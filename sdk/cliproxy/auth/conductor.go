@@ -87,6 +87,10 @@ const (
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
 	transientErrorCooldown    = time.Minute
+	// xaiErrorCooldown is the fixed cooldown applied to xAI credentials after any
+	// request failure. Large xAI pools otherwise keep rotating through rate-limited
+	// or invalid accounts for the full credential set.
+	xaiErrorCooldown = 24 * time.Hour
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -105,6 +109,270 @@ func SetTransientErrorCooldownSeconds(seconds int) {
 
 func quotaCooldownDisabledForAuth(auth *Auth) bool {
 	return quotaCooldownDisabledForAuthWithConfig(auth, nil)
+}
+
+const (
+	xaiAutoDisableMessage = "xai credential disabled for 24h after error"
+	// Metadata keys persisted to the auth JSON so the management UI enable
+	// switch reflects the temporary disable (and survives process restarts).
+	xaiAutoDisableMetaKey      = "xai_error_disabled"
+	xaiAutoDisableUntilMetaKey = "xai_error_disabled_until"
+)
+
+// isXAIAuth reports whether the auth belongs to the xAI / Grok provider.
+func isXAIAuth(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") {
+		return true
+	}
+	if auth.Metadata != nil {
+		if raw, ok := auth.Metadata["type"]; ok {
+			if s, ok := raw.(string); ok && strings.EqualFold(strings.TrimSpace(s), "xai") {
+				return true
+			}
+		}
+	}
+	if auth.Attributes != nil {
+		if strings.EqualFold(strings.TrimSpace(auth.Attributes["type"]), "xai") {
+			return true
+		}
+		if strings.EqualFold(strings.TrimSpace(auth.Attributes["provider"]), "xai") {
+			return true
+		}
+	}
+	// File-backed xAI OAuth credentials are named like xai-<id>@domain.json.
+	id := strings.TrimSpace(auth.ID)
+	if id == "" {
+		id = strings.TrimSpace(auth.FileName)
+	}
+	return strings.HasPrefix(strings.ToLower(id), "xai-")
+}
+
+// applyXAIErrorCooldown forces a 24h disable on xAI credentials after any request
+// error. The credential is marked Disabled (management UI switch off) and
+// unavailable for routing until the window expires, then auto-reenabled.
+// Returns true when the xAI policy was applied.
+func applyXAIErrorCooldown(auth *Auth, state *ModelState, now time.Time, disableCooling bool) bool {
+	if disableCooling || !isXAIAuth(auth) {
+		return false
+	}
+	next := now.Add(xaiErrorCooldown)
+	if state != nil {
+		state.Unavailable = true
+		state.Status = StatusDisabled
+		state.NextRetryAfter = next
+		state.UpdatedAt = now
+		// Mark as quota/cooldown so selectors treat it as blockReasonCooldown.
+		state.Quota.Exceeded = true
+		state.Quota.Reason = "xai_error_cooldown"
+		state.Quota.NextRecoverAt = next
+		state.StatusMessage = xaiAutoDisableMessage
+	}
+	if auth != nil {
+		// Disabled drives the management-center enable switch and is persisted
+		// to the auth JSON via Metadata["disabled"].
+		auth.Disabled = true
+		auth.Unavailable = true
+		auth.Status = StatusDisabled
+		auth.NextRetryAfter = next
+		auth.UpdatedAt = now
+		auth.Quota.Exceeded = true
+		auth.Quota.Reason = "xai_error_cooldown"
+		auth.Quota.NextRecoverAt = next
+		auth.StatusMessage = xaiAutoDisableMessage
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		auth.Metadata["disabled"] = true
+		auth.Metadata[xaiAutoDisableMetaKey] = true
+		auth.Metadata[xaiAutoDisableUntilMetaKey] = next.UTC().Format(time.RFC3339)
+	}
+	return true
+}
+
+// isXAIAutoDisabled reports whether the auth was temporarily disabled by the
+// xAI error policy (as opposed to an operator manual disable).
+func isXAIAutoDisabled(auth *Auth) bool {
+	if auth == nil || !isXAIAuth(auth) {
+		return false
+	}
+	if auth.Quota.Reason == "xai_error_cooldown" {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.StatusMessage), xaiAutoDisableMessage) {
+		return true
+	}
+	if auth.Metadata == nil {
+		return false
+	}
+	if v, ok := auth.Metadata[xaiAutoDisableMetaKey]; ok {
+		switch t := v.(type) {
+		case bool:
+			return t
+		case string:
+			parsed, err := strconv.ParseBool(strings.TrimSpace(t))
+			return err == nil && parsed
+		}
+	}
+	return false
+}
+
+// xaiAutoDisableUntil returns the expiry of an xAI auto-disable window.
+func xaiAutoDisableUntil(auth *Auth) time.Time {
+	if auth == nil {
+		return time.Time{}
+	}
+	if !auth.NextRetryAfter.IsZero() {
+		return auth.NextRetryAfter
+	}
+	if !auth.Quota.NextRecoverAt.IsZero() {
+		return auth.Quota.NextRecoverAt
+	}
+	if auth.Metadata == nil {
+		return time.Time{}
+	}
+	raw, ok := auth.Metadata[xaiAutoDisableUntilMetaKey]
+	if !ok || raw == nil {
+		return time.Time{}
+	}
+	switch v := raw.(type) {
+	case string:
+		if ts, err := time.Parse(time.RFC3339, strings.TrimSpace(v)); err == nil {
+			return ts
+		}
+	case time.Time:
+		return v
+	}
+	return time.Time{}
+}
+
+// clearXAIAutoDisable removes the temporary disable flags so the credential can
+// be selected again and the management UI switch shows enabled.
+func clearXAIAutoDisable(auth *Auth, now time.Time) {
+	if auth == nil {
+		return
+	}
+	auth.Disabled = false
+	auth.Unavailable = false
+	auth.Status = StatusActive
+	if strings.EqualFold(strings.TrimSpace(auth.StatusMessage), xaiAutoDisableMessage) {
+		auth.StatusMessage = ""
+	}
+	auth.NextRetryAfter = time.Time{}
+	if auth.Quota.Reason == "xai_error_cooldown" {
+		auth.Quota = QuotaState{}
+	}
+	auth.UpdatedAt = now
+	if auth.Metadata != nil {
+		auth.Metadata["disabled"] = false
+		delete(auth.Metadata, xaiAutoDisableMetaKey)
+		delete(auth.Metadata, xaiAutoDisableUntilMetaKey)
+	}
+	// Clear matching per-model auto-disable windows.
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		if state.Quota.Reason == "xai_error_cooldown" || strings.EqualFold(strings.TrimSpace(state.StatusMessage), xaiAutoDisableMessage) {
+			state.Unavailable = false
+			state.Status = StatusActive
+			state.StatusMessage = ""
+			state.NextRetryAfter = time.Time{}
+			state.Quota = QuotaState{}
+			state.UpdatedAt = now
+		}
+	}
+}
+
+// reviveExpiredXAIDisable re-enables an xAI credential whose 24h auto-disable
+// window has elapsed. Returns true when the auth was revived.
+func reviveExpiredXAIDisable(auth *Auth, now time.Time) bool {
+	if auth == nil || !isXAIAutoDisabled(auth) {
+		return false
+	}
+	until := xaiAutoDisableUntil(auth)
+	if until.IsZero() || until.After(now) {
+		return false
+	}
+	clearXAIAutoDisable(auth, now)
+	return true
+}
+
+// preserveAuthLevelRuntimeCooldown copies whole-credential cooldown / auto-disable
+// fields from the existing runtime auth into a freshly synthesized auth update.
+// ModelStates are already preserved separately when the incoming payload omits them.
+func preserveAuthLevelRuntimeCooldown(dst, src *Auth) {
+	if dst == nil || src == nil {
+		return
+	}
+	now := time.Now()
+
+	// Preserve temporary xAI auto-disable so a racey file reload cannot re-open
+	// the management enable switch before the 24h window ends.
+	if isXAIAutoDisabled(src) {
+		until := xaiAutoDisableUntil(src)
+		if !until.IsZero() && until.After(now) && !dst.Disabled {
+			dst.Disabled = true
+			dst.Unavailable = true
+			dst.Status = StatusDisabled
+			dst.NextRetryAfter = until
+			dst.Quota = src.Quota
+			dst.StatusMessage = xaiAutoDisableMessage
+			if src.LastError != nil {
+				dst.LastError = cloneError(src.LastError)
+			}
+			if dst.Metadata == nil {
+				dst.Metadata = make(map[string]any)
+			}
+			dst.Metadata["disabled"] = true
+			dst.Metadata[xaiAutoDisableMetaKey] = true
+			dst.Metadata[xaiAutoDisableUntilMetaKey] = until.UTC().Format(time.RFC3339)
+			return
+		}
+	}
+
+	srcBlocked := src.Unavailable && !src.NextRetryAfter.IsZero() && src.NextRetryAfter.After(now)
+	dstBlocked := dst.Unavailable && !dst.NextRetryAfter.IsZero() && dst.NextRetryAfter.After(now)
+	if !srcBlocked || dstBlocked {
+		// Still re-aggregate from preserved model states when the file payload
+		// cleared auth-level flags but model cooldowns remain.
+		if !dstBlocked && len(dst.ModelStates) > 0 {
+			updateAggregatedAvailability(dst, now)
+		}
+		return
+	}
+	dst.Unavailable = true
+	dst.NextRetryAfter = src.NextRetryAfter
+	dst.Quota = src.Quota
+	if src.LastError != nil {
+		dst.LastError = cloneError(src.LastError)
+	}
+	if src.StatusMessage != "" {
+		dst.StatusMessage = src.StatusMessage
+	}
+	if src.Status == StatusError || src.Status == StatusDisabled {
+		dst.Status = src.Status
+	}
+}
+
+func isEmptyStreamError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		if strings.EqualFold(strings.TrimSpace(authErr.Code), "empty_stream") {
+			return true
+		}
+		if strings.Contains(strings.ToLower(authErr.Message), "upstream stream closed before first payload") {
+			return true
+		}
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "empty_stream") ||
+		strings.Contains(lower, "upstream stream closed before first payload")
 }
 
 func quotaCooldownDisabledForAuthWithConfig(auth *Auth, cfg *internalconfig.Config) bool {
@@ -848,7 +1116,12 @@ func (m *Manager) cooldownStateSnapshot() ([]CooldownStateRecord, CooldownStateS
 }
 
 func (m *Manager) cooldownStateRecordsForAuthLocked(auth *Auth, now time.Time) []CooldownStateRecord {
-	if auth == nil || auth.ID == "" || auth.Disabled || auth.Status == StatusDisabled || m.cooldownDisabledForAuth(auth) {
+	if auth == nil || auth.ID == "" || m.cooldownDisabledForAuth(auth) {
+		return nil
+	}
+	// Operator-disabled credentials are excluded, but temporary xAI auto-disables
+	// still need durable cooldown records so restarts restore the 24h window.
+	if (auth.Disabled || auth.Status == StatusDisabled) && !isXAIAutoDisabled(auth) {
 		return nil
 	}
 	records := make([]CooldownStateRecord, 0, 1+len(auth.ModelStates))
@@ -1704,6 +1977,20 @@ func (e *streamBootstrapError) Headers() http.Header {
 	return cloneHTTPHeader(e.headers)
 }
 
+// StatusCode surfaces the underlying cause status (e.g. empty_stream → 502)
+// so handlers report a meaningful HTTP status instead of a generic 500.
+func (e *streamBootstrapError) StatusCode() int {
+	if e == nil || e.cause == nil {
+		return http.StatusBadGateway
+	}
+	if se, ok := e.cause.(interface{ StatusCode() int }); ok && se != nil {
+		if code := se.StatusCode(); code > 0 {
+			return code
+		}
+	}
+	return http.StatusBadGateway
+}
+
 func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamResult {
 	ch := make(chan cliproxyexecutor.StreamChunk, 1)
 	ch <- cliproxyexecutor.StreamChunk{Err: err}
@@ -1932,7 +2219,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 
 		if closed && len(buffered) == 0 {
-			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
+			// Treat empty upstream streams as a retryable bad-gateway style failure so
+			// MarkResult applies cooldown and credential rotation can skip this auth.
+			emptyErr := &Error{
+				Code:       "empty_stream",
+				Message:    "upstream stream closed before first payload",
+				Retryable:  true,
+				HTTPStatus: http.StatusBadGateway,
+			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
 			m.MarkResult(ctx, result)
 			if idx < len(execModels)-1 {
@@ -2191,15 +2485,37 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = existing.recentRequests
+	// Always try to preserve xAI auto-disable / cooldown across file reloads,
+	// including when the incoming payload still has disabled=false (race before
+	// disk write) or when both sides are temporarily disabled.
+	preserveAuthLevelRuntimeCooldown(auth, existing)
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
 		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
 		}
+	} else if isXAIAutoDisabled(auth) || isXAIAutoDisabled(existing) {
+		// Keep model-level cooldown windows for auto-disabled xAI accounts.
+		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+			auth.ModelStates = existing.ModelStates
+		}
+	}
+	// Operator manual enable (disabled -> active) should clear auto-disable meta.
+	if existing.Disabled && !auth.Disabled && auth.Status != StatusDisabled && isXAIAuth(auth) {
+		if isXAIAutoDisabled(existing) || (auth.Metadata != nil && auth.Metadata[xaiAutoDisableMetaKey] != nil) {
+			clearXAIAutoDisable(auth, time.Now())
+		}
 	}
 	now := time.Now()
 	clearedCooldown := false
-	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
+	// Do not clear cooldowns for temporary xAI auto-disables; those must remain
+	// blocked until the 24h window expires (or an operator manually re-enables).
+	xaiAuto := isXAIAutoDisabled(auth) || isXAIAutoDisabled(existing)
+	if (m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled) && !xaiAuto {
 		clearedCooldown = clearCooldownStateForAuth(auth, now)
+	}
+	if xaiAuto {
+		// Re-apply after any later mutations so disk reload cannot reopen the switch.
+		preserveAuthLevelRuntimeCooldown(auth, existing)
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
@@ -3597,6 +3913,12 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if isRequestInvalidError(err) {
 		return 0, false
 	}
+	// empty_stream / bootstrap failures already rotated credentials inside
+	// execute*MixedOnce (up to max-retry-credentials). Never start another
+	// full sweep just because cooled accounts have a short remaining wait.
+	if isEmptyStreamError(err) {
+		return 0, false
+	}
 	wait, found := m.closestCooldownWait(providers, model, attempt)
 	if found {
 		if wait > maxWait {
@@ -3717,98 +4039,116 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						auth.StatusMessage = result.Error.Message
 					}
 
-					statusCode := statusCodeFromResult(result.Error)
-					if isModelSupportResultError(result.Error) {
-						next := now.Add(12 * time.Hour)
-						state.NextRetryAfter = next
-						suspendReason = "model_not_supported"
+					// xAI: any request error disables the whole credential for 24h so
+					// rate-limited / invalid accounts are not rotated through the pool.
+					xaiCooled := applyXAIErrorCooldown(auth, state, now, disableCooling)
+					if xaiCooled {
+						suspendReason = "xai_error_cooldown"
 						shouldSuspendModel = true
-					} else if isCloudflareChallengeResultError(result.Error) {
-						next, backoffLevel := nextCloudflareCooldown(state.Quota.BackoffLevel, disableCooling, now)
-						state.NextRetryAfter = next
-						state.StatusMessage = "cloudflare challenge"
-						if auth.LastError != nil {
-							auth.StatusMessage = "cloudflare challenge"
-						}
-						state.Quota = QuotaState{
-							Exceeded:      true,
-							Reason:        "cloudflare challenge",
-							NextRecoverAt: next,
-							BackoffLevel:  backoffLevel,
-						}
-					} else if isInvalidGrantResultError(result.Error) {
-						if disableCooling {
-							state.NextRetryAfter = time.Time{}
-						} else {
-							state.NextRetryAfter = now.Add(30 * time.Minute)
-							suspendReason = "invalid_grant"
-							shouldSuspendModel = true
-						}
+						setModelQuota = true
 					} else {
-						switch statusCode {
-						case 401:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(30 * time.Minute)
-								state.NextRetryAfter = next
-								suspendReason = "unauthorized"
-								shouldSuspendModel = true
-							}
-						case 402, 403:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(30 * time.Minute)
-								state.NextRetryAfter = next
-								suspendReason = "payment_required"
-								shouldSuspendModel = true
-							}
-						case 404:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(12 * time.Hour)
-								state.NextRetryAfter = next
-								suspendReason = "not_found"
-								shouldSuspendModel = true
-							}
-						case 429:
-							var next time.Time
-							backoffLevel := state.Quota.BackoffLevel
-							if !disableCooling {
-								if result.RetryAfter != nil {
-									next = now.Add(*result.RetryAfter)
-								} else {
-									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
-								}
-							}
+						statusCode := statusCodeFromResult(result.Error)
+						if isModelSupportResultError(result.Error) {
+							next := now.Add(12 * time.Hour)
 							state.NextRetryAfter = next
+							suspendReason = "model_not_supported"
+							shouldSuspendModel = true
+						} else if isCloudflareChallengeResultError(result.Error) {
+							next, backoffLevel := nextCloudflareCooldown(state.Quota.BackoffLevel, disableCooling, now)
+							state.NextRetryAfter = next
+							state.StatusMessage = "cloudflare challenge"
+							if auth.LastError != nil {
+								auth.StatusMessage = "cloudflare challenge"
+							}
 							state.Quota = QuotaState{
 								Exceeded:      true,
-								Reason:        "quota",
+								Reason:        "cloudflare challenge",
 								NextRecoverAt: next,
 								BackoffLevel:  backoffLevel,
 							}
-							if !disableCooling {
-								suspendReason = "quota"
-								shouldSuspendModel = true
-								setModelQuota = true
-							}
-						case 408, 500, 502, 503, 504:
+						} else if isInvalidGrantResultError(result.Error) {
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
-								state.NextRetryAfter = nextTransientErrorRetryAfter(now)
+								state.NextRetryAfter = now.Add(30 * time.Minute)
+								suspendReason = "invalid_grant"
+								shouldSuspendModel = true
 							}
-						default:
-							state.NextRetryAfter = time.Time{}
+						} else {
+							switch statusCode {
+							case 401:
+								if disableCooling {
+									state.NextRetryAfter = time.Time{}
+								} else {
+									next := now.Add(30 * time.Minute)
+									state.NextRetryAfter = next
+									suspendReason = "unauthorized"
+									shouldSuspendModel = true
+								}
+							case 402, 403:
+								if disableCooling {
+									state.NextRetryAfter = time.Time{}
+								} else {
+									next := now.Add(30 * time.Minute)
+									state.NextRetryAfter = next
+									suspendReason = "payment_required"
+									shouldSuspendModel = true
+								}
+							case 404:
+								if disableCooling {
+									state.NextRetryAfter = time.Time{}
+								} else {
+									next := now.Add(12 * time.Hour)
+									state.NextRetryAfter = next
+									suspendReason = "not_found"
+									shouldSuspendModel = true
+								}
+							case 429:
+								var next time.Time
+								backoffLevel := state.Quota.BackoffLevel
+								if !disableCooling {
+									if result.RetryAfter != nil {
+										next = now.Add(*result.RetryAfter)
+									} else {
+										next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
+									}
+								}
+								state.NextRetryAfter = next
+								state.Quota = QuotaState{
+									Exceeded:      true,
+									Reason:        "quota",
+									NextRecoverAt: next,
+									BackoffLevel:  backoffLevel,
+								}
+								if !disableCooling {
+									suspendReason = "quota"
+									shouldSuspendModel = true
+									setModelQuota = true
+								}
+							case 408, 500, 502, 503, 504:
+								if disableCooling {
+									state.NextRetryAfter = time.Time{}
+								} else {
+									state.NextRetryAfter = nextTransientErrorRetryAfter(now)
+								}
+							default:
+								state.NextRetryAfter = time.Time{}
+							}
 						}
-					}
 
-					auth.Status = StatusError
+					} // end non-xAI status handling
+
+					if !xaiCooled {
+						auth.Status = StatusError
+					}
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
+					// updateAggregatedAvailability only marks the auth unavailable when
+					// every model is blocked. xAI policy is whole-credential: re-apply
+					// the 24h auth-level disable after aggregation.
+					if xaiCooled {
+						_ = applyXAIErrorCooldown(auth, state, now, disableCooling)
+					}
 				}
 			} else {
 				disableCooling := m.cooldownDisabledForAuth(auth)
@@ -4281,6 +4621,10 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.StatusMessage = resultErr.Message
 		}
 	}
+	// xAI: disable the whole credential for 24h after any error.
+	if applyXAIErrorCooldown(auth, nil, now, disableCooling) {
+		return
+	}
 	statusCode := statusCodeFromResult(resultErr)
 	if isCloudflareChallengeResultError(resultErr) {
 		auth.StatusMessage = "cloudflare challenge"
@@ -4389,29 +4733,57 @@ func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) 
 }
 
 // List returns all auth entries currently known by the manager.
+// Expired xAI auto-disables are revived here so the management UI enable
+// switch flips back on after 24h without requiring a request.
 func (m *Manager) List() []*Auth {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	if m == nil {
+		return nil
+	}
+	now := time.Now()
+	var revived []*Auth
+	m.mu.Lock()
 	list := make([]*Auth, 0, len(m.auths))
 	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		if reviveExpiredXAIDisable(auth, now) {
+			revived = append(revived, auth.Clone())
+		}
 		list = append(list, auth.Clone())
+	}
+	m.mu.Unlock()
+	for _, snap := range revived {
+		_ = m.persist(context.Background(), snap)
+		if m.scheduler != nil {
+			m.scheduler.upsertAuth(snap)
+		}
 	}
 	return list
 }
 
 // GetByID retrieves an auth entry by its ID.
-
 func (m *Manager) GetByID(id string) (*Auth, bool) {
 	if id == "" {
 		return nil, false
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	now := time.Now()
+	m.mu.Lock()
 	auth, ok := m.auths[id]
-	if !ok {
+	if !ok || auth == nil {
+		m.mu.Unlock()
 		return nil, false
 	}
-	return auth.Clone(), true
+	revived := reviveExpiredXAIDisable(auth, now)
+	cloned := auth.Clone()
+	m.mu.Unlock()
+	if revived {
+		_ = m.persist(context.Background(), cloned)
+		if m.scheduler != nil {
+			m.scheduler.upsertAuth(cloned)
+		}
+	}
+	return cloned, true
 }
 
 // GetExecutionSessionAuthByID retrieves a Home runtime auth scoped to an execution session.

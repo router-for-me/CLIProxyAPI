@@ -1214,3 +1214,360 @@ func TestManager_RequestScopedNotFoundStopsRetryWithoutSuspendingAuth(t *testing
 		t.Fatalf("expected request-scoped 404 to avoid bad auth model cooldown state, got %#v", state)
 	}
 }
+
+func TestManager_MarkResult_XAIErrorDisablesCredentialFor24h(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "xai-005hr7toa0@edu.coogmanut.me.json",
+		Provider: "xai",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "grok-build-0.1"
+	before := time.Now()
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: "xai",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+	})
+	after := time.Now()
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if !updated.Disabled {
+		t.Fatalf("expected xAI auth Disabled=true so management enable switch is off")
+	}
+	if updated.Status != StatusDisabled {
+		t.Fatalf("status = %q, want disabled", updated.Status)
+	}
+	if !updated.Unavailable {
+		t.Fatalf("expected xAI auth to be unavailable after error")
+	}
+	if updated.Quota.Reason != "xai_error_cooldown" {
+		t.Fatalf("quota reason = %q, want xai_error_cooldown", updated.Quota.Reason)
+	}
+	if updated.Metadata == nil || updated.Metadata["disabled"] != true {
+		t.Fatalf("expected metadata disabled=true for file persist, got %#v", updated.Metadata)
+	}
+	if updated.Metadata[xaiAutoDisableMetaKey] != true {
+		t.Fatalf("expected xai_error_disabled metadata marker")
+	}
+	if updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected NextRetryAfter to be set")
+	}
+	minNext := before.Add(24 * time.Hour).Add(-5 * time.Second)
+	maxNext := after.Add(24 * time.Hour).Add(5 * time.Second)
+	if updated.NextRetryAfter.Before(minNext) || updated.NextRetryAfter.After(maxNext) {
+		t.Fatalf("NextRetryAfter = %v, want ~24h from now (between %v and %v)", updated.NextRetryAfter, minNext, maxNext)
+	}
+
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state")
+	}
+	if !state.Unavailable || state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected model state 24h cooldown, got unavailable=%v next=%v", state.Unavailable, state.NextRetryAfter)
+	}
+
+	// Whole-credential: other models on the same auth must also be blocked.
+	blocked, reason, next := isAuthBlockedForModel(updated, "grok-4.5", time.Now())
+	if !blocked || reason != blockReasonDisabled {
+		t.Fatalf("expected other models blocked by xAI auto-disable, blocked=%v reason=%v", blocked, reason)
+	}
+	if next.IsZero() {
+		t.Fatalf("expected cooldown next time")
+	}
+
+	// After 24h List/GetByID revives the credential (switch back on).
+	// Simulate expiry on a clone then revive.
+	expired := updated.Clone()
+	expired.NextRetryAfter = time.Now().Add(-time.Second)
+	if expired.Metadata != nil {
+		expired.Metadata[xaiAutoDisableUntilMetaKey] = time.Now().Add(-time.Second).UTC().Format(time.RFC3339)
+	}
+	if !reviveExpiredXAIDisable(expired, time.Now()) {
+		t.Fatal("expected revive after 24h")
+	}
+	if expired.Disabled || expired.Status != StatusActive {
+		t.Fatalf("expected revived auth enabled, disabled=%v status=%v", expired.Disabled, expired.Status)
+	}
+}
+
+func TestManager_MarkResult_XAIErrorRespectsDisableCooling(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "xai-disabled-cooling.json",
+		Provider: "xai",
+		Metadata: map[string]any{"disable_cooling": true},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "grok-4.3"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: "xai",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: 500, Message: "boom"},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth")
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state")
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected no 24h cooldown when disable_cooling=true, got %v", state.NextRetryAfter)
+	}
+}
+
+func TestIsXAIAuth(t *testing.T) {
+	if !isXAIAuth(&Auth{Provider: "xai"}) {
+		t.Fatal("provider=xai should match")
+	}
+	if !isXAIAuth(&Auth{ID: "xai-foo@bar.com.json", Provider: "mixed"}) {
+		t.Fatal("xai- id prefix should match")
+	}
+	if !isXAIAuth(&Auth{Metadata: map[string]any{"type": "xai"}}) {
+		t.Fatal("metadata type=xai should match")
+	}
+	if isXAIAuth(&Auth{Provider: "claude", ID: "user@example.com.json"}) {
+		t.Fatal("non-xai auth should not match")
+	}
+}
+
+func TestPreserveAuthLevelRuntimeCooldown_KeepsXAI24hAcrossReload(t *testing.T) {
+	now := time.Now()
+	until := now.Add(20 * time.Hour)
+	existing := &Auth{
+		ID:             "xai-reload@example.com.json",
+		Provider:       "xai",
+		Disabled:       true,
+		Unavailable:    true,
+		NextRetryAfter: until,
+		Status:         StatusDisabled,
+		StatusMessage:  xaiAutoDisableMessage,
+		Quota: QuotaState{
+			Exceeded:      true,
+			Reason:        "xai_error_cooldown",
+			NextRecoverAt: until,
+		},
+		Metadata: map[string]any{
+			"type":                     "xai",
+			"disabled":                 true,
+			xaiAutoDisableMetaKey:      true,
+			xaiAutoDisableUntilMetaKey: until.UTC().Format(time.RFC3339),
+		},
+		ModelStates: map[string]*ModelState{
+			"grok-4.5": {
+				Status:         StatusDisabled,
+				Unavailable:    true,
+				NextRetryAfter: until,
+				Quota: QuotaState{
+					Exceeded:      true,
+					Reason:        "xai_error_cooldown",
+					NextRecoverAt: until,
+				},
+			},
+		},
+	}
+	// Fresh auth synthesized from file reload before disk write — still enabled.
+	reloaded := &Auth{
+		ID:          "xai-reload@example.com.json",
+		Provider:    "xai",
+		Status:      StatusActive,
+		Disabled:    false,
+		Metadata:    map[string]any{"type": "xai"},
+		ModelStates: existing.ModelStates,
+	}
+	preserveAuthLevelRuntimeCooldown(reloaded, existing)
+
+	if !reloaded.Disabled {
+		t.Fatal("expected Disabled preserved across reload")
+	}
+	if !reloaded.Unavailable {
+		t.Fatal("expected unavailable preserved across reload")
+	}
+	if reloaded.NextRetryAfter.IsZero() || !reloaded.NextRetryAfter.After(now) {
+		t.Fatalf("expected NextRetryAfter preserved, got %v", reloaded.NextRetryAfter)
+	}
+	if reloaded.Quota.Reason != "xai_error_cooldown" {
+		t.Fatalf("quota reason = %q, want xai_error_cooldown", reloaded.Quota.Reason)
+	}
+
+	blocked, reason, _ := isAuthBlockedForModel(reloaded, "grok-4.5", now)
+	if !blocked || reason != blockReasonDisabled {
+		t.Fatalf("expected reloaded auth blocked, blocked=%v reason=%v", blocked, reason)
+	}
+}
+
+func TestManager_MarkResult_EmptyStreamDisablesXAIFor24h(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "xai-empty-stream@example.com.json",
+		Provider: "xai",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "grok-4.5"
+	emptyErr := &Error{
+		Code:       "empty_stream",
+		Message:    "upstream stream closed before first payload",
+		Retryable:  true,
+		HTTPStatus: http.StatusBadGateway,
+	}
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: "xai",
+		Model:    model,
+		Success:  false,
+		Error:    emptyErr,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("expected auth")
+	}
+	if !updated.Disabled {
+		t.Fatal("expected Disabled=true after empty_stream (management switch off)")
+	}
+	if !updated.Unavailable || updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected 24h disable after empty_stream, unavailable=%v next=%v", updated.Unavailable, updated.NextRetryAfter)
+	}
+	blocked, reason, _ := isAuthBlockedForModel(updated, model, time.Now())
+	if !blocked || reason != blockReasonDisabled {
+		t.Fatalf("expected auth blocked after empty_stream, blocked=%v reason=%v", blocked, reason)
+	}
+}
+
+func TestIsEmptyStreamError(t *testing.T) {
+	err := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", HTTPStatus: 502}
+	if !isEmptyStreamError(err) {
+		t.Fatal("expected empty_stream Error to match")
+	}
+	wrapped := newStreamBootstrapError(err, nil)
+	if !isEmptyStreamError(wrapped) {
+		t.Fatal("expected streamBootstrapError wrapping empty_stream to match")
+	}
+	if isEmptyStreamError(&Error{Code: "quota", Message: "rate limited", HTTPStatus: 429}) {
+		t.Fatal("quota error should not match empty_stream")
+	}
+}
+
+func TestManager_Update_PreservesCooldownAcrossAuthFileReload(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "xai-update-preserve@example.com.json",
+		Provider: "xai",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+
+	model := "grok-4.5"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: "xai",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: 502, Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true},
+	})
+
+	// Simulate auth-file WRITE reload: fresh Auth without runtime fields.
+	reloaded := &Auth{
+		ID:       auth.ID,
+		Provider: "xai",
+		Status:   StatusActive,
+		Metadata: map[string]any{"type": "xai", "email": "update-preserve@example.com"},
+	}
+	if _, errUpdate := m.Update(context.Background(), reloaded); errUpdate != nil {
+		t.Fatalf("update: %v", errUpdate)
+	}
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("expected auth after update")
+	}
+	if !updated.Disabled {
+		t.Fatal("expected Disabled preserved after Update reload")
+	}
+	if !updated.Unavailable || updated.NextRetryAfter.IsZero() {
+		t.Fatalf("cooldown lost after Update reload: unavailable=%v next=%v", updated.Unavailable, updated.NextRetryAfter)
+	}
+	blocked, reason, _ := isAuthBlockedForModel(updated, model, time.Now())
+	if !blocked || reason != blockReasonDisabled {
+		t.Fatalf("expected still blocked after reload, blocked=%v reason=%v", blocked, reason)
+	}
+}
+
+func TestManager_List_RevivesExpiredXAIAutoDisable(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "xai-revive@example.com.json", Provider: "xai"}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	m.MarkResult(context.Background(), Result{
+		AuthID: auth.ID, Provider: "xai", Model: "grok-4.5", Success: false,
+		Error: &Error{HTTPStatus: 502, Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true},
+	})
+	// Force expiry in manager state.
+	m.mu.Lock()
+	live := m.auths[auth.ID]
+	live.NextRetryAfter = time.Now().Add(-time.Minute)
+	live.Quota.NextRecoverAt = live.NextRetryAfter
+	if live.Metadata != nil {
+		live.Metadata[xaiAutoDisableUntilMetaKey] = live.NextRetryAfter.UTC().Format(time.RFC3339)
+	}
+	m.mu.Unlock()
+
+	list := m.List()
+	var found *Auth
+	for _, a := range list {
+		if a.ID == auth.ID {
+			found = a
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("auth missing from List")
+	}
+	if found.Disabled {
+		t.Fatal("expected List to revive expired auto-disable (switch on)")
+	}
+	if found.Status != StatusActive {
+		t.Fatalf("status = %q, want active", found.Status)
+	}
+}

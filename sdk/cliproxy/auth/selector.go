@@ -307,7 +307,25 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonOther, time.Time{}
 	}
 	if auth.Disabled || auth.Status == StatusDisabled {
-		return true, blockReasonDisabled, time.Time{}
+		// xAI auto-disable expires after 24h; treat expired windows as not blocked
+		// so routing can pick the account (List/GetByID revive the switch).
+		if isXAIAutoDisabled(auth) {
+			until := xaiAutoDisableUntil(auth)
+			if !until.IsZero() && !until.After(now) {
+				// fall through — expired auto-disable
+			} else if until.IsZero() {
+				return true, blockReasonDisabled, time.Time{}
+			} else {
+				return true, blockReasonDisabled, until
+			}
+		} else {
+			return true, blockReasonDisabled, time.Time{}
+		}
+	}
+	// xAI whole-credential cooldown: one request error disables the account for
+	// 24h across every model, not just the model that failed.
+	if blocked, reason, next := xaiCredentialBlocked(auth, now); blocked {
+		return true, reason, next
 	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
@@ -359,6 +377,38 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonOther, next
 	}
 	return false, blockReasonNone, time.Time{}
+}
+
+// xaiCredentialBlocked reports whether an xAI auth is under the whole-credential
+// 24h error cooldown / auto-disable and should not be selected for any model.
+func xaiCredentialBlocked(auth *Auth, now time.Time) (bool, blockReason, time.Time) {
+	if auth == nil || !isXAIAuth(auth) {
+		return false, blockReasonNone, time.Time{}
+	}
+	// Auto-disabled credentials (management switch off) stay blocked until expiry.
+	if isXAIAutoDisabled(auth) {
+		until := xaiAutoDisableUntil(auth)
+		if until.IsZero() {
+			// Missing expiry: keep blocked while disabled flag is set.
+			if auth.Disabled || auth.Status == StatusDisabled {
+				return true, blockReasonDisabled, time.Time{}
+			}
+		} else if until.After(now) {
+			return true, blockReasonDisabled, until
+		}
+		// Expired auto-disable is revived by List/GetByID/availableAuths; treat as free here.
+	}
+	if !auth.Unavailable || auth.NextRetryAfter.IsZero() || !auth.NextRetryAfter.After(now) {
+		return false, blockReasonNone, time.Time{}
+	}
+	next := auth.NextRetryAfter
+	if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {
+		next = auth.Quota.NextRecoverAt
+	}
+	if next.Before(now) {
+		next = now
+	}
+	return true, blockReasonCooldown, next
 }
 
 // sessionPattern matches Claude Code user_id format:
