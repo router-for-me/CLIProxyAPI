@@ -647,7 +647,7 @@ func (s *PostgresStore) absoluteAuthPath(id string) (string, error) {
 	return path, nil
 }
 
-func (s *PostgresStore) fullTableNameOLD(name string) string { //nolint:deadcode
+func (s *PostgresStore) fullTableName(name string) string {
 	if strings.TrimSpace(s.cfg.Schema) == "" {
 		return quoteIdentifier(name)
 	}
