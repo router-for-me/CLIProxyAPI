@@ -64,6 +64,8 @@ final class AgentConfigWriter {
 
         var lines = (try? String(contentsOf: configURL, encoding: .utf8))?.components(separatedBy: .newlines) ?? []
 
+        NSLog("applyCodex called with baseURL=%@ apiKey=%@", baseURL, apiKey)
+
         func replaceOrAppend(key: String, value: String) {
             var found = false
             for (index, line) in lines.enumerated() {
@@ -101,13 +103,20 @@ final class AgentConfigWriter {
         }
 
         let catalogPath = codexDir.appendingPathComponent("cli-proxy-model-catalog.json")
-        try await buildCodexModelCatalog(at: catalogPath, baseURL: baseURL, apiKey: apiKey)
+        do {
+            try await buildCodexModelCatalog(at: catalogPath, baseURL: baseURL, apiKey: apiKey)
+            NSLog("applyCodex: built catalog at %@", catalogPath.path)
+        } catch {
+            NSLog("applyCodex: failed to build catalog: %@", error.localizedDescription)
+            throw error
+        }
 
         replaceOrAppend(key: "model_catalog_json", value: catalogPath.path)
         replaceOrAppend(key: "openai_base_url", value: baseURL)
         replaceOrAppend(key: "OPENAI_API_KEY", value: apiKey)
 
         try lines.joined(separator: "\n").write(to: configURL, atomically: true, encoding: .utf8)
+        NSLog("applyCodex: wrote config to %@", configURL.path)
     }
 
     private func resetCodex() throws {

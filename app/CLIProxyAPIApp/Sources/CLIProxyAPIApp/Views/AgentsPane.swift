@@ -68,9 +68,12 @@ final class AgentsPaneStore {
         lastError = nil
         defer { isApplying = false }
 
+        NSLog("AgentsPaneStore.apply called for %@ with baseURL=%@", app.id, app.displayURL)
         do {
             try await writer.applyCLIProxy(to: app, baseURL: app.displayURL, apiKey: app.displayKey)
+            NSLog("AgentsPaneStore.apply succeeded for %@", app.id)
         } catch {
+            NSLog("AgentsPaneStore.apply failed for %@: %@", app.id, error.localizedDescription)
             lastError = error.localizedDescription
         }
     }
