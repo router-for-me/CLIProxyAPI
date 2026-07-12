@@ -4,6 +4,7 @@ package registry
 
 import (
 	"strings"
+	"time"
 )
 
 const (
@@ -110,6 +111,11 @@ func GetXAIModels() []*ModelInfo {
 	return WithXAIBuiltins(cloneModelInfos(getModels().XAI))
 }
 
+// GetWindsurfModels returns the standard Windsurf / Devin CLI model definitions.
+func GetWindsurfModels() []*ModelInfo {
+	return buildWindsurfModels()
+}
+
 // WithCodexBuiltins injects hard-coded Codex-only model definitions that should
 // not depend on remote models.json updates. Built-ins replace any matching IDs
 // already present in the provided slice.
@@ -192,6 +198,49 @@ func xaiBuiltinVideoModelInfo() *ModelInfo {
 		Name:        xaiBuiltinVideoModelID,
 		Description: "xAI Grok video generation model.",
 	}
+}
+
+func buildWindsurfModels() []*ModelInfo {
+	ids := []string{
+		"devin/glm-5.2",
+		"devin/glm-5.1",
+		"devin/gpt-5.5",
+		"devin/gpt-5.4",
+		"devin/gpt-5.4-mini",
+		"devin/gpt-5.3-codex",
+		"devin/gpt-5.2",
+		"devin/claude-opus-4.8",
+		"devin/claude-fable-5",
+		"devin/claude-sonnet-5",
+		"devin/claude-opus-4.7",
+		"devin/claude-opus-4.6",
+		"devin/claude-opus-4.5",
+		"devin/claude-sonnet-4.6",
+		"devin/claude-sonnet-4.5",
+		"devin/claude-haiku-4.5",
+		"devin/gemini-3.5-flash",
+		"devin/gemini-3-pro",
+		"devin/gemini-3-flash",
+		"devin/swe-1.6",
+		"devin/swe-1.5",
+		"devin/kimi-k2.7",
+		"devin/kimi-k2.6",
+		"devin/deepseek-v4",
+		"devin/default",
+	}
+	now := time.Now().Unix()
+	models := make([]*ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		models = append(models, &ModelInfo{
+			ID:          id,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "windsurf",
+			Type:        "openai",
+			DisplayName: id,
+		})
+	}
+	return models
 }
 
 func xaiBuiltinVideo15PreviewModelInfo() *ModelInfo {
@@ -296,6 +345,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAntigravityModels()
 	case "xai", "x-ai", "grok":
 		return GetXAIModels()
+	case "windsurf", "devin":
+		return GetWindsurfModels()
 	default:
 		return nil
 	}
@@ -324,6 +375,12 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 			if m != nil && m.ID == modelID {
 				return cloneModelInfo(m)
 			}
+		}
+	}
+
+	for _, m := range GetWindsurfModels() {
+		if m != nil && m.ID == modelID {
+			return cloneModelInfo(m)
 		}
 	}
 
