@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	windsurfmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/windsurf/models"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -148,7 +149,7 @@ func (e *WindsurfExecutor) executeChat(ctx context.Context, auth *cliproxyauth.A
 		return nil, statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("windsurf executor: invalid json: %v", err)}
 	}
 
-	modelCfg := parseWindsurfModelConfig()
+	modelCfg := windsurfmodels.ParseConfig("")
 	modelUid := mapOpenAIModelToWindsurf(req.Model, modelCfg)
 	if modelUid == "" {
 		modelUid = modelCfg.DefaultModelID
@@ -319,7 +320,7 @@ func (e *WindsurfExecutor) buildGetChatMessageRequest(apiKey, userJwt, modelUid 
 		promptMessages = append(promptMessages, openAIMessage{Role: "user", Content: ""})
 	}
 
-	cfg := parseWindsurfModelConfig()
+	cfg := windsurfmodels.ParseConfig("")
 	ctxWindow := modelContextWindow(reqModelFallback(body.Model, cfg.DefaultModelID))
 	budget := computeCompletionBudget(ctxWindow, body.MaxTokens)
 

@@ -5,6 +5,8 @@ package registry
 import (
 	"strings"
 	"time"
+
+	windsurfmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/windsurf/models"
 )
 
 const (
@@ -201,33 +203,7 @@ func xaiBuiltinVideoModelInfo() *ModelInfo {
 }
 
 func buildWindsurfModels() []*ModelInfo {
-	ids := []string{
-		"devin/glm-5.2",
-		"devin/glm-5.1",
-		"devin/gpt-5.5",
-		"devin/gpt-5.4",
-		"devin/gpt-5.4-mini",
-		"devin/gpt-5.3-codex",
-		"devin/gpt-5.2",
-		"devin/claude-opus-4.8",
-		"devin/claude-fable-5",
-		"devin/claude-sonnet-5",
-		"devin/claude-opus-4.7",
-		"devin/claude-opus-4.6",
-		"devin/claude-opus-4.5",
-		"devin/claude-sonnet-4.6",
-		"devin/claude-sonnet-4.5",
-		"devin/claude-haiku-4.5",
-		"devin/gemini-3.5-flash",
-		"devin/gemini-3-pro",
-		"devin/gemini-3-flash",
-		"devin/swe-1.6",
-		"devin/swe-1.5",
-		"devin/kimi-k2.7",
-		"devin/kimi-k2.6",
-		"devin/deepseek-v4",
-		"devin/default",
-	}
+	ids := windsurfmodels.WindsurfModelIDs()
 	now := time.Now().Unix()
 	models := make([]*ModelInfo, 0, len(ids))
 	for _, id := range ids {
