@@ -35,6 +35,14 @@ final class ModelsStore {
     private(set) var exposedModels: Set<String> = []
     private(set) var isLoading = false
     private(set) var lastError: String?
+    private let defaults = UserDefaults.standard
+    private let cacheKey = "exposedModelsCache"
+
+    init() {
+        if let cached = defaults.array(forKey: cacheKey) as? [String] {
+            exposedModels = Set(cached)
+        }
+    }
 
     func fetch(baseURL: URL, secret: String) async {
         isLoading = true
@@ -46,6 +54,7 @@ final class ModelsStore {
             let exposed = try await fetchExposedModels(baseURL: baseURL, secret: secret)
             subscriptions = subs
             exposedModels = Set(exposed)
+            defaults.set(Array(exposedModels), forKey: cacheKey)
         } catch {
             lastError = error.localizedDescription
         }
@@ -77,6 +86,7 @@ final class ModelsStore {
         } else {
             exposedModels.insert(slug)
         }
+        defaults.set(Array(exposedModels), forKey: cacheKey)
         await save(baseURL: baseURL, secret: secret)
     }
 

@@ -148,22 +148,29 @@ struct AgentAppRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(app.name)
                     .font(.body.weight(.semibold))
-                if !app.isInstalled {
-                    Text("Not installed")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                } else if app.isRunning {
-                    Text("Running")
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                } else if app.isEnabled {
-                    Text("Routed to CLIProxyAPI")
-                        .font(.caption)
-                        .foregroundStyle(.blue)
-                } else {
-                    Text("Default provider")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Text(app.kind.rawValue)
+                        .font(.caption2)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(.quaternary, in: Capsule())
+                    if !app.isInstalled {
+                        Text("Not installed")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    } else if app.isRunning {
+                        Text("Running")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    } else if app.isEnabled {
+                        Text("Routed to CLIProxyAPI")
+                            .font(.caption)
+                            .foregroundStyle(.blue)
+                    } else {
+                        Text("Default provider")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 

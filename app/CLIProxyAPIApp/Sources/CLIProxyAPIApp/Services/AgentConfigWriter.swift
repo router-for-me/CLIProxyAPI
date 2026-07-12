@@ -33,8 +33,6 @@ final class AgentConfigWriter {
             try applyClaude(baseURL: baseURL, apiKey: apiKey)
         case "devin":
             try applyDevin(baseURL: baseURL, apiKey: apiKey)
-        case "aider":
-            try applyAider(baseURL: baseURL, apiKey: apiKey)
         case "opencode":
             try applyOpencode(baseURL: baseURL, apiKey: apiKey)
         default:
@@ -58,8 +56,6 @@ final class AgentConfigWriter {
             try resetClaude()
         case "devin":
             try resetDevin()
-        case "aider":
-            try resetAider()
         case "opencode":
             try resetOpencode()
         default:
@@ -181,33 +177,6 @@ final class AgentConfigWriter {
     private func resetDevin() throws {
         let envURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".devin/cli-proxy.env")
         try? FileManager.default.removeItem(at: envURL)
-    }
-
-    // MARK: - Aider
-
-    private func applyAider(baseURL: String, apiKey: String) throws {
-        let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".aider.conf.yml")
-        var content = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
-        let lines = [
-            "openai-api-base: \(baseURL)",
-            "openai-api-key: \(apiKey)",
-        ]
-        if content.isEmpty {
-            content = lines.joined(separator: "\n")
-        } else {
-            content += "\n" + lines.joined(separator: "\n")
-        }
-        try content.write(to: configURL, atomically: true, encoding: .utf8)
-    }
-
-    private func resetAider() throws {
-        let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".aider.conf.yml")
-        guard FileManager.default.fileExists(atPath: configURL.path) else { return }
-        var content = try String(contentsOf: configURL, encoding: .utf8)
-        content = content.components(separatedBy: .newlines)
-            .filter { !$0.contains("openai-api-base:") && !$0.contains("openai-api-key:") }
-            .joined(separator: "\n")
-        try content.write(to: configURL, atomically: true, encoding: .utf8)
     }
 
     // MARK: - OpenCode

@@ -3,11 +3,10 @@ import SwiftUI
 struct SettingsView: View {
     @Bindable var settings: BridgeSettingsStore
     @Bindable var bridge: BridgeProcessController
-    @Bindable var codexProvider: CodexProviderController
 
     var body: some View {
         TabView {
-            GeneralSettingsPane(settings: self.settings, bridge: self.bridge, codexProvider: self.codexProvider)
+            GeneralSettingsPane(settings: self.settings, bridge: self.bridge)
                 .tabItem {
                     Label("General", systemImage: "gearshape")
                 }
@@ -35,8 +34,6 @@ struct SettingsView: View {
 struct GeneralSettingsPane: View {
     @Bindable var settings: BridgeSettingsStore
     @Bindable var bridge: BridgeProcessController
-    @Bindable var codexProvider: CodexProviderController
-    @State private var selectedCodexProvider: CodexProviderMode = .openai
     @State private var showAdvanced = false
 
     var body: some View {
@@ -94,37 +91,6 @@ struct GeneralSettingsPane: View {
                     }
                 }
 
-                // Codex provider
-                SettingsSection(title: "Codex Provider") {
-                    SettingsRow(title: "Backend", subtitle: "Switches the Codex desktop config and restarts Codex.") {
-                        Picker("Codex provider", selection: self.$selectedCodexProvider) {
-                            ForEach(CodexProviderMode.allCases) { mode in
-                                Text(mode.title).tag(mode)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.segmented)
-                        .frame(width: 180)
-                    }
-
-                    HStack(spacing: 10) {
-                        Button {
-                            if self.selectedCodexProvider == .devin, !self.bridge.status.isActive {
-                                self.bridge.start(settings: self.settings)
-                            }
-                            self.codexProvider.switchProvider(to: self.selectedCodexProvider, settings: self.settings)
-                        } label: {
-                            Text(self.codexProvider.isSwitching ? "Switching..." : "Apply and Restart Codex")
-                        }
-                        .disabled(self.codexProvider.isSwitching)
-
-                        Button("Refresh Status") {
-                            self.codexProvider.refreshStatus(settings: self.settings)
-                        }
-                        .disabled(self.codexProvider.isSwitching)
-                    }
-                }
-
                 // Advanced
                 DisclosureGroup("Advanced", isExpanded: self.$showAdvanced) {
                     VStack(alignment: .leading, spacing: 16) {
@@ -163,13 +129,6 @@ struct GeneralSettingsPane: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 4)
-        }
-        .task {
-            self.codexProvider.refreshStatus(settings: self.settings)
-            self.selectedCodexProvider = self.codexProvider.selectedMode
-        }
-        .onChange(of: self.codexProvider.selectedMode) { _, newValue in
-            self.selectedCodexProvider = newValue
         }
     }
 
