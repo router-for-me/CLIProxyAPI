@@ -88,6 +88,7 @@ final class ModelsStore {
         }
         defaults.set(Array(exposedModels), forKey: cacheKey)
         await save(baseURL: baseURL, secret: secret)
+        await AgentConfigWriter.shared.reapplyEnabledAgents()
     }
 
     private func save(baseURL: URL, secret: String) async {

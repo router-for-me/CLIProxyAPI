@@ -1851,10 +1851,17 @@ func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
 
 // AuthMiddleware returns a Gin middleware handler that authenticates requests
 // using the configured authentication providers. When no providers are available,
-// it allows all requests (legacy behaviour).
+// it allows all requests (legacy behaviour). Local loopback requests are always
+// allowed without authentication so the bundled menu-bar app and local clients
+// work without configuring API keys.
 func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if manager == nil {
+			c.Next()
+			return
+		}
+
+		if isLocalLoopback(c.Request.RemoteAddr) {
 			c.Next()
 			return
 		}
@@ -1878,6 +1885,14 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		}
 		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
 	}
+}
+
+func isLocalLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return false
+	}
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
 }
 
 func configuredSignatureCacheEnabled(cfg *config.Config) bool {

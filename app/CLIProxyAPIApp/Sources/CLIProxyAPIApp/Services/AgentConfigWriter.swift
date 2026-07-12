@@ -38,6 +38,24 @@ final class AgentConfigWriter {
         }
     }
 
+    func reapplyEnabledAgents() async {
+        guard let data = UserDefaults.standard.array(forKey: "agentApps") as? [[String: Any]] else { return }
+        for dict in data {
+            guard let id = dict["id"] as? String,
+                  let isEnabled = dict["isEnabled"] as? Bool, isEnabled,
+                  let app = AgentApp.discover().first(where: { $0.id == id }) else { continue }
+            let customBaseURL = dict["customBaseURL"] as? String ?? ""
+            let customAPIKey = dict["customAPIKey"] as? String ?? ""
+            let baseURL = customBaseURL.isEmpty ? app.defaultBaseURL : customBaseURL
+            let apiKey = customAPIKey.isEmpty ? app.defaultAPIKey : customAPIKey
+            do {
+                try await applyCLIProxy(to: app, baseURL: baseURL, apiKey: apiKey)
+            } catch {
+                NSLog("reapplyEnabledAgents: failed for %@: %@", id, error.localizedDescription)
+            }
+        }
+    }
+
     func resetToDefault(app: AgentApp) async throws {
         switch app.id {
         case "codex":

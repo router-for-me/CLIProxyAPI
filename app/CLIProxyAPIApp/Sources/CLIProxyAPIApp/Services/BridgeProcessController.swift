@@ -13,6 +13,7 @@ final class BridgeProcessController {
     private var healthTask: Task<Void, Never>?
     private var consecutiveHealthFailures = 0
     private let maxGracePeriodFailures = 5
+    private var hasReappliedAgentsForCurrentProcess = false
 
     var hasManagedProcess: Bool {
         self.process != nil
@@ -26,6 +27,7 @@ final class BridgeProcessController {
 
         self.status = .starting
         self.consecutiveHealthFailures = 0
+        self.hasReappliedAgentsForCurrentProcess = false
         self.lastLogLine = "Starting bridge..."
 
         let process = Process()
@@ -131,6 +133,10 @@ final class BridgeProcessController {
             self.consecutiveHealthFailures = 0
             if let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) {
                 self.status = .running
+                if !self.hasReappliedAgentsForCurrentProcess {
+                    self.hasReappliedAgentsForCurrentProcess = true
+                    Task { await AgentConfigWriter.shared.reapplyEnabledAgents() }
+                }
             } else {
                 self.status = .unhealthy("Health check returned an unexpected response.")
             }
