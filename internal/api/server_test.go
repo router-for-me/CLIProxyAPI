@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,8 +21,54 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
+
+type codexSearchCaptureExecutor struct {
+	request *http.Request
+	body    []byte
+	authIDs []string
+}
+
+func (e *codexSearchCaptureExecutor) Identifier() string { return "codex" }
+
+func (e *codexSearchCaptureExecutor) Execute(context.Context, *auth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, nil
+}
+
+func (e *codexSearchCaptureExecutor) ExecuteStream(context.Context, *auth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e *codexSearchCaptureExecutor) Refresh(_ context.Context, a *auth.Auth) (*auth.Auth, error) {
+	return a, nil
+}
+
+func (e *codexSearchCaptureExecutor) CountTokens(context.Context, *auth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, nil
+}
+
+func (e *codexSearchCaptureExecutor) PrepareRequest(req *http.Request, a *auth.Auth) error {
+	token, _ := a.Metadata["access_token"].(string)
+	req.Header.Set("Authorization", "Bearer "+token)
+	return nil
+}
+
+func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *auth.Auth, req *http.Request) (*http.Response, error) {
+	e.request = req.Clone(req.Context())
+	e.authIDs = append(e.authIDs, selected.ID)
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	e.body = body
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"results":[{"url":"https://example.com"}]}`)),
+	}, nil
+}
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
@@ -91,6 +139,154 @@ func TestHealthz(t *testing.T) {
 			t.Fatalf("expected empty body for HEAD request, got %q", rr.Body.String())
 		}
 	})
+}
+
+func TestCodexAlphaSearchForwardsRequest(t *testing.T) {
+	server := newTestServer(t)
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	credential := &auth.Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Metadata: map[string]any{"access_token": "codex-token", "account_id": "account-123"},
+	}
+	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+		t.Fatalf("register Codex auth: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"query":"GPT-5.6"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Session_id", "session-123")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if executor.request == nil {
+		t.Fatal("Codex executor did not receive a request")
+	}
+	if got, want := executor.request.URL.String(), "https://chatgpt.com/backend-api/codex/alpha/search"; got != want {
+		t.Fatalf("upstream URL = %q, want %q", got, want)
+	}
+	if got, want := string(executor.body), `{"query":"GPT-5.6"}`; got != want {
+		t.Fatalf("upstream body = %q, want %q", got, want)
+	}
+	if got := executor.request.Header.Get("Authorization"); got != "Bearer codex-token" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if got := executor.request.Header.Get("Chatgpt-Account-Id"); got != "account-123" {
+		t.Fatalf("Chatgpt-Account-Id = %q", got)
+	}
+	if got := executor.request.Header.Get("Session_id"); got != "session-123" {
+		t.Fatalf("Session_id = %q", got)
+	}
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("response Content-Type = %q", got)
+	}
+}
+
+func TestCodexAlphaSearchUsesRequestIDForSessionAffinity(t *testing.T) {
+	server := newTestServer(t)
+	server.handlers.AuthManager.SetSelector(auth.NewSessionAffinitySelector(&auth.RoundRobinSelector{}))
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	for _, id := range []string{"codex-auth-a", "codex-auth-b"} {
+		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: "gpt-5.6-luna"}})
+		t.Cleanup(func() {
+			registry.GetGlobalRegistry().UnregisterClient(id)
+		})
+		credential := &auth.Auth{
+			ID:       id,
+			Provider: "codex",
+			Status:   auth.StatusActive,
+			Metadata: map[string]any{"access_token": id},
+		}
+		if _, errRegister := server.handlers.AuthManager.Register(context.Background(), credential); errRegister != nil {
+			t.Fatalf("register Codex auth: %v", errRegister)
+		}
+	}
+
+	for _, payload := range []string{
+		`{"id":"session-a","model":"gpt-5.6-luna"}`,
+		`{"id":"session-b","model":"gpt-5.6-luna"}`,
+		`{"id":"session-a","model":"gpt-5.6-luna"}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(payload))
+		req.Header.Set("Authorization", "Bearer test-key")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+	}
+
+	if got, want := len(executor.authIDs), 3; got != want {
+		t.Fatalf("selected auth count = %d, want %d", got, want)
+	}
+	if executor.authIDs[0] == executor.authIDs[1] {
+		t.Fatalf("different sessions selected the same auth %q", executor.authIDs[0])
+	}
+	if got, want := executor.authIDs[2], executor.authIDs[0]; got != want {
+		t.Fatalf("session-affinity auth = %q, want %q", got, want)
+	}
+}
+
+func TestCodexAlphaSearchRecordsRequestLog(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.RequestLog = true
+
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	credential := &auth.Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Metadata: map[string]any{"access_token": "codex-token", "account_id": "account-123"},
+	}
+	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+		t.Fatalf("register Codex auth: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rr)
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"query":"GPT-5.6"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	c.Request = req
+
+	server.codexAlphaSearch(c)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	rawAPIRequest, okRequest := c.Get("API_REQUEST")
+	if !okRequest {
+		t.Fatal("API_REQUEST was not captured")
+	}
+	apiRequest, _ := rawAPIRequest.([]byte)
+	if !strings.Contains(string(apiRequest), "=== API REQUEST 1 ===") {
+		t.Fatalf("API_REQUEST missing request header section: %q", apiRequest)
+	}
+	if !strings.Contains(string(apiRequest), "https://chatgpt.com/backend-api/codex/alpha/search") {
+		t.Fatalf("API_REQUEST missing upstream URL: %q", apiRequest)
+	}
+	if !strings.Contains(string(apiRequest), `{"query":"GPT-5.6"}`) {
+		t.Fatalf("API_REQUEST missing body: %q", apiRequest)
+	}
+	rawAPIResponse, okResponse := c.Get("API_RESPONSE")
+	if !okResponse {
+		t.Fatal("API_RESPONSE was not captured")
+	}
+	apiResponse, _ := rawAPIResponse.([]byte)
+	if !strings.Contains(string(apiResponse), "=== API RESPONSE 1 ===") {
+		t.Fatalf("API_RESPONSE missing response header section: %q", apiResponse)
+	}
+	if !strings.Contains(string(apiResponse), `{"results":[{"url":"https://example.com"}]}`) {
+		t.Fatalf("API_RESPONSE missing body: %q", apiResponse)
+	}
 }
 
 func TestManagementResponseExposesPluginSupportHeaderForCORS(t *testing.T) {
