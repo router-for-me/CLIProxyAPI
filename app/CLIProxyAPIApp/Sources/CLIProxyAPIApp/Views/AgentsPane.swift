@@ -3,7 +3,7 @@ import SwiftUI
 
 @MainActor
 @Observable
-final class UseInAgentStore {
+final class AgentsPaneStore {
     var apps: [AgentApp] = []
     private let agentStore = AgentAppStore()
     private let writer = AgentConfigWriter.shared
@@ -19,16 +19,18 @@ final class UseInAgentStore {
         apps = agentStore.apps
     }
 
-    func toggleEnabled(_ app: AgentApp, baseURL: String, apiKey: String) {
+    func toggle(_ app: AgentApp) {
         guard let index = apps.firstIndex(where: { $0.id == app.id }) else { return }
         let newValue = !apps[index].isEnabled
         apps[index].isEnabled = newValue
         agentStore.update(id: app.id, isEnabled: newValue)
 
-        if newValue {
-            apply(app: apps[index], baseURL: baseURL, apiKey: apiKey)
-        } else {
-            reset(app: apps[index])
+        Task {
+            if newValue {
+                await apply(app: apps[index])
+            } else {
+                await reset(app: apps[index])
+            }
         }
     }
 
@@ -44,14 +46,14 @@ final class UseInAgentStore {
         agentStore.update(id: app.id, customAPIKey: key)
     }
 
-    func reset(app: AgentApp) {
+    func reset(app: AgentApp) async {
         guard let index = apps.firstIndex(where: { $0.id == app.id }) else { return }
         isApplying = true
         lastError = nil
         defer { isApplying = false }
 
         do {
-            try writer.resetToDefault(app: app)
+            try await writer.resetToDefault(app: app)
             apps[index].isEnabled = false
             apps[index].customBaseURL = ""
             apps[index].customAPIKey = ""
@@ -61,29 +63,29 @@ final class UseInAgentStore {
         }
     }
 
-    func apply(app: AgentApp, baseURL: String, apiKey: String) {
+    func apply(app: AgentApp) async {
         isApplying = true
         lastError = nil
         defer { isApplying = false }
 
         do {
-            try writer.applyCLIProxy(to: app, baseURL: baseURL, apiKey: apiKey)
+            try await writer.applyCLIProxy(to: app, baseURL: app.displayURL, apiKey: app.displayKey)
         } catch {
             lastError = error.localizedDescription
         }
     }
 }
 
-struct UseInAgentPane: View {
+struct AgentsPane: View {
     @Bindable var settings: BridgeSettingsStore
     @Bindable var bridge: BridgeProcessController
-    @State private var store = UseInAgentStore()
+    @State private var store = AgentsPaneStore()
     @State private var editingAppID: String? = nil
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
             VStack(alignment: .leading, spacing: 16) {
-                SettingsSection(title: "Use CLIProxyAPI in", caption: "Select the agents you want to route through CLIProxyAPI. When enabled, their OpenAI-compatible settings point to the local bridge.") {
+                SettingsSection(title: "Agents", caption: "Select the agent apps or CLIs you want to route through CLIProxyAPI. When enabled, their config is updated and the app is restarted if it is currently running.") {
                     if store.isApplying {
                         HStack {
                             ProgressView()
@@ -105,17 +107,17 @@ struct UseInAgentPane: View {
                         AgentAppRow(
                             app: app,
                             isEditing: editingAppID == app.id,
-                            onToggle: { store.toggleEnabled(app, baseURL: settings.endpointString, apiKey: "devin-test") },
+                            onToggle: { store.toggle(app) },
                             onEdit: { editingAppID = editingAppID == app.id ? nil : app.id },
                             onURLChange: { store.updateURL($0, for: app) },
                             onKeyChange: { store.updateKey($0, for: app) },
-                            onReset: { store.reset(app: app) }
+                            onReset: { Task { await store.reset(app: app) } }
                         )
                     }
                 }
 
                 if bridge.status.isRunning {
-                    SettingsSection(title: "Selected model catalog", caption: "These are the models currently exposed at /v1/models. When an agent requests the model list, it sees only these models.") {
+                    SettingsSection(title: "Selected model catalog", caption: "These models are currently exposed at /v1/models for all enabled agents.") {
                         ExposedModelSummary(settings: settings)
                     }
                 }
@@ -150,10 +152,14 @@ struct AgentAppRow: View {
                     Text("Not installed")
                         .font(.caption)
                         .foregroundStyle(.red)
+                } else if app.isRunning {
+                    Text("Running")
+                        .font(.caption)
+                        .foregroundStyle(.green)
                 } else if app.isEnabled {
                     Text("Routed to CLIProxyAPI")
                         .font(.caption)
-                        .foregroundStyle(.green)
+                        .foregroundStyle(.blue)
                 } else {
                     Text("Default provider")
                         .font(.caption)
@@ -186,6 +192,7 @@ struct AgentAppRow: View {
                 ))
                 .toggleStyle(.switch)
                 .labelsHidden()
+                .disabled(!app.isInstalled)
             }
         }
 
@@ -195,7 +202,7 @@ struct AgentAppRow: View {
                     Text("Base URL")
                     Spacer()
                     TextField("Base URL", text: Binding(
-                        get: { app.customBaseURL.isEmpty ? app.defaultBaseURL ?? "" : app.customBaseURL },
+                        get: { app.customBaseURL.isEmpty ? app.defaultBaseURL : app.customBaseURL },
                         set: { onURLChange($0) }
                     ))
                     .textFieldStyle(.roundedBorder)
@@ -206,7 +213,7 @@ struct AgentAppRow: View {
                     Text("API Key")
                     Spacer()
                     TextField("API Key", text: Binding(
-                        get: { app.customAPIKey.isEmpty ? app.defaultAPIKey ?? "" : app.customAPIKey },
+                        get: { app.customAPIKey.isEmpty ? app.defaultAPIKey : app.customAPIKey },
                         set: { onKeyChange($0) }
                     ))
                     .textFieldStyle(.roundedBorder)
@@ -225,12 +232,12 @@ struct AgentAppIcon: View {
 
     var body: some View {
         Group {
-            if let path = app.iconPath {
+            if let path = app.appPath {
                 Image(nsImage: NSWorkspace.shared.icon(forFile: path))
                     .resizable()
                     .aspectRatio(contentMode: .fit)
             } else {
-                Image(systemName: "app.fill")
+                Image(systemName: "terminal.fill")
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .foregroundStyle(.secondary)

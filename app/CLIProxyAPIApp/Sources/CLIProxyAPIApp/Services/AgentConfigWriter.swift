@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 enum AgentConfigError: LocalizedError {
@@ -20,7 +21,7 @@ enum AgentConfigError: LocalizedError {
 final class AgentConfigWriter {
     static let shared = AgentConfigWriter()
 
-    func applyCLIProxy(to app: AgentApp, baseURL: String, apiKey: String) throws {
+    func applyCLIProxy(to app: AgentApp, baseURL: String, apiKey: String) async throws {
         switch app.id {
         case "codex":
             try applyCodex(baseURL: baseURL, apiKey: apiKey)
@@ -28,18 +29,24 @@ final class AgentConfigWriter {
             try applyCursor(baseURL: baseURL, apiKey: apiKey)
         case "windsurf":
             try applyWindsurf(baseURL: baseURL, apiKey: apiKey)
-        case "cline":
-            try applyCline(baseURL: baseURL, apiKey: apiKey)
-        case "continue":
-            try applyContinue(baseURL: baseURL, apiKey: apiKey)
         case "claude":
             try applyClaude(baseURL: baseURL, apiKey: apiKey)
+        case "devin":
+            try applyDevin(baseURL: baseURL, apiKey: apiKey)
+        case "aider":
+            try applyAider(baseURL: baseURL, apiKey: apiKey)
+        case "opencode":
+            try applyOpencode(baseURL: baseURL, apiKey: apiKey)
         default:
             throw AgentConfigError.unsupportedConfigType
         }
+
+        if app.isRunning, let bundleID = app.bundleID {
+            await restartApp(bundleID: bundleID)
+        }
     }
 
-    func resetToDefault(app: AgentApp) throws {
+    func resetToDefault(app: AgentApp) async throws {
         switch app.id {
         case "codex":
             try resetCodex()
@@ -47,14 +54,20 @@ final class AgentConfigWriter {
             try resetCursor()
         case "windsurf":
             try resetWindsurf()
-        case "cline":
-            try resetCline()
-        case "continue":
-            try resetContinue()
         case "claude":
             try resetClaude()
+        case "devin":
+            try resetDevin()
+        case "aider":
+            try resetAider()
+        case "opencode":
+            try resetOpencode()
         default:
             throw AgentConfigError.unsupportedConfigType
+        }
+
+        if app.isRunning, let bundleID = app.bundleID {
+            await restartApp(bundleID: bundleID)
         }
     }
 
@@ -66,8 +79,7 @@ final class AgentConfigWriter {
         let configURL = codexDir.appendingPathComponent("config.toml")
 
         var lines: [String] = []
-        if FileManager.default.fileExists(atPath: configURL.path),
-           let content = try? String(contentsOf: configURL, encoding: .utf8) {
+        if let content = try? String(contentsOf: configURL, encoding: .utf8) {
             lines = content.components(separatedBy: .newlines)
         }
 
@@ -141,76 +153,12 @@ final class AgentConfigWriter {
         try writeJSON(config, to: configURL)
     }
 
-    // MARK: - Cline
-
-    private func applyCline(baseURL: String, apiKey: String) throws {
-        let configURL = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Application Support/Code/User/settings.json")
-        var config = try readJSON(configURL)
-        config["cline.apiProvider"] = "openai"
-        config["cline.openAiBaseUrl"] = baseURL
-        config["cline.openAiApiKey"] = apiKey
-        config["cline.apiModelId"] = "auto"
-        try writeJSON(config, to: configURL)
-    }
-
-    private func resetCline() throws {
-        let configURL = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Application Support/Code/User/settings.json")
-        var config = try readJSON(configURL)
-        config.removeValue(forKey: "cline.apiProvider")
-        config.removeValue(forKey: "cline.openAiBaseUrl")
-        config.removeValue(forKey: "cline.openAiApiKey")
-        config.removeValue(forKey: "cline.apiModelId")
-        try writeJSON(config, to: configURL)
-    }
-
-    // MARK: - Continue
-
-    private func applyContinue(baseURL: String, apiKey: String) throws {
-        let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".continue/config.yaml")
-        var content = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
-        let entry = """
-        models:
-          - name: CLIProxyAPI
-            provider: openai
-            model: auto
-            apiBase: \(baseURL)
-            apiKey: \(apiKey)
-        """
-        if content.isEmpty {
-            content = entry
-        } else if content.contains("CLIProxyAPI") {
-            content = content.replacingOccurrences(of: #"apiBase:.*"#, with: "apiBase: \(baseURL)", options: .regularExpression)
-            content = content.replacingOccurrences(of: #"apiKey:.*"#, with: "apiKey: \(apiKey)", options: .regularExpression)
-        } else {
-            content += "\n" + entry
-        }
-        try content.write(to: configURL, atomically: true, encoding: .utf8)
-    }
-
-    private func resetContinue() throws {
-        let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".continue/config.yaml")
-        guard FileManager.default.fileExists(atPath: configURL.path) else { return }
-        var content = try String(contentsOf: configURL, encoding: .utf8)
-        if let range = content.range(of: "models:") {
-            let tail = content[range.upperBound...]
-            if let nextSection = tail.range(of: "\n[a-zA-Z]", options: .regularExpression) {
-                content = String(content[..<range.lowerBound]) + String(tail[nextSection.upperBound...])
-            } else {
-                content = String(content[..<range.lowerBound])
-            }
-        }
-        try content.write(to: configURL, atomically: true, encoding: .utf8)
-    }
-
     // MARK: - Claude
 
     private func applyClaude(baseURL: String, apiKey: String) throws {
-        // Claude Desktop third-party inference requires plist/MDM or env vars.
-        // We write a .env file for local use and show a hint in the UI.
-        let envURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/cli-proxy.env")
-        try? FileManager.default.createDirectory(at: envURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let envDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude")
+        try? FileManager.default.createDirectory(at: envDir, withIntermediateDirectories: true)
+        let envURL = envDir.appendingPathComponent("cli-proxy.env")
         let content = "ANTHROPIC_BASE_URL=\(baseURL)\nANTHROPIC_API_KEY=\(apiKey)\n"
         try content.write(to: envURL, atomically: true, encoding: .utf8)
     }
@@ -218,6 +166,66 @@ final class AgentConfigWriter {
     private func resetClaude() throws {
         let envURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/cli-proxy.env")
         try? FileManager.default.removeItem(at: envURL)
+    }
+
+    // MARK: - Devin
+
+    private func applyDevin(baseURL: String, apiKey: String) throws {
+        let envDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".devin")
+        try? FileManager.default.createDirectory(at: envDir, withIntermediateDirectories: true)
+        let envURL = envDir.appendingPathComponent("cli-proxy.env")
+        let content = "OPENAI_BASE_URL=\(baseURL)\nOPENAI_API_KEY=\(apiKey)\n"
+        try content.write(to: envURL, atomically: true, encoding: .utf8)
+    }
+
+    private func resetDevin() throws {
+        let envURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".devin/cli-proxy.env")
+        try? FileManager.default.removeItem(at: envURL)
+    }
+
+    // MARK: - Aider
+
+    private func applyAider(baseURL: String, apiKey: String) throws {
+        let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".aider.conf.yml")
+        var content = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
+        let lines = [
+            "openai-api-base: \(baseURL)",
+            "openai-api-key: \(apiKey)",
+        ]
+        if content.isEmpty {
+            content = lines.joined(separator: "\n")
+        } else {
+            content += "\n" + lines.joined(separator: "\n")
+        }
+        try content.write(to: configURL, atomically: true, encoding: .utf8)
+    }
+
+    private func resetAider() throws {
+        let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".aider.conf.yml")
+        guard FileManager.default.fileExists(atPath: configURL.path) else { return }
+        var content = try String(contentsOf: configURL, encoding: .utf8)
+        content = content.components(separatedBy: .newlines)
+            .filter { !$0.contains("openai-api-base:") && !$0.contains("openai-api-key:") }
+            .joined(separator: "\n")
+        try content.write(to: configURL, atomically: true, encoding: .utf8)
+    }
+
+    // MARK: - OpenCode
+
+    private func applyOpencode(baseURL: String, apiKey: String) throws {
+        let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".opencode/config.json")
+        var config = try readJSON(configURL)
+        config["api_base"] = baseURL
+        config["api_key"] = apiKey
+        try writeJSON(config, to: configURL)
+    }
+
+    private func resetOpencode() throws {
+        let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".opencode/config.json")
+        var config = try readJSON(configURL)
+        config.removeValue(forKey: "api_base")
+        config.removeValue(forKey: "api_key")
+        try writeJSON(config, to: configURL)
     }
 
     // MARK: - Helpers
@@ -235,5 +243,29 @@ final class AgentConfigWriter {
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let data = try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: url)
+    }
+
+    private func restartApp(bundleID: String) async {
+        let workspace = NSWorkspace.shared
+        let url = workspace.urlForApplication(withBundleIdentifier: bundleID)
+
+        let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        for app in runningApps {
+            app.terminate()
+        }
+
+        for _ in 0..<20 {
+            if runningApps.allSatisfy(\.isTerminated) { break }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+
+        for app in runningApps where !app.isTerminated {
+            app.forceTerminate()
+        }
+
+        if let url {
+            let configuration = NSWorkspace.OpenConfiguration()
+            _ = try? await workspace.openApplication(at: url, configuration: configuration)
+        }
     }
 }

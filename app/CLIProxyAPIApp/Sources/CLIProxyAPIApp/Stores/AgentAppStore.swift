@@ -13,7 +13,7 @@ final class AgentAppStore {
 
     func refresh() {
         var refreshed: [AgentApp] = []
-        for var app in AgentApp.supportedApps {
+        for var app in AgentApp.discover() {
             let saved = apps.first { $0.id == app.id }
             app.isEnabled = saved?.isEnabled ?? false
             app.customBaseURL = saved?.customBaseURL ?? ""
@@ -63,7 +63,7 @@ final class AgentAppStore {
             let isEnabled = dict["isEnabled"] as? Bool ?? false
             let customBaseURL = dict["customBaseURL"] as? String ?? ""
             let customAPIKey = dict["customAPIKey"] as? String ?? ""
-            var app = AgentApp.supportedApps.first { $0.id == id }
+            var app = AgentApp.discover().first { $0.id == id }
             app?.isEnabled = isEnabled
             app?.customBaseURL = customBaseURL
             app?.customAPIKey = customAPIKey

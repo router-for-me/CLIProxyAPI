@@ -6,6 +6,7 @@ struct CLIProxyAPIApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var settings = BridgeSettingsStore()
     @State private var bridge = BridgeProcessController()
+    @State private var codexProvider = CodexProviderController()
 
     var body: some Scene {
         MenuBarExtra {
@@ -16,7 +17,7 @@ struct CLIProxyAPIApp: App {
         .menuBarExtraStyle(.menu)
 
         Settings {
-            SettingsView(settings: self.settings, bridge: self.bridge)
+            SettingsView(settings: self.settings, bridge: self.bridge, codexProvider: self.codexProvider)
                 .frame(width: 720, height: 600)
         }
         .windowResizability(.contentSize)
