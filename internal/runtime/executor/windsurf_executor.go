@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,12 +25,13 @@ import (
 )
 
 const (
-	windsurfBaseURL        = "https://server.codeium.com"
-	windsurfGetUserJwt     = "/exa.auth_pb.AuthService/GetUserJwt"
-	windsurfGetChatMsg     = "/exa.api_server_pb.ApiServerService/GetChatMessage"
-	windsurfVersion        = "2.0.0"
-	windsurfRequestTimeout = 120 * time.Second
-	jwtCacheMargin         = 60 * time.Second
+	windsurfBaseURL           = "https://server.codeium.com"
+	windsurfGetUserJwt        = "/exa.auth_pb.AuthService/GetUserJwt"
+	windsurfGetChatMsg        = "/exa.api_server_pb.ApiServerService/GetChatMessage"
+	windsurfVersion           = "2.0.0"
+	windsurfRequestTimeout    = 120 * time.Second
+	windsurfMaxForwardedTools = 30
+	jwtCacheMargin            = 60 * time.Second
 )
 
 // WindsurfExecutor executes requests against the Windsurf / Devin CLI backend.
@@ -324,16 +326,33 @@ func (e *WindsurfExecutor) buildGetChatMessageRequest(apiKey, userJwt, modelUid 
 	ctxWindow := modelContextWindow(reqModelFallback(body.Model, cfg.DefaultModelID))
 	budget := computeCompletionBudget(ctxWindow, body.MaxTokens)
 
+	// Limit prompt budget to the Windsurf backend cap (64K).
+	if budget.PromptBudget > 64000 {
+		budget.PromptBudget = 64000
+	}
+
+	// Forward tools; the backend rejects too many tool definitions, so cap the count.
+	tools := body.Tools
+	if len(tools) > windsurfMaxForwardedTools {
+		tools = reduceToolCountForBackend(tools)
+	}
+	toolTokenEstimate := estimateToolDefinitionsTokens(tools)
+	messageBudget := max(256, budget.PromptBudget-toolTokenEstimate)
+	budgetedMessages := truncateMessagesForPromptBudget(promptMessages, messageBudget)
+
 	p := newProtoBuf()
 	p.writeBytesField(1, metadata.bytes())
 	if instructionPrefix != "" {
 		p.writeStringField(2, instructionPrefix)
 	}
-	for _, m := range promptMessages {
+	for _, m := range budgetedMessages {
 		p.writeBytesField(3, encodeChatMessagePrompt(m))
 	}
 	p.writeVarintField(7, 5)
 	p.writeBytesField(8, encodeCompletionConfig(budget, body.Temperature, body.TopP))
+	for _, t := range tools {
+		p.writeBytesField(10, encodeToolDef(t))
+	}
 	p.writeStringField(16, cascadeID)
 	p.writeStringField(21, modelUid)
 	p.writeStringField(22, promptID)
@@ -828,13 +847,13 @@ type completionBudget struct {
 func modelContextWindow(modelID string) int {
 	switch {
 	case strings.Contains(modelID, "glm-5-2"):
-		return 128000
+		return 1000000
 	case strings.Contains(modelID, "glm-5-1"):
 		return 128000
 	case strings.Contains(modelID, "gpt-5-5"):
-		return 256000
+		return 1000000
 	case strings.Contains(modelID, "gpt-5-4"):
-		return 256000
+		return 1000000
 	case strings.Contains(modelID, "gpt-5-4-mini"):
 		return 128000
 	case strings.Contains(modelID, "gpt-5-3-codex"):
@@ -842,18 +861,22 @@ func modelContextWindow(modelID string) int {
 	case strings.Contains(modelID, "gpt-5-2"):
 		return 128000
 	case strings.Contains(modelID, "claude-opus-4-8"):
-		return 200000
+		return 1000000
+	case strings.Contains(modelID, "claude-5-fable"):
+		return 1000000
 	case strings.Contains(modelID, "claude-sonnet-5"):
-		return 200000
+		return 1000000
 	case strings.Contains(modelID, "claude-opus-4-7"):
-		return 200000
+		return 1000000
 	case strings.Contains(modelID, "claude-opus-4-6"):
-		return 200000
+		return 1000000
 	case strings.Contains(modelID, "claude-opus-4-5"):
-		return 200000
+		return 1000000
 	case strings.Contains(modelID, "claude-sonnet-4-6"):
 		return 200000
 	case strings.Contains(modelID, "claude-sonnet-4-5"):
+		return 200000
+	case strings.Contains(modelID, "claude-haiku-4-5"):
 		return 200000
 	case strings.Contains(modelID, "gemini-3-5-flash"):
 		return 128000
@@ -862,6 +885,8 @@ func modelContextWindow(modelID string) int {
 	case strings.Contains(modelID, "gemini-3.0-flash"):
 		return 128000
 	case strings.Contains(modelID, "swe-1-6"):
+		return 128000
+	case strings.Contains(modelID, "swe-1-7"):
 		return 128000
 	case strings.Contains(modelID, "kimi"):
 		return 256000
@@ -1118,6 +1143,107 @@ func min(a, b int) int {
 
 func min3(a, b, c int) int {
 	return min(min(a, b), c)
+}
+
+// reduceToolCountForBackend keeps the first N essential tools. The backend
+// rejects requests with too many tool definitions, so we cap at the known limit.
+func reduceToolCountForBackend(tools []openAITool) []openAITool {
+	if len(tools) <= windsurfMaxForwardedTools {
+		return tools
+	}
+	// Prefer core tools (common agent primitives) first, then keep the rest.
+	priorityPrefixes := []string{"exec", "write", "read", "search", "bash", "shell", "file", "codex_apps__"}
+	scored := make([]struct {
+		score int
+		tool  openAITool
+	}, 0, len(tools))
+	for _, t := range tools {
+		score := 0
+		name := strings.ToLower(t.Function.Name)
+		for i, prefix := range priorityPrefixes {
+			if strings.HasPrefix(name, prefix) {
+				score = len(priorityPrefixes) - i
+				break
+			}
+		}
+		scored = append(scored, struct {
+			score int
+			tool  openAITool
+		}{score, t})
+	}
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].score != scored[j].score {
+			return scored[i].score > scored[j].score
+		}
+		return i < j
+	})
+	reduced := make([]openAITool, 0, windsurfMaxForwardedTools)
+	for i := 0; i < windsurfMaxForwardedTools && i < len(scored); i++ {
+		reduced = append(reduced, scored[i].tool)
+	}
+	return reduced
+}
+
+func estimateToolDefinitionsTokens(tools []openAITool) int {
+	if len(tools) == 0 {
+		return 0
+	}
+	totalChars := 0
+	for _, t := range tools {
+		totalChars += len(t.Function.Name)
+		totalChars += len(t.Function.Description)
+		totalChars += len(jsonString(t.Function.Parameters))
+	}
+	return max(1, totalChars/4)
+}
+
+func jsonString(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+func truncateMessagesForPromptBudget(messages []openAIMessage, promptBudget int) []openAIMessage {
+	targetTokens := max(256, promptBudget-512)
+	if estimateMessagesTokens(messages) <= targetTokens {
+		return messages
+	}
+	// Keep the first user message (anchor) and as many recent messages as fit.
+	var anchor []openAIMessage
+	anchorTokens := 0
+	for i, m := range messages {
+		tokens := estimateMessageTokens(m)
+		if anchorTokens+tokens <= targetTokens/4 {
+			anchor = append(anchor, m)
+			anchorTokens += tokens
+			if m.Role == "user" {
+				break
+			}
+		} else {
+			break
+		}
+		_ = i
+	}
+	selected := make([]openAIMessage, 0, len(messages))
+	usedTokens := anchorTokens
+	for i := len(messages) - 1; i >= 0; i-- {
+		tokens := estimateMessageTokens(messages[i])
+		if usedTokens+tokens <= targetTokens {
+			selected = append([]openAIMessage{messages[i]}, selected...)
+			usedTokens += tokens
+		} else {
+			break
+		}
+	}
+	return append(anchor, selected...)
+}
+
+func estimateMessageTokens(m openAIMessage) int {
+	contentTokens := len(nativePromptText(m.Content)) / 4
+	toolCallTokens := 0
+	for _, tc := range m.ToolCalls {
+		toolCallTokens += len(tc.Function.Name) + len(tc.Function.Arguments)
+	}
+	return 8 + contentTokens + toolCallTokens
 }
 
 // cloudChatEvent is a decoded Windsurf backend event.
