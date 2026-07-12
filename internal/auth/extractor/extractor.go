@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
@@ -37,6 +39,14 @@ func ExtractAll(authDir string) ([]string, error) {
 		extractCursor,
 		extractGemini,
 		extractOpenAI,
+		extractAnthropic,
+		extractDeepSeek,
+		extractMistral,
+		extractGroq,
+		extractCohere,
+		extractPerplexity,
+		extractTogether,
+		extractFireworks,
 	}
 
 	var found []string
@@ -224,6 +234,189 @@ func extractOpenAI() *ExtractedAuth {
 	}
 }
 
+func extractAnthropic() *ExtractedAuth {
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		apiKey = keychainFind("ANTHROPIC_API_KEY", "anthropic")
+	}
+	if apiKey == "" {
+		apiKey = findEnvInFile("ANTHROPIC_API_KEY", ".anthropic", ".env")
+	}
+	if apiKey == "" {
+		return nil
+	}
+	return &ExtractedAuth{
+		Provider: "anthropic",
+		Filename: "anthropic.json",
+		Data: map[string]any{
+			"type":    "claude",
+			"api_key": apiKey,
+			"base_url": "https://api.anthropic.com",
+		},
+	}
+}
+
+func extractDeepSeek() *ExtractedAuth {
+	apiKey := os.Getenv("DEEPSEEK_API_KEY")
+	if apiKey == "" {
+		apiKey = keychainFind("DEEPSEEK_API_KEY", "deepseek")
+	}
+	if apiKey == "" {
+		apiKey = findEnvInFile("DEEPSEEK_API_KEY", ".deepseek", ".env")
+	}
+	if apiKey == "" {
+		return nil
+	}
+	return &ExtractedAuth{
+		Provider: "deepseek",
+		Filename: "deepseek.json",
+		Data: map[string]any{
+			"type":        "openai-compatibility",
+			"api_key":     apiKey,
+			"base_url":    "https://api.deepseek.com",
+			"compat_name": "deepseek",
+		},
+	}
+}
+
+func extractMistral() *ExtractedAuth {
+	apiKey := os.Getenv("MISTRAL_API_KEY")
+	if apiKey == "" {
+		apiKey = keychainFind("MISTRAL_API_KEY", "mistral")
+	}
+	if apiKey == "" {
+		apiKey = findEnvInFile("MISTRAL_API_KEY", ".mistral", ".env")
+	}
+	if apiKey == "" {
+		return nil
+	}
+	return &ExtractedAuth{
+		Provider: "mistral",
+		Filename: "mistral.json",
+		Data: map[string]any{
+			"type":        "openai-compatibility",
+			"api_key":     apiKey,
+			"base_url":    "https://api.mistral.ai",
+			"compat_name": "mistral",
+		},
+	}
+}
+
+func extractGroq() *ExtractedAuth {
+	apiKey := os.Getenv("GROQ_API_KEY")
+	if apiKey == "" {
+		apiKey = keychainFind("GROQ_API_KEY", "groq")
+	}
+	if apiKey == "" {
+		apiKey = findEnvInFile("GROQ_API_KEY", ".groq", ".env")
+	}
+	if apiKey == "" {
+		return nil
+	}
+	return &ExtractedAuth{
+		Provider: "groq",
+		Filename: "groq.json",
+		Data: map[string]any{
+			"type":        "openai-compatibility",
+			"api_key":     apiKey,
+			"base_url":    "https://api.groq.com/openai/v1",
+			"compat_name": "groq",
+		},
+	}
+}
+
+func extractCohere() *ExtractedAuth {
+	apiKey := os.Getenv("COHERE_API_KEY")
+	if apiKey == "" {
+		apiKey = keychainFind("COHERE_API_KEY", "cohere")
+	}
+	if apiKey == "" {
+		apiKey = findEnvInFile("COHERE_API_KEY", ".cohere", ".env")
+	}
+	if apiKey == "" {
+		return nil
+	}
+	return &ExtractedAuth{
+		Provider: "cohere",
+		Filename: "cohere.json",
+		Data: map[string]any{
+			"type":        "openai-compatibility",
+			"api_key":     apiKey,
+			"base_url":    "https://api.cohere.com/v1",
+			"compat_name": "cohere",
+		},
+	}
+}
+
+func extractPerplexity() *ExtractedAuth {
+	apiKey := os.Getenv("PERPLEXITY_API_KEY")
+	if apiKey == "" {
+		apiKey = keychainFind("PERPLEXITY_API_KEY", "perplexity")
+	}
+	if apiKey == "" {
+		apiKey = findEnvInFile("PERPLEXITY_API_KEY", ".perplexity", ".env")
+	}
+	if apiKey == "" {
+		return nil
+	}
+	return &ExtractedAuth{
+		Provider: "perplexity",
+		Filename: "perplexity.json",
+		Data: map[string]any{
+			"type":        "openai-compatibility",
+			"api_key":     apiKey,
+			"base_url":    "https://api.perplexity.ai",
+			"compat_name": "perplexity",
+		},
+	}
+}
+
+func extractTogether() *ExtractedAuth {
+	apiKey := os.Getenv("TOGETHER_API_KEY")
+	if apiKey == "" {
+		apiKey = keychainFind("TOGETHER_API_KEY", "together")
+	}
+	if apiKey == "" {
+		apiKey = findEnvInFile("TOGETHER_API_KEY", ".together", ".env")
+	}
+	if apiKey == "" {
+		return nil
+	}
+	return &ExtractedAuth{
+		Provider: "together",
+		Filename: "together.json",
+		Data: map[string]any{
+			"type":        "openai-compatibility",
+			"api_key":     apiKey,
+			"base_url":    "https://api.together.xyz/v1",
+			"compat_name": "together",
+		},
+	}
+}
+
+func extractFireworks() *ExtractedAuth {
+	apiKey := os.Getenv("FIREWORKS_API_KEY")
+	if apiKey == "" {
+		apiKey = keychainFind("FIREWORKS_API_KEY", "fireworks")
+	}
+	if apiKey == "" {
+		apiKey = findEnvInFile("FIREWORKS_API_KEY", ".fireworks", ".env")
+	}
+	if apiKey == "" {
+		return nil
+	}
+	return &ExtractedAuth{
+		Provider: "fireworks",
+		Filename: "fireworks.json",
+		Data: map[string]any{
+			"type":        "openai-compatibility",
+			"api_key":     apiKey,
+			"base_url":    "https://api.fireworks.ai/inference/v1",
+			"compat_name": "fireworks",
+		},
+	}
+}
+
 func extractKeyFromJSON(data []byte, keys ...string) string {
 	var parsed map[string]any
 	if err := json.Unmarshal(data, &parsed); err != nil {
@@ -242,4 +435,56 @@ func defaultString(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// keychainFind tries to read an API key from the macOS keychain.
+func keychainFind(envVar, serviceHint string) string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
+	out, err := exec.Command("security", "find-generic-password", "-s", serviceHint, "-w").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// findEnvInFile searches for KEY=value patterns in common dotenv/config files.
+func findEnvInFile(key string, dirs ...string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	searchDirs := []string{""}
+	for _, d := range dirs {
+		if d == "" || d == "." {
+			continue
+		}
+		searchDirs = append(searchDirs, filepath.Join(home, d))
+	}
+
+	filenames := []string{".env", ".env.local", "config", "credentials"}
+	for _, dir := range searchDirs {
+		for _, name := range filenames {
+			path := filepath.Join(dir, name)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "#") {
+					continue
+				}
+				parts := strings.SplitN(line, "=", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				if strings.TrimSpace(parts[0]) == key {
+					return strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+				}
+			}
+		}
+	}
+	return ""
 }
