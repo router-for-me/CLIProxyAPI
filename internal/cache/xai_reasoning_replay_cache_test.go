@@ -172,6 +172,56 @@ func TestXAIReasoningReplayCacheRejectsAssistantMessageWithoutReasoning(t *testi
 	}
 }
 
+func TestXAIReasoningReplayCacheStoresToolCallWithoutReasoning(t *testing.T) {
+	ClearXAIReasoningReplayCache()
+	t.Cleanup(ClearXAIReasoningReplayCache)
+
+	tests := []struct {
+		name        string
+		sessionKey  string
+		item        []byte
+		wantType    string
+		wantPayload string
+	}{
+		{
+			name:        "function call",
+			sessionKey:  "prompt-cache:function-call-only",
+			item:        []byte(`{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"weather\"}"}`),
+			wantType:    "function_call",
+			wantPayload: `{"q":"weather"}`,
+		},
+		{
+			name:        "custom tool call",
+			sessionKey:  "prompt-cache:custom-tool-call-only",
+			item:        []byte(`{"type":"custom_tool_call","call_id":"call_2","name":"shell","input":"pwd"}`),
+			wantType:    "custom_tool_call",
+			wantPayload: "pwd",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !CacheXAIReasoningReplayItems("grok-4.3", tt.sessionKey, [][]byte{tt.item}) {
+				t.Fatal("tool-call-only replay batch must be cached")
+			}
+			items, ok := GetXAIReasoningReplayItems("grok-4.3", tt.sessionKey)
+			if !ok || len(items) != 1 {
+				t.Fatalf("cached items = %q, %v, want one item", items, ok)
+			}
+			if got := gjson.GetBytes(items[0], "type").String(); got != tt.wantType {
+				t.Fatalf("cached type = %q, want %q; item=%s", got, tt.wantType, items[0])
+			}
+			payloadPath := "arguments"
+			if tt.wantType == "custom_tool_call" {
+				payloadPath = "input"
+			}
+			if got := gjson.GetBytes(items[0], payloadPath).String(); got != tt.wantPayload {
+				t.Fatalf("cached %s = %q, want %q; item=%s", payloadPath, got, tt.wantPayload, items[0])
+			}
+		})
+	}
+}
+
 func TestXAIReasoningReplayRequiredHomeExpireFailureReturnsItems(t *testing.T) {
 	ClearXAIReasoningReplayCache()
 	t.Cleanup(ClearXAIReasoningReplayCache)

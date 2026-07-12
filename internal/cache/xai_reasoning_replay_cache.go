@@ -243,17 +243,18 @@ func xaiReasoningReplayKVKey(modelName, sessionKey string) string {
 
 func normalizeXAIReasoningReplayItems(items [][]byte) ([][]byte, bool) {
 	normalized := make([][]byte, 0, len(items))
-	hasReasoning := false
+	hasReplayAnchor := false
 	for _, item := range items {
 		normalizedItem, ok := normalizeXAIReasoningReplayItem(item)
 		if ok {
 			normalized = append(normalized, normalizedItem)
-			if strings.TrimSpace(gjson.GetBytes(normalizedItem, "type").String()) == "reasoning" {
-				hasReasoning = true
+			switch strings.TrimSpace(gjson.GetBytes(normalizedItem, "type").String()) {
+			case "reasoning", "function_call", "custom_tool_call":
+				hasReplayAnchor = true
 			}
 		}
 	}
-	return normalized, hasReasoning
+	return normalized, hasReplayAnchor
 }
 
 func normalizeXAIReasoningReplayItem(item []byte) ([]byte, bool) {

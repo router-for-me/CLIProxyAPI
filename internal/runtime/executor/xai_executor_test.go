@@ -1877,6 +1877,47 @@ func TestApplyXAIReasoningReplayCacheFallsBackWhenReadFails(t *testing.T) {
 	}
 }
 
+func TestXAIReasoningReplayCacheReplaysFunctionCallWithoutReasoning(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	const executionSessionID = "xai-tool-call-only"
+	cacheXAIReasoningReplayFromCompleted(context.Background(), xaiReasoningReplayScope{
+		modelName:  "grok-4.3",
+		sessionKey: "execution:" + executionSessionID,
+	}, []byte(`{"response":{"output":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"weather\"}"}]}}`))
+
+	body := []byte(`{"model":"grok-4.3","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"call lookup"}]},{"type":"function_call_output","call_id":"call_1","output":"sunny"}]}`)
+	updated, scope, errReplay := applyXAIReasoningReplayCacheRequired(context.Background(), sdktranslator.FormatClaude, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: body,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: executionSessionID,
+		},
+	}, body)
+	if errReplay != nil {
+		t.Fatalf("applyXAIReasoningReplayCacheRequired() error = %v", errReplay)
+	}
+	if !scope.valid() {
+		t.Fatal("tool-call-only replay scope must remain valid")
+	}
+	input := gjson.GetBytes(updated, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("input length = %d, want 3; body=%s", len(input), updated)
+	}
+	wantTypes := []string{"message", "function_call", "function_call_output"}
+	for i, wantType := range wantTypes {
+		if got := input[i].Get("type").String(); got != wantType {
+			t.Fatalf("input.%d.type = %q, want %q; body=%s", i, got, wantType, updated)
+		}
+	}
+	if got := input[1].Get("call_id").String(); got != "call_1" {
+		t.Fatalf("replayed call_id = %q, want call_1; body=%s", got, updated)
+	}
+}
+
 func TestXAIExecutorReasoningReplayCacheReplaysFunctionCallForClaudeToolResult(t *testing.T) {
 	internalcache.ClearXAIReasoningReplayCache()
 	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
