@@ -239,17 +239,30 @@ struct AgentAppIcon: View {
 
     var body: some View {
         Group {
-            if let path = app.appPath {
+            switch app.effectiveIcon {
+            case .resource(let name):
+                if let image = NSImage(named: name) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else {
+                    fallbackIcon
+                }
+            case .appPath(let path):
                 Image(nsImage: NSWorkspace.shared.icon(forFile: path))
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-            } else {
-                Image(systemName: "terminal.fill")
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .foregroundStyle(.secondary)
+            case .none:
+                fallbackIcon
             }
         }
+    }
+
+    private var fallbackIcon: some View {
+        Image(systemName: app.kind == .cli ? "terminal.fill" : "app.fill")
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .foregroundStyle(.secondary)
     }
 }
 

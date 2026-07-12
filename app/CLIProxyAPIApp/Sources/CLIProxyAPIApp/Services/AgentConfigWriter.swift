@@ -25,8 +25,6 @@ final class AgentConfigWriter {
         switch app.id {
         case "codex":
             try applyCodex(baseURL: baseURL, apiKey: apiKey)
-        case "continue":
-            try applyContinue(baseURL: baseURL, apiKey: apiKey)
         case "cline":
             try applyCline(baseURL: baseURL, apiKey: apiKey)
         case "opencode":
@@ -44,8 +42,6 @@ final class AgentConfigWriter {
         switch app.id {
         case "codex":
             try resetCodex()
-        case "continue":
-            try resetContinue()
         case "cline":
             try resetCline()
         case "opencode":
@@ -126,67 +122,6 @@ final class AgentConfigWriter {
         config.removeValue(forKey: "cline.openAiCompatible.apiKey")
         config.removeValue(forKey: "cline.openAiCompatible.modelId")
         try writeJSON(config, to: configURL)
-    }
-
-    // MARK: - Continue
-
-    private func applyContinue(baseURL: String, apiKey: String) throws {
-        let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".continue/config.yaml")
-        let configYamlExists = FileManager.default.fileExists(atPath: configURL.path)
-        let configURLJson = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".continue/config.json")
-
-        if configYamlExists {
-            var content = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
-            let entry = """
-            models:
-              - name: CLIProxyAPI
-                provider: openai
-                model: auto
-                apiBase: \(baseURL)
-                apiKey: \(apiKey)
-            """
-            if content.contains("CLIProxyAPI") {
-                content = content.replacingOccurrences(of: #"apiBase:.*"#, with: "apiBase: \(baseURL)", options: .regularExpression)
-                content = content.replacingOccurrences(of: #"apiKey:.*"#, with: "apiKey: \(apiKey)", options: .regularExpression)
-            } else if content.contains("models:") {
-                content = content.replacingOccurrences(of: "models:", with: "models:\n  - name: CLIProxyAPI\n    provider: openai\n    model: auto\n    apiBase: \(baseURL)\n    apiKey: \(apiKey)", options: .literal, range: content.range(of: "models:"))
-            } else {
-                content += "\n" + entry
-            }
-            try content.write(to: configURL, atomically: true, encoding: .utf8)
-        } else {
-            var config = try readJSON(configURLJson)
-            var models = config["models"] as? [[String: Any]] ?? []
-            models.removeAll { ($0["name"] as? String) == "CLIProxyAPI" }
-            models.append([
-                "name": "CLIProxyAPI",
-                "provider": "openai",
-                "model": "auto",
-                "apiBase": baseURL,
-                "apiKey": apiKey,
-            ])
-            config["models"] = models
-            try writeJSON(config, to: configURLJson)
-        }
-    }
-
-    private func resetContinue() throws {
-        let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".continue/config.yaml")
-        if FileManager.default.fileExists(atPath: configURL.path) {
-            var content = try String(contentsOf: configURL, encoding: .utf8)
-            let pattern = #"\n?  - name: CLIProxyAPI\n(?:    .+\n?)*"#
-            if let range = content.range(of: pattern, options: .regularExpression) {
-                content.removeSubrange(range)
-            }
-            try content.write(to: configURL, atomically: true, encoding: .utf8)
-        } else {
-            let configURLJson = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".continue/config.json")
-            var config = try readJSON(configURLJson)
-            var models = config["models"] as? [[String: Any]] ?? []
-            models.removeAll { ($0["name"] as? String) == "CLIProxyAPI" }
-            config["models"] = models
-            try writeJSON(config, to: configURLJson)
-        }
     }
 
     // MARK: - OpenCode

@@ -8,6 +8,7 @@ struct AgentApp: Identifiable, Hashable {
     let bundleID: String?
     let appPath: String?
     let cliPath: String?
+    let iconResourceName: String?
     let configPath: String
     let configType: ConfigType
     let defaultBaseURL: String
@@ -48,11 +49,19 @@ struct AgentApp: Identifiable, Hashable {
         return false
     }
 
-    var effectiveIconPath: String? {
+    var effectiveIcon: AgentAppIconSource? {
+        if let iconResourceName = iconResourceName {
+            return .resource(name: iconResourceName)
+        }
         if let appPath = appPath, FileManager.default.fileExists(atPath: appPath) {
-            return appPath
+            return .appPath(appPath)
         }
         return nil
+    }
+
+    enum AgentAppIconSource {
+        case resource(name: String)
+        case appPath(String)
     }
 
     private func isProcessRunning(named: String) -> Bool {
@@ -75,7 +84,6 @@ extension AgentApp {
         // Only list agents where a full OpenAI-compatible base URL + model swap is supported.
         return [
             codex,
-            `continue`,
             cline,
             opencode,
         ]
@@ -143,31 +151,12 @@ extension AgentApp {
             bundleID: "com.openai.codex",
             appPath: path,
             cliPath: nil,
+            iconResourceName: nil,
             configPath: NSHomeDirectory() + "/.codex/config.toml",
             configType: .toml,
             defaultBaseURL: "http://localhost:8317/v1",
             defaultAPIKey: "devin-test",
             isInstalled: installed
-        )
-    }
-
-    private static var `continue`: AgentApp {
-        let path = resolveCLI("continue")
-        let configYaml = NSHomeDirectory() + "/.continue/config.yaml"
-        let configJson = NSHomeDirectory() + "/.continue/config.json"
-        let configPath = FileManager.default.fileExists(atPath: configYaml) ? configYaml : configJson
-        return AgentApp(
-            id: "continue",
-            name: "Continue",
-            kind: .cli,
-            bundleID: nil,
-            appPath: nil,
-            cliPath: path,
-            configPath: configPath,
-            configType: configPath.hasSuffix(".yaml") ? .yaml : .json,
-            defaultBaseURL: "http://localhost:8317/v1",
-            defaultAPIKey: "devin-test",
-            isInstalled: path != nil || FileManager.default.fileExists(atPath: configPath)
         )
     }
 
@@ -181,6 +170,7 @@ extension AgentApp {
             bundleID: "com.microsoft.VSCode",
             appPath: vscodePath,
             cliPath: nil,
+            iconResourceName: "cline",
             configPath: configURL,
             configType: .vscodeSettings,
             defaultBaseURL: "http://localhost:8317/v1",
@@ -198,6 +188,7 @@ extension AgentApp {
             bundleID: nil,
             appPath: nil,
             cliPath: path,
+            iconResourceName: nil,
             configPath: NSHomeDirectory() + "/.opencode/config.json",
             configType: .json,
             defaultBaseURL: "http://localhost:8317/v1",

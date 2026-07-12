@@ -25,6 +25,10 @@ if [ -f "../../config.windsurf.yaml" ]; then
     cp "../../config.windsurf.yaml" "${APP_BUNDLE}/Contents/Resources/"
 fi
 
+if [ -d "Resources/AgentIcons" ]; then
+    cp -R "Resources/AgentIcons" "${APP_BUNDLE}/Contents/Resources/"
+fi
+
 cat > "${APP_BUNDLE}/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
