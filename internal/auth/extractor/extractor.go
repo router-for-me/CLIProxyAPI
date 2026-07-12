@@ -116,17 +116,26 @@ func extractCodex() *ExtractedAuth {
 			return nil
 		}
 	}
-	apiKey := extractKeyFromJSON(data, "api_key", "token", "access_token")
-	if apiKey == "" {
+
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
 		return nil
 	}
+
+	// Codex auth files are OAuth JSONs; the access_token under tokens is the API key.
+	if _, ok := parsed["type"]; !ok {
+		parsed["type"] = "codex"
+	}
+	if _, ok := parsed["api_key"]; !ok {
+		if apiKey := extractKeyFromJSON(data, "api_key", "token", "access_token"); apiKey != "" {
+			parsed["api_key"] = apiKey
+		}
+	}
+
 	return &ExtractedAuth{
 		Provider: "codex",
 		Filename: "codex.json",
-		Data: map[string]any{
-			"type":    "codex",
-			"api_key": apiKey,
-		},
+		Data:     parsed,
 	}
 }
 
@@ -418,13 +427,31 @@ func extractFireworks() *ExtractedAuth {
 }
 
 func extractKeyFromJSON(data []byte, keys ...string) string {
-	var parsed map[string]any
+	var parsed any
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return ""
 	}
-	for _, key := range keys {
-		if s, ok := parsed[key].(string); ok && s != "" {
-			return s
+	return findStringInJSON(parsed, keys)
+}
+
+func findStringInJSON(v any, keys []string) string {
+	switch val := v.(type) {
+	case map[string]any:
+		for _, key := range keys {
+			if s, ok := val[key].(string); ok && s != "" {
+				return s
+			}
+		}
+		for _, v := range val {
+			if s := findStringInJSON(v, keys); s != "" {
+				return s
+			}
+		}
+	case []any:
+		for _, item := range val {
+			if s := findStringInJSON(item, keys); s != "" {
+				return s
+			}
 		}
 	}
 	return ""
