@@ -433,6 +433,13 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				urlContextNodes = append(urlContextNodes, urlToolNode)
 			}
 		}
+		if hasFunction {
+			if decls := gjson.GetBytes(functionToolNode, "functionDeclarations"); decls.IsArray() {
+				deduped := util.DeduplicateFunctionDeclarations([]byte(decls.Raw))
+				functionToolNode, _ = sjson.SetRawBytes(functionToolNode, "functionDeclarations", deduped)
+				hasFunction = gjson.GetBytes(deduped, "#").Int() > 0
+			}
+		}
 		if hasFunction || len(googleSearchNodes) > 0 || len(codeExecutionNodes) > 0 || len(urlContextNodes) > 0 {
 			toolsNode := []byte("[]")
 			if hasFunction {

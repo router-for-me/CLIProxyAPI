@@ -98,6 +98,17 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				}
 			}
 		}
+		for i := 0; i < len(toolResults); i++ {
+			declsResult := gjson.GetBytes(rawJSON, fmt.Sprintf("request.tools.%d.function_declarations", i))
+			if declsResult.Exists() && declsResult.IsArray() {
+				deduped := util.DeduplicateFunctionDeclarations([]byte(declsResult.Raw))
+				var errSet error
+				rawJSON, errSet = sjson.SetRawBytes(rawJSON, fmt.Sprintf("request.tools.%d.function_declarations", i), deduped)
+				if errSet != nil {
+					log.Warnf("failed to deduplicate function declarations in tool %d: %v", i, errSet)
+				}
+			}
+		}
 	}
 
 	if strings.Contains(strings.ToLower(modelName), "claude") {
