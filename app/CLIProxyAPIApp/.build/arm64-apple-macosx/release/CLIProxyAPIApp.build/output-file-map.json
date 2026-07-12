@@ -1,0 +1,61 @@
+{
+  "": {
+    "dependencies": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/CLIProxyAPIApp.d",
+    "object": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/CLIProxyAPIApp.o",
+    "swift-dependencies": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/primary.swiftdeps"
+  },
+  "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/Sources/CLIProxyAPIApp/App.swift": {
+    "object": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/App.swift.o",
+    "swiftmodule": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/App~partial.swiftmodule",
+    "swift-dependencies": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/App.swiftdeps",
+    "diagnostics": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/App.dia"
+  },
+  "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/Sources/CLIProxyAPIApp/Services/APIClient.swift": {
+    "object": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/APIClient.swift.o",
+    "swiftmodule": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/APIClient~partial.swiftmodule",
+    "swift-dependencies": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/APIClient.swiftdeps",
+    "diagnostics": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/APIClient.dia"
+  },
+  "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/Sources/CLIProxyAPIApp/Services/BridgeProcessController.swift": {
+    "object": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/BridgeProcessController.swift.o",
+    "swiftmodule": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/BridgeProcessController~partial.swiftmodule",
+    "swift-dependencies": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/BridgeProcessController.swiftdeps",
+    "diagnostics": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/BridgeProcessController.dia"
+  },
+  "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/Sources/CLIProxyAPIApp/Stores/SettingsStore.swift": {
+    "object": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/SettingsStore.swift.o",
+    "swiftmodule": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/SettingsStore~partial.swiftmodule",
+    "swift-dependencies": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/SettingsStore.swiftdeps",
+    "diagnostics": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/SettingsStore.dia"
+  },
+  "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/Sources/CLIProxyAPIApp/Views/BridgeMenuView.swift": {
+    "object": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/BridgeMenuView.swift.o",
+    "swiftmodule": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/BridgeMenuView~partial.swiftmodule",
+    "swift-dependencies": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/BridgeMenuView.swiftdeps",
+    "diagnostics": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/BridgeMenuView.dia"
+  },
+  "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/Sources/CLIProxyAPIApp/Views/MenuBarLabelView.swift": {
+    "object": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/MenuBarLabelView.swift.o",
+    "swiftmodule": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/MenuBarLabelView~partial.swiftmodule",
+    "swift-dependencies": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/MenuBarLabelView.swiftdeps",
+    "diagnostics": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/MenuBarLabelView.dia"
+  },
+  "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/Sources/CLIProxyAPIApp/Views/ModelsSettingsPane.swift": {
+    "object": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/ModelsSettingsPane.swift.o",
+    "swiftmodule": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/ModelsSettingsPane~partial.swiftmodule",
+    "swift-dependencies": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/ModelsSettingsPane.swiftdeps",
+    "diagnostics": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/ModelsSettingsPane.dia"
+  },
+  "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/Sources/CLIProxyAPIApp/Views/SettingsComponents.swift": {
+    "object": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/SettingsComponents.swift.o",
+    "swiftmodule": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/SettingsComponents~partial.swiftmodule",
+    "swift-dependencies": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/SettingsComponents.swiftdeps",
+    "diagnostics": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/SettingsComponents.dia"
+  },
+  "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/Sources/CLIProxyAPIApp/Views/SettingsView.swift": {
+    "object": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/SettingsView.swift.o",
+    "swiftmodule": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/SettingsView~partial.swiftmodule",
+    "swift-dependencies": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/SettingsView.swiftdeps",
+    "diagnostics": "/Users/maxi.lvn/development/CLIProxyAPI-worktrees/devin-provider/app/CLIProxyAPIApp/.build/arm64-apple-macosx/release/CLIProxyAPIApp.build/SettingsView.dia"
+  }
+}

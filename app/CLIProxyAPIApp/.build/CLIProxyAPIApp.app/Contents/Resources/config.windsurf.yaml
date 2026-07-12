@@ -1,0 +1,15 @@
+host: "127.0.0.1"
+port: 8317
+auth-dir: "/Users/maxi.lvn/.cli-proxy-api"
+api-keys:
+  - "devin-test"
+remote-management:
+  allow-remote: false
+  secret-key: "$2a$10$/5FboDq8MHgoCQxt.RMHxuTCDPaXS7iSpORqjFOsk6XDEiDOC2HV2"
+logging-to-file: false
+debug: true
+exposed-models:
+  - devin/glm-5.2
+  - codex-auto-review
+redis-usage-queue-retention-seconds: 60
+ws-auth: true
