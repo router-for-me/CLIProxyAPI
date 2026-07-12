@@ -81,6 +81,27 @@ final class AgentConfigWriter {
             }
         }
 
+        // Save the current model so we can restore it on reset.
+        let originalModel = lines.first { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return false }
+            let parts = trimmed.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            return parts.count == 2 && parts[0] == "model"
+        }
+        if let originalModel = originalModel, let value = originalModel.split(separator: "=", maxSplits: 1).last {
+            let cleaned = value.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            UserDefaults.standard.set(cleaned, forKey: "codexOriginalModel")
+        }
+
+        // Remove model so Codex fetches the model list from the custom base URL
+        // instead of trying to use a model that may not exist there.
+        lines = lines.filter { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return true }
+            let parts = trimmed.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            return parts.count < 2 || parts[0] != "model"
+        }
+
         replaceOrAppend(key: "openai_base_url", value: baseURL)
         replaceOrAppend(key: "OPENAI_API_KEY", value: apiKey)
 
@@ -91,6 +112,22 @@ final class AgentConfigWriter {
         let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex/config.toml")
         guard FileManager.default.fileExists(atPath: configURL.path) else { return }
         var lines = try String(contentsOf: configURL, encoding: .utf8).components(separatedBy: .newlines)
+
+        let originalModel = UserDefaults.standard.string(forKey: "codexOriginalModel")
+        if let originalModel = originalModel, !originalModel.isEmpty {
+            // Restore the original model if not already present.
+            let hasModel = lines.contains { line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return false }
+                let parts = trimmed.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                return parts.count == 2 && parts[0] == "model"
+            }
+            if !hasModel {
+                lines.append("model = \"\(originalModel)\"")
+            }
+            UserDefaults.standard.removeObject(forKey: "codexOriginalModel")
+        }
+
         lines = lines.filter { line in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return true }
