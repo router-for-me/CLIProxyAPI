@@ -86,24 +86,23 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	if toolsResult.Exists() && toolsResult.IsArray() {
 		toolResults := toolsResult.Array()
 		for i := 0; i < len(toolResults); i++ {
-			functionDeclarationsResult := gjson.GetBytes(rawJSON, fmt.Sprintf("request.tools.%d.function_declarations", i))
-			if functionDeclarationsResult.Exists() && functionDeclarationsResult.IsArray() {
-				functionDeclarationsResults := functionDeclarationsResult.Array()
-				for j := 0; j < len(functionDeclarationsResults); j++ {
-					parametersResult := gjson.GetBytes(rawJSON, fmt.Sprintf("request.tools.%d.function_declarations.%d.parameters", i, j))
-					if parametersResult.Exists() {
-						strJson, _ := util.RenameKey(string(rawJSON), fmt.Sprintf("request.tools.%d.function_declarations.%d.parameters", i, j), fmt.Sprintf("request.tools.%d.function_declarations.%d.parametersJsonSchema", i, j))
-						rawJSON = []byte(strJson)
+			for _, key := range []string{"function_declarations", "functionDeclarations"} {
+				declsResult := gjson.GetBytes(rawJSON, fmt.Sprintf("request.tools.%d.%s", i, key))
+				if !declsResult.Exists() || !declsResult.IsArray() {
+					continue
+				}
+				decls := declsResult.Array()
+				for j := 0; j < len(decls); j++ {
+					paramsPath := fmt.Sprintf("request.tools.%d.%s.%d.parameters", i, key, j)
+					if gjson.GetBytes(rawJSON, paramsPath).Exists() {
+						newPath := fmt.Sprintf("request.tools.%d.%s.%d.parametersJsonSchema", i, key, j)
+						renamed, _ := util.RenameKey(string(rawJSON), paramsPath, newPath)
+						rawJSON = []byte(renamed)
 					}
 				}
-			}
-		}
-		for i := 0; i < len(toolResults); i++ {
-			declsResult := gjson.GetBytes(rawJSON, fmt.Sprintf("request.tools.%d.function_declarations", i))
-			if declsResult.Exists() && declsResult.IsArray() {
 				deduped := util.DeduplicateFunctionDeclarations([]byte(declsResult.Raw))
 				var errSet error
-				rawJSON, errSet = sjson.SetRawBytes(rawJSON, fmt.Sprintf("request.tools.%d.function_declarations", i), deduped)
+				rawJSON, errSet = sjson.SetRawBytes(rawJSON, fmt.Sprintf("request.tools.%d.%s", i, key), deduped)
 				if errSet != nil {
 					log.Warnf("failed to deduplicate function declarations in tool %d: %v", i, errSet)
 				}

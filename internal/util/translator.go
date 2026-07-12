@@ -335,14 +335,14 @@ func DeduplicateFunctionDeclarations(raw []byte) []byte {
 		return raw
 	}
 	seen := make(map[string]bool)
-	deduped := []byte(`[]`)
+	var parts []string
 	for _, decl := range result.Array() {
 		name := decl.Get("name").String()
 		if name == "" || seen[name] {
 			continue
 		}
 		seen[name] = true
-		deduped, _ = sjson.SetRawBytes(deduped, "-1", []byte(decl.Raw))
+		parts = append(parts, decl.Raw)
 	}
-	return deduped
+	return []byte("[" + strings.Join(parts, ",") + "]")
 }
