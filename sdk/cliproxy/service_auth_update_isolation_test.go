@@ -61,6 +61,10 @@ func TestServiceApplyCoreAuthRemoval_PreservesUnrelatedAuthRuntimeState(t *testi
 	if _, errRegister := service.coreManager.Register(context.Background(), target); errRegister != nil {
 		t.Fatalf("register removed auth: %v", errRegister)
 	}
+	service.registerModelsForAuth(context.Background(), target)
+	if models := registry.GetGlobalRegistry().GetModelsForClient(target.ID); len(models) == 0 {
+		t.Fatalf("removed auth %q did not register models before removal", target.ID)
+	}
 
 	service.applyCoreAuthRemoval(context.Background(), target.ID)
 
