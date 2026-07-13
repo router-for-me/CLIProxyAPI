@@ -129,18 +129,22 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 		t.Fatalf("input.2 exists, want consecutive reasoning item merged; body=%s", string(gotBody))
 	}
 	tools := gjson.GetBytes(gotBody, "tools").Array()
-	if len(tools) != 5 {
-		t.Fatalf("tools length = %d, want 5; body=%s", len(tools), string(gotBody))
+	if len(tools) != 6 {
+		t.Fatalf("tools length = %d, want 6; body=%s", len(tools), string(gotBody))
 	}
 	foundAutomationUpdate := false
 	foundNamespaceCustom := false
+	foundXSearch := false
 	for i, tool := range tools {
 		toolType := tool.Get("type").String()
 		if toolType == "image_generation" {
 			t.Fatalf("tools.%d.type = image_generation, want removed; body=%s", i, string(gotBody))
 		}
-		if toolType != "function" && toolType != "web_search" {
-			t.Fatalf("tools.%d.type = %q, want function or web_search; body=%s", i, toolType, string(gotBody))
+		if toolType != "function" && toolType != "web_search" && toolType != "x_search" {
+			t.Fatalf("tools.%d.type = %q, want function, web_search, or x_search; body=%s", i, toolType, string(gotBody))
+		}
+		if toolType == "x_search" {
+			foundXSearch = true
 		}
 		if toolType == "function" && !tool.Get("parameters").Exists() {
 			t.Fatalf("tools.%d.parameters missing for xAI function tool; body=%s", i, string(gotBody))
@@ -169,6 +173,9 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	if !foundNamespaceCustom {
 		t.Fatalf("namespace custom tool was not moved to top-level tools; body=%s", string(gotBody))
 	}
+	if !foundXSearch {
+		t.Fatalf("native x_search tool was not injected; body=%s", string(gotBody))
+	}
 	if got := gjson.GetBytes(gotBody, "tool_choice.tools.0.name").String(); got != "codex_app__automation_update" {
 		t.Fatalf("tool_choice.tools.0.name = %q, want codex_app__automation_update; body=%s", got, string(gotBody))
 	}
@@ -180,6 +187,18 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	}
 	if got := gjson.GetBytes(gotBody, "tool_choice.tools.2.type").String(); got != "web_search" {
 		t.Fatalf("tool_choice.tools.2.type = %q, want web_search; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "tool_choice.tools.3.type").String(); got != "x_search" {
+		t.Fatalf("tool_choice.tools.3.type = %q, want x_search; body=%s", got, string(gotBody))
+	}
+	xSearchAllowedCount := 0
+	for _, tool := range gjson.GetBytes(gotBody, "tool_choice.tools").Array() {
+		if tool.Get("type").String() == "x_search" {
+			xSearchAllowedCount++
+		}
+	}
+	if xSearchAllowedCount != 1 {
+		t.Fatalf("allowed_tools x_search count = %d, want 1; body=%s", xSearchAllowedCount, string(gotBody))
 	}
 	foundEncryptedReasoningInclude := false
 	for _, include := range gjson.GetBytes(gotBody, "include").Array() {
@@ -459,6 +478,230 @@ func TestXAIExecutorExecuteFiltersInternalXSearchCalls(t *testing.T) {
 	}
 	if got := gjson.GetBytes(resp.Payload, "output.0.content.0.text").String(); got != "answer" {
 		t.Fatalf("response text = %q, want answer; payload=%s", got, resp.Payload)
+	}
+}
+
+func TestEnsureXAINativeXSearchTool(t *testing.T) {
+	t.Parallel()
+
+	// Missing tools array: inject a top-level x_search tool.
+	out := ensureXAINativeXSearchTool([]byte(`{"model":"grok-4.5","input":"hi"}`))
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 1 {
+		t.Fatalf("tools length = %d, want 1; body=%s", len(tools), out)
+	}
+	if got := tools[0].Get("type").String(); got != "x_search" {
+		t.Fatalf("tools.0.type = %q, want x_search; body=%s", got, out)
+	}
+
+	// Existing tools without x_search: append once.
+	out = ensureXAINativeXSearchTool([]byte(`{"tools":[{"type":"web_search"},{"type":"function","name":"lookup","parameters":{"type":"object"}}]}`))
+	tools = gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 3 {
+		t.Fatalf("tools length = %d, want 3; body=%s", len(tools), out)
+	}
+	if got := tools[2].Get("type").String(); got != "x_search" {
+		t.Fatalf("tools.2.type = %q, want x_search; body=%s", got, out)
+	}
+
+	// Already present: leave body unchanged (no duplicate).
+	in := []byte(`{"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}},{"type":"x_search"}]}`)
+	out = ensureXAINativeXSearchTool(in)
+	tools = gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("tools length = %d, want 2; body=%s", len(tools), out)
+	}
+	xSearchCount := 0
+	for _, tool := range tools {
+		if tool.Get("type").String() == "x_search" {
+			xSearchCount++
+		}
+	}
+	if xSearchCount != 1 {
+		t.Fatalf("x_search count = %d, want 1; body=%s", xSearchCount, out)
+	}
+
+	// allowed_tools without x_search: append once so Grok may select it.
+	out = ensureXAINativeXSearchTool([]byte(`{
+		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+		"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"lookup"}]}
+	}`))
+	if got := gjson.GetBytes(out, "tools.1.type").String(); got != "x_search" {
+		t.Fatalf("tools.1.type = %q, want x_search; body=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.tools.1.type").String(); got != "x_search" {
+		t.Fatalf("tool_choice.tools.1.type = %q, want x_search; body=%s", got, out)
+	}
+
+	// allowed_tools already lists x_search: do not duplicate.
+	out = ensureXAINativeXSearchTool([]byte(`{
+		"tools":[{"type":"web_search"},{"type":"x_search"}],
+		"tool_choice":{"type":"allowed_tools","tools":[{"type":"web_search"},{"type":"x_search"}]}
+	}`))
+	tools = gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("tools length = %d, want 2; body=%s", len(tools), out)
+	}
+	allowed := gjson.GetBytes(out, "tool_choice.tools").Array()
+	if len(allowed) != 2 {
+		t.Fatalf("tool_choice.tools length = %d, want 2; body=%s", len(allowed), out)
+	}
+	xSearchAllowed := 0
+	for _, tool := range allowed {
+		if tool.Get("type").String() == "x_search" {
+			xSearchAllowed++
+		}
+	}
+	if xSearchAllowed != 1 {
+		t.Fatalf("allowed_tools x_search count = %d, want 1; body=%s", xSearchAllowed, out)
+	}
+}
+
+func TestPruneXAIOrphanedToolChoice(t *testing.T) {
+	t.Parallel()
+
+	// Forced choice for a removed tool is dropped.
+	out := pruneXAIOrphanedToolChoice([]byte(`{
+		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+		"tool_choice":{"type":"image_generation"}
+	}`))
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("orphaned forced tool_choice should be removed: %s", out)
+	}
+
+	// allowed_tools keeps only still-available entries.
+	out = pruneXAIOrphanedToolChoice([]byte(`{
+		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}},{"type":"web_search"}],
+		"tool_choice":{"type":"allowed_tools","tools":[
+			{"type":"function","name":"lookup"},
+			{"type":"image_generation"},
+			{"type":"web_search"}
+		]}
+	}`))
+	allowed := gjson.GetBytes(out, "tool_choice.tools").Array()
+	if len(allowed) != 2 {
+		t.Fatalf("allowed_tools length = %d, want 2; body=%s", len(allowed), out)
+	}
+	if got := allowed[0].Get("name").String(); got != "lookup" {
+		t.Fatalf("allowed_tools.0.name = %q, want lookup; body=%s", got, out)
+	}
+	if got := allowed[1].Get("type").String(); got != "web_search" {
+		t.Fatalf("allowed_tools.1.type = %q, want web_search; body=%s", got, out)
+	}
+
+	// When every allowed entry is orphaned, drop tool_choice entirely.
+	out = pruneXAIOrphanedToolChoice([]byte(`{
+		"tools":[],
+		"tool_choice":{"type":"allowed_tools","tools":[{"type":"image_generation"}]}
+	}`))
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("fully orphaned allowed_tools should be removed: %s", out)
+	}
+
+	// String choices are not tool references.
+	in := []byte(`{"tools":[{"type":"web_search"}],"tool_choice":"auto"}`)
+	if got := pruneXAIOrphanedToolChoice(in); !bytes.Equal(got, in) {
+		t.Fatalf("string tool_choice changed: got=%s want=%s", got, in)
+	}
+}
+
+func TestXAIExecutorPrepareDropsOrphanedToolChoiceBeforeXSearchInject(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.5",
+		// image_generation is stripped by normalizeXAITools; without pruning, the
+		// forced choice would survive next to the injected x_search tool.
+		Payload: []byte(`{
+			"model":"grok-4.5",
+			"input":"draw something",
+			"tools":[{"type":"image_generation"}],
+			"tool_choice":{"type":"image_generation"}
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	}, false)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+
+	tools := gjson.GetBytes(prepared.body, "tools").Array()
+	if len(tools) != 1 {
+		t.Fatalf("tools length = %d, want 1; body=%s", len(tools), prepared.body)
+	}
+	if got := tools[0].Get("type").String(); got != "x_search" {
+		t.Fatalf("tools.0.type = %q, want x_search; body=%s", got, prepared.body)
+	}
+	if gjson.GetBytes(prepared.body, "tool_choice").Exists() {
+		t.Fatalf("orphaned image_generation tool_choice must not reach upstream: %s", prepared.body)
+	}
+}
+
+func TestXAIExecutorPrepareAllowedToolsSyncsInjectedXSearch(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.5",
+		// Only image_generation remains after client filtering of tool_search-like
+		// tools is not relevant here: normalizeXAITools drops image_generation and
+		// we inject x_search, while allowed_tools must be rewritten so Grok can
+		// choose the injected tool and not a deleted one.
+		Payload: []byte(`{
+			"model":"grok-4.5",
+			"input":"search X",
+			"tools":[{"type":"image_generation"},{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+			"tool_choice":{"type":"allowed_tools","tools":[
+				{"type":"image_generation"},
+				{"type":"function","name":"lookup"}
+			]}
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	}, false)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+
+	tools := gjson.GetBytes(prepared.body, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("tools length = %d, want 2; body=%s", len(tools), prepared.body)
+	}
+	foundLookup := false
+	foundXSearch := false
+	for _, tool := range tools {
+		switch tool.Get("type").String() {
+		case "function":
+			if tool.Get("name").String() == "lookup" {
+				foundLookup = true
+			}
+		case "x_search":
+			foundXSearch = true
+		case "image_generation":
+			t.Fatalf("image_generation must be removed; body=%s", prepared.body)
+		}
+	}
+	if !foundLookup || !foundXSearch {
+		t.Fatalf("expected lookup + x_search tools; body=%s", prepared.body)
+	}
+
+	allowed := gjson.GetBytes(prepared.body, "tool_choice.tools").Array()
+	if len(allowed) != 2 {
+		t.Fatalf("tool_choice.tools length = %d, want 2; body=%s", len(allowed), prepared.body)
+	}
+	if got := allowed[0].Get("name").String(); got != "lookup" {
+		t.Fatalf("tool_choice.tools.0.name = %q, want lookup; body=%s", got, prepared.body)
+	}
+	if got := allowed[1].Get("type").String(); got != "x_search" {
+		t.Fatalf("tool_choice.tools.1.type = %q, want x_search; body=%s", got, prepared.body)
+	}
+	for _, tool := range allowed {
+		if tool.Get("type").String() == "image_generation" {
+			t.Fatalf("orphaned image_generation choice leaked: %s", prepared.body)
+		}
 	}
 }
 
@@ -1578,8 +1821,8 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 	}
 
 	tools := gjson.GetBytes(gotBody, "tools").Array()
-	if len(tools) != 5 {
-		t.Fatalf("tools length = %d, want 5; body=%s", len(tools), string(gotBody))
+	if len(tools) != 6 {
+		t.Fatalf("tools length = %d, want 6; body=%s", len(tools), string(gotBody))
 	}
 	if gjson.GetBytes(gotBody, "input.0.content").Exists() {
 		t.Fatalf("input.0.content exists, want removed; body=%s", string(gotBody))
@@ -1601,13 +1844,14 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 	}
 	foundAutomationUpdate := false
 	foundNamespaceCustom := false
+	foundXSearch := false
 	for i, tool := range tools {
 		toolType := tool.Get("type").String()
 		if toolType == "image_generation" {
 			t.Fatalf("tools.%d.type = image_generation, want removed; body=%s", i, string(gotBody))
 		}
-		if toolType != "function" && toolType != "web_search" {
-			t.Fatalf("tools.%d.type = %q, want function or web_search; body=%s", i, toolType, string(gotBody))
+		if toolType != "function" && toolType != "web_search" && toolType != "x_search" {
+			t.Fatalf("tools.%d.type = %q, want function, web_search, or x_search; body=%s", i, toolType, string(gotBody))
 		}
 		if toolType == "function" && !tool.Get("parameters").Exists() {
 			t.Fatalf("tools.%d.parameters missing for xAI function tool; body=%s", i, string(gotBody))
@@ -1620,6 +1864,9 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 			foundAutomationUpdate = true
 		case "codex_app__namespace_custom":
 			foundNamespaceCustom = true
+		}
+		if toolType == "x_search" {
+			foundXSearch = true
 		}
 		if toolType == "web_search" {
 			if tool.Get("external_web_access").Exists() {
@@ -1635,6 +1882,9 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 	}
 	if !foundNamespaceCustom {
 		t.Fatalf("namespace custom tool was not moved to top-level tools; body=%s", string(gotBody))
+	}
+	if !foundXSearch {
+		t.Fatalf("native x_search tool was not injected; body=%s", string(gotBody))
 	}
 }
 
