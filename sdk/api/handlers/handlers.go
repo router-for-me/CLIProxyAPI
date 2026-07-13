@@ -318,15 +318,18 @@ func setServiceTierMetadata(meta map[string]any, rawJSON []byte) {
 	if meta == nil {
 		return
 	}
-	serviceTier := coreusage.DefaultServiceTier
+	legacyServiceTier := coreusage.DefaultServiceTier
+	requestServiceTier := coreusage.AutoServiceTier
 	node := gjson.GetBytes(rawJSON, "service_tier")
 	if node.Exists() {
 		value := strings.TrimSpace(node.String())
 		if value != "" {
-			serviceTier = value
+			legacyServiceTier = value
+			requestServiceTier = value
 		}
 	}
-	meta[coreexecutor.ServiceTierMetadataKey] = serviceTier
+	meta[coreexecutor.ServiceTierMetadataKey] = legacyServiceTier
+	meta[coreexecutor.RequestServiceTierMetadataKey] = requestServiceTier
 }
 
 // headersFromContext extracts the original HTTP request headers from the gin context

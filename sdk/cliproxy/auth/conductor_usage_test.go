@@ -11,9 +11,10 @@ import (
 func TestContextWithRequestedModelAliasIncludesReasoningEffort(t *testing.T) {
 	ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{
 		Metadata: map[string]any{
-			cliproxyexecutor.RequestedModelMetadataKey:  "client-model",
-			cliproxyexecutor.ReasoningEffortMetadataKey: "medium",
-			cliproxyexecutor.ServiceTierMetadataKey:     "priority",
+			cliproxyexecutor.RequestedModelMetadataKey:     "client-model",
+			cliproxyexecutor.ReasoningEffortMetadataKey:    "medium",
+			cliproxyexecutor.ServiceTierMetadataKey:        "default",
+			cliproxyexecutor.RequestServiceTierMetadataKey: "auto",
 		},
 	}, "fallback-model")
 
@@ -24,7 +25,25 @@ func TestContextWithRequestedModelAliasIncludesReasoningEffort(t *testing.T) {
 		t.Fatalf("reasoning effort = %q, want %q", got, "medium")
 	}
 	gotServiceTier := coreusage.ServiceTierFromContext(ctx)
-	if gotServiceTier != "priority" {
-		t.Fatalf("service tier = %q, want %q", gotServiceTier, "priority")
+	if gotServiceTier != "default" {
+		t.Fatalf("service tier = %q, want %q", gotServiceTier, "default")
+	}
+	if gotRequestServiceTier := coreusage.RequestServiceTierFromContext(ctx); gotRequestServiceTier != "auto" {
+		t.Fatalf("request service tier = %q, want %q", gotRequestServiceTier, "auto")
+	}
+}
+
+func TestContextWithRequestedModelAliasUsesLegacyTierWhenCanonicalTierIsAbsent(t *testing.T) {
+	ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.ServiceTierMetadataKey: "priority",
+		},
+	}, "fallback-model")
+
+	if got := coreusage.ServiceTierFromContext(ctx); got != "priority" {
+		t.Fatalf("service tier = %q, want %q", got, "priority")
+	}
+	if got := coreusage.RequestServiceTierFromContext(ctx); got != "priority" {
+		t.Fatalf("request service tier = %q, want %q", got, "priority")
 	}
 }

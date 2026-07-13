@@ -22,23 +22,24 @@ import (
 )
 
 type UsageReporter struct {
-	provider     string
-	executorType string
-	model        string
-	alias        string
-	authID       string
-	authIndex    string
-	authType     string
-	apiKey       string
-	source       string
-	reasoning    string
-	serviceTier  string
-	requestedAt  time.Time
-	ttftMu       sync.RWMutex
-	ttft         time.Duration
-	ttftStart    time.Time
-	ttftSet      bool
-	once         sync.Once
+	provider           string
+	executorType       string
+	model              string
+	alias              string
+	authID             string
+	authIndex          string
+	authType           string
+	apiKey             string
+	source             string
+	reasoning          string
+	serviceTier        string
+	requestServiceTier string
+	requestedAt        time.Time
+	ttftMu             sync.RWMutex
+	ttft               time.Duration
+	ttftStart          time.Time
+	ttftSet            bool
+	once               sync.Once
 }
 
 type usageExecutor interface {
@@ -62,15 +63,16 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		alias = model
 	}
 	reporter := &UsageReporter{
-		provider:    provider,
-		model:       model,
-		alias:       strings.TrimSpace(alias),
-		requestedAt: time.Now(),
-		apiKey:      apiKey,
-		source:      resolveUsageSource(auth, apiKey),
-		authType:    resolveUsageAuthType(auth),
-		reasoning:   usage.ReasoningEffortFromContext(ctx),
-		serviceTier: usage.ServiceTierFromContext(ctx),
+		provider:           provider,
+		model:              model,
+		alias:              strings.TrimSpace(alias),
+		requestedAt:        time.Now(),
+		apiKey:             apiKey,
+		source:             resolveUsageSource(auth, apiKey),
+		authType:           resolveUsageAuthType(auth),
+		reasoning:          usage.ReasoningEffortFromContext(ctx),
+		serviceTier:        usage.ServiceTierFromContext(ctx),
+		requestServiceTier: usage.RequestServiceTierFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -107,7 +109,6 @@ func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format stri
 		return
 	}
 	r.reasoning = thinking.ExtractTranslatedReasoningEffort(payload, format)
-	r.serviceTier = extractServiceTierFromPayload(payload)
 }
 
 func (r *UsageReporter) TrackHTTPClient(client *http.Client) *http.Client {
@@ -271,7 +272,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		AuthType:            r.authType,
 		ReasoningEffort:     r.reasoning,
 		ServiceTier:         r.serviceTier,
-		RequestServiceTier:  r.serviceTier,
+		RequestServiceTier:  r.requestServiceTier,
 		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
 		RequestedAt:         r.requestedAt,
 		Latency:             r.latency(),
@@ -280,19 +281,6 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Fail:                fail,
 		Detail:              detail,
 	}
-}
-
-func extractServiceTierFromPayload(payload []byte) string {
-	if len(payload) == 0 {
-		return usage.DefaultServiceTier
-	}
-	for _, path := range []string{"service_tier", "request.service_tier", "response.service_tier"} {
-		serviceTier := strings.TrimSpace(gjson.GetBytes(payload, path).String())
-		if serviceTier != "" {
-			return serviceTier
-		}
-	}
-	return usage.DefaultServiceTier
 }
 
 func failFromErrors(errs ...error) usage.Failure {

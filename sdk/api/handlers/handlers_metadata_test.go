@@ -48,6 +48,9 @@ func TestSetServiceTierMetadataExtractsValue(t *testing.T) {
 	if gotServiceTier != "priority" {
 		t.Fatalf("ServiceTierMetadataKey = %v, want %q", gotServiceTier, "priority")
 	}
+	if gotRequestServiceTier := meta[coreexecutor.RequestServiceTierMetadataKey]; gotRequestServiceTier != "priority" {
+		t.Fatalf("RequestServiceTierMetadataKey = %v, want %q", gotRequestServiceTier, "priority")
+	}
 }
 
 func TestSetServiceTierMetadataDefaultsWhenMissing(t *testing.T) {
@@ -58,5 +61,21 @@ func TestSetServiceTierMetadataDefaultsWhenMissing(t *testing.T) {
 	gotServiceTier := meta[coreexecutor.ServiceTierMetadataKey]
 	if gotServiceTier != "default" {
 		t.Fatalf("ServiceTierMetadataKey = %v, want %q", gotServiceTier, "default")
+	}
+	if gotRequestServiceTier := meta[coreexecutor.RequestServiceTierMetadataKey]; gotRequestServiceTier != "auto" {
+		t.Fatalf("RequestServiceTierMetadataKey = %v, want %q", gotRequestServiceTier, "auto")
+	}
+}
+
+func TestSetServiceTierMetadataPreservesExplicitDefault(t *testing.T) {
+	meta := make(map[string]any)
+
+	setServiceTierMetadata(meta, []byte(`{"service_tier":"default"}`))
+
+	if gotServiceTier := meta[coreexecutor.ServiceTierMetadataKey]; gotServiceTier != "default" {
+		t.Fatalf("ServiceTierMetadataKey = %v, want %q", gotServiceTier, "default")
+	}
+	if gotRequestServiceTier := meta[coreexecutor.RequestServiceTierMetadataKey]; gotRequestServiceTier != "default" {
+		t.Fatalf("RequestServiceTierMetadataKey = %v, want %q", gotRequestServiceTier, "default")
 	}
 }
