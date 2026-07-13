@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -405,6 +406,8 @@ type StreamingLogWriter interface {
 // FileRequestLogger implements RequestLogger using file-based storage.
 // It provides file-based logging functionality for HTTP requests and responses.
 type FileRequestLogger struct {
+	stateMu sync.RWMutex
+
 	// enabled indicates whether request logging is currently enabled.
 	enabled bool
 
@@ -414,7 +417,14 @@ type FileRequestLogger struct {
 	// errorLogsMaxFiles limits the number of error log files retained.
 	errorLogsMaxFiles int
 
-	homeEnabled bool
+	homeEnabled       bool
+	successSummary    bool
+	summaryRotation   time.Duration
+	summaryMaxFiles   int
+	summaryMu         sync.Mutex
+	summaryCleanupKey string
+	errorCleanupMu    sync.Mutex
+	now               func() time.Time
 }
 
 type homeRequestLogPayload struct {
@@ -447,7 +457,7 @@ func cloneHeaders(headers map[string][]string) map[string][]string {
 }
 
 func (l *FileRequestLogger) forwardRequestLogToHome(ctx context.Context, headers map[string][]string, requestID string, logText string) error {
-	if l == nil || !l.homeEnabled {
+	if l == nil || !l.isHomeEnabled() {
 		return nil
 	}
 	client := currentHomeRequestLogClient()
@@ -488,12 +498,19 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 			logsDir = filepath.Join(configDir, logsDir)
 		}
 	}
-	return &FileRequestLogger{
+	logger := &FileRequestLogger{
 		enabled:           enabled,
 		logsDir:           logsDir,
 		errorLogsMaxFiles: errorLogsMaxFiles,
 		homeEnabled:       false,
+		summaryRotation:   defaultRequestSummaryRotation,
+		summaryMaxFiles:   defaultRequestSummaryMaxFiles,
+		now:               time.Now,
 	}
+	if errCleanup := logger.cleanupStaleRequestLogTempArtifacts(time.Now(), staleRequestLogTempAge); errCleanup != nil {
+		log.WithError(errCleanup).Warn("failed to clean up stale request-log temp artifacts")
+	}
+	return logger
 }
 
 // SetHomeEnabled toggles home request-log forwarding.
@@ -502,7 +519,18 @@ func (l *FileRequestLogger) SetHomeEnabled(enabled bool) {
 	if l == nil {
 		return
 	}
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
 	l.homeEnabled = enabled
+}
+
+func (l *FileRequestLogger) isHomeEnabled() bool {
+	if l == nil {
+		return false
+	}
+	l.stateMu.RLock()
+	defer l.stateMu.RUnlock()
+	return l.homeEnabled
 }
 
 // IsEnabled returns whether request logging is currently enabled.
@@ -510,6 +538,11 @@ func (l *FileRequestLogger) SetHomeEnabled(enabled bool) {
 // Returns:
 //   - bool: True if logging is enabled, false otherwise
 func (l *FileRequestLogger) IsEnabled() bool {
+	if l == nil {
+		return false
+	}
+	l.stateMu.RLock()
+	defer l.stateMu.RUnlock()
 	return l.enabled
 }
 
@@ -519,12 +552,68 @@ func (l *FileRequestLogger) IsEnabled() bool {
 // Parameters:
 //   - enabled: Whether request logging should be enabled
 func (l *FileRequestLogger) SetEnabled(enabled bool) {
+	if l == nil {
+		return
+	}
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
 	l.enabled = enabled
 }
 
 // SetErrorLogsMaxFiles updates the maximum number of error log files to retain.
 func (l *FileRequestLogger) SetErrorLogsMaxFiles(maxFiles int) {
+	if l == nil {
+		return
+	}
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
 	l.errorLogsMaxFiles = maxFiles
+}
+
+// SetSuccessSummaryPolicy controls compact rolling summaries for successful requests.
+// Full per-request logging remains unchanged when enabled is false.
+func (l *FileRequestLogger) SetSuccessSummaryPolicy(enabled bool, rotationHours int, maxFiles int) {
+	if l == nil {
+		return
+	}
+	rotation := time.Duration(rotationHours) * time.Hour
+	if rotation <= 0 {
+		rotation = defaultRequestSummaryRotation
+	}
+	if maxFiles < 0 {
+		maxFiles = defaultRequestSummaryMaxFiles
+	}
+	l.stateMu.Lock()
+	changed := l.successSummary != enabled || l.summaryRotation != rotation || l.summaryMaxFiles != maxFiles
+	l.successSummary = enabled
+	l.summaryRotation = rotation
+	l.summaryMaxFiles = maxFiles
+	l.stateMu.Unlock()
+	if changed {
+		l.summaryMu.Lock()
+		l.summaryCleanupKey = ""
+		l.summaryMu.Unlock()
+	}
+}
+
+func (l *FileRequestLogger) successSummaryPolicy() (bool, time.Duration, int) {
+	if l == nil {
+		return false, defaultRequestSummaryRotation, defaultRequestSummaryMaxFiles
+	}
+	l.stateMu.RLock()
+	defer l.stateMu.RUnlock()
+	rotation := l.summaryRotation
+	if rotation <= 0 {
+		rotation = defaultRequestSummaryRotation
+	}
+	return l.successSummary, rotation, l.summaryMaxFiles
+}
+
+func (l *FileRequestLogger) currentTime() time.Time {
+	if l != nil && l.now != nil {
+		return l.now()
+	}
+	return time.Now()
 }
 
 // NewFileBodySource creates a temp-backed source under the request log directory.
@@ -583,11 +672,38 @@ func (l *FileRequestLogger) LogRequestWithOptionsAndAllSources(url, method strin
 func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline []byte, websocketTimelineSource *FileBodySource, apiRequest []byte, apiRequestSource *FileBodySource, apiResponse []byte, apiResponseSource *FileBodySource, apiWebsocketTimeline []byte, apiWebsocketTimelineSource *FileBodySource, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
 	defer cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource, apiWebsocketTimelineSource)
 
-	if !l.enabled && !force {
+	loggerEnabled := l.IsEnabled()
+	if !loggerEnabled && !force {
 		return nil
 	}
+	summaryEnabled, _, _ := l.successSummaryPolicy()
+	failed := isFailedRequest(statusCode, apiResponseErrors, force)
+	downstreamTransport := inferDownstreamTransport(requestHeaders, websocketTimeline, websocketTimelineSource)
+	upstreamTransport := inferUpstreamTransport(apiRequest, apiRequestSource, apiResponse, apiResponseSource, apiWebsocketTimeline, apiWebsocketTimelineSource, apiResponseErrors)
+	summary := l.newRequestSummary(
+		url,
+		method,
+		requestID,
+		statusCode,
+		requestTimestamp,
+		int64(len(body)),
+		int64(len(response)),
+		downstreamTransport,
+		upstreamTransport,
+		sectionSize(apiRequest, apiRequestSource),
+		sectionSize(apiResponse, apiResponseSource),
+		sectionSize(websocketTimeline, websocketTimelineSource),
+		sectionSize(apiWebsocketTimeline, apiWebsocketTimelineSource),
+	)
 
-	if l.homeEnabled && l.enabled {
+	if l.isHomeEnabled() && loggerEnabled {
+		if summaryEnabled && !failed {
+			raw, errMarshal := json.Marshal(summary)
+			if errMarshal != nil {
+				return fmt.Errorf("failed to marshal request summary: %w", errMarshal)
+			}
+			return l.forwardRequestLogToHome(context.Background(), nil, requestID, string(raw)+"\n")
+		}
 		responseToWrite, decompressErr := l.decompressResponse(responseHeaders, response)
 		if decompressErr != nil {
 			responseToWrite = response
@@ -622,6 +738,9 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 		}
 		return l.forwardRequestLogToHome(context.Background(), requestHeaders, requestID, buf.String())
 	}
+	if summaryEnabled && !failed {
+		return l.writeSuccessSummary(summary)
+	}
 
 	// Ensure logs directory exists
 	if errEnsure := l.ensureLogsDir(); errEnsure != nil {
@@ -630,7 +749,8 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 
 	// Generate filename with request ID
 	filename := l.generateFilename(url, requestID)
-	if force && !l.enabled {
+	writeAsErrorLog := (force && !loggerEnabled) || (summaryEnabled && failed)
+	if writeAsErrorLog {
 		filename = l.generateErrorFilename(url, requestID)
 	}
 	filePath := filepath.Join(l.logsDir, filename)
@@ -653,6 +773,13 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 		responseToWrite = response
 	}
 
+	// Error retention cleanup and full error publication share this lock. This
+	// prevents a concurrent cleanup from deleting a file while it is still being
+	// written and ensures retention runs only after the file is complete.
+	if writeAsErrorLog {
+		l.errorCleanupMu.Lock()
+		defer l.errorCleanupMu.Unlock()
+	}
 	logFile, errOpen := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if errOpen != nil {
 		return fmt.Errorf("failed to create log file: %w", errOpen)
@@ -691,8 +818,8 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 		return fmt.Errorf("failed to write log file: %w", writeErr)
 	}
 
-	if force && !l.enabled {
-		if errCleanup := l.cleanupOldErrorLogs(); errCleanup != nil {
+	if writeAsErrorLog {
+		if errCleanup := l.cleanupOldErrorLogsLocked(); errCleanup != nil {
 			log.WithError(errCleanup).Warn("failed to clean up old error logs")
 		}
 	}
@@ -713,16 +840,16 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 //   - StreamingLogWriter: A writer for streaming response chunks
 //   - error: An error if logging initialization fails, nil otherwise
 func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (StreamingLogWriter, error) {
-	if !l.enabled {
+	if !l.IsEnabled() {
 		return &NoOpStreamingLogWriter{}, nil
 	}
 
-	if l.homeEnabled {
+	if l.isHomeEnabled() {
 		client := currentHomeRequestLogClient()
 		if client == nil || !client.HeartbeatOK() {
 			return &NoOpStreamingLogWriter{}, nil
 		}
-		return newHomeStreamingLogWriter(url, method, headers, body, requestID), nil
+		return newHomeStreamingLogWriter(l, url, method, headers, body, requestID), nil
 	}
 
 	// Ensure logs directory exists
@@ -755,10 +882,12 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 
 	// Create streaming writer
 	writer := &FileStreamingLogWriter{
+		owner:            l,
 		logFilePath:      filePath,
 		url:              url,
 		method:           method,
-		timestamp:        time.Now(),
+		timestamp:        l.currentTime(),
+		requestID:        strings.TrimSpace(requestID),
 		requestHeaders:   requestHeaders,
 		requestBodyPath:  requestBodyPath,
 		responseBodyPath: responseBodyPath,
@@ -864,7 +993,16 @@ func (l *FileRequestLogger) sanitizeForFilename(path string) string {
 
 // cleanupOldErrorLogs keeps only the newest errorLogsMaxFiles forced error log files.
 func (l *FileRequestLogger) cleanupOldErrorLogs() error {
-	if l.errorLogsMaxFiles <= 0 {
+	l.errorCleanupMu.Lock()
+	defer l.errorCleanupMu.Unlock()
+	return l.cleanupOldErrorLogsLocked()
+}
+
+func (l *FileRequestLogger) cleanupOldErrorLogsLocked() error {
+	l.stateMu.RLock()
+	maxFiles := l.errorLogsMaxFiles
+	l.stateMu.RUnlock()
+	if maxFiles <= 0 {
 		return nil
 	}
 
@@ -895,7 +1033,7 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 		files = append(files, logFile{name: name, modTime: info.ModTime()})
 	}
 
-	if len(files) <= l.errorLogsMaxFiles {
+	if len(files) <= maxFiles {
 		return nil
 	}
 
@@ -903,7 +1041,7 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 		return files[i].modTime.After(files[j].modTime)
 	})
 
-	for _, file := range files[l.errorLogsMaxFiles:] {
+	for _, file := range files[maxFiles:] {
 		if errRemove := os.Remove(filepath.Join(l.logsDir, file.name)); errRemove != nil {
 			log.WithError(errRemove).Warnf("failed to remove old error log: %s", file.name)
 		}
@@ -1635,6 +1773,8 @@ func (l *FileRequestLogger) formatRequestInfo(url, method string, headers map[st
 // It spools streaming response chunks to a temporary file to avoid retaining large responses in memory.
 // The final log file is assembled when Close is called.
 type FileStreamingLogWriter struct {
+	owner *FileRequestLogger
+
 	// logFilePath is the final log file path.
 	logFilePath string
 
@@ -1646,6 +1786,9 @@ type FileStreamingLogWriter struct {
 
 	// timestamp is captured when the streaming log is initialized.
 	timestamp time.Time
+
+	requestID string
+	failed    bool
 
 	// requestHeaders stores the request headers.
 	requestHeaders map[string][]string
@@ -1694,6 +1837,8 @@ type FileStreamingLogWriter struct {
 
 	// apiResponseTimestamp captures when the API response was received.
 	apiResponseTimestamp time.Time
+
+	apiResponseErrors []*interfaces.ErrorMessage
 }
 
 // WriteChunkAsync writes a response chunk asynchronously (non-blocking).
@@ -1812,6 +1957,22 @@ func (w *FileStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
 	}
 }
 
+// MarkError records an upstream failure that may have happened after downstream
+// streaming headers were committed with a successful status.
+func (w *FileStreamingLogWriter) MarkError(failed bool) {
+	if failed {
+		w.failed = true
+	}
+}
+
+// WriteAPIResponseErrors retains upstream error metadata for a full streaming error log.
+func (w *FileStreamingLogWriter) WriteAPIResponseErrors(apiResponseErrors []*interfaces.ErrorMessage) {
+	if len(apiResponseErrors) == 0 {
+		return
+	}
+	w.apiResponseErrors = append([]*interfaces.ErrorMessage(nil), apiResponseErrors...)
+}
+
 // Close finalizes the log file and cleans up resources.
 // It writes all buffered data to the file in the correct order:
 // API WEBSOCKET TIMELINE -> API REQUEST -> API RESPONSE -> RESPONSE (status, headers, body chunks)
@@ -1841,6 +2002,44 @@ func (w *FileStreamingLogWriter) Close() error {
 		return nil
 	}
 
+	statusCode := w.responseStatus
+	if statusCode == 0 {
+		statusCode = 200
+	}
+	failed := w.failed || statusCode >= 400 || len(w.apiResponseErrors) > 0
+	writeAsErrorLog := false
+	if w.owner != nil {
+		summaryEnabled, _, _ := w.owner.successSummaryPolicy()
+		if summaryEnabled && !failed {
+			summary := w.owner.newRequestSummary(
+				w.url,
+				w.method,
+				w.requestID,
+				statusCode,
+				w.timestamp,
+				fileSize(w.requestBodyPath),
+				fileSize(w.responseBodyPath),
+				"http",
+				inferUpstreamTransport(w.apiRequest, w.apiRequestSource, w.apiResponse, w.apiResponseSource, w.apiWebsocketTimeline, nil, nil),
+				sectionSize(w.apiRequest, w.apiRequestSource),
+				sectionSize(w.apiResponse, w.apiResponseSource),
+				0,
+				int64(len(w.apiWebsocketTimeline)),
+			)
+			writeErr := w.owner.writeSuccessSummary(summary)
+			w.cleanupTempFiles()
+			return writeErr
+		}
+		if summaryEnabled && failed {
+			w.logFilePath = filepath.Join(w.owner.logsDir, w.owner.generateErrorFilename(w.url, w.requestID))
+			writeAsErrorLog = true
+		}
+	}
+
+	if writeAsErrorLog {
+		w.owner.errorCleanupMu.Lock()
+		defer w.owner.errorCleanupMu.Unlock()
+	}
 	logFile, errOpen := os.OpenFile(w.logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if errOpen != nil {
 		w.cleanupTempFiles()
@@ -1856,6 +2055,11 @@ func (w *FileStreamingLogWriter) Close() error {
 	}
 
 	w.cleanupTempFiles()
+	if writeAsErrorLog && writeErr == nil {
+		if errCleanup := w.owner.cleanupOldErrorLogsLocked(); errCleanup != nil {
+			log.WithError(errCleanup).Warn("failed to clean up old error logs")
+		}
+	}
 	return writeErr
 }
 
@@ -1903,6 +2107,9 @@ func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
 		return errWrite
 	}
 	if errWrite := writePreformattedAPISectionWithSource(logFile, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, w.apiRequestSource, time.Time{}); errWrite != nil {
+		return errWrite
+	}
+	if errWrite := writeAPIErrorResponses(logFile, w.apiResponseErrors); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writePreformattedAPISectionWithSource(logFile, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse, w.apiResponseSource, w.apiResponseTimestamp); errWrite != nil {
@@ -2002,6 +2209,7 @@ func (w *NoOpStreamingLogWriter) SetFirstChunkTimestamp(_ time.Time) {}
 func (w *NoOpStreamingLogWriter) Close() error { return nil }
 
 type homeStreamingLogWriter struct {
+	owner     *FileRequestLogger
 	url       string
 	method    string
 	timestamp time.Time
@@ -2012,19 +2220,21 @@ type homeStreamingLogWriter struct {
 	chunkChan chan []byte
 	doneChan  chan struct{}
 
-	responseStatus   int
-	statusWritten    bool
-	responseHeaders  map[string][]string
-	responseBody     bytes.Buffer
-	apiRequest       []byte
-	apiResponse      []byte
-	apiWebsocketTime []byte
-	requestID        string
-	apiResponseTS    time.Time
-	firstChunkTS     time.Time
+	responseStatus    int
+	statusWritten     bool
+	responseHeaders   map[string][]string
+	responseBody      bytes.Buffer
+	apiRequest        []byte
+	apiResponse       []byte
+	apiWebsocketTime  []byte
+	requestID         string
+	apiResponseTS     time.Time
+	firstChunkTS      time.Time
+	failed            bool
+	apiResponseErrors []*interfaces.ErrorMessage
 }
 
-func newHomeStreamingLogWriter(url, method string, headers map[string][]string, body []byte, requestID string) *homeStreamingLogWriter {
+func newHomeStreamingLogWriter(owner *FileRequestLogger, url, method string, headers map[string][]string, body []byte, requestID string) *homeStreamingLogWriter {
 	requestHeaders := make(map[string][]string, len(headers))
 	for key, values := range headers {
 		headerValues := make([]string, len(values))
@@ -2032,10 +2242,15 @@ func newHomeStreamingLogWriter(url, method string, headers map[string][]string, 
 		requestHeaders[key] = headerValues
 	}
 
+	timestamp := time.Now()
+	if owner != nil {
+		timestamp = owner.currentTime()
+	}
 	writer := &homeStreamingLogWriter{
+		owner:          owner,
 		url:            url,
 		method:         method,
-		timestamp:      time.Now(),
+		timestamp:      timestamp,
 		requestHeaders: requestHeaders,
 		requestBody:    append([]byte(nil), body...),
 		requestID:      strings.TrimSpace(requestID),
@@ -2118,13 +2333,21 @@ func (w *homeStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
 	}
 }
 
+func (w *homeStreamingLogWriter) MarkError(failed bool) {
+	if w != nil && failed {
+		w.failed = true
+	}
+}
+
+func (w *homeStreamingLogWriter) WriteAPIResponseErrors(apiResponseErrors []*interfaces.ErrorMessage) {
+	if w == nil || len(apiResponseErrors) == 0 {
+		return
+	}
+	w.apiResponseErrors = append([]*interfaces.ErrorMessage(nil), apiResponseErrors...)
+}
+
 func (w *homeStreamingLogWriter) Close() error {
 	if w == nil {
-		return nil
-	}
-
-	client := currentHomeRequestLogClient()
-	if client == nil || !client.HeartbeatOK() {
 		return nil
 	}
 
@@ -2135,9 +2358,44 @@ func (w *homeStreamingLogWriter) Close() error {
 	}
 
 	responsePayload := w.responseBody.Bytes()
+	client := currentHomeRequestLogClient()
+	if client == nil || !client.HeartbeatOK() {
+		return nil
+	}
+
+	statusCode := w.responseStatus
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	failed := w.failed || statusCode >= http.StatusBadRequest || len(w.apiResponseErrors) > 0
+	upstreamTransport := inferUpstreamTransport(w.apiRequest, nil, w.apiResponse, nil, w.apiWebsocketTime, nil, w.apiResponseErrors)
+	if w.owner != nil {
+		summaryEnabled, _, _ := w.owner.successSummaryPolicy()
+		if summaryEnabled && !failed {
+			summary := w.owner.newRequestSummary(
+				w.url,
+				w.method,
+				w.requestID,
+				statusCode,
+				w.timestamp,
+				int64(len(w.requestBody)),
+				int64(len(responsePayload)),
+				"http",
+				upstreamTransport,
+				int64(len(w.apiRequest)),
+				int64(len(w.apiResponse)),
+				0,
+				int64(len(w.apiWebsocketTime)),
+			)
+			raw, errMarshal := json.Marshal(summary)
+			if errMarshal != nil {
+				return errMarshal
+			}
+			return w.owner.forwardRequestLogToHome(context.Background(), nil, w.requestID, string(raw)+"\n")
+		}
+	}
 
 	var buf bytes.Buffer
-	upstreamTransport := inferUpstreamTransport(w.apiRequest, nil, w.apiResponse, nil, w.apiWebsocketTime, nil, nil)
 	if errWrite := writeRequestInfoWithBody(&buf, w.url, w.method, w.requestHeaders, w.requestBody, "", w.timestamp, "http", upstreamTransport, true); errWrite != nil {
 		return errWrite
 	}
@@ -2145,6 +2403,9 @@ func (w *homeStreamingLogWriter) Close() error {
 		return errWrite
 	}
 	if errWrite := writeAPISection(&buf, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, time.Time{}); errWrite != nil {
+		return errWrite
+	}
+	if errWrite := writeAPIErrorResponses(&buf, w.apiResponseErrors); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeAPISection(&buf, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse, w.apiResponseTS); errWrite != nil {

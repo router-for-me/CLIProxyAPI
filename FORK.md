@@ -2,15 +2,16 @@
 
 This repository is a narrow fork of
 [`router-for-me/CLIProxyAPI`](https://github.com/router-for-me/CLIProxyAPI).
-It keeps upstream as the canonical base and adds two isolated capabilities:
+It keeps upstream as the canonical base and adds three isolated capabilities:
 
 1. Codex-native Responses compaction for Claude Code requests routed to Codex.
 2. Provider-neutral request, cache, cost, and compaction observability in the
    server log and TUI.
+3. An opt-in compact request-log policy that retains full payloads only for
+   failures and rolls body-free success summaries in bounded time windows.
 
-The latest tagged release in the current fork base is upstream `v7.2.67` at
-`2075f77c8ebe9ec872759965661936fb1ac2931f`. The feature commits are rebased
-through upstream `main` at `9418054a3b2184cc6fa618f1bbef51ffca17c32d` on
+The latest tagged release in the current fork base is upstream `v7.2.72` at
+`6279bb8a`. The feature commits are rebased through that upstream `main` on
 `feature/hybrid-compaction-observability`.
 
 ## Remotes and upstream pulls
@@ -53,8 +54,11 @@ OAuth files, local configuration, logs, or secrets into Git.
   the configured auth directory.
 - A stable deterministic `prompt_cache_key` replaces the upstream one-hour
   random cache-key rotation for Claude Code sessions.
-- Request logs contain metadata and token counts only. They never include
-  prompts, tool bodies, headers, API keys, or OAuth data.
+- With `request-log-success-summary` enabled, successful requests persist only
+  masked, body-free JSONL summaries. Failed requests retain the full diagnostic
+  request/response transcript and must be treated as sensitive. Both summary
+  windows and error files have independent retention limits, and the existing
+  total log-directory size cap remains available.
 - The TUI cost is an estimate based on the built-in catalog, not an invoice or
   subscription charge.
 

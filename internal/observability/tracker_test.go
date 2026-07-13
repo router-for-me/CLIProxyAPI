@@ -96,6 +96,99 @@ func TestTrackerNormalizesClaudeAndCodexInputAndEstimatedCost(t *testing.T) {
 	}
 }
 
+func TestTrackerExposesEffortAndCostComponents(t *testing.T) {
+	tracker := NewTracker(2)
+	tracker.HandleUsage(context.Background(), usage.Record{
+		Provider:        "codex",
+		Model:           "gpt-5.6-sol",
+		ReasoningEffort: "XHIGH",
+		Detail: usage.Detail{
+			InputTokens:           100,
+			OutputTokens:          5,
+			CacheReadTokens:       20,
+			CacheCreationTokens:   10,
+			CacheTelemetryPresent: true,
+		},
+	})
+	tracker.HandleUsage(context.Background(), usage.Record{
+		Provider:        "claude",
+		Model:           "claude-fable-5",
+		ReasoningEffort: "high",
+		Detail: usage.Detail{
+			InputTokens:           100,
+			OutputTokens:          5,
+			CacheReadTokens:       20,
+			CacheCreationTokens:   10,
+			CacheCreation5mTokens: 10,
+			CacheTelemetryPresent: true,
+		},
+	})
+
+	events := tracker.Snapshot().RecentEvents
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2", len(events))
+	}
+	codex := events[0]
+	if codex.ReasoningEffort != "xhigh" {
+		t.Fatalf("Codex effort = %q, want xhigh", codex.ReasoningEffort)
+	}
+	// This record has a provider-confirmed write: 70 ordinary input tokens, 20
+	// discounted reads, and 10 write-priced tokens.
+	for label, values := range map[string][2]float64{
+		"Codex input":  {codex.EstimatedInputCostUSD, 0.00035},
+		"Codex output": {codex.EstimatedOutputCostUSD, 0.00015},
+		"Codex cache":  {codex.EstimatedCacheCostUSD, 0.0000725},
+		"Codex total":  {codex.EstimatedCostUSD, 0.0005725},
+	} {
+		if math.Abs(values[0]-values[1]) > 1e-12 {
+			t.Fatalf("%s cost = %.12f, want %.12f", label, values[0], values[1])
+		}
+	}
+
+	claude := events[1]
+	for label, values := range map[string][2]float64{
+		"Claude input":  {claude.EstimatedInputCostUSD, 0.001},
+		"Claude output": {claude.EstimatedOutputCostUSD, 0.00025},
+		"Claude cache":  {claude.EstimatedCacheCostUSD, 0.000145},
+		"Claude total":  {claude.EstimatedCostUSD, 0.001395},
+	} {
+		if math.Abs(values[0]-values[1]) > 1e-12 {
+			t.Fatalf("%s cost = %.12f, want %.12f", label, values[0], values[1])
+		}
+	}
+}
+
+func TestTrackerUsesEstimatedCodexCacheWriteForDisplayOnly(t *testing.T) {
+	tracker := NewTracker(1)
+	tracker.HandleUsage(context.Background(), usage.Record{
+		Provider: "codex",
+		Model:    "gpt-5.6-sol",
+		Detail: usage.Detail{
+			InputTokens:                    100,
+			OutputTokens:                   5,
+			CacheReadTokens:                20,
+			EstimatedCacheCreationTokens:   80,
+			CacheCreationEstimateAvailable: true,
+			CacheTelemetryPresent:          true,
+		},
+	})
+
+	event := tracker.Snapshot().RecentEvents[0]
+	if event.CacheWriteTokens != 80 || !event.CacheWriteEstimated {
+		t.Fatalf("cache write tokens/estimated = %d/%t, want 80/true", event.CacheWriteTokens, event.CacheWriteEstimated)
+	}
+	// The estimated write remains ordinary uncached OpenAI input for pricing.
+	if got, want := event.EstimatedInputCostUSD, 0.0004; math.Abs(got-want) > 1e-12 {
+		t.Fatalf("input cost = %.12f, want %.12f", got, want)
+	}
+	if got, want := event.EstimatedCacheCostUSD, 0.00001; math.Abs(got-want) > 1e-12 {
+		t.Fatalf("cache cost = %.12f, want %.12f", got, want)
+	}
+	if got, want := event.EstimatedCostUSD, 0.00056; math.Abs(got-want) > 1e-12 {
+		t.Fatalf("total cost = %.12f, want %.12f", got, want)
+	}
+}
+
 func TestTrackerDistinguishesCacheMissFromMissingTelemetry(t *testing.T) {
 	tracker := NewTracker(5)
 	tracker.HandleUsage(context.Background(), usage.Record{

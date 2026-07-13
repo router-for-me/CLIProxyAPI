@@ -302,6 +302,14 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		}
 
 		w.streamWriter.SetFirstChunkTimestamp(w.firstChunkTimestamp)
+		if errorMarker, ok := w.streamWriter.(interface{ MarkError(bool) }); ok {
+			errorMarker.MarkError(hasAPIError)
+		}
+		if errorRecorder, ok := w.streamWriter.(interface {
+			WriteAPIResponseErrors([]*interfaces.ErrorMessage)
+		}); ok {
+			errorRecorder.WriteAPIResponseErrors(slicesAPIResponseError)
+		}
 
 		// Write API Request and Response to the streaming log before closing
 		apiRequest := w.extractAPIRequest(c)

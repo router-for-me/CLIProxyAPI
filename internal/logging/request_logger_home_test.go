@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 )
 
 type stubHomeRequestLogClient struct {
@@ -346,6 +349,103 @@ func TestFileRequestLogger_HomeEnabled_ForwardsStreamingRequestID(t *testing.T) 
 	}
 	if got.RequestLog == "" {
 		t.Fatalf("request_log empty, want non-empty")
+	}
+}
+
+func TestFileRequestLogger_HomeSummaryPolicyDoesNotForwardSuccessfulStreamBodies(t *testing.T) {
+	original := currentHomeRequestLogClient
+	defer func() { currentHomeRequestLogClient = original }()
+
+	stub := &stubHomeRequestLogClient{heartbeatOK: true}
+	currentHomeRequestLogClient = func() homeRequestLogClient { return stub }
+	logger := NewFileRequestLogger(true, t.TempDir(), "", 0)
+	logger.SetHomeEnabled(true)
+	logger.SetSuccessSummaryPolicy(true, 5, 48)
+
+	writer, errLog := logger.LogStreamingRequest(
+		"/v1/responses?api_key=query-secret",
+		http.MethodPost,
+		map[string][]string{"Authorization": {"Bearer header-secret"}},
+		[]byte(`{"input":"request-secret"}`),
+		"stream-summary-1",
+	)
+	if errLog != nil {
+		t.Fatalf("LogStreamingRequest error: %v", errLog)
+	}
+	if errStatus := writer.WriteStatus(http.StatusOK, map[string][]string{"Content-Type": {"text/event-stream"}}); errStatus != nil {
+		t.Fatalf("WriteStatus error: %v", errStatus)
+	}
+	writer.WriteChunkAsync([]byte("data: response-secret\n\n"))
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatalf("Close error: %v", errClose)
+	}
+
+	if len(stub.pushed) != 1 {
+		t.Fatalf("home pushed records = %d, want 1", len(stub.pushed))
+	}
+	var got homeRequestLogPayload
+	if errUnmarshal := json.Unmarshal(stub.pushed[0], &got); errUnmarshal != nil {
+		t.Fatalf("unmarshal payload: %v", errUnmarshal)
+	}
+	if len(got.Headers) != 0 {
+		t.Fatalf("successful summary forwarded request headers: %+v", got.Headers)
+	}
+	for _, secret := range []string{"query-secret", "header-secret", "request-secret", "response-secret"} {
+		if strings.Contains(got.RequestLog, secret) {
+			t.Fatalf("successful summary forwarded %q: %s", secret, got.RequestLog)
+		}
+	}
+	var summary requestSummaryRecord
+	if errUnmarshal := json.Unmarshal([]byte(got.RequestLog), &summary); errUnmarshal != nil {
+		t.Fatalf("summary is not JSON: %v payload=%s", errUnmarshal, got.RequestLog)
+	}
+	if summary.RequestID != "stream-summary-1" || summary.Path != "/v1/responses" {
+		t.Fatalf("summary identity = %+v", summary)
+	}
+}
+
+func TestFileRequestLogger_HomeSummaryPolicyRetainsFullFailedStream(t *testing.T) {
+	original := currentHomeRequestLogClient
+	defer func() { currentHomeRequestLogClient = original }()
+
+	stub := &stubHomeRequestLogClient{heartbeatOK: true}
+	currentHomeRequestLogClient = func() homeRequestLogClient { return stub }
+	logger := NewFileRequestLogger(true, t.TempDir(), "", 0)
+	logger.SetHomeEnabled(true)
+	logger.SetSuccessSummaryPolicy(true, 5, 48)
+
+	writer, errLog := logger.LogStreamingRequest("/v1/responses", http.MethodPost, nil, []byte(`{"input":"failure-request"}`), "stream-error-1")
+	if errLog != nil {
+		t.Fatalf("LogStreamingRequest error: %v", errLog)
+	}
+	if errStatus := writer.WriteStatus(http.StatusOK, map[string][]string{"Content-Type": {"text/event-stream"}}); errStatus != nil {
+		t.Fatalf("WriteStatus error: %v", errStatus)
+	}
+	writer.WriteChunkAsync([]byte("data: failure-response\n\n"))
+	errorWriter, ok := writer.(interface {
+		MarkError(bool)
+		WriteAPIResponseErrors([]*interfaces.ErrorMessage)
+	})
+	if !ok {
+		t.Fatalf("home streaming writer lacks error retention methods: %T", writer)
+	}
+	errorWriter.MarkError(true)
+	errorWriter.WriteAPIResponseErrors([]*interfaces.ErrorMessage{{StatusCode: http.StatusBadGateway, Error: errors.New("upstream-failure")}})
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatalf("Close error: %v", errClose)
+	}
+
+	if len(stub.pushed) != 1 {
+		t.Fatalf("home pushed records = %d, want 1", len(stub.pushed))
+	}
+	var got homeRequestLogPayload
+	if errUnmarshal := json.Unmarshal(stub.pushed[0], &got); errUnmarshal != nil {
+		t.Fatalf("unmarshal payload: %v", errUnmarshal)
+	}
+	for _, want := range []string{"failure-request", "failure-response", "upstream-failure"} {
+		if !strings.Contains(got.RequestLog, want) {
+			t.Fatalf("full failed stream missing %q: %s", want, got.RequestLog)
+		}
 	}
 }
 

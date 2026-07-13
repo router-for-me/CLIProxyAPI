@@ -63,6 +63,12 @@ type Detail struct {
 	CacheCreationTokens   int64
 	CacheCreation5mTokens int64
 	CacheCreation1hTokens int64
+	// EstimatedCacheCreationTokens is a display-only compatibility estimate for
+	// providers that do not report cache writes. It must not be used for billing.
+	EstimatedCacheCreationTokens int64
+	// CacheCreationEstimateAvailable distinguishes an estimated zero from no
+	// estimate. CacheCreationTokens remains the provider-confirmed value.
+	CacheCreationEstimateAvailable bool
 	// CacheTelemetryPresent distinguishes an explicit zero-token cache result
 	// (a cache miss) from a provider response that omitted cache telemetry.
 	CacheTelemetryPresent bool

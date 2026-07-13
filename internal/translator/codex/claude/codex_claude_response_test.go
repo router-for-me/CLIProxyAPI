@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -1210,6 +1211,167 @@ func TestConvertCodexResponseToClaudeNonStream_StopSequenceMapping(t *testing.T)
 	}
 	if got := parsed.Get("stop_sequence").String(); got != "\nEND" {
 		t.Fatalf("stop_sequence = %q, want newline END. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamForwardsProviderCacheWriteUsage(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	outputs := ConvertCodexResponseToClaude(
+		ctx,
+		"gpt-5.6-sol",
+		[]byte(`{"messages":[]}`),
+		nil,
+		[]byte(`data: {"type":"response.completed","response":{"id":"resp_usage","model":"gpt-5.6-sol","usage":{"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":40}},"output":[]}}`),
+		&param,
+	)
+
+	delta, ok := findClaudeStreamMessageDelta(outputs)
+	if !ok {
+		t.Fatalf("expected message_delta usage event, outputs=%q", outputs)
+	}
+	assertCodexClaudeUsage(t, delta.Get("usage"), 30, 20, 30, 40, true)
+}
+
+func TestConvertCodexResponseToClaude_StreamDerivesCacheCreationWhenWriteUsageIsMissing(t *testing.T) {
+	ctx := estimatedCacheWriteUsageContext()
+	var param any
+
+	outputs := ConvertCodexResponseToClaude(
+		ctx,
+		"gpt-5.6-sol",
+		[]byte(`{"messages":[]}`),
+		nil,
+		[]byte(`data: {"type":"response.completed","response":{"id":"resp_usage","model":"gpt-5.6-sol","usage":{"input_tokens":2048,"output_tokens":20,"input_tokens_details":{"cached_tokens":512}},"output":[]}}`),
+		&param,
+	)
+
+	delta, ok := findClaudeStreamMessageDelta(outputs)
+	if !ok {
+		t.Fatalf("expected message_delta usage event, outputs=%q", outputs)
+	}
+	assertCodexClaudeUsage(t, delta.Get("usage"), 0, 20, 512, 1536, true)
+}
+
+func TestConvertCodexResponseToClaudeNonStream_DerivesCacheCreationFromExplicitZeroWrite(t *testing.T) {
+	ctx := estimatedCacheWriteUsageContext()
+	response := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"id":"resp_usage",
+			"model":"gpt-5.6-sol",
+			"usage":{
+				"input_tokens":2048,
+				"output_tokens":20,
+				"input_tokens_details":{"cached_tokens":512,"cache_write_tokens":0}
+			},
+			"output":[]
+		}
+	}`)
+
+	out := ConvertCodexResponseToClaudeNonStream(ctx, "gpt-5.6-sol", []byte(`{"messages":[]}`), nil, response, nil)
+	assertCodexClaudeUsage(t, gjson.GetBytes(out, "usage"), 0, 20, 512, 1536, true)
+}
+
+func TestExtractResponsesUsageMarksDerivedCacheCreationEstimate(t *testing.T) {
+	ctx := estimatedCacheWriteUsageContext()
+	for _, input := range []string{
+		`{"input_tokens":2048,"input_tokens_details":{"cached_tokens":512}}`,
+		`{"input_tokens":2048,"input_tokens_details":{"cached_tokens":512,"cache_write_tokens":0}}`,
+	} {
+		usage := extractResponsesUsage(ctx, gjson.Parse(input))
+		if !usage.CacheCreationEstimated {
+			t.Fatalf("CacheCreationEstimated = false, want true; input=%s", input)
+		}
+		if usage.InputTokens != 0 || usage.CacheCreationTokens != 1536 {
+			t.Fatalf("usage = %+v, want input=0 and estimated creation=1536; input=%s", usage, input)
+		}
+	}
+}
+
+func TestExtractResponsesUsageDoesNotEstimateBelowCacheEligibilityThreshold(t *testing.T) {
+	usage := extractResponsesUsage(estimatedCacheWriteUsageContext(), gjson.Parse(`{"input_tokens":100,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}}`))
+	if usage.HasCacheCreationTokens || usage.CacheCreationEstimated {
+		t.Fatalf("short prompt unexpectedly received cache creation estimate: %+v", usage)
+	}
+	if usage.InputTokens != 100 || usage.CacheReadTokens != 0 {
+		t.Fatalf("usage = %+v, want ordinary input 100 and cache read 0", usage)
+	}
+}
+
+func TestExtractResponsesUsageDoesNotSynthesizeCacheCreationByDefault(t *testing.T) {
+	usage := extractResponsesUsage(context.Background(), gjson.Parse(`{"input_tokens":100,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":0}}`))
+	if usage.HasCacheCreationTokens || usage.CacheCreationEstimated {
+		t.Fatalf("cache creation was synthesized without opt-in: %+v", usage)
+	}
+	if usage.InputTokens != 70 || usage.CacheReadTokens != 30 {
+		t.Fatalf("usage = %+v, want uncached input 70 and cache read 30", usage)
+	}
+}
+
+func estimatedCacheWriteUsageContext() context.Context {
+	return sdktranslator.WithCodexClaudeCacheWriteEstimate(context.Background(), true)
+}
+
+func TestExtractResponsesUsageKeepsProviderCacheWriteConfirmed(t *testing.T) {
+	usage := extractResponsesUsage(context.Background(), gjson.Parse(`{
+		"input_tokens":100,
+		"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":40}
+	}`))
+
+	if usage.CacheCreationEstimated {
+		t.Fatal("CacheCreationEstimated = true, want provider-confirmed false")
+	}
+	if usage.InputTokens != 30 || usage.CacheCreationTokens != 40 {
+		t.Fatalf("usage = %+v, want input=30 and confirmed creation=40", usage)
+	}
+}
+
+func TestExtractResponsesUsageDoesNotEstimateWithoutCacheTelemetry(t *testing.T) {
+	usage := extractResponsesUsage(estimatedCacheWriteUsageContext(), gjson.Parse(`{"input_tokens":100,"output_tokens":20}`))
+
+	if usage.CacheCreationEstimated || usage.HasCacheCreationTokens {
+		t.Fatalf("usage without cache fields unexpectedly estimated creation: %+v", usage)
+	}
+	if usage.InputTokens != 100 || usage.CacheCreationTokens != 0 {
+		t.Fatalf("usage = %+v, want input=100 and no cache creation", usage)
+	}
+}
+
+func TestExtractResponsesUsageClampsMalformedCacheBreakdown(t *testing.T) {
+	usage := extractResponsesUsage(context.Background(), gjson.Parse(`{
+		"input_tokens":50,
+		"output_tokens":7,
+		"input_tokens_details":{"cached_tokens":40,"cache_write_tokens":20}
+	}`))
+
+	if usage.InputTokens != 0 {
+		t.Fatalf("uncached input tokens = %d, want clamped zero", usage.InputTokens)
+	}
+	if usage.CacheReadTokens != 40 || usage.CacheCreationTokens != 20 {
+		t.Fatalf("cache usage = read %d/write %d, want 40/20", usage.CacheReadTokens, usage.CacheCreationTokens)
+	}
+}
+
+func assertCodexClaudeUsage(t *testing.T, usage gjson.Result, wantInput, wantOutput, wantCacheRead, wantCacheCreation int64, expectCacheCreation bool) {
+	t.Helper()
+
+	if got := usage.Get("input_tokens").Int(); got != wantInput {
+		t.Fatalf("input_tokens = %d, want %d; usage=%s", got, wantInput, usage.Raw)
+	}
+	if got := usage.Get("output_tokens").Int(); got != wantOutput {
+		t.Fatalf("output_tokens = %d, want %d; usage=%s", got, wantOutput, usage.Raw)
+	}
+	if got := usage.Get("cache_read_input_tokens").Int(); got != wantCacheRead {
+		t.Fatalf("cache_read_input_tokens = %d, want %d; usage=%s", got, wantCacheRead, usage.Raw)
+	}
+	cacheCreation := usage.Get("cache_creation_input_tokens")
+	if cacheCreation.Exists() != expectCacheCreation {
+		t.Fatalf("cache_creation_input_tokens presence = %t, want %t; usage=%s", cacheCreation.Exists(), expectCacheCreation, usage.Raw)
+	}
+	if expectCacheCreation && cacheCreation.Int() != wantCacheCreation {
+		t.Fatalf("cache_creation_input_tokens = %d, want %d; usage=%s", cacheCreation.Int(), wantCacheCreation, usage.Raw)
 	}
 }
 

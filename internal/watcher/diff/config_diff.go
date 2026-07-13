@@ -69,6 +69,18 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.ErrorLogsMaxFiles != newCfg.ErrorLogsMaxFiles {
 		changes = append(changes, fmt.Sprintf("error-logs-max-files: %d -> %d", oldCfg.ErrorLogsMaxFiles, newCfg.ErrorLogsMaxFiles))
 	}
+	if oldCfg.RequestLogSuccessSummary != newCfg.RequestLogSuccessSummary {
+		changes = append(changes, fmt.Sprintf("request-log-success-summary: %t -> %t", oldCfg.RequestLogSuccessSummary, newCfg.RequestLogSuccessSummary))
+	}
+	if oldCfg.RequestLogSummaryRotationHours != newCfg.RequestLogSummaryRotationHours {
+		changes = append(changes, fmt.Sprintf("request-log-summary-rotation-hours: %d -> %d", oldCfg.RequestLogSummaryRotationHours, newCfg.RequestLogSummaryRotationHours))
+	}
+	if oldCfg.RequestLogSummaryMaxFiles != newCfg.RequestLogSummaryMaxFiles {
+		changes = append(changes, fmt.Sprintf("request-log-summary-max-files: %d -> %d", oldCfg.RequestLogSummaryMaxFiles, newCfg.RequestLogSummaryMaxFiles))
+	}
+	if oldCfg.CodexClaudeEstimateCacheWriteUsage != newCfg.CodexClaudeEstimateCacheWriteUsage {
+		changes = append(changes, fmt.Sprintf("codex-claude-estimate-cache-write-usage: %t -> %t", oldCfg.CodexClaudeEstimateCacheWriteUsage, newCfg.CodexClaudeEstimateCacheWriteUsage))
+	}
 	if oldCfg.RequestRetry != newCfg.RequestRetry {
 		changes = append(changes, fmt.Sprintf("request-retry: %d -> %d", oldCfg.RequestRetry, newCfg.RequestRetry))
 	}

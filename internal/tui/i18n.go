@@ -215,13 +215,18 @@ var zhStrings = map[string]string{
 	"usage_time":          "时间",
 
 	// ── Logs ──
-	"logs_title":       "📋 日志",
-	"logs_auto_scroll": "● 自动滚动",
-	"logs_paused":      "○ 已暂停",
-	"logs_filter":      "过滤",
-	"logs_lines":       "行数",
-	"logs_help":        " [a] 自动滚动 • [c] 清除 • [1] 全部 [2] info+ [3] warn+ [4] error • [↑↓] 滚动",
-	"logs_waiting":     "  等待日志输出...",
+	"logs_title":         "📋 日志",
+	"logs_auto_scroll":   "● 自动滚动",
+	"logs_paused":        "○ 已暂停",
+	"logs_filter":        "过滤",
+	"logs_lines":         "行数",
+	"logs_view":          "视图",
+	"logs_view_requests": "请求",
+	"logs_view_raw":      "原始日志",
+	"logs_requests":      "请求",
+	"logs_no_matches":    "  没有符合当前过滤条件的请求。",
+	"logs_help":          " [v] 请求/原始日志 • [a] 自动滚动 • [c] 清除 • [1] 全部 [2] info+ [3] warn+ [4] error • [↑↓] 滚动",
+	"logs_waiting":       "  等待日志输出...",
 }
 
 var enStrings = map[string]string{
@@ -378,11 +383,16 @@ var enStrings = map[string]string{
 	"usage_time":          "Time",
 
 	// ── Logs ──
-	"logs_title":       "📋 Logs",
-	"logs_auto_scroll": "● AUTO-SCROLL",
-	"logs_paused":      "○ PAUSED",
-	"logs_filter":      "Filter",
-	"logs_lines":       "Lines",
-	"logs_help":        " [a] Auto-scroll • [c] Clear • [1] All [2] info+ [3] warn+ [4] error • [↑↓] Scroll",
-	"logs_waiting":     "  Waiting for log output...",
+	"logs_title":         "📋 Logs",
+	"logs_auto_scroll":   "● AUTO-SCROLL",
+	"logs_paused":        "○ PAUSED",
+	"logs_filter":        "Filter",
+	"logs_lines":         "Lines",
+	"logs_view":          "View",
+	"logs_view_requests": "REQUESTS",
+	"logs_view_raw":      "RAW",
+	"logs_requests":      "Requests",
+	"logs_no_matches":    "  No requests match this filter.",
+	"logs_help":          " [v] Requests/Raw • [a] Auto-scroll • [c] Clear • [1] All [2] info+ [3] warn+ [4] error • [↑↓] Scroll",
+	"logs_waiting":       "  Waiting for log output...",
 }

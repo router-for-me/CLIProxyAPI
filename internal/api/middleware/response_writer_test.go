@@ -2,13 +2,20 @@ package middleware
 
 import (
 	"bytes"
+	"errors"
+	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	apihandlers "github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 )
 
 func TestExtractRequestBodyPrefersOverride(t *testing.T) {
@@ -151,6 +158,74 @@ func TestFinalizeStreamingWritesAPIWebsocketTimeline(t *testing.T) {
 	}
 	if !streamWriter.closed {
 		t.Fatal("expected stream writer to be closed")
+	}
+}
+
+func TestRequestLoggingMiddlewareMarksTerminalForwardStreamError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logsDir := t.TempDir()
+	requestLogger := logging.NewFileRequestLogger(true, logsDir, "", 10)
+	requestLogger.SetSuccessSummaryPolicy(true, 5, 48)
+	baseHandler := apihandlers.NewBaseAPIHandlers(&config.SDKConfig{RequestLog: true}, nil)
+	terminalErr := &interfaces.ErrorMessage{
+		StatusCode: http.StatusServiceUnavailable,
+		Error:      errors.New("terminal upstream failure"),
+	}
+	var canceledWith error
+
+	router := gin.New()
+	router.Use(RequestLoggingMiddleware(requestLogger))
+	router.POST("/v1/test-stream", func(c *gin.Context) {
+		c.Header("Content-Type", "text/event-stream")
+		c.Status(http.StatusOK)
+		flusher, ok := c.Writer.(http.Flusher)
+		if !ok {
+			t.Fatal("response writer does not support flushing")
+		}
+
+		data := make(chan []byte)
+		errs := make(chan *interfaces.ErrorMessage, 1)
+		errs <- terminalErr
+		close(errs)
+		baseHandler.ForwardStream(c, flusher, func(err error) {
+			canceledWith = err
+		}, data, errs, apihandlers.StreamForwardOptions{
+			WriteTerminalError: func(*interfaces.ErrorMessage) {
+				_, _ = c.Writer.Write([]byte("event: error\ndata: preserved\n\n"))
+			},
+		})
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/test-stream", bytes.NewBufferString(`{"stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if !bytes.Contains(recorder.Body.Bytes(), []byte("event: error\ndata: preserved")) {
+		t.Fatalf("terminal error payload changed: %q", recorder.Body.String())
+	}
+	if !errors.Is(canceledWith, terminalErr.Error) {
+		t.Fatalf("cancel error = %v, want %v", canceledWith, terminalErr.Error)
+	}
+
+	entries, errRead := os.ReadDir(logsDir)
+	if errRead != nil {
+		t.Fatalf("ReadDir() error = %v", errRead)
+	}
+	if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "error-") {
+		t.Fatalf("log entries = %v, want one full error log", entries)
+	}
+	raw, errRead := os.ReadFile(filepath.Join(logsDir, entries[0].Name()))
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	for _, detail := range []string{`{"stream":true}`, "terminal upstream failure"} {
+		if !bytes.Contains(raw, []byte(detail)) {
+			t.Fatalf("full terminal stream error log missing %q: %s", detail, raw)
+		}
 	}
 }
 

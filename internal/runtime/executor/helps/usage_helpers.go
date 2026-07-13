@@ -42,6 +42,8 @@ type UsageReporter struct {
 	once         sync.Once
 }
 
+const minimumCodexCacheableInputTokens int64 = 1024
+
 type usageExecutor interface {
 	Identifier() string
 }
@@ -242,6 +244,8 @@ func hasNonZeroTokenUsage(detail usage.Detail) bool {
 		detail.CacheCreationTokens != 0 ||
 		detail.CacheCreation5mTokens != 0 ||
 		detail.CacheCreation1hTokens != 0 ||
+		detail.EstimatedCacheCreationTokens != 0 ||
+		detail.CacheCreationEstimateAvailable ||
 		detail.TotalTokens != 0
 }
 
@@ -644,8 +648,27 @@ func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 		return usage.Detail{ResponseServiceTier: responseServiceTier}, true
 	}
 	detail := parseOpenAIStyleUsageNode(usageNode)
+	detail = addCodexCacheCreationEstimate(usageNode, detail)
 	detail.ResponseServiceTier = responseServiceTier
 	return detail, true
+}
+
+func addCodexCacheCreationEstimate(usageNode gjson.Result, detail usage.Detail) usage.Detail {
+	// The Codex subscription endpoint currently emits cache_write_tokens=0 even
+	// while cache reads are active. Keep that provider-confirmed zero intact for
+	// costing, but expose the non-read input as a clearly display-only estimate.
+	// This mirrors the cache-creation category Claude Code expects without
+	// claiming that OpenAI confirmed a write.
+	if !usageNode.Get("input_tokens").Exists() || detail.InputTokens < minimumCodexCacheableInputTokens || !detail.CacheTelemetryPresent || detail.CacheCreationTokens > 0 {
+		return detail
+	}
+	estimate := detail.InputTokens - detail.CacheReadTokens
+	if estimate < 0 {
+		estimate = 0
+	}
+	detail.EstimatedCacheCreationTokens = estimate
+	detail.CacheCreationEstimateAvailable = true
+	return detail
 }
 
 func ParseCodexImageToolUsage(data []byte) (usage.Detail, bool) {
@@ -711,10 +734,10 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	}
 	cacheCreation := firstExistingUsageNode(
 		usageNode,
-		"input_tokens_details.cache_creation_tokens",
 		"input_tokens_details.cache_write_tokens",
-		"prompt_tokens_details.cache_creation_tokens",
+		"input_tokens_details.cache_creation_tokens",
 		"prompt_tokens_details.cache_write_tokens",
+		"prompt_tokens_details.cache_creation_tokens",
 	)
 	if cacheCreation.Exists() {
 		detail.CacheCreationTokens = cacheCreation.Int()

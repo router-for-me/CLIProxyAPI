@@ -94,6 +94,7 @@ func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
 	logger := logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
+	logger.SetSuccessSummaryPolicy(cfg.RequestLogSuccessSummary, cfg.RequestLogSummaryRotationHours, cfg.RequestLogSummaryMaxFiles)
 	logger.SetHomeEnabled(cfg != nil && cfg.Home.Enabled)
 	return logger
 }
@@ -1841,6 +1842,11 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		}
 	}
 
+	if s.requestLogger != nil && (oldCfg == nil || oldCfg.RequestLogSuccessSummary != cfg.RequestLogSuccessSummary || oldCfg.RequestLogSummaryRotationHours != cfg.RequestLogSummaryRotationHours || oldCfg.RequestLogSummaryMaxFiles != cfg.RequestLogSummaryMaxFiles) {
+		if setter, ok := s.requestLogger.(interface{ SetSuccessSummaryPolicy(bool, int, int) }); ok {
+			setter.SetSuccessSummaryPolicy(cfg.RequestLogSuccessSummary, cfg.RequestLogSummaryRotationHours, cfg.RequestLogSummaryMaxFiles)
+		}
+	}
 	if oldCfg == nil || oldCfg.DisableCooling != cfg.DisableCooling {
 		auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	}

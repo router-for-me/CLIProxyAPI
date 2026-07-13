@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -21,9 +22,11 @@ import (
 )
 
 const (
-	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
-	DefaultPprofAddr             = "127.0.0.1:8316"
-	DefaultAuthDir               = "~/.cli-proxy-api"
+	DefaultPanelGitHubRepository          = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+	DefaultPprofAddr                      = "127.0.0.1:8316"
+	DefaultAuthDir                        = "~/.cli-proxy-api"
+	DefaultRequestLogSummaryRotationHours = 5
+	DefaultRequestLogSummaryMaxFiles      = 48
 	// DefaultCodexClaudeClientContextWindow defers Claude Code's client-side
 	// compaction while Codex-native compaction manages the real context window.
 	DefaultCodexClaudeClientContextWindow int64 = 1_000_000
@@ -69,9 +72,19 @@ type Config struct {
 	// When exceeded, the oldest log files are deleted until within the limit. Set to 0 to disable.
 	LogsMaxTotalSizeMB int `yaml:"logs-max-total-size-mb" json:"logs-max-total-size-mb"`
 
-	// ErrorLogsMaxFiles limits the number of error log files retained when request logging is disabled.
+	// ErrorLogsMaxFiles limits the number of full error request logs retained in error-only or success-summary modes.
 	// When exceeded, the oldest error log files are deleted. Default is 10. Set to 0 to disable cleanup.
 	ErrorLogsMaxFiles int `yaml:"error-logs-max-files" json:"error-logs-max-files"`
+
+	// RequestLogSuccessSummary stores successful requests as compact JSONL records while retaining
+	// full per-request logs for failures. False preserves the upstream full-request logging behavior.
+	RequestLogSuccessSummary bool `yaml:"request-log-success-summary" json:"request-log-success-summary"`
+
+	// RequestLogSummaryRotationHours controls the time window represented by each success-summary log.
+	RequestLogSummaryRotationHours int `yaml:"request-log-summary-rotation-hours" json:"request-log-summary-rotation-hours"`
+
+	// RequestLogSummaryMaxFiles limits retained success-summary windows. Set to 0 to disable cleanup.
+	RequestLogSummaryMaxFiles int `yaml:"request-log-summary-max-files" json:"request-log-summary-max-files"`
 
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
@@ -764,6 +777,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
+	cfg.RequestLogSummaryRotationHours = DefaultRequestLogSummaryRotationHours
+	cfg.RequestLogSummaryMaxFiles = DefaultRequestLogSummaryMaxFiles
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
@@ -814,6 +829,14 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.ErrorLogsMaxFiles < 0 {
 		cfg.ErrorLogsMaxFiles = 10
+	}
+
+	if cfg.RequestLogSummaryRotationHours <= 0 {
+		cfg.RequestLogSummaryRotationHours = DefaultRequestLogSummaryRotationHours
+	}
+
+	if cfg.RequestLogSummaryMaxFiles < 0 {
+		cfg.RequestLogSummaryMaxFiles = DefaultRequestLogSummaryMaxFiles
 	}
 
 	if cfg.RedisUsageQueueRetentionSeconds <= 0 {
@@ -1556,6 +1579,10 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		switch fullPath {
 		case "error-logs-max-files":
 			return node.Value == "10"
+		case "request-log-summary-rotation-hours":
+			return node.Value == strconv.Itoa(DefaultRequestLogSummaryRotationHours)
+		case "request-log-summary-max-files":
+			return node.Value == strconv.Itoa(DefaultRequestLogSummaryMaxFiles)
 		}
 	}
 

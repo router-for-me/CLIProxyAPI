@@ -22,6 +22,8 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
+	cfg.RequestLogSummaryRotationHours = DefaultRequestLogSummaryRotationHours
+	cfg.RequestLogSummaryMaxFiles = DefaultRequestLogSummaryMaxFiles
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
@@ -62,6 +64,14 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 
 	if cfg.ErrorLogsMaxFiles < 0 {
 		cfg.ErrorLogsMaxFiles = 10
+	}
+
+	if cfg.RequestLogSummaryRotationHours <= 0 {
+		cfg.RequestLogSummaryRotationHours = DefaultRequestLogSummaryRotationHours
+	}
+
+	if cfg.RequestLogSummaryMaxFiles < 0 {
+		cfg.RequestLogSummaryMaxFiles = DefaultRequestLogSummaryMaxFiles
 	}
 
 	if cfg.RedisUsageQueueRetentionSeconds <= 0 {

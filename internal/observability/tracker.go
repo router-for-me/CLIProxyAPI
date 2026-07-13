@@ -39,11 +39,13 @@ type RequestEvent struct {
 	Timestamp                 time.Time    `json:"timestamp"`
 	Provider                  string       `json:"provider"`
 	Model                     string       `json:"model"`
+	ReasoningEffort           string       `json:"effort,omitempty"`
 	Operation                 string       `json:"operation"`
 	InputTokens               int64        `json:"input_tokens"`
 	OutputTokens              int64        `json:"output_tokens"`
 	CacheReadTokens           int64        `json:"cache_read_tokens"`
 	CacheWriteTokens          int64        `json:"cache_write_tokens"`
+	CacheWriteEstimated       bool         `json:"cache_write_estimated"`
 	UncachedInputTokens       int64        `json:"uncached_input_tokens"`
 	CacheReadPercent          float64      `json:"cache_read_percent"`
 	CacheLowReuse             bool         `json:"cache_low_reuse"`
@@ -54,6 +56,9 @@ type RequestEvent struct {
 	Failed                    bool         `json:"failed"`
 	LatencyMilliseconds       int64        `json:"latency_ms"`
 	EstimatedCostUSD          float64      `json:"estimated_cost_usd"`
+	EstimatedInputCostUSD     float64      `json:"estimated_input_cost_usd"`
+	EstimatedOutputCostUSD    float64      `json:"estimated_output_cost_usd"`
+	EstimatedCacheCostUSD     float64      `json:"estimated_cache_cost_usd"`
 	EstimatedCostAvailable    bool         `json:"estimated_cost_available"`
 	EstimatedCostCatalogModel string       `json:"estimated_cost_catalog_model,omitempty"`
 	EstimatedCostTier         string       `json:"estimated_cost_tier,omitempty"`
@@ -362,8 +367,9 @@ func normalizeRecord(record usage.Record) RequestEvent {
 	if cacheRead == 0 && !record.Detail.CacheTelemetryPresent && record.Detail.CachedTokens > 0 {
 		cacheRead = record.Detail.CachedTokens
 	}
-	cacheWrite := record.Detail.CacheCreationTokens
-	cacheTelemetryPresent := record.Detail.CacheTelemetryPresent || cacheRead != 0 || cacheWrite != 0
+	reportedCacheWrite := record.Detail.CacheCreationTokens
+	cacheTelemetryPresent := record.Detail.CacheTelemetryPresent ||
+		cacheRead != 0 || reportedCacheWrite != 0 || record.Detail.CacheCreationEstimateAvailable
 	cacheOutcome := CacheOutcomeUnknown
 	if cacheTelemetryPresent {
 		cacheOutcome = CacheOutcomeMiss
@@ -375,7 +381,25 @@ func normalizeRecord(record usage.Record) RequestEvent {
 	input := record.Detail.InputTokens
 	if provider == "claude" {
 		// Anthropic reports uncached input separately from cache reads/writes.
-		input += cacheRead + cacheWrite
+		input += cacheRead + reportedCacheWrite
+	}
+	cacheWrite := reportedCacheWrite
+	cacheWriteEstimated := false
+	if reportedCacheWrite == 0 && record.Detail.CacheCreationEstimateAvailable {
+		cacheWrite = record.Detail.EstimatedCacheCreationTokens
+		if cacheWrite < 0 {
+			cacheWrite = 0
+		}
+		cacheWriteEstimated = true
+	} else if provider == "codex" && reportedCacheWrite == 0 && cacheTelemetryPresent {
+		// Codex Responses reports discounted cache reads but no explicit write
+		// bucket. Keep a defensive fallback for usage producers that predate the
+		// explicit estimate fields.
+		cacheWrite = input - cacheRead
+		if cacheWrite < 0 {
+			cacheWrite = 0
+		}
+		cacheWriteEstimated = true
 	}
 	coverageCacheRead := cacheRead
 	if coverageCacheRead < 0 {
@@ -398,17 +422,19 @@ func normalizeRecord(record usage.Record) RequestEvent {
 		cacheLowReuse = uncachedInput > coverageCacheRead
 	}
 
-	cost, catalogModel, costTier, costAvailable := estimatedCost(record, cacheRead, cacheWrite)
+	costs, catalogModel, costTier, costAvailable := estimatedCostComponents(record, cacheRead, reportedCacheWrite)
 	timestamp := time.Now().UTC()
 	return RequestEvent{
 		Timestamp:                 timestamp,
 		Provider:                  provider,
 		Model:                     strings.TrimSpace(record.Model),
+		ReasoningEffort:           strings.ToLower(strings.TrimSpace(record.ReasoningEffort)),
 		Operation:                 operation,
 		InputTokens:               input,
 		OutputTokens:              record.Detail.OutputTokens,
 		CacheReadTokens:           cacheRead,
 		CacheWriteTokens:          cacheWrite,
+		CacheWriteEstimated:       cacheWriteEstimated,
 		UncachedInputTokens:       uncachedInput,
 		CacheReadPercent:          cacheReadPercent,
 		CacheLowReuse:             cacheLowReuse,
@@ -418,7 +444,10 @@ func normalizeRecord(record usage.Record) RequestEvent {
 		Compaction:                operation == operationCompaction,
 		Failed:                    record.Failed,
 		LatencyMilliseconds:       record.Latency.Milliseconds(),
-		EstimatedCostUSD:          cost,
+		EstimatedCostUSD:          costs.total(),
+		EstimatedInputCostUSD:     costs.input,
+		EstimatedOutputCostUSD:    costs.output,
+		EstimatedCacheCostUSD:     costs.cache,
 		EstimatedCostAvailable:    costAvailable,
 		EstimatedCostCatalogModel: catalogModel,
 		EstimatedCostTier:         costTier,
@@ -426,35 +455,54 @@ func normalizeRecord(record usage.Record) RequestEvent {
 }
 
 func estimatedCost(record usage.Record, cacheRead, cacheWrite int64) (float64, string, string, bool) {
+	costs, catalogModel, tier, ok := estimatedCostComponents(record, cacheRead, cacheWrite)
+	return costs.total(), catalogModel, tier, ok
+}
+
+type costComponents struct {
+	input  float64
+	output float64
+	cache  float64
+}
+
+func (c costComponents) total() float64 {
+	return c.input + c.output + c.cache
+}
+
+func estimatedCostComponents(record usage.Record, cacheRead, cacheWrite int64) (costComponents, string, string, bool) {
 	catalogModel, rates, tier, ok := resolveRates(record.Model, record.Alias, record.Detail.InputTokens)
 	if !ok {
-		return 0, "", "", false
+		return costComponents{}, "", "", false
 	}
 	if record.Failed && !hasPriceableUsage(record.Detail) && !record.Detail.CacheTelemetryPresent {
-		return 0, catalogModel, tier, false
+		return costComponents{}, catalogModel, tier, false
 	}
 
 	uncachedInput := record.Detail.InputTokens
-	if strings.ToLower(strings.TrimSpace(record.Provider)) != "claude" {
-		// OpenAI Responses input_tokens includes cached input tokens.
+	isClaude := strings.EqualFold(strings.TrimSpace(record.Provider), "claude")
+	if !isClaude {
+		// OpenAI Responses input_tokens includes provider-confirmed cache reads
+		// and writes. A display-only estimate is never passed into this function,
+		// so only confirmed writes receive the catalog's write rate.
 		uncachedInput -= cacheRead + cacheWrite
 		if uncachedInput < 0 {
 			uncachedInput = 0
 		}
 	}
 	cacheWriteCost := float64(cacheWrite) * rates.cacheWrite
-	if catalogModel == "claude-fable-5" {
+	if isClaude && catalogModel == "claude-fable-5" {
 		var cacheWriteCostOK bool
 		cacheWriteCost, cacheWriteCostOK = fableCacheWriteCost(record.Detail, cacheWrite)
 		if !cacheWriteCostOK {
-			return 0, catalogModel, tier, false
+			return costComponents{}, catalogModel, tier, false
 		}
 	}
-	cost := float64(uncachedInput)*rates.input +
-		float64(cacheRead)*rates.cacheRead +
-		cacheWriteCost +
-		float64(record.Detail.OutputTokens)*rates.output
-	return cost / 1_000_000, catalogModel, tier, true
+	costs := costComponents{
+		input:  float64(uncachedInput) * rates.input / 1_000_000,
+		output: float64(record.Detail.OutputTokens) * rates.output / 1_000_000,
+		cache:  (float64(cacheRead)*rates.cacheRead + cacheWriteCost) / 1_000_000,
+	}
+	return costs, catalogModel, tier, true
 }
 
 func hasPriceableUsage(detail usage.Detail) bool {
@@ -513,24 +561,35 @@ func normalizeModelName(model string) string {
 
 func logRequestEvent(event RequestEvent) {
 	cost := "unavailable"
+	inputCost := "unavailable"
+	outputCost := "unavailable"
+	cacheCost := "unavailable"
 	if event.EstimatedCostAvailable {
 		cost = fmt.Sprintf("%.8f", event.EstimatedCostUSD)
+		inputCost = fmt.Sprintf("%.8f", event.EstimatedInputCostUSD)
+		outputCost = fmt.Sprintf("%.8f", event.EstimatedOutputCostUSD)
+		cacheCost = fmt.Sprintf("%.8f", event.EstimatedCacheCostUSD)
 	}
 	log.Infof(
-		"request_event operation=%s provider=%q model=%q input_tokens=%d output_tokens=%d cache_read_tokens=%d cache_write_tokens=%d uncached_input_tokens=%d cache_read_percent=%.2f cache_low_reuse=%t cache_telemetry_present=%t cache_outcome=%s cache_miss=%t estimated_cost_usd=%s estimated_cost_tier=%s cost_estimated=%t failed=%t latency_ms=%d",
+		"request_event operation=%s provider=%q model=%q effort=%q input_tokens=%d output_tokens=%d cache_read_tokens=%d cache_write_tokens=%d cache_write_estimated=%t uncached_input_tokens=%d cache_read_percent=%.2f cache_low_reuse=%t cache_telemetry_present=%t cache_outcome=%s cache_miss=%t estimated_input_cost_usd=%s estimated_output_cost_usd=%s estimated_cache_cost_usd=%s estimated_cost_usd=%s estimated_cost_tier=%s cost_estimated=%t failed=%t latency_ms=%d",
 		event.Operation,
 		event.Provider,
 		event.Model,
+		event.ReasoningEffort,
 		event.InputTokens,
 		event.OutputTokens,
 		event.CacheReadTokens,
 		event.CacheWriteTokens,
+		event.CacheWriteEstimated,
 		event.UncachedInputTokens,
 		event.CacheReadPercent,
 		event.CacheLowReuse,
 		event.CacheTelemetryPresent,
 		event.CacheOutcome,
 		event.CacheMiss,
+		inputCost,
+		outputCost,
+		cacheCost,
 		cost,
 		event.EstimatedCostTier,
 		event.EstimatedCostAvailable,

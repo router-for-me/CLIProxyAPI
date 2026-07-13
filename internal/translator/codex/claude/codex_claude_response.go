@@ -13,6 +13,7 @@ import (
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -65,7 +66,7 @@ type pendingCodexFunctionCall struct {
 //
 // Returns:
 //   - [][]byte: A slice of Claude Code-compatible JSON responses
-func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRawJSON, _ []byte, rawJSON []byte, param *any) [][]byte {
+func ConvertCodexResponseToClaude(ctx context.Context, _ string, originalRequestRawJSON, _ []byte, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &ConvertCodexResponseToClaudeParams{
 			BlockIndex: 0,
@@ -141,11 +142,14 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		output = appendPendingCodexFunctionCallsFromTerminal(output, params, originalRequestRawJSON, responseData)
 		template, _ = sjson.SetBytes(template, "delta.stop_reason", mapCodexStopReasonToClaude(codexStopReason(responseData), params.HasEmittedToolUse))
 		template = setClaudeStopSequence(template, "delta.stop_sequence", responseData)
-		inputTokens, outputTokens, cachedTokens := extractResponsesUsage(responseData.Get("usage"))
-		template, _ = sjson.SetBytes(template, "usage.input_tokens", inputTokens)
-		template, _ = sjson.SetBytes(template, "usage.output_tokens", outputTokens)
-		if cachedTokens > 0 {
-			template, _ = sjson.SetBytes(template, "usage.cache_read_input_tokens", cachedTokens)
+		usage := extractResponsesUsage(ctx, responseData.Get("usage"))
+		template, _ = sjson.SetBytes(template, "usage.input_tokens", usage.InputTokens)
+		template, _ = sjson.SetBytes(template, "usage.output_tokens", usage.OutputTokens)
+		if usage.HasCacheReadTokens {
+			template, _ = sjson.SetBytes(template, "usage.cache_read_input_tokens", usage.CacheReadTokens)
+		}
+		if usage.HasCacheCreationTokens {
+			template, _ = sjson.SetBytes(template, "usage.cache_creation_input_tokens", usage.CacheCreationTokens)
 		}
 
 		output = translatorcommon.AppendSSEEventBytes(output, "message_delta", template, 2)
@@ -335,7 +339,7 @@ func codexStreamErrorToClaudeError(rootResult gjson.Result) []byte {
 // This function processes the complete Codex response and transforms it into a single Claude Code-compatible
 // JSON response. It handles message content, tool calls, reasoning content, and usage metadata, combining all
 // the information into a single response that matches the Claude Code API format.
-func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, _ []byte, rawJSON []byte, _ *any) []byte {
+func ConvertCodexResponseToClaudeNonStream(ctx context.Context, _ string, originalRequestRawJSON, _ []byte, rawJSON []byte, _ *any) []byte {
 	revNames := buildReverseMapFromClaudeOriginalShortToOriginal(originalRequestRawJSON)
 
 	rootResult := gjson.ParseBytes(rawJSON)
@@ -352,11 +356,14 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
 	out, _ = sjson.SetBytes(out, "id", responseData.Get("id").String())
 	out, _ = sjson.SetBytes(out, "model", responseData.Get("model").String())
-	inputTokens, outputTokens, cachedTokens := extractResponsesUsage(responseData.Get("usage"))
-	out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
-	out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
-	if cachedTokens > 0 {
-		out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", cachedTokens)
+	usage := extractResponsesUsage(ctx, responseData.Get("usage"))
+	out, _ = sjson.SetBytes(out, "usage.input_tokens", usage.InputTokens)
+	out, _ = sjson.SetBytes(out, "usage.output_tokens", usage.OutputTokens)
+	if usage.HasCacheReadTokens {
+		out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", usage.CacheReadTokens)
+	}
+	if usage.HasCacheCreationTokens {
+		out, _ = sjson.SetBytes(out, "usage.cache_creation_input_tokens", usage.CacheCreationTokens)
 	}
 
 	hasToolCall := false
@@ -778,24 +785,76 @@ func resolveCodexClaudeToolUseName(originalRequestRawJSON []byte, name string) s
 	return name
 }
 
-func extractResponsesUsage(usage gjson.Result) (int64, int64, int64) {
+type codexClaudeUsage struct {
+	InputTokens            int64
+	OutputTokens           int64
+	CacheReadTokens        int64
+	CacheCreationTokens    int64
+	HasCacheReadTokens     bool
+	HasCacheCreationTokens bool
+	CacheCreationEstimated bool
+}
+
+const minimumCodexCacheableInputTokens int64 = 1024
+
+func extractResponsesUsage(ctx context.Context, usage gjson.Result) codexClaudeUsage {
 	if !usage.Exists() || usage.Type == gjson.Null {
-		return 0, 0, 0
+		return codexClaudeUsage{}
 	}
 
-	inputTokens := usage.Get("input_tokens").Int()
-	outputTokens := usage.Get("output_tokens").Int()
-	cachedTokens := usage.Get("input_tokens_details.cached_tokens").Int()
+	inputTokens := usage.Get("input_tokens")
+	result := codexClaudeUsage{
+		InputTokens:  inputTokens.Int(),
+		OutputTokens: usage.Get("output_tokens").Int(),
+	}
 
-	if cachedTokens > 0 {
-		if inputTokens >= cachedTokens {
-			inputTokens -= cachedTokens
+	cacheRead := usage.Get("input_tokens_details.cached_tokens")
+	if cacheRead.Exists() {
+		result.CacheReadTokens = cacheRead.Int()
+		result.HasCacheReadTokens = true
+	}
+
+	// GPT-5.6 Responses usage can report provider-confirmed prompt cache writes
+	// as cache_write_tokens. Accept the older cache_creation_tokens spelling too.
+	cacheCreation := usage.Get("input_tokens_details.cache_write_tokens")
+	if !cacheCreation.Exists() {
+		cacheCreation = usage.Get("input_tokens_details.cache_creation_tokens")
+	}
+	if cacheCreation.Exists() && cacheCreation.Int() > 0 {
+		result.CacheCreationTokens = cacheCreation.Int()
+		result.HasCacheCreationTokens = true
+	}
+
+	// The Codex subscription endpoint currently returns an explicit zero for
+	// cache_write_tokens even as cached_tokens grows. Claude Code relies on cache
+	// creation usage to understand its additive prompt categories, so estimate
+	// creation as the non-read portion when OpenAI omits or zeroes the write field.
+	// This is compatibility telemetry, not a provider-confirmed or billable write.
+	cacheTelemetryPresent := cacheRead.Exists() || cacheCreation.Exists()
+	if sdktranslator.CodexClaudeCacheWriteEstimateEnabled(ctx) && inputTokens.Exists() && result.InputTokens >= minimumCodexCacheableInputTokens && cacheTelemetryPresent && !result.HasCacheCreationTokens {
+		result.CacheCreationTokens = result.InputTokens - result.CacheReadTokens
+		if result.CacheCreationTokens < 0 {
+			result.CacheCreationTokens = 0
+		}
+		result.HasCacheCreationTokens = true
+		result.CacheCreationEstimated = true
+		result.InputTokens = 0
+		return result
+	}
+
+	// OpenAI input_tokens includes cache reads and confirmed cache writes.
+	// Anthropic exposes those categories separately, so leave input_tokens as the
+	// remaining uncached, non-write input. Clamp malformed upstream breakdowns.
+	cacheCategorizedTokens := result.CacheReadTokens + result.CacheCreationTokens
+	if cacheCategorizedTokens > 0 {
+		if result.InputTokens >= cacheCategorizedTokens {
+			result.InputTokens -= cacheCategorizedTokens
 		} else {
-			inputTokens = 0
+			result.InputTokens = 0
 		}
 	}
 
-	return inputTokens, outputTokens, cachedTokens
+	return result
 }
 
 // buildReverseMapFromClaudeOriginalShortToOriginal builds a map[short]original from original Claude request tools.

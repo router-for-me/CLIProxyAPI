@@ -206,6 +206,47 @@ Fable cache writes use the provider's reported TTL breakdown: 5-minute writes
 are estimated at `$12.50/MTok`, 1-hour writes at `$20/MTok`, and an
 unclassified remainder is conservatively estimated at the 1-hour rate.
 
+The Logs tab defaults to a fixed-header request monitor with these columns:
+provider, model, effort, input, output, cache read, cache write, cache-read
+percentage, input cost, output cost, and cache cost. Press `v` to switch between
+the request table and ordinary raw server logs. Cache misses and low-reuse rows
+remain red; compaction rows remain magenta.
+
+OpenAI Responses usage includes cached reads but the Codex subscription endpoint
+currently reports `cache_write_tokens: 0` even while the next request reuses the
+new prefix. For Codex rows, the proxy therefore displays the uncached portion as
+a compatibility estimate for cache-eligible prompts (1,024+ input tokens) and
+prefixes it with `~`; metadata logs also emit
+`cache_write_estimated=true`. With
+`codex-claude-estimate-cache-write-usage: true`, the same estimate is returned
+to Claude Code as `cache_creation_input_tokens` so its cache-creation counter is
+useful. This is an explicit compatibility mode because Anthropic's wire schema
+cannot label that counter as estimated. It is not provider-confirmed and is
+never used for cache-write pricing: the provider's reported zero remains
+authoritative for cost, and the estimated portion remains normal OpenAI input.
+Provider-confirmed GPT-5.6 writes use OpenAI's documented 1.25x input rate.
+Native Claude/Fable cache-write values stay provider-reported.
+
+For bounded request diagnostics on this workstation, use:
+
+```yaml
+request-log: true
+request-log-success-summary: true
+request-log-summary-rotation-hours: 5
+request-log-summary-max-files: 48
+error-logs-max-files: 50
+logs-max-total-size-mb: 1024
+codex-claude-estimate-cache-write-usage: true
+```
+
+Successful requests then append one masked, body-free JSON object to a
+`request-summary-*.log` file. Files use fixed five-hour UTC windows, and the
+oldest summary windows are removed after the configured limit. Failed requests,
+including streamed failures detected after downstream HTTP 200 headers, retain
+a full `error-*.log` diagnostic. Those error files can include prompts, source,
+tool inputs/results, and response content; treat them as sensitive. Temporary
+streaming parts are removed after the final summary or error log is committed.
+
 Run `-tui -standalone` for an all-in-one foreground instance. When attaching a
 TUI to the background proxy, configure a loopback-only management secret. This
 fork lets the pure TUI client inherit `MANAGEMENT_PASSWORD` when `-password` is

@@ -187,6 +187,61 @@ func newModelExecutionHandler(t *testing.T, model string, executor *modelExecuti
 	return NewBaseAPIHandlers(cfg, manager)
 }
 
+func TestCodexClaudeCacheWriteEstimatePolicyReachesNonStreamAndStreamExecutions(t *testing.T) {
+	model := "model-execution-cache-write-policy"
+	observed := make(chan bool, 4)
+	executor := &modelExecutionCaptureExecutor{
+		execute: func(ctx context.Context, _ *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
+			observed <- sdktranslator.CodexClaudeCacheWriteEstimateEnabled(ctx)
+			return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+		},
+		stream: func(ctx context.Context, _ *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			observed <- sdktranslator.CodexClaudeCacheWriteEstimateEnabled(ctx)
+			chunks := make(chan coreexecutor.StreamChunk, 1)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"message_stop\"}\n\n")}
+			close(chunks)
+			return &coreexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{CodexClaudeEstimateCacheWriteUsage: true})
+	body := []byte(fmt.Sprintf(`{"model":%q}`, model))
+
+	run := func(want bool) {
+		t.Helper()
+		if _, errMsg := handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+			EntryProtocol: "claude",
+			ExitProtocol:  "claude",
+			Model:         model,
+			Body:          body,
+		}); errMsg != nil {
+			t.Fatalf("ExecuteModel() error = %+v", errMsg)
+		}
+		if got := <-observed; got != want {
+			t.Fatalf("non-stream policy = %t, want %t", got, want)
+		}
+
+		stream, errMsg := handler.ExecuteModelStream(context.Background(), ModelExecutionRequest{
+			EntryProtocol: "claude",
+			ExitProtocol:  "claude",
+			Model:         model,
+			Stream:        true,
+			Body:          body,
+		})
+		if errMsg != nil {
+			t.Fatalf("ExecuteModelStream() error = %+v", errMsg)
+		}
+		for range stream.Chunks {
+		}
+		if got := <-observed; got != want {
+			t.Fatalf("stream policy = %t, want %t", got, want)
+		}
+	}
+
+	run(true)
+	handler.UpdateClients(&sdkconfig.SDKConfig{CodexClaudeEstimateCacheWriteUsage: false})
+	run(false)
+}
+
 func TestExecuteModelCarriesEntryAndExitProtocols(t *testing.T) {
 	model := "model-execution-nonstream-model"
 	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))

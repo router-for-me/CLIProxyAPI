@@ -37,18 +37,24 @@ type observabilityEvent struct {
 	Sequence               uint64  `json:"sequence"`
 	Provider               string  `json:"provider"`
 	Model                  string  `json:"model"`
+	Effort                 string  `json:"effort"`
 	Operation              string  `json:"operation"`
 	InputTokens            int64   `json:"input_tokens"`
 	OutputTokens           int64   `json:"output_tokens"`
 	CacheReadTokens        int64   `json:"cache_read_tokens"`
 	CacheWriteTokens       int64   `json:"cache_write_tokens"`
+	CacheWriteEstimated    bool    `json:"cache_write_estimated"`
 	UncachedInputTokens    int64   `json:"uncached_input_tokens"`
 	CacheReadPercent       float64 `json:"cache_read_percent"`
 	CacheLowReuse          bool    `json:"cache_low_reuse"`
+	CacheTelemetryPresent  bool    `json:"cache_telemetry_present"`
 	CacheOutcome           string  `json:"cache_outcome"`
 	CacheMiss              bool    `json:"cache_miss"`
 	Failed                 bool    `json:"failed"`
 	EstimatedCostUSD       float64 `json:"estimated_cost_usd"`
+	EstimatedInputCostUSD  float64 `json:"estimated_input_cost_usd"`
+	EstimatedOutputCostUSD float64 `json:"estimated_output_cost_usd"`
+	EstimatedCacheCostUSD  float64 `json:"estimated_cache_cost_usd"`
 	EstimatedCostAvailable bool    `json:"estimated_cost_available"`
 	EstimatedCostTier      string  `json:"estimated_cost_tier"`
 	ResetReason            string  `json:"reset_reason"`

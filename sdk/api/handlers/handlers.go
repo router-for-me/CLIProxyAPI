@@ -447,6 +447,11 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 //   - cfg: The new application configuration
 func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) { h.Cfg = cfg }
 
+func (h *BaseAPIHandler) withCodexClaudeCacheWriteEstimatePolicy(ctx context.Context) context.Context {
+	enabled := h != nil && h.Cfg != nil && h.Cfg.CodexClaudeEstimateCacheWriteUsage
+	return sdktranslator.WithCodexClaudeCacheWriteEstimate(ctx, enabled)
+}
+
 // SetPluginHost configures the optional plugin interceptor host.
 func (h *BaseAPIHandler) SetPluginHost(host PluginInterceptorHost) {
 	if h == nil {
@@ -720,6 +725,7 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 }
 
 func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	ctx = h.withCodexClaudeCacheWriteEstimatePolicy(ctx)
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
@@ -1115,6 +1121,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 }
 
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	ctx = h.withCodexClaudeCacheWriteEstimatePolicy(ctx)
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
@@ -2227,19 +2234,27 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 }
 
 func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *interfaces.ErrorMessage) {
-	if h.Cfg.RequestLog {
-		if ginContext, ok := ctx.Value("gin").(*gin.Context); ok {
-			if apiResponseErrors, isExist := ginContext.Get("API_RESPONSE_ERROR"); isExist {
-				if slicesAPIResponseError, isOk := apiResponseErrors.([]*interfaces.ErrorMessage); isOk {
-					slicesAPIResponseError = append(slicesAPIResponseError, err)
-					ginContext.Set("API_RESPONSE_ERROR", slicesAPIResponseError)
-				}
-			} else {
-				// Create new response data entry
-				ginContext.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{err})
-			}
+	if h == nil || h.Cfg == nil || !h.Cfg.RequestLog || ctx == nil {
+		return
+	}
+	if ginContext, ok := ctx.Value("gin").(*gin.Context); ok {
+		recordAPIResponseError(ginContext, err)
+	}
+}
+
+// recordAPIResponseError marks a request as failed even when an SSE response has
+// already committed a successful HTTP status before the upstream stream fails.
+func recordAPIResponseError(c *gin.Context, err *interfaces.ErrorMessage) {
+	if c == nil || err == nil {
+		return
+	}
+	if apiResponseErrors, exists := c.Get("API_RESPONSE_ERROR"); exists {
+		if recordedErrors, ok := apiResponseErrors.([]*interfaces.ErrorMessage); ok {
+			c.Set("API_RESPONSE_ERROR", append(recordedErrors, err))
+			return
 		}
 	}
+	c.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{err})
 }
 
 // APIHandlerCancelFunc is a function type for canceling an API handler's context.

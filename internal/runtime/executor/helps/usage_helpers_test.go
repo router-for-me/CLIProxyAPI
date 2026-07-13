@@ -124,6 +124,74 @@ func TestParseCodexUsageIncludesCacheWriteTokens(t *testing.T) {
 	if detail.ResponseServiceTier != "priority" {
 		t.Fatalf("response service tier = %q, want priority", detail.ResponseServiceTier)
 	}
+	if detail.CacheCreationEstimateAvailable || detail.EstimatedCacheCreationTokens != 0 {
+		t.Fatalf("provider-confirmed cache write unexpectedly marked estimated: %+v", detail)
+	}
+}
+
+func TestParseCodexUsagePrefersCacheWriteTokensOverLegacyCreation(t *testing.T) {
+	data := []byte(`{"response":{"usage":{"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":30,"cache_creation_tokens":0,"cache_write_tokens":40}}}}`)
+	detail, ok := ParseCodexUsage(data)
+	if !ok {
+		t.Fatal("ParseCodexUsage() ok = false, want true")
+	}
+	if detail.CacheCreationTokens != 40 {
+		t.Fatalf("cache creation tokens = %d, want cache_write_tokens value 40", detail.CacheCreationTokens)
+	}
+	if detail.CacheCreationEstimateAvailable {
+		t.Fatalf("provider-confirmed cache write unexpectedly marked estimated: %+v", detail)
+	}
+}
+
+func TestParseCodexUsageAddsDisplayOnlyCacheCreationEstimate(t *testing.T) {
+	for _, input := range []string{
+		`{"response":{"usage":{"input_tokens":2048,"output_tokens":20,"total_tokens":2068,"input_tokens_details":{"cached_tokens":512}}}}`,
+		`{"response":{"usage":{"input_tokens":2048,"output_tokens":20,"total_tokens":2068,"input_tokens_details":{"cached_tokens":512,"cache_write_tokens":0}}}}`,
+	} {
+		detail, ok := ParseCodexUsage([]byte(input))
+		if !ok {
+			t.Fatalf("ParseCodexUsage() ok = false; input=%s", input)
+		}
+		if detail.CacheCreationTokens != 0 {
+			t.Fatalf("provider cache creation = %d, want confirmed zero; input=%s", detail.CacheCreationTokens, input)
+		}
+		if !detail.CacheCreationEstimateAvailable || detail.EstimatedCacheCreationTokens != 1536 {
+			t.Fatalf("cache creation estimate = %+v, want available 1536; input=%s", detail, input)
+		}
+		if detail.InputTokens != 2048 || detail.TotalTokens != 2068 {
+			t.Fatalf("provider token totals changed by display estimate: %+v", detail)
+		}
+	}
+}
+
+func TestParseCodexUsageClampsCacheCreationEstimate(t *testing.T) {
+	detail, ok := ParseCodexUsage([]byte(`{"response":{"usage":{"input_tokens":1024,"input_tokens_details":{"cached_tokens":2048,"cache_write_tokens":0}}}}`))
+	if !ok {
+		t.Fatal("ParseCodexUsage() ok = false, want true")
+	}
+	if !detail.CacheCreationEstimateAvailable || detail.EstimatedCacheCreationTokens != 0 {
+		t.Fatalf("clamped cache creation estimate = %+v, want available zero", detail)
+	}
+}
+
+func TestParseCodexUsageDoesNotEstimateBelowCacheEligibilityThreshold(t *testing.T) {
+	detail, ok := ParseCodexUsage([]byte(`{"response":{"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}}}}`))
+	if !ok {
+		t.Fatal("ParseCodexUsage() ok = false, want true")
+	}
+	if detail.CacheCreationEstimateAvailable || detail.EstimatedCacheCreationTokens != 0 {
+		t.Fatalf("short prompt unexpectedly received cache creation estimate: %+v", detail)
+	}
+}
+
+func TestParseCodexUsageDoesNotEstimateWithoutCacheTelemetry(t *testing.T) {
+	detail, ok := ParseCodexUsage([]byte(`{"response":{"usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}}}`))
+	if !ok {
+		t.Fatal("ParseCodexUsage() ok = false, want true")
+	}
+	if detail.CacheCreationEstimateAvailable || detail.EstimatedCacheCreationTokens != 0 {
+		t.Fatalf("usage without cache fields unexpectedly estimated creation: %+v", detail)
+	}
 }
 
 func TestParseOpenAIUsageNormalizesCacheCreationAlias(t *testing.T) {

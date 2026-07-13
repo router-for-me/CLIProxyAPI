@@ -665,6 +665,97 @@ func TestGetLogsLoggingDisabledKeepsBadRequest(t *testing.T) {
 	}
 }
 
+func TestGetRequestErrorLogsHonorsCurrentPolicy(t *testing.T) {
+	dir := t.TempDir()
+	if errWrite := os.WriteFile(filepath.Join(dir, "error-v1-messages-2026-07-13T101500-request.log"), []byte("full error"), 0o644); errWrite != nil {
+		t.Fatalf("write error log: %v", errWrite)
+	}
+	if errWrite := os.WriteFile(filepath.Join(dir, "request-summary-20260713T100000Z.log"), []byte("{}\n"), 0o644); errWrite != nil {
+		t.Fatalf("write summary log: %v", errWrite)
+	}
+	policies := []struct {
+		name           string
+		requestLog     bool
+		successSummary bool
+		wantFiles      int
+	}{
+		{name: "summary enabled", requestLog: true, successSummary: true, wantFiles: 1},
+		{name: "full logging enabled", requestLog: true, successSummary: false, wantFiles: 0},
+		{name: "request logging disabled", requestLog: false, successSummary: false, wantFiles: 1},
+	}
+	for _, policy := range policies {
+		t.Run(policy.name, func(t *testing.T) {
+			cfg := &config.Config{RequestLogSuccessSummary: policy.successSummary}
+			cfg.RequestLog = policy.requestLog
+			handler := NewHandlerWithoutConfigFilePath(cfg, nil)
+			handler.SetLogDirectory(dir)
+
+			gin.SetMode(gin.TestMode)
+			router := gin.New()
+			router.GET("/v0/management/request-error-logs", handler.GetRequestErrorLogs)
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/v0/management/request-error-logs", nil)
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+			}
+			var payload struct {
+				Files []struct {
+					Name string `json:"name"`
+				} `json:"files"`
+			}
+			if errDecode := json.Unmarshal(recorder.Body.Bytes(), &payload); errDecode != nil {
+				t.Fatalf("decode response: %v", errDecode)
+			}
+			if len(payload.Files) != policy.wantFiles {
+				t.Fatalf("files = %+v, want %d", payload.Files, policy.wantFiles)
+			}
+			if policy.wantFiles == 1 && !strings.HasPrefix(payload.Files[0].Name, "error-") {
+				t.Fatalf("files = %+v, want only the full error log", payload.Files)
+			}
+		})
+	}
+}
+
+func TestGetRequestLogByIDReturnsRollingSummaryRecord(t *testing.T) {
+	dir := t.TempDir()
+	content := strings.Join([]string{
+		`{"timestamp":"2026-07-13T10:00:00Z","request_id":"other","method":"POST","path":"/v1/messages","status":200}`,
+		`{"timestamp":"2026-07-13T10:01:00Z","request_id":"wanted","method":"POST","path":"/v1/responses","status":200}`,
+	}, "\n") + "\n"
+	if errWrite := os.WriteFile(filepath.Join(dir, "request-summary-20260713T100000Z.log"), []byte(content), 0o644); errWrite != nil {
+		t.Fatalf("write summary log: %v", errWrite)
+	}
+	cfg := &config.Config{RequestLogSuccessSummary: true}
+	cfg.RequestLog = true
+	handler := NewHandlerWithoutConfigFilePath(cfg, nil)
+	handler.SetLogDirectory(dir)
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/v0/management/request-log-by-id/:id", handler.GetRequestLogByID)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v0/management/request-log-by-id/wanted", nil)
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Header().Get("X-Request-Log-Mode") != "summary" {
+		t.Fatalf("X-Request-Log-Mode = %q, want summary", recorder.Header().Get("X-Request-Log-Mode"))
+	}
+	var record struct {
+		RequestID string `json:"request_id"`
+		Path      string `json:"path"`
+	}
+	if errDecode := json.Unmarshal(recorder.Body.Bytes(), &record); errDecode != nil {
+		t.Fatalf("decode summary response: %v", errDecode)
+	}
+	if record.RequestID != "wanted" || record.Path != "/v1/responses" {
+		t.Fatalf("record = %+v", record)
+	}
+}
+
 func mustEncodeRawCursor(t *testing.T, cursor logCursor) string {
 	t.Helper()
 	raw, err := json.Marshal(cursor)

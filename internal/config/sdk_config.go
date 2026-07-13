@@ -42,6 +42,10 @@ type SDKConfig struct {
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
+	// CodexClaudeEstimateCacheWriteUsage exposes a synthetic Anthropic cache-creation
+	// counter when Codex omits or zeroes cache-write usage. The estimate is not billable telemetry.
+	CodexClaudeEstimateCacheWriteUsage bool `yaml:"codex-claude-estimate-cache-write-usage" json:"codex-claude-estimate-cache-write-usage"`
+
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 

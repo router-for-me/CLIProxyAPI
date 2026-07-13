@@ -192,8 +192,9 @@ func (h *Handler) DeleteLogs(c *gin.Context) {
 	})
 }
 
-// GetRequestErrorLogs lists error request log files when RequestLog is disabled.
-// It returns an empty list when RequestLog is enabled.
+// GetRequestErrorLogs lists retained full error request log files. Preserve the
+// upstream behavior for full request logging, where those files are exposed via
+// the regular request-log endpoints instead.
 func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
@@ -203,11 +204,10 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
-	if h.cfg.RequestLog {
+	if h.cfg.RequestLog && !h.cfg.RequestLogSuccessSummary {
 		c.JSON(http.StatusOK, gin.H{"files": []any{}})
 		return
 	}
-
 	dir := h.logDirectory()
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
@@ -311,6 +311,16 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 	}
 
 	if matchedFile == "" {
+		summary, found, errSummary := findRequestSummaryByID(dir, entries, requestID)
+		if errSummary != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to search request summaries: %v", errSummary)})
+			return
+		}
+		if found {
+			c.Header("X-Request-Log-Mode", "summary")
+			c.Data(http.StatusOK, "application/json; charset=utf-8", append(summary, '\n'))
+			return
+		}
 		c.JSON(http.StatusNotFound, gin.H{"error": "log file not found for the given request ID"})
 		return
 	}
@@ -342,6 +352,51 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 	}
 
 	c.FileAttachment(fullPath, matchedFile)
+}
+
+func findRequestSummaryByID(dir string, entries []os.DirEntry, requestID string) ([]byte, bool, error) {
+	names := make([]string, 0)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, "request-summary-") && strings.HasSuffix(name, ".log") {
+			names = append(names, name)
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+
+	for _, name := range names {
+		file, errOpen := os.Open(filepath.Join(dir, name))
+		if errOpen != nil {
+			return nil, false, errOpen
+		}
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, logScannerInitialBuffer), logScannerMaxBuffer)
+		var matched []byte
+		for scanner.Scan() {
+			line := bytes.TrimSpace(scanner.Bytes())
+			var record struct {
+				RequestID string `json:"request_id"`
+			}
+			if json.Unmarshal(line, &record) == nil && record.RequestID == requestID {
+				matched = bytes.Clone(line)
+			}
+		}
+		errScan := scanner.Err()
+		errClose := file.Close()
+		if errScan != nil {
+			return nil, false, errScan
+		}
+		if errClose != nil {
+			return nil, false, errClose
+		}
+		if len(matched) > 0 {
+			return matched, true, nil
+		}
+	}
+	return nil, false, nil
 }
 
 // DownloadRequestErrorLog downloads a specific error request log file by name.
