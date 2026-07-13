@@ -11,6 +11,8 @@ const (
 
 // NotificationsConfig holds optional outbound notification settings.
 type NotificationsConfig struct {
+	// ServiceURL is the externally reachable base URL used by notification actions.
+	ServiceURL string `yaml:"service-url,omitempty" json:"service-url,omitempty"`
 	// Webhooks receives configured notification events.
 	Webhooks []NotificationWebhookConfig `yaml:"webhooks" json:"webhooks"`
 }
@@ -22,6 +24,7 @@ type NotificationWebhookConfig struct {
 	Adapter        string   `yaml:"adapter,omitempty" json:"adapter,omitempty"`
 	Format         string   `yaml:"format,omitempty" json:"format,omitempty"` // Legacy alias for adapter.
 	Target         string   `yaml:"target,omitempty" json:"target,omitempty"`
+	Mentions       []string `yaml:"mentions,omitempty" json:"mentions,omitempty"`
 	Disabled       bool     `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 	Events         []string `yaml:"events,omitempty" json:"events,omitempty"`
 	Providers      []string `yaml:"providers,omitempty" json:"providers,omitempty"`
@@ -36,6 +39,7 @@ func (c *Config) NormalizeNotificationsConfig() {
 	if c == nil {
 		return
 	}
+	c.Notifications.ServiceURL = strings.TrimRight(strings.TrimSpace(c.Notifications.ServiceURL), "/")
 	for i := range c.Notifications.Webhooks {
 		hook := &c.Notifications.Webhooks[i]
 		hook.Name = strings.TrimSpace(hook.Name)
@@ -43,6 +47,14 @@ func (c *Config) NormalizeNotificationsConfig() {
 		hook.Target = strings.TrimSpace(hook.Target)
 		hook.Adapter = strings.ToLower(strings.TrimSpace(hook.Adapter))
 		hook.Format = strings.ToLower(strings.TrimSpace(hook.Format))
+		normalizedMentions := hook.Mentions[:0]
+		for _, mention := range hook.Mentions {
+			mention = strings.TrimSpace(mention)
+			if mention != "" {
+				normalizedMentions = append(normalizedMentions, mention)
+			}
+		}
+		hook.Mentions = normalizedMentions
 		if hook.Adapter == "" {
 			hook.Adapter = hook.Format
 		}

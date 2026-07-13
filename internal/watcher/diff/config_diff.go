@@ -45,6 +45,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if !reflect.DeepEqual(oldCfg.Notifications.Webhooks, newCfg.Notifications.Webhooks) {
 		changes = append(changes, fmt.Sprintf("notifications.webhooks: %d configured -> %d configured", len(oldCfg.Notifications.Webhooks), len(newCfg.Notifications.Webhooks)))
 	}
+	if oldCfg.Notifications.ServiceURL != newCfg.Notifications.ServiceURL {
+		changes = append(changes, "notifications.service-url: changed")
+	}
 	if oldCfg.DisableCooling != newCfg.DisableCooling {
 		changes = append(changes, fmt.Sprintf("disable-cooling: %t -> %t", oldCfg.DisableCooling, newCfg.DisableCooling))
 	}

@@ -103,15 +103,18 @@ usage-statistics-enabled: false
 redis-usage-queue-retention-seconds: 60
 
 # Optional outbound notifications. Webhooks are best-effort and never block requests.
-# Slack, Feishu/Lark, and Telegram messages include action buttons only after the
-# server observes a public request host (Forwarded/X-Forwarded-Proto/X-Forwarded-Host/Host).
+# Slack, Feishu/Lark, and Telegram messages include action buttons when service-url is configured.
 notifications:
+  # Optional externally reachable base URL used by notification action buttons.
+  service-url: ""
   webhooks:
     # Example: Feishu/Lark bot webhook for OAuth refresh credential failures.
     # auth.refresh_failed is emitted when refreshing OAuth credentials fails with 401.
     - name: "oauth-refresh-failed-feishu"
       url: ""
       adapter: "feishu" # generic/json, slack, feishu/lark, telegram
+      # Optional Feishu/Lark card mentions. Use user open_id/user_id values, or "all".
+      # mentions: ["ou_xxx"]
       # Required. Use ["*"] only when this webhook should receive every notification event.
       events: ["auth.refresh_failed"]
       status-codes: [401]

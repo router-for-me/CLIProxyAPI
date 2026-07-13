@@ -5,11 +5,13 @@ import "testing"
 func TestParseConfigBytesNormalizesNotificationWebhooks(t *testing.T) {
 	cfg, err := ParseConfigBytes([]byte(`
 notifications:
+  service-url: "  https://proxy.example.test/base/  "
   webhooks:
     - name: "  alerts  "
       url: "  https://example.test/webhook  "
       adapter: "  FEISHU  "
       target: "  chat-1  "
+      mentions: ["  ou_user_1  ", ""]
       events: [" Auth.Refresh_Failed ", "", "auth.request_unauthorized"]
       providers: [" Codex ", "", "ANTIGRAVITY"]
       status-codes: [0, 401, -1]
@@ -25,6 +27,9 @@ notifications:
 	if len(cfg.Notifications.Webhooks) != 2 {
 		t.Fatalf("webhooks len = %d, want 2", len(cfg.Notifications.Webhooks))
 	}
+	if cfg.Notifications.ServiceURL != "https://proxy.example.test/base" {
+		t.Fatalf("ServiceURL = %q, want normalized service URL", cfg.Notifications.ServiceURL)
+	}
 
 	hook := cfg.Notifications.Webhooks[0]
 	if hook.Name != "alerts" || hook.URL != "https://example.test/webhook" {
@@ -35,6 +40,9 @@ notifications:
 	}
 	if hook.Target != "chat-1" {
 		t.Fatalf("Target = %q, want chat-1", hook.Target)
+	}
+	if len(hook.Mentions) != 1 || hook.Mentions[0] != "ou_user_1" {
+		t.Fatalf("Mentions = %#v, want normalized mention list", hook.Mentions)
 	}
 	if hook.TimeoutSeconds != DefaultNotificationWebhookTimeoutSeconds {
 		t.Fatalf("TimeoutSeconds = %d, want %d", hook.TimeoutSeconds, DefaultNotificationWebhookTimeoutSeconds)

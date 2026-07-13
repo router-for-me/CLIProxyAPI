@@ -21,6 +21,10 @@ func TestBuildConfigChangeDetails(t *testing.T) {
 			DisableAutoUpdatePanel: false,
 			PanelGitHubRepository:  "repo-old",
 		},
+		Notifications: config.NotificationsConfig{
+			ServiceURL: "https://old.example.test",
+			Webhooks:   []config.NotificationWebhookConfig{{Name: "old"}},
+		},
 		OAuthExcludedModels: map[string][]string{
 			"providerA": {"m1"},
 		},
@@ -47,6 +51,13 @@ func TestBuildConfigChangeDetails(t *testing.T) {
 			DisableControlPanel:    true,
 			DisableAutoUpdatePanel: true,
 			PanelGitHubRepository:  "repo-new",
+		},
+		Notifications: config.NotificationsConfig{
+			ServiceURL: "https://new.example.test",
+			Webhooks: []config.NotificationWebhookConfig{
+				{Name: "old"},
+				{Name: "new"},
+			},
 		},
 		OAuthExcludedModels: map[string][]string{
 			"providerA": {"m1", "m2"},
@@ -77,6 +88,8 @@ func TestBuildConfigChangeDetails(t *testing.T) {
 	expectContains(t, details, "remote-management.allow-remote: false -> true")
 	expectContains(t, details, "remote-management.disable-auto-update-panel: false -> true")
 	expectContains(t, details, "remote-management.secret-key: updated")
+	expectContains(t, details, "notifications.webhooks: 1 configured -> 2 configured")
+	expectContains(t, details, "notifications.service-url: changed")
 	expectContains(t, details, "oauth-excluded-models[providera]: updated (1 -> 2 entries)")
 	expectContains(t, details, "oauth-excluded-models[providerb]: added (1 entries)")
 	expectContains(t, details, "openai-compatibility:")

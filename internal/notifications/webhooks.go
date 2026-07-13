@@ -17,10 +17,11 @@ import (
 )
 
 const (
-	EventAll                     = "*"
-	EventAuthRequestFailed       = "auth.request_failed"
-	EventAuthRequestUnauthorized = "auth.request_unauthorized"
-	EventAuthRefreshFailed       = "auth.refresh_failed"
+	EventAll                         = "*"
+	EventAuthRequestFailed           = "auth.request_failed"
+	EventAuthRequestUnauthorized     = "auth.request_unauthorized"
+	EventAuthRefreshFailed           = "auth.refresh_failed"
+	EventAuthManagementRequestFailed = "auth.management_request_failed"
 
 	SeverityError = "error"
 
@@ -54,6 +55,7 @@ type webhook struct {
 	url         string
 	adapter     string
 	target      string
+	mentions    []string
 	events      map[string]struct{}
 	providers   map[string]struct{}
 	statusCodes map[int]struct{}
@@ -96,6 +98,12 @@ func newWebhookDispatcher(client *http.Client) *webhookDispatcher {
 // ConfigureWebhooks updates the process-wide notification webhook sinks.
 func ConfigureWebhooks(configs []config.NotificationWebhookConfig) {
 	globalWebhookDispatcher.configure(configs)
+}
+
+// Configure updates the process-wide notification settings.
+func Configure(cfg config.NotificationsConfig) {
+	ConfigureServiceURL(cfg.ServiceURL)
+	ConfigureWebhooks(cfg.Webhooks)
 }
 
 // PublishEvent sends an event to configured webhook sinks.
@@ -186,6 +194,7 @@ func webhookFromConfig(cfg config.NotificationWebhookConfig) (webhook, bool) {
 		url:         strings.TrimSpace(cfg.URL),
 		adapter:     adapter,
 		target:      strings.TrimSpace(cfg.Target),
+		mentions:    webhookMentionsFromConfig(cfg.Mentions),
 		events:      events,
 		providers:   providers,
 		statusCodes: statusCodes,
@@ -193,6 +202,18 @@ func webhookFromConfig(cfg config.NotificationWebhookConfig) (webhook, bool) {
 		retry:       retry,
 		dedupe:      time.Duration(dedupeSeconds) * time.Second,
 	}, true
+}
+
+func webhookMentionsFromConfig(mentions []string) []string {
+	out := make([]string, 0, len(mentions))
+	for _, mention := range mentions {
+		id := strings.TrimSpace(mention)
+		if id == "" {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 func (d *webhookDispatcher) publishPayload(payload []byte) {
@@ -336,7 +357,7 @@ func (h webhook) matches(event Event) bool {
 		return false
 	}
 	if _, ok := h.events[EventAll]; !ok {
-		if _, ok := h.events[strings.ToLower(strings.TrimSpace(event.Type))]; !ok {
+		if !h.matchesEvent(event.Type) {
 			return false
 		}
 	}
@@ -351,6 +372,20 @@ func (h webhook) matches(event Event) bool {
 		}
 	}
 	return true
+}
+
+func (h webhook) matchesEvent(eventType string) bool {
+	eventType = strings.ToLower(strings.TrimSpace(eventType))
+	if eventType == "" {
+		return false
+	}
+	if _, ok := h.events[eventType]; ok {
+		return true
+	}
+	// Treat auth.request_failed as the parent request-failure subscription.
+	// auth.request_unauthorized remains available for users who want only 401s.
+	_, hasRequestFailed := h.events[EventAuthRequestFailed]
+	return eventType == EventAuthRequestUnauthorized && hasRequestFailed
 }
 
 func (d *webhookDispatcher) pruneDedupeLocked(now time.Time) {
@@ -450,7 +485,7 @@ func formatWebhookBody(delivery webhookDelivery) ([]byte, string, error) {
 	case "slack":
 		return formatSlackWebhookBody(delivery.event)
 	case "feishu", "lark":
-		return formatFeishuWebhookBody(delivery.event)
+		return formatFeishuWebhookBody(delivery.event, delivery.hook.mentions...)
 	case "telegram":
 		if strings.TrimSpace(delivery.hook.target) == "" {
 			return nil, "", fmt.Errorf("telegram webhook target is required")
@@ -496,7 +531,7 @@ func formatSlackWebhookBody(event Event) ([]byte, string, error) {
 			"type": "section",
 			"text": map[string]string{
 				"type": "mrkdwn",
-				"text": "*Message*\n" + event.Message,
+				"text": "*Message*\n" + escapeSlackMrkdwn(event.Message),
 			},
 		})
 	}
@@ -522,8 +557,13 @@ func slackTextField(label, value string) map[string]string {
 	}
 	return map[string]string{
 		"type": "mrkdwn",
-		"text": fmt.Sprintf("*%s*\n%s", label, value),
+		"text": fmt.Sprintf("*%s*\n%s", label, escapeSlackMrkdwn(value)),
 	}
+}
+
+func escapeSlackMrkdwn(value string) string {
+	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+	return replacer.Replace(value)
 }
 
 func slackCardActions(serviceURL string) []any {
@@ -585,7 +625,7 @@ func telegramInlineKeyboard(serviceURL string) [][]map[string]string {
 	return [][]map[string]string{row}
 }
 
-func formatFeishuWebhookBody(event Event) ([]byte, string, error) {
+func formatFeishuWebhookBody(event Event, mentions ...string) ([]byte, string, error) {
 	event = normalizeEvent(event)
 	fields := []any{
 		feishuCardField("Event", event.Type),
@@ -602,18 +642,26 @@ func formatFeishuWebhookBody(event Event) ([]byte, string, error) {
 		fields = append(fields, feishuCardField("Code", event.Code))
 	}
 
-	elements := []any{
-		map[string]any{
-			"tag":    "div",
-			"fields": fields,
-		},
-	}
-	if event.Message != "" {
+	elements := make([]any, 0, 4)
+	if mentionText := feishuMentionText(mentions); mentionText != "" {
 		elements = append(elements, map[string]any{
 			"tag": "div",
 			"text": map[string]string{
 				"tag":     "lark_md",
-				"content": "**Message**\n" + event.Message,
+				"content": "**Notify**\n" + mentionText,
+			},
+		})
+	}
+	elements = append(elements, map[string]any{
+		"tag":    "div",
+		"fields": fields,
+	})
+	if event.Message != "" {
+		elements = append(elements, map[string]any{
+			"tag": "div",
+			"text": map[string]string{
+				"tag":     "plain_text",
+				"content": "Message\n" + event.Message,
 			},
 		})
 	}
@@ -644,6 +692,36 @@ func formatFeishuWebhookBody(event Event) ([]byte, string, error) {
 	return payload, "application/json", err
 }
 
+func feishuMentionText(mentions []string) string {
+	parts := make([]string, 0, len(mentions))
+	for _, mention := range mentions {
+		id := safeFeishuMentionID(mention)
+		if id == "" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("<at id=%s></at>", id))
+	}
+	return strings.Join(parts, " ")
+}
+
+func safeFeishuMentionID(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '_' || r == '-' || r == '.' || r == '@':
+		default:
+			return ""
+		}
+	}
+	return id
+}
+
 func feishuCardField(label, value string) map[string]any {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -652,8 +730,8 @@ func feishuCardField(label, value string) map[string]any {
 	return map[string]any{
 		"is_short": true,
 		"text": map[string]string{
-			"tag":     "lark_md",
-			"content": fmt.Sprintf("**%s**\n%s", label, value),
+			"tag":     "plain_text",
+			"content": fmt.Sprintf("%s\n%s", label, value),
 		},
 	}
 }
@@ -692,6 +770,8 @@ func cardTitle(event Event) string {
 		return "CLIProxyAPI unauthorized request"
 	case EventAuthRequestFailed:
 		return "CLIProxyAPI request failed"
+	case EventAuthManagementRequestFailed:
+		return "CLIProxyAPI management request failed"
 	default:
 		return "CLIProxyAPI notification"
 	}

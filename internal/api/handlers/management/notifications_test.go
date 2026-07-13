@@ -25,6 +25,7 @@ func TestPutNotificationWebhooks_NormalizesAndPersists(t *testing.T) {
 			"name": "  oauth-refresh  ",
 			"url": "  https://example.test/webhook  ",
 			"adapter": " Feishu ",
+			"mentions": [" ou_user_1 ", " "],
 			"events": [" AUTH.REFRESH_FAILED ", ""],
 			"providers": [" CODEX "],
 			"status-codes": [401, -1],
@@ -53,6 +54,9 @@ func TestPutNotificationWebhooks_NormalizesAndPersists(t *testing.T) {
 	if hook.TimeoutSeconds != config.MaxNotificationWebhookTimeoutSeconds || hook.Retry != config.MaxNotificationWebhookRetry || hook.DedupeSeconds != 0 {
 		t.Fatalf("unexpected normalized limits: %+v", hook)
 	}
+	if len(hook.Mentions) != 1 || hook.Mentions[0] != "ou_user_1" {
+		t.Fatalf("mentions = %#v, want normalized mention list", hook.Mentions)
+	}
 	if len(hook.Events) != 1 || hook.Events[0] != "auth.refresh_failed" {
 		t.Fatalf("events = %#v, want auth.refresh_failed", hook.Events)
 	}
@@ -69,6 +73,9 @@ func TestPutNotificationWebhooks_NormalizesAndPersists(t *testing.T) {
 	}
 	if len(loaded.Notifications.Webhooks) != 1 || loaded.Notifications.Webhooks[0].Name != "oauth-refresh" {
 		t.Fatalf("persisted webhooks = %+v", loaded.Notifications.Webhooks)
+	}
+	if len(loaded.Notifications.Webhooks[0].Mentions) != 1 || loaded.Notifications.Webhooks[0].Mentions[0] != "ou_user_1" {
+		t.Fatalf("persisted mentions = %+v", loaded.Notifications.Webhooks[0].Mentions)
 	}
 }
 

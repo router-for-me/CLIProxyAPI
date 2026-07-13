@@ -60,34 +60,29 @@ func TestWebhookDispatcherSendsMatchingGenericEvent(t *testing.T) {
 		t.Fatalf("Message = %q, want refresh failed", event.Message)
 	}
 	if event.ServiceURL != "" {
-		t.Fatalf("ServiceURL = %q, want empty without observed public URL", event.ServiceURL)
+		t.Fatalf("ServiceURL = %q, want empty without configured service URL", event.ServiceURL)
 	}
 }
 
-func TestServiceURLObservationUsesForwardedHeaders(t *testing.T) {
+func TestConfigureServiceURLNormalizesURL(t *testing.T) {
 	resetServiceURLForTest()
 	t.Cleanup(resetServiceURLForTest)
 
-	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/healthz", nil)
-	req.Header.Set("X-Forwarded-Proto", "https")
-	req.Header.Set("X-Forwarded-Host", "proxy.example.test")
+	ConfigureServiceURL(" HTTPS://proxy.example.test/base/?debug=1#fragment ")
 
-	ObserveHTTPRequest(req)
-
-	if got := CurrentServiceURL(); got != "https://proxy.example.test" {
-		t.Fatalf("CurrentServiceURL() = %q, want https://proxy.example.test", got)
+	if got := CurrentServiceURL(); got != "https://proxy.example.test/base" {
+		t.Fatalf("CurrentServiceURL() = %q, want https://proxy.example.test/base", got)
 	}
 }
 
-func TestServiceURLObservationIgnoresLocalAndPrivateHosts(t *testing.T) {
+func TestConfigureServiceURLRejectsUnsupportedValues(t *testing.T) {
 	resetServiceURLForTest()
 	t.Cleanup(resetServiceURLForTest)
 
-	for _, host := range []string{"localhost:8080", "127.0.0.1:8080", "10.0.0.12:8080", "192.168.1.2:8080", "[::1]:8080"} {
-		req := httptest.NewRequest(http.MethodGet, "http://"+host+"/healthz", nil)
-		ObserveHTTPRequest(req)
+	for _, rawURL := range []string{"proxy.example.test", "ftp://proxy.example.test", "://invalid"} {
+		ConfigureServiceURL(rawURL)
 		if got := CurrentServiceURL(); got != "" {
-			t.Fatalf("CurrentServiceURL() = %q after local/private host %q, want empty", got, host)
+			t.Fatalf("CurrentServiceURL() = %q after invalid URL %q, want empty", got, rawURL)
 		}
 	}
 }
@@ -137,6 +132,36 @@ func TestWebhookDispatcherWildcardEventMatchesAllEvents(t *testing.T) {
 	}
 	if event.Type != EventAuthRequestUnauthorized {
 		t.Fatalf("event type = %q, want %q", event.Type, EventAuthRequestUnauthorized)
+	}
+}
+
+func TestWebhookDispatcherRequestFailedMatchesUnauthorizedSubevent(t *testing.T) {
+	requests := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requests <- body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	dispatcher := newWebhookDispatcher(server.Client())
+	dispatcher.configure([]config.NotificationWebhookConfig{{
+		Name:        "request-failed",
+		URL:         server.URL,
+		Adapter:     "generic",
+		Events:      []string{EventAuthRequestFailed},
+		Providers:   []string{"codex"},
+		StatusCodes: []int{http.StatusUnauthorized},
+	}})
+
+	dispatcher.publishEvent(webhookTestEvent(EventAuthRequestUnauthorized, "codex", http.StatusUnauthorized))
+	got := requireWebhookRequest(t, requests)
+	var event Event
+	if err := json.Unmarshal(got, &event); err != nil {
+		t.Fatalf("unmarshal request failed body: %v body=%s", err, string(got))
+	}
+	if event.Type != EventAuthRequestUnauthorized || event.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unexpected event: %+v", event)
 	}
 }
 
@@ -216,6 +241,85 @@ func TestWebhookDispatcherFormatsFeishuAndDedupes(t *testing.T) {
 	})
 }
 
+func TestWebhookDispatcherFormatsFeishuMentions(t *testing.T) {
+	requests := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requests <- body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	dispatcher := newWebhookDispatcher(server.Client())
+	dispatcher.configure([]config.NotificationWebhookConfig{{
+		Name:     "feishu",
+		URL:      server.URL,
+		Adapter:  "feishu",
+		Events:   []string{EventAuthRefreshFailed},
+		Mentions: []string{" ou_user_1 ", "all", "bad id"},
+	}})
+
+	dispatcher.publishEvent(webhookTestEvent(EventAuthRefreshFailed, "codex", http.StatusUnauthorized))
+	got := requireWebhookRequest(t, requests)
+
+	var body struct {
+		Card struct {
+			Elements []struct {
+				Text struct {
+					Content string `json:"content"`
+				} `json:"text"`
+			} `json:"elements"`
+		} `json:"card"`
+	}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatalf("unmarshal feishu body: %v body=%s", err, string(got))
+	}
+	if len(body.Card.Elements) == 0 {
+		t.Fatalf("feishu card elements are empty: %s", string(got))
+	}
+	mentionContent := body.Card.Elements[0].Text.Content
+	assertTextContains(t, mentionContent, []string{
+		"**Notify**",
+		"<at id=ou_user_1></at>",
+		"<at id=all></at>",
+	})
+	if strings.Contains(mentionContent, "bad id") {
+		t.Fatalf("invalid mention id was rendered: %q", mentionContent)
+	}
+}
+
+func TestFeishuWebhookUsesPlainTextForDynamicMessage(t *testing.T) {
+	event := webhookTestEvent(EventAuthRefreshFailed, "codex", http.StatusUnauthorized)
+	event.Message = `<at id=all></at>`
+	payload, _, err := formatFeishuWebhookBody(event)
+	if err != nil {
+		t.Fatalf("formatFeishuWebhookBody: %v", err)
+	}
+
+	var body struct {
+		Card struct {
+			Elements []struct {
+				Text struct {
+					Tag     string `json:"tag"`
+					Content string `json:"content"`
+				} `json:"text"`
+			} `json:"elements"`
+		} `json:"card"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		t.Fatalf("unmarshal feishu body: %v body=%s", err, string(payload))
+	}
+	for _, element := range body.Card.Elements {
+		if strings.Contains(element.Text.Content, event.Message) {
+			if element.Text.Tag != "plain_text" {
+				t.Fatalf("dynamic message tag = %q, want plain_text", element.Text.Tag)
+			}
+			return
+		}
+	}
+	t.Fatalf("dynamic message not found in card: %s", string(payload))
+}
+
 func TestFeishuWebhookOmitsActionsWithoutServiceURL(t *testing.T) {
 	payload, _, err := formatFeishuWebhookBody(webhookTestEvent(EventAuthRefreshFailed, "codex", http.StatusUnauthorized))
 	if err != nil {
@@ -273,6 +377,7 @@ func TestWebhookDispatcherFormatsSlack(t *testing.T) {
 	}})
 
 	event := webhookTestEvent(EventAuthRefreshFailed, "codex", http.StatusUnauthorized)
+	event.Message = "refresh <@U123> & failed"
 	event.ServiceURL = "https://proxy.example.test"
 	dispatcher.publishEvent(event)
 	got := requireWebhookRequest(t, requests)
@@ -280,7 +385,10 @@ func TestWebhookDispatcherFormatsSlack(t *testing.T) {
 	var body struct {
 		Text   string `json:"text"`
 		Blocks []struct {
-			Type     string `json:"type"`
+			Type string `json:"type"`
+			Text struct {
+				Text string `json:"text"`
+			} `json:"text"`
 			Elements []struct {
 				Type string `json:"type"`
 				URL  string `json:"url"`
@@ -296,9 +404,18 @@ func TestWebhookDispatcherFormatsSlack(t *testing.T) {
 	if body.Text != "CLIProxyAPI OAuth refresh failed" {
 		t.Fatalf("slack text = %q, want card title", body.Text)
 	}
+	messageFound := false
+	for _, block := range body.Blocks {
+		if strings.Contains(block.Text.Text, "refresh &lt;@U123&gt; &amp; failed") {
+			messageFound = true
+			break
+		}
+	}
+	if !messageFound {
+		t.Fatalf("escaped Slack message not found: %s", string(got))
+	}
 	assertTextContains(t, string(got), []string{
 		"auth.refresh_failed",
-		"refresh failed",
 		"https://proxy.example.test",
 		"https://proxy.example.test/management.html#/quota",
 	})

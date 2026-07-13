@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/notifications"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -194,11 +195,58 @@ func (h *Handler) APICall(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return
 	}
+	h.publishAPICallAuthFailure(auth, resp.StatusCode, string(respBody))
 
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
 		Body:       string(respBody),
+	})
+}
+
+func (h *Handler) publishAPICallAuthFailure(auth *coreauth.Auth, statusCode int, body string) {
+	if auth == nil {
+		return
+	}
+	if statusCode != http.StatusUnauthorized && statusCode != http.StatusTooManyRequests {
+		return
+	}
+	message := strings.TrimSpace(body)
+	if message == "" {
+		message = http.StatusText(statusCode)
+	}
+	code := "upstream_error"
+	retryable := false
+	switch statusCode {
+	case http.StatusUnauthorized:
+		code = "unauthorized"
+	case http.StatusTooManyRequests:
+		code = "quota"
+		retryable = true
+	}
+
+	auth.EnsureIndex()
+	accountType, account := auth.AccountInfo()
+	accountType = strings.TrimSpace(accountType)
+	if accountType != "oauth" {
+		account = ""
+	}
+	notifications.PublishEvent(notifications.Event{
+		Type:        notifications.EventAuthManagementRequestFailed,
+		Severity:    notifications.SeverityError,
+		Provider:    strings.TrimSpace(auth.Provider),
+		AuthID:      strings.TrimSpace(auth.ID),
+		AuthIndex:   strings.TrimSpace(auth.Index),
+		AccountType: accountType,
+		Account:     strings.TrimSpace(account),
+		StatusCode:  statusCode,
+		Body:        message,
+		Message:     message,
+		Code:        code,
+		Retryable:   retryable,
+		Details: map[string]any{
+			"source": "management.api-call",
+		},
 	})
 }
 

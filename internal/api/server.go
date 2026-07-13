@@ -314,10 +314,6 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	engine.Use(corsMiddleware())
-	engine.Use(func(c *gin.Context) {
-		notifications.ObserveHTTPRequest(c.Request)
-		c.Next()
-	})
 	wd, err := os.Getwd()
 	if err != nil {
 		wd = configFilePath
@@ -1826,7 +1822,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if oldCfg == nil || oldCfg.RedisUsageQueueRetentionSeconds != cfg.RedisUsageQueueRetentionSeconds {
 		redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	}
-	notifications.ConfigureWebhooks(cfg.Notifications.Webhooks)
+	notifications.Configure(cfg.Notifications)
 
 	if s.requestLogger != nil && (oldCfg == nil || oldCfg.ErrorLogsMaxFiles != cfg.ErrorLogsMaxFiles) {
 		if setter, ok := s.requestLogger.(interface{ SetErrorLogsMaxFiles(int) }); ok {
