@@ -1289,32 +1289,49 @@ func normalizeXAIToolChoiceForTools(body []byte) []byte {
 	return body
 }
 
-// normalizeXAINamespaceToolChoice qualifies a forced namespaced function choice
-// using the same name sent in the flattened tools list. xAI does not accept the
-// Responses namespace field on tool_choice.
+// normalizeXAINamespaceToolChoice qualifies namespaced function choices using
+// the same names sent in the flattened tools list. xAI does not accept the
+// Responses namespace field on tool choices.
 func normalizeXAINamespaceToolChoice(body []byte) []byte {
 	if !gjson.ValidBytes(body) {
 		return body
 	}
-	toolChoice := gjson.GetBytes(body, "tool_choice")
-	if !toolChoice.IsObject() || toolChoice.Get("type").String() != xaiFunctionToolType {
-		return body
+	original := body
+	normalizeAtPath := func(path string) bool {
+		toolChoice := gjson.GetBytes(body, path)
+		if !toolChoice.IsObject() || toolChoice.Get("type").String() != xaiFunctionToolType {
+			return true
+		}
+		namespaceName := strings.TrimSpace(toolChoice.Get("namespace").String())
+		toolName := strings.TrimSpace(toolChoice.Get("name").String())
+		qualifiedName := qualifyXAINamespaceToolName(namespaceName, toolName)
+		if namespaceName == "" || qualifiedName == "" {
+			return true
+		}
+		updated, errSet := sjson.SetBytes(body, path+".name", qualifiedName)
+		if errSet != nil {
+			return false
+		}
+		updated, errDelete := sjson.DeleteBytes(updated, path+".namespace")
+		if errDelete != nil {
+			return false
+		}
+		body = updated
+		return true
 	}
-	namespaceName := strings.TrimSpace(toolChoice.Get("namespace").String())
-	toolName := strings.TrimSpace(toolChoice.Get("name").String())
-	qualifiedName := qualifyXAINamespaceToolName(namespaceName, toolName)
-	if namespaceName == "" || qualifiedName == "" {
-		return body
+
+	if !normalizeAtPath("tool_choice") {
+		return original
 	}
-	updated, errSet := sjson.SetBytes(body, "tool_choice.name", qualifiedName)
-	if errSet != nil {
-		return body
+	tools := gjson.GetBytes(body, "tool_choice.tools")
+	if tools.IsArray() {
+		for index := range tools.Array() {
+			if !normalizeAtPath(fmt.Sprintf("tool_choice.tools.%d", index)) {
+				return original
+			}
+		}
 	}
-	updated, errDelete := sjson.DeleteBytes(updated, "tool_choice.namespace")
-	if errDelete != nil {
-		return body
-	}
-	return updated
+	return body
 }
 
 func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bool) {

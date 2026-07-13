@@ -73,7 +73,7 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 
 	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "grok-4.3",
-		Payload: []byte(`{"model":"grok-4.3","input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"test"}],"content":null,"encrypted_content":null},{"type":"reasoning","summary":[{"type":"summary_text","text":"second"}]},{"role":"user","content":"hello"}],"include":["reasoning.encrypted_content"],"reasoning":{"effort":"high"},"tools":[{"type":"tool_search"},{"type":"image_generation"},{"type":"custom","name":"apply_patch"},{"type":"custom","name":"custom_lookup"},{"type":"function","name":"lookup"},{"type":"web_search","external_web_access":true,"search_content_types":["text","image"]},{"type":"namespace","name":"codex_app","description":"Tools in the codex_app namespace.","tools":[{"type":"function","name":"automation_update"},{"type":"custom","name":"namespace_custom"},{"type":"tool_search"}]}]}`),
+		Payload: []byte(`{"model":"grok-4.3","input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"test"}],"content":null,"encrypted_content":null},{"type":"reasoning","summary":[{"type":"summary_text","text":"second"}]},{"role":"user","content":"hello"}],"include":["reasoning.encrypted_content"],"reasoning":{"effort":"high"},"tools":[{"type":"tool_search"},{"type":"image_generation"},{"type":"custom","name":"apply_patch"},{"type":"custom","name":"custom_lookup"},{"type":"function","name":"lookup"},{"type":"web_search","external_web_access":true,"search_content_types":["text","image"]},{"type":"namespace","name":"codex_app","description":"Tools in the codex_app namespace.","tools":[{"type":"function","name":"automation_update"},{"type":"custom","name":"namespace_custom"},{"type":"tool_search"}]}],"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"automation_update","namespace":"codex_app"},{"type":"function","name":"lookup"},{"type":"web_search"}]}}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatOpenAIResponse,
 		Stream:       false,
@@ -167,6 +167,18 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	}
 	if !foundNamespaceCustom {
 		t.Fatalf("namespace custom tool was not moved to top-level tools; body=%s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "tool_choice.tools.0.name").String(); got != "codex_app__automation_update" {
+		t.Fatalf("tool_choice.tools.0.name = %q, want codex_app__automation_update; body=%s", got, string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "tool_choice.tools.0.namespace").Exists() {
+		t.Fatalf("tool_choice.tools.0.namespace should be removed for xAI upstream: %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "tool_choice.tools.1.name").String(); got != "lookup" {
+		t.Fatalf("tool_choice.tools.1.name = %q, want lookup; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "tool_choice.tools.2.type").String(); got != "web_search" {
+		t.Fatalf("tool_choice.tools.2.type = %q, want web_search; body=%s", got, string(gotBody))
 	}
 	foundEncryptedReasoningInclude := false
 	for _, include := range gjson.GetBytes(gotBody, "include").Array() {
@@ -1348,6 +1360,40 @@ func TestNormalizeXAINamespaceToolChoice(t *testing.T) {
 	}
 	if gjson.GetBytes(out, "tool_choice.namespace").Exists() {
 		t.Fatalf("tool_choice.namespace should be removed for xAI upstream: %s", string(out))
+	}
+}
+
+func TestNormalizeXAINamespaceToolChoiceAllowedTools(t *testing.T) {
+	body := []byte(`{
+		"tool_choice":{
+			"type":"allowed_tools",
+			"tools":[
+				{"type":"function","name":"search","namespace":"mcp__exa"},
+				{"type":"function","name":"collaboration__send_message","namespace":"collaboration"},
+				{"type":"function","name":"lookup"},
+				{"type":"web_search","namespace":"ignored"}
+			]
+		}
+	}`)
+	out := normalizeXAINamespaceToolChoice(body)
+
+	if got := gjson.GetBytes(out, "tool_choice.tools.0.name").String(); got != "mcp__exa__search" {
+		t.Fatalf("tool_choice.tools.0.name = %q, want mcp__exa__search; body=%s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tool_choice.tools.0.namespace").Exists() {
+		t.Fatalf("tool_choice.tools.0.namespace should be removed: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tool_choice.tools.1.name").String(); got != "collaboration__send_message" {
+		t.Fatalf("tool_choice.tools.1.name = %q, want collaboration__send_message; body=%s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tool_choice.tools.1.namespace").Exists() {
+		t.Fatalf("tool_choice.tools.1.namespace should be removed: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tool_choice.tools.2.name").String(); got != "lookup" {
+		t.Fatalf("tool_choice.tools.2.name = %q, want lookup; body=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tool_choice.tools.3.namespace").String(); got != "ignored" {
+		t.Fatalf("non-function namespace = %q, want ignored; body=%s", got, string(out))
 	}
 }
 
