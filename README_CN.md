@@ -101,6 +101,11 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
+### 运维提示（Homebrew 与 Docker）
+
+- **Homebrew 配置路径：** 若希望服务读取 `~/.cli-proxy-api/config.yaml`，请先创建该目录，把现有 `$(brew --prefix)/etc/cliproxyapi.conf` **复制**到 `~/.cli-proxy-api/config.yaml`，再用软链让 Homebrew 路径**指向**家目录配置（`ln -sf ~/.cli-proxy-api/config.yaml "$(brew --prefix)/etc/cliproxyapi.conf"`）。软链目标不存在时服务会立刻退出。`brew services start cliproxyapi` 前建议 `test -f ~/.cli-proxy-api/config.yaml`。
+- **Docker 升级后保留插件：** 已安装插件在 `plugins.dir`（默认 `plugins/`）下。`docker-compose.yml` 已将 `./plugins` 挂载到 `/CLIProxyAPI/plugins`，因此 **pull 之后重建/升级容器** 不会清空插件。未挂载 volume 时，重建容器会丢失插件，需要重新安装。
+
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)
