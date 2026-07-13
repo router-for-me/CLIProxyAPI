@@ -38,9 +38,10 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			RequestedAt:     time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
 			Latency:         1500 * time.Millisecond,
 			Detail: coreusage.Detail{
-				InputTokens:  10,
-				OutputTokens: 20,
-				TotalTokens:  30,
+				InputTokens:    10,
+				OutputTokens:   20,
+				CacheInputMode: coreusage.CacheInputModeIncluded,
+				TotalTokens:    30,
 			},
 			ResponseHeaders: responseHeaders.Clone(),
 		})
@@ -57,6 +58,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireStringField(t, payload, "request_id", "ctx-request-id")
 		requireStringField(t, payload, "reasoning_effort", "medium")
 		requireStringField(t, payload, "service_tier", "priority")
+		requireNestedStringField(t, payload, "tokens", "cache_input_mode", string(coreusage.CacheInputModeIncluded))
 		requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
 		requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
 		requireBoolField(t, payload, "failed", false)
@@ -283,6 +285,20 @@ func requireStringField(t *testing.T, payload map[string]json.RawMessage, key, w
 	if got != want {
 		t.Fatalf("%s = %q, want %q", key, got, want)
 	}
+}
+
+func requireNestedStringField(t *testing.T, payload map[string]json.RawMessage, parent, key, want string) {
+	t.Helper()
+
+	raw, ok := payload[parent]
+	if !ok {
+		t.Fatalf("payload missing %q", parent)
+	}
+	var nested map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &nested); err != nil {
+		t.Fatalf("unmarshal %q: %v", parent, err)
+	}
+	requireStringField(t, nested, key, want)
 }
 
 func requireMissingField(t *testing.T, payload map[string]json.RawMessage, key string) {
