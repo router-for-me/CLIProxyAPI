@@ -49,6 +49,7 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 	}
 
 	result := make([]map[string]any, 0, len(models))
+	templateBackedIndexes := make(map[int]struct{})
 	for _, model := range models {
 		id := strings.TrimSpace(stringModelValue(model, "id"))
 		if id == "" {
@@ -59,6 +60,7 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 		if template, ok := templates[metadataID]; ok {
 			entry := cloneCodexClientModelMap(template)
 			entry["slug"] = id
+			templateBackedIndexes[len(result)] = struct{}{}
 			applyCodexClientDisplayName(entry, model)
 			sanitizeCodexClientReasoningMetadata(entry)
 			applyCodexClientVisibilityOverride(entry, id)
@@ -73,7 +75,7 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 		result = append(result, entry)
 	}
 
-	applyCodexClientNonTemplatePriorities(result, templates)
+	applyCodexClientNonTemplatePriorities(result, templates, templateBackedIndexes)
 
 	sort.SliceStable(result, func(i, j int) bool {
 		return codexClientModelPriority(result[i]) < codexClientModelPriority(result[j])
@@ -93,7 +95,7 @@ func maxCodexClientTemplatePriority(templates map[string]map[string]any) int {
 	return maxPriority
 }
 
-func applyCodexClientNonTemplatePriorities(result []map[string]any, templates map[string]map[string]any) {
+func applyCodexClientNonTemplatePriorities(result []map[string]any, templates map[string]map[string]any, templateBackedIndexes map[int]struct{}) {
 	if len(result) == 0 {
 		return
 	}
@@ -107,10 +109,10 @@ func applyCodexClientNonTemplatePriorities(result []map[string]any, templates ma
 
 	pending := make([]nonTemplateEntry, 0)
 	for index, entry := range result {
-		slug := stringModelValue(entry, "slug")
-		if _, ok := templates[slug]; ok {
+		if _, ok := templateBackedIndexes[index]; ok {
 			continue
 		}
+		slug := stringModelValue(entry, "slug")
 		displayName := stringModelValue(entry, "display_name")
 		if displayName == "" {
 			displayName = slug
@@ -191,13 +193,13 @@ func applyCodexClientDisplayName(entry map[string]any, model map[string]any) {
 
 func applyCodexClientModelMetadata(entry map[string]any, id, metadataID string, model map[string]any) {
 	clientInfo := registry.LookupModelInfo(id)
-	capabilityInfo := clientInfo
+	metadataInfo := clientInfo
 	if clientInfo != nil && strings.TrimSpace(clientInfo.MetadataModelID) != "" {
 		if staticInfo := registry.LookupStaticModelInfo(metadataID); staticInfo != nil {
-			capabilityInfo = staticInfo
+			metadataInfo = staticInfo
 		} else if metadataID != id {
-			if metadataInfo := registry.LookupModelInfo(metadataID); metadataInfo != nil {
-				capabilityInfo = metadataInfo
+			if resolvedInfo := registry.LookupModelInfo(metadataID); resolvedInfo != nil {
+				metadataInfo = resolvedInfo
 			}
 		}
 	}
@@ -215,10 +217,34 @@ func applyCodexClientModelMetadata(entry map[string]any, id, metadataID string, 
 		}
 	}
 
-	if capabilityInfo != nil {
-		if capabilityInfo.ContextLength > 0 {
-			contextWindow = capabilityInfo.ContextLength
+	if contextWindow <= 0 && clientInfo != nil && clientInfo.ContextLength > 0 {
+		contextWindow = clientInfo.ContextLength
+	}
+	if contextWindow <= 0 && metadataInfo != nil && metadataInfo.ContextLength > 0 {
+		contextWindow = metadataInfo.ContextLength
+	}
+
+	// Canonical metadata fills missing capabilities; route-specific configuration remains authoritative.
+	capabilityInfo := metadataInfo
+	if clientInfo != nil {
+		if capabilityInfo == nil {
+			capabilityInfo = clientInfo
+		} else {
+			mergedInfo := *capabilityInfo
+			if clientInfo.Type == registry.OpenAIImageModelType {
+				mergedInfo.Type = clientInfo.Type
+			}
+			if len(clientInfo.SupportedInputModalities) > 0 {
+				mergedInfo.SupportedInputModalities = clientInfo.SupportedInputModalities
+			}
+			if clientInfo.Thinking != nil {
+				mergedInfo.Thinking = clientInfo.Thinking
+			}
+			capabilityInfo = &mergedInfo
 		}
+	}
+
+	if capabilityInfo != nil {
 		if capabilityInfo.Type == registry.OpenAIImageModelType {
 			entry["visibility"] = "hide"
 			delete(entry, "input_modalities")

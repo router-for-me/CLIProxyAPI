@@ -283,6 +283,9 @@ func TestCodexClientModelsResponse_UsesConfiguredMetadataModelID(t *testing.T) {
 		if got := stringModelValue(entry, "comp_hash"); got != "3000" {
 			t.Errorf("%s comp_hash = %q, want 3000", route, got)
 		}
+		if got := intModelValue(entry, "priority"); got != 1 {
+			t.Errorf("%s priority = %d, want 1", route, got)
+		}
 	}
 }
 
@@ -297,6 +300,12 @@ func TestCodexClientModelsResponse_UsesMetadataModelIDForStaticCapabilities(t *t
 		OwnedBy:         "anthropic",
 		Type:            "openai-compatibility",
 		DisplayName:     "Claude Opus Route",
+		SupportedInputModalities: []string{
+			"text",
+		},
+		Thinking: &registry.ThinkingSupport{
+			Levels: []string{"low", "high"},
+		},
 	}})
 	t.Cleanup(func() {
 		modelRegistry.UnregisterClient(clientID)
@@ -318,6 +327,26 @@ func TestCodexClientModelsResponse_UsesMetadataModelIDForStaticCapabilities(t *t
 	}
 	if got := intModelValue(models[0], "max_context_window"); got != 1000000 {
 		t.Fatalf("max_context_window = %d, want 1000000", got)
+	}
+	modalities, ok := models[0]["input_modalities"].([]any)
+	if !ok || len(modalities) != 1 || modalities[0] != "text" {
+		t.Fatalf("input_modalities = %#v, want [text]", models[0]["input_modalities"])
+	}
+	if _, exists := models[0]["supports_image_detail_original"]; exists {
+		t.Fatalf("text-only model should not expose supports_image_detail_original: %#v", models[0]["supports_image_detail_original"])
+	}
+	levels, ok := models[0]["supported_reasoning_levels"].([]any)
+	if !ok || len(levels) != 2 {
+		t.Fatalf("supported_reasoning_levels = %#v, want low and high", models[0]["supported_reasoning_levels"])
+	}
+	for index, want := range []string{"low", "high"} {
+		level, ok := levels[index].(map[string]any)
+		if !ok {
+			t.Fatalf("supported_reasoning_levels[%d] = %T, want map[string]any", index, levels[index])
+		}
+		if got := stringModelValue(level, "effort"); got != want {
+			t.Fatalf("supported_reasoning_levels[%d] = %q, want %s", index, got, want)
+		}
 	}
 }
 
