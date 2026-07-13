@@ -3755,7 +3755,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								suspendReason = "unauthorized"
 								shouldSuspendModel = true
 							}
-						case 402, 403:
+						case 402:
+							cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+							action := paymentRequiredAction(cfg)
+							if applyPaymentRequiredModelFailure(auth, state, now, result.Error, disableCooling, action) {
+								suspendReason = "payment_required"
+								shouldSuspendModel = true
+							}
+						case 403:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
@@ -3806,13 +3813,25 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 					}
 
-					auth.Status = StatusError
+					// Do not clobber an intentional permanent disable from 402 handling.
+					if !auth.Disabled && auth.Status != StatusDisabled {
+						auth.Status = StatusError
+					}
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
 				}
 			} else {
 				disableCooling := m.cooldownDisabledForAuth(auth)
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				if statusCodeFromResult(result.Error) == 402 {
+					cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+					if paymentRequiredAction(cfg) == "disable" {
+						disableAuthForPaymentRequired(auth, now, result.Error)
+					} else {
+						applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+					}
+				} else {
+					applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				}
 			}
 		}
 
@@ -4311,7 +4330,16 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		} else {
 			auth.NextRetryAfter = now.Add(30 * time.Minute)
 		}
-	case 402, 403:
+	case 402:
+		// applyAuthFailureState does not have Manager config; callers with config
+		// should prefer applyPaymentRequiredModelFailure. Keep cooldown default here.
+		auth.StatusMessage = "payment_required"
+		if disableCooling {
+			auth.NextRetryAfter = time.Time{}
+		} else {
+			auth.NextRetryAfter = now.Add(30 * time.Minute)
+		}
+	case 403:
 		auth.StatusMessage = "payment_required"
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
