@@ -103,8 +103,16 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 ### 运维提示（Homebrew 与 Docker）
 
-- **Homebrew 配置路径：** 若希望服务读取 `~/.cli-proxy-api/config.yaml`，请先创建该目录，把现有 `$(brew --prefix)/etc/cliproxyapi.conf` **复制**到 `~/.cli-proxy-api/config.yaml`，再用软链让 Homebrew 路径**指向**家目录配置（`ln -sf ~/.cli-proxy-api/config.yaml "$(brew --prefix)/etc/cliproxyapi.conf"`）。软链目标不存在时服务会立刻退出。`brew services start cliproxyapi` 前建议 `test -f ~/.cli-proxy-api/config.yaml`。
-- **Docker 升级后保留插件：** 已安装插件在 `plugins.dir`（默认 `plugins/`）下。`docker-compose.yml` 已将 `./plugins` 挂载到 `/CLIProxyAPI/plugins`，因此**之后**重建容器会保留插件。**第一次加 volume 时**，请在重建前从**正在运行的旧容器**拷出插件：`mkdir -p ./plugins && docker cp cli-proxy-api:/CLIProxyAPI/plugins/. ./plugins/`。新创建的空 host bind 目录会**遮挡**容器内已有插件文件，**不会**自动拷到宿主机。未挂载 volume 时，重建容器会丢失插件，需要重新安装。
+- **Homebrew 配置路径：** 若希望服务读取 `~/.cli-proxy-api/config.yaml`，请运行：
+
+  ```bash
+  mkdir -p ~/.cli-proxy-api
+  cp "$(brew --prefix)/etc/cliproxyapi.conf" ~/.cli-proxy-api/config.yaml
+  ln -sf ~/.cli-proxy-api/config.yaml "$(brew --prefix)/etc/cliproxyapi.conf"
+  ```
+
+  软链目标不存在时服务会立刻退出。运行 `brew services start cliproxyapi` 前，请先用 `test -f ~/.cli-proxy-api/config.yaml` 检查目标文件。
+- **Docker 升级后保留插件：** 已安装插件在 `plugins.dir`（默认 `plugins`）下。`docker-compose.yml` 已将 `./plugins` 挂载到 `/CLIProxyAPI/plugins`，因此**之后**重建容器会保留插件。**第一次加 volume 时**，请在重建前从**正在运行的旧容器**拷出插件：`mkdir -p ./plugins && docker cp cli-proxy-api:/CLIProxyAPI/plugins/. ./plugins/`。新创建的空 host bind 目录会**遮挡**容器内已有插件文件，**不会**自动拷到宿主机。未挂载 volume 时，重建容器会丢失插件，需要重新安装。
 
 ## 管理 API 文档
 
