@@ -143,6 +143,73 @@ func TestCodexClientModelsResponse_AppliesDisplayNameToTemplateModel(t *testing.
 	}
 }
 
+func TestCodexClientModelsResponse_DisablesSearchToolForSynthesizedModels(t *testing.T) {
+	resp := CodexClientModelsResponse([]map[string]any{
+		{"id": "custom-openai-compatible-model"},
+		{"id": "gpt-5.5"},
+	})
+	models, ok := resp["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
+	}
+
+	bySlug := make(map[string]map[string]any, len(models))
+	for _, model := range models {
+		bySlug[stringModelValue(model, "slug")] = model
+	}
+
+	custom := bySlug["custom-openai-compatible-model"]
+	if custom == nil {
+		t.Fatal("expected synthesized custom model entry")
+	}
+	if got, ok := custom["supports_search_tool"].(bool); !ok || got {
+		t.Fatalf("custom supports_search_tool = %#v, want false", custom["supports_search_tool"])
+	}
+
+	official := bySlug["gpt-5.5"]
+	if official == nil {
+		t.Fatal("expected official template model entry")
+	}
+	if got, ok := official["supports_search_tool"].(bool); !ok || !got {
+		t.Fatalf("official supports_search_tool = %#v, want true", official["supports_search_tool"])
+	}
+}
+
+func TestCodexClientModelsResponse_RequiresTemplateAndCodexProvidersForSearchTool(t *testing.T) {
+	providers := map[string][]string{
+		"new-codex-model": {"codex"},
+		"gpt-5.5":         {"openai-compatible-deepseek"},
+		"gpt-5.4":         {"codex", "xai"},
+		"gpt-5.6-sol":     {"codex"},
+	}
+	resp := codexClientModelsResponse([]map[string]any{
+		{"id": "new-codex-model"},
+		{"id": "gpt-5.5"},
+		{"id": "gpt-5.4"},
+		{"id": "gpt-5.6-sol"},
+	}, func(id string) []string {
+		return providers[id]
+	})
+	models, ok := resp["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
+	}
+
+	bySlug := make(map[string]map[string]any, len(models))
+	for _, model := range models {
+		bySlug[stringModelValue(model, "slug")] = model
+	}
+
+	if got, ok := bySlug["gpt-5.6-sol"]["supports_search_tool"].(bool); !ok || !got {
+		t.Errorf("gpt-5.6-sol supports_search_tool = %#v, want true", bySlug["gpt-5.6-sol"]["supports_search_tool"])
+	}
+	for _, slug := range []string{"new-codex-model", "gpt-5.5", "gpt-5.4"} {
+		if got, ok := bySlug[slug]["supports_search_tool"].(bool); !ok || got {
+			t.Errorf("%s supports_search_tool = %#v, want false", slug, bySlug[slug]["supports_search_tool"])
+		}
+	}
+}
+
 func TestCodexClientModelsResponse_PreservesUltraReasoningEffort(t *testing.T) {
 	resp := CodexClientModelsResponse([]map[string]any{{"id": "gpt-5.6-sol"}})
 	models, ok := resp["models"].([]map[string]any)
@@ -173,4 +240,56 @@ func TestCodexClientModelsResponse_PreservesUltraReasoningEffort(t *testing.T) {
 	}
 
 	t.Fatalf("supported_reasoning_levels = %#v, want ultra", levels)
+}
+
+func TestLoadCodexClientModelTemplatesRefreshesOnRevision(t *testing.T) {
+	codexClientModelTemplatesMu.Lock()
+	previousLoaded := codexClientModelTemplatesLoaded
+	previousRevision := codexClientModelTemplatesRevision
+	previousTemplates := codexClientModelTemplates
+	previousDefault := codexClientDefaultTemplate
+	previousErr := codexClientModelTemplatesErr
+	codexClientModelTemplatesLoaded = false
+	codexClientModelTemplatesMu.Unlock()
+	t.Cleanup(func() {
+		codexClientModelTemplatesMu.Lock()
+		codexClientModelTemplatesLoaded = previousLoaded
+		codexClientModelTemplatesRevision = previousRevision
+		codexClientModelTemplates = previousTemplates
+		codexClientDefaultTemplate = previousDefault
+		codexClientModelTemplatesErr = previousErr
+		codexClientModelTemplatesMu.Unlock()
+	})
+
+	first := []byte(`{"models":[{"slug":"gpt-5.5","display_name":"First"}]}`)
+	templates, defaultTemplate, err := loadCodexClientModelTemplatesSnapshot(first, 100)
+	if err != nil {
+		t.Fatalf("load first snapshot: %v", err)
+	}
+	if got := stringModelValue(templates["gpt-5.5"], "display_name"); got != "First" {
+		t.Fatalf("first display_name = %q, want First", got)
+	}
+	if got := stringModelValue(defaultTemplate, "display_name"); got != "First" {
+		t.Fatalf("first default display_name = %q, want First", got)
+	}
+
+	second := []byte(`{"models":[{"slug":"gpt-5.5","display_name":"Second"}]}`)
+	templates, defaultTemplate, err = loadCodexClientModelTemplatesSnapshot(second, 101)
+	if err != nil {
+		t.Fatalf("load second snapshot: %v", err)
+	}
+	if got := stringModelValue(templates["gpt-5.5"], "display_name"); got != "Second" {
+		t.Fatalf("second display_name = %q, want Second", got)
+	}
+	if got := stringModelValue(defaultTemplate, "display_name"); got != "Second" {
+		t.Fatalf("second default display_name = %q, want Second", got)
+	}
+
+	templates, _, err = loadCodexClientModelTemplatesSnapshot(first, 101)
+	if err != nil {
+		t.Fatalf("reload cached revision: %v", err)
+	}
+	if got := stringModelValue(templates["gpt-5.5"], "display_name"); got != "Second" {
+		t.Fatalf("cached display_name = %q, want Second", got)
+	}
 }
