@@ -54,9 +54,11 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 		if id == "" {
 			continue
 		}
+		metadataID := codexClientMetadataModelID(id)
 
-		if template, ok := templates[id]; ok {
+		if template, ok := templates[metadataID]; ok {
 			entry := cloneCodexClientModelMap(template)
+			entry["slug"] = id
 			applyCodexClientDisplayName(entry, model)
 			sanitizeCodexClientReasoningMetadata(entry)
 			applyCodexClientVisibilityOverride(entry, id)
@@ -65,7 +67,7 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 		}
 
 		entry := cloneCodexClientModelMap(defaultTemplate)
-		applyCodexClientModelMetadata(entry, id, model)
+		applyCodexClientModelMetadata(entry, id, metadataID, model)
 		sanitizeCodexClientReasoningMetadata(entry)
 		applyCodexClientVisibilityOverride(entry, id)
 		result = append(result, entry)
@@ -172,37 +174,59 @@ func loadCodexClientModelTemplatesSnapshot(raw []byte, revision uint64) (map[str
 	return codexClientModelTemplates, codexClientDefaultTemplate, codexClientModelTemplatesErr
 }
 
+func codexClientMetadataModelID(id string) string {
+	if info := registry.LookupModelInfo(id); info != nil {
+		if metadataID := strings.TrimSpace(info.MetadataModelID); metadataID != "" {
+			return metadataID
+		}
+	}
+	return id
+}
+
 func applyCodexClientDisplayName(entry map[string]any, model map[string]any) {
 	if displayName := stringModelValue(model, "display_name"); displayName != "" {
 		entry["display_name"] = displayName
 	}
 }
 
-func applyCodexClientModelMetadata(entry map[string]any, id string, model map[string]any) {
-	info := registry.LookupModelInfo(id)
+func applyCodexClientModelMetadata(entry map[string]any, id, metadataID string, model map[string]any) {
+	clientInfo := registry.LookupModelInfo(id)
+	capabilityInfo := clientInfo
+	if clientInfo != nil && strings.TrimSpace(clientInfo.MetadataModelID) != "" {
+		if staticInfo := registry.LookupStaticModelInfo(metadataID); staticInfo != nil {
+			capabilityInfo = staticInfo
+		} else if metadataID != id {
+			if metadataInfo := registry.LookupModelInfo(metadataID); metadataInfo != nil {
+				capabilityInfo = metadataInfo
+			}
+		}
+	}
 
 	displayName := stringModelValue(model, "display_name")
 	description := stringModelValue(model, "description")
 	contextWindow := intModelValue(model, "context_length")
 
-	if info != nil {
-		if info.DisplayName != "" {
-			displayName = info.DisplayName
+	if clientInfo != nil {
+		if clientInfo.DisplayName != "" {
+			displayName = clientInfo.DisplayName
 		}
-		if info.Description != "" {
-			description = info.Description
+		if clientInfo.Description != "" {
+			description = clientInfo.Description
 		}
-		if info.ContextLength > 0 {
-			contextWindow = info.ContextLength
+	}
+
+	if capabilityInfo != nil {
+		if capabilityInfo.ContextLength > 0 {
+			contextWindow = capabilityInfo.ContextLength
 		}
-		if info.Type == registry.OpenAIImageModelType {
+		if capabilityInfo.Type == registry.OpenAIImageModelType {
 			entry["visibility"] = "hide"
 			delete(entry, "input_modalities")
 			delete(entry, "supports_image_detail_original")
 		} else {
-			applyCodexClientInputModalitiesMetadata(entry, info.SupportedInputModalities)
+			applyCodexClientInputModalitiesMetadata(entry, capabilityInfo.SupportedInputModalities)
 		}
-		applyCodexClientThinkingMetadata(entry, info.Thinking)
+		applyCodexClientThinkingMetadata(entry, capabilityInfo.Thinking)
 	}
 
 	if displayName == "" {

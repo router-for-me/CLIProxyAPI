@@ -95,3 +95,40 @@ func TestBuildConfigModelsDisplayNameFallback(t *testing.T) {
 		t.Fatalf("DisplayName = %q, want upstream model name", model.DisplayName)
 	}
 }
+
+func TestBuildCodexConfigModelsPreservesMetadataModelID(t *testing.T) {
+	models := buildCodexConfigModels(&config.CodexKey{Models: []config.CodexModel{{
+		Name: "gpt-5.6-sol", Alias: "sol-alt",
+	}}})
+
+	var configured *ModelInfo
+	for _, model := range models {
+		if model != nil && model.ID == "sol-alt" {
+			configured = model
+			break
+		}
+	}
+	if configured == nil {
+		t.Fatal("configured model sol-alt was not built")
+	}
+	if configured.MetadataModelID != "gpt-5.6-sol" {
+		t.Fatalf("MetadataModelID = %q, want gpt-5.6-sol", configured.MetadataModelID)
+	}
+}
+
+func TestApplyModelPrefixesPreservesMetadataModelID(t *testing.T) {
+	models := applyModelPrefixes([]*ModelInfo{{
+		ID:              "sol-alt",
+		MetadataModelID: "gpt-5.6-sol",
+	}}, "krc", true)
+
+	if len(models) != 1 {
+		t.Fatalf("models length = %d, want 1", len(models))
+	}
+	if models[0].ID != "krc/sol-alt" {
+		t.Fatalf("ID = %q, want krc/sol-alt", models[0].ID)
+	}
+	if models[0].MetadataModelID != "gpt-5.6-sol" {
+		t.Fatalf("MetadataModelID = %q, want gpt-5.6-sol", models[0].MetadataModelID)
+	}
+}

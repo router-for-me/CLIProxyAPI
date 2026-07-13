@@ -2492,13 +2492,14 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 		displayName = alias
 	}
 	return &ModelInfo{
-		ID:          alias,
-		Object:      "model",
-		Created:     created,
-		OwnedBy:     ownedBy,
-		Type:        modelType,
-		DisplayName: displayName,
-		UserDefined: userDefined,
+		ID:              alias,
+		MetadataModelID: name,
+		Object:          "model",
+		Created:         created,
+		OwnedBy:         ownedBy,
+		Type:            modelType,
+		DisplayName:     displayName,
+		UserDefined:     userDefined,
 	}
 }
 

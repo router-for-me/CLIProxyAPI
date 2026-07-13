@@ -27,6 +27,9 @@ const (
 type ModelInfo struct {
 	// ID is the unique identifier for the model
 	ID string `json:"id"`
+	// MetadataModelID identifies the canonical model used to resolve client metadata.
+	// It is internal and must not be exposed in model-list responses.
+	MetadataModelID string `json:"-"`
 	// Object type for the model (typically "model")
 	Object string `json:"object"`
 	// Created timestamp when the model was created

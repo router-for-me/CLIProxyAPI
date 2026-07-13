@@ -226,3 +226,114 @@ func TestLoadCodexClientModelTemplatesRefreshesOnRevision(t *testing.T) {
 		t.Fatalf("cached display_name = %q, want Second", got)
 	}
 }
+
+func TestCodexClientModelsResponse_UsesConfiguredMetadataModelID(t *testing.T) {
+	routes := []string{
+		"krc-sol",
+		"krc/gpt-5.6-sol",
+		"krc/sol-alt",
+	}
+	registered := make([]*registry.ModelInfo, 0, len(routes))
+	for _, route := range routes {
+		registered = append(registered, &registry.ModelInfo{
+			ID:              route,
+			MetadataModelID: "gpt-5.6-sol",
+			Object:          "model",
+			OwnedBy:         "openai",
+			Type:            "openai",
+			DisplayName:     route,
+		})
+	}
+
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "codex-metadata-model-id-test"
+	modelRegistry.RegisterClient(clientID, "codex", registered)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	openaiModels := modelRegistry.GetAvailableModels("openai")
+	for _, model := range openaiModels {
+		if _, exists := model["metadata_model_id"]; exists {
+			t.Fatalf("ordinary OpenAI model metadata exposed internal metadata_model_id: %#v", model)
+		}
+	}
+
+	resp := CodexClientModelsResponse(openaiModels)
+	models, ok := resp["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
+	}
+
+	entries := make(map[string]map[string]any, len(routes))
+	for _, entry := range models {
+		entries[stringModelValue(entry, "slug")] = entry
+	}
+	for _, route := range routes {
+		entry := entries[route]
+		if entry == nil {
+			t.Fatalf("expected Codex client entry for %q", route)
+		}
+		if got := intModelValue(entry, "context_window"); got != 372000 {
+			t.Errorf("%s context_window = %d, want 372000", route, got)
+		}
+		if got := intModelValue(entry, "max_context_window"); got != 372000 {
+			t.Errorf("%s max_context_window = %d, want 372000", route, got)
+		}
+		if got := stringModelValue(entry, "comp_hash"); got != "3000" {
+			t.Errorf("%s comp_hash = %q, want 3000", route, got)
+		}
+	}
+}
+
+func TestCodexClientModelsResponse_UsesMetadataModelIDForStaticCapabilities(t *testing.T) {
+	const route = "krc/claude-opus"
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "codex-static-metadata-model-id-test"
+	modelRegistry.RegisterClient(clientID, "openai-compatibility", []*registry.ModelInfo{{
+		ID:              route,
+		MetadataModelID: "claude-opus-4-6",
+		Object:          "model",
+		OwnedBy:         "anthropic",
+		Type:            "openai-compatibility",
+		DisplayName:     "Claude Opus Route",
+	}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	resp := CodexClientModelsResponse([]map[string]any{{
+		"id":           route,
+		"display_name": "Claude Opus Route",
+	}})
+	models, ok := resp["models"].([]map[string]any)
+	if !ok || len(models) != 1 {
+		t.Fatalf("models = %#v, want one model", resp["models"])
+	}
+	if got := stringModelValue(models[0], "slug"); got != route {
+		t.Fatalf("slug = %q, want %s", got, route)
+	}
+	if got := intModelValue(models[0], "context_window"); got != 1000000 {
+		t.Fatalf("context_window = %d, want 1000000", got)
+	}
+	if got := intModelValue(models[0], "max_context_window"); got != 1000000 {
+		t.Fatalf("max_context_window = %d, want 1000000", got)
+	}
+}
+
+func TestCodexClientModelsResponse_UsesIDWhenMetadataModelIDIsUnset(t *testing.T) {
+	resp := CodexClientModelsResponse([]map[string]any{{"id": "gpt-5.6-sol"}})
+	models, ok := resp["models"].([]map[string]any)
+	if !ok || len(models) != 1 {
+		t.Fatalf("models = %#v, want one model", resp["models"])
+	}
+	if got := stringModelValue(models[0], "slug"); got != "gpt-5.6-sol" {
+		t.Fatalf("slug = %q, want gpt-5.6-sol", got)
+	}
+	if got := intModelValue(models[0], "context_window"); got != 372000 {
+		t.Fatalf("context_window = %d, want 372000", got)
+	}
+	if got := stringModelValue(models[0], "comp_hash"); got != "3000" {
+		t.Fatalf("comp_hash = %q, want 3000", got)
+	}
+}
