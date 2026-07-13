@@ -637,6 +637,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			}
 
 			for _, payload := range xaiNormalizeReasoningSummaryDataEvents(payload) {
+				payload = restoreXAINamespaceToolCalls(payload, prepared.namespaceTools)
 				eventType := gjson.GetBytes(payload, "type").String()
 				isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "error"
 				warmupCompletedPayload := []byte(nil)
