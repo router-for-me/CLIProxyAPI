@@ -1479,8 +1479,9 @@ func normalizeXAIInputCustomToolCalls(body []byte) []byte {
 	}
 
 	changed := false
-	items := make([]json.RawMessage, 0, len(input.Array()))
-	for _, item := range input.Array() {
+	inputArray := input.Array()
+	items := make([]json.RawMessage, 0, len(inputArray))
+	for _, item := range inputArray {
 		var normalized []byte
 		switch item.Get("type").String() {
 		case "custom_tool_call":
