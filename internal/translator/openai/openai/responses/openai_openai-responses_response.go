@@ -37,15 +37,21 @@ type oaiToResponsesState struct {
 	FuncNames    map[string]string
 	FuncCallIDs  map[string]string
 	FuncOutputIx map[string]int
+	FuncArgsSent map[string]int
 	MsgOutputIx  map[int]int
 	NextOutputIx int
 	// message item state per output index
 	MsgItemAdded    map[int]bool // whether response.output_item.added emitted for message
 	MsgContentAdded map[int]bool // whether response.content_part.added emitted for message
 	MsgItemDone     map[int]bool // whether message done events were emitted
-	// function item done state
-	FuncArgsDone map[string]bool
-	FuncItemDone map[string]bool
+	// function item state
+	FuncItemAdded  map[string]bool
+	FuncItemCustom map[string]bool
+	FuncArgsDone   map[string]bool
+	FuncItemDone   map[string]bool
+	// names of freeform ("custom") tools from the original request; calls to
+	// these are emitted as custom_tool_call items instead of function_call
+	CustomToolNames map[string]struct{}
 	// usage aggregation
 	PromptTokens     int64
 	CachedTokens     int64
@@ -166,6 +172,15 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 			}
 			callID := st.FuncCallIDs[key]
 			name := st.FuncNames[key]
+			if st.FuncItemCustom[key] {
+				item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
+				item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ctc_%s", callID))
+				item, _ = sjson.SetBytes(item, "input", unwrapCustomToolInput(args))
+				item, _ = sjson.SetBytes(item, "call_id", callID)
+				item, _ = sjson.SetBytes(item, "name", name)
+				outputItems = append(outputItems, completedOutputItem{index: st.FuncOutputIx[key], raw: item})
+				continue
+			}
 			item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 			item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", callID))
 			item, _ = sjson.SetBytes(item, "arguments", args)
@@ -206,11 +221,14 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			FuncNames:       make(map[string]string),
 			FuncCallIDs:     make(map[string]string),
 			FuncOutputIx:    make(map[string]int),
+			FuncArgsSent:    make(map[string]int),
 			MsgOutputIx:     make(map[int]int),
 			MsgTextBuf:      make(map[int]*strings.Builder),
 			MsgItemAdded:    make(map[int]bool),
 			MsgContentAdded: make(map[int]bool),
 			MsgItemDone:     make(map[int]bool),
+			FuncItemAdded:   make(map[string]bool),
+			FuncItemCustom:  make(map[string]bool),
 			FuncArgsDone:    make(map[string]bool),
 			FuncItemDone:    make(map[string]bool),
 			Reasonings:      make([]oaiToResponsesStateReasoning, 0),
@@ -281,6 +299,67 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 	}
 	toolStateKey := func(outputIndex, toolIndex int) string { return fmt.Sprintf("%d:%d", outputIndex, toolIndex) }
 	var out [][]byte
+	emitToolItem := func(key string, force bool) {
+		if st.FuncItemAdded[key] {
+			return
+		}
+		callID := st.FuncCallIDs[key]
+		name := st.FuncNames[key]
+		if !force && (callID == "" || name == "") {
+			return
+		}
+		if name == "" {
+			if customToolName, ok := responsesSingleCustomToolName(requestForNamespace); ok {
+				name = customToolName
+				st.FuncNames[key] = customToolName
+			}
+		}
+		if callID == "" {
+			callID = fmt.Sprintf("call_%s_%s", st.ResponseID, strings.ReplaceAll(key, ":", "_"))
+			st.FuncCallIDs[key] = callID
+		}
+
+		outputIndex := st.FuncOutputIx[key]
+		_, isCustomTool := st.CustomToolNames[name]
+		st.FuncItemCustom[key] = isCustomTool
+		if isCustomTool {
+			o := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"in_progress","input":"","call_id":"","name":""}}`)
+			o, _ = sjson.SetBytes(o, "sequence_number", nextSeq())
+			o, _ = sjson.SetBytes(o, "output_index", outputIndex)
+			o, _ = sjson.SetBytes(o, "item.id", fmt.Sprintf("ctc_%s", callID))
+			o, _ = sjson.SetBytes(o, "item.call_id", callID)
+			o, _ = sjson.SetBytes(o, "item.name", name)
+			out = append(out, emitRespEvent("response.output_item.added", o))
+		} else {
+			o := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"in_progress","arguments":"","call_id":"","name":""}}`)
+			o, _ = sjson.SetBytes(o, "sequence_number", nextSeq())
+			o, _ = sjson.SetBytes(o, "output_index", outputIndex)
+			o, _ = sjson.SetBytes(o, "item.id", fmt.Sprintf("fc_%s", callID))
+			o, _ = sjson.SetBytes(o, "item.call_id", callID)
+			o = applyResponsesFunctionCallNamespaceFields(o, requestForNamespace, name, "item")
+			out = append(out, emitRespEvent("response.output_item.added", o))
+		}
+		st.FuncItemAdded[key] = true
+	}
+	emitPendingFunctionArgs := func(key string) {
+		if !st.FuncItemAdded[key] || st.FuncItemCustom[key] {
+			return
+		}
+		argsBuf := st.FuncArgsBuf[key]
+		if argsBuf == nil || argsBuf.Len() <= st.FuncArgsSent[key] {
+			return
+		}
+		args := argsBuf.String()
+		delta := args[st.FuncArgsSent[key]:]
+		callID := st.FuncCallIDs[key]
+		ad := []byte(`{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`)
+		ad, _ = sjson.SetBytes(ad, "sequence_number", nextSeq())
+		ad, _ = sjson.SetBytes(ad, "item_id", fmt.Sprintf("fc_%s", callID))
+		ad, _ = sjson.SetBytes(ad, "output_index", st.FuncOutputIx[key])
+		ad, _ = sjson.SetBytes(ad, "delta", delta)
+		out = append(out, emitRespEvent("response.function_call_arguments.delta", ad))
+		st.FuncArgsSent[key] = len(args)
+	}
 
 	if !st.Started {
 		st.ResponseID = root.Get("id").String()
@@ -294,13 +373,17 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.FuncNames = make(map[string]string)
 		st.FuncCallIDs = make(map[string]string)
 		st.FuncOutputIx = make(map[string]int)
+		st.FuncArgsSent = make(map[string]int)
 		st.MsgOutputIx = make(map[int]int)
 		st.NextOutputIx = 0
 		st.MsgItemAdded = make(map[int]bool)
 		st.MsgContentAdded = make(map[int]bool)
 		st.MsgItemDone = make(map[int]bool)
+		st.FuncItemAdded = make(map[string]bool)
+		st.FuncItemCustom = make(map[string]bool)
 		st.FuncArgsDone = make(map[string]bool)
 		st.FuncItemDone = make(map[string]bool)
+		st.CustomToolNames = responsesCustomToolNames(requestForNamespace)
 		st.PromptTokens = 0
 		st.CachedTokens = 0
 		st.CompletionTokens = 0
@@ -470,53 +553,23 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 					tcs.ForEach(func(_, tc gjson.Result) bool {
 						toolIndex := int(tc.Get("index").Int())
 						key := toolStateKey(idx, toolIndex)
-						newCallID := tc.Get("id").String()
+						if st.FuncArgsBuf[key] == nil {
+							st.FuncArgsBuf[key] = &strings.Builder{}
+							st.FuncOutputIx[key] = allocOutputIndex()
+						}
+						if newCallID := tc.Get("id").String(); newCallID != "" && st.FuncCallIDs[key] == "" {
+							st.FuncCallIDs[key] = newCallID
+						}
 						nameChunk := tc.Get("function.name").String()
-						if nameChunk != "" {
+						if nameChunk != "" && !st.FuncItemAdded[key] {
 							st.FuncNames[key] = nameChunk
 						}
 
-						existingCallID := st.FuncCallIDs[key]
-						effectiveCallID := existingCallID
-						shouldEmitItem := false
-						if existingCallID == "" && newCallID != "" {
-							effectiveCallID = newCallID
-							st.FuncCallIDs[key] = newCallID
-							st.FuncOutputIx[key] = allocOutputIndex()
-							shouldEmitItem = true
-						}
-
-						if shouldEmitItem && effectiveCallID != "" {
-							outputIndex := st.FuncOutputIx[key]
-							o := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"in_progress","arguments":"","call_id":"","name":""}}`)
-							o, _ = sjson.SetBytes(o, "sequence_number", nextSeq())
-							o, _ = sjson.SetBytes(o, "output_index", outputIndex)
-							o, _ = sjson.SetBytes(o, "item.id", fmt.Sprintf("fc_%s", effectiveCallID))
-							o, _ = sjson.SetBytes(o, "item.call_id", effectiveCallID)
-							o = applyResponsesFunctionCallNamespaceFields(o, requestForNamespace, st.FuncNames[key], "item")
-							out = append(out, emitRespEvent("response.output_item.added", o))
-						}
-
-						if st.FuncArgsBuf[key] == nil {
-							st.FuncArgsBuf[key] = &strings.Builder{}
-						}
-
 						if args := tc.Get("function.arguments"); args.Exists() && args.String() != "" {
-							refCallID := st.FuncCallIDs[key]
-							if refCallID == "" {
-								refCallID = newCallID
-							}
-							if refCallID != "" {
-								outputIndex := st.FuncOutputIx[key]
-								ad := []byte(`{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`)
-								ad, _ = sjson.SetBytes(ad, "sequence_number", nextSeq())
-								ad, _ = sjson.SetBytes(ad, "item_id", fmt.Sprintf("fc_%s", refCallID))
-								ad, _ = sjson.SetBytes(ad, "output_index", outputIndex)
-								ad, _ = sjson.SetBytes(ad, "delta", args.String())
-								out = append(out, emitRespEvent("response.function_call_arguments.delta", ad))
-							}
 							st.FuncArgsBuf[key].WriteString(args.String())
 						}
+						emitToolItem(key, false)
+						emitPendingFunctionArgs(key)
 						return true
 					})
 				}
@@ -574,9 +627,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 				}
 
 				// Emit function call done events for any active function calls
-				if len(st.FuncCallIDs) > 0 {
-					keys := make([]string, 0, len(st.FuncCallIDs))
-					for key := range st.FuncCallIDs {
+				if len(st.FuncArgsBuf) > 0 {
+					keys := make([]string, 0, len(st.FuncArgsBuf))
+					for key := range st.FuncArgsBuf {
 						keys = append(keys, key)
 					}
 					sort.Slice(keys, func(i, j int) bool {
@@ -585,6 +638,8 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						return left < right || (left == right && keys[i] < keys[j])
 					})
 					for _, key := range keys {
+						emitToolItem(key, true)
+						emitPendingFunctionArgs(key)
 						callID := st.FuncCallIDs[key]
 						if callID == "" || st.FuncItemDone[key] {
 							continue
@@ -593,6 +648,27 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						args := "{}"
 						if b := st.FuncArgsBuf[key]; b != nil && b.Len() > 0 {
 							args = b.String()
+						}
+						if st.FuncItemCustom[key] {
+							input := unwrapCustomToolInput(args)
+							inputDone := []byte(`{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","output_index":0,"input":""}`)
+							inputDone, _ = sjson.SetBytes(inputDone, "sequence_number", nextSeq())
+							inputDone, _ = sjson.SetBytes(inputDone, "item_id", fmt.Sprintf("ctc_%s", callID))
+							inputDone, _ = sjson.SetBytes(inputDone, "output_index", outputIndex)
+							inputDone, _ = sjson.SetBytes(inputDone, "input", input)
+							out = append(out, emitRespEvent("response.custom_tool_call_input.done", inputDone))
+
+							itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}}`)
+							itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
+							itemDone, _ = sjson.SetBytes(itemDone, "output_index", outputIndex)
+							itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("ctc_%s", callID))
+							itemDone, _ = sjson.SetBytes(itemDone, "item.input", input)
+							itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", callID)
+							itemDone, _ = sjson.SetBytes(itemDone, "item.name", st.FuncNames[key])
+							out = append(out, emitRespEvent("response.output_item.done", itemDone))
+							st.FuncItemDone[key] = true
+							st.FuncArgsDone[key] = true
+							continue
 						}
 						fcDone := []byte(`{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`)
 						fcDone, _ = sjson.SetBytes(fcDone, "sequence_number", nextSeq())
@@ -758,10 +834,25 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 
 				// Function/tool calls
 				if tcs := msg.Get("tool_calls"); tcs.Exists() && tcs.IsArray() {
-					tcs.ForEach(func(_, tc gjson.Result) bool {
+					customToolNames := responsesCustomToolNames(requestForNamespace)
+					tcs.ForEach(func(tcIndex, tc gjson.Result) bool {
 						callID := tc.Get("id").String()
+						if callID == "" {
+							// Providers may omit tool_call ids; synthesize one so the
+							// function_call item stays usable for Codex round-trips.
+							callID = fmt.Sprintf("call_%s_%d_%d", id, choice.Get("index").Int(), tcIndex.Int())
+						}
 						name := tc.Get("function.name").String()
 						args := tc.Get("function.arguments").String()
+						if _, isCustomTool := customToolNames[name]; isCustomTool {
+							item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
+							item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ctc_%s", callID))
+							item, _ = sjson.SetBytes(item, "input", unwrapCustomToolInput(args))
+							item, _ = sjson.SetBytes(item, "call_id", callID)
+							item, _ = sjson.SetBytes(item, "name", name)
+							outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
+							return true
+						}
 						item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 						item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", callID))
 						item, _ = sjson.SetBytes(item, "arguments", args)

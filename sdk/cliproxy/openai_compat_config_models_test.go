@@ -14,6 +14,7 @@ func TestBuildOpenAICompatibilityConfigModels_InputModalities(t *testing.T) {
 			{
 				Name:            "upstream-vision",
 				Alias:           "mimo-v2.5-pro",
+				DisplayName:     "Mimo Vision",
 				InputModalities: []string{"TEXT", "image", "image"},
 			},
 			{
@@ -45,11 +46,17 @@ func TestBuildOpenAICompatibilityConfigModels_InputModalities(t *testing.T) {
 	if vision == nil {
 		t.Fatal("expected vision model")
 	}
+	if vision.DisplayName != "Mimo Vision" {
+		t.Fatalf("DisplayName = %q, want Mimo Vision", vision.DisplayName)
+	}
 	if got := joinModalities(vision.SupportedInputModalities); got != "text,image" {
 		t.Fatalf("SupportedInputModalities = %q, want text,image", got)
 	}
 	if imageModel == nil {
 		t.Fatal("expected image model")
+	}
+	if imageModel.DisplayName != "compat-image" {
+		t.Fatalf("image DisplayName = %q, want compat-image", imageModel.DisplayName)
 	}
 	if imageModel.Type != registry.OpenAIImageModelType {
 		t.Fatalf("image model type = %q, want %q", imageModel.Type, registry.OpenAIImageModelType)
