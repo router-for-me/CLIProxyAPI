@@ -530,9 +530,10 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 		outputNode = usageNode.Get("output_tokens")
 	}
 	detail := usage.Detail{
-		InputTokens:  inputNode.Int(),
-		OutputTokens: outputNode.Int(),
-		TotalTokens:  usageNode.Get("total_tokens").Int(),
+		InputTokens:    inputNode.Int(),
+		OutputTokens:   outputNode.Int(),
+		CacheInputMode: usage.CacheInputModeIncluded,
+		TotalTokens:    usageNode.Get("total_tokens").Int(),
 	}
 	cached := usageNode.Get("prompt_tokens_details.cached_tokens")
 	if !cached.Exists() {
@@ -599,6 +600,7 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		CachedTokens:        cacheReadTokens,
 		CacheReadTokens:     cacheReadTokens,
 		CacheCreationTokens: cacheCreationTokens,
+		CacheInputMode:      usage.CacheInputModeSeparate,
 	}
 	if detail.CachedTokens == 0 {
 		detail.CachedTokens = detail.CacheCreationTokens
@@ -608,12 +610,15 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 }
 
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
+	cachedTokens := node.Get("cachedContentTokenCount").Int()
 	detail := usage.Detail{
 		InputTokens:     node.Get("promptTokenCount").Int(),
 		OutputTokens:    node.Get("candidatesTokenCount").Int(),
 		ReasoningTokens: node.Get("thoughtsTokenCount").Int(),
 		TotalTokens:     node.Get("totalTokenCount").Int(),
-		CachedTokens:    node.Get("cachedContentTokenCount").Int(),
+		CachedTokens:    cachedTokens,
+		CacheReadTokens: cachedTokens,
+		CacheInputMode:  usage.CacheInputModeIncluded,
 	}
 	if detail.TotalTokens == 0 {
 		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
@@ -622,14 +627,19 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 }
 
 func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
+	cacheRead := firstExistingUsageNode(node, "cache_read_tokens", "cacheReadTokens")
 	detail := usage.Detail{
 		InputTokens:         firstExistingUsageNode(node, "input_tokens", "prompt_tokens", "total_input_tokens").Int(),
 		OutputTokens:        firstExistingUsageNode(node, "output_tokens", "completion_tokens", "total_output_tokens").Int(),
 		ReasoningTokens:     firstExistingUsageNode(node, "reasoning_tokens", "thoughtsTokenCount", "total_thought_tokens").Int(),
 		TotalTokens:         firstExistingUsageNode(node, "total_tokens", "totalTokenCount").Int(),
 		CachedTokens:        firstExistingUsageNode(node, "cached_tokens", "cachedContentTokenCount", "total_cached_tokens").Int(),
-		CacheReadTokens:     firstExistingUsageNode(node, "cache_read_tokens", "cacheReadTokens").Int(),
-		CacheCreationTokens: firstExistingUsageNode(node, "cache_creation_tokens", "cacheCreationTokens").Int(),
+		CacheReadTokens:     cacheRead.Int(),
+		CacheCreationTokens: firstExistingUsageNode(node, "cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens").Int(),
+		CacheInputMode:      usage.CacheInputModeIncluded,
+	}
+	if !cacheRead.Exists() && detail.CachedTokens > 0 {
+		detail.CacheReadTokens = detail.CachedTokens
 	}
 	if detail.TotalTokens == 0 {
 		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CacheReadTokens + detail.CacheCreationTokens

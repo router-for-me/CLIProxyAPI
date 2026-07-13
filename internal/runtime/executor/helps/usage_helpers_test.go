@@ -29,6 +29,9 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	if detail.CacheCreationTokens != 6 {
 		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 6)
 	}
+	if detail.CacheInputMode != usage.CacheInputModeIncluded {
+		t.Fatalf("cache input mode = %q, want %q", detail.CacheInputMode, usage.CacheInputModeIncluded)
+	}
 	if detail.ReasoningTokens != 5 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 5)
 	}
@@ -200,6 +203,9 @@ func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
 	if detail.CacheCreationTokens != 19514 {
 		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 19514)
 	}
+	if detail.CacheInputMode != usage.CacheInputModeSeparate {
+		t.Fatalf("cache input mode = %q, want %q", detail.CacheInputMode, usage.CacheInputModeSeparate)
+	}
 	if detail.CachedTokens != 7 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 7)
 	}
@@ -216,6 +222,19 @@ func TestParseClaudeUsageFallsBackCachedTokensToCacheCreation(t *testing.T) {
 	}
 	if detail.TotalTokens != 22852 {
 		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 22852)
+	}
+}
+
+func TestParseGeminiUsageNormalizesCachedContent(t *testing.T) {
+	detail := ParseGeminiUsage([]byte(`{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"cachedContentTokenCount":4,"totalTokenCount":12}}`))
+	if detail.CachedTokens != 4 {
+		t.Fatalf("cached tokens = %d, want 4", detail.CachedTokens)
+	}
+	if detail.CacheReadTokens != 4 {
+		t.Fatalf("cache read tokens = %d, want 4", detail.CacheReadTokens)
+	}
+	if detail.CacheInputMode != usage.CacheInputModeIncluded {
+		t.Fatalf("cache input mode = %q, want %q", detail.CacheInputMode, usage.CacheInputModeIncluded)
 	}
 }
 
