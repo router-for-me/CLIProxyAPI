@@ -142,6 +142,41 @@ func TestGeminiExecutorInteractionsWithGeminiAPIKeyUsesGeminiEndpoint(t *testing
 	}
 }
 
+func TestGeminiExecutorRewritesFlashLitePreviewToGAInPath(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`))
+	}))
+	defer server.Close()
+
+	exec := NewGeminiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "gemini",
+		Attributes: map[string]string{
+			"api_key":  "test-key",
+			"base_url": server.URL,
+		},
+	}
+	// Client still requests the retired preview id.
+	req := cliproxyexecutor.Request{
+		Model:   "gemini-3.1-flash-lite-preview",
+		Payload: []byte(`{"model":"gemini-3.1-flash-lite-preview","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
+	}
+	_, errExecute := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("gemini"),
+		ResponseFormat: sdktranslator.FromString("gemini"),
+	})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	want := "/v1beta/models/gemini-3.1-flash-lite:generateContent"
+	if gotPath != want {
+		t.Fatalf("path = %q, want GA resource %q (preview must be rewritten)", gotPath, want)
+	}
+}
+
 func TestGeminiExecutorNativeInteractionsUsesInteractionsEndpoint(t *testing.T) {
 	var gotPath string
 	var gotRevision string

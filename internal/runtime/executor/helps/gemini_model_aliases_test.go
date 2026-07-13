@@ -1,6 +1,9 @@
 package helps
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestCanonicalGeminiUpstreamModel(t *testing.T) {
 	t.Parallel()
@@ -20,5 +23,21 @@ func TestCanonicalGeminiUpstreamModel(t *testing.T) {
 		if got := CanonicalGeminiUpstreamModel(tc.in); got != tc.want {
 			t.Fatalf("CanonicalGeminiUpstreamModel(%q)=%q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestCanonicalGeminiUpstreamModel_usedAsURLSegment(t *testing.T) {
+	t.Parallel()
+	// Mirror Gemini executor path shape: /v1beta/models/{id}:generateContent
+	upstream := CanonicalGeminiUpstreamModel("gemini-3.1-flash-lite-preview")
+	gotPath := fmt.Sprintf("/v1beta/models/%s:generateContent", upstream)
+	wantPath := "/v1beta/models/gemini-3.1-flash-lite:generateContent"
+	if gotPath != wantPath {
+		t.Fatalf("path = %q, want %q", gotPath, wantPath)
+	}
+	// Vertex publishers path shape
+	vertexPath := fmt.Sprintf("/v1/projects/p/locations/us-central1/publishers/google/models/%s:generateContent", upstream)
+	if vertexPath != "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-3.1-flash-lite:generateContent" {
+		t.Fatalf("vertex path = %q", vertexPath)
 	}
 }
