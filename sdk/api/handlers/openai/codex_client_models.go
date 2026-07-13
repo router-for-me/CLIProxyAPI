@@ -14,10 +14,12 @@ type codexClientModelsPayload struct {
 }
 
 var (
-	codexClientModelTemplatesOnce sync.Once
-	codexClientModelTemplates     map[string]map[string]any
-	codexClientDefaultTemplate    map[string]any
-	codexClientModelTemplatesErr  error
+	codexClientModelTemplatesMu       sync.Mutex
+	codexClientModelTemplatesLoaded   bool
+	codexClientModelTemplatesRevision uint64
+	codexClientModelTemplates         map[string]map[string]any
+	codexClientDefaultTemplate        map[string]any
+	codexClientModelTemplatesErr      error
 )
 
 var codexClientAllowedReasoningLevels = map[string]struct{}{
@@ -133,26 +135,40 @@ func applyCodexClientNonTemplatePriorities(result []map[string]any, templates ma
 }
 
 func loadCodexClientModelTemplates() (map[string]map[string]any, map[string]any, error) {
-	codexClientModelTemplatesOnce.Do(func() {
-		var payload codexClientModelsPayload
-		codexClientModelTemplatesErr = json.Unmarshal(registry.GetCodexClientModelsJSON(), &payload)
-		if codexClientModelTemplatesErr != nil {
-			return
-		}
+	raw, revision := registry.GetCodexClientModelsSnapshot()
+	return loadCodexClientModelTemplatesSnapshot(raw, revision)
+}
 
-		codexClientModelTemplates = make(map[string]map[string]any, len(payload.Models))
+func loadCodexClientModelTemplatesSnapshot(raw []byte, revision uint64) (map[string]map[string]any, map[string]any, error) {
+	codexClientModelTemplatesMu.Lock()
+	defer codexClientModelTemplatesMu.Unlock()
+	if codexClientModelTemplatesLoaded && codexClientModelTemplatesRevision == revision {
+		return codexClientModelTemplates, codexClientDefaultTemplate, codexClientModelTemplatesErr
+	}
+
+	var payload codexClientModelsPayload
+	err := json.Unmarshal(raw, &payload)
+	var templates map[string]map[string]any
+	var defaultTemplate map[string]any
+	if err == nil {
+		templates = make(map[string]map[string]any, len(payload.Models))
 		for _, model := range payload.Models {
 			slug := strings.TrimSpace(stringModelValue(model, "slug"))
 			if slug == "" {
 				continue
 			}
-			codexClientModelTemplates[slug] = cloneCodexClientModelMap(model)
+			templates[slug] = cloneCodexClientModelMap(model)
 			if slug == "gpt-5.5" {
-				codexClientDefaultTemplate = cloneCodexClientModelMap(model)
+				defaultTemplate = cloneCodexClientModelMap(model)
 			}
 		}
-	})
+	}
 
+	codexClientModelTemplatesLoaded = true
+	codexClientModelTemplatesRevision = revision
+	codexClientModelTemplates = templates
+	codexClientDefaultTemplate = defaultTemplate
+	codexClientModelTemplatesErr = err
 	return codexClientModelTemplates, codexClientDefaultTemplate, codexClientModelTemplatesErr
 }
 

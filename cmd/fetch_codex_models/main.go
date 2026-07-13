@@ -10,8 +10,8 @@
 //
 //	--auths-dir       <path>  Directory containing auth JSON files (default: config auth-dir)
 //	--config          <path>  Config file path                 (default: "config.yaml")
-//	--output          <path>  Output JSON file path             (default: "codex_models.json")
-//	--client-version <ver>   Codex client_version query value  (default: "0.133.0")
+//	--output          <path>  Output JSON file path             (default: "codex_client_models.json")
+//	--client-version <ver>   Codex client_version query value  (default: "0.144.1")
 //	--pretty                 Pretty-print the output JSON      (default: true)
 package main
 
@@ -62,7 +62,7 @@ func main() {
 
 	flag.StringVar(&authsDir, "auths-dir", "", "Directory containing auth JSON files (overrides config auth-dir)")
 	flag.StringVar(&configPath, "config", "", "Configure File Path")
-	flag.StringVar(&outputPath, "output", "codex_models.json", "Output JSON file path")
+	flag.StringVar(&outputPath, "output", "codex_client_models.json", "Output JSON file path")
 	flag.StringVar(&clientVersion, "client-version", defaultClientVersion, "Codex client_version query value")
 	flag.BoolVar(&pretty, "pretty", true, "Pretty-print the output JSON")
 	flag.Parse()
@@ -296,11 +296,14 @@ func codexModelsURL(clientVersion string) (string, error) {
 
 func countModels(raw []byte) (int, error) {
 	var payload struct {
-		Models []map[string]any `json:"models"`
+		Models []json.RawMessage `json:"models"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return 0, fmt.Errorf("failed to parse response JSON: %w", err)
 	}
+	// Keep this check intentionally loose: fetch_codex_models dumps the upstream
+	// Codex API payload. Strict CPA catalog validation belongs in
+	// cmd/validate_codex_models and registry.ValidateCodexClientModelsJSON.
 	if payload.Models == nil {
 		return 0, fmt.Errorf("response JSON does not contain models array")
 	}
