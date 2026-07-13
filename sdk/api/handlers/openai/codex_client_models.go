@@ -192,10 +192,12 @@ func applyCodexClientSearchToolSupport(entry map[string]any, id string, template
 		return
 	}
 
+	if !templateModel {
+		entry["supports_search_tool"] = false
+		return
+	}
+
 	if providersForModel == nil {
-		if !templateModel {
-			entry["supports_search_tool"] = false
-		}
 		return
 	}
 

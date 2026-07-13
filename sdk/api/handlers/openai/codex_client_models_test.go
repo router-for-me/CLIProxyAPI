@@ -175,7 +175,7 @@ func TestCodexClientModelsResponse_DisablesSearchToolForSynthesizedModels(t *tes
 	}
 }
 
-func TestCodexClientModelsResponse_UsesProviderSearchToolSupport(t *testing.T) {
+func TestCodexClientModelsResponse_RequiresTemplateAndCodexProvidersForSearchTool(t *testing.T) {
 	providers := map[string][]string{
 		"new-codex-model": {"codex"},
 		"gpt-5.5":         {"openai-compatible-deepseek"},
@@ -200,12 +200,10 @@ func TestCodexClientModelsResponse_UsesProviderSearchToolSupport(t *testing.T) {
 		bySlug[stringModelValue(model, "slug")] = model
 	}
 
-	for _, slug := range []string{"new-codex-model", "gpt-5.6-sol"} {
-		if got, ok := bySlug[slug]["supports_search_tool"].(bool); !ok || !got {
-			t.Errorf("%s supports_search_tool = %#v, want true", slug, bySlug[slug]["supports_search_tool"])
-		}
+	if got, ok := bySlug["gpt-5.6-sol"]["supports_search_tool"].(bool); !ok || !got {
+		t.Errorf("gpt-5.6-sol supports_search_tool = %#v, want true", bySlug["gpt-5.6-sol"]["supports_search_tool"])
 	}
-	for _, slug := range []string{"gpt-5.5", "gpt-5.4"} {
+	for _, slug := range []string{"new-codex-model", "gpt-5.5", "gpt-5.4"} {
 		if got, ok := bySlug[slug]["supports_search_tool"].(bool); !ok || got {
 			t.Errorf("%s supports_search_tool = %#v, want false", slug, bySlug[slug]["supports_search_tool"])
 		}
