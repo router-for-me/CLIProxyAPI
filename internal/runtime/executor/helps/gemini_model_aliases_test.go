@@ -15,7 +15,9 @@ func TestCanonicalGeminiUpstreamModel(t *testing.T) {
 		{"  gemini-3.1-flash-lite-preview  ", "gemini-3.1-flash-lite"},
 		{"models/gemini-3.1-flash-lite-preview", "gemini-3.1-flash-lite"},
 		{"gemini-3.1-flash-lite", "gemini-3.1-flash-lite"},
+		{"models/gemini-3.1-flash-lite", "gemini-3.1-flash-lite"},
 		{"gemini-2.5-flash", "gemini-2.5-flash"},
+		{"models/gemini-2.5-flash", "gemini-2.5-flash"},
 		{"", ""},
 		{"   ", ""},
 	}

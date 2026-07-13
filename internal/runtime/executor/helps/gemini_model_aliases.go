@@ -12,21 +12,19 @@ var geminiUpstreamModelAliases = map[string]string{
 
 // CanonicalGeminiUpstreamModel rewrites known retired Gemini model IDs to the
 // GA resource name used by Google AI / Vertex publishers/google/models/{id}.
-// Unknown IDs are returned unchanged (after trim).
+// Accepts bare IDs and optional "models/<id>" forms; always returns a bare ID
+// so executors can safely build /models/{id}:... URLs. Unknown IDs are
+// returned unchanged after trim and prefix strip.
 func CanonicalGeminiUpstreamModel(model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" {
 		return model
 	}
-	if canonical, ok := geminiUpstreamModelAliases[model]; ok {
+	// Strip one leading models/ so clients that pass resource names don't
+	// produce doubled /models/models/... segments in executor URLs.
+	id := strings.TrimPrefix(model, "models/")
+	if canonical, ok := geminiUpstreamModelAliases[id]; ok {
 		return canonical
 	}
-	// Also accept "models/<id>" forms that some clients pass through.
-	if strings.HasPrefix(model, "models/") {
-		id := strings.TrimPrefix(model, "models/")
-		if canonical, ok := geminiUpstreamModelAliases[id]; ok {
-			return canonical
-		}
-	}
-	return model
+	return id
 }
