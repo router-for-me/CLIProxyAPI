@@ -43,7 +43,9 @@ func disableAuthForPaymentRequired(auth *Auth, now time.Time, resultErr *Error) 
 
 // applyPaymentRequiredModelFailure updates per-model failure state for HTTP 402.
 // When action is "disable", the whole auth is disabled (key/balance is auth-level).
-// Returns whether the model should also be suspended in the registry.
+// Model state stays StatusError (not StatusDisabled) so management re-enable can
+// restore routing without a ResetQuota. Returns whether the model should also be
+// suspended in the registry (cooldown only).
 func applyPaymentRequiredModelFailure(auth *Auth, state *ModelState, now time.Time, resultErr *Error, disableCooling bool, action string) (shouldSuspendModel bool) {
 	if state != nil {
 		state.Unavailable = true
@@ -56,11 +58,15 @@ func applyPaymentRequiredModelFailure(auth *Auth, state *ModelState, now time.Ti
 	if action == "disable" {
 		disableAuthForPaymentRequired(auth, now, resultErr)
 		if state != nil {
-			state.Status = StatusDisabled
-			state.StatusMessage = "payment_required"
+			// Auth-level disable only: do not hard-disable the model state so
+			// management "enable" can restore the credential without ResetQuota.
+			state.Status = StatusError
+			if resultErr == nil || resultErr.Message == "" {
+				state.StatusMessage = "payment_required"
+			}
 			state.NextRetryAfter = time.Time{}
 		}
-		return true
+		return false
 	}
 	// Default cooldown path.
 	if state != nil {
