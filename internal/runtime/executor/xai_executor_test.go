@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -128,18 +129,22 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 		t.Fatalf("input.2 exists, want consecutive reasoning item merged; body=%s", string(gotBody))
 	}
 	tools := gjson.GetBytes(gotBody, "tools").Array()
-	if len(tools) != 5 {
-		t.Fatalf("tools length = %d, want 5; body=%s", len(tools), string(gotBody))
+	if len(tools) != 6 {
+		t.Fatalf("tools length = %d, want 6; body=%s", len(tools), string(gotBody))
 	}
 	foundAutomationUpdate := false
 	foundNamespaceCustom := false
+	foundXSearch := false
 	for i, tool := range tools {
 		toolType := tool.Get("type").String()
 		if toolType == "image_generation" {
 			t.Fatalf("tools.%d.type = image_generation, want removed; body=%s", i, string(gotBody))
 		}
-		if toolType != "function" && toolType != "web_search" {
-			t.Fatalf("tools.%d.type = %q, want function or web_search; body=%s", i, toolType, string(gotBody))
+		if toolType != "function" && toolType != "web_search" && toolType != "x_search" {
+			t.Fatalf("tools.%d.type = %q, want function, web_search, or x_search; body=%s", i, toolType, string(gotBody))
+		}
+		if toolType == "x_search" {
+			foundXSearch = true
 		}
 		if toolType == "function" && !tool.Get("parameters").Exists() {
 			t.Fatalf("tools.%d.parameters missing for xAI function tool; body=%s", i, string(gotBody))
@@ -168,6 +173,9 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	if !foundNamespaceCustom {
 		t.Fatalf("namespace custom tool was not moved to top-level tools; body=%s", string(gotBody))
 	}
+	if !foundXSearch {
+		t.Fatalf("native x_search tool was not injected; body=%s", string(gotBody))
+	}
 	if got := gjson.GetBytes(gotBody, "tool_choice.tools.0.name").String(); got != "codex_app__automation_update" {
 		t.Fatalf("tool_choice.tools.0.name = %q, want codex_app__automation_update; body=%s", got, string(gotBody))
 	}
@@ -179,6 +187,18 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	}
 	if got := gjson.GetBytes(gotBody, "tool_choice.tools.2.type").String(); got != "web_search" {
 		t.Fatalf("tool_choice.tools.2.type = %q, want web_search; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "tool_choice.tools.3.type").String(); got != "x_search" {
+		t.Fatalf("tool_choice.tools.3.type = %q, want x_search; body=%s", got, string(gotBody))
+	}
+	xSearchAllowedCount := 0
+	for _, tool := range gjson.GetBytes(gotBody, "tool_choice.tools").Array() {
+		if tool.Get("type").String() == "x_search" {
+			xSearchAllowedCount++
+		}
+	}
+	if xSearchAllowedCount != 1 {
+		t.Fatalf("allowed_tools x_search count = %d, want 1; body=%s", xSearchAllowedCount, string(gotBody))
 	}
 	foundEncryptedReasoningInclude := false
 	for _, include := range gjson.GetBytes(gotBody, "include").Array() {
@@ -246,6 +266,990 @@ func TestXAIExecutorExecuteRestoresAdditionalToolsNamespaceCalls(t *testing.T) {
 	}
 	if got := output.Get("namespace").String(); got != "mcp__exa" {
 		t.Fatalf("response output namespace = %q, want mcp__exa; payload=%s", got, resp.Payload)
+	}
+}
+
+func TestXAIExecutorExecuteNormalizesCustomToolCallHistory(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		for _, item := range gjson.GetBytes(gotBody, "input").Array() {
+			if strings.HasPrefix(item.Get("type").String(), "custom_tool_call") {
+				http.Error(w, `{"error":"data did not match any variant of untagged enum ModelInput"}`, http.StatusUnprocessableEntity)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.5\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":  server.URL,
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	payload := []byte(`{
+		"model":"grok-4.5",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"search"}]},
+			{"type":"custom_tool_call","name":"missing_call_id","input":"invalid"},
+			{"type":"custom_tool_call_output","output":"missing call id"},
+			{"type":"custom_tool_call","status":"completed","call_id":"xs_call-1","name":"x_semantic_search","input":"{\"query\":\"US stocks\",\"limit\":\"10\"}","internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}},
+			{"type":"custom_tool_call_output","call_id":"xs_call-1","output":"unsupported custom tool call: x_semantic_search","internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}},
+			{"type":"custom_tool_call","call_id":"call-2","name":"apply_patch","input":"*** Begin Patch"},
+			{"type":"custom_tool_call_output","call_id":"call-2","output":[{"type":"input_text","text":"done"}]}
+		],
+		"tools":[{"type":"x_search"}],
+		"tool_choice":"auto"
+	}`)
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	input := gjson.GetBytes(gotBody, "input").Array()
+	if len(input) != 5 {
+		t.Fatalf("input length = %d, want 5; body=%s", len(input), gotBody)
+	}
+	if got := input[1].Get("type").String(); got != "function_call" {
+		t.Fatalf("input.1.type = %q, want function_call; body=%s", got, gotBody)
+	}
+	if got := gjson.Get(input[1].Get("arguments").String(), "query").String(); got != "US stocks" {
+		t.Fatalf("input.1 arguments query = %q, want US stocks; body=%s", got, gotBody)
+	}
+	if input[1].Get("input").Exists() || input[1].Get("internal_chat_message_metadata_passthrough").Exists() {
+		t.Fatalf("input.1 contains unsupported custom fields: %s", input[1].Raw)
+	}
+	if got := input[2].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("input.2.type = %q, want function_call_output; body=%s", got, gotBody)
+	}
+	if got := input[2].Get("output").String(); got != "unsupported custom tool call: x_semantic_search" {
+		t.Fatalf("input.2.output = %q; body=%s", got, gotBody)
+	}
+	if got := gjson.Get(input[3].Get("arguments").String(), "input").String(); got != "*** Begin Patch" {
+		t.Fatalf("input.3 freeform arguments = %q, want patch input; body=%s", got, gotBody)
+	}
+	if got := input[4].Get("output").String(); got != `[{"type":"input_text","text":"done"}]` {
+		t.Fatalf("input.4 output = %q, want flattened JSON string; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "tools.0.type").String(); got != "x_search" {
+		t.Fatalf("tools.0.type = %q, want x_search; body=%s", got, gotBody)
+	}
+}
+
+func TestXAIExecutorExecuteStreamFiltersInternalXSearchCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		names := []string{"x_user_search", "x_semantic_search", "x_keyword_search", "x_thread_fetch"}
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+		for i, name := range names {
+			itemID := fmt.Sprintf("ctc_%d", i)
+			callID := fmt.Sprintf("xs_call-%d", i)
+			_, _ = fmt.Fprintf(w, "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":%d,\"item\":{\"id\":%q,\"type\":\"custom_tool_call\",\"call_id\":%q,\"name\":%q,\"input\":\"\",\"status\":\"in_progress\"}}\n\n", i, itemID, callID, name)
+			_, _ = fmt.Fprintf(w, "event: response.custom_tool_call_input.done\ndata: {\"type\":\"response.custom_tool_call_input.done\",\"output_index\":%d,\"item_id\":%q,\"input\":\"{}\"}\n\n", i, itemID)
+			_, _ = fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":%d,\"item\":{\"id\":%q,\"type\":\"custom_tool_call\",\"call_id\":%q,\"name\":%q,\"input\":\"{}\",\"status\":\"completed\"}}\n\n", i, itemID, callID, name)
+			item := []byte(`{"id":"","type":"custom_tool_call","call_id":"","name":"","input":"{}","status":"completed"}`)
+			item, _ = sjson.SetBytes(item, "id", itemID)
+			item, _ = sjson.SetBytes(item, "call_id", callID)
+			item, _ = sjson.SetBytes(item, "name", name)
+			completed, _ = sjson.SetRawBytes(completed, "response.output.-1", item)
+		}
+
+		messageIndex := len(names)
+		_, _ = fmt.Fprintf(w, "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":%d,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"status\":\"in_progress\"}}\n\n", messageIndex)
+		_, _ = fmt.Fprintf(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":%d,\"item_id\":\"msg_1\",\"content_index\":0,\"delta\":\"answer\"}\n\n", messageIndex)
+		_, _ = fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":%d,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}],\"status\":\"completed\"}}\n\n", messageIndex)
+		message := []byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}],"status":"completed"}`)
+		completed, _ = sjson.SetRawBytes(completed, "response.output.-1", message)
+		_, _ = fmt.Fprintf(w, "event: response.completed\ndata: %s\n\n", completed)
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.5",
+		Payload: []byte(`{"model":"grok-4.5","input":"search X","tools":[{"type":"x_search"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var stream bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		stream.Write(chunk.Payload)
+		stream.WriteByte('\n')
+	}
+	streamText := stream.String()
+	for _, name := range []string{"x_user_search", "x_semantic_search", "x_keyword_search", "x_thread_fetch"} {
+		if strings.Contains(streamText, name) {
+			t.Fatalf("internal x_search call %q leaked downstream: %s", name, streamText)
+		}
+	}
+	if strings.Contains(streamText, "response.custom_tool_call_input") {
+		t.Fatalf("custom tool input event leaked downstream: %s", streamText)
+	}
+
+	var completed gjson.Result
+	messageIndexChecks := 0
+	for _, line := range strings.Split(streamText, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if !gjson.Valid(line) {
+			continue
+		}
+		event := gjson.Parse(line)
+		if event.Get("item.id").String() == "msg_1" || event.Get("item_id").String() == "msg_1" {
+			messageIndexChecks++
+			if got := event.Get("output_index").Int(); got != 0 {
+				t.Fatalf("message output_index = %d, want 0; event=%s", got, line)
+			}
+		}
+		if event.Get("type").String() == "response.completed" {
+			completed = event
+		}
+	}
+	if messageIndexChecks == 0 {
+		t.Fatal("no message events found")
+	}
+	if got := completed.Get("response.output.#").Int(); got != 1 {
+		t.Fatalf("completed output length = %d, want 1; completed=%s", got, completed.Raw)
+	}
+	if got := completed.Get("response.output.0.type").String(); got != "message" {
+		t.Fatalf("completed output type = %q, want message; completed=%s", got, completed.Raw)
+	}
+}
+
+func TestXAIExecutorExecuteFiltersInternalXSearchCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"ctc_1\",\"type\":\"custom_tool_call\",\"call_id\":\"xs_call-1\",\"name\":\"x_user_search\",\"input\":\"{}\",\"status\":\"completed\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}],\"status\":\"completed\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"id\":\"ctc_1\",\"type\":\"custom_tool_call\",\"call_id\":\"xs_call-1\",\"name\":\"x_user_search\",\"input\":\"{}\"},{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}]}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.5",
+		Payload: []byte(`{"model":"grok-4.5","input":"search X","tools":[{"type":"x_search"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if strings.Contains(string(resp.Payload), "x_user_search") || strings.Contains(string(resp.Payload), "custom_tool_call") {
+		t.Fatalf("internal X search call leaked into response: %s", resp.Payload)
+	}
+	if got := gjson.GetBytes(resp.Payload, "output.#").Int(); got != 1 {
+		t.Fatalf("response output length = %d, want 1; payload=%s", got, resp.Payload)
+	}
+	if got := gjson.GetBytes(resp.Payload, "output.0.content.0.text").String(); got != "answer" {
+		t.Fatalf("response text = %q, want answer; payload=%s", got, resp.Payload)
+	}
+}
+
+func TestEnsureXAINativeXSearchTool(t *testing.T) {
+	t.Parallel()
+
+	// Missing tools array: inject a top-level x_search tool.
+	out := ensureXAINativeXSearchTool([]byte(`{"model":"grok-4.5","input":"hi"}`))
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 1 {
+		t.Fatalf("tools length = %d, want 1; body=%s", len(tools), out)
+	}
+	if got := tools[0].Get("type").String(); got != "x_search" {
+		t.Fatalf("tools.0.type = %q, want x_search; body=%s", got, out)
+	}
+
+	// Existing tools without x_search: append once.
+	out = ensureXAINativeXSearchTool([]byte(`{"tools":[{"type":"web_search"},{"type":"function","name":"lookup","parameters":{"type":"object"}}]}`))
+	tools = gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 3 {
+		t.Fatalf("tools length = %d, want 3; body=%s", len(tools), out)
+	}
+	if got := tools[2].Get("type").String(); got != "x_search" {
+		t.Fatalf("tools.2.type = %q, want x_search; body=%s", got, out)
+	}
+
+	// Already present: leave body unchanged (no duplicate).
+	in := []byte(`{"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}},{"type":"x_search"}]}`)
+	out = ensureXAINativeXSearchTool(in)
+	tools = gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("tools length = %d, want 2; body=%s", len(tools), out)
+	}
+	xSearchCount := 0
+	for _, tool := range tools {
+		if tool.Get("type").String() == "x_search" {
+			xSearchCount++
+		}
+	}
+	if xSearchCount != 1 {
+		t.Fatalf("x_search count = %d, want 1; body=%s", xSearchCount, out)
+	}
+
+	// allowed_tools without x_search: append once so Grok may select it.
+	out = ensureXAINativeXSearchTool([]byte(`{
+		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+		"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"lookup"}]}
+	}`))
+	if got := gjson.GetBytes(out, "tools.1.type").String(); got != "x_search" {
+		t.Fatalf("tools.1.type = %q, want x_search; body=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.tools.1.type").String(); got != "x_search" {
+		t.Fatalf("tool_choice.tools.1.type = %q, want x_search; body=%s", got, out)
+	}
+
+	// allowed_tools already lists x_search: do not duplicate.
+	out = ensureXAINativeXSearchTool([]byte(`{
+		"tools":[{"type":"web_search"},{"type":"x_search"}],
+		"tool_choice":{"type":"allowed_tools","tools":[{"type":"web_search"},{"type":"x_search"}]}
+	}`))
+	tools = gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("tools length = %d, want 2; body=%s", len(tools), out)
+	}
+	allowed := gjson.GetBytes(out, "tool_choice.tools").Array()
+	if len(allowed) != 2 {
+		t.Fatalf("tool_choice.tools length = %d, want 2; body=%s", len(allowed), out)
+	}
+	xSearchAllowed := 0
+	for _, tool := range allowed {
+		if tool.Get("type").String() == "x_search" {
+			xSearchAllowed++
+		}
+	}
+	if xSearchAllowed != 1 {
+		t.Fatalf("allowed_tools x_search count = %d, want 1; body=%s", xSearchAllowed, out)
+	}
+}
+
+func TestPruneXAIOrphanedToolChoice(t *testing.T) {
+	t.Parallel()
+
+	// Forced choice for a removed tool is dropped.
+	out := pruneXAIOrphanedToolChoice([]byte(`{
+		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+		"tool_choice":{"type":"image_generation"}
+	}`))
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("orphaned forced tool_choice should be removed: %s", out)
+	}
+
+	// allowed_tools keeps only still-available entries.
+	out = pruneXAIOrphanedToolChoice([]byte(`{
+		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}},{"type":"web_search"}],
+		"tool_choice":{"type":"allowed_tools","tools":[
+			{"type":"function","name":"lookup"},
+			{"type":"image_generation"},
+			{"type":"web_search"}
+		]}
+	}`))
+	allowed := gjson.GetBytes(out, "tool_choice.tools").Array()
+	if len(allowed) != 2 {
+		t.Fatalf("allowed_tools length = %d, want 2; body=%s", len(allowed), out)
+	}
+	if got := allowed[0].Get("name").String(); got != "lookup" {
+		t.Fatalf("allowed_tools.0.name = %q, want lookup; body=%s", got, out)
+	}
+	if got := allowed[1].Get("type").String(); got != "web_search" {
+		t.Fatalf("allowed_tools.1.type = %q, want web_search; body=%s", got, out)
+	}
+
+	// When every allowed entry is orphaned, drop tool_choice entirely.
+	out = pruneXAIOrphanedToolChoice([]byte(`{
+		"tools":[],
+		"tool_choice":{"type":"allowed_tools","tools":[{"type":"image_generation"}]}
+	}`))
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("fully orphaned allowed_tools should be removed: %s", out)
+	}
+
+	// String choices are not tool references.
+	in := []byte(`{"tools":[{"type":"web_search"}],"tool_choice":"auto"}`)
+	if got := pruneXAIOrphanedToolChoice(in); !bytes.Equal(got, in) {
+		t.Fatalf("string tool_choice changed: got=%s want=%s", got, in)
+	}
+}
+
+func TestXAIExecutorPrepareDropsOrphanedToolChoiceBeforeXSearchInject(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.5",
+		// image_generation is stripped by normalizeXAITools; without pruning, the
+		// forced choice would survive next to the injected x_search tool.
+		Payload: []byte(`{
+			"model":"grok-4.5",
+			"input":"draw something",
+			"tools":[{"type":"image_generation"}],
+			"tool_choice":{"type":"image_generation"}
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	}, false)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+
+	tools := gjson.GetBytes(prepared.body, "tools").Array()
+	if len(tools) != 1 {
+		t.Fatalf("tools length = %d, want 1; body=%s", len(tools), prepared.body)
+	}
+	if got := tools[0].Get("type").String(); got != "x_search" {
+		t.Fatalf("tools.0.type = %q, want x_search; body=%s", got, prepared.body)
+	}
+	if gjson.GetBytes(prepared.body, "tool_choice").Exists() {
+		t.Fatalf("orphaned image_generation tool_choice must not reach upstream: %s", prepared.body)
+	}
+}
+
+func TestXAIExecutorPrepareAllowedToolsSyncsInjectedXSearch(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.5",
+		// Only image_generation remains after client filtering of tool_search-like
+		// tools is not relevant here: normalizeXAITools drops image_generation and
+		// we inject x_search, while allowed_tools must be rewritten so Grok can
+		// choose the injected tool and not a deleted one.
+		Payload: []byte(`{
+			"model":"grok-4.5",
+			"input":"search X",
+			"tools":[{"type":"image_generation"},{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+			"tool_choice":{"type":"allowed_tools","tools":[
+				{"type":"image_generation"},
+				{"type":"function","name":"lookup"}
+			]}
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	}, false)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+
+	tools := gjson.GetBytes(prepared.body, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("tools length = %d, want 2; body=%s", len(tools), prepared.body)
+	}
+	foundLookup := false
+	foundXSearch := false
+	for _, tool := range tools {
+		switch tool.Get("type").String() {
+		case "function":
+			if tool.Get("name").String() == "lookup" {
+				foundLookup = true
+			}
+		case "x_search":
+			foundXSearch = true
+		case "image_generation":
+			t.Fatalf("image_generation must be removed; body=%s", prepared.body)
+		}
+	}
+	if !foundLookup || !foundXSearch {
+		t.Fatalf("expected lookup + x_search tools; body=%s", prepared.body)
+	}
+
+	allowed := gjson.GetBytes(prepared.body, "tool_choice.tools").Array()
+	if len(allowed) != 2 {
+		t.Fatalf("tool_choice.tools length = %d, want 2; body=%s", len(allowed), prepared.body)
+	}
+	if got := allowed[0].Get("name").String(); got != "lookup" {
+		t.Fatalf("tool_choice.tools.0.name = %q, want lookup; body=%s", got, prepared.body)
+	}
+	if got := allowed[1].Get("type").String(); got != "x_search" {
+		t.Fatalf("tool_choice.tools.1.type = %q, want x_search; body=%s", got, prepared.body)
+	}
+	for _, tool := range allowed {
+		if tool.Get("type").String() == "image_generation" {
+			t.Fatalf("orphaned image_generation choice leaked: %s", prepared.body)
+		}
+	}
+}
+
+func TestXAIInternalXSearchResponseFilterRequiresNativeTool(t *testing.T) {
+	if xaiRequestHasNativeXSearch([]byte(`{"tools":[{"type":"web_search"}]}`)) {
+		t.Fatal("web_search must not enable internal X search filtering")
+	}
+	if !xaiRequestHasNativeXSearch([]byte(`{"tools":[{"type":"x_search"}]}`)) {
+		t.Fatal("x_search should enable internal X search filtering")
+	}
+
+	event := []byte(`{"type":"response.output_item.done","output_index":0,"item":{"id":"ctc_1","type":"custom_tool_call","name":"x_keyword_search"}}`)
+	if got := newXAIInternalXSearchResponseFilter(false, nil).apply(event); !bytes.Equal(got, event) {
+		t.Fatalf("disabled filter changed event: %s", got)
+	}
+	if got := newXAIInternalXSearchResponseFilter(true, nil).apply(event); got != nil {
+		t.Fatalf("enabled filter retained internal call: %s", got)
+	}
+}
+
+func TestXAIIsInternalXSearchCallPreservesClientDeclaredTools(t *testing.T) {
+	clientTools := collectXAIClientDeclaredToolKeys([]byte(`{
+		"tools":[
+			{"type":"x_search"},
+			{"type":"function","name":"x_keyword_search","parameters":{"type":"object"}},
+			{"type":"custom","name":"x_keyword_search"},
+			{"type":"namespace","name":"acme","tools":[
+				{"type":"function","name":"x_keyword_search","parameters":{"type":"object"}},
+				{"type":"custom","name":"x_keyword_search"}
+			]}
+		]
+	}`))
+	// Client custom tools are normalized to function before upstream send, so both
+	// plain function and plain custom declarations share the effective function key.
+	if _, ok := clientTools[xaiClientToolKey{namespace: "", name: "x_keyword_search", toolType: xaiFunctionToolType}]; !ok {
+		t.Fatalf("plain client function/custom tool missing effective function key: %#v", clientTools)
+	}
+	if _, ok := clientTools[xaiClientToolKey{namespace: "", name: "x_keyword_search", toolType: xaiCustomToolType}]; ok {
+		t.Fatalf("client custom tool must not be keyed as custom after normalization: %#v", clientTools)
+	}
+	if _, ok := clientTools[xaiClientToolKey{namespace: "acme", name: "x_keyword_search", toolType: xaiFunctionToolType}]; !ok {
+		t.Fatalf("namespaced client tool missing from declared set: %#v", clientTools)
+	}
+	if _, ok := clientTools[xaiClientToolKey{namespace: "acme", name: "x_keyword_search", toolType: xaiCustomToolType}]; ok {
+		t.Fatalf("namespaced client custom tool must not be keyed as custom after normalization: %#v", clientTools)
+	}
+
+	// Names not declared by the client remain internal X Search traces.
+	internalCustom := gjson.Parse(`{"type":"custom_tool_call","name":"x_user_search"}`)
+	if !xaiIsInternalXSearchCall(internalCustom, clientTools) {
+		t.Fatal("undeclared internal custom_tool_call should be filtered")
+	}
+	internalFunction := gjson.Parse(`{"type":"function_call","name":"x_semantic_search"}`)
+	if !xaiIsInternalXSearchCall(internalFunction, clientTools) {
+		t.Fatal("undeclared internal function_call should be filtered")
+	}
+
+	// Same short name as a client-declared function/custom tool is preserved only for function_call
+	// (the response shape after custom → function normalization).
+	plainClient := gjson.Parse(`{"type":"function_call","name":"x_keyword_search","call_id":"call_plain"}`)
+	if xaiIsInternalXSearchCall(plainClient, clientTools) {
+		t.Fatal("client-declared plain x_keyword_search function_call must be preserved")
+	}
+	// Genuine internal custom_tool_call with the same short name must still be filtered,
+	// even when the client also declared an ordinary function/custom tool of that name.
+	internalSameName := gjson.Parse(`{"type":"custom_tool_call","call_id":"xs_call-1","name":"x_keyword_search"}`)
+	if !xaiIsInternalXSearchCall(internalSameName, clientTools) {
+		t.Fatal("genuine internal custom_tool_call x_keyword_search must be filtered despite client function declaration")
+	}
+	// Declaring only a function tool must not exempt a same-name custom_tool_call without xs_call either.
+	functionOnlyTools := collectXAIClientDeclaredToolKeys([]byte(`{
+		"tools":[{"type":"function","name":"x_keyword_search","parameters":{"type":"object"}}]
+	}`))
+	plainInternalCustom := gjson.Parse(`{"type":"custom_tool_call","name":"x_keyword_search","call_id":"call_other"}`)
+	if !xaiIsInternalXSearchCall(plainInternalCustom, functionOnlyTools) {
+		t.Fatal("custom_tool_call must not be exempted by a function declaration of the same name")
+	}
+	// Client-declared custom tools are sent as function, so only function_call is the
+	// legitimate client response shape; bare custom_tool_call remains internal.
+	customOnlyTools := collectXAIClientDeclaredToolKeys([]byte(`{
+		"tools":[{"type":"custom","name":"x_keyword_search"}]
+	}`))
+	if _, ok := customOnlyTools[xaiClientToolKey{namespace: "", name: "x_keyword_search", toolType: xaiFunctionToolType}]; !ok {
+		t.Fatalf("client custom tool must be keyed as effective function: %#v", customOnlyTools)
+	}
+	clientCustomAsFunction := gjson.Parse(`{"type":"function_call","name":"x_keyword_search","call_id":"call_custom_fn"}`)
+	if xaiIsInternalXSearchCall(clientCustomAsFunction, customOnlyTools) {
+		t.Fatal("normalized client custom tool function_call must be preserved")
+	}
+	if !xaiIsInternalXSearchCall(plainInternalCustom, customOnlyTools) {
+		t.Fatal("custom_tool_call must not be exempted by a client custom declaration normalized to function")
+	}
+	// Even with a client custom declaration, xs_call* remains an internal X Search trace.
+	if !xaiIsInternalXSearchCall(internalSameName, customOnlyTools) {
+		t.Fatal("xs_call internal custom_tool_call must stay filtered when client declares custom same-name tool")
+	}
+	// After restoreXAINamespaceToolCalls, namespaced tools regain namespace.
+	namespacedClient := gjson.Parse(`{"type":"function_call","name":"x_keyword_search","namespace":"acme"}`)
+	if xaiIsInternalXSearchCall(namespacedClient, clientTools) {
+		t.Fatal("client-declared namespaced x_keyword_search must be preserved")
+	}
+	// Safety net even without an explicit declared-tool entry.
+	if xaiIsInternalXSearchCall(namespacedClient, nil) {
+		t.Fatal("namespaced tool call must never be treated as internal X Search")
+	}
+}
+
+func TestXAIInternalXSearchResponseFilterPreservesClientToolsInCompletedOutput(t *testing.T) {
+	clientTools := map[xaiClientToolKey]struct{}{
+		{namespace: "", name: "x_keyword_search", toolType: xaiFunctionToolType}:     {},
+		{namespace: "acme", name: "x_keyword_search", toolType: xaiFunctionToolType}: {},
+	}
+	filter := newXAIInternalXSearchResponseFilter(true, clientTools)
+	event := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"output":[
+				{"id":"ctc_1","type":"custom_tool_call","call_id":"xs_call-1","name":"x_keyword_search","input":"{}"},
+				{"id":"fc_plain","type":"function_call","call_id":"call_plain","name":"x_keyword_search","arguments":"{}"},
+				{"id":"fc_ns","type":"function_call","call_id":"call_ns","name":"x_keyword_search","namespace":"acme","arguments":"{}"},
+				{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}
+			]
+		}
+	}`)
+	got := filter.apply(event)
+	if got == nil {
+		t.Fatal("filter dropped entire completed event")
+	}
+	if gjson.GetBytes(got, "response.output.#").Int() != 3 {
+		t.Fatalf("completed output length = %d, want 3; event=%s", gjson.GetBytes(got, "response.output.#").Int(), got)
+	}
+	if gjson.GetBytes(got, `response.output.#(type=="custom_tool_call")`).Exists() {
+		t.Fatalf("internal custom_tool_call x_keyword_search leaked: %s", got)
+	}
+	if gotName := gjson.GetBytes(got, "response.output.0.name").String(); gotName != "x_keyword_search" {
+		t.Fatalf("output.0.name = %q, want x_keyword_search; event=%s", gotName, got)
+	}
+	if gotType := gjson.GetBytes(got, "response.output.0.type").String(); gotType != "function_call" {
+		t.Fatalf("output.0.type = %q, want function_call; event=%s", gotType, got)
+	}
+	if gotNS := gjson.GetBytes(got, "response.output.1.namespace").String(); gotNS != "acme" {
+		t.Fatalf("output.1.namespace = %q, want acme; event=%s", gotNS, got)
+	}
+}
+
+func TestXAIExecutorExecutePreservesClientSameNameToolsWithXSearch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Collision case: internal X Search and client tools both named x_keyword_search.
+		// Upstream still uses qualified names; restore happens before filtering.
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"ctc_1\",\"type\":\"custom_tool_call\",\"call_id\":\"xs_call-1\",\"name\":\"x_keyword_search\",\"input\":\"{}\",\"status\":\"completed\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"fc_ns\",\"type\":\"function_call\",\"call_id\":\"call_ns\",\"name\":\"acme__x_keyword_search\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"id\":\"fc_plain\",\"type\":\"function_call\",\"call_id\":\"call_plain\",\"name\":\"x_keyword_search\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}],\"status\":\"completed\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"id\":\"ctc_1\",\"type\":\"custom_tool_call\",\"call_id\":\"xs_call-1\",\"name\":\"x_keyword_search\",\"input\":\"{}\"},{\"id\":\"fc_ns\",\"type\":\"function_call\",\"call_id\":\"call_ns\",\"name\":\"acme__x_keyword_search\",\"arguments\":\"{}\"},{\"id\":\"fc_plain\",\"type\":\"function_call\",\"call_id\":\"call_plain\",\"name\":\"x_keyword_search\",\"arguments\":\"{}\"},{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}]}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "grok-4.5",
+		Payload: []byte(`{
+			"model":"grok-4.5",
+			"input":"search X",
+			"tools":[
+				{"type":"x_search"},
+				{"type":"function","name":"x_keyword_search","parameters":{"type":"object"}},
+				{"type":"namespace","name":"acme","tools":[
+					{"type":"function","name":"x_keyword_search","parameters":{"type":"object"}}
+				]}
+			]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	payload := string(resp.Payload)
+	if strings.Contains(payload, "xs_call") {
+		t.Fatalf("internal X search call_id leaked into response: %s", payload)
+	}
+	if strings.Contains(payload, "custom_tool_call") {
+		t.Fatalf("internal custom_tool_call leaked into response: %s", payload)
+	}
+	if got := gjson.GetBytes(resp.Payload, "output.#").Int(); got != 3 {
+		t.Fatalf("response output length = %d, want 3; payload=%s", got, payload)
+	}
+
+	var foundPlain, foundNamespaced bool
+	for _, item := range gjson.GetBytes(resp.Payload, "output").Array() {
+		switch item.Get("type").String() {
+		case "function_call":
+			if item.Get("name").String() == "x_keyword_search" && item.Get("namespace").String() == "acme" {
+				foundNamespaced = true
+			}
+			if item.Get("name").String() == "x_keyword_search" && item.Get("namespace").String() == "" && item.Get("call_id").String() == "call_plain" {
+				foundPlain = true
+			}
+		case "custom_tool_call":
+			t.Fatalf("internal custom_tool_call should have been filtered: %s", item.Raw)
+		}
+	}
+	if !foundPlain {
+		t.Fatalf("plain client x_keyword_search missing from response: %s", payload)
+	}
+	if !foundNamespaced {
+		t.Fatalf("namespaced client acme.x_keyword_search missing from response: %s", payload)
+	}
+}
+
+func TestXAIExecutorExecuteStreamPreservesClientSameNameToolsWithXSearch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Collision case: internal and client tools both named x_keyword_search.
+		_, _ = fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"ctc_1\",\"type\":\"custom_tool_call\",\"call_id\":\"xs_call-1\",\"name\":\"x_keyword_search\",\"input\":\"{}\",\"status\":\"completed\"}}\n\n")
+		_, _ = fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"fc_ns\",\"type\":\"function_call\",\"call_id\":\"call_ns\",\"name\":\"acme__x_keyword_search\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n")
+		_, _ = fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"id\":\"fc_plain\",\"type\":\"function_call\",\"call_id\":\"call_plain\",\"name\":\"x_keyword_search\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n")
+		_, _ = fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}],\"status\":\"completed\"}}\n\n")
+		completed := `{"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[{"id":"ctc_1","type":"custom_tool_call","call_id":"xs_call-1","name":"x_keyword_search","input":"{}"},{"id":"fc_ns","type":"function_call","call_id":"call_ns","name":"acme__x_keyword_search","arguments":"{}"},{"id":"fc_plain","type":"function_call","call_id":"call_plain","name":"x_keyword_search","arguments":"{}"},{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}]}}`
+		_, _ = fmt.Fprintf(w, "event: response.completed\ndata: %s\n\n", completed)
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "grok-4.5",
+		Payload: []byte(`{
+			"model":"grok-4.5",
+			"input":"search X",
+			"tools":[
+				{"type":"x_search"},
+				{"type":"function","name":"x_keyword_search","parameters":{"type":"object"}},
+				{"type":"namespace","name":"acme","tools":[
+					{"type":"function","name":"x_keyword_search","parameters":{"type":"object"}}
+				]}
+			]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var stream bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		stream.Write(chunk.Payload)
+		stream.WriteByte('\n')
+	}
+	streamText := stream.String()
+	if strings.Contains(streamText, "xs_call") {
+		t.Fatalf("internal X search call_id leaked downstream: %s", streamText)
+	}
+	if strings.Contains(streamText, "custom_tool_call") {
+		t.Fatalf("internal custom_tool_call leaked downstream: %s", streamText)
+	}
+
+	var foundPlain, foundNamespaced bool
+	var completed gjson.Result
+	for _, line := range strings.Split(streamText, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if !gjson.Valid(line) {
+			continue
+		}
+		event := gjson.Parse(line)
+		if event.Get("type").String() == "response.completed" {
+			completed = event
+		}
+		item := event.Get("item")
+		if !item.Exists() {
+			continue
+		}
+		if item.Get("type").String() == "custom_tool_call" {
+			t.Fatalf("internal custom_tool_call leaked in stream item: %s", item.Raw)
+		}
+		if item.Get("type").String() != "function_call" {
+			continue
+		}
+		if item.Get("name").String() == "x_keyword_search" && item.Get("namespace").String() == "acme" {
+			foundNamespaced = true
+		}
+		if item.Get("name").String() == "x_keyword_search" && item.Get("namespace").String() == "" && item.Get("call_id").String() == "call_plain" {
+			foundPlain = true
+		}
+	}
+	if !foundPlain {
+		t.Fatalf("plain client x_keyword_search missing from SSE stream: %s", streamText)
+	}
+	if !foundNamespaced {
+		t.Fatalf("namespaced client acme.x_keyword_search missing from SSE stream: %s", streamText)
+	}
+	if got := completed.Get("response.output.#").Int(); got != 3 {
+		t.Fatalf("completed output length = %d, want 3; completed=%s", got, completed.Raw)
+	}
+	if completed.Get(`response.output.#(type=="custom_tool_call")`).Exists() {
+		t.Fatalf("internal custom_tool_call present in completed output: %s", completed.Raw)
+	}
+	var completedPlain, completedNamespaced bool
+	for _, item := range completed.Get("response.output").Array() {
+		if item.Get("type").String() != "function_call" {
+			continue
+		}
+		if item.Get("name").String() == "x_keyword_search" && item.Get("namespace").String() == "acme" {
+			completedNamespaced = true
+		}
+		if item.Get("name").String() == "x_keyword_search" && item.Get("namespace").String() == "" && item.Get("call_id").String() == "call_plain" {
+			completedPlain = true
+		}
+	}
+	if !completedPlain || !completedNamespaced {
+		t.Fatalf("completed output missing client tools plain=%v namespaced=%v; completed=%s", completedPlain, completedNamespaced, completed.Raw)
+	}
+}
+
+// TestXAIExecutorExecutePreservesNormalizedCustomSameNameToolWithXSearch exercises the
+// real request path: client custom tools are normalized to upstream function, so the
+// mock must assert the outgoing function tool and feed back a function_call (not a
+// fabricated custom_tool_call that cannot occur after normalization).
+func TestXAIExecutorExecutePreservesNormalizedCustomSameNameToolWithXSearch(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read body: %v", errRead)
+			http.Error(w, errRead.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Internal X Search trace + legitimate client function_call for the normalized custom tool.
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"ctc_1\",\"type\":\"custom_tool_call\",\"call_id\":\"xs_call-1\",\"name\":\"x_keyword_search\",\"input\":\"{}\",\"status\":\"completed\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"fc_custom\",\"type\":\"function_call\",\"call_id\":\"call_custom\",\"name\":\"x_keyword_search\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}],\"status\":\"completed\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"id\":\"ctc_1\",\"type\":\"custom_tool_call\",\"call_id\":\"xs_call-1\",\"name\":\"x_keyword_search\",\"input\":\"{}\"},{\"id\":\"fc_custom\",\"type\":\"function_call\",\"call_id\":\"call_custom\",\"name\":\"x_keyword_search\",\"arguments\":\"{}\"},{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}]}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "grok-4.5",
+		Payload: []byte(`{
+			"model":"grok-4.5",
+			"input":"search X",
+			"tools":[
+				{"type":"x_search"},
+				{"type":"custom","name":"x_keyword_search"}
+			]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// Assert the client custom tool was normalized to function in the upstream request.
+	var foundNormalizedFunction bool
+	var foundRawCustom bool
+	for _, tool := range gjson.GetBytes(gotBody, "tools").Array() {
+		switch tool.Get("type").String() {
+		case "function":
+			if tool.Get("name").String() == "x_keyword_search" {
+				foundNormalizedFunction = true
+			}
+		case "custom":
+			if tool.Get("name").String() == "x_keyword_search" {
+				foundRawCustom = true
+			}
+		}
+	}
+	if !foundNormalizedFunction {
+		t.Fatalf("upstream request missing normalized function tool x_keyword_search; body=%s", gotBody)
+	}
+	if foundRawCustom {
+		t.Fatalf("upstream request still contains client custom tool type; body=%s", gotBody)
+	}
+
+	payload := string(resp.Payload)
+	if strings.Contains(payload, "xs_call") {
+		t.Fatalf("internal X search call_id leaked into response: %s", payload)
+	}
+	if strings.Contains(payload, "custom_tool_call") {
+		t.Fatalf("internal custom_tool_call leaked into response: %s", payload)
+	}
+	if got := gjson.GetBytes(resp.Payload, "output.#").Int(); got != 2 {
+		t.Fatalf("response output length = %d, want 2; payload=%s", got, payload)
+	}
+	var foundClientFunction bool
+	for _, item := range gjson.GetBytes(resp.Payload, "output").Array() {
+		if item.Get("type").String() == "function_call" &&
+			item.Get("name").String() == "x_keyword_search" &&
+			item.Get("call_id").String() == "call_custom" {
+			foundClientFunction = true
+		}
+		if item.Get("type").String() == "custom_tool_call" {
+			t.Fatalf("internal custom_tool_call should have been filtered: %s", item.Raw)
+		}
+	}
+	if !foundClientFunction {
+		t.Fatalf("normalized client custom tool function_call missing from response: %s", payload)
+	}
+}
+
+func TestXAIExecutorExecuteStreamPreservesNormalizedCustomSameNameToolWithXSearch(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read body: %v", errRead)
+			http.Error(w, errRead.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"ctc_1\",\"type\":\"custom_tool_call\",\"call_id\":\"xs_call-1\",\"name\":\"x_keyword_search\",\"input\":\"{}\",\"status\":\"completed\"}}\n\n")
+		_, _ = fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"fc_custom\",\"type\":\"function_call\",\"call_id\":\"call_custom\",\"name\":\"x_keyword_search\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n")
+		_, _ = fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}],\"status\":\"completed\"}}\n\n")
+		completed := `{"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[{"id":"ctc_1","type":"custom_tool_call","call_id":"xs_call-1","name":"x_keyword_search","input":"{}"},{"id":"fc_custom","type":"function_call","call_id":"call_custom","name":"x_keyword_search","arguments":"{}"},{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}]}}`
+		_, _ = fmt.Fprintf(w, "event: response.completed\ndata: %s\n\n", completed)
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "grok-4.5",
+		Payload: []byte(`{
+			"model":"grok-4.5",
+			"input":"search X",
+			"tools":[
+				{"type":"x_search"},
+				{"type":"custom","name":"x_keyword_search"}
+			]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var foundNormalizedFunction bool
+	var foundRawCustom bool
+	for _, tool := range gjson.GetBytes(gotBody, "tools").Array() {
+		switch tool.Get("type").String() {
+		case "function":
+			if tool.Get("name").String() == "x_keyword_search" {
+				foundNormalizedFunction = true
+			}
+		case "custom":
+			if tool.Get("name").String() == "x_keyword_search" {
+				foundRawCustom = true
+			}
+		}
+	}
+	if !foundNormalizedFunction {
+		t.Fatalf("upstream request missing normalized function tool x_keyword_search; body=%s", gotBody)
+	}
+	if foundRawCustom {
+		t.Fatalf("upstream request still contains client custom tool type; body=%s", gotBody)
+	}
+
+	var stream bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		stream.Write(chunk.Payload)
+		stream.WriteByte('\n')
+	}
+	streamText := stream.String()
+	if strings.Contains(streamText, "xs_call") {
+		t.Fatalf("internal X search call_id leaked downstream: %s", streamText)
+	}
+	if strings.Contains(streamText, "custom_tool_call") {
+		t.Fatalf("internal custom_tool_call leaked downstream: %s", streamText)
+	}
+
+	var foundClientFunction bool
+	var completed gjson.Result
+	for _, line := range strings.Split(streamText, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if !gjson.Valid(line) {
+			continue
+		}
+		event := gjson.Parse(line)
+		if event.Get("type").String() == "response.completed" {
+			completed = event
+		}
+		item := event.Get("item")
+		if !item.Exists() {
+			continue
+		}
+		if item.Get("type").String() == "custom_tool_call" {
+			t.Fatalf("internal custom_tool_call leaked in stream item: %s", item.Raw)
+		}
+		if item.Get("type").String() == "function_call" &&
+			item.Get("name").String() == "x_keyword_search" &&
+			item.Get("call_id").String() == "call_custom" {
+			foundClientFunction = true
+		}
+	}
+	if !foundClientFunction {
+		t.Fatalf("normalized client custom tool function_call missing from SSE stream: %s", streamText)
+	}
+	if got := completed.Get("response.output.#").Int(); got != 2 {
+		t.Fatalf("completed output length = %d, want 2; completed=%s", got, completed.Raw)
+	}
+	if completed.Get(`response.output.#(type=="custom_tool_call")`).Exists() {
+		t.Fatalf("internal custom_tool_call present in completed output: %s", completed.Raw)
+	}
+	var completedClientFunction bool
+	for _, item := range completed.Get("response.output").Array() {
+		if item.Get("type").String() == "function_call" &&
+			item.Get("name").String() == "x_keyword_search" &&
+			item.Get("call_id").String() == "call_custom" {
+			completedClientFunction = true
+		}
+	}
+	if !completedClientFunction {
+		t.Fatalf("completed output missing normalized client custom tool function_call: %s", completed.Raw)
 	}
 }
 
@@ -817,8 +1821,8 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 	}
 
 	tools := gjson.GetBytes(gotBody, "tools").Array()
-	if len(tools) != 5 {
-		t.Fatalf("tools length = %d, want 5; body=%s", len(tools), string(gotBody))
+	if len(tools) != 6 {
+		t.Fatalf("tools length = %d, want 6; body=%s", len(tools), string(gotBody))
 	}
 	if gjson.GetBytes(gotBody, "input.0.content").Exists() {
 		t.Fatalf("input.0.content exists, want removed; body=%s", string(gotBody))
@@ -840,13 +1844,14 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 	}
 	foundAutomationUpdate := false
 	foundNamespaceCustom := false
+	foundXSearch := false
 	for i, tool := range tools {
 		toolType := tool.Get("type").String()
 		if toolType == "image_generation" {
 			t.Fatalf("tools.%d.type = image_generation, want removed; body=%s", i, string(gotBody))
 		}
-		if toolType != "function" && toolType != "web_search" {
-			t.Fatalf("tools.%d.type = %q, want function or web_search; body=%s", i, toolType, string(gotBody))
+		if toolType != "function" && toolType != "web_search" && toolType != "x_search" {
+			t.Fatalf("tools.%d.type = %q, want function, web_search, or x_search; body=%s", i, toolType, string(gotBody))
 		}
 		if toolType == "function" && !tool.Get("parameters").Exists() {
 			t.Fatalf("tools.%d.parameters missing for xAI function tool; body=%s", i, string(gotBody))
@@ -859,6 +1864,9 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 			foundAutomationUpdate = true
 		case "codex_app__namespace_custom":
 			foundNamespaceCustom = true
+		}
+		if toolType == "x_search" {
+			foundXSearch = true
 		}
 		if toolType == "web_search" {
 			if tool.Get("external_web_access").Exists() {
@@ -874,6 +1882,9 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 	}
 	if !foundNamespaceCustom {
 		t.Fatalf("namespace custom tool was not moved to top-level tools; body=%s", string(gotBody))
+	}
+	if !foundXSearch {
+		t.Fatalf("native x_search tool was not injected; body=%s", string(gotBody))
 	}
 }
 

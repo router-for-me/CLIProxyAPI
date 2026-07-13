@@ -171,6 +171,14 @@ func TestComputeModelHashesIncludeDisplayName(t *testing.T) {
 	}
 }
 
+func TestComputeCodexModelsHashIncludesForceMapping(t *testing.T) {
+	withoutForceMapping := ComputeCodexModelsHash([]config.CodexModel{{Name: "m", Alias: "a"}})
+	withForceMapping := ComputeCodexModelsHash([]config.CodexModel{{Name: "m", Alias: "a", ForceMapping: true}})
+	if withoutForceMapping == "" || withoutForceMapping == withForceMapping {
+		t.Fatalf("force-mapping must change model hash: %q / %q", withoutForceMapping, withForceMapping)
+	}
+}
+
 func TestComputeExcludedModelsHash_Normalizes(t *testing.T) {
 	hash1 := ComputeExcludedModelsHash([]string{" A ", "b", "a"})
 	hash2 := ComputeExcludedModelsHash([]string{"a", " b", "A"})
