@@ -236,18 +236,22 @@ func TestCodexClientModelsResponse_UsesConfiguredMetadataModelID(t *testing.T) {
 	registered := make([]*registry.ModelInfo, 0, len(routes))
 	for _, route := range routes {
 		registered = append(registered, &registry.ModelInfo{
-			ID:              route,
-			MetadataModelID: "gpt-5.6-sol",
-			Object:          "model",
-			OwnedBy:         "openai",
-			Type:            "openai",
-			DisplayName:     route,
+			ID:                       route,
+			MetadataModelID:          "gpt-5.6-sol",
+			Object:                   "model",
+			OwnedBy:                  "openai",
+			Type:                     "openai-compatibility",
+			DisplayName:              route,
+			SupportedInputModalities: []string{"text"},
+			Thinking: &registry.ThinkingSupport{
+				Levels: []string{"low", "high"},
+			},
 		})
 	}
 
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "codex-metadata-model-id-test"
-	modelRegistry.RegisterClient(clientID, "codex", registered)
+	modelRegistry.RegisterClient(clientID, "openai-compatibility", registered)
 	t.Cleanup(func() {
 		modelRegistry.UnregisterClient(clientID)
 	})
@@ -286,66 +290,23 @@ func TestCodexClientModelsResponse_UsesConfiguredMetadataModelID(t *testing.T) {
 		if got := intModelValue(entry, "priority"); got != 1 {
 			t.Errorf("%s priority = %d, want 1", route, got)
 		}
-	}
-}
-
-func TestCodexClientModelsResponse_UsesMetadataModelIDForStaticCapabilities(t *testing.T) {
-	const route = "krc/claude-opus"
-	modelRegistry := registry.GetGlobalRegistry()
-	clientID := "codex-static-metadata-model-id-test"
-	modelRegistry.RegisterClient(clientID, "openai-compatibility", []*registry.ModelInfo{{
-		ID:              route,
-		MetadataModelID: "claude-opus-4-6",
-		Object:          "model",
-		OwnedBy:         "anthropic",
-		Type:            "openai-compatibility",
-		DisplayName:     "Claude Opus Route",
-		SupportedInputModalities: []string{
-			"text",
-		},
-		Thinking: &registry.ThinkingSupport{
-			Levels: []string{"low", "high"},
-		},
-	}})
-	t.Cleanup(func() {
-		modelRegistry.UnregisterClient(clientID)
-	})
-
-	resp := CodexClientModelsResponse([]map[string]any{{
-		"id":           route,
-		"display_name": "Claude Opus Route",
-	}})
-	models, ok := resp["models"].([]map[string]any)
-	if !ok || len(models) != 1 {
-		t.Fatalf("models = %#v, want one model", resp["models"])
-	}
-	if got := stringModelValue(models[0], "slug"); got != route {
-		t.Fatalf("slug = %q, want %s", got, route)
-	}
-	if got := intModelValue(models[0], "context_window"); got != 1000000 {
-		t.Fatalf("context_window = %d, want 1000000", got)
-	}
-	if got := intModelValue(models[0], "max_context_window"); got != 1000000 {
-		t.Fatalf("max_context_window = %d, want 1000000", got)
-	}
-	modalities, ok := models[0]["input_modalities"].([]any)
-	if !ok || len(modalities) != 1 || modalities[0] != "text" {
-		t.Fatalf("input_modalities = %#v, want [text]", models[0]["input_modalities"])
-	}
-	if _, exists := models[0]["supports_image_detail_original"]; exists {
-		t.Fatalf("text-only model should not expose supports_image_detail_original: %#v", models[0]["supports_image_detail_original"])
-	}
-	levels, ok := models[0]["supported_reasoning_levels"].([]any)
-	if !ok || len(levels) != 2 {
-		t.Fatalf("supported_reasoning_levels = %#v, want low and high", models[0]["supported_reasoning_levels"])
-	}
-	for index, want := range []string{"low", "high"} {
-		level, ok := levels[index].(map[string]any)
-		if !ok {
-			t.Fatalf("supported_reasoning_levels[%d] = %T, want map[string]any", index, levels[index])
+		modalities, ok := entry["input_modalities"].([]any)
+		if !ok || len(modalities) != 1 || modalities[0] != "text" {
+			t.Errorf("%s input_modalities = %#v, want [text]", route, entry["input_modalities"])
 		}
-		if got := stringModelValue(level, "effort"); got != want {
-			t.Fatalf("supported_reasoning_levels[%d] = %q, want %s", index, got, want)
+		if _, exists := entry["supports_image_detail_original"]; exists {
+			t.Errorf("%s should not expose supports_image_detail_original", route)
+		}
+		levels, ok := entry["supported_reasoning_levels"].([]any)
+		if !ok || len(levels) != 2 {
+			t.Errorf("%s supported_reasoning_levels = %#v, want low and high", route, entry["supported_reasoning_levels"])
+			continue
+		}
+		for index, want := range []string{"low", "high"} {
+			level, ok := levels[index].(map[string]any)
+			if !ok || stringModelValue(level, "effort") != want {
+				t.Errorf("%s supported_reasoning_levels[%d] = %#v, want %s", route, index, levels[index], want)
+			}
 		}
 	}
 }

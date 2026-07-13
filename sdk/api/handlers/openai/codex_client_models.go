@@ -49,7 +49,6 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 	}
 
 	result := make([]map[string]any, 0, len(models))
-	templateBackedIndexes := make(map[int]struct{})
 	for _, model := range models {
 		id := strings.TrimSpace(stringModelValue(model, "id"))
 		if id == "" {
@@ -60,7 +59,9 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 		if template, ok := templates[metadataID]; ok {
 			entry := cloneCodexClientModelMap(template)
 			entry["slug"] = id
-			templateBackedIndexes[len(result)] = struct{}{}
+			if metadataID != id {
+				applyCodexClientModelCapabilities(entry, registry.LookupModelInfo(id))
+			}
 			applyCodexClientDisplayName(entry, model)
 			sanitizeCodexClientReasoningMetadata(entry)
 			applyCodexClientVisibilityOverride(entry, id)
@@ -69,13 +70,13 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 		}
 
 		entry := cloneCodexClientModelMap(defaultTemplate)
-		applyCodexClientModelMetadata(entry, id, metadataID, model)
+		applyCodexClientModelMetadata(entry, id, model)
 		sanitizeCodexClientReasoningMetadata(entry)
 		applyCodexClientVisibilityOverride(entry, id)
 		result = append(result, entry)
 	}
 
-	applyCodexClientNonTemplatePriorities(result, templates, templateBackedIndexes)
+	applyCodexClientNonTemplatePriorities(result, templates)
 
 	sort.SliceStable(result, func(i, j int) bool {
 		return codexClientModelPriority(result[i]) < codexClientModelPriority(result[j])
@@ -95,7 +96,7 @@ func maxCodexClientTemplatePriority(templates map[string]map[string]any) int {
 	return maxPriority
 }
 
-func applyCodexClientNonTemplatePriorities(result []map[string]any, templates map[string]map[string]any, templateBackedIndexes map[int]struct{}) {
+func applyCodexClientNonTemplatePriorities(result []map[string]any, templates map[string]map[string]any) {
 	if len(result) == 0 {
 		return
 	}
@@ -109,10 +110,10 @@ func applyCodexClientNonTemplatePriorities(result []map[string]any, templates ma
 
 	pending := make([]nonTemplateEntry, 0)
 	for index, entry := range result {
-		if _, ok := templateBackedIndexes[index]; ok {
+		slug := stringModelValue(entry, "slug")
+		if _, ok := templates[codexClientMetadataModelID(slug)]; ok {
 			continue
 		}
-		slug := stringModelValue(entry, "slug")
 		displayName := stringModelValue(entry, "display_name")
 		if displayName == "" {
 			displayName = slug
@@ -191,68 +192,38 @@ func applyCodexClientDisplayName(entry map[string]any, model map[string]any) {
 	}
 }
 
-func applyCodexClientModelMetadata(entry map[string]any, id, metadataID string, model map[string]any) {
-	clientInfo := registry.LookupModelInfo(id)
-	metadataInfo := clientInfo
-	if clientInfo != nil && strings.TrimSpace(clientInfo.MetadataModelID) != "" {
-		if staticInfo := registry.LookupStaticModelInfo(metadataID); staticInfo != nil {
-			metadataInfo = staticInfo
-		} else if metadataID != id {
-			if resolvedInfo := registry.LookupModelInfo(metadataID); resolvedInfo != nil {
-				metadataInfo = resolvedInfo
-			}
-		}
+func applyCodexClientModelCapabilities(entry map[string]any, info *registry.ModelInfo) {
+	if info == nil {
+		return
 	}
+	if info.Type == registry.OpenAIImageModelType {
+		entry["visibility"] = "hide"
+		delete(entry, "input_modalities")
+		delete(entry, "supports_image_detail_original")
+	} else {
+		applyCodexClientInputModalitiesMetadata(entry, info.SupportedInputModalities)
+	}
+	applyCodexClientThinkingMetadata(entry, info.Thinking)
+}
+
+func applyCodexClientModelMetadata(entry map[string]any, id string, model map[string]any) {
+	info := registry.LookupModelInfo(id)
 
 	displayName := stringModelValue(model, "display_name")
 	description := stringModelValue(model, "description")
 	contextWindow := intModelValue(model, "context_length")
 
-	if clientInfo != nil {
-		if clientInfo.DisplayName != "" {
-			displayName = clientInfo.DisplayName
+	if info != nil {
+		if info.DisplayName != "" {
+			displayName = info.DisplayName
 		}
-		if clientInfo.Description != "" {
-			description = clientInfo.Description
+		if info.Description != "" {
+			description = info.Description
 		}
-	}
-
-	if contextWindow <= 0 && clientInfo != nil && clientInfo.ContextLength > 0 {
-		contextWindow = clientInfo.ContextLength
-	}
-	if contextWindow <= 0 && metadataInfo != nil && metadataInfo.ContextLength > 0 {
-		contextWindow = metadataInfo.ContextLength
-	}
-
-	// Canonical metadata fills missing capabilities; route-specific configuration remains authoritative.
-	capabilityInfo := metadataInfo
-	if clientInfo != nil {
-		if capabilityInfo == nil {
-			capabilityInfo = clientInfo
-		} else {
-			mergedInfo := *capabilityInfo
-			if clientInfo.Type == registry.OpenAIImageModelType {
-				mergedInfo.Type = clientInfo.Type
-			}
-			if len(clientInfo.SupportedInputModalities) > 0 {
-				mergedInfo.SupportedInputModalities = clientInfo.SupportedInputModalities
-			}
-			if clientInfo.Thinking != nil {
-				mergedInfo.Thinking = clientInfo.Thinking
-			}
-			capabilityInfo = &mergedInfo
+		if info.ContextLength > 0 {
+			contextWindow = info.ContextLength
 		}
-	}
-
-	if capabilityInfo != nil {
-		if capabilityInfo.Type == registry.OpenAIImageModelType {
-			entry["visibility"] = "hide"
-			delete(entry, "input_modalities")
-			delete(entry, "supports_image_detail_original")
-		} else {
-			applyCodexClientInputModalitiesMetadata(entry, capabilityInfo.SupportedInputModalities)
-		}
-		applyCodexClientThinkingMetadata(entry, capabilityInfo.Thinking)
+		applyCodexClientModelCapabilities(entry, info)
 	}
 
 	if displayName == "" {
