@@ -493,7 +493,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TARGET: ${{ matrix.target }}
-      GOARCH: ${{ matrix.goarch }}
+      TARGET_GOARCH: ${{ matrix.goarch }}
       ASSET_ARCH: ${{ matrix.asset_arch }}
       ASSET_SUFFIX: ${{ matrix.asset_suffix }}
     strategy:
@@ -576,7 +576,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "dist/${TARGET}/bin"
-          CGO_ENABLED=0 GOOS=freebsd GOARCH="$GOARCH" go build -buildvcs=false \
+          CGO_ENABLED=0 GOOS=freebsd GOARCH="$TARGET_GOARCH" go build -buildvcs=false \
             -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
             -o "dist/${TARGET}/bin/cli-proxy-api" ./cmd/server/
       - name: Package FreeBSD archive
