@@ -828,8 +828,11 @@ func TestManager_OpenAICompatPoolStopsAfterPaymentRequiredDisable(t *testing.T) 
 		t.Fatalf("execute models = %v, want only model-a (stopAuth)", got)
 	}
 	auth, ok := m.GetByID("pool-auth-" + t.Name())
-	if !ok || auth == nil || !auth.Disabled {
-		// Register ID uses t.Name() of this test function
+	if !ok || auth == nil {
+		t.Fatalf("auth missing after 402 disable")
+	}
+	if !auth.Disabled || auth.Status != StatusDisabled {
+		t.Fatalf("auth not disabled: disabled=%v status=%s", auth.Disabled, auth.Status)
 	}
 
 	// Count path
