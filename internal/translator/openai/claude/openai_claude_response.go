@@ -338,9 +338,9 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 	// Only process if usage has actual values (not null)
 	if param.FinishReason != "" {
 		usage := root.Get("usage")
-		var inputTokens, outputTokens, cachedTokens int64
+		var inputTokens, outputTokens, cachedTokens, cacheCreationTokens int64
 		if usage.Exists() && usage.Type != gjson.Null {
-			inputTokens, outputTokens, cachedTokens = extractOpenAIUsage(usage)
+			inputTokens, outputTokens, cachedTokens, cacheCreationTokens = extractOpenAIUsage(usage)
 			// Send message_delta with usage
 			messageDeltaJSON := []byte(`{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
 			messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "delta.stop_reason", mapOpenAIFinishReasonToAnthropic(effectiveOpenAIFinishReason(param)))
@@ -348,6 +348,9 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 			messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.output_tokens", outputTokens)
 			if cachedTokens > 0 {
 				messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.cache_read_input_tokens", cachedTokens)
+			}
+			if cacheCreationTokens > 0 {
+				messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.cache_creation_input_tokens", cacheCreationTokens)
 			}
 			results = append(results, translatorcommon.AppendSSEEventBytes(nil, "message_delta", messageDeltaJSON, 2))
 			param.MessageDeltaSent = true
@@ -476,11 +479,14 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 
 	// Set usage information
 	if usage := root.Get("usage"); usage.Exists() {
-		inputTokens, outputTokens, cachedTokens := extractOpenAIUsage(usage)
+		inputTokens, outputTokens, cachedTokens, cacheCreationTokens := extractOpenAIUsage(usage)
 		out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
 		out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
 		if cachedTokens > 0 {
 			out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", cachedTokens)
+		}
+		if cacheCreationTokens > 0 {
+			out, _ = sjson.SetBytes(out, "usage.cache_creation_input_tokens", cacheCreationTokens)
 		}
 	}
 
@@ -749,11 +755,14 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 	}
 
 	if respUsage := root.Get("usage"); respUsage.Exists() {
-		inputTokens, outputTokens, cachedTokens := extractOpenAIUsage(respUsage)
+		inputTokens, outputTokens, cachedTokens, cacheCreationTokens := extractOpenAIUsage(respUsage)
 		out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
 		out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
 		if cachedTokens > 0 {
 			out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", cachedTokens)
+		}
+		if cacheCreationTokens > 0 {
+			out, _ = sjson.SetBytes(out, "usage.cache_creation_input_tokens", cacheCreationTokens)
 		}
 	}
 
@@ -772,14 +781,18 @@ func ClaudeTokenCount(ctx context.Context, count int64) []byte {
 	return translatorcommon.ClaudeInputTokensJSON(count)
 }
 
-func extractOpenAIUsage(usage gjson.Result) (int64, int64, int64) {
+func extractOpenAIUsage(usage gjson.Result) (int64, int64, int64, int64) {
 	if !usage.Exists() || usage.Type == gjson.Null {
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
 
 	inputTokens := usage.Get("prompt_tokens").Int()
 	outputTokens := usage.Get("completion_tokens").Int()
 	cachedTokens := usage.Get("prompt_tokens_details.cached_tokens").Int()
+	cacheCreationTokens := usage.Get("prompt_tokens_details.cache_write_tokens").Int()
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = usage.Get("prompt_tokens_details.cache_creation_tokens").Int()
+	}
 
 	if cachedTokens > 0 {
 		if inputTokens >= cachedTokens {
@@ -788,6 +801,13 @@ func extractOpenAIUsage(usage gjson.Result) (int64, int64, int64) {
 			inputTokens = 0
 		}
 	}
+	if cacheCreationTokens > 0 {
+		if inputTokens >= cacheCreationTokens {
+			inputTokens -= cacheCreationTokens
+		} else {
+			inputTokens = 0
+		}
+	}
 
-	return inputTokens, outputTokens, cachedTokens
+	return inputTokens, outputTokens, cachedTokens, cacheCreationTokens
 }

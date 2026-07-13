@@ -1250,3 +1250,132 @@ func firstClaudeStreamPayloadForEvent(output, event string) (gjson.Result, bool)
 	}
 	return gjson.Result{}, false
 }
+
+func TestExtractResponsesUsage_CacheReadAndWrite(t *testing.T) {
+	tests := []struct {
+		name              string
+		usageJSON         string
+		wantInput         int64
+		wantOutput        int64
+		wantCached        int64
+		wantCacheCreation int64
+	}{
+		{
+			name:              "cache read only",
+			usageJSON:         `{"input_tokens":9818,"output_tokens":20,"input_tokens_details":{"cached_tokens":9472}}`,
+			wantInput:         346,
+			wantOutput:        20,
+			wantCached:        9472,
+			wantCacheCreation: 0,
+		},
+		{
+			name:              "cache write tokens",
+			usageJSON:         `{"input_tokens":2000,"output_tokens":30,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":1500}}`,
+			wantInput:         500,
+			wantOutput:        30,
+			wantCached:        0,
+			wantCacheCreation: 1500,
+		},
+		{
+			name:              "cache creation alias",
+			usageJSON:         `{"input_tokens":2000,"output_tokens":30,"input_tokens_details":{"cache_creation_tokens":400}}`,
+			wantInput:         1600,
+			wantOutput:        30,
+			wantCached:        0,
+			wantCacheCreation: 400,
+		},
+		{
+			name:              "read and write together",
+			usageJSON:         `{"input_tokens":9818,"output_tokens":20,"input_tokens_details":{"cached_tokens":9472,"cache_write_tokens":100}}`,
+			wantInput:         246,
+			wantOutput:        20,
+			wantCached:        9472,
+			wantCacheCreation: 100,
+		},
+		{
+			name:              "malformed cached tokens cannot go negative",
+			usageJSON:         `{"input_tokens":10,"output_tokens":1,"input_tokens_details":{"cached_tokens":50,"cache_write_tokens":3}}`,
+			wantInput:         0,
+			wantOutput:        1,
+			wantCached:        50,
+			wantCacheCreation: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input, output, cached, creation := extractResponsesUsage(gjson.Parse(tt.usageJSON))
+			if input != tt.wantInput || output != tt.wantOutput || cached != tt.wantCached || creation != tt.wantCacheCreation {
+				t.Fatalf("got input=%d output=%d cached=%d creation=%d, want %d %d %d %d",
+					input, output, cached, creation, tt.wantInput, tt.wantOutput, tt.wantCached, tt.wantCacheCreation)
+			}
+		})
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamEmitsCacheUsage(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	outputs := ConvertCodexResponseToClaude(
+		ctx,
+		"",
+		[]byte(`{"messages":[]}`),
+		nil,
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":9818,"output_tokens":20,"input_tokens_details":{"cached_tokens":9472,"cache_write_tokens":111}},"output":[]}}`),
+		&param,
+	)
+
+	messageDelta, ok := findClaudeStreamMessageDelta(outputs)
+	if !ok {
+		t.Fatalf("message_delta not found in outputs: %v", outputs)
+	}
+	if got := messageDelta.Get("usage.input_tokens").Int(); got != 235 {
+		t.Fatalf("input_tokens = %d, want 235", got)
+	}
+	if got := messageDelta.Get("usage.output_tokens").Int(); got != 20 {
+		t.Fatalf("output_tokens = %d, want 20", got)
+	}
+	if got := messageDelta.Get("usage.cache_read_input_tokens").Int(); got != 9472 {
+		t.Fatalf("cache_read_input_tokens = %d, want 9472", got)
+	}
+	if got := messageDelta.Get("usage.cache_creation_input_tokens").Int(); got != 111 {
+		t.Fatalf("cache_creation_input_tokens = %d, want 111", got)
+	}
+	if got := messageDelta.Get("usage.cache_creation.ephemeral_5m_input_tokens").Int(); got != 111 {
+		t.Fatalf("ephemeral_5m_input_tokens = %d, want 111", got)
+	}
+	if messageDelta.Get("usage.cache_creation.ephemeral_1h_input_tokens").Exists() && messageDelta.Get("usage.cache_creation.ephemeral_1h_input_tokens").Int() != 0 {
+		t.Fatalf("ephemeral_1h_input_tokens should be absent or 0, got %d", messageDelta.Get("usage.cache_creation.ephemeral_1h_input_tokens").Int())
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_EmitsCacheUsage(t *testing.T) {
+	ctx := context.Background()
+	out := ConvertCodexResponseToClaudeNonStream(
+		ctx,
+		"",
+		[]byte(`{"messages":[]}`),
+		nil,
+		[]byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5","stop_reason":"stop","usage":{"input_tokens":9818,"output_tokens":20,"input_tokens_details":{"cached_tokens":9472,"cache_write_tokens":111}},"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}`),
+		nil,
+	)
+	parsed := gjson.ParseBytes(out)
+	if got := parsed.Get("usage.input_tokens").Int(); got != 235 {
+		t.Fatalf("input_tokens = %d, want 235. Output: %s", got, string(out))
+	}
+	if got := parsed.Get("usage.output_tokens").Int(); got != 20 {
+		t.Fatalf("output_tokens = %d, want 20. Output: %s", got, string(out))
+	}
+	if got := parsed.Get("usage.cache_read_input_tokens").Int(); got != 9472 {
+		t.Fatalf("cache_read_input_tokens = %d, want 9472. Output: %s", got, string(out))
+	}
+	if got := parsed.Get("usage.cache_creation_input_tokens").Int(); got != 111 {
+		t.Fatalf("cache_creation_input_tokens = %d, want 111. Output: %s", got, string(out))
+	}
+	if got := parsed.Get("usage.cache_creation.ephemeral_5m_input_tokens").Int(); got != 111 {
+		t.Fatalf("ephemeral_5m_input_tokens = %d, want 111. Output: %s", got, string(out))
+	}
+	if parsed.Get("usage.cache_creation.ephemeral_1h_input_tokens").Exists() && parsed.Get("usage.cache_creation.ephemeral_1h_input_tokens").Int() != 0 {
+		t.Fatalf("ephemeral_1h_input_tokens should be absent or 0, got %d. Output: %s", parsed.Get("usage.cache_creation.ephemeral_1h_input_tokens").Int(), string(out))
+	}
+}
