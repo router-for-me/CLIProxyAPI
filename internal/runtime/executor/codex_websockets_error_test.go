@@ -68,3 +68,17 @@ func TestCodexWebsocketStatuslessErrorEventPreservesTopLevelError(t *testing.T) 
 		})
 	}
 }
+
+func TestCodexWebsocketStatuslessErrorEventUsesTopLevelErrorType(t *testing.T) {
+	err, ok := codexWebsocketStatuslessErrorEvent([]byte(`{"type":"error","error_type":"invalid_request_error","message":"bad request"}`))
+	if !ok {
+		t.Fatal("expected statusless websocket error")
+	}
+	statusErr, ok := err.(interface{ StatusCode() int })
+	if !ok || statusErr.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("status = %#v, want %d", err, http.StatusBadRequest)
+	}
+	if got := gjson.Get(err.Error(), "error.type").String(); got != "invalid_request_error" {
+		t.Fatalf("error type = %q, want invalid_request_error", got)
+	}
+}

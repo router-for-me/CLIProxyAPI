@@ -2008,6 +2008,9 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 		errType = strings.TrimSpace(gjson.GetBytes(payload, "body.error.type").String())
 	}
 	if errType == "" {
+		errType = strings.TrimSpace(gjson.GetBytes(payload, "error_type").String())
+	}
+	if errType == "" {
 		topLevelType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
 		if !strings.EqualFold(topLevelType, wsEventTypeError) {
 			errType = topLevelType
