@@ -174,6 +174,7 @@ func TestPatchAndDeleteNotificationWebhook(t *testing.T) {
 	if got := h.cfg.Notifications.Webhooks[1].URL; got != "https://example.test/slack-2" {
 		t.Fatalf("patched url = %q, want slack-2 url", got)
 	}
+	sharedBeforeDelete := h.cfg.Notifications.Webhooks
 
 	deleteRec := httptest.NewRecorder()
 	deleteCtx, _ := gin.CreateTestContext(deleteRec)
@@ -189,5 +190,8 @@ func TestPatchAndDeleteNotificationWebhook(t *testing.T) {
 	}
 	if got := h.cfg.Notifications.Webhooks[0].Name; got != "slack" {
 		t.Fatalf("remaining webhook = %q, want slack", got)
+	}
+	if sharedBeforeDelete[0].Name != "feishu" || sharedBeforeDelete[1].Name != "slack" {
+		t.Fatalf("delete mutated shared webhook slice: %+v", sharedBeforeDelete)
 	}
 }

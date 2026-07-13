@@ -116,7 +116,10 @@ func (h *Handler) DeleteNotificationWebhook(c *gin.Context) {
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
 		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil && idx >= 0 && idx < len(h.cfg.Notifications.Webhooks) {
-			h.cfg.Notifications.Webhooks = append(h.cfg.Notifications.Webhooks[:idx], h.cfg.Notifications.Webhooks[idx+1:]...)
+			next := make([]config.NotificationWebhookConfig, 0, len(h.cfg.Notifications.Webhooks)-1)
+			next = append(next, h.cfg.Notifications.Webhooks[:idx]...)
+			next = append(next, h.cfg.Notifications.Webhooks[idx+1:]...)
+			h.cfg.Notifications.Webhooks = next
 			h.persistLocked(c)
 			return
 		}

@@ -546,6 +546,53 @@ func TestWebhookDispatcherRetriesFailedDelivery(t *testing.T) {
 	}
 }
 
+func TestWebhookDispatcherSlowDeliveryDoesNotBlockOtherHooks(t *testing.T) {
+	slowStarted := make(chan struct{}, 1)
+	releaseSlow := make(chan struct{})
+	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		slowStarted <- struct{}{}
+		<-releaseSlow
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer slowServer.Close()
+	defer close(releaseSlow)
+
+	fastRequests := make(chan struct{}, 1)
+	fastServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fastRequests <- struct{}{}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer fastServer.Close()
+
+	dispatcher := newWebhookDispatcher(http.DefaultClient)
+	dispatcher.configure([]config.NotificationWebhookConfig{
+		{
+			Name:    "slow",
+			URL:     slowServer.URL,
+			Adapter: "generic",
+			Events:  []string{EventAuthRequestFailed},
+		},
+		{
+			Name:    "fast",
+			URL:     fastServer.URL,
+			Adapter: "generic",
+			Events:  []string{EventAuthRequestFailed},
+		},
+	})
+	dispatcher.publishEvent(webhookTestEvent(EventAuthRequestFailed, "codex", http.StatusTooManyRequests))
+
+	select {
+	case <-slowStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for slow webhook delivery")
+	}
+	select {
+	case <-fastRequests:
+	case <-time.After(time.Second):
+		t.Fatal("slow webhook blocked delivery to another hook")
+	}
+}
+
 func webhookTestEvent(eventType, provider string, statusCode int) Event {
 	return Event{
 		Type:        eventType,

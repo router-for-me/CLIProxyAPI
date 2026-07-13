@@ -26,6 +26,7 @@ const (
 	SeverityError = "error"
 
 	webhookQueueSize           = 256
+	webhookWorkerCount         = 4
 	webhookUserAgent           = "CLIProxyAPI"
 	webhookDedupePruneInterval = time.Minute
 )
@@ -91,7 +92,9 @@ func newWebhookDispatcher(client *http.Client) *webhookDispatcher {
 		queue:    make(chan webhookDelivery, webhookQueueSize),
 		lastSent: make(map[string]time.Time),
 	}
-	go dispatcher.worker()
+	for range webhookWorkerCount {
+		go dispatcher.worker()
+	}
 	return dispatcher
 }
 
@@ -804,17 +807,6 @@ func formatWebhookText(event Event) string {
 	appendTextField(&b, "message", event.Message)
 	appendTextField(&b, "service_url", event.ServiceURL)
 	return b.String()
-}
-
-func appendURLPath(rawURL, path string) string {
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return ""
-	}
-	parsed.Path = path
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	return parsed.String()
 }
 
 func managementPanelURL(rawURL string) string {
