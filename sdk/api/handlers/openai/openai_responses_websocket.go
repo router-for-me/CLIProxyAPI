@@ -2014,7 +2014,9 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 		}
 	}
 	if status <= 0 {
-		if strings.EqualFold(errCode, "previous_response_not_found") || strings.EqualFold(errType, "invalid_request_error") {
+		if strings.EqualFold(errCode, "websocket_connection_limit_reached") {
+			status = http.StatusTooManyRequests
+		} else if strings.EqualFold(errCode, "previous_response_not_found") || strings.EqualFold(errType, "invalid_request_error") {
 			status = http.StatusBadRequest
 		} else {
 			status = http.StatusInternalServerError
