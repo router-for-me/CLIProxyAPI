@@ -13,6 +13,16 @@ import (
 // DefaultServiceTier is used when a request does not specify service_tier.
 const DefaultServiceTier = "default"
 
+// CacheInputMode describes whether fine-grained cache tokens are already
+// included in InputTokens. The zero value is intentionally unknown so older
+// plugins and usage consumers remain backward compatible.
+type CacheInputMode string
+
+const (
+	CacheInputModeIncluded CacheInputMode = "included_in_input"
+	CacheInputModeSeparate CacheInputMode = "separate_from_input"
+)
+
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
 	Provider string
@@ -53,6 +63,7 @@ type Detail struct {
 	CachedTokens        int64
 	CacheReadTokens     int64
 	CacheCreationTokens int64
+	CacheInputMode      CacheInputMode
 	TotalTokens         int64
 }
 
