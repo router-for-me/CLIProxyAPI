@@ -84,6 +84,10 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
 	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
 
+	if h.writeClaudeMaxTokensOneProbeResponse(c, rawJSON) {
+		return
+	}
+
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if !streamResult.Exists() || streamResult.Type == gjson.False {
@@ -147,6 +151,79 @@ func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 		return rawJSON
 	}
 	return updated
+}
+
+func (h *ClaudeCodeAPIHandler) writeClaudeMaxTokensOneProbeResponse(c *gin.Context, rawJSON []byte) bool {
+	if !isClaudeMaxTokensOneProbe(rawJSON) {
+		return false
+	}
+
+	streamResult := gjson.GetBytes(rawJSON, "stream")
+	if streamResult.Exists() && streamResult.Type == gjson.True {
+		h.writeClaudeMaxTokensOneProbeStream(c, rawJSON)
+		return true
+	}
+
+	body := claudeMaxTokensOneProbeBody(rawJSON)
+	appendClaudeAPIResponse(c, body)
+	c.Header("Content-Type", "application/json")
+	c.Status(http.StatusOK)
+	_, _ = c.Writer.Write(body)
+	return true
+}
+
+func isClaudeMaxTokensOneProbe(rawJSON []byte) bool {
+	maxTokens := gjson.GetBytes(rawJSON, "max_tokens")
+	return maxTokens.Exists() && maxTokens.Type == gjson.Number && maxTokens.Int() == 1
+}
+
+func claudeMaxTokensOneProbeBody(rawJSON []byte) []byte {
+	body := []byte(`{"id":"msg_cli_proxy_probe","type":"message","role":"assistant","model":"","content":[{"type":"text","text":"ok"}],"stop_reason":"max_tokens","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
+	if model := gjson.GetBytes(rawJSON, "model").String(); model != "" {
+		if updated, err := sjson.SetBytes(body, "model", model); err == nil {
+			body = updated
+		}
+	}
+	return body
+}
+
+func (h *ClaudeCodeAPIHandler) writeClaudeMaxTokensOneProbeStream(c *gin.Context, rawJSON []byte) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("Access-Control-Allow-Origin", "*")
+
+	model := gjson.GetBytes(rawJSON, "model").String()
+	messageStart := []byte(`{"type":"message_start","message":{"id":"msg_cli_proxy_probe","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`)
+	if model != "" {
+		if updated, err := sjson.SetBytes(messageStart, "message.model", model); err == nil {
+			messageStart = updated
+		}
+	}
+
+	var stream bytes.Buffer
+	appendClaudeSSEEvent(&stream, "message_start", messageStart)
+	appendClaudeSSEEvent(&stream, "content_block_start", []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`))
+	appendClaudeSSEEvent(&stream, "content_block_delta", []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`))
+	appendClaudeSSEEvent(&stream, "content_block_stop", []byte(`{"type":"content_block_stop","index":0}`))
+	appendClaudeSSEEvent(&stream, "message_delta", []byte(`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`))
+	appendClaudeSSEEvent(&stream, "message_stop", []byte(`{"type":"message_stop"}`))
+
+	body := stream.Bytes()
+	appendClaudeAPIResponse(c, body)
+	c.Status(http.StatusOK)
+	_, _ = c.Writer.Write(body)
+	if flusher, ok := c.Writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func appendClaudeSSEEvent(buf *bytes.Buffer, event string, payload []byte) {
+	_, _ = buf.WriteString("event: ")
+	_, _ = buf.WriteString(event)
+	_, _ = buf.WriteString("\ndata: ")
+	_, _ = buf.Write(payload)
+	_, _ = buf.WriteString("\n\n")
 }
 
 // ClaudeModels handles the Claude models listing endpoint.
