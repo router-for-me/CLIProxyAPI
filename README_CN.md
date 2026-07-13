@@ -107,7 +107,9 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
   ```bash
   mkdir -p ~/.cli-proxy-api
-  cp "$(brew --prefix)/etc/cliproxyapi.conf" ~/.cli-proxy-api/config.yaml
+  if [ ! -f ~/.cli-proxy-api/config.yaml ]; then
+    cp "$(brew --prefix)/etc/cliproxyapi.conf" ~/.cli-proxy-api/config.yaml
+  fi
   ln -sf ~/.cli-proxy-api/config.yaml "$(brew --prefix)/etc/cliproxyapi.conf"
   ```
 
