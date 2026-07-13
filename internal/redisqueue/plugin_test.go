@@ -34,8 +34,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			AuthType:            "apikey",
 			Source:              "user@example.com",
 			ReasoningEffort:     "medium",
-			ServiceTier:         "default",
-			RequestServiceTier:  "auto",
+			ServiceTier:         "auto",
 			ResponseServiceTier: "default",
 			RequestedAt:         time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
 			Latency:             1500 * time.Millisecond,
@@ -58,8 +57,8 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireMissingField(t, payload, "user_api_key")
 		requireStringField(t, payload, "request_id", "ctx-request-id")
 		requireStringField(t, payload, "reasoning_effort", "medium")
-		requireStringField(t, payload, "service_tier", "default")
-		requireStringField(t, payload, "request_service_tier", "auto")
+		requireStringField(t, payload, "service_tier", "auto")
+		requireMissingField(t, payload, "request_service_tier")
 		requireStringField(t, payload, "response_service_tier", "default")
 		requireTokensBoolField(t, payload, "cache_read_tokens_present", true)
 		requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
@@ -96,10 +95,9 @@ func TestUsageQueuePluginMarksCanonicalZeroCacheRead(t *testing.T) {
 	})
 }
 
-func TestUsageQueuePluginPreservesLegacyTierAndEmitsCanonicalAutoTier(t *testing.T) {
+func TestUsageQueuePluginEmitsSingleCanonicalAutoTier(t *testing.T) {
 	withEnabledQueue(t, func() {
-		ctx := coreusage.WithServiceTier(context.Background(), "default")
-		ctx = coreusage.WithRequestServiceTier(ctx, "auto")
+		ctx := coreusage.WithServiceTier(context.Background(), coreusage.AutoServiceTier)
 		ctx = internallogging.WithResponseStatusHolder(ctx)
 		internallogging.SetResponseStatus(ctx, http.StatusOK)
 
@@ -113,8 +111,26 @@ func TestUsageQueuePluginPreservesLegacyTierAndEmitsCanonicalAutoTier(t *testing
 		})
 
 		payload := popSinglePayload(t)
-		requireStringField(t, payload, "service_tier", "default")
-		requireStringField(t, payload, "request_service_tier", "auto")
+		requireStringField(t, payload, "service_tier", "auto")
+		requireMissingField(t, payload, "request_service_tier")
+	})
+}
+
+func TestUsageQueuePluginAcceptsDeprecatedRequestTierRecordField(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider:           "openai",
+			Model:              "gpt-5.4",
+			RequestServiceTier: "priority",
+			Detail:             coreusage.Detail{InputTokens: 1, TotalTokens: 1},
+		})
+
+		payload := popSinglePayload(t)
+		requireStringField(t, payload, "service_tier", "priority")
+		requireMissingField(t, payload, "request_service_tier")
 	})
 }
 

@@ -10,12 +10,12 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// DefaultServiceTier preserves the legacy service_tier value when a request does
-// not specify service_tier.
+// DefaultServiceTier is retained for direct SDK and non-OpenAI usage callers.
 const DefaultServiceTier = "default"
 
-// AutoServiceTier is the canonical request_service_tier value when a request
-// does not specify service_tier.
+// AutoServiceTier is the OpenAI request semantics when service_tier is omitted.
+// OpenAI HTTP handlers set it explicitly, without changing other providers'
+// historical direct-SDK default.
 const AutoServiceTier = "auto"
 
 // Record contains the usage statistics captured for a single provider request.
@@ -32,9 +32,10 @@ type Record struct {
 	Source       string
 	// ReasoningEffort stores the translated upstream thinking level for request event logs.
 	ReasoningEffort string
-	// ServiceTier stores the legacy service_tier value for older usage sinks.
+	// ServiceTier stores the client-requested service tier.
 	ServiceTier string
-	// RequestServiceTier stores the canonical client-requested service tier.
+	// RequestServiceTier is a deprecated input alias for older SDK callers. New
+	// records must use ServiceTier and are emitted with service_tier only.
 	RequestServiceTier string
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string
@@ -69,7 +70,6 @@ type Detail struct {
 type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
-type requestServiceTierContextKey struct{}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
@@ -127,7 +127,7 @@ func ReasoningEffortFromContext(ctx context.Context) string {
 	}
 }
 
-// WithServiceTier stores the legacy service_tier value for usage sinks.
+// WithServiceTier stores the client-requested service tier for usage sinks.
 func WithServiceTier(ctx context.Context, tier string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -136,14 +136,10 @@ func WithServiceTier(ctx context.Context, tier string) context.Context {
 	if tier == "" {
 		tier = DefaultServiceTier
 	}
-	ctx = context.WithValue(ctx, serviceTierContextKey{}, tier)
-	if _, exists := requestServiceTierContextValue(ctx); !exists {
-		ctx = context.WithValue(ctx, requestServiceTierContextKey{}, tier)
-	}
-	return ctx
+	return context.WithValue(ctx, serviceTierContextKey{}, tier)
 }
 
-// ServiceTierFromContext returns the legacy service_tier value stored in ctx.
+// ServiceTierFromContext returns the client-requested service tier stored in ctx.
 func ServiceTierFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return DefaultServiceTier
@@ -167,42 +163,16 @@ func ServiceTierFromContext(ctx context.Context) string {
 	}
 }
 
-// WithRequestServiceTier stores the canonical client-requested service tier for
-// usage sinks.
+// WithRequestServiceTier is retained for source compatibility. New callers must
+// use WithServiceTier; both names write the same value.
 func WithRequestServiceTier(ctx context.Context, tier string) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	tier = strings.TrimSpace(tier)
-	if tier == "" {
-		tier = AutoServiceTier
-	}
-	return context.WithValue(ctx, requestServiceTierContextKey{}, tier)
+	return WithServiceTier(ctx, tier)
 }
 
-// RequestServiceTierFromContext returns the canonical client-requested service
-// tier stored in ctx.
+// RequestServiceTierFromContext is retained for source compatibility. New
+// callers must use ServiceTierFromContext.
 func RequestServiceTierFromContext(ctx context.Context) string {
-	tier, exists := requestServiceTierContextValue(ctx)
-	if !exists || tier == "" {
-		return AutoServiceTier
-	}
-	return tier
-}
-
-func requestServiceTierContextValue(ctx context.Context) (string, bool) {
-	if ctx == nil {
-		return "", false
-	}
-	raw := ctx.Value(requestServiceTierContextKey{})
-	switch value := raw.(type) {
-	case string:
-		return strings.TrimSpace(value), true
-	case []byte:
-		return strings.TrimSpace(string(value)), true
-	default:
-		return "", false
-	}
+	return ServiceTierFromContext(ctx)
 }
 
 // Plugin consumes usage records emitted by the proxy runtime.

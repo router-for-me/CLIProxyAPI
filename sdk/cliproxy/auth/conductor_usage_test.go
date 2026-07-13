@@ -11,10 +11,9 @@ import (
 func TestContextWithRequestedModelAliasIncludesReasoningEffort(t *testing.T) {
 	ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{
 		Metadata: map[string]any{
-			cliproxyexecutor.RequestedModelMetadataKey:     "client-model",
-			cliproxyexecutor.ReasoningEffortMetadataKey:    "medium",
-			cliproxyexecutor.ServiceTierMetadataKey:        "default",
-			cliproxyexecutor.RequestServiceTierMetadataKey: "auto",
+			cliproxyexecutor.RequestedModelMetadataKey:  "client-model",
+			cliproxyexecutor.ReasoningEffortMetadataKey: "medium",
+			cliproxyexecutor.ServiceTierMetadataKey:     "auto",
 		},
 	}, "fallback-model")
 
@@ -25,18 +24,18 @@ func TestContextWithRequestedModelAliasIncludesReasoningEffort(t *testing.T) {
 		t.Fatalf("reasoning effort = %q, want %q", got, "medium")
 	}
 	gotServiceTier := coreusage.ServiceTierFromContext(ctx)
-	if gotServiceTier != "default" {
-		t.Fatalf("service tier = %q, want %q", gotServiceTier, "default")
+	if gotServiceTier != "auto" {
+		t.Fatalf("service tier = %q, want %q", gotServiceTier, "auto")
 	}
 	if gotRequestServiceTier := coreusage.RequestServiceTierFromContext(ctx); gotRequestServiceTier != "auto" {
-		t.Fatalf("request service tier = %q, want %q", gotRequestServiceTier, "auto")
+		t.Fatalf("deprecated request service tier = %q, want %q", gotRequestServiceTier, "auto")
 	}
 }
 
-func TestContextWithRequestedModelAliasUsesLegacyTierWhenCanonicalTierIsAbsent(t *testing.T) {
+func TestContextWithRequestedModelAliasAcceptsDeprecatedTierMetadata(t *testing.T) {
 	ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{
 		Metadata: map[string]any{
-			cliproxyexecutor.ServiceTierMetadataKey: "priority",
+			cliproxyexecutor.RequestServiceTierMetadataKey: "priority",
 		},
 	}, "fallback-model")
 

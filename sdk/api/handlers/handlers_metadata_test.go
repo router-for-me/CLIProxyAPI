@@ -48,8 +48,8 @@ func TestSetServiceTierMetadataExtractsValue(t *testing.T) {
 	if gotServiceTier != "priority" {
 		t.Fatalf("ServiceTierMetadataKey = %v, want %q", gotServiceTier, "priority")
 	}
-	if gotRequestServiceTier := meta[coreexecutor.RequestServiceTierMetadataKey]; gotRequestServiceTier != "priority" {
-		t.Fatalf("RequestServiceTierMetadataKey = %v, want %q", gotRequestServiceTier, "priority")
+	if _, exists := meta[coreexecutor.RequestServiceTierMetadataKey]; exists {
+		t.Fatal("unexpected deprecated request_service_tier metadata")
 	}
 }
 
@@ -59,11 +59,8 @@ func TestSetServiceTierMetadataDefaultsWhenMissing(t *testing.T) {
 	setServiceTierMetadata(meta, []byte(`{"model":"gpt-5.4"}`))
 
 	gotServiceTier := meta[coreexecutor.ServiceTierMetadataKey]
-	if gotServiceTier != "default" {
-		t.Fatalf("ServiceTierMetadataKey = %v, want %q", gotServiceTier, "default")
-	}
-	if gotRequestServiceTier := meta[coreexecutor.RequestServiceTierMetadataKey]; gotRequestServiceTier != "auto" {
-		t.Fatalf("RequestServiceTierMetadataKey = %v, want %q", gotRequestServiceTier, "auto")
+	if gotServiceTier != "auto" {
+		t.Fatalf("ServiceTierMetadataKey = %v, want %q", gotServiceTier, "auto")
 	}
 }
 
@@ -74,8 +71,5 @@ func TestSetServiceTierMetadataPreservesExplicitDefault(t *testing.T) {
 
 	if gotServiceTier := meta[coreexecutor.ServiceTierMetadataKey]; gotServiceTier != "default" {
 		t.Fatalf("ServiceTierMetadataKey = %v, want %q", gotServiceTier, "default")
-	}
-	if gotRequestServiceTier := meta[coreexecutor.RequestServiceTierMetadataKey]; gotRequestServiceTier != "default" {
-		t.Fatalf("RequestServiceTierMetadataKey = %v, want %q", gotRequestServiceTier, "default")
 	}
 }

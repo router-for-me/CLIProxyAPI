@@ -24,10 +24,11 @@ const AuthSelectionModelMetadataKey = "auth_selection_model"
 // ReasoningEffortMetadataKey stores the client-requested reasoning effort for usage logs.
 const ReasoningEffortMetadataKey = "reasoning_effort"
 
-// ServiceTierMetadataKey stores the legacy service tier for usage logs.
+// ServiceTierMetadataKey stores the client-requested service tier for usage logs.
 const ServiceTierMetadataKey = "service_tier"
 
-// RequestServiceTierMetadataKey stores the canonical client-requested service tier for usage logs.
+// RequestServiceTierMetadataKey is the deprecated metadata alias used by older
+// SDK callers. New callers must use ServiceTierMetadataKey.
 const RequestServiceTierMetadataKey = "request_service_tier"
 
 const (

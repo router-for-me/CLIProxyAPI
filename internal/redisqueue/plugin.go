@@ -57,13 +57,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
 	}
 	serviceTier := strings.TrimSpace(record.ServiceTier)
-	requestServiceTier := strings.TrimSpace(record.RequestServiceTier)
-	if requestServiceTier == "" {
-		if serviceTier != "" {
-			requestServiceTier = serviceTier
-		} else {
-			requestServiceTier = coreusage.RequestServiceTierFromContext(ctx)
-		}
+	if serviceTier == "" {
+		serviceTier = strings.TrimSpace(record.RequestServiceTier)
 	}
 	if serviceTier == "" {
 		serviceTier = coreusage.ServiceTierFromContext(ctx)
@@ -117,7 +112,6 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		RequestID:           requestID,
 		ReasoningEffort:     reasoningEffort,
 		ServiceTier:         serviceTier,
-		RequestServiceTier:  requestServiceTier,
 		ResponseServiceTier: responseServiceTier,
 	})
 	if err != nil {
@@ -138,7 +132,6 @@ type queuedUsageDetail struct {
 	RequestID           string `json:"request_id"`
 	ReasoningEffort     string `json:"reasoning_effort"`
 	ServiceTier         string `json:"service_tier"`
-	RequestServiceTier  string `json:"request_service_tier"`
 	ResponseServiceTier string `json:"response_service_tier,omitempty"`
 }
 

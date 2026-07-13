@@ -3025,15 +3025,11 @@ func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.O
 		ctx = coreusage.WithReasoningEffort(ctx, effort)
 	}
 	serviceTier := serviceTierFromOptions(opts)
+	if serviceTier == "" {
+		serviceTier = requestServiceTierFromOptions(opts)
+	}
 	if serviceTier != "" {
 		ctx = coreusage.WithServiceTier(ctx, serviceTier)
-	}
-	requestServiceTier := requestServiceTierFromOptions(opts)
-	if requestServiceTier == "" {
-		requestServiceTier = serviceTier
-	}
-	if requestServiceTier != "" {
-		ctx = coreusage.WithRequestServiceTier(ctx, requestServiceTier)
 	}
 	return ctx
 }
