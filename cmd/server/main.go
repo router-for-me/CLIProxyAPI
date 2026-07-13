@@ -107,7 +107,7 @@ func main() {
 	flag.BoolVar(&homeDisableClusterDiscovery, "home-disable-cluster-discovery", false, "Disable Home CLUSTER NODES discovery and keep using the configured -home-jwt address")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
-	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
+	flag.BoolVar(&localModel, "local-model", false, "Use embedded models.json and codex_client_models.json only, skip remote model catalog fetching")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -621,18 +621,14 @@ func main() {
 			return
 		}
 		if localModel && (!tuiMode || standalone) {
-			log.Info("Local model mode: using embedded model catalog, remote model updates disabled")
+			log.Info("Local model mode: using embedded model catalogs, remote model updates disabled")
 		}
 		if tuiMode {
 			if standalone {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
 				misc.StartAntigravityVersionUpdater(context.Background())
-				if !localModel && !cfg.Home.Enabled {
-					registry.StartModelsUpdater(context.Background())
-				} else if cfg.Home.Enabled {
-					log.Info("Home mode: remote model updates disabled")
-				}
+				startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
 				log.AddHook(hook)
@@ -706,13 +702,31 @@ func main() {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
-			if !localModel && !cfg.Home.Enabled {
-				registry.StartModelsUpdater(context.Background())
-			} else if cfg.Home.Enabled {
-				log.Info("Home mode: remote model updates disabled")
-			}
+			startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
 			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
 		}
+	}
+}
+
+// modelCatalogUpdaterPlan decides which remote model catalogs should refresh.
+// Codex client templates still refresh under Home mode because the model list
+// comes from Home IDs while template metadata stays edge-local.
+func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCodexClient bool) {
+	if localModel {
+		return false, false
+	}
+	return !homeEnabled, true
+}
+
+func startModelCatalogUpdaters(localModel, homeEnabled bool) {
+	startModels, startCodexClient := modelCatalogUpdaterPlan(localModel, homeEnabled)
+	if startCodexClient {
+		registry.StartCodexClientModelsUpdater(context.Background())
+	}
+	if startModels {
+		registry.StartModelsUpdater(context.Background())
+	} else if homeEnabled {
+		log.Info("Home mode: remote models.json updates disabled; Codex client model list follows Home model IDs")
 	}
 }
 
