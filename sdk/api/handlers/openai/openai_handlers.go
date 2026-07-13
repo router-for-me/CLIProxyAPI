@@ -59,19 +59,20 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAI-compatible format.
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
+	allModels := h.Models()
+	exposedModels := h.filterExposedModels(allModels)
+
 	if _, ok := c.Request.URL.Query()["client_version"]; ok {
-		c.JSON(http.StatusOK, h.codexClientModelsResponse())
+		c.JSON(http.StatusOK, h.codexClientModelsResponse(exposedModels))
 		return
 	}
 
-	// Get all available models
-	allModels := h.Models()
-
 	// Filter to only include the 4 required fields: id, object, created, owned_by
-	filteredModels := make([]map[string]any, len(allModels))
-	for i, model := range allModels {
+	filteredModels := make([]map[string]any, 0, len(exposedModels))
+	for _, model := range exposedModels {
+		id, _ := model["id"].(string)
 		filteredModel := map[string]any{
-			"id":     model["id"],
+			"id":     id,
 			"object": model["object"],
 		}
 
@@ -85,13 +86,33 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			filteredModel["owned_by"] = ownedBy
 		}
 
-		filteredModels[i] = filteredModel
+		filteredModels = append(filteredModels, filteredModel)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
 		"data":   filteredModels,
 	})
+}
+
+func (h *OpenAIAPIHandler) filterExposedModels(models []map[string]any) []map[string]any {
+	if h.Cfg == nil || len(h.Cfg.ExposedModels) == 0 {
+		return models
+	}
+
+	exposedSet := make(map[string]struct{})
+	for _, m := range h.Cfg.ExposedModels {
+		exposedSet[m] = struct{}{}
+	}
+
+	filteredModels := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		id, _ := model["id"].(string)
+		if _, ok := exposedSet[id]; ok {
+			filteredModels = append(filteredModels, model)
+		}
+	}
+	return filteredModels
 }
 
 // ChatCompletions handles the /v1/chat/completions endpoint.

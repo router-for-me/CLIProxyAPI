@@ -511,6 +511,7 @@ func (s *Server) setupRoutes() {
 	s.engine.HEAD("/healthz", healthzHandler)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	s.engine.Static("/ui", "./web")
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
@@ -912,10 +913,16 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
+		mgmt.POST("/extract-auth", s.mgmt.PostExtractAuth)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
+
+		mgmt.GET("/exposed-models", s.mgmt.GetExposedModels)
+		mgmt.PUT("/exposed-models", s.mgmt.PutExposedModels)
+		mgmt.POST("/exposed-models", s.mgmt.PostExposedModels)
+		mgmt.GET("/subscriptions", s.mgmt.GetSubscriptions)
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
@@ -1956,10 +1963,17 @@ func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
 
 // AuthMiddleware returns a Gin middleware handler that authenticates requests
 // using the configured authentication providers. When no providers are available,
-// it allows all requests (legacy behaviour).
+// it allows all requests (legacy behaviour). Local loopback requests are always
+// allowed without authentication so the bundled menu-bar app and local clients
+// work without configuring API keys.
 func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if manager == nil {
+			c.Next()
+			return
+		}
+
+		if isLocalLoopback(c.Request.RemoteAddr) {
 			c.Next()
 			return
 		}
@@ -1983,6 +1997,14 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		}
 		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
 	}
+}
+
+func isLocalLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return false
+	}
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
 }
 
 func configuredSignatureCacheEnabled(cfg *config.Config) bool {

@@ -179,6 +179,14 @@ func (r *ModelRegistry) invalidateAvailableModelsCacheLocked() {
 	clear(r.availableModelsCache)
 }
 
+// InvalidateAvailableModelsCache clears the cached result of GetAvailableModels
+// so that the next request recomputes the exposed model list.
+func (r *ModelRegistry) InvalidateAvailableModelsCache() {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	r.invalidateAvailableModelsCacheLocked()
+}
+
 // LookupModelInfo searches dynamic registry (provider-specific > global) then static definitions.
 func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	modelID = strings.TrimSpace(modelID)

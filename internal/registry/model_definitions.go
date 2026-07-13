@@ -4,6 +4,9 @@ package registry
 
 import (
 	"strings"
+	"time"
+
+	windsurfmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/windsurf/models"
 )
 
 const (
@@ -110,6 +113,11 @@ func GetXAIModels() []*ModelInfo {
 	return WithXAIBuiltins(cloneModelInfos(getModels().XAI))
 }
 
+// GetWindsurfModels returns the standard Windsurf / Devin CLI model definitions.
+func GetWindsurfModels() []*ModelInfo {
+	return buildWindsurfModels()
+}
+
 // WithCodexBuiltins injects hard-coded Codex-only model definitions that should
 // not depend on remote models.json updates. Built-ins replace any matching IDs
 // already present in the provided slice.
@@ -192,6 +200,23 @@ func xaiBuiltinVideoModelInfo() *ModelInfo {
 		Name:        xaiBuiltinVideoModelID,
 		Description: "xAI Grok video generation model.",
 	}
+}
+
+func buildWindsurfModels() []*ModelInfo {
+	ids := windsurfmodels.WindsurfModelIDs()
+	now := time.Now().Unix()
+	models := make([]*ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		models = append(models, &ModelInfo{
+			ID:          id,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "windsurf",
+			Type:        "openai",
+			DisplayName: id,
+		})
+	}
+	return models
 }
 
 func xaiBuiltinVideo15PreviewModelInfo() *ModelInfo {
@@ -296,6 +321,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAntigravityModels()
 	case "xai", "x-ai", "grok":
 		return GetXAIModels()
+	case "windsurf", "devin":
+		return GetWindsurfModels()
 	default:
 		return nil
 	}
@@ -324,6 +351,12 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 			if m != nil && m.ID == modelID {
 				return cloneModelInfo(m)
 			}
+		}
+	}
+
+	for _, m := range GetWindsurfModels() {
+		if m != nil && m.ID == modelID {
+			return cloneModelInfo(m)
 		}
 	}
 

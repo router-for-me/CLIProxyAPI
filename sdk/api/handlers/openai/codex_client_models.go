@@ -32,8 +32,8 @@ var codexClientAllowedReasoningLevels = map[string]struct{}{
 	"ultra":  {},
 }
 
-func (h *OpenAIAPIHandler) codexClientModelsResponse() map[string]any {
-	return CodexClientModelsResponse(h.Models())
+func (h *OpenAIAPIHandler) codexClientModelsResponse(models []map[string]any) map[string]any {
+	return CodexClientModelsResponse(models)
 }
 
 func CodexClientModelsResponse(models []map[string]any) map[string]any {
@@ -72,6 +72,12 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 	}
 
 	applyCodexClientNonTemplatePriorities(result, templates)
+
+	for _, entry := range result {
+		entry["tool_mode"] = "code_mode_only"
+		entry["use_responses_lite"] = false
+		entry["supported_response_formats"] = []any{"json_object", "json_schema"}
+	}
 
 	sort.SliceStable(result, func(i, j int) bool {
 		return codexClientModelPriority(result[i]) < codexClientModelPriority(result[j])
@@ -217,6 +223,9 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	entry["description"] = description
 	entry["prefer_websockets"] = false
 	entry["service_tiers"] = []any{}
+	entry["tool_mode"] = "code_mode_only"
+	entry["use_responses_lite"] = false
+	entry["supported_response_formats"] = []any{"json_object", "json_schema"}
 	delete(entry, "apply_patch_tool_type")
 	delete(entry, "upgrade")
 	delete(entry, "availability_nux")
@@ -238,6 +247,8 @@ func applyCodexClientVisibilityOverride(entry map[string]any, id string) {
 	switch strings.TrimSpace(id) {
 	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "grok-imagine-image", "grok-imagine-video", "grok-imagine-video-1.5-preview":
 		entry["visibility"] = "hide"
+	case "codex-auto-review":
+		entry["visibility"] = "list"
 	}
 }
 
