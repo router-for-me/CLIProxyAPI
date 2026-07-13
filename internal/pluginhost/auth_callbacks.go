@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -196,6 +197,11 @@ func (h *Host) listAuthFilesFromDisk() ([]pluginapi.HostAuthFileEntry, error) {
 						fileEntry.Priority = priority
 					}
 				}
+				if selectionWeight, okWeight := parseSelectionWeightMetadata(metadata); okWeight {
+					fileEntry.SelectionWeight = selectionWeight
+				} else {
+					fileEntry.SelectionWeight = 1
+				}
 				if note, ok := metadata["note"].(string); ok {
 					fileEntry.Note = strings.TrimSpace(note)
 				}
@@ -352,6 +358,7 @@ func (h *Host) buildAuthFromFileData(path string, data []byte) (*coreauth.Auth, 
 		}
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(auth)
+	syncHostAuthSelectionWeightAttribute(auth)
 	return auth, nil
 }
 
@@ -463,6 +470,7 @@ func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth) *pluginapi.HostAuthFi
 			}
 		}
 	}
+	entry.SelectionWeight = effectiveHostAuthSelectionWeight(auth)
 	if note := strings.TrimSpace(authAttribute(auth, "note")); note != "" {
 		entry.Note = note
 	} else if auth.Metadata != nil {
@@ -609,6 +617,86 @@ func parsePriorityValue(raw any) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+func effectiveHostAuthSelectionWeight(auth *coreauth.Auth) int {
+	if auth == nil {
+		return 1
+	}
+	for _, key := range []string{"selection_weight", "selection-weight", "weight"} {
+		if raw := strings.TrimSpace(authAttribute(auth, key)); raw != "" {
+			parsed, errParse := strconv.Atoi(raw)
+			if errParse == nil && parsed >= 0 {
+				return parsed
+			}
+			return 1
+		}
+	}
+	if weight, ok := parseSelectionWeightMetadata(auth.Metadata); ok {
+		return weight
+	}
+	return 1
+}
+
+func syncHostAuthSelectionWeightAttribute(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	weight, ok := parseSelectionWeightMetadata(auth.Metadata)
+	if !ok {
+		delete(auth.Attributes, "selection_weight")
+		return
+	}
+	auth.Attributes["selection_weight"] = strconv.Itoa(weight)
+}
+
+func parseSelectionWeightMetadata(metadata map[string]any) (int, bool) {
+	if metadata == nil {
+		return 0, false
+	}
+	value, ok := metadata["selection_weight"]
+	if !ok {
+		value, ok = metadata["selection-weight"]
+	}
+	if !ok {
+		return 0, false
+	}
+	return parseSelectionWeightValue(value)
+}
+
+func parseSelectionWeightValue(raw any) (int, bool) {
+	var parsed int
+	var ok bool
+	switch v := raw.(type) {
+	case int:
+		parsed, ok = v, true
+	case int32:
+		parsed, ok = int(v), true
+	case int64:
+		parsed, ok = int(v), true
+	case float64:
+		if math.Trunc(v) != v {
+			return 0, false
+		}
+		parsed, ok = int(v), true
+	case json.Number:
+		value, err := v.Int64()
+		if err == nil {
+			parsed, ok = int(value), true
+		}
+	case string:
+		value, err := strconv.Atoi(strings.TrimSpace(v))
+		if err == nil {
+			parsed, ok = value, true
+		}
+	}
+	if !ok || parsed < 0 {
+		return 0, false
+	}
+	return parsed, true
 }
 
 func parseWebsocketsValue(raw any) (bool, bool) {

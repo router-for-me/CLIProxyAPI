@@ -14,13 +14,14 @@ import (
 // editableField represents an editable field on an auth file.
 type editableField struct {
 	label string
-	key   string // API field key: "prefix", "proxy_url", "priority"
+	key   string // API field key: "prefix", "proxy_url", "priority", "selection_weight"
 }
 
 var authEditableFields = []editableField{
 	{label: "Prefix", key: "prefix"},
 	{label: "Proxy URL", key: "proxy_url"},
 	{label: "Priority", key: "priority"},
+	{label: "Selection Weight", key: "selection_weight"},
 }
 
 // authTabModel displays auth credential files with interactive management.
@@ -280,6 +281,7 @@ func (m authTabModel) renderDetail(f map[string]any) string {
 		{"Prefix", "prefix", true},
 		{"Proxy URL", "proxy_url", true},
 		{"Priority", "priority", true},
+		{"Selection Weight", "selection_weight", true},
 		{"Project ID", "project_id", false},
 		{"Disabled", "disabled", false},
 		{"Created", "created_at", false},
@@ -336,9 +338,14 @@ func (m authTabModel) handleEditInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
 		m.editing = false
 		m.editInput.Blur()
 		fields := map[string]any{}
-		if fieldKey == "priority" {
+		if fieldKey == "priority" || fieldKey == "selection_weight" {
 			p, err := strconv.Atoi(value)
 			if err != nil {
+				return m, func() tea.Msg {
+					return authActionMsg{err: fmt.Errorf("%s: %s", T("invalid_int"), value)}
+				}
+			}
+			if fieldKey == "selection_weight" && p < 0 {
 				return m, func() tea.Msg {
 					return authActionMsg{err: fmt.Errorf("%s: %s", T("invalid_int"), value)}
 				}
@@ -445,6 +452,8 @@ func (m authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) 
 		return m, m.startEdit(1) // proxy_url
 	case "3":
 		return m, m.startEdit(2) // priority
+	case "4":
+		return m, m.startEdit(3) // selection_weight
 	case "r":
 		m.status = ""
 		return m, m.fetchFiles

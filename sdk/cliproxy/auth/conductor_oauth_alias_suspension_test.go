@@ -128,3 +128,105 @@ func TestManagerExecute_OAuthAliasBypassesBlockedRouteModel(t *testing.T) {
 		t.Fatalf("execute alias = %q, want %q", gotAliases[0], routeModel)
 	}
 }
+
+func TestManagerPickNextLegacySessionAffinityKeepsOAuthAliasBindingWhenRouteModelBlocked(t *testing.T) {
+	const (
+		provider    = "antigravity-affinity"
+		routeModel  = "claude-opus-4-6-affinity"
+		targetModel = "claude-opus-4-6-affinity-thinking"
+	)
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	manager := NewManager(nil, selector, nil)
+	manager.RegisterExecutor(&aliasRoutingExecutor{id: provider})
+	manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		provider: {{
+			Name:  targetModel,
+			Alias: routeModel,
+			Fork:  true,
+		}},
+	})
+
+	reg := registry.GetGlobalRegistry()
+	for _, authID := range []string{"alias-high", "alias-low"} {
+		reg.RegisterClient(authID, provider, []*registry.ModelInfo{{ID: routeModel}, {ID: targetModel}})
+	}
+	t.Cleanup(func() {
+		reg.UnregisterClient("alias-high")
+		reg.UnregisterClient("alias-low")
+	})
+
+	now := time.Now()
+	high := &Auth{
+		ID:       "alias-high",
+		Provider: provider,
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"priority": "10",
+		},
+		Metadata: map[string]any{"email": "high@example.com"},
+		ModelStates: map[string]*ModelState{
+			targetModel: {
+				Unavailable:    true,
+				Status:         StatusError,
+				NextRetryAfter: now.Add(time.Hour),
+			},
+		},
+	}
+	low := &Auth{
+		ID:             "alias-low",
+		Provider:       provider,
+		Status:         StatusActive,
+		Unavailable:    true,
+		NextRetryAfter: now.Add(time.Hour),
+		Metadata:       map[string]any{"email": "low@example.com"},
+		ModelStates: map[string]*ModelState{
+			routeModel: {
+				Unavailable:    true,
+				Status:         StatusError,
+				NextRetryAfter: now.Add(time.Hour),
+			},
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), high); errRegister != nil {
+		t.Fatalf("register high: %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), low); errRegister != nil {
+		t.Fatalf("register low: %v", errRegister)
+	}
+
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_alias-affinity"}}`),
+	}
+	got, _, errPick := manager.pickNext(context.Background(), provider, routeModel, opts, nil)
+	if errPick != nil {
+		t.Fatalf("first pickNext() error = %v", errPick)
+	}
+	if got == nil || got.ID != "alias-low" {
+		t.Fatalf("first pickNext() = %#v, want alias-low", got)
+	}
+
+	high.ModelStates = map[string]*ModelState{
+		routeModel: {
+			Unavailable:    false,
+			Status:         StatusActive,
+			NextRetryAfter: time.Time{},
+		},
+	}
+	if _, errUpdate := manager.Update(context.Background(), high); errUpdate != nil {
+		t.Fatalf("update high: %v", errUpdate)
+	}
+
+	got, _, errPick = manager.pickNext(context.Background(), provider, routeModel, opts, nil)
+	if errPick != nil {
+		t.Fatalf("second pickNext() error = %v", errPick)
+	}
+	if got == nil || got.ID != "alias-low" {
+		t.Fatalf("second pickNext() = %#v, want sticky alias-low", got)
+	}
+}

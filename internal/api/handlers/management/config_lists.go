@@ -139,6 +139,11 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	for i := range arr {
+		if !validateSelectionWeightPatch(c, arr[i].SelectionWeight) {
+			return
+		}
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.cfg.GeminiKey = append([]config.GeminiKey(nil), arr...)
@@ -147,12 +152,13 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 }
 func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	type geminiKeyPatch struct {
-		APIKey         *string            `json:"api-key"`
-		Prefix         *string            `json:"prefix"`
-		BaseURL        *string            `json:"base-url"`
-		ProxyURL       *string            `json:"proxy-url"`
-		Headers        *map[string]string `json:"headers"`
-		ExcludedModels *[]string          `json:"excluded-models"`
+		APIKey          *string            `json:"api-key"`
+		SelectionWeight *int               `json:"selection-weight"`
+		Prefix          *string            `json:"prefix"`
+		BaseURL         *string            `json:"base-url"`
+		ProxyURL        *string            `json:"proxy-url"`
+		Headers         *map[string]string `json:"headers"`
+		ExcludedModels  *[]string          `json:"excluded-models"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -199,6 +205,12 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.SelectionWeight != nil {
+		if !validateSelectionWeightPatch(c, body.Value.SelectionWeight) {
+			return
+		}
+		entry.SelectionWeight = body.Value.SelectionWeight
 	}
 	if body.Value.BaseURL != nil {
 		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
@@ -459,6 +471,9 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 	}
 	for i := range arr {
 		normalizeClaudeKey(&arr[i])
+		if !validateSelectionWeightPatch(c, arr[i].SelectionWeight) {
+			return
+		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -469,6 +484,7 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
 		APIKey                  *string               `json:"api-key"`
+		SelectionWeight         *int                  `json:"selection-weight"`
 		Prefix                  *string               `json:"prefix"`
 		BaseURL                 *string               `json:"base-url"`
 		ProxyURL                *string               `json:"proxy-url"`
@@ -513,6 +529,12 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.SelectionWeight != nil {
+		if !validateSelectionWeightPatch(c, body.Value.SelectionWeight) {
+			return
+		}
+		entry.SelectionWeight = body.Value.SelectionWeight
 	}
 	if body.Value.BaseURL != nil {
 		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
@@ -615,6 +637,12 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 	filtered := make([]config.OpenAICompatibility, 0, len(arr))
 	for i := range arr {
 		normalizeOpenAICompatibilityEntry(&arr[i])
+		if !validateSelectionWeightPatch(c, arr[i].SelectionWeight) {
+			return
+		}
+		if !validateOpenAICompatAPIKeyEntriesPatch(c, arr[i].APIKeyEntries) {
+			return
+		}
 		if strings.TrimSpace(arr[i].BaseURL) != "" {
 			filtered = append(filtered, arr[i])
 		}
@@ -627,14 +655,15 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	type openAICompatPatch struct {
-		Name           *string                             `json:"name"`
-		Prefix         *string                             `json:"prefix"`
-		Disabled       *bool                               `json:"disabled"`
-		DisableCooling *bool                               `json:"disable-cooling"`
-		BaseURL        *string                             `json:"base-url"`
-		APIKeyEntries  *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
-		Models         *[]config.OpenAICompatibilityModel  `json:"models"`
-		Headers        *map[string]string                  `json:"headers"`
+		Name            *string                             `json:"name"`
+		SelectionWeight *int                                `json:"selection-weight"`
+		Prefix          *string                             `json:"prefix"`
+		Disabled        *bool                               `json:"disabled"`
+		DisableCooling  *bool                               `json:"disable-cooling"`
+		BaseURL         *string                             `json:"base-url"`
+		APIKeyEntries   *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
+		Models          *[]config.OpenAICompatibilityModel  `json:"models"`
+		Headers         *map[string]string                  `json:"headers"`
 	}
 	var body struct {
 		Name  *string            `json:"name"`
@@ -673,6 +702,12 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
 	}
+	if body.Value.SelectionWeight != nil {
+		if !validateSelectionWeightPatch(c, body.Value.SelectionWeight) {
+			return
+		}
+		entry.SelectionWeight = body.Value.SelectionWeight
+	}
 	if body.Value.Disabled != nil {
 		entry.Disabled = *body.Value.Disabled
 	}
@@ -690,7 +725,11 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		entry.BaseURL = trimmed
 	}
 	if body.Value.APIKeyEntries != nil {
-		entry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), (*body.Value.APIKeyEntries)...)
+		nextEntries := append([]config.OpenAICompatibilityAPIKey(nil), (*body.Value.APIKeyEntries)...)
+		if !validateOpenAICompatAPIKeyEntriesPatch(c, nextEntries) {
+			return
+		}
+		entry.APIKeyEntries = nextEntries
 	}
 	if body.Value.Models != nil {
 		entry.Models = append([]config.OpenAICompatibilityModel(nil), (*body.Value.Models)...)
@@ -755,6 +794,9 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 	}
 	for i := range arr {
 		normalizeVertexCompatKey(&arr[i])
+		if !validateSelectionWeightPatch(c, arr[i].SelectionWeight) {
+			return
+		}
 		if arr[i].APIKey == "" {
 			c.JSON(400, gin.H{"error": fmt.Sprintf("vertex-api-key[%d].api-key is required", i)})
 			return
@@ -768,13 +810,14 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 }
 func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	type vertexCompatPatch struct {
-		APIKey         *string                     `json:"api-key"`
-		Prefix         *string                     `json:"prefix"`
-		BaseURL        *string                     `json:"base-url"`
-		ProxyURL       *string                     `json:"proxy-url"`
-		Headers        *map[string]string          `json:"headers"`
-		Models         *[]config.VertexCompatModel `json:"models"`
-		ExcludedModels *[]string                   `json:"excluded-models"`
+		APIKey          *string                     `json:"api-key"`
+		SelectionWeight *int                        `json:"selection-weight"`
+		Prefix          *string                     `json:"prefix"`
+		BaseURL         *string                     `json:"base-url"`
+		ProxyURL        *string                     `json:"proxy-url"`
+		Headers         *map[string]string          `json:"headers"`
+		Models          *[]config.VertexCompatModel `json:"models"`
+		ExcludedModels  *[]string                   `json:"excluded-models"`
 	}
 	var body struct {
 		Index *int               `json:"index"`
@@ -821,6 +864,12 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.SelectionWeight != nil {
+		if !validateSelectionWeightPatch(c, body.Value.SelectionWeight) {
+			return
+		}
+		entry.SelectionWeight = body.Value.SelectionWeight
 	}
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
@@ -1111,6 +1160,9 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 	for i := range arr {
 		entry := arr[i]
 		normalizeCodexKey(&entry)
+		if !validateSelectionWeightPatch(c, entry.SelectionWeight) {
+			return
+		}
 		if entry.BaseURL == "" {
 			continue
 		}
@@ -1124,13 +1176,14 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
-		APIKey         *string              `json:"api-key"`
-		Prefix         *string              `json:"prefix"`
-		BaseURL        *string              `json:"base-url"`
-		ProxyURL       *string              `json:"proxy-url"`
-		Models         *[]config.CodexModel `json:"models"`
-		Headers        *map[string]string   `json:"headers"`
-		ExcludedModels *[]string            `json:"excluded-models"`
+		APIKey          *string              `json:"api-key"`
+		SelectionWeight *int                 `json:"selection-weight"`
+		Prefix          *string              `json:"prefix"`
+		BaseURL         *string              `json:"base-url"`
+		ProxyURL        *string              `json:"proxy-url"`
+		Models          *[]config.CodexModel `json:"models"`
+		Headers         *map[string]string   `json:"headers"`
+		ExcludedModels  *[]string            `json:"excluded-models"`
 	}
 	var body struct {
 		Index *int           `json:"index"`
@@ -1168,6 +1221,12 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.SelectionWeight != nil {
+		if !validateSelectionWeightPatch(c, body.Value.SelectionWeight) {
+			return
+		}
+		entry.SelectionWeight = body.Value.SelectionWeight
 	}
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
@@ -1281,6 +1340,23 @@ func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) 
 		out[i] = copyEntry
 	}
 	return out
+}
+
+func validateSelectionWeightPatch(c *gin.Context, value *int) bool {
+	if value == nil || *value >= 0 {
+		return true
+	}
+	c.JSON(400, gin.H{"error": "selection-weight must be a non-negative integer"})
+	return false
+}
+
+func validateOpenAICompatAPIKeyEntriesPatch(c *gin.Context, entries []config.OpenAICompatibilityAPIKey) bool {
+	for i := range entries {
+		if !validateSelectionWeightPatch(c, entries[i].SelectionWeight) {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeClaudeKey(entry *config.ClaudeKey) {
