@@ -165,12 +165,14 @@ func TestXAIWebsocketsExecuteStreamRestoresNamespaceToolCalls(t *testing.T) {
 		Model: "grok-4.3",
 		Payload: []byte(`{
 			"model":"grok-4.3",
-			"input":"use Exa",
-			"tools":[{
-				"type":"namespace",
-				"name":"mcp__exa",
-				"tools":[{"type":"function","name":"web_search_exa","parameters":{"type":"object"}}]
-			}]
+			"input":[
+				{"type":"additional_tools","role":"developer","tools":[{
+					"type":"namespace",
+					"name":"mcp__exa",
+					"tools":[{"type":"function","name":"web_search_exa","parameters":{"type":"object"}}]
+				}]},
+				{"role":"user","content":"use Exa"}
+			]
 		}`),
 	}
 	opts := cliproxyexecutor.Options{
@@ -187,12 +189,12 @@ func TestXAIWebsocketsExecuteStreamRestoresNamespaceToolCalls(t *testing.T) {
 
 	select {
 	case payload := <-capturedPayload:
-		tool := gjson.GetBytes(payload, "tools.0")
+		tool := gjson.GetBytes(payload, "input.0.tools.0")
 		if got := tool.Get("name").String(); got != "mcp__exa__web_search_exa" {
 			t.Fatalf("upstream tool name = %q, want qualified name; payload=%s", got, payload)
 		}
-		if tool.Get("namespace").Exists() {
-			t.Fatalf("upstream tool should not contain namespace: %s", payload)
+		if tool.Get("tools").Exists() {
+			t.Fatalf("upstream tool should not contain namespace children: %s", payload)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")

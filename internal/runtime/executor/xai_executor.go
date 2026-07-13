@@ -1170,11 +1170,48 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 }
 
 func normalizeXAITools(body []byte) []byte {
-	tools := gjson.GetBytes(body, "tools")
-	if !tools.Exists() || !tools.IsArray() {
+	if !gjson.ValidBytes(body) {
 		return body
 	}
+	original := body
+	normalizeAtPath := func(path string) bool {
+		tools := gjson.GetBytes(body, path)
+		if !tools.Exists() || !tools.IsArray() {
+			return true
+		}
+		filtered, changed, ok := normalizeXAIToolArray(tools)
+		if !ok {
+			return false
+		}
+		if !changed {
+			return true
+		}
+		updated, errSet := sjson.SetRawBytes(body, path, filtered)
+		if errSet != nil {
+			return false
+		}
+		body = updated
+		return true
+	}
 
+	if !normalizeAtPath("tools") {
+		return original
+	}
+	input := gjson.GetBytes(body, "input")
+	if input.Exists() && input.IsArray() {
+		for index, item := range input.Array() {
+			if item.Get("type").String() != "additional_tools" {
+				continue
+			}
+			if !normalizeAtPath(fmt.Sprintf("input.%d.tools", index)) {
+				return original
+			}
+		}
+	}
+	return body
+}
+
+func normalizeXAIToolArray(tools gjson.Result) ([]byte, bool, bool) {
 	changed := false
 	filtered := []byte(`[]`)
 	for _, tool := range tools.Array() {
@@ -1186,7 +1223,7 @@ func normalizeXAITools(body []byte) []byte {
 				for _, nestedTool := range namespaceTools.Array() {
 					nestedRaw, nestedChanged, ok := normalizeXAITool(nestedTool, namespaceName)
 					if !ok {
-						return body
+						return nil, false, false
 					}
 					changed = changed || nestedChanged
 					if len(nestedRaw) == 0 {
@@ -1194,7 +1231,7 @@ func normalizeXAITools(body []byte) []byte {
 					}
 					updated, errSet := sjson.SetRawBytes(filtered, "-1", nestedRaw)
 					if errSet != nil {
-						return body
+						return nil, false, false
 					}
 					filtered = updated
 				}
@@ -1203,7 +1240,7 @@ func normalizeXAITools(body []byte) []byte {
 		}
 		raw, toolChanged, ok := normalizeXAITool(tool, "")
 		if !ok {
-			return body
+			return nil, false, false
 		}
 		changed = changed || toolChanged
 		if len(raw) == 0 {
@@ -1211,18 +1248,11 @@ func normalizeXAITools(body []byte) []byte {
 		}
 		updated, errSet := sjson.SetRawBytes(filtered, "-1", raw)
 		if errSet != nil {
-			return body
+			return nil, false, false
 		}
 		filtered = updated
 	}
-	if !changed {
-		return body
-	}
-	updated, errSet := sjson.SetRawBytes(body, "tools", filtered)
-	if errSet != nil {
-		return body
-	}
-	return updated
+	return filtered, changed, true
 }
 
 // normalizeXAIToolChoiceForTools drops tool_choice and parallel_tool_calls
@@ -1232,6 +1262,18 @@ func normalizeXAITools(body []byte) []byte {
 func normalizeXAIToolChoiceForTools(body []byte) []byte {
 	tools := gjson.GetBytes(body, "tools")
 	hasTools := tools.Exists() && tools.IsArray() && len(tools.Array()) > 0
+	if !hasTools {
+		input := gjson.GetBytes(body, "input")
+		if input.Exists() && input.IsArray() {
+			for _, item := range input.Array() {
+				additionalTools := item.Get("tools")
+				if item.Get("type").String() == "additional_tools" && additionalTools.IsArray() && len(additionalTools.Array()) > 0 {
+					hasTools = true
+					break
+				}
+			}
+		}
+	}
 	if hasTools {
 		return body
 	}
@@ -1362,25 +1404,35 @@ func qualifyXAINamespaceToolName(namespaceName, toolName string) string {
 
 func collectXAINamespaceToolRefs(body []byte) map[string]xaiNamespaceToolRef {
 	refs := make(map[string]xaiNamespaceToolRef)
-	tools := gjson.GetBytes(body, "tools")
-	if !tools.Exists() || !tools.IsArray() {
-		return refs
-	}
-	for _, tool := range tools.Array() {
-		if tool.Get("type").String() != xaiNamespaceToolType {
-			continue
+	collect := func(tools gjson.Result) {
+		if !tools.Exists() || !tools.IsArray() {
+			return
 		}
-		namespaceName := strings.TrimSpace(tool.Get("name").String())
-		if namespaceName == "" {
-			continue
-		}
-		for _, nestedTool := range tool.Get("tools").Array() {
-			toolName := strings.TrimSpace(nestedTool.Get("name").String())
-			qualifiedName := qualifyXAINamespaceToolName(namespaceName, toolName)
-			if qualifiedName == "" {
+		for _, tool := range tools.Array() {
+			if tool.Get("type").String() != xaiNamespaceToolType {
 				continue
 			}
-			refs[qualifiedName] = xaiNamespaceToolRef{namespace: namespaceName, name: toolName}
+			namespaceName := strings.TrimSpace(tool.Get("name").String())
+			if namespaceName == "" {
+				continue
+			}
+			for _, nestedTool := range tool.Get("tools").Array() {
+				toolName := strings.TrimSpace(nestedTool.Get("name").String())
+				qualifiedName := qualifyXAINamespaceToolName(namespaceName, toolName)
+				if qualifiedName == "" {
+					continue
+				}
+				refs[qualifiedName] = xaiNamespaceToolRef{namespace: namespaceName, name: toolName}
+			}
+		}
+	}
+	collect(gjson.GetBytes(body, "tools"))
+	input := gjson.GetBytes(body, "input")
+	if input.Exists() && input.IsArray() {
+		for _, item := range input.Array() {
+			if item.Get("type").String() == "additional_tools" {
+				collect(item.Get("tools"))
+			}
 		}
 	}
 	return refs

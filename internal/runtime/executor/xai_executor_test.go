@@ -166,6 +166,63 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorExecuteRestoresAdditionalToolsNamespaceCalls(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"name\":\"mcp__exa__web_search_exa\",\"call_id\":\"call_1\",\"arguments\":\"{}\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "grok-4.3",
+		Payload: []byte(`{
+			"model":"grok-4.3",
+			"input":[
+				{"type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"mcp__exa","tools":[{"type":"function","name":"web_search_exa","parameters":{"type":"object"}}]}]},
+				{"role":"user","content":"use Exa"}
+			]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         false,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	tool := gjson.GetBytes(gotBody, "input.0.tools.0")
+	if got := tool.Get("name").String(); got != "mcp__exa__web_search_exa" {
+		t.Fatalf("upstream additional tool name = %q, want qualified name; body=%s", got, gotBody)
+	}
+	if got := tool.Get("type").String(); got != "function" {
+		t.Fatalf("upstream additional tool type = %q, want function; body=%s", got, gotBody)
+	}
+	if tool.Get("tools").Exists() {
+		t.Fatalf("upstream additional tool should not contain namespace children: %s", gotBody)
+	}
+	output := gjson.GetBytes(resp.Payload, "output.0")
+	if got := output.Get("name").String(); got != "web_search_exa" {
+		t.Fatalf("response output name = %q, want child name; payload=%s", got, resp.Payload)
+	}
+	if got := output.Get("namespace").String(); got != "mcp__exa" {
+		t.Fatalf("response output namespace = %q, want mcp__exa; payload=%s", got, resp.Payload)
+	}
+}
+
 func TestXAIExecutorComposerSessionIsolation(t *testing.T) {
 	exec := NewXAIExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
@@ -1136,6 +1193,27 @@ func TestNormalizeXAITools_QualifiesSameNamedNamespaceTools(t *testing.T) {
 	}
 }
 
+func TestNormalizeXAITools_AdditionalToolsNamespace(t *testing.T) {
+	body := []byte(`{
+		"input":[
+			{"type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"mcp__exa","tools":[{"type":"function","name":"search","parameters":{"type":"object"}}]}]},
+			{"role":"user","content":"hello"}
+		]
+	}`)
+	out := normalizeXAITools(body)
+
+	tools := gjson.GetBytes(out, "input.0.tools").Array()
+	if len(tools) != 1 {
+		t.Fatalf("additional tools length = %d, want 1; body=%s", len(tools), string(out))
+	}
+	if got := tools[0].Get("name").String(); got != "mcp__exa__search" {
+		t.Fatalf("additional tool name = %q, want mcp__exa__search; body=%s", got, string(out))
+	}
+	if got := tools[0].Get("type").String(); got != "function" {
+		t.Fatalf("additional tool type = %q, want function; body=%s", got, string(out))
+	}
+}
+
 func TestNormalizeXAINamespaceToolChoice(t *testing.T) {
 	body := []byte(`{
 		"tools":[{"type":"namespace","name":"mcp__exa","tools":[{"type":"function","name":"search","parameters":{"type":"object"}}]}],
@@ -1356,6 +1434,18 @@ func TestNormalizeXAIToolChoiceForTools_KeepsWhenToolsPresent(t *testing.T) {
 	}
 	if got := gjson.GetBytes(out, "tool_choice").String(); got != "auto" {
 		t.Fatalf("tool_choice = %q, want auto: %s", got, string(out))
+	}
+}
+
+func TestNormalizeXAIToolChoiceForTools_KeepsWhenAdditionalToolsPresent(t *testing.T) {
+	body := []byte(`{"model":"grok-4","input":[{"type":"additional_tools","tools":[{"type":"function","name":"Bash"}]}],"tool_choice":"auto","parallel_tool_calls":true}`)
+	out := normalizeXAIToolChoiceForTools(body)
+
+	if got := gjson.GetBytes(out, "tool_choice").String(); got != "auto" {
+		t.Fatalf("tool_choice = %q, want auto: %s", got, string(out))
+	}
+	if !gjson.GetBytes(out, "parallel_tool_calls").Bool() {
+		t.Fatalf("parallel_tool_calls should be kept: %s", string(out))
 	}
 }
 
