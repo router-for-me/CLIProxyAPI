@@ -153,6 +153,61 @@ func TestBuildConfigChangeDetails_ModelPrefixes(t *testing.T) {
 	expectContains(t, changes, "vertex[0].prefix: old-v -> new-v")
 }
 
+func TestBuildConfigChangeDetails_XAIKeys(t *testing.T) {
+	oldCfg := &config.Config{XAIKey: []config.XAIKey{{
+		APIKey:         "old-key",
+		Priority:       1,
+		Prefix:         "old",
+		BaseURL:        "https://old.example.com/v1",
+		ProxyURL:       "http://old-proxy",
+		Websockets:     false,
+		DisableCooling: false,
+		Headers:        map[string]string{"X-Test": "old"},
+		Models:         []config.XAIModel{{Name: "grok-old", Alias: "grok"}},
+		ExcludedModels: []string{"grok-hidden"},
+	}}}
+	newCfg := &config.Config{XAIKey: []config.XAIKey{{
+		APIKey:         "new-key",
+		Priority:       2,
+		Prefix:         "new",
+		BaseURL:        "https://new.example.com/v1",
+		ProxyURL:       "http://new-proxy",
+		Websockets:     true,
+		DisableCooling: true,
+		Headers:        map[string]string{"X-Test": "new"},
+		Models:         []config.XAIModel{{Name: "grok-new", Alias: "grok"}},
+		ExcludedModels: []string{"grok-other"},
+	}}}
+
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "xai[0].base-url: https://old.example.com/v1 -> https://new.example.com/v1")
+	expectContains(t, changes, "xai[0].proxy-url: http://old-proxy -> http://new-proxy")
+	expectContains(t, changes, "xai[0].prefix: old -> new")
+	expectContains(t, changes, "xai[0].priority: 1 -> 2")
+	expectContains(t, changes, "xai[0].websockets: false -> true")
+	expectContains(t, changes, "xai[0].disable-cooling: false -> true")
+	expectContains(t, changes, "xai[0].api-key: updated")
+	expectContains(t, changes, "xai[0].headers: updated")
+	expectContains(t, changes, "xai[0].models: updated (1 -> 1 entries)")
+	expectContains(t, changes, "xai[0].excluded-models: updated (1 -> 1 entries)")
+}
+
+func TestBuildConfigChangeDetails_XAIForceMappingOnly(t *testing.T) {
+	oldCfg := &config.Config{XAIKey: []config.XAIKey{{
+		APIKey:  "xai-key",
+		BaseURL: "https://api.x.ai/v1",
+		Models:  []config.XAIModel{{Name: "grok-4.5", Alias: "grok-latest"}},
+	}}}
+	newCfg := &config.Config{XAIKey: []config.XAIKey{{
+		APIKey:  "xai-key",
+		BaseURL: "https://api.x.ai/v1",
+		Models:  []config.XAIModel{{Name: "grok-4.5", Alias: "grok-latest", ForceMapping: true}},
+	}}}
+
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "xai[0].models: updated (1 -> 1 entries)")
+}
+
 func TestBuildConfigChangeDetails_NilSafe(t *testing.T) {
 	if details := BuildConfigChangeDetails(nil, &config.Config{}); len(details) != 0 {
 		t.Fatalf("expected empty change list when old nil, got %v", details)
@@ -477,7 +532,8 @@ func TestBuildConfigChangeDetails_CountBranches(t *testing.T) {
 	newCfg := &config.Config{
 		GeminiKey: []config.GeminiKey{{APIKey: "g"}},
 		ClaudeKey: []config.ClaudeKey{{APIKey: "c"}},
-		CodexKey:  []config.CodexKey{{APIKey: "x"}},
+		CodexKey:  []config.CodexKey{{APIKey: "c"}},
+		XAIKey:    []config.XAIKey{{APIKey: "x"}},
 		VertexCompatAPIKey: []config.VertexCompatKey{
 			{APIKey: "v", BaseURL: "http://v"},
 		},
@@ -487,6 +543,7 @@ func TestBuildConfigChangeDetails_CountBranches(t *testing.T) {
 	expectContains(t, changes, "gemini-api-key count: 0 -> 1")
 	expectContains(t, changes, "claude-api-key count: 0 -> 1")
 	expectContains(t, changes, "codex-api-key count: 0 -> 1")
+	expectContains(t, changes, "xai-api-key count: 0 -> 1")
 	expectContains(t, changes, "vertex-api-key count: 0 -> 1")
 }
 

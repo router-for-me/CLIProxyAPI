@@ -20,6 +20,19 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestXAIWebsocketsEnabledForConfigAPIKey(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"api_key":    "xai-key",
+			"websockets": "true",
+		},
+	}
+	if !xaiWebsocketsEnabled(auth) {
+		t.Fatal("xaiWebsocketsEnabled() = false, want true")
+	}
+}
+
 func TestXAIWebsocketsExecuteStreamSendsResponseCreateWithPreviousResponseID(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	capturedPayload := make(chan []byte, 1)
