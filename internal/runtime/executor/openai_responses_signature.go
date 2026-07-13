@@ -21,6 +21,13 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 		provider = "openai responses upstream"
 	}
 
+	// Codex backend rejects store=true and does not persist items when store=false.
+	// A reasoning item that still carries an id without usable encrypted_content is
+	// treated as a store lookup and returns:
+	//   Item with id '...' not found. Items are not persisted when `store` is set to false.
+	// Strip those orphan ids unless the request explicitly opts into store=true.
+	stripOrphanReasoningIDs := !gjson.GetBytes(body, "store").Bool()
+
 	items := inputResult.Array()
 
 	// rebuilt accumulates the edited "input" array as JSON array bytes. It
@@ -40,6 +47,18 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 		rebuilt = append(rebuilt, raw...)
 		itemsWritten++
 	}
+	startRebuild := func(index int) {
+		if rebuilt != nil {
+			return
+		}
+		// First item that needs editing: start the buffer and backfill
+		// it with the raw JSON of every preceding item.
+		rebuilt = make([]byte, 0, len(inputResult.Raw))
+		rebuilt = append(rebuilt, '[')
+		for i := range index {
+			keep(items[i].Raw)
+		}
+	}
 
 	for index, item := range items {
 		if strings.TrimSpace(item.Get("type").String()) != "reasoning" {
@@ -48,7 +67,24 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 		}
 
 		encryptedContent := item.Get("encrypted_content")
+		itemID := strings.TrimSpace(item.Get("id").String())
+		if itemID == "" {
+			itemID = fmt.Sprintf("input[%d]", index)
+		}
+
 		if !encryptedContent.Exists() {
+			if stripOrphanReasoningIDs && item.Get("id").Exists() {
+				nextItem, err := sjson.Delete(item.Raw, "id")
+				if err != nil {
+					helps.LogWithRequestID(ctx).Debugf("%s: failed to drop orphan reasoning id at input[%d]: %v", provider, index, err)
+					keep(item.Raw)
+					continue
+				}
+				startRebuild(index)
+				keep(nextItem)
+				helps.LogWithRequestID(ctx).Debugf("%s: dropped orphan reasoning id at input[%d] item_id=%q reason=missing encrypted_content with store disabled", provider, index, itemID)
+				continue
+			}
 			keep(item.Raw)
 			continue
 		}
@@ -78,22 +114,17 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 			keep(item.Raw)
 			continue
 		}
-
-		if rebuilt == nil {
-			// First item that needs editing: start the buffer and backfill
-			// it with the raw JSON of every preceding item.
-			rebuilt = make([]byte, 0, len(inputResult.Raw))
-			rebuilt = append(rebuilt, '[')
-			for i := range index {
-				keep(items[i].Raw)
+		if stripOrphanReasoningIDs && item.Get("id").Exists() {
+			if nextID, errID := sjson.Delete(nextItem, "id"); errID != nil {
+				helps.LogWithRequestID(ctx).Debugf("%s: failed to drop reasoning id after invalid encrypted_content at input[%d]: %v", provider, index, errID)
+			} else {
+				nextItem = nextID
 			}
 		}
+
+		startRebuild(index)
 		keep(nextItem)
 
-		itemID := strings.TrimSpace(item.Get("id").String())
-		if itemID == "" {
-			itemID = fmt.Sprintf("input[%d]", index)
-		}
 		helps.LogWithRequestID(ctx).Debugf("%s: dropped invalid reasoning encrypted_content at input[%d] item_id=%q reason=%s", provider, index, itemID, reason)
 	}
 
