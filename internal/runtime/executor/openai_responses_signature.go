@@ -12,8 +12,8 @@ import (
 )
 
 func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provider string, body []byte) []byte {
-	input := gjson.GetBytes(body, "input")
-	if !input.Exists() || !input.IsArray() {
+	inputResult := gjson.GetBytes(body, "input")
+	if !inputResult.Exists() || !inputResult.IsArray() {
 		return body
 	}
 	provider = strings.TrimSpace(provider)
@@ -21,15 +21,35 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 		provider = "openai responses upstream"
 	}
 
-	updated := body
-	for index, item := range input.Array() {
+	items := inputResult.Array()
+
+	// rebuilt accumulates the edited "input" array as JSON array bytes. It
+	// stays nil while no item needs editing so the common case (nothing to
+	// sanitize) does no allocation or rebuilding. Edits are applied directly
+	// to each item's own raw JSON rather than re-parsing the whole body,
+	// keeping the cost proportional to the item being edited.
+	var rebuilt []byte
+	itemsWritten := 0
+	keep := func(raw string) {
+		if rebuilt == nil {
+			return
+		}
+		if itemsWritten > 0 {
+			rebuilt = append(rebuilt, ',')
+		}
+		rebuilt = append(rebuilt, raw...)
+		itemsWritten++
+	}
+
+	for index, item := range items {
 		if strings.TrimSpace(item.Get("type").String()) != "reasoning" {
+			keep(item.Raw)
 			continue
 		}
 
-		encryptedContentPath := fmt.Sprintf("input.%d.encrypted_content", index)
-		encryptedContent := gjson.GetBytes(updated, encryptedContentPath)
+		encryptedContent := item.Get("encrypted_content")
 		if !encryptedContent.Exists() {
+			keep(item.Raw)
 			continue
 		}
 
@@ -48,21 +68,44 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 			reason = fmt.Sprintf("encrypted_content must be a string, got %s", encryptedContent.Type.String())
 		}
 		if reason == "" {
+			keep(item.Raw)
 			continue
 		}
 
-		next, err := sjson.DeleteBytes(updated, encryptedContentPath)
+		nextItem, err := sjson.Delete(item.Raw, "encrypted_content")
 		if err != nil {
 			helps.LogWithRequestID(ctx).Debugf("%s: failed to drop invalid reasoning encrypted_content at input[%d]: %v", provider, index, err)
+			keep(item.Raw)
 			continue
 		}
-		updated = next
 
-		itemID := strings.TrimSpace(gjson.GetBytes(updated, fmt.Sprintf("input.%d.id", index)).String())
+		if rebuilt == nil {
+			// First item that needs editing: start the buffer and backfill
+			// it with the raw JSON of every preceding item.
+			rebuilt = make([]byte, 0, len(inputResult.Raw))
+			rebuilt = append(rebuilt, '[')
+			for i := range index {
+				keep(items[i].Raw)
+			}
+		}
+		keep(nextItem)
+
+		itemID := strings.TrimSpace(item.Get("id").String())
 		if itemID == "" {
 			itemID = fmt.Sprintf("input[%d]", index)
 		}
 		helps.LogWithRequestID(ctx).Debugf("%s: dropped invalid reasoning encrypted_content at input[%d] item_id=%q reason=%s", provider, index, itemID, reason)
+	}
+
+	if rebuilt == nil {
+		return body
+	}
+	rebuilt = append(rebuilt, ']')
+
+	updated, err := sjson.SetRawBytes(body, "input", rebuilt)
+	if err != nil {
+		helps.LogWithRequestID(ctx).Debugf("%s: failed to rebuild input array while sanitizing reasoning encrypted_content: %v", provider, err)
+		return body
 	}
 	return updated
 }
