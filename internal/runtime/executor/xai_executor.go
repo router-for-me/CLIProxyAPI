@@ -869,6 +869,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	if err != nil {
 		return nil, err
 	}
+	body = normalizeXAIInputCustomToolCalls(body)
 	body = normalizeXAIInputNamespaceToolCalls(body)
 	body = normalizeXAIInputReasoningItems(body)
 	body = sanitizeXAIInputEncryptedContent(body)
@@ -1453,6 +1454,97 @@ func collectXAINamespaceToolRefs(body []byte) map[string]xaiNamespaceToolRef {
 		}
 	}
 	return refs
+}
+
+func normalizeXAIInputCustomToolCalls(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+
+	changed := false
+	items := make([]json.RawMessage, 0, len(input.Array()))
+	for _, item := range input.Array() {
+		var normalized []byte
+		switch item.Get("type").String() {
+		case "custom_tool_call":
+			callID := strings.TrimSpace(item.Get("call_id").String())
+			name := strings.TrimSpace(item.Get("name").String())
+			if callID == "" || name == "" {
+				changed = true
+				continue
+			}
+			normalized = []byte(`{"type":"function_call"}`)
+			normalized, _ = sjson.SetBytes(normalized, "call_id", callID)
+			normalized, _ = sjson.SetBytes(normalized, "name", name)
+			normalized, _ = sjson.SetBytes(normalized, "arguments", xaiCustomToolCallArguments(item.Get("input")))
+		case "custom_tool_call_output":
+			callID := strings.TrimSpace(item.Get("call_id").String())
+			if callID == "" {
+				changed = true
+				continue
+			}
+			normalized = []byte(`{"type":"function_call_output"}`)
+			normalized, _ = sjson.SetBytes(normalized, "call_id", callID)
+			normalized, _ = sjson.SetBytes(normalized, "output", xaiCustomToolCallOutput(item.Get("output")))
+		default:
+			items = append(items, json.RawMessage(item.Raw))
+			continue
+		}
+		items = append(items, json.RawMessage(normalized))
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+
+	rawInput, errMarshal := json.Marshal(items)
+	if errMarshal != nil {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "input", rawInput)
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
+
+func xaiCustomToolCallArguments(input gjson.Result) string {
+	if !input.Exists() {
+		return "{}"
+	}
+	if input.Type == gjson.String {
+		text := input.String()
+		trimmed := strings.TrimSpace(text)
+		if gjson.Valid(trimmed) {
+			parsed := gjson.Parse(trimmed)
+			if parsed.IsObject() {
+				return parsed.Raw
+			}
+		}
+		encoded, errMarshal := json.Marshal(text)
+		if errMarshal != nil {
+			return "{}"
+		}
+		return `{"input":` + string(encoded) + `}`
+	}
+	if input.IsObject() {
+		return input.Raw
+	}
+	if input.Raw != "" {
+		return `{"input":` + input.Raw + `}`
+	}
+	return "{}"
+}
+
+func xaiCustomToolCallOutput(output gjson.Result) string {
+	if !output.Exists() {
+		return ""
+	}
+	if output.Type == gjson.String {
+		return output.String()
+	}
+	return output.Raw
 }
 
 func normalizeXAIInputNamespaceToolCalls(body []byte) []byte {

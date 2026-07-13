@@ -249,6 +249,90 @@ func TestXAIExecutorExecuteRestoresAdditionalToolsNamespaceCalls(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorExecuteNormalizesCustomToolCallHistory(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		for _, item := range gjson.GetBytes(gotBody, "input").Array() {
+			if strings.HasPrefix(item.Get("type").String(), "custom_tool_call") {
+				http.Error(w, `{"error":"data did not match any variant of untagged enum ModelInput"}`, http.StatusUnprocessableEntity)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.5\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":  server.URL,
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	payload := []byte(`{
+		"model":"grok-4.5",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"search"}]},
+			{"type":"custom_tool_call","name":"missing_call_id","input":"invalid"},
+			{"type":"custom_tool_call_output","output":"missing call id"},
+			{"type":"custom_tool_call","status":"completed","call_id":"xs_call-1","name":"x_semantic_search","input":"{\"query\":\"US stocks\",\"limit\":\"10\"}","internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}},
+			{"type":"custom_tool_call_output","call_id":"xs_call-1","output":"unsupported custom tool call: x_semantic_search","internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}},
+			{"type":"custom_tool_call","call_id":"call-2","name":"apply_patch","input":"*** Begin Patch"},
+			{"type":"custom_tool_call_output","call_id":"call-2","output":[{"type":"input_text","text":"done"}]}
+		],
+		"tools":[{"type":"x_search"}],
+		"tool_choice":"auto"
+	}`)
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	input := gjson.GetBytes(gotBody, "input").Array()
+	if len(input) != 5 {
+		t.Fatalf("input length = %d, want 5; body=%s", len(input), gotBody)
+	}
+	if got := input[1].Get("type").String(); got != "function_call" {
+		t.Fatalf("input.1.type = %q, want function_call; body=%s", got, gotBody)
+	}
+	if got := gjson.Get(input[1].Get("arguments").String(), "query").String(); got != "US stocks" {
+		t.Fatalf("input.1 arguments query = %q, want US stocks; body=%s", got, gotBody)
+	}
+	if input[1].Get("input").Exists() || input[1].Get("internal_chat_message_metadata_passthrough").Exists() {
+		t.Fatalf("input.1 contains unsupported custom fields: %s", input[1].Raw)
+	}
+	if got := input[2].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("input.2.type = %q, want function_call_output; body=%s", got, gotBody)
+	}
+	if got := input[2].Get("output").String(); got != "unsupported custom tool call: x_semantic_search" {
+		t.Fatalf("input.2.output = %q; body=%s", got, gotBody)
+	}
+	if got := gjson.Get(input[3].Get("arguments").String(), "input").String(); got != "*** Begin Patch" {
+		t.Fatalf("input.3 freeform arguments = %q, want patch input; body=%s", got, gotBody)
+	}
+	if got := input[4].Get("output").String(); got != `[{"type":"input_text","text":"done"}]` {
+		t.Fatalf("input.4 output = %q, want flattened JSON string; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "tools.0.type").String(); got != "x_search" {
+		t.Fatalf("tools.0.type = %q, want x_search; body=%s", got, gotBody)
+	}
+}
+
 func TestXAIExecutorComposerSessionIsolation(t *testing.T) {
 	exec := NewXAIExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
