@@ -15,7 +15,7 @@ import (
 func TestClaudeCodeCompactionWindowsACLIsCurrentUserOnly(t *testing.T) {
 	resetClaudeCodeCompactionLanesForTest()
 	stateDir := filepath.Join(t.TempDir(), "state")
-	key, _ := NewClaudeCodeCompactionLaneKey("acl-session", "model", "auth")
+	key, _ := NewClaudeCodeCompactionLaneKey("acl-session", "", "model", "auth")
 	lane := LockClaudeCodeCompactionLane(key, time.Hour, stateDir)
 	if _, err := lane.Commit(ClaudeCodeCompactionState{EnvelopeHash: "secured"}); err != nil {
 		lane.Unlock()

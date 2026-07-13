@@ -89,10 +89,18 @@ func TestColorRequestEventHighlightsCacheMissAndCompaction(t *testing.T) {
 	if got := colorRequestEvent(cacheMiss); got != "\x1b[31m"+cacheMiss+"\x1b[0m" {
 		t.Fatalf("cache miss color = %q", got)
 	}
+	lowReuse := "request_event operation=inference cache_outcome=hit cache_miss=false cache_low_reuse=true"
+	if got := colorRequestEvent(lowReuse); got != "\x1b[31m"+lowReuse+"\x1b[0m" {
+		t.Fatalf("low cache reuse color = %q", got)
+	}
 
 	compaction := "request_event operation=compaction cache_outcome=hit cache_miss=false"
 	if got := colorRequestEvent(compaction); got != "\x1b[35m"+compaction+"\x1b[0m" {
 		t.Fatalf("compaction color = %q", got)
+	}
+	reset := "compaction_event operation=compaction_reset lane_id=0123456789abcdef"
+	if got := colorRequestEvent(reset); got != "\x1b[35m"+reset+"\x1b[0m" {
+		t.Fatalf("compaction reset color = %q", got)
 	}
 
 	normal := "ordinary log line"

@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -120,6 +121,113 @@ func TestTrackerDistinguishesCacheMissFromMissingTelemetry(t *testing.T) {
 	}
 	if snapshot.RecentEvents[1].CacheMiss || snapshot.RecentEvents[1].CacheOutcome != CacheOutcomeUnknown {
 		t.Fatalf("omitted cache telemetry = %+v, want unknown", snapshot.RecentEvents[1])
+	}
+}
+
+func TestTrackerReportsLowCacheReuseWithoutChangingHitMissSemantics(t *testing.T) {
+	tracker := NewTracker(4)
+	tracker.HandleUsage(context.Background(), usage.Record{
+		Provider: "codex",
+		Model:    "gpt-5.6-sol",
+		Detail: usage.Detail{
+			InputTokens:           300_000,
+			CacheReadTokens:       17_920,
+			CacheTelemetryPresent: true,
+		},
+	})
+	tracker.HandleUsage(context.Background(), usage.Record{
+		Provider: "claude",
+		Model:    "claude-fable-5",
+		Detail: usage.Detail{
+			InputTokens:           20_000,
+			CacheReadTokens:       80_000,
+			CacheTelemetryPresent: true,
+		},
+	})
+
+	snapshot := tracker.Snapshot()
+	if snapshot.CacheHits != 2 || snapshot.CacheMisses != 0 || snapshot.CacheLowReuseRequests != 1 {
+		t.Fatalf("cache hits/misses/low-reuse = %d/%d/%d, want 2/0/1", snapshot.CacheHits, snapshot.CacheMisses, snapshot.CacheLowReuseRequests)
+	}
+	lowReuse := snapshot.RecentEvents[0]
+	if lowReuse.CacheOutcome != CacheOutcomeHit || lowReuse.CacheMiss || !lowReuse.CacheLowReuse {
+		t.Fatalf("low-reuse event classification = %+v, want hit + low reuse without strict miss", lowReuse)
+	}
+	if lowReuse.UncachedInputTokens != 282_080 {
+		t.Fatalf("uncached input = %d, want 282080", lowReuse.UncachedInputTokens)
+	}
+	if got, want := lowReuse.CacheReadPercent, float64(17_920)*100/300_000; math.Abs(got-want) > 1e-12 {
+		t.Fatalf("cache read percent = %.12f, want %.12f", got, want)
+	}
+	healthy := snapshot.RecentEvents[1]
+	if healthy.InputTokens != 100_000 || healthy.UncachedInputTokens != 20_000 || healthy.CacheLowReuse {
+		t.Fatalf("healthy Claude cache coverage = %+v, want 100K total, 20K uncached, not low reuse", healthy)
+	}
+}
+
+func TestTrackerCountsStrictCacheMissAsLowReuse(t *testing.T) {
+	tracker := NewTracker(1)
+	tracker.HandleUsage(context.Background(), usage.Record{
+		Provider: "codex",
+		Model:    "gpt-5.6-sol",
+		Detail: usage.Detail{
+			InputTokens:           10_000,
+			CacheTelemetryPresent: true,
+		},
+	})
+
+	snapshot := tracker.Snapshot()
+	if snapshot.CacheMisses != 1 || snapshot.CacheLowReuseRequests != 1 {
+		t.Fatalf("cache misses/low reuse = %d/%d, want 1/1", snapshot.CacheMisses, snapshot.CacheLowReuseRequests)
+	}
+	if !snapshot.RecentEvents[0].CacheMiss || !snapshot.RecentEvents[0].CacheLowReuse {
+		t.Fatalf("strict miss event = %+v, want miss and low reuse", snapshot.RecentEvents[0])
+	}
+}
+
+func TestTrackerRecordsSafeCompactionResetWithoutChangingRequestTotals(t *testing.T) {
+	tracker := NewTracker(2)
+	tracker.HandleUsage(context.Background(), usage.Record{
+		Provider: "codex",
+		Model:    "gpt-5.6-sol",
+		Detail:   usage.Detail{InputTokens: 10},
+	})
+	tracker.RecordCompactionReset(NewCompactionResetDiagnostic(
+		"codex",
+		"gpt-5.6-sol",
+		"Request envelope changed!",
+		"session-secret:model:auth-secret",
+		"agent-secret",
+		"previous-envelope-secret",
+		"new-envelope-secret",
+	))
+
+	snapshot := tracker.Snapshot()
+	if snapshot.Requests != 1 || snapshot.CompactionAttempts != 0 || snapshot.Compactions != 0 || snapshot.CompactionResets != 1 {
+		t.Fatalf("requests/attempts/compactions/resets = %d/%d/%d/%d, want 1/0/0/1", snapshot.Requests, snapshot.CompactionAttempts, snapshot.Compactions, snapshot.CompactionResets)
+	}
+	if snapshot.CacheUnknown != 1 || snapshot.PricedRequests != 1 || snapshot.UnpricedRequests != 0 {
+		t.Fatalf("reset altered cache/pricing totals: %+v", snapshot)
+	}
+	if len(snapshot.RecentEvents) != 2 || snapshot.RecentEvents[1].Operation != operationCompactionReset {
+		t.Fatalf("recent events = %+v, want request followed by compaction reset", snapshot.RecentEvents)
+	}
+	reset := snapshot.RecentEvents[1]
+	if reset.ResetReason != "request_envelope_changed" {
+		t.Fatalf("reset reason = %q, want request_envelope_changed", reset.ResetReason)
+	}
+	serialized := strings.Join([]string{reset.LaneID, reset.AgentID, reset.PreviousEnvelopeID, reset.EnvelopeID}, " ")
+	for _, secret := range []string{"session-secret", "auth-secret", "agent-secret", "previous-envelope-secret", "new-envelope-secret"} {
+		if strings.Contains(serialized, secret) {
+			t.Fatalf("safe diagnostic IDs %q expose %q", serialized, secret)
+		}
+	}
+	for name, value := range map[string]string{
+		"lane": reset.LaneID, "agent": reset.AgentID, "previous envelope": reset.PreviousEnvelopeID, "envelope": reset.EnvelopeID,
+	} {
+		if len(value) != 16 {
+			t.Fatalf("%s fingerprint length = %d (%q), want 16", name, len(value), value)
+		}
 	}
 }
 

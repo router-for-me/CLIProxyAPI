@@ -220,11 +220,13 @@ func stdoutSupportsRequestEventColors() bool {
 
 func colorRequestEvent(message string) string {
 	lower := strings.ToLower(message)
-	if !strings.Contains(lower, "request_event") {
+	requestEvent := strings.Contains(lower, "request_event")
+	compactionEvent := strings.Contains(lower, "compaction_event")
+	if !requestEvent && !compactionEvent {
 		return message
 	}
 	const reset = "\x1b[0m"
-	if strings.Contains(lower, "cache_outcome=miss") || strings.Contains(lower, "cache_miss=true") {
+	if requestEvent && (strings.Contains(lower, "cache_outcome=miss") || strings.Contains(lower, "cache_miss=true") || strings.Contains(lower, "cache_low_reuse=true")) {
 		return "\x1b[31m" + message + reset
 	}
 	if strings.Contains(lower, "operation=compaction") {

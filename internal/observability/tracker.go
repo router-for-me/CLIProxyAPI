@@ -4,6 +4,7 @@ package observability
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"strings"
@@ -16,9 +17,10 @@ import (
 )
 
 const (
-	defaultRecentEventLimit = 200
-	operationInference      = "inference"
-	operationCompaction     = "compaction"
+	defaultRecentEventLimit  = 200
+	operationInference       = "inference"
+	operationCompaction      = "compaction"
+	operationCompactionReset = "compaction_reset"
 )
 
 // CacheOutcome describes whether upstream cache telemetry reported a hit, a
@@ -42,6 +44,9 @@ type RequestEvent struct {
 	OutputTokens              int64        `json:"output_tokens"`
 	CacheReadTokens           int64        `json:"cache_read_tokens"`
 	CacheWriteTokens          int64        `json:"cache_write_tokens"`
+	UncachedInputTokens       int64        `json:"uncached_input_tokens"`
+	CacheReadPercent          float64      `json:"cache_read_percent"`
+	CacheLowReuse             bool         `json:"cache_low_reuse"`
 	CacheTelemetryPresent     bool         `json:"cache_telemetry_present"`
 	CacheOutcome              CacheOutcome `json:"cache_outcome"`
 	CacheMiss                 bool         `json:"cache_miss"`
@@ -52,36 +57,72 @@ type RequestEvent struct {
 	EstimatedCostAvailable    bool         `json:"estimated_cost_available"`
 	EstimatedCostCatalogModel string       `json:"estimated_cost_catalog_model,omitempty"`
 	EstimatedCostTier         string       `json:"estimated_cost_tier,omitempty"`
+	ResetReason               string       `json:"reset_reason,omitempty"`
+	LaneID                    string       `json:"lane_id,omitempty"`
+	AgentID                   string       `json:"agent_id,omitempty"`
+	PreviousEnvelopeID        string       `json:"previous_envelope_id,omitempty"`
+	EnvelopeID                string       `json:"envelope_id,omitempty"`
 }
 
 // Snapshot contains process-lifetime totals plus a bounded recent event list.
 // Costs are estimates based on the built-in context-tiered catalog.
 type Snapshot struct {
-	GeneratedAt        time.Time      `json:"generated_at"`
-	StartedAt          time.Time      `json:"started_at"`
-	BootID             string         `json:"boot_id"`
-	ProcessID          int            `json:"process_id"`
-	Requests           uint64         `json:"requests"`
-	FailedRequests     uint64         `json:"failed_requests"`
-	InputTokens        int64          `json:"input_tokens"`
-	OutputTokens       int64          `json:"output_tokens"`
-	CacheHits          uint64         `json:"cache_hits"`
-	CacheMisses        uint64         `json:"cache_misses"`
-	CacheUnknown       uint64         `json:"cache_unknown"`
-	Compactions        uint64         `json:"compactions"`
-	CompactionAttempts uint64         `json:"compaction_attempts"`
-	EstimatedCostUSD   float64        `json:"estimated_cost_usd"`
-	CostEstimated      bool           `json:"cost_estimated"`
-	PricedRequests     uint64         `json:"priced_requests"`
-	UnpricedRequests   uint64         `json:"unpriced_requests"`
-	EarliestSequence   uint64         `json:"earliest_sequence"`
-	LatestSequence     uint64         `json:"latest_sequence"`
-	NextAfter          uint64         `json:"next_after"`
-	EventGap           bool           `json:"event_gap"`
-	GapFromSequence    uint64         `json:"gap_from_sequence,omitempty"`
-	GapToSequence      uint64         `json:"gap_to_sequence,omitempty"`
-	CursorReset        bool           `json:"cursor_reset,omitempty"`
-	RecentEvents       []RequestEvent `json:"recent_events"`
+	GeneratedAt           time.Time      `json:"generated_at"`
+	StartedAt             time.Time      `json:"started_at"`
+	BootID                string         `json:"boot_id"`
+	ProcessID             int            `json:"process_id"`
+	Requests              uint64         `json:"requests"`
+	FailedRequests        uint64         `json:"failed_requests"`
+	InputTokens           int64          `json:"input_tokens"`
+	OutputTokens          int64          `json:"output_tokens"`
+	CacheHits             uint64         `json:"cache_hits"`
+	CacheMisses           uint64         `json:"cache_misses"`
+	CacheUnknown          uint64         `json:"cache_unknown"`
+	CacheLowReuseRequests uint64         `json:"cache_low_reuse_requests"`
+	Compactions           uint64         `json:"compactions"`
+	CompactionAttempts    uint64         `json:"compaction_attempts"`
+	CompactionResets      uint64         `json:"compaction_resets"`
+	EstimatedCostUSD      float64        `json:"estimated_cost_usd"`
+	CostEstimated         bool           `json:"cost_estimated"`
+	PricedRequests        uint64         `json:"priced_requests"`
+	UnpricedRequests      uint64         `json:"unpriced_requests"`
+	EarliestSequence      uint64         `json:"earliest_sequence"`
+	LatestSequence        uint64         `json:"latest_sequence"`
+	NextAfter             uint64         `json:"next_after"`
+	EventGap              bool           `json:"event_gap"`
+	GapFromSequence       uint64         `json:"gap_from_sequence,omitempty"`
+	GapToSequence         uint64         `json:"gap_to_sequence,omitempty"`
+	CursorReset           bool           `json:"cursor_reset,omitempty"`
+	RecentEvents          []RequestEvent `json:"recent_events"`
+}
+
+// CompactionResetDiagnostic describes a proxy-side compaction lane reset.
+// Identity material remains private so callers cannot accidentally place raw
+// session, agent, or envelope identifiers in management responses or logs.
+type CompactionResetDiagnostic struct {
+	timestamp          time.Time
+	provider           string
+	model              string
+	reason             string
+	laneID             string
+	agentID            string
+	previousEnvelopeID string
+	envelopeID         string
+}
+
+// NewCompactionResetDiagnostic constructs a reset diagnostic while replacing
+// all opaque identity material with stable, short SHA-256 fingerprints.
+func NewCompactionResetDiagnostic(provider, model, reason, laneMaterial, agentID, previousEnvelope, envelope string) CompactionResetDiagnostic {
+	return CompactionResetDiagnostic{
+		timestamp:          time.Now().UTC(),
+		provider:           strings.ToLower(strings.TrimSpace(provider)),
+		model:              strings.TrimSpace(model),
+		reason:             normalizeDiagnosticReason(reason),
+		laneID:             diagnosticFingerprint(laneMaterial),
+		agentID:            diagnosticFingerprint(agentID),
+		previousEnvelopeID: diagnosticFingerprint(previousEnvelope),
+		envelopeID:         diagnosticFingerprint(envelope),
+	}
 }
 
 // Tracker implements usage.Plugin.
@@ -132,6 +173,9 @@ func (t *Tracker) HandleUsage(_ context.Context, record usage.Record) {
 	default:
 		t.snapshot.CacheUnknown++
 	}
+	if event.CacheLowReuse {
+		t.snapshot.CacheLowReuseRequests++
+	}
 	if event.Compaction {
 		t.snapshot.CompactionAttempts++
 		if !event.Failed {
@@ -148,6 +192,45 @@ func (t *Tracker) HandleUsage(_ context.Context, record usage.Record) {
 	t.mu.Unlock()
 
 	logRequestEvent(event)
+}
+
+// RecordCompactionReset appends a non-request diagnostic event. It advances
+// the event cursor and reset total without changing request, cache, token,
+// pricing, or successful-compaction counters.
+func (t *Tracker) RecordCompactionReset(diagnostic CompactionResetDiagnostic) {
+	if t == nil {
+		return
+	}
+	timestamp := diagnostic.timestamp
+	if timestamp.IsZero() {
+		timestamp = time.Now().UTC()
+	}
+	event := RequestEvent{
+		Timestamp:          timestamp,
+		Provider:           diagnostic.provider,
+		Model:              diagnostic.model,
+		Operation:          operationCompactionReset,
+		CacheOutcome:       CacheOutcomeUnknown,
+		ResetReason:        diagnostic.reason,
+		LaneID:             diagnostic.laneID,
+		AgentID:            diagnostic.agentID,
+		PreviousEnvelopeID: diagnostic.previousEnvelopeID,
+		EnvelopeID:         diagnostic.envelopeID,
+	}
+
+	t.mu.Lock()
+	t.next++
+	event.Sequence = t.next
+	t.snapshot.CompactionResets++
+	t.appendEventLocked(event)
+	t.mu.Unlock()
+
+	logCompactionResetEvent(event)
+}
+
+// RecordCompactionReset appends a diagnostic to the process-wide tracker.
+func RecordCompactionReset(diagnostic CompactionResetDiagnostic) {
+	DefaultTracker().RecordCompactionReset(diagnostic)
 }
 
 // Snapshot returns a defensive copy of the current process-lifetime totals.
@@ -294,6 +377,26 @@ func normalizeRecord(record usage.Record) RequestEvent {
 		// Anthropic reports uncached input separately from cache reads/writes.
 		input += cacheRead + cacheWrite
 	}
+	coverageCacheRead := cacheRead
+	if coverageCacheRead < 0 {
+		coverageCacheRead = 0
+	}
+	if coverageCacheRead > input && input >= 0 {
+		coverageCacheRead = input
+	}
+	uncachedInput := input - coverageCacheRead
+	if uncachedInput < 0 {
+		uncachedInput = 0
+	}
+	cacheReadPercent := 0.0
+	cacheLowReuse := false
+	if cacheTelemetryPresent && input > 0 {
+		cacheReadPercent = float64(coverageCacheRead) * 100 / float64(input)
+		// A low-reuse request is one where the majority of normalized input
+		// was not served from cache. This includes strict zero-read misses but
+		// does not change the existing hit/miss/unknown classification.
+		cacheLowReuse = uncachedInput > coverageCacheRead
+	}
 
 	cost, catalogModel, costTier, costAvailable := estimatedCost(record, cacheRead, cacheWrite)
 	timestamp := time.Now().UTC()
@@ -306,6 +409,9 @@ func normalizeRecord(record usage.Record) RequestEvent {
 		OutputTokens:              record.Detail.OutputTokens,
 		CacheReadTokens:           cacheRead,
 		CacheWriteTokens:          cacheWrite,
+		UncachedInputTokens:       uncachedInput,
+		CacheReadPercent:          cacheReadPercent,
+		CacheLowReuse:             cacheLowReuse,
 		CacheTelemetryPresent:     cacheTelemetryPresent,
 		CacheOutcome:              cacheOutcome,
 		CacheMiss:                 cacheOutcome == CacheOutcomeMiss,
@@ -411,7 +517,7 @@ func logRequestEvent(event RequestEvent) {
 		cost = fmt.Sprintf("%.8f", event.EstimatedCostUSD)
 	}
 	log.Infof(
-		"request_event operation=%s provider=%q model=%q input_tokens=%d output_tokens=%d cache_read_tokens=%d cache_write_tokens=%d cache_telemetry_present=%t cache_outcome=%s cache_miss=%t estimated_cost_usd=%s estimated_cost_tier=%s cost_estimated=%t failed=%t latency_ms=%d",
+		"request_event operation=%s provider=%q model=%q input_tokens=%d output_tokens=%d cache_read_tokens=%d cache_write_tokens=%d uncached_input_tokens=%d cache_read_percent=%.2f cache_low_reuse=%t cache_telemetry_present=%t cache_outcome=%s cache_miss=%t estimated_cost_usd=%s estimated_cost_tier=%s cost_estimated=%t failed=%t latency_ms=%d",
 		event.Operation,
 		event.Provider,
 		event.Model,
@@ -419,6 +525,9 @@ func logRequestEvent(event RequestEvent) {
 		event.OutputTokens,
 		event.CacheReadTokens,
 		event.CacheWriteTokens,
+		event.UncachedInputTokens,
+		event.CacheReadPercent,
+		event.CacheLowReuse,
 		event.CacheTelemetryPresent,
 		event.CacheOutcome,
 		event.CacheMiss,
@@ -428,6 +537,53 @@ func logRequestEvent(event RequestEvent) {
 		event.Failed,
 		event.LatencyMilliseconds,
 	)
+}
+
+func logCompactionResetEvent(event RequestEvent) {
+	log.Warnf(
+		"compaction_event operation=%s provider=%q model=%q reason=%q lane_id=%q agent_id=%q previous_envelope_id=%q envelope_id=%q",
+		event.Operation,
+		event.Provider,
+		event.Model,
+		event.ResetReason,
+		event.LaneID,
+		event.AgentID,
+		event.PreviousEnvelopeID,
+		event.EnvelopeID,
+	)
+}
+
+func diagnosticFingerprint(material string) string {
+	material = strings.TrimSpace(material)
+	if material == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(material))
+	return fmt.Sprintf("%x", digest[:8])
+}
+
+func normalizeDiagnosticReason(reason string) string {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	if reason == "" {
+		return "unknown"
+	}
+	var normalized strings.Builder
+	normalized.Grow(min(len(reason), 64))
+	for _, r := range reason {
+		if normalized.Len() >= 64 {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '-':
+			normalized.WriteRune(r)
+		case r == ' ':
+			normalized.WriteByte('_')
+		}
+	}
+	if normalized.Len() == 0 {
+		return "unknown"
+	}
+	return normalized.String()
 }
 
 var defaultTracker = NewTracker(defaultRecentEventLimit)

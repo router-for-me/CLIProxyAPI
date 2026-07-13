@@ -18,23 +18,35 @@ func TestRequestEventLineStyles(t *testing.T) {
 	if got, want := model.styleLine(compaction), logCompactionStyle.Render(compaction); got != want {
 		t.Fatalf("compaction style = %q, want magenta style %q", got, want)
 	}
+
+	lowReuse := `[info] request_event operation=inference cache_outcome=hit cache_miss=false cache_low_reuse=true`
+	if got, want := model.styleLine(lowReuse), logErrorStyle.Render(lowReuse); got != want {
+		t.Fatalf("low cache reuse style = %q, want red style %q", got, want)
+	}
+
+	reset := `[warn] compaction_event operation=compaction_reset lane_id="0123456789abcdef"`
+	if got, want := model.styleLine(reset), logCompactionStyle.Render(reset); got != want {
+		t.Fatalf("compaction reset style = %q, want magenta style %q", got, want)
+	}
 }
 
 func TestRenderObservabilitySummaryIncludesFixedCounters(t *testing.T) {
 	app := App{
 		width: 180,
 		observability: observabilitySnapshot{
-			Requests:         12,
-			InputTokens:      345,
-			OutputTokens:     67,
-			CacheMisses:      3,
-			Compactions:      2,
-			EstimatedCostUSD: 1.25,
-			PricedRequests:   12,
+			Requests:              12,
+			InputTokens:           345,
+			OutputTokens:          67,
+			CacheMisses:           3,
+			CacheLowReuseRequests: 4,
+			Compactions:           2,
+			CompactionResets:      1,
+			EstimatedCostUSD:      1.25,
+			PricedRequests:        12,
 		},
 	}
 	rendered := app.renderObservabilitySummary()
-	for _, want := range []string{"Requests 12", "In 345", "Out 67", "Cache misses 3", "Compactions 2", "Est. cost $1.2500"} {
+	for _, want := range []string{"Requests 12", "In 345", "Out 67", "Cache misses 3", "Low cache reuse 4", "Compactions 2", "Compaction resets 1", "Est. cost $1.2500"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("summary %q missing %q", rendered, want)
 		}
@@ -45,17 +57,19 @@ func TestRenderObservabilitySummaryUsesCompactLabelsWhenNarrow(t *testing.T) {
 	app := App{
 		width: 80,
 		observability: observabilitySnapshot{
-			Requests:         12,
-			InputTokens:      345,
-			OutputTokens:     67,
-			CacheMisses:      3,
-			Compactions:      2,
-			EstimatedCostUSD: 1.25,
-			PricedRequests:   12,
+			Requests:              12,
+			InputTokens:           345,
+			OutputTokens:          67,
+			CacheMisses:           3,
+			CacheLowReuseRequests: 4,
+			Compactions:           2,
+			CompactionResets:      1,
+			EstimatedCostUSD:      1.25,
+			PricedRequests:        12,
 		},
 	}
 	rendered := app.renderObservabilitySummary()
-	for _, want := range []string{"Req 12", "In 345", "Out 67", "Miss 3", "Cmp 2", "Est $1.2500"} {
+	for _, want := range []string{"Req 12", "In 345 Out 67", "Miss 3/Low 4", "Cmp 2/Rst 1", "$1.2500"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("compact summary %q missing %q", rendered, want)
 		}
@@ -92,6 +106,10 @@ func TestObservabilityOnlyLogsAppendEachRequestOnce(t *testing.T) {
 		Operation:              "compaction",
 		InputTokens:            240000,
 		OutputTokens:           1024,
+		CacheReadTokens:        17920,
+		UncachedInputTokens:    222080,
+		CacheReadPercent:       7.4666667,
+		CacheLowReuse:          true,
 		CacheOutcome:           "miss",
 		CacheMiss:              true,
 		EstimatedCostUSD:       1.23,
@@ -102,13 +120,44 @@ func TestObservabilityOnlyLogsAppendEachRequestOnce(t *testing.T) {
 	if len(model.lines) != 1 {
 		t.Fatalf("observability lines = %d, want 1", len(model.lines))
 	}
-	for _, want := range []string{"operation=compaction", `provider="codex"`, "cache_outcome=miss", "cache_miss=true"} {
+	for _, want := range []string{"operation=compaction", `provider="codex"`, "uncached_input_tokens=222080", "cache_read_percent=7.47", "cache_low_reuse=true", "cache_outcome=miss", "cache_miss=true"} {
 		if !strings.Contains(model.lines[0], want) {
 			t.Fatalf("request event %q missing %q", model.lines[0], want)
 		}
 	}
 	if got, want := model.styleLine(model.lines[0]), logErrorStyle.Render(model.lines[0]); got != want {
 		t.Fatalf("cache-miss compaction style = %q, want red %q", got, want)
+	}
+}
+
+func TestObservabilityCompactionResetUsesSafeDiagnosticLine(t *testing.T) {
+	model := newLogsTabModel(nil, nil)
+	model.SetObservabilityOnly(true)
+	event := observabilityEvent{
+		Sequence:           1,
+		Provider:           "codex",
+		Model:              "gpt-5.6-sol",
+		Operation:          "compaction_reset",
+		ResetReason:        "request_envelope_changed",
+		LaneID:             "0123456789abcdef",
+		AgentID:            "fedcba9876543210",
+		PreviousEnvelopeID: "1111111111111111",
+		EnvelopeID:         "2222222222222222",
+	}
+	model.AddObservabilityEvents([]observabilityEvent{event})
+	if len(model.lines) != 1 {
+		t.Fatalf("observability lines = %d, want 1", len(model.lines))
+	}
+	for _, want := range []string{"compaction_event", "operation=compaction_reset", `reason="request_envelope_changed"`, `lane_id="0123456789abcdef"`, `agent_id="fedcba9876543210"`} {
+		if !strings.Contains(model.lines[0], want) {
+			t.Fatalf("compaction reset line %q missing %q", model.lines[0], want)
+		}
+	}
+	if strings.Contains(model.lines[0], "input_tokens=") || strings.Contains(model.lines[0], "cache_outcome=") {
+		t.Fatalf("compaction reset line %q looks like a request", model.lines[0])
+	}
+	if got, want := model.styleLine(model.lines[0]), logCompactionStyle.Render(model.lines[0]); got != want {
+		t.Fatalf("compaction reset style = %q, want magenta %q", got, want)
 	}
 }
 

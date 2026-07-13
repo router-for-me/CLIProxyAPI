@@ -17,8 +17,10 @@ import (
 
 const (
 	maxClaudeCodeCompactionLanes           = 2048
-	claudeCodeCompactionStateVersion       = 1
-	claudeCodeCompactionStateFilePrefix    = "claude-code-compaction-v1-"
+	legacyClaudeCodeCompactionStateVersion = 1
+	legacyClaudeCodeCompactionStatePrefix  = "claude-code-compaction-v1-"
+	claudeCodeCompactionStateVersion       = 2
+	claudeCodeCompactionStateFilePrefix    = "claude-code-compaction-v2-"
 	claudeCodeCompactionStateFileSuffix    = ".json"
 	defaultClaudeCodeCompactionStateTTL    = 7 * 24 * time.Hour
 	claudeCodeCompactionSweepInterval      = time.Hour
@@ -28,19 +30,22 @@ const (
 )
 
 // ClaudeCodeCompactionLaneKey isolates compacted history by the Claude Code
-// conversation, resolved Codex model, and concrete upstream credential. Opaque
-// compaction items cannot safely cross any of those boundaries.
+// conversation and agent, resolved Codex model, and concrete upstream
+// credential. Opaque compaction items cannot safely cross any of those
+// boundaries. AgentID is empty for the main/headerless lane.
 type ClaudeCodeCompactionLaneKey struct {
 	SessionID string `json:"session_id"`
+	AgentID   string `json:"agent_id,omitempty"`
 	Model     string `json:"model"`
 	AuthID    string `json:"auth_id"`
 }
 
 // NewClaudeCodeCompactionLaneKey returns a normalized key when the request can
 // be associated with a Claude Code conversation.
-func NewClaudeCodeCompactionLaneKey(sessionID, model, authID string) (ClaudeCodeCompactionLaneKey, bool) {
+func NewClaudeCodeCompactionLaneKey(sessionID, agentID, model, authID string) (ClaudeCodeCompactionLaneKey, bool) {
 	key := ClaudeCodeCompactionLaneKey{
 		SessionID: strings.TrimSpace(sessionID),
+		AgentID:   strings.TrimSpace(agentID),
 		Model:     strings.TrimSpace(model),
 		AuthID:    strings.TrimSpace(authID),
 	}
@@ -528,9 +533,23 @@ func normalizeClaudeCodeCompactionStateDir(stateDirs []string) (string, error) {
 }
 
 func claudeCodeCompactionStatePath(stateDir string, key ClaudeCodeCompactionLaneKey) string {
+	path, _ := claudeCodeCompactionStatePathForVersion(stateDir, claudeCodeCompactionStateVersion, key)
+	return path
+}
+
+func claudeCodeCompactionStatePathForVersion(stateDir string, version int, key ClaudeCodeCompactionLaneKey) (string, bool) {
+	prefix := ""
+	switch version {
+	case legacyClaudeCodeCompactionStateVersion:
+		prefix = legacyClaudeCodeCompactionStatePrefix
+	case claudeCodeCompactionStateVersion:
+		prefix = claudeCodeCompactionStateFilePrefix
+	default:
+		return "", false
+	}
 	keyBytes, _ := json.Marshal(key)
 	digest := sha256.Sum256(keyBytes)
-	return filepath.Join(stateDir, claudeCodeCompactionStateFilePrefix+hex.EncodeToString(digest[:])+claudeCodeCompactionStateFileSuffix)
+	return filepath.Join(stateDir, prefix+hex.EncodeToString(digest[:])+claudeCodeCompactionStateFileSuffix), true
 }
 
 func maybeSweepExpiredClaudeCodeCompactionStates(stateDir string, now time.Time) {
@@ -576,14 +595,19 @@ func sweepExpiredClaudeCodeCompactionStates(stateDir string, now time.Time) erro
 			continue
 		}
 		var record persistedClaudeCodeCompactionRecord
-		if json.Unmarshal(data, &record) != nil || validateClaudeCodeCompactionStateRecord(record, path) != nil {
+		if json.Unmarshal(data, &record) != nil || !supportedClaudeCodeCompactionStateVersion(record.Version) || validateClaudeCodeCompactionStateRecordVersion(record, path, record.Version) != nil {
 			// Never delete a file we cannot authenticate as one of our records.
 			continue
 		}
-		if filepath.Base(claudeCodeCompactionStatePath(stateDir, record.Key)) != entry.Name() {
+		expectedPath, ok := claudeCodeCompactionStatePathForVersion(stateDir, record.Version, record.Key)
+		if !ok || filepath.Base(expectedPath) != entry.Name() {
 			continue
 		}
-		if record.ExpiresAt <= 0 || now.Before(time.Unix(0, record.ExpiresAt)) {
+		// V1 keyed every Claude Code worker only by session/model/auth. It is
+		// intentionally unsafe to reuse after agent-aware v2 lanes, so retire an
+		// authenticated v1 record immediately instead of waiting for its TTL.
+		retireLegacy := record.Version == legacyClaudeCodeCompactionStateVersion
+		if !retireLegacy && (record.ExpiresAt <= 0 || now.Before(time.Unix(0, record.ExpiresAt))) {
 			continue
 		}
 		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) && firstErr == nil {
@@ -594,10 +618,17 @@ func sweepExpiredClaudeCodeCompactionStates(stateDir string, now time.Time) erro
 }
 
 func isClaudeCodeCompactionStateFileName(name string) bool {
-	if !strings.HasPrefix(name, claudeCodeCompactionStateFilePrefix) || !strings.HasSuffix(name, claudeCodeCompactionStateFileSuffix) {
+	prefix := ""
+	for _, candidate := range []string{claudeCodeCompactionStateFilePrefix, legacyClaudeCodeCompactionStatePrefix} {
+		if strings.HasPrefix(name, candidate) {
+			prefix = candidate
+			break
+		}
+	}
+	if prefix == "" || !strings.HasSuffix(name, claudeCodeCompactionStateFileSuffix) {
 		return false
 	}
-	digest := strings.TrimSuffix(strings.TrimPrefix(name, claudeCodeCompactionStateFilePrefix), claudeCodeCompactionStateFileSuffix)
+	digest := strings.TrimSuffix(strings.TrimPrefix(name, prefix), claudeCodeCompactionStateFileSuffix)
 	if len(digest) != sha256.Size*2 {
 		return false
 	}
@@ -606,7 +637,11 @@ func isClaudeCodeCompactionStateFileName(name string) bool {
 }
 
 func validateClaudeCodeCompactionStateRecord(record persistedClaudeCodeCompactionRecord, path string) error {
-	if record.Version != claudeCodeCompactionStateVersion {
+	return validateClaudeCodeCompactionStateRecordVersion(record, path, claudeCodeCompactionStateVersion)
+}
+
+func validateClaudeCodeCompactionStateRecordVersion(record persistedClaudeCodeCompactionRecord, path string, expectedVersion int) error {
+	if record.Version != expectedVersion {
 		return fmt.Errorf("unsupported claude code compaction state version %d in %q", record.Version, path)
 	}
 	if len(record.State.AbsorbedReplayItemHashes) > maxClaudeCodeCompactionStateHashes || len(record.State.RejectedEncryptedItemHashes) > maxClaudeCodeCompactionStateHashes {
@@ -622,6 +657,10 @@ func validateClaudeCodeCompactionStateRecord(record persistedClaudeCodeCompactio
 		return fmt.Errorf("claude code compaction state checksum mismatch in %q", path)
 	}
 	return nil
+}
+
+func supportedClaudeCodeCompactionStateVersion(version int) bool {
+	return version == legacyClaudeCodeCompactionStateVersion || version == claudeCodeCompactionStateVersion
 }
 
 func loadClaudeCodeCompactionState(stateDir string, key ClaudeCodeCompactionLaneKey, now time.Time) (ClaudeCodeCompactionState, error) {

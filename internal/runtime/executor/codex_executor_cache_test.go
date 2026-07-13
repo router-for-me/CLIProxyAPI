@@ -307,3 +307,55 @@ func TestCodexExecutorCacheHelper_ClaudeUsesSessionHeader(t *testing.T) {
 		t.Fatalf("same Claude Code session header produced different prompt_cache_key: first=%q second=%q", firstKey, secondKey)
 	}
 }
+
+func TestCodexExecutorCacheHelper_ClaudeSeparatesAgentIDs(t *testing.T) {
+	executor := &CodexExecutor{}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol(xhigh)",
+		Payload: []byte(`{"model":"gpt-5.6-sol","metadata":{"user_id":"{\"session_id\":\"shared-agent-session\"}"},"messages":[{"role":"user","content":"hello"}]}`),
+	}
+	rawJSON := []byte(`{"model":"gpt-5.6-sol","stream":true}`)
+	url := "https://example.com/responses"
+	agentAHeaders := http.Header{}
+	agentAHeaders.Set(helps.ClaudeCodeAgentHeader, "agent-a")
+	agentBHeaders := http.Header{}
+	agentBHeaders.Set(helps.ClaudeCodeAgentHeader, "agent-b")
+
+	requestFor := func(headers http.Header) (*http.Request, []byte) {
+		t.Helper()
+		httpReq, body, _, err := executor.cacheHelper(context.Background(), sdktranslator.FormatClaude, url, nil, req, req.Payload, rawJSON, headers)
+		if err != nil {
+			t.Fatalf("cacheHelper error: %v", err)
+		}
+		return httpReq, body
+	}
+
+	agentARequest, agentABody := requestFor(agentAHeaders)
+	agentARepeatRequest, agentARepeatBody := requestFor(agentAHeaders)
+	agentBRequest, agentBBody := requestFor(agentBHeaders)
+	agentAKey := gjson.GetBytes(agentABody, "prompt_cache_key").String()
+	agentARepeatKey := gjson.GetBytes(agentARepeatBody, "prompt_cache_key").String()
+	agentBKey := gjson.GetBytes(agentBBody, "prompt_cache_key").String()
+	if agentAKey == "" || agentBKey == "" {
+		t.Fatalf("agent prompt cache keys must be non-empty: agent-a=%q agent-b=%q", agentAKey, agentBKey)
+	}
+	if agentAKey != agentARepeatKey {
+		t.Fatalf("same agent produced different prompt_cache_key values: %q and %q", agentAKey, agentARepeatKey)
+	}
+	if agentAKey == agentBKey {
+		t.Fatalf("different agents share prompt_cache_key %q", agentAKey)
+	}
+	for _, tc := range []struct {
+		name string
+		req  *http.Request
+		key  string
+	}{
+		{name: "agent-a", req: agentARequest, key: agentAKey},
+		{name: "agent-a-repeat", req: agentARepeatRequest, key: agentARepeatKey},
+		{name: "agent-b", req: agentBRequest, key: agentBKey},
+	} {
+		if got := tc.req.Header["Session_id"]; len(got) != 1 || got[0] != tc.key {
+			t.Fatalf("%s Session_id = %#v, want [%q]", tc.name, got, tc.key)
+		}
+	}
+}

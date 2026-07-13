@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -685,6 +686,59 @@ func TestApplyCodexPromptCacheHeadersClaudeUsesClaudeCodeSessionID(t *testing.T)
 	}
 	if got := secondHeaders["session_id"]; len(got) != 1 || got[0] != firstKey {
 		t.Fatalf("second session_id = %#v, want [%q]", got, firstKey)
+	}
+}
+
+func TestApplyCodexPromptCacheHeadersClaudeSeparatesAgentIDs(t *testing.T) {
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol(xhigh)",
+		Payload: []byte(`{"metadata":{"user_id":"{\"session_id\":\"ws-shared-agent-session\"}"},"messages":[{"role":"user","content":"hello"}]}`),
+	}
+	rawJSON := []byte(`{"model":"gpt-5.6-sol"}`)
+	agentAHeaders := http.Header{}
+	agentAHeaders.Set(helps.ClaudeCodeAgentHeader, "agent-a")
+	agentBHeaders := http.Header{}
+	agentBHeaders.Set(helps.ClaudeCodeAgentHeader, "agent-b")
+
+	agentABody, agentAUpstreamHeaders, err := applyCodexPromptCacheHeadersWithContext(context.Background(), sdktranslator.FormatClaude, req, rawJSON, agentAHeaders)
+	if err != nil {
+		t.Fatalf("agent A prompt cache headers: %v", err)
+	}
+	agentARepeatBody, _, err := applyCodexPromptCacheHeadersWithContext(context.Background(), sdktranslator.FormatClaude, req, rawJSON, agentAHeaders)
+	if err != nil {
+		t.Fatalf("agent A repeated prompt cache headers: %v", err)
+	}
+	agentBBody, agentBUpstreamHeaders, err := applyCodexPromptCacheHeadersWithContext(context.Background(), sdktranslator.FormatClaude, req, rawJSON, agentBHeaders)
+	if err != nil {
+		t.Fatalf("agent B prompt cache headers: %v", err)
+	}
+
+	agentAKey := gjson.GetBytes(agentABody, "prompt_cache_key").String()
+	agentARepeatKey := gjson.GetBytes(agentARepeatBody, "prompt_cache_key").String()
+	agentBKey := gjson.GetBytes(agentBBody, "prompt_cache_key").String()
+	if agentAKey == "" || agentBKey == "" {
+		t.Fatalf("websocket prompt cache keys must be non-empty: agent-a=%q agent-b=%q", agentAKey, agentBKey)
+	}
+	if agentAKey != agentARepeatKey {
+		t.Fatalf("same websocket agent produced unstable prompt_cache_key values: %q and %q", agentAKey, agentARepeatKey)
+	}
+	if agentAKey == agentBKey {
+		t.Fatalf("different websocket agents share prompt_cache_key %q", agentAKey)
+	}
+	for _, tc := range []struct {
+		name    string
+		headers http.Header
+		key     string
+	}{
+		{name: "agent-a", headers: agentAUpstreamHeaders, key: agentAKey},
+		{name: "agent-b", headers: agentBUpstreamHeaders, key: agentBKey},
+	} {
+		if got := tc.headers["session_id"]; len(got) != 1 || got[0] != tc.key {
+			t.Fatalf("%s session_id = %#v, want [%q]", tc.name, got, tc.key)
+		}
+		if got := tc.headers.Get("Conversation_id"); got != tc.key {
+			t.Fatalf("%s Conversation_id = %q, want %q", tc.name, got, tc.key)
+		}
 	}
 }
 

@@ -235,6 +235,24 @@ func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToCodex_AdaptiveEffort(t *testing.T) {
+	for _, effort := range []string{"low", "medium", "high", "xhigh", "max"} {
+		t.Run(effort, func(t *testing.T) {
+			inputJSON := `{
+				"model": "claude-opus-4-6",
+				"messages": [{"role": "user", "content": "hello"}],
+				"thinking": {"type": "adaptive"},
+				"output_config": {"effort": "` + effort + `"}
+			}`
+
+			result := ConvertClaudeRequestToCodex("gpt-5.6-sol", []byte(inputJSON), false)
+			if got := gjson.GetBytes(result, "reasoning.effort").String(); got != effort {
+				t.Fatalf("reasoning.effort = %q, want %q. Output: %s", got, effort, string(result))
+			}
+		})
+	}
+}
+
 func TestConvertClaudeRequestToCodex_ShortenLongToolUseIDs(t *testing.T) {
 	longID := "toolu_" + strings.Repeat("a", 62)
 	if len(longID) <= 64 {

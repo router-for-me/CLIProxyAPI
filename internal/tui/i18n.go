@@ -97,7 +97,9 @@ var zhStrings = map[string]string{
 	"summary_input":               "输入",
 	"summary_output":              "输出",
 	"summary_cache_misses":        "缓存未命中",
+	"summary_cache_low_reuse":     "缓存低复用",
 	"summary_compactions":         "压缩",
+	"summary_compaction_resets":   "压缩重置",
 	"summary_estimated_cost":      "预估费用",
 
 	// ── Dashboard ──
@@ -258,7 +260,9 @@ var enStrings = map[string]string{
 	"summary_input":               "In",
 	"summary_output":              "Out",
 	"summary_cache_misses":        "Cache misses",
+	"summary_cache_low_reuse":     "Low cache reuse",
 	"summary_compactions":         "Compactions",
+	"summary_compaction_resets":   "Compaction resets",
 	"summary_estimated_cost":      "Est. cost",
 
 	// ── Dashboard ──

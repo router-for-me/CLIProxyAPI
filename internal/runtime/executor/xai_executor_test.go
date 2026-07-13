@@ -18,6 +18,7 @@ import (
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -2671,6 +2672,47 @@ func TestXAIExecutorComposerReusesClaudeCodeSession(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorComposerSeparatesClaudeAgentsWithinSession(t *testing.T) {
+	exec := NewXAIExecutor(&config.Config{})
+	payload := []byte(`{"model":"grok-composer-2.5-fast","metadata":{"user_id":"{\"session_id\":\"shared-composer-session\"}"},"input":"hello"}`)
+	req := cliproxyexecutor.Request{Model: "grok-composer-2.5-fast", Payload: payload}
+	agentAHeaders := http.Header{}
+	agentAHeaders.Set(helps.ClaudeCodeAgentHeader, "agent-a")
+	agentBHeaders := http.Header{}
+	agentBHeaders.Set(helps.ClaudeCodeAgentHeader, "agent-b")
+	agentAOpts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Stream: true, Headers: agentAHeaders}
+	agentBOpts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Stream: true, Headers: agentBHeaders}
+
+	agentA, err := exec.prepareResponsesRequest(context.Background(), req, agentAOpts, true)
+	if err != nil {
+		t.Fatalf("prepare agent A request: %v", err)
+	}
+	agentARepeat, err := exec.prepareResponsesRequest(context.Background(), req, agentAOpts, true)
+	if err != nil {
+		t.Fatalf("prepare repeated agent A request: %v", err)
+	}
+	agentB, err := exec.prepareResponsesRequest(context.Background(), req, agentBOpts, true)
+	if err != nil {
+		t.Fatalf("prepare agent B request: %v", err)
+	}
+
+	agentAKey := gjson.GetBytes(agentA.body, "prompt_cache_key").String()
+	agentARepeatKey := gjson.GetBytes(agentARepeat.body, "prompt_cache_key").String()
+	agentBKey := gjson.GetBytes(agentB.body, "prompt_cache_key").String()
+	if agentAKey == "" || agentBKey == "" {
+		t.Fatalf("composer prompt cache keys must be non-empty: agent-a=%q agent-b=%q", agentAKey, agentBKey)
+	}
+	if agentAKey != agentARepeatKey {
+		t.Fatalf("same composer agent produced unstable prompt cache keys: %q and %q", agentAKey, agentARepeatKey)
+	}
+	if agentAKey == agentBKey {
+		t.Fatalf("different composer agents share prompt cache key %q", agentAKey)
+	}
+	if agentA.sessionID != agentAKey || agentB.sessionID != agentBKey {
+		t.Fatalf("composer conversation IDs do not match prompt cache keys: agent-a=%q/%q agent-b=%q/%q", agentA.sessionID, agentAKey, agentB.sessionID, agentBKey)
+	}
+}
+
 func TestSanitizeXAIInputEncryptedContent_DropsInvalidReasoningBlob(t *testing.T) {
 	body := []byte(`{"model":"grok-4.3","input":[{"type":"reasoning","summary":[],"encrypted_content":"bad"},{"type":"reasoning","summary":[],"encrypted_content":"gAAAAABinvalid-gpt-shape"},{"role":"user","content":"hi"}]}`)
 	got := sanitizeXAIInputEncryptedContent(body)
@@ -3227,8 +3269,30 @@ func TestXAIReasoningReplayScopeDisablesClaudeWithoutAPIKey(t *testing.T) {
 	if !scopeWithKey.valid() {
 		t.Fatal("Claude with caller API key must enable replay")
 	}
-	if !strings.HasPrefix(scopeWithKey.sessionKey, "caller:") || !strings.Contains(scopeWithKey.sessionKey, "claude:shared-session") {
-		t.Fatalf("session key = %q, want caller-isolated Claude session key", scopeWithKey.sessionKey)
+	if !strings.HasPrefix(scopeWithKey.sessionKey, "caller:") || !strings.Contains(scopeWithKey.sessionKey, "claude-agent-v1:") {
+		t.Fatalf("session key = %q, want caller- and agent-isolated Claude session key", scopeWithKey.sessionKey)
+	}
+}
+
+func TestXAIReasoningReplayScopeSeparatesClaudeAgentsWithinSession(t *testing.T) {
+	payload := []byte(`{"model":"grok-4.3","metadata":{"user_id":"{\"session_id\":\"shared-agent-session\"}"},"messages":[{"role":"user","content":"hello"}]}`)
+	req := cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}
+	agentAHeaders := http.Header{}
+	agentAHeaders.Set(helps.ClaudeCodeAgentHeader, "agent-a")
+	agentBHeaders := http.Header{}
+	agentBHeaders.Set(helps.ClaudeCodeAgentHeader, "agent-b")
+	ctx := testContextWithAPIKey("shared-caller-key")
+
+	agentAScope := xaiReasoningReplayScopeFromRequest(ctx, sdktranslator.FormatClaude, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Headers: agentAHeaders}, payload)
+	agentBScope := xaiReasoningReplayScopeFromRequest(ctx, sdktranslator.FormatClaude, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Headers: agentBHeaders}, payload)
+	if !agentAScope.valid() || !agentBScope.valid() {
+		t.Fatalf("agent replay scopes must be valid: agent-a=%+v agent-b=%+v", agentAScope, agentBScope)
+	}
+	if agentAScope.sessionKey == agentBScope.sessionKey {
+		t.Fatalf("different Claude agents share xAI replay scope %q", agentAScope.sessionKey)
+	}
+	if !strings.HasPrefix(agentAScope.sessionKey, "caller:") || !strings.Contains(agentAScope.sessionKey, "claude-agent-v1:") {
+		t.Fatalf("agent A session key = %q, want caller- and agent-isolated scope", agentAScope.sessionKey)
 	}
 }
 

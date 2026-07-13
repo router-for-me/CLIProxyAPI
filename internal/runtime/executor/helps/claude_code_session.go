@@ -11,7 +11,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-const ClaudeCodeSessionHeader = "X-Claude-Code-Session-Id"
+const (
+	ClaudeCodeSessionHeader = "X-Claude-Code-Session-Id"
+	ClaudeCodeAgentHeader   = "X-Claude-Code-Agent-Id"
+)
 
 var claudeCodeSessionSuffixPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
 
@@ -30,6 +33,25 @@ func ExtractClaudeCodeSessionID(ctx context.Context, payload []byte, headers htt
 		}
 	}
 	return extractClaudeCodeSessionIDFromPayload(payload)
+}
+
+// ExtractClaudeCodeAgentID resolves the stable Claude Code agent identity from
+// X-Claude-Code-Agent-Id. An empty result denotes the session's main/headerless
+// lane and preserves compatibility with clients that do not send the header.
+func ExtractClaudeCodeAgentID(ctx context.Context, headers http.Header) string {
+	if headers != nil {
+		if agentID := strings.TrimSpace(headers.Get(ClaudeCodeAgentHeader)); agentID != "" {
+			return agentID
+		}
+	}
+	if ctx != nil {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			if agentID := strings.TrimSpace(ginCtx.Request.Header.Get(ClaudeCodeAgentHeader)); agentID != "" {
+				return agentID
+			}
+		}
+	}
+	return ""
 }
 
 func extractClaudeCodeSessionIDFromPayload(payload []byte) string {
@@ -55,12 +77,16 @@ func ClaudeCodePromptCache(ctx context.Context, modelName string, payload []byte
 	if sessionID == "" {
 		return CodexCache{}, false, nil
 	}
-	name := strings.Join([]string{
+	parts := []string{
 		"cli-proxy-api",
 		"claude-code",
 		"prompt-cache",
 		strings.TrimSpace(modelName),
 		strings.TrimSpace(sessionID),
-	}, ":")
+	}
+	if agentID := ExtractClaudeCodeAgentID(ctx, headers); agentID != "" {
+		parts = append(parts, "agent", agentID)
+	}
+	name := strings.Join(parts, ":")
 	return CodexCache{ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte(name)).String()}, true, nil
 }

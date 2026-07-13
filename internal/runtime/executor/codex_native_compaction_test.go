@@ -12,6 +12,7 @@ import (
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -131,6 +132,90 @@ func TestCodexNativeCompactionV2RewritesFollowupAsExactAppend(t *testing.T) {
 	mu.Unlock()
 	if gotRequests != 1 {
 		t.Fatalf("follow-up unexpectedly recompacted; requests=%d", gotRequests)
+	}
+}
+
+func TestCodexNativeCompactionSeparatesInterleavedClaudeAgents(t *testing.T) {
+	var mu sync.Mutex
+	compactionRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		compactionRequests++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"opaque-agent-a\"}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":20,\"output_tokens\":3,\"total_tokens\":23}}}\n\n")
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{AuthDir: t.TempDir(), Codex: config.CodexConfig{NativeCompaction: config.CodexNativeCompaction{
+		Enabled:               true,
+		TriggerTokens:         3,
+		ContextWindow:         1000,
+		PreserveRecentTokens:  1,
+		RetainedMessageTokens: 64,
+	}}}
+	executor := NewCodexExecutor(cfg)
+	auth := &cliproxyauth.Auth{ID: "auth-agent-isolation", Attributes: map[string]string{"api_key": "test"}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol(xhigh)",
+		Payload: []byte(`{"model":"gpt-5.6-sol(xhigh)"}`),
+	}
+	options := func(agentID string) cliproxyexecutor.Options {
+		headers := http.Header{}
+		headers.Set(helps.ClaudeCodeSessionHeader, "11111111-1111-4111-8111-111111111111")
+		headers.Set(helps.ClaudeCodeAgentHeader, agentID)
+		return cliproxyexecutor.Options{Headers: headers}
+	}
+	agentABody := []byte(`{"model":"gpt-5.6-sol","instructions":"","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"rules"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"first question"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"current question"}]}],"tools":[{"type":"function","name":"agent_a_tool","description":"agent a only","parameters":{"type":"object"}}],"stream":true}`)
+	agentBBody := []byte(`{"model":"gpt-5.6-sol","instructions":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"other branch"}]}],"tools":[{"type":"function","name":"agent_b_tool","description":"agent b only","parameters":{"type":"object"}}],"stream":true}`)
+
+	firstBody, firstScope, active, err := executor.prepareCodexNativeCompaction(
+		context.Background(), auth, req, sdktranslator.FormatClaude, options("agent-a"), req.Payload, agentABody,
+		"gpt-5.6-sol", "test", server.URL,
+	)
+	if err != nil {
+		t.Fatalf("prepare agent A: %v", err)
+	}
+	if !active || !strings.Contains(string(firstBody), "opaque-agent-a") {
+		t.Fatalf("agent A compaction was not installed: active=%v body=%s", active, firstBody)
+	}
+	firstScope.observeTerminal([]byte(`{"type":"response.completed","response":{"usage":{"input_tokens":11}}}`))
+
+	// Agent B uses the same Claude session, model, and auth but a different tool
+	// envelope. It must create its own lane rather than resetting Agent A's
+	// compacted replacement.
+	cfg.Codex.NativeCompaction.TriggerTokens = 1000
+	_, secondScope, active, err := executor.prepareCodexNativeCompaction(
+		context.Background(), auth, req, sdktranslator.FormatClaude, options("agent-b"), req.Payload, agentBBody,
+		"gpt-5.6-sol", "test", server.URL,
+	)
+	if err != nil {
+		t.Fatalf("prepare agent B: %v", err)
+	}
+	if active {
+		t.Fatal("agent B unexpectedly inherited agent A's compacted replacement")
+	}
+	secondScope.observeTerminal([]byte(`{"type":"response.completed","response":{"usage":{"input_tokens":5}}}`))
+
+	agentAItems, _ := codexInputItems(agentABody)
+	followup := codexSetInputItems(agentABody, append(agentAItems, []byte(`{"type":"message","role":"user","content":[{"type":"input_text","text":"new append"}]}`)))
+	followupBody, followupScope, active, err := executor.prepareCodexNativeCompaction(
+		context.Background(), auth, req, sdktranslator.FormatClaude, options("agent-a"), req.Payload, followup,
+		"gpt-5.6-sol", "test", server.URL,
+	)
+	if err != nil {
+		t.Fatalf("prepare agent A follow-up: %v", err)
+	}
+	defer followupScope.abandon()
+	if !active || !strings.Contains(string(followupBody), "opaque-agent-a") {
+		t.Fatalf("agent A replacement was lost after agent B interleaved: active=%v body=%s", active, followupBody)
+	}
+	mu.Lock()
+	gotCompactions := compactionRequests
+	mu.Unlock()
+	if gotCompactions != 1 {
+		t.Fatalf("interleaved agents caused recompaction: requests=%d, want 1", gotCompactions)
 	}
 }
 
@@ -288,6 +373,7 @@ func TestCodexNativeCompactionRetriesTransientV2ProtocolFailure(t *testing.T) {
 		context.Background(), auth,
 		cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: []byte(`{"model":"gpt-5.6-sol"}`)},
 		sdktranslator.FormatClaude, []byte(`{"model":"gpt-5.6-sol"}`),
+		nil,
 		[]byte(`{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`),
 		"gpt-5.6-sol", "test", server.URL,
 	)
@@ -412,7 +498,8 @@ func TestCodexNativeCompactionIncludesReasoningReplayExactlyOnce(t *testing.T) {
 	const sessionID = "native-replay-session"
 	model := "gpt-5.6-sol"
 	firstReasoning := validCodexReasoningEncryptedContentForTestSeed(31)
-	internalcache.CacheCodexReasoningReplayItem(model, "claude:"+sessionID, []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+firstReasoning+`"}`))
+	replayKey := claudeReplayKeyForTest("claude:"+sessionID, nil)
+	internalcache.CacheCodexReasoningReplayItem(model, replayKey, []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+firstReasoning+`"}`))
 
 	cfg := &config.Config{AuthDir: t.TempDir(), Codex: config.CodexConfig{NativeCompaction: config.CodexNativeCompaction{
 		Enabled:               true,
@@ -486,7 +573,7 @@ func TestCodexNativeCompactionIncludesReasoningReplayExactlyOnce(t *testing.T) {
 	// Once completion advances the replay cache, the active lane injects the new
 	// reasoning into the exact client tail without duplicating it.
 	secondReasoning := validCodexReasoningEncryptedContentForTestSeed(32)
-	internalcache.CacheCodexReasoningReplayItem(model, "claude:"+sessionID, []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+secondReasoning+`"}`))
+	internalcache.CacheCodexReasoningReplayItem(model, replayKey, []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+secondReasoning+`"}`))
 	secondBody, secondScope, active, err := executor.prepareCodexNativeCompaction(
 		context.Background(), auth, req, sdktranslator.FormatClaude, opts, req.Payload, followup,
 		model, "test", server.URL,
@@ -547,7 +634,8 @@ func TestCodexNativeCompactionSuppressesRejectedReasoningReplay(t *testing.T) {
 			const sessionID = "rejected-replay-session"
 			model := "gpt-5.6-luna"
 			reasoning := validCodexReasoningEncryptedContentForTestSeed(41)
-			internalcache.CacheCodexReasoningReplayItem(model, "claude:"+sessionID, []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+reasoning+`"}`))
+			replayKey := claudeReplayKeyForTest("claude:"+sessionID, nil)
+			internalcache.CacheCodexReasoningReplayItem(model, replayKey, []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+reasoning+`"}`))
 			cfg := &config.Config{AuthDir: t.TempDir(), Codex: config.CodexConfig{NativeCompaction: config.CodexNativeCompaction{
 				Enabled:               true,
 				TriggerTokens:         3,
@@ -579,7 +667,7 @@ func TestCodexNativeCompactionSuppressesRejectedReasoningReplay(t *testing.T) {
 			if firstAttempts != 2 {
 				t.Fatalf("compaction attempts = %d, want one rejection plus one recovery", firstAttempts)
 			}
-			if _, ok := internalcache.GetCodexReasoningReplayItem(model, "claude:"+sessionID); !ok {
+			if _, ok := internalcache.GetCodexReasoningReplayItem(model, replayKey); !ok {
 				t.Fatal("per-auth rejection unexpectedly destroyed the shared replay cache")
 			}
 			if got := countCodexInputItemsOfType(recoveredBody, "reasoning"); got != 0 {
@@ -625,7 +713,8 @@ func TestCodexNativeCompactionRecoveryPreservesReplayToolCall(t *testing.T) {
 		[]byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"` + reasoning + `"}`),
 		[]byte(`{"type":"function_call","call_id":"call-1","name":"lookup","arguments":"{\"q\":\"weather\"}"}`),
 	}
-	if !internalcache.CacheCodexReasoningReplayItems(model, "claude:"+sessionID, replayItems) {
+	replayKey := claudeReplayKeyForTest("claude:"+sessionID, nil)
+	if !internalcache.CacheCodexReasoningReplayItems(model, replayKey, replayItems) {
 		t.Fatal("failed to cache composite reasoning replay")
 	}
 
@@ -694,7 +783,7 @@ func TestCodexNativeCompactionRecoveryPreservesReplayToolCall(t *testing.T) {
 	if callIndex < 0 || outputIndex < 0 || callIndex >= outputIndex {
 		t.Fatalf("recovery orphaned tool output: call=%d output=%d body=%s", callIndex, outputIndex, requestBodies[1])
 	}
-	cachedItems, ok := internalcache.GetCodexReasoningReplayItems(model, "claude:"+sessionID)
+	cachedItems, ok := internalcache.GetCodexReasoningReplayItems(model, replayKey)
 	if !ok || len(cachedItems) != 2 || gjson.GetBytes(cachedItems[0], "type").String() != "reasoning" || gjson.GetBytes(cachedItems[1], "type").String() != "function_call" {
 		t.Fatalf("shared replay cache = %s, want auth-independent reasoning and function call", codexJSONItems(cachedItems))
 	}
@@ -706,7 +795,7 @@ func TestCodexNativeCompactionRejectedSummaryClearsAbsorbedReplayMarkers(t *test
 
 	const sessionID = "rejected-summary-absorbed-replay"
 	model := "gpt-5.6-terra"
-	if !internalcache.CacheCodexReasoningReplayItems(model, "claude:"+sessionID, [][]byte{
+	if !internalcache.CacheCodexReasoningReplayItems(model, claudeReplayKeyForTest("claude:"+sessionID, nil), [][]byte{
 		[]byte(`{"type":"function_call","call_id":"call-absorbed","name":"lookup","arguments":"{}"}`),
 	}) {
 		t.Fatal("failed to cache tool replay")
@@ -781,7 +870,7 @@ func TestCodexNativeCompactionSecondRejectionStillPreservesReplayToolCall(t *tes
 	const sessionID = "twice-rejected-composite-session"
 	model := "gpt-5.6-terra"
 	reasoning := validCodexReasoningEncryptedContentForTestSeed(45)
-	if !internalcache.CacheCodexReasoningReplayItems(model, "claude:"+sessionID, [][]byte{
+	if !internalcache.CacheCodexReasoningReplayItems(model, claudeReplayKeyForTest("claude:"+sessionID, nil), [][]byte{
 		[]byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"` + reasoning + `"}`),
 		[]byte(`{"type":"function_call","call_id":"call-2","name":"lookup","arguments":"{}"}`),
 	}) {
@@ -910,7 +999,7 @@ func TestCodexExecutorRetriesRejectedDurableCompactionFromClientHistory(t *testi
 	internalcache.ClearCodexReasoningReplayCache()
 	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
 	validTailReasoning := validCodexReasoningEncryptedContentForTestSeed(46)
-	if !internalcache.CacheCodexReasoningReplayItem("gpt-5.6-sol", "claude:durable-recovery-session", []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+validTailReasoning+`"}`)) {
+	if !internalcache.CacheCodexReasoningReplayItem("gpt-5.6-sol", claudeReplayKeyForTest("claude:durable-recovery-session", nil), []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+validTailReasoning+`"}`)) {
 		t.Fatal("cache valid reasoning for durable-summary recovery")
 	}
 

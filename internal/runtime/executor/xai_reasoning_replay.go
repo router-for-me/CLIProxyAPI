@@ -59,7 +59,13 @@ func xaiReasoningReplayScopeFromRequest(ctx context.Context, from sdktranslator.
 	if cliproxyexecutor.DownstreamWebsocket(ctx) && strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String()) != "" {
 		return xaiReasoningReplayScope{}
 	}
-	sessionKey := codexReasoningReplaySessionKey(ctx, from, req, opts, body)
+	sessionKey := codexReasoningReplayBaseSessionKey(ctx, from, req, opts, body)
+	// Claude's client-controlled continuity keys need the same agent boundary as
+	// Codex replay. Trusted execution session IDs are already host-scoped and
+	// must retain their execution: prefix so caller isolation can recognize them.
+	if sourceFormatEqual(from, sdktranslator.FormatClaude) && !strings.HasPrefix(sessionKey, "execution:") {
+		sessionKey = codexClaudeCodeAgentScopedReplaySessionKey(ctx, sessionKey, opts.Headers)
+	}
 	sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
 	return xaiReasoningReplayScope{
 		modelName:  thinking.ParseSuffix(req.Model).ModelName,

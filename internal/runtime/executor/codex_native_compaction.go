@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/observability"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -157,8 +158,9 @@ func (e *CodexExecutor) prepareCodexNativeCompaction(
 		return body, codexNativeCompactionScope{}, false, nil
 	}
 
-	sessionID := helps.ExtractClaudeCodeSessionID(ctx, req.Payload, nil)
-	key, ok := helps.NewClaudeCodeCompactionLaneKey(sessionID, req.Model, auth.ID)
+	sessionID := helps.ExtractClaudeCodeSessionID(ctx, req.Payload, opts.Headers)
+	agentID := helps.ExtractClaudeCodeAgentID(ctx, opts.Headers)
+	key, ok := helps.NewClaudeCodeCompactionLaneKey(sessionID, agentID, req.Model, auth.ID)
 	if !ok {
 		return body, codexNativeCompactionScope{}, false, nil
 	}
@@ -214,6 +216,15 @@ func (e *CodexExecutor) prepareCodexNativeCompaction(
 		if _, commitErr := lane.Commit(resetState); commitErr != nil {
 			return body, codexNativeCompactionScope{}, false, fmt.Errorf("codex native compaction: reset changed source state: %w", commitErr)
 		}
+		observability.RecordCompactionReset(observability.NewCompactionResetDiagnostic(
+			"codex",
+			baseModel,
+			reason,
+			strings.Join([]string{key.SessionID, key.AgentID, key.Model, key.AuthID}, "\x00"),
+			key.AgentID,
+			state.EnvelopeHash,
+			envelopeHash,
+		))
 		state = lane.State()
 	}
 
@@ -269,7 +280,7 @@ func (e *CodexExecutor) prepareCodexNativeCompaction(
 		if cut > 0 && cut <= len(effectiveItems) {
 			prefix := codexCloneItems(effectiveItems[:cut])
 			compactionBody := codexSetInputItems(body, prefix)
-			result, compactErr := e.requestCodexNativeCompaction(ctx, auth, req, from, originalPayload, compactionBody, baseModel, apiKey, baseURL)
+			result, compactErr := e.requestCodexNativeCompaction(ctx, auth, req, from, originalPayload, opts.Headers, compactionBody, baseModel, apiKey, baseURL)
 			recoveryAttempted := false
 			if codexCompactionErrorIsInvalidReasoning(compactErr) {
 				recoveryAttempted = true
@@ -322,7 +333,7 @@ func (e *CodexExecutor) prepareCodexNativeCompaction(
 				if cut > 0 && cut <= len(effectiveItems) {
 					prefix = codexCloneItems(effectiveItems[:cut])
 					compactionBody = codexSetInputItems(body, prefix)
-					result, compactErr = e.requestCodexNativeCompaction(ctx, auth, req, from, originalPayload, compactionBody, baseModel, apiKey, baseURL)
+					result, compactErr = e.requestCodexNativeCompaction(ctx, auth, req, from, originalPayload, opts.Headers, compactionBody, baseModel, apiKey, baseURL)
 				} else {
 					compactErr = codexCompactionProtocolError{message: "codex native compaction recovery could not preserve a safe recent tail"}
 				}
@@ -521,18 +532,19 @@ func (e *CodexExecutor) requestCodexNativeCompaction(
 	req cliproxyexecutor.Request,
 	from sdktranslator.Format,
 	originalPayload []byte,
+	requestHeaders http.Header,
 	body []byte,
 	baseModel string,
 	apiKey string,
 	baseURL string,
 ) (codexNativeCompactionResult, error) {
-	result, err := e.requestCodexNativeCompactionTransport(ctx, auth, req, from, originalPayload, body, baseModel, apiKey, baseURL, false)
+	result, err := e.requestCodexNativeCompactionTransport(ctx, auth, req, from, originalPayload, requestHeaders, body, baseModel, apiKey, baseURL, false)
 	if err == nil {
 		return result, nil
 	}
 	if codexShouldRetryV2Compaction(ctx, err) {
 		helps.LogWithRequestID(ctx).Warnf("codex native compaction v2 attempt failed transiently; retrying once: %v", err)
-		result, err = e.requestCodexNativeCompactionTransport(ctx, auth, req, from, originalPayload, body, baseModel, apiKey, baseURL, false)
+		result, err = e.requestCodexNativeCompactionTransport(ctx, auth, req, from, originalPayload, requestHeaders, body, baseModel, apiKey, baseURL, false)
 		if err == nil {
 			return result, nil
 		}
@@ -541,7 +553,7 @@ func (e *CodexExecutor) requestCodexNativeCompaction(
 		return codexNativeCompactionResult{}, err
 	}
 	helps.LogWithRequestID(ctx).Warnf("codex native compaction v2 explicitly unsupported; falling back to /responses/compact for this attempt: %v", err)
-	return e.requestCodexNativeCompactionTransport(ctx, auth, req, from, originalPayload, body, baseModel, apiKey, baseURL, true)
+	return e.requestCodexNativeCompactionTransport(ctx, auth, req, from, originalPayload, requestHeaders, body, baseModel, apiKey, baseURL, true)
 }
 
 func codexShouldRetryV2Compaction(ctx context.Context, err error) bool {
@@ -585,6 +597,7 @@ func (e *CodexExecutor) requestCodexNativeCompactionTransport(
 	req cliproxyexecutor.Request,
 	from sdktranslator.Format,
 	originalPayload []byte,
+	requestHeaders http.Header,
 	body []byte,
 	baseModel string,
 	apiKey string,
@@ -612,7 +625,7 @@ func (e *CodexExecutor) requestCodexNativeCompactionTransport(
 		path = "/responses/compact"
 	}
 	url := strings.TrimSuffix(baseURL, "/") + path
-	httpReq, upstreamBody, identityState, err := e.cacheHelper(ctx, from, url, auth, req, originalPayload, body)
+	httpReq, upstreamBody, identityState, err := e.cacheHelper(ctx, from, url, auth, req, originalPayload, body, requestHeaders)
 	if err != nil {
 		return result, err
 	}

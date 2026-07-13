@@ -244,12 +244,24 @@ func (m *logsTabModel) refreshObservabilityView() {
 }
 
 func formatObservabilityEventLine(event observabilityEvent) string {
+	if event.Operation == "compaction_reset" {
+		return fmt.Sprintf(
+			"[warn] compaction_event operation=compaction_reset provider=%q model=%q reason=%q lane_id=%q agent_id=%q previous_envelope_id=%q envelope_id=%q",
+			event.Provider,
+			event.Model,
+			event.ResetReason,
+			event.LaneID,
+			event.AgentID,
+			event.PreviousEnvelopeID,
+			event.EnvelopeID,
+		)
+	}
 	cost := "unavailable"
 	if event.EstimatedCostAvailable {
 		cost = fmt.Sprintf("%.8f", event.EstimatedCostUSD)
 	}
 	return fmt.Sprintf(
-		"[info] request_event operation=%s provider=%q model=%q input_tokens=%d output_tokens=%d cache_read_tokens=%d cache_write_tokens=%d cache_outcome=%s cache_miss=%t estimated_cost_usd=%s estimated_cost_tier=%s failed=%t",
+		"[info] request_event operation=%s provider=%q model=%q input_tokens=%d output_tokens=%d cache_read_tokens=%d cache_write_tokens=%d uncached_input_tokens=%d cache_read_percent=%.2f cache_low_reuse=%t cache_outcome=%s cache_miss=%t estimated_cost_usd=%s estimated_cost_tier=%s failed=%t",
 		event.Operation,
 		event.Provider,
 		event.Model,
@@ -257,6 +269,9 @@ func formatObservabilityEventLine(event observabilityEvent) string {
 		event.OutputTokens,
 		event.CacheReadTokens,
 		event.CacheWriteTokens,
+		event.UncachedInputTokens,
+		event.CacheReadPercent,
+		event.CacheLowReuse,
 		event.CacheOutcome,
 		event.CacheMiss,
 		cost,
@@ -344,8 +359,11 @@ func (m logsTabModel) matchLevel(line string) bool {
 func (m logsTabModel) styleLine(line string) string {
 	lower := strings.ToLower(line)
 	if strings.Contains(lower, "request_event") &&
-		(strings.Contains(lower, "cache_outcome=miss") || strings.Contains(lower, "cache_miss=true")) {
+		(strings.Contains(lower, "cache_outcome=miss") || strings.Contains(lower, "cache_miss=true") || strings.Contains(lower, "cache_low_reuse=true")) {
 		return logErrorStyle.Render(line)
+	}
+	if strings.Contains(lower, "compaction_event") {
+		return logCompactionStyle.Render(line)
 	}
 	if strings.Contains(lower, "request_event") && strings.Contains(lower, "operation=compaction") {
 		return logCompactionStyle.Render(line)

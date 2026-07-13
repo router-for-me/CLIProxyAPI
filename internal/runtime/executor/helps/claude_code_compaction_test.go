@@ -2,6 +2,8 @@ package helps
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,7 +16,7 @@ import (
 
 func TestClaudeCodeCompactionLaneIsolatedAndDefensive(t *testing.T) {
 	resetClaudeCodeCompactionLanesForTest()
-	key, ok := NewClaudeCodeCompactionLaneKey("session", "model-a", "auth-a")
+	key, ok := NewClaudeCodeCompactionLaneKey("session", "", "model-a", "auth-a")
 	if !ok {
 		t.Fatal("expected valid lane key")
 	}
@@ -39,7 +41,7 @@ func TestClaudeCodeCompactionLaneIsolatedAndDefensive(t *testing.T) {
 		t.Fatalf("stored state was not defensively copied: %#v", got)
 	}
 
-	otherKey, _ := NewClaudeCodeCompactionLaneKey("session", "model-b", "auth-a")
+	otherKey, _ := NewClaudeCodeCompactionLaneKey("session", "", "model-b", "auth-a")
 	other := LockClaudeCodeCompactionLane(otherKey, time.Hour)
 	defer other.Unlock()
 	if got := other.State(); len(got.ReplacementItems) != 0 {
@@ -47,9 +49,44 @@ func TestClaudeCodeCompactionLaneIsolatedAndDefensive(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeCompactionLaneSeparatesAgentsWithinSession(t *testing.T) {
+	resetClaudeCodeCompactionLanesForTest()
+	agentAKey, ok := NewClaudeCodeCompactionLaneKey("shared-session", "agent-a", "model", "auth")
+	if !ok {
+		t.Fatal("expected valid agent A lane key")
+	}
+	agentBKey, ok := NewClaudeCodeCompactionLaneKey("shared-session", "agent-b", "model", "auth")
+	if !ok {
+		t.Fatal("expected valid agent B lane key")
+	}
+	headerlessKey, ok := NewClaudeCodeCompactionLaneKey("shared-session", "", "model", "auth")
+	if !ok {
+		t.Fatal("expected valid headerless lane key")
+	}
+
+	agentA := LockClaudeCodeCompactionLane(agentAKey, time.Hour)
+	if _, err := agentA.Commit(ClaudeCodeCompactionState{EnvelopeHash: "agent-a-envelope"}); err != nil {
+		agentA.Unlock()
+		t.Fatalf("commit agent A lane: %v", err)
+	}
+	agentA.Unlock()
+
+	for name, key := range map[string]ClaudeCodeCompactionLaneKey{
+		"agent B":    agentBKey,
+		"headerless": headerlessKey,
+	} {
+		lane := LockClaudeCodeCompactionLane(key, time.Hour)
+		got := lane.State()
+		lane.Unlock()
+		if got.EnvelopeHash != "" {
+			t.Fatalf("%s lane leaked agent A state: %#v", name, got)
+		}
+	}
+}
+
 func TestClaudeCodeCompactionLaneBoundsDurableHashHistory(t *testing.T) {
 	resetClaudeCodeCompactionLanesForTest()
-	key, ok := NewClaudeCodeCompactionLaneKey("bounded-hashes", "model-a", "auth-a")
+	key, ok := NewClaudeCodeCompactionLaneKey("bounded-hashes", "", "model-a", "auth-a")
 	if !ok {
 		t.Fatal("expected valid lane key")
 	}
@@ -82,7 +119,7 @@ func TestClaudeCodeCompactionLaneBoundsDurableHashHistory(t *testing.T) {
 
 func TestClaudeCodeCompactionObservationRejectsStaleRevision(t *testing.T) {
 	resetClaudeCodeCompactionLanesForTest()
-	key, _ := NewClaudeCodeCompactionLaneKey("session", "model", "auth")
+	key, _ := NewClaudeCodeCompactionLaneKey("session", "", "model", "auth")
 	staleLane := LockClaudeCodeCompactionLane(key, time.Hour)
 	if _, err := staleLane.Commit(ClaudeCodeCompactionState{ReplacementItems: [][]byte{[]byte(`{"type":"compaction"}`)}}); err != nil {
 		t.Fatalf("commit lane: %v", err)
@@ -112,7 +149,7 @@ func TestClaudeCodeCompactionObservationRejectsStaleRevision(t *testing.T) {
 func TestClaudeCodeCompactionStateSurvivesRestartExactly(t *testing.T) {
 	resetClaudeCodeCompactionLanesForTest()
 	stateDir := t.TempDir()
-	key, _ := NewClaudeCodeCompactionLaneKey("restart-session", "gpt-5.6-sol", "codex-auth")
+	key, _ := NewClaudeCodeCompactionLaneKey("restart-session", "agent-restart", "gpt-5.6-sol", "codex-auth")
 	wantItems := [][]byte{
 		[]byte(` {"type":"compaction","encrypted_content":"AA=="} `),
 		{0x00, 0xff, '\n', '\r', '\t', 0x7f},
@@ -171,6 +208,17 @@ func TestClaudeCodeCompactionStateSurvivesRestartExactly(t *testing.T) {
 	if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), claudeCodeCompactionStateFilePrefix) {
 		t.Fatalf("state directory entries = %#v, want one versioned state file", entries)
 	}
+	recordBytes, err := os.ReadFile(filepath.Join(stateDir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read persisted state record: %v", err)
+	}
+	var record persistedClaudeCodeCompactionRecord
+	if err := json.Unmarshal(recordBytes, &record); err != nil {
+		t.Fatalf("decode persisted state record: %v", err)
+	}
+	if record.Version != claudeCodeCompactionStateVersion || record.Key.AgentID != "agent-restart" {
+		t.Fatalf("persisted version/key = %d/%#v, want version %d and agent-restart", record.Version, record.Key, claudeCodeCompactionStateVersion)
+	}
 	if runtime.GOOS != "windows" {
 		dirInfo, err := os.Stat(stateDir)
 		if err != nil {
@@ -192,7 +240,7 @@ func TestClaudeCodeCompactionStateSurvivesRestartExactly(t *testing.T) {
 func TestClaudeCodeCompactionReplaceStateIfRevisionIsAtomicAndConditional(t *testing.T) {
 	resetClaudeCodeCompactionLanesForTest()
 	stateDir := t.TempDir()
-	key, _ := NewClaudeCodeCompactionLaneKey("rejected-session", "gpt-5.6-sol", "codex-auth")
+	key, _ := NewClaudeCodeCompactionLaneKey("rejected-session", "", "gpt-5.6-sol", "codex-auth")
 	lane := LockClaudeCodeCompactionLane(key, time.Hour, stateDir)
 	if _, err := lane.Commit(ClaudeCodeCompactionState{
 		ReplacementItems: [][]byte{[]byte(`{"type":"compaction","encrypted_content":"rejected"}`)},
@@ -228,7 +276,7 @@ func TestClaudeCodeCompactionReplaceStateIfRevisionIsAtomicAndConditional(t *tes
 func TestClaudeCodeCompactionRejectsUnchangedReplacementAcrossNewerObservation(t *testing.T) {
 	resetClaudeCodeCompactionLanesForTest()
 	stateDir := t.TempDir()
-	key, _ := NewClaudeCodeCompactionLaneKey("parallel-rejected-session", "gpt-5.6-sol", "codex-auth")
+	key, _ := NewClaudeCodeCompactionLaneKey("parallel-rejected-session", "", "gpt-5.6-sol", "codex-auth")
 	expected := ClaudeCodeCompactionState{
 		SourcePrefixHashes: []string{"source-a"},
 		ReplacementItems:   [][]byte{[]byte(`{"type":"compaction","encrypted_content":"bad"}`)},
@@ -265,7 +313,7 @@ func TestClaudeCodeCompactionRejectsUnchangedReplacementAcrossNewerObservation(t
 func TestClaudeCodeCompactionStateRejectsCorruptChecksum(t *testing.T) {
 	resetClaudeCodeCompactionLanesForTest()
 	stateDir := t.TempDir()
-	key, _ := NewClaudeCodeCompactionLaneKey("corrupt-session", "gpt-5.6-terra", "codex-auth")
+	key, _ := NewClaudeCodeCompactionLaneKey("corrupt-session", "", "gpt-5.6-terra", "codex-auth")
 	lane := LockClaudeCodeCompactionLane(key, time.Hour, stateDir)
 	if _, err := lane.Commit(ClaudeCodeCompactionState{
 		ReplacementItems: [][]byte{[]byte(`{"type":"compaction","encrypted_content":"original"}`)},
@@ -307,7 +355,7 @@ func TestClaudeCodeCompactionStateRejectsCorruptChecksum(t *testing.T) {
 func TestClaudeCodeCompactionStateExpiresAcrossRestart(t *testing.T) {
 	resetClaudeCodeCompactionLanesForTest()
 	stateDir := t.TempDir()
-	key, _ := NewClaudeCodeCompactionLaneKey("expired-session", "gpt-5.6-luna", "codex-auth")
+	key, _ := NewClaudeCodeCompactionLaneKey("expired-session", "", "gpt-5.6-luna", "codex-auth")
 	ttl := 20 * time.Millisecond
 	lane := LockClaudeCodeCompactionLane(key, ttl, stateDir)
 	if _, err := lane.Commit(ClaudeCodeCompactionState{ReplacementItems: [][]byte{[]byte("opaque")}}); err != nil {
@@ -334,17 +382,19 @@ func TestClaudeCodeCompactionSweepRemovesOnlyAuthenticatedExpiredStates(t *testi
 	resetClaudeCodeCompactionLanesForTest()
 	stateDir := t.TempDir()
 	now := time.Now()
-	expiredKey, _ := NewClaudeCodeCompactionLaneKey("sweep-expired", "model", "auth")
-	freshKey, _ := NewClaudeCodeCompactionLaneKey("sweep-fresh", "model", "auth")
-	corruptKey, _ := NewClaudeCodeCompactionLaneKey("sweep-corrupt", "model", "auth")
+	expiredKey, _ := NewClaudeCodeCompactionLaneKey("sweep-expired", "", "model", "auth")
+	freshKey, _ := NewClaudeCodeCompactionLaneKey("sweep-fresh", "", "model", "auth")
+	corruptKey, _ := NewClaudeCodeCompactionLaneKey("sweep-corrupt", "", "model", "auth")
+	legacyKey, _ := NewClaudeCodeCompactionLaneKey("sweep-legacy", "", "model", "auth")
 	if err := persistClaudeCodeCompactionState(stateDir, expiredKey, ClaudeCodeCompactionState{EnvelopeHash: "expired"}, now.Add(-2*time.Hour), time.Hour); err != nil {
 		t.Fatalf("persist expired state: %v", err)
 	}
 	if err := persistClaudeCodeCompactionState(stateDir, freshKey, ClaudeCodeCompactionState{EnvelopeHash: "fresh"}, now, time.Hour); err != nil {
 		t.Fatalf("persist fresh state: %v", err)
 	}
+	legacyPath := persistLegacyClaudeCodeCompactionStateForTest(t, stateDir, legacyKey, ClaudeCodeCompactionState{EnvelopeHash: "ambiguous-legacy"}, now, time.Hour)
 	corruptPath := claudeCodeCompactionStatePath(stateDir, corruptKey)
-	if err := os.WriteFile(corruptPath, []byte(`{"version":1,"expires_at_unix_nano":1,"sha256":"invalid"}`), claudeCodeCompactionStateFileMode); err != nil {
+	if err := os.WriteFile(corruptPath, []byte(fmt.Sprintf(`{"version":%d,"expires_at_unix_nano":1,"sha256":"invalid"}`, claudeCodeCompactionStateVersion)), claudeCodeCompactionStateFileMode); err != nil {
 		t.Fatalf("write corrupt state: %v", err)
 	}
 	unrelatedPath := filepath.Join(stateDir, "keep-me.json")
@@ -352,12 +402,15 @@ func TestClaudeCodeCompactionSweepRemovesOnlyAuthenticatedExpiredStates(t *testi
 		t.Fatalf("write unrelated file: %v", err)
 	}
 
-	triggerKey, _ := NewClaudeCodeCompactionLaneKey("sweep-trigger", "model", "auth")
+	triggerKey, _ := NewClaudeCodeCompactionLaneKey("sweep-trigger", "", "model", "auth")
 	lane := LockClaudeCodeCompactionLane(triggerKey, time.Hour, stateDir)
 	lane.Unlock()
 
 	if _, err := os.Stat(claudeCodeCompactionStatePath(stateDir, expiredKey)); !os.IsNotExist(err) {
 		t.Fatalf("authenticated expired state still exists: %v", err)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("authenticated legacy state was not retired: %v", err)
 	}
 	for name, path := range map[string]string{
 		"fresh state":    claudeCodeCompactionStatePath(stateDir, freshKey),
@@ -370,11 +423,11 @@ func TestClaudeCodeCompactionSweepRemovesOnlyAuthenticatedExpiredStates(t *testi
 	}
 
 	// A second request in the same interval must not rescan the directory.
-	deferredKey, _ := NewClaudeCodeCompactionLaneKey("sweep-deferred", "model", "auth")
+	deferredKey, _ := NewClaudeCodeCompactionLaneKey("sweep-deferred", "", "model", "auth")
 	if err := persistClaudeCodeCompactionState(stateDir, deferredKey, ClaudeCodeCompactionState{EnvelopeHash: "deferred"}, now.Add(-2*time.Hour), time.Hour); err != nil {
 		t.Fatalf("persist deferred expired state: %v", err)
 	}
-	secondTriggerKey, _ := NewClaudeCodeCompactionLaneKey("sweep-second-trigger", "model", "auth")
+	secondTriggerKey, _ := NewClaudeCodeCompactionLaneKey("sweep-second-trigger", "", "model", "auth")
 	lane = LockClaudeCodeCompactionLane(secondTriggerKey, time.Hour, stateDir)
 	lane.Unlock()
 	if _, err := os.Stat(claudeCodeCompactionStatePath(stateDir, deferredKey)); err != nil {
@@ -384,7 +437,7 @@ func TestClaudeCodeCompactionSweepRemovesOnlyAuthenticatedExpiredStates(t *testi
 	claudeCodeCompactionSweeps.Lock()
 	claudeCodeCompactionSweeps.lastByDirectory[stateDir] = now.Add(-2 * claudeCodeCompactionSweepInterval)
 	claudeCodeCompactionSweeps.Unlock()
-	thirdTriggerKey, _ := NewClaudeCodeCompactionLaneKey("sweep-third-trigger", "model", "auth")
+	thirdTriggerKey, _ := NewClaudeCodeCompactionLaneKey("sweep-third-trigger", "", "model", "auth")
 	lane = LockClaudeCodeCompactionLane(thirdTriggerKey, time.Hour, stateDir)
 	lane.Unlock()
 	if _, err := os.Stat(claudeCodeCompactionStatePath(stateDir, deferredKey)); !os.IsNotExist(err) {
@@ -392,9 +445,40 @@ func TestClaudeCodeCompactionSweepRemovesOnlyAuthenticatedExpiredStates(t *testi
 	}
 }
 
+func persistLegacyClaudeCodeCompactionStateForTest(t *testing.T, stateDir string, key ClaudeCodeCompactionLaneKey, state ClaudeCodeCompactionState, now time.Time, ttl time.Duration) string {
+	t.Helper()
+	payload := persistedClaudeCodeCompactionPayload{
+		Version:   legacyClaudeCodeCompactionStateVersion,
+		Key:       key,
+		UpdatedAt: now.UnixNano(),
+		ExpiresAt: now.Add(ttl).UnixNano(),
+		State:     state,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("encode legacy compaction payload: %v", err)
+	}
+	digest := sha256.Sum256(payloadBytes)
+	recordBytes, err := json.Marshal(persistedClaudeCodeCompactionRecord{
+		persistedClaudeCodeCompactionPayload: payload,
+		Checksum:                             hex.EncodeToString(digest[:]),
+	})
+	if err != nil {
+		t.Fatalf("encode legacy compaction record: %v", err)
+	}
+	path, ok := claudeCodeCompactionStatePathForVersion(stateDir, legacyClaudeCodeCompactionStateVersion, key)
+	if !ok {
+		t.Fatal("legacy compaction state path is unavailable")
+	}
+	if err := os.WriteFile(path, recordBytes, claudeCodeCompactionStateFileMode); err != nil {
+		t.Fatalf("write legacy compaction record: %v", err)
+	}
+	return path
+}
+
 func TestClaudeCodeCompactionPruneKeepsActiveAndWaitingLane(t *testing.T) {
 	resetClaudeCodeCompactionLanesForTest()
-	key, _ := NewClaudeCodeCompactionLaneKey("pinned-session", "model", "auth")
+	key, _ := NewClaudeCodeCompactionLaneKey("pinned-session", "", "model", "auth")
 	active := LockClaudeCodeCompactionLane(key, time.Hour)
 	if _, err := active.Commit(ClaudeCodeCompactionState{EnvelopeHash: "still-the-same-entry"}); err != nil {
 		t.Fatalf("commit active lane: %v", err)
@@ -407,7 +491,7 @@ func TestClaudeCodeCompactionPruneKeepsActiveAndWaitingLane(t *testing.T) {
 	waitForClaudeCodeCompactionPins(t, active.entry, 2)
 
 	for i := 0; i < maxClaudeCodeCompactionLanes+maxClaudeCodeCompactionLanes/2; i++ {
-		otherKey, _ := NewClaudeCodeCompactionLaneKey(fmt.Sprintf("other-%d", i), "model", "auth")
+		otherKey, _ := NewClaudeCodeCompactionLaneKey(fmt.Sprintf("other-%d", i), "", "model", "auth")
 		other := LockClaudeCodeCompactionLane(otherKey, time.Hour)
 		other.Unlock()
 	}
@@ -437,7 +521,7 @@ func TestClaudeCodeCompactionPruneKeepsActiveAndWaitingLane(t *testing.T) {
 
 func TestClaudeCodeCompactionPruneKeepsInFlightObservation(t *testing.T) {
 	resetClaudeCodeCompactionLanesForTest()
-	key, _ := NewClaudeCodeCompactionLaneKey("observed-session", "model", "auth")
+	key, _ := NewClaudeCodeCompactionLaneKey("observed-session", "", "model", "auth")
 	lane := LockClaudeCodeCompactionLane(key, time.Hour)
 	if _, err := lane.Commit(ClaudeCodeCompactionState{EnvelopeHash: "observed-entry"}); err != nil {
 		t.Fatalf("commit observed lane: %v", err)
@@ -447,7 +531,7 @@ func TestClaudeCodeCompactionPruneKeepsInFlightObservation(t *testing.T) {
 	lane.Unlock()
 
 	for i := 0; i < maxClaudeCodeCompactionLanes+maxClaudeCodeCompactionLanes/2; i++ {
-		otherKey, _ := NewClaudeCodeCompactionLaneKey(fmt.Sprintf("observed-other-%d", i), "model", "auth")
+		otherKey, _ := NewClaudeCodeCompactionLaneKey(fmt.Sprintf("observed-other-%d", i), "", "model", "auth")
 		other := LockClaudeCodeCompactionLane(otherKey, time.Hour)
 		other.Unlock()
 	}
@@ -495,7 +579,7 @@ func TestClaudeCodeCompactionPersistenceErrorsAreSurfaced(t *testing.T) {
 	if err := os.WriteFile(notDirectory, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	key, _ := NewClaudeCodeCompactionLaneKey("error-session", "model", "auth")
+	key, _ := NewClaudeCodeCompactionLaneKey("error-session", "", "model", "auth")
 	lane := LockClaudeCodeCompactionLane(key, time.Hour, notDirectory)
 	if err := lane.PersistenceError(); err == nil {
 		t.Fatal("expected state directory load error")
@@ -519,7 +603,7 @@ func TestClaudeCodeCompactionPersistenceErrorsAreSurfaced(t *testing.T) {
 func TestClaudeCodeCompactionTransientWriteFailureCanRecover(t *testing.T) {
 	resetClaudeCodeCompactionLanesForTest()
 	stateDir := filepath.Join(t.TempDir(), "state")
-	key, _ := NewClaudeCodeCompactionLaneKey("retry-session", "model", "auth")
+	key, _ := NewClaudeCodeCompactionLaneKey("retry-session", "", "model", "auth")
 	lane := LockClaudeCodeCompactionLane(key, time.Hour, stateDir)
 	defer lane.Unlock()
 	if err := lane.PersistenceError(); err != nil {
@@ -554,7 +638,7 @@ func TestClaudeCodeCompactionTransientWriteFailureCanRecover(t *testing.T) {
 	}
 }
 
-func TestNewClaudeCodeCompactionLaneKeyRequiresAllDimensions(t *testing.T) {
+func TestNewClaudeCodeCompactionLaneKeyRequiresSessionModelAndAuth(t *testing.T) {
 	for _, tc := range []struct {
 		session string
 		model   string
@@ -564,7 +648,7 @@ func TestNewClaudeCodeCompactionLaneKeyRequiresAllDimensions(t *testing.T) {
 		{"session", "", "auth"},
 		{"session", "model", ""},
 	} {
-		if _, ok := NewClaudeCodeCompactionLaneKey(tc.session, tc.model, tc.auth); ok {
+		if _, ok := NewClaudeCodeCompactionLaneKey(tc.session, "", tc.model, tc.auth); ok {
 			t.Fatalf("unexpected valid key for %#v", tc)
 		}
 	}

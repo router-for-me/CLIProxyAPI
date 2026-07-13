@@ -9,10 +9,27 @@ The `claude-codex` function points Claude Code at CLIProxyAPI and uses:
 
 | Claude class | Routed model |
 | --- | --- |
-| Opus | `gpt-5.6-sol(xhigh)` |
-| Sonnet | `gpt-5.6-terra(xhigh)` |
-| Haiku | `gpt-5.6-luna(xhigh)` |
+| Opus | `gpt-5.6-sol` |
+| Sonnet | `gpt-5.6-terra` |
+| Haiku | `gpt-5.6-luna` |
 | Fable 5 selected through `/model` | native `claude-fable-5` |
+
+The wrapper sets `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1` so Claude Code sends its
+selected effort even for custom gateway model IDs. It starts at `xhigh` unless
+the caller supplies `--effort`, and `/effort` can change the level during an
+interactive session. The model names deliberately have no `(xhigh)` suffix:
+suffix-based thinking has higher priority inside CLIProxyAPI and would otherwise
+override Claude Code's per-request selection.
+
+Claude Code's **Ultracode** workflow sends `xhigh` model effort plus additional
+client-side orchestration. There is no `ultra` API effort value. Use Ultracode
+when that workflow is desired, or select `max` with `/effort max` (or
+`--effort max`) when maximum model inference effort is desired. CLIProxyAPI
+passes both `xhigh` and `max` through to compatible Codex models. The Codex
+client's separately named **Ultra** preset is also client-side and is converted
+to `max` before a Responses API request. Claude's request does not expose an
+Ultracode marker distinct from ordinary `xhigh`, so the proxy must not silently
+upgrade every `xhigh` request to `max`.
 
 The wrapper temporarily removes Claude Code's client-side compaction overrides
 only for `claude-codex`. This lets the proxy trigger Codex-native compaction at
@@ -79,6 +96,13 @@ Rejected encrypted reasoning is tombstoned per Codex credential and session,
 without deleting the auth-independent replay cache used for failover. Companion
 tool calls remain available so recovery cannot orphan a tool output.
 
+Claude Code's session header identifies the conversation, while its agent
+header identifies each worker. The proxy scopes Codex prompt-cache identity,
+reasoning replay, and native-compaction state by both values. Interleaved Opus
+workers can therefore use different tool envelopes without resetting or
+recompacting one another's history. Headerless requests keep a distinct main
+conversation lane for compatibility with older clients.
+
 If native compaction has a transient failure below 272,000 tokens, the current
 valid lane is sent and a warning is logged. If Codex rejects encrypted state,
 the proxy atomically retires the suspect summary, rebuilds from authoritative
@@ -87,9 +111,11 @@ retries once. A summary rejected by the following generation is treated as the
 first suspect so unrelated recent reasoning is not blacklisted. At or above the
 hard boundary the request fails explicitly instead of silently discarding
 history. Compaction state is committed only after a validated terminal response
-and an atomic durable write. The state files live under
-`<auth-dir>\state\codex-native-compaction\claude-code-compaction-v1-*.json`;
-they are versioned, checksum-verified, and expire with `state-ttl`. The state
+and an atomic durable write. The agent-aware state files live under
+`<auth-dir>\state\codex-native-compaction\claude-code-compaction-v2-*.json`;
+they are versioned, checksum-verified, and expire with `state-ttl`. Authenticated
+v1 files are retired automatically because their session-wide keys cannot be
+safely reused by agent-scoped lanes. The state
 directory and files receive a user-only ACL on Windows (and `0700`/`0600`
 permissions on Unix-like systems); periodic sweeps remove expired valid lane
 files while leaving unrelated or corrupt evidence untouched. Do not delete
@@ -152,14 +178,19 @@ example `auth_unavailable` or request validation failures) produce one
 unpriced synthetic event. A per-request publication marker prevents a normal
 executor record from being counted a second time.
 
-- A reported cache miss is red.
+- A reported cache miss is red. A low-reuse request, where more than half of
+  normalized input was not served from cache, is also red without being
+  reclassified as a strict miss.
 - A compaction is magenta unless the same attempt is a cache miss, in which case
   red takes precedence.
 - Redirected output and file logs never receive ANSI escape sequences.
 
-The fixed TUI row shows request count, input/output tokens, cache misses,
-successful compactions, and estimated cost. Failed compaction attempts remain in
-the event log and are exposed separately as `compaction_attempts` by:
+The fixed TUI row shows request count, input/output tokens, strict cache misses,
+low-reuse requests, successful compactions, compaction-lane resets, and
+estimated cost. Resets are metadata-only diagnostics with hashed lane, agent,
+and tool-envelope identifiers; they do not expose prompts or raw IDs and do not
+inflate request/token/cost totals. Failed compaction attempts remain in the
+event log and are exposed separately as `compaction_attempts` by:
 
 ```text
 GET /v0/management/observability
