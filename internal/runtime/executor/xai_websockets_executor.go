@@ -578,7 +578,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
-		responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch)
+		responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
 		recordedTranscript := false
 		for {
 			if ctx != nil && ctx.Err() != nil {
