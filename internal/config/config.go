@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"syscall"
@@ -124,6 +125,14 @@ type Config struct {
 
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
+
+	// CodexOAuthBaseURL overrides the upstream base URL for Codex OAuth credentials.
+	// It is captured at startup; configuration hot reloads do not change it.
+	CodexOAuthBaseURL string `yaml:"codex-oauth-base-url" json:"codex-oauth-base-url"`
+
+	// CodexOAuthHeaders defines headers added to requests routed through CodexOAuthBaseURL.
+	// It is captured at startup; configuration hot reloads do not change it.
+	CodexOAuthHeaders map[string]string `yaml:"codex-oauth-headers" json:"codex-oauth-headers"`
 
 	// Codex configures provider-wide Codex request behavior.
 	Codex CodexConfig `yaml:"codex" json:"codex"`
@@ -757,6 +766,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
+	if err = cfg.NormalizeCodexOAuthBaseURL(); err != nil {
+		return nil, err
+	}
+	if err = cfg.ValidateCodexOAuthHeaders(); err != nil {
+		return nil, err
+	}
 
 	// Hash remote management key if plaintext is detected (nested)
 	// We consider a value to be already hashed if it looks like a bcrypt hash ($2a$, $2b$, or $2y$ prefix).
@@ -838,6 +853,77 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// NormalizeCodexOAuthBaseURL validates and normalizes the optional Codex OAuth upstream URL.
+func (cfg *Config) NormalizeCodexOAuthBaseURL() error {
+	if cfg == nil || cfg.CodexOAuthBaseURL == "" {
+		return nil
+	}
+
+	raw := cfg.CodexOAuthBaseURL
+	parsed, errParse := url.Parse(raw)
+	if errParse != nil {
+		return fmt.Errorf("codex-oauth-base-url: invalid URL: %w", errParse)
+	}
+	if !parsed.IsAbs() || (!strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https")) {
+		return fmt.Errorf("codex-oauth-base-url: must be an absolute http or https URL")
+	}
+	if parsed.Hostname() == "" {
+		return fmt.Errorf("codex-oauth-base-url: host must not be empty")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("codex-oauth-base-url: userinfo is not allowed")
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return fmt.Errorf("codex-oauth-base-url: query is not allowed")
+	}
+	if parsed.Fragment != "" || strings.Contains(raw, "#") {
+		return fmt.Errorf("codex-oauth-base-url: fragment is not allowed")
+	}
+
+	cfg.CodexOAuthBaseURL = strings.TrimRight(raw, "/")
+	return nil
+}
+
+// ValidateCodexOAuthHeaders validates headers added to requests routed through CodexOAuthBaseURL.
+func (cfg *Config) ValidateCodexOAuthHeaders() error {
+	if cfg == nil || len(cfg.CodexOAuthHeaders) == 0 {
+		return nil
+	}
+	if cfg.CodexOAuthBaseURL == "" {
+		return fmt.Errorf("codex-oauth-headers: codex-oauth-base-url must be set")
+	}
+
+	for name := range cfg.CodexOAuthHeaders {
+		if !isHTTPToken(name) {
+			return fmt.Errorf("codex-oauth-headers: invalid header name %q", name)
+		}
+		switch strings.ToLower(name) {
+		case "authorization", "host", "content-length":
+			return fmt.Errorf("codex-oauth-headers: forbidden header %q", name)
+		}
+	}
+	return nil
+}
+
+func isHTTPToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		switch c {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // NormalizePluginsConfig applies default plugin configuration values.

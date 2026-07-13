@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -41,6 +42,12 @@ import (
 type Service struct {
 	// cfg holds the current application configuration.
 	cfg *config.Config
+
+	// codexOAuthBaseURL is immutable for the lifetime of the service.
+	codexOAuthBaseURL string
+
+	// codexOAuthHeaders is immutable for the lifetime of the service.
+	codexOAuthHeaders map[string]string
 
 	// cfgMu protects concurrent access to the configuration.
 	cfgMu sync.RWMutex
@@ -1275,6 +1282,8 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 	if newCfg == nil {
 		return
 	}
+	newCfg.CodexOAuthBaseURL = s.codexOAuthBaseURL
+	newCfg.CodexOAuthHeaders = maps.Clone(s.codexOAuthHeaders)
 
 	nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
 	normalizeStrategy := func(strategy string) string {
@@ -1641,7 +1650,13 @@ func (s *Service) Run(ctx context.Context) error {
 	s.registerPluginAuthParser()
 	if s.coreManager != nil && !homeEnabled {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
+			if s.cfg != nil && s.cfg.CodexOAuthBaseURL != "" {
+				return fmt.Errorf("cliproxy: cannot validate codex-oauth-base-url conflicts because the auth store failed to load: %w", errLoad)
+			}
 			log.Warnf("failed to load auth store: %v", errLoad)
+		}
+		if errConflict := validateCodexOAuthBaseURLAuthConflicts(s.cfg, s.coreManager.List()); errConflict != nil {
+			return errConflict
 		}
 		s.registerConfigAPIKeyAuths(coreauth.WithSkipPersist(ctx), s.cfg)
 		if s.cfg.SaveCooldownStatus {
@@ -1778,6 +1793,59 @@ func (s *Service) Run(ctx context.Context) error {
 	case errServer := <-s.serverErr:
 		return errServer
 	}
+}
+
+func validateCodexOAuthBaseURLAuthConflicts(cfg *config.Config, auths []*coreauth.Auth) error {
+	if cfg == nil || cfg.CodexOAuthBaseURL == "" {
+		return nil
+	}
+
+	for _, auth := range auths {
+		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+			continue
+		}
+		if auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != "" {
+			continue
+		}
+
+		baseURL := ""
+		if auth.Attributes != nil {
+			baseURL = strings.TrimSpace(auth.Attributes["base_url"])
+		}
+		if baseURL == "" && auth.Metadata != nil {
+			if rawBaseURL, exists := auth.Metadata["base_url"]; exists && rawBaseURL != nil {
+				value, okString := rawBaseURL.(string)
+				if !okString {
+					return fmt.Errorf("codex-oauth-base-url conflicts with Codex OAuth auth %q: base_url must be a string", codexAuthConflictName(auth))
+				}
+				baseURL = strings.TrimSpace(value)
+			}
+		}
+		if baseURL == "" {
+			continue
+		}
+
+		for index := range cfg.CodexKey {
+			if strings.EqualFold(strings.TrimSpace(cfg.CodexKey[index].BaseURL), baseURL) {
+				return fmt.Errorf("codex-oauth-base-url conflicts with Codex OAuth auth %q base_url %q, which matches codex-api-key[%d].base-url", codexAuthConflictName(auth), baseURL, index)
+			}
+		}
+		return fmt.Errorf("codex-oauth-base-url conflicts with Codex OAuth auth %q base_url %q", codexAuthConflictName(auth), baseURL)
+	}
+	return nil
+}
+
+func codexAuthConflictName(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if fileName := strings.TrimSpace(auth.FileName); fileName != "" {
+		return fileName
+	}
+	if id := strings.TrimSpace(auth.ID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(auth.Label)
 }
 
 // Shutdown gracefully stops background workers and the HTTP server.

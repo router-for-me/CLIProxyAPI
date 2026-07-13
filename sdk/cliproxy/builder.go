@@ -6,6 +6,7 @@ package cliproxy
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -271,17 +272,19 @@ func (b *Builder) Build() (*Service, error) {
 	}
 
 	service := &Service{
-		cfg:            b.cfg,
-		configPath:     b.configPath,
-		tokenProvider:  tokenProvider,
-		apiKeyProvider: apiKeyProvider,
-		watcherFactory: watcherFactory,
-		hooks:          b.hooks,
-		authManager:    authManager,
-		accessManager:  accessManager,
-		coreManager:    coreManager,
-		pluginHost:     pluginHost,
-		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
+		cfg:               b.cfg,
+		codexOAuthBaseURL: b.cfg.CodexOAuthBaseURL,
+		codexOAuthHeaders: maps.Clone(b.cfg.CodexOAuthHeaders),
+		configPath:        b.configPath,
+		tokenProvider:     tokenProvider,
+		apiKeyProvider:    apiKeyProvider,
+		watcherFactory:    watcherFactory,
+		hooks:             b.hooks,
+		authManager:       authManager,
+		accessManager:     accessManager,
+		coreManager:       coreManager,
+		pluginHost:        pluginHost,
+		serverOptions:     append([]api.ServerOption(nil), b.serverOptions...),
 	}
 	if b.postAuthHook != nil {
 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))

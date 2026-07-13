@@ -36,6 +36,12 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config payload: %w", err)
 	}
+	if err := cfg.NormalizeCodexOAuthBaseURL(); err != nil {
+		return nil, err
+	}
+	if err := cfg.ValidateCodexOAuthHeaders(); err != nil {
+		return nil, err
+	}
 
 	// Hash remote management key if plaintext is detected (nested), but do NOT persist.
 	if cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {

@@ -20,6 +20,7 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Default config: `config.yaml` (template: `config.example.yaml`)
 - `.env` is auto-loaded from the working directory
 - Auth material defaults under `auths/`
+- `codex-oauth-base-url` and `codex-oauth-headers` are startup-only and route Codex subscription OAuth requests over HTTP
 - Storage backends: file-based default; optional Postgres/git/object store (`PGSTORE_*`, `GITSTORE_*`, `OBJECTSTORE_*`)
 
 ## Architecture

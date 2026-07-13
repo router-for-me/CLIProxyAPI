@@ -177,6 +177,20 @@ routing:
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
 
+# Optional upstream base URL for ChatGPT-Codex subscription OAuth credentials.
+# Empty preserves stock routing. When set, this must be an absolute http(s) URL without
+# userinfo, query, or fragment. The value is captured at startup; valid hot reload changes
+# do not take effect until restart. Do not combine it with any Codex OAuth auth-file base_url; a
+# base_url that also matches a codex-api-key entry is reported explicitly as a conflict.
+codex-oauth-base-url: ""
+
+# Optional headers sent with every Codex OAuth request routed to codex-oauth-base-url.
+# Like the base URL, these headers are captured at startup; hot reload changes require a restart.
+codex-oauth-headers: {}
+# Example:
+# codex-oauth-headers:
+#   x-edgee-api-key: "your-edgee-api-key"
+
 # Codex provider behavior.
 codex:
   # When true, and routing.strategy is fill-first or routing.session-affinity is true,
