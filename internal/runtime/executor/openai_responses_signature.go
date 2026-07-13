@@ -114,7 +114,7 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 			keep(item.Raw)
 			continue
 		}
-		if stripOrphanReasoningIDs {
+		if stripOrphanReasoningIDs && item.Get("id").Exists() {
 			if nextID, errID := sjson.Delete(nextItem, "id"); errID != nil {
 				helps.LogWithRequestID(ctx).Debugf("%s: failed to drop reasoning id after invalid encrypted_content at input[%d]: %v", provider, index, errID)
 			} else {
