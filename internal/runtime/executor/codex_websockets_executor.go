@@ -2646,6 +2646,8 @@ func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
 	if conn == nil {
 		return
 	}
+	closeErr := fmt.Errorf("codex websockets executor: session closed: %s", reason)
+	_ = sess.deliverActiveRead(codexWebsocketRead{conn: conn, err: closeErr})
 	logCodexWebsocketDisconnected(sessionID, authID, wsURL, reason, nil)
 	if errClose := conn.Close(); errClose != nil {
 		log.Errorf("codex websockets executor: close websocket error: %v", errClose)
