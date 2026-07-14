@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 
@@ -121,6 +122,16 @@ jobs:
 
           cat "${sync_error_file}" >&2
           exit "${sync_status}"
+
+      - name: Trigger release draft workflow
+        if: steps.sync_upstream.outputs.sync_outcome == 'synced'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run release-pr.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref "${BASE_BRANCH}"
 
       - name: Close obsolete conflict review PR
         if: steps.compare.outputs.has_changes == 'false' || steps.sync_upstream.outputs.sync_outcome == 'synced'
