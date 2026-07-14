@@ -34,8 +34,8 @@ type Record struct {
 	ReasoningEffort string
 	// ServiceTier stores the client-requested service tier.
 	ServiceTier string
-	// RequestServiceTier is a deprecated input alias for older SDK callers. New
-	// records must use ServiceTier and are emitted with service_tier only.
+	// RequestServiceTier is a deprecated input-only alias retained for existing
+	// plugin callers. It is normalized into ServiceTier and never emitted.
 	RequestServiceTier string
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string
@@ -161,18 +161,6 @@ func ServiceTierFromContext(ctx context.Context) string {
 	default:
 		return DefaultServiceTier
 	}
-}
-
-// WithRequestServiceTier is retained for source compatibility. New callers must
-// use WithServiceTier; both names write the same value.
-func WithRequestServiceTier(ctx context.Context, tier string) context.Context {
-	return WithServiceTier(ctx, tier)
-}
-
-// RequestServiceTierFromContext is retained for source compatibility. New
-// callers must use ServiceTierFromContext.
-func RequestServiceTierFromContext(ctx context.Context) string {
-	return ServiceTierFromContext(ctx)
 }
 
 // Plugin consumes usage records emitted by the proxy runtime.

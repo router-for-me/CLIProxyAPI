@@ -464,9 +464,6 @@ func TestUsageReporterBuildRecordIncludesServiceTier(t *testing.T) {
 	if record.ServiceTier != "auto" {
 		t.Fatalf("service tier = %q, want %q", record.ServiceTier, "auto")
 	}
-	if record.RequestServiceTier != "" {
-		t.Fatalf("deprecated request service tier = %q, want empty", record.RequestServiceTier)
-	}
 	if record.ResponseServiceTier != "default" {
 		t.Fatalf("response service tier = %q, want default", record.ResponseServiceTier)
 	}
@@ -481,16 +478,6 @@ func TestUsageReporterSetTranslatedReasoningEffortPreservesClientServiceTier(t *
 	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
 	if record.ServiceTier != "auto" {
 		t.Fatalf("service tier = %q, want %q", record.ServiceTier, "auto")
-	}
-}
-
-func TestUsageReporterAcceptsDeprecatedRequestServiceTierAlias(t *testing.T) {
-	ctx := usage.WithRequestServiceTier(context.Background(), "default")
-	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
-
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
-	if record.ServiceTier != "default" {
-		t.Fatalf("service tier = %q, want default", record.ServiceTier)
 	}
 }
 

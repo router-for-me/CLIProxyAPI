@@ -27,22 +27,4 @@ func TestContextWithRequestedModelAliasIncludesReasoningEffort(t *testing.T) {
 	if gotServiceTier != "auto" {
 		t.Fatalf("service tier = %q, want %q", gotServiceTier, "auto")
 	}
-	if gotRequestServiceTier := coreusage.RequestServiceTierFromContext(ctx); gotRequestServiceTier != "auto" {
-		t.Fatalf("deprecated request service tier = %q, want %q", gotRequestServiceTier, "auto")
-	}
-}
-
-func TestContextWithRequestedModelAliasAcceptsDeprecatedTierMetadata(t *testing.T) {
-	ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{
-		Metadata: map[string]any{
-			cliproxyexecutor.RequestServiceTierMetadataKey: "priority",
-		},
-	}, "fallback-model")
-
-	if got := coreusage.ServiceTierFromContext(ctx); got != "priority" {
-		t.Fatalf("service tier = %q, want %q", got, "priority")
-	}
-	if got := coreusage.RequestServiceTierFromContext(ctx); got != "priority" {
-		t.Fatalf("request service tier = %q, want %q", got, "priority")
-	}
 }

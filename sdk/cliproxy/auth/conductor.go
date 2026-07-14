@@ -3025,9 +3025,6 @@ func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.O
 		ctx = coreusage.WithReasoningEffort(ctx, effort)
 	}
 	serviceTier := serviceTierFromOptions(opts)
-	if serviceTier == "" {
-		serviceTier = requestServiceTierFromOptions(opts)
-	}
 	if serviceTier != "" {
 		ctx = coreusage.WithServiceTier(ctx, serviceTier)
 	}
@@ -3079,10 +3076,6 @@ func reasoningEffortFromOptions(opts cliproxyexecutor.Options) string {
 
 func serviceTierFromOptions(opts cliproxyexecutor.Options) string {
 	return stringMetadataValue(opts.Metadata, cliproxyexecutor.ServiceTierMetadataKey)
-}
-
-func requestServiceTierFromOptions(opts cliproxyexecutor.Options) string {
-	return stringMetadataValue(opts.Metadata, cliproxyexecutor.RequestServiceTierMetadataKey)
 }
 
 func stringMetadataValue(metadata map[string]any, key string) string {

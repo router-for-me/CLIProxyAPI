@@ -27,10 +27,6 @@ const ReasoningEffortMetadataKey = "reasoning_effort"
 // ServiceTierMetadataKey stores the client-requested service tier for usage logs.
 const ServiceTierMetadataKey = "service_tier"
 
-// RequestServiceTierMetadataKey is the deprecated metadata alias used by older
-// SDK callers. New callers must use ServiceTierMetadataKey.
-const RequestServiceTierMetadataKey = "request_service_tier"
-
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"

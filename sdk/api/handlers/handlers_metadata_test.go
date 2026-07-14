@@ -48,9 +48,6 @@ func TestSetServiceTierMetadataExtractsValue(t *testing.T) {
 	if gotServiceTier != "priority" {
 		t.Fatalf("ServiceTierMetadataKey = %v, want %q", gotServiceTier, "priority")
 	}
-	if _, exists := meta[coreexecutor.RequestServiceTierMetadataKey]; exists {
-		t.Fatal("unexpected deprecated request_service_tier metadata")
-	}
 }
 
 func TestSetServiceTierMetadataDefaultsWhenMissing(t *testing.T) {
