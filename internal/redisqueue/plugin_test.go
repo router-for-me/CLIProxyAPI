@@ -34,7 +34,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			AuthType:            "apikey",
 			Source:              "user@example.com",
 			ReasoningEffort:     "medium",
-			ServiceTier:         "priority",
+			ServiceTier:         "auto",
 			ResponseServiceTier: "default",
 			RequestedAt:         time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
 			Latency:             1500 * time.Millisecond,
@@ -57,13 +57,80 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireMissingField(t, payload, "user_api_key")
 		requireStringField(t, payload, "request_id", "ctx-request-id")
 		requireStringField(t, payload, "reasoning_effort", "medium")
-		requireStringField(t, payload, "service_tier", "priority")
-		requireStringField(t, payload, "request_service_tier", "priority")
+		requireStringField(t, payload, "service_tier", "auto")
+		requireMissingField(t, payload, "request_service_tier")
 		requireStringField(t, payload, "response_service_tier", "default")
+		requireTokensBoolField(t, payload, "cache_read_tokens_present", true)
 		requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
 		requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
 		requireBoolField(t, payload, "failed", false)
 		requireFailField(t, payload, http.StatusOK, "")
+	})
+}
+
+func TestUsageQueuePluginMarksCanonicalZeroCacheRead(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider: "openai",
+			Model:    "gpt-5.4",
+			Detail: coreusage.Detail{
+				CachedTokens:    13,
+				CacheReadTokens: 0,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireTokensBoolField(t, payload, "cache_read_tokens_present", true)
+		tokens := requireTokensPayload(t, payload)
+		var cacheReadTokens int64
+		if errUnmarshal := json.Unmarshal(tokens["cache_read_tokens"], &cacheReadTokens); errUnmarshal != nil {
+			t.Fatalf("unmarshal cache_read_tokens: %v", errUnmarshal)
+		}
+		if cacheReadTokens != 0 {
+			t.Fatalf("cache_read_tokens = %d, want 0", cacheReadTokens)
+		}
+	})
+}
+
+func TestUsageQueuePluginEmitsSingleCanonicalAutoTier(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := coreusage.WithServiceTier(context.Background(), coreusage.AutoServiceTier)
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider: "openai",
+			Model:    "gpt-5.4",
+			Detail: coreusage.Detail{
+				InputTokens: 1,
+				TotalTokens: 1,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireStringField(t, payload, "service_tier", "auto")
+		requireMissingField(t, payload, "request_service_tier")
+	})
+}
+
+func TestUsageQueuePluginAcceptsDeprecatedRequestTierRecordField(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider:           "openai",
+			Model:              "gpt-5.4",
+			RequestServiceTier: "priority",
+			Detail:             coreusage.Detail{InputTokens: 1, TotalTokens: 1},
+		})
+
+		payload := popSinglePayload(t)
+		requireStringField(t, payload, "service_tier", "priority")
+		requireMissingField(t, payload, "request_service_tier")
 	})
 }
 
@@ -316,6 +383,24 @@ func requireBoolField(t *testing.T, payload map[string]json.RawMessage, key stri
 	if got != want {
 		t.Fatalf("%s = %t, want %t", key, got, want)
 	}
+}
+
+func requireTokensPayload(t *testing.T, payload map[string]json.RawMessage) map[string]json.RawMessage {
+	t.Helper()
+	raw, ok := payload["tokens"]
+	if !ok {
+		t.Fatal("payload missing tokens")
+	}
+	var tokens map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(raw, &tokens); errUnmarshal != nil {
+		t.Fatalf("unmarshal tokens: %v", errUnmarshal)
+	}
+	return tokens
+}
+
+func requireTokensBoolField(t *testing.T, payload map[string]json.RawMessage, key string, want bool) {
+	t.Helper()
+	requireBoolField(t, requireTokensPayload(t, payload), key, want)
 }
 
 func requireFailField(t *testing.T, payload map[string]json.RawMessage, wantStatus int, wantBody string) {

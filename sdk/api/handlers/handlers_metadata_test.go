@@ -56,7 +56,17 @@ func TestSetServiceTierMetadataDefaultsWhenMissing(t *testing.T) {
 	setServiceTierMetadata(meta, []byte(`{"model":"gpt-5.4"}`))
 
 	gotServiceTier := meta[coreexecutor.ServiceTierMetadataKey]
-	if gotServiceTier != "default" {
+	if gotServiceTier != "auto" {
+		t.Fatalf("ServiceTierMetadataKey = %v, want %q", gotServiceTier, "auto")
+	}
+}
+
+func TestSetServiceTierMetadataPreservesExplicitDefault(t *testing.T) {
+	meta := make(map[string]any)
+
+	setServiceTierMetadata(meta, []byte(`{"service_tier":"default"}`))
+
+	if gotServiceTier := meta[coreexecutor.ServiceTierMetadataKey]; gotServiceTier != "default" {
 		t.Fatalf("ServiceTierMetadataKey = %v, want %q", gotServiceTier, "default")
 	}
 }
