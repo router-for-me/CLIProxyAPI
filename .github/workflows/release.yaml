@@ -5,6 +5,7 @@ on:
     # run only against tags
     tags:
       - '*'
+      - '!*-hybrid.*'
 
 permissions:
   contents: write

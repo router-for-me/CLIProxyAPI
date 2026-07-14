@@ -1,0 +1,5 @@
+# Public OAuth client constants inherited from upstream. Keep these fingerprints
+# narrow so every other tracked file and every fork-only commit remains scanned.
+internal/auth/antigravity/constants.go:generic-api-key:7
+internal/api/handlers/management/api_tools.go:generic-api-key:24
+internal/runtime/executor/antigravity_executor.go:generic-api-key:53
