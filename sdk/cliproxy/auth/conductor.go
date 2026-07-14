@@ -1248,10 +1248,32 @@ func (m *Manager) resolveExecutionAliasResult(auth *Auth, routeModel string) OAu
 }
 
 func (m *Manager) resolveExecutionAliasResultForRequested(auth *Auth, requestedModel string) OAuthModelAliasResult {
+	if result := homeForceMappingAliasResult(auth, requestedModel); result.ForceMapping {
+		return result
+	}
 	if auth != nil && auth.AuthKind() == AuthKindAPIKey {
 		return m.resolveAPIKeyModelAliasWithResult(auth, requestedModel)
 	}
 	return m.applyOAuthModelAliasWithResult(auth, requestedModel)
+}
+
+func homeForceMappingAliasResult(auth *Auth, requestedModel string) OAuthModelAliasResult {
+	if auth == nil || auth.Attributes == nil || !strings.EqualFold(strings.TrimSpace(auth.Attributes[homeForceMappingAttributeKey]), "true") {
+		return OAuthModelAliasResult{}
+	}
+	originalAlias := strings.TrimSpace(auth.Attributes[homeOriginalAliasAttributeKey])
+	if originalAlias == "" {
+		return OAuthModelAliasResult{}
+	}
+	upstreamModel := strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey])
+	if upstreamModel == "" {
+		upstreamModel = strings.TrimSpace(requestedModel)
+	}
+	return OAuthModelAliasResult{
+		UpstreamModel: upstreamModel,
+		ForceMapping:  true,
+		OriginalAlias: originalAlias,
+	}
 }
 
 func executionAliasPoolModel(auth *Auth, requestedModel string, aliasResult OAuthModelAliasResult) string {
@@ -4899,6 +4921,8 @@ type homeErrorDetail struct {
 
 const (
 	homeUpstreamModelAttributeKey     = "home_upstream_model"
+	homeForceMappingAttributeKey      = "home_force_mapping"
+	homeOriginalAliasAttributeKey     = "home_original_alias"
 	homeRequestRetryExceededErrorCode = "request_retry_exceeded"
 )
 
@@ -4938,11 +4962,13 @@ func repeatedHomeAuthError() *Error {
 }
 
 type homeAuthDispatchResponse struct {
-	Model      string `json:"model"`
-	Provider   string `json:"provider"`
-	AuthIndex  string `json:"auth_index"`
-	UserAPIKey string `json:"user_api_key"`
-	Auth       Auth   `json:"auth"`
+	Model         string `json:"model"`
+	Provider      string `json:"provider"`
+	AuthIndex     string `json:"auth_index"`
+	UserAPIKey    string `json:"user_api_key"`
+	ForceMapping  bool   `json:"force_mapping"`
+	OriginalAlias string `json:"original_alias"`
+	Auth          Auth   `json:"auth"`
 }
 
 type homeAuthDispatcher interface {
@@ -5204,9 +5230,16 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	}
 	if upstreamModel := strings.TrimSpace(dispatch.Model); upstreamModel != "" {
 		if auth.Attributes == nil {
-			auth.Attributes = make(map[string]string, 1)
+			auth.Attributes = make(map[string]string, 3)
 		}
 		auth.Attributes[homeUpstreamModelAttributeKey] = upstreamModel
+	}
+	if originalAlias := strings.TrimSpace(dispatch.OriginalAlias); dispatch.ForceMapping && originalAlias != "" {
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string, 2)
+		}
+		auth.Attributes[homeForceMappingAttributeKey] = "true"
+		auth.Attributes[homeOriginalAliasAttributeKey] = originalAlias
 	}
 	if strings.TrimSpace(auth.ID) == "" {
 		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned auth without id", HTTPStatus: http.StatusBadGateway}
