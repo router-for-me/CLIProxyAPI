@@ -65,8 +65,8 @@ func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode,
 	return safemode.HasExampleAPIKeys(cfg.APIKeys)
 }
 
-func shouldSyncStoragePlugins(commandMode, tuiMode, standalone, storageEnabled bool) bool {
-	return storageEnabled && !commandMode && (!tuiMode || standalone)
+func shouldSyncStoragePlugins(commandMode, tuiMode, standalone, cloudConfigMissing, storageEnabled bool) bool {
+	return storageEnabled && !commandMode && (!tuiMode || standalone) && !cloudConfigMissing
 }
 
 // main is the entry point of the application.
@@ -574,7 +574,7 @@ func main() {
 
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
-	if shouldSyncStoragePlugins(commandMode, tuiMode, standalone, usePostgresStore || useObjectStore || useGitStore) {
+	if shouldSyncStoragePlugins(commandMode, tuiMode, standalone, cloudConfigMissing, usePostgresStore || useObjectStore || useGitStore) {
 		if errSync := homeplugins.Sync(context.Background(), cfg, pluginHost); errSync != nil {
 			log.Errorf("failed to sync plugins from storage-backed config: %v", errSync)
 			return
