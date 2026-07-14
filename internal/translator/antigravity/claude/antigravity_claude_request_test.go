@@ -1191,6 +1191,64 @@ func TestConvertClaudeRequestToAntigravity_ToolDeclarations(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_DeduplicatesAndDisambiguatesTools(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"` + second + `","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ok"}]}
+		],
+		"tools":[
+			{"name":"lookup","input_schema":{"type":"object"}},
+			{"name":"lookup","description":"duplicate","input_schema":{"type":"object"}},
+			{"name":"` + first + `","input_schema":{"type":"object"}},
+			{"name":"` + second + `","input_schema":{"type":"object"}}
+		],
+		"tool_choice":{"type":"tool","name":"` + second + `"}
+	}`)
+
+	out := ConvertClaudeRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	declarations := gjson.GetBytes(out, "request.tools.0.functionDeclarations").Array()
+	if len(declarations) != 3 {
+		t.Fatalf("declaration count = %d, want 3. Output: %s", len(declarations), out)
+	}
+	firstMapped := declarations[1].Get("name").String()
+	secondMapped := declarations[2].Get("name").String()
+	if firstMapped == secondMapped || len(secondMapped) > 64 {
+		t.Fatalf("collision names = %q and %q, want distinct names <= 64 chars", firstMapped, secondMapped)
+	}
+	if got := gjson.GetBytes(out, "request.contents.0.parts.0.functionCall.name").String(); got != secondMapped {
+		t.Fatalf("functionCall.name = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+	if got := gjson.GetBytes(out, "request.contents.1.parts.0.functionResponse.name").String(); got != secondMapped {
+		t.Fatalf("functionResponse.name = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+	if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames.0").String(); got != secondMapped {
+		t.Fatalf("allowedFunctionNames.0 = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_MapsToolResultNameOnce(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"read/file","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ok"}]}
+		],
+		"tools":[
+			{"name":"read/file","input_schema":{"type":"object"}},
+			{"name":"read_file","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	out := ConvertClaudeRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	callName := gjson.GetBytes(out, "request.contents.0.parts.0.functionCall.name").String()
+	responseName := gjson.GetBytes(out, "request.contents.1.parts.0.functionResponse.name").String()
+	if callName == "" || responseName != callName {
+		t.Fatalf("function names call=%q response=%q, want the same non-empty mapping. Output: %s", callName, responseName, out)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_ToolChoice_SpecificTool(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gemini-3-flash-preview",

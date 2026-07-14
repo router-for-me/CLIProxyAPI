@@ -28,6 +28,7 @@ const antigravityFunctionThoughtSignature = "skip_thought_signature_validator"
 //   - []byte: The transformed request data in Antigravity API format
 func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
+	functionNameMap := util.SanitizedFunctionNameMap(rawJSON)
 	// Base envelope (no default thinkingConfig)
 	out := []byte(`{"project":"","request":{"contents":[]},"model":"gemini-2.5-pro"}`)
 
@@ -295,7 +296,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							continue
 						}
 						fid := tc.Get("id").String()
-						fname := util.SanitizeFunctionName(tc.Get("function.name").String())
+						fname := util.MapSanitizedFunctionName(functionNameMap, tc.Get("function.name").String())
 						if fname == "" {
 							continue
 						}
@@ -323,7 +324,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					for _, fid := range fIDs {
 						if name, ok := tcID2Name[fid]; ok {
 							toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.id", fid)
-							toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.name", util.SanitizeFunctionName(name))
+							toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.name", util.MapSanitizedFunctionName(functionNameMap, name))
 							resp := toolResponses[fid]
 							if resp == "" {
 								resp = "{}"
@@ -399,7 +400,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						fnRaw = string(fnRawBytes)
 					}
 					fnRawBytes := []byte(fnRaw)
-					fnRawBytes, _ = sjson.SetBytes(fnRawBytes, "name", util.SanitizeFunctionName(fn.Get("name").String()))
+					fnRawBytes, _ = sjson.SetBytes(fnRawBytes, "name", util.MapSanitizedFunctionName(functionNameMap, fn.Get("name").String()))
 					fnRaw, _ = sjson.Delete(string(fnRawBytes), "strict")
 					if !hasFunction {
 						functionToolNode, _ = sjson.SetRawBytes(functionToolNode, "functionDeclarations", []byte("[]"))
@@ -444,6 +445,12 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				urlContextNodes = append(urlContextNodes, urlToolNode)
 			}
 		}
+		if hasFunction {
+			declarations := gjson.GetBytes(functionToolNode, "functionDeclarations")
+			deduplicated := util.DeduplicateFunctionDeclarations([]byte(declarations.Raw))
+			functionToolNode, _ = sjson.SetRawBytes(functionToolNode, "functionDeclarations", deduplicated)
+			hasFunction = len(gjson.ParseBytes(deduplicated).Array()) > 0
+		}
 		if hasFunction || len(googleSearchNodes) > 0 || len(codeExecutionNodes) > 0 || len(urlContextNodes) > 0 {
 			toolsNode := []byte("[]")
 			if hasFunction {
@@ -462,7 +469,41 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 	}
 
+	out = applyOpenAIToolChoiceToAntigravity(out, rawJSON, functionNameMap)
 	return common.AttachDefaultSafetySettings(out, "request.safetySettings")
+}
+
+func applyOpenAIToolChoiceToAntigravity(out, rawJSON []byte, functionNameMap map[string]string) []byte {
+	toolChoice := gjson.GetBytes(rawJSON, "tool_choice")
+	if !toolChoice.Exists() {
+		return out
+	}
+
+	mode := ""
+	allowedName := ""
+	if toolChoice.Type == gjson.String {
+		switch strings.ToLower(strings.TrimSpace(toolChoice.String())) {
+		case "none":
+			mode = "NONE"
+		case "auto":
+			mode = "AUTO"
+		case "required", "any":
+			mode = "ANY"
+		}
+	} else if toolChoice.IsObject() && strings.EqualFold(toolChoice.Get("type").String(), "function") {
+		mode = "ANY"
+		allowedName = toolChoice.Get("function.name").String()
+	}
+	if mode == "" {
+		return out
+	}
+
+	out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", mode)
+	if strings.TrimSpace(allowedName) != "" {
+		mappedName := util.MapSanitizedFunctionName(functionNameMap, allowedName)
+		out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames", []string{mappedName})
+	}
+	return out
 }
 
 func applyOpenAIThinkingCompatibilityToAntigravity(out []byte, rawJSON []byte, modelName string) []byte {
