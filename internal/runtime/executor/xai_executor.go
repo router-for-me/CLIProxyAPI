@@ -2543,10 +2543,16 @@ var xaiCapacityErrorPaths = [...]string{
 	"response.error.message",
 }
 
+var xaiCapacityErrorPhrases = [...][]byte{
+	[]byte("resource has been exhausted"),
+	[]byte("temporarily at capacity"),
+	[]byte("service is at capacity"),
+}
+
 // xaiCapacityEventStatusErr detects retryable capacity failures that the xAI
 // Responses endpoint can embed in an otherwise successful HTTP 200 SSE stream.
 func xaiCapacityEventStatusErr(eventData []byte) (statusErr, bool) {
-	if len(eventData) == 0 || !gjson.ValidBytes(eventData) {
+	if len(eventData) == 0 || !xaiContainsCapacityPhrase(eventData) || !gjson.ValidBytes(eventData) {
 		return statusErr{}, false
 	}
 
@@ -2562,6 +2568,19 @@ func xaiCapacityEventStatusErr(eventData []byte) (statusErr, bool) {
 		}
 	}
 	return statusErr{}, false
+}
+
+func xaiContainsCapacityPhrase(eventData []byte) bool {
+	for _, phrase := range xaiCapacityErrorPhrases {
+		remaining := eventData
+		for len(remaining) >= len(phrase) {
+			if bytes.EqualFold(remaining[:len(phrase)], phrase) {
+				return true
+			}
+			remaining = remaining[1:]
+		}
+	}
+	return false
 }
 
 // xaiStatusErr wraps upstream error bodies so free-tier exhaustion

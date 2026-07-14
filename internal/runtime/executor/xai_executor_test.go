@@ -36,7 +36,7 @@ func testContextWithAPIKey(apiKey string) context.Context {
 
 func TestXAICapacityEventStatusErr(t *testing.T) {
 	tests := []string{
-		`{"code":"Some resource has been exhausted"}`,
+		`{"code":"SOME RESOURCE HAS BEEN EXHAUSTED"}`,
 		`{"error":"The service is temporarily at capacity. Please retry your request shortly."}`,
 		`{"error":{"message":"Service is at capacity"}}`,
 		`{"message":"resource has been exhausted"}`,
