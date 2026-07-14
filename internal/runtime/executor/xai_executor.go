@@ -194,7 +194,11 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		if !bytes.HasPrefix(line, xaiDataTag) {
 			continue
 		}
-		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
+		rawEventData := bytes.TrimSpace(line[len(xaiDataTag):])
+		if capacityErr, ok := xaiCapacityEventStatusErr(rawEventData); ok {
+			return resp, capacityErr
+		}
+		eventData := xaiNormalizeReasoningSummaryData(rawEventData)
 		eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
 		eventData = responseFilter.apply(eventData)
 		if len(eventData) == 0 {
@@ -685,6 +689,15 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				eventDataList := xaiNormalizeReasoningSummaryDataEvents(bytes.TrimSpace(line[len(xaiDataTag):]))
 				hasPendingEventLine := pendingEventLine != nil
 				for i, eventData := range eventDataList {
+					if capacityErr, ok := xaiCapacityEventStatusErr(eventData); ok {
+						helps.RecordAPIResponseError(ctx, e.cfg, capacityErr)
+						reporter.PublishFailure(ctx, capacityErr)
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: capacityErr}:
+						case <-ctx.Done():
+						}
+						return
+					}
 					eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
 					eventData = responseFilter.apply(eventData)
 					if len(eventData) == 0 {
@@ -2520,6 +2533,36 @@ func xaiPatchCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]by
 // xaiFreeUsageExhaustedCooldown is the free-tier rolling window advertised by
 // cli-chat-proxy ("Usage resets over a rolling 24-hour window").
 const xaiFreeUsageExhaustedCooldown = 24 * time.Hour
+
+var xaiCapacityErrorPaths = [...]string{
+	"code",
+	"error",
+	"error.message",
+	"message",
+	"response.error.code",
+	"response.error.message",
+}
+
+// xaiCapacityEventStatusErr detects retryable capacity failures that the xAI
+// Responses endpoint can embed in an otherwise successful HTTP 200 SSE stream.
+func xaiCapacityEventStatusErr(eventData []byte) (statusErr, bool) {
+	if len(eventData) == 0 || !gjson.ValidBytes(eventData) {
+		return statusErr{}, false
+	}
+
+	for _, path := range xaiCapacityErrorPaths {
+		value := strings.ToLower(strings.TrimSpace(gjson.GetBytes(eventData, path).String()))
+		if strings.Contains(value, "resource has been exhausted") ||
+			strings.Contains(value, "temporarily at capacity") ||
+			strings.Contains(value, "service is at capacity") {
+			return statusErr{
+				code: http.StatusServiceUnavailable,
+				msg:  "xai upstream is temporarily at capacity",
+			}, true
+		}
+	}
+	return statusErr{}, false
+}
 
 // xaiStatusErr wraps upstream error bodies so free-tier exhaustion
 // (subscription:free-usage-exhausted) carries a 24h RetryAfter hint for
