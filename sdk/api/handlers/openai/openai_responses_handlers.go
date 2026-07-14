@@ -494,8 +494,9 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	// Auth selection validates the upstream stream bootstrap synchronously. Run it separately so
 	// configured downstream keep-alives can start while the first upstream payload is still pending.
 	executionChan := make(chan streamExecutionResult, 1)
+	bgCtx := context.WithValue(cliCtx, "gin", c.Copy())
 	go func() {
-		data, upstreamHeaders, errs := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+		data, upstreamHeaders, errs := h.ExecuteStreamWithAuthManager(bgCtx, h.HandlerType(), modelName, rawJSON, "")
 		executionChan <- streamExecutionResult{data: data, upstreamHeaders: upstreamHeaders, errs: errs}
 	}()
 
@@ -544,6 +545,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		defer keepAlive.Stop()
 		keepAliveC = keepAlive.C
 	}
+	requiresExecutionHeaders := handlers.PassthroughHeadersEnabled(h.Cfg) || h.PluginHost != nil
 
 	// Wait for stream execution and peek at the first chunk.
 	for {
@@ -596,6 +598,10 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
 			return
 		case <-keepAliveC:
+			// Once the response is committed, late upstream or interceptor headers cannot be added.
+			if executionChan != nil && requiresExecutionHeaders {
+				continue
+			}
 			commitStream()
 			_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
 			flusher.Flush()

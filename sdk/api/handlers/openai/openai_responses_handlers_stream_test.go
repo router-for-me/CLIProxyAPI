@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,8 @@ import (
 
 type delayedResponsesStreamExecutor struct {
 	release <-chan struct{}
+	headers http.Header
+	payload []byte
 }
 
 func (e *delayedResponsesStreamExecutor) Identifier() string { return "test-provider" }
@@ -37,9 +40,15 @@ func (e *delayedResponsesStreamExecutor) ExecuteStream(ctx context.Context, _ *c
 		select {
 		case <-ctx.Done():
 		case <-e.release:
+			if len(e.payload) > 0 {
+				select {
+				case <-ctx.Done():
+				case chunks <- coreexecutor.StreamChunk{Payload: e.payload}:
+				}
+			}
 		}
 	}()
-	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	return &coreexecutor.StreamResult{Headers: e.headers.Clone(), Chunks: chunks}, nil
 }
 
 func (e *delayedResponsesStreamExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
@@ -52,6 +61,43 @@ func (e *delayedResponsesStreamExecutor) CountTokens(context.Context, *coreauth.
 
 func (e *delayedResponsesStreamExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
 	return nil, errors.New("not implemented")
+}
+
+func newDelayedResponsesStreamServer(t *testing.T, cfg *sdkconfig.SDKConfig, upstreamHeaders http.Header) (*httptest.Server, func(), string) {
+	t.Helper()
+
+	gin.SetMode(gin.TestMode)
+	releaseChan := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			close(releaseChan)
+		})
+	}
+	executor := &delayedResponsesStreamExecutor{
+		release: releaseChan,
+		headers: upstreamHeaders,
+		payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-keepalive\",\"output\":[]}}\n\n"),
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	authID := t.Name() + "-auth"
+	auth := &coreauth.Auth{ID: authID, Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	modelID := t.Name() + "-model"
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: modelID}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(cfg, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses", h.Responses)
+	return httptest.NewServer(router), release, modelID
 }
 
 func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *httptest.ResponseRecorder, *gin.Context, http.Flusher) {
@@ -74,36 +120,10 @@ func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *h
 }
 
 func TestResponsesStreamingSendsConfiguredKeepAliveBeforeFirstChunk(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	release := make(chan struct{})
-	released := false
-	defer func() {
-		if !released {
-			close(release)
-		}
-	}()
-
-	executor := &delayedResponsesStreamExecutor{release: release}
-	manager := coreauth.NewManager(nil, nil, nil)
-	manager.RegisterExecutor(executor)
-
-	auth := &coreauth.Auth{ID: "responses-keepalive-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
-	if _, err := manager.Register(context.Background(), auth); err != nil {
-		t.Fatalf("Register auth: %v", err)
-	}
-	modelID := "test-responses-keepalive-model"
-	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: modelID}})
-	t.Cleanup(func() {
-		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
-	})
-
 	cfg := &sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{KeepAliveSeconds: 1}}
-	base := handlers.NewBaseAPIHandlers(cfg, manager)
-	h := NewOpenAIResponsesAPIHandler(base)
-	router := gin.New()
-	router.POST("/v1/responses", h.Responses)
-	server := httptest.NewServer(router)
+	server, release, modelID := newDelayedResponsesStreamServer(t, cfg, nil)
 	defer server.Close()
+	defer release()
 
 	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", strings.NewReader(`{"model":"`+modelID+`","stream":true,"input":"hello"}`))
 	if err != nil {
@@ -128,8 +148,7 @@ func TestResponsesStreamingSendsConfiguredKeepAliveBeforeFirstChunk(t *testing.T
 		t.Fatalf("Content-Type = %q, want text/event-stream", got)
 	}
 
-	close(release)
-	released = true
+	release()
 	body, err := io.ReadAll(resp.Body)
 	if errClose := resp.Body.Close(); err == nil && errClose != nil {
 		err = errClose
@@ -139,6 +158,48 @@ func TestResponsesStreamingSendsConfiguredKeepAliveBeforeFirstChunk(t *testing.T
 	}
 	if !strings.HasPrefix(string(body), ": keep-alive\n\n") {
 		t.Fatalf("body = %q, want pre-first-chunk keep-alive", body)
+	}
+}
+
+func TestResponsesStreamingPreservesPassthroughHeadersBeforeKeepAlive(t *testing.T) {
+	cfg := &sdkconfig.SDKConfig{
+		PassthroughHeaders: true,
+		Streaming:          sdkconfig.StreamingConfig{KeepAliveSeconds: 1},
+	}
+	server, release, modelID := newDelayedResponsesStreamServer(t, cfg, http.Header{"X-Request-ID": {"req-delayed"}})
+	defer server.Close()
+	defer release()
+	timer := time.AfterFunc(1200*time.Millisecond, release)
+	defer timer.Stop()
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", strings.NewReader(`{"model":"`+modelID+`","stream":true,"input":"hello"}`))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := server.Client()
+	client.Timeout = 3 * time.Second
+
+	started := time.Now()
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("stream did not start after upstream headers became available: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < time.Second {
+		t.Fatalf("stream committed after %s, before delayed upstream headers were available", elapsed)
+	}
+	if got := resp.Header.Get("X-Request-ID"); got != "req-delayed" {
+		t.Fatalf("X-Request-ID = %q, want req-delayed", got)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if errClose := resp.Body.Close(); err == nil && errClose != nil {
+		err = errClose
+	}
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if strings.HasPrefix(string(body), ": keep-alive\n\n") {
+		t.Fatalf("body = %q, keep-alive committed before passthrough headers", body)
 	}
 }
 
