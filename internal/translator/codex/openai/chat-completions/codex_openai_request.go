@@ -93,6 +93,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 
 	// Extract system instructions from first system message (string or text object)
 	messages := gjson.GetBytes(rawJSON, "messages")
+	toolCallIDs, toolOutputIDs := openAIToolCallPairing(messages)
 	// if messages.IsArray() {
 	// 	arr := messages.Array()
 	// 	for i := 0; i < len(arr); i++ {
@@ -120,7 +121,10 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			switch role {
 			case "tool":
 				// Handle tool response messages as top-level function_call_output objects
-				toolCallID := m.Get("tool_call_id").String()
+				toolCallID := strings.TrimSpace(m.Get("tool_call_id").String())
+				if toolCallID == "" || !toolCallIDs[toolCallID] {
+					continue
+				}
 				content := m.Get("content")
 
 				// Create function_call_output object
@@ -226,6 +230,10 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 						for j := 0; j < len(toolCallsArr); j++ {
 							tc := toolCallsArr[j]
 							if tc.Get("type").String() == "function" {
+								callID := strings.TrimSpace(tc.Get("id").String())
+								if callID == "" || !toolOutputIDs[callID] {
+									continue
+								}
 								// Create function_call as top-level object
 								funcCall := []byte(`{}`)
 								funcCall, _ = sjson.SetBytes(funcCall, "type", "function_call")
@@ -371,6 +379,36 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 
 	out, _ = sjson.SetBytes(out, "store", false)
 	return out
+}
+
+func openAIToolCallPairing(messages gjson.Result) (callIDs map[string]bool, outputIDs map[string]bool) {
+	callIDs = make(map[string]bool)
+	outputIDs = make(map[string]bool)
+	if !messages.IsArray() {
+		return callIDs, outputIDs
+	}
+	for _, m := range messages.Array() {
+		switch strings.TrimSpace(m.Get("role").String()) {
+		case "assistant":
+			toolCalls := m.Get("tool_calls")
+			if !toolCalls.IsArray() {
+				continue
+			}
+			for _, tc := range toolCalls.Array() {
+				if tc.Get("type").String() != "function" {
+					continue
+				}
+				if id := strings.TrimSpace(tc.Get("id").String()); id != "" {
+					callIDs[id] = true
+				}
+			}
+		case "tool":
+			if id := strings.TrimSpace(m.Get("tool_call_id").String()); id != "" {
+				outputIDs[id] = true
+			}
+		}
+	}
+	return callIDs, outputIDs
 }
 
 func setToolCallOutputContent(funcOutput []byte, content gjson.Result) []byte {

@@ -804,6 +804,46 @@ func TestCallIDsMatchBetweenCallAndOutput(t *testing.T) {
 	}
 }
 
+func TestOrphanToolCallDropped(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Check status"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{"id": "call_orphan", "type": "function", "function": {"name": "run_shell_command", "arguments": "{}"}},
+					{"id": "call_ok", "type": "function", "function": {"name": "run_shell_command", "arguments": "{}"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_ok", "content": "{\"cancelled\":true}"}
+		],
+		"tools": [
+			{"type": "function", "function": {"name": "run_shell_command", "description": "Run", "parameters": {"type": "object", "properties": {}}}}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+
+	for _, item := range items {
+		if item.Get("type").String() == "function_call" && item.Get("call_id").String() == "call_orphan" {
+			t.Fatalf("orphan function_call should be dropped, got input: %s", gjson.GetBytes(out, "input").Raw)
+		}
+	}
+
+	foundOK := false
+	for _, item := range items {
+		if item.Get("type").String() == "function_call" && item.Get("call_id").String() == "call_ok" {
+			foundOK = true
+		}
+	}
+	if !foundOK {
+		t.Fatalf("expected function_call for call_ok, got: %s", gjson.GetBytes(out, "input").Raw)
+	}
+}
+
 // Tools array should carry over to the Responses format output.
 func TestToolsDefinitionTranslated(t *testing.T) {
 	input := []byte(`{
