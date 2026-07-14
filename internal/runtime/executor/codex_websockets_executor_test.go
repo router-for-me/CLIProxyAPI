@@ -98,6 +98,87 @@ func TestCodexWebsocketsExecuteResponsesLiteDoesNotInjectImageGenerationTool(t *
 	}
 }
 
+func TestCodexWebsocketsExecuteStreamReconcilesClaudeUsage(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		created := []byte(`{"type":"response.created","response":{"id":"resp-1","model":"gpt-5.6-sol"}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, created); errWrite != nil {
+			t.Errorf("write created websocket message: %v", errWrite)
+			return
+		}
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Errorf("write completed websocket message: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Provider: "codex", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol",
+		Payload: []byte(`{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("claude"),
+		ResponseFormat: sdktranslator.FromString("claude"),
+	}
+
+	result, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	var stream strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		stream.Write(chunk.Payload)
+	}
+	start, ok := firstClaudeStreamEventPayload(stream.String(), "message_start")
+	if !ok {
+		t.Fatalf("missing message_start: %s", stream.String())
+	}
+	if got := start.Get("message.usage.input_tokens").Int(); got <= 0 {
+		t.Fatalf("message_start input token estimate = %d, want positive", got)
+	}
+	delta, ok := firstClaudeStreamEventPayload(stream.String(), "message_delta")
+	if !ok {
+		t.Fatalf("missing message_delta: %s", stream.String())
+	}
+	if got := delta.Get("usage.input_tokens").Int(); got != 10 {
+		t.Fatalf("terminal input_tokens = %d, want 10", got)
+	}
+	if !strings.Contains(stream.String(), `"type":"message_stop"`) {
+		t.Fatalf("missing message_stop: %s", stream.String())
+	}
+}
+
+func firstClaudeStreamEventPayload(stream, event string) (gjson.Result, bool) {
+	currentEvent := ""
+	for _, line := range strings.Split(stream, "\n") {
+		if strings.HasPrefix(line, "event: ") {
+			currentEvent = strings.TrimPrefix(line, "event: ")
+			continue
+		}
+		if currentEvent == event && strings.HasPrefix(line, "data: ") {
+			return gjson.Parse(strings.TrimPrefix(line, "data: ")), true
+		}
+	}
+	return gjson.Result{}, false
+}
+
 func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	capturedPayload := make(chan []byte, 1)

@@ -451,6 +451,15 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	clientBody := body
 	var identityState codexIdentityConfuseState
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, body)
+	estimatedInputTokens := int64(0)
+	if sourceFormatEqual(responseFormat, sdktranslator.FormatClaude) {
+		var errEstimate error
+		estimatedInputTokens, errEstimate = estimateCodexInputTokens(baseModel, upstreamBody)
+		if errEstimate != nil {
+			helps.LogWithRequestID(ctx).WithError(errEstimate).Debug("codex websocket stream input token estimate unavailable")
+			estimatedInputTokens = 0
+		}
+	}
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 	applyModelHeaderOverrides(wsHeaders, baseModel)
@@ -569,8 +578,20 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	go func() {
 		terminateReason := "completed"
 		var terminateErr error
+		terminalEventReceived := false
+		terminalUsageReceived := false
 
 		defer close(out)
+		defer func() {
+			if terminalUsageReceived {
+				return
+			}
+			reason := terminateReason
+			if terminalEventReceived {
+				reason = "terminal_event_without_usage"
+			}
+			logMissingCodexTerminalUsage(ctx, "websocket", reason)
+		}()
 		defer func() {
 			if sess != nil {
 				sess.clearActive(readCh)
@@ -657,10 +678,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			eventType := gjson.GetBytes(payload, "type").String()
-			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "error"
+			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" || eventType == "error"
 			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
 			if cliproxyexecutor.DownstreamWebsocket(ctx) {
-				if eventType == "response.completed" || eventType == "response.done" {
+				if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
+					terminalEventReceived = true
+					terminalUsageReceived = codexTerminalUsageAvailable(payload)
 					if detail, ok := helps.ParseCodexUsage(payload); ok {
 						reporter.Publish(ctx, detail)
 					}
@@ -678,7 +701,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 			payload = normalizeCodexWebsocketCompletion(payload)
 			eventType = gjson.GetBytes(payload, "type").String()
-			if eventType == "response.completed" || eventType == "response.done" {
+			if eventType == "response.created" {
+				payload = patchCodexCreatedInputUsage(payload, estimatedInputTokens)
+			}
+			if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
+				terminalEventReceived = true
+				terminalUsageReceived = codexTerminalUsageAvailable(payload)
 				if detail, ok := helps.ParseCodexUsage(payload); ok {
 					reporter.Publish(ctx, detail)
 				}
@@ -694,7 +722,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					return
 				}
 			}
-			if eventType == "response.completed" || eventType == "response.done" {
+			if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
 				return
 			}
 		}

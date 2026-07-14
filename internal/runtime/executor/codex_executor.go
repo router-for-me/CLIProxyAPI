@@ -107,6 +107,43 @@ func patchCodexCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]
 	return completedDataPatched
 }
 
+func patchCodexCreatedInputUsage(eventData []byte, estimatedInputTokens int64) []byte {
+	if estimatedInputTokens <= 0 || gjson.GetBytes(eventData, "type").String() != "response.created" {
+		return eventData
+	}
+	if gjson.GetBytes(eventData, "response.usage.input_tokens").Exists() {
+		return eventData
+	}
+	eventData, _ = sjson.SetBytes(eventData, "response.usage.input_tokens", estimatedInputTokens)
+	return eventData
+}
+
+func estimateCodexInputTokens(model string, body []byte) (int64, error) {
+	enc, err := tokenizerForCodexModel(model)
+	if err != nil {
+		return 0, fmt.Errorf("tokenizer init failed: %w", err)
+	}
+	count, err := countCodexInputTokens(enc, body)
+	if err != nil {
+		return 0, fmt.Errorf("token counting failed: %w", err)
+	}
+	return count, nil
+}
+
+func logMissingCodexTerminalUsage(ctx context.Context, transport, reason string) {
+	help := helps.LogWithRequestID(ctx).WithFields(log.Fields{
+		"provider":  "codex",
+		"transport": transport,
+		"reason":    reason,
+	})
+	help.Debug("codex stream ended without authoritative terminal usage")
+}
+
+func codexTerminalUsageAvailable(eventData []byte) bool {
+	usage := gjson.GetBytes(eventData, "response.usage")
+	return usage.Get("input_tokens").Exists()
+}
+
 func codexTerminalStreamContextLengthErr(eventData []byte) (statusErr, bool) {
 	streamErr, body, ok := codexTerminalStreamErr(eventData)
 	if !ok || !codexTerminalErrorIsContextLength(body) {
@@ -1095,6 +1132,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if err != nil {
 		return nil, err
 	}
+	estimatedInputTokens := int64(0)
+	if sourceFormatEqual(responseFormat, sdktranslator.FormatClaude) {
+		var errEstimate error
+		estimatedInputTokens, errEstimate = estimateCodexInputTokens(baseModel, upstreamBody)
+		if errEstimate != nil {
+			helps.LogWithRequestID(ctx).WithError(errEstimate).Debug("codex stream input token estimate unavailable")
+			estimatedInputTokens = 0
+		}
+	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
 	applyModelHeaderOverrides(httpReq.Header, baseModel)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
@@ -1144,7 +1190,21 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
+		terminalEventReceived := false
+		terminalUsageReceived := false
 		defer close(out)
+		defer func() {
+			if terminalUsageReceived {
+				return
+			}
+			reason := "upstream_closed"
+			if terminalEventReceived {
+				reason = "terminal_event_without_usage"
+			} else if ctx.Err() != nil {
+				reason = "context_done"
+			}
+			logMissingCodexTerminalUsage(ctx, "http", reason)
+		}()
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("codex executor: close response body error: %v", errClose)
@@ -1181,15 +1241,22 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					return
 				}
 				switch gjson.GetBytes(data, "type").String() {
+				case "response.created":
+					data = patchCodexCreatedInputUsage(data, estimatedInputTokens)
+					translatedLine = append([]byte("data: "), data...)
 				case "response.output_item.done":
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
-				case "response.completed":
+				case "response.completed", "response.incomplete":
+					terminalEventReceived = true
+					terminalUsageReceived = codexTerminalUsageAvailable(data)
 					if detail, ok := helps.ParseCodexUsage(data); ok {
 						reporter.Publish(ctx, detail)
 					}
-					publishCodexImageToolUsage(ctx, reporter, body, data)
-					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
-					cacheCodexReasoningReplayFromCompleted(replayScope, data)
+					if gjson.GetBytes(data, "type").String() == "response.completed" {
+						publishCodexImageToolUsage(ctx, reporter, body, data)
+						data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
+						cacheCodexReasoningReplayFromCompleted(replayScope, data)
+					}
 					translatedLine = append([]byte("data: "), data...)
 				}
 			}
@@ -1237,14 +1304,9 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	body, _ = sjson.SetBytes(body, "stream", false)
 	body = normalizeCodexInstructions(body)
 
-	enc, err := tokenizerForCodexModel(baseModel)
+	count, err := estimateCodexInputTokens(baseModel, body)
 	if err != nil {
-		return cliproxyexecutor.Response{}, fmt.Errorf("codex executor: tokenizer init failed: %w", err)
-	}
-
-	count, err := countCodexInputTokens(enc, body)
-	if err != nil {
-		return cliproxyexecutor.Response{}, fmt.Errorf("codex executor: token counting failed: %w", err)
+		return cliproxyexecutor.Response{}, fmt.Errorf("codex executor: %w", err)
 	}
 
 	usageJSON := fmt.Sprintf(`{"response":{"usage":{"input_tokens":%d,"output_tokens":0,"total_tokens":%d}}}`, count, count)

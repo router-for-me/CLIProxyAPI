@@ -1213,6 +1213,109 @@ func TestConvertCodexResponseToClaudeNonStream_StopSequenceMapping(t *testing.T)
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamCreatedUsage(t *testing.T) {
+	var param any
+	outputs := ConvertCodexResponseToClaude(context.Background(), "", []byte(`{"messages":[]}`), nil, []byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-sol","usage":{"input_tokens":1234,"output_tokens":0}}}`), &param)
+	payload, ok := firstClaudeStreamPayloadForEvent(string(outputs[0]), "message_start")
+	if !ok {
+		t.Fatalf("missing message_start: %q", outputs)
+	}
+	if got := payload.Get("message.usage.input_tokens").Int(); got != 1234 {
+		t.Fatalf("message_start input_tokens = %d, want 1234", got)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamTerminalUsage(t *testing.T) {
+	tests := []struct {
+		name              string
+		event             string
+		usage             string
+		wantInput         int64
+		wantOutput        int64
+		wantCacheRead     int64
+		wantCacheCreation int64
+		wantStopReason    string
+	}{
+		{name: "uncached", event: "response.completed", usage: `{"input_tokens":1666,"output_tokens":42}`, wantInput: 1666, wantOutput: 42, wantStopReason: "end_turn"},
+		{name: "cached", event: "response.completed", usage: `{"input_tokens":210050,"output_tokens":42,"input_tokens_details":{"cached_tokens":208384}}`, wantInput: 1666, wantOutput: 42, wantCacheRead: 208384, wantStopReason: "end_turn"},
+		{name: "cache creation", event: "response.completed", usage: `{"input_tokens":100,"output_tokens":7,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":40}}`, wantInput: 30, wantOutput: 7, wantCacheRead: 30, wantCacheCreation: 40, wantStopReason: "end_turn"},
+		{name: "zero", event: "response.completed", usage: `{"input_tokens":0,"output_tokens":0}`, wantStopReason: "end_turn"},
+		{name: "missing", event: "response.completed", usage: `null`, wantStopReason: "end_turn"},
+		{name: "incomplete", event: "response.incomplete", usage: `{"input_tokens":11,"output_tokens":5}`, wantInput: 11, wantOutput: 5, wantStopReason: "max_tokens"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			responseFields := `"usage":` + tt.usage
+			if tt.event == "response.incomplete" {
+				responseFields += `,"incomplete_details":{"reason":"max_output_tokens"}`
+			}
+			chunk := []byte(`data: {"type":"` + tt.event + `","response":{` + responseFields + `}}`)
+			outputs := ConvertCodexResponseToClaude(context.Background(), "", []byte(`{"messages":[]}`), nil, chunk, &param)
+			delta, ok := findClaudeStreamMessageDelta(outputs)
+			if !ok {
+				t.Fatalf("missing message_delta: %q", outputs)
+			}
+			if got := delta.Get("usage.input_tokens").Int(); got != tt.wantInput {
+				t.Fatalf("input_tokens = %d, want %d", got, tt.wantInput)
+			}
+			if got := delta.Get("usage.output_tokens").Int(); got != tt.wantOutput {
+				t.Fatalf("output_tokens = %d, want %d", got, tt.wantOutput)
+			}
+			if got := delta.Get("usage.cache_read_input_tokens").Int(); got != tt.wantCacheRead {
+				t.Fatalf("cache_read_input_tokens = %d, want %d", got, tt.wantCacheRead)
+			}
+			if got := delta.Get("usage.cache_creation_input_tokens").Int(); got != tt.wantCacheCreation {
+				t.Fatalf("cache_creation_input_tokens = %d, want %d", got, tt.wantCacheCreation)
+			}
+			if got := delta.Get("delta.stop_reason").String(); got != tt.wantStopReason {
+				t.Fatalf("stop_reason = %q, want %q", got, tt.wantStopReason)
+			}
+			if got := tt.wantInput + tt.wantCacheRead + tt.wantCacheCreation; got != gjson.Parse(tt.usage).Get("input_tokens").Int() {
+				t.Fatalf("Claude input usage sum = %d, upstream input_tokens = %d", got, gjson.Parse(tt.usage).Get("input_tokens").Int())
+			}
+		})
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamTerminalEventOrdering(t *testing.T) {
+	var param any
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-sol"}}`),
+		[]byte(`data: {"type":"response.content_part.added","part":{"type":"output_text"}}`),
+		[]byte(`data: {"type":"response.output_text.delta","delta":"ok"}`),
+		[]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":2,"output_tokens":1}}}`),
+	}
+	var output strings.Builder
+	for _, chunk := range chunks {
+		for _, translated := range ConvertCodexResponseToClaude(context.Background(), "", []byte(`{"messages":[]}`), nil, chunk, &param) {
+			output.Write(translated)
+		}
+	}
+	stream := output.String()
+	blockStop := strings.Index(stream, `"type":"content_block_stop"`)
+	messageDelta := strings.Index(stream, `"type":"message_delta"`)
+	messageStop := strings.Index(stream, `"type":"message_stop"`)
+	if blockStop < 0 || messageDelta <= blockStop || messageStop <= messageDelta {
+		t.Fatalf("terminal event order is invalid: %s", stream)
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_UsageAccounting(t *testing.T) {
+	response := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.6-sol","usage":{"input_tokens":100,"output_tokens":7,"input_tokens_details":{"cached_tokens":30,"cache_creation_tokens":40}},"output":[]}}`)
+	out := gjson.ParseBytes(ConvertCodexResponseToClaudeNonStream(context.Background(), "", []byte(`{"messages":[]}`), nil, response, nil))
+	if got := out.Get("usage.input_tokens").Int(); got != 30 {
+		t.Fatalf("input_tokens = %d, want 30", got)
+	}
+	if got := out.Get("usage.cache_read_input_tokens").Int(); got != 30 {
+		t.Fatalf("cache_read_input_tokens = %d, want 30", got)
+	}
+	if got := out.Get("usage.cache_creation_input_tokens").Int(); got != 40 {
+		t.Fatalf("cache_creation_input_tokens = %d, want 40", got)
+	}
+}
+
 func findClaudeStreamStopReason(outputs [][]byte) (string, bool) {
 	messageDelta, ok := findClaudeStreamMessageDelta(outputs)
 	if !ok {
