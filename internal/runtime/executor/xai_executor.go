@@ -169,6 +169,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			return resp, errRead
 		}
+		clearXAIReasoningReplayOnInvalidEncryptedContent(ctx, prepared.replayScope, httpResp.StatusCode, data)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		return resp, xaiStatusErr(httpResp.StatusCode, data)
@@ -191,6 +192,11 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		switch gjson.GetBytes(eventData, "type").String() {
 		case "response.output_item.done":
 			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
+		case "error", "response.failed":
+			if status, body, ok := xaiSSETerminalFailure(eventData); ok {
+				clearXAIReasoningReplayOnInvalidEncryptedContent(ctx, prepared.replayScope, status, body)
+				return resp, xaiStatusErr(status, body)
+			}
 		case "response.completed":
 			if detail, ok := helps.ParseCodexUsage(eventData); ok {
 				reporter.Publish(ctx, detail)
@@ -265,6 +271,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		clearXAIReasoningReplayOnInvalidEncryptedContent(ctx, prepared.replayScope, httpResp.StatusCode, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = xaiStatusErr(httpResp.StatusCode, data)
 		return nil, nil, nil, err
@@ -626,6 +633,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			return nil, errRead
 		}
+		clearXAIReasoningReplayOnInvalidEncryptedContent(ctx, prepared.replayScope, httpResp.StatusCode, data)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		return nil, xaiStatusErr(httpResp.StatusCode, data)
@@ -676,6 +684,18 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 					switch normalizedEventName {
 					case "response.output_item.done":
 						xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
+					case "error", "response.failed":
+						if status, body, okFail := xaiSSETerminalFailure(eventData); okFail {
+							clearXAIReasoningReplayOnInvalidEncryptedContent(ctx, prepared.replayScope, status, body)
+							streamErr := xaiStatusErr(status, body)
+							helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+							reporter.PublishFailure(ctx, streamErr)
+							select {
+							case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+							case <-ctx.Done():
+							}
+							return
+						}
 					case "response.completed":
 						if detail, ok := helps.ParseCodexUsage(eventData); ok {
 							reporter.Publish(ctx, detail)

@@ -283,7 +283,7 @@ func codexReasoningReplayScopeFromRequest(ctx context.Context, from sdktranslato
 	}
 	return codexReasoningReplayScope{
 		modelName:  thinking.ParseSuffix(req.Model).ModelName,
-		sessionKey: codexReasoningReplaySessionKey(ctx, from, req, opts, body),
+		sessionKey: helps.IsolateClientReasoningReplaySessionKey(ctx, codexReasoningReplaySessionKey(ctx, from, req, opts, body)),
 	}
 }
 
@@ -702,20 +702,39 @@ func cacheCodexReasoningReplayFromCompleted(scope codexReasoningReplayScope, com
 			continue
 		}
 	}
-	if !internalcache.CacheCodexReasoningReplayItemsBestEffort(context.Background(), scope.modelName, scope.sessionKey, items) {
-		internalcache.DeleteCodexReasoningReplayItem(scope.modelName, scope.sessionKey)
+	switch internalcache.StoreCodexReasoningReplayItems(context.Background(), scope.modelName, scope.sessionKey, items) {
+	case internalcache.CodexReasoningReplayStored:
+		return
+	case internalcache.CodexReasoningReplayNoReplayableState:
+		// Successful completed turn without cacheable reasoning must not leave
+		// a previous turn's encrypted state to be injected later.
+		if errDelete := internalcache.DeleteCodexReasoningReplayItemRequired(context.Background(), scope.modelName, scope.sessionKey); errDelete != nil {
+			log.Warnf("codex reasoning replay cache delete failed after non-replayable completed output: %v", errDelete)
+		}
+	case internalcache.CodexReasoningReplayStoreBackendError:
+		log.Debug("codex reasoning replay cache store backend error; retaining previous entry")
+	default:
+		// Invalid args: nothing to store or clear.
 	}
 }
 
-func clearCodexReasoningReplayOnInvalidSignature(ctx context.Context, scope codexReasoningReplayScope, statusCode int, body []byte) error {
+// clearCodexReasoningReplayOnInvalidSignature best-effort clears stale replay
+// state when upstream rejects encrypted thinking content. Delete failures are
+// logged and never replace the upstream status error.
+func clearCodexReasoningReplayOnInvalidSignature(ctx context.Context, scope codexReasoningReplayScope, statusCode int, body []byte) {
 	if !scope.valid() {
-		return nil
+		return
 	}
 	code, _, ok := codexStatusErrorClassification(statusCode, body)
-	if ok && code == "thinking_signature_invalid" {
-		return internalcache.DeleteCodexReasoningReplayItemRequired(ctx, scope.modelName, scope.sessionKey)
+	if !ok || code != "thinking_signature_invalid" {
+		return
 	}
-	return nil
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errDelete := internalcache.DeleteCodexReasoningReplayItemRequired(ctx, scope.modelName, scope.sessionKey); errDelete != nil {
+		log.Warnf("codex reasoning replay cache delete failed after invalid signature: %v", errDelete)
+	}
 }
 
 // PrepareRequest injects Codex credentials into the outgoing HTTP request.
@@ -846,9 +865,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		b = applyCodexIdentityConfuseResponsePayload(b, identityState)
-		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, b); errClearReplay != nil {
-			return resp, errClearReplay
-		}
+		clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, b)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = newCodexStatusErr(httpResp.StatusCode, b)
@@ -874,9 +891,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		eventType := gjson.GetBytes(eventData, "type").String()
 
 		if streamErr, terminalBody, ok := codexTerminalStreamErr(eventData); ok {
-			if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
-				return resp, errClearReplay
-			}
+			clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody)
 			err = streamErr
 			return resp, err
 		}
@@ -1134,9 +1149,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			return nil, readErr
 		}
 		data = applyCodexIdentityConfuseResponsePayload(data, identityState)
-		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, data); errClearReplay != nil {
-			return nil, errClearReplay
-		}
+		clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, data)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = newCodexStatusErr(httpResp.StatusCode, data)
@@ -1163,15 +1176,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
 				if streamErr, terminalBody, ok := codexTerminalStreamErr(data); ok {
-					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
-						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
-						reporter.PublishFailure(ctx, errClearReplay)
-						select {
-						case out <- cliproxyexecutor.StreamChunk{Err: errClearReplay}:
-						case <-ctx.Done():
-						}
-						return
-					}
+					clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody)
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
 					select {

@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -225,6 +226,19 @@ type Manager struct {
 	mu            sync.RWMutex
 	auths         map[string]*Auth
 	scheduler     *authScheduler
+	// selectorUses tracks in-flight legacy picks per Stoppable selector instance,
+	// so a reinstalled or retired selector is stopped only after every pick that
+	// borrowed it (across all installs) returns. Non-stoppable selectors are
+	// never stopped and are not tracked. A slice (not a map) is used because a
+	// Selector may legally be a non-comparable concrete type (named map/slice/
+	// func); the slice structure is mutated only under mu.Lock. Entries are
+	// claimed/retired by pointer identity, so no selector-value comparison is
+	// needed to find them (which would be unreliable for func-typed selectors).
+	selectorUses []*selectorUseEntry
+	// currentUse is the tracking entry for the currently installed selector, or
+	// nil when the current selector is not stoppable. Pick paths increment this
+	// entry directly (under mu.RLock) rather than looking it up by value.
+	currentUse *selectorUseEntry
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
 	// homeRuntimeAuths caches auths returned by Home so websocket sessions can
@@ -287,6 +301,10 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
 	manager.scheduler = newAuthScheduler(selector)
+	// Track the initial selector so the first SetSelector can retire it; without
+	// this a startup SessionAffinitySelector is treated as already retired and
+	// its SessionCache cleanup goroutine leaks for the process lifetime.
+	manager.currentUse = manager.trackSelectorLocked(selector)
 	return manager
 }
 
@@ -462,6 +480,17 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	}
 }
 
+// SetSelector installs selector as the active selector and asynchronously
+// retires the previous one (Stopping it after its in-flight picks drain).
+//
+// Contract: callers must pass a freshly constructed selector on each change and
+// must not reinstall a StoppableSelector instance that was previously replaced.
+// StoppableSelector.Stop (e.g. SessionAffinitySelector) is irreversible — its
+// SessionCache cleanup goroutine cannot be restarted — so reinstalling a
+// retired instance would leave a live-but-dead-cleanup selector. The only
+// production caller (config hot-reload) always builds a new selector, so this is
+// never hit; the same-instance no-op below only exists to make a redundant set
+// of the current instance harmless.
 func (m *Manager) SetSelector(selector Selector) {
 	if m == nil {
 		return
@@ -470,11 +499,199 @@ func (m *Manager) SetSelector(selector Selector) {
 		selector = &RoundRobinSelector{}
 	}
 	m.mu.Lock()
+	previous := m.selector
+	// Re-setting the same instance is a no-op for retirement: keep its in-flight
+	// counter so older picks stay accounted, and never stop a live selector.
+	if selectorSameInstance(previous, selector) {
+		m.mu.Unlock()
+		if m.scheduler != nil {
+			m.scheduler.setSelector(selector)
+			m.syncScheduler()
+		}
+		return
+	}
 	m.selector = selector
+	prevUse := m.currentUse
+	// Ensure the new stoppable instance has a use-tracking entry so pick paths
+	// can account for it. Reuse an existing entry if this exact instance is being
+	// reinstalled (A->B->A) so drain accounting spans installs.
+	m.currentUse = m.trackSelectorLocked(selector)
 	m.mu.Unlock()
+	// Stop the previous affinity/cache selector so config hot-reload does not
+	// leak SessionCache cleanup goroutines, but defer the Stop until every pick
+	// that borrowed that instance finishes so a mid-pick Stop cannot tear down
+	// resources under an in-flight Pick.
+	if prevUse != nil {
+		go m.retireSelector(prevUse)
+	}
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
+	}
+}
+
+// selectorUseEntry tracks in-flight picks for a single Stoppable selector
+// instance across all installs of that instance. Entries are referenced by
+// pointer identity, so tracking never depends on comparing selector values.
+type selectorUseEntry struct {
+	sel   StoppableSelector
+	inUse atomic.Int64
+}
+
+// selectorUseEntryLocked returns the existing tracking entry whose selector is
+// the same identifiable instance as sel, or nil. Identity uses the panic-safe
+// selectorSameInstance; it is deliberately best-effort (it returns nil for
+// func-typed selectors, which then get a fresh per-install entry). Callers hold
+// mu (read or write).
+func (m *Manager) selectorUseEntryLocked(sel StoppableSelector) *selectorUseEntry {
+	for _, entry := range m.selectorUses {
+		if selectorSameInstance(entry.sel, sel) {
+			return entry
+		}
+	}
+	return nil
+}
+
+// trackSelectorLocked returns the use-tracking entry for a stoppable selector,
+// reusing an existing one when the same identifiable instance is (re)installed
+// (A->B->A) and appending a fresh entry otherwise. Returns nil for non-stoppable
+// selectors. Callers hold mu.Lock.
+func (m *Manager) trackSelectorLocked(selector Selector) *selectorUseEntry {
+	stoppable, ok := selector.(StoppableSelector)
+	if !ok {
+		return nil
+	}
+	if entry := m.selectorUseEntryLocked(stoppable); entry != nil {
+		return entry
+	}
+	entry := &selectorUseEntry{sel: stoppable}
+	m.selectorUses = append(m.selectorUses, entry)
+	return entry
+}
+
+// removeSelectorUseLocked drops a tracking entry and reports whether it was
+// present. Its presence in the slice is the single retirement claim token, so a
+// true return means the caller (and only the caller) owns the subsequent Stop.
+// Callers hold mu.Lock. The vacated last slot is niled before reslicing so the
+// manager's retained backing array does not keep the retired selector (and its
+// SessionCache) alive.
+func (m *Manager) removeSelectorUseLocked(target *selectorUseEntry) bool {
+	for i, entry := range m.selectorUses {
+		if entry == target {
+			copy(m.selectorUses[i:], m.selectorUses[i+1:])
+			last := len(m.selectorUses) - 1
+			m.selectorUses[last] = nil
+			m.selectorUses = m.selectorUses[:last]
+			return true
+		}
+	}
+	return false
+}
+
+// acquireSelectorUse increments the in-flight counter for the current stoppable
+// selector and returns its entry so the caller can release without a second
+// lookup. Returns nil when the current selector is not stoppable. Callers hold
+// mu.RLock.
+func (m *Manager) acquireSelectorUse() *selectorUseEntry {
+	if m == nil {
+		return nil
+	}
+	entry := m.currentUse
+	if entry == nil {
+		return nil
+	}
+	entry.inUse.Add(1)
+	return entry
+}
+
+func (m *Manager) releaseSelectorUse(entry *selectorUseEntry) {
+	if entry != nil {
+		entry.inUse.Add(-1)
+	}
+}
+
+func (m *Manager) waitSelectorEntryIdle(entry *selectorUseEntry) {
+	if m == nil || entry == nil {
+		return
+	}
+	for entry.inUse.Load() > 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// retireSelector stops a replaced Stoppable selector once every pick that
+// borrowed its instance (across all installs sharing this entry) has returned,
+// unless the same instance was reinstalled in the meantime. The reinstall check
+// and the claim (entry removal) run under mu.Lock so exactly one goroutine
+// retires the entry; Stop is then called after unlocking so a re-entrant custom
+// Stop (one that calls back into Manager) cannot deadlock on mu, matching the
+// shutdown path. Reinstalling a claimed instance is a caller-contract violation
+// (see SetSelector) not reachable from the config hot-reload path.
+func (m *Manager) retireSelector(entry *selectorUseEntry) {
+	if m == nil || entry == nil {
+		return
+	}
+	for {
+		m.waitSelectorEntryIdle(entry)
+		m.mu.Lock()
+		if m.currentUse == entry {
+			// Reinstalled while draining (A->B->A reused this entry): keep alive.
+			m.mu.Unlock()
+			return
+		}
+		if entry.inUse.Load() > 0 {
+			// A pick slipped in during a brief reinstall window; drain again.
+			m.mu.Unlock()
+			continue
+		}
+		// Claim under the lock: removeSelectorUseLocked returning true is the
+		// single exactly-once token. If another retire goroutine or StopAutoRefresh
+		// already claimed this entry, we get false and must not Stop. Stop runs
+		// outside the lock so a re-entrant custom Stop cannot deadlock on mu.
+		claimed := m.removeSelectorUseLocked(entry)
+		m.mu.Unlock()
+		if claimed {
+			entry.sel.Stop()
+		}
+		return
+	}
+}
+
+// selectorSameInstance reports whether a and b refer to the same selector
+// instance without panicking on non-comparable concrete types.
+func selectorSameInstance(a, b Selector) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	va := reflect.ValueOf(a)
+	vb := reflect.ValueOf(b)
+	if !va.IsValid() || !vb.IsValid() || va.Type() != vb.Type() {
+		return false
+	}
+	switch va.Kind() {
+	case reflect.Func:
+		// Function values have no reliable identity: distinct closures built from
+		// the same function literal can share a code pointer, so never treat two
+		// func selectors as the same instance (a replacement is always installed).
+		return false
+	case reflect.Ptr, reflect.Map, reflect.Chan, reflect.UnsafePointer:
+		if va.IsNil() || vb.IsNil() {
+			return va.IsNil() && vb.IsNil()
+		}
+		return va.Pointer() == vb.Pointer()
+	case reflect.Slice:
+		if va.IsNil() || vb.IsNil() {
+			return va.IsNil() && vb.IsNil()
+		}
+		// Pointer, length, and capacity together identify a slice header; two
+		// slices over the same array with the same length but different caps
+		// (base[:1:1] vs base[:1:2]) are distinct values a Pick could observe.
+		return va.Pointer() == vb.Pointer() && va.Len() == vb.Len() && va.Cap() == vb.Cap()
+	default:
+		if va.Comparable() {
+			return a == b
+		}
+		return false
 	}
 }
 
@@ -2277,7 +2494,15 @@ func (m *Manager) invalidateSessionAffinity(authID string) {
 	if m == nil || authID == "" {
 		return
 	}
-	if invalidator, ok := m.selector.(interface{ InvalidateAuth(string) }); ok && invalidator != nil {
+	// Borrow the current selector's retirement entry (like a pick) so a concurrent
+	// SetSelector cannot Stop the selector while InvalidateAuth is still using its
+	// resources. A selector may implement both StoppableSelector and InvalidateAuth.
+	m.mu.RLock()
+	selector := m.selector
+	use := m.acquireSelectorUse()
+	m.mu.RUnlock()
+	defer m.releaseSelectorUse(use)
+	if invalidator, ok := selector.(interface{ InvalidateAuth(string) }); ok && invalidator != nil {
 		invalidator.InvalidateAuth(authID)
 	}
 }
@@ -4523,6 +4748,8 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 
 	m.mu.RLock()
 	selector := m.selector
+	selectorUseCounter := m.acquireSelectorUse()
+	defer m.releaseSelectorUse(selectorUseCounter)
 	pluginScheduler := m.pluginScheduler
 	executor, okExecutor := m.executors[provider]
 	if !okExecutor {
@@ -4688,6 +4915,8 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 
 	m.mu.RLock()
 	selector := m.selector
+	selectorUseCounter := m.acquireSelectorUse()
+	defer m.releaseSelectorUse(selectorUseCounter)
 	pluginScheduler := m.pluginScheduler
 	candidates := make([]*Auth, 0, len(m.auths))
 	modelKey := strings.TrimSpace(model)
@@ -5503,13 +5732,25 @@ func (m *Manager) StopAutoRefresh() {
 	cancel := m.refreshCancel
 	m.refreshCancel = nil
 	m.refreshLoop = nil
+	// Claim the current selector's retirement entry under the lock so a later
+	// SetSelector (whose prevUse would otherwise point at this instance) cannot
+	// queue a second Stop. Stop is not required to be idempotent.
+	current := m.selector
+	claimed := false
+	if m.currentUse != nil {
+		claimed = m.removeSelectorUseLocked(m.currentUse)
+		m.currentUse = nil
+	}
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
-	// Stop selector if it implements StoppableSelector (e.g., SessionAffinitySelector)
-	if stoppable, ok := m.selector.(StoppableSelector); ok {
-		stoppable.Stop()
+	// Stop selector if it implements StoppableSelector (e.g., SessionAffinitySelector),
+	// but only when we won the retirement claim so it is stopped exactly once.
+	if claimed {
+		if stoppable, ok := current.(StoppableSelector); ok {
+			stoppable.Stop()
+		}
 	}
 }
 

@@ -64,32 +64,58 @@ func CacheAntigravityReasoningReplayItems(modelName, sessionKey string, items []
 	return CacheAntigravityReasoningReplayItemsBestEffort(context.Background(), modelName, sessionKey, items)
 }
 
+// AntigravityReasoningReplayStoreStatus reports why a completed-turn cache write
+// succeeded or failed so callers can decide whether to keep prior entries.
+type AntigravityReasoningReplayStoreStatus int
+
+const (
+	// AntigravityReasoningReplayStoreInvalidArgs means model/session were empty.
+	AntigravityReasoningReplayStoreInvalidArgs AntigravityReasoningReplayStoreStatus = iota
+	// AntigravityReasoningReplayStored means a valid reasoning batch was written.
+	AntigravityReasoningReplayStored
+	// AntigravityReasoningReplayNoReplayableState means the completed output had no
+	// cacheable reasoning batch (for example reasoning disabled).
+	AntigravityReasoningReplayNoReplayableState
+	// AntigravityReasoningReplayStoreBackendError means normalize succeeded but the
+	// storage backend failed; previous entries should be retained.
+	AntigravityReasoningReplayStoreBackendError
+)
+
 // CacheAntigravityReasoningReplayItemsBestEffort stores replay items for completed response paths.
 func CacheAntigravityReasoningReplayItemsBestEffort(ctx context.Context, modelName, sessionKey string, items [][]byte) bool {
+	return StoreAntigravityReasoningReplayItems(ctx, modelName, sessionKey, items) == AntigravityReasoningReplayStored
+}
+
+// StoreAntigravityReasoningReplayItems stores replay items and distinguishes empty
+// completed state from backend failures.
+func StoreAntigravityReasoningReplayItems(ctx context.Context, modelName, sessionKey string, items [][]byte) AntigravityReasoningReplayStoreStatus {
 	key := antigravityReasoningReplayCacheKey(modelName, sessionKey)
 	if key == "" {
-		return false
+		return AntigravityReasoningReplayStoreInvalidArgs
 	}
 	normalized, ok := normalizeAntigravityReasoningReplayItems(items)
 	if !ok {
-		return false
+		return AntigravityReasoningReplayNoReplayableState
 	}
 	if client, homeMode, errClient := currentAntigravityReasoningReplayKVClient(); homeMode {
 		if errClient != nil {
 			log.Errorf("home kv best-effort antigravity reasoning replay set failed prefix=cpa:antigravity:*: %v", errClient)
-			return false
+			return AntigravityReasoningReplayStoreBackendError
 		}
 		raw, errMarshal := json.Marshal(normalized)
 		if errMarshal != nil {
 			log.Errorf("home kv best-effort antigravity reasoning replay set failed prefix=cpa:antigravity:*: %v", errMarshal)
-			return false
+			return AntigravityReasoningReplayStoreBackendError
 		}
 		written, errSet := client.KVSet(ctx, antigravityReasoningReplayKVKey(modelName, sessionKey), raw, homekv.KVSetOptions{EX: AntigravityReasoningReplayCacheTTL})
 		if errSet != nil {
 			log.Errorf("home kv best-effort antigravity reasoning replay set failed prefix=cpa:antigravity:*: %v", errSet)
-			return false
+			return AntigravityReasoningReplayStoreBackendError
 		}
-		return written
+		if !written {
+			return AntigravityReasoningReplayStoreBackendError
+		}
+		return AntigravityReasoningReplayStored
 	}
 
 	cacheCleanupOnce.Do(startCacheCleanup)
@@ -103,7 +129,7 @@ func CacheAntigravityReasoningReplayItemsBestEffort(ctx context.Context, modelNa
 	if len(antigravityReasoningReplayEntries) > AntigravityReasoningReplayCacheMaxEntries {
 		evictOldestAntigravityReasoningReplayEntries(AntigravityReasoningReplayCacheEvictBatchSize)
 	}
-	return true
+	return AntigravityReasoningReplayStored
 }
 
 // GetAntigravityReasoningReplayItem retrieves a normalized reasoning replay item.
@@ -144,7 +170,7 @@ func GetAntigravityReasoningReplayItemsRequired(ctx context.Context, modelName, 
 			return nil, false, errUnmarshal
 		}
 		if _, errExpire := client.KVExpire(ctx, antigravityReasoningReplayKVKey(modelName, sessionKey), AntigravityReasoningReplayCacheTTL); errExpire != nil {
-			return nil, false, errExpire
+			log.Warnf("home kv antigravity reasoning replay expire failed prefix=cpa:antigravity:*: %v", errExpire)
 		}
 		return cloneAntigravityReasoningReplayItems(homeItems), true, nil
 	}

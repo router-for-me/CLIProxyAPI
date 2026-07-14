@@ -1280,6 +1280,9 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		if entry.ownedBy != "" {
 			model["owned_by"] = entry.ownedBy
 		}
+		if entry.displayName != "" {
+			model["display_name"] = entry.displayName
+		}
 		filtered = append(filtered, model)
 	}
 	c.JSON(http.StatusOK, gin.H{

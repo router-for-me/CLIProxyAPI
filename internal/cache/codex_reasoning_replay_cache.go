@@ -63,32 +63,58 @@ func CacheCodexReasoningReplayItems(modelName, sessionKey string, items [][]byte
 	return CacheCodexReasoningReplayItemsBestEffort(context.Background(), modelName, sessionKey, items)
 }
 
+// CodexReasoningReplayStoreStatus reports why a completed-turn cache write
+// succeeded or failed so callers can decide whether to keep prior entries.
+type CodexReasoningReplayStoreStatus int
+
+const (
+	// CodexReasoningReplayStoreInvalidArgs means model/session were empty.
+	CodexReasoningReplayStoreInvalidArgs CodexReasoningReplayStoreStatus = iota
+	// CodexReasoningReplayStored means a valid reasoning batch was written.
+	CodexReasoningReplayStored
+	// CodexReasoningReplayNoReplayableState means the completed output had no
+	// cacheable reasoning batch (for example reasoning disabled).
+	CodexReasoningReplayNoReplayableState
+	// CodexReasoningReplayStoreBackendError means normalize succeeded but the
+	// storage backend failed; previous entries should be retained.
+	CodexReasoningReplayStoreBackendError
+)
+
 // CacheCodexReasoningReplayItemsBestEffort stores replay items for completed response paths.
 func CacheCodexReasoningReplayItemsBestEffort(ctx context.Context, modelName, sessionKey string, items [][]byte) bool {
+	return StoreCodexReasoningReplayItems(ctx, modelName, sessionKey, items) == CodexReasoningReplayStored
+}
+
+// StoreCodexReasoningReplayItems stores replay items and distinguishes empty
+// completed state from backend failures.
+func StoreCodexReasoningReplayItems(ctx context.Context, modelName, sessionKey string, items [][]byte) CodexReasoningReplayStoreStatus {
 	key := codexReasoningReplayCacheKey(modelName, sessionKey)
 	if key == "" {
-		return false
+		return CodexReasoningReplayStoreInvalidArgs
 	}
 	normalized, ok := normalizeCodexReasoningReplayItems(items)
 	if !ok {
-		return false
+		return CodexReasoningReplayNoReplayableState
 	}
 	if client, homeMode, errClient := currentCodexReasoningReplayKVClient(); homeMode {
 		if errClient != nil {
 			log.Errorf("home kv best-effort codex reasoning replay set failed prefix=cpa:codex:*: %v", errClient)
-			return false
+			return CodexReasoningReplayStoreBackendError
 		}
 		raw, errMarshal := json.Marshal(normalized)
 		if errMarshal != nil {
 			log.Errorf("home kv best-effort codex reasoning replay set failed prefix=cpa:codex:*: %v", errMarshal)
-			return false
+			return CodexReasoningReplayStoreBackendError
 		}
 		written, errSet := client.KVSet(ctx, codexReasoningReplayKVKey(modelName, sessionKey), raw, homekv.KVSetOptions{EX: CodexReasoningReplayCacheTTL})
 		if errSet != nil {
 			log.Errorf("home kv best-effort codex reasoning replay set failed prefix=cpa:codex:*: %v", errSet)
-			return false
+			return CodexReasoningReplayStoreBackendError
 		}
-		return written
+		if !written {
+			return CodexReasoningReplayStoreBackendError
+		}
+		return CodexReasoningReplayStored
 	}
 
 	cacheCleanupOnce.Do(startCacheCleanup)
@@ -102,7 +128,7 @@ func CacheCodexReasoningReplayItemsBestEffort(ctx context.Context, modelName, se
 	if len(codexReasoningReplayEntries) > CodexReasoningReplayCacheMaxEntries {
 		evictOldestCodexReasoningReplayEntries(CodexReasoningReplayCacheEvictBatchSize)
 	}
-	return true
+	return CodexReasoningReplayStored
 }
 
 // GetCodexReasoningReplayItem retrieves a normalized reasoning replay item.
@@ -143,7 +169,7 @@ func GetCodexReasoningReplayItemsRequired(ctx context.Context, modelName, sessio
 			return nil, false, errUnmarshal
 		}
 		if _, errExpire := client.KVExpire(ctx, codexReasoningReplayKVKey(modelName, sessionKey), CodexReasoningReplayCacheTTL); errExpire != nil {
-			return nil, false, errExpire
+			log.Warnf("home kv codex reasoning replay expire failed prefix=cpa:codex:*: %v", errExpire)
 		}
 		return cloneCodexReasoningReplayItems(homeItems), true, nil
 	}

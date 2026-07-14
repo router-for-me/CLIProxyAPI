@@ -11,6 +11,7 @@ import (
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -44,19 +45,33 @@ func antigravityReasoningReplayScopeFromPayload(modelName string, payload []byte
 }
 
 func antigravityReasoningReplayScopeFromRequest(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, payload []byte) antigravityReasoningReplayScope {
+	// Trusted execution sessions take precedence and remain un-namespaced.
+	if value := metadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
+		return antigravityReasoningReplayScope{
+			modelName:  modelName,
+			sessionKey: helps.IsolateClientReasoningReplaySessionKey(ctx, "execution:"+value),
+		}
+	}
+	if value := metadataString(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
+		return antigravityReasoningReplayScope{
+			modelName:  modelName,
+			sessionKey: helps.IsolateClientReasoningReplaySessionKey(ctx, "execution:"+value),
+		}
+	}
 	if scope := antigravityReasoningReplayScopeFromPayload(modelName, payload); scope.valid() {
+		scope.sessionKey = helps.IsolateClientReasoningReplaySessionKey(ctx, scope.sessionKey)
+		if !scope.valid() {
+			return antigravityReasoningReplayScope{}
+		}
 		return scope
 	}
 	if scope := antigravityReasoningReplayScopeFromPayload(modelName, req.Payload); scope.valid() {
+		scope.sessionKey = helps.IsolateClientReasoningReplaySessionKey(ctx, scope.sessionKey)
+		if !scope.valid() {
+			return antigravityReasoningReplayScope{}
+		}
 		return scope
 	}
-	if value := metadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
-		return antigravityReasoningReplayScope{modelName: modelName, sessionKey: "execution:" + value}
-	}
-	if value := metadataString(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
-		return antigravityReasoningReplayScope{modelName: modelName, sessionKey: "execution:" + value}
-	}
-	_ = ctx
 	return antigravityReasoningReplayScope{}
 }
 
@@ -121,18 +136,26 @@ func prepareAntigravityGeminiReasoningReplayPayload(ctx context.Context, modelNa
 	return applyAntigravityReasoningReplayCache(ctx, modelName, req, opts, payload)
 }
 
-func clearAntigravityReasoningReplayOnInvalidSignature(ctx context.Context, scope antigravityReasoningReplayScope, statusCode int, body []byte) error {
+// clearAntigravityReasoningReplayOnInvalidSignature best-effort clears stale
+// replay state when upstream rejects an injected thought signature. Delete
+// failures are logged and never replace the upstream status error.
+func clearAntigravityReasoningReplayOnInvalidSignature(ctx context.Context, scope antigravityReasoningReplayScope, statusCode int, body []byte) {
 	if !scope.valid() {
-		return nil
+		return
 	}
 	if statusCode != http.StatusBadRequest {
-		return nil
+		return
 	}
 	bodyText := strings.ToLower(string(body))
 	if !strings.Contains(bodyText, "thoughtsignature") && !strings.Contains(bodyText, "thought_signature") && !strings.Contains(bodyText, "signature") {
-		return nil
+		return
 	}
-	return internalcache.DeleteAntigravityReasoningReplayItemRequired(ctx, scope.modelName, scope.sessionKey)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errDelete := internalcache.DeleteAntigravityReasoningReplayItemRequired(ctx, scope.modelName, scope.sessionKey); errDelete != nil {
+		log.Warnf("antigravity reasoning replay cache delete failed after invalid signature: %v", errDelete)
+	}
 }
 
 func applyAntigravityReasoningReplayCache(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, payload []byte) ([]byte, antigravityReasoningReplayScope, error) {
@@ -531,6 +554,10 @@ type antigravityReasoningReplayAccumulator struct {
 	seenFC         map[string]bool
 	contentIndex   int
 	nextPartIndex  int
+	// completed is set once a terminal finishReason is observed, distinguishing a
+	// successfully completed turn from an interrupted stream so an empty completed
+	// batch can clear a stale prior entry without a partial stream doing so.
+	completed bool
 }
 
 func newAntigravityReasoningReplayAccumulator(scope antigravityReasoningReplayScope, requestPayload []byte) *antigravityReasoningReplayAccumulator {
@@ -559,6 +586,9 @@ func (a *antigravityReasoningReplayAccumulator) ObserveSSELine(line []byte) {
 }
 
 func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload []byte) {
+	if fr := gjson.GetBytes(payload, "response.candidates.0.finishReason"); fr.Exists() && strings.TrimSpace(fr.String()) != "" {
+		a.completed = true
+	}
 	parts := gjson.GetBytes(payload, "response.candidates.0.content.parts")
 	if !parts.IsArray() {
 		return
@@ -624,11 +654,28 @@ func buildAntigravityFunctionCallPartItem(contentIndex, partIndex int, fc gjson.
 }
 
 func (a *antigravityReasoningReplayAccumulator) Flush(ctx context.Context) {
-	if a == nil || !a.scope.valid() || len(a.items) == 0 {
+	if a == nil || !a.scope.valid() {
 		return
 	}
-	if !internalcache.CacheAntigravityReasoningReplayItemsBestEffort(ctx, a.scope.modelName, a.scope.sessionKey, a.items) {
-		_ = internalcache.DeleteAntigravityReasoningReplayItemRequired(ctx, a.scope.modelName, a.scope.sessionKey)
+	// An interrupted stream (no terminal finishReason) with no collected items
+	// must not clear a still-valid prior entry; only a successfully completed turn
+	// with no reasoning parts should clear it, matching codex parity.
+	if len(a.items) == 0 && !a.completed {
+		return
+	}
+	switch internalcache.StoreAntigravityReasoningReplayItems(ctx, a.scope.modelName, a.scope.sessionKey, a.items) {
+	case internalcache.AntigravityReasoningReplayStored:
+		return
+	case internalcache.AntigravityReasoningReplayNoReplayableState:
+		// Successful completed turn without cacheable reasoning must not leave
+		// a previous turn's encrypted state to be injected later.
+		if errDelete := internalcache.DeleteAntigravityReasoningReplayItemRequired(ctx, a.scope.modelName, a.scope.sessionKey); errDelete != nil {
+			log.Warnf("antigravity reasoning replay cache delete failed after non-replayable completed output: %v", errDelete)
+		}
+	case internalcache.AntigravityReasoningReplayStoreBackendError:
+		log.Debug("antigravity reasoning replay cache store backend error; retaining previous entry")
+	default:
+		// Invalid args: nothing to store or clear.
 	}
 }
 
@@ -638,6 +685,9 @@ func cacheAntigravityReasoningReplayFromResponse(ctx context.Context, scope anti
 	}
 	acc := newAntigravityReasoningReplayAccumulator(scope, requestPayload)
 	acc.observeResponsePayload(body)
+	// This path only runs for a fully received successful response, so an empty
+	// batch here is a completed turn without reasoning and may clear stale state.
+	acc.completed = true
 	acc.Flush(ctx)
 }
 

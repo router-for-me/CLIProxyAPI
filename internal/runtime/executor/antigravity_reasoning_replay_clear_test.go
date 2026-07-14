@@ -10,17 +10,59 @@ import (
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
+
+func TestAntigravityReasoningReplayFlushClearsOnEmptyCompletion(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	model := "gemini-3-flash-agent"
+	ctx := context.Background()
+	sessionKey := "execution:empty-completion"
+	scope := antigravityReasoningReplayScope{modelName: model, sessionKey: sessionKey}
+	sig := []byte(`{"type":"thought_signature","thoughtSignature":"OLD_REPLAY_SIGNATURE_XXXXXXXXXX","contentIndex":1,"partIndex":0}`)
+	if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{sig}) {
+		t.Fatal("failed to seed replay cache")
+	}
+
+	// An interrupted stream (no terminal finishReason) with no items must NOT
+	// clear the still-valid prior entry.
+	acc := newAntigravityReasoningReplayAccumulator(scope, []byte(`{}`))
+	acc.Flush(ctx)
+	if _, ok := internalcache.GetAntigravityReasoningReplayItem(model, sessionKey); !ok {
+		t.Fatal("interrupted empty stream must not clear replay entry")
+	}
+
+	// A successfully completed turn with no reasoning parts MUST clear the stale
+	// entry so it is not injected into the next turn.
+	acc2 := newAntigravityReasoningReplayAccumulator(scope, []byte(`{}`))
+	acc2.completed = true
+	acc2.Flush(ctx)
+	if _, ok := internalcache.GetAntigravityReasoningReplayItem(model, sessionKey); ok {
+		t.Fatal("completed empty turn must clear stale replay entry")
+	}
+}
+
+func TestAntigravityReasoningReplayObserveMarksCompletedOnFinishReason(t *testing.T) {
+	scope := antigravityReasoningReplayScope{modelName: "gemini-3-flash-agent", sessionKey: "execution:finish-reason"}
+	acc := newAntigravityReasoningReplayAccumulator(scope, []byte(`{}`))
+	acc.observeResponsePayload([]byte(`{"response":{"candidates":[{"finishReason":"STOP","content":{"parts":[]}}]}}`))
+	if !acc.completed {
+		t.Fatal("finishReason must mark the accumulator completed")
+	}
+}
 
 func TestAntigravityReasoningReplayClearsOnInvalidSignature400(t *testing.T) {
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
 	model := "gemini-3-flash-agent"
-	sessionKey := "session:pr3900-invalid-sig"
+	ctx := testContextWithAPIKey("antigravity-replay-caller")
+	sessionKey := helps.IsolateClientReasoningReplaySessionKey(ctx, "session:pr3900-invalid-sig")
 	bad := []byte(`{"type":"thought_signature","thoughtSignature":"INVALID_REPLAY_SIGNATURE_PR3900_XXXXXXXXX","contentIndex":1,"partIndex":0}`)
 	if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{bad}) {
 		t.Fatal("failed to seed replay cache")
@@ -48,7 +90,7 @@ func TestAntigravityReasoningReplayClearsOnInvalidSignature400(t *testing.T) {
 	}
 
 	payload := []byte(`{"sessionId":"pr3900-invalid-sig","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"user","parts":[{"functionResponse":{"id":"id1","name":"Bash","response":{"result":"ok"}}}]}]}}`)
-	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+	_, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{
 		Model:   model,
 		Payload: payload,
 	}, cliproxyexecutor.Options{

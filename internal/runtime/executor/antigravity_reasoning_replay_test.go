@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 )
@@ -48,15 +49,17 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadInjectsCachedToolPart(t *
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
+	ctx := testContextWithAPIKey("antigravity-prepare-caller")
+	sessionKey := helps.IsolateClientReasoningReplaySessionKey(ctx, "session:sess-2")
 	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":"Read","call_id":"id1","args":{"file_path":"/a"},"thoughtSignature":"sig-first"}`)
-	if !internalcache.CacheAntigravityReasoningReplayItems("gemini-3-flash-agent", "session:sess-2", [][]byte{item}) {
+	if !internalcache.CacheAntigravityReasoningReplayItems("gemini-3-flash-agent", sessionKey, [][]byte{item}) {
 		t.Fatal("cache write failed")
 	}
 
 	req := cliproxyexecutor.Request{}
 	opts := cliproxyexecutor.Options{}
 	payload := []byte(`{"sessionId":"sess-2","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"user","parts":[{"functionResponse":{"id":"id1","name":"Read","response":{"result":"ok"}}}]}]}}`)
-	out, scope, err := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), "gemini-3-flash-agent", req, opts, payload)
+	out, scope, err := prepareAntigravityGeminiReasoningReplayPayload(ctx, "gemini-3-flash-agent", req, opts, payload)
 	if err != nil {
 		t.Fatalf("prepare error: %v", err)
 	}
@@ -81,11 +84,13 @@ func TestPrepareAntigravityGeminiReasoningReplayInsertsBeforeModelFunctionRespon
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
+	ctx := testContextWithAPIKey("antigravity-prepare-caller")
+	sessionKey := helps.IsolateClientReasoningReplaySessionKey(ctx, "session:sess-3")
 	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":"Read","call_id":"id1","args":{"file_path":"/a"},"thoughtSignature":"sig-first"}`)
-	internalcache.CacheAntigravityReasoningReplayItems("gemini-3-flash-agent", "session:sess-3", [][]byte{item})
+	internalcache.CacheAntigravityReasoningReplayItems("gemini-3-flash-agent", sessionKey, [][]byte{item})
 
 	payload := []byte(`{"sessionId":"sess-3","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"functionResponse":{"id":"id1","name":"Read","response":{"result":"ok"}}}]}]}}`)
-	out, _, err := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), "gemini-3-flash-agent", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload)
+	out, _, err := prepareAntigravityGeminiReasoningReplayPayload(ctx, "gemini-3-flash-agent", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,11 +106,13 @@ func TestMergeAntigravityFunctionCallPartReplayMergesSignatureIntoExistingFuncti
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
+	ctx := testContextWithAPIKey("antigravity-prepare-caller")
+	sessionKey := helps.IsolateClientReasoningReplaySessionKey(ctx, "session:sess-merge")
 	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":"Read","call_id":"id1","args":{"file_path":"/a"},"thoughtSignature":"sig-first"}`)
-	internalcache.CacheAntigravityReasoningReplayItems("gemini-3-flash-agent", "session:sess-merge", [][]byte{item})
+	internalcache.CacheAntigravityReasoningReplayItems("gemini-3-flash-agent", sessionKey, [][]byte{item})
 
 	payload := []byte(`{"sessionId":"sess-merge","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"functionCall":{"id":"id1","name":"Read","args":{"file_path":"/a"}}}]},{"role":"user","parts":[{"functionResponse":{"id":"id1","name":"Read","response":{"result":"ok"}}}]}]}}`)
-	out, _, err := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), "gemini-3-flash-agent", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload)
+	out, _, err := prepareAntigravityGeminiReasoningReplayPayload(ctx, "gemini-3-flash-agent", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,11 +125,13 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadAppendsStaleThoughtSignat
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
+	ctx := testContextWithAPIKey("antigravity-prepare-caller")
+	sessionKey := helps.IsolateClientReasoningReplaySessionKey(ctx, "session:sess-stale-text")
 	item := []byte(`{"type":"thought_signature","contentIndex":8,"partIndex":3,"thoughtSignature":"stale-thought-sig-ok12"}`)
-	internalcache.CacheAntigravityReasoningReplayItems("gemini-3-flash-agent", "session:sess-stale-text", [][]byte{item})
+	internalcache.CacheAntigravityReasoningReplayItems("gemini-3-flash-agent", sessionKey, [][]byte{item})
 
 	payload := []byte(`{"sessionId":"sess-stale-text","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"text":"visible answer"}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
-	out, _, err := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), "gemini-3-flash-agent", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload)
+	out, _, err := prepareAntigravityGeminiReasoningReplayPayload(ctx, "gemini-3-flash-agent", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,5 +181,38 @@ func TestAntigravityRequestHasMatchingFunctionResponseWhitespaceCallID(t *testin
 	item := gjson.Parse(`{"call_id":" "}`)
 	if !antigravityRequestHasMatchingFunctionResponse(nil, item) {
 		t.Fatal("whitespace-only call_id should be treated as empty => true")
+	}
+}
+
+func TestAntigravityReasoningReplayScopeIsolatesClientSessionByAPIKey(t *testing.T) {
+	payload := []byte(`{"sessionId":"shared-session","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)
+	req := cliproxyexecutor.Request{Model: "gemini-3-flash-agent", Payload: payload}
+	opts := cliproxyexecutor.Options{}
+
+	scopeA := antigravityReasoningReplayScopeFromRequest(testContextWithAPIKey("api-key-a"), "gemini-3-flash-agent", req, opts, payload)
+	scopeB := antigravityReasoningReplayScopeFromRequest(testContextWithAPIKey("api-key-b"), "gemini-3-flash-agent", req, opts, payload)
+	if !scopeA.valid() || !scopeB.valid() {
+		t.Fatalf("scopes must be valid with caller api keys: A=%+v B=%+v", scopeA, scopeB)
+	}
+	if scopeA.sessionKey == scopeB.sessionKey {
+		t.Fatalf("session keys must differ across callers, both %q", scopeA.sessionKey)
+	}
+	if !strings.HasPrefix(scopeA.sessionKey, "caller:") || !strings.Contains(scopeA.sessionKey, "session:shared-session") {
+		t.Fatalf("session key A = %q, want caller-isolated session key", scopeA.sessionKey)
+	}
+
+	scopeNoKey := antigravityReasoningReplayScopeFromRequest(context.Background(), "gemini-3-flash-agent", req, opts, payload)
+	if scopeNoKey.valid() {
+		t.Fatalf("without caller API key must disable client-controlled replay: %+v", scopeNoKey)
+	}
+
+	executionScope := antigravityReasoningReplayScopeFromRequest(context.Background(), "gemini-3-flash-agent", cliproxyexecutor.Request{
+		Model: "gemini-3-flash-agent",
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "trusted-session",
+		},
+	}, cliproxyexecutor.Options{}, []byte(`{}`))
+	if !executionScope.valid() || executionScope.sessionKey != "execution:trusted-session" {
+		t.Fatalf("trusted execution session = %+v, want execution:trusted-session", executionScope)
 	}
 }

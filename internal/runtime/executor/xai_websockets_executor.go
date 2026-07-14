@@ -625,6 +625,8 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
 
 			if wsErr, ok := parseXAIWebsocketError(payload); ok {
+				statusCode := xaiErrorStatusCode(wsErr, payload)
+				clearXAIReasoningReplayOnInvalidEncryptedContent(ctx, prepared.replayScope, statusCode, xaiWebsocketErrorObject(payload))
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
@@ -638,7 +640,10 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 
 			for _, payload := range xaiNormalizeReasoningSummaryDataEvents(payload) {
 				eventType := gjson.GetBytes(payload, "type").String()
-				isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "error"
+				isTerminalEvent := eventType == "response.completed" ||
+					eventType == "response.done" ||
+					eventType == "error" ||
+					eventType == "response.failed"
 				warmupCompletedPayload := []byte(nil)
 				switch eventType {
 				case "response.created":
@@ -669,6 +674,8 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 						idMapper.state.recordTranscriptTurn(wsReqBody, payload)
 						recordedTranscript = true
 					}
+				case "response.failed", "error":
+					logXAIWebsocketTerminalResponse(executionSessionID, authID, wsURL, eventType, payload)
 				}
 
 				if cliproxyexecutor.DownstreamWebsocket(ctx) {
@@ -820,46 +827,156 @@ func buildXAIWebsocketWarmupCompletedPayload(createdPayload []byte) []byte {
 	return completed
 }
 
+// xaiErrorStatusCode extracts an HTTP-like status from a websocket error for
+// replay-cache cleanup. Explicit top-level or nested status wins; only
+// statusless invalid encrypted-content bodies map to 400 when
+// parseXAIWebsocketError synthesized a 500, so the clear helper's 4xx gate
+// still runs without deleting on explicit server errors.
+func xaiErrorStatusCode(err error, payload []byte) int {
+	if status := int(gjson.GetBytes(payload, "status").Int()); xaiIsHTTPErrorStatus(status) {
+		return status
+	}
+	if status := int(gjson.GetBytes(payload, "status_code").Int()); xaiIsHTTPErrorStatus(status) {
+		return status
+	}
+	if status := xaiNestedExplicitWebsocketStatus(payload); status > 0 {
+		return status
+	}
+	// Prefer the status already classified by parseXAIWebsocketError (structured
+	// code/type semantics) so a server_error / overloaded / rate_limit failure
+	// whose message merely echoes "invalid_encrypted_content" is not downgraded to
+	// 400 and does not evict valid replay state.
+	if err != nil {
+		if withStatus, ok := err.(interface{ StatusCode() int }); ok {
+			if code := withStatus.StatusCode(); code > 0 {
+				return code
+			}
+		}
+	}
+	// Fallback for a statusless invalid-encrypted-content body (no classifiable
+	// status): map to 400 so the replay-cache clear gate runs. Classify only from
+	// the structured error object, never the whole event, since response.output /
+	// instructions can echo caller or model text.
+	if xaiBodyIndicatesInvalidEncryptedContent(xaiWebsocketErrorObject(payload)) {
+		return http.StatusBadRequest
+	}
+	return 0
+}
+
+// xaiNestedExplicitWebsocketStatus returns a numeric status from nested error
+// fields that parseXAIWebsocketError also understands (including response.failed).
+// Only valid 4xx/5xx values are treated as HTTP statuses: fields like error.code
+// often carry application error codes (e.g. 1001) that must not be propagated as
+// HTTP statuses, and a 2xx/3xx value must not turn a terminal failure into a
+// success-class response.
+func xaiNestedExplicitWebsocketStatus(payload []byte) int {
+	for _, path := range []string{
+		"error.code", "error.status", "code",
+		"response.error.code", "response.error.status",
+	} {
+		num := gjson.GetBytes(payload, path)
+		if num.Type == gjson.Number {
+			if status := int(num.Int()); xaiIsHTTPErrorStatus(status) {
+				return status
+			}
+		}
+		raw := strings.TrimSpace(num.String())
+		if raw == "" {
+			continue
+		}
+		if status, errAtoi := strconv.Atoi(raw); errAtoi == nil && xaiIsHTTPErrorStatus(status) {
+			return status
+		}
+	}
+	return 0
+}
+
+// xaiIsHTTPErrorStatus reports whether status is a valid HTTP client/server error
+// status code.
+func xaiIsHTTPErrorStatus(status int) bool {
+	return status >= 400 && status <= 599
+}
+
 func parseXAIWebsocketError(payload []byte) (error, bool) {
 	if wsErr, ok := parseCodexWebsocketError(payload); ok {
 		if statusError, okStatus := wsErr.(statusErrWithHeaders); okStatus {
-			xaiError := xaiStatusErr(statusError.code, payload)
-			if xaiError.retryAfter != nil {
-				statusError.retryAfter = xaiError.retryAfter
+			// The Codex envelope builder ignores flat top-level code/message fields.
+			// Rebuild the body from the xAI extractor (merged flat + nested) and
+			// canonicalize a 400 so the actual error is preserved and requests are not
+			// retried across credentials; keep the Codex status, headers, and
+			// retry-after.
+			body := xaiExtractTerminalErrorBody(payload)
+			if len(body) == 0 {
+				body = []byte(statusError.msg)
+			} else {
+				if statusError.code == http.StatusBadRequest {
+					body = xaiEnsureInvalidRequestType(body)
+				}
+				body, _ = sjson.SetBytes(body, "type", "error")
+				body, _ = sjson.SetBytes(body, "status", statusError.code)
 			}
+			xaiError := xaiStatusErr(statusError.code, body)
+			if xaiError.retryAfter == nil {
+				xaiError.retryAfter = statusError.retryAfter
+			}
+			statusError.statusErr = xaiError
 			return statusError, true
 		}
 		return wsErr, true
 	}
+	// Responses API terminal failure: error lives under response.error, not top-level error.
+	if status, body, ok := xaiSSETerminalFailure(payload); ok {
+		out := []byte(`{}`)
+		out, _ = sjson.SetBytes(out, "type", "error")
+		out, _ = sjson.SetBytes(out, "status", status)
+		if errNode := gjson.GetBytes(body, "error"); errNode.Exists() {
+			out, _ = sjson.SetRawBytes(out, "error", []byte(errNode.Raw))
+		} else if errNode := gjson.GetBytes(payload, "response.error"); errNode.Exists() {
+			out, _ = sjson.SetRawBytes(out, "error", []byte(errNode.Raw))
+		} else if errNode := gjson.GetBytes(payload, "error"); errNode.Exists() {
+			out, _ = sjson.SetRawBytes(out, "error", []byte(errNode.Raw))
+		}
+		return xaiStatusErr(status, out), true
+	}
 	if len(payload) == 0 || !gjson.GetBytes(payload, "error").Exists() {
 		return nil, false
 	}
-	status := int(gjson.GetBytes(payload, "status").Int())
+	status := 0
+	if s := int(gjson.GetBytes(payload, "status").Int()); xaiIsHTTPErrorStatus(s) {
+		status = s
+	}
 	if status <= 0 {
-		status = int(gjson.GetBytes(payload, "status_code").Int())
+		if s := int(gjson.GetBytes(payload, "status_code").Int()); xaiIsHTTPErrorStatus(s) {
+			status = s
+		}
 	}
 	if status <= 0 {
 		status = xaiBareWebsocketErrorStatus(payload)
 	}
-	out := []byte(`{}`)
+	// Merge flat + nested fields so no structured code is lost, and canonicalize a
+	// classified 400 so the conductor treats it as request-scoped (not retried).
+	out := xaiExtractTerminalErrorBody(payload)
+	if len(out) == 0 {
+		out = []byte(`{"error":{}}`)
+	}
+	if status == http.StatusBadRequest {
+		out = xaiEnsureInvalidRequestType(out)
+	}
 	out, _ = sjson.SetBytes(out, "type", "error")
 	out, _ = sjson.SetBytes(out, "status", status)
-	if errNode := gjson.GetBytes(payload, "error"); errNode.Exists() {
-		out, _ = sjson.SetRawBytes(out, "error", []byte(errNode.Raw))
-	}
 	return xaiStatusErr(status, out), true
 }
 
 func xaiBareWebsocketErrorStatus(payload []byte) int {
-	for _, path := range []string{"error.code", "error.status", "code"} {
-		raw := strings.TrimSpace(gjson.GetBytes(payload, path).String())
-		if raw == "" {
-			continue
-		}
-		status, errAtoi := strconv.Atoi(raw)
-		if errAtoi == nil && status > 0 {
-			return status
-		}
+	if status := xaiNestedExplicitWebsocketStatus(payload); status > 0 {
+		return status
+	}
+	// Classify from the structured error object (code/type) so a bare shape such as
+	// {"error":{"code":"invalid_encrypted_content"}} — which carries no top-level
+	// type or status — is recognized as a 400 client error and its rejected replay
+	// state is cleared, instead of defaulting to a 5xx that leaves it cached.
+	if status := xaiStatusFromErrorSemantics(xaiWebsocketErrorObject(payload)); status > 0 {
+		return status
 	}
 	message := strings.TrimSpace(gjson.GetBytes(payload, "error.message").String())
 	if strings.Contains(message, `"code":"400"`) || strings.Contains(message, "Request validation error") {

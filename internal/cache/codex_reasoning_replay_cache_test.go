@@ -148,9 +148,6 @@ func TestCodexReasoningReplayRequiredHomeFailures(t *testing.T) {
 		client *fakeCodexReasoningReplayKVClient
 	}{
 		{name: "get", client: &fakeCodexReasoningReplayKVClient{values: make(map[string][]byte), getErr: errors.New("get failed")}},
-		{name: "expire", client: &fakeCodexReasoningReplayKVClient{values: map[string][]byte{
-			codexReasoningReplayKVKey("gpt-5.4", "session-home"): mustCodexReasoningReplayJSON(t, [][]byte{validCodexReasoningReplayItemForTest(4)}),
-		}, expireErr: errors.New("expire failed")}},
 		{name: "delete", client: &fakeCodexReasoningReplayKVClient{values: make(map[string][]byte), delErr: errors.New("delete failed")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -166,6 +163,52 @@ func TestCodexReasoningReplayRequiredHomeFailures(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCodexReasoningReplayRequiredHomeExpireFailureReturnsItems(t *testing.T) {
+	ClearCodexReasoningReplayCache()
+	t.Cleanup(ClearCodexReasoningReplayCache)
+	client := newFakeCodexReasoningReplayKVClient()
+	client.expireErr = errors.New("expire failed")
+	key := codexReasoningReplayKVKey("gpt-5.4", "session-home")
+	item := validCodexReasoningReplayItemForTest(4)
+	client.values[key] = mustCodexReasoningReplayJSON(t, [][]byte{item})
+	useFakeCodexReasoningReplayKVClient(t, client, true, nil)
+
+	items, found, errGet := GetCodexReasoningReplayItemsRequired(context.Background(), "gpt-5.4", "session-home")
+	if errGet != nil {
+		t.Fatalf("GetCodexReasoningReplayItemsRequired() error = %v", errGet)
+	}
+	if !found || len(items) != 1 || string(items[0]) != string(item) {
+		t.Fatalf("GetCodexReasoningReplayItemsRequired() = %q, %v, want item, true", items, found)
+	}
+	if client.expireCount != 1 || client.lastExpireTTL != CodexReasoningReplayCacheTTL {
+		t.Fatalf("KVExpire count/ttl = %d/%v, want 1/%v", client.expireCount, client.lastExpireTTL, CodexReasoningReplayCacheTTL)
+	}
+}
+
+func TestStoreCodexReasoningReplayItemsStatus(t *testing.T) {
+	ClearCodexReasoningReplayCache()
+	t.Cleanup(ClearCodexReasoningReplayCache)
+
+	if status := StoreCodexReasoningReplayItems(context.Background(), "", "session", [][]byte{validCodexReasoningReplayItemForTest(1)}); status != CodexReasoningReplayStoreInvalidArgs {
+		t.Fatalf("empty model status = %v, want InvalidArgs", status)
+	}
+	if status := StoreCodexReasoningReplayItems(context.Background(), "gpt-5.4", "session", [][]byte{[]byte(`{"type":"message"}`)}); status != CodexReasoningReplayNoReplayableState {
+		t.Fatalf("non-replayable status = %v, want NoReplayableState", status)
+	}
+
+	client := newFakeCodexReasoningReplayKVClient()
+	client.setErr = errors.New("set failed")
+	useFakeCodexReasoningReplayKVClient(t, client, true, nil)
+	if status := StoreCodexReasoningReplayItems(context.Background(), "gpt-5.4", "session-home", [][]byte{validCodexReasoningReplayItemForTest(2)}); status != CodexReasoningReplayStoreBackendError {
+		t.Fatalf("backend error status = %v, want StoreBackendError", status)
+	}
+
+	useFakeCodexReasoningReplayKVClient(t, newFakeCodexReasoningReplayKVClient(), false, nil)
+	if status := StoreCodexReasoningReplayItems(context.Background(), "gpt-5.4", "session-local", [][]byte{validCodexReasoningReplayItemForTest(3)}); status != CodexReasoningReplayStored {
+		t.Fatalf("local store status = %v, want Stored", status)
 	}
 }
 

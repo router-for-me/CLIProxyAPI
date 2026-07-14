@@ -17,6 +17,7 @@ import (
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -1952,6 +1953,549 @@ func TestXAIReasoningReplayScopeDisablesClaudeWithoutAPIKey(t *testing.T) {
 	}
 	if !strings.HasPrefix(scopeWithKey.sessionKey, "caller:") || !strings.Contains(scopeWithKey.sessionKey, "claude:shared-session") {
 		t.Fatalf("session key = %q, want caller-isolated Claude session key", scopeWithKey.sessionKey)
+	}
+}
+
+func TestXAIReasoningReplayClearsOnInvalidEncryptedContent(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	encrypted := testValidGrokEncryptedContentForSeed(50)
+	sessionKey := helps.IsolateClientReasoningReplaySessionKey(testContextWithAPIKey("xai-invalid-caller"), "prompt-cache:invalid-session")
+	if sessionKey == "" {
+		t.Fatal("expected isolated session key")
+	}
+	if !internalcache.CacheXAIReasoningReplayItem("grok-4.3", sessionKey, []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+encrypted+`"}`)) {
+		t.Fatal("failed to seed replay cache")
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid_encrypted_content","type":"invalid_request_error"}}`))
+	}))
+	defer server.Close()
+
+	executor := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-xai-invalid-encrypted",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "test",
+		},
+	}
+	ctx := testContextWithAPIKey("xai-invalid-caller")
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","prompt_cache_key":"invalid-session","input":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: false})
+	if err == nil {
+		t.Fatal("expected upstream 400 error")
+	}
+	if _, ok := internalcache.GetXAIReasoningReplayItem("grok-4.3", sessionKey); ok {
+		t.Fatal("invalid encrypted content response should clear cached replay item")
+	}
+}
+
+func TestXAIReasoningReplayClearsOnInvalidEncryptedContentCompact(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	encrypted := testValidGrokEncryptedContentForSeed(51)
+	sessionKey := helps.IsolateClientReasoningReplaySessionKey(testContextWithAPIKey("xai-invalid-compact-caller"), "prompt-cache:invalid-compact")
+	if sessionKey == "" {
+		t.Fatal("expected isolated session key")
+	}
+	if !internalcache.CacheXAIReasoningReplayItem("grok-4.3", sessionKey, []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+encrypted+`"}`)) {
+		t.Fatal("failed to seed replay cache")
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		if !strings.HasSuffix(r.URL.Path, "/responses/compact") {
+			t.Fatalf("unexpected path %q, want /responses/compact", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid_encrypted_content","type":"invalid_request_error"}}`))
+	}))
+	defer server.Close()
+
+	executor := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-xai-invalid-encrypted-compact",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "test",
+		},
+	}
+	ctx := testContextWithAPIKey("xai-invalid-compact-caller")
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","prompt_cache_key":"invalid-compact","input":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+		Alt:          "responses/compact",
+	})
+	if err == nil {
+		t.Fatal("expected upstream compact 400 error")
+	}
+	if _, ok := internalcache.GetXAIReasoningReplayItem("grok-4.3", sessionKey); ok {
+		t.Fatal("invalid encrypted content compact response should clear cached replay item")
+	}
+}
+
+func TestXAIReasoningReplayClearsOnTopLevelSSEError(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	encrypted := testValidGrokEncryptedContentForSeed(54)
+	sessionKey := helps.IsolateClientReasoningReplaySessionKey(testContextWithAPIKey("xai-top-level-error-caller"), "prompt-cache:top-level-error")
+	if !internalcache.CacheXAIReasoningReplayItem("grok-4.3", sessionKey, []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+encrypted+`"}`)) {
+		t.Fatal("failed to seed replay cache")
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// Standard Responses SSE shape: top-level code/message, no nested error object.
+		_, _ = w.Write([]byte(`data: {"type":"error","code":"invalid_encrypted_content","message":"encrypted content rejected"}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-xai-top-level-error",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "test",
+		},
+	}
+	ctx := testContextWithAPIKey("xai-top-level-error-caller")
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","prompt_cache_key":"top-level-error","input":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: false})
+	if err == nil {
+		t.Fatal("expected top-level SSE error")
+	}
+	if _, ok := internalcache.GetXAIReasoningReplayItem("grok-4.3", sessionKey); ok {
+		t.Fatal("top-level invalid_encrypted_content error should clear cached replay item")
+	}
+}
+
+func TestXAIStatusFromErrorSemantics(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "free usage", body: `{"error":{"code":"subscription:free-usage-exhausted"}}`, want: http.StatusTooManyRequests},
+		{name: "rate limit", body: `{"error":{"type":"rate_limit_exceeded"}}`, want: http.StatusTooManyRequests},
+		{name: "server error", body: `{"error":{"type":"server_error"}}`, want: http.StatusInternalServerError},
+		{name: "overloaded", body: `{"error":{"type":"overloaded"}}`, want: http.StatusServiceUnavailable},
+		{name: "account deactivated is auth", body: `{"error":{"code":"account_deactivated"}}`, want: http.StatusUnauthorized},
+		// Free-form message text must never synthesize a quota/rate cooldown.
+		{name: "message-only quota not classified", body: `{"error":{"message":"you still have included free usage; watch the rate limit"}}`, want: 0},
+		{name: "invalid encrypted", body: `{"error":{"code":"invalid_encrypted_content"}}`, want: http.StatusBadRequest},
+		{name: "invalid api key", body: `{"error":{"code":"invalid_api_key"}}`, want: http.StatusUnauthorized},
+		{name: "authentication error", body: `{"error":{"type":"authentication_error"}}`, want: http.StatusUnauthorized},
+		{name: "insufficient quota", body: `{"error":{"code":"insufficient_quota"}}`, want: http.StatusTooManyRequests},
+		// Structured type must win over a message that echoes "rate limit".
+		{name: "invalid_request type beats message", body: `{"error":{"type":"invalid_request_error","message":"your prompt mentioned rate limit"}}`, want: http.StatusBadRequest},
+		{name: "context length exceeded code", body: `{"error":{"code":"context_length_exceeded"}}`, want: http.StatusBadRequest},
+		{name: "request validation error message", body: `{"error":{"message":"Request validation error: bad field"}}`, want: http.StatusBadRequest},
+		// A specific quota/rate code must win over a generic invalid_request type.
+		{name: "rate_limit code beats invalid_request type", body: `{"error":{"code":"rate_limit_exceeded","type":"invalid_request_error"}}`, want: http.StatusTooManyRequests},
+		{name: "free usage code beats invalid_request type", body: `{"error":{"code":"subscription:free-usage-exhausted","type":"invalid_request_error"}}`, want: http.StatusTooManyRequests},
+		{name: "unknown", body: `{"error":{"message":"something else"}}`, want: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := xaiStatusFromErrorSemantics([]byte(tc.body)); got != tc.want {
+				t.Fatalf("status = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestXAISSETerminalFailureStatus(t *testing.T) {
+	cases := []struct {
+		name  string
+		event string
+		want  int
+	}{
+		{
+			// Model/caller text inside response.output must NOT drive the status:
+			// the error object is generic, so this falls to the 500 default.
+			name:  "content does not leak into status",
+			event: `{"type":"response.failed","response":{"error":{"message":"aborted"},"output":[{"type":"message","content":[{"type":"output_text","text":"explaining rate limit and too many requests"}]}]}}`,
+			want:  http.StatusInternalServerError,
+		},
+		{
+			name:  "statusless unknown defaults to 500",
+			event: `{"type":"error","error":{"message":"connection reset by peer"}}`,
+			want:  http.StatusInternalServerError,
+		},
+		{
+			name:  "bare error event defaults to 500",
+			event: `{"type":"error"}`,
+			want:  http.StatusInternalServerError,
+		},
+		{
+			name:  "top-level invalid_api_key maps to 401",
+			event: `{"type":"error","code":"invalid_api_key","message":"bad key"}`,
+			want:  http.StatusUnauthorized,
+		},
+		{
+			name:  "top-level insufficient_quota maps to 429",
+			event: `{"type":"error","code":"insufficient_quota","message":"no credits"}`,
+			want:  http.StatusTooManyRequests,
+		},
+		{
+			// Type-only nested error object must be preserved and classified.
+			name:  "type-only nested error maps to 429",
+			event: `{"type":"error","error":{"type":"rate_limit_exceeded"}}`,
+			want:  http.StatusTooManyRequests,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, _, ok := xaiSSETerminalFailure([]byte(tc.event))
+			if !ok {
+				t.Fatalf("xaiSSETerminalFailure(%s) not recognized as terminal", tc.event)
+			}
+			if status != tc.want {
+				t.Fatalf("status = %d, want %d", status, tc.want)
+			}
+		})
+	}
+}
+
+func TestXAISSETerminalFailureTagsInvalidRequestType(t *testing.T) {
+	// A code-only client error (no explicit type) must be tagged
+	// invalid_request_error so the conductor treats the 400 as request-scoped.
+	status, body, ok := xaiSSETerminalFailure([]byte(`{"type":"error","code":"context_length_exceeded","message":"too long"}`))
+	if !ok {
+		t.Fatal("expected terminal failure")
+	}
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", status)
+	}
+	if got := gjson.GetBytes(body, "error.type").String(); got != "invalid_request_error" {
+		t.Fatalf("error.type = %q, want invalid_request_error", got)
+	}
+}
+
+func TestParseXAIWebsocketErrorPreservesFlatCodeInCodexEnvelope(t *testing.T) {
+	// type+status makes parseCodexWebsocketError match; the flat code/message must
+	// still survive and the 400 must be canonicalized so it is not retried.
+	payload := []byte(`{"type":"error","status":400,"code":"invalid_encrypted_content","message":"rejected thinking"}`)
+	err, ok := parseXAIWebsocketError(payload)
+	if !ok {
+		t.Fatal("expected terminal websocket error")
+	}
+	body := err.Error()
+	if !strings.Contains(body, "invalid_encrypted_content") {
+		t.Fatalf("flat code lost from error body: %s", body)
+	}
+	if got := gjson.Get(body, "error.type").String(); got != "invalid_request_error" {
+		t.Fatalf("error.type = %q, want invalid_request_error (canonicalized)", got)
+	}
+}
+
+func TestParseXAIWebsocketBareErrorCanonicalizes400(t *testing.T) {
+	payload := []byte(`{"error":{"code":"invalid_encrypted_content"}}`)
+	err, ok := parseXAIWebsocketError(payload)
+	if !ok {
+		t.Fatal("expected terminal websocket error")
+	}
+	if got := gjson.Get(err.Error(), "error.type").String(); got != "invalid_request_error" {
+		t.Fatalf("bare 400 error.type = %q, want invalid_request_error", got)
+	}
+}
+
+func TestXAISSETerminalFailureRejectsSuccessStatus(t *testing.T) {
+	// A response.failed carrying an SSE transport status of 200 must not become a
+	// 200; it falls through to semantic classification (server_error -> 500).
+	status, _, ok := xaiSSETerminalFailure([]byte(`{"type":"response.failed","status":200,"response":{"error":{"code":"server_error"}}}`))
+	if !ok {
+		t.Fatal("expected terminal failure")
+	}
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (200 rejected, classified from server_error)", status)
+	}
+}
+
+func TestXAIBareWebsocketErrorClassifiesInvalidEncrypted(t *testing.T) {
+	// A bare error with no top-level type/status must still be classified 400 from
+	// its structured code, so parseXAIWebsocketError yields a 4xx that clears replay.
+	payload := []byte(`{"error":{"code":"invalid_encrypted_content"}}`)
+	wsErr, ok := parseXAIWebsocketError(payload)
+	if !ok {
+		t.Fatal("expected terminal websocket error")
+	}
+	if got := xaiErrorStatusCode(wsErr, payload); got != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (so replay is cleared)", got)
+	}
+}
+
+func TestXAINestedStatusRejectsNonHTTPCodes(t *testing.T) {
+	// Application error codes (e.g. 1001) and 2xx/3xx values must not be treated as
+	// HTTP statuses.
+	if got := xaiNestedExplicitWebsocketStatus([]byte(`{"response":{"error":{"code":1001}}}`)); got != 0 {
+		t.Fatalf("app code 1001 = %d, want 0 (ignored)", got)
+	}
+	if got := xaiNestedExplicitWebsocketStatus([]byte(`{"error":{"code":200}}`)); got != 0 {
+		t.Fatalf("2xx code = %d, want 0 (ignored)", got)
+	}
+	if got := xaiNestedExplicitWebsocketStatus([]byte(`{"error":{"code":429}}`)); got != 429 {
+		t.Fatalf("valid 429 = %d, want 429", got)
+	}
+}
+
+func TestXAIMixedShapeErrorMergesFlatCode(t *testing.T) {
+	// An event that combines a nested error value with a flat structured code must
+	// be classified from both: the flat code drives status and replay cleanup.
+	event := []byte(`{"type":"error","code":"insufficient_quota","error":"rejected"}`)
+	if got := gjson.GetBytes(xaiWebsocketErrorObject(event), "error.code").String(); got != "insufficient_quota" {
+		t.Fatalf("merged error.code = %q, want insufficient_quota", got)
+	}
+	status, _, ok := xaiSSETerminalFailure(event)
+	if !ok {
+		t.Fatal("expected terminal failure")
+	}
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 from flat insufficient_quota code", status)
+	}
+	// Flat invalid-encrypted code alongside a nested error value must still be
+	// visible for the replay-clear gate.
+	obj := xaiWebsocketErrorObject([]byte(`{"type":"error","status":400,"code":"invalid_encrypted_content","error":"rejected"}`))
+	if !xaiBodyIndicatesInvalidEncryptedContent(obj) {
+		t.Fatalf("merged body %q should indicate invalid encrypted content", obj)
+	}
+}
+
+func TestXAISSETerminalFailureCanonicalizesRequestType(t *testing.T) {
+	// A non-canonical request type must be canonicalized to invalid_request_error
+	// (so isRequestInvalidError recognizes it) while preserving the original as code.
+	status, body, ok := xaiSSETerminalFailure([]byte(`{"type":"error","error":{"type":"invalid_prompt","message":"bad prompt"}}`))
+	if !ok || status != http.StatusBadRequest {
+		t.Fatalf("status=%d ok=%v, want 400/true", status, ok)
+	}
+	if got := gjson.GetBytes(body, "error.type").String(); got != "invalid_request_error" {
+		t.Fatalf("error.type = %q, want invalid_request_error", got)
+	}
+	if got := gjson.GetBytes(body, "error.code").String(); got != "invalid_prompt" {
+		t.Fatalf("error.code = %q, want invalid_prompt (original preserved)", got)
+	}
+}
+
+func TestXAIErrorStatusCodeServerErrorNotDowngradedByContent(t *testing.T) {
+	// End-to-end: a server_error code whose message echoes invalid_encrypted_content
+	// must remain 500 through parseXAIWebsocketError + xaiErrorStatusCode, so the
+	// replay clear gate (4xx only) does not evict valid state for a server failure.
+	payload := []byte(`{"type":"error","error":{"code":"server_error","message":"internal failure: invalid_encrypted_content observed"}}`)
+	wsErr, ok := parseXAIWebsocketError(payload)
+	if !ok {
+		t.Fatal("expected terminal websocket error")
+	}
+	if got := xaiErrorStatusCode(wsErr, payload); got != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (not downgraded to 400 by message content)", got)
+	}
+}
+
+func TestXAIErrorStatusCodeHonorsResponseErrorStatus(t *testing.T) {
+	payload := []byte(`{"type":"response.failed","response":{"error":{"message":"invalid_encrypted_content","status":500}}}`)
+	if got := xaiErrorStatusCode(statusErr{code: 500, msg: "x"}, payload); got != 500 {
+		t.Fatalf("status = %d, want 500 from response.error.status", got)
+	}
+	// Explicit 5xx must not clear replay despite invalid-encrypted text.
+	scope := xaiReasoningReplayScope{modelName: "grok-4.3", sessionKey: "execution:nested-5xx"}
+	encrypted := testValidGrokEncryptedContentForSeed(55)
+	if !internalcache.CacheXAIReasoningReplayItem(scope.modelName, scope.sessionKey, []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+encrypted+`"}`)) {
+		t.Fatal("failed to seed cache")
+	}
+	clearXAIReasoningReplayOnInvalidEncryptedContent(context.Background(), scope, 500, payload)
+	if _, ok := internalcache.GetXAIReasoningReplayItem(scope.modelName, scope.sessionKey); !ok {
+		t.Fatal("explicit 5xx must not clear replay cache")
+	}
+	internalcache.DeleteXAIReasoningReplayItem(scope.modelName, scope.sessionKey)
+}
+
+func TestXAIErrorStatusCodeIgnoresContentInvalidEncrypted(t *testing.T) {
+	// A statusless response.failed whose error object is generic but whose
+	// response.output echoes "invalid_encrypted_content" must NOT be classified
+	// 400 (which would evict valid replay); only the structured error object may
+	// drive classification.
+	payload := []byte(`{"type":"response.failed","response":{"error":{"message":"aborted"},"output":[{"type":"message","content":[{"type":"output_text","text":"the phrase invalid_encrypted_content appears here"}]}]}}`)
+	wsErr, ok := parseXAIWebsocketError(payload)
+	if !ok {
+		t.Fatal("expected terminal websocket error")
+	}
+	if got := xaiErrorStatusCode(wsErr, payload); got == http.StatusBadRequest {
+		t.Fatalf("status = 400 driven by response.output content, want non-400 (got %d)", got)
+	}
+
+	// The cleanup path must also leave a valid replay entry in place.
+	scope := xaiReasoningReplayScope{modelName: "grok-4.3", sessionKey: "execution:content-invalid"}
+	encrypted := testValidGrokEncryptedContentForSeed(57)
+	if !internalcache.CacheXAIReasoningReplayItem(scope.modelName, scope.sessionKey, []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+encrypted+`"}`)) {
+		t.Fatal("failed to seed cache")
+	}
+	t.Cleanup(func() { internalcache.DeleteXAIReasoningReplayItem(scope.modelName, scope.sessionKey) })
+	clearXAIReasoningReplayOnInvalidEncryptedContent(context.Background(), scope, xaiErrorStatusCode(wsErr, payload), xaiWebsocketErrorObject(payload))
+	if _, ok := internalcache.GetXAIReasoningReplayItem(scope.modelName, scope.sessionKey); !ok {
+		t.Fatal("model-output content must not clear replay cache")
+	}
+}
+
+func TestXAIReasoningReplayClearsOnSSEResponseFailed(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	encrypted := testValidGrokEncryptedContentForSeed(52)
+	sessionKey := helps.IsolateClientReasoningReplaySessionKey(testContextWithAPIKey("xai-sse-failed-caller"), "prompt-cache:sse-failed")
+	if sessionKey == "" {
+		t.Fatal("expected isolated session key")
+	}
+	if !internalcache.CacheXAIReasoningReplayItem("grok-4.3", sessionKey, []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+encrypted+`"}`)) {
+		t.Fatal("failed to seed replay cache")
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"message":"invalid_encrypted_content","type":"invalid_request_error"}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-xai-sse-failed",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "test",
+		},
+	}
+	ctx := testContextWithAPIKey("xai-sse-failed-caller")
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","prompt_cache_key":"sse-failed","input":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: false})
+	if err == nil {
+		t.Fatal("expected terminal SSE failure error")
+	}
+	if _, ok := internalcache.GetXAIReasoningReplayItem("grok-4.3", sessionKey); ok {
+		t.Fatal("response.failed with invalid encrypted content should clear cached replay item")
+	}
+}
+
+func TestXAIReasoningReplayClearsOnSSEResponseFailedStream(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	encrypted := testValidGrokEncryptedContentForSeed(53)
+	sessionKey := helps.IsolateClientReasoningReplaySessionKey(testContextWithAPIKey("xai-sse-stream-failed-caller"), "prompt-cache:sse-stream-failed")
+	if !internalcache.CacheXAIReasoningReplayItem("grok-4.3", sessionKey, []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+encrypted+`"}`)) {
+		t.Fatal("failed to seed replay cache")
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"message":"invalid_encrypted_content","type":"invalid_request_error"}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-xai-sse-stream-failed",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "test",
+		},
+	}
+	ctx := testContextWithAPIKey("xai-sse-stream-failed-caller")
+	stream, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","prompt_cache_key":"sse-stream-failed","input":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream setup error: %v", err)
+	}
+	gotErr := false
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			gotErr = true
+		}
+	}
+	if !gotErr {
+		t.Fatal("expected stream chunk error for response.failed")
+	}
+	if _, ok := internalcache.GetXAIReasoningReplayItem("grok-4.3", sessionKey); ok {
+		t.Fatal("stream response.failed should clear cached replay item")
+	}
+}
+
+func TestParseXAIWebsocketErrorResponseFailed(t *testing.T) {
+	payload := []byte(`{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"message":"invalid_encrypted_content","type":"invalid_request_error"}}}`)
+	err, ok := parseXAIWebsocketError(payload)
+	if !ok || err == nil {
+		t.Fatalf("parseXAIWebsocketError() = %v, %v, want error, true", err, ok)
+	}
+	statusCode := xaiErrorStatusCode(err, payload)
+	if statusCode < 400 || statusCode >= 500 {
+		t.Fatalf("status for response.failed cleanup = %d, want 4xx", statusCode)
+	}
+	if !xaiBodyIndicatesInvalidEncryptedContent(payload) {
+		t.Fatal("expected invalid encrypted content marker in payload")
+	}
+}
+
+func TestXAIErrorStatusCodeFallsBackForInvalidEncryptedBody(t *testing.T) {
+	payload := []byte(`{"error":{"message":"invalid_encrypted_content"}}`)
+	// With no classified error status (nil err), a statusless invalid-encrypted
+	// body maps to 400 so the replay-cache clear gate runs.
+	if got := xaiErrorStatusCode(nil, payload); got != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", got)
+	}
+
+	// A classified error status wins over the invalid-content fallback: a server
+	// failure whose message merely echoes invalid_encrypted_content must stay 5xx
+	// and not evict valid replay state. (parseXAIWebsocketError itself classifies a
+	// genuine statusless invalid-encrypted error as 400, so the real caller passes
+	// a 400-status err here — not a 500.)
+	err500 := statusErr{code: http.StatusInternalServerError, msg: "x"}
+	if got := xaiErrorStatusCode(err500, payload); got != http.StatusInternalServerError {
+		t.Fatalf("classified 500 must not be downgraded to 400, got %d", got)
+	}
+
+	// Explicit payload status still wins when present.
+	if got := xaiErrorStatusCode(err500, []byte(`{"status":422,"error":{"message":"invalid_encrypted_content"}}`)); got != 422 {
+		t.Fatalf("status = %d, want 422 from payload", got)
+	}
+
+	// Nested explicit 5xx must win over invalid-encrypted body classification so
+	// cleanup does not delete replay state for server errors.
+	if got := xaiErrorStatusCode(err500, []byte(`{"error":{"message":"invalid_encrypted_content","status":500}}`)); got != 500 {
+		t.Fatalf("nested status = %d, want 500", got)
+	}
+	if got := xaiErrorStatusCode(err500, []byte(`{"error":{"message":"invalid_encrypted_content","code":"503"}}`)); got != 503 {
+		t.Fatalf("nested code = %d, want 503", got)
+	}
+
+	// Non-matching body still uses err StatusCode().
+	if got := xaiErrorStatusCode(err500, []byte(`{"error":{"message":"other"}}`)); got != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 from StatusCode()", got)
+	}
+	if got := xaiErrorStatusCode(statusErr{code: 422, msg: "x"}, []byte(`{}`)); got != 422 {
+		t.Fatalf("status = %d, want 422 from StatusCode()", got)
 	}
 }
 
