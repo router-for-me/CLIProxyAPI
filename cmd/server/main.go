@@ -89,6 +89,12 @@ func main() {
 	var tuiMode bool
 	var standalone bool
 	var localModel bool
+	var installClaudeCodeAliases bool
+	var aliasShell string
+	var aliasProfile string
+	var aliasDryRun bool
+	var aliasBaseURL string
+	var claudeExecutable string
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
@@ -108,6 +114,12 @@ func main() {
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded models.json and codex_client_models.json only, skip remote model catalog fetching")
+	flag.BoolVar(&installClaudeCodeAliases, "install-claude-code-aliases", false, "Install the claude-codex shell function without changing the native claude command")
+	flag.StringVar(&aliasShell, "alias-shell", "auto", "Shell for alias installation: auto, powershell, bash, zsh, or fish")
+	flag.StringVar(&aliasProfile, "alias-profile", "", "Override the shell profile modified by alias installation")
+	flag.BoolVar(&aliasDryRun, "alias-dry-run", false, "Validate and report alias installation without changing the profile")
+	flag.StringVar(&aliasBaseURL, "alias-base-url", "", "Override the local CLIProxyAPI URL used by claude-codex")
+	flag.StringVar(&claudeExecutable, "claude-executable", "", "Override the Claude Code executable resolved by alias installation")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -144,6 +156,13 @@ func main() {
 
 	// Parse the command-line flags.
 	flag.Parse()
+	if installClaudeCodeAliases {
+		if err := runClaudeCodeAliasInstaller(configPath, aliasShell, aliasProfile, aliasBaseURL, claudeExecutable, aliasDryRun); err != nil {
+			log.Errorf("failed to install Claude Code aliases: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if password == "" && tuiMode && !standalone {
 		// A pure TUI client may reuse the same inherited, loopback-only secret as
 		// the server without placing it in process arguments. An empty value keeps
@@ -712,6 +731,60 @@ func main() {
 			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
 		}
 	}
+}
+
+func runClaudeCodeAliasInstaller(configPath, shell, profile, baseURL, claudeExecutable string, dryRun bool) error {
+	if strings.TrimSpace(configPath) == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get working directory: %w", err)
+		}
+		configPath = filepath.Join(wd, "config.yaml")
+	}
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		return err
+	}
+	apiKey := ""
+	for _, candidate := range cfg.APIKeys {
+		if strings.TrimSpace(candidate) != "" {
+			apiKey = strings.TrimSpace(candidate)
+			break
+		}
+	}
+	if strings.TrimSpace(baseURL) == "" {
+		port := cfg.Port
+		if port <= 0 {
+			port = 8317
+		}
+		scheme := "http"
+		if cfg.TLS.Enable {
+			scheme = "https"
+		}
+		baseURL = fmt.Sprintf("%s://127.0.0.1:%d", scheme, port)
+	}
+	result, err := cmd.InstallClaudeCodeAliases(cmd.ClaudeCodeAliasOptions{
+		Shell:            shell,
+		ProfilePath:      profile,
+		ClaudeExecutable: claudeExecutable,
+		BaseURL:          baseURL,
+		APIKey:           apiKey,
+		DryRun:           dryRun,
+	})
+	if err != nil {
+		return err
+	}
+	action := "already current"
+	if result.DryRun && result.Changed {
+		action = "would update"
+	} else if result.DryRun {
+		action = "would leave unchanged"
+	} else if result.Changed {
+		action = "updated"
+	}
+	fmt.Printf("Claude Code aliases: %s %s profile %s\n", action, result.Shell, result.ProfilePath)
+	fmt.Println("Native claude remains unchanged; open a new shell or reload the profile to use claude-codex.")
+	return nil
 }
 
 // modelCatalogUpdaterPlan decides which remote model catalogs should refresh.
