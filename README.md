@@ -323,7 +323,7 @@ go test ./...
 go build -o test-output ./cmd/server
 ```
 
-The CI matrix runs formatting, `go vet`, tests on Windows and Linux, compilation, and a repository secret scan.
+The CI matrix runs formatting, a checked `go vet` baseline that rejects new diagnostics, tests on Windows and Linux, compilation, and a repository secret scan.
 
 ## Releases and versioning
 

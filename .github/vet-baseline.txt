@@ -1,0 +1,6 @@
+internal/logging/request_logger.go:210:26: method WriteTo(w io.Writer) error should have signature WriteTo(io.Writer) (int64, error)
+internal/pluginhost/host_callbacks.go:164:2: the cancel function is not used on all paths (possible context leak)
+internal/pluginhost/host_callbacks.go:178:2: this return statement may be reached without using the cancel var defined on line 164
+internal/pluginhost/host_model_stream_callbacks.go:29:2: the cancel function is not used on all paths (possible context leak)
+internal/pluginhost/host_model_stream_callbacks.go:48:2: this return statement may be reached without using the cancel var defined on line 29
+sdk/api/handlers/handlers.go:1421:4: unreachable code

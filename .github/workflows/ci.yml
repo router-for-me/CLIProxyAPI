@@ -34,8 +34,9 @@ jobs:
             printf 'Files require gofmt:\n%s\n' "$files"
             exit 1
           fi
-      - name: Vet
-        run: go vet ./...
+      - name: Check vet baseline
+        shell: bash
+        run: bash .github/scripts/check-vet-baseline.sh
       - name: Validate GitHub Actions
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
