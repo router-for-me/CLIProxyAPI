@@ -569,6 +569,12 @@ func main() {
 
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
+	if usePostgresStore || useObjectStore || useGitStore {
+		if errSync := homeplugins.Sync(context.Background(), cfg, pluginHost); errSync != nil {
+			log.Errorf("failed to sync plugins from storage-backed config: %v", errSync)
+			return
+		}
+	}
 	pluginHost.ApplyConfig(context.Background(), cfg)
 	if configLoadedFromHome {
 		errHomePluginLoad := homeplugins.MarkLoadResults(&homePluginSyncReport, pluginHost)

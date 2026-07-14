@@ -72,6 +72,36 @@ func TestSyncPlatformInstallsManifestArtifact(t *testing.T) {
 	}
 }
 
+func TestSyncPlatformInstallsManifestWithoutHome(t *testing.T) {
+	root := t.TempDir()
+	archiveData := makeZip(t, map[string]string{"sample.dll": "library-data"})
+	archiveName := "sample_0.2.0_windows_amd64.zip"
+	checksum := sha256.Sum256(archiveData)
+	httpClient := mapHTTPDoer{
+		"https://api.github.com/repos/owner/sample-plugin/releases/tags/v0.2.0": []byte(`{
+			"tag_name": "v0.2.0",
+			"assets": [
+				{"name": "` + archiveName + `", "browser_download_url": "https://downloads.example/` + archiveName + `"},
+				{"name": "checksums.txt", "browser_download_url": "https://downloads.example/checksums.txt"}
+			]
+		}`),
+		"https://downloads.example/" + archiveName: archiveData,
+		"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
+	}
+	restore := replacePluginStoreClientForTest(httpClient)
+	defer restore()
+
+	cfg := syncTestConfig(t, root)
+	cfg.Home.Enabled = false
+	if errSync := SyncPlatform(context.Background(), cfg, nil, Platform{GOOS: "windows", GOARCH: "amd64"}); errSync != nil {
+		t.Fatalf("SyncPlatform() error = %v", errSync)
+	}
+	target := pluginTestPath(root, "windows", "amd64", "sample", "0.2.0")
+	if _, errStat := os.Stat(target); errStat != nil {
+		t.Fatalf("plugin artifact %s was not installed: %v", target, errStat)
+	}
+}
+
 func TestSyncPlatformWithReportRecordsSuccessfulInstall(t *testing.T) {
 	root := t.TempDir()
 	archiveData := makeZip(t, map[string]string{"sample.dll": "library-data"})

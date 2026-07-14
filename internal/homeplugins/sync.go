@@ -120,7 +120,7 @@ func SyncWithReport(ctx context.Context, cfg *config.Config, pluginRuntime Plugi
 }
 
 func SyncPlatformWithReport(ctx context.Context, cfg *config.Config, pluginRuntime PluginRuntime, platform Platform) (SyncReport, error) {
-	if cfg == nil || !cfg.Home.Enabled || !cfg.Plugins.Enabled {
+	if cfg == nil || !cfg.Plugins.Enabled {
 		return newSyncReport(platform), nil
 	}
 	platform = NormalizePlatform(platform)
