@@ -131,6 +131,17 @@ func newUtlsHTTP2Transport() *http2.Transport {
 		// HTTP/2 transport otherwise injects "Accept-Encoding: gzip" when the
 		// request leaves it empty, which diverges from captured codex_cli_rs.
 		DisableCompression: true,
+		// Actively health-check pooled HTTP/2 connections. A proxy/NAT can silently
+		// sever an idle upstream connection while both ends still believe it is alive;
+		// a new request assigned to such a dead connection then hangs until the OS TCP
+		// retransmit timeout (minutes), which surfaces as intermittent multi-minute
+		// first-token stalls (TTFT ~0, total ~300s until the downstream proxy gives
+		// up). With ReadIdleTimeout the transport sends an HTTP/2 PING after the
+		// connection is idle that long, and PingTimeout fails the connection when the
+		// PING is not answered in time, so the dead connection is evicted from the
+		// pool (CanTakeNewRequest → false) and the request is rebuilt on a fresh one.
+		ReadIdleTimeout: 15 * time.Second,
+		PingTimeout:     15 * time.Second,
 	}
 }
 
