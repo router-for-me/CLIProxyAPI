@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -955,6 +956,20 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
 	return &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 }
 
+func synchronousBootstrapRetryEligible(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+func streamResultWithError(err error) *coreexecutor.StreamResult {
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks <- coreexecutor.StreamChunk{Err: err}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}
+}
+
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
@@ -1161,7 +1176,13 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 	opts.Metadata = reqMeta
 	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+	// Route synchronous EOFs through the existing chunk retry path so they share its retry budget.
+	if err != nil && maxBootstrapRetries > 0 && synchronousBootstrapRetryEligible(err) {
+		streamResult = streamResultWithError(err)
+		err = nil
+	}
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -1274,7 +1295,6 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		bootstrapRetries := 0
 		chunkIndex := 0
 		var historyChunks [][]byte
-		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
 			if ctx == nil {
@@ -1344,6 +1364,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 								pendingChunks = nil
 								streamClosedBeforeRead = false
 								chunks = retryResult.Chunks
+								continue outer
+							}
+							if bootstrapRetries < maxBootstrapRetries && synchronousBootstrapRetryEligible(retryErr) {
+								pendingChunks = nil
+								streamClosedBeforeRead = false
+								chunks = streamResultWithError(retryErr).Chunks
 								continue outer
 							}
 							streamErr = enrichAuthSelectionError(retryErr, providers, normalizedModel)
