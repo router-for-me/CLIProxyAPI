@@ -18,6 +18,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"github.com/tidwall/gjson"
 )
 
@@ -63,7 +64,36 @@ func (e *delayedResponsesStreamExecutor) HttpRequest(context.Context, *coreauth.
 	return nil, errors.New("not implemented")
 }
 
-func newDelayedResponsesStreamServer(t *testing.T, cfg *sdkconfig.SDKConfig, upstreamHeaders http.Header) (*httptest.Server, func(), string) {
+type responsesStreamInterceptorHost struct {
+	interceptStreamChunk func(context.Context, pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse
+}
+
+func (h *responsesStreamInterceptorHost) InterceptRequestBeforeAuth(_ context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+	return pluginapi.RequestInterceptResponse{Headers: req.Headers.Clone(), Body: append([]byte(nil), req.Body...)}
+}
+
+func (h *responsesStreamInterceptorHost) InterceptRequestAfterAuth(_ context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+	return pluginapi.RequestInterceptResponse{Headers: req.Headers.Clone(), Body: append([]byte(nil), req.Body...)}
+}
+
+func (h *responsesStreamInterceptorHost) InterceptResponse(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+	return pluginapi.ResponseInterceptResponse{Headers: req.ResponseHeaders.Clone(), Body: append([]byte(nil), req.Body...)}
+}
+
+func (h *responsesStreamInterceptorHost) InterceptStreamChunk(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+	if h != nil && h.interceptStreamChunk != nil {
+		return h.interceptStreamChunk(ctx, req)
+	}
+	return pluginapi.StreamChunkInterceptResponse{Headers: req.ResponseHeaders.Clone(), Body: append([]byte(nil), req.Body...)}
+}
+
+func (h *responsesStreamInterceptorHost) HasRequestInterceptors() bool { return false }
+
+func (h *responsesStreamInterceptorHost) HasStreamInterceptors() bool {
+	return h != nil && h.interceptStreamChunk != nil
+}
+
+func newDelayedResponsesStreamServer(t *testing.T, cfg *sdkconfig.SDKConfig, upstreamHeaders http.Header, pluginHost handlers.PluginInterceptorHost) (*httptest.Server, func(), string) {
 	t.Helper()
 
 	gin.SetMode(gin.TestMode)
@@ -95,6 +125,7 @@ func newDelayedResponsesStreamServer(t *testing.T, cfg *sdkconfig.SDKConfig, ups
 
 	base := handlers.NewBaseAPIHandlers(cfg, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
+	h.SetPluginHost(pluginHost)
 	router := gin.New()
 	router.POST("/v1/responses", h.Responses)
 	return httptest.NewServer(router), release, modelID
@@ -121,7 +152,7 @@ func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *h
 
 func TestResponsesStreamingSendsConfiguredKeepAliveBeforeFirstChunk(t *testing.T) {
 	cfg := &sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{KeepAliveSeconds: 1}}
-	server, release, modelID := newDelayedResponsesStreamServer(t, cfg, nil)
+	server, release, modelID := newDelayedResponsesStreamServer(t, cfg, nil, nil)
 	defer server.Close()
 	defer release()
 
@@ -166,7 +197,7 @@ func TestResponsesStreamingPreservesPassthroughHeadersBeforeKeepAlive(t *testing
 		PassthroughHeaders: true,
 		Streaming:          sdkconfig.StreamingConfig{KeepAliveSeconds: 1},
 	}
-	server, release, modelID := newDelayedResponsesStreamServer(t, cfg, http.Header{"X-Request-ID": {"req-delayed"}})
+	server, release, modelID := newDelayedResponsesStreamServer(t, cfg, http.Header{"X-Request-ID": {"req-delayed"}}, nil)
 	defer server.Close()
 	defer release()
 	timer := time.AfterFunc(1200*time.Millisecond, release)
@@ -200,6 +231,52 @@ func TestResponsesStreamingPreservesPassthroughHeadersBeforeKeepAlive(t *testing
 	}
 	if strings.HasPrefix(string(body), ": keep-alive\n\n") {
 		t.Fatalf("body = %q, keep-alive committed before passthrough headers", body)
+	}
+}
+
+func TestResponsesStreamingPreservesInterceptorHeadersBeforeKeepAlive(t *testing.T) {
+	cfg := &sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{KeepAliveSeconds: 1}}
+	pluginHost := &responsesStreamInterceptorHost{
+		interceptStreamChunk: func(_ context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			headers := req.ResponseHeaders.Clone()
+			if headers == nil {
+				headers = make(http.Header)
+			}
+			if req.ChunkIndex == 0 {
+				time.Sleep(1200 * time.Millisecond)
+				headers.Set("X-Plugin-Header", "ready")
+			}
+			return pluginapi.StreamChunkInterceptResponse{Headers: headers, Body: append([]byte(nil), req.Body...)}
+		},
+	}
+	server, release, modelID := newDelayedResponsesStreamServer(t, cfg, nil, pluginHost)
+	defer server.Close()
+	release()
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", strings.NewReader(`{"model":"`+modelID+`","stream":true,"input":"hello"}`))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := server.Client()
+	client.Timeout = 3 * time.Second
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("stream did not start after interceptor headers became available: %v", err)
+	}
+	if got := resp.Header.Get("X-Plugin-Header"); got != "ready" {
+		t.Fatalf("X-Plugin-Header = %q, want ready", got)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if errClose := resp.Body.Close(); err == nil && errClose != nil {
+		err = errClose
+	}
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if strings.HasPrefix(string(body), ": keep-alive\n\n") {
+		t.Fatalf("body = %q, keep-alive committed before interceptor headers", body)
 	}
 }
 

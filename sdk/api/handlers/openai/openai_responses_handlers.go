@@ -599,7 +599,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			return
 		case <-keepAliveC:
 			// Once the response is committed, late upstream or interceptor headers cannot be added.
-			if executionChan != nil && requiresExecutionHeaders {
+			if requiresExecutionHeaders {
 				continue
 			}
 			commitStream()
