@@ -1264,8 +1264,18 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 			eventType := gjson.GetBytes(payload, "type").String()
 			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "error"
+			statuslessErr, hasStatuslessErr := codexWebsocketStatuslessErrorEvent(payload)
 			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
 			if cliproxyexecutor.DownstreamWebsocket(ctx) {
+				if hasStatuslessErr {
+					terminateReason = "upstream_error"
+					terminateErr = statuslessErr
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", statuslessErr)
+					reporter.PublishFailure(ctx, statuslessErr)
+					if sess != nil {
+						e.clearUpstreamConn(sess, conn, "upstream_error", statuslessErr, false)
+					}
+				}
 				if eventType == "response.completed" || eventType == "response.done" {
 					if detail, ok := helps.ParseCodexUsage(payload); ok {
 						reporter.Publish(ctx, detail)
@@ -1283,15 +1293,15 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				continue
 			}
 
-			if wsErr, ok := codexWebsocketStatuslessErrorEvent(payload); ok {
+			if hasStatuslessErr {
 				terminateReason = "upstream_error"
-				terminateErr = wsErr
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
-				reporter.PublishFailure(ctx, wsErr)
+				terminateErr = statuslessErr
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", statuslessErr)
+				reporter.PublishFailure(ctx, statuslessErr)
 				if sess != nil {
-					e.clearUpstreamConn(sess, conn, "upstream_error", wsErr, codexWebsocketShouldNotifyUpstreamDisconnect(ctx, wsErr))
+					e.clearUpstreamConn(sess, conn, "upstream_error", statuslessErr, codexWebsocketShouldNotifyUpstreamDisconnect(ctx, statuslessErr))
 				}
-				_ = send(cliproxyexecutor.StreamChunk{Err: wsErr})
+				_ = send(cliproxyexecutor.StreamChunk{Err: statuslessErr})
 				return
 			}
 
