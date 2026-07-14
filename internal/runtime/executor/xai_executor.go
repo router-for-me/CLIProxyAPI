@@ -1434,6 +1434,17 @@ func flattenXAIAdditionalTools(body []byte) []byte {
 	if !input.Exists() || !input.IsArray() {
 		return body
 	}
+	hasAdditionalTools := false
+	input.ForEach(func(_, item gjson.Result) bool {
+		if item.Get("type").String() == "additional_tools" {
+			hasAdditionalTools = true
+			return false
+		}
+		return true
+	})
+	if !hasAdditionalTools {
+		return body
+	}
 
 	topLevelTools := gjson.GetBytes(body, "tools")
 	if topLevelTools.Exists() && !topLevelTools.IsArray() {
@@ -1445,7 +1456,6 @@ func flattenXAIAdditionalTools(body []byte) []byte {
 		tools = append(tools, json.RawMessage(tool.Raw))
 	}
 
-	changed := false
 	inputItems := input.Array()
 	items := make([]json.RawMessage, 0, len(inputItems))
 	for _, item := range inputItems {
@@ -1460,10 +1470,6 @@ func flattenXAIAdditionalTools(body []byte) []byte {
 		for _, tool := range additionalTools.Array() {
 			tools = append(tools, json.RawMessage(tool.Raw))
 		}
-		changed = true
-	}
-	if !changed {
-		return body
 	}
 
 	rawInput, errMarshalInput := json.Marshal(items)
