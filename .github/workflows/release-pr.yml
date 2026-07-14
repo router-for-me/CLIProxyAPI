@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '43 2 * * *'
   workflow_dispatch:
+  pull_request_target:
+    types:
+      - closed
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -20,6 +25,18 @@ env:
 
 jobs:
   draft-release-pr:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'pull_request_target' &&
+        github.event.action == 'closed' &&
+        github.event.pull_request.merged == true &&
+        github.event.pull_request.base.ref == 'main' &&
+        github.event.pull_request.base.repo.full_name == github.repository &&
+        github.event.pull_request.head.repo.full_name == 'router-for-me/CLIProxyAPI' &&
+        github.event.pull_request.head.ref == 'main'
+      )
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
