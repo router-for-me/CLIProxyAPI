@@ -1330,24 +1330,19 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 				case "response.output_item.done":
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
-				case "response.completed":
+				case "response.completed", "response.incomplete":
 					terminalUsageData = data
 					terminalEventReceived = true
 					terminalUsageReceived = codexTerminalUsageAvailable(data)
 					if detail, ok := helps.ParseCodexUsage(data); ok {
 						reporter.Publish(ctx, detail)
 					}
-					publishCodexImageToolUsage(ctx, reporter, body, data)
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
-					cacheCodexReasoningReplayFromCompleted(replayScope, data)
-					translatedLine = append([]byte("data: "), data...)
-				case "response.incomplete":
-					terminalUsageData = data
-					terminalEventReceived = true
-					terminalUsageReceived = codexTerminalUsageAvailable(data)
-					if detail, ok := helps.ParseCodexUsage(data); ok {
-						reporter.Publish(ctx, detail)
+					if gjson.GetBytes(data, "type").String() == "response.completed" {
+						publishCodexImageToolUsage(ctx, reporter, body, data)
+						cacheCodexReasoningReplayFromCompleted(replayScope, data)
 					}
+					translatedLine = append([]byte("data: "), data...)
 				}
 			}
 

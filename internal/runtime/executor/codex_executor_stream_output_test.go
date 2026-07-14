@@ -271,6 +271,57 @@ func TestPatchClaudeMessageStartInputUsage(t *testing.T) {
 	}
 }
 
+func TestPatchCodexIncompleteOutputUsesCollectedItems(t *testing.T) {
+	incomplete := []byte(`{"type":"response.incomplete","response":{"output":[],"usage":{"input_tokens":1,"output_tokens":1}}}`)
+	items := map[int64][]byte{0: []byte(`{"type":"message","content":[{"type":"output_text","text":"partial"}]}`)}
+	patched := patchCodexCompletedOutput(incomplete, items, nil)
+	if got := gjson.GetBytes(patched, "type").String(); got != "response.incomplete" {
+		t.Fatalf("type = %q, want response.incomplete", got)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.content.0.text").String(); got != "partial" {
+		t.Fatalf("patched incomplete output text = %q, want partial", got)
+	}
+}
+
+func TestCodexExecutorExecuteStream_IncompleteOutputUsesCollectedItems(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"partial"}]},"output_index":0}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.incomplete","response":{"id":"resp_1","model":"gpt-5.6-sol","output":[],"usage":{"input_tokens":11,"output_tokens":5},"incomplete_details":{"reason":"max_output_tokens"}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol",
+		Payload: []byte(`{"model":"gpt-5.6-sol","input":"hello"}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var incomplete []byte
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		payload := bytes.TrimSpace(chunk.Payload)
+		if bytes.HasPrefix(payload, []byte("data:")) {
+			data := bytes.TrimSpace(payload[5:])
+			if gjson.GetBytes(data, "type").String() == "response.incomplete" {
+				incomplete = append([]byte(nil), data...)
+			}
+		}
+	}
+	if len(incomplete) == 0 {
+		t.Fatal("missing response.incomplete chunk")
+	}
+	if got := gjson.GetBytes(incomplete, "response.output.0.content.0.text").String(); got != "partial" {
+		t.Fatalf("response.output[0].content[0].text = %q, want partial; incomplete=%s", got, incomplete)
+	}
+}
+
 func TestCodexTerminalUsageAvailableRequiresInputTokens(t *testing.T) {
 	if codexTerminalUsageAvailable([]byte(`{"response":{"usage":{}}}`)) {
 		t.Fatal("empty usage object must not be authoritative")
