@@ -545,7 +545,11 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		defer keepAlive.Stop()
 		keepAliveC = keepAlive.C
 	}
-	requiresExecutionHeaders := handlers.PassthroughHeadersEnabled(h.Cfg) || h.PluginHost != nil
+	streamInterceptorsActive := h.PluginHost != nil
+	if detector, ok := h.PluginHost.(interface{ HasStreamInterceptors() bool }); ok {
+		streamInterceptorsActive = detector.HasStreamInterceptors()
+	}
+	requiresExecutionHeaders := handlers.PassthroughHeadersEnabled(h.Cfg) || streamInterceptorsActive
 
 	// Wait for stream execution and peek at the first chunk.
 	for {

@@ -151,44 +151,55 @@ func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *h
 }
 
 func TestResponsesStreamingSendsConfiguredKeepAliveBeforeFirstChunk(t *testing.T) {
-	cfg := &sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{KeepAliveSeconds: 1}}
-	server, release, modelID := newDelayedResponsesStreamServer(t, cfg, nil, nil)
-	defer server.Close()
-	defer release()
+	testCases := []struct {
+		name       string
+		pluginHost handlers.PluginInterceptorHost
+	}{
+		{name: "without_plugin_host"},
+		{name: "with_inactive_plugin_host", pluginHost: &responsesStreamInterceptorHost{}},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{KeepAliveSeconds: 1}}
+			server, release, modelID := newDelayedResponsesStreamServer(t, cfg, nil, tc.pluginHost)
+			defer server.Close()
+			defer release()
 
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", strings.NewReader(`{"model":"`+modelID+`","stream":true,"input":"hello"}`))
-	if err != nil {
-		t.Fatalf("NewRequest: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	client := server.Client()
-	client.Timeout = 2500 * time.Millisecond
+			req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", strings.NewReader(`{"model":"`+modelID+`","stream":true,"input":"hello"}`))
+			if err != nil {
+				t.Fatalf("NewRequest: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			client := server.Client()
+			client.Timeout = 2500 * time.Millisecond
 
-	started := time.Now()
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("stream did not start before the first upstream chunk: %v", err)
-	}
-	if elapsed := time.Since(started); elapsed >= 2*time.Second {
-		t.Fatalf("stream headers took %s, want less than 2s", elapsed)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
-	}
-	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/event-stream") {
-		t.Fatalf("Content-Type = %q, want text/event-stream", got)
-	}
+			started := time.Now()
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("stream did not start before the first upstream chunk: %v", err)
+			}
+			if elapsed := time.Since(started); elapsed >= 2*time.Second {
+				t.Fatalf("stream headers took %s, want less than 2s", elapsed)
+			}
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+			}
+			if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/event-stream") {
+				t.Fatalf("Content-Type = %q, want text/event-stream", got)
+			}
 
-	release()
-	body, err := io.ReadAll(resp.Body)
-	if errClose := resp.Body.Close(); err == nil && errClose != nil {
-		err = errClose
-	}
-	if err != nil {
-		t.Fatalf("read response body: %v", err)
-	}
-	if !strings.HasPrefix(string(body), ": keep-alive\n\n") {
-		t.Fatalf("body = %q, want pre-first-chunk keep-alive", body)
+			release()
+			body, err := io.ReadAll(resp.Body)
+			if errClose := resp.Body.Close(); err == nil && errClose != nil {
+				err = errClose
+			}
+			if err != nil {
+				t.Fatalf("read response body: %v", err)
+			}
+			if !strings.HasPrefix(string(body), ": keep-alive\n\n") {
+				t.Fatalf("body = %q, want pre-first-chunk keep-alive", body)
+			}
+		})
 	}
 }
 
