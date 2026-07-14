@@ -24,8 +24,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Verify modules
-        run: go mod verify
+      - name: Download and verify modules
+        run: |
+          go mod download
+          go mod verify
       - name: Check formatting
         shell: bash
         run: |

@@ -17,7 +17,7 @@ else
   status=$?
 fi
 
-sed 's#\\#/#g' "$raw" | sort -u >"$normalized"
+sed 's#\\#/#g' "$raw" | awk '!/^go: downloading /' | sort -u >"$normalized"
 comm -23 "$normalized" "$baseline" >"$unexpected"
 if [[ -s "$unexpected" ]]; then
   echo "unexpected go vet diagnostics:" >&2

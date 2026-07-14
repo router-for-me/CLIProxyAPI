@@ -53,8 +53,10 @@ jobs:
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - name: Verify modules
-        run: go mod verify
+      - name: Download and verify modules
+        run: |
+          go mod download
+          go mod verify
       - name: Check formatting
         shell: bash
         run: |
