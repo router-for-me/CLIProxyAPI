@@ -651,7 +651,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		selectionHeaders.Set("X-Session-ID", sessionID)
 	}
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
-	selected, err := s.handlers.AuthManager.SelectAuth(ctx, "codex", strings.TrimSpace(routing.Model), coreexecutor.Options{
+	selected, err := s.handlers.AuthManager.SelectAuthByKind(ctx, "codex", strings.TrimSpace(routing.Model), auth.AuthKindOAuth, coreexecutor.Options{
 		Headers:         selectionHeaders,
 		OriginalRequest: body,
 	})

@@ -4629,6 +4629,37 @@ func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts c
 	return selected, nil
 }
 
+// SelectAuthByKind selects one credential of the required kind through the
+// configured scheduling strategy. Credentials of other kinds are skipped.
+func (m *Manager) SelectAuthByKind(ctx context.Context, provider, model, requiredKind string, opts cliproxyexecutor.Options) (*Auth, error) {
+	requiredKind = normalizeAuthKind(requiredKind)
+	if requiredKind == "" {
+		return nil, &Error{Code: "invalid_auth_kind", Message: "required auth kind is invalid", HTTPStatus: http.StatusBadRequest}
+	}
+
+	tried := make(map[string]struct{})
+	for {
+		selected, _, errPick := m.pickNext(ctx, provider, model, opts, tried)
+		if errPick != nil {
+			return nil, errPick
+		}
+		if selected == nil {
+			return nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+		}
+		if selected.AuthKind() == requiredKind {
+			return selected, nil
+		}
+		authID := strings.TrimSpace(selected.ID)
+		if authID == "" {
+			return nil, &Error{Code: "auth_not_found", Message: "selected auth has no ID"}
+		}
+		if _, alreadyTried := tried[authID]; alreadyTried {
+			return nil, &Error{Code: "auth_not_found", Message: "selector repeatedly returned an ineligible auth"}
+		}
+		tried[authID] = struct{}{}
+	}
+}
+
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
 	if m.HomeEnabled() {
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)

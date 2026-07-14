@@ -427,6 +427,69 @@ func TestManagerPluginSchedulerSelectsAuthID(t *testing.T) {
 	}
 }
 
+func TestManagerSelectAuthByKindSkipsAPIKey(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	for _, candidate := range []*Auth{
+		{ID: "codex-api-key", Provider: "codex", Attributes: map[string]string{AttributeAPIKey: "test-key"}},
+		{ID: "codex-oauth", Provider: "codex", Metadata: map[string]any{"access_token": "test-token"}},
+	} {
+		if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", candidate.ID, errRegister)
+		}
+	}
+
+	scheduler := &fakePluginScheduler{
+		resp:    pluginapi.SchedulerPickResponse{Handled: true, AuthID: "codex-api-key"},
+		handled: true,
+	}
+	manager.SetPluginScheduler(scheduler)
+
+	selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", AuthKindOAuth, cliproxyexecutor.Options{})
+	if errSelect != nil {
+		t.Fatalf("SelectAuthByKind() error = %v", errSelect)
+	}
+	if selected == nil || selected.ID != "codex-oauth" {
+		t.Fatalf("SelectAuthByKind() auth = %#v, want codex-oauth", selected)
+	}
+	if scheduler.calls != 2 {
+		t.Fatalf("scheduler.calls = %d, want 2", scheduler.calls)
+	}
+}
+
+func TestManagerSelectAuthByKindReturnsErrorWhenUnavailable(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{
+		ID:         "codex-api-key",
+		Provider:   "codex",
+		Attributes: map[string]string{AttributeAPIKey: "test-key"},
+	}); errRegister != nil {
+		t.Fatalf("Register(codex-api-key) error = %v", errRegister)
+	}
+
+	selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", AuthKindOAuth, cliproxyexecutor.Options{})
+	if selected != nil {
+		t.Fatalf("SelectAuthByKind() auth = %#v, want nil", selected)
+	}
+	var authErr *Error
+	if !errors.As(errSelect, &authErr) || authErr.Code != "auth_not_found" {
+		t.Fatalf("SelectAuthByKind() error = %#v, want auth_not_found", errSelect)
+	}
+}
+
+func TestManagerSelectAuthByKindRejectsInvalidKind(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", "certificate", cliproxyexecutor.Options{})
+	if selected != nil {
+		t.Fatalf("SelectAuthByKind() auth = %#v, want nil", selected)
+	}
+	var authErr *Error
+	if !errors.As(errSelect, &authErr) || authErr.Code != "invalid_auth_kind" || authErr.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("SelectAuthByKind() error = %#v, want invalid_auth_kind", errSelect)
+	}
+}
+
 func TestManagerPluginSchedulerSkippedWhenHomeEnabled(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
