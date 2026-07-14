@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"time"
 
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
@@ -104,6 +105,9 @@ type Options struct {
 	Metadata map[string]any
 	// RequestAfterAuthInterceptor runs after credential selection and before executor translation.
 	RequestAfterAuthInterceptor RequestAfterAuthInterceptor
+	// StreamFirstByteTimeout bounds how long a streaming attempt waits for the first
+	// non-empty upstream payload before the attempt is cancelled and retried. 0 disables it.
+	StreamFirstByteTimeout time.Duration
 }
 
 // ResponseFormatOrSource returns the response target format for an execution.

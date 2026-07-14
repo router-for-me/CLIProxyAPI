@@ -67,4 +67,12 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+
+	// FirstByteTimeoutSeconds bounds how long a streaming attempt waits for the
+	// first non-empty upstream payload before the attempt is cancelled and retried
+	// via the existing credential-rotation / bootstrap-retry path. It measures time
+	// to the first non-empty stream payload only (not TCP connect, response headers,
+	// or empty SSE heartbeats), so normal long reasoning is never interrupted once
+	// the first payload has arrived. <= 0 disables the timeout. Default is 0.
+	FirstByteTimeoutSeconds int `yaml:"first-byte-timeout-seconds,omitempty" json:"first-byte-timeout-seconds,omitempty"`
 }

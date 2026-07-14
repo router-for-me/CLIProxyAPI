@@ -1769,6 +1769,20 @@ func (e *streamBootstrapError) Headers() http.Header {
 	return cloneHTTPHeader(e.headers)
 }
 
+// streamFirstByteTimeoutError builds the retryable 504 returned when a streaming
+// attempt produces no first non-empty payload within the configured first-byte
+// timeout. It surfaces as an ordinary retryable bootstrap error so the existing
+// OAuth-refresh / model-pool fallback / credential-rotation / handler
+// bootstrap-retry recovery path takes over — no dedicated retry path.
+func streamFirstByteTimeoutError(timeout time.Duration) *Error {
+	return &Error{
+		Code:       "stream_first_byte_timeout",
+		Message:    fmt.Sprintf("upstream did not return a streaming payload within %s", timeout),
+		Retryable:  true,
+		HTTPStatus: http.StatusGatewayTimeout,
+	}
+}
+
 func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamResult {
 	ch := make(chan cliproxyexecutor.StreamChunk, 1)
 	ch <- cliproxyexecutor.StreamChunk{Err: err}
@@ -1811,10 +1825,15 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult) *cliproxyexecutor.StreamResult {
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult, attemptCancel context.CancelFunc) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
+		// Release the attempt context only once the stream is fully forwarded, so the
+		// first-byte timeout no longer applies to the (already-committed) body.
+		if attemptCancel != nil {
+			defer attemptCancel()
+		}
 		var failed bool
 		forward := true
 		var rewriter *StreamRewriter
@@ -1907,113 +1926,164 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		execOpts := opts
 		execReq, execOpts = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
-		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
-		if errStream != nil {
-			if errCtx := ctx.Err(); errCtx != nil {
-				return nil, errCtx
+		lastAttempt := idx == len(execModels)-1
+
+		var (
+			attemptResult *cliproxyexecutor.StreamResult
+			attemptErr    error
+			attemptRetry  bool
+		)
+		func() {
+			// Per-attempt context so a first-byte timeout cancels only this attempt
+			// (aborting the stalled upstream request) without cancelling the client's
+			// ctx, so the outer retry can proceed on another credential.
+			firstByteTimeout := execOpts.StreamFirstByteTimeout
+			attemptCtx := ctx
+			attemptCancel := context.CancelFunc(func() {})
+			var fbTimedOut atomic.Bool
+			var fbTimer *time.Timer
+			if firstByteTimeout > 0 {
+				attemptCtx, attemptCancel = context.WithCancel(ctx)
+				fbTimer = time.AfterFunc(firstByteTimeout, func() {
+					fbTimedOut.Store(true)
+					attemptCancel()
+				})
 			}
-			if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(ctx, auth, errStream, didRefreshOnUnauthorized); okRefresh {
-				auth = refreshed
-				didRefreshOnUnauthorized = true
-				streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, execOpts)
-				if errStream != nil {
-					if errCtx := ctx.Err(); errCtx != nil {
-						return nil, errCtx
+			handedOff := false
+			defer func() {
+				if fbTimer != nil {
+					fbTimer.Stop()
+				}
+				if !handedOff {
+					attemptCancel()
+				}
+			}()
+
+			streamResult, errStream := executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
+			if errStream != nil {
+				if errCtx := ctx.Err(); errCtx != nil {
+					attemptErr = errCtx
+					return
+				}
+				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(ctx, auth, errStream, didRefreshOnUnauthorized); okRefresh {
+					auth = refreshed
+					didRefreshOnUnauthorized = true
+					streamResult, errStream = executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
+					if errStream != nil {
+						if errCtx := ctx.Err(); errCtx != nil {
+							attemptErr = errCtx
+							return
+						}
 					}
 				}
 			}
+			if errStream != nil {
+				if fbTimedOut.Load() && ctx.Err() == nil {
+					errStream = streamFirstByteTimeoutError(firstByteTimeout)
+				}
+				rerr := &Error{Message: errStream.Error()}
+				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
+					rerr.HTTPStatus = se.StatusCode()
+				}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+				result.RetryAfter = retryAfterFromError(errStream)
+				m.MarkResult(ctx, result)
+				if isRequestInvalidError(errStream) {
+					attemptErr = errStream
+					return
+				}
+				lastErr = errStream
+				attemptRetry = true
+				return
+			}
+
+			buffered, closed, bootstrapErr := readStreamBootstrap(attemptCtx, streamResult.Chunks)
+			if fbTimer != nil {
+				fbTimer.Stop()
+			}
+			// If the first-byte timer fired — even if a payload raced in at the same
+			// instant — treat this attempt as timed out instead of forwarding a stream
+			// under the already-cancelled attemptCtx (which would truncate it).
+			if fbTimedOut.Load() && ctx.Err() == nil {
+				bootstrapErr = streamFirstByteTimeoutError(firstByteTimeout)
+			}
+			if bootstrapErr != nil {
+				if errCtx := ctx.Err(); errCtx != nil {
+					discardStreamChunks(streamResult.Chunks)
+					attemptErr = errCtx
+					return
+				}
+				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(ctx, auth, bootstrapErr, didRefreshOnUnauthorized); okRefresh {
+					discardStreamChunks(streamResult.Chunks)
+					auth = refreshed
+					didRefreshOnUnauthorized = true
+					retryStream, retryErr := executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
+					if retryErr != nil {
+						if errCtx := ctx.Err(); errCtx != nil {
+							attemptErr = errCtx
+							return
+						}
+						bootstrapErr = retryErr
+						streamResult = &cliproxyexecutor.StreamResult{}
+					} else {
+						streamResult = retryStream
+						buffered, closed, bootstrapErr = readStreamBootstrap(attemptCtx, streamResult.Chunks)
+					}
+				}
+			}
+			if bootstrapErr != nil {
+				rerr := &Error{Message: bootstrapErr.Error()}
+				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
+					rerr.HTTPStatus = se.StatusCode()
+				}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+				result.RetryAfter = retryAfterFromError(bootstrapErr)
+				m.MarkResult(ctx, result)
+				discardStreamChunks(streamResult.Chunks)
+				if isRequestInvalidError(bootstrapErr) {
+					attemptErr = bootstrapErr
+					return
+				}
+				if !lastAttempt {
+					lastErr = bootstrapErr
+					attemptRetry = true
+					return
+				}
+				attemptErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+				return
+			}
+
+			if closed && len(buffered) == 0 {
+				emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
+				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr})
+				if !lastAttempt {
+					lastErr = emptyErr
+					attemptRetry = true
+					return
+				}
+				attemptErr = newStreamBootstrapError(emptyErr, streamResult.Headers)
+				return
+			}
+
+			remaining := streamResult.Chunks
+			if closed {
+				closedCh := make(chan cliproxyexecutor.StreamChunk)
+				close(closedCh)
+				remaining = closedCh
+			}
+			handedOff = true
+			attemptResult = m.wrapStreamResult(attemptCtx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, aliasResult, attemptCancel)
+		}()
+
+		if attemptResult != nil {
+			return attemptResult, nil
 		}
-		if errStream != nil {
-			rerr := &Error{Message: errStream.Error()}
-			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
-				rerr.HTTPStatus = se.StatusCode()
-			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-			result.RetryAfter = retryAfterFromError(errStream)
-			m.MarkResult(ctx, result)
-			if isRequestInvalidError(errStream) {
-				return nil, errStream
-			}
-			lastErr = errStream
+		if attemptErr != nil {
+			return nil, attemptErr
+		}
+		if attemptRetry {
 			continue
 		}
-
-		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
-		if bootstrapErr != nil {
-			if errCtx := ctx.Err(); errCtx != nil {
-				discardStreamChunks(streamResult.Chunks)
-				return nil, errCtx
-			}
-			if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(ctx, auth, bootstrapErr, didRefreshOnUnauthorized); okRefresh {
-				discardStreamChunks(streamResult.Chunks)
-				auth = refreshed
-				didRefreshOnUnauthorized = true
-				retryStream, retryErr := executor.ExecuteStream(ctx, auth, execReq, execOpts)
-				if retryErr != nil {
-					if errCtx := ctx.Err(); errCtx != nil {
-						return nil, errCtx
-					}
-					bootstrapErr = retryErr
-					streamResult = &cliproxyexecutor.StreamResult{}
-				} else {
-					streamResult = retryStream
-					buffered, closed, bootstrapErr = readStreamBootstrap(ctx, streamResult.Chunks)
-				}
-			}
-		}
-		if bootstrapErr != nil {
-			if isRequestInvalidError(bootstrapErr) {
-				rerr := &Error{Message: bootstrapErr.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				m.MarkResult(ctx, result)
-				discardStreamChunks(streamResult.Chunks)
-				return nil, bootstrapErr
-			}
-			if idx < len(execModels)-1 {
-				rerr := &Error{Message: bootstrapErr.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				m.MarkResult(ctx, result)
-				discardStreamChunks(streamResult.Chunks)
-				lastErr = bootstrapErr
-				continue
-			}
-			rerr := &Error{Message: bootstrapErr.Error()}
-			if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-				rerr.HTTPStatus = se.StatusCode()
-			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-			result.RetryAfter = retryAfterFromError(bootstrapErr)
-			m.MarkResult(ctx, result)
-			discardStreamChunks(streamResult.Chunks)
-			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
-		}
-
-		if closed && len(buffered) == 0 {
-			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
-			m.MarkResult(ctx, result)
-			if idx < len(execModels)-1 {
-				lastErr = emptyErr
-				continue
-			}
-			return nil, newStreamBootstrapError(emptyErr, streamResult.Headers)
-		}
-
-		remaining := streamResult.Chunks
-		if closed {
-			closedCh := make(chan cliproxyexecutor.StreamChunk)
-			close(closedCh)
-			remaining = closedCh
-		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, aliasResult), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}

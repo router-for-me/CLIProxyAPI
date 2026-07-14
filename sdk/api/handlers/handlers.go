@@ -54,8 +54,9 @@ type ErrorDetail struct {
 const idempotencyKeyMetadataKey = "idempotency_key"
 
 const (
-	defaultStreamingKeepAliveSeconds = 0
-	defaultStreamingBootstrapRetries = 0
+	defaultStreamingKeepAliveSeconds        = 0
+	defaultStreamingBootstrapRetries        = 0
+	defaultStreamingFirstByteTimeoutSeconds = 0
 	// Stream interceptor history is intentionally bounded and not configurable in the first SDK surface.
 	maxStreamInterceptorHistoryChunks = 64
 	maxStreamInterceptorHistoryBytes  = 1 << 20
@@ -217,6 +218,19 @@ func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 	seconds := defaultStreamingKeepAliveSeconds
 	if cfg != nil {
 		seconds = cfg.Streaming.KeepAliveSeconds
+	}
+	if seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// StreamingFirstByteTimeout returns how long a streaming attempt waits for the
+// first non-empty upstream payload before it is cancelled and retried. 0 disables it.
+func StreamingFirstByteTimeout(cfg *config.SDKConfig) time.Duration {
+	seconds := defaultStreamingFirstByteTimeoutSeconds
+	if cfg != nil {
+		seconds = cfg.Streaming.FirstByteTimeoutSeconds
 	}
 	if seconds <= 0 {
 		return 0
@@ -907,6 +921,8 @@ func (h *BaseAPIHandler) pluginExecutorRequest(ctx context.Context, entryProtoco
 		Headers:         modelExecutionHeaders(ctx, execOptions.Headers),
 		Query:           modelExecutionQuery(ctx, execOptions.Query),
 		Metadata:        reqMeta,
+		// Only consulted on the streaming path (Auth Manager bootstrap read).
+		StreamFirstByteTimeout: StreamingFirstByteTimeout(h.Cfg),
 	}
 	return req, opts
 }
@@ -1158,6 +1174,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
 		Query:                       modelExecutionQuery(ctx, execOptions.Query),
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, execOptions.SkipInterceptorPluginID),
+		StreamFirstByteTimeout:      StreamingFirstByteTimeout(h.Cfg),
 	}
 	opts.Metadata = reqMeta
 	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
