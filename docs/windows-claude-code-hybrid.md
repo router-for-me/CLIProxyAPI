@@ -81,6 +81,14 @@ opaque compaction item and `response.completed` are observed. An unsupported v2
 request falls back to `/responses/compact`. Transient transport or stream
 failures retry v2 once and never permanently downgrade a conversation.
 
+Every compaction request is independently capped to the real context window
+minus the configured recent-tail reserve. If a lane is new or reset after
+Claude Code has already accumulated more history than one compaction request
+can accept, the proxy compacts bounded prefixes in sequence: each opaque result
+becomes the root of the next prefix until the rewritten request is safe. A
+deterministic `context_length_exceeded` response is replanned with a smaller
+prefix instead of retrying the same oversized body.
+
 The proxy retains a recent exact tail outside compaction so the user's active
 turn and tool-call pairs are not split. After compaction, later Claude Code
 requests are rewritten as the saved replacement history plus only the exact

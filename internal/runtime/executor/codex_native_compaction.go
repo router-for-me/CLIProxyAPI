@@ -27,6 +27,11 @@ import (
 
 const codexRemoteCompactionV2Feature = "remote_compaction_v2"
 
+const (
+	maxCodexNativeCompactionPasses  = 16
+	maxCodexNativeCompactionReplans = 4
+)
+
 type codexNativeCompactionSettings struct {
 	triggerTokens         int64
 	contextWindow         int64
@@ -48,6 +53,15 @@ type codexNativeCompactionScope struct {
 	replayScope                 codexReasoningReplayScope
 	replayApplied               bool
 	active                      bool
+}
+
+type codexNativeCompactionProgress struct {
+	body                    []byte
+	effectiveItems          [][]byte
+	state                   helps.ClaudeCodeCompactionState
+	sourceBoundary          int
+	replayInsertion         codexInsertedItems
+	estimatedUpstreamTokens int64
 }
 
 func (s codexNativeCompactionScope) observeTerminal(eventData []byte) {
@@ -266,46 +280,89 @@ func (e *CodexExecutor) prepareCodexNativeCompaction(
 	}
 
 	if estimatedUpstreamTokens >= settings.triggerTokens {
-		cut := codexCompactionCut(enc, effectiveItems, settings.preserveRecentTokens)
-		cut = codexAdjustCompactionCutForInsertedItems(cut, replayInsertion)
-		minimumCut := len(state.ReplacementItems)
-		if replayInsertion.start < minimumCut {
-			minimumCut += replayInsertion.count
+		progress := codexNativeCompactionProgress{
+			body:                    body,
+			effectiveItems:          effectiveItems,
+			state:                   state,
+			sourceBoundary:          sourceBoundary,
+			replayInsertion:         replayInsertion,
+			estimatedUpstreamTokens: estimatedUpstreamTokens,
 		}
-		if len(state.ReplacementItems) > 0 && cut < minimumCut {
-			cut = minimumCut
-		}
-		cut = codexAdjustCompactionCutForToolPairs(effectiveItems, cut)
-		cut = codexAdjustCompactionCutForInsertedItems(cut, replayInsertion)
-		if cut > 0 && cut <= len(effectiveItems) {
-			prefix := codexCloneItems(effectiveItems[:cut])
-			compactionBody := codexSetInputItems(body, prefix)
-			result, compactErr := e.requestCodexNativeCompaction(ctx, auth, req, from, originalPayload, opts.Headers, compactionBody, baseModel, apiKey, baseURL)
-			recoveryAttempted := false
-			if codexCompactionErrorIsInvalidReasoning(compactErr) {
-				recoveryAttempted = true
+		progress, failedPrefix, compactErr := e.runCodexNativeCompactionPasses(
+			ctx, auth, req, from, opts.Headers, originalPayload, baseModel, apiKey, baseURL,
+			settings, enc, envelopeHash, clientHashes, replayApplication.sourceItems, lane, progress,
+		)
+		recoveryAttempted := false
+		if codexCompactionErrorIsInvalidReasoning(compactErr) {
+			recoveryAttempted = true
 
-				// An invalid encrypted reasoning item can originate in the replay
-				// cache, the client history, or a previously installed compaction
-				// item. Discard the replacement and persist per-lane rejection
-				// fingerprints before retrying from authoritative client history.
-				// The shared replay cache remains intact for auth failover; this lane
-				// suppresses only the encrypted items present in the failed prefix.
+			// An invalid encrypted reasoning item can originate in replay, client
+			// history, or a previously installed compaction. Restart from the
+			// authoritative client history with only the rejected encrypted items
+			// suppressed; the shared replay cache remains available to other lanes.
+			rejectedHashes := codexMergeUniqueHashes(
+				progress.state.RejectedEncryptedItemHashes,
+				codexRejectedEncryptedItemHashes(failedPrefix),
+			)
+			recoveryState := helps.ClaudeCodeCompactionState{
+				EnvelopeHash:                envelopeHash,
+				RejectedEncryptedItemHashes: rejectedHashes,
+			}
+			if _, commitErr := lane.Commit(recoveryState); commitErr != nil {
+				return progress.body, codexNativeCompactionScope{}, false, fmt.Errorf("codex native compaction: persist rejected encrypted reasoning recovery: %w", commitErr)
+			}
+			state = lane.State()
+			effectiveItems = codexSanitizeRejectedEncryptedItems(inputItems, rejectedHashes)
+			baseEffectiveItems = codexCloneItems(effectiveItems)
+			body = codexSetInputItems(clientBody, effectiveItems)
+			replaySuppressions := codexMergeUniqueHashes(
+				state.AbsorbedReplayItemHashes,
+				codexRejectedReplayItemHashes(replayApplication.sourceItems, rejectedHashes),
+			)
+			body, _ = applyCodexReasoningReplayItems(body, replayApplication.sourceItems, replaySuppressions)
+			effectiveItems, ok = codexInputItems(body)
+			if !ok {
+				return body, codexNativeCompactionScope{}, false, fmt.Errorf("codex native compaction: recovery replay produced an invalid input array")
+			}
+			replayInsertion, mapOK = codexInsertedItemSpan(baseEffectiveItems, effectiveItems)
+			if !mapOK {
+				return body, codexNativeCompactionScope{}, false, fmt.Errorf("codex native compaction: could not map recovery replay onto the client history")
+			}
+			recoveredTokens, countErr := countCodexInputTokens(enc, body)
+			if countErr != nil {
+				return body, codexNativeCompactionScope{}, false, fmt.Errorf("codex native compaction: count recovered input: %w", countErr)
+			}
+			progress = codexNativeCompactionProgress{
+				body:                    body,
+				effectiveItems:          effectiveItems,
+				state:                   state,
+				replayInsertion:         replayInsertion,
+				estimatedUpstreamTokens: recoveredTokens,
+			}
+			progress, failedPrefix, compactErr = e.runCodexNativeCompactionPasses(
+				ctx, auth, req, from, opts.Headers, originalPayload, baseModel, apiKey, baseURL,
+				settings, enc, envelopeHash, clientHashes, replayApplication.sourceItems, lane, progress,
+			)
+		}
+		body = progress.body
+		effectiveItems = progress.effectiveItems
+		state = progress.state
+		estimatedUpstreamTokens = progress.estimatedUpstreamTokens
+		if compactErr != nil {
+			if codexCompactionErrorIsInvalidReasoning(compactErr) && recoveryAttempted {
 				rejectedHashes := codexMergeUniqueHashes(
 					state.RejectedEncryptedItemHashes,
-					codexRejectedEncryptedItemHashes(prefix),
+					codexRejectedEncryptedItemHashes(failedPrefix),
 				)
 				recoveryState := helps.ClaudeCodeCompactionState{
 					EnvelopeHash:                envelopeHash,
 					RejectedEncryptedItemHashes: rejectedHashes,
 				}
 				if _, commitErr := lane.Commit(recoveryState); commitErr != nil {
-					return body, codexNativeCompactionScope{}, false, fmt.Errorf("codex native compaction: persist rejected encrypted reasoning recovery: %w", commitErr)
+					return body, codexNativeCompactionScope{}, false, fmt.Errorf("codex native compaction: persist second rejected encrypted reasoning recovery: %w", commitErr)
 				}
 				state = lane.State()
-				sourceBoundary = 0
 				effectiveItems = codexSanitizeRejectedEncryptedItems(inputItems, rejectedHashes)
-				baseEffectiveItems = codexCloneItems(effectiveItems)
 				body = codexSetInputItems(clientBody, effectiveItems)
 				replaySuppressions := codexMergeUniqueHashes(
 					state.AbsorbedReplayItemHashes,
@@ -314,133 +371,21 @@ func (e *CodexExecutor) prepareCodexNativeCompaction(
 				body, _ = applyCodexReasoningReplayItems(body, replayApplication.sourceItems, replaySuppressions)
 				effectiveItems, ok = codexInputItems(body)
 				if !ok {
-					return body, codexNativeCompactionScope{}, false, fmt.Errorf("codex native compaction: recovery replay produced an invalid input array")
+					return body, codexNativeCompactionScope{}, false, fmt.Errorf("codex native compaction: second recovery replay produced an invalid input array")
 				}
-				replayInsertion, mapOK = codexInsertedItemSpan(baseEffectiveItems, effectiveItems)
-				if !mapOK {
-					return body, codexNativeCompactionScope{}, false, fmt.Errorf("codex native compaction: could not map recovery replay onto the client history")
-				}
-				recoveredTokens, countErr := countCodexInputTokens(enc, body)
+				secondRecoveredTokens, countErr := countCodexInputTokens(enc, body)
 				if countErr != nil {
-					return body, codexNativeCompactionScope{}, false, fmt.Errorf("codex native compaction: count recovered input: %w", countErr)
+					return body, codexNativeCompactionScope{}, false, fmt.Errorf("codex native compaction: count second recovered input: %w", countErr)
 				}
-				if recoveredTokens > estimatedUpstreamTokens {
-					estimatedUpstreamTokens = recoveredTokens
-				}
-
-				cut = codexCompactionCut(enc, effectiveItems, settings.preserveRecentTokens)
-				cut = codexAdjustCompactionCutForToolPairs(effectiveItems, cut)
-				if cut > 0 && cut <= len(effectiveItems) {
-					prefix = codexCloneItems(effectiveItems[:cut])
-					compactionBody = codexSetInputItems(body, prefix)
-					result, compactErr = e.requestCodexNativeCompaction(ctx, auth, req, from, originalPayload, opts.Headers, compactionBody, baseModel, apiKey, baseURL)
-				} else {
-					compactErr = codexCompactionProtocolError{message: "codex native compaction recovery could not preserve a safe recent tail"}
+				estimatedUpstreamTokens = secondRecoveredTokens
+			}
+			if estimatedUpstreamTokens >= settings.contextWindow {
+				return body, codexNativeCompactionScope{}, len(state.ReplacementItems) > 0, statusErr{
+					code: http.StatusBadRequest,
+					msg:  fmt.Sprintf("codex native compaction failed at the configured %d-token context boundary: %v", settings.contextWindow, compactErr),
 				}
 			}
-			if compactErr == nil {
-				baseCut := codexBaseItemCut(cut, replayInsertion)
-				newSourceBoundary := sourceBoundary
-				if len(state.ReplacementItems) == 0 {
-					newSourceBoundary = baseCut
-				} else if baseCut > len(state.ReplacementItems) {
-					newSourceBoundary += baseCut - len(state.ReplacementItems)
-				}
-				if newSourceBoundary > len(clientHashes) {
-					newSourceBoundary = len(clientHashes)
-				}
-
-				var replacement [][]byte
-				if result.legacy {
-					// The legacy endpoint returns the authoritative replacement
-					// history, including any retained/truncated messages and
-					// metadata selected by the server. Install it byte-for-byte.
-					replacement = codexCloneItems(result.items)
-				} else {
-					replacement = codexRetainedMessages(enc, prefix, settings.retainedMessageTokens)
-					replacement = append(replacement, codexCloneItems(result.items)...)
-				}
-				tail := codexCloneItems(effectiveItems[cut:])
-
-				compactionTokens := result.outputTokens
-				if compactionTokens <= 0 {
-					for _, item := range result.items {
-						if gjson.GetBytes(item, "type").String() == "compaction" {
-							compactionTokens += codexApproxOpaqueCompactionTokens(item)
-						}
-					}
-				}
-				absorbedReplayItemHashes := codexAbsorbedReplayItemHashes(
-					state.AbsorbedReplayItemHashes,
-					replayApplication.sourceItems,
-					prefix,
-				)
-				state = helps.ClaudeCodeCompactionState{
-					SourcePrefixHashes:          clientHashes[:newSourceBoundary],
-					ReplacementItems:            replacement,
-					EnvelopeHash:                envelopeHash,
-					CompactionTokens:            compactionTokens,
-					AbsorbedReplayItemHashes:    absorbedReplayItemHashes,
-					RejectedEncryptedItemHashes: append([]string(nil), state.RejectedEncryptedItemHashes...),
-				}
-				if _, commitErr := lane.Commit(state); commitErr != nil {
-					if estimatedUpstreamTokens >= settings.contextWindow {
-						return body, codexNativeCompactionScope{}, len(lane.State().ReplacementItems) > 0, statusErr{
-							code: http.StatusInternalServerError,
-							msg:  fmt.Sprintf("codex native compaction completed but its durable state could not be installed at the configured %d-token context boundary: %v", settings.contextWindow, commitErr),
-						}
-					}
-					helps.LogWithRequestID(ctx).Warnf("codex native compaction completed but durable state installation failed below the hard boundary; continuing with the prior lane: %v", commitErr)
-				} else {
-					effectiveItems = append(codexCloneItems(replacement), tail...)
-					body = codexSetInputItems(body, effectiveItems)
-				}
-			} else {
-				if codexCompactionErrorIsInvalidReasoning(compactErr) {
-					if recoveryAttempted {
-						rejectedHashes := codexMergeUniqueHashes(
-							state.RejectedEncryptedItemHashes,
-							codexRejectedEncryptedItemHashes(prefix),
-						)
-						recoveryState := helps.ClaudeCodeCompactionState{
-							EnvelopeHash:                envelopeHash,
-							RejectedEncryptedItemHashes: rejectedHashes,
-						}
-						if _, commitErr := lane.Commit(recoveryState); commitErr != nil {
-							return body, codexNativeCompactionScope{}, false, fmt.Errorf("codex native compaction: persist second rejected encrypted reasoning recovery: %w", commitErr)
-						}
-						state = lane.State()
-						effectiveItems = codexSanitizeRejectedEncryptedItems(inputItems, rejectedHashes)
-						body = codexSetInputItems(clientBody, effectiveItems)
-						replaySuppressions := codexMergeUniqueHashes(
-							state.AbsorbedReplayItemHashes,
-							codexRejectedReplayItemHashes(replayApplication.sourceItems, rejectedHashes),
-						)
-						body, _ = applyCodexReasoningReplayItems(body, replayApplication.sourceItems, replaySuppressions)
-						effectiveItems, ok = codexInputItems(body)
-						if !ok {
-							return body, codexNativeCompactionScope{}, false, fmt.Errorf("codex native compaction: second recovery replay produced an invalid input array")
-						}
-					} else {
-						// This branch is defensive: the first invalid response is normally
-						// consumed by the same-request recovery above.
-						effectiveItems = codexCloneItems(baseEffectiveItems)
-						body = codexSetInputItems(body, effectiveItems)
-					}
-				}
-				if estimatedUpstreamTokens >= settings.contextWindow {
-					return body, codexNativeCompactionScope{}, len(state.ReplacementItems) > 0, statusErr{
-						code: http.StatusBadRequest,
-						msg:  fmt.Sprintf("codex native compaction failed at the configured %d-token context boundary: %v", settings.contextWindow, compactErr),
-					}
-				}
-				helps.LogWithRequestID(ctx).Warnf("codex native compaction failed below hard context boundary; continuing with current lane: %v", compactErr)
-			}
-		} else if estimatedUpstreamTokens >= settings.contextWindow {
-			return body, codexNativeCompactionScope{}, len(state.ReplacementItems) > 0, statusErr{
-				code: http.StatusBadRequest,
-				msg:  fmt.Sprintf("codex native compaction could not preserve a safe recent tail at the configured %d-token context boundary", settings.contextWindow),
-			}
+			helps.LogWithRequestID(ctx).Warnf("codex native compaction failed below hard context boundary; continuing with current lane: %v", compactErr)
 		}
 	}
 
@@ -468,6 +413,209 @@ func (e *CodexExecutor) prepareCodexNativeCompaction(
 		active:                      true,
 	}
 	return body, scope, compactionActive, nil
+}
+
+func (e *CodexExecutor) runCodexNativeCompactionPasses(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	req cliproxyexecutor.Request,
+	from sdktranslator.Format,
+	requestHeaders http.Header,
+	originalPayload []byte,
+	baseModel string,
+	apiKey string,
+	baseURL string,
+	settings codexNativeCompactionSettings,
+	enc tokenizer.Codec,
+	envelopeHash string,
+	clientHashes []string,
+	replaySourceItems [][]byte,
+	lane *helps.ClaudeCodeCompactionLane,
+	progress codexNativeCompactionProgress,
+) (codexNativeCompactionProgress, [][]byte, error) {
+	var lastPrefix [][]byte
+	for pass := 1; progress.estimatedUpstreamTokens >= settings.triggerTokens; pass++ {
+		if pass > maxCodexNativeCompactionPasses {
+			return progress, lastPrefix, codexCompactionProtocolError{message: fmt.Sprintf(
+				"codex native compaction still exceeds the %d-token trigger after %d bounded passes",
+				settings.triggerTokens,
+				maxCodexNativeCompactionPasses,
+			)}
+		}
+
+		maximumCut := codexCompactionCut(enc, progress.effectiveItems, settings.preserveRecentTokens)
+		minimumCut := len(progress.state.ReplacementItems)
+		if progress.replayInsertion.count > 0 && progress.replayInsertion.start < minimumCut {
+			minimumCut += progress.replayInsertion.count
+		}
+		if len(progress.state.ReplacementItems) > 0 && maximumCut < minimumCut {
+			maximumCut = minimumCut
+		}
+		maximumCut = codexNormalizeCompactionCut(progress.effectiveItems, maximumCut, progress.replayInsertion)
+		if maximumCut <= 0 || maximumCut > len(progress.effectiveItems) {
+			return progress, lastPrefix, codexCompactionProtocolError{message: "codex native compaction could not preserve a safe recent tail"}
+		}
+
+		attemptBudget := codexNativeCompactionInputBudget(settings)
+		attemptMaximumCut := maximumCut
+		var result codexNativeCompactionResult
+		var cut int
+		var compactErr error
+		for replan := 0; ; replan++ {
+			var inputEstimate int64
+			cut, inputEstimate, compactErr = codexBoundedCompactionCut(
+				enc,
+				progress.body,
+				progress.effectiveItems,
+				attemptMaximumCut,
+				minimumCut,
+				progress.replayInsertion,
+				progress.state.CompactionTokens,
+				attemptBudget,
+			)
+			if compactErr != nil {
+				return progress, lastPrefix, fmt.Errorf("codex native compaction: choose bounded prefix: %w", compactErr)
+			}
+			if cut <= 0 {
+				return progress, lastPrefix, codexCompactionProtocolError{message: fmt.Sprintf(
+					"codex native compaction could not fit a complete prefix within the %d-token compaction budget",
+					attemptBudget,
+				)}
+			}
+
+			lastPrefix = codexCloneItems(progress.effectiveItems[:cut])
+			compactionBody := codexSetInputItems(progress.body, lastPrefix)
+			result, compactErr = e.requestCodexNativeCompaction(
+				ctx, auth, req, from, originalPayload, requestHeaders, compactionBody, baseModel, apiKey, baseURL,
+			)
+			if compactErr == nil || !codexCompactionErrorIsContextLength(compactErr) || replan >= maxCodexNativeCompactionReplans {
+				break
+			}
+
+			nextMaximumCut := cut - 1
+			nextBudget := inputEstimate * 3 / 4
+			if nextBudget <= 0 || nextBudget >= attemptBudget {
+				nextBudget = attemptBudget * 3 / 4
+			}
+			if nextBudget >= attemptBudget {
+				nextBudget = attemptBudget - 1
+			}
+			if nextMaximumCut <= 0 || nextBudget <= 0 {
+				break
+			}
+			helps.LogWithRequestID(ctx).Warnf(
+				"codex native compaction prefix was rejected for context length; replanning below %d estimated tokens (pass %d, replan %d)",
+				nextBudget,
+				pass,
+				replan+1,
+			)
+			attemptMaximumCut = nextMaximumCut
+			attemptBudget = nextBudget
+		}
+		if compactErr != nil {
+			return progress, lastPrefix, compactErr
+		}
+
+		baseCut := codexBaseItemCut(cut, progress.replayInsertion)
+		newSourceBoundary := progress.sourceBoundary
+		previousReplacementLength := len(progress.state.ReplacementItems)
+		if previousReplacementLength == 0 {
+			newSourceBoundary = baseCut
+		} else if baseCut > previousReplacementLength {
+			newSourceBoundary += baseCut - previousReplacementLength
+		}
+		if newSourceBoundary > len(clientHashes) {
+			newSourceBoundary = len(clientHashes)
+		}
+
+		var replacement [][]byte
+		if result.legacy {
+			// The legacy endpoint returns the authoritative replacement history,
+			// including any retained messages and server-selected metadata.
+			replacement = codexCloneItems(result.items)
+		} else {
+			replacement = codexRetainedMessages(enc, lastPrefix, settings.retainedMessageTokens)
+			replacement = append(replacement, codexCloneItems(result.items)...)
+		}
+		tail := codexCloneItems(progress.effectiveItems[cut:])
+
+		compactionTokens := result.outputTokens
+		if compactionTokens <= 0 {
+			for _, item := range result.items {
+				if gjson.GetBytes(item, "type").String() == "compaction" {
+					compactionTokens += codexApproxOpaqueCompactionTokens(item)
+				}
+			}
+		}
+		nextState := helps.ClaudeCodeCompactionState{
+			SourcePrefixHashes: clientHashes[:newSourceBoundary],
+			ReplacementItems:   replacement,
+			EnvelopeHash:       envelopeHash,
+			CompactionTokens:   compactionTokens,
+			AbsorbedReplayItemHashes: codexAbsorbedReplayItemHashes(
+				progress.state.AbsorbedReplayItemHashes,
+				replaySourceItems,
+				lastPrefix,
+			),
+			RejectedEncryptedItemHashes: append([]string(nil), progress.state.RejectedEncryptedItemHashes...),
+		}
+		if _, commitErr := lane.Commit(nextState); commitErr != nil {
+			if progress.estimatedUpstreamTokens >= settings.contextWindow {
+				return progress, lastPrefix, statusErr{
+					code: http.StatusInternalServerError,
+					msg: fmt.Sprintf(
+						"codex native compaction completed but its durable state could not be installed at the configured %d-token context boundary: %v",
+						settings.contextWindow,
+						commitErr,
+					),
+				}
+			}
+			helps.LogWithRequestID(ctx).Warnf(
+				"codex native compaction completed but durable state installation failed below the hard boundary; continuing with the prior lane: %v",
+				commitErr,
+			)
+			return progress, lastPrefix, nil
+		}
+
+		progress.effectiveItems = append(codexCloneItems(replacement), tail...)
+		progress.body = codexSetInputItems(progress.body, progress.effectiveItems)
+		progress.replayInsertion = codexAdvanceInsertedItemSpan(progress.replayInsertion, cut, len(replacement))
+		progress.sourceBoundary = newSourceBoundary
+		progress.state = lane.State()
+		rewrittenTokens, countErr := countCodexInputTokens(enc, progress.body)
+		if countErr != nil {
+			return progress, lastPrefix, fmt.Errorf("codex native compaction: count bounded pass output: %w", countErr)
+		}
+		progress.estimatedUpstreamTokens = rewrittenTokens + progress.state.CompactionTokens
+		helps.LogWithRequestID(ctx).Infof(
+			"codex native compaction completed bounded pass %d; estimated rewritten input is %d tokens",
+			pass,
+			progress.estimatedUpstreamTokens,
+		)
+		if cut >= maximumCut {
+			break
+		}
+	}
+	return progress, lastPrefix, nil
+}
+
+func codexNativeCompactionInputBudget(settings codexNativeCompactionSettings) int64 {
+	// Tiny context windows are used by unit tests to force boundary branches;
+	// no supported Codex model has a context window below 1K tokens.
+	if settings.contextWindow < 1_024 {
+		if settings.triggerTokens > 1_024 {
+			return settings.triggerTokens
+		}
+		return 1_024
+	}
+	budget := settings.contextWindow - settings.preserveRecentTokens
+	if budget <= 0 {
+		budget = settings.triggerTokens
+	}
+	if budget > settings.contextWindow {
+		budget = settings.contextWindow
+	}
+	return budget
 }
 
 type codexInsertedItems struct {
@@ -515,6 +663,93 @@ func codexBaseItemCut(cut int, inserted codexInsertedItems) int {
 	return cut - inserted.count
 }
 
+func codexNormalizeCompactionCut(items [][]byte, cut int, inserted codexInsertedItems) int {
+	cut = codexAdjustCompactionCutForInsertedItems(cut, inserted)
+	cut = codexAdjustCompactionCutForToolPairs(items, cut)
+	return codexAdjustCompactionCutForInsertedItems(cut, inserted)
+}
+
+func codexAdvanceInsertedItemSpan(inserted codexInsertedItems, cut, replacementLength int) codexInsertedItems {
+	if inserted.count <= 0 {
+		return codexInsertedItems{}
+	}
+	if cut <= inserted.start {
+		return codexInsertedItems{
+			start: replacementLength + inserted.start - cut,
+			count: inserted.count,
+		}
+	}
+	return codexInsertedItems{}
+}
+
+func codexBoundedCompactionCut(
+	enc tokenizer.Codec,
+	body []byte,
+	items [][]byte,
+	maximumCut int,
+	minimumCut int,
+	inserted codexInsertedItems,
+	opaqueCompactionTokens int64,
+	tokenLimit int64,
+) (int, int64, error) {
+	if maximumCut <= 0 || len(items) == 0 || tokenLimit <= 0 {
+		return 0, 0, nil
+	}
+	if maximumCut > len(items) {
+		maximumCut = len(items)
+	}
+	if minimumCut < 1 {
+		minimumCut = 1
+	}
+	maximumCut = codexNormalizeCompactionCut(items, maximumCut, inserted)
+	if maximumCut < minimumCut {
+		return 0, 0, nil
+	}
+
+	countPrefix := func(cut int) (int64, error) {
+		candidateBody := codexSetInputItems(body, items[:cut])
+		tokens, err := countCodexInputTokens(enc, candidateBody)
+		if err != nil {
+			return 0, err
+		}
+		return tokens + opaqueCompactionTokens, nil
+	}
+
+	maximumTokens, err := countPrefix(maximumCut)
+	if err != nil {
+		return 0, 0, err
+	}
+	if maximumTokens <= tokenLimit {
+		return maximumCut, maximumTokens, nil
+	}
+
+	bestCut := 0
+	var bestTokens int64
+	low, high := minimumCut, maximumCut-1
+	for low <= high {
+		rawCut := low + (high-low)/2
+		candidateCut := codexNormalizeCompactionCut(items, rawCut, inserted)
+		if candidateCut < minimumCut {
+			low = rawCut + 1
+			continue
+		}
+		candidateTokens, countErr := countPrefix(candidateCut)
+		if countErr != nil {
+			return 0, 0, countErr
+		}
+		if candidateTokens <= tokenLimit {
+			if candidateCut > bestCut {
+				bestCut = candidateCut
+				bestTokens = candidateTokens
+			}
+			low = rawCut + 1
+		} else {
+			high = rawCut - 1
+		}
+	}
+	return bestCut, bestTokens, nil
+}
+
 type codexNativeCompactionResult struct {
 	items        [][]byte
 	inputTokens  int64
@@ -560,7 +795,7 @@ func codexShouldRetryV2Compaction(ctx context.Context, err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	if codexCompactionErrorIsInvalidReasoning(err) {
+	if codexCompactionErrorIsInvalidReasoning(err) || codexCompactionErrorIsContextLength(err) {
 		return false
 	}
 	if ctx != nil && ctx.Err() != nil {
@@ -576,6 +811,27 @@ func codexShouldRetryV2Compaction(ctx context.Context, err error) bool {
 	}
 	code := status.StatusCode()
 	return code == http.StatusRequestTimeout || code == http.StatusConflict || code == http.StatusTooEarly || code == http.StatusTooManyRequests || code >= 500
+}
+
+func codexCompactionErrorIsContextLength(err error) bool {
+	if err == nil {
+		return false
+	}
+	statusCode := http.StatusBadRequest
+	var status interface{ StatusCode() int }
+	if errors.As(err, &status) && status.StatusCode() > 0 {
+		statusCode = status.StatusCode()
+	}
+	code, _, ok := codexStatusErrorClassification(statusCode, []byte(err.Error()))
+	if ok && code == "context_too_large" {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "context_length_exceeded") ||
+		strings.Contains(lower, "context_too_large") ||
+		strings.Contains(lower, "context length") ||
+		strings.Contains(lower, "maximum context") ||
+		strings.Contains(lower, "too many tokens")
 }
 
 func codexCompactionErrorIsInvalidReasoning(err error) bool {

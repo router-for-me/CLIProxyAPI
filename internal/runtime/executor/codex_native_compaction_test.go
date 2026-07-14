@@ -1,7 +1,9 @@
 package executor
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -434,6 +436,251 @@ func TestCodexNativeCompactionParserRequiresOneCompletedItem(t *testing.T) {
 	duplicate := append(append([]byte(nil), valid...), []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"second\"}}\n")...)
 	if _, _, _, err = parseCodexRemoteCompactionV2(duplicate); err == nil {
 		t.Fatal("duplicate compaction items unexpectedly succeeded")
+	}
+}
+
+func TestCodexNativeCompactionBootstrapsOversizedAndResetHistoryInBoundedPasses(t *testing.T) {
+	enc, err := tokenizerForCodexModel("gpt-5.6-sol")
+	if err != nil {
+		t.Fatalf("tokenizer: %v", err)
+	}
+	const (
+		triggerTokens  = int64(800)
+		contextWindow  = int64(1_200)
+		preserveTokens = int64(200)
+		outputTokens   = int64(4)
+	)
+	compactionBudget := contextWindow - preserveTokens
+
+	var compactionBodies [][]byte
+	var compactionEstimates []int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestBody, _ := io.ReadAll(r.Body)
+		input := gjson.GetBytes(requestBody, "input").Array()
+		if len(input) == 0 || input[len(input)-1].Get("type").String() != "compaction_trigger" {
+			t.Errorf("request is not a native compaction: %s", requestBody)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		prefix := make([][]byte, 0, len(input)-1)
+		compactionItems := int64(0)
+		for _, item := range input[:len(input)-1] {
+			prefix = append(prefix, []byte(item.Raw))
+			if item.Get("type").String() == "compaction" {
+				compactionItems++
+			}
+		}
+		countBody := codexSetInputItems(requestBody, prefix)
+		estimate, countErr := countCodexInputTokens(enc, countBody)
+		if countErr != nil {
+			t.Errorf("count compaction input: %v", countErr)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		estimate += compactionItems * outputTokens
+		compactionBodies = append(compactionBodies, append([]byte(nil), requestBody...))
+		compactionEstimates = append(compactionEstimates, estimate)
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"type":"response.output_item.done","item":{"type":"compaction","encrypted_content":"opaque-bootstrap"}}`+"\n\n")
+		_, _ = io.WriteString(w, fmt.Sprintf(
+			"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":%d,\"output_tokens\":%d}}}\n\n",
+			estimate,
+			outputTokens,
+		))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{AuthDir: t.TempDir(), Codex: config.CodexConfig{NativeCompaction: config.CodexNativeCompaction{
+		Enabled:               true,
+		TriggerTokens:         triggerTokens,
+		ContextWindow:         contextWindow,
+		PreserveRecentTokens:  preserveTokens,
+		RetainedMessageTokens: 100,
+	}}}
+	executor := NewCodexExecutor(cfg)
+	auth := &cliproxyauth.Auth{ID: "auth-bounded-bootstrap", Attributes: map[string]string{"api_key": "test"}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol(xhigh)",
+		Payload: []byte(`{"model":"gpt-5.6-sol(xhigh)","metadata":{"user_id":"user_a_account_b_session_deadbeef-9001"}}`),
+	}
+	body := []byte(`{"model":"gpt-5.6-sol","instructions":"stable rules","input":[],"tools":[{"type":"function","name":"lookup","description":"lookup data","parameters":{"type":"object"}}],"stream":true}`)
+	clientItems := make([][]byte, 0, 80)
+	for i := 0; i < 80; i++ {
+		clientItems = append(clientItems, []byte(fmt.Sprintf(
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"segment-%02d %s"}]}`,
+			i,
+			strings.Repeat("token ", 30),
+		)))
+	}
+	body = codexSetInputItems(body, clientItems)
+	clientTokens, err := countCodexInputTokens(enc, body)
+	if err != nil {
+		t.Fatalf("count client history: %v", err)
+	}
+	if clientTokens <= contextWindow {
+		t.Fatalf("test history is not oversized: tokens=%d window=%d", clientTokens, contextWindow)
+	}
+
+	compactedBody, scope, compacted, err := executor.prepareCodexNativeCompaction(
+		context.Background(), auth, req, sdktranslator.FormatClaude, cliproxyexecutor.Options{}, req.Payload, body,
+		"gpt-5.6-sol", "test", server.URL,
+	)
+	if err != nil {
+		t.Fatalf("bootstrap oversized history: %v", err)
+	}
+	if !compacted || !scope.active {
+		t.Fatal("oversized history did not install a compaction lane")
+	}
+	if len(compactionBodies) < 2 {
+		t.Fatalf("compaction passes = %d, want multiple bounded passes", len(compactionBodies))
+	}
+	for i, estimate := range compactionEstimates {
+		if estimate > compactionBudget {
+			t.Fatalf("compaction pass %d estimate = %d, exceeds budget %d", i+1, estimate, compactionBudget)
+		}
+	}
+	finalTokens, err := countCodexInputTokens(enc, compactedBody)
+	if err != nil {
+		t.Fatalf("count compacted body: %v", err)
+	}
+	if finalTokens+outputTokens >= contextWindow {
+		t.Fatalf("compacted body estimate = %d, want below context window %d", finalTokens+outputTokens, contextWindow)
+	}
+	if got := countCodexInputItemsOfType(compactedBody, "compaction"); got != 1 {
+		t.Fatalf("final compaction items = %d, want 1", got)
+	}
+
+	requestsBeforeAppend := len(compactionBodies)
+	appendItem := []byte(`{"type":"message","role":"user","content":[{"type":"input_text","text":"exact append"}]}`)
+	followupClientBody := codexSetInputItems(body, append(codexCloneItems(clientItems), appendItem))
+	followupBody, _, active, err := executor.prepareCodexNativeCompaction(
+		context.Background(), auth, req, sdktranslator.FormatClaude, cliproxyexecutor.Options{}, req.Payload, followupClientBody,
+		"gpt-5.6-sol", "test", server.URL,
+	)
+	if err != nil {
+		t.Fatalf("reuse bootstrapped lane: %v", err)
+	}
+	if !active || len(compactionBodies) != requestsBeforeAppend {
+		t.Fatalf("exact append recompacted: active=%v requests=%d want=%d", active, len(compactionBodies), requestsBeforeAppend)
+	}
+	firstInput := gjson.GetBytes(compactedBody, "input").Array()
+	followupInput := gjson.GetBytes(followupBody, "input").Array()
+	if len(followupInput) != len(firstInput)+1 {
+		t.Fatalf("follow-up input length = %d, want %d", len(followupInput), len(firstInput)+1)
+	}
+	for i := range firstInput {
+		if firstInput[i].Raw != followupInput[i].Raw {
+			t.Fatalf("follow-up changed compacted prefix at item %d", i)
+		}
+	}
+
+	mutatedItems := codexCloneItems(clientItems)
+	mutatedItems[0] = []byte(`{"type":"message","role":"user","content":[{"type":"input_text","text":"mutated first source item"}]}`)
+	for i := 0; i < 20; i++ {
+		mutatedItems = append(mutatedItems, []byte(fmt.Sprintf(
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"reset-extra-%02d %s"}]}`,
+			i,
+			strings.Repeat("extra ", 30),
+		)))
+	}
+	resetBody := codexSetInputItems(body, mutatedItems)
+	requestsBeforeReset := len(compactionBodies)
+	resetCompactedBody, _, resetActive, err := executor.prepareCodexNativeCompaction(
+		context.Background(), auth, req, sdktranslator.FormatClaude, cliproxyexecutor.Options{}, req.Payload, resetBody,
+		"gpt-5.6-sol", "test", server.URL,
+	)
+	if err != nil {
+		t.Fatalf("recover source-prefix reset: %v", err)
+	}
+	if !resetActive || len(compactionBodies)-requestsBeforeReset < 2 {
+		t.Fatalf("reset recovery active=%v new passes=%d, want multiple", resetActive, len(compactionBodies)-requestsBeforeReset)
+	}
+	resetTokens, err := countCodexInputTokens(enc, resetCompactedBody)
+	if err != nil {
+		t.Fatalf("count reset compacted body: %v", err)
+	}
+	if resetTokens+outputTokens >= contextWindow {
+		t.Fatalf("reset compacted body estimate = %d, want below context window %d", resetTokens+outputTokens, contextWindow)
+	}
+}
+
+func TestCodexNativeCompactionReplansContextLengthWithSmallerPrefix(t *testing.T) {
+	enc, err := tokenizerForCodexModel("gpt-5.6-sol")
+	if err != nil {
+		t.Fatalf("tokenizer: %v", err)
+	}
+	var requestBodies [][]byte
+	var estimates []int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestBody, _ := io.ReadAll(r.Body)
+		input := gjson.GetBytes(requestBody, "input").Array()
+		prefix := make([][]byte, 0, len(input)-1)
+		for _, item := range input[:len(input)-1] {
+			prefix = append(prefix, []byte(item.Raw))
+		}
+		countBody := codexSetInputItems(requestBody, prefix)
+		estimate, _ := countCodexInputTokens(enc, countBody)
+		if countCodexInputItemsOfType(countBody, "compaction") > 0 {
+			estimate += 4
+		}
+		requestBodies = append(requestBodies, append([]byte(nil), requestBody...))
+		estimates = append(estimates, estimate)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if len(requestBodies) == 1 {
+			_, _ = io.WriteString(w, `data: {"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}`+"\n\n")
+			return
+		}
+		_, _ = io.WriteString(w, `data: {"type":"response.output_item.done","item":{"type":"compaction","encrypted_content":"opaque-replanned"}}`+"\n\n")
+		_, _ = io.WriteString(w, fmt.Sprintf(
+			"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":%d,\"output_tokens\":4}}}\n\n",
+			estimate,
+		))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{AuthDir: t.TempDir(), Codex: config.CodexConfig{NativeCompaction: config.CodexNativeCompaction{
+		Enabled:               true,
+		TriggerTokens:         800,
+		ContextWindow:         1_200,
+		PreserveRecentTokens:  200,
+		RetainedMessageTokens: 100,
+	}}}
+	executor := NewCodexExecutor(cfg)
+	auth := &cliproxyauth.Auth{ID: "auth-context-replan", Attributes: map[string]string{"api_key": "test"}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol(xhigh)",
+		Payload: []byte(`{"model":"gpt-5.6-sol(xhigh)","metadata":{"user_id":"user_a_account_b_session_deadbeef-9002"}}`),
+	}
+	body := []byte(`{"model":"gpt-5.6-sol","instructions":"rules","input":[],"tools":[],"stream":true}`)
+	items := make([][]byte, 0, 80)
+	for i := 0; i < 80; i++ {
+		items = append(items, []byte(fmt.Sprintf(
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"replan-%02d %s"}]}`,
+			i,
+			strings.Repeat("token ", 30),
+		)))
+	}
+	body = codexSetInputItems(body, items)
+
+	_, _, compacted, err := executor.prepareCodexNativeCompaction(
+		context.Background(), auth, req, sdktranslator.FormatClaude, cliproxyexecutor.Options{}, req.Payload, body,
+		"gpt-5.6-sol", "test", server.URL,
+	)
+	if err != nil {
+		t.Fatalf("replan context-length rejection: %v", err)
+	}
+	if !compacted || len(requestBodies) < 2 {
+		t.Fatalf("replanned compaction active=%v requests=%d", compacted, len(requestBodies))
+	}
+	if bytes.Equal(requestBodies[0], requestBodies[1]) {
+		t.Fatal("context-length rejection retried an identical compaction body")
+	}
+	if estimates[1] >= estimates[0] {
+		t.Fatalf("replanned estimate = %d, want below first rejected estimate %d", estimates[1], estimates[0])
+	}
+	if codexShouldRetryV2Compaction(context.Background(), codexCompactionProtocolError{message: "context_length_exceeded"}) {
+		t.Fatal("context-length protocol error was classified as a transient identical-body retry")
 	}
 }
 
