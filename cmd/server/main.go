@@ -47,6 +47,12 @@ var (
 	DefaultConfigPath = ""
 )
 
+const storagePluginSyncTimeout = time.Minute
+
+func storagePluginSyncContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), storagePluginSyncTimeout)
+}
+
 // init initializes the shared logger setup.
 func init() {
 	logging.SetupBaseLogger()
@@ -570,7 +576,10 @@ func main() {
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
 	if usePostgresStore || useObjectStore || useGitStore {
-		if errSync := homeplugins.Sync(context.Background(), cfg, pluginHost); errSync != nil {
+		ctxPluginSync, cancelPluginSync := storagePluginSyncContext()
+		errSync := homeplugins.Sync(ctxPluginSync, cfg, pluginHost)
+		cancelPluginSync()
+		if errSync != nil {
 			log.Errorf("failed to sync plugins from storage-backed config: %v", errSync)
 			return
 		}

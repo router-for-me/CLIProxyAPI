@@ -2,9 +2,24 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
+
+func TestStoragePluginSyncContextDeadline(t *testing.T) {
+	ctx, cancel := storagePluginSyncContext()
+	defer cancel()
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("storagePluginSyncContext() has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining > storagePluginSyncTimeout || remaining < storagePluginSyncTimeout-time.Second {
+		t.Fatalf("storagePluginSyncContext() deadline in %s, want about %s", remaining, storagePluginSyncTimeout)
+	}
+}
 
 func TestShouldEnableExampleAPIKeySafeMode(t *testing.T) {
 	cfgWithExampleKey := &config.Config{
