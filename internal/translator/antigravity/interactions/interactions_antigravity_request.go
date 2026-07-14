@@ -13,6 +13,7 @@ import (
 
 func ConvertInteractionsRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
+	functionNameMap := util.SanitizedFunctionNameMap(inputRawJSON)
 	out := []byte(`{"project":"","request":{"contents":[]},"model":""}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
 	if stream || root.Get("stream").Bool() {
@@ -21,8 +22,31 @@ func ConvertInteractionsRequestToAntigravity(modelName string, inputRawJSON []by
 	out = copyInteractionsSystemToAntigravity(out, root)
 	out = copyInteractionsGenerationConfigToAntigravity(out, root)
 	out = appendInteractionsInputToAntigravity(out, root.Get("input"))
-	out = copyInteractionsToolsToAntigravity(out, root)
+	out = copyInteractionsToolsToAntigravity(out, root, functionNameMap)
+	out = rewriteInteractionsFunctionNames(out, functionNameMap)
 	out = attachDefaultAntigravitySafetySettings(out)
+	return out
+}
+
+func rewriteInteractionsFunctionNames(out []byte, functionNameMap map[string]string) []byte {
+	contents := gjson.GetBytes(out, "request.contents")
+	for contentIndex, content := range contents.Array() {
+		for partIndex, part := range content.Get("parts").Array() {
+			for _, field := range []string{"functionCall", "functionResponse"} {
+				name := part.Get(field + ".name").String()
+				if name == "" {
+					continue
+				}
+				path := fmt.Sprintf("request.contents.%d.parts.%d.%s.name", contentIndex, partIndex, field)
+				out, _ = sjson.SetBytes(out, path, util.MapSanitizedFunctionName(functionNameMap, name))
+			}
+		}
+	}
+	allowedNames := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames")
+	for index, name := range allowedNames.Array() {
+		path := fmt.Sprintf("request.toolConfig.functionCallingConfig.allowedFunctionNames.%d", index)
+		out, _ = sjson.SetBytes(out, path, util.MapSanitizedFunctionName(functionNameMap, name.String()))
+	}
 	return out
 }
 
@@ -169,12 +193,12 @@ func copyInteractionsToolChoiceToAntigravity(out []byte, root gjson.Result) []by
 			mode = "ANY"
 		case "function":
 			mode = "ANY"
-			if name := strings.TrimSpace(toolChoice.Get("function.name").String()); name != "" {
+			if name := toolChoice.Get("function.name").String(); strings.TrimSpace(name) != "" {
 				allowedNames = append(allowedNames, name)
 			}
 		case "tool":
 			mode = "ANY"
-			if name := strings.TrimSpace(toolChoice.Get("name").String()); name != "" {
+			if name := toolChoice.Get("name").String(); strings.TrimSpace(name) != "" {
 				allowedNames = append(allowedNames, name)
 			}
 		}
@@ -434,7 +458,7 @@ func appendInteractionsFunctionResultToAntigravity(out []byte, step gjson.Result
 	return out
 }
 
-func copyInteractionsToolsToAntigravity(out []byte, root gjson.Result) []byte {
+func copyInteractionsToolsToAntigravity(out []byte, root gjson.Result, functionNameMap map[string]string) []byte {
 	tools := root.Get("tools")
 	if !tools.Exists() {
 		return out
@@ -449,25 +473,31 @@ func copyInteractionsToolsToAntigravity(out []byte, root gjson.Result) []byte {
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		if decls := tool.Get("functionDeclarations"); decls.Exists() && decls.IsArray() {
 			decls.ForEach(func(_, decl gjson.Result) bool {
-				functionToolNode, hasFunction = appendAntigravityFunctionDeclaration(functionToolNode, decl, hasFunction)
+				functionToolNode, hasFunction = appendAntigravityFunctionDeclaration(functionToolNode, decl, hasFunction, functionNameMap)
 				return true
 			})
 			return true
 		}
 		if decls := tool.Get("function_declarations"); decls.Exists() && decls.IsArray() {
 			decls.ForEach(func(_, decl gjson.Result) bool {
-				functionToolNode, hasFunction = appendAntigravityFunctionDeclaration(functionToolNode, decl, hasFunction)
+				functionToolNode, hasFunction = appendAntigravityFunctionDeclaration(functionToolNode, decl, hasFunction, functionNameMap)
 				return true
 			})
 			return true
 		}
 		if tool.Get("type").String() == "function" || tool.Get("name").Exists() {
-			functionToolNode, hasFunction = appendAntigravityFunctionDeclaration(functionToolNode, tool, hasFunction)
+			functionToolNode, hasFunction = appendAntigravityFunctionDeclaration(functionToolNode, tool, hasFunction, functionNameMap)
 			return true
 		}
 		otherTools = append(otherTools, []byte(tool.Raw))
 		return true
 	})
+	if hasFunction {
+		declarations := gjson.GetBytes(functionToolNode, "functionDeclarations")
+		deduplicated := util.DeduplicateFunctionDeclarations([]byte(declarations.Raw))
+		functionToolNode, _ = sjson.SetRawBytes(functionToolNode, "functionDeclarations", deduplicated)
+		hasFunction = len(gjson.ParseBytes(deduplicated).Array()) > 0
+	}
 	toolsNode := []byte(`[]`)
 	if hasFunction {
 		toolsNode, _ = sjson.SetRawBytes(toolsNode, "-1", functionToolNode)
@@ -481,8 +511,8 @@ func copyInteractionsToolsToAntigravity(out []byte, root gjson.Result) []byte {
 	return out
 }
 
-func appendAntigravityFunctionDeclaration(functionToolNode []byte, decl gjson.Result, hasFunction bool) ([]byte, bool) {
-	fnRaw := antigravityFunctionDeclarationJSON(decl)
+func appendAntigravityFunctionDeclaration(functionToolNode []byte, decl gjson.Result, hasFunction bool, functionNameMap map[string]string) ([]byte, bool) {
+	fnRaw := antigravityFunctionDeclarationJSON(decl, functionNameMap)
 	if len(fnRaw) == 0 {
 		return functionToolNode, hasFunction
 	}
@@ -493,17 +523,17 @@ func appendAntigravityFunctionDeclaration(functionToolNode []byte, decl gjson.Re
 	return functionToolNode, true
 }
 
-func antigravityFunctionDeclarationJSON(decl gjson.Result) []byte {
+func antigravityFunctionDeclarationJSON(decl gjson.Result, functionNameMap map[string]string) []byte {
 	fn := decl
 	if nested := decl.Get("function"); nested.Exists() && nested.IsObject() {
 		fn = nested
 	}
-	name := strings.TrimSpace(fn.Get("name").String())
-	if name == "" {
+	name := fn.Get("name").String()
+	if strings.TrimSpace(name) == "" {
 		return nil
 	}
 	out := []byte(`{"name":"","parametersJsonSchema":{"type":"object","properties":{}}}`)
-	out, _ = sjson.SetBytes(out, "name", util.SanitizeFunctionName(name))
+	out, _ = sjson.SetBytes(out, "name", util.MapSanitizedFunctionName(functionNameMap, name))
 	if desc := fn.Get("description"); desc.Exists() {
 		out, _ = sjson.SetBytes(out, "description", desc.String())
 	}

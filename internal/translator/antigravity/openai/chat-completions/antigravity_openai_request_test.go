@@ -207,3 +207,60 @@ func TestConvertOpenAIRequestToAntigravityThinkingAliases(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertOpenAIRequestToAntigravityDeduplicatesAndDisambiguatesTools(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	inputJSON := `{
+		"messages":[
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"` + second + `","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"{}"}
+		],
+		"tools":[
+			{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}},
+			{"type":"function","function":{"name":"lookup","description":"duplicate","parameters":{"type":"object"}}},
+			{"type":"function","function":{"name":"` + first + `","parameters":{"type":"object"}}},
+			{"type":"function","function":{"name":"` + second + `","parameters":{"type":"object"}}}
+		],
+		"tool_choice":{"type":"function","function":{"name":"` + second + `"}}
+	}`
+
+	out := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	declarations := gjson.GetBytes(out, "request.tools.0.functionDeclarations").Array()
+	if len(declarations) != 3 {
+		t.Fatalf("declaration count = %d, want 3. Output: %s", len(declarations), out)
+	}
+	firstMapped := declarations[1].Get("name").String()
+	secondMapped := declarations[2].Get("name").String()
+	if firstMapped == secondMapped || len(secondMapped) > 64 {
+		t.Fatalf("collision names = %q and %q, want distinct names <= 64 chars", firstMapped, secondMapped)
+	}
+	if got := gjson.GetBytes(out, "request.contents.0.parts.0.functionCall.name").String(); got != secondMapped {
+		t.Fatalf("functionCall.name = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+	if got := gjson.GetBytes(out, "request.contents.1.parts.0.functionResponse.name").String(); got != secondMapped {
+		t.Fatalf("functionResponse.name = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+	if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames.0").String(); got != secondMapped {
+		t.Fatalf("allowedFunctionNames.0 = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravityMapsToolChoiceModes(t *testing.T) {
+	for _, tt := range []struct {
+		choice string
+		mode   string
+	}{
+		{choice: `"none"`, mode: "NONE"},
+		{choice: `"auto"`, mode: "AUTO"},
+		{choice: `"required"`, mode: "ANY"},
+	} {
+		t.Run(tt.mode+tt.choice, func(t *testing.T) {
+			inputJSON := []byte(`{"messages":[{"role":"user","content":"hi"}],"tool_choice":` + tt.choice + `}`)
+			out := ConvertOpenAIRequestToAntigravity("gemini-3-flash", inputJSON, false)
+			if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != tt.mode {
+				t.Fatalf("tool choice mode = %q, want %q. Output: %s", got, tt.mode, out)
+			}
+		})
+	}
+}
