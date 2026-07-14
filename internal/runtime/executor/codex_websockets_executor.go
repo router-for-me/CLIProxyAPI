@@ -991,10 +991,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				if sess != nil && !sentPayload && isCodexWebsocketStaleTerminalCloseError(errRead) {
 					if !canRetryCodexWebsocketRequestAfterStaleTerminalClose(sess, upstreamBody) {
 						terminateReason = "stale_terminal_close_append_without_retry"
-						helps.RecordAPIWebsocketError(ctx, e.cfg, "read_stale_terminal_close_append_without_retry", errRead)
-						sess.notifyUpstreamDisconnect(errRead)
-						reporter.PublishFailure(ctx, errRead)
-						_ = send(cliproxyexecutor.StreamChunk{Err: errRead})
+						stateLossErr := e.failCodexWebsocketRequestWithoutUpstreamContext(ctx, sess, conn, "read_stale_terminal_close_append_without_retry", errRead)
+						terminateErr = stateLossErr
+						reporter.PublishFailure(ctx, stateLossErr)
+						_ = send(cliproxyexecutor.StreamChunk{Err: stateLossErr})
 						return
 					}
 					terminateReason = "stale_terminal_close_retry"

@@ -1257,7 +1257,7 @@ func TestCodexWebsocketsExecuteStreamRetriesFastFollowAfterTerminalClose(t *test
 	}
 }
 
-func TestCodexWebsocketsExecuteStreamDoesNotRetryIncrementalRequestAfterStaleTerminalClose(t *testing.T) {
+func TestCodexWebsocketsExecuteStreamReturnsReplayableStateLossAfterStaleTerminalClose(t *testing.T) {
 	tests := []struct {
 		name    string
 		payload []byte
@@ -1376,25 +1376,15 @@ func TestCodexWebsocketsExecuteStreamDoesNotRetryIncrementalRequestAfterStaleTer
 			select {
 			case chunk, ok := <-result.Chunks:
 				if !ok {
-					t.Fatal("follow-up stream closed before stale terminal close error")
+					t.Fatal("follow-up stream closed before replayable state loss error")
 				}
-				if !isCodexWebsocketStaleTerminalCloseError(chunk.Err) {
-					t.Fatalf("follow-up chunk Err = %v, want stale terminal close error", chunk.Err)
-				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("timed out waiting for follow-up stale terminal close error")
-			}
-			select {
-			case errDisconnect, ok := <-disconnectCh:
-				if !ok {
-					t.Fatal("disconnect channel closed before delivering error")
-				}
-				if !isCodexWebsocketStaleTerminalCloseError(errDisconnect) {
-					t.Fatalf("disconnect error = %v, want stale terminal close error", errDisconnect)
+				if !isCodexWebsocketRequestWithoutUpstreamContextError(chunk.Err) {
+					t.Fatalf("follow-up chunk Err = %v, want replayable state loss error", chunk.Err)
 				}
 			case <-time.After(5 * time.Second):
-				t.Fatal("timed out waiting for upstream disconnect signal")
+				t.Fatal("timed out waiting for follow-up replayable state loss error")
 			}
+			assertNoCodexWebsocketDisconnectSignal(t, disconnectCh, "after replayable stale terminal close")
 			if got := websocketConnections.Load(); got != 1 {
 				t.Fatalf("websocket connection count = %d, want 1", got)
 			}
