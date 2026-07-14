@@ -687,8 +687,15 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			}
 		}
 		if toolDeclCount > 0 {
-			toolsJSON = []byte(`[]`)
-			toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", functionToolNode)
+			if decls := gjson.GetBytes(functionToolNode, "functionDeclarations"); decls.IsArray() {
+				deduped := util.DeduplicateFunctionDeclarations([]byte(decls.Raw))
+				functionToolNode, _ = sjson.SetRawBytes(functionToolNode, "functionDeclarations", deduped)
+				toolDeclCount = int(gjson.GetBytes(deduped, "#").Int())
+			}
+			if toolDeclCount > 0 {
+				toolsJSON = []byte(`[]`)
+				toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", functionToolNode)
+			}
 		}
 	}
 

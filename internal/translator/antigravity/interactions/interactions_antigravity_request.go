@@ -468,6 +468,13 @@ func copyInteractionsToolsToAntigravity(out []byte, root gjson.Result) []byte {
 		otherTools = append(otherTools, []byte(tool.Raw))
 		return true
 	})
+	if hasFunction {
+		if decls := gjson.GetBytes(functionToolNode, "functionDeclarations"); decls.IsArray() {
+			deduped := util.DeduplicateFunctionDeclarations([]byte(decls.Raw))
+			functionToolNode, _ = sjson.SetRawBytes(functionToolNode, "functionDeclarations", deduped)
+			hasFunction = gjson.GetBytes(deduped, "#").Int() > 0
+		}
+	}
 	toolsNode := []byte(`[]`)
 	if hasFunction {
 		toolsNode, _ = sjson.SetRawBytes(toolsNode, "-1", functionToolNode)

@@ -326,3 +326,23 @@ func RestoreSanitizedToolName(toolNameMap map[string]string, sanitizedName strin
 	}
 	return sanitizedName
 }
+
+// DeduplicateFunctionDeclarations removes duplicate function declarations by name,
+// keeping the first occurrence. Input must be a JSON array of declaration objects.
+func DeduplicateFunctionDeclarations(raw []byte) []byte {
+	result := gjson.ParseBytes(raw)
+	if !result.IsArray() {
+		return raw
+	}
+	seen := make(map[string]bool)
+	var parts []string
+	for _, decl := range result.Array() {
+		name := decl.Get("name").String()
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		parts = append(parts, decl.Raw)
+	}
+	return []byte("[" + strings.Join(parts, ",") + "]")
+}
