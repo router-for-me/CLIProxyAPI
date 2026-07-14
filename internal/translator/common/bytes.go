@@ -22,6 +22,25 @@ func ClaudeInputTokensJSON(count int64) []byte {
 	return out
 }
 
+func JoinRawArray(items [][]byte) []byte {
+	if len(items) == 0 {
+		return []byte("[]")
+	}
+	size := len(items) + 1
+	for _, item := range items {
+		size += len(item)
+	}
+	out := make([]byte, 0, size)
+	out = append(out, '[')
+	for i, item := range items {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, item...)
+	}
+	return append(out, ']')
+}
+
 func SSEEventData(event string, payload []byte) []byte {
 	out := make([]byte, 0, len(event)+len(payload)+14)
 	out = append(out, "event: "...)
