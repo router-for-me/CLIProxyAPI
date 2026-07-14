@@ -2,10 +2,8 @@
 
 ## Routing contract
 
-The `claude` PowerShell function starts normal Claude Code with permission
-prompts disabled. It does not change provider or compaction environment.
-
-The `claude-codex` function points Claude Code at CLIProxyAPI and uses:
+The native `claude` command is left unchanged. The `claude-codex` function
+points Claude Code at CLIProxyAPI and uses:
 
 | Claude class | Routed model |
 | --- | --- |
@@ -137,8 +135,8 @@ Run the interactive logins from the fork binary when either provider has no
 usable auth file:
 
 ```powershell
-C:\Code\CLIProxyAPI\bin\cli-proxy-api.exe -codex-login
-C:\Code\CLIProxyAPI\bin\cli-proxy-api.exe -claude-login
+.\cli-proxy-api.exe --config .\config.yaml --codex-login
+.\cli-proxy-api.exe --config .\config.yaml --claude-login
 ```
 
 Claude OAuth is what allows native Fable selected inside `/model` to remain on
@@ -169,11 +167,16 @@ oauth-model-alias:
 Leave `force-mapping` disabled. The class environment variables remain the
 primary Opus/Sonnet/Haiku mapping.
 
-The installed PowerShell launcher accepts an existing listener on port 8317
-only when its executable path is the fork binary and both the health endpoint
-and authenticated observability endpoint respond successfully. An unrelated
-or unhealthy listener fails explicitly instead of being mistaken for the
-proxy.
+Install the PowerShell function idempotently from the binary. The local proxy
+key is read from `config.yaml` and is not printed:
+
+```powershell
+.\cli-proxy-api.exe --config .\config.yaml --install-claude-code-aliases
+. $PROFILE.CurrentUserAllHosts
+```
+
+Use `--alias-dry-run` to preview whether the selected profile would change.
+The installer never replaces the native `claude` command.
 
 ## Observability
 
@@ -235,7 +238,7 @@ authoritative for cost, and the estimated portion remains normal OpenAI input.
 Provider-confirmed GPT-5.6 writes use OpenAI's documented 1.25x input rate.
 Native Claude/Fable cache-write values stay provider-reported.
 
-For bounded request diagnostics on this workstation, use:
+For bounded request diagnostics, use:
 
 ```yaml
 request-log: true

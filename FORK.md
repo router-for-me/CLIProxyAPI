@@ -2,17 +2,20 @@
 
 This repository is a narrow fork of
 [`router-for-me/CLIProxyAPI`](https://github.com/router-for-me/CLIProxyAPI).
-It keeps upstream as the canonical base and adds three isolated capabilities:
+It keeps upstream as the canonical base and adds five isolated capabilities:
 
 1. Codex-native Responses compaction for Claude Code requests routed to Codex.
 2. Provider-neutral request, cache, cost, and compaction observability in the
    server log and TUI.
 3. An opt-in compact request-log policy that retains full payloads only for
    failures and rolls body-free success summaries in bounded time windows.
+4. Bounded multi-pass native compaction recovery for oversized fresh or reset
+   Claude Code lanes.
+5. An idempotent cross-platform installer for the `claude-codex` shell
+   function that leaves the native `claude` command untouched.
 
-The latest tagged release in the current fork base is upstream `v7.2.72` at
-`6279bb8a`. The feature commits are rebased through that upstream `main` on
-`feature/hybrid-compaction-observability`.
+The current fork base is upstream `v7.2.73`. Feature commits are rebased through
+the current upstream `main` on `feature/hybrid-compaction-observability`.
 
 ## Remotes and upstream pulls
 
@@ -61,6 +64,9 @@ OAuth files, local configuration, logs, or secrets into Git.
   total log-directory size cap remains available.
 - The TUI cost is an estimate based on the built-in catalog, not an invoice or
   subscription charge.
+- `--install-claude-code-aliases` supports PowerShell, Bash, Zsh, and Fish. It
+  modifies only a marked profile block and does not alter Claude Code's native
+  permission behavior.
 
 See [docs/windows-claude-code-hybrid.md](docs/windows-claude-code-hybrid.md)
 for the machine setup and operating model.
