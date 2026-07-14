@@ -36,10 +36,14 @@ var requestLogID atomic.Uint64
 const (
 	WebsocketTimelineSourceContextKey    = "WEBSOCKET_TIMELINE_SOURCE"
 	APIRequestSourceContextKey           = "API_REQUEST_SOURCE"
+	DeferredAPIRequestContextKey         = "DEFERRED_API_REQUEST"
 	APIResponseSourceContextKey          = "API_RESPONSE_SOURCE"
 	APIResponseCapturedContextKey        = "API_RESPONSE_CAPTURED"
 	APIWebsocketTimelineSourceContextKey = "API_WEBSOCKET_TIMELINE_SOURCE"
 )
+
+// DeferredAPIRequest builds an upstream request log only when an error log needs it.
+type DeferredAPIRequest func() []byte
 
 type homeRequestLogClient interface {
 	HeartbeatOK() bool
