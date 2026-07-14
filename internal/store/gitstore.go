@@ -862,6 +862,14 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 	} else if errRewrite := s.rewriteHeadAsSingleCommit(repo, headRef.Name(), commitHash, message, signature); errRewrite != nil {
 		return errRewrite
 	}
+	// Repack loose objects written by rewriteHeadAsSingleCommit before pushing.
+	// On ephemeral filesystems (e.g. Render free tier), the repo is freshly cloned
+	// on every restart so all existing objects live in packfiles. The squashed orphan
+	// commit is written as a loose object; without repacking, go-git cannot locate it
+	// during push and returns "packfile not found".
+	if err := repo.RepackObjects(&git.RepackConfig{}); err != nil {
+		return fmt.Errorf("git token store: repack: %w", err)
+	}
 	pushOpts := &git.PushOptions{Auth: s.gitAuth(), Force: true}
 	if s.branch != "" {
 		pushOpts.RefSpecs = []config.RefSpec{config.RefSpec("refs/heads/" + s.branch + ":refs/heads/" + s.branch)}
