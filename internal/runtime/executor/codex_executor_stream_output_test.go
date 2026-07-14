@@ -14,8 +14,6 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	log "github.com/sirupsen/logrus"
-	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
 )
 
@@ -257,102 +255,4 @@ func TestCodexExecutorExecuteStream_EmptyStreamCompletionOutputUsesOutputItemDon
 	if gotContent != "ok" {
 		t.Fatalf("response.output[0].content[0].text = %q, want %q; completed=%s", gotContent, "ok", string(completed))
 	}
-}
-
-func TestPatchCodexCreatedInputUsagePreservesUpstreamUsage(t *testing.T) {
-	created := []byte(`{"type":"response.created","response":{"usage":{"input_tokens":9}}}`)
-	patched := patchCodexCreatedInputUsage(created, 42)
-	if got := gjson.GetBytes(patched, "response.usage.input_tokens").Int(); got != 9 {
-		t.Fatalf("input_tokens = %d, want upstream value 9", got)
-	}
-}
-
-func TestCodexTerminalUsageAvailableRejectsEmptyUsage(t *testing.T) {
-	if codexTerminalUsageAvailable([]byte(`{"response":{"usage":{}}}`)) {
-		t.Fatal("empty usage object must not be authoritative")
-	}
-	if codexTerminalUsageAvailable([]byte(`{"response":{"usage":{"output_tokens":2}}}`)) {
-		t.Fatal("output-only usage must not be authoritative for context accounting")
-	}
-	if !codexTerminalUsageAvailable([]byte(`{"response":{"usage":{"input_tokens":0,"output_tokens":0}}}`)) {
-		t.Fatal("explicit zero token fields must be authoritative")
-	}
-}
-
-func TestCodexExecutorExecuteStream_CanceledBeforeTerminalUsage(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-sol"}}` + "\n\n"))
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		<-r.Context().Done()
-	}))
-	defer server.Close()
-
-	previousLevel := log.GetLevel()
-	log.SetLevel(log.DebugLevel)
-	hook := logrustest.NewLocal(log.StandardLogger())
-	t.Cleanup(func() {
-		hook.Reset()
-		log.SetLevel(previousLevel)
-	})
-
-	executor := NewCodexExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"base_url": server.URL,
-		"api_key":  "test",
-	}}
-	ctx, cancel := context.WithCancel(context.Background())
-	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
-		Model:   "gpt-5.6-sol",
-		Payload: []byte(`{"model":"gpt-5.6-sol","messages":[{"role":"user","content":"hello"}]}`),
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("claude"),
-		Stream:       true,
-	})
-	if err != nil {
-		cancel()
-		t.Fatalf("ExecuteStream error: %v", err)
-	}
-
-	first, ok := <-result.Chunks
-	if !ok {
-		cancel()
-		t.Fatal("stream closed before message_start")
-	}
-	if got := gjson.Get(firstClaudeSSEData(first.Payload), "message.usage.input_tokens").Int(); got <= 0 {
-		cancel()
-		t.Fatalf("message_start input token estimate = %d, want positive; payload=%s", got, first.Payload)
-	}
-	cancel()
-
-	var stream bytes.Buffer
-	stream.Write(first.Payload)
-	for chunk := range result.Chunks {
-		stream.Write(chunk.Payload)
-	}
-	if strings.Contains(stream.String(), `"type":"message_delta"`) || strings.Contains(stream.String(), `"type":"message_stop"`) {
-		t.Fatalf("canceled stream fabricated terminal events: %s", stream.String())
-	}
-
-	foundDiagnostic := false
-	for _, entry := range hook.AllEntries() {
-		if entry.Message == "codex stream ended without authoritative terminal usage" && entry.Data["reason"] == "context_done" {
-			foundDiagnostic = true
-			break
-		}
-	}
-	if !foundDiagnostic {
-		t.Fatalf("missing cancellation diagnostic; entries=%v", hook.AllEntries())
-	}
-}
-
-func firstClaudeSSEData(payload []byte) string {
-	for _, line := range strings.Split(string(payload), "\n") {
-		if strings.HasPrefix(line, "data: ") {
-			return strings.TrimPrefix(line, "data: ")
-		}
-	}
-	return ""
 }

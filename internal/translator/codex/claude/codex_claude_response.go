@@ -98,15 +98,6 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		template = []byte(`{"type":"message_start","message":{"id":"","type":"message","role":"assistant","model":"claude-opus-4-1-20250805","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0},"content":[],"stop_reason":null}}`)
 		template, _ = sjson.SetBytes(template, "message.model", rootResult.Get("response.model").String())
 		template, _ = sjson.SetBytes(template, "message.id", rootResult.Get("response.id").String())
-		inputTokens, outputTokens, cachedTokens, cacheCreationTokens := extractResponsesUsage(rootResult.Get("response.usage"))
-		template, _ = sjson.SetBytes(template, "message.usage.input_tokens", inputTokens)
-		template, _ = sjson.SetBytes(template, "message.usage.output_tokens", outputTokens)
-		if cachedTokens > 0 {
-			template, _ = sjson.SetBytes(template, "message.usage.cache_read_input_tokens", cachedTokens)
-		}
-		if cacheCreationTokens > 0 {
-			template, _ = sjson.SetBytes(template, "message.usage.cache_creation_input_tokens", cacheCreationTokens)
-		}
 
 		output = translatorcommon.AppendSSEEventBytes(output, "message_start", template, 2)
 	case "response.reasoning_summary_part.added":
@@ -150,14 +141,11 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		output = appendPendingCodexFunctionCallsFromTerminal(output, params, originalRequestRawJSON, responseData)
 		template, _ = sjson.SetBytes(template, "delta.stop_reason", mapCodexStopReasonToClaude(codexStopReason(responseData), params.HasEmittedToolUse))
 		template = setClaudeStopSequence(template, "delta.stop_sequence", responseData)
-		inputTokens, outputTokens, cachedTokens, cacheCreationTokens := extractResponsesUsage(responseData.Get("usage"))
+		inputTokens, outputTokens, cachedTokens := extractResponsesUsage(responseData.Get("usage"))
 		template, _ = sjson.SetBytes(template, "usage.input_tokens", inputTokens)
 		template, _ = sjson.SetBytes(template, "usage.output_tokens", outputTokens)
 		if cachedTokens > 0 {
 			template, _ = sjson.SetBytes(template, "usage.cache_read_input_tokens", cachedTokens)
-		}
-		if cacheCreationTokens > 0 {
-			template, _ = sjson.SetBytes(template, "usage.cache_creation_input_tokens", cacheCreationTokens)
 		}
 
 		output = translatorcommon.AppendSSEEventBytes(output, "message_delta", template, 2)
@@ -364,14 +352,11 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
 	out, _ = sjson.SetBytes(out, "id", responseData.Get("id").String())
 	out, _ = sjson.SetBytes(out, "model", responseData.Get("model").String())
-	inputTokens, outputTokens, cachedTokens, cacheCreationTokens := extractResponsesUsage(responseData.Get("usage"))
+	inputTokens, outputTokens, cachedTokens := extractResponsesUsage(responseData.Get("usage"))
 	out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
 	out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
 	if cachedTokens > 0 {
 		out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", cachedTokens)
-	}
-	if cacheCreationTokens > 0 {
-		out, _ = sjson.SetBytes(out, "usage.cache_creation_input_tokens", cacheCreationTokens)
 	}
 
 	hasToolCall := false
@@ -793,29 +778,24 @@ func resolveCodexClaudeToolUseName(originalRequestRawJSON []byte, name string) s
 	return name
 }
 
-func extractResponsesUsage(usage gjson.Result) (int64, int64, int64, int64) {
+func extractResponsesUsage(usage gjson.Result) (int64, int64, int64) {
 	if !usage.Exists() || usage.Type == gjson.Null {
-		return 0, 0, 0, 0
+		return 0, 0, 0
 	}
 
 	inputTokens := usage.Get("input_tokens").Int()
 	outputTokens := usage.Get("output_tokens").Int()
 	cachedTokens := usage.Get("input_tokens_details.cached_tokens").Int()
-	cacheCreationTokens := usage.Get("input_tokens_details.cache_creation_tokens").Int()
-	if !usage.Get("input_tokens_details.cache_creation_tokens").Exists() {
-		cacheCreationTokens = usage.Get("input_tokens_details.cache_write_tokens").Int()
+
+	if cachedTokens > 0 {
+		if inputTokens >= cachedTokens {
+			inputTokens -= cachedTokens
+		} else {
+			inputTokens = 0
+		}
 	}
 
-	// Responses input_tokens includes cached and cache-creation input. Claude
-	// reports those buckets separately, so subtract each once while preserving
-	// the upstream total even if a malformed breakdown exceeds it.
-	remainingInputTokens := max(inputTokens, 0)
-	cachedTokens = min(max(cachedTokens, 0), remainingInputTokens)
-	remainingInputTokens -= cachedTokens
-	cacheCreationTokens = min(max(cacheCreationTokens, 0), remainingInputTokens)
-	remainingInputTokens -= cacheCreationTokens
-
-	return remainingInputTokens, outputTokens, cachedTokens, cacheCreationTokens
+	return inputTokens, outputTokens, cachedTokens
 }
 
 // buildReverseMapFromClaudeOriginalShortToOriginal builds a map[short]original from original Claude request tools.
