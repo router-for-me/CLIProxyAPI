@@ -86,6 +86,17 @@ func NewXAIExecutor(cfg *config.Config) *XAIExecutor {
 	return &XAIExecutor{cfg: cfg}
 }
 
+// xsearchResponseFilterEnabled reports whether the internal x_search response
+// filter should run. It defaults to true (upstream behavior) when the config
+// field is absent; set xai.x-search-response-filter: false to disable it and
+// fix grok multi-turn output truncation. Hot-reloadable via config; xAI-only.
+func (e *XAIExecutor) xsearchResponseFilterEnabled() bool {
+	if e.cfg != nil && e.cfg.XAI.XSearchResponseFilter != nil {
+		return *e.cfg.XAI.XSearchResponseFilter
+	}
+	return true
+}
+
 // Identifier returns the provider identifier.
 func (e *XAIExecutor) Identifier() string {
 	return "xai"
@@ -937,7 +948,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 		clientDeclaredTools:   clientDeclaredTools,
 		sessionID:             sessionID,
 		replayScope:           replayScope,
-		filterInternalXSearch: xaiRequestHasNativeXSearch(body),
+		filterInternalXSearch: e.xsearchResponseFilterEnabled() && xaiRequestHasNativeXSearch(body),
 	}, nil
 }
 

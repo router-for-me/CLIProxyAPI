@@ -131,6 +131,9 @@ type Config struct {
 	// Codex configures provider-wide Codex request behavior.
 	Codex CodexConfig `yaml:"codex" json:"codex"`
 
+	// XAI configures provider-wide xAI (Grok) request behavior.
+	XAI XAIConfig `yaml:"xai" json:"xai"`
+
 	// CodexHeaderDefaults configures fallback headers for Codex OAuth model requests.
 	// These are used only when the client does not send its own headers.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
@@ -340,6 +343,18 @@ type FingerprintObserveConfig struct {
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
+}
+
+// XAIConfig holds provider-wide xAI (Grok) behavior toggles.
+type XAIConfig struct {
+	// XSearchResponseFilter controls the internal x_search response filter that
+	// hides native backend-search traces from Responses clients. When nil (field
+	// absent) it defaults to true, preserving upstream behavior. Set to false to
+	// disable the filter, which fixes grok multi-turn output truncation (the
+	// filter can over-drop the final answer). Disabling does NOT remove x_search
+	// injection, so backend web_search stays available. xAI-only; never affects
+	// Codex or other providers.
+	XSearchResponseFilter *bool `yaml:"x-search-response-filter" json:"x-search-response-filter"`
 }
 
 // TLSConfig holds HTTPS server settings.
