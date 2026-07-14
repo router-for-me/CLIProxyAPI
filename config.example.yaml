@@ -134,11 +134,23 @@ save-cooldown-status: false
 # Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
 transient-error-cooldown-seconds: 0
 
-# When true, globally disable Claude request cloaking (the Claude Code CLI disguise and
-# system prompt replacement), so the original system prompt is passed through to Claude as-is.
-# Individual credentials can still override this: a claude-api-key entry via its "cloak.mode",
-# or a Claude OAuth/token file via a "cloak_mode" value. Default false keeps the per-client
-# "auto" behavior (cloak only non-Claude-Code clients).
+# Global default Claude cloak mode: "auto" (default), "always", or "never".
+# Cloaking is the Claude Code CLI disguise (device fingerprint + fake user id +
+# system prompt replacement). "auto" cloaks only clients whose User-Agent is not
+# Claude Code; "always" cloaks every request regardless of client; "never" disables
+# it. Set "always" when this proxy only ever fronts non-Claude-Code apps: it stops a
+# stray "claude-cli" User-Agent from disabling cloaking (which makes Anthropic reject
+# premium models with 429 while Haiku still works). Individual credentials can still
+# override this via a claude-api-key "cloak.mode" or a Claude OAuth/token file
+# "cloak_mode" value. Empty keeps "auto".
+claude-cloak-mode: "auto"
+
+# When true, globally disable Claude request cloaking (equivalent to
+# claude-cloak-mode: "never"; kept for backward compatibility and takes precedence
+# over claude-cloak-mode when true), so the original system prompt is passed through
+# to Claude as-is. Individual credentials can still override this: a claude-api-key
+# entry via its "cloak.mode", or a Claude OAuth/token file via a "cloak_mode" value.
+# Default false keeps the per-client "auto" behavior (cloak only non-Claude-Code clients).
 disable-claude-cloak-mode: false
 
 # disable-image-generation supports: false (default), true, "chat", or "passthrough".
