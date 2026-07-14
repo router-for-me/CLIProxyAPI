@@ -10,8 +10,13 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// DefaultServiceTier is used when a request does not specify service_tier.
+// DefaultServiceTier is retained for direct SDK and non-OpenAI usage callers.
 const DefaultServiceTier = "default"
+
+// AutoServiceTier is the OpenAI request semantics when service_tier is omitted.
+// OpenAI HTTP handlers set it explicitly, without changing other providers'
+// historical direct-SDK default.
+const AutoServiceTier = "auto"
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
@@ -27,9 +32,10 @@ type Record struct {
 	Source       string
 	// ReasoningEffort stores the translated upstream thinking level for request event logs.
 	ReasoningEffort string
-	// ServiceTier stores the client-requested service tier for request event logs.
+	// ServiceTier stores the client-requested service tier.
 	ServiceTier string
-	// RequestServiceTier explicitly aliases the client-requested service tier.
+	// RequestServiceTier is a deprecated input-only alias retained for existing
+	// plugin callers. It is normalized into ServiceTier and never emitted.
 	RequestServiceTier string
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string

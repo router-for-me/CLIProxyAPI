@@ -55,6 +55,90 @@ func TestConvertOpenAIRequestToAntigravitySkipsEmptyTextPartsWithoutNulls(t *tes
 	}
 }
 
+func TestConvertOpenAIRequestToAntigravityPreservesReasoningContent(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"messages": [
+			{"role": "user", "content": "hi"},
+			{"role": "assistant", "content": "", "reasoning_content": "thinking only"},
+			{"role": "user", "content": "say ok"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), true)
+	contents := gjson.GetBytes(result, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents length = %d, want 3. Output: %s", len(contents), result)
+	}
+	part := contents[1].Get("parts.0")
+	if got := contents[1].Get("role").String(); got != "model" {
+		t.Fatalf("contents.1.role = %q, want model. Output: %s", got, result)
+	}
+	if got := part.Get("text").String(); got != "thinking only" {
+		t.Fatalf("reasoning text = %q, want thinking only. Output: %s", got, result)
+	}
+	if !part.Get("thought").Bool() {
+		t.Fatalf("reasoning part should be marked as thought. Output: %s", result)
+	}
+	if got := part.Get("thoughtSignature").String(); got != antigravityFunctionThoughtSignature {
+		t.Fatalf("thoughtSignature = %q, want bypass sentinel. Output: %s", got, result)
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravityPreservesReasoningBeforeVisibleContentAndToolCall(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"messages": [
+			{"role": "user", "content": "hi"},
+			{"role": "assistant", "content": "visible answer", "reasoning_content": "thinking only", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+			{"role": "tool", "tool_call_id": "call_1", "content": "{\"output\":\"ok\"}"},
+			{"role": "user", "content": "say ok"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), true)
+	contents := gjson.GetBytes(result, "request.contents").Array()
+	if len(contents) != 4 {
+		t.Fatalf("contents length = %d, want 4. Output: %s", len(contents), result)
+	}
+	parts := contents[1].Get("parts").Array()
+	if len(parts) != 3 {
+		t.Fatalf("model parts length = %d, want 3. Output: %s", len(parts), result)
+	}
+	if got := parts[0].Get("text").String(); got != "thinking only" || !parts[0].Get("thought").Bool() {
+		t.Fatalf("first part should be the reasoning thought. Output: %s", result)
+	}
+	if got := parts[1].Get("text").String(); got != "visible answer" || parts[1].Get("thought").Bool() {
+		t.Fatalf("second part should be visible assistant content. Output: %s", result)
+	}
+	if got := parts[2].Get("functionCall.name").String(); got != "read_file" {
+		t.Fatalf("functionCall.name = %q, want read_file. Output: %s", got, result)
+	}
+	if got := parts[2].Get("thoughtSignature").String(); got != antigravityFunctionThoughtSignature {
+		t.Fatalf("functionCall thoughtSignature = %q, want bypass sentinel. Output: %s", got, result)
+	}
+	if got := contents[2].Get("parts.0.functionResponse.name").String(); got != "read_file" {
+		t.Fatalf("functionResponse.name = %q, want read_file. Output: %s", got, result)
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravitySkipsEmptyAssistantMessages(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"messages": [
+			{"role": "user", "content": "hi"},
+			{"role": "assistant", "content": "", "tool_calls": [{"type": "function", "function": {"name": "", "arguments": "{}"}}, {"type": "custom"}]},
+			{"role": "user", "content": "say ok"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), true)
+	contents := gjson.GetBytes(result, "request.contents").Array()
+	if len(contents) != 2 {
+		t.Fatalf("contents length = %d, want 2. Output: %s", len(contents), result)
+	}
+}
+
 func TestConvertOpenAIRequestToAntigravityThinkingAliases(t *testing.T) {
 	tests := []struct {
 		name string
