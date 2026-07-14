@@ -31,7 +31,7 @@ jobs:
       - name: Check formatting
         shell: bash
         run: |
-          files="$(gofmt -l $(git ls-files '*.go'))"
+          files="$(git ls-files -z '*.go' | xargs -0 gofmt -l)"
           if [[ -n "$files" ]]; then
             printf 'Files require gofmt:\n%s\n' "$files"
             exit 1

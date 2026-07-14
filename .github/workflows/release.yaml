@@ -151,9 +151,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-          echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
-          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          {
+            echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}"
+            echo "COMMIT=$(git rev-parse --short HEAD)"
+            echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_ENV"
       - name: Build archive
         shell: bash
         env:
@@ -269,9 +271,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-          echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
-          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          {
+            echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}"
+            echo "COMMIT=$(git rev-parse --short HEAD)"
+            echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_ENV"
       - name: Build archive
         shell: bash
         env:
@@ -410,9 +414,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-          echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
-          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          {
+            echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}"
+            echo "COMMIT=$(git rev-parse --short HEAD)"
+            echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_ENV"
       - name: Build archive
         shell: bash
         env:
@@ -539,12 +545,16 @@ jobs:
           release_version="${GITHUB_REF_NAME#v}"
           commit="$(git rev-parse --short HEAD)"
           build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          echo "RELEASE_VERSION=$release_version" >> "$GITHUB_ENV"
-          echo "COMMIT=$commit" >> "$GITHUB_ENV"
-          echo "BUILD_DATE=$build_date" >> "$GITHUB_ENV"
-          echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
-          echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          echo "build_date=$build_date" >> "$GITHUB_OUTPUT"
+          {
+            echo "RELEASE_VERSION=$release_version"
+            echo "COMMIT=$commit"
+            echo "BUILD_DATE=$build_date"
+          } >> "$GITHUB_ENV"
+          {
+            echo "release_version=$release_version"
+            echo "commit=$commit"
+            echo "build_date=$build_date"
+          } >> "$GITHUB_OUTPUT"
       - name: Prepare FreeBSD output
         shell: bash
         run: |
