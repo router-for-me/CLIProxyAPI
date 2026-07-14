@@ -804,6 +804,273 @@ func TestCallIDsMatchBetweenCallAndOutput(t *testing.T) {
 	}
 }
 
+func TestCustomToolCallHistory(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.6-sol",
+		"messages": [
+			{"role": "user", "content": "Update the specification."},
+			{
+				"role": "assistant",
+				"content": "I will update the file.",
+				"tool_calls": [
+					{
+						"id": "call_apply_patch",
+						"type": "custom",
+						"custom": {
+							"name": "apply_patch",
+							"input": "*** Begin Patch\n*** Add File: spec.md\n+done\n*** End Patch"
+						}
+					}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_apply_patch",
+				"content": "Added spec.md"
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "apply_patch",
+					"description": "Apply a freeform patch.",
+					"parameters": {
+						"type": "object",
+						"properties": {"input": {"type": "string"}},
+						"required": ["input"]
+					}
+				}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 4 {
+		t.Fatalf("expected 4 input items, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	}
+
+	customCall := items[2]
+	if customCall.Get("type").String() != "custom_tool_call" {
+		t.Fatalf("expected custom_tool_call, got %s", customCall.Raw)
+	}
+	if customCall.Get("call_id").String() != "call_apply_patch" {
+		t.Fatalf("expected custom call_id to be preserved, got %s", customCall.Raw)
+	}
+	if customCall.Get("name").String() != "apply_patch" {
+		t.Fatalf("expected custom tool name apply_patch, got %s", customCall.Raw)
+	}
+	if customCall.Get("input").String() != "*** Begin Patch\n*** Add File: spec.md\n+done\n*** End Patch" {
+		t.Fatalf("expected custom tool input to be preserved, got %s", customCall.Raw)
+	}
+
+	customOutput := items[3]
+	if customOutput.Get("type").String() != "custom_tool_call_output" {
+		t.Fatalf("expected custom_tool_call_output, got %s", customOutput.Raw)
+	}
+	if customOutput.Get("call_id").String() != "call_apply_patch" {
+		t.Fatalf("expected custom output call_id to be preserved, got %s", customOutput.Raw)
+	}
+	if customOutput.Get("output").String() != "Added spec.md" {
+		t.Fatalf("expected custom tool output to be preserved, got %s", customOutput.Raw)
+	}
+}
+
+func TestMixedToolCallHistoryPreservesCallFamilies(t *testing.T) {
+	input := []byte(`{
+		"messages": [
+			{"role":"user","content":"Run both tools."},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_function","type":"function","function":{"name":"lookup","arguments":"{}"}},
+				{"id":"call_custom","type":"custom","custom":{"name":"apply_patch","input":"patch"}}
+			]},
+			{"role":"tool","tool_call_id":"call_custom","content":"patched"},
+			{"role":"tool","tool_call_id":"call_function","content":"found"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 5 {
+		t.Fatalf("expected 5 input items, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	}
+
+	expectedTypes := []string{"message", "function_call", "custom_tool_call", "custom_tool_call_output", "function_call_output"}
+	for i, expectedType := range expectedTypes {
+		if got := items[i].Get("type").String(); got != expectedType {
+			t.Fatalf("item %d: expected type %s, got %s: %s", i, expectedType, got, items[i].Raw)
+		}
+	}
+	if got := items[3].Get("call_id").String(); got != "call_custom" {
+		t.Fatalf("expected custom output call_id call_custom, got %s", items[3].Raw)
+	}
+	if got := items[4].Get("call_id").String(); got != "call_function" {
+		t.Fatalf("expected function output call_id call_function, got %s", items[4].Raw)
+	}
+}
+
+func TestToolCallHistoryAllowsReusedCallIDAcrossRounds(t *testing.T) {
+	input := []byte(`{
+		"messages": [
+			{"role":"user","content":"Run the first tool."},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_reused","type":"function","function":{"name":"lookup","arguments":"{}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_reused","content":"found"},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_reused","type":"custom","custom":{"name":"apply_patch","input":"patch"}}
+			]},
+			{"role":"tool","tool_call_id":"call_reused","content":"patched"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 5 {
+		t.Fatalf("expected 5 input items, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	}
+	if got := items[2].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("expected first reused call output to remain function_call_output, got %s", items[2].Raw)
+	}
+	if got := items[4].Get("type").String(); got != "custom_tool_call_output" {
+		t.Fatalf("expected second reused call output to be custom_tool_call_output, got %s", items[4].Raw)
+	}
+}
+
+func TestCustomToolCallHistorySynthesizesMissingCallID(t *testing.T) {
+	input := []byte(`{
+		"messages": [
+			{"role":"tool","content":"orphan"},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"type":"custom","custom":{"name":"apply_patch","input":"patch"}}
+			]},
+			{"role":"tool","content":"patched"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 2 {
+		t.Fatalf("expected orphan output to be dropped and missing ID pair preserved, got %d items: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	}
+	if got := items[0].Get("type").String(); got != "custom_tool_call" {
+		t.Fatalf("expected custom_tool_call, got %s", items[0].Raw)
+	}
+	if got := items[1].Get("type").String(); got != "custom_tool_call_output" {
+		t.Fatalf("expected custom_tool_call_output, got %s", items[1].Raw)
+	}
+	callID := items[0].Get("call_id").String()
+	if callID == "" {
+		t.Fatalf("expected synthesized call_id, got %s", items[0].Raw)
+	}
+	if got := items[1].Get("call_id").String(); got != callID {
+		t.Fatalf("expected synthesized call_id %q on output, got %s", callID, items[1].Raw)
+	}
+}
+
+func TestToolCallHistoryClearsUnmatchedCallAtNewBatch(t *testing.T) {
+	input := []byte(`{
+		"messages": [
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_reused","type":"custom","custom":{"name":"apply_patch","input":"old patch"}}
+			]},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_reused","type":"function","function":{"name":"lookup","arguments":"{}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_reused","content":"found"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("expected two calls and one output, got %d items: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	}
+	if got := items[2].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("expected new batch output to match function call, got %s", items[2].Raw)
+	}
+}
+
+func TestToolCallOutputWithoutIDUsesPendingCall(t *testing.T) {
+	input := []byte(`{
+		"messages": [
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_explicit","type":"function","function":{"name":"lookup","arguments":"{}"}},
+				{"type":"custom","custom":{"name":"apply_patch","input":"patch"}}
+			]},
+			{"role":"tool","content":"found"},
+			{"role":"tool","content":"patched"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 4 {
+		t.Fatalf("expected two calls and two outputs, got %d items: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	}
+	if got := items[2].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("expected first empty-ID output to match function call, got %s", items[2].Raw)
+	}
+	if got := items[2].Get("call_id").String(); got != "call_explicit" {
+		t.Fatalf("expected explicit pending call_id, got %s", items[2].Raw)
+	}
+	if got := items[3].Get("type").String(); got != "custom_tool_call_output" {
+		t.Fatalf("expected second empty-ID output to match custom call, got %s", items[3].Raw)
+	}
+	if got := items[3].Get("call_id").String(); got == "" {
+		t.Fatalf("expected synthesized custom output call_id, got %s", items[3].Raw)
+	}
+}
+
+func TestAmbiguousDuplicateToolCallIDsAreDropped(t *testing.T) {
+	input := []byte(`{
+		"messages": [
+			{"role":"user","content":"Run both tools."},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_duplicate","type":"function","function":{"name":"lookup","arguments":"{}"}},
+				{"id":"call_duplicate","type":"custom","custom":{"name":"apply_patch","input":"patch"}}
+			]},
+			{"role":"tool","tool_call_id":"call_duplicate","content":"first"},
+			{"role":"tool","tool_call_id":"call_duplicate","content":"second"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 1 || items[0].Get("role").String() != "user" {
+		t.Fatalf("expected ambiguous calls and outputs to be dropped, got %s", gjson.GetBytes(out, "input").Raw)
+	}
+}
+
+func TestOrphanAndDuplicateToolCallOutputsAreDropped(t *testing.T) {
+	input := []byte(`{
+		"messages": [
+			{"role":"tool","tool_call_id":"call_orphan","content":"orphan"},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_custom","type":"custom","custom":{"name":"apply_patch","input":"patch"}}
+			]},
+			{"role":"tool","tool_call_id":"call_custom","content":"patched"},
+			{"role":"tool","tool_call_id":"call_custom","content":"duplicate"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 2 {
+		t.Fatalf("expected only the matched call and first output, got %d items: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	}
+	if got := items[0].Get("type").String(); got != "custom_tool_call" {
+		t.Fatalf("expected custom_tool_call, got %s", items[0].Raw)
+	}
+	if got := items[1].Get("type").String(); got != "custom_tool_call_output" {
+		t.Fatalf("expected custom_tool_call_output, got %s", items[1].Raw)
+	}
+	if got := items[1].Get("output").String(); got != "patched" {
+		t.Fatalf("expected first matched output to be preserved, got %s", items[1].Raw)
+	}
+}
+
 // Tools array should carry over to the Responses format output.
 func TestToolsDefinitionTranslated(t *testing.T) {
 	input := []byte(`{
