@@ -2003,6 +2003,12 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 	if errCode == "" {
 		errCode = strings.TrimSpace(gjson.GetBytes(payload, "code").String())
 	}
+	if errCode == "" {
+		errorValue := gjson.GetBytes(payload, "error")
+		if errorValue.Type == gjson.String {
+			errCode = strings.TrimSpace(errorValue.String())
+		}
+	}
 	errType := strings.TrimSpace(gjson.GetBytes(payload, "error.type").String())
 	if errType == "" {
 		errType = strings.TrimSpace(gjson.GetBytes(payload, "body.error.type").String())
