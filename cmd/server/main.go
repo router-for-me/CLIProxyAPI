@@ -47,12 +47,6 @@ var (
 	DefaultConfigPath = ""
 )
 
-const storagePluginSyncTimeout = time.Minute
-
-func storagePluginSyncContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), storagePluginSyncTimeout)
-}
-
 // init initializes the shared logger setup.
 func init() {
 	logging.SetupBaseLogger()
@@ -69,6 +63,10 @@ func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode,
 		return false
 	}
 	return safemode.HasExampleAPIKeys(cfg.APIKeys)
+}
+
+func shouldSyncStoragePlugins(commandMode, storageEnabled bool) bool {
+	return storageEnabled && !commandMode
 }
 
 // main is the entry point of the application.
@@ -545,13 +543,14 @@ func main() {
 	}
 	managementasset.SetCurrentConfig(cfg)
 
+	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin
+
 	// Create login options to be used in authentication flows.
 	options := &cmd.LoginOptions{
 		NoBrowser:    noBrowser,
 		CallbackPort: oauthCallbackPort,
 	}
 
-	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
@@ -575,11 +574,8 @@ func main() {
 
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
-	if usePostgresStore || useObjectStore || useGitStore {
-		ctxPluginSync, cancelPluginSync := storagePluginSyncContext()
-		errSync := homeplugins.Sync(ctxPluginSync, cfg, pluginHost)
-		cancelPluginSync()
-		if errSync != nil {
+	if shouldSyncStoragePlugins(commandMode, usePostgresStore || useObjectStore || useGitStore) {
+		if errSync := homeplugins.Sync(context.Background(), cfg, pluginHost); errSync != nil {
 			log.Errorf("failed to sync plugins from storage-backed config: %v", errSync)
 			return
 		}

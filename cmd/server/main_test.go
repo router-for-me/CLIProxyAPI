@@ -2,22 +2,29 @@ package main
 
 import (
 	"testing"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
-func TestStoragePluginSyncContextDeadline(t *testing.T) {
-	ctx, cancel := storagePluginSyncContext()
-	defer cancel()
-
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		t.Fatal("storagePluginSyncContext() has no deadline")
+func TestShouldSyncStoragePlugins(t *testing.T) {
+	tests := []struct {
+		name        string
+		commandMode bool
+		useStore    bool
+		want        bool
+	}{
+		{name: "server with storage backend", useStore: true, want: true},
+		{name: "server without storage backend", want: false},
+		{name: "native command with storage backend", commandMode: true, useStore: true, want: false},
 	}
-	remaining := time.Until(deadline)
-	if remaining > storagePluginSyncTimeout || remaining < storagePluginSyncTimeout-time.Second {
-		t.Fatalf("storagePluginSyncContext() deadline in %s, want about %s", remaining, storagePluginSyncTimeout)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldSyncStoragePlugins(tt.commandMode, tt.useStore)
+			if got != tt.want {
+				t.Fatalf("shouldSyncStoragePlugins(%t, %t) = %t, want %t", tt.commandMode, tt.useStore, got, tt.want)
+			}
+		})
 	}
 }
 
