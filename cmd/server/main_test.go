@@ -10,19 +10,23 @@ func TestShouldSyncStoragePlugins(t *testing.T) {
 	tests := []struct {
 		name        string
 		commandMode bool
+		tuiMode     bool
+		standalone  bool
 		useStore    bool
 		want        bool
 	}{
 		{name: "server with storage backend", useStore: true, want: true},
 		{name: "server without storage backend", want: false},
 		{name: "native command with storage backend", commandMode: true, useStore: true, want: false},
+		{name: "pure TUI client with storage backend", tuiMode: true, useStore: true, want: false},
+		{name: "standalone TUI with storage backend", tuiMode: true, standalone: true, useStore: true, want: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := shouldSyncStoragePlugins(tt.commandMode, tt.useStore)
+			got := shouldSyncStoragePlugins(tt.commandMode, tt.tuiMode, tt.standalone, tt.useStore)
 			if got != tt.want {
-				t.Fatalf("shouldSyncStoragePlugins(%t, %t) = %t, want %t", tt.commandMode, tt.useStore, got, tt.want)
+				t.Fatalf("shouldSyncStoragePlugins(%t, %t, %t, %t) = %t, want %t", tt.commandMode, tt.tuiMode, tt.standalone, tt.useStore, got, tt.want)
 			}
 		})
 	}
