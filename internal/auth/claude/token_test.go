@@ -3,6 +3,7 @@
 package claude
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -34,6 +35,32 @@ func TestSaveTokenToFileTightensExistingFileMode(t *testing.T) {
 	}
 
 	assertPrivateFileMode(t, authFilePath)
+}
+
+func TestSaveTokenToFilePreservesExistingFileWhenEncodingFails(t *testing.T) {
+	dir := t.TempDir()
+	authFilePath := filepath.Join(dir, "credentials.json")
+	original := []byte(`{"refresh_token":"existing"}`)
+	if err := os.WriteFile(authFilePath, original, 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	storage := &ClaudeTokenStorage{
+		AccessToken:  "access",
+		RefreshToken: "refresh",
+		Metadata:     map[string]any{"unsupported": make(chan int)},
+	}
+	if err := storage.SaveTokenToFile(authFilePath); err == nil {
+		t.Fatal("SaveTokenToFile() error = nil, want encoding error")
+	}
+
+	got, err := os.ReadFile(authFilePath)
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatal("credential file contents changed after failed save")
+	}
 }
 
 func assertPrivateFileMode(t *testing.T, path string) {
