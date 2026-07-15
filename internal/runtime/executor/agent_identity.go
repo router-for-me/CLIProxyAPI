@@ -69,7 +69,7 @@ func isAgentIdentityAuth(auth *cliproxyauth.Auth) bool {
 		return true
 	}
 	creds := agentIdentityCredsFromAuth(auth)
-	return creds.runtimeID != "" && creds.privateKeyB64 != ""
+	return creds.runtimeID != "" && creds.privateKeyB64 != "" && creds.taskID != ""
 }
 
 // agentIdentityAccountID returns the ChatGPT account id associated with an agent identity auth.

@@ -201,6 +201,24 @@ func TestCodexPrepareRequestOAuthKeepsBearer(t *testing.T) {
 	}
 }
 
+func TestCodexPrepareRequestOAuthWithIncompleteAgentIdentityKeepsBearer(t *testing.T) {
+	auth, _ := agentIdentityTestAuth(t, "agent_private_key")
+	auth.Metadata["type"] = "codex"
+	auth.Metadata["access_token"] = "tok"
+	delete(auth.Metadata, "task_id")
+	req, err := http.NewRequest(http.MethodPost, "https://example.test/responses", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	if err = NewCodexExecutor(nil).PrepareRequest(req, auth); err != nil {
+		t.Fatalf("PrepareRequest() error = %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer tok" {
+		t.Fatalf("Authorization = %q, want Bearer tok", got)
+	}
+}
+
 func TestApplyCodexWebsocketHeadersFreshAssertionPerDial(t *testing.T) {
 	auth, publicKey := agentIdentityTestAuth(t, "agent_private_key")
 
