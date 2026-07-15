@@ -64,6 +64,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel codexClie
 		if template, ok := templates[id]; ok {
 			entry := cloneCodexClientModelMap(template)
 			applyCodexClientDisplayName(entry, model)
+			applyCodexClientContextWindow(entry, model)
 			applyCodexClientSearchToolSupport(entry, id, true, providersForModel)
 			sanitizeCodexClientReasoningMetadata(entry)
 			applyCodexClientVisibilityOverride(entry, id)
@@ -184,6 +185,15 @@ func applyCodexClientDisplayName(entry map[string]any, model map[string]any) {
 	if displayName := stringModelValue(model, "display_name"); displayName != "" {
 		entry["display_name"] = displayName
 	}
+}
+
+func applyCodexClientContextWindow(entry map[string]any, model map[string]any) {
+	contextWindow := intModelValue(model, "context_length")
+	if contextWindow <= 0 {
+		return
+	}
+	entry["context_window"] = contextWindow
+	entry["max_context_window"] = contextWindow
 }
 
 func applyCodexClientSearchToolSupport(entry map[string]any, id string, templateModel bool, providersForModel codexClientModelProvidersFunc) {

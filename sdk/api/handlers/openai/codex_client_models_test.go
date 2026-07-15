@@ -143,6 +143,25 @@ func TestCodexClientModelsResponse_AppliesDisplayNameToTemplateModel(t *testing.
 	}
 }
 
+func TestCodexClientModelsResponse_AppliesContextWindowToTemplateModel(t *testing.T) {
+	resp := CodexClientModelsResponse([]map[string]any{
+		{
+			"id":             "gpt-5.5",
+			"context_length": 1000000,
+		},
+	})
+	models, ok := resp["models"].([]map[string]any)
+	if !ok || len(models) != 1 {
+		t.Fatalf("models = %#v, want one model", resp["models"])
+	}
+	if got := intModelValue(models[0], "context_window"); got != 1000000 {
+		t.Fatalf("context_window = %v, want 1000000", models[0]["context_window"])
+	}
+	if got := intModelValue(models[0], "max_context_window"); got != 1000000 {
+		t.Fatalf("max_context_window = %v, want 1000000", models[0]["max_context_window"])
+	}
+}
+
 func TestCodexClientModelsResponse_DisablesSearchToolForSynthesizedModels(t *testing.T) {
 	resp := CodexClientModelsResponse([]map[string]any{
 		{"id": "custom-openai-compatible-model"},

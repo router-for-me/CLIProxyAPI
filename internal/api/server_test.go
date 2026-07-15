@@ -1045,7 +1045,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		t.Fatalf("custom display_name = %q, want Custom Codex Model", got)
 	}
 	wantCustomPriority := codexClientTestMaxTemplatePriority(t) + 100
-	if got := int(codexClientTestPriority(custom["priority"])); got != wantCustomPriority {
+	if got := codexClientTestInt(custom["priority"]); got != wantCustomPriority {
 		t.Fatalf("custom priority = %v, want %d", custom["priority"], wantCustomPriority)
 	}
 	if got, _ := custom["description"].(string); got != "Custom model from registry" {
@@ -1102,10 +1102,12 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	}
 }
 
-func codexClientTestPriority(raw any) int {
+func codexClientTestInt(raw any) int {
 	switch value := raw.(type) {
 	case int:
 		return value
+	case int64:
+		return int(value)
 	case float64:
 		return int(value)
 	default:
@@ -1123,7 +1125,7 @@ func codexClientTestMaxTemplatePriority(t *testing.T) int {
 	}
 	maxPriority := 0
 	for _, model := range payload.Models {
-		if priority := codexClientTestPriority(model["priority"]); priority > maxPriority {
+		if priority := codexClientTestInt(model["priority"]); priority > maxPriority {
 			maxPriority = priority
 		}
 	}
@@ -1376,10 +1378,10 @@ func TestFormatHomeCodexModelsKeepsContextMetadataForOpaqueAlias(t *testing.T) {
 	if got, _ := model["slug"].(string); got != "model-orchestration" {
 		t.Fatalf("slug = %q, want model-orchestration", got)
 	}
-	if got, _ := model["context_window"].(int); got != 1000000 {
+	if got := codexClientTestInt(model["context_window"]); got != 1000000 {
 		t.Fatalf("context_window = %v, want 1000000", model["context_window"])
 	}
-	if got, _ := model["max_context_window"].(int); got != 1000000 {
+	if got := codexClientTestInt(model["max_context_window"]); got != 1000000 {
 		t.Fatalf("max_context_window = %v, want 1000000", model["max_context_window"])
 	}
 }
