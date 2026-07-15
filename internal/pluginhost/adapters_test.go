@@ -2138,6 +2138,55 @@ func TestUsageAdapterPanicFusesPlugin(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterNormalizesOmittedGenerateToTrue(t *testing.T) {
+	var gotGenerate bool
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		gotGenerate = record.Generate
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-generate",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-generate",
+	}
+
+	// Legacy callers construct usage.Record without Generate; adapter must publish true.
+	adapter.HandleUsage(context.Background(), coreusage.Record{Provider: "provider", Model: "gpt-5.4"})
+	if !gotGenerate {
+		t.Fatalf("plugin Generate = %v, want true for omitted field", gotGenerate)
+	}
+}
+
+func TestUsageAdapterPreservesExplicitGenerateFalse(t *testing.T) {
+	var gotGenerate bool
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		gotGenerate = record.Generate
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-generate-false",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-generate-false",
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "provider",
+		Model:    "gpt-5.4",
+		Generate: coreusage.GenerateFlag(false),
+	})
+	if gotGenerate {
+		t.Fatalf("plugin Generate = %v, want false", gotGenerate)
+	}
+}
+
 func TestUsageManagerRegisterNamedReplacesWithoutDuplicateDispatch(t *testing.T) {
 	manager := coreusage.NewManager(0)
 	defer manager.Stop()

@@ -96,6 +96,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		AuthIndex:       record.AuthIndex,
 		Tokens:          tokens,
 		Failed:          failed,
+		Generate:        coreusage.GenerateEnabled(record.Generate),
 		Fail:            fail,
 		ResponseHeaders: record.ResponseHeaders,
 	}
@@ -143,6 +144,7 @@ type requestDetail struct {
 	AuthIndex       string      `json:"auth_index"`
 	Tokens          tokenStats  `json:"tokens"`
 	Failed          bool        `json:"failed"`
+	Generate        bool        `json:"generate"`
 	Fail            failDetail  `json:"fail"`
 	ResponseHeaders http.Header `json:"response_headers,omitempty"`
 }

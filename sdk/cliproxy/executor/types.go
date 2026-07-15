@@ -27,6 +27,10 @@ const ReasoningEffortMetadataKey = "reasoning_effort"
 // ServiceTierMetadataKey stores the client-requested service tier for usage logs.
 const ServiceTierMetadataKey = "service_tier"
 
+// GenerateMetadataKey stores whether the client requested actual generation for usage logs.
+// Missing or true means generation is enabled; only an explicit false disables generation.
+const GenerateMetadataKey = "generate"
+
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
