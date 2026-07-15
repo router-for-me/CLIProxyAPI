@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -21,6 +22,7 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -2001,7 +2003,9 @@ func TestXAIExecutorExecuteNormalizesReasoningOutputForNonStreamTranslation(t *t
 	}
 }
 
-func TestXAIExecutorExecuteImagesUsesImagesEndpoint(t *testing.T) {
+func TestXAIExecutorExecuteImagesUsesImagesEndpointAndPublishesUsage(t *testing.T) {
+	const requestedModel = "grok-imagine-image-quality"
+
 	var gotPath string
 	var gotAuth string
 	var gotAccept string
@@ -2020,9 +2024,14 @@ func TestXAIExecutorExecuteImagesUsesImagesEndpoint(t *testing.T) {
 			t.Fatalf("read body: %v", errRead)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"created":123,"data":[{"b64_json":"AA=="}]}`))
+		_, _ = w.Write([]byte(`{"created":123,"data":[{"b64_json":"AA=="}],"usage":{"cost_in_usd_ticks":250000}}`))
 	}))
 	defer server.Close()
+	plugin := &captureXAIUsagePlugin{
+		model:   requestedModel,
+		records: make(chan usage.Record, 2),
+	}
+	usage.RegisterPlugin(plugin)
 
 	exec := NewXAIExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
@@ -2035,8 +2044,8 @@ func TestXAIExecutorExecuteImagesUsesImagesEndpoint(t *testing.T) {
 	}
 
 	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "grok-imagine-image",
-		Payload: []byte(`{"model":"grok-imagine-image","prompt":"draw"}`),
+		Model:   "image-model-alias",
+		Payload: []byte(`{"model":"grok-imagine-image-quality","prompt":"draw"}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FromString("openai-image"),
 		Metadata: map[string]any{
@@ -2062,11 +2071,107 @@ func TestXAIExecutorExecuteImagesUsesImagesEndpoint(t *testing.T) {
 	if gotClientVersion != "" {
 		t.Fatalf("%s = %q, want empty on media path", xaiClientVersionHeader, gotClientVersion)
 	}
-	if string(gotBody) != `{"model":"grok-imagine-image","prompt":"draw"}` {
+	if string(gotBody) != `{"model":"grok-imagine-image-quality","prompt":"draw"}` {
 		t.Fatalf("body = %s", string(gotBody))
 	}
 	if gjson.GetBytes(resp.Payload, "data.0.b64_json").String() != "AA==" {
 		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+
+	record := waitForXAIUsageRecord(t, plugin.records)
+	if record.Model != requestedModel {
+		t.Fatalf("model = %q, want %q", record.Model, requestedModel)
+	}
+	if record.Failed {
+		t.Fatalf("failed = true, want false; failure=%+v", record.Fail)
+	}
+	if record.Detail != (usage.Detail{}) {
+		t.Fatalf("detail = %+v, want zero token usage", record.Detail)
+	}
+	assertNoAdditionalXAIUsageRecord(t, plugin.records)
+}
+
+func TestXAIExecutorExecuteImagesPublishesFailureUsage(t *testing.T) {
+	const requestedModel = "grok-imagine-image-quality"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"rate limited"}`))
+	}))
+	defer server.Close()
+
+	plugin := &captureXAIUsagePlugin{
+		model:   requestedModel,
+		records: make(chan usage.Record, 2),
+	}
+	usage.RegisterPlugin(plugin)
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "image-model-alias",
+		Payload: []byte(`{"model":"grok-imagine-image-quality","prompt":"draw"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+		},
+	})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want non-nil")
+	}
+
+	record := waitForXAIUsageRecord(t, plugin.records)
+	if record.Model != requestedModel {
+		t.Fatalf("model = %q, want %q", record.Model, requestedModel)
+	}
+	if !record.Failed {
+		t.Fatal("failed = false, want true")
+	}
+	if record.Fail.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("failure status = %d, want %d", record.Fail.StatusCode, http.StatusTooManyRequests)
+	}
+	assertNoAdditionalXAIUsageRecord(t, plugin.records)
+}
+
+type captureXAIUsagePlugin struct {
+	model   string
+	records chan usage.Record
+}
+
+func (p *captureXAIUsagePlugin) HandleUsage(_ context.Context, record usage.Record) {
+	if p == nil || record.Provider != "xai" || record.Model != p.model {
+		return
+	}
+	select {
+	case p.records <- record:
+	default:
+	}
+}
+
+func waitForXAIUsageRecord(t *testing.T, records <-chan usage.Record) usage.Record {
+	t.Helper()
+	select {
+	case record := <-records:
+		return record
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for xAI usage record")
+		return usage.Record{}
+	}
+}
+
+func assertNoAdditionalXAIUsageRecord(t *testing.T, records <-chan usage.Record) {
+	t.Helper()
+	select {
+	case record := <-records:
+		t.Fatalf("received additional xAI usage record: %+v", record)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
