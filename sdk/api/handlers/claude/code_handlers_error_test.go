@@ -14,28 +14,39 @@ import (
 func TestClaudeErrorNormalizesContextLimitForClientCompaction(t *testing.T) {
 	tests := []struct {
 		name    string
+		status  int
 		errText string
 		want    string
 	}{
 		{
-			name:    "normalized executor code",
+			name:    "normalized executor code on request entity too large",
+			status:  http.StatusRequestEntityTooLarge,
 			errText: `{"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","type":"invalid_request_error","code":"context_too_large"}}`,
 			want:    "Prompt is too long: Your input exceeds the context window of this model. Please adjust your input and try again.",
 		},
 		{
 			name:    "upstream context code",
+			status:  http.StatusBadRequest,
 			errText: `{"error":{"message":"Maximum context length exceeded.","type":"invalid_request_error","code":"context_length_exceeded"}}`,
 			want:    "Prompt is too long: Maximum context length exceeded.",
 		},
 		{
 			name:    "recognized message remains unchanged",
+			status:  http.StatusRequestEntityTooLarge,
 			errText: `{"error":{"message":"Prompt is too long: Maximum context length exceeded.","type":"invalid_request_error","code":"context_too_large"}}`,
 			want:    "Prompt is too long: Maximum context length exceeded.",
 		},
 		{
 			name:    "unrelated bad request remains unchanged",
+			status:  http.StatusBadRequest,
 			errText: `{"error":{"message":"Invalid request body.","type":"invalid_request_error","code":"invalid_request"}}`,
 			want:    "Invalid request body.",
+		},
+		{
+			name:    "unrelated request entity too large remains unchanged",
+			status:  http.StatusRequestEntityTooLarge,
+			errText: `{"error":{"message":"Upload exceeds the request size limit.","type":"invalid_request_error","code":"request_too_large"}}`,
+			want:    "Upload exceeds the request size limit.",
 		},
 	}
 
@@ -43,7 +54,7 @@ func TestClaudeErrorNormalizesContextLimitForClientCompaction(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			handler := &ClaudeCodeAPIHandler{}
 			msg := &interfaces.ErrorMessage{
-				StatusCode: http.StatusBadRequest,
+				StatusCode: tt.status,
 				Error:      errors.New(tt.errText),
 			}
 

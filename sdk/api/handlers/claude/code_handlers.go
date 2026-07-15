@@ -452,16 +452,26 @@ func claudeErrorDetailFromText(status int, errText string) (string, string) {
 	if json.Valid([]byte(message)) {
 		if err := json.Unmarshal([]byte(message), &payload); err == nil {
 			if e, ok := payload["error"].(map[string]any); ok {
-				if t, ok := e["type"].(string); ok && strings.TrimSpace(t) != "" {
-					errType = strings.TrimSpace(t)
+				if t, ok := e["type"].(string); ok {
+					typeText := strings.TrimSpace(t)
+					if typeText != "" {
+						errType = typeText
+					}
 				}
-				if m, ok := e["message"].(string); ok && strings.TrimSpace(m) != "" {
-					message = strings.TrimSpace(m)
+				messageText := ""
+				if m, ok := e["message"].(string); ok {
+					messageText = strings.TrimSpace(m)
+					if messageText != "" {
+						message = messageText
+					}
 				}
-				if c, ok := e["code"].(string); ok && strings.TrimSpace(c) != "" {
-					upstreamCode = strings.ToLower(strings.TrimSpace(c))
-					if m, ok := e["message"].(string); !ok || strings.TrimSpace(m) == "" {
-						message = strings.TrimSpace(c)
+				if c, ok := e["code"].(string); ok {
+					codeText := strings.TrimSpace(c)
+					if codeText != "" {
+						upstreamCode = strings.ToLower(codeText)
+						if messageText == "" {
+							message = codeText
+						}
 					}
 				}
 			} else {
@@ -474,7 +484,7 @@ func claudeErrorDetailFromText(status int, errText string) (string, string) {
 			}
 		}
 	}
-	if status == http.StatusBadRequest &&
+	if (status == http.StatusBadRequest || status == http.StatusRequestEntityTooLarge) &&
 		(upstreamCode == "context_length_exceeded" || upstreamCode == "context_too_large") &&
 		!strings.Contains(strings.ToLower(message), "prompt is too long") {
 		message = "Prompt is too long: " + message
