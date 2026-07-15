@@ -1359,6 +1359,31 @@ func TestDecodeHomeModelsKeepsTokenMetadata(t *testing.T) {
 	}
 }
 
+func TestFormatHomeCodexModelsKeepsContextMetadataForOpaqueAlias(t *testing.T) {
+	resp := formatHomeCodexClientModels([]homeModelEntry{
+		{
+			id:            "model-orchestration",
+			displayName:   "Claude Fable 5",
+			contextLength: 1000000,
+		},
+	})
+
+	models, ok := resp["models"].([]map[string]any)
+	if !ok || len(models) != 1 {
+		t.Fatalf("models = %#v, want one model", resp["models"])
+	}
+	model := models[0]
+	if got, _ := model["slug"].(string); got != "model-orchestration" {
+		t.Fatalf("slug = %q, want model-orchestration", got)
+	}
+	if got, _ := model["context_window"].(int); got != 1000000 {
+		t.Fatalf("context_window = %v, want 1000000", model["context_window"])
+	}
+	if got, _ := model["max_context_window"].(int); got != 1000000 {
+		t.Fatalf("max_context_window = %v, want 1000000", model["max_context_window"])
+	}
+}
+
 func TestHomeModelsAuthStatus(t *testing.T) {
 	cases := []struct {
 		name        string
