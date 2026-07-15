@@ -723,9 +723,20 @@ func (e *CodexExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Aut
 	if req == nil {
 		return nil
 	}
-	apiKey, _ := codexCreds(auth)
-	if strings.TrimSpace(apiKey) != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+	if isAgentIdentityAuth(auth) {
+		assertion, err := generateAgentAssertion(auth)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", assertion)
+		if accountID := agentIdentityAccountID(auth); accountID != "" {
+			req.Header.Set("Chatgpt-Account-Id", accountID)
+		}
+	} else {
+		apiKey, _ := codexCreds(auth)
+		if strings.TrimSpace(apiKey) != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
 	}
 	var attrs map[string]string
 	if auth != nil {
@@ -1628,7 +1639,18 @@ func applyCodexDirectImageHeaders(r *http.Request, auth *cliproxyauth.Auth, toke
 
 func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config, ginHeaders http.Header) {
 	r.Header.Set("Content-Type", "application/json")
-	r.Header.Set("Authorization", "Bearer "+token)
+	if isAgentIdentityAuth(auth) {
+		if assertion, err := generateAgentAssertion(auth); err != nil {
+			log.Errorf("codex executor: generate agent assertion: %v", err)
+		} else {
+			r.Header.Set("Authorization", assertion)
+		}
+		if accountID := agentIdentityAccountID(auth); accountID != "" {
+			r.Header.Set("Chatgpt-Account-Id", accountID)
+		}
+	} else {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	if ginHeaders != nil && ginHeaders.Get("X-Codex-Beta-Features") != "" {
 		r.Header.Set("X-Codex-Beta-Features", ginHeaders.Get("X-Codex-Beta-Features"))
@@ -1925,6 +1947,10 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	if a.Attributes != nil {
 		apiKey = a.Attributes["api_key"]
 		baseURL = a.Attributes["base_url"]
+	}
+	if isAgentIdentityAuth(a) {
+		// Agent identity auths sign per-request assertions; there is no bearer credential.
+		return "", baseURL
 	}
 	if apiKey == "" && a.Metadata != nil {
 		if v, ok := a.Metadata["access_token"].(string); ok {

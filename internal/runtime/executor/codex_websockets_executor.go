@@ -912,7 +912,13 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	if headers == nil {
 		headers = http.Header{}
 	}
-	if strings.TrimSpace(token) != "" {
+	if isAgentIdentityAuth(auth) {
+		if assertion, err := generateAgentAssertion(auth); err != nil {
+			log.Errorf("codex websocket executor: generate agent assertion: %v", err)
+		} else {
+			headers.Set("Authorization", assertion)
+		}
+	} else if strings.TrimSpace(token) != "" {
 		headers.Set("Authorization", "Bearer "+token)
 	}
 
@@ -954,12 +960,17 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		headers.Set("Originator", codexOriginator)
 	}
 	if !isAPIKey {
+		accountID := ""
 		if auth != nil && auth.Metadata != nil {
-			if accountID, ok := auth.Metadata["account_id"].(string); ok {
-				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
-					setHeaderCasePreserved(headers, "ChatGPT-Account-ID", trimmed)
-				}
+			if v, ok := auth.Metadata["account_id"].(string); ok {
+				accountID = strings.TrimSpace(v)
 			}
+		}
+		if accountID == "" {
+			accountID = agentIdentityAccountID(auth)
+		}
+		if accountID != "" {
+			setHeaderCasePreserved(headers, "ChatGPT-Account-ID", accountID)
 		}
 	}
 
