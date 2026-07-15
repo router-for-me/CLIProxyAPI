@@ -84,6 +84,24 @@ func TestConvertInteractionsRequestToCodexFunctionDeclarations(t *testing.T) {
 	}
 }
 
+func TestConvertCodexResponseToInteractionsIncompleteTerminal(t *testing.T) {
+	raw := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`)
+	nonStreamOut := ConvertCodexResponseToInteractionsNonStream(context.Background(), "codex-test", nil, nil, raw, nil)
+	if got := gjson.GetBytes(nonStreamOut, "status").String(); got != "incomplete" {
+		t.Fatalf("non-stream status = %q, want incomplete. Output: %s", got, nonStreamOut)
+	}
+
+	var param any
+	streamOut := ConvertCodexResponseToInteractions(context.Background(), "codex-test", nil, nil, append([]byte("data: "), raw...), &param)
+	payload := findCodexInteractionsEventPayload(streamOut, "interaction.completed")
+	if len(payload) == 0 {
+		t.Fatalf("stream incomplete event did not terminate interaction: %q", streamOut)
+	}
+	if got := gjson.GetBytes(payload, "interaction.status").String(); got != "incomplete" {
+		t.Fatalf("stream status = %q, want incomplete. Payload: %s", got, payload)
+	}
+}
+
 func TestConvertCodexResponseToInteractionsNonStream(t *testing.T) {
 	raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","created_at":1700000000,"usage":{"input_tokens":3,"output_tokens":2},"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]},{"type":"reasoning","content":"thinking"},{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"x\"}"}]}}`)
 	out := ConvertCodexResponseToInteractionsNonStream(context.Background(), "codex-test", nil, nil, raw, nil)
