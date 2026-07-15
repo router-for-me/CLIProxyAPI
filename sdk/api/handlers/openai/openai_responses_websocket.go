@@ -608,7 +608,7 @@ func websocketScopedDownstreamSessionKey(c *gin.Context, sessionKey string) stri
 	}
 	callerScope := websocketCallerScope(c)
 	if callerScope == "" {
-		return sessionKey
+		return ""
 	}
 	scopeHash := sha256.Sum256([]byte(callerScope))
 	return sessionKey + ":caller:" + fmt.Sprintf("%x", scopeHash[:])

@@ -87,6 +87,7 @@ func TestResponsesWebsocketUsesCompactStateForNextIncrementalTurn(t *testing.T) 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
 	router := gin.New()
+	router.Use(testTrustedCallerScope)
 	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
 	router.POST("/v1/responses/compact", h.Compact)
 

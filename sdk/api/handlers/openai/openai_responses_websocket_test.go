@@ -2497,6 +2497,7 @@ func TestResponsesWebsocketCodexReconnectReplaysCachedTranscript(t *testing.T) {
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
 	router := gin.New()
+	router.Use(testTrustedCallerScope)
 	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
 
 	server := httptest.NewServer(router)
@@ -2673,6 +2674,7 @@ func TestResponsesWebsocketPassthroughReconnectReplaysCumulativeTranscript(t *te
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
 	router := gin.New()
+	router.Use(testTrustedCallerScope)
 	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
 
 	server := httptest.NewServer(router)
@@ -2777,6 +2779,7 @@ func TestResponsesWebsocketPassthroughErrorDoesNotCacheFailedTurn(t *testing.T) 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
 	router := gin.New()
+	router.Use(testTrustedCallerScope)
 	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
 
 	server := httptest.NewServer(router)
@@ -2880,6 +2883,7 @@ func TestResponsesWebsocketErrorDoesNotCacheFailedTurn(t *testing.T) {
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
 	router := gin.New()
+	router.Use(testTrustedCallerScope)
 	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
 
 	server := httptest.NewServer(router)
@@ -2980,6 +2984,7 @@ func TestResponsesWebsocketXAIReconnectReplaysCachedTranscript(t *testing.T) {
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
 	router := gin.New()
+	router.Use(testTrustedCallerScope)
 	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
 
 	server := httptest.NewServer(router)

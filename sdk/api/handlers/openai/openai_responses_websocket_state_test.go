@@ -28,6 +28,12 @@ type websocketContextLostReplayExecutor struct {
 	active   bool
 }
 
+func testTrustedCallerScope(c *gin.Context) {
+	c.Set("userApiKey", "test-api-key")
+	c.Set("accessProvider", "test-access")
+	c.Next()
+}
+
 func (e *websocketContextLostReplayExecutor) Identifier() string { return "codex" }
 
 func (e *websocketContextLostReplayExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
@@ -272,6 +278,49 @@ func TestResponsesWebsocketRequestRequiresUpstreamContext(t *testing.T) {
 				t.Fatalf("requires upstream context = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestWebsocketScopedDownstreamSessionKeyRequiresTrustedCallerScope(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newContext := func(principal string) *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses/ws", nil)
+		if principal != "" {
+			c.Set("userApiKey", principal)
+			c.Set("accessProvider", "test-access")
+		}
+		return c
+	}
+
+	const downstreamSessionKey = "guessable-client-session"
+	anonymousKey := websocketScopedDownstreamSessionKey(newContext(""), downstreamSessionKey)
+	if anonymousKey != "" {
+		got := anonymousKey
+		t.Fatalf("anonymous caller session key = %q, want empty", got)
+	}
+
+	cache := newResponsesWebsocketTranscriptStateCache(time.Minute)
+	cache.record(anonymousKey, testResponsesWebsocketTranscriptState("anonymous-request"))
+	if len(cache.sessions) != 0 {
+		t.Fatal("anonymous caller transcript state was cached")
+	}
+	if _, ok := cache.get(anonymousKey); ok {
+		t.Fatal("anonymous caller restored cached transcript state")
+	}
+
+	callerAKey := websocketScopedDownstreamSessionKey(newContext("caller-a"), downstreamSessionKey)
+	if callerAKey == "" || callerAKey == downstreamSessionKey {
+		t.Fatalf("authenticated caller session key = %q, want non-empty scoped key", callerAKey)
+	}
+
+	cache.record(callerAKey, testResponsesWebsocketTranscriptState("request-a"))
+	if _, ok := cache.get(websocketScopedDownstreamSessionKey(newContext("caller-a"), downstreamSessionKey)); !ok {
+		t.Fatal("expected the same authenticated caller to restore cached transcript state")
+	}
+	if _, ok := cache.get(websocketScopedDownstreamSessionKey(newContext("caller-b"), downstreamSessionKey)); ok {
+		t.Fatal("different authenticated caller restored another caller's cached transcript state")
 	}
 }
 
