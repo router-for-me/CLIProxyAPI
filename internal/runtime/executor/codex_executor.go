@@ -160,7 +160,12 @@ func codexTerminalFailureStatus(body []byte) int {
 
 	errorType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))
 	errorCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
+	lowerBody := strings.ToLower(strings.TrimSpace(string(body)))
 	switch {
+	case errorCode == "previous_response_not_found" ||
+		strings.Contains(lowerBody, "previous_response_not_found") ||
+		strings.Contains(lowerBody, "previous_response_id") && strings.Contains(lowerBody, "not found"):
+		return http.StatusBadRequest
 	case errorType == "invalid_request_error", errorType == "bad_request_error":
 		return http.StatusBadRequest
 	case errorType == "authentication_error", errorCode == "invalid_api_key", errorCode == "unauthorized":

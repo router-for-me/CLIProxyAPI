@@ -475,6 +475,16 @@ func TestCodexTerminalFailureErrClassifiesStatus(t *testing.T) {
 			wantStatus: http.StatusUnauthorized,
 		},
 		{
+			name:       "previous response missing by code",
+			event:      `{"type":"response.failed","response":{"error":{"code":"previous_response_not_found","message":"Previous response is unavailable."}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "previous response missing by message",
+			event:      `{"type":"response.failed","response":{"error":{"message":"Previous response with id 'resp-1' was not found for previous_response_id."}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
 			name:       "rate limit",
 			event:      `{"type":"error","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"Rate limit reached."}}`,
 			wantStatus: http.StatusTooManyRequests,
