@@ -182,10 +182,6 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	apiKey, baseURL := codexCreds(auth)
-	apiKey = codexRequestAPIKey(apiKey, opts)
-	if opts.Alt == constant.ClaudeResponsesBridgeAlt && apiKey == "" {
-		return resp, statusErr{code: http.StatusUnauthorized, msg: "Claude Responses bridge requires a request API token"}
-	}
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -414,10 +410,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	apiKey, baseURL := codexCreds(auth)
-	apiKey = codexRequestAPIKey(apiKey, opts)
-	if opts.Alt == constant.ClaudeResponsesBridgeAlt && apiKey == "" {
-		return nil, statusErr{code: http.StatusUnauthorized, msg: "Claude Responses bridge requires a request API token"}
-	}
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}

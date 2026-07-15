@@ -17,38 +17,15 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestCodexRequestAPIKey(t *testing.T) {
-	tests := []struct {
-		name       string
-		alt        string
-		headers    http.Header
-		configured string
-		want       string
-	}{
-		{name: "bridge bearer", alt: constant.ClaudeResponsesBridgeAlt, headers: http.Header{"Authorization": []string{"Bearer request-token"}}, configured: "configured-token", want: "request-token"},
-		{name: "bridge x-api-key", alt: constant.ClaudeResponsesBridgeAlt, headers: http.Header{"X-Api-Key": []string{"request-token"}}, configured: "configured-token", want: "request-token"},
-		{name: "bridge prefers Anthropic x-api-key", alt: constant.ClaudeResponsesBridgeAlt, headers: http.Header{"Authorization": []string{"Bearer local-proxy-token"}, "X-Api-Key": []string{"upstream-token"}}, configured: "configured-token", want: "upstream-token"},
-		{name: "invalid bearer is rejected", alt: constant.ClaudeResponsesBridgeAlt, headers: http.Header{"Authorization": []string{"Basic request-token"}}, configured: "configured-token", want: ""},
-		{name: "missing request token is rejected", alt: constant.ClaudeResponsesBridgeAlt, configured: "configured-token", want: ""},
-		{name: "ordinary request never forwards", headers: http.Header{"Authorization": []string{"Bearer request-token"}}, configured: "configured-token", want: "configured-token"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := codexRequestAPIKey(tt.configured, cliproxyexecutor.Options{Alt: tt.alt, Headers: tt.headers})
-			if got != tt.want {
-				t.Fatalf("codexRequestAPIKey() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestCodexExecutorClaudeResponsesBridgeUsesRequestToken(t *testing.T) {
+func TestCodexExecutorClaudeResponsesBridgeUsesOAuthToken(t *testing.T) {
 	var gotPath string
 	var gotAuthorization string
+	var gotAccountID string
 	var gotBody []byte
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuthorization = r.Header.Get("Authorization")
+		gotAccountID = r.Header.Get("Chatgpt-Account-Id")
 		body, errRead := io.ReadAll(r.Body)
 		if errRead != nil {
 			t.Fatalf("read request body: %v", errRead)
@@ -60,10 +37,10 @@ func TestCodexExecutorClaudeResponsesBridgeUsesRequestToken(t *testing.T) {
 	defer upstream.Close()
 
 	executor := NewCodexExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"base_url": upstream.URL,
-		"api_key":  "configured-token",
-	}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"base_url": upstream.URL},
+		Metadata:   map[string]any{"access_token": "oauth-token", "account_id": "oauth-account"},
+	}
 	requestBody := []byte(`{"model":"gpt-5.6-sol","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`)
 	response, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.6-sol",
@@ -73,7 +50,7 @@ func TestCodexExecutorClaudeResponsesBridgeUsesRequestToken(t *testing.T) {
 		SourceFormat:    sdktranslator.FormatClaude,
 		ResponseFormat:  sdktranslator.FormatClaude,
 		OriginalRequest: requestBody,
-		Headers:         http.Header{"Authorization": []string{"Bearer request-token"}},
+		Headers:         http.Header{"Authorization": []string{"Bearer local-proxy-token"}, "X-Api-Key": []string{"local-proxy-key"}},
 	})
 	if errExecute != nil {
 		t.Fatalf("Execute error: %v", errExecute)
@@ -82,8 +59,11 @@ func TestCodexExecutorClaudeResponsesBridgeUsesRequestToken(t *testing.T) {
 	if gotPath != "/responses" {
 		t.Fatalf("path = %q, want /responses", gotPath)
 	}
-	if gotAuthorization != "Bearer request-token" {
-		t.Fatalf("Authorization = %q, want request token", gotAuthorization)
+	if gotAuthorization != "Bearer oauth-token" {
+		t.Fatalf("Authorization = %q, want OAuth token", gotAuthorization)
+	}
+	if gotAccountID != "oauth-account" {
+		t.Fatalf("Chatgpt-Account-Id = %q, want OAuth account", gotAccountID)
 	}
 	if got := gjson.GetBytes(gotBody, "model").String(); got != "gpt-5.6-sol" {
 		t.Fatalf("upstream model = %q, want gpt-5.6-sol; body=%s", got, gotBody)
@@ -96,7 +76,7 @@ func TestCodexExecutorClaudeResponsesBridgeUsesRequestToken(t *testing.T) {
 	}
 }
 
-func TestCodexExecutorClaudeResponsesBridgeStreamUsesRequestToken(t *testing.T) {
+func TestCodexExecutorClaudeResponsesBridgeStreamUsesOAuthToken(t *testing.T) {
 	var gotAuthorization string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuthorization = r.Header.Get("Authorization")
@@ -108,10 +88,10 @@ func TestCodexExecutorClaudeResponsesBridgeStreamUsesRequestToken(t *testing.T) 
 	defer upstream.Close()
 
 	executor := NewCodexExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"base_url": upstream.URL,
-		"api_key":  "configured-token",
-	}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"base_url": upstream.URL},
+		Metadata:   map[string]any{"access_token": "oauth-token"},
+	}
 	requestBody := []byte(`{"model":"gpt-5.6-sol","stream":true,"max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`)
 	stream, errExecute := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.6-sol",
@@ -121,7 +101,7 @@ func TestCodexExecutorClaudeResponsesBridgeStreamUsesRequestToken(t *testing.T) 
 		SourceFormat:    sdktranslator.FormatClaude,
 		ResponseFormat:  sdktranslator.FormatClaude,
 		OriginalRequest: requestBody,
-		Headers:         http.Header{"X-Api-Key": []string{"request-token"}},
+		Headers:         http.Header{"X-Api-Key": []string{"local-proxy-key"}},
 		Stream:          true,
 	})
 	if errExecute != nil {
@@ -134,15 +114,15 @@ func TestCodexExecutorClaudeResponsesBridgeStreamUsesRequestToken(t *testing.T) 
 		}
 		output.Write(chunk.Payload)
 	}
-	if gotAuthorization != "Bearer request-token" {
-		t.Fatalf("Authorization = %q, want request token", gotAuthorization)
+	if gotAuthorization != "Bearer oauth-token" {
+		t.Fatalf("Authorization = %q, want OAuth token", gotAuthorization)
 	}
 	if !strings.Contains(output.String(), "event: message_start") || !strings.Contains(output.String(), "hello") {
 		t.Fatalf("unexpected Claude stream: %s", output.String())
 	}
 }
 
-func TestCodexExecutorClaudeResponsesCompactBridgeUsesRequestToken(t *testing.T) {
+func TestCodexExecutorClaudeResponsesCompactBridgeUsesOAuthToken(t *testing.T) {
 	var gotPath string
 	var gotAuthorization string
 	var gotBody []byte
@@ -157,10 +137,10 @@ func TestCodexExecutorClaudeResponsesCompactBridgeUsesRequestToken(t *testing.T)
 	defer upstream.Close()
 
 	executor := NewCodexExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"base_url": upstream.URL,
-		"api_key":  "configured-token",
-	}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"base_url": upstream.URL},
+		Metadata:   map[string]any{"access_token": "oauth-token"},
+	}
 	requestBody := []byte(`{"model":"gpt-5.6-sol","messages":[{"role":"user","content":"Your task is to create a detailed summary of the conversation so far."}]}`)
 	response, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.6-sol",
@@ -170,7 +150,7 @@ func TestCodexExecutorClaudeResponsesCompactBridgeUsesRequestToken(t *testing.T)
 		SourceFormat:    sdktranslator.FormatClaude,
 		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
 		OriginalRequest: requestBody,
-		Headers:         http.Header{"Authorization": []string{"Bearer request-token"}},
+		Headers:         http.Header{"Authorization": []string{"Bearer local-proxy-token"}},
 	})
 	if errExecute != nil {
 		t.Fatalf("Execute compact error: %v", errExecute)
@@ -178,8 +158,8 @@ func TestCodexExecutorClaudeResponsesCompactBridgeUsesRequestToken(t *testing.T)
 	if gotPath != "/responses/compact" {
 		t.Fatalf("path = %q, want /responses/compact", gotPath)
 	}
-	if gotAuthorization != "Bearer request-token" {
-		t.Fatalf("Authorization = %q, want request token", gotAuthorization)
+	if gotAuthorization != "Bearer oauth-token" {
+		t.Fatalf("Authorization = %q, want OAuth token", gotAuthorization)
 	}
 	if got := gjson.GetBytes(gotBody, "model").String(); got != "gpt-5.6-sol" {
 		t.Fatalf("compact upstream model = %q; body=%s", got, gotBody)

@@ -100,17 +100,18 @@ func newResponsesBridgeHandler(t *testing.T) (*ClaudeCodeAPIHandler, *responsesB
 	executor := &responsesBridgeCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
-	auth := &coreauth.Auth{
+	oauth := &coreauth.Auth{
 		ID:       "responses-bridge-auth",
 		Provider: constant.Codex,
 		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"access_token": "oauth-token", "account_id": "account-id"},
 	}
-	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
-		t.Fatalf("register auth: %v", errRegister)
+	if _, errRegister := manager.Register(context.Background(), oauth); errRegister != nil {
+		t.Fatalf("register OAuth auth: %v", errRegister)
 	}
-	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: responsesBridgeUpstreamModel}})
+	registry.GetGlobalRegistry().RegisterClient(oauth.ID, oauth.Provider, []*registry.ModelInfo{{ID: responsesBridgeUpstreamModel}})
 	t.Cleanup(func() {
-		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		registry.GetGlobalRegistry().UnregisterClient(oauth.ID)
 	})
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true}, manager)
 	return NewClaudeCodeAPIHandler(base), executor
@@ -181,7 +182,6 @@ func TestClaudeMessagesResponsesBridgeNonStreaming(t *testing.T) {
 
 	body := `{"model":"claude-fable-5-dd-los-6.5-tpg","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages?source=localhost", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer request-token")
 	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, req)
@@ -209,11 +209,11 @@ func TestClaudeMessagesResponsesBridgeNonStreaming(t *testing.T) {
 	if gotOpts.SourceFormat != sdktranslator.FormatClaude || gotOpts.ResponseFormat != sdktranslator.FormatClaude {
 		t.Fatalf("formats = %q -> %q, want claude -> claude", gotOpts.SourceFormat, gotOpts.ResponseFormat)
 	}
-	if got := gotOpts.Headers.Get("Authorization"); got != "Bearer request-token" {
-		t.Fatalf("Authorization = %q, want request token", got)
-	}
 	if got := gotOpts.Query.Get("source"); got != "localhost" {
 		t.Fatalf("query source = %q, want localhost", got)
+	}
+	if _, pinned := gotOpts.Metadata[coreexecutor.PinnedAuthMetadataKey]; pinned {
+		t.Fatalf("bridge unexpectedly pinned an auth: %#v", gotOpts.Metadata)
 	}
 }
 
@@ -225,7 +225,6 @@ func TestClaudeMessagesResponsesBridgeStreaming(t *testing.T) {
 
 	body := `{"model":"claude-fable-5-dd-los-6.5-tpg","stream":true,"max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
-	req.Header.Set("X-Api-Key", "request-token")
 	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, req)
@@ -244,8 +243,8 @@ func TestClaudeMessagesResponsesBridgeStreaming(t *testing.T) {
 	if !gotOpts.Stream {
 		t.Fatal("executor stream option = false, want true")
 	}
-	if got := gotOpts.Headers.Get("X-Api-Key"); got != "request-token" {
-		t.Fatalf("X-Api-Key = %q, want request token", got)
+	if _, pinned := gotOpts.Metadata[coreexecutor.PinnedAuthMetadataKey]; pinned {
+		t.Fatalf("stream bridge unexpectedly pinned an auth: %#v", gotOpts.Metadata)
 	}
 }
 
@@ -257,7 +256,6 @@ func TestClaudeMessagesResponsesBridgeCompactNonStreaming(t *testing.T) {
 
 	body := `{"model":"claude-fable-5-dd-los-6.5-tpg","max_tokens":128,"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"Your task is to create a detailed summary of the conversation so far. Do not use tools. Preserve the API details."}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer request-token")
 	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, req)
@@ -270,8 +268,8 @@ func TestClaudeMessagesResponsesBridgeCompactNonStreaming(t *testing.T) {
 	if errStrip != nil || !found {
 		t.Fatalf("decode compact marker: found=%v err=%v marker=%q", found, errStrip, marker)
 	}
-	if capsule.Model != responsesBridgeUpstreamModel || capsule.AuthID != "responses-bridge-auth" {
-		t.Fatalf("capsule model/auth = %q/%q", capsule.Model, capsule.AuthID)
+	if capsule.Model != responsesBridgeUpstreamModel {
+		t.Fatalf("capsule model = %q, want %q", capsule.Model, responsesBridgeUpstreamModel)
 	}
 	if got := gjson.Get(recorder.Body.String(), "model").String(); got != responsesBridgeClientModel {
 		t.Fatalf("response model = %q, want %q", got, responsesBridgeClientModel)
@@ -297,7 +295,6 @@ func TestClaudeMessagesResponsesBridgeCompactStreamingUsesBufferedCompactEndpoin
 
 	body := `{"model":"claude-fable-5-dd-los-6.5-tpg","stream":true,"max_tokens":128,"messages":[{"role":"user","content":"Your task is to create a detailed summary of the conversation so far."}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
-	req.Header.Set("X-Api-Key", "request-token")
 	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, req)
@@ -322,7 +319,6 @@ func TestClaudeMessagesResponsesBridgeRehydratesCompactCapsule(t *testing.T) {
 
 	compactBody := `{"model":"claude-fable-5-dd-los-6.5-tpg","max_tokens":128,"messages":[{"role":"user","content":"Your task is to create a detailed summary of the conversation so far."}]}`
 	compactReq := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(compactBody))
-	compactReq.Header.Set("Authorization", "Bearer request-token")
 	compactReq.Header.Set("Content-Type", "application/json")
 	compactRecorder := httptest.NewRecorder()
 	router.ServeHTTP(compactRecorder, compactReq)
@@ -333,7 +329,6 @@ func TestClaudeMessagesResponsesBridgeRehydratesCompactCapsule(t *testing.T) {
 
 	followupBody := `{"model":"claude-fable-5-dd-los-6.5-tpg","max_tokens":128,"messages":[{"role":"assistant","content":` + string(mustJSONMarshalForTest(t, marker)) + `},{"role":"user","content":"continue"}]}`
 	followupReq := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(followupBody))
-	followupReq.Header.Set("Authorization", "Bearer request-token")
 	followupReq.Header.Set("Content-Type", "application/json")
 	followupRecorder := httptest.NewRecorder()
 	router.ServeHTTP(followupRecorder, followupReq)
@@ -344,6 +339,9 @@ func TestClaudeMessagesResponsesBridgeRehydratesCompactCapsule(t *testing.T) {
 	gotReq, gotOpts := executor.captured()
 	if gotOpts.Alt != constant.ClaudeResponsesBridgeAlt {
 		t.Fatalf("follow-up Alt = %q, want %q", gotOpts.Alt, constant.ClaudeResponsesBridgeAlt)
+	}
+	if _, pinned := gotOpts.Metadata[coreexecutor.PinnedAuthMetadataKey]; pinned {
+		t.Fatalf("compaction replay unexpectedly pinned an auth: %#v", gotOpts.Metadata)
 	}
 	if got := gjson.GetBytes(gotReq.Payload, constant.ClaudeResponsesCompactionField+".output.1.type").String(); got != "compaction_summary" {
 		t.Fatalf("replay compaction item type = %q; payload=%s", got, gotReq.Payload)

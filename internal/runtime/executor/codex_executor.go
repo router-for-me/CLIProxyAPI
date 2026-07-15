@@ -820,10 +820,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
-	apiKey = codexRequestAPIKey(apiKey, opts)
-	if opts.Alt == constant.ClaudeResponsesBridgeAlt && apiKey == "" {
-		return resp, statusErr{code: http.StatusUnauthorized, msg: "Claude Responses bridge requires a request API token"}
-	}
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -1013,10 +1009,6 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
-	apiKey = codexRequestAPIKey(apiKey, opts)
-	if opts.Alt == constant.ClaudeResponsesCompactBridgeAlt && apiKey == "" {
-		return resp, statusErr{code: http.StatusUnauthorized, msg: "Claude Responses compact bridge requires a request API token"}
-	}
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -1129,10 +1121,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
-	apiKey = codexRequestAPIKey(apiKey, opts)
-	if opts.Alt == constant.ClaudeResponsesBridgeAlt && apiKey == "" {
-		return nil, statusErr{code: http.StatusUnauthorized, msg: "Claude Responses bridge requires a request API token"}
-	}
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -2033,25 +2021,6 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
-}
-
-func codexRequestAPIKey(configured string, opts cliproxyexecutor.Options) string {
-	if opts.Alt != constant.ClaudeResponsesBridgeAlt && opts.Alt != constant.ClaudeResponsesCompactBridgeAlt {
-		return configured
-	}
-	if opts.Headers == nil {
-		return ""
-	}
-	if apiKey := strings.TrimSpace(opts.Headers.Get("X-Api-Key")); apiKey != "" {
-		return apiKey
-	}
-	if authorization := strings.TrimSpace(opts.Headers.Get("Authorization")); authorization != "" {
-		parts := strings.Fields(authorization)
-		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") && parts[1] != "" {
-			return parts[1]
-		}
-	}
-	return ""
 }
 
 func applyClaudeResponsesCompactionReplay(translated, source []byte, opts cliproxyexecutor.Options) []byte {

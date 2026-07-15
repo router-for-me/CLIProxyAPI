@@ -56,12 +56,10 @@ func TestCodexAutoExecutorClaudeResponsesBridgeStreamsOverWebsocket(t *testing.T
 
 	exec := NewCodexAutoExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
 	auth := &cliproxyauth.Auth{
-		ID:       "bridge-ws-auth",
-		Provider: constant.Codex,
-		Attributes: map[string]string{
-			"api_key":  "configured-token",
-			"base_url": server.URL,
-		},
+		ID:         "bridge-ws-auth",
+		Provider:   constant.Codex,
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "oauth-token"},
 	}
 	requestBody := []byte(`{"model":"gpt-5.6-sol","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`)
 	stream, errExecute := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
@@ -72,7 +70,7 @@ func TestCodexAutoExecutorClaudeResponsesBridgeStreamsOverWebsocket(t *testing.T
 		SourceFormat:    sdktranslator.FormatClaude,
 		ResponseFormat:  sdktranslator.FormatClaude,
 		OriginalRequest: requestBody,
-		Headers:         http.Header{"Authorization": []string{"Bearer request-token"}},
+		Headers:         http.Header{"Authorization": []string{"Bearer local-proxy-token"}},
 		Stream:          true,
 	})
 	if errExecute != nil {
@@ -88,8 +86,8 @@ func TestCodexAutoExecutorClaudeResponsesBridgeStreamsOverWebsocket(t *testing.T
 
 	select {
 	case authorization := <-capturedAuthorization:
-		if authorization != "Bearer request-token" {
-			t.Fatalf("Authorization = %q, want request token", authorization)
+		if authorization != "Bearer oauth-token" {
+			t.Fatalf("Authorization = %q, want OAuth token", authorization)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for websocket authorization")
