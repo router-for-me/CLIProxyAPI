@@ -396,6 +396,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		defer streamUsage.Publish(ctx, reporter)
 		if passThroughSSE {
 			reader := bufio.NewReader(httpResp.Body)
+			hasSSEEventLine := false
 			for {
 				line, errRead := reader.ReadBytes('\n')
 				if len(line) > 0 {
@@ -403,6 +404,21 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					helps.AppendAPIResponseChunk(ctx, e.cfg, rawLine)
 					streamUsage.ObserveOpenAIStream(rawLine)
 					trimmedLine := bytes.TrimSpace(rawLine)
+					if len(trimmedLine) == 0 {
+						if !hasSSEEventLine {
+							continue
+						}
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: rawLine, SSEPassthrough: true}:
+						case <-ctx.Done():
+							return
+						}
+						hasSSEEventLine = false
+						continue
+					}
+					if bytes.HasPrefix(trimmedLine, []byte(":")) {
+						continue
+					}
 					if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
 						streamErr := statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}
 						helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
@@ -418,6 +434,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					case <-ctx.Done():
 						return
 					}
+					hasSSEEventLine = true
 				}
 				if errRead == nil {
 					continue

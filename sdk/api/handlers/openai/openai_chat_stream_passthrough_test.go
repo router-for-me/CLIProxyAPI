@@ -76,25 +76,27 @@ func TestOpenAICompatChatStreamPreservesNativeSSEFraming(t *testing.T) {
 	terminalWithoutDone := "data: {\"id\":\"chatcmpl-native-no-done\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"fixture response\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":60,\"completion_tokens\":9,\"total_tokens\":69,\"prompt_tokens_details\":{\"cached_tokens\":20}}}\n"
 	malformedEvent := "event: message\ndata: {\"usage\":\n\ndata: [DONE]\n"
 	terminalWithDone := ": fixture keepalive\n\ndata: {\"id\":\"chatcmpl-native-terminal\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"fixture response\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":101,\"completion_tokens\":17,\"total_tokens\":125,\"prompt_tokens_details\":{\"cached_tokens\":60},\"completion_tokens_details\":{\"reasoning_tokens\":7}}}\n\ndata: {\"id\":\"chatcmpl-native-terminal\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":999,\"completion_tokens\":999,\"total_tokens\":1998}}\n\ndata: [DONE]\n"
+	terminalWithDoneExpected := strings.TrimPrefix(terminalWithDone, ": fixture keepalive\n\n")
 	framingFields := "event: message\nid: fixture-42\nretry: 2500\ndata: {\"id\":\"chatcmpl-framing\",\"object\":\"chat.completion.chunk\",\"choices\":[]}\n\n"
 
 	for _, tc := range []struct {
 		name      string
 		upstream  string
+		expected  string
 		doneCount int
 	}{
-		{name: "clean EOF does not add DONE", upstream: terminalWithoutDone, doneCount: 0},
-		{name: "malformed event retains event field", upstream: malformedEvent, doneCount: 1},
-		{name: "normal terminal usage and DONE remain unchanged", upstream: terminalWithDone, doneCount: 1},
-		{name: "event id and retry fields remain unchanged", upstream: framingFields, doneCount: 0},
+		{name: "clean EOF does not add DONE", upstream: terminalWithoutDone, expected: terminalWithoutDone, doneCount: 0},
+		{name: "malformed event retains event field", upstream: malformedEvent, expected: malformedEvent, doneCount: 1},
+		{name: "normal terminal usage and DONE preserve data order", upstream: terminalWithDone, expected: terminalWithDoneExpected, doneCount: 1},
+		{name: "event id and retry fields remain unchanged", upstream: framingFields, expected: framingFields, doneCount: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := runOpenAICompatStreamFixture(t, tc.upstream)
 			if resp.Code != http.StatusOK {
 				t.Fatalf("status = %d, want %d; body=%q", resp.Code, http.StatusOK, resp.Body.String())
 			}
-			if got := resp.Body.String(); got != tc.upstream {
-				t.Fatalf("stream body = %q, want %q", got, tc.upstream)
+			if got := resp.Body.String(); got != tc.expected {
+				t.Fatalf("stream body = %q, want %q", got, tc.expected)
 			}
 			if got := strings.Count(resp.Body.String(), "data: [DONE]"); got != tc.doneCount {
 				t.Fatalf("DONE count = %d, want %d; body=%q", got, tc.doneCount, resp.Body.String())
