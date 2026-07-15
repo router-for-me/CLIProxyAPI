@@ -16,6 +16,7 @@ import (
 	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -810,7 +811,7 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	if opts.Alt == "responses/compact" {
+	if opts.Alt == "responses/compact" || opts.Alt == constant.ClaudeResponsesCompactBridgeAlt {
 		return e.executeCompact(ctx, auth, req, opts)
 	}
 	if isCodexOpenAIImageRequest(opts) {
@@ -819,6 +820,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
+	apiKey = codexRequestAPIKey(apiKey, opts)
+	if opts.Alt == constant.ClaudeResponsesBridgeAlt && apiKey == "" {
+		return resp, statusErr{code: http.StatusUnauthorized, msg: "Claude Responses bridge requires a request API token"}
+	}
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -835,6 +840,8 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	originalPayload := originalPayloadSource
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, false)
+	originalTranslated = applyClaudeResponsesCompactionReplay(originalTranslated, originalPayload, opts)
+	body = applyClaudeResponsesCompactionReplay(body, req.Payload, opts)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -1006,6 +1013,10 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
+	apiKey = codexRequestAPIKey(apiKey, opts)
+	if opts.Alt == constant.ClaudeResponsesCompactBridgeAlt && apiKey == "" {
+		return resp, statusErr{code: http.StatusUnauthorized, msg: "Claude Responses compact bridge requires a request API token"}
+	}
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -1015,28 +1026,35 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
-	to := sdktranslator.FromString("openai-response")
+	requestFormat := sdktranslator.FromString("openai-response")
+	if opts.Alt == constant.ClaudeResponsesCompactBridgeAlt {
+		requestFormat = sdktranslator.FromString("codex")
+	}
+	responseSourceFormat := sdktranslator.FromString("openai-response")
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, false)
+	originalTranslated, body := translateCodexRequestPair(from, requestFormat, baseModel, originalPayload, req.Payload, false)
+	originalTranslated = applyClaudeResponsesCompactionReplay(originalTranslated, originalPayload, opts)
+	body = applyClaudeResponsesCompactionReplay(body, req.Payload, opts)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), requestFormat.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, requestFormat.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body = normalizeCodexInstructions(body)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body = normalizeCodexParallelToolCallsForTools(body)
-	reporter.SetTranslatedReasoningEffort(body, to.String())
+	body = codexCompactRequestPayload(body)
+	reporter.SetTranslatedReasoningEffort(body, requestFormat.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	var identityState codexIdentityConfuseState
@@ -1096,13 +1114,13 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	reporter.EnsurePublished(ctx)
 	var param any
 	clientData := applyCodexIdentityExposeResponsePayload(upstreamData, identityState)
-	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, originalPayload, body, clientData, &param)
+	out := sdktranslator.TranslateNonStream(ctx, responseSourceFormat, responseFormat, req.Model, originalPayload, body, clientData, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
 
 func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
-	if opts.Alt == "responses/compact" {
+	if opts.Alt == "responses/compact" || opts.Alt == constant.ClaudeResponsesCompactBridgeAlt {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
 	if isCodexOpenAIImageRequest(opts) {
@@ -1111,6 +1129,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
+	apiKey = codexRequestAPIKey(apiKey, opts)
+	if opts.Alt == constant.ClaudeResponsesBridgeAlt && apiKey == "" {
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "Claude Responses bridge requires a request API token"}
+	}
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -1127,6 +1149,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	originalPayload := originalPayloadSource
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true)
+	originalTranslated = applyClaudeResponsesCompactionReplay(originalTranslated, originalPayload, opts)
+	body = applyClaudeResponsesCompactionReplay(body, req.Payload, opts)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -2009,6 +2033,74 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
+}
+
+func codexRequestAPIKey(configured string, opts cliproxyexecutor.Options) string {
+	if opts.Alt != constant.ClaudeResponsesBridgeAlt && opts.Alt != constant.ClaudeResponsesCompactBridgeAlt {
+		return configured
+	}
+	if opts.Headers == nil {
+		return ""
+	}
+	if apiKey := strings.TrimSpace(opts.Headers.Get("X-Api-Key")); apiKey != "" {
+		return apiKey
+	}
+	if authorization := strings.TrimSpace(opts.Headers.Get("Authorization")); authorization != "" {
+		parts := strings.Fields(authorization)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") && parts[1] != "" {
+			return parts[1]
+		}
+	}
+	return ""
+}
+
+func applyClaudeResponsesCompactionReplay(translated, source []byte, opts cliproxyexecutor.Options) []byte {
+	if opts.Alt != constant.ClaudeResponsesBridgeAlt && opts.Alt != constant.ClaudeResponsesCompactBridgeAlt {
+		return translated
+	}
+	replay := gjson.GetBytes(source, constant.ClaudeResponsesCompactionField+".output")
+	if !replay.IsArray() || len(replay.Array()) == 0 {
+		return translated
+	}
+
+	input := gjson.GetBytes(translated, "input")
+	var combined bytes.Buffer
+	combined.WriteByte('[')
+	needsComma := false
+	for _, item := range replay.Array() {
+		if needsComma {
+			combined.WriteByte(',')
+		}
+		combined.WriteString(item.Raw)
+		needsComma = true
+	}
+	if input.IsArray() {
+		for _, item := range input.Array() {
+			if needsComma {
+				combined.WriteByte(',')
+			}
+			combined.WriteString(item.Raw)
+			needsComma = true
+		}
+	}
+	combined.WriteByte(']')
+	updated, errSet := sjson.SetRawBytes(translated, "input", combined.Bytes())
+	if errSet != nil {
+		return translated
+	}
+	return updated
+}
+
+func codexCompactRequestPayload(body []byte) []byte {
+	out := []byte(`{"model":"","instructions":"","input":[]}`)
+	out, _ = sjson.SetBytes(out, "model", gjson.GetBytes(body, "model").String())
+	if instructions := gjson.GetBytes(body, "instructions"); instructions.Type == gjson.String {
+		out, _ = sjson.SetBytes(out, "instructions", instructions.String())
+	}
+	if input := gjson.GetBytes(body, "input"); input.IsArray() {
+		out, _ = sjson.SetRawBytes(out, "input", []byte(input.Raw))
+	}
+	return out
 }
 
 func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.CodexKey {

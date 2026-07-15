@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -175,12 +176,16 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if opts.Alt == "responses/compact" {
+	if opts.Alt == "responses/compact" || opts.Alt == constant.ClaudeResponsesCompactBridgeAlt {
 		return e.CodexExecutor.executeCompact(ctx, auth, req, opts)
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	apiKey, baseURL := codexCreds(auth)
+	apiKey = codexRequestAPIKey(apiKey, opts)
+	if opts.Alt == constant.ClaudeResponsesBridgeAlt && apiKey == "" {
+		return resp, statusErr{code: http.StatusUnauthorized, msg: "Claude Responses bridge requires a request API token"}
+	}
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -197,6 +202,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 	originalPayload := originalPayloadSource
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, false)
+	originalTranslated = applyClaudeResponsesCompactionReplay(originalTranslated, originalPayload, opts)
+	body = applyClaudeResponsesCompactionReplay(body, req.Payload, opts)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -401,12 +408,16 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if opts.Alt == "responses/compact" {
+	if opts.Alt == "responses/compact" || opts.Alt == constant.ClaudeResponsesCompactBridgeAlt {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	apiKey, baseURL := codexCreds(auth)
+	apiKey = codexRequestAPIKey(apiKey, opts)
+	if opts.Alt == constant.ClaudeResponsesBridgeAlt && apiKey == "" {
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "Claude Responses bridge requires a request API token"}
+	}
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -422,6 +433,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if len(opts.OriginalRequest) > 0 {
 		userPayload = opts.OriginalRequest
 	}
+	originalTranslated := body
+	if opts.Alt == constant.ClaudeResponsesBridgeAlt {
+		originalTranslated, body = translateCodexRequestPair(from, to, baseModel, userPayload, req.Payload, true)
+		originalTranslated = applyClaudeResponsesCompactionReplay(originalTranslated, userPayload, opts)
+		body = applyClaudeResponsesCompactionReplay(body, req.Payload, opts)
+	}
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -430,7 +447,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, body, requestedModel, requestPath, opts.Headers)
+	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
@@ -1686,7 +1703,8 @@ func CloseCodexWebsocketSessionsForAuthID(authID string, reason string) {
 	}
 }
 
-// CodexAutoExecutor routes Codex requests to the websocket transport only when:
+// CodexAutoExecutor routes Codex requests to the websocket transport when the
+// Claude Responses bridge requests streaming, or when:
 //  1. The downstream transport is websocket, and
 //  2. The selected auth enables websockets.
 //
@@ -1733,7 +1751,7 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if e == nil || e.httpExec == nil || e.wsExec == nil {
 		return nil, fmt.Errorf("codex auto executor: executor is nil")
 	}
-	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
+	if opts.Alt == constant.ClaudeResponsesBridgeAlt || (cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth)) {
 		return e.wsExec.ExecuteStream(ctx, auth, req, opts)
 	}
 	return e.httpExec.ExecuteStream(ctx, auth, req, opts)
