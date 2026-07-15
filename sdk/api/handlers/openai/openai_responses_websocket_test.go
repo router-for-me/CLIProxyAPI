@@ -2017,6 +2017,16 @@ func TestResponsesWebsocketErrorPayloadInfersStatusFromMessage(t *testing.T) {
 			wantRetryable: true,
 		},
 		{
+			name:       "rate limit by type",
+			payload:    []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Rate limit reached."}}`),
+			wantStatus: http.StatusTooManyRequests,
+		},
+		{
+			name:       "rate limit by code",
+			payload:    []byte(`{"type":"error","code":"rate_limit_exceeded","message":"Rate limit reached."}`),
+			wantStatus: http.StatusTooManyRequests,
+		},
+		{
 			name:       "unrelated resource not found",
 			payload:    []byte(`{"type":"error","message":"Requested model was not found."}`),
 			wantStatus: http.StatusInternalServerError,

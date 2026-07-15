@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -55,5 +56,33 @@ func TestCloseCodexWebsocketSessionFailsActiveRequest(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("active request was not notified when its websocket session closed")
+	}
+}
+
+func TestDeliverActiveReadLeavesCapturedChannelOpen(t *testing.T) {
+	sess := &codexWebsocketSession{}
+	activeCh := make(chan codexWebsocketRead, 1)
+	sess.setActive(activeCh)
+
+	closeErr := errors.New("codex websockets executor: session closed: auth_removed")
+	if !sess.deliverActiveRead(codexWebsocketRead{err: closeErr}) {
+		t.Fatal("active request did not receive the close error")
+	}
+
+	event, ok := <-activeCh
+	if !ok {
+		t.Fatal("active request channel closed before delivering the close error")
+	}
+	if !errors.Is(event.err, closeErr) {
+		t.Fatalf("close error = %v, want %v", event.err, closeErr)
+	}
+
+	select {
+	case _, ok = <-activeCh:
+		if !ok {
+			t.Fatal("active request channel was closed while a reader could still hold it")
+		}
+		t.Fatal("active request received an unexpected duplicate event")
+	default:
 	}
 }

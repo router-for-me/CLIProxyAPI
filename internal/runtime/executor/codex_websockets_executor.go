@@ -244,7 +244,6 @@ func (s *codexWebsocketSession) deliverActiveRead(ev codexWebsocketRead) bool {
 	default:
 	}
 	s.clearActive(ch)
-	close(ch)
 	return delivered
 }
 

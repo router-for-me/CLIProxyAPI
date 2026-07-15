@@ -2036,7 +2036,9 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 	}
 	if status <= 0 {
 		lowerErrText := strings.ToLower(errText)
-		if strings.EqualFold(errCode, "websocket_connection_limit_reached") {
+		if strings.EqualFold(errCode, "websocket_connection_limit_reached") ||
+			strings.EqualFold(errCode, "rate_limit_exceeded") ||
+			strings.EqualFold(errType, "rate_limit_error") {
 			status = http.StatusTooManyRequests
 		} else if strings.EqualFold(errCode, "previous_response_not_found") ||
 			strings.EqualFold(errType, "invalid_request_error") ||
