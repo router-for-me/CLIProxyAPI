@@ -2088,6 +2088,9 @@ func TestXAIExecutorExecuteImagesUsesImagesEndpointAndPublishesUsage(t *testing.
 	if record.Detail != (usage.Detail{}) {
 		t.Fatalf("detail = %+v, want zero token usage", record.Detail)
 	}
+	if record.TTFT <= 0 {
+		t.Fatalf("ttft = %v, want positive duration", record.TTFT)
+	}
 	assertNoAdditionalXAIUsageRecord(t, plugin.records)
 }
 
@@ -2136,6 +2139,44 @@ func TestXAIExecutorExecuteImagesPublishesFailureUsage(t *testing.T) {
 	}
 	if record.Fail.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("failure status = %d, want %d", record.Fail.StatusCode, http.StatusTooManyRequests)
+	}
+	assertNoAdditionalXAIUsageRecord(t, plugin.records)
+}
+
+func TestXAIExecutorExecuteImagesPublishesRequestBuildFailureUsage(t *testing.T) {
+	const requestedModel = "grok-imagine-image-fallback"
+
+	plugin := &captureXAIUsagePlugin{
+		model:   requestedModel,
+		records: make(chan usage.Record, 2),
+	}
+	usage.RegisterPlugin(plugin)
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": "://invalid"},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   requestedModel,
+		Payload: []byte(`{"prompt":"draw"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+		},
+	})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want non-nil")
+	}
+
+	record := waitForXAIUsageRecord(t, plugin.records)
+	if record.Model != requestedModel {
+		t.Fatalf("model = %q, want %q", record.Model, requestedModel)
+	}
+	if !record.Failed {
+		t.Fatal("failed = false, want true")
 	}
 	assertNoAdditionalXAIUsageRecord(t, plugin.records)
 }
