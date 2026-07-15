@@ -78,10 +78,24 @@ func agentIdentityAccountID(auth *cliproxyauth.Auth) string {
 }
 
 // agentIdentityPrivateKey decodes the base64 PKCS#8 DER private key into an Ed25519 key.
+// Metadata often contains whitespace/newlines or omits padding, so decoding accepts both
+// standard and raw base64 after stripping whitespace.
 func agentIdentityPrivateKey(privateKeyB64 string) (ed25519.PrivateKey, error) {
-	der, err := base64.StdEncoding.DecodeString(privateKeyB64)
+	cleaned := strings.Map(func(r rune) rune {
+		switch r {
+		case ' ', '\n', '\r', '	':
+			return -1
+		default:
+			return r
+		}
+	}, privateKeyB64)
+	der, err := base64.StdEncoding.DecodeString(cleaned)
 	if err != nil {
-		return nil, fmt.Errorf("agent identity auth: decode private key: %w", err)
+		var errRaw error
+		der, errRaw = base64.RawStdEncoding.DecodeString(cleaned)
+		if errRaw != nil {
+			return nil, fmt.Errorf("agent identity auth: decode private key: %w", err)
+		}
 	}
 	parsedKey, err := x509.ParsePKCS8PrivateKey(der)
 	if err != nil {

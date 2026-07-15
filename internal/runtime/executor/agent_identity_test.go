@@ -118,6 +118,46 @@ func TestApplyCodexHeadersFromSourcesUsesAgentAssertion(t *testing.T) {
 	}
 }
 
+func TestAgentIdentityPrivateKeyAcceptsWhitespaceAndRawBase64(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ed25519 key: %v", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatalf("marshal private key: %v", err)
+	}
+	std := base64.StdEncoding.EncodeToString(der)
+	raw := base64.RawStdEncoding.EncodeToString(der)
+	wrapped := std[:20] + "\n " + std[20:]
+
+	for _, keyB64 := range []string{wrapped, raw} {
+		got, err := agentIdentityPrivateKey(keyB64)
+		if err != nil {
+			t.Fatalf("agentIdentityPrivateKey(%q) error = %v", keyB64[:24], err)
+		}
+		if len(got) != ed25519.PrivateKeySize {
+			t.Fatalf("private key size = %d", len(got))
+		}
+	}
+}
+
+func TestApplyCodexHeadersFromSourcesPrefersNonEmptyAccountID(t *testing.T) {
+	auth, _ := agentIdentityTestAuth(t, "agent_private_key")
+	// Empty account_id must not clobber chatgpt_account_id fallback.
+	auth.Metadata["account_id"] = "   "
+	auth.Metadata["chatgpt_account_id"] = "acct-fallback"
+	req, err := http.NewRequest(http.MethodPost, "https://example.test/responses", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	applyCodexHeadersFromSources(req, auth, "ignored-bearer", true, nil, nil)
+	if got := req.Header.Get("Chatgpt-Account-Id"); got != "acct-fallback" {
+		t.Fatalf("Chatgpt-Account-Id = %q, want acct-fallback", got)
+	}
+}
+
 func TestApplyCodexHeadersFromSourcesOAuthKeepsBearer(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		Provider: "codex",
