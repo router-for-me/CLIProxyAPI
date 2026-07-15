@@ -2086,27 +2086,37 @@ func restoreXAINamespaceToolCallAtPath(data []byte, path string, refs map[string
 	return updated
 }
 
-// xaiFunctionParametersNeedSimplification reports whether a function tool
-// should have its parameters schema simplified before being sent to xAI.
+// xaiFunctionParametersNeedSimplification reports whether a tool's parameters
+// schema should be simplified before being sent to xAI.
 //
 // Covers:
 // 1. Codex Desktop namespaced form: namespace=codex_app, name=automation_update
 // 2. Flattened form already renamed to codex_app__automation_update
-// 3. Any function tool whose parameter root is anyOf/oneOf with a non-object
-//    branch (xAI rejects these with invalid_client_tool_schema)
+// 3. Function tools (and client custom tools rewritten to function) whose
+//    parameter root is anyOf/oneOf with a non-object branch
+//    (xAI rejects these with invalid_client_tool_schema)
+//
+// Name-based force simplification stays limited to function tools so ordinary
+// custom tools keep their parameter contracts unless the schema itself is
+// invalid for xAI.
 func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
-	if !strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), xaiFunctionToolType) {
+	toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
+	// non-apply_patch custom tools are rewritten to function before upstream
+	// send; still evaluate their parameter schemas here.
+	if toolType != xaiFunctionToolType && toolType != xaiCustomToolType {
 		return false
 	}
 	name := strings.TrimSpace(tool.Get("name").String())
 	namespace := strings.TrimSpace(namespaceName)
-	qualified := xaiCodexAppNamespaceName + "__" + xaiAutomationUpdateToolName
-	if strings.EqualFold(name, qualified) {
-		return true
-	}
-	if strings.EqualFold(namespace, xaiCodexAppNamespaceName) &&
-		strings.EqualFold(name, xaiAutomationUpdateToolName) {
-		return true
+	if toolType == xaiFunctionToolType {
+		qualified := xaiCodexAppNamespaceName + "__" + xaiAutomationUpdateToolName
+		if strings.EqualFold(name, qualified) {
+			return true
+		}
+		if strings.EqualFold(namespace, xaiCodexAppNamespaceName) &&
+			strings.EqualFold(name, xaiAutomationUpdateToolName) {
+			return true
+		}
 	}
 	return xaiParametersHaveInvalidUnionRoot(tool.Get("parameters"))
 }
