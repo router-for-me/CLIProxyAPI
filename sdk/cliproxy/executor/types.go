@@ -128,6 +128,8 @@ type Response struct {
 type StreamChunk struct {
 	// Payload is the raw provider chunk payload.
 	Payload []byte
+	// SSEPassthrough reports that Payload is already native SSE framing and must not be reframed.
+	SSEPassthrough bool
 	// Err reports any terminal error encountered while producing chunks.
 	Err error
 }

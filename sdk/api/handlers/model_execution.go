@@ -123,14 +123,14 @@ func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecut
 	if !req.Stream {
 		return ModelExecutionStream{}, modelExecutionModeError("ExecuteModelStream requires Stream=true")
 	}
-	dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, false, modelExecutionOptions{
+	streamChunks, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, false, modelExecutionOptions{
 		Headers:                 req.Headers,
 		Query:                   req.Query,
 		InternalSource:          true,
 		SkipInterceptorPluginID: req.SkipInterceptorPluginID,
 		SkipRouterPluginID:      req.SkipRouterPluginID,
 	})
-	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
+	chunks, errMsg := prepareModelExecutionStream(ctx, StreamChunkPayloads(ctx, streamChunks), errChan)
 	if errMsg != nil {
 		return ModelExecutionStream{}, errMsg
 	}
@@ -167,13 +167,13 @@ func (h *BaseAPIHandler) ExecuteProtocolStreamWithAuthManager(ctx context.Contex
 	if !req.Stream {
 		return ModelExecutionStream{}, modelExecutionModeError("ExecuteProtocolStreamWithAuthManager requires Stream=true")
 	}
-	dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, false, modelExecutionOptions{
+	streamChunks, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, false, modelExecutionOptions{
 		Headers:            req.Headers,
 		Query:              req.Query,
 		ForcedProvider:     req.ForcedProvider,
 		AuthSelectionModel: req.AuthSelectionModel,
 	})
-	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
+	chunks, errMsg := prepareModelExecutionStream(ctx, StreamChunkPayloads(ctx, streamChunks), errChan)
 	if errMsg != nil {
 		return ModelExecutionStream{}, errMsg
 	}

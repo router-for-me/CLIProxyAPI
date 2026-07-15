@@ -307,6 +307,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
+	passThroughSSE := isOpenAIChatSSEPassthrough(from, responseFormat, opts)
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -390,11 +391,53 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
 		}()
-		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		var streamUsage helps.StreamUsageBuffer
 		defer streamUsage.Publish(ctx, reporter)
+		if passThroughSSE {
+			reader := bufio.NewReader(httpResp.Body)
+			for {
+				line, errRead := reader.ReadBytes('\n')
+				if len(line) > 0 {
+					rawLine := bytes.Clone(line)
+					helps.AppendAPIResponseChunk(ctx, e.cfg, rawLine)
+					streamUsage.ObserveOpenAIStream(rawLine)
+					trimmedLine := bytes.TrimSpace(rawLine)
+					if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
+						streamErr := statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}
+						helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+						reporter.PublishFailure(ctx, streamErr)
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+						case <-ctx.Done():
+						}
+						return
+					}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: rawLine, SSEPassthrough: true}:
+					case <-ctx.Done():
+						return
+					}
+				}
+				if errRead == nil {
+					continue
+				}
+				if errRead != io.EOF {
+					helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+					reporter.PublishFailure(ctx, errRead)
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: errRead}:
+					case <-ctx.Done():
+					}
+				}
+				break
+			}
+			streamUsage.Publish(ctx, reporter)
+			reporter.EnsurePublished(ctx)
+			return
+		}
+		scanner := bufio.NewScanner(httpResp.Body)
+		scanner.Buffer(nil, 52_428_800) // 50MB
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -457,6 +500,15 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func isOpenAIChatSSEPassthrough(from, responseFormat sdktranslator.Format, opts cliproxyexecutor.Options) bool {
+	openAIFormat := sdktranslator.FromString("openai")
+	if from != openAIFormat || responseFormat != openAIFormat {
+		return false
+	}
+	requestPath := helps.PayloadRequestPath(opts)
+	return requestPath == "" || strings.HasSuffix(requestPath, "/chat/completions")
 }
 
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {

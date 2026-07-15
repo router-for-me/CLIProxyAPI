@@ -959,15 +959,56 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	chunks, headers, errs := h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false)
+	return StreamChunkPayloads(ctx, chunks), headers, errs
+}
+
+// ExecuteStreamWithAuthManagerWithSSEPassthrough preserves native SSE framing metadata for routes that support it.
+func (h *BaseAPIHandler) ExecuteStreamWithAuthManagerWithSSEPassthrough(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan coreexecutor.StreamChunk, http.Header, <-chan *interfaces.ErrorMessage) {
 	return h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false)
 }
 
 // ExecuteImageStreamWithAuthManager executes a streaming OpenAI-compatible image endpoint request.
 func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	return h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, true)
+	chunks, headers, errs := h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, true)
+	return StreamChunkPayloads(ctx, chunks), headers, errs
 }
 
-func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProtocol, responseProtocol, modelName, originalRequestedModel string, rawJSON []byte, alt, executorPluginID string, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+// StreamChunkPayloads adapts executor stream chunks for callers that do not need framing metadata.
+func StreamChunkPayloads(ctx context.Context, chunks <-chan coreexecutor.StreamChunk) <-chan []byte {
+	if chunks == nil {
+		return nil
+	}
+	var done <-chan struct{}
+	if ctx != nil {
+		done = ctx.Done()
+	}
+	out := make(chan []byte)
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-done:
+				return
+			case chunk, ok := <-chunks:
+				if !ok {
+					return
+				}
+				if len(chunk.Payload) == 0 {
+					continue
+				}
+				select {
+				case <-done:
+					return
+				case out <- chunk.Payload:
+				}
+			}
+		}
+	}()
+	return out
+}
+
+func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProtocol, responseProtocol, modelName, originalRequestedModel string, rawJSON []byte, alt, executorPluginID string, execOptions modelExecutionOptions) (<-chan coreexecutor.StreamChunk, http.Header, <-chan *interfaces.ErrorMessage) {
 	host := h.pluginExecutorHost()
 	if host == nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -1025,7 +1066,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		applyStreamHeaders(intercepted.Headers)
 	}
 
-	dataChan := make(chan []byte)
+	dataChan := make(chan coreexecutor.StreamChunk)
 	errChan := make(chan *interfaces.ErrorMessage, 1)
 	var done <-chan struct{}
 	if ctx != nil {
@@ -1097,7 +1138,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 			}
 			streamHeadersCommitted = true
 			select {
-			case dataChan <- payload:
+			case dataChan <- coreexecutor.StreamChunk{Payload: payload}:
 				if streamInterceptorsActive {
 					historyChunks = appendStreamInterceptorHistory(historyChunks, payload)
 				}
@@ -1109,11 +1150,11 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 	return dataChan, upstreamHeaders, errChan
 }
 
-func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) (<-chan coreexecutor.StreamChunk, http.Header, <-chan *interfaces.ErrorMessage) {
 	return h.executeStreamWithAuthManagerFormats(ctx, handlerType, handlerType, modelName, rawJSON, alt, allowImageModel, modelExecutionOptions{})
 }
 
-func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan coreexecutor.StreamChunk, http.Header, <-chan *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
@@ -1196,7 +1237,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		upstreamHeaders = make(http.Header)
 	}
 	chunks := streamResult.Chunks
-	dataChan := make(chan []byte)
+	dataChan := make(chan coreexecutor.StreamChunk)
 	errChan := make(chan *interfaces.ErrorMessage, 1)
 	streamHeaderInitialized := false
 	streamHeadersCommitted := false
@@ -1289,7 +1330,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			}
 		}
 
-		sendData := func(chunk []byte) bool {
+		sendData := func(chunk coreexecutor.StreamChunk) bool {
 			if ctx == nil {
 				dataChan <- chunk
 				return true
@@ -1402,7 +1443,8 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 					}
 					sentPayload = true
 					streamHeadersCommitted = true
-					if okSendData := sendData(payload); !okSendData {
+					chunk.Payload = payload
+					if okSendData := sendData(chunk); !okSendData {
 						return
 					}
 					if streamInterceptorsActive {

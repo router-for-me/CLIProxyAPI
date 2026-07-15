@@ -442,3 +442,25 @@ func TestOpenAICompatExecutorStreamSkipsKeepAliveUntilDataLine(t *testing.T) {
 		t.Fatalf("stream payload = %s", got.String())
 	}
 }
+
+func TestIsOpenAIChatSSEPassthrough(t *testing.T) {
+	openAIFormat := sdktranslator.FromString("openai")
+	for _, tc := range []struct {
+		name           string
+		responseFormat sdktranslator.Format
+		requestPath    string
+		want           bool
+	}{
+		{name: "chat completions", responseFormat: openAIFormat, requestPath: "/v1/chat/completions", want: true},
+		{name: "implicit chat completions", responseFormat: openAIFormat, want: true},
+		{name: "completions conversion", responseFormat: openAIFormat, requestPath: "/v1/completions", want: false},
+		{name: "translated response", responseFormat: sdktranslator.FromString("claude"), requestPath: "/v1/chat/completions", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.RequestPathMetadataKey: tc.requestPath}}
+			if got := isOpenAIChatSSEPassthrough(openAIFormat, tc.responseFormat, opts); got != tc.want {
+				t.Fatalf("isOpenAIChatSSEPassthrough() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
