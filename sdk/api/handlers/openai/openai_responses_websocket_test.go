@@ -271,10 +271,7 @@ func (e *websocketPreviousResponseMissingExecutor) ExecuteStream(_ context.Conte
 
 	chunks := make(chan coreexecutor.StreamChunk, 1)
 	if count == 2 {
-		chunks <- coreexecutor.StreamChunk{Err: websocketPinnedFailoverStatusError{
-			status: http.StatusBadRequest,
-			msg:    `{"status":400,"error":{"message":"Previous response with id 'resp-1' not found.","type":"invalid_request_error","code":"previous_response_not_found","param":"previous_response_id"}}`,
-		}}
+		chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"error","message":"Previous response with id 'resp-1' not found for previous_response_id."}`)}
 		close(chunks)
 		return &coreexecutor.StreamResult{Chunks: chunks}, nil
 	}
@@ -1930,6 +1927,42 @@ func TestResponsesWebsocketErrorPayloadPreservesCodeForPreviousResponseRetry(t *
 	}
 }
 
+func TestResponsesWebsocketErrorPayloadInfersStatusFromMessage(t *testing.T) {
+	tests := []struct {
+		name          string
+		payload       []byte
+		wantStatus    int
+		wantRetryable bool
+	}{
+		{
+			name:          "previous response not found",
+			payload:       []byte(`{"type":"error","message":"Previous response with id 'resp-1' not found for previous_response_id."}`),
+			wantStatus:    http.StatusBadRequest,
+			wantRetryable: true,
+		},
+		{
+			name:       "unrelated resource not found",
+			payload:    []byte(`{"type":"error","message":"Requested model was not found."}`),
+			wantStatus: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			errMsg := responsesWebsocketErrorMessageFromPayload(tc.payload)
+			if errMsg == nil {
+				t.Fatal("expected error message")
+			}
+			if errMsg.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", errMsg.StatusCode, tc.wantStatus)
+			}
+			if got := responsesWebsocketPreviousResponseNotFoundError(errMsg); got != tc.wantRetryable {
+				t.Fatalf("retryable = %t, want %t", got, tc.wantRetryable)
+			}
+		})
+	}
+}
+
 func TestRecordPendingToolCallIDsFromPayloadDropsSatisfiedCalls(t *testing.T) {
 	pending := map[string]struct{}{}
 	payload := []byte(`{"type":"response.completed","response":{"output":[{"type":"function_call","call_id":"call-1","id":"fc-1"},{"type":"function_call_output","call_id":"call-1","id":"out-1"},{"type":"custom_tool_call","call_id":"call-2","id":"ctc-1"},{"type":"custom_tool_call_output","call_id":"call-2","id":"custom-out-1"}]}}`)
@@ -2352,7 +2385,7 @@ func TestResponsesWebsocketCodexPassthroughReplaysWhenUpstreamSessionInactive(t 
 	}
 }
 
-func TestResponsesWebsocketCodexPassthroughReplaysAfterPreviousResponseNotFound(t *testing.T) {
+func TestResponsesWebsocketCodexPassthroughReplaysAfterStatuslessPreviousResponseMessage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	executor := &websocketPreviousResponseMissingExecutor{done: make(chan struct{})}

@@ -28,3 +28,28 @@ func TestCodexWebsocketRequestResetsUpstreamContextForLocalCompactionSummary(t *
 		t.Fatal("ordinary user text must not reset the upstream websocket")
 	}
 }
+
+func TestCodexWebsocketRequestResetsUpstreamContextForNormalizedMessageReplay(t *testing.T) {
+	replayInput := `[
+		{"type":"message","role":"developer","content":"workspace context"},
+		{"type":"message","role":"user","content":"first turn"},
+		{"type":"message","role":"user","content":"next turn"}
+	]`
+
+	if !codexWebsocketRequestResetsUpstreamContext([]byte(fmt.Sprintf(`{"model":"gpt-5-codex","stream":true,"input":%s}`, replayInput))) {
+		t.Fatal("normalized type-less user/developer replay must reset the upstream websocket")
+	}
+	if codexWebsocketRequestResetsUpstreamContext([]byte(fmt.Sprintf(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":%s}`, replayInput))) {
+		t.Fatal("normalized replay with previous_response_id must keep the upstream websocket")
+	}
+	if codexWebsocketRequestResetsUpstreamContext([]byte(fmt.Sprintf(`{"type":"response.append","model":"gpt-5-codex","input":%s}`, replayInput))) {
+		t.Fatal("response.append must keep the upstream websocket")
+	}
+	if codexWebsocketRequestResetsUpstreamContext([]byte(fmt.Sprintf(`{"input":%s}`, replayInput))) {
+		t.Fatal("ordinary model-less follow-up must keep the upstream websocket")
+	}
+	ordinary := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"next turn"}]}`)
+	if codexWebsocketRequestResetsUpstreamContext(ordinary) {
+		t.Fatal("ordinary single-message follow-up must keep the upstream websocket")
+	}
+}

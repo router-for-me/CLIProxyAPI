@@ -2026,16 +2026,6 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 			errType = topLevelType
 		}
 	}
-	if status <= 0 {
-		if strings.EqualFold(errCode, "websocket_connection_limit_reached") {
-			status = http.StatusTooManyRequests
-		} else if strings.EqualFold(errCode, "previous_response_not_found") || strings.EqualFold(errType, "invalid_request_error") {
-			status = http.StatusBadRequest
-		} else {
-			status = http.StatusInternalServerError
-		}
-	}
-
 	errText := strings.TrimSpace(gjson.GetBytes(payload, "error.message").String())
 	if errText == "" {
 		errText = strings.TrimSpace(gjson.GetBytes(payload, "body.error.message").String())
@@ -2043,6 +2033,20 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 	if errText == "" {
 		errText = strings.TrimSpace(gjson.GetBytes(payload, "message").String())
 	}
+	if status <= 0 {
+		lowerErrText := strings.ToLower(errText)
+		if strings.EqualFold(errCode, "websocket_connection_limit_reached") {
+			status = http.StatusTooManyRequests
+		} else if strings.EqualFold(errCode, "previous_response_not_found") ||
+			strings.EqualFold(errType, "invalid_request_error") ||
+			strings.Contains(lowerErrText, "previous_response_not_found") ||
+			strings.Contains(lowerErrText, "previous_response_id") && strings.Contains(lowerErrText, "not found") {
+			status = http.StatusBadRequest
+		} else {
+			status = http.StatusInternalServerError
+		}
+	}
+
 	if errText == "" {
 		errText = strings.TrimSpace(string(payload))
 	}

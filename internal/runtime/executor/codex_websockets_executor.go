@@ -1545,7 +1545,13 @@ func codexWebsocketRequestResetsUpstreamContext(body []byte) bool {
 	if codexWebsocketRequestUsesPreviousResponseID(body) || codexWebsocketRequestIsAppendOnly(body) {
 		return false
 	}
-	return codexWebsocketInputLooksFullTranscript(gjson.GetBytes(body, "input"))
+	input := gjson.GetBytes(body, "input")
+	if codexWebsocketInputLooksFullTranscript(input) {
+		return true
+	}
+	return requestType == "" &&
+		strings.TrimSpace(gjson.GetBytes(body, "model").String()) != "" &&
+		codexWebsocketInputLooksNormalizedMessageReplay(input)
 }
 
 func codexWebsocketRequestNeedsLiveUpstream(body []byte) bool {
@@ -1576,6 +1582,31 @@ func codexWebsocketInputLooksFullTranscript(input gjson.Result) bool {
 		}
 	}
 	return false
+}
+
+func codexWebsocketInputLooksNormalizedMessageReplay(input gjson.Result) bool {
+	if !input.IsArray() {
+		return false
+	}
+	items := input.Array()
+	if len(items) < 2 {
+		return false
+	}
+	hasUser := false
+	for _, item := range items {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if itemType != "" && itemType != "message" {
+			return false
+		}
+		switch strings.TrimSpace(item.Get("role").String()) {
+		case "user":
+			hasUser = true
+		case "developer":
+		default:
+			return false
+		}
+	}
+	return hasUser
 }
 
 func canFallbackCodexWebsocketRequestToHTTP(sess *codexWebsocketSession, conn *websocket.Conn, body []byte) bool {
