@@ -2508,6 +2508,14 @@ func TestXAIFunctionParametersNeedSimplification(t *testing.T) {
 	if xaiFunctionParametersNeedSimplification(auto, "") {
 		t.Fatal("top-level automation_update should not need simplification")
 	}
+	flat := gjson.Parse(`{"type":"function","name":"codex_app__automation_update","parameters":{"oneOf":[{"type":"object"},{"type":"null"}]}}`)
+	if !xaiFunctionParametersNeedSimplification(flat, "") {
+		t.Fatal("flattened codex_app__automation_update should need simplification")
+	}
+	union := gjson.Parse(`{"type":"function","name":"other_tool","parameters":{"anyOf":[{"type":"object","properties":{"a":{"type":"string"}}},{"type":"null"}]}}`)
+	if !xaiFunctionParametersNeedSimplification(union, "") {
+		t.Fatal("anyOf root with non-object branch should need simplification")
+	}
 	custom := gjson.Parse(`{"type":"custom","name":"automation_update","parameters":{"type":"object"}}`)
 	if xaiFunctionParametersNeedSimplification(custom, "codex_app") {
 		t.Fatal("custom codex_app.automation_update should not need simplification")

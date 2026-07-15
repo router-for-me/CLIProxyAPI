@@ -2086,12 +2086,60 @@ func restoreXAINamespaceToolCallAtPath(data []byte, path string, refs map[string
 	return updated
 }
 
-// xaiFunctionParametersNeedSimplification reports whether a function tool is
-// the Codex Desktop automation tool known to hang xAI Responses streaming.
+// xaiFunctionParametersNeedSimplification reports whether a function tool
+// should have its parameters schema simplified before being sent to xAI.
+//
+// Covers:
+// 1. Codex Desktop namespaced form: namespace=codex_app, name=automation_update
+// 2. Flattened form already renamed to codex_app__automation_update
+// 3. Any function tool whose parameter root is anyOf/oneOf with a non-object
+//    branch (xAI rejects these with invalid_client_tool_schema)
 func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
-	return strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), xaiFunctionToolType) &&
-		strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
-		strings.EqualFold(strings.TrimSpace(tool.Get("name").String()), xaiAutomationUpdateToolName)
+	if !strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), xaiFunctionToolType) {
+		return false
+	}
+	name := strings.TrimSpace(tool.Get("name").String())
+	namespace := strings.TrimSpace(namespaceName)
+	qualified := xaiCodexAppNamespaceName + "__" + xaiAutomationUpdateToolName
+	if strings.EqualFold(name, qualified) {
+		return true
+	}
+	if strings.EqualFold(namespace, xaiCodexAppNamespaceName) &&
+		strings.EqualFold(name, xaiAutomationUpdateToolName) {
+		return true
+	}
+	return xaiParametersHaveInvalidUnionRoot(tool.Get("parameters"))
+}
+
+// xaiParametersHaveInvalidUnionRoot reports whether a JSON Schema root is an
+// anyOf/oneOf union that xAI rejects (especially unions that include non-object
+// branches such as null).
+func xaiParametersHaveInvalidUnionRoot(params gjson.Result) bool {
+	if !params.Exists() || !params.IsObject() {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(params.Get("type").String()), "object") {
+		return false
+	}
+	for _, key := range []string{"anyOf", "oneOf"} {
+		branches := params.Get(key)
+		if !branches.IsArray() || len(branches.Array()) == 0 {
+			continue
+		}
+		for _, branch := range branches.Array() {
+			branchType := strings.ToLower(strings.TrimSpace(branch.Get("type").String()))
+			if branchType == "" {
+				// Nested unions or untyped branches are also unsafe for xAI.
+				return true
+			}
+			if branchType != "object" {
+				return true
+			}
+		}
+		// Pure union root without type:object is rejected by xAI.
+		return true
+	}
+	return false
 }
 
 func sanitizeXAIInputEncryptedContent(body []byte) []byte {
