@@ -230,7 +230,11 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	var identityState codexIdentityConfuseState
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
-	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	var errHeaders error
+	wsHeaders, errHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	if errHeaders != nil {
+		return resp, errHeaders
+	}
 	applyModelHeaderOverrides(wsHeaders, baseModel)
 	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
 
@@ -452,7 +456,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	var identityState codexIdentityConfuseState
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, body)
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
-	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	var errHeaders error
+	wsHeaders, errHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	if errHeaders != nil {
+		return nil, errHeaders
+	}
 	applyModelHeaderOverrides(wsHeaders, baseModel)
 	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
 
@@ -908,16 +916,16 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 	return rawJSON, headers, nil
 }
 
-func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, token string, cfg *config.Config) http.Header {
+func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, token string, cfg *config.Config) (http.Header, error) {
 	if headers == nil {
 		headers = http.Header{}
 	}
 	if isAgentIdentityAuth(auth) {
-		if assertion, err := generateAgentAssertion(auth); err != nil {
-			log.Errorf("codex websocket executor: generate agent assertion: %v", err)
-		} else {
-			headers.Set("Authorization", assertion)
+		assertion, err := generateAgentAssertion(auth)
+		if err != nil {
+			return nil, fmt.Errorf("codex websocket executor: generate agent assertion: %w", err)
 		}
+		headers.Set("Authorization", assertion)
 	} else if strings.TrimSpace(token) != "" {
 		headers.Set("Authorization", "Bearer "+token)
 	}
@@ -980,7 +988,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
 
-	return headers
+	return headers, nil
 }
 
 func ensureCodexWebsocketSessionHeader(target http.Header, source http.Header, fallbackValue string) {

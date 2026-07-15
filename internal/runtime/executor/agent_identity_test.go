@@ -111,7 +111,9 @@ func TestApplyCodexHeadersFromSourcesUsesAgentAssertion(t *testing.T) {
 		t.Fatalf("new request: %v", err)
 	}
 
-	applyCodexHeadersFromSources(req, auth, "ignored-bearer", true, nil, nil)
+	if err := applyCodexHeadersFromSources(req, auth, "ignored-bearer", true, nil, nil); err != nil {
+		t.Fatalf("applyCodexHeadersFromSources() error = %v", err)
+	}
 	parseAgentAssertionForTest(t, req.Header.Get("Authorization"))
 	if got := req.Header.Get("Chatgpt-Account-Id"); got != "acct-test" {
 		t.Fatalf("Chatgpt-Account-Id = %q, want acct-test", got)
@@ -152,7 +154,9 @@ func TestApplyCodexHeadersFromSourcesPrefersNonEmptyAccountID(t *testing.T) {
 		t.Fatalf("new request: %v", err)
 	}
 
-	applyCodexHeadersFromSources(req, auth, "ignored-bearer", true, nil, nil)
+	if err := applyCodexHeadersFromSources(req, auth, "ignored-bearer", true, nil, nil); err != nil {
+		t.Fatalf("applyCodexHeadersFromSources() error = %v", err)
+	}
 	if got := req.Header.Get("Chatgpt-Account-Id"); got != "acct-fallback" {
 		t.Fatalf("Chatgpt-Account-Id = %q, want acct-fallback", got)
 	}
@@ -168,7 +172,9 @@ func TestApplyCodexHeadersFromSourcesOAuthKeepsBearer(t *testing.T) {
 		t.Fatalf("new request: %v", err)
 	}
 
-	applyCodexHeadersFromSources(req, auth, "tok", true, nil, nil)
+	if err := applyCodexHeadersFromSources(req, auth, "tok", true, nil, nil); err != nil {
+		t.Fatalf("applyCodexHeadersFromSources() error = %v", err)
+	}
 	if got := req.Header.Get("Authorization"); got != "Bearer tok" {
 		t.Fatalf("Authorization = %q, want Bearer tok", got)
 	}
@@ -198,7 +204,10 @@ func TestCodexPrepareRequestOAuthKeepsBearer(t *testing.T) {
 func TestApplyCodexWebsocketHeadersFreshAssertionPerDial(t *testing.T) {
 	auth, publicKey := agentIdentityTestAuth(t, "agent_private_key")
 
-	first := applyCodexWebsocketHeaders(context.Background(), nil, auth, "", nil)
+	first, err := applyCodexWebsocketHeaders(context.Background(), nil, auth, "", nil)
+	if err != nil {
+		t.Fatalf("applyCodexWebsocketHeaders() error = %v", err)
+	}
 	firstAssertion := parseAgentAssertionForTest(t, first.Get("Authorization"))
 	if firstAssertion.TaskID != "task-test" {
 		t.Fatalf("first dial task_id = %q, want task-test", firstAssertion.TaskID)
@@ -209,7 +218,10 @@ func TestApplyCodexWebsocketHeadersFreshAssertionPerDial(t *testing.T) {
 
 	// A later dial must sign the current metadata, not reuse a cached assertion.
 	auth.Metadata["task_id"] = "task-rotated"
-	second := applyCodexWebsocketHeaders(context.Background(), nil, auth, "", nil)
+	second, err := applyCodexWebsocketHeaders(context.Background(), nil, auth, "", nil)
+	if err != nil {
+		t.Fatalf("second applyCodexWebsocketHeaders() error = %v", err)
+	}
 	secondAssertion := parseAgentAssertionForTest(t, second.Get("Authorization"))
 	if secondAssertion.TaskID != "task-rotated" {
 		t.Fatalf("second dial task_id = %q, want task-rotated", secondAssertion.TaskID)
@@ -229,11 +241,54 @@ func TestApplyCodexWebsocketHeadersOAuthKeepsBearer(t *testing.T) {
 		Provider: "codex",
 		Metadata: map[string]any{"type": "codex", "access_token": "tok", "account_id": "acct-oauth"},
 	}
-	headers := applyCodexWebsocketHeaders(context.Background(), nil, auth, "tok", nil)
+	headers, err := applyCodexWebsocketHeaders(context.Background(), nil, auth, "tok", nil)
+	if err != nil {
+		t.Fatalf("applyCodexWebsocketHeaders() error = %v", err)
+	}
 	if got := headers.Get("Authorization"); got != "Bearer tok" {
 		t.Fatalf("Authorization = %q, want Bearer tok", got)
 	}
 	if got := headerValueCaseInsensitive(headers, "ChatGPT-Account-ID"); got != "acct-oauth" {
 		t.Fatalf("ChatGPT-Account-ID = %q, want acct-oauth", got)
+	}
+}
+
+func TestApplyCodexHeadersFromSourcesReturnsAssertionError(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":             "agent_identity",
+			"agent_runtime_id": "agent-test",
+			// missing task_id and private key
+		},
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://example.test/responses", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if err := applyCodexHeadersFromSources(req, auth, "", true, nil, nil); err == nil {
+		t.Fatal("expected assertion generation error")
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty on failure", got)
+	}
+}
+
+func TestApplyCodexWebsocketHeadersReturnsAssertionError(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":              "agent_identity",
+			"agent_runtime_id":  "agent-test",
+			"agent_private_key": "not-valid-base64!!!",
+			"task_id":           "task-test",
+		},
+	}
+	headers, err := applyCodexWebsocketHeaders(context.Background(), nil, auth, "", nil)
+	if err == nil {
+		t.Fatal("expected assertion generation error")
+	}
+	if headers != nil {
+		t.Fatalf("headers = %#v, want nil on failure", headers)
 	}
 }

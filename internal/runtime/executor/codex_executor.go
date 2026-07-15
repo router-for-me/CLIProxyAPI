@@ -821,7 +821,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if err != nil {
 		return resp, err
 	}
-	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+	if err = applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg); err != nil {
+		return resp, err
+	}
 	applyModelHeaderOverrides(httpReq.Header, baseModel)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	var authID, authLabel, authType, authValue string
@@ -991,7 +993,9 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
-	applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg)
+	if err = applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg); err != nil {
+		return resp, err
+	}
 	applyModelHeaderOverrides(httpReq.Header, baseModel)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	var authID, authLabel, authType, authValue string
@@ -1106,7 +1110,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if err != nil {
 		return nil, err
 	}
-	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+	if err = applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg); err != nil {
+		return nil, err
+	}
 	applyModelHeaderOverrides(httpReq.Header, baseModel)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	var authID, authLabel, authType, authValue string
@@ -1601,12 +1607,12 @@ func codexIdentityConfuseUUID(authID string, kind string, value string) string {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(name)).String()
 }
 
-func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) {
+func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) error {
 	var ginHeaders http.Header
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header
 	}
-	applyCodexHeadersFromSources(r, auth, token, stream, cfg, ginHeaders)
+	return applyCodexHeadersFromSources(r, auth, token, stream, cfg, ginHeaders)
 }
 
 // applyModelHeaderOverrides forces models.json config.override_header onto upstream headers.
@@ -1628,23 +1634,23 @@ func applyModelHeaderOverrides(headers http.Header, modelName string) {
 
 // applyCodexDirectImageHeaders sets Codex upstream headers for direct /images/* calls.
 // Downstream client User-Agent values are not forwarded to reduce Cloudflare 1010 blocks.
-func applyCodexDirectImageHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) {
+func applyCodexDirectImageHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) error {
 	var ginHeaders http.Header
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header.Clone()
 		ginHeaders.Del("User-Agent")
 	}
-	applyCodexHeadersFromSources(r, auth, token, stream, cfg, ginHeaders)
+	return applyCodexHeadersFromSources(r, auth, token, stream, cfg, ginHeaders)
 }
 
-func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config, ginHeaders http.Header) {
+func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config, ginHeaders http.Header) error {
 	r.Header.Set("Content-Type", "application/json")
 	if isAgentIdentityAuth(auth) {
-		if assertion, err := generateAgentAssertion(auth); err != nil {
-			log.Errorf("codex executor: generate agent assertion: %v", err)
-		} else {
-			r.Header.Set("Authorization", assertion)
+		assertion, err := generateAgentAssertion(auth)
+		if err != nil {
+			return fmt.Errorf("codex executor: generate agent assertion: %w", err)
 		}
+		r.Header.Set("Authorization", assertion)
 		if accountID := agentIdentityAccountID(auth); accountID != "" {
 			r.Header.Set("Chatgpt-Account-Id", accountID)
 		}
@@ -1702,6 +1708,7 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	return nil
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
