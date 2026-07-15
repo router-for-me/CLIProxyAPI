@@ -2516,6 +2516,10 @@ func TestXAIFunctionParametersNeedSimplification(t *testing.T) {
 	if !xaiFunctionParametersNeedSimplification(union, "") {
 		t.Fatal("anyOf root with non-object branch should need simplification")
 	}
+	objectOnlyUnion := gjson.Parse(`{"type":"function","name":"exec_command","parameters":{"oneOf":[{"type":"object","properties":{"mode":{"type":"string"}}},{"type":"object","properties":{"cmd":{"type":"string"}}}]}}`)
+	if xaiFunctionParametersNeedSimplification(objectOnlyUnion, "codex_app") {
+		t.Fatal("object-only oneOf root should be preserved")
+	}
 	custom := gjson.Parse(`{"type":"custom","name":"automation_update","parameters":{"type":"object"}}`)
 	if xaiFunctionParametersNeedSimplification(custom, "codex_app") {
 		t.Fatal("custom codex_app.automation_update should not need simplification")

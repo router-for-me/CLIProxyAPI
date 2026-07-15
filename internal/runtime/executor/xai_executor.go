@@ -2112,8 +2112,9 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 }
 
 // xaiParametersHaveInvalidUnionRoot reports whether a JSON Schema root is an
-// anyOf/oneOf union that xAI rejects (especially unions that include non-object
-// branches such as null).
+// anyOf/oneOf union that xAI rejects because at least one branch is not an
+// object (for example null). Object-only unions are preserved so unrelated
+// tools keep their original parameter contracts.
 func xaiParametersHaveInvalidUnionRoot(params gjson.Result) bool {
 	if !params.Exists() || !params.IsObject() {
 		return false
@@ -2123,10 +2124,14 @@ func xaiParametersHaveInvalidUnionRoot(params gjson.Result) bool {
 	}
 	for _, key := range []string{"anyOf", "oneOf"} {
 		branches := params.Get(key)
-		if !branches.IsArray() || len(branches.Array()) == 0 {
+		if !branches.IsArray() {
 			continue
 		}
-		for _, branch := range branches.Array() {
+		arr := branches.Array()
+		if len(arr) == 0 {
+			continue
+		}
+		for _, branch := range arr {
 			branchType := strings.ToLower(strings.TrimSpace(branch.Get("type").String()))
 			if branchType == "" {
 				// Nested unions or untyped branches are also unsafe for xAI.
@@ -2136,8 +2141,7 @@ func xaiParametersHaveInvalidUnionRoot(params gjson.Result) bool {
 				return true
 			}
 		}
-		// Pure union root without type:object is rejected by xAI.
-		return true
+		// All branches are typed objects: keep the original schema.
 	}
 	return false
 }
