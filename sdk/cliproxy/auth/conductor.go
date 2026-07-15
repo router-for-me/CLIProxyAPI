@@ -1769,18 +1769,34 @@ func (e *streamBootstrapError) Headers() http.Header {
 	return cloneHTTPHeader(e.headers)
 }
 
-// streamFirstByteTimeoutError builds the retryable 504 returned when a streaming
-// attempt produces no first non-empty payload within the configured first-byte
-// timeout. It surfaces as an ordinary retryable bootstrap error so the existing
-// OAuth-refresh / model-pool fallback / credential-rotation / handler
-// bootstrap-retry recovery path takes over — no dedicated retry path.
-func streamFirstByteTimeoutError(timeout time.Duration) *Error {
+// firstByteTimeoutExhaustedCode marks a first-byte timeout whose same-account
+// reconnect budget is exhausted. It is terminal: no credential switch, no
+// request retry, no bootstrap retry, and no account cooldown — it is surfaced to
+// the client as a 504.
+const firstByteTimeoutExhaustedCode = "stream_first_byte_timeout_exhausted"
+
+// firstByteTimeoutExhaustedError builds the terminal 504 returned once the
+// same-account first-byte reconnect budget is used up. Retryable is false so the
+// outer retry layers do not switch credentials or replay the request.
+func firstByteTimeoutExhaustedError(timeout time.Duration, attempts int) *Error {
 	return &Error{
-		Code:       "stream_first_byte_timeout",
-		Message:    fmt.Sprintf("upstream did not return a streaming payload within %s", timeout),
-		Retryable:  true,
+		Code:       firstByteTimeoutExhaustedCode,
+		Message:    fmt.Sprintf("upstream returned no streaming payload within %s across %d same-account attempt(s)", timeout, attempts),
+		Retryable:  false,
 		HTTPStatus: http.StatusGatewayTimeout,
 	}
+}
+
+// IsFirstByteTimeoutExhausted reports whether err is the terminal first-byte
+// timeout produced after the same-account reconnect budget is exhausted. Outer
+// retry layers (credential switch and handler bootstrap) treat it as terminal so
+// the 504 reaches the client immediately instead of burning other credentials.
+func IsFirstByteTimeoutExhausted(err error) bool {
+	var e *Error
+	if errors.As(err, &e) && e != nil {
+		return e.Code == firstByteTimeoutExhaustedCode
+	}
+	return false
 }
 
 func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamResult {
@@ -1934,145 +1950,192 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			attemptRetry  bool
 		)
 		func() {
-			// Per-attempt context so a first-byte timeout cancels only this attempt
-			// (aborting the stalled upstream request) without cancelling the client's
-			// ctx, so the outer retry can proceed on another credential.
+			// First-byte budget per attempt. On a first-byte timeout the stalled
+			// upstream request is aborted (and its uTLS transport closed) and the
+			// SAME credential reconnects on a fresh connection — re-rolling the
+			// upstream queue — up to firstByteRetries times. It never switches
+			// credentials and never cools the account, since a first-byte stall is a
+			// per-request-instance stall (bad luck / upstream queueing), not an
+			// account fault. Exhausting the budget returns a terminal 504.
 			firstByteTimeout := execOpts.StreamFirstByteTimeout
-			attemptCtx := ctx
-			attemptCancel := context.CancelFunc(func() {})
-			var fbTimedOut atomic.Bool
-			var fbTimer *time.Timer
-			if firstByteTimeout > 0 {
-				attemptCtx, attemptCancel = context.WithCancel(ctx)
-				fbTimer = time.AfterFunc(firstByteTimeout, func() {
-					fbTimedOut.Store(true)
-					attemptCancel()
-				})
+			firstByteRetries := 0
+			if firstByteTimeout > 0 && execOpts.StreamFirstByteRetries > 0 {
+				firstByteRetries = execOpts.StreamFirstByteRetries
 			}
 			handedOff := false
+			var currentCancel context.CancelFunc
 			defer func() {
-				if fbTimer != nil {
-					fbTimer.Stop()
-				}
-				if !handedOff {
-					attemptCancel()
+				if !handedOff && currentCancel != nil {
+					currentCancel()
 				}
 			}()
 
-			streamResult, errStream := executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
-			if errStream != nil {
-				if errCtx := ctx.Err(); errCtx != nil {
-					attemptErr = errCtx
-					return
+			fbRetriesUsed := 0
+			for {
+				attemptCtx := ctx
+				attemptCancel := context.CancelFunc(func() {})
+				var fbTimedOut atomic.Bool
+				var fbTimer *time.Timer
+				if firstByteTimeout > 0 {
+					attemptCtx, attemptCancel = context.WithCancel(ctx)
+					fbTimer = time.AfterFunc(firstByteTimeout, func() {
+						fbTimedOut.Store(true)
+						attemptCancel()
+					})
 				}
-				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(ctx, auth, errStream, didRefreshOnUnauthorized); okRefresh {
-					auth = refreshed
-					didRefreshOnUnauthorized = true
-					streamResult, errStream = executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
-					if errStream != nil {
-						if errCtx := ctx.Err(); errCtx != nil {
-							attemptErr = errCtx
-							return
-						}
-					}
-				}
-			}
-			if errStream != nil {
-				if fbTimedOut.Load() && ctx.Err() == nil {
-					errStream = streamFirstByteTimeoutError(firstByteTimeout)
-				}
-				rerr := &Error{Message: errStream.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-				result.RetryAfter = retryAfterFromError(errStream)
-				m.MarkResult(ctx, result)
-				if isRequestInvalidError(errStream) {
-					attemptErr = errStream
-					return
-				}
-				lastErr = errStream
-				attemptRetry = true
-				return
-			}
+				currentCancel = attemptCancel
 
-			buffered, closed, bootstrapErr := readStreamBootstrap(attemptCtx, streamResult.Chunks)
-			if fbTimer != nil {
-				fbTimer.Stop()
-			}
-			// If the first-byte timer fired — even if a payload raced in at the same
-			// instant — treat this attempt as timed out instead of forwarding a stream
-			// under the already-cancelled attemptCtx (which would truncate it).
-			if fbTimedOut.Load() && ctx.Err() == nil {
-				bootstrapErr = streamFirstByteTimeoutError(firstByteTimeout)
-			}
-			if bootstrapErr != nil {
-				if errCtx := ctx.Err(); errCtx != nil {
-					discardStreamChunks(streamResult.Chunks)
-					attemptErr = errCtx
-					return
-				}
-				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(ctx, auth, bootstrapErr, didRefreshOnUnauthorized); okRefresh {
-					discardStreamChunks(streamResult.Chunks)
-					auth = refreshed
-					didRefreshOnUnauthorized = true
-					retryStream, retryErr := executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
-					if retryErr != nil {
-						if errCtx := ctx.Err(); errCtx != nil {
-							attemptErr = errCtx
-							return
+				streamResult, errStream := executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
+
+				// A client cancellation wins over everything — including a coincident
+				// first-byte timeout — so stop promptly with no MarkResult and no retry.
+				if errStream != nil {
+					if errCtx := ctx.Err(); errCtx != nil {
+						if fbTimer != nil {
+							fbTimer.Stop()
 						}
-						bootstrapErr = retryErr
-						streamResult = &cliproxyexecutor.StreamResult{}
-					} else {
-						streamResult = retryStream
-						buffered, closed, bootstrapErr = readStreamBootstrap(attemptCtx, streamResult.Chunks)
+						attemptErr = errCtx
+						return
 					}
 				}
-			}
-			if bootstrapErr != nil {
-				rerr := &Error{Message: bootstrapErr.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
+
+				// Unauthorized refresh applies only to genuine executor errors, not to
+				// a first-byte timeout cancellation.
+				if errStream != nil && !fbTimedOut.Load() {
+					if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(ctx, auth, errStream, didRefreshOnUnauthorized); okRefresh {
+						if fbTimer != nil {
+							fbTimer.Stop()
+						}
+						attemptCancel()
+						auth = refreshed
+						didRefreshOnUnauthorized = true
+						continue
+					}
 				}
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				m.MarkResult(ctx, result)
-				discardStreamChunks(streamResult.Chunks)
-				if isRequestInvalidError(bootstrapErr) {
-					attemptErr = bootstrapErr
+
+				// First-byte timeout during connect/headers → same-account reconnect.
+				if errStream != nil && fbTimedOut.Load() && ctx.Err() == nil {
+					if fbTimer != nil {
+						fbTimer.Stop()
+					}
+					attemptCancel()
+					if fbRetriesUsed < firstByteRetries {
+						fbRetriesUsed++
+						continue
+					}
+					attemptErr = firstByteTimeoutExhaustedError(firstByteTimeout, firstByteRetries+1)
 					return
 				}
-				if !lastAttempt {
-					lastErr = bootstrapErr
+
+				if errStream != nil {
+					if fbTimer != nil {
+						fbTimer.Stop()
+					}
+					rerr := &Error{Message: errStream.Error()}
+					if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
+						rerr.HTTPStatus = se.StatusCode()
+					}
+					result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+					result.RetryAfter = retryAfterFromError(errStream)
+					m.MarkResult(ctx, result)
+					if isRequestInvalidError(errStream) {
+						attemptErr = errStream
+						return
+					}
+					lastErr = errStream
 					attemptRetry = true
 					return
 				}
-				attemptErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
-				return
-			}
 
-			if closed && len(buffered) == 0 {
-				emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
-				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr})
-				if !lastAttempt {
-					lastErr = emptyErr
-					attemptRetry = true
+				buffered, closed, bootstrapErr := readStreamBootstrap(attemptCtx, streamResult.Chunks)
+				// Treat "the first-byte timer fired" as authoritative from Stop()'s
+				// return rather than the racy atomic: the timer is stopped exactly once
+				// (here) on any path that reaches the bootstrap read, so Stop()==false
+				// means it already expired and its callback will cancel attemptCtx. A
+				// real payload that raced in at that instant must be discarded and
+				// re-rolled, not forwarded under a cancelled ctx (which would truncate it).
+				fbFired := false
+				if fbTimer != nil {
+					fbFired = !fbTimer.Stop()
+				}
+
+				// First-byte timeout while waiting for the first payload → same-account
+				// reconnect (discarding any payload that raced in as the timer fired).
+				if (fbFired || fbTimedOut.Load()) && ctx.Err() == nil {
+					attemptCancel()
+					discardStreamChunks(streamResult.Chunks)
+					if fbRetriesUsed < firstByteRetries {
+						fbRetriesUsed++
+						continue
+					}
+					attemptErr = firstByteTimeoutExhaustedError(firstByteTimeout, firstByteRetries+1)
 					return
 				}
-				attemptErr = newStreamBootstrapError(emptyErr, streamResult.Headers)
+
+				if bootstrapErr != nil {
+					if errCtx := ctx.Err(); errCtx != nil {
+						discardStreamChunks(streamResult.Chunks)
+						attemptErr = errCtx
+						return
+					}
+					if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(ctx, auth, bootstrapErr, didRefreshOnUnauthorized); okRefresh {
+						// Re-run the whole attempt on the refreshed credential via the loop
+						// so it gets a FRESH first-byte timer. Re-executing inline here would
+						// read the post-refresh stream with the timer already stopped, so a
+						// silent refreshed upstream could hang forever waiting for the first
+						// byte. didRefreshOnUnauthorized prevents a second refresh, so this
+						// re-roll cannot loop.
+						attemptCancel()
+						discardStreamChunks(streamResult.Chunks)
+						auth = refreshed
+						didRefreshOnUnauthorized = true
+						continue
+					}
+				}
+				if bootstrapErr != nil {
+					rerr := &Error{Message: bootstrapErr.Error()}
+					if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
+						rerr.HTTPStatus = se.StatusCode()
+					}
+					result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+					result.RetryAfter = retryAfterFromError(bootstrapErr)
+					m.MarkResult(ctx, result)
+					discardStreamChunks(streamResult.Chunks)
+					if isRequestInvalidError(bootstrapErr) {
+						attemptErr = bootstrapErr
+						return
+					}
+					if !lastAttempt {
+						lastErr = bootstrapErr
+						attemptRetry = true
+						return
+					}
+					attemptErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+					return
+				}
+
+				if closed && len(buffered) == 0 {
+					emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
+					m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr})
+					if !lastAttempt {
+						lastErr = emptyErr
+						attemptRetry = true
+						return
+					}
+					attemptErr = newStreamBootstrapError(emptyErr, streamResult.Headers)
+					return
+				}
+
+				remaining := streamResult.Chunks
+				if closed {
+					closedCh := make(chan cliproxyexecutor.StreamChunk)
+					close(closedCh)
+					remaining = closedCh
+				}
+				handedOff = true
+				attemptResult = m.wrapStreamResult(attemptCtx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, aliasResult, attemptCancel)
 				return
 			}
-
-			remaining := streamResult.Chunks
-			if closed {
-				closedCh := make(chan cliproxyexecutor.StreamChunk)
-				close(closedCh)
-				remaining = closedCh
-			}
-			handedOff = true
-			attemptResult = m.wrapStreamResult(attemptCtx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, aliasResult, attemptCancel)
 		}()
 
 		if attemptResult != nil {
@@ -2963,6 +3026,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
+			// A same-account first-byte timeout that exhausted its reconnect budget
+			// is terminal: do not switch credentials — surface the 504 to the client.
+			if IsFirstByteTimeoutExhausted(errStream) {
+				return nil, errStream
+			}
 			lastErr = errStream
 			if homeMode {
 				homeAuthCount++
@@ -3745,6 +3813,13 @@ func (m *Manager) retryAllowed(attempt int, providers []string) bool {
 
 func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []string, model string, maxWait time.Duration) (time.Duration, bool) {
 	if err == nil {
+		return 0, false
+	}
+	// A same-account first-byte timeout that exhausted its reconnect budget is
+	// terminal: never replay it at the request-retry layer — not even when another
+	// pool credential happens to be cooling down (which would otherwise let
+	// closestCooldownWait re-enter the pool).
+	if IsFirstByteTimeoutExhausted(err) {
 		return 0, false
 	}
 	if maxWait <= 0 {

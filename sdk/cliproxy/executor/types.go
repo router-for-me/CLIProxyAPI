@@ -108,6 +108,11 @@ type Options struct {
 	// StreamFirstByteTimeout bounds how long a streaming attempt waits for the first
 	// non-empty upstream payload before the attempt is cancelled and retried. 0 disables it.
 	StreamFirstByteTimeout time.Duration
+	// StreamFirstByteRetries bounds how many times a first-byte timeout reconnects on
+	// the SAME credential (re-rolling the upstream on a fresh connection) before a
+	// terminal 504 is returned. It never switches credentials and never cools the
+	// account. 0 disables same-account reconnect (single attempt only).
+	StreamFirstByteRetries int
 }
 
 // ResponseFormatOrSource returns the response target format for an execution.

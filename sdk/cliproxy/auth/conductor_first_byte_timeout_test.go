@@ -10,28 +10,32 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
-// The first-byte timeout must surface as a retryable 504 so the existing
-// OAuth-refresh / model-pool / credential-rotation / handler bootstrap-retry path
-// treats it as an ordinary recoverable bootstrap failure.
-func TestStreamFirstByteTimeoutError_RetryableGatewayTimeout(t *testing.T) {
-	err := streamFirstByteTimeoutError(30 * time.Second)
+// An exhausted first-byte timeout must be TERMINAL: a 504 that is NOT retryable
+// and is recognised by IsFirstByteTimeoutExhausted, so the credential-switch,
+// request-retry, and handler bootstrap layers all surface it straight to the
+// client instead of burning other credentials or replaying the whole request.
+func TestFirstByteTimeoutExhaustedError_TerminalGatewayTimeout(t *testing.T) {
+	err := firstByteTimeoutExhaustedError(15*time.Second, 2)
 
-	if err.Code != "stream_first_byte_timeout" {
-		t.Fatalf("Code = %q, want stream_first_byte_timeout", err.Code)
+	if err.Code != firstByteTimeoutExhaustedCode {
+		t.Fatalf("Code = %q, want %q", err.Code, firstByteTimeoutExhaustedCode)
 	}
 	if err.HTTPStatus != http.StatusGatewayTimeout {
 		t.Fatalf("HTTPStatus = %d, want %d", err.HTTPStatus, http.StatusGatewayTimeout)
 	}
-	if !err.Retryable {
-		t.Fatal("first-byte timeout must be Retryable so bootstrap-retry can recover")
+	if err.Retryable {
+		t.Fatal("exhausted first-byte timeout must NOT be retryable (it is terminal)")
 	}
-	if err.StatusCode() != http.StatusGatewayTimeout {
-		t.Fatalf("StatusCode() = %d, want %d", err.StatusCode(), http.StatusGatewayTimeout)
+	if !IsFirstByteTimeoutExhausted(err) {
+		t.Fatal("IsFirstByteTimeoutExhausted must recognise the exhausted error")
 	}
-	// It must be a 5xx so the handler's bootstrapEligible retries it, and must not
-	// be treated as a request-invalid (which would return immediately, no retry).
 	if isRequestInvalidError(err) {
-		t.Fatal("first-byte timeout must not be treated as request-invalid")
+		t.Fatal("exhausted first-byte timeout must not be treated as request-invalid")
+	}
+	// A genuine upstream 504 (or any other error) must NOT be misclassified as an
+	// exhausted first-byte timeout, so real transient-error cooldowns still apply.
+	if IsFirstByteTimeoutExhausted(&Error{HTTPStatus: http.StatusGatewayTimeout, Message: "real upstream 504"}) {
+		t.Fatal("a real upstream 504 must not be classified as an exhausted first-byte timeout")
 	}
 }
 

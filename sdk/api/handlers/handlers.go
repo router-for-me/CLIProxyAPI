@@ -923,6 +923,7 @@ func (h *BaseAPIHandler) pluginExecutorRequest(ctx context.Context, entryProtoco
 		Metadata:        reqMeta,
 		// Only consulted on the streaming path (Auth Manager bootstrap read).
 		StreamFirstByteTimeout: StreamingFirstByteTimeout(h.Cfg),
+		StreamFirstByteRetries: StreamingBootstrapRetries(h.Cfg),
 	}
 	return req, opts
 }
@@ -1175,6 +1176,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		Query:                       modelExecutionQuery(ctx, execOptions.Query),
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, execOptions.SkipInterceptorPluginID),
 		StreamFirstByteTimeout:      StreamingFirstByteTimeout(h.Cfg),
+		StreamFirstByteRetries:      StreamingBootstrapRetries(h.Cfg),
 	}
 	opts.Metadata = reqMeta
 	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
@@ -1320,6 +1322,11 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 
 		bootstrapEligible := func(err error) bool {
+			// A same-account first-byte timeout that exhausted its reconnect budget is
+			// terminal — do not replay the whole request at the handler layer.
+			if coreauth.IsFirstByteTimeoutExhausted(err) {
+				return false
+			}
 			status := statusFromError(err)
 			if status == 0 {
 				return true

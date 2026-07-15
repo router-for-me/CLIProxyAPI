@@ -63,16 +63,24 @@ type StreamingConfig struct {
 	// <= 0 disables keep-alives. Default is 0.
 	KeepAliveSeconds int `yaml:"keepalive-seconds,omitempty" json:"keepalive-seconds,omitempty"`
 
-	// BootstrapRetries controls how many times the server may retry a streaming request before any bytes are sent,
-	// to allow auth rotation / transient recovery.
-	// <= 0 disables bootstrap retries. Default is 0.
+	// BootstrapRetries controls how many times a streaming request may be retried
+	// before any bytes are sent, to allow auth rotation / transient recovery. It is
+	// ALSO reused as the first-byte-timeout SAME-ACCOUNT reconnect budget: when
+	// FirstByteTimeoutSeconds fires, the request re-issues on the SAME credential up
+	// to this many times (e.g. bootstrap-retries: 1 => first attempt + 1 same-account
+	// re-roll) before returning a terminal 504.
+	// <= 0 disables bootstrap retries (and same-account first-byte reconnect). Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
 
 	// FirstByteTimeoutSeconds bounds how long a streaming attempt waits for the
-	// first non-empty upstream payload before the attempt is cancelled and retried
-	// via the existing credential-rotation / bootstrap-retry path. It measures time
-	// to the first non-empty stream payload only (not TCP connect, response headers,
-	// or empty SSE heartbeats), so normal long reasoning is never interrupted once
-	// the first payload has arrived. <= 0 disables the timeout. Default is 0.
+	// first non-empty upstream payload before the stalled attempt is aborted and the
+	// SAME credential reconnects on a fresh connection (re-rolling the upstream),
+	// bounded by BootstrapRetries. It never switches credentials and never cools the
+	// account for a first-byte stall. The budget spans the WHOLE attempt — TCP
+	// connect, TLS handshake, request send, and the wait for the first non-empty
+	// stream payload — so a stalled connect/handshake/headers phase is covered too;
+	// empty SSE heartbeats do NOT count as the first payload. Once the first non-empty
+	// payload arrives the timer is cleared, so normal long reasoning is never
+	// interrupted. <= 0 disables the timeout. Default is 0.
 	FirstByteTimeoutSeconds int `yaml:"first-byte-timeout-seconds,omitempty" json:"first-byte-timeout-seconds,omitempty"`
 }
