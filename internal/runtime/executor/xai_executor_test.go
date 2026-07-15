@@ -2313,6 +2313,45 @@ func TestNormalizeXAITools_SimplifiesCodexAppAutomationUpdateSchema(t *testing.T
 	}
 }
 
+func TestNormalizeXAITools_SimplifiesFlattenedAndInvalidRootSchemas(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","name":"codex_app__automation_update","strict":true,"parameters":{"oneOf":[{"type":"object","properties":{"action":{"type":"string"}},"required":["action"]},{"type":"null"}]}},{"type":"function","name":"nullable_lookup","strict":true,"parameters":{"anyOf":[{"type":"object","properties":{"query":{"type":"string"}}},{"type":["object","null"]}]}},{"type":"custom","name":"nullable_custom","strict":true,"parameters":{"oneOf":[{"type":"object"},{"type":"null"}]}},{"type":"function","name":"echo_tool","strict":true,"parameters":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"],"additionalProperties":false}}]}`)
+	out := normalizeXAITools(body)
+
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 4 {
+		t.Fatalf("tools length = %d, want 4; body=%s", len(tools), string(out))
+	}
+	for index, wantName := range []string{"codex_app__automation_update", "nullable_lookup", "nullable_custom"} {
+		tool := tools[index]
+		if got := tool.Get("name").String(); got != wantName {
+			t.Fatalf("tools.%d.name = %q, want %q; body=%s", index, got, wantName, string(out))
+		}
+		if got := tool.Get("type").String(); got != xaiFunctionToolType {
+			t.Fatalf("tools.%d type = %q, want function; body=%s", index, got, string(out))
+		}
+		if got := tool.Get("parameters.type").String(); got != "object" {
+			t.Fatalf("tools.%d parameters.type = %q, want object; body=%s", index, got, string(out))
+		}
+		if tool.Get("parameters.additionalProperties").Type != gjson.True {
+			t.Fatalf("tools.%d parameters should allow additionalProperties: %s", index, string(out))
+		}
+		if tool.Get("strict").Type != gjson.False {
+			t.Fatalf("tools.%d strict = %s, want false; body=%s", index, tool.Get("strict").Raw, string(out))
+		}
+	}
+
+	echoTool := tools[3]
+	if got := echoTool.Get("parameters.properties.message.type").String(); got != "string" {
+		t.Fatalf("echo_tool schema changed, message type = %q; body=%s", got, string(out))
+	}
+	if echoTool.Get("strict").Type != gjson.True {
+		t.Fatalf("echo_tool strict changed: %s", string(out))
+	}
+	if echoTool.Get("parameters.additionalProperties").Type != gjson.False {
+		t.Fatalf("echo_tool additionalProperties changed: %s", string(out))
+	}
+}
+
 func TestNormalizeXAITools_QualifiesSameNamedNamespaceTools(t *testing.T) {
 	body := []byte(`{
 		"tools":[
@@ -2508,9 +2547,37 @@ func TestXAIFunctionParametersNeedSimplification(t *testing.T) {
 	if xaiFunctionParametersNeedSimplification(auto, "") {
 		t.Fatal("top-level automation_update should not need simplification")
 	}
+	flattened := gjson.Parse(`{"type":"function","name":"codex_app__automation_update","parameters":{"type":"object"}}`)
+	if !xaiFunctionParametersNeedSimplification(flattened, "") {
+		t.Fatal("flattened codex_app__automation_update should need simplification")
+	}
 	custom := gjson.Parse(`{"type":"custom","name":"automation_update","parameters":{"type":"object"}}`)
 	if xaiFunctionParametersNeedSimplification(custom, "codex_app") {
-		t.Fatal("custom codex_app.automation_update should not need simplification")
+		t.Fatal("custom codex_app.automation_update with an object schema should not need simplification")
+	}
+	invalidCustom := gjson.Parse(`{"type":"custom","name":"nullable_lookup","parameters":{"oneOf":[{"type":"object"},{"type":"null"}]}}`)
+	if !xaiFunctionParametersNeedSimplification(invalidCustom, "") {
+		t.Fatal("custom tool normalized to a function should simplify an invalid root union")
+	}
+	invalidOneOf := gjson.Parse(`{"type":"function","name":"nullable_lookup","parameters":{"oneOf":[{"type":"object"},{"type":"null"}]}}`)
+	if !xaiFunctionParametersNeedSimplification(invalidOneOf, "") {
+		t.Fatal("root oneOf with a non-object branch should need simplification")
+	}
+	invalidAnyOf := gjson.Parse(`{"type":"function","name":"nullable_lookup","parameters":{"anyOf":[{"type":"object"},{"type":["object","null"]}]}}`)
+	if !xaiFunctionParametersNeedSimplification(invalidAnyOf, "") {
+		t.Fatal("root anyOf with a non-object type should need simplification")
+	}
+	untypedBranch := gjson.Parse(`{"type":"function","name":"nullable_lookup","parameters":{"oneOf":[{"type":"object"},{"const":null}]}}`)
+	if !xaiFunctionParametersNeedSimplification(untypedBranch, "") {
+		t.Fatal("root union with an untyped branch should need simplification")
+	}
+	objectUnion := gjson.Parse(`{"type":"function","name":"lookup","parameters":{"oneOf":[{"type":"object"},{"type":"object"}]}}`)
+	if xaiFunctionParametersNeedSimplification(objectUnion, "") {
+		t.Fatal("root union containing only object branches should not need simplification")
+	}
+	nestedUnion := gjson.Parse(`{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"value":{"oneOf":[{"type":"string"},{"type":"null"}]}}}}`)
+	if xaiFunctionParametersNeedSimplification(nestedUnion, "") {
+		t.Fatal("nested union should not need root schema simplification")
 	}
 	safe := gjson.Parse(`{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}`)
 	if xaiFunctionParametersNeedSimplification(safe, "codex_app") {
