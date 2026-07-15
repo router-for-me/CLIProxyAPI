@@ -2508,6 +2508,22 @@ func TestXAIFunctionParametersNeedSimplification(t *testing.T) {
 	if xaiFunctionParametersNeedSimplification(auto, "") {
 		t.Fatal("top-level automation_update should not need simplification")
 	}
+	flat := gjson.Parse(`{"type":"function","name":"codex_app__automation_update","parameters":{"oneOf":[{"type":"object"},{"type":"null"}]}}`)
+	if !xaiFunctionParametersNeedSimplification(flat, "") {
+		t.Fatal("flattened codex_app__automation_update should need simplification")
+	}
+	union := gjson.Parse(`{"type":"function","name":"other_tool","parameters":{"anyOf":[{"type":"object","properties":{"a":{"type":"string"}}},{"type":"null"}]}}`)
+	if !xaiFunctionParametersNeedSimplification(union, "") {
+		t.Fatal("anyOf root with non-object branch should need simplification")
+	}
+	objectOnlyUnion := gjson.Parse(`{"type":"function","name":"exec_command","parameters":{"oneOf":[{"type":"object","properties":{"mode":{"type":"string"}}},{"type":"object","properties":{"cmd":{"type":"string"}}}]}}`)
+	if xaiFunctionParametersNeedSimplification(objectOnlyUnion, "codex_app") {
+		t.Fatal("object-only oneOf root should be preserved")
+	}
+	customUnion := gjson.Parse(`{"type":"custom","name":"custom_lookup","parameters":{"oneOf":[{"type":"object","properties":{"q":{"type":"string"}}},{"type":"null"}]}}`)
+	if !xaiFunctionParametersNeedSimplification(customUnion, "") {
+		t.Fatal("custom tool with non-object union root should need simplification after rewrite to function")
+	}
 	custom := gjson.Parse(`{"type":"custom","name":"automation_update","parameters":{"type":"object"}}`)
 	if xaiFunctionParametersNeedSimplification(custom, "codex_app") {
 		t.Fatal("custom codex_app.automation_update should not need simplification")
@@ -2515,6 +2531,31 @@ func TestXAIFunctionParametersNeedSimplification(t *testing.T) {
 	safe := gjson.Parse(`{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}`)
 	if xaiFunctionParametersNeedSimplification(safe, "codex_app") {
 		t.Fatal("unrelated codex_app function should not need simplification")
+	}
+}
+
+func TestNormalizeXAITools_SimplifiesCustomInvalidUnionRoot(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"custom","name":"custom_lookup","strict":true,"parameters":{"oneOf":[{"type":"object","properties":{"q":{"type":"string"}}},{"type":"null"}]}}]}`)
+	out := normalizeXAITools(body)
+	tool := gjson.GetBytes(out, "tools.0")
+	if got := tool.Get("type").String(); got != "function" {
+		t.Fatalf("custom tool type = %q, want function; body=%s", got, string(out))
+	}
+	if got := tool.Get("name").String(); got != "custom_lookup" {
+		t.Fatalf("tool name = %q, want custom_lookup; body=%s", got, string(out))
+	}
+	params := tool.Get("parameters")
+	if got := params.Get("type").String(); got != "object" {
+		t.Fatalf("parameters.type = %q, want object; body=%s", got, string(out))
+	}
+	if params.Get("oneOf").Exists() || params.Get("anyOf").Exists() {
+		t.Fatalf("invalid union root was not simplified: %s", string(out))
+	}
+	if params.Get("additionalProperties").Type != gjson.True {
+		t.Fatalf("simplified parameters should allow additionalProperties: %s", string(out))
+	}
+	if tool.Get("strict").Type != gjson.False {
+		t.Fatalf("strict = %s, want false after simplification; body=%s", tool.Get("strict").Raw, string(out))
 	}
 }
 

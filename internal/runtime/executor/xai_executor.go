@@ -2086,12 +2086,74 @@ func restoreXAINamespaceToolCallAtPath(data []byte, path string, refs map[string
 	return updated
 }
 
-// xaiFunctionParametersNeedSimplification reports whether a function tool is
-// the Codex Desktop automation tool known to hang xAI Responses streaming.
+// xaiFunctionParametersNeedSimplification reports whether a tool's parameters
+// schema should be simplified before being sent to xAI.
+//
+// Covers:
+// 1. Codex Desktop namespaced form: namespace=codex_app, name=automation_update
+// 2. Flattened form already renamed to codex_app__automation_update
+// 3. Function tools (and client custom tools rewritten to function) whose
+//    parameter root is anyOf/oneOf with a non-object branch
+//    (xAI rejects these with invalid_client_tool_schema)
+//
+// Name-based force simplification stays limited to function tools so ordinary
+// custom tools keep their parameter contracts unless the schema itself is
+// invalid for xAI.
 func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
-	return strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), xaiFunctionToolType) &&
-		strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
-		strings.EqualFold(strings.TrimSpace(tool.Get("name").String()), xaiAutomationUpdateToolName)
+	toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
+	// non-apply_patch custom tools are rewritten to function before upstream
+	// send; still evaluate their parameter schemas here.
+	if toolType != xaiFunctionToolType && toolType != xaiCustomToolType {
+		return false
+	}
+	name := strings.TrimSpace(tool.Get("name").String())
+	namespace := strings.TrimSpace(namespaceName)
+	if toolType == xaiFunctionToolType {
+		qualified := xaiCodexAppNamespaceName + "__" + xaiAutomationUpdateToolName
+		if strings.EqualFold(name, qualified) {
+			return true
+		}
+		if strings.EqualFold(namespace, xaiCodexAppNamespaceName) &&
+			strings.EqualFold(name, xaiAutomationUpdateToolName) {
+			return true
+		}
+	}
+	return xaiParametersHaveInvalidUnionRoot(tool.Get("parameters"))
+}
+
+// xaiParametersHaveInvalidUnionRoot reports whether a JSON Schema root is an
+// anyOf/oneOf union that xAI rejects because at least one branch is not an
+// object (for example null). Object-only unions are preserved so unrelated
+// tools keep their original parameter contracts.
+func xaiParametersHaveInvalidUnionRoot(params gjson.Result) bool {
+	if !params.Exists() || !params.IsObject() {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(params.Get("type").String()), "object") {
+		return false
+	}
+	for _, key := range []string{"anyOf", "oneOf"} {
+		branches := params.Get(key)
+		if !branches.IsArray() {
+			continue
+		}
+		arr := branches.Array()
+		if len(arr) == 0 {
+			continue
+		}
+		for _, branch := range arr {
+			branchType := strings.ToLower(strings.TrimSpace(branch.Get("type").String()))
+			if branchType == "" {
+				// Nested unions or untyped branches are also unsafe for xAI.
+				return true
+			}
+			if branchType != "object" {
+				return true
+			}
+		}
+		// All branches are typed objects: keep the original schema.
+	}
+	return false
 }
 
 func sanitizeXAIInputEncryptedContent(body []byte) []byte {
