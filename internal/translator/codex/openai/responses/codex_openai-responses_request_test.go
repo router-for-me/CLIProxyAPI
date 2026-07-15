@@ -356,6 +356,29 @@ func TestContextManagementCompactionCompatibility(t *testing.T) {
 	}
 }
 
+func TestOutputConfigRemovedForCodexCompatibility(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.6-sol",
+		"output_config": {
+			"effort": "high"
+		},
+		"reasoning": {
+			"effort": "medium"
+		},
+		"input": [{"role":"user","content":"hello"}]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6-sol", inputJSON, false)
+	outputStr := string(output)
+
+	if gjson.Get(outputStr, "output_config").Exists() {
+		t.Fatalf("output_config should be removed for Codex compatibility")
+	}
+	if effort := gjson.Get(outputStr, "reasoning.effort").String(); effort != "medium" {
+		t.Fatalf("reasoning.effort = %q, want medium", effort)
+	}
+}
+
 func TestTruncationRemovedForCodexCompatibility(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gpt-5.2",
