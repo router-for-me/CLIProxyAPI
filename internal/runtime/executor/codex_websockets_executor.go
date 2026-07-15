@@ -684,10 +684,15 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
 			return resp, wsErr
 		}
+		if eventType := gjson.GetBytes(payload, "type").String(); eventType == "response.failed" {
+			wsErr, _, _ := codexTerminalFailureErr(payload)
+			helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
+			return resp, wsErr
+		}
 
 		payload = normalizeCodexWebsocketCompletion(payload)
 		eventType := gjson.GetBytes(payload, "type").String()
-		if eventType == "response.completed" {
+		if isCodexWebsocketSuccessfulTerminalEvent(eventType) {
 			if detail, ok := helps.ParseCodexUsage(payload); ok {
 				reporter.Publish(ctx, detail)
 			}
@@ -1263,7 +1268,16 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			eventType := gjson.GetBytes(payload, "type").String()
-			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "error"
+			isTerminalEvent := isCodexWebsocketSuccessfulTerminalEvent(eventType) || eventType == "response.failed" || eventType == "error"
+			if eventType == "response.failed" {
+				wsErr, _, _ := codexTerminalFailureErr(payload)
+				terminateReason = "upstream_error"
+				terminateErr = wsErr
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
+				reporter.PublishFailure(ctx, wsErr)
+				_ = send(cliproxyexecutor.StreamChunk{Err: wsErr})
+				return
+			}
 			statuslessErr, hasStatuslessErr := codexWebsocketStatuslessErrorEvent(payload)
 			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
 			if cliproxyexecutor.DownstreamWebsocket(ctx) {
@@ -1276,7 +1290,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 						e.clearUpstreamConn(sess, conn, "upstream_error", statuslessErr, false)
 					}
 				}
-				if eventType == "response.completed" || eventType == "response.done" {
+				if isCodexWebsocketSuccessfulTerminalEvent(eventType) {
 					if detail, ok := helps.ParseCodexUsage(payload); ok {
 						reporter.Publish(ctx, detail)
 					}
@@ -1307,7 +1321,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 			payload = normalizeCodexWebsocketCompletion(payload)
 			eventType = gjson.GetBytes(payload, "type").String()
-			if eventType == "response.completed" || eventType == "response.done" {
+			if isCodexWebsocketSuccessfulTerminalEvent(eventType) {
 				if detail, ok := helps.ParseCodexUsage(payload); ok {
 					reporter.Publish(ctx, detail)
 				}
@@ -1324,7 +1338,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				sentPayload = true
 			}
-			if eventType == "response.completed" || eventType == "response.done" {
+			if isCodexWebsocketSuccessfulTerminalEvent(eventType) {
 				return
 			}
 		}
@@ -1485,8 +1499,13 @@ func shouldRetryCodexWebsocketPrePayloadReadError(err error, retryAttempt int) b
 }
 
 func isCodexWebsocketTerminalPayload(payload []byte) bool {
-	switch strings.TrimSpace(gjson.GetBytes(payload, "type").String()) {
-	case "response.completed", "response.done":
+	eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	return isCodexWebsocketSuccessfulTerminalEvent(eventType) || eventType == "response.failed"
+}
+
+func isCodexWebsocketSuccessfulTerminalEvent(eventType string) bool {
+	switch strings.TrimSpace(eventType) {
+	case "response.completed", "response.done", "response.incomplete":
 		return true
 	default:
 		return false

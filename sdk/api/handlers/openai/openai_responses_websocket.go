@@ -30,14 +30,15 @@ import (
 )
 
 const (
-	wsRequestTypeCreate  = "response.create"
-	wsRequestTypeAppend  = "response.append"
-	wsEventTypeError     = "error"
-	wsEventTypeCompleted = "response.completed"
-	wsEventTypeDone      = "response.done"
-	wsDoneMarker         = "[DONE]"
-	wsTurnStateHeader    = "x-codex-turn-state"
-	wsTimelineBodyKey    = "WEBSOCKET_TIMELINE_OVERRIDE"
+	wsRequestTypeCreate   = "response.create"
+	wsRequestTypeAppend   = "response.append"
+	wsEventTypeError      = "error"
+	wsEventTypeCompleted  = "response.completed"
+	wsEventTypeDone       = "response.done"
+	wsEventTypeIncomplete = "response.incomplete"
+	wsDoneMarker          = "[DONE]"
+	wsTurnStateHeader     = "x-codex-turn-state"
+	wsTimelineBodyKey     = "WEBSOCKET_TIMELINE_OVERRIDE"
 
 	codexLocalCompactionSummaryPrefix = util.CodexLocalCompactionSummaryPrefix
 )
@@ -1992,7 +1993,7 @@ func websocketPayloadPreview(payload []byte) string {
 }
 
 func isResponsesWebsocketCompletionEvent(eventType string) bool {
-	return eventType == wsEventTypeCompleted || eventType == wsEventTypeDone
+	return eventType == wsEventTypeCompleted || eventType == wsEventTypeDone || eventType == wsEventTypeIncomplete
 }
 
 func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.ErrorMessage {
