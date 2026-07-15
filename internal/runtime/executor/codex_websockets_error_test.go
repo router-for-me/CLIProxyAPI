@@ -82,3 +82,52 @@ func TestCodexWebsocketStatuslessErrorEventUsesTopLevelErrorType(t *testing.T) {
 		t.Fatalf("error type = %q, want invalid_request_error", got)
 	}
 }
+
+func TestCodexWebsocketStatuslessErrorEventClassifiesRateLimits(t *testing.T) {
+	tests := []struct {
+		name           string
+		payload        []byte
+		wantRetryAfter *time.Duration
+	}{
+		{
+			name:    "nested rate limit",
+			payload: []byte(`{"type":"error","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"Rate limit reached."}}`),
+		},
+		{
+			name:    "top-level rate limit code",
+			payload: []byte(`{"type":"error","code":"rate_limit_exceeded","message":"Rate limit reached."}`),
+		},
+		{
+			name:           "usage limit retry after",
+			payload:        []byte(`{"type":"error","error":{"type":"usage_limit_reached","message":"Usage limit reached.","resets_in_seconds":7}}`),
+			wantRetryAfter: durationPointer(7 * time.Second),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err, ok := codexWebsocketStatuslessErrorEvent(tc.payload)
+			if !ok {
+				t.Fatal("expected statusless websocket error")
+			}
+			statusErr, ok := err.(interface{ StatusCode() int })
+			if !ok || statusErr.StatusCode() != http.StatusTooManyRequests {
+				t.Fatalf("status = %#v, want %d", err, http.StatusTooManyRequests)
+			}
+			retryable, ok := err.(interface{ RetryAfter() *time.Duration })
+			if tc.wantRetryAfter == nil {
+				if ok && retryable.RetryAfter() != nil {
+					t.Fatalf("retryAfter = %v, want nil", *retryable.RetryAfter())
+				}
+				return
+			}
+			if !ok || retryable.RetryAfter() == nil || *retryable.RetryAfter() != *tc.wantRetryAfter {
+				t.Fatalf("retryAfter = %#v, want %v", err, *tc.wantRetryAfter)
+			}
+		})
+	}
+}
+
+func durationPointer(value time.Duration) *time.Duration {
+	return &value
+}

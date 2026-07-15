@@ -2197,6 +2197,12 @@ func codexWebsocketStatuslessErrorStatus(payload []byte) int {
 	if message == "" {
 		message = strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "message").String()))
 	}
+	if strings.EqualFold(code, "rate_limit_exceeded") ||
+		strings.EqualFold(code, "usage_limit_reached") ||
+		strings.EqualFold(errType, "rate_limit_error") ||
+		strings.EqualFold(errType, "usage_limit_reached") {
+		return http.StatusTooManyRequests
+	}
 	if strings.EqualFold(code, "previous_response_not_found") ||
 		strings.EqualFold(errType, "invalid_request_error") ||
 		strings.Contains(message, "previous_response_not_found") ||
