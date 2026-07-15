@@ -481,6 +481,9 @@ func xaiBuildSSEFrame(eventName string, data []byte) []byte {
 }
 
 func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, endpointPath string) (resp cliproxyexecutor.Response, err error) {
+	model := gjson.GetBytes(req.Payload, "model").String()
+	reporter := helps.NewExecutorUsageReporter(ctx, e, model, auth)
+
 	token, baseURL := xaiCreds(auth)
 	if baseURL == "" {
 		baseURL = xaiauth.DefaultAPIBaseURL
@@ -502,6 +505,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		reporter.PublishFailure(ctx, err)
 		return resp, err
 	}
 	defer func() {
@@ -514,15 +518,19 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		reporter.PublishFailure(ctx, err)
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, xaiStatusErr(httpResp.StatusCode, data)
+		err = xaiStatusErr(httpResp.StatusCode, data)
+		reporter.PublishFailure(ctx, err)
+		return resp, err
 	}
 
+	reporter.EnsurePublished(ctx)
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }
 
