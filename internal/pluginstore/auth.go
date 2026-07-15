@@ -27,7 +27,10 @@ const (
 	AuthTypeGitHubToken = "github-token"
 )
 
-const authCommandTimeout = 5 * time.Second
+const (
+	authCommandTimeout   = 5 * time.Second
+	authCommandWaitDelay = 100 * time.Millisecond
+)
 
 var errAuthCommandTimedOut = errors.New("auth command timed out")
 
@@ -345,7 +348,10 @@ func authCommandShell(expression string) (string, []string) {
 }
 
 func runAuthCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
+	command := exec.CommandContext(ctx, name, args...)
+	command.WaitDelay = authCommandWaitDelay
+	configureAuthCommandCancellation(command)
+	return command.Output()
 }
 
 func validatePluginStoreRequestURL(auth []AuthConfig, requestURL string, kind string) error {
