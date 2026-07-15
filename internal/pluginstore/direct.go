@@ -24,6 +24,10 @@ func SelectArtifact(plan InstallPlan, goos string, goarch string) (Artifact, err
 }
 
 func (c Client) DownloadArtifact(ctx context.Context, artifact Artifact) ([]byte, error) {
+	return c.DownloadArtifactWithResolver(ctx, NewAuthResolver(), artifact)
+}
+
+func (c Client) DownloadArtifactWithResolver(ctx context.Context, resolver *AuthResolver, artifact Artifact) ([]byte, error) {
 	artifact = NormalizeInstallPlan(InstallPlan{Type: InstallTypeDirect, Artifacts: []Artifact{artifact}}).Artifacts[0]
 	if errValidate := ValidateArtifact(artifact); errValidate != nil {
 		return nil, errValidate
@@ -32,7 +36,7 @@ func (c Client) DownloadArtifact(ctx context.Context, artifact Artifact) ([]byte
 	if artifact.Size > 0 {
 		maxSize = artifact.Size
 	}
-	data, errDownload := c.get(ctx, artifact.URL, "application/octet-stream", RequestKindArtifact, maxSize)
+	data, errDownload := c.get(ctx, resolver, artifact.URL, "application/octet-stream", RequestKindArtifact, maxSize)
 	if errDownload != nil {
 		return nil, errDownload
 	}

@@ -814,6 +814,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if errResolvePluginsDir := cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && cfg.Plugins.Enabled {
 		return nil, errResolvePluginsDir
 	}
+	if errAuth := cfg.ValidatePluginStoreAuth(); errAuth != nil {
+		return nil, errAuth
+	}
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
@@ -879,6 +882,16 @@ func (cfg *Config) NormalizePluginsConfig() {
 	if cfg.Plugins.Configs == nil {
 		cfg.Plugins.Configs = map[string]PluginInstanceConfig{}
 	}
+}
+
+func (cfg *Config) ValidatePluginStoreAuth() error {
+	if cfg == nil {
+		return nil
+	}
+	if errAuth := sdkpluginstore.ValidateAuthConfigs(cfg.Plugins.StoreAuth); errAuth != nil {
+		return fmt.Errorf("invalid plugin store auth: %w", errAuth)
+	}
+	return nil
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.
