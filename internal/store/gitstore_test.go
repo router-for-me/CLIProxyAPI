@@ -358,6 +358,14 @@ func setupGitRemoteRepository(t *testing.T, root, defaultBranch string, branches
 	if err != nil {
 		t.Fatalf("init seed repo: %v", err)
 	}
+	seedConfig, errConfig := seedRepo.Config()
+	if errConfig != nil {
+		t.Fatalf("get seed repo config: %v", errConfig)
+	}
+	seedConfig.Commit.GpgSign = gitconfig.OptBoolFalse
+	if errSetConfig := seedRepo.SetConfig(seedConfig); errSetConfig != nil {
+		t.Fatalf("disable seed repo commit signing: %v", errSetConfig)
+	}
 	if err := seedRepo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName(defaultBranch))); err != nil {
 		t.Fatalf("set seed HEAD: %v", err)
 	}

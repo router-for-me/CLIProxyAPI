@@ -481,6 +481,13 @@ func xaiBuildSSEFrame(eventName string, data []byte) []byte {
 }
 
 func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, endpointPath string) (resp cliproxyexecutor.Response, err error) {
+	model := strings.TrimSpace(gjson.GetBytes(req.Payload, "model").String())
+	if model == "" {
+		model = strings.TrimSpace(req.Model)
+	}
+	reporter := helps.NewExecutorUsageReporter(ctx, e, model, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
 	token, baseURL := xaiCreds(auth)
 	if baseURL == "" {
 		baseURL = xaiauth.DefaultAPIBaseURL
@@ -499,6 +506,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), req.Payload)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -520,9 +528,11 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, xaiStatusErr(httpResp.StatusCode, data)
+		err = xaiStatusErr(httpResp.StatusCode, data)
+		return resp, err
 	}
 
+	reporter.EnsurePublished(ctx)
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }
 
@@ -1579,9 +1589,8 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 		raw = updatedTool
 		changed = true
 	}
-	// Codex Desktop's codex_app.automation_update schema hangs xAI free/build
-	// streaming. Limit the workaround to that exact namespaced tool so unrelated
-	// tools keep their parameter contracts.
+	// Simplify the Codex Desktop automation schema and root unions that xAI
+	// rejects because function parameters must resolve exclusively to objects.
 	if toolType == xaiFunctionToolType && xaiFunctionParametersNeedSimplification(tool, namespaceName) {
 		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(xaiSafeFunctionParameters))
 		if errSet != nil {
@@ -1596,7 +1605,7 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 			raw = updatedTool
 		}
 		changed = true
-		log.Debugf("xai: simplified parameters for tool %s.%s to avoid upstream hang", namespaceName, tool.Get("name").String())
+		log.Debugf("xai: simplified parameters for tool %s.%s to avoid upstream schema rejection or hang", namespaceName, tool.Get("name").String())
 	}
 	if toolType == xaiFunctionToolType && strings.TrimSpace(namespaceName) != "" {
 		qualifiedName := qualifyXAINamespaceToolName(namespaceName, tool.Get("name").String())
@@ -2086,12 +2095,55 @@ func restoreXAINamespaceToolCallAtPath(data []byte, path string, refs map[string
 	return updated
 }
 
-// xaiFunctionParametersNeedSimplification reports whether a function tool is
-// the Codex Desktop automation tool known to hang xAI Responses streaming.
+// xaiFunctionParametersNeedSimplification reports whether a function tool, or
+// a custom tool normalized to a function, has a schema that xAI cannot accept.
 func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
-	return strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), xaiFunctionToolType) &&
-		strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
-		strings.EqualFold(strings.TrimSpace(tool.Get("name").String()), xaiAutomationUpdateToolName)
+	toolType := strings.TrimSpace(tool.Get("type").String())
+	isFunction := strings.EqualFold(toolType, xaiFunctionToolType)
+	isNormalizedCustom := strings.EqualFold(toolType, xaiCustomToolType)
+	if !isFunction && !isNormalizedCustom {
+		return false
+	}
+
+	toolName := strings.TrimSpace(tool.Get("name").String())
+	qualifiedAutomationName := xaiCodexAppNamespaceName + "__" + xaiAutomationUpdateToolName
+	if isFunction && (strings.EqualFold(toolName, qualifiedAutomationName) ||
+		(strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
+			strings.EqualFold(toolName, xaiAutomationUpdateToolName))) {
+		return true
+	}
+
+	parameters := tool.Get("parameters")
+	for _, unionName := range []string{"anyOf", "oneOf"} {
+		union := parameters.Get(unionName)
+		if !union.IsArray() {
+			continue
+		}
+		for _, branch := range union.Array() {
+			branchType := branch.Get("type")
+			if branchType.Type == gjson.String {
+				if !strings.EqualFold(strings.TrimSpace(branchType.String()), "object") {
+					return true
+				}
+				continue
+			}
+			if !branchType.IsArray() {
+				// Without an explicit object type, the branch may accept non-object
+				// values even when it only declares object-specific keywords.
+				return true
+			}
+			allowedTypes := branchType.Array()
+			if len(allowedTypes) == 0 {
+				return true
+			}
+			for _, allowedType := range allowedTypes {
+				if allowedType.Type != gjson.String || !strings.EqualFold(strings.TrimSpace(allowedType.String()), "object") {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func sanitizeXAIInputEncryptedContent(body []byte) []byte {

@@ -469,6 +469,25 @@ func TestUsageReporterBuildRecordIncludesServiceTier(t *testing.T) {
 	}
 }
 
+func TestUsageReporterBuildRecordDefaultsGenerateTrue(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if !usage.GenerateEnabled(record.Generate) {
+		t.Fatalf("generate = %v, want true", usage.GenerateEnabled(record.Generate))
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesGenerateFalse(t *testing.T) {
+	ctx := usage.WithGenerate(context.Background(), false)
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if usage.GenerateEnabled(record.Generate) {
+		t.Fatalf("generate = %v, want false", usage.GenerateEnabled(record.Generate))
+	}
+}
+
 func TestUsageReporterSetTranslatedReasoningEffortPreservesClientServiceTier(t *testing.T) {
 	ctx := usage.WithServiceTier(context.Background(), "auto")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)

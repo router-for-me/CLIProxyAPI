@@ -39,12 +39,16 @@ type Record struct {
 	RequestServiceTier string
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string
-	RequestedAt         time.Time
-	Latency             time.Duration
-	TTFT                time.Duration
-	Failed              bool
-	Fail                Failure
-	Detail              Detail
+	// Generate reports whether the client requested actual generation.
+	// nil or true means generation is enabled; only an explicit false disables generation.
+	// Use GenerateFlag to set the value and GenerateEnabled to read it with the default.
+	Generate    *bool
+	RequestedAt time.Time
+	Latency     time.Duration
+	TTFT        time.Duration
+	Failed      bool
+	Fail        Failure
+	Detail      Detail
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
 }
@@ -70,6 +74,7 @@ type Detail struct {
 type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
+type generateContextKey struct{}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
@@ -161,6 +166,44 @@ func ServiceTierFromContext(ctx context.Context) string {
 	default:
 		return DefaultServiceTier
 	}
+}
+
+// WithGenerate stores whether the client requested actual generation for usage sinks.
+// Missing context values default to true; only an explicit false disables generation.
+func WithGenerate(ctx context.Context, generate bool) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, generateContextKey{}, generate)
+}
+
+// GenerateFromContext returns whether the client requested actual generation.
+// Missing values default to true.
+func GenerateFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return true
+	}
+	raw := ctx.Value(generateContextKey{})
+	switch value := raw.(type) {
+	case bool:
+		return value
+	default:
+		return true
+	}
+}
+
+// GenerateFlag returns a pointer suitable for Record.Generate.
+func GenerateFlag(generate bool) *bool {
+	return &generate
+}
+
+// GenerateEnabled reports whether generation is enabled for the record field.
+// A nil value defaults to true so legacy callers that omit Generate keep the historical behavior.
+func GenerateEnabled(generate *bool) bool {
+	if generate == nil {
+		return true
+	}
+	return *generate
 }
 
 // Plugin consumes usage records emitted by the proxy runtime.

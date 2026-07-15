@@ -136,9 +136,11 @@ func SyncPlatformWithReport(ctx context.Context, cfg *config.Config, pluginRunti
 		return report, errPlatform
 	}
 	report.Platform = platform
-	root := strings.TrimSpace(cfg.Plugins.Dir)
-	if root == "" {
-		root = "plugins"
+	root, errResolvePluginsDir := config.ResolvePluginsDir(cfg.Plugins.Dir)
+	if errResolvePluginsDir != nil {
+		errPluginsDir := fmt.Errorf("home plugins: %w", errResolvePluginsDir)
+		finishReport(&report, errPluginsDir)
+		return report, errPluginsDir
 	}
 	client := newPluginStoreClient(cfg)
 	var syncErrors []error
@@ -226,9 +228,14 @@ func DeleteWithReport(ctx context.Context, cfg *config.Config, pluginRuntime Plu
 		finishReport(&report, errors.New(status.Error))
 		return report
 	}
-	root := strings.TrimSpace(cfg.Plugins.Dir)
-	if root == "" {
-		root = "plugins"
+	root, errResolvePluginsDir := config.ResolvePluginsDir(cfg.Plugins.Dir)
+	if errResolvePluginsDir != nil {
+		errPluginsDir := fmt.Errorf("home plugins: %w", errResolvePluginsDir)
+		status.InstallStatus = pluginInstallStatusFailed
+		status.Error = errPluginsDir.Error()
+		report.Plugins = append(report.Plugins, status)
+		finishReport(&report, errPluginsDir)
+		return report
 	}
 	path, deleted, errDelete := deletePluginArtifact(root, pluginID, pluginRuntime)
 	status.Path = strings.TrimSpace(path)

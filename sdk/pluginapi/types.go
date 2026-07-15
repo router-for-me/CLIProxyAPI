@@ -1276,6 +1276,9 @@ type UsageRecord struct {
 	ReasoningEffort string
 	// ServiceTier records the requested or reported service tier.
 	ServiceTier string
+	// Generate reports whether the client requested actual generation.
+	// The host normalizes omitted usage.Record values to true before delivery.
+	Generate bool
 	// RequestedAt is the time the request was received.
 	RequestedAt time.Time
 	// Latency is the total request latency.
