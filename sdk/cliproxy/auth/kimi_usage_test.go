@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"testing"
 	"time"
 
@@ -135,6 +136,27 @@ func TestKimiUsageCooldown_ExhaustedNoReset_NotActionable(t *testing.T) {
 	_, ok := kimiUsageCooldown(windows)
 	if ok {
 		t.Error("expected !ok when exhausted but no reset info")
+	}
+}
+
+func TestKimiUsageCooldown_ExhaustedMixedReset_Declines(t *testing.T) {
+	t.Parallel()
+	// One exhausted window has a resetTime, another is exhausted but lacks one.
+	// The account is usable only after ALL windows recover, so the probe must not
+	// promise recovery at the known window's reset while the other may still be
+	// exhausted; it declines (ok=false) and the caller falls back to the generic
+	// backoff.
+	fiveHourReset := time.Date(2026, 7, 15, 18, 0, 0, 0, time.UTC)
+	windows := []kimiUsageWindow{
+		{Name: "five_hour", Limit: 100, Remaining: 0, ResetAt: fiveHourReset, HasReset: true},
+		{Name: "weekly", Limit: 1000, Remaining: 0, ResetAt: time.Time{}, HasReset: false},
+	}
+	recoverAt, ok := kimiUsageCooldown(windows)
+	if ok {
+		t.Error("expected !ok when an exhausted window lacks a resetTime")
+	}
+	if !recoverAt.IsZero() {
+		t.Errorf("recoverAt = %v, want zero (declined)", recoverAt)
 	}
 }
 
@@ -568,8 +590,8 @@ func TestSetAuthQuotaExceeded_PreservesCloudflareBackoff(t *testing.T) {
 // TestSetAuthQuotaExceeded_OverwritesGeneric403Fallback verifies that a model
 // under the generic 402/403 payment_required fallback IS replaced by the probe's
 // precise upstream reset time. This is the probe's core purpose. MarkResult does
-// NOT set Quota for the 402/403 fallback (it leaves Exceeded=false, Reason=""),
-// so the overwrite discriminator is the empty reason, not Quota.Exceeded.
+// NOT set Quota for the 402/403 fallback (it leaves Reason=""), storing the status
+// only in LastError.HTTPStatus, so that status is the overwrite discriminator.
 func TestSetAuthQuotaExceeded_OverwritesGeneric403Fallback(t *testing.T) {
 	t.Parallel()
 	manager := NewManager(nil, nil, nil)
@@ -577,7 +599,7 @@ func TestSetAuthQuotaExceeded_OverwritesGeneric403Fallback(t *testing.T) {
 	authID := "kimi-generic-403-auth"
 	model := "kimi-k2"
 	// Realistic generic-403 state from MarkResult: 30 min cooldown, Quota LEFT
-	// UNTOUCHED (Exceeded=false, Reason=""), StatusMessage = upstream message.
+	// UNTOUCHED (Reason=""), status carried only by LastError.HTTPStatus.
 	genericAfter := time.Now().Add(30 * time.Minute)
 
 	reg := registry.GetGlobalRegistry()
@@ -595,6 +617,7 @@ func TestSetAuthQuotaExceeded_OverwritesGeneric403Fallback(t *testing.T) {
 				Unavailable:    true,
 				NextRetryAfter: genericAfter,
 				Quota:          QuotaState{}, // untouched by MarkResult for 402/403
+				LastError:      &Error{HTTPStatus: http.StatusForbidden, Message: "quota exhausted, refreshed in the next cycle"},
 				UpdatedAt:      time.Now(),
 			},
 		},
@@ -622,6 +645,63 @@ func TestSetAuthQuotaExceeded_OverwritesGeneric403Fallback(t *testing.T) {
 	}
 	if !state.NextRetryAfter.Equal(recoverAt) {
 		t.Errorf("NextRetryAfter = %v, want %v (probe precise reset)", state.NextRetryAfter, recoverAt)
+	}
+}
+
+// TestSetAuthQuotaExceeded_PreservesUnauthorized401 verifies that a model under a
+// fresh 401 unauthorized cooldown is NOT overwritten, even though it carries no
+// Quota.Reason (just like the 402/403 fallback). The discriminator is
+// LastError.HTTPStatus: 401 stays, 402/403 gets replaced.
+func TestSetAuthQuotaExceeded_PreservesUnauthorized401(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	authID := "kimi-401-auth"
+	model := "kimi-k2"
+	unauthAfter := time.Now().Add(30 * time.Minute)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "openai-compatible-kimi", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	if _, err := manager.Register(ctx, &Auth{
+		ID:       authID,
+		Provider: "openai-compatible-kimi",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusError,
+				StatusMessage:  "unauthorized",
+				Unavailable:    true,
+				NextRetryAfter: unauthAfter,
+				Quota:          QuotaState{}, // untouched by MarkResult for 401
+				LastError:      &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
+				UpdatedAt:      time.Now(),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	recoverAt := time.Now().Add(10 * time.Minute)
+	snapshot, err := manager.SetAuthQuotaExceeded(ctx, authID, recoverAt, kimiUsageReason)
+	if err != nil {
+		t.Fatalf("SetAuthQuotaExceeded() error = %v", err)
+	}
+	if snapshot == nil {
+		t.Fatal("SetAuthQuotaExceeded() returned nil snapshot")
+	}
+
+	state := snapshot.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state missing after SetAuthQuotaExceeded")
+	}
+	// 401 cooldown must be preserved (not reclassified as Kimi).
+	if state.Quota.Reason != "" {
+		t.Errorf("Quota.Reason = %q, want empty (401 preserved, not overwritten)", state.Quota.Reason)
+	}
+	if !state.NextRetryAfter.Equal(unauthAfter) {
+		t.Errorf("NextRetryAfter = %v, want %v (401 cooldown preserved)", state.NextRetryAfter, unauthAfter)
 	}
 }
 
