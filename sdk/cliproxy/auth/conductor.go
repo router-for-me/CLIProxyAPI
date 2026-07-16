@@ -1987,50 +1987,52 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 
 				streamResult, errStream := executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
 
-				// A client cancellation wins over everything — including a coincident
-				// first-byte timeout — so stop promptly with no MarkResult and no retry.
+				// Resolve authoritatively whether the first-byte timer fired for this
+				// SYNCHRONOUS error: Stop()==false means it already expired and its
+				// callback will cancel attemptCtx, even if fbTimedOut is not yet visible
+				// (the same AfterFunc race the bootstrap-read path guards). The errStream
+				// case stops the timer exactly once, here.
+				errFbFired := false
+				if errStream != nil && fbTimer != nil {
+					errFbFired = !fbTimer.Stop()
+				}
+
 				if errStream != nil {
+					errIsFirstByteTimeout := errFbFired || fbTimedOut.Load()
+
+					// Client cancellation wins over everything, including a coincident
+					// first-byte timeout. Re-checked HERE (not only at the top) because the
+					// cancel may become visible only after ExecuteStream returned; this
+					// closes the TOCTOU window that would otherwise route an FBT — or a
+					// cancelled request — into MarkResult and wrongly touch the account.
 					if errCtx := ctx.Err(); errCtx != nil {
-						if fbTimer != nil {
-							fbTimer.Stop()
-						}
+						attemptCancel()
 						attemptErr = errCtx
 						return
 					}
-				}
 
-				// Unauthorized refresh applies only to genuine executor errors, not to
-				// a first-byte timeout cancellation.
-				if errStream != nil && !fbTimedOut.Load() {
-					if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(ctx, auth, errStream, didRefreshOnUnauthorized); okRefresh {
-						if fbTimer != nil {
-							fbTimer.Stop()
+					// First-byte timeout during connect/headers → same-account reconnect
+					// (never MarkResult, never rotate credentials).
+					if errIsFirstByteTimeout {
+						attemptCancel()
+						if fbRetriesUsed < firstByteRetries {
+							fbRetriesUsed++
+							continue
 						}
+						attemptErr = firstByteTimeoutExhaustedError(firstByteTimeout, firstByteRetries+1)
+						return
+					}
+
+					// Unauthorized refresh (a genuine non-FBT error): re-enter the loop for
+					// a fresh first-byte timer, without consuming the retry budget.
+					if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(ctx, auth, errStream, didRefreshOnUnauthorized); okRefresh {
 						attemptCancel()
 						auth = refreshed
 						didRefreshOnUnauthorized = true
 						continue
 					}
-				}
 
-				// First-byte timeout during connect/headers → same-account reconnect.
-				if errStream != nil && fbTimedOut.Load() && ctx.Err() == nil {
-					if fbTimer != nil {
-						fbTimer.Stop()
-					}
-					attemptCancel()
-					if fbRetriesUsed < firstByteRetries {
-						fbRetriesUsed++
-						continue
-					}
-					attemptErr = firstByteTimeoutExhaustedError(firstByteTimeout, firstByteRetries+1)
-					return
-				}
-
-				if errStream != nil {
-					if fbTimer != nil {
-						fbTimer.Stop()
-					}
+					// Genuine non-FBT executor error → cool + rotate (original behavior).
 					rerr := &Error{Message: errStream.Error()}
 					if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
 						rerr.HTTPStatus = se.StatusCode()
