@@ -371,7 +371,8 @@ func TestHasKimiUsageCooldown_ActiveCooldown(t *testing.T) {
 	auth := &Auth{
 		ModelStates: map[string]*ModelState{
 			"kimi-k2": {
-				Quota: QuotaState{Exceeded: true, Reason: kimiUsageReason, NextRecoverAt: future},
+				NextRetryAfter: future,
+				Quota:          QuotaState{Exceeded: true, Reason: kimiUsageReason, NextRecoverAt: future},
 			},
 		},
 	}
@@ -409,6 +410,72 @@ func TestHasKimiUsageCooldown_OtherReasonIgnored(t *testing.T) {
 	}
 	if hasKimiUsageCooldown(auth) {
 		t.Error("expected false when cooldown reason is not kimiUsageReason")
+	}
+}
+
+func TestIsKimiProbeOwnedCooldown(t *testing.T) {
+	t.Parallel()
+	future := time.Now().Add(time.Hour)
+	past := time.Now().Add(-time.Hour)
+	fortyOne := time.Now().Add(30 * time.Minute) // a fresh 401 cooldown time
+	cases := []struct {
+		name  string
+		state *ModelState
+		want  bool
+	}{
+		{
+			name:  "nil",
+			state: nil,
+			want:  false,
+		},
+		{
+			name: "non-kimi reason",
+			state: &ModelState{
+				NextRetryAfter: future,
+				Quota:          QuotaState{Exceeded: true, Reason: "cloudflare challenge", NextRecoverAt: future},
+			},
+			want: false,
+		},
+		{
+			name: "active kimi (NextRetryAfter equals NextRecoverAt)",
+			state: &ModelState{
+				NextRetryAfter: future,
+				Quota:          QuotaState{Exceeded: true, Reason: kimiUsageReason, NextRecoverAt: future},
+			},
+			want: true,
+		},
+		{
+			name: "expired kimi lazily cleared (NextRetryAfter zeroed)",
+			state: &ModelState{
+				NextRetryAfter: time.Time{},
+				Quota:          QuotaState{Exceeded: true, Reason: kimiUsageReason, NextRecoverAt: past},
+			},
+			want: true,
+		},
+		{
+			name: "expired kimi not yet aggregated (NextRetryAfter equals past NextRecoverAt)",
+			state: &ModelState{
+				NextRetryAfter: past,
+				Quota:          QuotaState{Exceeded: true, Reason: kimiUsageReason, NextRecoverAt: past},
+			},
+			want: true,
+		},
+		{
+			name: "kimi cooldown overwritten by fresh 401 (NextRetryAfter diverges)",
+			state: &ModelState{
+				NextRetryAfter: fortyOne,
+				Quota:          QuotaState{Exceeded: true, Reason: kimiUsageReason, NextRecoverAt: past},
+			},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isKimiProbeOwnedCooldown(tc.state); got != tc.want {
+				t.Errorf("isKimiProbeOwnedCooldown(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -628,5 +695,87 @@ func TestClearKimiUsageCooldown_RestoresAuthStatus(t *testing.T) {
 	}
 	if after.StatusMessage != "" {
 		t.Errorf("post-clear StatusMessage = %q, want empty", after.StatusMessage)
+	}
+}
+
+// TestClearKimiUsageCooldown_PreservesOverwrittenByNonQuotaFailure verifies that a
+// state which began as a Kimi cooldown but was overwritten by a fresh non-quota
+// failure is NOT cleared. Scenario: Kimi cooldown expired, request was let
+// through (lazy expiry), then hit a 401 - MarkResult updates NextRetryAfter and
+// StatusMessage but leaves the stale Quota.Reason == kimiUsageReason. The probe
+// must not treat that as a Kimi cooldown and resume the model prematurely.
+func TestClearKimiUsageCooldown_PreservesOverwrittenByNonQuotaFailure(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	authID := "kimi-overwritten-auth"
+	model := "kimi-k2"
+
+	freshRetry := time.Now().Add(30 * time.Minute) // a fresh 401 cooldown
+	pastRecover := time.Now().Add(-time.Hour)      // the expired Kimi recover time
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "openai-compatible-kimi", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	if _, err := manager.Register(ctx, &Auth{
+		ID:       authID,
+		Provider: "openai-compatible-kimi",
+		Status:   StatusError,
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusError,
+				StatusMessage:  "unauthorized",
+				Unavailable:    true,
+				NextRetryAfter: freshRetry, // overwritten by the fresh 401
+				Quota: QuotaState{ // stale Kimi probe fields, untouched by MarkResult
+					Exceeded:      true,
+					Reason:        kimiUsageReason,
+					NextRecoverAt: pastRecover,
+				},
+				UpdatedAt: time.Now(),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	live := manager.snapshotAuths()
+	var target *Auth
+	for i := range live {
+		if live[i].ID == authID {
+			target = live[i]
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("auth not found in snapshot")
+	}
+
+	if err := manager.clearKimiUsageCooldown(ctx, target, time.Now()); err != nil {
+		t.Fatalf("clearKimiUsageCooldown() error = %v", err)
+	}
+
+	// Re-snapshot: the overwritten model must still be cooling down for the 401.
+	live = manager.snapshotAuths()
+	var after *Auth
+	for i := range live {
+		if live[i].ID == authID {
+			after = live[i]
+			break
+		}
+	}
+	if after == nil {
+		t.Fatal("auth not found in snapshot after clear")
+	}
+	state := after.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state missing after clear")
+	}
+	if !state.NextRetryAfter.Equal(freshRetry) {
+		t.Errorf("NextRetryAfter = %v, want %v (401 cooldown must not be cleared)", state.NextRetryAfter, freshRetry)
+	}
+	if state.Status != StatusError {
+		t.Errorf("Status = %v, want StatusError (401 cooldown preserved)", state.Status)
 	}
 }

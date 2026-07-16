@@ -411,14 +411,33 @@ func hasKimiUsageCooldown(auth *Auth) bool {
 		return false
 	}
 	for _, state := range auth.ModelStates {
-		if state == nil {
-			continue
-		}
-		if state.Quota.Reason == kimiUsageReason {
+		if isKimiProbeOwnedCooldown(state) {
 			return true
 		}
 	}
 	return false
+}
+
+// isKimiProbeOwnedCooldown reports whether state still represents a cooldown
+// owned by the Kimi usage probe, as opposed to one that began as a Kimi cooldown
+// but was since overwritten by a fresh non-quota failure.
+//
+// SetAuthQuotaExceeded writes NextRetryAfter == Quota.NextRecoverAt == recoverAt.
+// A later non-quota MarkResult (401/404/5xx/...) overwrites NextRetryAfter but
+// leaves Quota.Reason/NextRecoverAt untouched, so the two times diverge and the
+// state must no longer be treated as a Kimi cooldown - clearing it would resume a
+// model that is actually cooling down for a fresh unauthorized/not-found error.
+// The state is probe-owned only when NextRetryAfter is still consistent with the
+// probe's recover time: equal to Quota.NextRecoverAt, or zeroed by
+// updateAggregatedAvailability after the Kimi cooldown expired (lazy clear).
+func isKimiProbeOwnedCooldown(state *ModelState) bool {
+	if state == nil || state.Quota.Reason != kimiUsageReason {
+		return false
+	}
+	if state.NextRetryAfter.IsZero() {
+		return true
+	}
+	return state.NextRetryAfter.Equal(state.Quota.NextRecoverAt)
 }
 
 // clearKimiUsageCooldown clears only the model-level cooldown states that were
@@ -452,8 +471,9 @@ func (m *Manager) clearKimiUsageCooldown(ctx context.Context, auth *Auth, now ti
 		if modelKey == "" || state == nil {
 			continue
 		}
-		// Only clear states that were written by this probe.
-		if state.Quota.Reason != kimiUsageReason {
+		// Only clear states still owned by this probe; skip states that began as a
+		// Kimi cooldown but were since overwritten by a fresh non-quota failure.
+		if !isKimiProbeOwnedCooldown(state) {
 			continue
 		}
 		resetModelState(state, now)
