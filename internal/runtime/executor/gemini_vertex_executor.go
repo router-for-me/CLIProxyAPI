@@ -351,7 +351,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		}
 	}
 	baseURL := vertexBaseURL(location)
-	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, baseModel, action)
+	url := helps.JoinBaseURL(baseURL, fmt.Sprintf("/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", vertexAPIVersion, projectID, location, baseModel, action))
 	if opts.Alt != "" && action != "countTokens" {
 		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
@@ -479,7 +479,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 	if baseURL == "" {
 		baseURL = "https://aiplatform.googleapis.com"
 	}
-	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, baseModel, action)
+	url := helps.JoinBaseURL(baseURL, fmt.Sprintf("/%s/publishers/google/models/%s:%s", vertexAPIVersion, baseModel, action))
 	if opts.Alt != "" && action != "countTokens" {
 		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
@@ -585,7 +585,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 
 	action := getVertexAction(baseModel, true)
 	baseURL := vertexBaseURL(location)
-	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, baseModel, action)
+	url := helps.JoinBaseURL(baseURL, fmt.Sprintf("/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", vertexAPIVersion, projectID, location, baseModel, action))
 	// Imagen models don't support streaming, skip SSE params
 	if !isImagenModel(baseModel) {
 		if opts.Alt == "" {
@@ -733,7 +733,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 	if baseURL == "" {
 		baseURL = "https://aiplatform.googleapis.com"
 	}
-	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, baseModel, action)
+	url := helps.JoinBaseURL(baseURL, fmt.Sprintf("/%s/publishers/google/models/%s:%s", vertexAPIVersion, baseModel, action))
 	// Imagen models don't support streaming, skip SSE params
 	if !isImagenModel(baseModel) {
 		if opts.Alt == "" {
@@ -866,7 +866,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
 
 	baseURL := vertexBaseURL(location)
-	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, baseModel, "countTokens")
+	url := helps.JoinBaseURL(baseURL, fmt.Sprintf("/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", vertexAPIVersion, projectID, location, baseModel, "countTokens"))
 
 	httpReq, errNewReq := http.NewRequestWithContext(respCtx, http.MethodPost, url, bytes.NewReader(translatedReq))
 	if errNewReq != nil {
@@ -960,7 +960,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 	if baseURL == "" {
 		baseURL = "https://aiplatform.googleapis.com"
 	}
-	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, baseModel, "countTokens")
+	url := helps.JoinBaseURL(baseURL, fmt.Sprintf("/%s/publishers/google/models/%s:%s", vertexAPIVersion, baseModel, "countTokens"))
 
 	httpReq, errNewReq := http.NewRequestWithContext(respCtx, http.MethodPost, url, bytes.NewReader(translatedReq))
 	if errNewReq != nil {

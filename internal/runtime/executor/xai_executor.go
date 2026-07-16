@@ -148,7 +148,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	defer reporter.TrackFailure(ctx, &err)
 	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	url := helps.JoinBaseURL(baseURL, "/responses")
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
 	if err != nil {
 		return resp, err
@@ -247,7 +247,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	defer reporter.TrackFailure(ctx, &err)
 	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
-	requestURL := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
+	requestURL := helps.JoinBaseURL(baseURL, "/responses/compact")
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(prepared.body))
 	if err != nil {
 		return nil, nil, nil, err
@@ -497,7 +497,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 		endpointPath = xaiDefaultImageEndpointPath
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + endpointPath
+	url := helps.JoinBaseURL(baseURL, endpointPath)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(req.Payload))
 	if err != nil {
 		return resp, err
@@ -557,7 +557,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 			body = nil
 		}
 	}
-	requestURL := strings.TrimSuffix(baseURL, "/") + endpointPath
+	requestURL := helps.JoinBaseURL(baseURL, endpointPath)
 	httpReq, err := http.NewRequestWithContext(ctx, method, requestURL, body)
 	if err != nil {
 		return resp, err
@@ -623,7 +623,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 	defer reporter.TrackFailure(ctx, &err)
 	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	url := helps.JoinBaseURL(baseURL, "/responses")
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
 	if err != nil {
 		return nil, err

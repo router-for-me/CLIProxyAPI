@@ -862,7 +862,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	url := helps.JoinBaseURL(baseURL, "/responses")
 	var identityState codexIdentityConfuseState
 	httpReq, upstreamBody, identityState, err := e.cacheHelper(ctx, from, url, auth, req, originalPayloadSource, body)
 	if err != nil {
@@ -1038,7 +1038,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = normalizeCodexParallelToolCallsForTools(body)
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
+	url := helps.JoinBaseURL(baseURL, "/responses/compact")
 	var identityState codexIdentityConfuseState
 	httpReq, upstreamBody, identityState, err := e.cacheHelper(ctx, from, url, auth, req, originalPayloadSource, body)
 	if err != nil {
@@ -1153,7 +1153,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	url := helps.JoinBaseURL(baseURL, "/responses")
 	var identityState codexIdentityConfuseState
 	httpReq, upstreamBody, identityState, err := e.cacheHelper(ctx, from, url, auth, req, originalPayloadSource, body)
 	if err != nil {

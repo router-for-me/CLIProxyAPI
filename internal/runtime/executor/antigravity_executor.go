@@ -1705,14 +1705,13 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	var lastErr error
 
 	for idx, baseURL := range baseURLs {
-		base := strings.TrimSuffix(baseURL, "/")
+		base := helps.NormalizeBaseURL(baseURL)
 		if base == "" {
 			base = buildBaseURL(auth)
 		}
 
 		var requestURL strings.Builder
-		requestURL.WriteString(base)
-		requestURL.WriteString(antigravityCountTokensPath)
+		requestURL.WriteString(helps.JoinBaseURL(base, antigravityCountTokensPath))
 		if opts.Alt != "" {
 			requestURL.WriteString("?$alt=")
 			requestURL.WriteString(url.QueryEscape(opts.Alt))
@@ -2114,7 +2113,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 		return
 	}
 	baseURL := antigravityLoadCodeAssistBaseURL(auth)
-	endpointURL := strings.TrimSuffix(baseURL, "/") + "/v1internal:loadCodeAssist"
+	endpointURL := helps.JoinBaseURL(baseURL, "/v1internal:loadCodeAssist")
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(loadReqBody))
 	if errReq != nil {
 		log.Debugf("antigravity executor: create loadCodeAssist request error: %v", errReq)
@@ -2195,7 +2194,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
 
-	base := strings.TrimSuffix(baseURL, "/")
+	base := helps.NormalizeBaseURL(baseURL)
 	if base == "" {
 		base = buildBaseURL(auth)
 	}
@@ -2204,8 +2203,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		path = antigravityStreamPath
 	}
 	var requestURL strings.Builder
-	requestURL.WriteString(base)
-	requestURL.WriteString(path)
+	requestURL.WriteString(helps.JoinBaseURL(base, path))
 	if stream {
 		if alt != "" {
 			requestURL.WriteString("?$alt=")
@@ -2737,14 +2735,14 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 	}
 	if auth.Attributes != nil {
 		if v := strings.TrimSpace(auth.Attributes["base_url"]); v != "" {
-			return strings.TrimSuffix(v, "/")
+			return helps.NormalizeBaseURL(v)
 		}
 	}
 	if auth.Metadata != nil {
 		if v, ok := auth.Metadata["base_url"].(string); ok {
 			v = strings.TrimSpace(v)
 			if v != "" {
-				return strings.TrimSuffix(v, "/")
+				return helps.NormalizeBaseURL(v)
 			}
 		}
 	}

@@ -281,7 +281,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
 
-	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	url := helps.JoinBaseURL(baseURL, "/v1/messages?beta=true")
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return resp, err
@@ -470,7 +470,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
 
-	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	url := helps.JoinBaseURL(baseURL, "/v1/messages?beta=true")
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return nil, err
@@ -726,7 +726,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel)
 
-	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
+	url := helps.JoinBaseURL(baseURL, "/v1/messages/count_tokens?beta=true")
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err

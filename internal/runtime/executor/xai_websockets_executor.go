@@ -422,7 +422,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	defer reporter.TrackFailure(ctx, &err)
 	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
-	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
+	httpURL := helps.JoinBaseURL(baseURL, "/responses")
 	wsURL, err := buildXAIResponsesWebsocketURL(httpURL)
 	if err != nil {
 		return nil, err
