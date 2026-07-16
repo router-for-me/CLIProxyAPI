@@ -1,9 +1,9 @@
-name: claude-compact-ghcr
+name: claude-compact-allocation-fix-ghcr
 
 on:
   push:
     branches:
-      - codex/claude-compact-patch
+      - codex/claude-compact-allocation-fix
   workflow_dispatch:
 
 permissions:
@@ -11,7 +11,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: claude-compact-ghcr-${{ github.ref }}
+  group: claude-compact-allocation-fix-ghcr-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -36,7 +36,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-          echo "version=claude-compact-patch" >> "$GITHUB_OUTPUT"
+          echo "version=claude-compact-allocation-fix" >> "$GITHUB_OUTPUT"
           echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
@@ -59,8 +59,8 @@ jobs:
         with:
           images: ${{ steps.build.outputs.image }}
           tags: |
-            type=raw,value=claude-compact-patch
-            type=sha,prefix=claude-compact-patch-
+            type=raw,value=claude-compact-allocation-fix
+            type=sha,prefix=claude-compact-allocation-fix-
 
       - name: Build and push image
         uses: docker/build-push-action@v6
