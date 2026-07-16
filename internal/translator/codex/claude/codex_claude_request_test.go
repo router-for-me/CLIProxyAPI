@@ -347,8 +347,20 @@ func TestConvertClaudeRequestToCodex_TranslatesDeferredToolDiscovery(t *testing.
 	resultJSON := gjson.ParseBytes(result)
 
 	tools := resultJSON.Get("tools").Array()
-	if len(tools) != 1 || tools[0].Get("name").String() != "ToolSearch" {
-		t.Fatalf("top-level tools = %s, want only non-deferred ToolSearch", resultJSON.Get("tools").Raw)
+	if len(tools) != 1 || tools[0].Get("type").String() != "tool_search" {
+		t.Fatalf("top-level tools = %s, want one native tool_search", resultJSON.Get("tools").Raw)
+	}
+	if got := tools[0].Get("execution").String(); got != "client" {
+		t.Fatalf("tool search execution = %q, want client", got)
+	}
+	if tools[0].Get("name").Exists() {
+		t.Fatalf("native tool_search must not have a function name: %s", tools[0].Raw)
+	}
+	if got := tools[0].Get("description").String(); got != "Search for tools" {
+		t.Fatalf("tool search description = %q, want Search for tools", got)
+	}
+	if got := tools[0].Get("parameters.required.0").String(); got != "query" {
+		t.Fatalf("tool search required field = %q, want query", got)
 	}
 
 	inputs := resultJSON.Get("input").Array()
@@ -490,6 +502,10 @@ func TestConvertClaudeRequestToCodex_DoesNotPartiallyResolveDeferredTools(t *tes
 	if strings.Contains(gjson.GetBytes(result, "input").Raw, `"type":"tool_search_output"`) {
 		t.Fatalf("unresolved discovery emitted a partial tool_search_output: %s", gjson.GetBytes(result, "input").Raw)
 	}
+	tools := gjson.GetBytes(result, "tools").Array()
+	if len(tools) != 2 || tools[0].Get("type").String() != "function" || tools[1].Get("type").String() != "function" {
+		t.Fatalf("unresolved discovery must advertise both tools eagerly: %s", gjson.GetBytes(result, "tools").Raw)
+	}
 	output := inputs[1].Get("output").String()
 	if !strings.Contains(output, "known_tool") || !strings.Contains(output, "missing_tool") {
 		t.Fatalf("ordinary fallback output did not preserve references: %q", output)
@@ -549,6 +565,10 @@ func TestConvertClaudeRequestToCodex_ErrorDiscoveryRemainsOrdinaryToolResult(t *
 	}
 	if output := inputs[1].Get("output").String(); !strings.Contains(output, "calendar_create") {
 		t.Fatalf("error fallback output did not preserve the reference: %q", output)
+	}
+	tools := gjson.GetBytes(result, "tools").Array()
+	if len(tools) != 2 || tools[0].Get("type").String() != "function" || tools[1].Get("type").String() != "function" {
+		t.Fatalf("error discovery must advertise both tools eagerly: %s", gjson.GetBytes(result, "tools").Raw)
 	}
 }
 
@@ -610,6 +630,149 @@ func TestConvertClaudeRequestToCodex_RejectsDuplicateDiscoveryCallID(t *testing.
 		if strings.HasPrefix(item.Get("type").String(), "tool_search_") {
 			t.Fatalf("ambiguous duplicate call ID emitted tool search item at %d: %s", i, gjson.GetBytes(result, "input").Raw)
 		}
+	}
+	tools := gjson.GetBytes(result, "tools").Array()
+	if len(tools) != 2 || tools[0].Get("type").String() != "function" || tools[1].Get("type").String() != "function" {
+		t.Fatalf("ambiguous discovery must advertise both tools eagerly: %s", gjson.GetBytes(result, "tools").Raw)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_RejectsDiscoveryCallIDSharedWithOrdinaryTool(t *testing.T) {
+	inputJSON := `{
+		"tools": [
+			{"name":"ToolSearch","input_schema":{"type":"object"}},
+			{"name":"calendar_create","input_schema":{"type":"object"},"defer_loading":true},
+			{"name":"lookup","input_schema":{"type":"object"}}
+		],
+		"messages": [
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"shared_id","name":"ToolSearch","input":{"query":"calendar"}},
+				{"type":"tool_use","id":"shared_id","name":"lookup","input":{"query":"calendar"}}
+			]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"shared_id","content":[{"type":"tool_reference","tool_name":"calendar_create"}]}]}
+		]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	for i, item := range gjson.GetBytes(result, "input").Array() {
+		if strings.HasPrefix(item.Get("type").String(), "tool_search_") {
+			t.Fatalf("shared call ID emitted tool search item at %d: %s", i, gjson.GetBytes(result, "input").Raw)
+		}
+	}
+	tools := gjson.GetBytes(result, "tools").Array()
+	if len(tools) != 3 {
+		t.Fatalf("ambiguous discovery must advertise every function eagerly: %s", gjson.GetBytes(result, "tools").Raw)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_RejectsDiscoveryWithEmptyCallID(t *testing.T) {
+	inputJSON := `{
+		"tools": [
+			{"name":"ToolSearch","input_schema":{"type":"object"}},
+			{"name":"calendar_create","input_schema":{"type":"object"},"defer_loading":true}
+		],
+		"messages": [
+			{"role":"assistant","content":[{"type":"tool_use","id":"","name":"ToolSearch","input":{"query":"calendar"}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":[{"type":"tool_reference","tool_name":"calendar_create"}]}]}
+		]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	if strings.Contains(gjson.GetBytes(result, "input").Raw, `"type":"tool_search_`) {
+		t.Fatalf("empty call ID emitted tool search history: %s", gjson.GetBytes(result, "input").Raw)
+	}
+	tools := gjson.GetBytes(result, "tools").Array()
+	if len(tools) != 2 || tools[0].Get("type").String() != "function" || tools[1].Get("type").String() != "function" {
+		t.Fatalf("empty call ID must advertise both tools eagerly: %s", gjson.GetBytes(result, "tools").Raw)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_RejectsOrphanDiscoveryResult(t *testing.T) {
+	inputJSON := `{
+		"tools": [
+			{"name":"ToolSearch","input_schema":{"type":"object"}},
+			{"name":"calendar_create","input_schema":{"type":"object"},"defer_loading":true}
+		],
+		"messages": [
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"orphan_search","content":[{"type":"tool_reference","tool_name":"calendar_create"}]}]}
+		]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	if strings.Contains(gjson.GetBytes(result, "input").Raw, `"type":"tool_search_`) {
+		t.Fatalf("orphan discovery result emitted tool search history: %s", gjson.GetBytes(result, "input").Raw)
+	}
+	tools := gjson.GetBytes(result, "tools").Array()
+	if len(tools) != 2 || tools[0].Get("type").String() != "function" || tools[1].Get("type").String() != "function" {
+		t.Fatalf("orphan discovery result must advertise both tools eagerly: %s", gjson.GetBytes(result, "tools").Raw)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_RejectsDiscoveryResultBeforeCall(t *testing.T) {
+	inputJSON := `{
+		"tools": [
+			{"name":"ToolSearch","input_schema":{"type":"object"}},
+			{"name":"calendar_create","input_schema":{"type":"object"},"defer_loading":true}
+		],
+		"messages": [
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"search_1","content":[{"type":"tool_reference","tool_name":"calendar_create"}]}]},
+			{"role":"assistant","content":[{"type":"tool_use","id":"search_1","name":"ToolSearch","input":{"query":"calendar"}}]}
+		]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	for i, item := range gjson.GetBytes(result, "input").Array() {
+		if strings.HasPrefix(item.Get("type").String(), "tool_search_") {
+			t.Fatalf("reversed discovery emitted tool search item at %d: %s", i, gjson.GetBytes(result, "input").Raw)
+		}
+	}
+	tools := gjson.GetBytes(result, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("reversed discovery must advertise both functions eagerly: %s", gjson.GetBytes(result, "tools").Raw)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_RejectsHostedToolNamedToolSearch(t *testing.T) {
+	inputJSON := `{
+		"tools": [
+			{"type":"web_search_20250305","name":"ToolSearch"},
+			{"name":"calendar_create","input_schema":{"type":"object"},"defer_loading":true}
+		],
+		"messages": [
+			{"role":"assistant","content":[{"type":"tool_use","id":"search_1","name":"ToolSearch","input":{"query":"calendar"}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"search_1","content":[{"type":"tool_reference","tool_name":"calendar_create"}]}]}
+		]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	if strings.Contains(gjson.GetBytes(result, "input").Raw, `"type":"tool_search_`) {
+		t.Fatalf("hosted declaration must not activate client tool search: %s", gjson.GetBytes(result, "input").Raw)
+	}
+	tools := gjson.GetBytes(result, "tools").Array()
+	if len(tools) != 2 || tools[0].Get("type").String() != "web_search" || tools[1].Get("name").String() != "calendar_create" {
+		t.Fatalf("hosted declaration fallback must retain the deferred function eagerly: %s", gjson.GetBytes(result, "tools").Raw)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_RejectsTypedToolNamedToolSearch(t *testing.T) {
+	inputJSON := `{
+		"tools": [
+			{"type":"computer_20250124","name":"ToolSearch","display_width_px":1024,"display_height_px":768,"display_number":1},
+			{"name":"calendar_create","input_schema":{"type":"object"},"defer_loading":true}
+		],
+		"messages": [
+			{"role":"assistant","content":[{"type":"tool_use","id":"search_1","name":"ToolSearch","input":{"query":"calendar"}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"search_1","content":[{"type":"tool_reference","tool_name":"calendar_create"}]}]}
+		]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	if strings.Contains(gjson.GetBytes(result, "input").Raw, `"type":"tool_search_`) {
+		t.Fatalf("typed declaration must not activate client tool search: %s", gjson.GetBytes(result, "input").Raw)
+	}
+	tools := gjson.GetBytes(result, "tools").Array()
+	if len(tools) != 2 || tools[0].Get("type").String() != "function" || tools[1].Get("name").String() != "calendar_create" {
+		t.Fatalf("typed declaration fallback must retain deferred functions eagerly: %s", gjson.GetBytes(result, "tools").Raw)
 	}
 }
 
@@ -773,6 +936,50 @@ func TestConvertClaudeRequestToCodex_ToolChoiceSpecificFunctionUsesConvertedName
 	}
 	if choiceName == longName {
 		t.Fatalf("tool_choice.name should use shortened Codex tool name. Output: %s", string(result))
+	}
+}
+
+func TestConvertClaudeRequestToCodex_ToolChoiceToolSearchUsesNativeType(t *testing.T) {
+	inputJSON := `{
+		"tools": [
+			{"name":"ToolSearch","input_schema":{"type":"object"}},
+			{"name":"calendar_create","input_schema":{"type":"object"},"defer_loading":true}
+		],
+		"tool_choice": {"type":"tool","name":"ToolSearch"},
+		"messages": [{"role":"user","content":"find a calendar tool"}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	if got := resultJSON.Get("tool_choice.type").String(); got != "tool_search" {
+		t.Fatalf("tool_choice.type = %q, want tool_search. Output: %s", got, string(result))
+	}
+	if resultJSON.Get("tool_choice.name").Exists() {
+		t.Fatalf("native tool search choice must not carry a name. Output: %s", string(result))
+	}
+}
+
+func TestConvertClaudeRequestToCodex_ToolChoiceDeferredFunctionUsesEagerFallback(t *testing.T) {
+	inputJSON := `{
+		"tools": [
+			{"name":"ToolSearch","input_schema":{"type":"object"}},
+			{"name":"calendar_create","input_schema":{"type":"object"},"defer_loading":true}
+		],
+		"tool_choice": {"type":"tool","name":"calendar_create"},
+		"messages": [{"role":"user","content":"create an event"}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	tools := resultJSON.Get("tools").Array()
+	if len(tools) != 2 || tools[0].Get("type").String() != "function" || tools[1].Get("type").String() != "function" {
+		t.Fatalf("forced deferred function must disable native search and advertise all functions: %s", resultJSON.Get("tools").Raw)
+	}
+	if got := resultJSON.Get("tool_choice.type").String(); got != "function" {
+		t.Fatalf("tool_choice.type = %q, want function. Output: %s", got, string(result))
+	}
+	if got := resultJSON.Get("tool_choice.name").String(); got != tools[1].Get("name").String() {
+		t.Fatalf("tool_choice.name = %q, want %q. Output: %s", got, tools[1].Get("name").String(), string(result))
 	}
 }
 

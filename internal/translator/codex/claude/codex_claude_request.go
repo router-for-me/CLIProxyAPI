@@ -45,8 +45,13 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 	rootResult := gjson.ParseBytes(rawJSON)
 	toolNameMap := buildReverseMapFromClaudeOriginalToShort(rawJSON)
-	toolCatalog := buildClaudeToolCatalog(rootResult.Get("tools"), toolNameMap)
-	toolDiscoveries := buildClaudeToolDiscoveries(rootResult.Get("messages"), toolCatalog)
+	toolsResult := rootResult.Get("tools")
+	toolCatalog := buildClaudeToolCatalog(toolsResult, toolNameMap)
+	toolDiscoveries, discoveryHistoryValid := buildClaudeToolDiscoveries(rootResult.Get("messages"), toolCatalog)
+	nativeToolSearch := discoveryHistoryValid && supportsNativeClaudeToolSearch(toolsResult, rootResult.Get("tool_choice"))
+	if !nativeToolSearch {
+		toolDiscoveries = make(map[string]claudeToolDiscovery)
+	}
 	template, _ = sjson.SetBytes(template, "model", modelName)
 
 	// Process system messages and convert them to input content format.
@@ -193,7 +198,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					case "tool_use":
 						flushMessage()
 						callID := shortenCodexCallIDIfNeeded(messageContentResult.Get("id").String())
-						if _, ok := toolDiscoveries[callID]; ok {
+						if _, ok := toolDiscoveries[callID]; ok && messageContentResult.Get("name").String() == "ToolSearch" {
 							toolSearchCall := []byte(`{"type":"tool_search_call","call_id":"","status":"completed","execution":"client","arguments":{}}`)
 							toolSearchCall, _ = sjson.SetBytes(toolSearchCall, "call_id", callID)
 							if input := messageContentResult.Get("input"); input.Raw != "" && gjson.Valid(input.Raw) {
@@ -290,11 +295,10 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	}
 
 	// Convert tools declarations to the expected format for the Codex API.
-	toolsResult := rootResult.Get("tools")
 	if toolsResult.IsArray() {
 		template, _ = sjson.SetRawBytes(template, "tools", []byte(`[]`))
 		webSearchToolNames := buildClaudeWebSearchToolNameSet(toolsResult)
-		template, _ = sjson.SetRawBytes(template, "tool_choice", convertClaudeToolChoiceToCodex(rootResult.Get("tool_choice"), toolNameMap, webSearchToolNames))
+		template, _ = sjson.SetRawBytes(template, "tool_choice", convertClaudeToolChoiceToCodex(rootResult.Get("tool_choice"), toolNameMap, webSearchToolNames, nativeToolSearch))
 		toolResults := toolsResult.Array()
 		for i := 0; i < len(toolResults); i++ {
 			toolResult := toolResults[i]
@@ -303,7 +307,11 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				template, _ = sjson.SetRawBytes(template, "tools.-1", convertClaudeWebSearchToolToCodex(toolResult))
 				continue
 			}
-			if toolResult.Get("defer_loading").Bool() {
+			if nativeToolSearch && toolResult.Get("name").String() == "ToolSearch" {
+				template, _ = sjson.SetRawBytes(template, "tools.-1", convertClaudeToolSearchToCodex(toolResult))
+				continue
+			}
+			if nativeToolSearch && toolResult.Get("defer_loading").Bool() {
 				continue
 			}
 			tool := convertClaudeFunctionToolToCodex(toolResult, toolNameMap, false)
@@ -370,72 +378,111 @@ type claudeToolDiscovery struct {
 	residualContent []gjson.Result
 }
 
-func buildClaudeToolDiscoveries(messages gjson.Result, toolCatalog map[string]claudeToolCatalogEntry) map[string]claudeToolDiscovery {
+func buildClaudeToolDiscoveries(messages gjson.Result, toolCatalog map[string]claudeToolCatalogEntry) (map[string]claudeToolDiscovery, bool) {
 	discoveries := make(map[string]claudeToolDiscovery)
 	if !messages.IsArray() {
-		return discoveries
+		return discoveries, true
 	}
 
 	toolUseCounts := make(map[string]int)
+	toolSearchUseCounts := make(map[string]int)
 	toolResultCounts := make(map[string]int)
-	candidates := make(map[string]claudeToolDiscovery)
+	toolResults := make(map[string]gjson.Result)
+	discoveryResultIDs := make(map[string]struct{})
+	toolUsePositions := make(map[string]int)
+	toolResultPositions := make(map[string]int)
+	position := 0
 	for _, message := range messages.Array() {
 		content := message.Get("content")
 		if !content.IsArray() {
 			continue
 		}
 		for _, part := range content.Array() {
+			position++
 			switch part.Get("type").String() {
 			case "tool_use":
 				callID := shortenCodexCallIDIfNeeded(part.Get("id").String())
+				if part.Get("name").String() == "ToolSearch" && callID == "" {
+					return make(map[string]claudeToolDiscovery), false
+				}
 				if callID != "" {
 					toolUseCounts[callID]++
+					toolUsePositions[callID] = position
+					if part.Get("name").String() == "ToolSearch" {
+						toolSearchUseCounts[callID]++
+					}
 				}
 			case "tool_result":
 				callID := shortenCodexCallIDIfNeeded(part.Get("tool_use_id").String())
+				isDiscoveryResult := hasClaudeToolReference(part.Get("content"))
 				if callID == "" {
+					if isDiscoveryResult {
+						return make(map[string]claudeToolDiscovery), false
+					}
 					continue
 				}
 				toolResultCounts[callID]++
-				if part.Get("is_error").Bool() {
-					continue
-				}
-				toolNames, residualContent, ok := parseClaudeToolDiscoveryContent(part.Get("content"))
-				if !ok {
-					continue
-				}
-
-				loadedTools := make([][]byte, 0, len(toolNames))
-				allResolved := true
-				for _, toolName := range toolNames {
-					entry, exists := toolCatalog[toolName]
-					if !exists {
-						allResolved = false
-						break
-					}
-					if len(entry.loadedTool) > 0 {
-						loadedTools = append(loadedTools, entry.loadedTool)
-					}
-				}
-				if allResolved {
-					// Rewrite only complete, unambiguous discovery pairs. Other results
-					// continue through the ordinary function call/output conversion.
-					candidates[callID] = claudeToolDiscovery{
-						loadedTools:     loadedTools,
-						residualContent: residualContent,
-					}
+				toolResults[callID] = part
+				toolResultPositions[callID] = position
+				if isDiscoveryResult {
+					discoveryResultIDs[callID] = struct{}{}
 				}
 			}
 		}
 	}
 
-	for callID, discovery := range candidates {
-		if toolUseCounts[callID] == 1 && toolResultCounts[callID] == 1 {
-			discoveries[callID] = discovery
+	for callID := range discoveryResultIDs {
+		if toolSearchUseCounts[callID] != 1 {
+			return make(map[string]claudeToolDiscovery), false
 		}
 	}
 
-	return discoveries
+	for callID, toolSearchUseCount := range toolSearchUseCounts {
+		toolResult, hasResult := toolResults[callID]
+		if toolSearchUseCount != 1 ||
+			toolUseCounts[callID] != 1 ||
+			toolResultCounts[callID] != 1 ||
+			!hasResult ||
+			toolUsePositions[callID] >= toolResultPositions[callID] ||
+			toolResult.Get("is_error").Bool() {
+			return make(map[string]claudeToolDiscovery), false
+		}
+
+		toolNames, residualContent, ok := parseClaudeToolDiscoveryContent(toolResult.Get("content"))
+		if !ok {
+			return make(map[string]claudeToolDiscovery), false
+		}
+
+		loadedTools := make([][]byte, 0, len(toolNames))
+		for _, toolName := range toolNames {
+			entry, exists := toolCatalog[toolName]
+			if !exists {
+				return make(map[string]claudeToolDiscovery), false
+			}
+			if len(entry.loadedTool) > 0 {
+				loadedTools = append(loadedTools, entry.loadedTool)
+			}
+		}
+
+		discoveries[callID] = claudeToolDiscovery{
+			loadedTools:     loadedTools,
+			residualContent: residualContent,
+		}
+	}
+
+	return discoveries, true
+}
+
+func hasClaudeToolReference(content gjson.Result) bool {
+	if !content.IsArray() {
+		return false
+	}
+	for _, part := range content.Array() {
+		if part.Get("type").String() == "tool_reference" {
+			return true
+		}
+	}
+	return false
 }
 
 func parseClaudeToolDiscoveryContent(content gjson.Result) ([]string, []gjson.Result, bool) {
@@ -477,6 +524,49 @@ func parseClaudeToolDiscoveryContent(content gjson.Result) ([]string, []gjson.Re
 		return nil, nil, false
 	}
 	return toolNames, residualContent, true
+}
+
+func supportsNativeClaudeToolSearch(tools gjson.Result, toolChoice gjson.Result) bool {
+	if !tools.IsArray() {
+		return false
+	}
+
+	seenNames := make(map[string]struct{})
+	hasToolSearch := false
+	hasDeferredTool := false
+	deferredFunctionNames := make(map[string]struct{})
+	for _, tool := range tools.Array() {
+		name := tool.Get("name").String()
+		if name == "" {
+			continue
+		}
+		if _, exists := seenNames[name]; exists {
+			return false
+		}
+		seenNames[name] = struct{}{}
+
+		if name == "ToolSearch" {
+			if tool.Get("type").String() != "" || !tool.Get("input_schema").IsObject() {
+				return false
+			}
+			hasToolSearch = true
+		}
+		isHostedTool := isClaudeWebSearchToolType(tool.Get("type").String())
+		if tool.Get("defer_loading").Bool() && name != "ToolSearch" {
+			hasDeferredTool = true
+			if !isHostedTool {
+				deferredFunctionNames[name] = struct{}{}
+			}
+		}
+	}
+
+	if toolChoice.Get("type").String() == "tool" {
+		if _, forcedDeferredFunction := deferredFunctionNames[toolChoice.Get("name").String()]; forcedDeferredFunction {
+			return false
+		}
+	}
+
+	return hasToolSearch && hasDeferredTool
 }
 
 func buildClaudeToolCatalog(tools gjson.Result, toolNameMap map[string]string) map[string]claudeToolCatalogEntry {
@@ -529,6 +619,16 @@ func convertClaudeFunctionToolToCodex(toolResult gjson.Result, toolNameMap map[s
 	if keepDeferLoading {
 		tool, _ = sjson.SetBytes(tool, "defer_loading", true)
 	}
+	return tool
+}
+
+func convertClaudeToolSearchToCodex(toolResult gjson.Result) []byte {
+	tool := []byte(`{"type":"tool_search","execution":"client","parameters":{}}`)
+	if description := toolResult.Get("description"); description.Exists() && description.Type == gjson.String {
+		tool, _ = sjson.SetBytes(tool, "description", description.String())
+	}
+	tool, _ = sjson.SetRawBytes(tool, "parameters", []byte(normalizeToolParameters(toolResult.Get("input_schema").Raw)))
+	tool, _ = sjson.DeleteBytes(tool, "parameters.$schema")
 	return tool
 }
 
@@ -632,7 +732,7 @@ func buildClaudeWebSearchToolNameSet(tools gjson.Result) map[string]struct{} {
 	return names
 }
 
-func convertClaudeToolChoiceToCodex(toolChoice gjson.Result, toolNameMap map[string]string, webSearchToolNames map[string]struct{}) []byte {
+func convertClaudeToolChoiceToCodex(toolChoice gjson.Result, toolNameMap map[string]string, webSearchToolNames map[string]struct{}, nativeToolSearch bool) []byte {
 	if !toolChoice.Exists() || toolChoice.Type == gjson.Null {
 		return []byte(`"auto"`)
 	}
@@ -651,6 +751,9 @@ func convertClaudeToolChoiceToCodex(toolChoice gjson.Result, toolNameMap map[str
 		return []byte(`"none"`)
 	case "tool":
 		name := toolChoice.Get("name").String()
+		if nativeToolSearch && name == "ToolSearch" {
+			return []byte(`{"type":"tool_search"}`)
+		}
 		if _, ok := webSearchToolNames[name]; ok {
 			return []byte(`{"type":"web_search"}`)
 		}
