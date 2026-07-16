@@ -2000,21 +2000,15 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				if errStream != nil {
 					errIsFirstByteTimeout := errFbFired || fbTimedOut.Load()
 
-					// Client cancellation wins over everything, including a coincident
-					// first-byte timeout. Re-checked HERE (not only at the top) because the
-					// cancel may become visible only after ExecuteStream returned; this
-					// closes the TOCTOU window that would otherwise route an FBT — or a
-					// cancelled request — into MarkResult and wrongly touch the account.
-					if errCtx := ctx.Err(); errCtx != nil {
-						attemptCancel()
-						attemptErr = errCtx
-						return
-					}
-
 					// First-byte timeout during connect/headers → same-account reconnect
-					// (never MarkResult, never rotate credentials).
+					// (never MarkResult, never rotate credentials). If the client already
+					// cancelled, don't reconnect (pointless) — return the cancellation.
 					if errIsFirstByteTimeout {
 						attemptCancel()
+						if errCtx := ctx.Err(); errCtx != nil {
+							attemptErr = errCtx
+							return
+						}
 						if fbRetriesUsed < firstByteRetries {
 							fbRetriesUsed++
 							continue
@@ -2032,15 +2026,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 						continue
 					}
 
-					// Genuine non-FBT executor error → cool + rotate (original behavior).
-					// Final client-cancel check: a cancel that landed while OAuth Refresh
-					// was running (a seconds-wide window) must not be recorded as an account
-					// failure via MarkResult.
-					if errCtx := ctx.Err(); errCtx != nil {
-						attemptCancel()
-						attemptErr = errCtx
-						return
-					}
+					// Genuine non-FBT executor error → cool + rotate. Flow it to MarkResult
+					// unconditionally: MarkResult's own guard skips a cancel-CAUSED failure
+					// (status 0) but still records a real upstream 401/429/5xx even under a
+					// coincident client cancel, so a genuinely rate-limited/unauthorized
+					// account is not left uncooled.
 					rerr := &Error{Message: errStream.Error()}
 					if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
 						rerr.HTTPStatus = se.StatusCode()
@@ -2070,10 +2060,15 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				}
 
 				// First-byte timeout while waiting for the first payload → same-account
-				// reconnect (discarding any payload that raced in as the timer fired).
-				if (fbFired || fbTimedOut.Load()) && ctx.Err() == nil {
+				// reconnect (discarding any payload that raced in as the timer fired). If the
+				// client already cancelled, don't reconnect — return the cancellation.
+				if fbFired || fbTimedOut.Load() {
 					attemptCancel()
 					discardStreamChunks(streamResult.Chunks)
+					if errCtx := ctx.Err(); errCtx != nil {
+						attemptErr = errCtx
+						return
+					}
 					if fbRetriesUsed < firstByteRetries {
 						fbRetriesUsed++
 						continue
@@ -2083,11 +2078,6 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				}
 
 				if bootstrapErr != nil {
-					if errCtx := ctx.Err(); errCtx != nil {
-						discardStreamChunks(streamResult.Chunks)
-						attemptErr = errCtx
-						return
-					}
 					if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(ctx, auth, bootstrapErr, didRefreshOnUnauthorized); okRefresh {
 						// Re-run the whole attempt on the refreshed credential via the loop
 						// so it gets a FRESH first-byte timer. Re-executing inline here would
@@ -2101,15 +2091,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 						didRefreshOnUnauthorized = true
 						continue
 					}
-				}
-				if bootstrapErr != nil {
-					// Final client-cancel check: a cancel that landed while OAuth Refresh
-					// was running must not be recorded as an account failure via MarkResult.
-					if errCtx := ctx.Err(); errCtx != nil {
-						discardStreamChunks(streamResult.Chunks)
-						attemptErr = errCtx
-						return
-					}
+					// Genuine non-FBT bootstrap error → cool + rotate. Flow to MarkResult
+					// unconditionally: its guard skips a cancel-caused failure (status 0)
+					// but still records a real upstream 401/429/5xx under a coincident
+					// cancel, so a rate-limited/unauthorized account is not left uncooled.
 					rerr := &Error{Message: bootstrapErr.Error()}
 					if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
 						rerr.HTTPStatus = se.StatusCode()
