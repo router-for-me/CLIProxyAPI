@@ -27,6 +27,7 @@ const (
 type claudeCompactionCapsule struct {
 	Version int               `json:"version"`
 	Model   string            `json:"model"`
+	AuthID  string            `json:"auth_id"`
 	Output  []json.RawMessage `json:"output"`
 }
 
@@ -255,6 +256,9 @@ func validateClaudeCompactionCapsule(capsule *claudeCompactionCapsule) error {
 	if strings.TrimSpace(capsule.Model) == "" {
 		return fmt.Errorf("compaction capsule model is missing")
 	}
+	if strings.TrimSpace(capsule.AuthID) == "" {
+		return fmt.Errorf("compaction capsule auth affinity is missing")
+	}
 	return validateResponsesCompactionOutput(capsule.Output)
 }
 
@@ -299,7 +303,7 @@ func validateResponsesCompactionOutput(output []json.RawMessage) error {
 	return nil
 }
 
-func (h *ClaudeCodeAPIHandler) handleCompactResponsesBridge(c *gin.Context, rawJSON []byte, clientModel string) {
+func (h *ClaudeCodeAPIHandler) handleCompactResponsesBridge(c *gin.Context, rawJSON []byte, clientModel string, replay *claudeCompactionCapsule) {
 	clientWantsStream := gjson.GetBytes(rawJSON, "stream").Bool()
 	if clientWantsStream {
 		if _, okFlusher := c.Writer.(http.Flusher); !okFlusher {
@@ -311,6 +315,13 @@ func (h *ClaudeCodeAPIHandler) handleCompactResponsesBridge(c *gin.Context, rawJ
 	}
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	if replay != nil {
+		cliCtx = handlers.WithPinnedAuthID(cliCtx, replay.AuthID)
+	}
+	selectedAuthID := ""
+	cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+		selectedAuthID = authID
+	})
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	stopKeepAlive := func() {}
 	if !clientWantsStream {
@@ -332,7 +343,10 @@ func (h *ClaudeCodeAPIHandler) handleCompactResponsesBridge(c *gin.Context, rawJ
 		cliCancel(errMsg.Error)
 		return
 	}
-	clientResponse, marker, errBuild := buildClaudeCompactResponse(response.Body, clientModel, modelName)
+	if selectedAuthID == "" && replay != nil {
+		selectedAuthID = replay.AuthID
+	}
+	clientResponse, marker, errBuild := buildClaudeCompactResponse(response.Body, clientModel, modelName, selectedAuthID)
 	if errBuild != nil {
 		c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{Message: errBuild.Error(), Type: "api_error"},
@@ -357,7 +371,7 @@ func (h *ClaudeCodeAPIHandler) handleCompactResponsesBridge(c *gin.Context, rawJ
 	cliCancel()
 }
 
-func buildClaudeCompactResponse(rawCompact []byte, clientModel, upstreamModel string) ([]byte, string, error) {
+func buildClaudeCompactResponse(rawCompact []byte, clientModel, upstreamModel, authID string) ([]byte, string, error) {
 	var compact responsesCompactionResource
 	if errUnmarshal := json.Unmarshal(rawCompact, &compact); errUnmarshal != nil {
 		return nil, "", fmt.Errorf("decode upstream compaction response: %w", errUnmarshal)
@@ -371,6 +385,7 @@ func buildClaudeCompactResponse(rawCompact []byte, clientModel, upstreamModel st
 	capsule := &claudeCompactionCapsule{
 		Version: claudeCompactionCapsuleVersion,
 		Model:   upstreamModel,
+		AuthID:  authID,
 		Output:  compact.Output,
 	}
 	marker, errEncode := encodeClaudeCompactionCapsule(capsule)

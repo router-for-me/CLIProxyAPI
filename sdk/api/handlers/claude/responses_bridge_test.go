@@ -271,6 +271,9 @@ func TestClaudeMessagesResponsesBridgeCompactNonStreaming(t *testing.T) {
 	if capsule.Model != responsesBridgeUpstreamModel {
 		t.Fatalf("capsule model = %q, want %q", capsule.Model, responsesBridgeUpstreamModel)
 	}
+	if capsule.AuthID != "responses-bridge-auth" {
+		t.Fatalf("capsule auth ID = %q, want responses-bridge-auth", capsule.AuthID)
+	}
 	if got := gjson.Get(recorder.Body.String(), "model").String(); got != responsesBridgeClientModel {
 		t.Fatalf("response model = %q, want %q", got, responsesBridgeClientModel)
 	}
@@ -284,6 +287,9 @@ func TestClaudeMessagesResponsesBridgeCompactNonStreaming(t *testing.T) {
 	}
 	if got := gjson.GetBytes(gotReq.Payload, "messages.2.content").String(); !strings.Contains(got, "Preserve the API details") {
 		t.Fatalf("custom compact instruction was not preserved; payload=%s", gotReq.Payload)
+	}
+	if _, pinned := gotOpts.Metadata[coreexecutor.PinnedAuthMetadataKey]; pinned {
+		t.Fatalf("initial compact request unexpectedly pinned an auth: %#v", gotOpts.Metadata)
 	}
 }
 
@@ -340,8 +346,8 @@ func TestClaudeMessagesResponsesBridgeRehydratesCompactCapsule(t *testing.T) {
 	if gotOpts.Alt != constant.ClaudeResponsesBridgeAlt {
 		t.Fatalf("follow-up Alt = %q, want %q", gotOpts.Alt, constant.ClaudeResponsesBridgeAlt)
 	}
-	if _, pinned := gotOpts.Metadata[coreexecutor.PinnedAuthMetadataKey]; pinned {
-		t.Fatalf("compaction replay unexpectedly pinned an auth: %#v", gotOpts.Metadata)
+	if pinned := gotOpts.Metadata[coreexecutor.PinnedAuthMetadataKey]; pinned != "responses-bridge-auth" {
+		t.Fatalf("compaction replay pinned auth = %#v, want responses-bridge-auth", pinned)
 	}
 	if got := gjson.GetBytes(gotReq.Payload, constant.ClaudeResponsesCompactionField+".output.1.type").String(); got != "compaction_summary" {
 		t.Fatalf("replay compaction item type = %q; payload=%s", got, gotReq.Payload)

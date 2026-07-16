@@ -26,7 +26,7 @@ func shouldUseClaudeResponsesBridge(clientModel, upstreamModel string) bool {
 func (h *ClaudeCodeAPIHandler) handleResponsesBridge(c *gin.Context, rawJSON []byte, clientModel string) {
 	compactRequest := isClaudeCompactRequest(rawJSON)
 	upstreamModel := gjson.GetBytes(rawJSON, "model").String()
-	preparedJSON, _, errPrepare := prepareClaudeCompactionReplay(rawJSON, upstreamModel)
+	preparedJSON, replay, errPrepare := prepareClaudeCompactionReplay(rawJSON, upstreamModel)
 	if errPrepare != nil {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{Message: errPrepare.Error(), Type: "invalid_request_error"},
@@ -34,19 +34,22 @@ func (h *ClaudeCodeAPIHandler) handleResponsesBridge(c *gin.Context, rawJSON []b
 		return
 	}
 	if compactRequest {
-		h.handleCompactResponsesBridge(c, preparedJSON, clientModel)
+		h.handleCompactResponsesBridge(c, preparedJSON, clientModel, replay)
 		return
 	}
 	if gjson.GetBytes(rawJSON, "stream").Bool() {
-		h.handleStreamingResponsesBridge(c, preparedJSON, clientModel)
+		h.handleStreamingResponsesBridge(c, preparedJSON, clientModel, replay)
 		return
 	}
-	h.handleNonStreamingResponsesBridge(c, preparedJSON, clientModel)
+	h.handleNonStreamingResponsesBridge(c, preparedJSON, clientModel, replay)
 }
 
-func (h *ClaudeCodeAPIHandler) handleNonStreamingResponsesBridge(c *gin.Context, rawJSON []byte, clientModel string) {
+func (h *ClaudeCodeAPIHandler) handleNonStreamingResponsesBridge(c *gin.Context, rawJSON []byte, clientModel string, replay *claudeCompactionCapsule) {
 	c.Header("Content-Type", "application/json")
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	if replay != nil {
+		cliCtx = handlers.WithPinnedAuthID(cliCtx, replay.AuthID)
+	}
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
@@ -72,7 +75,7 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponsesBridge(c *gin.Context,
 	cliCancel()
 }
 
-func (h *ClaudeCodeAPIHandler) handleStreamingResponsesBridge(c *gin.Context, rawJSON []byte, clientModel string) {
+func (h *ClaudeCodeAPIHandler) handleStreamingResponsesBridge(c *gin.Context, rawJSON []byte, clientModel string, replay *claudeCompactionCapsule) {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
@@ -82,6 +85,9 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponsesBridge(c *gin.Context, ra
 	}
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	if replay != nil {
+		cliCtx = handlers.WithPinnedAuthID(cliCtx, replay.AuthID)
+	}
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	stream, errMsg := h.ExecuteProtocolStreamWithAuthManager(cliCtx, handlers.ProtocolExecutionRequest{
 		EntryProtocol:  Claude,
