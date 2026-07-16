@@ -1621,7 +1621,14 @@ func (s *Service) startFileWatcher(ctx context.Context) error {
 	watcherCtx, watcherCancel := context.WithCancel(context.Background())
 	s.watcherCancel = watcherCancel
 	if errStart := watcherWrapper.Start(watcherCtx); errStart != nil {
-		return fmt.Errorf("cliproxy: failed to start watcher: %w", errStart)
+		watcherCancel()
+		s.watcherCancel = nil
+		if errStop := watcherWrapper.Stop(); errStop != nil {
+			log.Warnf("failed to stop file watcher after startup error: %v", errStop)
+		}
+		s.watcher = nil
+		log.Warnf("failed to start file watcher; continuing without hot reload: %v", errStart)
+		return nil
 	}
 	log.Info("file watcher started for config and auth directory changes")
 	return nil

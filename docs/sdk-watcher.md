@@ -18,7 +18,7 @@ The SDK service exposes a watcher integration that surfaces granular auth update
 
 Set `disable-file-watcher: true` in `config.yaml` to skip watcher creation. This is useful on constrained container hosts where `fsnotify` cannot allocate a watcher. The API service still starts and loads the current config and auth files, but changes to `config.yaml` or the auth directory require a restart.
 
-If watcher creation fails while the option is false, the service logs a warning and continues with the same restart-required behavior. When watcher creation succeeds, hot reload behavior is unchanged.
+If watcher creation or startup fails while the option is false, the service closes any partially initialized watcher, logs a warning, and continues with the same restart-required behavior. When the watcher starts successfully, hot reload behavior is unchanged.
 
 ## High-Frequency Change Handling
 

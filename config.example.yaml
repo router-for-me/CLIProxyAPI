@@ -36,7 +36,7 @@ remote-management:
 auth-dir: "~/.cli-proxy-api"
 
 # Disable hot reload monitoring for config.yaml and the authentication directory.
-# Use this on constrained container hosts if fsnotify cannot create a watcher.
+# Use this on constrained container hosts if fsnotify cannot create or start a watcher.
 disable-file-watcher: false
 
 # API keys for authentication

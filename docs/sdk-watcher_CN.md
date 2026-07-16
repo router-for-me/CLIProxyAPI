@@ -18,7 +18,7 @@
 
 在`config.yaml`中设置`disable-file-watcher: true`可完全跳过watcher创建，适用于`fsnotify`无法分配watcher的受限容器环境。API服务仍会启动并加载当前配置和认证文件，但后续修改`config.yaml`或认证目录后需要重启服务才能生效。
 
-当该配置为false但watcher创建失败时，服务会记录warning并按同样的“修改后需重启”模式继续运行。watcher创建成功时，原有热更新行为不变。
+当该配置为false但watcher创建或启动失败时，服务会关闭已经部分初始化的watcher、记录warning，并按同样的“修改后需重启”模式继续运行。watcher成功启动时，原有热更新行为不变。
 
 ## 高频变更处理
 

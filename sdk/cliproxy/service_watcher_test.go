@@ -55,3 +55,44 @@ func TestStartFileWatcherCreationFailureIsNonFatal(t *testing.T) {
 		t.Fatalf("expected degradation warning, got %q", logs.String())
 	}
 }
+
+func TestStartFileWatcherStartFailureIsNonFatal(t *testing.T) {
+	var logs bytes.Buffer
+	previousOutput := log.StandardLogger().Out
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousOutput) })
+
+	watcherStopped := false
+	service := &Service{
+		cfg: &config.Config{},
+		watcherFactory: func(string, string, func(*config.Config)) (*WatcherWrapper, error) {
+			return &WatcherWrapper{
+				start: func(context.Context) error {
+					return errors.New("permission denied")
+				},
+				stop: func() error {
+					watcherStopped = true
+					return nil
+				},
+			}, nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := service.startFileWatcher(ctx); err != nil {
+		t.Fatalf("startFileWatcher() error = %v", err)
+	}
+	if !watcherStopped {
+		t.Fatal("watcher was not stopped after startup failed")
+	}
+	if service.watcher != nil {
+		t.Fatal("watcher was retained after startup failed")
+	}
+	if service.watcherCancel != nil {
+		t.Fatal("watcher cancellation function was retained after startup failed")
+	}
+	if !strings.Contains(logs.String(), "failed to start file watcher; continuing without hot reload") {
+		t.Fatalf("expected startup degradation warning, got %q", logs.String())
+	}
+}
