@@ -332,7 +332,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		if p.http2 {
 			perHost[host] = &closeOwnedTransportRoundTripper{base: newUtlsRoundTripper(dialer, p)}
 		} else {
-			perHost[host] = newUtlsH1RoundTripper(dialer, p)
+			perHost[host] = &closeOwnedTransportRoundTripper{base: newUtlsH1RoundTripper(dialer, p)}
 		}
 	}
 

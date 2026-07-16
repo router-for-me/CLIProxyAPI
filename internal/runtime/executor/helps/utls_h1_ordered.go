@@ -211,6 +211,29 @@ func (t *utlsH1RoundTripper) putIdle(host string, pc *utlsH1Conn) {
 	t.mu.Unlock()
 }
 
+// CloseIdleConnections closes every pooled idle connection. Because NewUtlsHTTPClient
+// builds a fresh client per request, a fully-read keep-alive body otherwise returns
+// its socket to this request-local idle map where nothing ever reuses or closes it —
+// leaking one socket per h1 request. The closeOwnedTransportRoundTripper wrapper
+// calls this when the response body is closed.
+func (t *utlsH1RoundTripper) CloseIdleConnections() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	conns := make([]*utlsH1Conn, 0, len(t.idle))
+	for host, pcs := range t.idle {
+		conns = append(conns, pcs...)
+		delete(t.idle, host)
+	}
+	t.mu.Unlock()
+	for _, pc := range conns {
+		if pc != nil && pc.conn != nil {
+			_ = pc.conn.Close()
+		}
+	}
+}
+
 func (t *utlsH1RoundTripper) dial(host, addr string) (*utlsH1Conn, error) {
 	raw, err := t.dialer.Dial("tcp", addr)
 	if err != nil {

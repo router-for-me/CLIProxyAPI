@@ -3914,6 +3914,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
 		return
 	}
+	// A request the client already abandoned must not penalize the account: skip
+	// recording a FAILURE when the caller's context is cancelled. This closes the
+	// cancel-during-error and cancel-during-refresh windows across every call site
+	// at the source, so no account is cooled/suspended/failed for an abandoned
+	// request. Successes still record (they clear state and usage).
+	if !result.Success && ctx != nil && ctx.Err() != nil {
+		return
+	}
 
 	shouldResumeModel := false
 	shouldSuspendModel := false
@@ -6174,7 +6182,10 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 
 	cloned := auth.Clone()
 	updated, err := exec.Refresh(ctx, cloned)
-	if err != nil && errors.Is(err, context.Canceled) {
+	if err != nil && (errors.Is(err, context.Canceled) || ctx.Err() != nil) {
+		// A client cancel during Refresh must not mutate credential state (LastError /
+		// Unavailable / NextRefreshAfter) — the request was abandoned. Covers the case
+		// where Refresh returns a non-context.Canceled error while ctx is cancelled.
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
 		return nil, err
 	}
