@@ -3,7 +3,6 @@ package cliproxy
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"strings"
 	"sync"
 
@@ -18,6 +17,7 @@ type EmbeddedRuntime struct {
 	manager *coreauth.Manager
 	service *Service
 
+	opMu               sync.Mutex
 	mu                 sync.Mutex
 	started            bool
 	closed             bool
@@ -28,6 +28,9 @@ type EmbeddedRuntime struct {
 }
 
 // NewEmbeddedRuntime creates a headless runtime backed by a host-owned auth manager.
+// The supplied configuration becomes the manager's runtime configuration and OAuth
+// alias source. A default RoundTripper provider is installed only when the host has
+// not already configured one.
 func NewEmbeddedRuntime(cfg *config.Config, manager *coreauth.Manager) (*EmbeddedRuntime, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("cliproxy: embedded runtime configuration is required")
@@ -36,7 +39,7 @@ func NewEmbeddedRuntime(cfg *config.Config, manager *coreauth.Manager) (*Embedde
 		return nil, fmt.Errorf("cliproxy: embedded runtime auth manager is required")
 	}
 
-	manager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
+	manager.SetRoundTripperProviderIfAbsent(newDefaultRoundTripperProvider())
 	manager.SetConfig(cfg)
 	manager.SetOAuthModelAlias(cfg.OAuthModelAlias)
 
@@ -60,28 +63,42 @@ func (r *EmbeddedRuntime) Start(ctx context.Context) error {
 		return errContext
 	}
 
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	if errContext := ctx.Err(); errContext != nil {
+		return errContext
+	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.closed {
+		r.mu.Unlock()
 		return fmt.Errorf("cliproxy: embedded runtime is closed")
 	}
 	if r.started {
+		r.mu.Unlock()
 		return nil
 	}
+	r.mu.Unlock()
 
+	runtimeCtx := coreauth.WithSkipPersist(ctx)
 	auths := r.manager.List()
-	r.service.registerAvailableExecutors(ctx, executorRegistrationOptions{
-		auths:             auths,
-		forceReplaceAuths: true,
-	})
 	for _, auth := range auths {
+		installed, owned := r.service.registerExecutorForAuth(auth, false)
+		if owned {
+			r.installedExecutors[embeddedRuntimeExecutorProvider(auth)] = installed
+		}
 		if errContext := ctx.Err(); errContext != nil {
+			r.rollbackStartLocked()
 			return errContext
 		}
-		r.trackExecutorForAuthLocked(auth)
-		r.registerAuthModelsLocked(ctx, auth)
+		r.registerAuthModelsLocked(runtimeCtx, auth)
+		if errContext := ctx.Err(); errContext != nil {
+			r.rollbackStartLocked()
+			return errContext
+		}
 	}
+	r.mu.Lock()
 	r.started = true
+	r.mu.Unlock()
 	return nil
 }
 
@@ -100,19 +117,28 @@ func (r *EmbeddedRuntime) SyncAuth(ctx context.Context, auth *coreauth.Auth) err
 		return errContext
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if errState := r.requireStartedLocked(); errState != nil {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	if errContext := ctx.Err(); errContext != nil {
+		return errContext
+	}
+	if errState := r.requireStarted(); errState != nil {
 		return errState
 	}
 
+	installed, owned := r.service.registerExecutorForAuth(auth, false)
+	if owned {
+		r.installedExecutors[embeddedRuntimeExecutorProvider(auth)] = installed
+	}
 	runtimeCtx := coreauth.WithSkipPersist(ctx)
-	prepared := r.service.prepareCoreAuthForModelRegistration(runtimeCtx, auth)
+	prepared := r.manager.SyncRuntimeAuth(auth)
 	if prepared == nil {
 		return fmt.Errorf("cliproxy: failed to synchronize auth %q", auth.ID)
 	}
-	r.trackExecutorForAuthLocked(prepared)
 	r.registerAuthModelsLocked(runtimeCtx, prepared)
+	if errContext := ctx.Err(); errContext != nil {
+		return errContext
+	}
 	return nil
 }
 
@@ -132,9 +158,12 @@ func (r *EmbeddedRuntime) RemoveAuth(ctx context.Context, authID string) error {
 		return errContext
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if errState := r.requireStartedLocked(); errState != nil {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	if errContext := ctx.Err(); errContext != nil {
+		return errContext
+	}
+	if errState := r.requireStarted(); errState != nil {
 		return errState
 	}
 
@@ -155,26 +184,33 @@ func (r *EmbeddedRuntime) ReconcileModels(ctx context.Context, activeModels []st
 		return errContext
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if errState := r.requireStartedLocked(); errState != nil {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	if errContext := ctx.Err(); errContext != nil {
+		return errContext
+	}
+	if errState := r.requireStarted(); errState != nil {
 		return errState
 	}
 
 	r.activeModels = make(map[string]struct{}, len(activeModels))
 	for _, modelID := range activeModels {
-		modelID = strings.TrimSpace(modelID)
+		modelID = strings.ToLower(strings.TrimSpace(modelID))
 		if modelID != "" {
 			r.activeModels[modelID] = struct{}{}
 		}
 	}
 	r.modelsReconciled = true
 
+	runtimeCtx := coreauth.WithSkipPersist(ctx)
 	for _, auth := range r.manager.List() {
 		if errContext := ctx.Err(); errContext != nil {
 			return errContext
 		}
-		r.registerAuthModelsLocked(ctx, auth)
+		r.registerAuthModelsLocked(runtimeCtx, auth)
+		if errContext := ctx.Err(); errContext != nil {
+			return errContext
+		}
 	}
 	return nil
 }
@@ -188,28 +224,30 @@ func (r *EmbeddedRuntime) Close(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.closed {
+		r.mu.Unlock()
 		return nil
 	}
+	r.mu.Unlock()
 	for authID := range r.registeredAuthIDs {
 		registry.GetGlobalRegistry().UnregisterClient(authID)
 		r.manager.RefreshSchedulerEntry(authID)
 	}
 	for provider, installed := range r.installedExecutors {
-		current, okExecutor := r.manager.Executor(provider)
-		if !okExecutor || !sameProviderExecutor(current, installed) {
-			continue
-		}
-		if closer, okCloser := current.(coreauth.ExecutionSessionCloser); okCloser {
+		if closer, okCloser := installed.(coreauth.ExecutionSessionCloser); okCloser {
 			closer.CloseExecutionSession(coreauth.CloseAllExecutionSessionsID)
 		}
-		r.manager.UnregisterExecutor(provider)
+		r.manager.UnregisterExecutorIfMatch(provider, installed)
 	}
 	r.registeredAuthIDs = make(map[string]struct{})
 	r.installedExecutors = make(map[string]coreauth.ProviderExecutor)
+	r.mu.Lock()
 	r.closed = true
+	r.started = false
+	r.mu.Unlock()
 	return nil
 }
 
@@ -233,7 +271,9 @@ func (r *EmbeddedRuntime) WatcherStarted() bool {
 	return r.service != nil && r.service.watcher != nil
 }
 
-func (r *EmbeddedRuntime) requireStartedLocked() error {
+func (r *EmbeddedRuntime) requireStarted() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.closed {
 		return fmt.Errorf("cliproxy: embedded runtime is closed")
 	}
@@ -247,6 +287,16 @@ func (r *EmbeddedRuntime) registerAuthModelsLocked(ctx context.Context, auth *co
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return
 	}
+	provider := embeddedRuntimeExecutorProvider(auth)
+	if provider == "" {
+		return
+	}
+	if _, okExecutor := r.manager.Executor(provider); !okExecutor {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		r.manager.RefreshSchedulerEntry(auth.ID)
+		delete(r.registeredAuthIDs, auth.ID)
+		return
+	}
 	var activeModels map[string]struct{}
 	if r.modelsReconciled {
 		activeModels = r.activeModels
@@ -255,15 +305,19 @@ func (r *EmbeddedRuntime) registerAuthModelsLocked(ctx context.Context, auth *co
 	r.registeredAuthIDs[auth.ID] = struct{}{}
 }
 
-func (r *EmbeddedRuntime) trackExecutorForAuthLocked(auth *coreauth.Auth) {
-	provider := embeddedRuntimeExecutorProvider(auth)
-	if provider == "" {
-		return
+func (r *EmbeddedRuntime) rollbackStartLocked() {
+	for authID := range r.registeredAuthIDs {
+		registry.GetGlobalRegistry().UnregisterClient(authID)
+		r.manager.RefreshSchedulerEntry(authID)
 	}
-	executor, okExecutor := r.manager.Executor(provider)
-	if okExecutor && executor != nil {
-		r.installedExecutors[provider] = executor
+	for provider, installed := range r.installedExecutors {
+		if closer, okCloser := installed.(coreauth.ExecutionSessionCloser); okCloser {
+			closer.CloseExecutionSession(coreauth.CloseAllExecutionSessionsID)
+		}
+		r.manager.UnregisterExecutorIfMatch(provider, installed)
 	}
+	r.registeredAuthIDs = make(map[string]struct{})
+	r.installedExecutors = make(map[string]coreauth.ProviderExecutor)
 }
 
 func embeddedRuntimeExecutorProvider(auth *coreauth.Auth) string {
@@ -277,15 +331,4 @@ func embeddedRuntimeExecutorProvider(auth *coreauth.Auth) string {
 		return "openai-compatibility"
 	}
 	return strings.ToLower(strings.TrimSpace(auth.Provider))
-}
-
-func sameProviderExecutor(first, second coreauth.ProviderExecutor) bool {
-	if first == nil || second == nil {
-		return first == nil && second == nil
-	}
-	firstType := reflect.TypeOf(first)
-	if firstType != reflect.TypeOf(second) || !firstType.Comparable() {
-		return false
-	}
-	return first == second
 }

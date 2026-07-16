@@ -1023,22 +1023,12 @@ func (s *Service) registerExecutorsForAuths(auths []*coreauth.Auth, forceReplace
 	}
 }
 
-func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
+func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) (installed coreauth.ProviderExecutor, owned bool) {
 	if s == nil || s.coreManager == nil || a == nil {
 		return
 	}
 	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
-		if !forceReplace {
-			existingExecutor, hasExecutor := s.coreManager.Executor("codex")
-			if hasExecutor {
-				_, isCodexAutoExecutor := existingExecutor.(*executor.CodexAutoExecutor)
-				if isCodexAutoExecutor {
-					return
-				}
-			}
-		}
-		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(s.cfg))
-		return
+		return s.installExecutor(executor.NewCodexAutoExecutor(s.cfg), forceReplace)
 	}
 	// Skip disabled auth entries when (re)binding executors.
 	// Disabled auths can linger during config reloads (e.g., removed OpenAI-compat entries)
@@ -1053,36 +1043,28 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		if compatProviderKey == "" {
 			compatProviderKey = "openai-compatibility"
 		}
-		if !forceReplace {
-			if existingExecutor, hasExecutor := s.coreManager.Executor(compatProviderKey); hasExecutor {
-				if _, isOpenAICompatExecutor := existingExecutor.(*executor.OpenAICompatExecutor); isOpenAICompatExecutor {
-					return
-				}
-			}
-		}
-		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(compatProviderKey, s.cfg))
-		return
+		return s.installExecutor(executor.NewOpenAICompatExecutor(compatProviderKey, s.cfg), forceReplace)
 	}
 	switch strings.ToLower(a.Provider) {
 	case constant.Gemini:
-		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
+		return s.installExecutor(executor.NewGeminiExecutor(s.cfg), forceReplace)
 	case constant.GeminiInteractions:
-		s.coreManager.RegisterExecutor(executor.NewGeminiInteractionsExecutor(s.cfg))
+		return s.installExecutor(executor.NewGeminiInteractionsExecutor(s.cfg), forceReplace)
 	case "vertex":
-		s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
+		return s.installExecutor(executor.NewGeminiVertexExecutor(s.cfg), forceReplace)
 	case "aistudio":
 		if s.wsGateway != nil {
-			s.coreManager.RegisterExecutor(executor.NewAIStudioExecutor(s.cfg, a.ID, s.wsGateway))
+			return s.installExecutor(executor.NewAIStudioExecutor(s.cfg, a.ID, s.wsGateway), forceReplace)
 		}
 		return
 	case "antigravity":
-		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
+		return s.installExecutor(executor.NewAntigravityExecutor(s.cfg), forceReplace)
 	case "claude":
-		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
+		return s.installExecutor(executor.NewClaudeExecutor(s.cfg), forceReplace)
 	case "kimi":
-		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
+		return s.installExecutor(executor.NewKimiExecutor(s.cfg), forceReplace)
 	case "xai":
-		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(s.cfg))
+		return s.installExecutor(executor.NewXAIAutoExecutor(s.cfg), forceReplace)
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -1094,15 +1076,22 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 			s.unregisterOpenAICompatExecutor(providerKey)
 			return
 		}
-		if !forceReplace {
-			if existingExecutor, hasExecutor := s.coreManager.Executor(providerKey); hasExecutor {
-				if _, isOpenAICompatExecutor := existingExecutor.(*executor.OpenAICompatExecutor); isOpenAICompatExecutor {
-					return
-				}
-			}
-		}
-		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(providerKey, s.cfg))
+		return s.installExecutor(executor.NewOpenAICompatExecutor(providerKey, s.cfg), forceReplace)
 	}
+}
+
+func (s *Service) installExecutor(candidate coreauth.ProviderExecutor, forceReplace bool) (coreauth.ProviderExecutor, bool) {
+	if candidate == nil {
+		return nil, false
+	}
+	if forceReplace {
+		s.coreManager.RegisterExecutor(candidate)
+		return candidate, true
+	}
+	if !s.coreManager.RegisterExecutorIfAbsent(candidate) {
+		return nil, false
+	}
+	return candidate, true
 }
 
 func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey string, models []*ModelInfo) {
@@ -1920,7 +1909,7 @@ func (s *Service) reconcileModelsForAuth(ctx context.Context, a *coreauth.Auth, 
 			if model == nil {
 				continue
 			}
-			if _, active := activeModels[strings.TrimSpace(model.ID)]; active {
+			if _, active := activeModels[strings.ToLower(strings.TrimSpace(model.ID))]; active {
 				filtered = append(filtered, model)
 			}
 		}

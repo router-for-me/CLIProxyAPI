@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -500,6 +501,21 @@ func (m *Manager) SetRoundTripperProvider(p RoundTripperProvider) {
 	m.mu.Lock()
 	m.rtProvider = p
 	m.mu.Unlock()
+}
+
+// SetRoundTripperProviderIfAbsent installs p only when the host has not
+// already configured a RoundTripper provider. It reports whether p was stored.
+func (m *Manager) SetRoundTripperProviderIfAbsent(p RoundTripperProvider) bool {
+	if m == nil || p == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.rtProvider != nil {
+		return false
+	}
+	m.rtProvider = p
+	return true
 }
 
 // SetConfig updates the runtime config snapshot used by request-time helpers.
@@ -2144,6 +2160,57 @@ func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	}
 }
 
+// RegisterExecutorIfAbsent registers executor only when its provider key has
+// no current executor. It reports whether the executor was installed.
+func (m *Manager) RegisterExecutorIfAbsent(executor ProviderExecutor) bool {
+	if m == nil || executor == nil {
+		return false
+	}
+	provider := strings.ToLower(strings.TrimSpace(executor.Identifier()))
+	if provider == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if current := m.executors[provider]; current != nil {
+		return false
+	}
+	m.executors[provider] = executor
+	return true
+}
+
+// UnregisterExecutorIfMatch removes provider only when expected is still the
+// registered executor. This lets embedding hosts avoid deleting replacements
+// installed concurrently by another owner.
+func (m *Manager) UnregisterExecutorIfMatch(provider string, expected ProviderExecutor) bool {
+	if m == nil || expected == nil {
+		return false
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current := m.executors[provider]
+	if !sameProviderExecutor(current, expected) {
+		return false
+	}
+	delete(m.executors, provider)
+	return true
+}
+
+func sameProviderExecutor(first, second ProviderExecutor) bool {
+	if first == nil || second == nil {
+		return first == nil && second == nil
+	}
+	firstType := reflect.TypeOf(first)
+	if firstType != reflect.TypeOf(second) || !firstType.Comparable() {
+		return false
+	}
+	return first == second
+}
+
 // UnregisterExecutor removes the executor associated with the provider key.
 func (m *Manager) UnregisterExecutor(provider string) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
@@ -2233,6 +2300,41 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.persistCooldownStates(ctx)
 	}
 	return auth.Clone(), nil
+}
+
+// SyncRuntimeAuth adds or replaces auth in runtime memory without persistence
+// or host hooks. It is intended for embedded runtimes whose host owns durable
+// storage and mutation notifications.
+func (m *Manager) SyncRuntimeAuth(auth *Auth) *Auth {
+	if m == nil || auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return nil
+	}
+	auth = auth.Clone()
+	m.mu.Lock()
+	if existing := m.auths[auth.ID]; existing != nil {
+		auth.CreatedAt = existing.CreatedAt
+		auth.Success = existing.Success
+		auth.Failed = existing.Failed
+		auth.recentRequests = existing.recentRequests
+		if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
+			auth.LastRefreshedAt = existing.LastRefreshedAt
+			auth.NextRefreshAfter = existing.NextRefreshAfter
+			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+				auth.ModelStates = existing.ModelStates
+			}
+		}
+	}
+	auth.EnsureIndex()
+	stored := auth.Clone()
+	m.auths[auth.ID] = stored
+	m.mu.Unlock()
+
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(stored)
+	}
+	m.queueRefreshReschedule(auth.ID)
+	return stored.Clone()
 }
 
 // Remove deletes an auth from runtime state without persisting.
