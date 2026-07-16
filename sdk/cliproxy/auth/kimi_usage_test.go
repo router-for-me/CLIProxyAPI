@@ -1,9 +1,12 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
 func TestParseKimiResetTime_ISO8601(t *testing.T) {
@@ -418,5 +421,128 @@ func TestKimiUsageCooldown_ShorterThanGeneric403(t *testing.T) {
 	}
 	if !recoverAt.Equal(probeReset) {
 		t.Errorf("recoverAt=%v, want %v (precise upstream reset)", recoverAt, probeReset)
+	}
+}
+
+// TestSetAuthQuotaExceeded_PreservesNonQuotaSuspension verifies that a model
+// already suspended for a non-quota reason (e.g. 404 model_not_supported, which
+// has Quota.Exceeded=false) is NOT overwritten when the Kimi probe detects
+// account-level quota exhaustion. Such structural suspensions must outlive the
+// quota cooldown so the model is not prematurely re-enabled when quota recovers.
+func TestSetAuthQuotaExceeded_PreservesNonQuotaSuspension(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	authID := "kimi-non-quota-auth"
+	model := "kimi-k2"
+	// Original non-quota suspension: 12h model_not_supported, Quota.Exceeded=false.
+	longAfter := time.Now().Add(12 * time.Hour)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "openai-compatible-kimi", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	if _, err := manager.Register(ctx, &Auth{
+		ID:       authID,
+		Provider: "openai-compatible-kimi",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusError,
+				StatusMessage:  "model_not_supported",
+				Unavailable:    true,
+				NextRetryAfter: longAfter,
+				Quota:          QuotaState{Exceeded: false, Reason: "model_not_supported"},
+				UpdatedAt:      time.Now(),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	// Probe says quota exhausted, recovering in 10 minutes (much sooner).
+	recoverAt := time.Now().Add(10 * time.Minute)
+	snapshot, err := manager.SetAuthQuotaExceeded(ctx, authID, recoverAt, kimiUsageReason)
+	if err != nil {
+		t.Fatalf("SetAuthQuotaExceeded() error = %v", err)
+	}
+	if snapshot == nil {
+		t.Fatal("SetAuthQuotaExceeded() returned nil snapshot")
+	}
+
+	state := snapshot.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state missing after SetAuthQuotaExceeded")
+	}
+	// Non-quota suspension must be untouched.
+	if state.Quota.Exceeded {
+		t.Errorf("Quota.Exceeded = true, want false (non-quota suspension preserved)")
+	}
+	if state.Quota.Reason != "model_not_supported" {
+		t.Errorf("Quota.Reason = %q, want model_not_supported (not overwritten)", state.Quota.Reason)
+	}
+	if !state.NextRetryAfter.Equal(longAfter) {
+		t.Errorf("NextRetryAfter = %v, want %v (12h non-quota suspension preserved)", state.NextRetryAfter, longAfter)
+	}
+}
+
+// TestSetAuthQuotaExceeded_OverwritesGenericQuotaCooldown verifies that a model
+// with a quota-related cooldown from another cause (e.g. generic 403
+// payment_required, Quota.Exceeded=true) IS replaced by the probe's precise
+// upstream reset time when that time is sooner.
+func TestSetAuthQuotaExceeded_OverwritesGenericQuotaCooldown(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	authID := "kimi-generic-quota-auth"
+	model := "kimi-k2"
+	// Generic 403 cooldown: 30 min, Quota.Exceeded=true (a quota-like fallback).
+	genericAfter := time.Now().Add(30 * time.Minute)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "openai-compatible-kimi", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	if _, err := manager.Register(ctx, &Auth{
+		ID:       authID,
+		Provider: "openai-compatible-kimi",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusError,
+				StatusMessage:  "payment_required",
+				Unavailable:    true,
+				NextRetryAfter: genericAfter,
+				Quota:          QuotaState{Exceeded: true, Reason: "payment_required", NextRecoverAt: genericAfter},
+				UpdatedAt:      time.Now(),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	// Probe's precise reset time is sooner (10 min).
+	recoverAt := time.Now().Add(10 * time.Minute)
+	snapshot, err := manager.SetAuthQuotaExceeded(ctx, authID, recoverAt, kimiUsageReason)
+	if err != nil {
+		t.Fatalf("SetAuthQuotaExceeded() error = %v", err)
+	}
+	if snapshot == nil {
+		t.Fatal("SetAuthQuotaExceeded() returned nil snapshot")
+	}
+
+	state := snapshot.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state missing after SetAuthQuotaExceeded")
+	}
+	// Should be overwritten with the probe's precise time + reason.
+	if !state.Quota.Exceeded {
+		t.Errorf("Quota.Exceeded = false, want true")
+	}
+	if state.Quota.Reason != kimiUsageReason {
+		t.Errorf("Quota.Reason = %q, want %q", state.Quota.Reason, kimiUsageReason)
+	}
+	if !state.NextRetryAfter.Equal(recoverAt) {
+		t.Errorf("NextRetryAfter = %v, want %v (probe precise reset)", state.NextRetryAfter, recoverAt)
 	}
 }

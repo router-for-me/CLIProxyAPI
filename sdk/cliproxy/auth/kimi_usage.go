@@ -277,9 +277,11 @@ func kimiUsageFullyAvailable(windows []kimiUsageWindow) bool {
 // "quota exhausted, cooled down until recoverAt". Called by the background usage
 // probe, not through the request path. Under lock: writes model-level state +
 // aggregates; outside lock: registry visibility + persistence. Follows the same
-// concurrency pattern as MarkResult. Only extends cooldowns that were set by the
-// same reason (kimiUsageReason); cooldowns from other causes (e.g. generic 403
-// payment_required) are replaced with the probe's precise upstream reset time.
+// concurrency pattern as MarkResult. Non-quota model suspensions (e.g. 404
+// model_not_supported, 401 unauthorized) are always preserved. Among quota
+// cooldowns, only same-reason (kimiUsageReason) ones are extended; quota
+// cooldowns from other causes (e.g. generic 403 payment_required) are replaced
+// with the probe's precise upstream reset time.
 func (m *Manager) SetAuthQuotaExceeded(ctx context.Context, authID string, recoverAt time.Time, reason string) (*Auth, error) {
 	if m == nil {
 		return nil, nil
@@ -335,12 +337,17 @@ func (m *Manager) SetAuthQuotaExceeded(ctx context.Context, authID string, recov
 			continue
 		}
 		state := ensureModelState(auth, model)
+		// Preserve non-quota model suspensions (e.g. 404 model_not_supported,
+		// 401 unauthorized). These have NextRetryAfter set but Quota.Exceeded
+		// is false - they are structural issues, not quota exhaustion, and
+		// the probe should not touch them.
+		if !state.Quota.Exceeded && !state.NextRetryAfter.IsZero() {
+			continue
+		}
 		// Only extend when the existing cooldown was set by this same probe
-		// (kimiUsageReason) and is already longer. For cooldowns from other
-		// causes (e.g. generic 403 payment_required from MarkResult), the
-		// probe's precise upstream reset time should take precedence so the
-		// auth recovers at the real reset time rather than the generic 30 min
-		// fallback.
+		// (kimiUsageReason) and is already longer. For quota cooldowns from
+		// other causes (e.g. generic 403 payment_required from MarkResult),
+		// the probe's precise upstream reset time takes precedence.
 		if state.Quota.Reason == reason && !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(recoverAt) {
 			continue
 		}
