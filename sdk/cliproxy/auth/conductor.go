@@ -2033,6 +2033,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					}
 
 					// Genuine non-FBT executor error → cool + rotate (original behavior).
+					// Final client-cancel check: a cancel that landed while OAuth Refresh
+					// was running (a seconds-wide window) must not be recorded as an account
+					// failure via MarkResult.
+					if errCtx := ctx.Err(); errCtx != nil {
+						attemptCancel()
+						attemptErr = errCtx
+						return
+					}
 					rerr := &Error{Message: errStream.Error()}
 					if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
 						rerr.HTTPStatus = se.StatusCode()
@@ -2095,6 +2103,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					}
 				}
 				if bootstrapErr != nil {
+					// Final client-cancel check: a cancel that landed while OAuth Refresh
+					// was running must not be recorded as an account failure via MarkResult.
+					if errCtx := ctx.Err(); errCtx != nil {
+						discardStreamChunks(streamResult.Chunks)
+						attemptErr = errCtx
+						return
+					}
 					rerr := &Error{Message: bootstrapErr.Error()}
 					if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
 						rerr.HTTPStatus = se.StatusCode()
