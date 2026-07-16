@@ -127,7 +127,7 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel := helps.CanonicalGeminiUpstreamModel(thinking.ParseSuffix(req.Model).ModelName)
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
@@ -196,7 +196,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel := helps.CanonicalGeminiUpstreamModel(thinking.ParseSuffix(req.Model).ModelName)
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
@@ -375,7 +375,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 
 // CountTokens counts tokens for the given request using the AI Studio API.
 func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel := helps.CanonicalGeminiUpstreamModel(thinking.ParseSuffix(req.Model).ModelName)
 	_, body, err := e.translateRequest(req, opts, false)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
@@ -445,7 +445,7 @@ type translatedPayload struct {
 }
 
 func (e *AIStudioExecutor) translateRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) ([]byte, translatedPayload, error) {
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel := helps.CanonicalGeminiUpstreamModel(thinking.ParseSuffix(req.Model).ModelName)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")

@@ -436,12 +436,42 @@
       }
     },
     {
+      "id": "gemini-3.1-flash-lite",
+      "object": "model",
+      "created": 1776288000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.1 Flash Lite",
+      "name": "models/gemini-3.1-flash-lite",
+      "version": "3.1",
+      "description": "Our smallest and most cost effective model, built for at scale usage.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
       "id": "gemini-3.1-flash-lite-preview",
       "object": "model",
       "created": 1776288000,
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3.1 Flash Lite Preview",
+      "display_name": "Gemini 3.1 Flash Lite (legacy preview id)",
       "name": "models/gemini-3.1-flash-lite-preview",
       "version": "3.1",
       "description": "Our smallest and most cost effective model, built for at scale usage.",
@@ -459,6 +489,8 @@
         "dynamic_allowed": true,
         "levels": [
           "minimal",
+          "low",
+          "medium",
           "high"
         ]
       }
@@ -735,12 +767,42 @@
       }
     },
     {
+      "id": "gemini-3.1-flash-lite",
+      "object": "model",
+      "created": 1776288000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.1 Flash Lite",
+      "name": "models/gemini-3.1-flash-lite",
+      "version": "3.1",
+      "description": "Our smallest and most cost effective model, built for at scale usage.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
       "id": "gemini-3.1-flash-lite-preview",
       "object": "model",
       "created": 1776288000,
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3.1 Flash Lite Preview",
+      "display_name": "Gemini 3.1 Flash Lite (legacy preview id)",
       "name": "models/gemini-3.1-flash-lite-preview",
       "version": "3.1",
       "description": "Our smallest and most cost effective model, built for at scale usage.",
@@ -1054,12 +1116,42 @@
       }
     },
     {
+      "id": "gemini-3.1-flash-lite",
+      "object": "model",
+      "created": 1776288000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.1 Flash Lite",
+      "name": "models/gemini-3.1-flash-lite",
+      "version": "3.1",
+      "description": "Our smallest and most cost effective model, built for at scale usage.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
       "id": "gemini-3.1-flash-lite-preview",
       "object": "model",
       "created": 1776288000,
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3.1 Flash Lite Preview",
+      "display_name": "Gemini 3.1 Flash Lite (legacy preview id)",
       "name": "models/gemini-3.1-flash-lite-preview",
       "version": "3.1",
       "description": "Our smallest and most cost effective model, built for at scale usage.",
@@ -1230,12 +1322,42 @@
       }
     },
     {
+      "id": "gemini-3.1-flash-lite",
+      "object": "model",
+      "created": 1776288000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.1 Flash Lite",
+      "name": "models/gemini-3.1-flash-lite",
+      "version": "3.1",
+      "description": "Our smallest and most cost effective model, built for at scale usage.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
       "id": "gemini-3.1-flash-lite-preview",
       "object": "model",
       "created": 1776288000,
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3.1 Flash Lite Preview",
+      "display_name": "Gemini 3.1 Flash Lite (legacy preview id)",
       "name": "models/gemini-3.1-flash-lite-preview",
       "version": "3.1",
       "description": "Our smallest and most cost effective model, built for at scale usage.",

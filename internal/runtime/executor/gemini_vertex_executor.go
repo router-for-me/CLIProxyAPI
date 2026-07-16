@@ -304,7 +304,7 @@ func (e *GeminiVertexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.A
 // executeWithServiceAccount handles authentication using service account credentials.
 // This method contains the original service account authentication logic.
 func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, saJSON []byte) (resp cliproxyexecutor.Response, err error) {
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel := helps.CanonicalGeminiUpstreamModel(thinking.ParseSuffix(req.Model).ModelName)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -439,7 +439,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 
 // executeWithAPIKey handles authentication using API key credentials.
 func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, apiKey, baseURL string) (resp cliproxyexecutor.Response, err error) {
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel := helps.CanonicalGeminiUpstreamModel(thinking.ParseSuffix(req.Model).ModelName)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -554,7 +554,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 
 // executeStreamWithServiceAccount handles streaming authentication using service account credentials.
 func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, saJSON []byte) (_ *cliproxyexecutor.StreamResult, err error) {
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel := helps.CanonicalGeminiUpstreamModel(thinking.ParseSuffix(req.Model).ModelName)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -699,7 +699,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 
 // executeStreamWithAPIKey handles streaming authentication using API key credentials.
 func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, apiKey, baseURL string) (_ *cliproxyexecutor.StreamResult, err error) {
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel := helps.CanonicalGeminiUpstreamModel(thinking.ParseSuffix(req.Model).ModelName)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -844,7 +844,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 
 // countTokensWithServiceAccount counts tokens using service account credentials.
 func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, saJSON []byte) (cliproxyexecutor.Response, error) {
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel := helps.CanonicalGeminiUpstreamModel(thinking.ParseSuffix(req.Model).ModelName)
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -935,7 +935,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 
 // countTokensWithAPIKey handles token counting using API key credentials.
 func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, apiKey, baseURL string) (cliproxyexecutor.Response, error) {
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel := helps.CanonicalGeminiUpstreamModel(thinking.ParseSuffix(req.Model).ModelName)
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
