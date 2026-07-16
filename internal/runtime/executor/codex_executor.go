@@ -1159,11 +1159,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		err = newCodexStatusErr(httpResp.StatusCode, data)
 		return nil, err
 	}
-	// Buffered (cap 1) so a terminal status chunk can be delivered without a
-	// rendezvous: sendTerminalChunk lands it in the buffer even if the client has
-	// already cancelled, letting readStreamBootstrap still observe the real status
-	// and cool the account instead of losing it to a coincident cancellation.
-	out := make(chan cliproxyexecutor.StreamChunk, 1)
+	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
 		defer func() {
@@ -1187,12 +1183,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 						reporter.PublishFailure(ctx, errClearReplay)
-						sendTerminalChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errClearReplay})
+						sendTerminalChunk(out, cliproxyexecutor.StreamChunk{Err: errClearReplay})
 						return
 					}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
-					sendTerminalChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: streamErr})
+					sendTerminalChunk(out, cliproxyexecutor.StreamChunk{Err: streamErr})
 					return
 				}
 				switch gjson.GetBytes(data, "type").String() {
@@ -1728,24 +1724,17 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	observeCodexFingerprint(cfg, auth, r)
 }
 
-// sendTerminalChunk delivers a terminal chunk (carrying the final upstream
-// status) preferring delivery over cancellation. Because out is buffered, the
-// non-blocking send lands the status in the buffer even when the client has
-// already cancelled, so readStreamBootstrap can still observe the real status
-// (e.g. a 429) and cool the account rather than losing it to a coincident
-// cancel. Only if the buffer is unexpectedly full does it fall back to the
-// cancel-aware blocking send (which cannot deadlock: a receiver drains out
-// until close on every path).
-func sendTerminalChunk(ctx context.Context, out chan<- cliproxyexecutor.StreamChunk, chunk cliproxyexecutor.StreamChunk) {
-	select {
-	case out <- chunk:
-		return
-	default:
-	}
-	select {
-	case out <- chunk:
-	case <-ctx.Done():
-	}
+// sendTerminalChunk delivers a terminal chunk carrying the final upstream status
+// (e.g. a 429 parsed before the first byte). It is an escape-free BLOCKING send
+// with NO ctx.Done() case on purpose: the status must reach the reader so the
+// account is cooled even if the client cancelled at the same instant. A racy
+// select against ctx.Done() (Go picks at random) could otherwise drop it and
+// leave a rate-limited account uncooled. This cannot leak: the conductor always
+// drains this channel to close — the bootstrap read while it is reading, then
+// drainAndCoolOnStatus / discardStreamChunks on the give-up paths, or the
+// forwarder after handoff — so a receiver is always present until close(out).
+func sendTerminalChunk(out chan<- cliproxyexecutor.StreamChunk, chunk cliproxyexecutor.StreamChunk) {
+	out <- chunk
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {

@@ -1726,6 +1726,41 @@ func discardStreamChunks(ch <-chan cliproxyexecutor.StreamChunk) {
 	}()
 }
 
+// drainAndCoolOnStatus drains an abandoned attempt's stream to close and, if a
+// real upstream status error surfaces during the drain (e.g. a 429 that landed
+// AFTER the bootstrap read already gave up on a first-byte timeout or client
+// cancel), records it via MarkResult so the rate-limited/unauthorized account is
+// still cooled instead of being hammered. It runs asynchronously so it never
+// blocks the caller and, like discardStreamChunks, relies on the producer
+// closing (every executor defers close). It records at most once — the terminal
+// status is the last chunk before close — so it cannot double-cool when the
+// bootstrap read already recorded the same error. A background context is used
+// because the client context is typically already cancelled here and a real
+// status must be recorded regardless.
+func (m *Manager) drainAndCoolOnStatus(ch <-chan cliproxyexecutor.StreamChunk, auth *Auth, provider, resultModel string) {
+	if ch == nil || auth == nil {
+		return
+	}
+	authID := auth.ID
+	go func() {
+		marked := false
+		for chunk := range ch {
+			if marked || chunk.Err == nil {
+				continue
+			}
+			code := upstreamStatusCode(chunk.Err)
+			if code == 0 {
+				continue
+			}
+			marked = true
+			rerr := &Error{Message: chunk.Err.Error(), HTTPStatus: code}
+			result := Result{AuthID: authID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+			result.RetryAfter = retryAfterFromError(chunk.Err)
+			m.MarkResult(context.Background(), result)
+		}
+	}()
+}
+
 type streamBootstrapError struct {
 	cause   error
 	headers http.Header
@@ -1822,11 +1857,14 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 		if ctx != nil {
 			select {
 			case <-ctx.Done():
-				// Cancellation and a ready chunk can be ready at the same instant;
-				// Go's select picks at random and would drop a chunk carrying a real
-				// upstream status (e.g. a 429 delivered just before the client aborted),
-				// leaving the account uncooled. Prefer draining a ready chunk; only
-				// report cancellation when nothing is waiting.
+				// Cancellation and a ready chunk can be ready at the same instant; Go's
+				// select picks at random and would drop a chunk carrying a real upstream
+				// status (e.g. a 429 that raced the client abort), leaving the account
+				// uncooled. Prefer draining a ready chunk; only report cancellation when
+				// nothing is waiting. A status that lands AFTER this give-up is still
+				// caught by drainAndCoolOnStatus on the caller's abandon path, so this
+				// stays non-blocking and honours the first-byte-timeout deadline (a
+				// silent, never-closing upstream must not hang the read here).
 				select {
 				case chunk, ok = <-ch:
 				default:
@@ -2007,7 +2045,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				}
 
 				if errStream != nil {
-					errIsFirstByteTimeout := errFbFired || fbTimedOut.Load()
+					// A real upstream status (e.g. a 429 that arrived just as the 15s timer
+					// fired) must be handled as a real error — cooled and rotated — NOT as a
+					// first-byte timeout. Only a status-less stall (connect/header timeout,
+					// ctx cancel) is an actual first-byte timeout eligible for reconnect.
+					errIsFirstByteTimeout := (errFbFired || fbTimedOut.Load()) && upstreamStatusCode(errStream) == 0
 
 					// First-byte timeout during connect/headers → same-account reconnect
 					// (never MarkResult, never rotate credentials). If the client already
@@ -2077,9 +2119,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				// First-byte timeout while waiting for the first payload → same-account
 				// reconnect (discarding any payload that raced in as the timer fired). If the
 				// client already cancelled, don't reconnect — return the cancellation.
-				if fbFired || fbTimedOut.Load() {
+				// A real upstream status that raced in with the timer is NOT a first-byte
+				// timeout: it falls through to the bootstrapErr branch below to be cooled.
+				if (fbFired || fbTimedOut.Load()) && upstreamStatusCode(bootstrapErr) == 0 {
 					attemptCancel()
-					discardStreamChunks(streamResult.Chunks)
+					// Drain the abandoned attempt; if a real status (e.g. a 429) lands
+					// after this first-byte-timeout give-up, still cool the account.
+					m.drainAndCoolOnStatus(streamResult.Chunks, auth, provider, resultModel)
 					if errCtx := ctx.Err(); errCtx != nil {
 						attemptErr = errCtx
 						return
@@ -2117,7 +2163,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 					result.RetryAfter = retryAfterFromError(bootstrapErr)
 					m.MarkResult(ctx, result)
-					discardStreamChunks(streamResult.Chunks)
+					// Drain the rest; if this give-up was a client cancel that raced a
+					// real status onto the stream after the bootstrap read returned the
+					// cancellation, drainAndCoolOnStatus still cools the account (it records
+					// at most once, so it will not double-cool the error just recorded).
+					m.drainAndCoolOnStatus(streamResult.Chunks, auth, provider, resultModel)
 					// Real status now recorded; if the client already gave up, stop here
 					// rather than trying this account's remaining models for a gone request.
 					if errCtx := ctx.Err(); errCtx != nil {
@@ -4373,6 +4423,21 @@ func statusCodeFromResult(err *Error) int {
 		return 0
 	}
 	return err.StatusCode()
+}
+
+// upstreamStatusCode returns the HTTP status a raw executor error carries, or 0
+// when it carries none. It distinguishes a real upstream response (e.g. a 429
+// StatusError) from a status-less stall or cancellation, so a real status that
+// races the first-byte timer is cooled/rotated rather than mistaken for a
+// first-byte timeout and retried on the same rate-limited account.
+func upstreamStatusCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	if se, ok := errors.AsType[cliproxyexecutor.StatusError](err); ok && se != nil {
+		return se.StatusCode()
+	}
+	return 0
 }
 
 func isModelSupportErrorMessage(message string) bool {
