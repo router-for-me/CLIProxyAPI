@@ -123,10 +123,12 @@ func (m *Manager) probeSingleKimiAuth(ctx context.Context, auth *Auth) error {
 		return nil
 	}
 
-	if kimiUsageFullyAvailable(windows) && hasAuthQuotaExceeded(auth, now) {
+	if kimiUsageFullyAvailable(windows) && hasKimiUsageCooldown(auth) {
 		// Only clear cooldown states that were set by this probe (kimiUsageReason),
 		// to avoid resetting cooldowns from other causes (e.g. Cloudflare challenges,
-		// generic 429 backoff).
+		// generic 429 backoff). hasKimiUsageCooldown matches any Kimi-probe state,
+		// including ones whose NextRetryAfter has already passed, so the probe also
+		// resumes registry-suspended models after the reset time.
 		if errClear := m.clearKimiUsageCooldown(ctx, auth, now); errClear != nil {
 			return errClear
 		}

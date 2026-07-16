@@ -390,10 +390,18 @@ func (m *Manager) SetAuthQuotaExceeded(ctx context.Context, authID string, recov
 	return snapshot, nil
 }
 
-// hasAuthQuotaExceeded checks (on a snapshot or under lock) whether the auth
-// currently has an active quota-exhausted cooldown. The probe uses this to avoid
-// repeatedly clearing cooldowns on healthy accounts.
-func hasAuthQuotaExceeded(auth *Auth, now time.Time) bool {
+// hasKimiUsageCooldown reports whether any of the auth's model states still carry
+// a cooldown written by the Kimi usage probe (Quota.Reason == kimiUsageReason),
+// regardless of whether that cooldown's NextRetryAfter has already passed. The
+// probe uses this instead of hasAuthQuotaExceeded (which only matches
+// still-active future cooldowns) to decide whether to call clearKimiUsageCooldown
+// after a healthy /v1/usages response. This matters because SetAuthQuotaExceeded
+// also suspends each model in the registry; that registry suspension is only
+// resumed inside clearKimiUsageCooldown. Once the reset time has passed the
+// routing block expires lazily (isAuthBlockedForModel), but the registry-level
+// suspension and the auth-level Status do not, so the probe still needs to clear
+// the now-expired state to resume the model and restore the status.
+func hasKimiUsageCooldown(auth *Auth) bool {
 	if auth == nil {
 		return false
 	}
@@ -401,7 +409,7 @@ func hasAuthQuotaExceeded(auth *Auth, now time.Time) bool {
 		if state == nil {
 			continue
 		}
-		if state.Quota.Exceeded && !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now) {
+		if state.Quota.Reason == kimiUsageReason {
 			return true
 		}
 	}
@@ -449,6 +457,16 @@ func (m *Manager) clearKimiUsageCooldown(ctx context.Context, auth *Auth, now ti
 
 	if len(clearedModels) > 0 {
 		updateAggregatedAvailability(live, now)
+		// Mirror ResetQuota: updateAggregatedAvailability only touches
+		// Unavailable/NextRetryAfter/Quota, not Status/StatusMessage. If clearing
+		// the Kimi cooldown left no remaining model error, restore the auth-level
+		// status so management views and scheduler metadata no longer report a
+		// recovered credential as errored.
+		if !live.Disabled && live.Status != StatusDisabled && !hasModelError(live, now) {
+			live.LastError = nil
+			live.StatusMessage = ""
+			live.Status = StatusActive
+		}
 	}
 	_ = m.persist(ctx, live)
 	snapshot = live.Clone()

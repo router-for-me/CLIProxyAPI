@@ -365,35 +365,50 @@ func TestWindowFromDetail_Normal(t *testing.T) {
 	}
 }
 
-func TestHasAuthQuotaExceeded_True(t *testing.T) {
+func TestHasKimiUsageCooldown_ActiveCooldown(t *testing.T) {
 	t.Parallel()
 	future := time.Now().Add(time.Hour)
 	auth := &Auth{
 		ModelStates: map[string]*ModelState{
 			"kimi-k2": {
-				Quota:          QuotaState{Exceeded: true},
-				NextRetryAfter: future,
+				Quota: QuotaState{Exceeded: true, Reason: kimiUsageReason, NextRecoverAt: future},
 			},
 		},
 	}
-	if !hasAuthQuotaExceeded(auth, time.Now()) {
-		t.Error("expected true when quota is exceeded and cooldown is active")
+	if !hasKimiUsageCooldown(auth) {
+		t.Error("expected true when a Kimi-probe cooldown is present")
 	}
 }
 
-func TestHasAuthQuotaExceeded_ExpiredIgnored(t *testing.T) {
+func TestHasKimiUsageCooldown_ExpiredStillMatched(t *testing.T) {
 	t.Parallel()
+	// A Kimi-probe cooldown whose NextRetryAfter has already passed must still be
+	// reported so the probe clears it (resumes the registry-suspended model and
+	// restores auth status) after the reset time.
 	past := time.Now().Add(-time.Hour)
 	auth := &Auth{
 		ModelStates: map[string]*ModelState{
 			"kimi-k2": {
-				Quota:          QuotaState{Exceeded: true},
-				NextRetryAfter: past, // already expired → not active
+				Quota: QuotaState{Exceeded: true, Reason: kimiUsageReason, NextRecoverAt: past},
 			},
 		},
 	}
-	if hasAuthQuotaExceeded(auth, time.Now()) {
-		t.Error("expected false when cooldown has expired")
+	if !hasKimiUsageCooldown(auth) {
+		t.Error("expected true for expired Kimi-probe cooldown (still needs clearing)")
+	}
+}
+
+func TestHasKimiUsageCooldown_OtherReasonIgnored(t *testing.T) {
+	t.Parallel()
+	auth := &Auth{
+		ModelStates: map[string]*ModelState{
+			"kimi-k2": {
+				Quota: QuotaState{Exceeded: true, Reason: "payment_required"},
+			},
+		},
+	}
+	if hasKimiUsageCooldown(auth) {
+		t.Error("expected false when cooldown reason is not kimiUsageReason")
 	}
 }
 
@@ -544,5 +559,78 @@ func TestSetAuthQuotaExceeded_OverwritesGenericQuotaCooldown(t *testing.T) {
 	}
 	if !state.NextRetryAfter.Equal(recoverAt) {
 		t.Errorf("NextRetryAfter = %v, want %v (probe precise reset)", state.NextRetryAfter, recoverAt)
+	}
+}
+
+// TestClearKimiUsageCooldown_RestoresAuthStatus verifies that clearing a Kimi
+// probe cooldown also restores the auth-level Status to active (mirrors
+// ResetQuota). SetAuthQuotaExceeded sets auth.Status = StatusError; after the
+// probe clears the cooldown and no model error remains, the status must be
+// StatusActive again so management views and scheduler metadata do not report a
+// recovered credential as errored.
+func TestClearKimiUsageCooldown_RestoresAuthStatus(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	authID := "kimi-clear-auth"
+	model := "kimi-k2"
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "openai-compatible-kimi", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	if _, err := manager.Register(ctx, &Auth{
+		ID:       authID,
+		Provider: "openai-compatible-kimi",
+		Status:   StatusActive,
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	// Probe sets a Kimi quota cooldown (this also flips auth.Status to StatusError).
+	recoverAt := time.Now().Add(time.Hour)
+	if _, err := manager.SetAuthQuotaExceeded(ctx, authID, recoverAt, kimiUsageReason); err != nil {
+		t.Fatalf("SetAuthQuotaExceeded() error = %v", err)
+	}
+
+	// Confirm the auth is now errored at the aggregated level.
+	live := manager.snapshotAuths()
+	var before *Auth
+	for i := range live {
+		if live[i].ID == authID {
+			before = live[i]
+			break
+		}
+	}
+	if before == nil {
+		t.Fatal("auth not found in snapshot")
+	}
+	if before.Status != StatusError {
+		t.Fatalf("pre-clear Status = %v, want StatusError", before.Status)
+	}
+
+	// Clear the Kimi cooldown (simulating the probe seeing recovered quota).
+	now := time.Now()
+	if err := manager.clearKimiUsageCooldown(ctx, before, now); err != nil {
+		t.Fatalf("clearKimiUsageCooldown() error = %v", err)
+	}
+
+	// Re-snapshot and assert the auth-level status is restored to active.
+	live = manager.snapshotAuths()
+	var after *Auth
+	for i := range live {
+		if live[i].ID == authID {
+			after = live[i]
+			break
+		}
+	}
+	if after == nil {
+		t.Fatal("auth not found in snapshot after clear")
+	}
+	if after.Status != StatusActive {
+		t.Errorf("post-clear Status = %v, want StatusActive", after.Status)
+	}
+	if after.StatusMessage != "" {
+		t.Errorf("post-clear StatusMessage = %q, want empty", after.StatusMessage)
 	}
 }
