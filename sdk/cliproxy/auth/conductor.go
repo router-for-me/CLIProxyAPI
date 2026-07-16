@@ -260,9 +260,8 @@ type Manager struct {
 	refreshLoop   *authAutoRefreshLoop
 
 	requestPrepareLocks sync.Map
-	// refreshLocks serializes credential refresh per auth ID so concurrent
-	// 401 recoveries and auto-refresh workers do not race the same refresh_token.
-	refreshLocks sync.Map
+	// mutationLocks serialize durable auth mutations per auth ID for process lifetime.
+	mutationLocks sync.Map
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -2163,6 +2162,14 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
+	mutationLock := m.mutationLock(auth.ID)
+	mutationLock.mu.Lock()
+	defer mutationLock.mu.Unlock()
+	revision, errRevision := newAuthRevision()
+	if errRevision != nil {
+		return nil, errRevision
+	}
+	auth.revision = revision
 	now := time.Now()
 	clearedCooldown := false
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
@@ -2170,6 +2177,9 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
+	if errPersist := m.persist(ctx, authClone); errPersist != nil {
+		return nil, errPersist
+	}
 	m.mu.Lock()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
@@ -2180,12 +2190,11 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.scheduler.upsertAuth(authClone)
 	}
 	m.queueRefreshReschedule(auth.ID)
-	_ = m.persist(ctx, auth)
-	m.hook.OnAuthRegistered(ctx, auth.Clone())
+	m.hook.OnAuthRegistered(ctx, authClone.Clone())
 	if clearedCooldown {
 		m.persistCooldownStates(ctx)
 	}
-	return auth.Clone(), nil
+	return authClone.Clone(), nil
 }
 
 // Update replaces an existing auth entry and notifies hooks.
@@ -2193,46 +2202,10 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
-	m.mu.Lock()
-	existing, ok := m.auths[auth.ID]
-	if !ok || existing == nil {
-		m.mu.Unlock()
-		return nil, nil
-	}
-	if !auth.indexAssigned && auth.Index == "" {
-		auth.Index = existing.Index
-		auth.indexAssigned = existing.indexAssigned
-	}
-	auth.Success = existing.Success
-	auth.Failed = existing.Failed
-	auth.recentRequests = existing.recentRequests
-	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
-		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
-			auth.ModelStates = existing.ModelStates
-		}
-	}
-	now := time.Now()
-	clearedCooldown := false
-	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
-		clearedCooldown = clearCooldownStateForAuth(auth, now)
-	}
-	auth.EnsureIndex()
-	authClone := auth.Clone()
-	m.auths[auth.ID] = authClone
-	m.mu.Unlock()
-	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
-		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
-	}
-	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone)
-	}
-	m.queueRefreshReschedule(auth.ID)
-	_ = m.persist(ctx, auth)
-	m.hook.OnAuthUpdated(ctx, auth.Clone())
-	if clearedCooldown {
-		m.persistCooldownStates(ctx)
-	}
-	return auth.Clone(), nil
+	mutationLock := m.mutationLock(auth.ID)
+	mutationLock.mu.Lock()
+	defer mutationLock.mu.Unlock()
+	return m.updateLocked(ctx, auth)
 }
 
 // Remove deletes an auth from runtime state without persisting.
@@ -2245,6 +2218,9 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 	if id == "" {
 		return
 	}
+	mutationLock := m.mutationLock(id)
+	mutationLock.mu.Lock()
+	defer mutationLock.mu.Unlock()
 	_ = ctx
 
 	m.mu.Lock()
@@ -2314,6 +2290,12 @@ func (m *Manager) Load(ctx context.Context) error {
 		if auth == nil || auth.ID == "" {
 			continue
 		}
+		revision, errRevision := newAuthRevision()
+		if errRevision != nil {
+			m.mu.Unlock()
+			return errRevision
+		}
+		auth.revision = revision
 		auth.EnsureIndex()
 		m.auths[auth.ID] = auth.Clone()
 	}
@@ -5960,12 +5942,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		return nil, errors.New("auth id is empty")
 	}
 
-	lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{})
-	lock, _ := lockValue.(*authRefreshLock)
-	if lock == nil {
-		lock = &authRefreshLock{}
-		m.refreshLocks.Store(id, lock)
-	}
+	lock := m.mutationLock(id)
 	lock.mu.Lock()
 	defer lock.mu.Unlock()
 
@@ -6042,12 +6019,13 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
-	saved, errUpdate := m.Update(ctx, updated)
-	for _, model := range modelsToResume {
-		registry.GetGlobalRegistry().ResumeClientModel(id, model)
-	}
+	saved, errUpdate := m.updateLocked(ctx, updated)
 	if errUpdate != nil {
 		log.Debugf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
+		return nil, errUpdate
+	}
+	for _, model := range modelsToResume {
+		registry.GetGlobalRegistry().ResumeClientModel(id, model)
 	}
 	if saved != nil {
 		return saved, nil

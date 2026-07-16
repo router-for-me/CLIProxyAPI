@@ -40,6 +40,23 @@ func TestToolPrefixDisabled(t *testing.T) {
 	}
 }
 
+func TestAuthCloneDeepCopiesNestedMetadata(t *testing.T) {
+	original := &Auth{Metadata: map[string]any{
+		"headers": map[string]any{"X-Test": "before"},
+		"scopes":  []any{"one", map[string]any{"nested": "before"}},
+	}}
+	clone := original.Clone()
+	clone.Metadata["headers"].(map[string]any)["X-Test"] = "after"
+	clone.Metadata["scopes"].([]any)[1].(map[string]any)["nested"] = "after"
+
+	if got := original.Metadata["headers"].(map[string]any)["X-Test"]; got != "before" {
+		t.Fatalf("original nested map changed = %#v", got)
+	}
+	if got := original.Metadata["scopes"].([]any)[1].(map[string]any)["nested"]; got != "before" {
+		t.Fatalf("original nested slice map changed = %#v", got)
+	}
+}
+
 func TestEnsureIndexUsesCredentialIdentity(t *testing.T) {
 	t.Parallel()
 

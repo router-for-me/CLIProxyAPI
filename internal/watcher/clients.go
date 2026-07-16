@@ -169,10 +169,12 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 	data, errRead := os.ReadFile(path)
 	if errRead != nil {
 		log.Errorf("failed to read auth file %s: %v", filepath.Base(path), errRead)
+		w.scheduleAuthReconciliation()
 		return
 	}
 	if len(data) == 0 {
 		log.Debugf("ignoring empty auth file: %s", filepath.Base(path))
+		w.scheduleAuthReconciliation()
 		return
 	}
 
@@ -184,6 +186,7 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 	var newAuth coreauth.Auth
 	if errParse := json.Unmarshal(data, &newAuth); errParse != nil {
 		log.Errorf("failed to parse auth file %s: %v", filepath.Base(path), errParse)
+		w.scheduleAuthReconciliation()
 		return
 	}
 

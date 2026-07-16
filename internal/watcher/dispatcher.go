@@ -303,7 +303,7 @@ func normalizeAuth(a *coreauth.Auth) *coreauth.Auth {
 	if a == nil {
 		return nil
 	}
-	clone := a.Clone()
+	clone := a.CloneWithoutRevision()
 	clone.CreatedAt = time.Time{}
 	clone.UpdatedAt = time.Time{}
 	clone.LastRefreshedAt = time.Time{}
