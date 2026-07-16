@@ -138,8 +138,16 @@ func windowFromDetail(d kimiUsageDetail, name string) kimiUsageWindow {
 
 // isKimiUsageAuth checks whether an auth is a Kimi Coding auth with a queryable
 // /v1/usages endpoint. It matches by base_url prefix, not by config provider type.
+// Disabled auths are excluded to avoid sending background traffic to credentials
+// the operator has taken out of service (consistent with routing in selector.go).
 func isKimiUsageAuth(auth *Auth) bool {
 	if auth == nil || auth.Provider == "" {
+		return false
+	}
+	// Skip disabled auths — the operator explicitly took them out of service.
+	// Routing already excludes them; the probe should not waste their quota
+	// on background /v1/usages calls.
+	if auth.Disabled || auth.Status == StatusDisabled {
 		return false
 	}
 	if auth.Attributes == nil || strings.TrimSpace(auth.Attributes["api_key"]) == "" {

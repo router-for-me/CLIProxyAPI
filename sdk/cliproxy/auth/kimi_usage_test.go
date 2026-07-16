@@ -310,6 +310,39 @@ func TestIsKimiUsageAuth_BaseURLPrefixFalsePositive(t *testing.T) {
 	}
 }
 
+func TestIsKimiUsageAuth_DisabledAuth(t *testing.T) {
+	t.Parallel()
+	// A disabled auth must not be matched, even if it has a valid Kimi base_url
+	// and api_key. The operator took it out of service; the probe should not
+	// send background /v1/usages traffic to it.
+	auth := &Auth{
+		Provider: "claude",
+		Disabled: true,
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": "https://api.kimi.com/coding",
+		},
+	}
+	if isKimiUsageAuth(auth) {
+		t.Error("should reject disabled auth")
+	}
+}
+
+func TestIsKimiUsageAuth_StatusDisabled(t *testing.T) {
+	t.Parallel()
+	auth := &Auth{
+		Provider: "claude",
+		Status:   StatusDisabled,
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": "https://api.kimi.com/coding",
+		},
+	}
+	if isKimiUsageAuth(auth) {
+		t.Error("should reject auth with StatusDisabled")
+	}
+}
+
 func TestWindowFromDetail_Normal(t *testing.T) {
 	t.Parallel()
 	d := kimiUsageDetail{
