@@ -690,23 +690,69 @@ func TestListPluginStoreReportsGitHubMetadataAuth(t *testing.T) {
 	}
 }
 
-func TestInstallPluginFromStoreWritesFileAndEnablesConfig(t *testing.T) {
-	t.Parallel()
+func TestInstallPluginFromStoreRejectsUnresolvedPluginsDir(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Chdir(workspace)
 
-	pluginsDir := t.TempDir()
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Dir:     "~/.cli-proxy-api/plugins",
+				Configs: map[string]config.PluginInstanceConfig{},
+			},
+		},
+		pluginStoreRegistryURL: "https://registry.example/registry.json",
+		pluginStoreHTTPClient:  fakePluginStoreHTTPClient{},
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install", nil)
+
+	h.InstallPluginFromStore(c)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	var body map[string]any
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatalf("Unmarshal() error = %v; body=%s", errDecode, rec.Body.String())
+	}
+	if body["error"] != "plugin_directory_invalid" {
+		t.Fatalf("error = %#v, want plugin_directory_invalid", body["error"])
+	}
+	if _, errStat := os.Stat(filepath.Join(workspace, "~")); !os.IsNotExist(errStat) {
+		t.Fatalf("literal tilde directory stat error = %v, want not exist", errStat)
+	}
+}
+
+func TestInstallPluginFromStoreWritesFileAndEnablesConfig(t *testing.T) {
+	workspace := t.TempDir()
+	homeDir := filepath.Join(workspace, "home")
+	if errMkdir := os.MkdirAll(homeDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", homeDir, errMkdir)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	t.Chdir(workspace)
+
+	cfg, errParse := config.ParseConfigBytes([]byte(`
+plugins:
+  enabled: false
+  dir: "~/.cli-proxy-api/plugins"
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	cfg.Plugins.Configs["sample-provider"] = pluginConfigFromYAML(t, "enabled: false\nmode: fast\n")
+	pluginsDir := filepath.Join(homeDir, ".cli-proxy-api", "plugins")
 	archiveData := makeManagementPluginStoreZip(t, "sample-provider"+managementPluginExtension(runtime.GOOS), "library-data")
 	archiveName := "sample-provider_0.1.0_" + runtime.GOOS + "_" + runtime.GOARCH + ".zip"
 	checksum := sha256.Sum256(archiveData)
 	h := &Handler{
-		cfg: &config.Config{
-			Plugins: config.PluginsConfig{
-				Enabled: false,
-				Dir:     pluginsDir,
-				Configs: map[string]config.PluginInstanceConfig{
-					"sample-provider": pluginConfigFromYAML(t, "enabled: false\nmode: fast\n"),
-				},
-			},
-		},
+		cfg:                    cfg,
 		configFilePath:         writeTestConfigFile(t),
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{

@@ -580,6 +580,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		var outputItemsFallback [][]byte
 		droppedOutputIndexes := make(map[int64]struct{})
 		customOutputIndexes := make(map[int64]struct{})
+		responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
 		recordedTranscript := false
 		for {
 			if ctx != nil && ctx.Err() != nil {
@@ -639,6 +640,11 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			}
 
 			for _, payload := range xaiNormalizeReasoningSummaryDataEvents(payload) {
+				payload = restoreXAINamespaceToolCalls(payload, prepared.namespaceTools)
+				payload = responseFilter.apply(payload)
+				if len(payload) == 0 {
+					continue
+				}
 				eventType := gjson.GetBytes(payload, "type").String()
 				isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "error"
 				warmupCompletedPayload := []byte(nil)

@@ -31,6 +31,45 @@ plugins: {}
 	}
 }
 
+func TestParseConfigBytes_PluginsDirExpandsLeadingTilde(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	cfg, errParse := ParseConfigBytes([]byte(`
+plugins:
+  dir: "~/.cli-proxy-api/plugins"
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+
+	want := filepath.Join(homeDir, ".cli-proxy-api", "plugins")
+	if cfg.Plugins.Dir != want {
+		t.Fatalf("Plugins.Dir = %q, want %q", cfg.Plugins.Dir, want)
+	}
+}
+
+func TestLoadConfig_PluginsDirExpandsLeadingTilde(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if errWrite := os.WriteFile(configPath, []byte("plugins:\n  dir: \"~/.cli-proxy-api/plugins\"\n"), 0o600); errWrite != nil {
+		t.Fatalf("os.WriteFile() error = %v", errWrite)
+	}
+
+	cfg, errLoad := LoadConfig(configPath)
+	if errLoad != nil {
+		t.Fatalf("LoadConfig() error = %v", errLoad)
+	}
+
+	want := filepath.Join(homeDir, ".cli-proxy-api", "plugins")
+	if cfg.Plugins.Dir != want {
+		t.Fatalf("Plugins.Dir = %q, want %q", cfg.Plugins.Dir, want)
+	}
+}
+
 func TestParseConfigBytes_PluginStoreSources(t *testing.T) {
 	cfg, errParse := ParseConfigBytes([]byte(`
 plugins:

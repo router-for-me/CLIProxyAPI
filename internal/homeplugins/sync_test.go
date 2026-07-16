@@ -302,6 +302,44 @@ func TestMarkLoadResultsPreservesInstallFailure(t *testing.T) {
 	}
 }
 
+func TestDeleteWithReportRejectsUnresolvedPluginsDir(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Chdir(workspace)
+
+	literalPluginsDir := filepath.Join(workspace, "~", ".cli-proxy-api", "plugins")
+	targetDir := filepath.Join(literalPluginsDir, runtime.GOOS, runtime.GOARCH)
+	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", targetDir, errMkdir)
+	}
+	target := filepath.Join(targetDir, "sample"+pluginExtension(runtime.GOOS))
+	if errWrite := os.WriteFile(target, []byte("library-data"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile(%s) error = %v", target, errWrite)
+	}
+	cfg := &config.Config{
+		Home: config.HomeConfig{Enabled: true},
+		Plugins: config.PluginsConfig{
+			Dir: "~/.cli-proxy-api/plugins",
+		},
+	}
+
+	report := DeleteWithReport(context.Background(), cfg, nil, 41, "sample")
+
+	if report.OK || report.Status != pluginTaskStatusError {
+		t.Fatalf("report = %+v, want failed delete task", report)
+	}
+	if len(report.Plugins) != 1 || report.Plugins[0].InstallStatus != pluginInstallStatusFailed {
+		t.Fatalf("plugin report = %+v, want failed status", report.Plugins)
+	}
+	if !strings.Contains(report.Plugins[0].Error, "resolve plugins directory") {
+		t.Fatalf("plugin error = %q, want directory resolution error", report.Plugins[0].Error)
+	}
+	if _, errStat := os.Stat(target); errStat != nil {
+		t.Fatalf("literal tilde target stat error = %v, want retained", errStat)
+	}
+}
+
 func TestDeleteWithReportRemovesCurrentPlatformPlugin(t *testing.T) {
 	root := t.TempDir()
 	targetDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)

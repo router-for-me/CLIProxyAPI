@@ -275,6 +275,62 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_FlattensNamespaceT
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_FlattensNamespaceCustomTools(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{
+			name: "top-level tools",
+			raw: []byte(`{
+				"tools":[{
+					"type":"namespace",
+					"name":"terminal",
+					"tools":[{"type":"custom","name":"exec","description":"Run a command"}]
+				}]
+			}`),
+		},
+		{
+			name: "additional tools",
+			raw: []byte(`{
+				"input":[{
+					"type":"additional_tools",
+					"tools":[{
+						"type":"namespace",
+						"name":"terminal",
+						"tools":[{"type":"custom","name":"exec","description":"Run a command"}]
+					}]
+				}]
+			}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", tt.raw, false)
+
+			if got := gjson.GetBytes(out, "tools.#").Int(); got != 1 {
+				t.Fatalf("tools count = %d, want 1; output=%s", got, out)
+			}
+			if got := gjson.GetBytes(out, "tools.0.function.name").String(); got != "terminal__exec" {
+				t.Fatalf("tool name = %q, want terminal__exec; output=%s", got, out)
+			}
+			if got := gjson.GetBytes(out, "tools.0.function.description").String(); got != "Run a command" {
+				t.Fatalf("tool description = %q, want Run a command; output=%s", got, out)
+			}
+			if got := gjson.GetBytes(out, "tools.0.function.parameters.type").String(); got != "object" {
+				t.Fatalf("parameters type = %q, want object; output=%s", got, out)
+			}
+			if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.input.type").String(); got != "string" {
+				t.Fatalf("input type = %q, want string; output=%s", got, out)
+			}
+			if got := gjson.GetBytes(out, "tools.0.function.parameters.required.0").String(); got != "input" {
+				t.Fatalf("required parameter = %q, want input; output=%s", got, out)
+			}
+		})
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesStructuredToolChoice(t *testing.T) {
 	raw := []byte(`{
 		"input": [

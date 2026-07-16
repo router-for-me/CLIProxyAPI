@@ -81,6 +81,12 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 	host := h.pluginHost
 	h.mu.Unlock()
 
+	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
+	if errResolvePluginsDir != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_directory_invalid", "message": errResolvePluginsDir.Error()})
+		return
+	}
+	pluginsDir = resolvedPluginsDir
 	entries := make(map[string]pluginListEntry)
 	files, errDiscover := pluginhost.DiscoverPluginFiles(pluginsDir, pluginStoreDesiredVersions(configs))
 	if errDiscover != nil {
@@ -185,7 +191,12 @@ func (h *Handler) GetPluginConfig(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{})
 		return
 	}
-	discovered, errDiscover := pluginDiscovered(pluginsDir, id)
+	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
+	if errResolvePluginsDir != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_directory_invalid", "message": errResolvePluginsDir.Error()})
+		return
+	}
+	discovered, errDiscover := pluginDiscovered(resolvedPluginsDir, id)
 	if errDiscover != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_discovery_failed", "message": errDiscover.Error()})
 		return
@@ -326,6 +337,12 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	host := h.pluginHost
 	h.mu.Unlock()
 
+	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
+	if errResolvePluginsDir != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_directory_invalid", "message": errResolvePluginsDir.Error()})
+		return
+	}
+	pluginsDir = resolvedPluginsDir
 	var desiredVersions map[string]string
 	if configured {
 		desiredVersions = pluginStoreDesiredVersions(map[string]config.PluginInstanceConfig{id: item})

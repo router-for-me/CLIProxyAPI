@@ -244,7 +244,13 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			} else if role == "assistant" {
 				node := []byte(`{"role":"model","parts":[]}`)
 				p := 0
-				if content.Type == gjson.String {
+				if reasoningContent := m.Get("reasoning_content"); reasoningContent.Type == gjson.String && reasoningContent.String() != "" {
+					node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", reasoningContent.String())
+					node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thought", true)
+					node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiFunctionThoughtSignature)
+					p++
+				}
+				if content.Type == gjson.String && content.String() != "" {
 					// Assistant text -> single model content
 					node, _ = sjson.SetBytes(node, "parts.-1.text", content.String())
 					p++
@@ -286,6 +292,9 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						}
 						fid := tc.Get("id").String()
 						fname := util.SanitizeFunctionName(tc.Get("function.name").String())
+						if fname == "" {
+							continue
+						}
 						fargs := tc.Get("function.arguments").String()
 						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.name", fname)
 						node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionCall.args", []byte(fargs))
@@ -295,7 +304,9 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							fIDs = append(fIDs, fid)
 						}
 					}
-					out, _ = sjson.SetRawBytes(out, "contents.-1", node)
+					if p > 0 {
+						out, _ = sjson.SetRawBytes(out, "contents.-1", node)
+					}
 
 					// Append a single tool content combining name + response per function
 					toolNode := []byte(`{"role":"user","parts":[]}`)
@@ -314,7 +325,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 					if pp > 0 {
 						out, _ = sjson.SetRawBytes(out, "contents.-1", toolNode)
 					}
-				} else {
+				} else if p > 0 {
 					out, _ = sjson.SetRawBytes(out, "contents.-1", node)
 				}
 			}

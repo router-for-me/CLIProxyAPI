@@ -7,6 +7,35 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertCodexResponseToOpenAI_IncompleteTerminal(t *testing.T) {
+	ctx := context.Background()
+	terminal := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","model":"gpt-5.5","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`)
+
+	var param any
+	streamOut := ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, append([]byte("data: "), terminal...), &param)
+	if len(streamOut) != 1 {
+		t.Fatalf("expected 1 streaming terminal chunk, got %d", len(streamOut))
+	}
+	if got := gjson.GetBytes(streamOut[0], "choices.0.finish_reason").String(); got != "length" {
+		t.Fatalf("stream finish_reason = %q, want length; payload=%s", got, streamOut[0])
+	}
+	if got := gjson.GetBytes(streamOut[0], "choices.0.native_finish_reason").String(); got != "max_output_tokens" {
+		t.Fatalf("stream native_finish_reason = %q, want max_output_tokens; payload=%s", got, streamOut[0])
+	}
+
+	var toolParam any
+	_ = ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"lookup"}}`), &toolParam)
+	toolStreamOut := ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, append([]byte("data: "), terminal...), &toolParam)
+	if got := gjson.GetBytes(toolStreamOut[0], "choices.0.finish_reason").String(); got != "length" {
+		t.Fatalf("tool stream finish_reason = %q, want length; payload=%s", got, toolStreamOut[0])
+	}
+
+	nonStreamOut := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.5", nil, nil, terminal, nil)
+	if got := gjson.GetBytes(nonStreamOut, "choices.0.finish_reason").String(); got != "length" {
+		t.Fatalf("non-stream finish_reason = %q, want length; payload=%s", got, nonStreamOut)
+	}
+}
+
 func TestConvertCodexResponseToOpenAI_StreamSetsModelFromResponseCreated(t *testing.T) {
 	ctx := context.Background()
 	var param any

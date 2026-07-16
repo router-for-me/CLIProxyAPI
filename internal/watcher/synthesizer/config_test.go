@@ -339,6 +339,59 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_XAIKeys(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			XAIKey: []config.XAIKey{{
+				APIKey:         "xai-key-123",
+				Prefix:         "grok",
+				BaseURL:        "https://api.x.ai/v1",
+				ProxyURL:       "http://proxy.local",
+				Websockets:     true,
+				DisableCooling: true,
+				Headers:        map[string]string{"X-Custom": "value"},
+				Models:         []config.XAIModel{{Name: "grok-4.5", Alias: "grok-latest"}},
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	auth := auths[0]
+	if auth.Provider != "xai" {
+		t.Fatalf("provider = %q, want xai", auth.Provider)
+	}
+	if auth.Label != "xai-apikey" {
+		t.Fatalf("label = %q, want xai-apikey", auth.Label)
+	}
+	if auth.Attributes["websockets"] != "true" {
+		t.Fatalf("websockets = %q, want true", auth.Attributes["websockets"])
+	}
+	if auth.Attributes["base_url"] != "https://api.x.ai/v1" {
+		t.Fatalf("base_url = %q, want https://api.x.ai/v1", auth.Attributes["base_url"])
+	}
+	if auth.Attributes["header:X-Custom"] != "value" {
+		t.Fatalf("custom header = %q, want value", auth.Attributes["header:X-Custom"])
+	}
+	if auth.Attributes["models_hash"] == "" {
+		t.Fatal("models_hash is empty")
+	}
+	if auth.ProxyURL != "http://proxy.local" {
+		t.Fatalf("proxy URL = %q, want http://proxy.local", auth.ProxyURL)
+	}
+	if disabled, ok := auth.Metadata["disable_cooling"].(bool); !ok || !disabled {
+		t.Fatalf("disable_cooling = %#v, want true", auth.Metadata["disable_cooling"])
+	}
+}
+
 func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{
@@ -703,6 +756,9 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 			CodexKey: []config.CodexKey{
 				{APIKey: "codex-key"},
 			},
+			XAIKey: []config.XAIKey{
+				{APIKey: "xai-key"},
+			},
 			OpenAICompatibility: []config.OpenAICompatibility{
 				{Name: "compat", BaseURL: "https://compat.api"},
 			},
@@ -718,8 +774,8 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(auths) != 5 {
-		t.Fatalf("expected 5 auths, got %d", len(auths))
+	if len(auths) != 6 {
+		t.Fatalf("expected 6 auths, got %d", len(auths))
 	}
 
 	providers := make(map[string]bool)
@@ -727,7 +783,7 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		providers[a.Provider] = true
 	}
 
-	expected := []string{"gemini", "claude", "codex", "openai-compatible-compat", "vertex"}
+	expected := []string{"gemini", "claude", "codex", "xai", "openai-compatible-compat", "vertex"}
 	for _, p := range expected {
 		if !providers[p] {
 			t.Errorf("expected provider %s not found", p)

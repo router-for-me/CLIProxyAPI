@@ -56,7 +56,47 @@ func TestSetServiceTierMetadataDefaultsWhenMissing(t *testing.T) {
 	setServiceTierMetadata(meta, []byte(`{"model":"gpt-5.4"}`))
 
 	gotServiceTier := meta[coreexecutor.ServiceTierMetadataKey]
-	if gotServiceTier != "default" {
+	if gotServiceTier != "auto" {
+		t.Fatalf("ServiceTierMetadataKey = %v, want %q", gotServiceTier, "auto")
+	}
+}
+
+func TestSetServiceTierMetadataPreservesExplicitDefault(t *testing.T) {
+	meta := make(map[string]any)
+
+	setServiceTierMetadata(meta, []byte(`{"service_tier":"default"}`))
+
+	if gotServiceTier := meta[coreexecutor.ServiceTierMetadataKey]; gotServiceTier != "default" {
 		t.Fatalf("ServiceTierMetadataKey = %v, want %q", gotServiceTier, "default")
+	}
+}
+
+func TestSetGenerateMetadataDefaultsWhenMissing(t *testing.T) {
+	meta := make(map[string]any)
+
+	setGenerateMetadata(meta, []byte(`{"model":"gpt-5.4"}`))
+
+	if got := meta[coreexecutor.GenerateMetadataKey]; got != true {
+		t.Fatalf("GenerateMetadataKey = %v, want true", got)
+	}
+}
+
+func TestSetGenerateMetadataPreservesTrue(t *testing.T) {
+	meta := make(map[string]any)
+
+	setGenerateMetadata(meta, []byte(`{"generate":true}`))
+
+	if got := meta[coreexecutor.GenerateMetadataKey]; got != true {
+		t.Fatalf("GenerateMetadataKey = %v, want true", got)
+	}
+}
+
+func TestSetGenerateMetadataHonorsExplicitFalse(t *testing.T) {
+	meta := make(map[string]any)
+
+	setGenerateMetadata(meta, []byte(`{"generate":false}`))
+
+	if got := meta[coreexecutor.GenerateMetadataKey]; got != false {
+		t.Fatalf("GenerateMetadataKey = %v, want false", got)
 	}
 }

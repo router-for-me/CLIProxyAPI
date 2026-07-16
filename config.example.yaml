@@ -229,6 +229,7 @@ nonstream-keepalive-interval: 0
 #     models:
 #       - name: "gemini-2.5-flash" # upstream model name
 #         alias: "gemini-flash"    # client alias mapped to the upstream model
+#         display-name: "Gemini Flash" # optional catalog display name
 #     excluded-models:
 #       - "gemini-2.5-pro"     # exclude specific models from this provider (exact match)
 #       - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
@@ -267,12 +268,34 @@ nonstream-keepalive-interval: 0
 #     models:
 #       - name: "gpt-5-codex"   # upstream model name
 #         alias: "codex-latest" # client alias mapped to the upstream model
+#         display-name: "Codex Latest" # optional catalog display name
 #         force-mapping: true    # optional: rewrite response model fields back to the alias
 #     excluded-models:
 #       - "gpt-5.1"         # exclude specific models (exact match)
 #       - "gpt-5-*"         # wildcard matching prefix (e.g. gpt-5-medium, gpt-5-codex)
 #       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
 #       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
+
+# xAI API keys
+# Uses the native xAI executor, including its Responses namespace-tool handling.
+# xai-api-key:
+#   - api-key: "xai-..."
+#     prefix: "xai" # optional: require calls like "xai/grok-4.5" to target this credential
+#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     base-url: "https://api.x.ai/v1" # xAI-compatible Responses API endpoint
+#     websockets: true # optional: use the xAI upstream websocket transport for downstream websocket requests
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     # proxy-url: "direct" # optional: explicit direct connect for this credential
+#     models:
+#       - name: "grok-4.5"       # upstream model name
+#         alias: "grok-latest"   # client alias mapped to the upstream model
+#         display-name: "Grok Latest" # optional catalog display name
+#         force-mapping: true     # optional: rewrite response model fields back to the alias
+#     excluded-models:
+#       - "grok-4.1"             # exclude specific models (exact match)
+#       - "grok-3-*"             # wildcard matching prefix
 
 # Claude API keys
 # claude-api-key:
@@ -288,6 +311,7 @@ nonstream-keepalive-interval: 0
 #     models:
 #       - name: "claude-3-5-sonnet-20241022" # upstream model name
 #         alias: "claude-sonnet-latest"      # client alias mapped to the upstream model
+#         display-name: "Claude Sonnet"      # optional catalog display name
 #         force-mapping: true                 # optional: rewrite response model fields back to the alias
 #     excluded-models:
 #       - "claude-opus-4-5-20251101" # exclude specific models (exact match)
@@ -352,6 +376,7 @@ nonstream-keepalive-interval: 0
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2"               # The alias used in the API.
+#         display-name: "Kimi K2"         # optional catalog display name
 #         image: false                   # optional: set true to allow this model on /v1/images/generations and /v1/images/edits (not chat/responses image input)
 #         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients
 #         output-modalities: [text]       # optional: declare output modalities when known
@@ -381,6 +406,7 @@ nonstream-keepalive-interval: 0
 #     models:                                     # optional: map aliases to upstream model names
 #       - name: "gemini-2.5-flash"                # upstream model name
 #         alias: "vertex-flash"                   # client-visible alias
+#         display-name: "Vertex Flash"            # optional catalog display name
 #       - name: "gemini-2.5-pro"
 #         alias: "vertex-pro"
 #     excluded-models:                            # optional: models to exclude from listing
@@ -390,7 +416,7 @@ nonstream-keepalive-interval: 0
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
 # Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai.
-# NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, claude-api-key, openai-compatibility, or vertex-api-key.
+# NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, claude-api-key, openai-compatibility, or vertex-api-key.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. For strict backend pinning, use
 # unique aliases/prefixes or avoid overlapping names.

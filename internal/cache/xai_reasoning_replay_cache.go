@@ -63,32 +63,58 @@ func CacheXAIReasoningReplayItems(modelName, sessionKey string, items [][]byte) 
 	return CacheXAIReasoningReplayItemsBestEffort(context.Background(), modelName, sessionKey, items)
 }
 
+// XAIReasoningReplayStoreStatus reports why a completed-turn cache write
+// succeeded or failed so callers can decide whether to keep prior entries.
+type XAIReasoningReplayStoreStatus int
+
+const (
+	// XAIReasoningReplayStoreInvalidArgs means model/session were empty.
+	XAIReasoningReplayStoreInvalidArgs XAIReasoningReplayStoreStatus = iota
+	// XAIReasoningReplayStored means a valid reasoning batch was written.
+	XAIReasoningReplayStored
+	// XAIReasoningReplayNoReplayableState means the completed output had no
+	// cacheable reasoning batch (for example reasoning disabled).
+	XAIReasoningReplayNoReplayableState
+	// XAIReasoningReplayStoreBackendError means normalize succeeded but the
+	// storage backend failed; previous entries should be retained.
+	XAIReasoningReplayStoreBackendError
+)
+
 // CacheXAIReasoningReplayItemsBestEffort stores replay items for completed response paths.
 func CacheXAIReasoningReplayItemsBestEffort(ctx context.Context, modelName, sessionKey string, items [][]byte) bool {
+	return StoreXAIReasoningReplayItems(ctx, modelName, sessionKey, items) == XAIReasoningReplayStored
+}
+
+// StoreXAIReasoningReplayItems stores replay items and distinguishes empty
+// completed state from backend failures.
+func StoreXAIReasoningReplayItems(ctx context.Context, modelName, sessionKey string, items [][]byte) XAIReasoningReplayStoreStatus {
 	key := xaiReasoningReplayCacheKey(modelName, sessionKey)
 	if key == "" {
-		return false
+		return XAIReasoningReplayStoreInvalidArgs
 	}
 	normalized, ok := normalizeXAIReasoningReplayItems(items)
 	if !ok {
-		return false
+		return XAIReasoningReplayNoReplayableState
 	}
 	if client, homeMode, errClient := currentXAIReasoningReplayKVClient(); homeMode {
 		if errClient != nil {
 			log.Errorf("home kv best-effort xai reasoning replay set failed prefix=cpa:xai:*: %v", errClient)
-			return false
+			return XAIReasoningReplayStoreBackendError
 		}
 		raw, errMarshal := json.Marshal(normalized)
 		if errMarshal != nil {
 			log.Errorf("home kv best-effort xai reasoning replay set failed prefix=cpa:xai:*: %v", errMarshal)
-			return false
+			return XAIReasoningReplayStoreBackendError
 		}
 		written, errSet := client.KVSet(ctx, xaiReasoningReplayKVKey(modelName, sessionKey), raw, homekv.KVSetOptions{EX: XAIReasoningReplayCacheTTL})
 		if errSet != nil {
 			log.Errorf("home kv best-effort xai reasoning replay set failed prefix=cpa:xai:*: %v", errSet)
-			return false
+			return XAIReasoningReplayStoreBackendError
 		}
-		return written
+		if !written {
+			return XAIReasoningReplayStoreBackendError
+		}
+		return XAIReasoningReplayStored
 	}
 
 	cacheCleanupOnce.Do(startCacheCleanup)
@@ -102,7 +128,7 @@ func CacheXAIReasoningReplayItemsBestEffort(ctx context.Context, modelName, sess
 	if len(xaiReasoningReplayEntries) > XAIReasoningReplayCacheMaxEntries {
 		evictOldestXAIReasoningReplayEntriesLocked(XAIReasoningReplayCacheEvictBatchSize)
 	}
-	return true
+	return XAIReasoningReplayStored
 }
 
 // GetXAIReasoningReplayItem retrieves a normalized reasoning replay item.
@@ -217,13 +243,18 @@ func xaiReasoningReplayKVKey(modelName, sessionKey string) string {
 
 func normalizeXAIReasoningReplayItems(items [][]byte) ([][]byte, bool) {
 	normalized := make([][]byte, 0, len(items))
+	hasReplayAnchor := false
 	for _, item := range items {
 		normalizedItem, ok := normalizeXAIReasoningReplayItem(item)
 		if ok {
 			normalized = append(normalized, normalizedItem)
+			switch strings.TrimSpace(gjson.GetBytes(normalizedItem, "type").String()) {
+			case "reasoning", "function_call", "custom_tool_call":
+				hasReplayAnchor = true
+			}
 		}
 	}
-	return normalized, len(normalized) > 0
+	return normalized, hasReplayAnchor
 }
 
 func normalizeXAIReasoningReplayItem(item []byte) ([]byte, bool) {
@@ -231,6 +262,8 @@ func normalizeXAIReasoningReplayItem(item []byte) ([]byte, bool) {
 	switch strings.TrimSpace(itemResult.Get("type").String()) {
 	case "reasoning":
 		return normalizeXAIReasoningReplayReasoningItem(itemResult)
+	case "message":
+		return normalizeXAIReasoningReplayMessageItem(itemResult)
 	case "function_call":
 		return normalizeXAIReasoningReplayFunctionCallItem(itemResult)
 	case "custom_tool_call":
@@ -255,6 +288,50 @@ func normalizeXAIReasoningReplayReasoningItem(itemResult gjson.Result) ([]byte, 
 
 	normalized := []byte(`{"type":"reasoning","summary":[],"content":null}`)
 	normalized, _ = sjson.SetBytes(normalized, "encrypted_content", encryptedContent)
+	return normalized, true
+}
+
+func normalizeXAIReasoningReplayMessageItem(itemResult gjson.Result) ([]byte, bool) {
+	if !strings.EqualFold(strings.TrimSpace(itemResult.Get("role").String()), "assistant") {
+		return nil, false
+	}
+	content := itemResult.Get("content")
+	if !content.IsArray() || len(content.Array()) == 0 {
+		return nil, false
+	}
+
+	normalized := []byte(`{"type":"message","role":"assistant","content":[]}`)
+	for _, part := range content.Array() {
+		partType := strings.TrimSpace(part.Get("type").String())
+		var nextPart []byte
+		switch partType {
+		case "output_text":
+			textValue := part.Get("text")
+			if textValue.Type != gjson.String {
+				continue
+			}
+			nextPart = []byte(`{"type":"output_text","text":""}`)
+			nextPart, _ = sjson.SetBytes(nextPart, "text", textValue.String())
+		case "refusal":
+			// Responses API refusal parts use the "refusal" field, not "text".
+			refusalValue := part.Get("refusal")
+			if refusalValue.Type != gjson.String {
+				continue
+			}
+			nextPart = []byte(`{"type":"refusal","refusal":""}`)
+			nextPart, _ = sjson.SetBytes(nextPart, "refusal", refusalValue.String())
+		default:
+			continue
+		}
+		updated, errSet := sjson.SetRawBytes(normalized, "content.-1", nextPart)
+		if errSet != nil {
+			return nil, false
+		}
+		normalized = updated
+	}
+	if len(gjson.GetBytes(normalized, "content").Array()) == 0 {
+		return nil, false
+	}
 	return normalized, true
 }
 

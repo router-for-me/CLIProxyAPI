@@ -306,6 +306,11 @@ func (c *Client) GetCodexKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/codex-api-key", "codex-api-key")
 }
 
+// GetXAIKeys fetches xAI API keys.
+func (c *Client) GetXAIKeys() ([]map[string]any, error) {
+	return c.getWrappedKeyList("/v0/management/xai-api-key", "xai-api-key")
+}
+
 // GetVertexKeys fetches Vertex API keys.
 func (c *Client) GetVertexKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/vertex-api-key", "vertex-api-key")

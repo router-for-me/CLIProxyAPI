@@ -27,6 +27,10 @@ const ReasoningEffortMetadataKey = "reasoning_effort"
 // ServiceTierMetadataKey stores the client-requested service tier for usage logs.
 const ServiceTierMetadataKey = "service_tier"
 
+// GenerateMetadataKey stores whether the client requested actual generation for usage logs.
+// Missing or true means generation is enabled; only an explicit false disables generation.
+const GenerateMetadataKey = "generate"
+
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
@@ -147,4 +151,12 @@ type StreamResult struct {
 type StatusError interface {
 	error
 	StatusCode() int
+}
+
+// RequestScopedError identifies a failure tied to the current request rather
+// than the selected credential. Auth managers should not retry these errors
+// across credentials or change credential availability because of them.
+type RequestScopedError interface {
+	error
+	IsRequestScoped() bool
 }
