@@ -58,18 +58,9 @@ func agentIdentityCredsFromAuth(auth *cliproxyauth.Auth) agentIdentityCreds {
 }
 
 // isAgentIdentityAuth reports whether the auth carries agent identity credentials.
+// Delegates to the shared classifier so executor and auth manager agree.
 func isAgentIdentityAuth(auth *cliproxyauth.Auth) bool {
-	if auth == nil || auth.Metadata == nil {
-		return false
-	}
-	if kind := agentIdentityMetadataString(auth, "auth_kind"); strings.EqualFold(kind, "agent_identity") {
-		return true
-	}
-	if t := agentIdentityMetadataString(auth, "type"); strings.EqualFold(t, "agent_identity") {
-		return true
-	}
-	creds := agentIdentityCredsFromAuth(auth)
-	return creds.runtimeID != "" && creds.privateKeyB64 != "" && creds.taskID != ""
+	return cliproxyauth.IsAgentIdentityAuth(auth)
 }
 
 // agentIdentityAccountID returns the ChatGPT account id associated with an agent identity auth.

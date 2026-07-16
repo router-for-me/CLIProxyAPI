@@ -509,6 +509,39 @@ func TestManagerSelectAuthByKindRejectsInvalidKind(t *testing.T) {
 	}
 }
 
+func TestManagerSelectAuthByKindExcludesAgentIdentity(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	for _, candidate := range []*Auth{
+		{
+			ID:       "codex-agent",
+			Provider: "codex",
+			Attributes: map[string]string{AttributeAuthKind: AuthKindAgentIdentity},
+			Metadata: map[string]any{
+				"auth_kind":         AuthKindAgentIdentity,
+				"email":             "agent@example.com",
+				"refresh_token":     "stale-refresh",
+				"agent_runtime_id":  "agent-1",
+				"task_id":           "task-1",
+				"agent_private_key": "cHJpdmF0ZQ==",
+			},
+		},
+		{ID: "codex-oauth", Provider: "codex", Metadata: map[string]any{"access_token": "test-token"}},
+	} {
+		if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", candidate.ID, errRegister)
+		}
+	}
+
+	selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", AuthKindOAuth, cliproxyexecutor.Options{})
+	if errSelect != nil {
+		t.Fatalf("SelectAuthByKind() error = %v", errSelect)
+	}
+	if selected == nil || selected.ID != "codex-oauth" {
+		t.Fatalf("SelectAuthByKind() auth = %#v, want codex-oauth", selected)
+	}
+}
+
 func TestManagerSelectAuthByKindAdvancesHomeAuthCount(t *testing.T) {
 	tests := []struct {
 		name       string

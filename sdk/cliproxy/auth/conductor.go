@@ -5913,6 +5913,10 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	if m == nil || auth == nil || alreadyTried || execErr == nil {
 		return auth, false
 	}
+	// Agent Identity credentials authenticate via per-request assertions, not OAuth refresh.
+	if auth.AuthKind() == AuthKindAgentIdentity {
+		return auth, false
+	}
 	if !isUnauthorizedError(execErr) || !authHasRefreshCredential(auth) {
 		return auth, false
 	}

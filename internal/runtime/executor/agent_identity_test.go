@@ -8,9 +8,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -219,38 +223,91 @@ func TestCodexPrepareRequestOAuthWithIncompleteAgentIdentityKeepsBearer(t *testi
 	}
 }
 
-func TestApplyCodexWebsocketHeadersFreshAssertionPerDial(t *testing.T) {
-	auth, publicKey := agentIdentityTestAuth(t, "agent_private_key")
+func TestApplyCodexWebsocketHeadersDefersAssertionToDial(t *testing.T) {
+	auth, _ := agentIdentityTestAuth(t, "agent_private_key")
 
-	first, err := applyCodexWebsocketHeaders(context.Background(), nil, auth, "", nil)
+	headers, err := applyCodexWebsocketHeaders(context.Background(), nil, auth, "", nil)
 	if err != nil {
 		t.Fatalf("applyCodexWebsocketHeaders() error = %v", err)
 	}
-	firstAssertion := parseAgentAssertionForTest(t, first.Get("Authorization"))
-	if firstAssertion.TaskID != "task-test" {
-		t.Fatalf("first dial task_id = %q, want task-test", firstAssertion.TaskID)
+	if got := headers.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty before dial", got)
 	}
-	if got := headerValueCaseInsensitive(first, "ChatGPT-Account-ID"); got != "acct-test" {
+	if got := headerValueCaseInsensitive(headers, "ChatGPT-Account-ID"); got != "acct-test" {
 		t.Fatalf("ChatGPT-Account-ID = %q, want acct-test", got)
 	}
+}
 
-	// A later dial must sign the current metadata, not reuse a cached assertion.
+func TestDialCodexWebsocketMintsFreshAssertionPerDial(t *testing.T) {
+	auth, publicKey := agentIdentityTestAuth(t, "agent_private_key")
+
+	var (
+		mu          sync.Mutex
+		authHeaders []string
+		upgrader    = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+		mu.Unlock()
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade: %v", err)
+			return
+		}
+		_ = conn.Close()
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	executor := NewCodexWebsocketsExecutor(nil)
+	baseHeaders, err := applyCodexWebsocketHeaders(context.Background(), nil, auth, "", nil)
+	if err != nil {
+		t.Fatalf("applyCodexWebsocketHeaders() error = %v", err)
+	}
+
+	// First dial
+	conn1, _, err := executor.dialCodexWebsocket(context.Background(), auth, wsURL, baseHeaders)
+	if err != nil {
+		t.Fatalf("first dial error = %v", err)
+	}
+	_ = conn1.Close()
+
+	// Simulate queue delay and rotated task metadata before reconnect dial.
+	time.Sleep(1100 * time.Millisecond)
 	auth.Metadata["task_id"] = "task-rotated"
-	second, err := applyCodexWebsocketHeaders(context.Background(), nil, auth, "", nil)
+	conn2, _, err := executor.dialCodexWebsocket(context.Background(), auth, wsURL, baseHeaders)
 	if err != nil {
-		t.Fatalf("second applyCodexWebsocketHeaders() error = %v", err)
+		t.Fatalf("second dial error = %v", err)
 	}
-	secondAssertion := parseAgentAssertionForTest(t, second.Get("Authorization"))
-	if secondAssertion.TaskID != "task-rotated" {
-		t.Fatalf("second dial task_id = %q, want task-rotated", secondAssertion.TaskID)
+	_ = conn2.Close()
+
+	mu.Lock()
+	gotHeaders := append([]string(nil), authHeaders...)
+	mu.Unlock()
+	if len(gotHeaders) != 2 {
+		t.Fatalf("dial count = %d, want 2; headers=%v", len(gotHeaders), gotHeaders)
 	}
-	signature, err := base64.StdEncoding.DecodeString(secondAssertion.Signature)
-	if err != nil {
-		t.Fatalf("decode signature: %v", err)
+	first := parseAgentAssertionForTest(t, gotHeaders[0])
+	second := parseAgentAssertionForTest(t, gotHeaders[1])
+	if first.TaskID != "task-test" {
+		t.Fatalf("first dial task_id = %q, want task-test", first.TaskID)
 	}
-	payload := secondAssertion.AgentRuntimeID + ":" + secondAssertion.TaskID + ":" + secondAssertion.Timestamp
-	if !ed25519.Verify(publicKey, []byte(payload), signature) {
-		t.Fatal("second dial signature does not verify")
+	if second.TaskID != "task-rotated" {
+		t.Fatalf("second dial task_id = %q, want task-rotated", second.TaskID)
+	}
+	if first.Timestamp == second.Timestamp && first.Signature == second.Signature {
+		t.Fatalf("expected distinct assertions across dials; first=%+v second=%+v", first, second)
+	}
+	for i, assertion := range []agentAssertion{first, second} {
+		signature, err := base64.StdEncoding.DecodeString(assertion.Signature)
+		if err != nil {
+			t.Fatalf("decode signature %d: %v", i, err)
+		}
+		payload := assertion.AgentRuntimeID + ":" + assertion.TaskID + ":" + assertion.Timestamp
+		if !ed25519.Verify(publicKey, []byte(payload), signature) {
+			t.Fatalf("dial %d signature does not verify", i)
+		}
 	}
 }
 

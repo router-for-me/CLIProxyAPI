@@ -718,7 +718,22 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
+	// AgentAssertion timestamps are short-lived. Always mint a fresh assertion
+	// immediately before DialContext so queued requests and reconnect dials never
+	// reuse a pre-lock / pre-retry Authorization header.
+	dialHeaders := headers
+	if isAgentIdentityAuth(auth) {
+		dialHeaders = http.Header{}
+		if headers != nil {
+			dialHeaders = headers.Clone()
+		}
+		assertion, errAssertion := generateAgentAssertion(auth)
+		if errAssertion != nil {
+			return nil, nil, fmt.Errorf("codex websocket executor: generate agent assertion: %w", errAssertion)
+		}
+		dialHeaders.Set("Authorization", assertion)
+	}
+	conn, resp, err := dialer.DialContext(ctx, wsURL, dialHeaders)
 	if conn != nil {
 		// Avoid gorilla/websocket flate tail validation issues on some upstreams/Go versions.
 		// Negotiating permessage-deflate is fine; we just don't compress outbound messages.
@@ -921,11 +936,12 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		headers = http.Header{}
 	}
 	if isAgentIdentityAuth(auth) {
-		assertion, err := generateAgentAssertion(auth)
-		if err != nil {
+		// Validate material early, but do not publish Authorization here.
+		// dialCodexWebsocket mints a fresh AgentAssertion immediately before each DialContext.
+		if _, err := generateAgentAssertion(auth); err != nil {
 			return nil, fmt.Errorf("codex websocket executor: generate agent assertion: %w", err)
 		}
-		headers.Set("Authorization", assertion)
+		headers.Del("Authorization")
 	} else if strings.TrimSpace(token) != "" {
 		headers.Set("Authorization", "Bearer "+token)
 	}

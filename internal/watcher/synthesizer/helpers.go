@@ -72,7 +72,8 @@ func ApplyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey
 			}
 		}
 	}
-	if authKindKey == "apikey" {
+	if authKindKey == "apikey" || authKindKey == "agent_identity" {
+		// API keys and Agent Identity are not OAuth credentials; only per-account exclusions apply.
 		add(perKey)
 	} else {
 		// For OAuth: merge per-account excluded models with global provider-level exclusions
