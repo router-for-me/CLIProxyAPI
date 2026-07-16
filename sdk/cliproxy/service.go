@@ -1597,6 +1597,36 @@ func (s *Service) startHomeSubscriber(ctx context.Context) {
 	s.homeLogForwarder = logging.StartHomeAppLogForwarder(0)
 }
 
+func (s *Service) startFileWatcher(ctx context.Context) error {
+	if s.cfg.DisableFileWatcher {
+		log.Warn("file watcher disabled by configuration; config and auth directory changes require a restart")
+		return nil
+	}
+
+	reloadCallback := func(newCfg *config.Config) { s.applyWatcherConfigUpdate(newCfg) }
+	watcherWrapper, errCreate := s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
+	if errCreate != nil {
+		log.Warnf("failed to create file watcher; continuing without hot reload: %v", errCreate)
+		return nil
+	}
+
+	s.watcher = watcherWrapper
+	s.ensureAuthUpdateQueue(ctx)
+	if s.authUpdates != nil {
+		watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
+	}
+	watcherWrapper.SetConfig(s.cfg)
+	s.registerPluginAuthParser()
+
+	watcherCtx, watcherCancel := context.WithCancel(context.Background())
+	s.watcherCancel = watcherCancel
+	if errStart := watcherWrapper.Start(watcherCtx); errStart != nil {
+		return fmt.Errorf("cliproxy: failed to start watcher: %w", errStart)
+	}
+	log.Info("file watcher started for config and auth directory changes")
+	return nil
+}
+
 // Run starts the service and blocks until the context is cancelled or the server stops.
 // It initializes all components including authentication, file watching, HTTP server,
 // and starts processing requests. The method blocks until the context is cancelled.
@@ -1738,27 +1768,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	if !homeEnabled {
-		var watcherWrapper *WatcherWrapper
-		reloadCallback := func(newCfg *config.Config) { s.applyWatcherConfigUpdate(newCfg) }
-
-		watcherWrapper, errCreate := s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
-		if errCreate != nil {
-			return fmt.Errorf("cliproxy: failed to create watcher: %w", errCreate)
+		if errWatcher := s.startFileWatcher(ctx); errWatcher != nil {
+			return errWatcher
 		}
-		s.watcher = watcherWrapper
-		s.ensureAuthUpdateQueue(ctx)
-		if s.authUpdates != nil {
-			watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
-		}
-		watcherWrapper.SetConfig(s.cfg)
-		s.registerPluginAuthParser()
-
-		watcherCtx, watcherCancel := context.WithCancel(context.Background())
-		s.watcherCancel = watcherCancel
-		if errStart := watcherWrapper.Start(watcherCtx); errStart != nil {
-			return fmt.Errorf("cliproxy: failed to start watcher: %w", errStart)
-		}
-		log.Info("file watcher started for config and auth directory changes")
 		s.syncPluginModelRuntime(ctx)
 	}
 

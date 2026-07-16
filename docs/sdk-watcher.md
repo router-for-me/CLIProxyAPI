@@ -14,6 +14,12 @@ The SDK service exposes a watcher integration that surfaces granular auth update
 - Updates are coalesced per credential identifier. If multiple changes occur before dispatch (e.g., write followed by delete), only the final action is sent downstream.
 - The watcher runs an internal dispatch loop that buffers pending updates in memory and forwards them asynchronously to the queue. Producers never block on channel capacity; they just enqueue into the in-memory buffer and signal the dispatcher. Dispatch cancellation happens when the watcher stops, guaranteeing goroutines exit cleanly.
 
+## Disabling File Watching
+
+Set `disable-file-watcher: true` in `config.yaml` to skip watcher creation. This is useful on constrained container hosts where `fsnotify` cannot allocate a watcher. The API service still starts and loads the current config and auth files, but changes to `config.yaml` or the auth directory require a restart.
+
+If watcher creation fails while the option is false, the service logs a warning and continues with the same restart-required behavior. When watcher creation succeeds, hot reload behavior is unchanged.
+
 ## High-Frequency Change Handling
 
 - The dispatch loop and service consumer run independently, preventing filesystem watchers from blocking even when many updates arrive at once.
