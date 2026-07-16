@@ -164,6 +164,12 @@ quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
   antigravity-credits: true # Whether to use credits as last-resort fallback when all free-tier auths are exhausted for Claude models
+  # What to do when an auth returns HTTP 402 Payment Required (e.g. zero balance).
+  # "cooldown" (default): temporary unavailability (~30m), then retry.
+  # "disable": mark the auth disabled (file-backed auths persist until re-enabled
+  # in the management panel; config-listed API keys stay disabled for the process
+  # lifetime / until re-enabled, and may be re-created active on config reload).
+  on-payment-required: cooldown
 
 # Routing strategy for selecting credentials when multiple match.
 routing:

@@ -1885,11 +1885,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			rerr := resultErrorFromError(errStream)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
-			m.MarkResult(ctx, result)
+			stopAuth := m.markResult(ctx, result)
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
 			lastErr = errStream
+			if stopAuth {
+				return nil, errStream
+			}
 			continue
 		}
 
@@ -1929,9 +1932,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				rerr := resultErrorFromError(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				m.MarkResult(ctx, result)
+				stopAuth := m.markResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
 				lastErr = bootstrapErr
+				if stopAuth {
+					return nil, bootstrapErr
+				}
 				continue
 			}
 			rerr := resultErrorFromError(bootstrapErr)
@@ -2620,11 +2626,14 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(execCtx, result)
+				stopAuth := m.markResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
+				if stopAuth {
+					break
+				}
 				continue
 			}
 			m.MarkResult(execCtx, result)
@@ -2733,11 +2742,14 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(execCtx, result)
+				stopAuth := m.markResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
+				if stopAuth {
+					break
+				}
 				continue
 			}
 			m.MarkResult(execCtx, result)
@@ -3698,9 +3710,17 @@ func waitForCooldown(ctx context.Context, wait, maxWait time.Duration) error {
 }
 
 // MarkResult records an execution result and notifies hooks.
+// MarkResult records a request outcome for auth/model availability accounting.
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
+	_ = m.markResult(ctx, result)
+}
+
+// markResult is the internal implementation of MarkResult. stopAuth is true when
+// the auth was permanently disabled (e.g. HTTP 402 with on-payment-required: disable)
+// and callers must not try remaining models on the same credential.
+func (m *Manager) markResult(ctx context.Context, result Result) (stopAuth bool) {
 	if result.AuthID == "" {
-		return
+		return false
 	}
 
 	shouldResumeModel := false
@@ -3795,7 +3815,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								suspendReason = "unauthorized"
 								shouldSuspendModel = true
 							}
-						case 402, 403:
+						case 402:
+							cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+							action := paymentRequiredAction(cfg)
+							if applyPaymentRequiredModelFailure(auth, state, now, result.Error, disableCooling, action) {
+								suspendReason = "payment_required"
+								shouldSuspendModel = true
+							}
+							if action == "disable" || auth.Disabled || auth.Status == StatusDisabled {
+								stopAuth = true
+							}
+						case 403:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
@@ -3846,13 +3876,26 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 					}
 
-					auth.Status = StatusError
+					// Do not clobber an intentional permanent disable from 402 handling.
+					if !auth.Disabled && auth.Status != StatusDisabled {
+						auth.Status = StatusError
+					}
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
 				}
 			} else {
 				disableCooling := m.cooldownDisabledForAuth(auth)
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				if statusCodeFromResult(result.Error) == 402 {
+					cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+					if paymentRequiredAction(cfg) == "disable" {
+						disableAuthForPaymentRequired(auth, now, result.Error)
+						stopAuth = true
+					} else {
+						applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+					}
+				} else {
+					applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				}
 			}
 		}
 
@@ -3885,6 +3928,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, authSnapshot)
+	return stopAuth
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {
@@ -4381,7 +4425,16 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		} else {
 			auth.NextRetryAfter = now.Add(30 * time.Minute)
 		}
-	case 402, 403:
+	case 402:
+		// applyAuthFailureState does not have Manager config; callers with config
+		// should prefer applyPaymentRequiredModelFailure. Keep cooldown default here.
+		auth.StatusMessage = "payment_required"
+		if disableCooling {
+			auth.NextRetryAfter = time.Time{}
+		} else {
+			auth.NextRetryAfter = now.Add(30 * time.Minute)
+		}
+	case 403:
 		auth.StatusMessage = "payment_required"
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}

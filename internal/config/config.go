@@ -332,6 +332,24 @@ type QuotaExceeded struct {
 	// When all free-tier auths are exhausted (429/503), the conductor retries with
 	// an auth that has available Google One AI credits.
 	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
+
+	// OnPaymentRequired controls what happens when an auth receives HTTP 402 Payment Required.
+	// Supported values:
+	//   - "cooldown" (default): temporary unavailability (existing behavior)
+	//   - "disable": mark the auth disabled until manually re-enabled
+	// Empty values are treated as "cooldown".
+	OnPaymentRequired string `yaml:"on-payment-required,omitempty" json:"on-payment-required,omitempty"`
+}
+
+// PaymentRequiredAction returns the normalized 402 handling mode.
+// Unknown values fall back to "cooldown".
+func (q QuotaExceeded) PaymentRequiredAction() string {
+	switch strings.ToLower(strings.TrimSpace(q.OnPaymentRequired)) {
+	case "disable":
+		return "disable"
+	default:
+		return "cooldown"
+	}
 }
 
 // RoutingConfig configures how credentials are selected for requests.
