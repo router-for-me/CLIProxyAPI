@@ -46,12 +46,12 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	rootResult := gjson.ParseBytes(rawJSON)
 	toolNameMap := buildReverseMapFromClaudeOriginalToShort(rawJSON)
 	template, _ = sjson.SetBytes(template, "model", modelName)
-	inputItems := make([][]byte, 0, len(rootResult.Get("messages").Array())+1)
+	inputItems := make([][]byte, 0, 16)
 
 	// Process system messages and convert them to input content format.
 	systemsResult := rootResult.Get("system")
 	if systemsResult.Exists() {
-		contentItems := make([][]byte, 0, len(systemsResult.Array()))
+		contentItems := make([][]byte, 0, 2)
 
 		appendSystemText := func(text string) {
 			if text == "" || util.IsClaudeCodeAttributionSystemText(text) {
@@ -100,7 +100,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			}
 
 			messageContentsResult := messageResult.Get("content")
-			contentItems := make([][]byte, 0, len(messageContentsResult.Array()))
+			contentItems := make([][]byte, 0, 4)
 
 			flushMessage := func() {
 				if len(contentItems) > 0 {
