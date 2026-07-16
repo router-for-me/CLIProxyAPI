@@ -147,6 +147,20 @@ func TestKimiUsageCooldown_AllAvailable(t *testing.T) {
 	}
 }
 
+func TestKimiUsageCooldown_ZeroLimitIgnored(t *testing.T) {
+	t.Parallel()
+	// A window with limit<=0 should be skipped; it should not trigger a cooldown
+	// even if remaining is 0.
+	windows := []kimiUsageWindow{
+		{Name: "five_hour", Limit: 0, Remaining: 0, ResetAt: time.Now(), HasReset: true},
+		{Name: "weekly", Limit: 1000, Remaining: 500, ResetAt: time.Now(), HasReset: true},
+	}
+	_, ok := kimiUsageCooldown(windows)
+	if ok {
+		t.Error("expected !ok when only zero-limit window is exhausted")
+	}
+}
+
 func TestKimiUsageFullyAvailable_AllPositive(t *testing.T) {
 	t.Parallel()
 	windows := []kimiUsageWindow{
@@ -188,9 +202,22 @@ func TestKimiUsageFullyAvailable_ZeroLimitIgnored(t *testing.T) {
 	}
 }
 
+func TestKimiUsageFullyAvailable_AllZeroLimit_NoValidWindows(t *testing.T) {
+	t.Parallel()
+	// When all windows have limit<=0, there are no valid windows to observe;
+	// should return false to avoid clearing cooldown on empty data.
+	windows := []kimiUsageWindow{
+		{Name: "five_hour", Limit: 0, Remaining: 0},
+		{Name: "weekly", Limit: 0, Remaining: 0},
+	}
+	if kimiUsageFullyAvailable(windows) {
+		t.Error("expected false when all windows have zero limit (no valid data)")
+	}
+}
+
 func TestIsKimiUsageAuth_Valid_ClaudeKey(t *testing.T) {
 	t.Parallel()
-	// claude_key 配置的 Kimi auth，Provider 是 "claude"
+	// Kimi auth configured via claude_key, Provider is "claude"
 	auth := &Auth{
 		Provider: "claude",
 		Attributes: map[string]string{
@@ -205,7 +232,7 @@ func TestIsKimiUsageAuth_Valid_ClaudeKey(t *testing.T) {
 
 func TestIsKimiUsageAuth_Valid_OpenAICompat(t *testing.T) {
 	t.Parallel()
-	// openai-compatibility 配置的 Kimi auth，Provider 是 "openai-compatible-kimi"
+	// Kimi auth configured via openai-compatibility, Provider is "openai-compatible-kimi"
 	auth := &Auth{
 		Provider: "openai-compatible-kimi",
 		Attributes: map[string]string{
@@ -220,7 +247,7 @@ func TestIsKimiUsageAuth_Valid_OpenAICompat(t *testing.T) {
 
 func TestIsKimiUsageAuth_BaseURLWithPath(t *testing.T) {
 	t.Parallel()
-	// base_url 带子路径也应匹配
+	// base_url with trailing path should also match
 	auth := &Auth{
 		Provider: "claude",
 		Attributes: map[string]string{
@@ -264,6 +291,22 @@ func TestIsKimiUsageAuth_WrongBaseURL(t *testing.T) {
 	}
 	if isKimiUsageAuth(auth) {
 		t.Error("should reject non-kimi base_url")
+	}
+}
+
+func TestIsKimiUsageAuth_BaseURLPrefixFalsePositive(t *testing.T) {
+	t.Parallel()
+	// A base_url like https://api.kimi.com/coding-fake must NOT match
+	// https://api.kimi.com/coding (strict prefix with "/" boundary check).
+	auth := &Auth{
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": "https://api.kimi.com/coding-fake",
+		},
+	}
+	if isKimiUsageAuth(auth) {
+		t.Error("should reject base_url that only shares a prefix (coding-fake)")
 	}
 }
 

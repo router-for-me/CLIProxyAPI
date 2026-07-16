@@ -1878,7 +1878,8 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if s.handlers != nil && s.handlers.AuthManager != nil {
 		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
 
-		// 动态重启 Kimi 用量探针（响应 Management Center 的配置变更）
+		// Dynamically restart the Kimi usage probe when the management center
+		// changes the relevant config fields.
 		prevEnabled := false
 		prevInterval := 0
 		if oldCfg != nil {

@@ -259,8 +259,9 @@ type Manager struct {
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
 
-	// Kimi usage probe state：周期查询 base_url 为 api.kimi.com/coding 的 auth 的
-	// /v1/usages，在滚动窗口耗尽时按真实 resetTime 冷却。由 service 在启用时 Start/Stop。
+	// Kimi usage probe state: periodically queries /v1/usages for auths whose
+	// base_url matches api.kimi.com/coding, cooling them down to the real resetTime
+	// when a rolling window is exhausted. Started/stopped by the service layer.
 	usageProbeMu     sync.Mutex
 	usageProbeCancel context.CancelFunc
 	usageProbeWG     sync.WaitGroup
