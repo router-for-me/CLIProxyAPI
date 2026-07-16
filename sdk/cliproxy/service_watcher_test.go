@@ -32,6 +32,15 @@ func TestStartFileWatcherDisabled(t *testing.T) {
 	}
 }
 
+func TestStartFileWatcherRejectsNilConfig(t *testing.T) {
+	service := &Service{}
+
+	err := service.startFileWatcher(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "configuration is nil") {
+		t.Fatalf("startFileWatcher() error = %v, want configuration error", err)
+	}
+}
+
 func TestStartFileWatcherCreationFailureIsNonFatal(t *testing.T) {
 	var logs bytes.Buffer
 	previousOutput := log.StandardLogger().Out

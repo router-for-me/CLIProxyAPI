@@ -1598,13 +1598,20 @@ func (s *Service) startHomeSubscriber(ctx context.Context) {
 }
 
 func (s *Service) startFileWatcher(ctx context.Context) error {
+	if s.cfg == nil {
+		return fmt.Errorf("cliproxy: configuration is nil")
+	}
 	if s.cfg.DisableFileWatcher {
 		log.Warn("file watcher disabled by configuration; config and auth directory changes require a restart")
 		return nil
 	}
 
 	reloadCallback := func(newCfg *config.Config) { s.applyWatcherConfigUpdate(newCfg) }
-	watcherWrapper, errCreate := s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
+	factory := s.watcherFactory
+	if factory == nil {
+		factory = defaultWatcherFactory
+	}
+	watcherWrapper, errCreate := factory(s.configPath, s.cfg.AuthDir, reloadCallback)
 	if errCreate != nil {
 		log.Warnf("failed to create file watcher; continuing without hot reload: %v", errCreate)
 		return nil
