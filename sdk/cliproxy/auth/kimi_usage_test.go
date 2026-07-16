@@ -439,19 +439,19 @@ func TestKimiUsageCooldown_ShorterThanGeneric403(t *testing.T) {
 	}
 }
 
-// TestSetAuthQuotaExceeded_PreservesNonQuotaSuspension verifies that a model
-// already suspended for a non-quota reason (e.g. 404 model_not_supported, which
-// has Quota.Exceeded=false) is NOT overwritten when the Kimi probe detects
-// account-level quota exhaustion. Such structural suspensions must outlive the
-// quota cooldown so the model is not prematurely re-enabled when quota recovers.
-func TestSetAuthQuotaExceeded_PreservesNonQuotaSuspension(t *testing.T) {
+// TestSetAuthQuotaExceeded_PreservesCloudflareBackoff verifies that a model
+// under a Cloudflare challenge backoff (Quota.Exceeded=true, Reason="cloudflare
+// challenge" as set by MarkResult) is NOT overwritten by the Kimi probe. A
+// Cloudflare/edge block is unrelated to Kimi quota, so overwriting it and later
+// clearing it would let requests through before the backoff elapses.
+func TestSetAuthQuotaExceeded_PreservesCloudflareBackoff(t *testing.T) {
 	t.Parallel()
 	manager := NewManager(nil, nil, nil)
 	ctx := context.Background()
-	authID := "kimi-non-quota-auth"
+	authID := "kimi-cf-auth"
 	model := "kimi-k2"
-	// Original non-quota suspension: 12h model_not_supported, Quota.Exceeded=false.
-	longAfter := time.Now().Add(12 * time.Hour)
+	// Realistic Cloudflare state from MarkResult: Exceeded=true, explicit reason.
+	cfAfter := time.Now().Add(5 * time.Minute)
 
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(authID, "openai-compatible-kimi", []*registry.ModelInfo{{ID: model}})
@@ -464,10 +464,10 @@ func TestSetAuthQuotaExceeded_PreservesNonQuotaSuspension(t *testing.T) {
 		ModelStates: map[string]*ModelState{
 			model: {
 				Status:         StatusError,
-				StatusMessage:  "model_not_supported",
+				StatusMessage:  "cloudflare challenge",
 				Unavailable:    true,
-				NextRetryAfter: longAfter,
-				Quota:          QuotaState{Exceeded: false, Reason: "model_not_supported"},
+				NextRetryAfter: cfAfter,
+				Quota:          QuotaState{Exceeded: true, Reason: "cloudflare challenge", NextRecoverAt: cfAfter},
 				UpdatedAt:      time.Now(),
 			},
 		},
@@ -475,7 +475,7 @@ func TestSetAuthQuotaExceeded_PreservesNonQuotaSuspension(t *testing.T) {
 		t.Fatalf("register auth: %v", err)
 	}
 
-	// Probe says quota exhausted, recovering in 10 minutes (much sooner).
+	// Probe says quota exhausted, recovering in 10 minutes.
 	recoverAt := time.Now().Add(10 * time.Minute)
 	snapshot, err := manager.SetAuthQuotaExceeded(ctx, authID, recoverAt, kimiUsageReason)
 	if err != nil {
@@ -489,29 +489,28 @@ func TestSetAuthQuotaExceeded_PreservesNonQuotaSuspension(t *testing.T) {
 	if state == nil {
 		t.Fatal("model state missing after SetAuthQuotaExceeded")
 	}
-	// Non-quota suspension must be untouched.
-	if state.Quota.Exceeded {
-		t.Errorf("Quota.Exceeded = true, want false (non-quota suspension preserved)")
+	// Cloudflare backoff must be untouched.
+	if state.Quota.Reason != "cloudflare challenge" {
+		t.Errorf("Quota.Reason = %q, want cloudflare challenge (preserved)", state.Quota.Reason)
 	}
-	if state.Quota.Reason != "model_not_supported" {
-		t.Errorf("Quota.Reason = %q, want model_not_supported (not overwritten)", state.Quota.Reason)
-	}
-	if !state.NextRetryAfter.Equal(longAfter) {
-		t.Errorf("NextRetryAfter = %v, want %v (12h non-quota suspension preserved)", state.NextRetryAfter, longAfter)
+	if !state.NextRetryAfter.Equal(cfAfter) {
+		t.Errorf("NextRetryAfter = %v, want %v (Cloudflare backoff preserved)", state.NextRetryAfter, cfAfter)
 	}
 }
 
-// TestSetAuthQuotaExceeded_OverwritesGenericQuotaCooldown verifies that a model
-// with a quota-related cooldown from another cause (e.g. generic 403
-// payment_required, Quota.Exceeded=true) IS replaced by the probe's precise
-// upstream reset time when that time is sooner.
-func TestSetAuthQuotaExceeded_OverwritesGenericQuotaCooldown(t *testing.T) {
+// TestSetAuthQuotaExceeded_OverwritesGeneric403Fallback verifies that a model
+// under the generic 402/403 payment_required fallback IS replaced by the probe's
+// precise upstream reset time. This is the probe's core purpose. MarkResult does
+// NOT set Quota for the 402/403 fallback (it leaves Exceeded=false, Reason=""),
+// so the overwrite discriminator is the empty reason, not Quota.Exceeded.
+func TestSetAuthQuotaExceeded_OverwritesGeneric403Fallback(t *testing.T) {
 	t.Parallel()
 	manager := NewManager(nil, nil, nil)
 	ctx := context.Background()
-	authID := "kimi-generic-quota-auth"
+	authID := "kimi-generic-403-auth"
 	model := "kimi-k2"
-	// Generic 403 cooldown: 30 min, Quota.Exceeded=true (a quota-like fallback).
+	// Realistic generic-403 state from MarkResult: 30 min cooldown, Quota LEFT
+	// UNTOUCHED (Exceeded=false, Reason=""), StatusMessage = upstream message.
 	genericAfter := time.Now().Add(30 * time.Minute)
 
 	reg := registry.GetGlobalRegistry()
@@ -525,10 +524,10 @@ func TestSetAuthQuotaExceeded_OverwritesGenericQuotaCooldown(t *testing.T) {
 		ModelStates: map[string]*ModelState{
 			model: {
 				Status:         StatusError,
-				StatusMessage:  "payment_required",
+				StatusMessage:  "quota exhausted, refreshed in the next cycle",
 				Unavailable:    true,
 				NextRetryAfter: genericAfter,
-				Quota:          QuotaState{Exceeded: true, Reason: "payment_required", NextRecoverAt: genericAfter},
+				Quota:          QuotaState{}, // untouched by MarkResult for 402/403
 				UpdatedAt:      time.Now(),
 			},
 		},
@@ -550,10 +549,7 @@ func TestSetAuthQuotaExceeded_OverwritesGenericQuotaCooldown(t *testing.T) {
 	if state == nil {
 		t.Fatal("model state missing after SetAuthQuotaExceeded")
 	}
-	// Should be overwritten with the probe's precise time + reason.
-	if !state.Quota.Exceeded {
-		t.Errorf("Quota.Exceeded = false, want true")
-	}
+	// Should be overwritten with the probe's precise time + Kimi reason.
 	if state.Quota.Reason != kimiUsageReason {
 		t.Errorf("Quota.Reason = %q, want %q", state.Quota.Reason, kimiUsageReason)
 	}

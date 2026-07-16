@@ -277,11 +277,13 @@ func kimiUsageFullyAvailable(windows []kimiUsageWindow) bool {
 // "quota exhausted, cooled down until recoverAt". Called by the background usage
 // probe, not through the request path. Under lock: writes model-level state +
 // aggregates; outside lock: registry visibility + persistence. Follows the same
-// concurrency pattern as MarkResult. Non-quota model suspensions (e.g. 404
-// model_not_supported, 401 unauthorized) are always preserved. Among quota
-// cooldowns, only same-reason (kimiUsageReason) ones are extended; quota
-// cooldowns from other causes (e.g. generic 403 payment_required) are replaced
-// with the probe's precise upstream reset time.
+// concurrency pattern as MarkResult. Existing model states are classified by
+// Quota.Reason: states carrying an explicit non-Kimi backoff reason (Cloudflare
+// challenge, 429 rate-limit) are preserved; states with no reason (the generic
+// 402/403 payment_required fallback, plus 401/404 which are structurally
+// indistinguishable from it because MarkResult leaves their Quota untouched) are
+// replaced with the probe's precise upstream reset time; the probe's own
+// same-reason cooldowns are only extended, never shortened.
 func (m *Manager) SetAuthQuotaExceeded(ctx context.Context, authID string, recoverAt time.Time, reason string) (*Auth, error) {
 	if m == nil {
 		return nil, nil
@@ -337,17 +339,20 @@ func (m *Manager) SetAuthQuotaExceeded(ctx context.Context, authID string, recov
 			continue
 		}
 		state := ensureModelState(auth, model)
-		// Preserve non-quota model suspensions (e.g. 404 model_not_supported,
-		// 401 unauthorized). These have NextRetryAfter set but Quota.Exceeded
-		// is false - they are structural issues, not quota exhaustion, and
-		// the probe should not touch them.
-		if !state.Quota.Exceeded && !state.NextRetryAfter.IsZero() {
+		// Preserve cooldowns that carry an explicit non-Kimi backoff reason
+		// (e.g. Cloudflare challenge, 429 rate-limit). These are deliberate,
+		// cause-specific backoffs set by MarkResult and the probe must not
+		// touch them. The generic 402/403 payment_required fallback is the
+		// imprecise cooldown this probe is meant to replace; MarkResult leaves
+		// its Quota.Reason empty, so it falls through here and is overwritten
+		// below with the probe's precise reset time. 401/404 cooldowns also
+		// carry no reason and are indistinguishable from the 403 fallback, so
+		// they are overwritten too; they self-heal on the next request.
+		if state.Quota.Reason != "" && state.Quota.Reason != reason {
 			continue
 		}
-		// Only extend when the existing cooldown was set by this same probe
-		// (kimiUsageReason) and is already longer. For quota cooldowns from
-		// other causes (e.g. generic 403 payment_required from MarkResult),
-		// the probe's precise upstream reset time takes precedence.
+		// Only extend the probe's own cooldowns: never shorten an existing
+		// Kimi-probe cooldown that is already longer than recoverAt.
 		if state.Quota.Reason == reason && !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(recoverAt) {
 			continue
 		}
