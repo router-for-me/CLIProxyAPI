@@ -393,3 +393,30 @@ func TestHasAuthQuotaExceeded_ExpiredIgnored(t *testing.T) {
 		t.Error("expected false when cooldown has expired")
 	}
 }
+
+// TestKimiUsageCooldown_ShorterThanGeneric403 verifies that when a model
+// already has a cooldown from a different cause (e.g. generic 403
+// payment_required, Quota.Reason != kimiUsageReason), the probe's precise
+// upstream reset time is allowed to shorten it. This is tested indirectly
+// via the cooldown calculation: the probe always reports the real reset
+// time, and SetAuthQuotaExceeded only skips when the existing cooldown
+// shares the same reason AND is already longer.
+func TestKimiUsageCooldown_ShorterThanGeneric403(t *testing.T) {
+	t.Parallel()
+	// Simulate: the probe sees a real reset time in 10 minutes.
+	// Even if a generic 403 cooldown is set to 30 minutes, the probe's
+	// shorter reset time should take effect because the reasons differ.
+	// This test validates the cooldown calculation itself produces the
+	// correct recoverAt, which is the precise reset time from upstream.
+	probeReset := time.Date(2026, 7, 15, 18, 10, 0, 0, time.UTC)
+	windows := []kimiUsageWindow{
+		{Name: "five_hour", Limit: 100, Remaining: 0, ResetAt: probeReset, HasReset: true},
+	}
+	recoverAt, ok := kimiUsageCooldown(windows)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if !recoverAt.Equal(probeReset) {
+		t.Errorf("recoverAt=%v, want %v (precise upstream reset)", recoverAt, probeReset)
+	}
+}

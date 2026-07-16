@@ -277,8 +277,9 @@ func kimiUsageFullyAvailable(windows []kimiUsageWindow) bool {
 // "quota exhausted, cooled down until recoverAt". Called by the background usage
 // probe, not through the request path. Under lock: writes model-level state +
 // aggregates; outside lock: registry visibility + persistence. Follows the same
-// concurrency pattern as MarkResult. Only extends (never shortens) existing
-// cooldowns to avoid clobbering longer cooldowns from other causes.
+// concurrency pattern as MarkResult. Only extends cooldowns that were set by the
+// same reason (kimiUsageReason); cooldowns from other causes (e.g. generic 403
+// payment_required) are replaced with the probe's precise upstream reset time.
 func (m *Manager) SetAuthQuotaExceeded(ctx context.Context, authID string, recoverAt time.Time, reason string) (*Auth, error) {
 	if m == nil {
 		return nil, nil
@@ -334,9 +335,13 @@ func (m *Manager) SetAuthQuotaExceeded(ctx context.Context, authID string, recov
 			continue
 		}
 		state := ensureModelState(auth, model)
-		// Only extend: if a later cooldown already exists (e.g. 12h
-		// model_not_supported), don't shorten it.
-		if !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(recoverAt) {
+		// Only extend when the existing cooldown was set by this same probe
+		// (kimiUsageReason) and is already longer. For cooldowns from other
+		// causes (e.g. generic 403 payment_required from MarkResult), the
+		// probe's precise upstream reset time should take precedence so the
+		// auth recovers at the real reset time rather than the generic 30 min
+		// fallback.
+		if state.Quota.Reason == reason && !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(recoverAt) {
 			continue
 		}
 		state.Unavailable = true
