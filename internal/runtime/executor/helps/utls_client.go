@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -99,8 +100,50 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.Clie
 		return nil, err
 	}
 
+	// The previous per-host connection may have become unable to take new requests
+	// (GOAWAY / half-broken / saturated). It is replaced here but never returned to
+	// any pool, so nothing else would ever close it — the underlying TCP/TLS socket
+	// leaks and accumulates unbounded. Drain+close it in the background.
+	if old := t.connections[host]; old != nil && old != h2Conn {
+		go shutdownUtlsConnection(old)
+	}
 	t.connections[host] = h2Conn
 	return h2Conn, nil
+}
+
+const utlsConnectionShutdownTimeout = 30 * time.Second
+
+// shutdownUtlsConnection drains in-flight streams on a replaced/evicted h2
+// ClientConn (bounded), then force-closes it. These conns are built via
+// tr.NewClientConn and bypass the http2.Transport pool, so nothing else reclaims
+// them — without this they leak as ESTABLISHED sockets.
+func shutdownUtlsConnection(conn *http2.ClientConn) {
+	if conn == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), utlsConnectionShutdownTimeout)
+	defer cancel()
+	if err := conn.Shutdown(ctx); err != nil {
+		_ = conn.Close()
+	}
+}
+
+// CloseIdleConnections drains and closes every pooled connection. Used to reclaim
+// a per-request client's connection once its response body is closed.
+func (t *utlsRoundTripper) CloseIdleConnections() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	conns := make([]*http2.ClientConn, 0, len(t.connections))
+	for host, conn := range t.connections {
+		delete(t.connections, host)
+		conns = append(conns, conn)
+	}
+	t.mu.Unlock()
+	for _, conn := range conns {
+		go shutdownUtlsConnection(conn)
+	}
 }
 
 func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientConn, error) {
@@ -165,6 +208,7 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 			delete(t.connections, hostname)
 		}
 		t.mu.Unlock()
+		go shutdownUtlsConnection(h2Conn)
 		return nil, err
 	}
 
@@ -186,6 +230,49 @@ func (d *utlsDispatchRoundTripper) RoundTrip(req *http.Request) (*http.Response,
 		}
 	}
 	return d.fallback.RoundTrip(req)
+}
+
+// closeOwnedTransportRoundTripper ties a request-owned uTLS transport to its
+// response body: NewUtlsHTTPClient builds a fresh client per upstream request, so
+// the pooled h2 connection must be reclaimed when that request finishes rather
+// than left to accumulate (each request otherwise orphans one ESTABLISHED socket).
+type closeOwnedTransportRoundTripper struct {
+	base http.RoundTripper
+}
+
+func (t *closeOwnedTransportRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil {
+		t.CloseIdleConnections()
+		return resp, err
+	}
+	if resp == nil || resp.Body == nil {
+		t.CloseIdleConnections()
+		return resp, nil
+	}
+	resp.Body = &closeOwnedTransportReadCloser{ReadCloser: resp.Body, close: t.CloseIdleConnections}
+	return resp, nil
+}
+
+func (t *closeOwnedTransportRoundTripper) CloseIdleConnections() {
+	if t == nil || t.base == nil {
+		return
+	}
+	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
+type closeOwnedTransportReadCloser struct {
+	io.ReadCloser
+	once  sync.Once
+	close func()
+}
+
+func (r *closeOwnedTransportReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	r.once.Do(r.close)
+	return err
 }
 
 // NewUtlsHTTPClient creates an HTTP client that presents a client-matched uTLS
@@ -243,7 +330,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 			continue
 		}
 		if p.http2 {
-			perHost[host] = newUtlsRoundTripper(dialer, p)
+			perHost[host] = &closeOwnedTransportRoundTripper{base: newUtlsRoundTripper(dialer, p)}
 		} else {
 			perHost[host] = newUtlsH1RoundTripper(dialer, p)
 		}
