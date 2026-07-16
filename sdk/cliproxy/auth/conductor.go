@@ -711,7 +711,7 @@ func dedupeStrings(values []string) []string {
 	return out
 }
 
-// ResetQuota clears quota/cooldown state for an auth and resumes registry routing.
+// ResetQuota clears quota/cooldown and refresh quarantine state for an auth and resumes registry routing.
 func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []string, error) {
 	if m == nil {
 		return nil, nil, nil
@@ -733,6 +733,7 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 		m.mu.Unlock()
 		return nil, nil, nil
 	}
+	auth.RefreshBlocked = false
 
 	var cooldownRecordsBefore []CooldownStateRecord
 	trackCooldownState := m.cooldownStore != nil
@@ -789,6 +790,7 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 	if snapshot != nil && cooldownStateChanged {
 		m.persistCooldownStates(ctx)
 	}
+	m.queueRefreshReschedule(authID)
 	return snapshot, models, nil
 }
 

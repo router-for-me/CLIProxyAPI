@@ -372,19 +372,21 @@ func isNonRetryableRefreshErr(err error) bool {
 	return isTerminalRefreshFailure(err.Error())
 }
 
+var terminalRefreshFailureMarkers = []string{
+	"refresh_token_reused",
+	"refresh_token_invalidated",
+	"invalid_client",
+	"invalid_grant",
+	"refresh token has already been used",
+	"refresh token was already used",
+	"refresh token has been invalidated",
+	"authentication token has been invalidated",
+	"invalid client specified",
+}
+
 func isTerminalRefreshFailure(message string) bool {
 	lower := strings.ToLower(message)
-	for _, marker := range []string{
-		"refresh_token_reused",
-		"refresh_token_invalidated",
-		"invalid_client",
-		"invalid_grant",
-		"refresh token has already been used",
-		"refresh token was already used",
-		"refresh token has been invalidated",
-		"authentication token has been invalidated",
-		"invalid client specified",
-	} {
+	for _, marker := range terminalRefreshFailureMarkers {
 		if strings.Contains(lower, marker) {
 			return true
 		}
