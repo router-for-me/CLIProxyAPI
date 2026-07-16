@@ -1,0 +1,31 @@
+name: auto-merge
+
+# 仅对仓库所有者本人发起的 PR 自动开启 auto-merge:
+# main 分支保护完整生效(CI build/build-test 必绿才真正合入),这里只是
+# 省去每次手动 `gh pr merge --auto`。任何非 owner 的 PR 一律不碰。
+# 不 checkout PR 代码,纯 API 调用,pull_request_target 下无代码执行风险。
+#
+# 凭证:优先 secrets.AUTOMERGE_PAT(建议 fine-grained、仅本仓库
+# contents+pull-requests 写权限),未配置则回退内置 GITHUB_TOKEN。
+# 回退模式已知限制:由 GITHUB_TOKEN 完成的 merge 推送不会触发 push
+# workflow(fork-image/fork-ci 不跑,GHCR :main 镜像不更新);配上
+# AUTOMERGE_PAT 后自动恢复。tag 发布流(fork-release/fork-image)不受影响。
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable-automerge:
+    if: github.event.pull_request.user.login == github.repository_owner && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Arm auto-merge (merge commit) for owner PR
+        env:
+          GH_TOKEN: ${{ secrets.AUTOMERGE_PAT || github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --merge "$PR_URL"
