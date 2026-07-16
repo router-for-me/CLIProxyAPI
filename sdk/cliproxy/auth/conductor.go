@@ -4106,6 +4106,13 @@ func isUnauthorizedError(err error) bool {
 	if err == nil {
 		return false
 	}
+	type authUnavailableError interface {
+		AuthUnavailable() bool
+	}
+	var terminal authUnavailableError
+	if errors.As(err, &terminal) && terminal != nil && terminal.AuthUnavailable() {
+		return true
+	}
 	if statusCodeFromError(err) == http.StatusUnauthorized {
 		return true
 	}
@@ -4125,7 +4132,7 @@ func refreshErrorFromError(err error) *Error {
 		return nil
 	}
 	statusCode := statusCodeFromError(err)
-	if statusCode == 0 && isUnauthorizedError(err) {
+	if isUnauthorizedError(err) {
 		statusCode = http.StatusUnauthorized
 	}
 	authErr := &Error{Message: err.Error(), HTTPStatus: statusCode}
@@ -5661,6 +5668,9 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if a == nil {
 		return false
 	}
+	if a.RefreshBlocked {
+		return false
+	}
 	if hasUnauthorizedAuthFailure(a) {
 		return false
 	}
@@ -6004,6 +6014,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 			if unauthorized {
 				current.NextRefreshAfter = time.Time{}
 				current.Unavailable = true
+				current.RefreshBlocked = true
 				current.Status = StatusError
 				current.StatusMessage = "unauthorized"
 			} else {
@@ -6034,6 +6045,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	updated.LastError = nil
 	updated.StatusMessage = ""
 	updated.Unavailable = false
+	updated.RefreshBlocked = false
 	if updated.Status == StatusError {
 		updated.Status = StatusActive
 	}

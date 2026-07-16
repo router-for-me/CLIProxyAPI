@@ -7,6 +7,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,6 +34,38 @@ const (
 // exchanging authorization codes for tokens, and refreshing access tokens.
 type CodexAuth struct {
 	httpClient *http.Client
+}
+
+type tokenRefreshError struct {
+	statusCode int
+	body       string
+}
+
+func (e *tokenRefreshError) Error() string {
+	if e == nil {
+		return "token refresh failed"
+	}
+	return fmt.Sprintf("token refresh failed with status %d: %s", e.statusCode, e.body)
+}
+
+func (e *tokenRefreshError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.statusCode
+}
+
+// NonRetryable reports whether retrying with the same refresh token cannot recover.
+func (e *tokenRefreshError) NonRetryable() bool {
+	if e == nil {
+		return false
+	}
+	return e.statusCode == http.StatusUnauthorized || isTerminalRefreshFailure(e.body)
+}
+
+// AuthUnavailable marks terminal refresh failures for the auth manager to quarantine.
+func (e *tokenRefreshError) AuthUnavailable() bool {
+	return e.NonRetryable()
 }
 
 var codexRefreshGroup singleflight.Group
@@ -239,7 +272,7 @@ func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, &tokenRefreshError{statusCode: resp.StatusCode, body: string(body)}
 	}
 
 	var tokenResp struct {
@@ -329,8 +362,34 @@ func isNonRetryableRefreshErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	raw := strings.ToLower(err.Error())
-	return strings.Contains(raw, "refresh_token_reused")
+	type nonRetryableError interface {
+		NonRetryable() bool
+	}
+	var terminal nonRetryableError
+	if errors.As(err, &terminal) && terminal != nil {
+		return terminal.NonRetryable()
+	}
+	return isTerminalRefreshFailure(err.Error())
+}
+
+func isTerminalRefreshFailure(message string) bool {
+	lower := strings.ToLower(message)
+	for _, marker := range []string{
+		"refresh_token_reused",
+		"refresh_token_invalidated",
+		"invalid_client",
+		"invalid_grant",
+		"refresh token has already been used",
+		"refresh token was already used",
+		"refresh token has been invalidated",
+		"authentication token has been invalidated",
+		"invalid client specified",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.

@@ -52,6 +52,93 @@ func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
 	}
 }
 
+func TestRefreshTokensWithRetry_TerminalOAuthErrorsOnlyAttemptOnce(t *testing.T) {
+	testCases := []struct {
+		name       string
+		statusCode int
+		body       string
+	}{
+		{
+			name:       "rotated token message",
+			statusCode: http.StatusBadRequest,
+			body:       `{"error":{"message":"Your refresh token has already been used to generate a new access token."}}`,
+		},
+		{
+			name:       "invalidated refresh token",
+			statusCode: http.StatusBadRequest,
+			body:       `{"error":"invalid_grant","code":"refresh_token_invalidated"}`,
+		},
+		{
+			name:       "invalid client code",
+			statusCode: http.StatusBadRequest,
+			body:       `{"error":"invalid_client"}`,
+		},
+		{
+			name:       "invalid client message",
+			statusCode: http.StatusUnauthorized,
+			body:       `Invalid client specified`,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			resetCodexRefreshGroupForTest()
+			t.Cleanup(resetCodexRefreshGroupForTest)
+
+			var calls int32
+			auth := &CodexAuth{
+				httpClient: &http.Client{
+					Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						atomic.AddInt32(&calls, 1)
+						return &http.Response{
+							StatusCode: testCase.statusCode,
+							Body:       io.NopCloser(strings.NewReader(testCase.body)),
+							Header:     make(http.Header),
+							Request:    req,
+						}, nil
+					}),
+				},
+			}
+
+			_, err := auth.RefreshTokensWithRetry(context.Background(), "dummy_refresh_token", 3)
+			if err == nil {
+				t.Fatal("expected terminal token refresh error")
+			}
+			if got := atomic.LoadInt32(&calls); got != 1 {
+				t.Fatalf("expected 1 refresh attempt, got %d", got)
+			}
+		})
+	}
+}
+
+func TestRefreshTokensWithRetry_TransientErrorStillRetries(t *testing.T) {
+	resetCodexRefreshGroupForTest()
+	t.Cleanup(resetCodexRefreshGroupForTest)
+
+	var calls int32
+	auth := &CodexAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				atomic.AddInt32(&calls, 1)
+				return &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Body:       io.NopCloser(strings.NewReader(`{"error":"temporarily_unavailable"}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	_, err := auth.RefreshTokensWithRetry(context.Background(), "dummy_refresh_token", 3)
+	if err == nil {
+		t.Fatal("expected transient token refresh error")
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("expected 3 refresh attempts, got %d", got)
+	}
+}
+
 func TestRefreshTokens_DeduplicatesConcurrentRefreshAcrossInstances(t *testing.T) {
 	resetCodexRefreshGroupForTest()
 	t.Cleanup(resetCodexRefreshGroupForTest)
