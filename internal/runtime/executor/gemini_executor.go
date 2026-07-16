@@ -167,7 +167,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 	}
 	baseURL := resolveGeminiBaseURL(auth)
-	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, action)
+	url := helps.JoinBaseURL(baseURL, fmt.Sprintf("/%s/models/%s:%s", glAPIVersion, baseModel, action))
 	if opts.Alt != "" && action != "countTokens" {
 		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
@@ -274,7 +274,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = capGeminiMaxOutputTokens(body, baseModel)
 
 	baseURL := resolveGeminiBaseURL(auth)
-	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, "streamGenerateContent")
+	url := helps.JoinBaseURL(baseURL, fmt.Sprintf("/%s/models/%s:%s", glAPIVersion, baseModel, "streamGenerateContent"))
 	if opts.Alt == "" {
 		url = url + "?alt=sse"
 	} else {
@@ -401,7 +401,7 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 
 	baseURL := resolveGeminiBaseURL(auth)
-	url := fmt.Sprintf("%s/%s/interactions", baseURL, glAPIVersion)
+	url := helps.JoinBaseURL(baseURL, fmt.Sprintf("/%s/interactions", glAPIVersion))
 	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errRequest != nil {
 		return resp, errRequest
@@ -477,7 +477,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "stream", true)
 	baseURL := resolveGeminiBaseURL(auth)
-	url := fmt.Sprintf("%s/%s/interactions", baseURL, glAPIVersion)
+	url := helps.JoinBaseURL(baseURL, fmt.Sprintf("/%s/interactions", glAPIVersion))
 	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errRequest != nil {
 		return nil, errRequest
@@ -628,7 +628,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	translatedReq, _ = sjson.SetBytes(translatedReq, "model", baseModel)
 
 	baseURL := resolveGeminiBaseURL(auth)
-	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, "countTokens")
+	url := helps.JoinBaseURL(baseURL, fmt.Sprintf("/%s/models/%s:%s", glAPIVersion, baseModel, "countTokens"))
 
 	requestBody := bytes.NewReader(translatedReq)
 

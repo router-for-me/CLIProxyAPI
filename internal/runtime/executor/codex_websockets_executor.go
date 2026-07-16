@@ -216,7 +216,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex websockets executor", body)
 
-	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
+	httpURL := helps.JoinBaseURL(baseURL, "/responses")
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
 	if err != nil {
 		return resp, err
@@ -438,7 +438,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex websockets executor", body)
 
-	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
+	httpURL := helps.JoinBaseURL(baseURL, "/responses")
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
 	if err != nil {
 		return nil, err
