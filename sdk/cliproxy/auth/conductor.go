@@ -2038,6 +2038,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 					result.RetryAfter = retryAfterFromError(errStream)
 					m.MarkResult(ctx, result)
+					// Real status now recorded; if the client already gave up, stop here
+					// rather than trying this account's remaining models for a gone request.
+					if errCtx := ctx.Err(); errCtx != nil {
+						attemptErr = errCtx
+						return
+					}
 					if isRequestInvalidError(errStream) {
 						attemptErr = errStream
 						return
@@ -2103,6 +2109,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					result.RetryAfter = retryAfterFromError(bootstrapErr)
 					m.MarkResult(ctx, result)
 					discardStreamChunks(streamResult.Chunks)
+					// Real status now recorded; if the client already gave up, stop here
+					// rather than trying this account's remaining models for a gone request.
+					if errCtx := ctx.Err(); errCtx != nil {
+						attemptErr = errCtx
+						return
+					}
 					if isRequestInvalidError(bootstrapErr) {
 						attemptErr = bootstrapErr
 						return
@@ -2119,6 +2131,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				if closed && len(buffered) == 0 {
 					emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
 					m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr})
+					// If the client already gave up, stop here rather than trying this
+					// account's remaining models for a gone request.
+					if errCtx := ctx.Err(); errCtx != nil {
+						attemptErr = errCtx
+						return
+					}
 					if !lastAttempt {
 						lastErr = emptyErr
 						attemptRetry = true
