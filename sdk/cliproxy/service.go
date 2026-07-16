@@ -1906,6 +1906,34 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 	s.registerModelsForAuthWithCache(ctx, a, nil)
 }
 
+// reconcileModelsForAuth rebuilds one auth's native model projection and,
+// when activeModels is non-nil, prunes models the embedding host has not activated.
+func (s *Service) reconcileModelsForAuth(ctx context.Context, a *coreauth.Auth, activeModels map[string]struct{}) {
+	if s == nil || s.coreManager == nil || a == nil || strings.TrimSpace(a.ID) == "" {
+		return
+	}
+	s.registerModelsForAuth(ctx, a)
+	if activeModels != nil {
+		models := registry.GetGlobalRegistry().GetModelsForClient(a.ID)
+		filtered := make([]*ModelInfo, 0, len(models))
+		for _, model := range models {
+			if model == nil {
+				continue
+			}
+			if _, active := activeModels[strings.TrimSpace(model.ID)]; active {
+				filtered = append(filtered, model)
+			}
+		}
+		provider := strings.ToLower(strings.TrimSpace(a.Provider))
+		if providerKey, _, isCompat := openAICompatInfoFromAuth(a); isCompat && providerKey != "" {
+			provider = providerKey
+		}
+		s.registerResolvedModelsForAuth(a, provider, filtered)
+	}
+	s.coreManager.ReconcileRegistryModelStates(ctx, a.ID)
+	s.coreManager.RefreshSchedulerEntry(a.ID)
+}
+
 func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreauth.Auth, compatCache *openAICompatibilityRegistrationCache) {
 	if a == nil || a.ID == "" {
 		return
