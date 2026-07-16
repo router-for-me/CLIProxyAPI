@@ -137,12 +137,13 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 		return
 	}
 	pluginsDir = resolvedPluginsDir
+	resolver := pluginstore.NewAuthResolver()
 	sources, errSources := h.pluginStoreSources(sourceConfigs)
 	if errSources != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_store_source_invalid", "message": errSources.Error()})
 		return
 	}
-	plugins, sourceErrors := h.fetchSourcedPlugins(c.Request.Context(), proxyURL, storeAuth, sources)
+	plugins, sourceErrors := h.fetchSourcedPlugins(c.Request.Context(), resolver, proxyURL, storeAuth, sources)
 	if len(plugins) == 0 && len(sourceErrors) > 0 {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_store_registry_failed", "message": sourceErrors[0].Message})
 		return
@@ -158,7 +159,7 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 		latestInput = append(latestInput, item.plugin)
 	}
 	client := h.newPluginStoreClient(proxyURL, "", storeAuth)
-	latestVersions := h.latestPluginVersions(c.Request.Context(), client, latestInput)
+	latestVersions := h.latestPluginVersions(c.Request.Context(), resolver, client, latestInput)
 	pluginSourceCounts := make(map[string]int, len(plugins))
 	for _, item := range plugins {
 		pluginSourceCounts[item.plugin.ID]++
@@ -193,7 +194,7 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 			Repository:          htmlsanitize.String(plugin.Repository),
 			InstallType:         htmlsanitize.String(pluginstore.PluginInstallType(plugin)),
 			AuthRequired:        plugin.AuthRequired,
-			AuthConfigured:      pluginAuthConfigured(item.source, plugin, storeAuth),
+			AuthConfigured:      pluginAuthConfigured(c.Request.Context(), resolver, item.source, plugin, storeAuth),
 			Platforms:           sanitizePluginStorePlatforms(pluginstore.PluginPlatforms(plugin)),
 			Logo:                htmlsanitize.String(plugin.Logo),
 			Homepage:            htmlsanitize.String(plugin.Homepage),
@@ -236,6 +237,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	installCtx := c.Request.Context()
+	resolver := pluginstore.NewAuthResolver()
 	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, host := h.pluginStoreSnapshot()
 	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
 	if errResolvePluginsDir != nil {
@@ -248,7 +250,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_store_source_invalid", "message": errSources.Error()})
 		return
 	}
-	source, plugin, client, okPlugin := h.findPluginStoreInstallTarget(installCtx, proxyURL, storeAuth, sources, id, c.Query("source"), c)
+	source, plugin, client, okPlugin := h.findPluginStoreInstallTarget(installCtx, resolver, proxyURL, storeAuth, sources, id, c.Query("source"), c)
 	if !okPlugin {
 		return
 	}
@@ -273,9 +275,9 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_manifest_invalid", "message": errManifest.Error()})
 			return
 		}
-		result, errInstall = client.InstallManifest(installCtx, manifest, installOptions)
+		result, errInstall = client.InstallManifestWithResolver(installCtx, resolver, manifest, installOptions)
 	case pluginstore.InstallTypeGitHubRelease:
-		result, errInstall = installPluginStoreGitHubRelease(installCtx, client, plugin, requestedVersion, installOptions)
+		result, errInstall = installPluginStoreGitHubRelease(installCtx, resolver, client, plugin, requestedVersion, installOptions)
 	default:
 		c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_manifest_invalid", "message": fmt.Sprintf("unsupported install type %q", plugin.Install.Type)})
 		return
@@ -385,15 +387,15 @@ func pluginStoreDirectManifest(source pluginstore.Source, plugin pluginstore.Plu
 	return pluginstore.Manifest{}, fmt.Errorf("direct plugin version %q not found", version)
 }
 
-func installPluginStoreGitHubRelease(ctx context.Context, client pluginstore.Client, plugin pluginstore.Plugin, requestedVersion string, options pluginstore.InstallOptions) (pluginstore.InstallResult, error) {
+func installPluginStoreGitHubRelease(ctx context.Context, resolver *pluginstore.AuthResolver, client pluginstore.Client, plugin pluginstore.Plugin, requestedVersion string, options pluginstore.InstallOptions) (pluginstore.InstallResult, error) {
 	version := normalizePluginStoreRequestedVersion(requestedVersion)
 	if version == "" {
-		return client.Install(ctx, plugin, options)
+		return client.InstallWithResolver(ctx, resolver, plugin, options)
 	}
 	tags := pluginStoreReleaseTagCandidates(requestedVersion)
 	errs := make([]error, 0, len(tags))
 	for _, tag := range tags {
-		result, errInstall := client.InstallVersion(ctx, plugin, tag, version, options)
+		result, errInstall := client.InstallVersionWithResolver(ctx, resolver, plugin, tag, version, options)
 		if errInstall == nil {
 			return result, nil
 		}
@@ -544,12 +546,12 @@ func (h *Handler) newPluginStoreClient(proxyURL string, registryURL string, stor
 	return pluginstore.Client{HTTPClient: client, RegistryURL: registryURL, Auth: storeAuth}
 }
 
-func (h *Handler) fetchSourcedPlugins(ctx context.Context, proxyURL string, storeAuth []pluginstore.AuthConfig, sources []pluginstore.Source) ([]sourcedPlugin, []pluginStoreSourceErr) {
+func (h *Handler) fetchSourcedPlugins(ctx context.Context, resolver *pluginstore.AuthResolver, proxyURL string, storeAuth []pluginstore.AuthConfig, sources []pluginstore.Source) ([]sourcedPlugin, []pluginStoreSourceErr) {
 	plugins := make([]sourcedPlugin, 0)
 	sourceErrors := make([]pluginStoreSourceErr, 0)
 	for _, source := range sources {
 		client := h.newPluginStoreClient(proxyURL, source.URL, storeAuth)
-		registry, errRegistry := client.FetchRegistry(ctx)
+		registry, errRegistry := client.FetchRegistryWithResolver(ctx, resolver)
 		if errRegistry != nil {
 			sourceErrors = append(sourceErrors, pluginStoreSourceErr{
 				SourceID:   source.ID,
@@ -566,7 +568,7 @@ func (h *Handler) fetchSourcedPlugins(ctx context.Context, proxyURL string, stor
 	return plugins, sourceErrors
 }
 
-func (h *Handler) findPluginStoreInstallTarget(ctx context.Context, proxyURL string, storeAuth []pluginstore.AuthConfig, sources []pluginstore.Source, id string, requestedSourceID string, c *gin.Context) (pluginstore.Source, pluginstore.Plugin, pluginstore.Client, bool) {
+func (h *Handler) findPluginStoreInstallTarget(ctx context.Context, resolver *pluginstore.AuthResolver, proxyURL string, storeAuth []pluginstore.AuthConfig, sources []pluginstore.Source, id string, requestedSourceID string, c *gin.Context) (pluginstore.Source, pluginstore.Plugin, pluginstore.Client, bool) {
 	requestedSourceID = strings.TrimSpace(requestedSourceID)
 	if requestedSourceID != "" {
 		for _, source := range sources {
@@ -574,7 +576,7 @@ func (h *Handler) findPluginStoreInstallTarget(ctx context.Context, proxyURL str
 				continue
 			}
 			client := h.newPluginStoreClient(proxyURL, source.URL, storeAuth)
-			registry, errRegistry := client.FetchRegistry(ctx)
+			registry, errRegistry := client.FetchRegistryWithResolver(ctx, resolver)
 			if errRegistry != nil {
 				c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_store_registry_failed", "message": errRegistry.Error()})
 				return pluginstore.Source{}, pluginstore.Plugin{}, pluginstore.Client{}, false
@@ -590,7 +592,7 @@ func (h *Handler) findPluginStoreInstallTarget(ctx context.Context, proxyURL str
 		return pluginstore.Source{}, pluginstore.Plugin{}, pluginstore.Client{}, false
 	}
 
-	plugins, sourceErrors := h.fetchSourcedPlugins(ctx, proxyURL, storeAuth, sources)
+	plugins, sourceErrors := h.fetchSourcedPlugins(ctx, resolver, proxyURL, storeAuth, sources)
 	matches := make([]sourcedPlugin, 0)
 	for _, item := range plugins {
 		if item.plugin.ID == id {
@@ -667,21 +669,21 @@ func sanitizePluginStorePlatforms(platforms []pluginstore.Platform) []pluginStor
 	return out
 }
 
-func pluginAuthConfigured(source pluginstore.Source, plugin pluginstore.Plugin, storeAuth []pluginstore.AuthConfig) bool {
-	return pluginstore.PluginAuthConfigured(source, plugin, storeAuth)
+func pluginAuthConfigured(ctx context.Context, resolver *pluginstore.AuthResolver, source pluginstore.Source, plugin pluginstore.Plugin, storeAuth []pluginstore.AuthConfig) bool {
+	return pluginstore.PluginAuthConfiguredContext(ctx, resolver, source, plugin, storeAuth)
 }
 
 // latestPluginVersions resolves the latest release version of each registry
 // plugin concurrently, returning results positionally aligned with plugins.
 // Unresolved entries are left empty so callers can fall back gracefully.
-func (h *Handler) latestPluginVersions(ctx context.Context, client pluginstore.Client, plugins []pluginstore.Plugin) []string {
+func (h *Handler) latestPluginVersions(ctx context.Context, resolver *pluginstore.AuthResolver, client pluginstore.Client, plugins []pluginstore.Plugin) []string {
 	versions := make([]string, len(plugins))
 	var wg sync.WaitGroup
 	for index := range plugins {
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
-			versions[index] = h.latestPluginVersion(ctx, client, plugins[index])
+			versions[index] = h.latestPluginVersion(ctx, resolver, client, plugins[index])
 		}(index)
 	}
 	wg.Wait()
@@ -692,7 +694,7 @@ func (h *Handler) latestPluginVersions(ctx context.Context, client pluginstore.C
 // lookups per repository so repeated listings do not exhaust the GitHub API
 // rate limit. Failed lookups are cached for a shorter interval and reported
 // as an empty version.
-func (h *Handler) latestPluginVersion(ctx context.Context, client pluginstore.Client, plugin pluginstore.Plugin) string {
+func (h *Handler) latestPluginVersion(ctx context.Context, resolver *pluginstore.AuthResolver, client pluginstore.Client, plugin pluginstore.Plugin) string {
 	if pluginstore.PluginInstallType(plugin) != pluginstore.InstallTypeGitHubRelease {
 		return ""
 	}
@@ -710,7 +712,7 @@ func (h *Handler) latestPluginVersion(ctx context.Context, client pluginstore.Cl
 
 	version := ""
 	ttl := pluginReleaseFailureCacheTTL
-	release, errRelease := client.FetchLatestRelease(ctx, plugin)
+	release, errRelease := client.FetchLatestReleaseWithResolver(ctx, resolver, plugin)
 	if errRelease != nil {
 		log.WithError(errRelease).WithField("plugin_id", plugin.ID).Warn("pluginstore: failed to fetch latest release")
 	} else if latestVersion, errVersion := pluginstore.ReleaseVersion(release); errVersion != nil {

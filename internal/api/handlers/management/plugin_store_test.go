@@ -598,6 +598,51 @@ func TestListPluginStoreIncludesDirectMetadataAndAuth(t *testing.T) {
 	}
 }
 
+func TestListPluginStoreReusesCommandAuthResolution(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("command expression is POSIX shell syntax")
+	}
+	countPath := filepath.Join(t.TempDir(), "command-count")
+	const resolved = "command-token"
+	command := "printf x >> " + countPath + "; printf " + resolved
+	h := &Handler{
+		cfg: &config.Config{Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     t.TempDir(),
+			StoreAuth: []pluginstore.AuthConfig{{
+				Match:        "https://registry.example/",
+				ApplyTo:      []string{pluginstore.RequestKindRegistry},
+				Type:         pluginstore.AuthTypeBearer,
+				TokenCommand: command,
+			}},
+		}},
+		configFilePath:         writeTestConfigFile(t),
+		pluginStoreRegistryURL: "https://registry.example/registry.json",
+		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
+			"https://registry.example/registry.json": directRegistryJSON("https://downloads.example/sample-provider.zip", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugin-store", nil)
+	h.ListPluginStore(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	count, errRead := os.ReadFile(countPath)
+	if errRead != nil {
+		t.Fatalf("ReadFile(command count) error = %v", errRead)
+	}
+	if string(count) != "x" {
+		t.Fatalf("command executions = %q, want one", count)
+	}
+	if strings.Contains(rec.Body.String(), resolved) {
+		t.Fatalf("list response leaked resolved command value: %s", rec.Body.String())
+	}
+}
+
 func TestListPluginStoreReportsVersionArtifactAuth(t *testing.T) {
 	t.Setenv("PLUGIN_STORE_TOKEN", "secret-token")
 
@@ -1383,6 +1428,32 @@ func pluginStorePlatformsContain(platforms []pluginStorePlatform, goos string, g
 		}
 	}
 	return false
+}
+
+func TestGetConfigSerializesPluginStoreAuthExpressionsOnly(t *testing.T) {
+	const command = "printf configured-expression"
+	const resolved = "resolved-secret"
+	h := &Handler{cfg: &config.Config{Plugins: config.PluginsConfig{StoreAuth: []pluginstore.AuthConfig{{
+		Match:        "https://plugins.example/",
+		Type:         pluginstore.AuthTypeBearer,
+		TokenCommand: command,
+	}}}}}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+	h.GetConfig(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, command) {
+		t.Fatalf("config response missing command expression: %s", body)
+	}
+	if strings.Contains(body, resolved) || strings.Contains(body, "authResolution") || strings.Contains(body, "cache") {
+		t.Fatalf("config response leaked resolved auth state: %s", body)
+	}
 }
 
 func makeManagementPluginStoreZip(t *testing.T, name string, content string) []byte {

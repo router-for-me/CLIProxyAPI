@@ -38,11 +38,15 @@ type ReleaseAsset struct {
 }
 
 func (c Client) FetchRegistry(ctx context.Context) (Registry, error) {
+	return c.FetchRegistryWithResolver(ctx, NewAuthResolver())
+}
+
+func (c Client) FetchRegistryWithResolver(ctx context.Context, resolver *AuthResolver) (Registry, error) {
 	registryURL := strings.TrimSpace(c.RegistryURL)
 	if registryURL == "" {
 		registryURL = DefaultRegistryURL
 	}
-	data, errDownload := c.get(ctx, registryURL, "application/json", RequestKindRegistry, 0)
+	data, errDownload := c.get(ctx, resolver, registryURL, "application/json", RequestKindRegistry, 0)
 	if errDownload != nil {
 		return Registry{}, errDownload
 	}
@@ -56,6 +60,10 @@ func (c Client) FetchRegistry(ctx context.Context) (Registry, error) {
 // FetchLatestRelease returns the latest published release of the plugin's
 // GitHub repository, mirroring the WebUI panel update check.
 func (c Client) FetchLatestRelease(ctx context.Context, plugin Plugin) (Release, error) {
+	return c.FetchLatestReleaseWithResolver(ctx, NewAuthResolver(), plugin)
+}
+
+func (c Client) FetchLatestReleaseWithResolver(ctx context.Context, resolver *AuthResolver, plugin Plugin) (Release, error) {
 	owner, repo, errRepository := GitHubRepositoryParts(plugin.Repository)
 	if errRepository != nil {
 		return Release{}, errRepository
@@ -65,7 +73,7 @@ func (c Client) FetchLatestRelease(ctx context.Context, plugin Plugin) (Release,
 		url.PathEscape(owner),
 		url.PathEscape(repo),
 	)
-	data, errDownload := c.get(ctx, releaseURL, "application/vnd.github+json", RequestKindMetadata, 0)
+	data, errDownload := c.get(ctx, resolver, releaseURL, "application/vnd.github+json", RequestKindMetadata, 0)
 	if errDownload != nil {
 		return Release{}, errDownload
 	}
@@ -78,6 +86,10 @@ func (c Client) FetchLatestRelease(ctx context.Context, plugin Plugin) (Release,
 
 // FetchReleaseByTag returns a published release by its exact GitHub tag.
 func (c Client) FetchReleaseByTag(ctx context.Context, plugin Plugin, tag string) (Release, error) {
+	return c.FetchReleaseByTagWithResolver(ctx, NewAuthResolver(), plugin, tag)
+}
+
+func (c Client) FetchReleaseByTagWithResolver(ctx context.Context, resolver *AuthResolver, plugin Plugin, tag string) (Release, error) {
 	owner, repo, errRepository := GitHubRepositoryParts(plugin.Repository)
 	if errRepository != nil {
 		return Release{}, errRepository
@@ -92,7 +104,7 @@ func (c Client) FetchReleaseByTag(ctx context.Context, plugin Plugin, tag string
 		url.PathEscape(repo),
 		url.PathEscape(tag),
 	)
-	data, errDownload := c.get(ctx, releaseURL, "application/vnd.github+json", RequestKindMetadata, 0)
+	data, errDownload := c.get(ctx, resolver, releaseURL, "application/vnd.github+json", RequestKindMetadata, 0)
 	if errDownload != nil {
 		return Release{}, errDownload
 	}
@@ -114,9 +126,13 @@ func ReleaseVersion(release Release) (string, error) {
 }
 
 func (c Client) DownloadAsset(ctx context.Context, asset ReleaseAsset) ([]byte, error) {
+	return c.DownloadAssetWithResolver(ctx, NewAuthResolver(), asset)
+}
+
+func (c Client) DownloadAssetWithResolver(ctx context.Context, resolver *AuthResolver, asset ReleaseAsset) ([]byte, error) {
 	downloadURL := strings.TrimSpace(asset.BrowserDownloadURL)
 	apiURL := strings.TrimSpace(asset.APIURL)
-	if downloadURL == "" || c.releaseAssetAPIAuthenticated(apiURL) {
+	if downloadURL == "" || c.releaseAssetAPIAuthenticatedContext(ctx, resolver, apiURL) {
 		if apiURL != "" {
 			downloadURL = apiURL
 		}
@@ -124,18 +140,22 @@ func (c Client) DownloadAsset(ctx context.Context, asset ReleaseAsset) ([]byte, 
 	if downloadURL == "" {
 		return nil, fmt.Errorf("asset %q missing download url", asset.Name)
 	}
-	return c.get(ctx, downloadURL, "application/octet-stream", RequestKindArtifact, 0)
+	return c.get(ctx, resolver, downloadURL, "application/octet-stream", RequestKindArtifact, 0)
 }
 
 func (c Client) releaseAssetAPIAuthenticated(apiURL string) bool {
+	return c.releaseAssetAPIAuthenticatedContext(context.Background(), NewAuthResolver(), apiURL)
+}
+
+func (c Client) releaseAssetAPIAuthenticatedContext(ctx context.Context, resolver *AuthResolver, apiURL string) bool {
 	apiURL = strings.TrimSpace(apiURL)
 	if apiURL == "" {
 		return false
 	}
-	return AuthConfigured(c.Auth, apiURL, RequestKindArtifact)
+	return AuthConfiguredContext(ctx, resolver, c.Auth, apiURL, RequestKindArtifact)
 }
 
-func (c Client) get(ctx context.Context, requestURL string, accept string, kind string, maxSize int64) ([]byte, error) {
+func (c Client) get(ctx context.Context, resolver *AuthResolver, requestURL string, accept string, kind string, maxSize int64) ([]byte, error) {
 	currentURL := strings.TrimSpace(requestURL)
 	for redirects := 0; ; redirects++ {
 		if errURL := validatePluginStoreRequestURL(c.Auth, currentURL, kind); errURL != nil {
@@ -145,7 +165,7 @@ func (c Client) get(ctx context.Context, requestURL string, accept string, kind 
 			"Accept":     []string{accept},
 			"User-Agent": []string{c.userAgent()},
 		}
-		if errAuth := applyPluginStoreAuth(headers, c.Auth, currentURL, kind); errAuth != nil {
+		if errAuth := applyPluginStoreAuthContext(ctx, resolver, headers, c.Auth, currentURL, kind); errAuth != nil {
 			return nil, errAuth
 		}
 		resp, errDo := pluginStoreGetNoRedirect(ctx, c.httpClient(), currentURL, headers)

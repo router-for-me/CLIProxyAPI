@@ -244,3 +244,88 @@ plugins:
 		}
 	}
 }
+
+func TestParseConfigBytes_PluginStoreAuthCommandSources(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`
+plugins:
+  store-auth:
+    - match: " https://token.example/ "
+      type: bearer
+      token-command: " printf token "
+    - match: "https://basic.example/"
+      type: basic
+      username-command: " printf username "
+      password-command: " printf password "
+    - match: "https://header.example/"
+      type: header
+      header-name: " X-Plugin-Token "
+      header-value-command: " printf header "
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+
+	auth := cfg.Plugins.StoreAuth
+	if len(auth) != 3 || auth[0].TokenCommand != "printf token" || auth[1].UsernameCommand != "printf username" || auth[1].PasswordCommand != "printf password" || auth[2].HeaderValueCommand != "printf header" {
+		t.Fatalf("normalized command auth = %#v", auth)
+	}
+	if auth[2].HeaderName != "X-Plugin-Token" {
+		t.Fatalf("HeaderName = %q, want X-Plugin-Token", auth[2].HeaderName)
+	}
+}
+
+func TestParseConfigBytes_PluginStoreAuthKeepsEnvironmentSource(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`
+plugins:
+  store-auth:
+    - match: "https://plugins.example/"
+      type: bearer
+      token-env: " PLUGIN_STORE_TOKEN "
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if got := cfg.Plugins.StoreAuth[0].TokenEnv; got != "PLUGIN_STORE_TOKEN" {
+		t.Fatalf("TokenEnv = %q, want PLUGIN_STORE_TOKEN", got)
+	}
+}
+
+func TestLoadConfigOptional_RejectsAmbiguousPluginStoreAuthSource(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	const secret = "not-a-secret-value"
+	if errWrite := os.WriteFile(configPath, []byte(`
+plugins:
+  store-auth:
+    - match: "https://plugins.example/"
+      type: header
+      header-value-env: "PLUGIN_STORE_HEADER"
+      header-value-command: "printf `+secret+`"
+`), 0o600); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	_, errLoad := LoadConfigOptional(configPath, false)
+	if errLoad == nil {
+		t.Fatal("LoadConfigOptional() error = nil, want ambiguity error")
+	}
+	if !strings.Contains(errLoad.Error(), "header value source is ambiguous") || strings.Contains(errLoad.Error(), secret) {
+		t.Fatalf("LoadConfigOptional() error = %q, want safe header-value ambiguity", errLoad)
+	}
+}
+
+func TestParseConfigBytes_RejectsAmbiguousPluginStoreAuthSource(t *testing.T) {
+	const secret = "not-a-secret-value"
+	_, errParse := ParseConfigBytes([]byte(`
+plugins:
+  store-auth:
+    - match: "https://plugins.example/"
+      type: bearer
+      token-env: "PLUGIN_STORE_TOKEN"
+      token-command: "printf ` + secret + `"
+`))
+	if errParse == nil {
+		t.Fatal("ParseConfigBytes() error = nil, want ambiguity error")
+	}
+	if !strings.Contains(errParse.Error(), "token source is ambiguous") || strings.Contains(errParse.Error(), secret) {
+		t.Fatalf("ParseConfigBytes() error = %q, want safe token ambiguity", errParse)
+	}
+}

@@ -64,13 +64,26 @@ plugins:
   # Additional plugin store registries. The built-in official registry is always included.
   # store-sources:
   #   - "https://example.com/cliproxy-plugins/registry.json"
-  # Optional plugin store auth rules. Values are read from environment variables;
-  # tokens are not written into plugin manifests or node status.
+  # Optional plugin store auth rules. Use an environment variable or command for each
+  # secret, never both. Commands run through /bin/sh -c on Unix or cmd.exe /C on Windows,
+  # have a fixed 5s limit, their trimmed output is not persisted, and configured expressions
+  # remain visible through privileged config APIs. Do not embed literal secrets.
   # store-auth:
   #   - match: "https://example.com/cliproxy-plugins/"
   #     apply-to: ["registry", "artifact"]
   #     type: bearer
   #     token-env: "CLIPROXY_PLUGIN_STORE_TOKEN"
+  #   - match: "https://api.github.com/"
+  #     type: github-token
+  #     token-command: "gh auth token --hostname github.com"
+  #   - match: "https://basic.example.com/"
+  #     type: basic
+  #     username-command: "security find-generic-password -s plugin-user -w"
+  #     password-command: "security find-generic-password -s plugin-password -w"
+  #   - match: "https://headers.example.com/"
+  #     type: header
+  #     header-name: "X-Plugin-Token"
+  #     header-value-command: "security find-generic-password -s plugin-header -w"
   configs:
     example:
       enabled: true

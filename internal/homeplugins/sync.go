@@ -143,6 +143,7 @@ func SyncPlatformWithReport(ctx context.Context, cfg *config.Config, pluginRunti
 		return report, errPluginsDir
 	}
 	client := newPluginStoreClient(cfg)
+	resolver := sdkpluginstore.NewAuthResolver()
 	var syncErrors []error
 	ids := make([]string, 0, len(cfg.Plugins.Configs))
 	for id := range cfg.Plugins.Configs {
@@ -169,7 +170,7 @@ func SyncPlatformWithReport(ctx context.Context, cfg *config.Config, pluginRunti
 			continue
 		}
 		status := pluginStatusFromManifest(manifest)
-		result, errSync := installManifest(ctx, client, manifest, root, platform, pluginRuntime)
+		result, errSync := installManifest(ctx, resolver, client, manifest, root, platform, pluginRuntime)
 		if errSync != nil {
 			status.InstallStatus = pluginInstallStatusFailed
 			status.Error = errSync.Error()
@@ -192,7 +193,7 @@ func SyncPlatformWithReport(ctx context.Context, cfg *config.Config, pluginRunti
 	return report, errSync
 }
 
-func installManifest(ctx context.Context, client sdkpluginstore.Client, manifest sdkpluginstore.Manifest, root string, platform Platform, pluginRuntime PluginRuntime) (sdkpluginstore.InstallResult, error) {
+func installManifest(ctx context.Context, resolver *sdkpluginstore.AuthResolver, client sdkpluginstore.Client, manifest sdkpluginstore.Manifest, root string, platform Platform, pluginRuntime PluginRuntime) (sdkpluginstore.InstallResult, error) {
 	id := strings.TrimSpace(manifest.ID)
 	if id == "" {
 		return sdkpluginstore.InstallResult{}, fmt.Errorf("home plugins: manifest plugin id is empty")
@@ -200,7 +201,7 @@ func installManifest(ctx context.Context, client sdkpluginstore.Client, manifest
 	pluginIsBusy := func() bool {
 		return pluginRuntime != nil && pluginRuntime.PluginBusy(id)
 	}
-	result, errInstall := client.InstallManifest(ctx, manifest, sdkpluginstore.InstallOptions{
+	result, errInstall := client.InstallManifestWithResolver(ctx, resolver, manifest, sdkpluginstore.InstallOptions{
 		PluginsDir:   root,
 		GOOS:         platform.GOOS,
 		GOARCH:       platform.GOARCH,

@@ -45,15 +45,19 @@ type InstallResult struct {
 }
 
 func (c Client) Install(ctx context.Context, plugin Plugin, options InstallOptions) (InstallResult, error) {
+	return c.InstallWithResolver(ctx, NewAuthResolver(), plugin, options)
+}
+
+func (c Client) InstallWithResolver(ctx context.Context, resolver *AuthResolver, plugin Plugin, options InstallOptions) (InstallResult, error) {
 	if errValidate := ValidatePlugin(plugin); errValidate != nil {
 		return InstallResult{}, errValidate
 	}
 	options = normalizeInstallOptions(options)
 	if PluginInstallType(plugin) == InstallTypeDirect {
 		plugin.Version = normalizeVersion(plugin.Version)
-		return c.InstallDirect(ctx, plugin, plugin.Install, options)
+		return c.installDirectWithResolver(ctx, resolver, plugin, plugin.Install, options)
 	}
-	release, errRelease := c.FetchLatestRelease(ctx, plugin)
+	release, errRelease := c.FetchLatestReleaseWithResolver(ctx, resolver, plugin)
 	if errRelease != nil {
 		return InstallResult{}, errRelease
 	}
@@ -62,23 +66,27 @@ func (c Client) Install(ctx context.Context, plugin Plugin, options InstallOptio
 		return InstallResult{}, errVersion
 	}
 	plugin.Version = latestVersion
-	return c.installRelease(ctx, plugin, release, latestVersion, options)
+	return c.installRelease(ctx, resolver, plugin, release, latestVersion, options)
 }
 
 func (c Client) InstallManifest(ctx context.Context, manifest Manifest, options InstallOptions) (InstallResult, error) {
+	return c.InstallManifestWithResolver(ctx, NewAuthResolver(), manifest, options)
+}
+
+func (c Client) InstallManifestWithResolver(ctx context.Context, resolver *AuthResolver, manifest Manifest, options InstallOptions) (InstallResult, error) {
 	if errValidate := manifest.Validate(); errValidate != nil {
 		return InstallResult{}, errValidate
 	}
 	options = normalizeInstallOptions(options)
 	switch manifest.InstallType() {
 	case InstallTypeDirect:
-		plugin, errPlugin := c.directPluginFromManifest(ctx, manifest)
+		plugin, errPlugin := c.directPluginFromManifest(ctx, resolver, manifest)
 		if errPlugin != nil {
 			return InstallResult{}, errPlugin
 		}
-		return c.InstallDirect(ctx, plugin, plugin.Install, options)
+		return c.installDirectWithResolver(ctx, resolver, plugin, plugin.Install, options)
 	case InstallTypeGitHubRelease:
-		return c.InstallVersion(ctx, manifest.Plugin(), manifest.ReleaseTag, manifest.Version, options)
+		return c.InstallVersionWithResolver(ctx, resolver, manifest.Plugin(), manifest.ReleaseTag, manifest.Version, options)
 	default:
 		return InstallResult{}, fmt.Errorf("unsupported install type %q", manifest.Install.Type)
 	}
@@ -86,6 +94,10 @@ func (c Client) InstallManifest(ctx context.Context, manifest Manifest, options 
 
 // InstallVersion installs a plugin artifact from a fixed release tag/version.
 func (c Client) InstallVersion(ctx context.Context, plugin Plugin, releaseTag string, version string, options InstallOptions) (InstallResult, error) {
+	return c.InstallVersionWithResolver(ctx, NewAuthResolver(), plugin, releaseTag, version, options)
+}
+
+func (c Client) InstallVersionWithResolver(ctx context.Context, resolver *AuthResolver, plugin Plugin, releaseTag string, version string, options InstallOptions) (InstallResult, error) {
 	if errValidate := ValidatePlugin(plugin); errValidate != nil {
 		return InstallResult{}, errValidate
 	}
@@ -98,7 +110,7 @@ func (c Client) InstallVersion(ctx context.Context, plugin Plugin, releaseTag st
 	if releaseTag == "" {
 		releaseTag = version
 	}
-	release, errRelease := c.FetchReleaseByTag(ctx, plugin, releaseTag)
+	release, errRelease := c.FetchReleaseByTagWithResolver(ctx, resolver, plugin, releaseTag)
 	if errRelease != nil {
 		return InstallResult{}, errRelease
 	}
@@ -110,19 +122,19 @@ func (c Client) InstallVersion(ctx context.Context, plugin Plugin, releaseTag st
 		return InstallResult{}, fmt.Errorf("release tag %q resolved version %q, want %q", releaseTag, releaseVersion, version)
 	}
 	plugin.Version = version
-	return c.installRelease(ctx, plugin, release, version, options)
+	return c.installRelease(ctx, resolver, plugin, release, version, options)
 }
 
-func (c Client) installRelease(ctx context.Context, plugin Plugin, release Release, version string, options InstallOptions) (InstallResult, error) {
+func (c Client) installRelease(ctx context.Context, resolver *AuthResolver, plugin Plugin, release Release, version string, options InstallOptions) (InstallResult, error) {
 	archiveAsset, checksumAsset, errAssets := SelectReleaseAssets(release, plugin.ID, plugin.Version, options.GOOS, options.GOARCH)
 	if errAssets != nil {
 		return InstallResult{}, errAssets
 	}
-	archiveData, errArchive := c.DownloadAsset(ctx, archiveAsset)
+	archiveData, errArchive := c.DownloadAssetWithResolver(ctx, resolver, archiveAsset)
 	if errArchive != nil {
 		return InstallResult{}, fmt.Errorf("download %s: %w", archiveAsset.Name, errArchive)
 	}
-	checksumData, errChecksum := c.DownloadAsset(ctx, checksumAsset)
+	checksumData, errChecksum := c.DownloadAssetWithResolver(ctx, resolver, checksumAsset)
 	if errChecksum != nil {
 		return InstallResult{}, fmt.Errorf("download checksums.txt: %w", errChecksum)
 	}
@@ -144,6 +156,10 @@ func (c Client) installRelease(ctx context.Context, plugin Plugin, release Relea
 }
 
 func (c Client) InstallDirect(ctx context.Context, plugin Plugin, plan InstallPlan, options InstallOptions) (InstallResult, error) {
+	return c.installDirectWithResolver(ctx, NewAuthResolver(), plugin, plan, options)
+}
+
+func (c Client) installDirectWithResolver(ctx context.Context, resolver *AuthResolver, plugin Plugin, plan InstallPlan, options InstallOptions) (InstallResult, error) {
 	plugin.ID = strings.TrimSpace(plugin.ID)
 	plugin.Version = normalizeVersion(plugin.Version)
 	if !validPluginID(plugin.ID) {
@@ -162,7 +178,7 @@ func (c Client) InstallDirect(ctx context.Context, plugin Plugin, plan InstallPl
 	if errSelect != nil {
 		return InstallResult{}, errSelect
 	}
-	archiveData, errDownload := c.DownloadArtifact(ctx, artifact)
+	archiveData, errDownload := c.DownloadArtifactWithResolver(ctx, resolver, artifact)
 	if errDownload != nil {
 		return InstallResult{}, fmt.Errorf("download artifact: %w", errDownload)
 	}
@@ -177,7 +193,7 @@ func (c Client) InstallDirect(ctx context.Context, plugin Plugin, plan InstallPl
 	return result, nil
 }
 
-func (c Client) directPluginFromManifest(ctx context.Context, manifest Manifest) (Plugin, error) {
+func (c Client) directPluginFromManifest(ctx context.Context, resolver *AuthResolver, manifest Manifest) (Plugin, error) {
 	plugin := manifest.Plugin()
 	plugin.Version = normalizeVersion(manifest.Version)
 	plugin.Install = NormalizeInstallPlan(plugin.Install)
@@ -194,7 +210,7 @@ func (c Client) directPluginFromManifest(ctx context.Context, manifest Manifest)
 	}
 	sourceClient := c
 	sourceClient.RegistryURL = sourceURL
-	registry, errRegistry := sourceClient.FetchRegistry(ctx)
+	registry, errRegistry := sourceClient.FetchRegistryWithResolver(ctx, resolver)
 	if errRegistry != nil {
 		return Plugin{}, fmt.Errorf("fetch direct install source: %w", errRegistry)
 	}
