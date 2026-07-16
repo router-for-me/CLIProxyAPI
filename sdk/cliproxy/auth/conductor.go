@@ -259,6 +259,7 @@ type Manager struct {
 	// Auto refresh state
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
+	refreshDone   <-chan struct{}
 
 	requestPrepareLocks sync.Map
 	// refreshLocks serializes credential refresh per auth ID so concurrent
@@ -5695,6 +5696,7 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	cancelPrev := m.refreshCancel
 	m.refreshCancel = nil
 	m.refreshLoop = nil
+	m.refreshDone = nil
 	m.mu.Unlock()
 	if cancelPrev != nil {
 		cancelPrev()
@@ -5706,14 +5708,123 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 		workers = cfg.AuthAutoRefreshWorkers
 	}
 	loop := newAuthAutoRefreshLoop(m, interval, workers)
+	done := make(chan struct{})
 
 	m.mu.Lock()
 	m.refreshCancel = cancelCtx
 	m.refreshLoop = loop
+	m.refreshDone = done
 	m.mu.Unlock()
 
 	loop.rebuild(time.Now())
-	go loop.run(ctx)
+	go m.runAutoRefreshLoop(ctx, loop, done)
+}
+
+func (m *Manager) runAutoRefreshLoop(ctx context.Context, loop *authAutoRefreshLoop, done chan struct{}) {
+	loop.run(ctx)
+	close(done)
+	m.mu.Lock()
+	if m.refreshLoop == loop {
+		m.refreshCancel = nil
+		m.refreshLoop = nil
+		m.refreshDone = nil
+	}
+	m.mu.Unlock()
+}
+
+// AutoRefreshLease represents an auto-refresh loop acquired for an embedding
+// runtime. A lease only stops the exact loop it created; an existing host-owned
+// loop is reused and remains untouched when the lease closes.
+type AutoRefreshLease struct {
+	manager *Manager
+	loop    *authAutoRefreshLoop
+	cancel  context.CancelFunc
+	done    <-chan struct{}
+	owned   bool
+	once    sync.Once
+}
+
+// EnsureAutoRefresh reuses an existing manager loop or starts one owned by the
+// returned lease. Closing a non-owning lease is a no-op.
+func (m *Manager) EnsureAutoRefresh(parent context.Context, interval time.Duration) *AutoRefreshLease {
+	if m == nil {
+		return &AutoRefreshLease{}
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	if interval <= 0 {
+		interval = refreshCheckInterval
+	}
+
+	m.mu.Lock()
+	if m.refreshLoop != nil {
+		loopDone := m.refreshDone
+		loopRunning := true
+		if loopDone != nil {
+			select {
+			case <-loopDone:
+				loopRunning = false
+			default:
+			}
+		}
+		if loopRunning {
+			lease := &AutoRefreshLease{manager: m, loop: m.refreshLoop, done: loopDone}
+			m.mu.Unlock()
+			return lease
+		}
+		m.refreshCancel = nil
+		m.refreshLoop = nil
+		m.refreshDone = nil
+	}
+	ctx, cancelCtx := context.WithCancel(parent)
+	workers := refreshMaxConcurrency
+	if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil && cfg.AuthAutoRefreshWorkers > 0 {
+		workers = cfg.AuthAutoRefreshWorkers
+	}
+	loop := newAuthAutoRefreshLoop(m, interval, workers)
+	done := make(chan struct{})
+	m.refreshCancel = cancelCtx
+	m.refreshLoop = loop
+	m.refreshDone = done
+	m.mu.Unlock()
+
+	loop.rebuild(time.Now())
+	go m.runAutoRefreshLoop(ctx, loop, done)
+	return &AutoRefreshLease{manager: m, loop: loop, cancel: cancelCtx, done: done, owned: true}
+}
+
+// Close cancels an owned loop and waits for its scheduler and workers to exit.
+func (l *AutoRefreshLease) Close(ctx context.Context) error {
+	if l == nil || !l.owned {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	l.once.Do(func() {
+		if l.manager != nil {
+			l.manager.mu.Lock()
+			if l.manager.refreshLoop == l.loop {
+				l.manager.refreshCancel = nil
+				l.manager.refreshLoop = nil
+				l.manager.refreshDone = nil
+			}
+			l.manager.mu.Unlock()
+		}
+		if l.cancel != nil {
+			l.cancel()
+		}
+	})
+	if l.done == nil {
+		return nil
+	}
+	select {
+	case <-l.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // StopAutoRefresh cancels the background refresh loop, if running.
@@ -5723,6 +5834,7 @@ func (m *Manager) StopAutoRefresh() {
 	cancel := m.refreshCancel
 	m.refreshCancel = nil
 	m.refreshLoop = nil
+	m.refreshDone = nil
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()

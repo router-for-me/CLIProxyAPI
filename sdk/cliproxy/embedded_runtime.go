@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -25,7 +26,10 @@ type EmbeddedRuntime struct {
 	activeModels       map[string]struct{}
 	registeredAuthIDs  map[string]struct{}
 	installedExecutors map[string]coreauth.ProviderExecutor
+	refreshLease       *coreauth.AutoRefreshLease
 }
+
+const embeddedRuntimeRefreshInterval = 15 * time.Minute
 
 // NewEmbeddedRuntime creates a headless runtime backed by a host-owned auth manager.
 // The supplied configuration becomes the manager's runtime configuration and OAuth
@@ -95,6 +99,11 @@ func (r *EmbeddedRuntime) Start(ctx context.Context) error {
 			r.rollbackStartLocked()
 			return errContext
 		}
+	}
+	r.refreshLease = r.manager.EnsureAutoRefresh(context.Background(), embeddedRuntimeRefreshInterval)
+	if errContext := ctx.Err(); errContext != nil {
+		r.rollbackStartLocked()
+		return errContext
 	}
 	r.mu.Lock()
 	r.started = true
@@ -232,6 +241,14 @@ func (r *EmbeddedRuntime) Close(ctx context.Context) error {
 		return nil
 	}
 	r.mu.Unlock()
+	var refreshErr error
+	if r.refreshLease != nil {
+		refreshErr = r.refreshLease.Close(ctx)
+		if refreshErr != nil {
+			return refreshErr
+		}
+		r.refreshLease = nil
+	}
 	for authID := range r.registeredAuthIDs {
 		registry.GetGlobalRegistry().UnregisterClient(authID)
 		r.manager.RefreshSchedulerEntry(authID)
@@ -248,7 +265,7 @@ func (r *EmbeddedRuntime) Close(ctx context.Context) error {
 	r.closed = true
 	r.started = false
 	r.mu.Unlock()
-	return nil
+	return refreshErr
 }
 
 // ServerStarted reports whether an HTTP server was constructed by this runtime.
@@ -306,6 +323,10 @@ func (r *EmbeddedRuntime) registerAuthModelsLocked(ctx context.Context, auth *co
 }
 
 func (r *EmbeddedRuntime) rollbackStartLocked() {
+	if r.refreshLease != nil {
+		_ = r.refreshLease.Close(context.Background())
+		r.refreshLease = nil
+	}
 	for authID := range r.registeredAuthIDs {
 		registry.GetGlobalRegistry().UnregisterClient(authID)
 		r.manager.RefreshSchedulerEntry(authID)

@@ -2,9 +2,12 @@ package cliproxy_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
@@ -16,6 +19,10 @@ import (
 
 type embeddedRuntimeTestExecutor struct {
 	provider string
+
+	refreshOnce sync.Once
+	refreshed   chan struct{}
+	release     chan struct{}
 }
 
 func (e *embeddedRuntimeTestExecutor) Identifier() string { return e.provider }
@@ -31,6 +38,12 @@ func (e *embeddedRuntimeTestExecutor) ExecuteStream(context.Context, *coreauth.A
 }
 
 func (e *embeddedRuntimeTestExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	if e.refreshed != nil {
+		e.refreshOnce.Do(func() { close(e.refreshed) })
+	}
+	if e.release != nil {
+		<-e.release
+	}
 	return auth, nil
 }
 
@@ -285,5 +298,83 @@ func TestEmbeddedRuntimeCanceledStartRollsBackOwnedExecutors(t *testing.T) {
 	}
 	if _, okExecutor := manager.Executor("claude"); okExecutor {
 		t.Fatal("canceled start leaked claude executor")
+	}
+}
+
+func TestEmbeddedRuntimeOwnsManagerAutoRefreshLifecycle(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	refreshed := make(chan struct{})
+	manager.RegisterExecutor(&embeddedRuntimeTestExecutor{provider: "codex", refreshed: refreshed})
+	if _, errRegister := manager.Register(t.Context(), &coreauth.Auth{
+		ID:       "codex-refresh-1",
+		Provider: "codex",
+		Attributes: map[string]string{
+			coreauth.AttributeAuthKind: coreauth.AuthKindOAuth,
+		},
+		Metadata: map[string]any{
+			"access_token":  "expired-access",
+			"refresh_token": "refresh-token",
+			"expires_at":    time.Now().Add(-time.Minute).Format(time.RFC3339),
+		},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	runtime, errRuntime := cliproxy.NewEmbeddedRuntime(&config.Config{}, manager)
+	if errRuntime != nil {
+		t.Fatalf("new embedded runtime: %v", errRuntime)
+	}
+	if errStart := runtime.Start(t.Context()); errStart != nil {
+		t.Fatalf("start embedded runtime: %v", errStart)
+	}
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
+
+	select {
+	case <-refreshed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("embedded runtime did not start manager auto-refresh")
+	}
+}
+
+func TestEmbeddedRuntimeCloseCanRetryRefreshDrain(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	refreshed := make(chan struct{})
+	release := make(chan struct{})
+	manager.RegisterExecutor(&embeddedRuntimeTestExecutor{provider: "codex", refreshed: refreshed, release: release})
+	if _, errRegister := manager.Register(t.Context(), &coreauth.Auth{
+		ID:       "codex-refresh-close",
+		Provider: "codex",
+		Attributes: map[string]string{
+			coreauth.AttributeAuthKind: coreauth.AuthKindOAuth,
+		},
+		Metadata: map[string]any{
+			"access_token":  "expired-access",
+			"refresh_token": "refresh-token",
+			"expires_at":    time.Now().Add(-time.Minute).Format(time.RFC3339),
+		},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	runtime, errRuntime := cliproxy.NewEmbeddedRuntime(&config.Config{}, manager)
+	if errRuntime != nil {
+		t.Fatalf("new embedded runtime: %v", errRuntime)
+	}
+	if errStart := runtime.Start(t.Context()); errStart != nil {
+		t.Fatalf("start embedded runtime: %v", errStart)
+	}
+	select {
+	case <-refreshed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresh worker did not start")
+	}
+
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelClose()
+	if errClose := runtime.Close(closeCtx); !errors.Is(errClose, context.DeadlineExceeded) {
+		t.Fatalf("first close error = %v, want context deadline exceeded", errClose)
+	}
+	close(release)
+	if errClose := runtime.Close(context.Background()); errClose != nil {
+		t.Fatalf("retry close: %v", errClose)
 	}
 }
