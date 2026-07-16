@@ -3914,12 +3914,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
 		return
 	}
-	// A request the client already abandoned must not penalize the account: skip
-	// recording a FAILURE when the caller's context is cancelled. This closes the
-	// cancel-during-error and cancel-during-refresh windows across every call site
-	// at the source, so no account is cooled/suspended/failed for an abandoned
-	// request. Successes still record (they clear state and usage).
-	if !result.Success && ctx != nil && ctx.Err() != nil {
+	// A request the client abandoned must not penalize the account for a failure
+	// CAUSED by that cancellation. Skip only when the caller ctx is cancelled AND
+	// the failure carries no real upstream status (context.Canceled / empty stream
+	// → statusCodeFromResult == 0). A genuine upstream status (401/402/403/404/429/
+	// 5xx) is still recorded even under a coincident cancel, because it is a real
+	// signal about the account (rate-limited / unauthorized) and must still cool or
+	// suspend it. This closes the cancel-during-error/refresh windows at the source
+	// without swallowing real failures. Successes always record.
+	if !result.Success && ctx != nil && ctx.Err() != nil && statusCodeFromResult(result.Error) == 0 {
 		return
 	}
 
