@@ -1822,7 +1822,16 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 		if ctx != nil {
 			select {
 			case <-ctx.Done():
-				return nil, false, ctx.Err()
+				// Cancellation and a ready chunk can be ready at the same instant;
+				// Go's select picks at random and would drop a chunk carrying a real
+				// upstream status (e.g. a 429 delivered just before the client aborted),
+				// leaving the account uncooled. Prefer draining a ready chunk; only
+				// report cancellation when nothing is waiting.
+				select {
+				case chunk, ok = <-ch:
+				default:
+					return nil, false, ctx.Err()
+				}
 			case chunk, ok = <-ch:
 			}
 		} else {
