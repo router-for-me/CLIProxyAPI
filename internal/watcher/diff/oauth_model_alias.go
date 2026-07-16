@@ -83,6 +83,9 @@ func summarizeOAuthModelAliasList(list []config.OAuthModelAlias) OAuthModelAlias
 		if alias.Fork {
 			key += "|fork"
 		}
+		if alias.ReasoningEffort != "" {
+			key += "|reasoning-effort=" + strings.ToLower(strings.TrimSpace(alias.ReasoningEffort))
+		}
 		if alias.ForceMapping {
 			key += "|force-mapping"
 		}

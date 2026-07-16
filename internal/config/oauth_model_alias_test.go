@@ -6,7 +6,7 @@ func TestSanitizeOAuthModelAlias_PreservesForkFlag(t *testing.T) {
 	cfg := &Config{
 		OAuthModelAlias: map[string][]OAuthModelAlias{
 			" CoDeX ": {
-				{Name: " gpt-5 ", Alias: " g5 ", Fork: true},
+				{Name: " gpt-5 ", Alias: " g5 ", Fork: true, ReasoningEffort: " HIGH "},
 				{Name: "gpt-6", Alias: "g6"},
 			},
 		},
@@ -18,8 +18,8 @@ func TestSanitizeOAuthModelAlias_PreservesForkFlag(t *testing.T) {
 	if len(aliases) != 2 {
 		t.Fatalf("expected 2 sanitized aliases, got %d", len(aliases))
 	}
-	if aliases[0].Name != "gpt-5" || aliases[0].Alias != "g5" || !aliases[0].Fork {
-		t.Fatalf("expected first alias to be gpt-5->g5 fork=true, got name=%q alias=%q fork=%v", aliases[0].Name, aliases[0].Alias, aliases[0].Fork)
+	if aliases[0].Name != "gpt-5" || aliases[0].Alias != "g5" || !aliases[0].Fork || aliases[0].ReasoningEffort != "high" {
+		t.Fatalf("expected first alias to be gpt-5->g5 fork=true reasoning-effort=high, got name=%q alias=%q fork=%v reasoning-effort=%q", aliases[0].Name, aliases[0].Alias, aliases[0].Fork, aliases[0].ReasoningEffort)
 	}
 	if aliases[1].Name != "gpt-6" || aliases[1].Alias != "g6" || aliases[1].Fork {
 		t.Fatalf("expected second alias to be gpt-6->g6 fork=false, got name=%q alias=%q fork=%v", aliases[1].Name, aliases[1].Alias, aliases[1].Fork)
