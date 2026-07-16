@@ -92,6 +92,16 @@ type Config struct {
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
 
+	// KimiUsageQueryEnabled enables a background loop that periodically polls the
+	// upstream /v1/usages endpoint for auths whose base_url matches api.kimi.com/coding.
+	// When a rolling quota window (5h or weekly) is exhausted the auth is cooled
+	// down until the precise reset time reported by the upstream, instead of relying
+	// on the flat 403 cooldown. Disabled by default.
+	KimiUsageQueryEnabled bool `yaml:"kimi-usage-query-enabled" json:"kimi-usage-query-enabled"`
+	// KimiUsageQueryIntervalSeconds controls the polling period for the Kimi usage
+	// probe loop. Default 300 (5 minutes) when <= 0.
+	KimiUsageQueryIntervalSeconds int `yaml:"kimi-usage-query-interval-seconds" json:"kimi-usage-query-interval-seconds"`
+
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
 	// MaxRetryCredentials defines the maximum number of credentials to try for a failed request.
@@ -808,6 +818,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
+	}
+
+	// Kimi usage probe interval: default to 5 minutes when unset/non-positive.
+	if cfg.KimiUsageQueryIntervalSeconds <= 0 {
+		cfg.KimiUsageQueryIntervalSeconds = 300
 	}
 
 	cfg.NormalizePluginsConfig()

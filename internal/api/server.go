@@ -843,6 +843,14 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 		mgmt.PATCH("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 
+		mgmt.GET("/kimi-usage-query-enabled", s.mgmt.GetKimiUsageQueryEnabled)
+		mgmt.PUT("/kimi-usage-query-enabled", s.mgmt.PutKimiUsageQueryEnabled)
+		mgmt.PATCH("/kimi-usage-query-enabled", s.mgmt.PutKimiUsageQueryEnabled)
+
+		mgmt.GET("/kimi-usage-query-interval-seconds", s.mgmt.GetKimiUsageQueryIntervalSeconds)
+		mgmt.PUT("/kimi-usage-query-interval-seconds", s.mgmt.PutKimiUsageQueryIntervalSeconds)
+		mgmt.PATCH("/kimi-usage-query-interval-seconds", s.mgmt.PutKimiUsageQueryIntervalSeconds)
+
 		mgmt.GET("/proxy-url", s.mgmt.GetProxyURL)
 		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)
 		mgmt.PATCH("/proxy-url", s.mgmt.PutProxyURL)
@@ -1869,6 +1877,23 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	if s.handlers != nil && s.handlers.AuthManager != nil {
 		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
+
+		// 动态重启 Kimi 用量探针（响应 Management Center 的配置变更）
+		prevEnabled := false
+		prevInterval := 0
+		if oldCfg != nil {
+			prevEnabled = oldCfg.KimiUsageQueryEnabled
+			prevInterval = oldCfg.KimiUsageQueryIntervalSeconds
+		}
+		if !prevEnabled && cfg.KimiUsageQueryEnabled {
+			interval := time.Duration(cfg.KimiUsageQueryIntervalSeconds) * time.Second
+			s.handlers.AuthManager.StartKimiUsageProbe(context.Background(), interval)
+		} else if prevEnabled && !cfg.KimiUsageQueryEnabled {
+			s.handlers.AuthManager.StopKimiUsageProbe()
+		} else if prevEnabled && cfg.KimiUsageQueryEnabled && prevInterval != cfg.KimiUsageQueryIntervalSeconds {
+			interval := time.Duration(cfg.KimiUsageQueryIntervalSeconds) * time.Second
+			s.handlers.AuthManager.StartKimiUsageProbe(context.Background(), interval)
+		}
 	}
 
 	// Update log level dynamically when debug flag changes
