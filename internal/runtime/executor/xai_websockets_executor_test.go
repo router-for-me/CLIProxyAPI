@@ -211,12 +211,21 @@ func TestXAIWebsocketsExecuteStreamRestoresNamespaceToolCalls(t *testing.T) {
 
 	select {
 	case payload := <-capturedPayload:
-		tool := gjson.GetBytes(payload, "input.0.tools.0")
+		// additional_tools are promoted to top-level tools, then namespace-flattened.
+		tool := gjson.GetBytes(payload, "tools.0")
 		if got := tool.Get("name").String(); got != "mcp__exa__web_search_exa" {
 			t.Fatalf("upstream tool name = %q, want qualified name; payload=%s", got, payload)
 		}
+		if got := tool.Get("type").String(); got != "function" {
+			t.Fatalf("upstream tool type = %q, want function; payload=%s", got, payload)
+		}
 		if tool.Get("tools").Exists() {
 			t.Fatalf("upstream tool should not contain namespace children: %s", payload)
+		}
+		for _, item := range gjson.GetBytes(payload, "input").Array() {
+			if item.Get("type").String() == "additional_tools" {
+				t.Fatalf("additional_tools should be promoted out of input: %s", payload)
+			}
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
