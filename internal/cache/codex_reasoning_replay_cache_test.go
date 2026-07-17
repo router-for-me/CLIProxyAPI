@@ -1,18 +1,22 @@
 package cache
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/tidwall/gjson"
 )
 
 type fakeCodexReasoningReplayKVClient struct {
+	mu            sync.Mutex
 	values        map[string][]byte
 	getErr        error
 	setErr        error
@@ -31,6 +35,8 @@ func newFakeCodexReasoningReplayKVClient() *fakeCodexReasoningReplayKVClient {
 }
 
 func (c *fakeCodexReasoningReplayKVClient) KVGet(_ context.Context, key string) ([]byte, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.getCount++
 	if c.getErr != nil {
 		return nil, false, c.getErr
@@ -43,6 +49,8 @@ func (c *fakeCodexReasoningReplayKVClient) KVGet(_ context.Context, key string) 
 }
 
 func (c *fakeCodexReasoningReplayKVClient) KVSet(_ context.Context, key string, value []byte, opts homekv.KVSetOptions) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.setCount++
 	c.lastSetTTL = opts.EX
 	if c.setErr != nil {
@@ -52,7 +60,25 @@ func (c *fakeCodexReasoningReplayKVClient) KVSet(_ context.Context, key string, 
 	return true, nil
 }
 
+func (c *fakeCodexReasoningReplayKVClient) KVCompareAndSwap(_ context.Context, key string, expected []byte, expectedExists bool, value []byte, ttl time.Duration) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.setCount++
+	c.lastSetTTL = ttl
+	if c.setErr != nil {
+		return false, c.setErr
+	}
+	current, exists := c.values[key]
+	if exists != expectedExists || (exists && !bytes.Equal(current, expected)) {
+		return false, nil
+	}
+	c.values[key] = append([]byte(nil), value...)
+	return true, nil
+}
+
 func (c *fakeCodexReasoningReplayKVClient) KVDel(_ context.Context, keys ...string) (int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.delCount++
 	if c.delErr != nil {
 		return 0, c.delErr
@@ -68,6 +94,8 @@ func (c *fakeCodexReasoningReplayKVClient) KVDel(_ context.Context, keys ...stri
 }
 
 func (c *fakeCodexReasoningReplayKVClient) KVExpire(_ context.Context, _ string, ttl time.Duration) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.expireCount++
 	c.lastExpireTTL = ttl
 	if c.expireErr != nil {
@@ -182,6 +210,95 @@ func TestCodexReasoningReplayBestEffortHomeWriteFailureDoesNotUseLocalCache(t *t
 	useFakeCodexReasoningReplayKVClient(t, newFakeCodexReasoningReplayKVClient(), false, nil)
 	if _, found := GetCodexReasoningReplayItems("gpt-5.4", "session-home"); found {
 		t.Fatalf("local replay cache was populated after Home best-effort write failure")
+	}
+}
+
+func TestCodexReasoningReplayAppendPreservesCumulativeTurnsInHome(t *testing.T) {
+	ClearCodexReasoningReplayCache()
+	t.Cleanup(ClearCodexReasoningReplayCache)
+	client := newFakeCodexReasoningReplayKVClient()
+	useFakeCodexReasoningReplayKVClient(t, client, true, nil)
+
+	first := [][]byte{
+		[]byte(`{"type":"` + CodexReasoningReplayTurnType + `","id":"turn-1","assistant_fingerprint":"answer-1"}`),
+		validCodexReasoningReplayItemForTest(11),
+	}
+	second := [][]byte{
+		[]byte(`{"type":"` + CodexReasoningReplayTurnType + `","id":"turn-2","call_ids":["call-2"]}`),
+		validCodexReasoningReplayItemForTest(12),
+	}
+	if !AppendCodexReasoningReplayItemsBestEffort(context.Background(), "gpt-5.4", "session-home-append", first) {
+		t.Fatal("first append failed")
+	}
+	if !AppendCodexReasoningReplayItemsBestEffort(context.Background(), "gpt-5.4", "session-home-append", second) {
+		t.Fatal("second append failed")
+	}
+	if !AppendCodexReasoningReplayItemsBestEffort(context.Background(), "gpt-5.4", "session-home-append", second) {
+		t.Fatal("duplicate append failed")
+	}
+
+	items, found, errGet := GetCodexReasoningReplayItemsRequired(context.Background(), "gpt-5.4", "session-home-append")
+	if errGet != nil || !found {
+		t.Fatalf("get cumulative turns = found %v err %v", found, errGet)
+	}
+	if len(items) != 4 {
+		t.Fatalf("cumulative item count = %d, want 4: %q", len(items), items)
+	}
+	if got := gjson.GetBytes(items[0], "id").String(); got != "turn-1" {
+		t.Fatalf("first turn id = %q, want turn-1", got)
+	}
+	if got := gjson.GetBytes(items[2], "id").String(); got != "turn-2" {
+		t.Fatalf("second turn id = %q, want turn-2", got)
+	}
+}
+
+func TestCodexReasoningReplayAppendHomeCASPreservesConcurrentTurns(t *testing.T) {
+	ClearCodexReasoningReplayCache()
+	t.Cleanup(ClearCodexReasoningReplayCache)
+	client := newFakeCodexReasoningReplayKVClient()
+	useFakeCodexReasoningReplayKVClient(t, client, true, nil)
+
+	const turnCount = 16
+	var waitGroup sync.WaitGroup
+	for turn := 0; turn < turnCount; turn++ {
+		waitGroup.Add(1)
+		go func(turnID int) {
+			defer waitGroup.Done()
+			items := [][]byte{
+				[]byte(fmt.Sprintf(`{"type":"%s","id":"turn-%d"}`, CodexReasoningReplayTurnType, turnID)),
+				validCodexReasoningReplayItemForTest(byte(30 + turnID)),
+			}
+			if !AppendCodexReasoningReplayItemsBestEffort(context.Background(), "gpt-5.4", "session-home-concurrent", items) {
+				t.Errorf("append turn %d failed", turnID)
+			}
+		}(turn)
+	}
+	waitGroup.Wait()
+
+	items, found, errGet := GetCodexReasoningReplayItemsRequired(context.Background(), "gpt-5.4", "session-home-concurrent")
+	if errGet != nil || !found {
+		t.Fatalf("get concurrent turns = found %v err %v", found, errGet)
+	}
+	if len(items) != turnCount*2 {
+		t.Fatalf("concurrent cumulative item count = %d, want %d", len(items), turnCount*2)
+	}
+}
+
+func TestCodexReasoningReplayAppendBoundsTurnsPerEntry(t *testing.T) {
+	items := make([][]byte, 0, (CodexReasoningReplayCacheMaxTurnsPerEntry+1)*2)
+	for turn := 0; turn <= CodexReasoningReplayCacheMaxTurnsPerEntry; turn++ {
+		items = append(items,
+			[]byte(fmt.Sprintf(`{"type":"%s","id":"turn-%d"}`, CodexReasoningReplayTurnType, turn)),
+			validCodexReasoningReplayItemForTest(byte(50+turn)),
+		)
+	}
+
+	trimmed := trimCodexReasoningReplayItems(items)
+	if len(trimmed) != CodexReasoningReplayCacheMaxTurnsPerEntry*2 {
+		t.Fatalf("trimmed item count = %d, want %d", len(trimmed), CodexReasoningReplayCacheMaxTurnsPerEntry*2)
+	}
+	if firstID := gjson.GetBytes(trimmed[0], "id").String(); firstID != "turn-1" {
+		t.Fatalf("first retained turn = %q, want turn-1", firstID)
 	}
 }
 

@@ -410,9 +410,10 @@ nonstream-keepalive-interval: 0
 # client-visible names can become ambiguous across providers. For strict backend pinning, use
 # unique aliases/prefixes or avoid overlapping names.
 # You can repeat the same name with different aliases to expose multiple client model names.
-# Optional per-entry flags:
-#   fork: true          # keep the upstream model and also expose the alias as a separate client-visible model
-#   force-mapping: true # optional: rewrite upstream response model fields back to the client-visible alias (example below uses antigravity only)
+# Optional per-entry fields:
+#   fork: true                  # keep the upstream model and also expose the alias as a separate client-visible model
+#   display-name: "Model Name" # override the human-readable name shown in model catalogs
+#   force-mapping: true         # rewrite upstream response model fields back to the client-visible alias (example below uses antigravity only)
 # Per-auth OAuth aliases can also be stored in an OAuth auth JSON file as "model-aliases".
 # They apply only to that selected auth and take precedence over global aliases for the same client-visible alias.
 # Example auth JSON:
@@ -432,8 +433,9 @@ nonstream-keepalive-interval: 0
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"
 #   antigravity:
-#     - name: "gemini-pro-agent"          # upstream Antigravity model id
-#       alias: "gemini-3.1-pro-preview"   # client-visible id (Gemini 3.1 Pro Preview)
+#     - name: "gemini-pro-agent"                   # upstream Antigravity model id
+#       alias: "gemini-3.1-pro-preview"            # client-visible id (Gemini 3.1 Pro Preview)
+#       display-name: "Antigravity Gemini 3.1 Pro" # optional catalog display name
 #       fork: true
 #       force-mapping: true
 #   claude:

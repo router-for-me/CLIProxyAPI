@@ -820,6 +820,125 @@ func TestXAIWebsocketsExecuteStreamRewritesRepeatedResponseIDWithoutPreviousResp
 	}
 }
 
+func TestXAIWebsocketsExecuteStreamReplaysTranscriptWhenAuthChanges(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	type capturedRequest struct {
+		authorization string
+		payload       []byte
+	}
+	captured := make(chan capturedRequest, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("upgrade websocket: %v", errUpgrade)
+			return
+		}
+		defer func() {
+			if errClose := conn.Close(); errClose != nil {
+				t.Errorf("close upstream websocket: %v", errClose)
+			}
+		}()
+
+		for {
+			_, payload, errRead := conn.ReadMessage()
+			if errRead != nil {
+				return
+			}
+			authorization := r.Header.Get("Authorization")
+			captured <- capturedRequest{authorization: authorization, payload: bytes.Clone(payload)}
+			responseID := "resp-auth-a"
+			if strings.Contains(authorization, "token-c") {
+				responseID = "resp-auth-c"
+			}
+			completed := []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"output":[{"type":"message","id":%q,"role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}`, responseID, "msg-"+responseID))
+			if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+				t.Errorf("write completed websocket message: %v", errWrite)
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	rejectedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "rejected", http.StatusUnauthorized)
+	}))
+	defer rejectedServer.Close()
+
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	exec.idStore = &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+	defer exec.CloseExecutionSession("xai-auth-switch-session")
+
+	newAuth := func(id string, token string, baseURL string) *cliproxyauth.Auth {
+		return &cliproxyauth.Auth{
+			ID:       id,
+			Provider: "xai",
+			Attributes: map[string]string{
+				"base_url":   baseURL,
+				"websockets": "true",
+			},
+			Metadata: map[string]any{"access_token": token},
+		}
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "xai-auth-switch-session",
+		},
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	runRequest := func(auth *cliproxyauth.Auth, body []byte) []byte {
+		result, errExecute := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{Model: "grok-4.3", Payload: body}, opts)
+		if errExecute != nil {
+			t.Fatalf("ExecuteStream() error = %v", errExecute)
+		}
+		var completed []byte
+		for chunk := range result.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("stream chunk error = %v", chunk.Err)
+			}
+			if gjson.GetBytes(chunk.Payload, "type").String() == "response.completed" {
+				completed = bytes.Clone(chunk.Payload)
+			}
+		}
+		if len(completed) == 0 {
+			t.Fatal("stream did not return response.completed")
+		}
+		return completed
+	}
+
+	firstCompleted := runRequest(newAuth("auth-a", "token-a", server.URL), []byte(`{"model":"grok-4.3","input":[{"type":"message","id":"user-1","role":"user","content":"first"}]}`))
+	firstResponseID := gjson.GetBytes(firstCompleted, "response.id").String()
+	if firstResponseID != "resp-auth-a" {
+		t.Fatalf("first response ID = %q, want resp-auth-a", firstResponseID)
+	}
+	firstUpstream := <-captured
+	if firstUpstream.authorization != "Bearer token-a" {
+		t.Fatalf("first Authorization = %q, want Bearer token-a", firstUpstream.authorization)
+	}
+
+	secondBody := []byte(fmt.Sprintf(`{"model":"grok-4.3","previous_response_id":%q,"input":[{"type":"message","id":"user-2","role":"user","content":"second"}]}`, firstResponseID))
+	if _, errExecute := exec.ExecuteStream(ctx, newAuth("auth-b", "token-b", rejectedServer.URL), cliproxyexecutor.Request{Model: "grok-4.3", Payload: secondBody}, opts); errExecute == nil {
+		t.Fatal("expected auth B websocket handshake to fail")
+	}
+	runRequest(newAuth("auth-c", "token-c", server.URL), secondBody)
+	secondUpstream := <-captured
+	if secondUpstream.authorization != "Bearer token-c" {
+		t.Fatalf("second successful Authorization = %q, want Bearer token-c", secondUpstream.authorization)
+	}
+	if gjson.GetBytes(secondUpstream.payload, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id was sent after auth switch: %s", secondUpstream.payload)
+	}
+	input := gjson.GetBytes(secondUpstream.payload, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("replayed input len = %d, want 3: %s", len(input), secondUpstream.payload)
+	}
+	if input[0].Get("id").String() != "user-1" || input[1].Get("id").String() != "msg-resp-auth-a" || input[2].Get("id").String() != "user-2" {
+		t.Fatalf("unexpected replayed input: %s", secondUpstream.payload)
+	}
+}
+
 func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedContext(t *testing.T) {
 	nativeEncryptedContent := testValidGrokEncryptedContent()
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}

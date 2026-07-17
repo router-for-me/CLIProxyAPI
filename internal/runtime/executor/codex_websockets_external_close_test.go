@@ -37,7 +37,7 @@ func TestCloseCodexWebsocketSessionFailsActiveRequest(t *testing.T) {
 		readerConn: conn,
 	}
 	activeCh := make(chan codexWebsocketRead, 1)
-	sess.setActive(activeCh)
+	sess.setActive(conn, activeCh)
 	exec := NewCodexWebsocketsExecutor(&config.Config{})
 	go exec.readUpstreamLoop(sess, conn)
 
@@ -61,8 +61,9 @@ func TestCloseCodexWebsocketSessionFailsActiveRequest(t *testing.T) {
 
 func TestDeliverActiveReadLeavesCapturedChannelOpen(t *testing.T) {
 	sess := &codexWebsocketSession{}
+	conn := &websocket.Conn{}
 	activeCh := make(chan codexWebsocketRead, 1)
-	sess.setActive(activeCh)
+	sess.setActive(conn, activeCh)
 
 	closeErr := errors.New("codex websockets executor: session closed: auth_removed")
 	if !sess.deliverActiveRead(codexWebsocketRead{err: closeErr}) {

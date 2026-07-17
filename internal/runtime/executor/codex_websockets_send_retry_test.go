@@ -102,7 +102,7 @@ func TestCodexWebsocketsExecuteStreamRetriesCloseSentFreshSend(t *testing.T) {
 	sess.authID = "test-auth"
 	sess.connMu.Unlock()
 
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	auth := &cliproxyauth.Auth{ID: "test-auth", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5-codex",
 		Payload: []byte(`{"type":"response.create","model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","role":"user","content":"next"}]}`),

@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -634,8 +638,15 @@ func TestExecuteStreamWithAuthManager_SelectedAuthCallbackReceivesAuthID(t *test
 		},
 	}, manager)
 
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	logging.SetGinRequestID(ginCtx, "1234abcd")
+
 	selectedAuthID := ""
-	ctx := WithSelectedAuthIDCallback(context.Background(), func(authID string) {
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	ctx = WithSelectedAuthIDCallback(ctx, func(authID string) {
 		selectedAuthID = authID
 	})
 	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "")
@@ -658,6 +669,14 @@ func TestExecuteStreamWithAuthManager_SelectedAuthCallbackReceivesAuthID(t *test
 	}
 	if selectedAuthID != "auth2" {
 		t.Fatalf("selectedAuthID = %q, want %q", selectedAuthID, "auth2")
+	}
+	traceID := logging.GetGinCPATraceID(ginCtx)
+	parts := strings.Split(traceID, "-")
+	if len(parts) != 3 || parts[1] != auth2.Index || parts[2] != "1234abcd" {
+		t.Fatalf("trace ID = %q, want timestamp-%s-1234abcd", traceID, auth2.Index)
+	}
+	if _, errParse := time.Parse("20060102150405", parts[0]); errParse != nil {
+		t.Fatalf("trace timestamp = %q: %v", parts[0], errParse)
 	}
 }
 
