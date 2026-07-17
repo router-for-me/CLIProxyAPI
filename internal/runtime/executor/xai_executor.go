@@ -827,22 +827,36 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 	if tokenEndpoint != "" {
 		auth.Metadata["token_endpoint"] = tokenEndpoint
 	}
-	// Preserve an explicit base_url. When missing, only backfill the official API
-	// base for using_api=true so chat stays on api.x.ai; OAuth chat (using_api=false)
-	// keeps base_url empty and resolves to CLIChatProxyBaseURL at request time.
-	// Media/websocket already fall back to DefaultAPIBaseURL when base_url is empty.
-	if xaiMetadataString(auth.Metadata, "base_url") == "" && xaiUsingAPI(auth) {
-		auth.Metadata["base_url"] = xaiauth.DefaultAPIBaseURL
-	}
 	auth.Metadata["last_refresh"] = time.Now().UTC().Format(time.RFC3339)
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
 	}
 	auth.Attributes["auth_kind"] = "oauth"
-	if strings.TrimSpace(auth.Attributes["base_url"]) == "" && xaiUsingAPI(auth) {
+	// Backfill official API base only when using_api=true and neither Attributes nor
+	// Metadata already carries a base_url. Checking via xaiCreds avoids overwriting
+	// Attributes with DefaultAPI when Metadata alone holds a custom gateway URL
+	// (Attributes is preferred by xaiCreds and would otherwise mask Metadata).
+	xaiBackfillBaseURLAfterRefresh(auth)
+	return auth, nil
+}
+
+// xaiBackfillBaseURLAfterRefresh fills DefaultAPIBaseURL when using_api is true and
+// the resolved base_url from Attributes/Metadata is empty. OAuth chat with
+// using_api=false keeps base_url empty so xaiChatBaseURL can select CLIChatProxy.
+func xaiBackfillBaseURLAfterRefresh(auth *cliproxyauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	if _, resolvedBaseURL := xaiCreds(auth); resolvedBaseURL == "" && xaiUsingAPI(auth) {
+		auth.Metadata["base_url"] = xaiauth.DefaultAPIBaseURL
 		auth.Attributes["base_url"] = xaiauth.DefaultAPIBaseURL
 	}
-	return auth, nil
 }
 
 type xaiPreparedRequest struct {
