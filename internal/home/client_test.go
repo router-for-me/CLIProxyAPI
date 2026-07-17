@@ -254,6 +254,26 @@ func TestKVSetConditionUnmetReturnsFalse(t *testing.T) {
 	}
 }
 
+func TestKVCompareAndSwapReturnsScriptResult(t *testing.T) {
+	client, commands := newRedisCommandTestClient(t, func(args []string) string {
+		if len(args) > 0 && strings.EqualFold(args[0], "EVAL") {
+			return ":1\r\n"
+		}
+		return "-ERR unexpected command\r\n"
+	})
+
+	swapped, errCAS := client.KVCompareAndSwap(context.Background(), "key", []byte("old"), true, []byte("new"), 1500*time.Millisecond)
+	if errCAS != nil {
+		t.Fatalf("KVCompareAndSwap() error = %v", errCAS)
+	}
+	if !swapped {
+		t.Fatal("KVCompareAndSwap() swapped = false, want true")
+	}
+	if lastCommand := commands.Last(); len(lastCommand) < 2 || !strings.EqualFold(lastCommand[0], "EVAL") {
+		t.Fatalf("last command = %#v, want EVAL", lastCommand)
+	}
+}
+
 func TestKVMSetUsesStableKeyOrder(t *testing.T) {
 	client, commands := newRedisCommandTestClient(t, func(args []string) string {
 		if len(args) > 0 && strings.EqualFold(args[0], "MSET") {

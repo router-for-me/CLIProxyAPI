@@ -647,6 +647,40 @@ func (c *Client) KVSetNX(ctx context.Context, key string, value []byte, ttl time
 	return c.KVSet(ctx, key, value, opts)
 }
 
+// KVCompareAndSwap atomically replaces a value only when its current state matches the expected state.
+func (c *Client) KVCompareAndSwap(ctx context.Context, key string, expected []byte, expectedExists bool, value []byte, ttl time.Duration) (bool, error) {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return false, errClient
+	}
+	const script = `
+local current = redis.call("GET", KEYS[1])
+if ARGV[1] == "1" then
+  if not current or current ~= ARGV[2] then
+    return 0
+  end
+elseif current then
+  return 0
+end
+local ttl = tonumber(ARGV[4])
+if ttl and ttl > 0 then
+  redis.call("SET", KEYS[1], ARGV[3], "PX", ttl)
+else
+  redis.call("SET", KEYS[1], ARGV[3])
+end
+return 1
+`
+	expectedFlag := "0"
+	if expectedExists {
+		expectedFlag = "1"
+	}
+	result, errEval := cmd.Eval(ctx, script, []string{key}, expectedFlag, expected, value, durationCeil(ttl, time.Millisecond)).Int64()
+	if errEval != nil {
+		return false, errEval
+	}
+	return result == 1, nil
+}
+
 func (c *Client) KVDel(ctx context.Context, keys ...string) (int64, error) {
 	if len(keys) == 0 {
 		return 0, nil
