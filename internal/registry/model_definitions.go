@@ -9,6 +9,7 @@ import (
 const (
 	codexBuiltinImage15ModelID      = "gpt-image-1.5"
 	codexBuiltinImageModelID        = "gpt-image-2"
+	kimiBuiltinK31MModelID          = "k3[1m]"
 	xaiBuiltinImageModelID          = "grok-imagine-image"
 	xaiBuiltinImageQualityModelID   = "grok-imagine-image-quality"
 	xaiBuiltinVideoModelID          = "grok-imagine-video"
@@ -72,7 +73,7 @@ func GetCodexProModels() []*ModelInfo {
 
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
 func GetKimiModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Kimi)
+	return WithKimiBuiltins(cloneModelInfos(getModels().Kimi))
 }
 
 // GetAntigravityModels returns the standard Antigravity model definitions.
@@ -117,6 +118,13 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo())
 }
 
+// WithKimiBuiltins injects hard-coded Kimi-only model definitions that should
+// not depend on remote models.json updates. Built-ins replace any matching IDs
+// already present in the provided slice.
+func WithKimiBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, kimiBuiltinK31MModelInfo())
+}
+
 // WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
@@ -140,6 +148,23 @@ func codexBuiltinImage15ModelInfo() *ModelInfo {
 		Type:        "openai",
 		DisplayName: "GPT Image 1.5",
 		Version:     codexBuiltinImage15ModelID,
+	}
+}
+
+func kimiBuiltinK31MModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                  kimiBuiltinK31MModelID,
+		Object:              "model",
+		Created:             1784073600, // 2026-07-15, same as kimi-k3
+		OwnedBy:             "moonshot",
+		Type:                "kimi",
+		DisplayName:         "Kimi K3 (1M Context)",
+		Description:         "Kimi K3 1M-context variant - Moonshot AI's next-generation flagship model with the full 1M token context window enabled",
+		ContextLength:       1048576,
+		MaxCompletionTokens: 65536,
+		Thinking: &ThinkingSupport{
+			Levels: []string{"low", "high", "max"},
+		},
 	}
 }
 

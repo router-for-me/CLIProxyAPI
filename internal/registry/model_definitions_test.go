@@ -35,6 +35,49 @@ func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
 	t.Fatalf("Vertex models do not contain %q", releaseID)
 }
 
+func TestWithKimiBuiltinsIncludesK31MModel(t *testing.T) {
+	models := WithKimiBuiltins(nil)
+
+	var found *ModelInfo
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if model.ID == kimiBuiltinK31MModelID {
+			found = model
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected Kimi builtin model %s", kimiBuiltinK31MModelID)
+	}
+	if found.ContextLength != 1048576 {
+		t.Fatalf("context_length = %d, want 1048576", found.ContextLength)
+	}
+	if found.Thinking == nil {
+		t.Fatal("thinking = nil, want level-based thinking support")
+	}
+	wantLevels := []string{"low", "high", "max"}
+	if len(found.Thinking.Levels) != len(wantLevels) {
+		t.Fatalf("thinking.levels = %v, want %v", found.Thinking.Levels, wantLevels)
+	}
+	for i, level := range wantLevels {
+		if found.Thinking.Levels[i] != level {
+			t.Fatalf("thinking.levels = %v, want %v", found.Thinking.Levels, wantLevels)
+		}
+	}
+}
+
+func TestGetKimiModelsIncludesK31MBuiltin(t *testing.T) {
+	for _, model := range GetKimiModels() {
+		if model != nil && model.ID == kimiBuiltinK31MModelID {
+			return
+		}
+	}
+
+	t.Fatalf("expected GetKimiModels to include builtin model %s", kimiBuiltinK31MModelID)
+}
+
 func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 
