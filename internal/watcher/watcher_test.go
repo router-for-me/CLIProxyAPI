@@ -1510,11 +1510,14 @@ func TestNormalizeAuthNil(t *testing.T) {
 
 // stubStore implements coreauth.Store plus watcher-specific persistence helpers.
 type stubStore struct {
+	mu              sync.Mutex
 	authDir         string
 	cfgPersisted    int32
 	authPersisted   int32
 	lastAuthMessage string
 	lastAuthPaths   []string
+	cfgDone         chan struct{}
+	authDone        chan struct{}
 }
 
 func (s *stubStore) List(context.Context) ([]*coreauth.Auth, error) { return nil, nil }
@@ -1524,15 +1527,29 @@ func (s *stubStore) Save(context.Context, *coreauth.Auth) (string, error) {
 func (s *stubStore) Delete(context.Context, string) error { return nil }
 func (s *stubStore) PersistConfig(context.Context) error {
 	atomic.AddInt32(&s.cfgPersisted, 1)
+	if s.cfgDone != nil {
+		s.cfgDone <- struct{}{}
+	}
 	return nil
 }
 func (s *stubStore) PersistAuthFiles(_ context.Context, message string, paths ...string) error {
 	atomic.AddInt32(&s.authPersisted, 1)
+	s.mu.Lock()
 	s.lastAuthMessage = message
-	s.lastAuthPaths = paths
+	s.lastAuthPaths = append([]string(nil), paths...)
+	s.mu.Unlock()
+	if s.authDone != nil {
+		s.authDone <- struct{}{}
+	}
 	return nil
 }
 func (s *stubStore) AuthDir() string { return s.authDir }
+
+func (s *stubStore) authSnapshot() (string, []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastAuthMessage, append([]string(nil), s.lastAuthPaths...)
+}
 
 func TestNewWatcherDetectsPersisterAndAuthDir(t *testing.T) {
 	tmp := t.TempDir()
@@ -1554,26 +1571,40 @@ func TestNewWatcherDetectsPersisterAndAuthDir(t *testing.T) {
 }
 
 func TestPersistConfigAndAuthAsyncInvokePersister(t *testing.T) {
+	store := &stubStore{
+		cfgDone:  make(chan struct{}, 1),
+		authDone: make(chan struct{}, 1),
+	}
 	w := &Watcher{
-		storePersister: &stubStore{},
+		storePersister: store,
 	}
 
 	w.persistConfigAsync()
 	w.persistAuthAsync("msg", " a ", "", "b ")
 
-	time.Sleep(30 * time.Millisecond)
-	store := w.storePersister.(*stubStore)
-	if atomic.LoadInt32(&store.cfgPersisted) != 1 {
-		t.Fatalf("expected PersistConfig to be called once, got %d", store.cfgPersisted)
+	select {
+	case <-store.cfgDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for PersistConfig")
 	}
-	if atomic.LoadInt32(&store.authPersisted) != 1 {
-		t.Fatalf("expected PersistAuthFiles to be called once, got %d", store.authPersisted)
+	select {
+	case <-store.authDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for PersistAuthFiles")
 	}
-	if store.lastAuthMessage != "msg" {
-		t.Fatalf("unexpected auth message: %s", store.lastAuthMessage)
+
+	if got := atomic.LoadInt32(&store.cfgPersisted); got != 1 {
+		t.Fatalf("expected PersistConfig to be called once, got %d", got)
 	}
-	if len(store.lastAuthPaths) != 2 || store.lastAuthPaths[0] != "a" || store.lastAuthPaths[1] != "b" {
-		t.Fatalf("unexpected filtered paths: %#v", store.lastAuthPaths)
+	if got := atomic.LoadInt32(&store.authPersisted); got != 1 {
+		t.Fatalf("expected PersistAuthFiles to be called once, got %d", got)
+	}
+	message, paths := store.authSnapshot()
+	if message != "msg" {
+		t.Fatalf("unexpected auth message: %s", message)
+	}
+	if len(paths) != 2 || paths[0] != "a" || paths[1] != "b" {
+		t.Fatalf("unexpected filtered paths: %#v", paths)
 	}
 }
 
@@ -1586,22 +1617,31 @@ func TestScheduleConfigReloadDebounces(t *testing.T) {
 	}
 
 	var reloads int32
+	store := &stubStore{cfgDone: make(chan struct{}, 1)}
 	w := &Watcher{
 		configPath:     cfgPath,
 		authDir:        authDir,
 		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+		storePersister: store,
 	}
 	w.SetConfig(&config.Config{AuthDir: authDir})
 
 	w.scheduleConfigReload()
 	w.scheduleConfigReload()
 
-	time.Sleep(400 * time.Millisecond)
+	select {
+	case <-store.cfgDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for debounced config reload")
+	}
 
 	if atomic.LoadInt32(&reloads) != 1 {
 		t.Fatalf("expected single debounced reload, got %d", reloads)
 	}
-	if w.lastConfigHash == "" {
+	w.clientsMutex.RLock()
+	lastConfigHash := w.lastConfigHash
+	w.clientsMutex.RUnlock()
+	if lastConfigHash == "" {
 		t.Fatal("expected lastConfigHash to be set after reload")
 	}
 }
