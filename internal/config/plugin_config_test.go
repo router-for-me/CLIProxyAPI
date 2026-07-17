@@ -117,6 +117,16 @@ plugins:
 	}
 }
 
+func TestParseConfigBytes_PluginSyncRevision(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte("plugins:\n  sync-revision: 42\n"))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if cfg.Plugins.SyncRevision != 42 {
+		t.Fatalf("Plugins.SyncRevision = %d, want 42", cfg.Plugins.SyncRevision)
+	}
+}
+
 func TestParseConfigBytes_PluginInstanceEmptyRawYAML(t *testing.T) {
 	cfg, errParse := ParseConfigBytes([]byte(`
 plugins:
