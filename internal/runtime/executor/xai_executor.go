@@ -539,13 +539,14 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 		endpointPath = xaiDefaultImageEndpointPath
 	}
 
+	payload := normalizeXAIImageRefs(req.Payload)
 	url := strings.TrimSuffix(baseURL, "/") + endpointPath
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(req.Payload))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return resp, err
 	}
 	applyXAIHeaders(httpReq, auth, token, false, "")
-	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), req.Payload)
+	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), payload)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
@@ -585,15 +586,16 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 	}
 	logXAIResolvedBaseURL(ctx, baseURL)
 
+	payload := normalizeXAIImageRefs(req.Payload)
 	method := http.MethodPost
 	endpointPath := xaiVideosGenerationsPath
-	var body io.Reader = bytes.NewReader(req.Payload)
+	var body io.Reader = bytes.NewReader(payload)
 
 	switch path := xaiVideoEndpointPath(opts); path {
 	case xaiVideosGenerationsPath, xaiVideosEditsPath, xaiVideosExtensionsPath:
 		endpointPath = path
 	default:
-		if requestID := strings.TrimSpace(gjson.GetBytes(req.Payload, "request_id").String()); requestID != "" {
+		if requestID := strings.TrimSpace(gjson.GetBytes(payload, "request_id").String()); requestID != "" {
 			method = http.MethodGet
 			endpointPath = xaiVideosPath + "/" + url.PathEscape(requestID)
 			body = nil
@@ -614,7 +616,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 			httpReq.Header.Set("x-idempotency-key", key)
 		}
 	}
-	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), req.Payload)
+	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), payload)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
@@ -1051,6 +1053,7 @@ func (e *XAIExecutor) prepareResponsesRequestToWithPreviousResponseToolOutputs(c
 	body = sanitizeXAIInputEncryptedContent(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
+	body = normalizeXAIImageRefs(body)
 
 	sessionID, errSession := xaiResolveComposerSessionID(ctx, req, opts, baseModel)
 	if errSession != nil {
@@ -1375,6 +1378,92 @@ func xaiImageEndpointPath(opts cliproxyexecutor.Options) string {
 		return xaiImagesGenerationsPath
 	}
 	return xaiDefaultImageEndpointPath
+}
+
+// normalizeXAIImageRefs rewrites OpenAI-style image object fields to the xAI
+// image API shape before the payload is sent upstream:
+//
+//	{"image":{"image_url":"https://..."}} → {"image":{"url":"https://..."}}
+//
+// Applies to image / images / reference_images anywhere in the JSON tree,
+// including nested objects and array items. Does not rewrite chat content
+// parts shaped as {"type":"image_url","image_url":{...}}.
+func normalizeXAIImageRefs(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var payload any
+	if errDecode := decoder.Decode(&payload); errDecode != nil {
+		return body
+	}
+
+	if !normalizeXAIImageRefsValue(payload) {
+		return body
+	}
+	normalized, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		return body
+	}
+	return normalized
+}
+
+func normalizeXAIImageRefsValue(value any) bool {
+	changed := false
+	switch node := value.(type) {
+	case map[string]any:
+		for key, child := range node {
+			switch key {
+			case "image":
+				changed = normalizeXAIImageRef(child) || changed
+			case "images", "reference_images":
+				if refs, ok := child.([]any); ok {
+					for _, ref := range refs {
+						changed = normalizeXAIImageRef(ref) || changed
+					}
+				}
+			}
+			changed = normalizeXAIImageRefsValue(child) || changed
+		}
+	case []any:
+		for _, child := range node {
+			changed = normalizeXAIImageRefsValue(child) || changed
+		}
+	}
+	return changed
+}
+
+func normalizeXAIImageRef(value any) bool {
+	ref, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+
+	originalURL, _ := ref["url"].(string)
+	url := strings.TrimSpace(originalURL)
+	imageURL, hasImageURL := ref["image_url"]
+	if url == "" {
+		switch imageURL := imageURL.(type) {
+		case string:
+			url = strings.TrimSpace(imageURL)
+		case map[string]any:
+			url, _ = imageURL["url"].(string)
+			url = strings.TrimSpace(url)
+		}
+	}
+	if url == "" {
+		return false
+	}
+	if url == originalURL && !hasImageURL {
+		return false
+	}
+
+	// Always emit the xAI field name and drop the OpenAI alias.
+	ref["url"] = url
+	delete(ref, "image_url")
+	return true
 }
 
 func xaiIsVideoRequest(opts cliproxyexecutor.Options) bool {

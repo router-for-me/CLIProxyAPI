@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
+	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
@@ -32,8 +34,43 @@ func (s *Service) syncHomePlugins(ctx context.Context, cfg *config.Config) (home
 		}
 		s.homePluginSyncMu.Unlock()
 	}
-	report, errSync := homeplugins.SyncWithReport(ctx, cfg, s.pluginHost)
+	if !cfg.Plugins.Enabled {
+		return homeplugins.CompletedSyncReport(homeplugins.CurrentPlatform(), nil), syncKey, false, nil
+	}
+	installedVersions, errInstalled := homeplugins.InstalledVersions(cfg)
+	if errInstalled != nil {
+		return homeplugins.CompletedSyncReport(homeplugins.CurrentPlatform(), errInstalled), syncKey, false, errInstalled
+	}
+	platform := homeplugins.CurrentPlatform()
+	request := sdkpluginstore.PluginSyncRequest{
+		SchemaVersion:     sdkpluginstore.PluginSyncSchemaVersion,
+		GOOS:              platform.GOOS,
+		GOARCH:            platform.GOARCH,
+		InstalledVersions: installedVersions,
+	}
+	defer request.Clear()
+	response, errFetch := s.fetchHomePluginSync(ctx, request)
+	if errors.Is(errFetch, home.ErrPluginSyncUnsupported) {
+		response.Clear()
+		report, errSync := homeplugins.SyncWithReport(ctx, cfg, s.pluginHost)
+		return report, syncKey, true, errSync
+	}
+	if errFetch != nil {
+		return homeplugins.CompletedSyncReport(platform, errFetch), syncKey, false, errFetch
+	}
+	defer response.Clear()
+	report, errSync := homeplugins.SyncResolvedWithReport(ctx, cfg, response.Items, response.ExpiresAt, request.InstalledVersions, s.pluginHost)
 	return report, syncKey, true, errSync
+}
+
+func (s *Service) fetchHomePluginSync(ctx context.Context, request sdkpluginstore.PluginSyncRequest) (sdkpluginstore.PluginSyncResponse, error) {
+	if s.homePluginSyncFetch != nil {
+		return s.homePluginSyncFetch(ctx, request)
+	}
+	if s.homeClient == nil {
+		return sdkpluginstore.PluginSyncResponse{}, fmt.Errorf("home client is unavailable")
+	}
+	return s.homeClient.GetPluginSync(ctx, request)
 }
 
 func (s *Service) markHomePluginsSynced(syncKey string) {
@@ -108,7 +145,7 @@ func homePluginSyncKey(cfg *config.Config) string {
 		return ""
 	}
 	hash := sha256.New()
-	_, _ = fmt.Fprintf(hash, "enabled=%t\ndir=%s\n", cfg.Plugins.Enabled, strings.TrimSpace(cfg.Plugins.Dir))
+	_, _ = fmt.Fprintf(hash, "enabled=%t\ndir=%s\nsync-revision=%d\n", cfg.Plugins.Enabled, strings.TrimSpace(cfg.Plugins.Dir), cfg.Plugins.SyncRevision)
 	ids := make([]string, 0, len(cfg.Plugins.Configs))
 	for id := range cfg.Plugins.Configs {
 		ids = append(ids, id)
