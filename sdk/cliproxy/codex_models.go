@@ -20,6 +20,7 @@ type codexModelCatalogFetcher func(context.Context, *coreauth.Auth) ([]codexauth
 
 type codexModelDiscoveryEntry struct {
 	generation uint64
+	revision   uint64
 	identity   string
 	models     []codexauth.ModelCatalogEntry
 	ready      bool
@@ -55,9 +56,9 @@ func (s *Service) stopCodexModelDiscovery() {
 	s.codexModelsMu.Unlock()
 }
 
-func (s *Service) discoveredCodexModelsForAuth(ctx context.Context, auth *coreauth.Auth) ([]*ModelInfo, bool) {
+func (s *Service) discoveredCodexModelsForAuth(ctx context.Context, auth *coreauth.Auth) ([]*ModelInfo, bool, uint64) {
 	if !s.codexModelDiscoveryEnabled(auth) {
-		return nil, false
+		return nil, false, 0
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -79,12 +80,14 @@ func (s *Service) discoveredCodexModelsForAuth(ctx context.Context, auth *coreau
 		entry.generation = s.nextCodexModelGenerationLocked()
 		entry.identity = identity
 		entry.models = nil
+		entry.revision = 0
 		entry.ready = false
 		entry.fetching = false
 		entry.attempted = false
 	}
 
 	ready := entry.ready
+	revision := entry.revision
 	cached := cloneCodexModelCatalogEntries(entry.models)
 	fetchCtx := ctx
 	if s.codexModelsCtx != nil {
@@ -100,9 +103,9 @@ func (s *Service) discoveredCodexModelsForAuth(ctx context.Context, auth *coreau
 	s.codexModelsMu.Unlock()
 
 	if !ready || len(cached) == 0 {
-		return nil, false
+		return nil, false, revision
 	}
-	return codexCatalogModelInfos(cached), true
+	return codexCatalogModelInfos(cached), true, revision
 }
 
 func (s *Service) codexModelDiscoveryEnabled(auth *coreauth.Auth) bool {
@@ -176,6 +179,17 @@ func (s *Service) codexModelDiscoveryResultCurrent(authID, identity string, gene
 	return entry != nil && entry.generation == generation && entry.identity == identity && entry.ready
 }
 
+func (s *Service) codexModelDiscoveryRevisionChanged(auth *coreauth.Auth, revision uint64) bool {
+	if s == nil || auth == nil || auth.ID == "" {
+		return false
+	}
+	identity := codexModelDiscoveryIdentity(auth)
+	s.codexModelsMu.Lock()
+	defer s.codexModelsMu.Unlock()
+	entry := s.codexModels[auth.ID]
+	return entry != nil && entry.identity == identity && entry.ready && len(entry.models) > 0 && entry.revision != revision
+}
+
 func (s *Service) finishCodexModelFetch(authID, identity string, generation uint64, models []codexauth.ModelCatalogEntry, success bool) bool {
 	if s == nil || authID == "" {
 		return false
@@ -187,8 +201,10 @@ func (s *Service) finishCodexModelFetch(authID, identity string, generation uint
 		return false
 	}
 	entry.fetching = false
+	entry.attempted = success
 	if success {
 		entry.models = cloneCodexModelCatalogEntries(models)
+		entry.revision++
 		entry.ready = true
 	}
 	return success

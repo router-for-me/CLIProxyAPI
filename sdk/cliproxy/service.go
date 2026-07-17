@@ -1960,6 +1960,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		return
 	}
 	var models []*ModelInfo
+	var codexDiscoveryRevision uint64
 	switch provider {
 	case constant.Gemini:
 		models = registry.GetGeminiModels()
@@ -2014,7 +2015,9 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		}
 		models = applyExcludedModels(models, excluded)
 	case "codex":
-		if discovered, ok := s.discoveredCodexModelsForAuth(ctx, a); ok {
+		discovered, ok, revision := s.discoveredCodexModelsForAuth(ctx, a)
+		codexDiscoveryRevision = revision
+		if ok {
 			models = discovered
 		} else {
 			codexPlanType := ""
@@ -2165,10 +2168,16 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	models = s.appendPluginModels(key, models)
 	if len(models) > 0 {
 		s.registerResolvedModelsForAuth(a, key, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
-		return
+	} else {
+		GlobalModelRegistry().UnregisterClient(a.ID)
 	}
 
-	GlobalModelRegistry().UnregisterClient(a.ID)
+	// A fast asynchronous discovery can complete before this call finishes
+	// registering its current catalog. Reconcile from the now-cached revision
+	// so older or fallback models cannot overwrite a successful discovery.
+	if provider == "codex" && s.codexModelDiscoveryRevisionChanged(a, codexDiscoveryRevision) {
+		s.registerModelsForAuthWithCache(ctx, a, compatCache)
+	}
 }
 
 // refreshModelRegistrationForAuth re-applies the latest model registration for

@@ -105,40 +105,66 @@ func TestCodexModelDiscoveryReplacesStaleFreeCatalog(t *testing.T) {
 
 func TestCodexModelDiscoveryFailureKeepsLastGoodCatalog(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
-	service := &Service{cfg: &config.Config{}, coreManager: manager}
 	auth := testCodexDiscoveryAuth("codex-last-good")
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
-
-	firstDone := make(chan struct{})
-	service.codexModelsFetch = func(context.Context, *coreauth.Auth) ([]codexauth.ModelCatalogEntry, error) {
-		close(firstDone)
-		return []codexauth.ModelCatalogEntry{{Slug: "gpt-5.6-sol"}}, nil
+	service := &Service{
+		cfg:                   &config.Config{},
+		coreManager:           manager,
+		codexModelsGeneration: 1,
+		codexModels: map[string]*codexModelDiscoveryEntry{
+			auth.ID: {
+				generation: 1,
+				revision:   1,
+				identity:   codexModelDiscoveryIdentity(auth),
+				models:     []codexauth.ModelCatalogEntry{{Slug: "gpt-5.6-sol"}},
+				ready:      true,
+				attempted:  true,
+			},
+		},
 	}
 	modelRegistry := registry.GetGlobalRegistry()
 	modelRegistry.UnregisterClient(auth.ID)
 	t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
 	service.registerModelsForAuth(context.Background(), auth)
-	waitSignal(t, firstDone, "first model discovery")
-	waitFor(t, "first model registration", func() bool {
-		return clientHasModel(modelRegistry, auth.ID, "gpt-5.6-sol")
-	})
 
 	failedDone := make(chan struct{})
+	retryDone := make(chan struct{})
+	var calls atomic.Int32
 	service.codexModelsFetch = func(context.Context, *coreauth.Auth) ([]codexauth.ModelCatalogEntry, error) {
-		close(failedDone)
-		return nil, errors.New("upstream unavailable")
+		switch calls.Add(1) {
+		case 1:
+			close(failedDone)
+			return nil, errors.New("upstream unavailable")
+		case 2:
+			close(retryDone)
+			return []codexauth.ModelCatalogEntry{{Slug: "gpt-5.6-luna"}}, nil
+		default:
+			return nil, errors.New("unexpected model discovery fetch")
+		}
 	}
 	service.invalidateCodexModelDiscovery(auth)
 	service.registerModelsForAuth(context.Background(), auth)
 	waitSignal(t, failedDone, "failed model discovery")
+	waitFor(t, "failed discovery to become retryable", func() bool {
+		return codexModelDiscoveryRetryable(service, auth.ID)
+	})
 	if !clientHasModel(modelRegistry, auth.ID, "gpt-5.6-sol") {
 		t.Fatal("failed refresh removed last-good model catalog")
 	}
+
+	service.registerModelsForAuth(context.Background(), auth)
+	waitSignal(t, retryDone, "model discovery retry")
+	waitFor(t, "retried model registration", func() bool {
+		return clientHasModel(modelRegistry, auth.ID, "gpt-5.6-luna")
+	})
+	if clientHasModel(modelRegistry, auth.ID, "gpt-5.6-sol") {
+		t.Fatal("successful retry retained the stale last-good model catalog")
+	}
 }
 
-func TestCodexModelDiscoveryFirstFailureKeepsPlanFallback(t *testing.T) {
+func TestCodexModelDiscoveryFirstFailureKeepsPlanFallbackAndRetries(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	service := &Service{cfg: &config.Config{}, coreManager: manager}
 	auth := testCodexDiscoveryAuth("codex-first-failure")
@@ -147,21 +173,43 @@ func TestCodexModelDiscoveryFirstFailureKeepsPlanFallback(t *testing.T) {
 	}
 
 	done := make(chan struct{})
+	retryDone := make(chan struct{})
+	var calls atomic.Int32
 	service.codexModelsFetch = func(context.Context, *coreauth.Auth) ([]codexauth.ModelCatalogEntry, error) {
-		close(done)
-		return nil, errors.New("upstream unavailable")
+		switch calls.Add(1) {
+		case 1:
+			close(done)
+			return nil, errors.New("upstream unavailable")
+		case 2:
+			close(retryDone)
+			return []codexauth.ModelCatalogEntry{{Slug: "gpt-5.6-sol"}}, nil
+		default:
+			return nil, errors.New("unexpected model discovery fetch")
+		}
 	}
 	modelRegistry := registry.GetGlobalRegistry()
 	modelRegistry.UnregisterClient(auth.ID)
 	t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
 	service.registerModelsForAuth(context.Background(), auth)
 	waitSignal(t, done, "failed first model discovery")
+	waitFor(t, "failed discovery to become retryable", func() bool {
+		return codexModelDiscoveryRetryable(service, auth.ID)
+	})
 
 	if clientHasModel(modelRegistry, auth.ID, "gpt-5.6-sol") {
 		t.Fatal("failed first discovery registered paid-tier model for free fallback")
 	}
 	if !clientHasModel(modelRegistry, auth.ID, "gpt-5.6-luna") {
 		t.Fatal("failed first discovery removed free plan fallback")
+	}
+
+	service.registerModelsForAuth(context.Background(), auth)
+	waitSignal(t, retryDone, "model discovery retry")
+	waitFor(t, "retried model registration", func() bool {
+		return clientHasModel(modelRegistry, auth.ID, "gpt-5.6-sol")
+	})
+	if clientHasModel(modelRegistry, auth.ID, "gpt-5.6-luna") {
+		t.Fatal("successful retry retained the plan fallback catalog")
 	}
 }
 
@@ -384,6 +432,13 @@ func clientHasModel(modelRegistry *registry.ModelRegistry, authID, modelID strin
 		}
 	}
 	return false
+}
+
+func codexModelDiscoveryRetryable(service *Service, authID string) bool {
+	service.codexModelsMu.Lock()
+	defer service.codexModelsMu.Unlock()
+	entry := service.codexModels[authID]
+	return entry != nil && !entry.fetching && !entry.attempted
 }
 
 func waitSignal(t *testing.T, signal <-chan struct{}, label string) {
