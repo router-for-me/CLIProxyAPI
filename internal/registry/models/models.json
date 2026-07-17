@@ -2092,13 +2092,9 @@
       "context_length": 131072,
       "max_completion_tokens": 32768,
       "thinking": {
-        "min": 1024,
-        "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true,
         "levels": [
           "low",
-          "medium",
           "high"
         ]
       }
@@ -2114,13 +2110,9 @@
       "context_length": 262144,
       "max_completion_tokens": 32768,
       "thinking": {
-        "min": 1024,
-        "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true,
         "levels": [
           "low",
-          "medium",
           "high"
         ]
       }
@@ -2136,13 +2128,9 @@
       "context_length": 262144,
       "max_completion_tokens": 65536,
       "thinking": {
-        "min": 1024,
-        "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true,
         "levels": [
           "low",
-          "medium",
           "high"
         ]
       }
@@ -2158,13 +2146,9 @@
       "context_length": 262144,
       "max_completion_tokens": 65536,
       "thinking": {
-        "min": 1024,
-        "max": 32000,
         "zero_allowed": false,
-        "dynamic_allowed": true,
         "levels": [
           "low",
-          "medium",
           "high"
         ]
       }
@@ -2180,14 +2164,27 @@
       "context_length": 262144,
       "max_completion_tokens": 65536,
       "thinking": {
-        "min": 1024,
-        "max": 32000,
         "zero_allowed": false,
-        "dynamic_allowed": true,
         "levels": [
           "low",
-          "medium",
           "high"
+        ]
+      }
+    },
+    {
+      "id": "kimi-k3",
+      "object": "model",
+      "created": 1784073600,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K3",
+      "description": "Kimi K3 - Moonshot AI's next-generation flagship model (~2.5T MoE) with multimodal input and 1M context",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": false,
+        "levels": [
+          "max"
         ]
       }
     }
