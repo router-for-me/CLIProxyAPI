@@ -257,6 +257,72 @@ func TestCodexModelDiscoveryDeduplicatesAndRejectsRemovedAuth(t *testing.T) {
 	}
 }
 
+func TestCodexModelDiscoveryReconciliationRejectsRemovedAuthSnapshot(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+	auth := testCodexDiscoveryAuth("codex-removed-snapshot")
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	identity := codexModelDiscoveryIdentity(auth)
+	stale := auth.Clone()
+	service.removeCodexModelDiscovery(auth.ID)
+	manager.Remove(context.Background(), auth.ID)
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "gpt-5.6-sol"}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
+
+	service.reconcileDiscoveredCodexModelRegistration(context.Background(), stale, identity, 1)
+	if models := modelRegistry.GetModelsForClient(auth.ID); len(models) != 0 {
+		t.Fatalf("removed auth retained models after stale discovery reconciliation: %#v", models)
+	}
+}
+
+func TestCodexModelDiscoveryReconciliationUsesUpdatedAuthSnapshot(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := testCodexDiscoveryAuth("codex-updated-snapshot")
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	identity := codexModelDiscoveryIdentity(auth)
+	service := &Service{
+		cfg:                   &config.Config{SDKConfig: config.SDKConfig{ForceModelPrefix: true}},
+		coreManager:           manager,
+		codexModelsGeneration: 2,
+		codexModels: map[string]*codexModelDiscoveryEntry{
+			auth.ID: {
+				generation: 2,
+				revision:   1,
+				identity:   identity,
+				models:     []codexauth.ModelCatalogEntry{{Slug: "gpt-5.6-sol"}},
+				ready:      true,
+				attempted:  true,
+			},
+		},
+	}
+	stale := auth.Clone()
+	updated := auth.Clone()
+	updated.Prefix = "updated"
+	if _, errUpdate := manager.Update(context.Background(), updated); errUpdate != nil {
+		t.Fatalf("Update() error = %v", errUpdate)
+	}
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
+
+	service.reconcileDiscoveredCodexModelRegistration(context.Background(), stale, identity, 1)
+	if !clientHasModel(modelRegistry, auth.ID, "updated/gpt-5.6-sol") {
+		t.Fatal("stale discovery reconciliation did not apply the updated auth prefix")
+	}
+	if clientHasModel(modelRegistry, auth.ID, "gpt-5.6-sol") {
+		t.Fatal("stale discovery reconciliation retained the old unprefixed route")
+	}
+}
+
 func TestCodexModelDiscoveryDisabledForLocalModeAndAPIKeys(t *testing.T) {
 	tests := []struct {
 		name string

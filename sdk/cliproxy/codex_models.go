@@ -151,18 +151,30 @@ func (s *Service) refreshDiscoveredCodexModels(ctx context.Context, auth *coreau
 		GlobalModelRegistry().UnregisterClient(auth.ID)
 		return
 	}
-	if !s.codexModelDiscoveryResultCurrent(auth.ID, identity, generation) || codexModelDiscoveryIdentity(latest) != identity {
-		s.completeModelRegistrationForAuth(ctx, latest)
+	s.reconcileDiscoveredCodexModelRegistration(ctx, latest, identity, generation)
+}
+
+func (s *Service) reconcileDiscoveredCodexModelRegistration(ctx context.Context, auth *coreauth.Auth, identity string, generation uint64) {
+	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" {
 		return
 	}
-	s.completeModelRegistrationForAuth(ctx, latest)
+	authID := auth.ID
+	if !s.codexModelDiscoveryResultCurrent(authID, identity, generation) || codexModelDiscoveryIdentity(auth) != identity {
+		current, exists := s.coreManager.GetByID(authID)
+		if !exists || current == nil || current.Disabled {
+			GlobalModelRegistry().UnregisterClient(authID)
+			return
+		}
+		auth = current
+	}
+	s.completeModelRegistrationForAuth(ctx, auth)
 
 	// An auth update can race between the pre-registration checks and the registry
 	// write. Restore the newest auth snapshot if that happened.
-	current, exists := s.coreManager.GetByID(auth.ID)
-	if !s.codexModelDiscoveryResultCurrent(auth.ID, identity, generation) || !exists || current == nil || current.Disabled || codexModelDiscoveryIdentity(current) != identity {
+	current, exists := s.coreManager.GetByID(authID)
+	if !s.codexModelDiscoveryResultCurrent(authID, identity, generation) || !exists || current == nil || current.Disabled || codexModelDiscoveryIdentity(current) != identity {
 		if !exists || current == nil || current.Disabled {
-			GlobalModelRegistry().UnregisterClient(auth.ID)
+			GlobalModelRegistry().UnregisterClient(authID)
 			return
 		}
 		s.completeModelRegistrationForAuth(ctx, current)
