@@ -735,13 +735,13 @@
       }
     },
     {
-      "id": "gemini-3.1-flash-lite-preview",
+      "id": "gemini-3.1-flash-lite",
       "object": "model",
       "created": 1776288000,
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3.1 Flash Lite Preview",
-      "name": "models/gemini-3.1-flash-lite-preview",
+      "display_name": "Gemini 3.1 Flash Lite",
+      "name": "models/gemini-3.1-flash-lite",
       "version": "3.1",
       "description": "Our smallest and most cost effective model, built for at scale usage.",
       "inputTokenLimit": 1048576,
