@@ -1187,81 +1187,78 @@ func normalizeXAIImageRefs(body []byte) []byte {
 	if !gjson.ValidBytes(body) {
 		return body
 	}
-	return normalizeXAIImageRefsAt(body, "")
-}
 
-func normalizeXAIImageRefsAt(body []byte, path string) []byte {
-	node := gjson.GetBytes(body, path)
-	if path == "" {
-		node = gjson.ParseBytes(body)
-	}
-	if !node.Exists() {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var payload any
+	if errDecode := decoder.Decode(&payload); errDecode != nil {
 		return body
 	}
 
-	if node.IsObject() {
-		node.ForEach(func(key, value gjson.Result) bool {
-			childPath := key.String()
-			if path != "" {
-				childPath = path + "." + key.String()
-			}
-			switch key.String() {
+	if !normalizeXAIImageRefsValue(payload) {
+		return body
+	}
+	normalized, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		return body
+	}
+	return normalized
+}
+
+func normalizeXAIImageRefsValue(value any) bool {
+	changed := false
+	switch node := value.(type) {
+	case map[string]any:
+		for key, child := range node {
+			switch key {
 			case "image":
-				body = normalizeXAIImageRefAtPath(body, childPath)
+				changed = normalizeXAIImageRef(child) || changed
 			case "images", "reference_images":
-				if value.IsArray() {
-					for i := range value.Array() {
-						body = normalizeXAIImageRefAtPath(body, fmt.Sprintf("%s.%d", childPath, i))
+				if refs, ok := child.([]any); ok {
+					for _, ref := range refs {
+						changed = normalizeXAIImageRef(ref) || changed
 					}
 				}
-			default:
-				if value.IsObject() || value.IsArray() {
-					body = normalizeXAIImageRefsAt(body, childPath)
-				}
 			}
-			return true
-		})
-		return body
-	}
-
-	if node.IsArray() {
-		for i := range node.Array() {
-			childPath := fmt.Sprintf("%d", i)
-			if path != "" {
-				childPath = fmt.Sprintf("%s.%d", path, i)
-			}
-			body = normalizeXAIImageRefsAt(body, childPath)
+			changed = normalizeXAIImageRefsValue(child) || changed
+		}
+	case []any:
+		for _, child := range node {
+			changed = normalizeXAIImageRefsValue(child) || changed
 		}
 	}
-	return body
+	return changed
 }
 
-func normalizeXAIImageRefAtPath(body []byte, path string) []byte {
-	ref := gjson.GetBytes(body, path)
-	if !ref.Exists() || ref.Type != gjson.JSON || !ref.IsObject() {
-		return body
+func normalizeXAIImageRef(value any) bool {
+	ref, ok := value.(map[string]any)
+	if !ok {
+		return false
 	}
 
-	url := strings.TrimSpace(ref.Get("url").String())
+	originalURL, _ := ref["url"].(string)
+	url := strings.TrimSpace(originalURL)
+	imageURL, hasImageURL := ref["image_url"]
 	if url == "" {
-		if imageURL := ref.Get("image_url"); imageURL.Exists() {
-			if imageURL.Type == gjson.String {
-				url = strings.TrimSpace(imageURL.String())
-			} else if imageURL.IsObject() {
-				url = strings.TrimSpace(imageURL.Get("url").String())
-			}
+		switch imageURL := imageURL.(type) {
+		case string:
+			url = strings.TrimSpace(imageURL)
+		case map[string]any:
+			url, _ = imageURL["url"].(string)
+			url = strings.TrimSpace(url)
 		}
 	}
 	if url == "" {
-		return body
+		return false
+	}
+	if url == originalURL && !hasImageURL {
+		return false
 	}
 
 	// Always emit the xAI field name and drop the OpenAI alias.
-	body, _ = sjson.SetBytes(body, path+".url", url)
-	if ref.Get("image_url").Exists() {
-		body, _ = sjson.DeleteBytes(body, path+".image_url")
-	}
-	return body
+	ref["url"] = url
+	delete(ref, "image_url")
+	return true
 }
 
 func xaiIsVideoRequest(opts cliproxyexecutor.Options) bool {

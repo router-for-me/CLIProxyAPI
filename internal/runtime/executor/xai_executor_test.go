@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -2299,6 +2300,42 @@ func TestNormalizeXAIImageRefsRewritesImageURLField(t *testing.T) {
 	}
 	if gjson.GetBytes(out, "content.0.url").Exists() {
 		t.Fatalf("chat content parts must not be rewritten to url; body=%s", out)
+	}
+}
+
+func TestNormalizeXAIImageRefsSupportsSpecialJSONKeys(t *testing.T) {
+	t.Parallel()
+
+	in := []byte(`{
+		"metadata.with.dot":{"image":{"image_url":"https://example.com/dot.png"}},
+		"back\\slash":{"image":{"image_url":"https://example.com/backslash.png"}},
+		"":{"image":{"image_url":"https://example.com/empty-key.png"}}
+	}`)
+	out := normalizeXAIImageRefs(in)
+
+	var payload map[string]any
+	if errUnmarshal := json.Unmarshal(out, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal normalized payload: %v", errUnmarshal)
+	}
+	for key, wantURL := range map[string]string{
+		"metadata.with.dot": "https://example.com/dot.png",
+		"back\\slash":       "https://example.com/backslash.png",
+		"":                  "https://example.com/empty-key.png",
+	} {
+		nested, ok := payload[key].(map[string]any)
+		if !ok {
+			t.Fatalf("payload[%q] = %#v, want object", key, payload[key])
+		}
+		image, ok := nested["image"].(map[string]any)
+		if !ok {
+			t.Fatalf("payload[%q].image = %#v, want object", key, nested["image"])
+		}
+		if gotURL, _ := image["url"].(string); gotURL != wantURL {
+			t.Fatalf("payload[%q].image.url = %q, want %q", key, gotURL, wantURL)
+		}
+		if _, exists := image["image_url"]; exists {
+			t.Fatalf("payload[%q].image_url should be removed", key)
+		}
 	}
 }
 
