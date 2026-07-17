@@ -27,6 +27,20 @@ type loadedPlugin struct {
 	client     pluginClient
 }
 
+type pluginIdentityKey struct {
+	id      string
+	path    string
+	version string
+}
+
+func makePluginIdentityKey(id, path, version string) pluginIdentityKey {
+	return pluginIdentityKey{
+		id:      strings.TrimSpace(id),
+		path:    cleanPluginPath(path),
+		version: strings.TrimSpace(version),
+	}
+}
+
 type modelExecutor interface {
 	ExecuteModel(context.Context, handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage)
 	ExecuteModelStream(context.Context, handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage)
@@ -60,6 +74,8 @@ type Host struct {
 	retired                map[string][]*loadedPlugin
 	loading                map[string]*pluginLoadRequest
 	fused                  map[string]string
+	fusedIdentities        map[pluginIdentityKey]uint64
+	nextFuseEpoch          uint64
 	pluginFileVersions     map[string]string
 	activePluginVersions   map[string]string
 	activePluginPaths      map[string]string
@@ -93,6 +109,7 @@ func New() *Host {
 		retired:                make(map[string][]*loadedPlugin),
 		loading:                make(map[string]*pluginLoadRequest),
 		fused:                  make(map[string]string),
+		fusedIdentities:        make(map[pluginIdentityKey]uint64),
 		pluginFileVersions:     make(map[string]string),
 		activePluginVersions:   make(map[string]string),
 		activePluginPaths:      make(map[string]string),
@@ -304,7 +321,6 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 			if replaced != nil {
 				hotReloadFields = pluginHotReloadLogFields(file.ID, file.Version, file.Path, replaced.version, replaced.path)
 				h.retireLoadedPluginLocked(replaced)
-				delete(h.fused, file.ID)
 				h.removePluginRuntimeStateLocked(file.ID)
 			}
 			h.loaded[file.ID] = lp
@@ -326,12 +342,14 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 			}
 		}
 		plugin.Metadata = clonePluginMetadata(plugin.Metadata)
+		recordVersion := strings.TrimSpace(file.Version)
 		h.mu.Lock()
 		if lp != nil {
 			lp.name = strings.TrimSpace(plugin.Metadata.Name)
 			if strings.TrimSpace(lp.version) == "" {
 				lp.version = strings.TrimSpace(plugin.Metadata.Version)
 			}
+			recordVersion = lp.version
 		}
 		h.mu.Unlock()
 		if loadedNow {
@@ -343,7 +361,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		records = append(records, capabilityRecord{
 			id:       file.ID,
 			path:     file.Path,
-			version:  file.Version,
+			version:  recordVersion,
 			priority: item.Priority,
 			meta:     plugin.Metadata,
 			plugin:   plugin,
@@ -705,9 +723,13 @@ func (h *Host) pluginIdentityCurrent(id string, path string, version string) boo
 	if h == nil {
 		return false
 	}
-	version = strings.TrimSpace(version)
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.pluginIdentityCurrentLocked(id, path, version)
+}
+
+func (h *Host) pluginIdentityCurrentLocked(id string, path string, version string) bool {
+	version = strings.TrimSpace(version)
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return false
@@ -764,6 +786,8 @@ func (h *Host) removePluginRuntimeStateLocked(id string) {
 }
 
 func (h *Host) rebuildActivePluginMapsLocked(records []capabilityRecord) {
+	previousPaths := h.activePluginPaths
+	previousVersions := h.activePluginVersions
 	h.pluginFileVersions = make(map[string]string, len(records))
 	h.activePluginVersions = make(map[string]string, len(records))
 	h.activePluginPaths = make(map[string]string, len(records))
@@ -776,6 +800,17 @@ func (h *Host) rebuildActivePluginMapsLocked(records []capabilityRecord) {
 		h.pluginFileVersions[path] = strings.TrimSpace(record.version)
 		h.activePluginVersions[id] = strings.TrimSpace(record.version)
 		h.activePluginPaths[id] = path
+	}
+	for id, path := range h.activePluginPaths {
+		previousPath := previousPaths[id]
+		if previousPath == "" {
+			continue
+		}
+		previousIdentity := makePluginIdentityKey(id, previousPath, previousVersions[id])
+		currentIdentity := makePluginIdentityKey(id, path, h.activePluginVersions[id])
+		if previousIdentity != currentIdentity {
+			delete(h.fused, id)
+		}
 	}
 }
 
@@ -792,7 +827,7 @@ func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeI
 		method = pluginabi.MethodPluginReconfigure
 	}
 
-	plugin, okCall := h.safePluginCall(ctx, lp.id, method, func() pluginapi.Plugin {
+	plugin, okCall := h.safePluginCall(ctx, lp, method, func() pluginapi.Plugin {
 		plugin, errRegister := registerRPCPlugin(ctx, h, lp.id, lp.client, method, item.ConfigYAML)
 		if errRegister != nil {
 			log.Warnf("pluginhost: plugin %s %s failed: %v", lp.id, method, errRegister)
@@ -813,10 +848,14 @@ func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeI
 	return plugin, true
 }
 
-func (h *Host) safePluginCall(ctx context.Context, id, method string, fn func() pluginapi.Plugin) (out pluginapi.Plugin, ok bool) {
+func (h *Host) safePluginCall(ctx context.Context, lp *loadedPlugin, method string, fn func() pluginapi.Plugin) (out pluginapi.Plugin, ok bool) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(id, method, recovered)
+			// Fuse using the loading plugin's own identity. During initial load
+			// and hot reload lp is not yet in h.loaded, so deriving the identity
+			// from the map would resolve the outgoing plugin and advance the
+			// wrong fuse epoch.
+			h.fuseLoadingPluginIdentity(lp.id, lp.path, lp.version, method, recovered)
 			out = pluginapi.Plugin{}
 			ok = false
 		}

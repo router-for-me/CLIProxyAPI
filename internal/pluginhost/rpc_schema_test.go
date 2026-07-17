@@ -43,6 +43,40 @@ func TestRPCCapabilitiesIncludeFrontendAuthProviderExclusive(t *testing.T) {
 	}
 }
 
+func TestRPCCapabilitiesIncludeStatefulStreamInterceptor(t *testing.T) {
+	plugin := pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+		StreamChunkInterceptor: responseInterceptorFunc{
+			interceptStreamChunk: func(context.Context, pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+				return pluginapi.StreamChunkInterceptResponse{}, nil
+			},
+		},
+		StreamChunkInterceptorStateful: true,
+	}}
+
+	caps := rpcCapabilitiesFromPlugin(plugin)
+	if !caps.StreamChunkInterceptor || !caps.StreamChunkInterceptorStateful {
+		t.Fatalf("stream capabilities = %+v, want interceptor and stateful true", caps)
+	}
+	raw, errMarshal := json.Marshal(caps)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	var decoded map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if decoded["response_stream_interceptor_stateful"] != true {
+		t.Fatalf("response_stream_interceptor_stateful = %#v, want true", decoded["response_stream_interceptor_stateful"])
+	}
+
+	withoutInterceptor := rpcCapabilitiesFromPlugin(pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+		StreamChunkInterceptorStateful: true,
+	}})
+	if withoutInterceptor.StreamChunkInterceptorStateful {
+		t.Fatal("stateful flag must be ignored without a stream interceptor")
+	}
+}
+
 func TestRPCCapabilitiesIncludeScheduler(t *testing.T) {
 	plugin := pluginapi.Plugin{
 		Capabilities: pluginapi.Capabilities{
@@ -116,6 +150,28 @@ func TestRegisterRPCPluginSendsHostSchemaVersion(t *testing.T) {
 	}
 	if string(lookup.lastLifecycle.ConfigYAML) != "mode: test" {
 		t.Fatalf("lifecycle config = %q, want input config", lookup.lastLifecycle.ConfigYAML)
+	}
+}
+
+func TestRegisterRPCPluginCopiesStatefulStreamInterceptorCapability(t *testing.T) {
+	plugin := validTestPlugin("stateful-stream")
+	plugin.Capabilities.StreamChunkInterceptor = responseInterceptorFunc{
+		interceptStreamChunk: func(context.Context, pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+			return pluginapi.StreamChunkInterceptResponse{}, nil
+		},
+	}
+	plugin.Capabilities.StreamChunkInterceptorStateful = true
+	lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
+
+	registered, errRegister := registerRPCPlugin(context.Background(), nil, "stateful-stream", lookup, pluginabi.MethodPluginRegister, nil)
+	if errRegister != nil {
+		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+	}
+	if registered.Capabilities.StreamChunkInterceptor == nil {
+		t.Fatal("StreamChunkInterceptor = nil, want RPC adapter")
+	}
+	if !registered.Capabilities.StreamChunkInterceptorStateful {
+		t.Fatal("StreamChunkInterceptorStateful = false, want copied registration capability")
 	}
 }
 

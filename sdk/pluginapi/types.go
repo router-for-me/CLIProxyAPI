@@ -107,6 +107,16 @@ type Capabilities struct {
 	ResponseInterceptor ResponseInterceptor
 	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
 	StreamChunkInterceptor StreamChunkInterceptor
+	// StreamChunkInterceptorStateful declares that the interceptor keys per-stream
+	// state on StreamChunkInterceptRequest.StreamID and only needs the heavy
+	// RequestBody, OriginalRequest, and HistoryChunks fields on the header-init
+	// call (ChunkIndex == StreamChunkHeaderInitIndex). When every active stream
+	// interceptor is stateful, the host omits those heavy fields on payload
+	// chunks, avoiding a full clone and re-serialization of the request body on
+	// every chunk. The host sends StreamChunkEndIndex when the stream finishes;
+	// the interceptor must release state for that StreamID. Ignored unless
+	// StreamChunkInterceptor is set.
+	StreamChunkInterceptorStateful bool
 	// ThinkingApplier applies validated thinking configuration to provider payloads.
 	ThinkingApplier ThinkingApplier
 	// UsagePlugin receives completed usage records.
@@ -939,8 +949,35 @@ type StreamChunkInterceptor interface {
 	InterceptStreamChunk(context.Context, StreamChunkInterceptRequest) (StreamChunkInterceptResponse, error)
 }
 
-// StreamChunkHeaderInitIndex marks the header-only stream initialization interceptor call.
-const StreamChunkHeaderInitIndex = -1
+// StreamChunkInterceptorSession pins one stream to a stable interceptor set.
+// Calls must be made in stream order, beginning with StreamChunkHeaderInitIndex
+// and ending with StreamChunkEndIndex when initialization was attempted. A
+// bootstrap retry before downstream delivery may send header-init again for the
+// same StreamID; it replaces state from the abandoned upstream attempt and
+// payload indexes restart at zero.
+type StreamChunkInterceptorSession interface {
+	InterceptStreamChunk(context.Context, StreamChunkInterceptRequest) StreamChunkInterceptResponse
+	// CanOmitHeavyFields reports whether every pinned interceptor initialized
+	// state successfully and payload calls may omit RequestBody,
+	// OriginalRequest, and HistoryChunks.
+	CanOmitHeavyFields() bool
+	// Close releases host resources pinned for this stream. It must be called
+	// exactly once by convention; implementations must tolerate repeated calls.
+	Close()
+}
+
+// StreamChunkInterceptorSessionHost opens pinned stream interceptor sessions.
+// A nil result means no stream interceptor is active for the request.
+type StreamChunkInterceptorSessionHost interface {
+	OpenStreamChunkInterceptorSession(skipPluginID string) StreamChunkInterceptorSession
+}
+
+const (
+	// StreamChunkEndIndex marks the stateful stream completion interceptor call.
+	StreamChunkEndIndex = -2
+	// StreamChunkHeaderInitIndex marks the header-only stream initialization interceptor call.
+	StreamChunkHeaderInitIndex = -1
+)
 
 // RequestTransformRequest describes a request payload transformation.
 type RequestTransformRequest struct {
@@ -1031,6 +1068,12 @@ type ResponseInterceptResponse struct {
 
 // StreamChunkInterceptRequest describes a successful stream chunk before downstream delivery.
 type StreamChunkInterceptRequest struct {
+	// StreamID is a stable identifier for the whole stream. It is identical for
+	// the header-init call and every payload chunk of the same stream, and
+	// unique across concurrent streams. Stateful interceptors can key per-stream
+	// state on it instead of hashing the request body on every chunk. Hosts that
+	// predate this field leave it empty; interceptors must fall back accordingly.
+	StreamID        string
 	SourceFormat    string
 	Model           string
 	RequestedModel  string
@@ -1042,7 +1085,8 @@ type StreamChunkInterceptRequest struct {
 	// HistoryChunks contains a bounded recent history of chunks already delivered downstream.
 	// The host currently retains at most 64 chunks and 1 MiB total history bytes.
 	HistoryChunks [][]byte
-	// ChunkIndex starts at 0 for payload chunks. StreamChunkHeaderInitIndex marks the header-only initialization call.
+	// ChunkIndex starts at 0 for payload chunks. StreamChunkHeaderInitIndex marks
+	// initialization, and StreamChunkEndIndex marks stateful stream completion.
 	ChunkIndex int
 	// Metadata is a best-effort cloned context snapshot. Treat it as read-only and JSON-like.
 	Metadata map[string]any

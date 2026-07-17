@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
@@ -23,14 +24,49 @@ type handlerInterceptorTestHost struct {
 	interceptRequestAfterAuth  func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
 	interceptResponse          func(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse
 	interceptStreamChunk       func(context.Context, pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse
+	streamSession              pluginapi.StreamChunkInterceptorSession
+}
+
+type handlerStreamInterceptorSession struct {
+	intercept func(context.Context, pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse
+	canOmit   func() bool
+	onClose   func()
+}
+
+func (s *handlerStreamInterceptorSession) InterceptStreamChunk(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+	if s != nil && s.intercept != nil {
+		return s.intercept(ctx, req)
+	}
+	return pluginapi.StreamChunkInterceptResponse{Headers: cloneHeader(req.ResponseHeaders), Body: cloneBytes(req.Body)}
+}
+
+func (s *handlerStreamInterceptorSession) CanOmitHeavyFields() bool {
+	return s != nil && s.canOmit != nil && s.canOmit()
+}
+
+func (s *handlerStreamInterceptorSession) Close() {
+	if s != nil && s.onClose != nil {
+		s.onClose()
+	}
 }
 
 type handlerInterceptorNoStreamTestHost struct {
 	*handlerInterceptorTestHost
 }
 
+type handlerSessionInterceptorTestHost struct {
+	*handlerInterceptorTestHost
+}
+
 func (h *handlerInterceptorNoStreamTestHost) HasStreamInterceptors() bool {
 	return false
+}
+
+func (h *handlerSessionInterceptorTestHost) OpenStreamChunkInterceptorSession(skipPluginID string) pluginapi.StreamChunkInterceptorSession {
+	if h == nil || h.handlerInterceptorTestHost == nil {
+		return nil
+	}
+	return h.streamSession
 }
 
 func (h *handlerInterceptorTestHost) InterceptRequestBeforeAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
@@ -657,6 +693,326 @@ func TestHandlerStreamInterceptorRewritesAndDropsChunks(t *testing.T) {
 	}
 }
 
+func TestHandlerStatefulStreamInterceptorOmitsHeavyPayloadFields(t *testing.T) {
+	model := "handler-stateful-stream-interceptor-model"
+	executor := &interceptorCaptureExecutor{
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 2)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("first")}
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("second")}
+			close(chunks)
+			return &coreexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
+	var requests []pluginapi.StreamChunkInterceptRequest
+	sessionClosed := make(chan struct{})
+	host := &handlerInterceptorTestHost{}
+	host.streamSession = &handlerStreamInterceptorSession{
+		canOmit: func() bool { return true },
+		onClose: func() { close(sessionClosed) },
+		intercept: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			requests = append(requests, pluginapi.StreamChunkInterceptRequest{
+				StreamID:        req.StreamID,
+				OriginalRequest: cloneBytes(req.OriginalRequest),
+				RequestBody:     cloneBytes(req.RequestBody),
+				Body:            cloneBytes(req.Body),
+				HistoryChunks:   cloneByteSlices(req.HistoryChunks),
+				ChunkIndex:      req.ChunkIndex,
+			})
+			return pluginapi.StreamChunkInterceptResponse{Body: cloneBytes(req.Body)}
+		},
+	}
+	handler.SetPluginHost(&handlerSessionInterceptorTestHost{handlerInterceptorTestHost: host})
+
+	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, requestBody, "")
+	for range dataChan {
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	<-sessionClosed
+
+	if len(requests) != 4 {
+		t.Fatalf("stream interceptor calls = %d, want init, two chunks, and end", len(requests))
+	}
+	streamID := requests[0].StreamID
+	if streamID == "" {
+		t.Fatal("header-init StreamID is empty")
+	}
+	if requests[0].ChunkIndex != pluginapi.StreamChunkHeaderInitIndex || len(requests[0].RequestBody) == 0 {
+		t.Fatalf("header-init request = %+v, want heavy RequestBody", requests[0])
+	}
+	for i, req := range requests[1:3] {
+		if req.StreamID != streamID {
+			t.Fatalf("chunk %d StreamID = %q, want %q", i, req.StreamID, streamID)
+		}
+		if req.ChunkIndex != i {
+			t.Fatalf("chunk %d index = %d", i, req.ChunkIndex)
+		}
+		if len(req.RequestBody) != 0 || len(req.OriginalRequest) != 0 || len(req.HistoryChunks) != 0 {
+			t.Fatalf("chunk %d retained heavy fields: request=%d original=%d history=%d", i, len(req.RequestBody), len(req.OriginalRequest), len(req.HistoryChunks))
+		}
+	}
+	if requests[3].StreamID != streamID || requests[3].ChunkIndex != pluginapi.StreamChunkEndIndex {
+		t.Fatalf("stream end request = %+v, want StreamID %q and end index", requests[3], streamID)
+	}
+}
+
+func TestHandlerStatefulStreamInterceptorFallsBackWhenSessionDisablesOmission(t *testing.T) {
+	model := "handler-stateful-stream-session-fallback-model"
+	executor := &interceptorCaptureExecutor{
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 2)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("first")}
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("second")}
+			close(chunks)
+			return &coreexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
+	var requests []pluginapi.StreamChunkInterceptRequest
+	canOmit := true
+	sessionClosed := make(chan struct{})
+	host := &handlerInterceptorTestHost{}
+	host.streamSession = &handlerStreamInterceptorSession{
+		canOmit: func() bool { return canOmit },
+		onClose: func() { close(sessionClosed) },
+		intercept: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			requests = append(requests, pluginapi.StreamChunkInterceptRequest{
+				StreamID:        req.StreamID,
+				OriginalRequest: cloneBytes(req.OriginalRequest),
+				RequestBody:     cloneBytes(req.RequestBody),
+				HistoryChunks:   cloneByteSlices(req.HistoryChunks),
+				ChunkIndex:      req.ChunkIndex,
+			})
+			if req.ChunkIndex == 0 {
+				canOmit = false
+			}
+			return pluginapi.StreamChunkInterceptResponse{Body: cloneBytes(req.Body)}
+		},
+	}
+	handler.SetPluginHost(&handlerSessionInterceptorTestHost{handlerInterceptorTestHost: host})
+
+	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, requestBody, "")
+	for range dataChan {
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	<-sessionClosed
+
+	if len(requests) != 4 {
+		t.Fatalf("stream interceptor calls = %d, want init, two chunks, and end", len(requests))
+	}
+	if len(requests[1].RequestBody) != 0 || len(requests[1].OriginalRequest) != 0 || len(requests[1].HistoryChunks) != 0 {
+		t.Fatalf("first chunk retained heavy fields before revision change: %+v", requests[1])
+	}
+	if string(requests[2].RequestBody) != string(requestBody) || string(requests[2].OriginalRequest) != string(requestBody) {
+		t.Fatalf("second chunk request fields = %q, %q, want %q", requests[2].RequestBody, requests[2].OriginalRequest, requestBody)
+	}
+	if len(requests[2].HistoryChunks) != 1 || string(requests[2].HistoryChunks[0]) != "first" {
+		t.Fatalf("second chunk history = %#v, want first payload", requests[2].HistoryChunks)
+	}
+	if requests[3].ChunkIndex != pluginapi.StreamChunkEndIndex || requests[3].StreamID != requests[0].StreamID {
+		t.Fatalf("stream end request = %+v, want end for StreamID %q", requests[3], requests[0].StreamID)
+	}
+}
+
+func TestHandlerStatefulStreamInterceptorEndsLifecycleAfterDroppedBootstrapRetry(t *testing.T) {
+	model := "handler-stateful-stream-retry-cleanup-model"
+	var executorCalls int
+	executor := &interceptorCaptureExecutor{
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			executorCalls++
+			chunks := make(chan coreexecutor.StreamChunk, 2)
+			if executorCalls == 1 {
+				chunks <- coreexecutor.StreamChunk{Payload: []byte("drop")}
+			}
+			chunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{
+				Code:       "upstream_closed",
+				Message:    "upstream closed before delivery",
+				HTTPStatus: http.StatusBadGateway,
+			}}
+			close(chunks)
+			return &coreexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{BootstrapRetries: 1},
+	})
+	retryAuth := &coreauth.Auth{
+		ID:       "handler-interceptor-retry-" + model,
+		Provider: executor.Identifier(),
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "retry-" + model + "@example.com"},
+	}
+	if _, errRegister := handler.AuthManager.Register(context.Background(), retryAuth); errRegister != nil {
+		t.Fatalf("manager.Register(retry auth): %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(retryAuth.ID, retryAuth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(retryAuth.ID)
+	})
+	var requests []pluginapi.StreamChunkInterceptRequest
+	sessionClosed := make(chan struct{})
+	host := &handlerInterceptorTestHost{}
+	host.streamSession = &handlerStreamInterceptorSession{
+		canOmit: func() bool { return true },
+		onClose: func() { close(sessionClosed) },
+		intercept: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			requests = append(requests, pluginapi.StreamChunkInterceptRequest{
+				StreamID:   req.StreamID,
+				Body:       cloneBytes(req.Body),
+				ChunkIndex: req.ChunkIndex,
+			})
+			if req.ChunkIndex == 0 {
+				return pluginapi.StreamChunkInterceptResponse{DropChunk: true}
+			}
+			return pluginapi.StreamChunkInterceptResponse{Body: cloneBytes(req.Body)}
+		},
+	}
+	handler.SetPluginHost(&handlerSessionInterceptorTestHost{handlerInterceptorTestHost: host})
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+	for chunk := range dataChan {
+		t.Fatalf("unexpected delivered payload after interceptor drop: %q", chunk)
+	}
+	var gotErr *interfaces.ErrorMessage
+	for msg := range errChan {
+		if msg != nil {
+			gotErr = msg
+		}
+	}
+	<-sessionClosed
+
+	if gotErr == nil {
+		t.Fatal("expected terminal error from retry stream")
+	}
+	if executorCalls != 2 {
+		t.Fatalf("stream attempts = %d, want 2", executorCalls)
+	}
+	if len(requests) != 3 {
+		t.Fatalf("stream interceptor calls = %d, want init, dropped payload, and end", len(requests))
+	}
+	streamID := requests[0].StreamID
+	if streamID == "" || requests[0].ChunkIndex != pluginapi.StreamChunkHeaderInitIndex {
+		t.Fatalf("header-init request = %+v", requests[0])
+	}
+	if requests[1].ChunkIndex != 0 || string(requests[1].Body) != "drop" {
+		t.Fatalf("payload request = %+v, want dropped first chunk", requests[1])
+	}
+	if requests[2].ChunkIndex != pluginapi.StreamChunkEndIndex || requests[2].StreamID != streamID {
+		t.Fatalf("stream end request = %+v, want cleanup for StreamID %q", requests[2], streamID)
+	}
+}
+
+func TestHandlerStatefulStreamInterceptorRestartsLifecycleOnSuccessfulBootstrapRetry(t *testing.T) {
+	model := "handler-stateful-stream-retry-success-model"
+	var executorCalls int
+	executor := &interceptorCaptureExecutor{
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			executorCalls++
+			chunks := make(chan coreexecutor.StreamChunk, 2)
+			if executorCalls == 1 {
+				chunks <- coreexecutor.StreamChunk{Payload: []byte("drop")}
+				chunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{
+					Code:       "upstream_closed",
+					Message:    "upstream closed before delivery",
+					HTTPStatus: http.StatusBadGateway,
+				}}
+			} else {
+				chunks <- coreexecutor.StreamChunk{Payload: []byte("retry")}
+			}
+			close(chunks)
+			return &coreexecutor.StreamResult{
+				Headers: http.Header{"X-Upstream-Attempt": []string{fmt.Sprintf("%d", executorCalls)}},
+				Chunks:  chunks,
+			}, nil
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{
+		PassthroughHeaders: true,
+		Streaming:          sdkconfig.StreamingConfig{BootstrapRetries: 1},
+	})
+	retryAuth := &coreauth.Auth{
+		ID:       "handler-interceptor-retry-" + model,
+		Provider: executor.Identifier(),
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "retry-" + model + "@example.com"},
+	}
+	if _, errRegister := handler.AuthManager.Register(context.Background(), retryAuth); errRegister != nil {
+		t.Fatalf("manager.Register(retry auth): %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(retryAuth.ID, retryAuth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(retryAuth.ID)
+	})
+	var requests []pluginapi.StreamChunkInterceptRequest
+	sessionClosed := make(chan struct{})
+	host := &handlerInterceptorTestHost{}
+	host.streamSession = &handlerStreamInterceptorSession{
+		canOmit: func() bool { return true },
+		onClose: func() { close(sessionClosed) },
+		intercept: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			requests = append(requests, pluginapi.StreamChunkInterceptRequest{
+				StreamID:      req.StreamID,
+				Body:          cloneBytes(req.Body),
+				HistoryChunks: cloneByteSlices(req.HistoryChunks),
+				ChunkIndex:    req.ChunkIndex,
+			})
+			if string(req.Body) == "drop" {
+				return pluginapi.StreamChunkInterceptResponse{DropChunk: true}
+			}
+			return pluginapi.StreamChunkInterceptResponse{Body: cloneBytes(req.Body)}
+		},
+	}
+	handler.SetPluginHost(&handlerSessionInterceptorTestHost{handlerInterceptorTestHost: host})
+
+	dataChan, upstreamHeaders, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+	var delivered []byte
+	for chunk := range dataChan {
+		delivered = append(delivered, chunk...)
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	<-sessionClosed
+	if got := upstreamHeaders.Get("X-Upstream-Attempt"); got != "2" {
+		t.Fatalf("returned upstream headers = attempt %q, want successful retry attempt 2", got)
+	}
+
+	if string(delivered) != "retry" {
+		t.Fatalf("delivered payload = %q, want retry", delivered)
+	}
+	if executorCalls != 2 {
+		t.Fatalf("stream attempts = %d, want 2", executorCalls)
+	}
+	if len(requests) != 5 {
+		t.Fatalf("stream interceptor calls = %d, want init, dropped payload, retry init, retry payload, and end", len(requests))
+	}
+	wantIndexes := []int{pluginapi.StreamChunkHeaderInitIndex, 0, pluginapi.StreamChunkHeaderInitIndex, 0, pluginapi.StreamChunkEndIndex}
+	for i, wantIndex := range wantIndexes {
+		if requests[i].ChunkIndex != wantIndex {
+			t.Fatalf("call %d chunk index = %d, want %d", i, requests[i].ChunkIndex, wantIndex)
+		}
+		if requests[i].StreamID != requests[0].StreamID {
+			t.Fatalf("call %d StreamID = %q, want %q", i, requests[i].StreamID, requests[0].StreamID)
+		}
+	}
+	if len(requests[3].HistoryChunks) != 0 {
+		t.Fatalf("retry payload history = %#v, want empty history for restarted upstream", requests[3].HistoryChunks)
+	}
+}
+
 func TestHandlerStreamInterceptorInitializesHeadersBeforeReturn(t *testing.T) {
 	model := "handler-interceptor-stream-header-before-return-model"
 	initStarted := make(chan struct{})
@@ -794,7 +1150,71 @@ func TestAppendStreamInterceptorHistoryBoundsRetainedChunks(t *testing.T) {
 	}
 }
 
-func TestHandlerStreamInterceptorKeepsReturnedHeadersStableAfterFirstPayload(t *testing.T) {
+func TestStreamFinalizerContextPreservesValuesWithoutCancellation(t *testing.T) {
+	type contextKey string
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), contextKey("request"), "value"))
+	cancel()
+
+	finalizerCtx := streamFinalizerContext(ctx)
+	if got := finalizerCtx.Value(contextKey("request")); got != "value" {
+		t.Fatalf("finalizer context value = %#v, want preserved request value", got)
+	}
+	if err := finalizerCtx.Err(); err != nil {
+		t.Fatalf("finalizer context error = %v, want cancellation detached", err)
+	}
+}
+
+func TestHandlerStreamChannelsCloseBeforeBlockedSessionCleanup(t *testing.T) {
+	model := "handler-stream-blocked-cleanup-model"
+	executor := &interceptorCaptureExecutor{
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 1)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("payload")}
+			close(chunks)
+			return &coreexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	}
+	endStarted := make(chan struct{})
+	allowEnd := make(chan struct{})
+	defer close(allowEnd)
+	host := &handlerInterceptorTestHost{}
+	host.streamSession = &handlerStreamInterceptorSession{
+		canOmit: func() bool { return true },
+		intercept: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			if req.ChunkIndex == pluginapi.StreamChunkEndIndex {
+				close(endStarted)
+				<-allowEnd
+			}
+			return pluginapi.StreamChunkInterceptResponse{Body: cloneBytes(req.Body)}
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
+	handler.SetPluginHost(&handlerSessionInterceptorTestHost{handlerInterceptorTestHost: host})
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+	if chunk := <-dataChan; string(chunk) != "payload" {
+		t.Fatalf("stream payload = %q, want payload", chunk)
+	}
+	<-endStarted
+	select {
+	case _, ok := <-dataChan:
+		if ok {
+			t.Fatal("data channel produced an extra payload")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("data channel remained open while session cleanup was blocked")
+	}
+	select {
+	case _, ok := <-errChan:
+		if ok {
+			t.Fatal("error channel remained open with an unexpected value")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("error channel remained open while session cleanup was blocked")
+	}
+}
+
+func TestHandlerStreamInterceptorKeepsReturnedHeadersStableAfterReturn(t *testing.T) {
 	model := "handler-interceptor-stream-stable-headers-model"
 	releaseSecond := make(chan struct{})
 	executor := &interceptorCaptureExecutor{
@@ -832,6 +1252,9 @@ func TestHandlerStreamInterceptorKeepsReturnedHeadersStableAfterFirstPayload(t *
 	})
 
 	dataChan, upstreamHeaders, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+	if upstreamHeaders.Get("X-Chunk") != "first" || upstreamHeaders.Get("X-Stage") != "init" {
+		t.Fatalf("upstream headers on return = %#v, want first transformed chunk headers", upstreamHeaders)
+	}
 	firstChunk, ok := <-dataChan
 	if !ok {
 		t.Fatal("data channel closed before first chunk")
