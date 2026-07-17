@@ -129,6 +129,12 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		config.Level = ""
 	}
 
+	// Model-declared level aliases resolve before support checks, so a mapped
+	// level is never rejected as unsupported on strict same-family paths.
+	if config.Mode == ModeLevel {
+		config.Level = applyLevelMapping(config.Level, modelInfo)
+	}
+
 	if len(support.Levels) > 0 && config.Mode == ModeLevel {
 		if !isLevelSupported(string(config.Level), support.Levels) {
 			if allowClampUnsupported {
@@ -239,9 +245,40 @@ func convertAutoToMidRange(config ThinkingConfig, support *registry.ThinkingSupp
 // standardLevelOrder defines the canonical ordering of thinking levels from lowest to highest.
 var standardLevelOrder = []ThinkingLevel{LevelMinimal, LevelLow, LevelMedium, LevelHigh, LevelXHigh, LevelMax}
 
+// applyLevelMapping resolves a requested level through the model's LevelMapping
+// (case-insensitive, single hop) and returns the mapped level. It returns the
+// input unchanged when the model defines no mapping for it.
+func applyLevelMapping(level ThinkingLevel, modelInfo *registry.ModelInfo) ThinkingLevel {
+	if modelInfo == nil || modelInfo.Thinking == nil || len(modelInfo.Thinking.LevelMapping) == 0 {
+		return level
+	}
+	key := strings.ToLower(strings.TrimSpace(string(level)))
+	if key == "" {
+		return level
+	}
+	for from, to := range modelInfo.Thinking.LevelMapping {
+		if strings.ToLower(strings.TrimSpace(from)) != key {
+			continue
+		}
+		mapped := ThinkingLevel(strings.ToLower(strings.TrimSpace(to)))
+		if mapped == "" || mapped == ThinkingLevel(key) {
+			return level
+		}
+		log.WithFields(log.Fields{
+			"model":          modelInfo.ID,
+			"original_value": key,
+			"mapped_to":      string(mapped),
+		}).Debug("thinking: level mapped via model level_mapping |")
+		return mapped
+	}
+	return level
+}
+
 // clampLevel clamps the given level to the nearest supported level.
-// On tie, prefers the lower level.
+// Model-declared LevelMapping aliases are applied first; then, on tie,
+// prefers the lower level.
 func clampLevel(level ThinkingLevel, modelInfo *registry.ModelInfo, provider string) ThinkingLevel {
+	level = applyLevelMapping(level, modelInfo)
 	model := "unknown"
 	var supported []string
 	if modelInfo != nil {

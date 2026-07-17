@@ -164,6 +164,14 @@ func kimiBuiltinK31MModelInfo() *ModelInfo {
 		MaxCompletionTokens: 65536,
 		Thinking: &ThinkingSupport{
 			Levels: []string{"low", "high", "max"},
+			// Kimi's K3 guidance maps Claude Code's medium/xhigh efforts upward
+			// (medium -> high, xhigh -> max) rather than clamping them down to
+			// the nearest lower supported level.
+			// https://www.kimi.com/code/docs/third-party-tools/other-coding-agents.html
+			LevelMapping: map[string]string{
+				"medium": "high",
+				"xhigh":  "max",
+			},
 		},
 	}
 }

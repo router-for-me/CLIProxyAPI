@@ -66,6 +66,15 @@ func TestWithKimiBuiltinsIncludesK31MModel(t *testing.T) {
 			t.Fatalf("thinking.levels = %v, want %v", found.Thinking.Levels, wantLevels)
 		}
 	}
+	wantMapping := map[string]string{"medium": "high", "xhigh": "max"}
+	if len(found.Thinking.LevelMapping) != len(wantMapping) {
+		t.Fatalf("thinking.level_mapping = %v, want %v", found.Thinking.LevelMapping, wantMapping)
+	}
+	for from, to := range wantMapping {
+		if found.Thinking.LevelMapping[from] != to {
+			t.Fatalf("thinking.level_mapping = %v, want %v", found.Thinking.LevelMapping, wantMapping)
+		}
+	}
 }
 
 func TestGetKimiModelsIncludesK31MBuiltin(t *testing.T) {
