@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -609,6 +610,13 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 // Refresh is a no-op for API-key based compatibility providers.
 func (e *OpenAICompatExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("openai compat executor: refresh called")
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "copilot") {
+		refreshed, err := e.refreshCopilotAuth(ctx, auth)
+		if err == nil {
+			return refreshed, nil
+		}
+		return auth, err
+	}
 	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
 		return refreshed, err
 	}
@@ -741,7 +749,64 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
 	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "copilot") {
+		if apiKey == "" {
+			apiKey = metadataString(auth.Metadata, "access_token")
+		}
+		if baseURL == "" {
+			baseURL = metadataString(auth.Metadata, "base_url")
+		}
+		if baseURL == "" {
+			baseURL = copilot.DefaultEndpointURL
+		}
+	}
 	return
+}
+
+func (e *OpenAICompatExecutor) refreshCopilotAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if auth == nil {
+		return nil, fmt.Errorf("copilot auth is nil")
+	}
+	githubAccessToken := metadataString(auth.Metadata, "github_access_token")
+	if githubAccessToken == "" {
+		githubAccessToken = metadataString(auth.Metadata, "github_token")
+	}
+	if githubAccessToken == "" {
+		return auth, nil
+	}
+	authSvc := copilot.NewAuth(e.cfg, auth.ProxyURL)
+	sessionToken, err := authSvc.FetchSessionToken(ctx, githubAccessToken)
+	if err != nil {
+		return auth, err
+	}
+	availableModels, errModels := authSvc.FetchAvailableModels(ctx, sessionToken.Token, sessionToken.Endpoint)
+	if errModels != nil {
+		log.Debugf("openai compat executor: copilot fetch available models failed: %v", errModels)
+	}
+	updated := auth.Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = make(map[string]any)
+	}
+	updated.Metadata["type"] = "copilot"
+	updated.Metadata["auth_kind"] = "oauth"
+	updated.Metadata["github_access_token"] = githubAccessToken
+	updated.Metadata["access_token"] = sessionToken.Token
+	updated.Metadata["expires_at"] = sessionToken.ExpiresAt.UTC().Format(time.RFC3339)
+	updated.Metadata["base_url"] = sessionToken.Endpoint
+	updated.Metadata["last_refresh"] = time.Now().UTC().Format(time.RFC3339)
+	if _, ok := updated.Metadata["headers"]; !ok {
+		updated.Metadata["headers"] = copilot.DefaultRequestHeaders()
+	}
+	if len(availableModels) > 0 {
+		updated.Metadata["available_models"] = availableModels
+	}
+	if updated.Attributes == nil {
+		updated.Attributes = make(map[string]string)
+	}
+	updated.Attributes["api_key"] = sessionToken.Token
+	updated.Attributes["base_url"] = sessionToken.Endpoint
+	cliproxyauth.ApplyCustomHeadersFromMetadata(updated)
+	return updated, nil
 }
 
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {

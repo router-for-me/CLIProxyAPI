@@ -205,6 +205,21 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		}
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
+	if provider == "copilot" {
+		if token, ok := metadata["access_token"].(string); ok {
+			if token = strings.TrimSpace(token); token != "" {
+				a.Attributes["api_key"] = token
+			}
+		}
+		if baseURL, ok := metadata["base_url"].(string); ok {
+			if baseURL = strings.TrimSpace(baseURL); baseURL != "" {
+				a.Attributes["base_url"] = baseURL
+			}
+		}
+		if _, ok := a.Attributes["base_url"]; !ok {
+			a.Attributes["base_url"] = "https://api.githubcopilot.com"
+		}
+	}
 	coreauth.SetOAuthModelAliasesAttribute(a, perAccountModelAliases)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	// For codex auth files, extract plan_type from the JWT id_token.

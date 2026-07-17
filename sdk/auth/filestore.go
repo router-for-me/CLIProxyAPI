@@ -338,6 +338,21 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
+	if strings.EqualFold(provider, "copilot") {
+		if token, ok := metadata["access_token"].(string); ok {
+			if token = strings.TrimSpace(token); token != "" {
+				auth.Attributes["api_key"] = token
+			}
+		}
+		if baseURL, ok := metadata["base_url"].(string); ok {
+			if baseURL = strings.TrimSpace(baseURL); baseURL != "" {
+				auth.Attributes["base_url"] = baseURL
+			}
+		}
+		if _, ok := auth.Attributes["base_url"]; !ok {
+			auth.Attributes["base_url"] = "https://api.githubcopilot.com"
+		}
+	}
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return []*cliproxyauth.Auth{auth}, nil
 }

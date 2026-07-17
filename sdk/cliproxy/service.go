@@ -2036,6 +2036,9 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case "copilot":
+		models = resolveCopilotModelsForAuth(a)
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -2403,6 +2406,99 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 		}
 	}
 	return filtered
+}
+
+func resolveCopilotModelsForAuth(auth *coreauth.Auth) []*ModelInfo {
+	defaultModels := registry.GetCodexProModels()
+	modelIDs := copilotAvailableModelIDs(auth)
+	if len(modelIDs) == 0 {
+		return defaultModels
+	}
+	catalog := copilotKnownModelsByID()
+	models := make([]*ModelInfo, 0, len(modelIDs))
+	for _, modelID := range modelIDs {
+		if model, ok := catalog[modelID]; ok && model != nil {
+			clone := *model
+			models = append(models, &clone)
+			continue
+		}
+		models = append(models, &ModelInfo{
+			ID:          modelID,
+			Object:      "model",
+			OwnedBy:     "openai",
+			Type:        "openai",
+			DisplayName: modelID,
+			Version:     modelID,
+		})
+	}
+	if len(models) == 0 {
+		return defaultModels
+	}
+	return models
+}
+
+func copilotAvailableModelIDs(auth *coreauth.Auth) []string {
+	if auth == nil || auth.Metadata == nil {
+		return nil
+	}
+	raw, ok := auth.Metadata["available_models"]
+	if !ok || raw == nil {
+		return nil
+	}
+
+	seen := map[string]struct{}{}
+	models := make([]string, 0)
+	add := func(modelID string) {
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" {
+			return
+		}
+		if _, ok := seen[modelID]; ok {
+			return
+		}
+		seen[modelID] = struct{}{}
+		models = append(models, modelID)
+	}
+
+	switch value := raw.(type) {
+	case []string:
+		for _, modelID := range value {
+			add(modelID)
+		}
+	case []any:
+		for _, item := range value {
+			if modelID, ok := item.(string); ok {
+				add(modelID)
+			}
+		}
+	case string:
+		for _, item := range strings.Split(value, ",") {
+			add(item)
+		}
+	}
+	return models
+}
+
+func copilotKnownModelsByID() map[string]*ModelInfo {
+	models := make(map[string]*ModelInfo)
+	for _, catalog := range [][]*ModelInfo{
+		registry.GetCodexFreeModels(),
+		registry.GetCodexTeamModels(),
+		registry.GetCodexPlusModels(),
+		registry.GetCodexProModels(),
+	} {
+		for _, model := range catalog {
+			if model == nil {
+				continue
+			}
+			modelID := strings.TrimSpace(model.ID)
+			if modelID == "" {
+				continue
+			}
+			models[modelID] = model
+		}
+	}
+	return models
 }
 
 func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix bool) []*ModelInfo {

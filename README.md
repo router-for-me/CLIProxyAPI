@@ -109,6 +109,7 @@ PackyCode provides special discounts for our software users: register using <a h
 
 - OpenAI/Gemini/Claude/Grok compatible API endpoints for CLI models
 - OpenAI Codex support (GPT models) via OAuth login
+- GitHub Copilot support (GPT models) via OAuth login
 - Claude Code support via OAuth login
 - Grok Build support via OAuth login
 - Streaming, non-streaming, and WebSocket responses where supported

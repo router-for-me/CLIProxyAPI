@@ -314,3 +314,41 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 		t.Fatalf("fetched-only model should not be registered: %#v", fetchedOnlyModel)
 	}
 }
+
+func TestRegisterModelsForAuth_CopilotUsesAvailableModelsMetadata(t *testing.T) {
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "auth-copilot-models",
+		Provider: "copilot",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"available_models": []any{"gpt-5.4-mini", "gpt-5.6-terra"},
+		},
+	}
+
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	models := modelRegistry.GetModelsForClient(auth.ID)
+	if len(models) != 2 {
+		t.Fatalf("registered model count = %d, want 2", len(models))
+	}
+
+	got := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		got[strings.TrimSpace(model.ID)] = struct{}{}
+	}
+	for _, want := range []string{"gpt-5.4-mini", "gpt-5.6-terra"} {
+		if _, ok := got[want]; !ok {
+			t.Fatalf("missing expected model %q, got=%v", want, got)
+		}
+	}
+}
