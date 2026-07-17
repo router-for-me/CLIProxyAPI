@@ -41,6 +41,27 @@ jobs:
               return;
             }
 
+            let hasDesiredBase = true;
+            try {
+              await github.rest.repos.getBranch({
+                owner,
+                repo,
+                branch: desiredBase,
+              });
+            } catch (error) {
+              if (error.status === 404) {
+                hasDesiredBase = false;
+              } else {
+                core.setFailed(`Failed to verify branch ${desiredBase}: ${error.message}`);
+                return;
+              }
+            }
+
+            if (!hasDesiredBase) {
+              core.warning(`Branch ${desiredBase} does not exist; skipping PR #${prNumber} retarget.`);
+              return;
+            }
+
             core.info(`Retargeting PR #${prNumber} base from ${baseRef} to ${desiredBase}.`);
 
             try {
