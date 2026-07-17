@@ -1413,6 +1413,68 @@ func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorCompactOAuthUsesOfficialAPIHeadersNotCLIProxy(t *testing.T) {
+	var gotPath string
+	var gotHost string
+	var gotTokenAuth string
+	var gotClientVersion string
+	var gotUserAgent string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotHost = r.Host
+		gotTokenAuth = r.Header.Get(xaiTokenAuthHeader)
+		gotClientVersion = r.Header.Get(xaiClientVersionHeader)
+		gotUserAgent = r.Header.Get("User-Agent")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque-out"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+			// Custom base is honored for both chat and compact; this asserts that
+			// OAuth compact uses standard API headers, not CLI chat-proxy identity.
+			"base_url": server.URL,
+			"api_key":  "oauth-token",
+		},
+	}
+	if compactBase := xaiCompactBaseURL(auth); compactBase != server.URL {
+		t.Fatalf("xaiCompactBaseURL() = %q, want %q", compactBase, server.URL)
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.5",
+		Payload: []byte(`{"model":"grok-4.5","input":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Alt:          "responses/compact",
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute compact error: %v", err)
+	}
+	if gotPath != "/responses/compact" {
+		t.Fatalf("path = %q, want /responses/compact", gotPath)
+	}
+	wantHost := strings.TrimPrefix(strings.TrimPrefix(server.URL, "https://"), "http://")
+	if gotHost != wantHost {
+		t.Fatalf("host = %q, want %q", gotHost, wantHost)
+	}
+	if gotTokenAuth != "" {
+		t.Fatalf("%s = %q, want empty on compact (not CLI proxy)", xaiTokenAuthHeader, gotTokenAuth)
+	}
+	if gotClientVersion != "" {
+		t.Fatalf("%s = %q, want empty on compact", xaiClientVersionHeader, gotClientVersion)
+	}
+	if strings.Contains(gotUserAgent, "xai-grok-workspace/") {
+		t.Fatalf("User-Agent = %q, want no CLI workspace UA on compact", gotUserAgent)
+	}
+}
+
 func TestXAIExecutorCompactClearsReplayBeforePostCompactTurn(t *testing.T) {
 	internalcache.ClearXAIReasoningReplayCache()
 	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
@@ -3929,6 +3991,93 @@ func TestXAIChatBaseURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := xaiChatBaseURL(tt.auth); got != tt.want {
 				t.Fatalf("xaiChatBaseURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestXAICompactBaseURL(t *testing.T) {
+	tests := []struct {
+		name string
+		auth *cliproxyauth.Auth
+		want string
+	}{
+		{
+			name: "empty base url defaults to official api",
+			auth: &cliproxyauth.Auth{Provider: "xai"},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "OAuth official default stays on official api for compact",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind": "oauth",
+					"base_url":  xaiauth.DefaultAPIBaseURL,
+				},
+			},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "metadata OAuth official default stays on official api for compact",
+			auth: &cliproxyauth.Auth{
+				Metadata: map[string]any{
+					"auth_kind": "oauth",
+					"base_url":  xaiauth.DefaultAPIBaseURL,
+				},
+			},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "using_api false official default stays on official api for compact",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"base_url":      xaiauth.DefaultAPIBaseURL,
+					xaiUsingAPIAttr: "false",
+				},
+			},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "explicit CLI chat proxy is rewritten to official api for compact",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind": "oauth",
+					"base_url":  xaiauth.CLIChatProxyBaseURL,
+				},
+			},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "explicit CLI chat proxy trailing slash is rewritten",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"base_url": xaiauth.CLIChatProxyBaseURL + "/",
+				},
+			},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "custom gateway is honored for compact",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind": "oauth",
+					"base_url":  "https://gateway.example.com/v1",
+				},
+			},
+			want: "https://gateway.example.com/v1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := xaiCompactBaseURL(tt.auth)
+			if got != tt.want {
+				t.Fatalf("xaiCompactBaseURL() = %q, want %q", got, tt.want)
+			}
+			// Chat may still rewrite OAuth defaults to CLI proxy; compact must not.
+			chat := xaiChatBaseURL(tt.auth)
+			if xaiIsCLIChatProxyBaseURL(chat) && xaiIsCLIChatProxyBaseURL(got) {
+				t.Fatalf("compact base unexpectedly pinned to CLI chat proxy: chat=%q compact=%q", chat, got)
 			}
 		})
 	}
