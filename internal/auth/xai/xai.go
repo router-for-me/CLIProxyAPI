@@ -185,10 +185,13 @@ func (a *XAIAuth) WaitForAuthorization(ctx context.Context, deviceCode *DeviceCo
 	if deviceCode != nil {
 		tokenEndpoint = strings.TrimSpace(deviceCode.TokenEndpoint)
 	}
+	// Leave BaseURL empty so each transport picks its channel default:
+	// chat (using_api=false) → CLIChatProxyBaseURL, media/websocket → DefaultAPIBaseURL.
+	// Operators can set base_url and/or using_api=true on the auth file to override.
 	return &AuthBundle{
 		TokenData:     *tokenData,
 		LastRefresh:   time.Now().UTC().Format(time.RFC3339),
-		BaseURL:       DefaultAPIBaseURL,
+		BaseURL:       "",
 		TokenEndpoint: tokenEndpoint,
 	}, nil
 }
@@ -416,17 +419,20 @@ func (a *XAIAuth) CreateTokenStorage(bundle *AuthBundle) *TokenStorage {
 		return nil
 	}
 	return &TokenStorage{
-		Type:          "xai",
-		AccessToken:   bundle.TokenData.AccessToken,
-		RefreshToken:  bundle.TokenData.RefreshToken,
-		IDToken:       bundle.TokenData.IDToken,
-		TokenType:     bundle.TokenData.TokenType,
-		ExpiresIn:     bundle.TokenData.ExpiresIn,
-		Expire:        bundle.TokenData.Expire,
-		LastRefresh:   bundle.LastRefresh,
-		Email:         strings.TrimSpace(bundle.TokenData.Email),
-		Subject:       bundle.TokenData.Subject,
-		BaseURL:       firstNonEmpty(bundle.BaseURL, DefaultAPIBaseURL),
+		Type:         "xai",
+		AccessToken:  bundle.TokenData.AccessToken,
+		RefreshToken: bundle.TokenData.RefreshToken,
+		IDToken:      bundle.TokenData.IDToken,
+		TokenType:    bundle.TokenData.TokenType,
+		ExpiresIn:    bundle.TokenData.ExpiresIn,
+		Expire:       bundle.TokenData.Expire,
+		LastRefresh:  bundle.LastRefresh,
+		Email:        strings.TrimSpace(bundle.TokenData.Email),
+		Subject:      bundle.TokenData.Subject,
+		// Do not invent DefaultAPIBaseURL here: empty means channel defaults
+		// (chat → CLI proxy for OAuth, media/WS → official API). Explicit values
+		// (including CLIChatProxyBaseURL or DefaultAPIBaseURL) are preserved.
+		BaseURL:       strings.TrimSpace(bundle.BaseURL),
 		RedirectURI:   bundle.RedirectURI,
 		TokenEndpoint: bundle.TokenEndpoint,
 		AuthKind:      "oauth",

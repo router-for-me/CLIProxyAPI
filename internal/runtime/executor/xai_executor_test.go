@@ -3794,6 +3794,75 @@ func TestXAIBaseURLSource(t *testing.T) {
 	}
 }
 
+func TestXAIBackfillBaseURLAfterRefresh(t *testing.T) {
+	const customGateway = "https://custom-xai-gateway.example/v1"
+
+	t.Run("preserves metadata-only custom base_url when using_api true", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				xaiUsingAPIAttr: "true",
+			},
+			Metadata: map[string]any{
+				"base_url": customGateway,
+			},
+		}
+		xaiBackfillBaseURLAfterRefresh(auth)
+		if got := strings.TrimSpace(auth.Attributes["base_url"]); got != "" {
+			t.Fatalf("Attributes base_url = %q, want empty (must not mask Metadata custom gateway)", got)
+		}
+		if got := xaiMetadataString(auth.Metadata, "base_url"); got != customGateway {
+			t.Fatalf("Metadata base_url = %q, want %q", got, customGateway)
+		}
+		if _, resolved := xaiCreds(auth); resolved != customGateway {
+			t.Fatalf("xaiCreds base_url = %q, want %q", resolved, customGateway)
+		}
+	})
+
+	t.Run("backfills both when empty and using_api true", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{
+			Attributes: map[string]string{xaiUsingAPIAttr: "true"},
+			Metadata:   map[string]any{"auth_kind": "oauth"},
+		}
+		xaiBackfillBaseURLAfterRefresh(auth)
+		if got := strings.TrimSpace(auth.Attributes["base_url"]); got != xaiauth.DefaultAPIBaseURL {
+			t.Fatalf("Attributes base_url = %q, want %q", got, xaiauth.DefaultAPIBaseURL)
+		}
+		if got := xaiMetadataString(auth.Metadata, "base_url"); got != xaiauth.DefaultAPIBaseURL {
+			t.Fatalf("Metadata base_url = %q, want %q", got, xaiauth.DefaultAPIBaseURL)
+		}
+	})
+
+	t.Run("does not backfill when using_api false oauth", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				"auth_kind":     "oauth",
+				xaiUsingAPIAttr: "false",
+			},
+			Metadata: map[string]any{"auth_kind": "oauth"},
+		}
+		xaiBackfillBaseURLAfterRefresh(auth)
+		if got := strings.TrimSpace(auth.Attributes["base_url"]); got != "" {
+			t.Fatalf("Attributes base_url = %q, want empty", got)
+		}
+		if got := xaiMetadataString(auth.Metadata, "base_url"); got != "" {
+			t.Fatalf("Metadata base_url = %q, want empty", got)
+		}
+	})
+
+	t.Run("preserves attributes custom base_url", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				"base_url":      customGateway,
+				xaiUsingAPIAttr: "true",
+			},
+		}
+		xaiBackfillBaseURLAfterRefresh(auth)
+		if got := strings.TrimSpace(auth.Attributes["base_url"]); got != customGateway {
+			t.Fatalf("Attributes base_url = %q, want %q", got, customGateway)
+		}
+	})
+}
+
 func TestXAIChatBaseURL(t *testing.T) {
 	tests := []struct {
 		name string
@@ -3922,6 +3991,51 @@ func TestXAIChatBaseURL(t *testing.T) {
 				},
 			},
 			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "OAuth with empty base_url defaults to chat proxy",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"auth_kind": "oauth"},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "OAuth metadata empty base_url defaults to chat proxy",
+			auth: &cliproxyauth.Auth{
+				Metadata: map[string]any{"auth_kind": "oauth"},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "OAuth using_api true empty base_url uses official api",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind":     "oauth",
+					xaiUsingAPIAttr: "true",
+				},
+			},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "OAuth using_api true custom base_url is honored",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind":     "oauth",
+					"base_url":      "https://gateway.example.com/v1",
+					xaiUsingAPIAttr: "true",
+				},
+			},
+			want: "https://gateway.example.com/v1",
+		},
+		{
+			name: "OAuth explicit CLI chat proxy base_url is preserved",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind": "oauth",
+					"base_url":  xaiauth.CLIChatProxyBaseURL,
+				},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
 		},
 	}
 

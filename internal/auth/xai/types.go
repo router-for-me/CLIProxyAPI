@@ -4,12 +4,16 @@ package xai
 import "time"
 
 const (
-	// DefaultAPIBaseURL is the default official xAI API base URL.
-	// Used for OAuth credential defaults, websocket, media (image/video),
-	// and non-media HTTP chat when auth using_api is true or non-OAuth.
+	// DefaultAPIBaseURL is the official xAI API base URL.
+	// Used for websocket, media (image/video), non-OAuth keys, and non-media
+	// HTTP chat when auth using_api is true (or when base_url is empty on that path).
+	// OAuth files may store this value historically; chat still rewrites it to
+	// CLIChatProxyBaseURL unless using_api is true. Set using_api=true to force
+	// chat through the official API (or an explicit base_url).
 	DefaultAPIBaseURL = "https://api.x.ai/v1"
 	// CLIChatProxyBaseURL is the Grok CLI chat-proxy base URL for non-image/video
-	// HTTP chat when auth using_api is false, including the OAuth default.
+	// HTTP chat when using_api is false (OAuth default). Media and websocket do
+	// not use this host (cli-chat-proxy rejects websocket upgrades).
 	CLIChatProxyBaseURL = "https://cli-chat-proxy.grok.com/v1"
 	// Issuer is xAI's OAuth issuer.
 	Issuer = "https://auth.x.ai"
