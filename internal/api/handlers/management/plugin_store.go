@@ -675,6 +675,9 @@ func pluginAuthConfigured(source pluginstore.Source, plugin pluginstore.Plugin, 
 // plugin concurrently, returning results positionally aligned with plugins.
 // Unresolved entries are left empty so callers can fall back gracefully.
 func (h *Handler) latestPluginVersions(ctx context.Context, client pluginstore.Client, plugins []pluginstore.Plugin) []string {
+	_ = ctx
+	_ = client
+	return make([]string, len(plugins))
 	versions := make([]string, len(plugins))
 	var wg sync.WaitGroup
 	for index := range plugins {

@@ -75,6 +75,9 @@ func init() {
 // immediately on startup and then refreshes the model catalog every 3 hours.
 // Safe to call multiple times; only one updater will run.
 func StartModelsUpdater(ctx context.Context) {
+	_ = ctx
+	log.Debug("remote models.json refresh disabled; using embedded catalog")
+	return
 	updaterOnce.Do(func() {
 		go runModelsUpdater(ctx)
 	})

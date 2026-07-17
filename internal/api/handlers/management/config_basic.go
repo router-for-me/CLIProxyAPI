@@ -38,6 +38,11 @@ type releaseInfo struct {
 
 // GetLatestVersion returns the latest release version from GitHub without downloading assets.
 func (h *Handler) GetLatestVersion(c *gin.Context) {
+	c.JSON(http.StatusServiceUnavailable, gin.H{
+		"error":   "remote_version_check_disabled",
+		"message": "remote version checks are disabled in this fork",
+	})
+	return
 	client := &http.Client{Timeout: 10 * time.Second}
 	proxyURL := ""
 	if h != nil && h.cfg != nil {

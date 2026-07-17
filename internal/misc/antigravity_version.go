@@ -42,6 +42,9 @@ var (
 // StartAntigravityVersionUpdater starts a background goroutine that periodically refreshes the cached antigravity version.
 // This is intentionally decoupled from request execution to avoid blocking executors on version lookups.
 func StartAntigravityVersionUpdater(ctx context.Context) {
+	_ = ctx
+	log.Debug("antigravity version remote refresh disabled; using embedded fallback")
+	return
 	antigravityUpdaterOnce.Do(func() {
 		go runAntigravityVersionUpdater(ctx)
 	})

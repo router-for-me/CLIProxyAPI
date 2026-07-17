@@ -392,17 +392,30 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.UsageSeen = false
 		st.CompletionPending = false
 		st.CompletedEmitted = false
+		responseModel := strings.TrimSpace(gjson.GetBytes(requestForNamespace, "model").String())
+		if responseModel == "" {
+			responseModel = strings.TrimSpace(root.Get("model").String())
+		}
+		if responseModel == "" {
+			responseModel = strings.TrimSpace(modelName)
+		}
 		// response.created
 		created := []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
 		created, _ = sjson.SetBytes(created, "sequence_number", nextSeq())
 		created, _ = sjson.SetBytes(created, "response.id", st.ResponseID)
 		created, _ = sjson.SetBytes(created, "response.created_at", st.Created)
+		if responseModel != "" {
+			created, _ = sjson.SetBytes(created, "response.model", responseModel)
+		}
 		out = append(out, emitRespEvent("response.created", created))
 
-		inprog := []byte(`{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress"}}`)
+		inprog := []byte(`{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
 		inprog, _ = sjson.SetBytes(inprog, "sequence_number", nextSeq())
 		inprog, _ = sjson.SetBytes(inprog, "response.id", st.ResponseID)
 		inprog, _ = sjson.SetBytes(inprog, "response.created_at", st.Created)
+		if responseModel != "" {
+			inprog, _ = sjson.SetBytes(inprog, "response.model", responseModel)
+		}
 		out = append(out, emitRespEvent("response.in_progress", inprog))
 		st.Started = true
 	}

@@ -23,6 +23,9 @@ var codexClientModelsUpdaterOnce sync.Once
 // Codex client model catalog immediately and then refreshes it every 3 hours.
 // Safe to call multiple times; only one updater will run.
 func StartCodexClientModelsUpdater(ctx context.Context) {
+	_ = ctx
+	log.Debug("remote Codex client model refresh disabled; using embedded catalog")
+	return
 	codexClientModelsUpdaterOnce.Do(func() {
 		go runCodexClientModelsUpdater(ctx)
 	})

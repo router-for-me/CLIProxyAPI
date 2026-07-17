@@ -251,7 +251,7 @@ func TestListPluginStoreEscapesRegistryStrings(t *testing.T) {
 	}
 }
 
-func TestListPluginStoreShowsLatestReleaseVersionAndCaches(t *testing.T) {
+func TestListPluginStoreSkipsLatestReleaseVersionLookup(t *testing.T) {
 	t.Parallel()
 
 	httpClient := &countingPluginStoreHTTPClient{responses: fakePluginStoreHTTPClient{
@@ -293,13 +293,13 @@ func TestListPluginStoreShowsLatestReleaseVersionAndCaches(t *testing.T) {
 		if len(body.Plugins) != 1 {
 			t.Fatalf("plugins len = %d, want 1", len(body.Plugins))
 		}
-		if body.Plugins[0].Version != "0.2.0" {
-			t.Fatalf("version = %q, want 0.2.0 from latest release tag", body.Plugins[0].Version)
+		if body.Plugins[0].Version != "0.1.0" {
+			t.Fatalf("version = %q, want registry version 0.1.0", body.Plugins[0].Version)
 		}
 	}
 	releaseCalls := httpClient.count("https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest")
-	if releaseCalls != 1 {
-		t.Fatalf("latest release fetched %d times, want 1 (cached)", releaseCalls)
+	if releaseCalls != 0 {
+		t.Fatalf("latest release fetched %d times, want 0", releaseCalls)
 	}
 }
 

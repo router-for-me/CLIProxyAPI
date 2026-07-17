@@ -59,6 +59,10 @@ func SetCurrentConfig(cfg *config.Config) {
 // StartAutoUpdater launches a background goroutine that periodically ensures the management asset is up to date.
 // It respects the disable-control-panel flag on every iteration and supports hot-reloaded configurations.
 func StartAutoUpdater(ctx context.Context, configFilePath string) {
+	_ = ctx
+	_ = configFilePath
+	log.Debug("management asset remote updates disabled; using local management.html")
+	return
 	configFilePath = strings.TrimSpace(configFilePath)
 	if configFilePath == "" {
 		log.Debug("management asset auto-updater skipped: empty config path")
@@ -189,6 +193,18 @@ func FilePath(configFilePath string) string {
 // EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
 // It coalesces concurrent sync attempts and returns whether the asset exists after the sync attempt.
 func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string) bool {
+	_ = ctx
+	_ = proxyURL
+	_ = panelRepository
+	staticDir = strings.TrimSpace(staticDir)
+	if staticDir == "" {
+		return false
+	}
+	if _, errLocal := os.Stat(filepath.Join(staticDir, managementAssetName)); errLocal != nil {
+		log.WithError(errLocal).Warn("local management.html is unavailable; remote download is disabled")
+		return false
+	}
+	return true
 	if ctx == nil {
 		ctx = context.Background()
 	}
