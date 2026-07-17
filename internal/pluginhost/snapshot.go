@@ -71,7 +71,7 @@ func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
 		authProvider := record.plugin.Capabilities.AuthProvider
 		oauthProvider := ""
 		if authProvider != nil && !h.isPluginFused(record.id) {
-			if identifier, okIdentifier := h.callAuthProviderIdentifier(record.id, authProvider); okIdentifier {
+			if identifier, okIdentifier := h.callAuthProviderIdentifier(record, authProvider); okIdentifier {
 				oauthProvider = identifier
 			}
 		}

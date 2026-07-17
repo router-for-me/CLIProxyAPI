@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -36,7 +37,8 @@ func (l *testSymbolLoader) Open(file pluginFile, host *Host) (pluginClient, erro
 type testSymbolLookup struct {
 	plugin              *testPlugin
 	active              pluginapi.Plugin
-	shutdownCalls       int
+	shutdownCalls       atomic.Int32
+	shutdownDone        chan struct{}
 	registerOverride    func([]byte) pluginapi.Plugin
 	reconfigureOverride func([]byte) pluginapi.Plugin
 	schemaVersion       uint32
@@ -179,7 +181,10 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 }
 
 func (l *testSymbolLookup) Shutdown() {
-	l.shutdownCalls++
+	l.shutdownCalls.Add(1)
+	if l.shutdownDone != nil {
+		close(l.shutdownDone)
+	}
 }
 
 func (l *testSymbolLookup) callLifecycle(request []byte, reload bool) ([]byte, error) {

@@ -115,7 +115,7 @@ func (h *Host) AuthProviderIdentifiers() []string {
 		if provider == nil || h.isPluginFused(record.id) {
 			continue
 		}
-		identifier, okIdentifier := h.callAuthProviderIdentifier(record.id, provider)
+		identifier, okIdentifier := h.callAuthProviderIdentifier(record, provider)
 		if okIdentifier && identifier != "" {
 			out = append(out, identifier)
 		}
@@ -137,7 +137,7 @@ func (h *Host) authProviderRecord(provider string) *capabilityRecord {
 		if authProvider == nil || h.isPluginFused(record.id) {
 			continue
 		}
-		identifier, okIdentifier := h.callAuthProviderIdentifier(record.id, authProvider)
+		identifier, okIdentifier := h.callAuthProviderIdentifier(record, authProvider)
 		if okIdentifier && identifier == provider {
 			copyRecord := record
 			return &copyRecord
@@ -146,13 +146,13 @@ func (h *Host) authProviderRecord(provider string) *capabilityRecord {
 	return nil
 }
 
-func (h *Host) callAuthProviderIdentifier(pluginID string, provider pluginapi.AuthProvider) (identifier string, ok bool) {
-	if h == nil || provider == nil || h.isPluginFused(pluginID) {
+func (h *Host) callAuthProviderIdentifier(record capabilityRecord, provider pluginapi.AuthProvider) (identifier string, ok bool) {
+	if h == nil || provider == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return "", false
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(pluginID, "AuthProvider.Identifier", recovered)
+			h.fusePlugin(record, "AuthProvider.Identifier", recovered)
 			identifier = ""
 			ok = false
 		}
@@ -206,7 +206,7 @@ func (h *Host) callParseAuths(ctx context.Context, record capabilityRecord, req 
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "AuthProvider.ParseAuth", recovered)
+			h.fusePlugin(record, "AuthProvider.ParseAuth", recovered)
 			auths = nil
 			handled = false
 			err = fmt.Errorf("auth provider panic: %v", recovered)
@@ -270,7 +270,7 @@ func (h *Host) callStartLogin(ctx context.Context, record capabilityRecord, prov
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "AuthProvider.StartLogin", recovered)
+			h.fusePlugin(record, "AuthProvider.StartLogin", recovered)
 			resp = pluginapi.AuthLoginStartResponse{}
 			handled = false
 			err = fmt.Errorf("auth provider start login panic: %v", recovered)
@@ -308,7 +308,7 @@ func (h *Host) callPollLogin(ctx context.Context, record capabilityRecord, provi
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "AuthProvider.PollLogin", recovered)
+			h.fusePlugin(record, "AuthProvider.PollLogin", recovered)
 			resp = pluginapi.AuthLoginPollResponse{}
 			handled = false
 			err = fmt.Errorf("auth provider poll login panic: %v", recovered)
@@ -341,7 +341,7 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "AuthProvider.RefreshAuth", recovered)
+			h.fusePlugin(*record, "AuthProvider.RefreshAuth", recovered)
 			refreshed = nil
 			handled = true
 			err = fmt.Errorf("auth provider refresh panic: %v", recovered)

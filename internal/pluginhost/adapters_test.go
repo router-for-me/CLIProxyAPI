@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1643,6 +1644,1512 @@ func TestStreamInterceptorsDropChunkStopsChain(t *testing.T) {
 	}
 }
 
+func TestStreamInterceptorSessionRoutesMixedLifecyclePerPlugin(t *testing.T) {
+	var statefulCalls []pluginapi.StreamChunkInterceptRequest
+	var legacyCalls []pluginapi.StreamChunkInterceptRequest
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "stateful",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						statefulCalls = append(statefulCalls, req)
+						return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+					},
+				},
+				StreamChunkInterceptorStateful: true,
+			}},
+		},
+		capabilityRecord{
+			id:       "legacy",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						legacyCalls = append(legacyCalls, req)
+						return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+					},
+				},
+			}},
+		},
+	)
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	if session == nil {
+		t.Fatal("OpenStreamChunkInterceptorSession() = nil, want active session")
+	}
+	initReq := pluginapi.StreamChunkInterceptRequest{
+		StreamID:        "stream-1",
+		OriginalRequest: []byte("original"),
+		RequestBody:     []byte("request"),
+		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+	}
+	session.InterceptStreamChunk(context.Background(), initReq)
+	if session.CanOmitHeavyFields() {
+		t.Fatal("CanOmitHeavyFields() = true, want false for mixed stateful and legacy interceptors")
+	}
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:        "stream-1",
+		OriginalRequest: []byte("original"),
+		RequestBody:     []byte("request"),
+		Body:            []byte("chunk"),
+		HistoryChunks:   [][]byte{[]byte("previous")},
+		ChunkIndex:      0,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+
+	if len(statefulCalls) != 3 {
+		t.Fatalf("stateful calls = %d, want init, payload, and end", len(statefulCalls))
+	}
+	for i, req := range statefulCalls {
+		if req.StreamID != "stream-1" {
+			t.Fatalf("stateful call %d StreamID = %q, want stream-1", i, req.StreamID)
+		}
+	}
+	if len(legacyCalls) != 2 {
+		t.Fatalf("legacy calls = %d, want init and payload only", len(legacyCalls))
+	}
+	for i, req := range legacyCalls {
+		if req.StreamID != "" {
+			t.Fatalf("legacy call %d StreamID = %q, want empty", i, req.StreamID)
+		}
+		if string(req.RequestBody) != "request" || string(req.OriginalRequest) != "original" {
+			t.Fatalf("legacy call %d heavy fields = request %q original %q", i, req.RequestBody, req.OriginalRequest)
+		}
+	}
+	if len(legacyCalls[1].HistoryChunks) != 1 || string(legacyCalls[1].HistoryChunks[0]) != "previous" {
+		t.Fatalf("legacy payload history = %#v, want previous chunk", legacyCalls[1].HistoryChunks)
+	}
+}
+
+func TestLegacyRPCStreamInterceptorSessionReturnsOnContextCancellation(t *testing.T) {
+	callStarted := make(chan struct{})
+	releaseCall := make(chan struct{})
+	shutdownDone := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(releaseCall) })
+	}
+
+	inner := &blockingStreamPluginClient{
+		callStarted:  callStarted,
+		releaseCall:  releaseCall,
+		shutdownDone: shutdownDone,
+	}
+	guarded := newGuardedPluginClient(inner)
+	host := New()
+	adapter := &rpcPluginAdapter{id: "legacy", host: host, client: guarded}
+	setHostSnapshotForTest(host, true, capabilityRecord{
+		id: "legacy",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: adapter,
+		}},
+	})
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	if session == nil {
+		t.Fatal("OpenStreamChunkInterceptorSession() = nil, want active session")
+	}
+	t.Cleanup(func() {
+		release()
+		session.Close()
+		guarded.Shutdown()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan pluginapi.StreamChunkInterceptResponse, 1)
+	go func() {
+		result <- session.InterceptStreamChunk(ctx, pluginapi.StreamChunkInterceptRequest{
+			ResponseHeaders: http.Header{"X-Original": []string{"true"}},
+			Body:            []byte("original"),
+			ChunkIndex:      0,
+		})
+	}()
+	waitForHostTestSignal(t, callStarted, "legacy stream interceptor RPC call")
+	cancel()
+
+	select {
+	case got := <-result:
+		if string(got.Body) != "original" || got.Headers.Get("X-Original") != "true" || got.DropChunk {
+			t.Fatalf("result after cancellation = %#v, want original passthrough", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("legacy stream interceptor session did not return after context cancellation")
+	}
+
+	release()
+	guarded.Shutdown()
+	waitForHostTestSignal(t, shutdownDone, "legacy plugin client shutdown")
+}
+
+func TestStreamInterceptorSessionPinsRecordsAcrossReload(t *testing.T) {
+	var oldCalls []int
+	var replacementCalls []int
+	host := newHostWithRecords(capabilityRecord{
+		id:      "privacy",
+		path:    "testdata/privacy-v1.plugin",
+		version: "v1",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					oldCalls = append(oldCalls, req.ChunkIndex)
+					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+				},
+			},
+			StreamChunkInterceptorStateful: true,
+		}},
+	})
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:    "stream-1",
+		RequestBody: []byte("request"),
+		ChunkIndex:  pluginapi.StreamChunkHeaderInitIndex,
+	})
+	if !session.CanOmitHeavyFields() {
+		t.Fatal("CanOmitHeavyFields() = false, want true after successful stateful initialization")
+	}
+
+	setHostSnapshotForTest(host, true, capabilityRecord{
+		id:      "privacy",
+		path:    "testdata/privacy-v2.plugin",
+		version: "v2",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					replacementCalls = append(replacementCalls, req.ChunkIndex)
+					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+				},
+			},
+			StreamChunkInterceptorStateful: true,
+		}},
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		Body:       []byte("chunk"),
+		ChunkIndex: 0,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+
+	if fmt.Sprint(oldCalls) != "[-1 0 -2]" {
+		t.Fatalf("pinned plugin calls = %v, want [-1 0 -2]", oldCalls)
+	}
+	if len(replacementCalls) != 0 {
+		t.Fatalf("replacement plugin calls = %v, want none for existing session", replacementCalls)
+	}
+}
+
+func TestStreamInterceptorSessionUsesCurrentLegacyRecordAfterReload(t *testing.T) {
+	var oldCalls []int
+	var replacementCalls []int
+	host := newHostWithRecords(capabilityRecord{
+		id:      "legacy",
+		path:    "testdata/legacy-v1.plugin",
+		version: "v1",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					oldCalls = append(oldCalls, req.ChunkIndex)
+					return pluginapi.StreamChunkInterceptResponse{Body: append(req.Body, []byte("|v1")...)}, nil
+				},
+			},
+		}},
+	})
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	if session == nil {
+		t.Fatal("OpenStreamChunkInterceptorSession() = nil, want active legacy session")
+	}
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		RequestBody: []byte("request"),
+		ChunkIndex:  pluginapi.StreamChunkHeaderInitIndex,
+	})
+
+	setHostSnapshotForTest(host, true, capabilityRecord{
+		id:      "legacy",
+		path:    "testdata/legacy-v2.plugin",
+		version: "v2",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					replacementCalls = append(replacementCalls, req.ChunkIndex)
+					return pluginapi.StreamChunkInterceptResponse{Body: append(req.Body, []byte("|v2")...)}, nil
+				},
+			},
+		}},
+	})
+	got := session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		RequestBody: []byte("request"),
+		Body:        []byte("chunk"),
+		ChunkIndex:  0,
+	})
+
+	if fmt.Sprint(oldCalls) != "[-1]" {
+		t.Fatalf("retired legacy calls = %v, want header init only", oldCalls)
+	}
+	if fmt.Sprint(replacementCalls) != "[0]" {
+		t.Fatalf("replacement legacy calls = %v, want payload only", replacementCalls)
+	}
+	if string(got.Body) != "chunk|v2" {
+		t.Fatalf("payload body = %q, want replacement output", got.Body)
+	}
+}
+
+func TestStreamInterceptorSessionDefersNewLegacyRecordAfterOmissionDecision(t *testing.T) {
+	statefulRecord := capabilityRecord{
+		id:      "stateful",
+		path:    "testdata/stateful.plugin",
+		version: "v1",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+				},
+			},
+			StreamChunkInterceptorStateful: true,
+		}},
+	}
+	host := newHostWithRecords(statefulRecord)
+	session := host.OpenStreamChunkInterceptorSession("")
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:    "stream-1",
+		RequestBody: []byte("request"),
+		ChunkIndex:  pluginapi.StreamChunkHeaderInitIndex,
+	})
+	if !session.CanOmitHeavyFields() {
+		t.Fatal("CanOmitHeavyFields() = false, want true before legacy plugin loads")
+	}
+
+	var legacyRequests []pluginapi.StreamChunkInterceptRequest
+	setHostSnapshotForTest(host, true, statefulRecord, capabilityRecord{
+		id:      "legacy",
+		path:    "testdata/legacy.plugin",
+		version: "v1",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					legacyRequests = append(legacyRequests, req)
+					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+				},
+			},
+		}},
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		Body:       []byte("omitted-fields"),
+		ChunkIndex: 0,
+	})
+	if len(legacyRequests) != 0 {
+		t.Fatalf("legacy calls after omission decision = %d, want 0", len(legacyRequests))
+	}
+
+	if session.CanOmitHeavyFields() {
+		t.Fatal("CanOmitHeavyFields() = true, want false after legacy plugin loads")
+	}
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:        "stream-1",
+		OriginalRequest: []byte("original"),
+		RequestBody:     []byte("request"),
+		HistoryChunks:   [][]byte{[]byte("history")},
+		Body:            []byte("full-fields"),
+		ChunkIndex:      1,
+	})
+	if len(legacyRequests) != 1 {
+		t.Fatalf("legacy calls after fields restored = %d, want 1", len(legacyRequests))
+	}
+	if string(legacyRequests[0].OriginalRequest) != "original" || string(legacyRequests[0].RequestBody) != "request" || len(legacyRequests[0].HistoryChunks) != 1 || string(legacyRequests[0].HistoryChunks[0]) != "history" {
+		t.Fatalf("legacy request heavy fields = %#v, want restored request data", legacyRequests[0])
+	}
+}
+
+func TestStreamInterceptorSessionCloseReturnsBeforeInflightRPCCall(t *testing.T) {
+	callStarted := make(chan struct{})
+	releaseCall := make(chan struct{})
+	shutdownDone := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(releaseCall) })
+	}
+	t.Cleanup(release)
+
+	inner := &blockingStreamPluginClient{
+		callStarted:  callStarted,
+		releaseCall:  releaseCall,
+		shutdownDone: shutdownDone,
+	}
+	guarded := newGuardedPluginClient(inner)
+	host := New()
+	adapter := &rpcPluginAdapter{id: "blocking", host: host, client: guarded}
+	setHostSnapshotForTest(host, true, capabilityRecord{
+		id: "blocking",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor:         adapter,
+			StreamChunkInterceptorStateful: true,
+		}},
+	})
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	if session == nil {
+		t.Fatal("OpenStreamChunkInterceptorSession() = nil, want active session")
+	}
+	result := make(chan pluginapi.StreamChunkInterceptResponse, 1)
+	go func() {
+		result <- session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+			ResponseHeaders: http.Header{"X-Original": []string{"true"}},
+			Body:            []byte("original"),
+			ChunkIndex:      0,
+		})
+	}()
+	waitForHostTestSignal(t, callStarted, "stream interceptor RPC call")
+
+	guarded.Shutdown()
+	closeDone := make(chan struct{})
+	go func() {
+		session.Close()
+		close(closeDone)
+	}()
+	closedBeforeRelease := false
+	select {
+	case <-closeDone:
+		closedBeforeRelease = true
+	case <-time.After(time.Second):
+		t.Error("Close() blocked behind an in-flight RPC call")
+	}
+
+	release()
+	if !closedBeforeRelease {
+		waitForHostTestSignal(t, closeDone, "session close after RPC release")
+	}
+	var got pluginapi.StreamChunkInterceptResponse
+	select {
+	case got = <-result:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for stream interceptor result")
+	}
+	if string(got.Body) != "original" || got.Headers.Get("X-Original") != "true" || got.DropChunk {
+		t.Fatalf("result after Close() = %#v, want original passthrough", got)
+	}
+	waitForHostTestSignal(t, shutdownDone, "deferred plugin client shutdown")
+}
+
+func TestStreamInterceptorSessionCallAfterCloseBypassesInflightRPCCall(t *testing.T) {
+	callStarted := make(chan struct{})
+	releaseCall := make(chan struct{})
+	shutdownDone := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(releaseCall) })
+	}
+	t.Cleanup(release)
+
+	inner := &blockingStreamPluginClient{
+		callStarted:  callStarted,
+		releaseCall:  releaseCall,
+		shutdownDone: shutdownDone,
+	}
+	guarded := newGuardedPluginClient(inner)
+	host := New()
+	adapter := &rpcPluginAdapter{id: "blocking", host: host, client: guarded}
+	setHostSnapshotForTest(host, true, capabilityRecord{
+		id: "blocking",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor:         adapter,
+			StreamChunkInterceptorStateful: true,
+		}},
+	})
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	firstResult := make(chan pluginapi.StreamChunkInterceptResponse, 1)
+	go func() {
+		firstResult <- session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+			Body:       []byte("first"),
+			ChunkIndex: 0,
+		})
+	}()
+	waitForHostTestSignal(t, callStarted, "first stream interceptor RPC call")
+
+	guarded.Shutdown()
+	session.Close()
+	secondResult := make(chan pluginapi.StreamChunkInterceptResponse, 1)
+	go func() {
+		secondResult <- session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+			ResponseHeaders: http.Header{"X-Original": []string{"true"}},
+			Body:            []byte("second"),
+			ChunkIndex:      1,
+		})
+	}()
+
+	select {
+	case got := <-secondResult:
+		if string(got.Body) != "second" || got.Headers.Get("X-Original") != "true" || got.DropChunk {
+			t.Fatalf("call after Close() = %#v, want original passthrough", got)
+		}
+	case <-time.After(time.Second):
+		t.Error("call after Close() blocked behind an earlier in-flight RPC call")
+	}
+
+	release()
+	select {
+	case <-firstResult:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first stream interceptor result")
+	}
+	waitForHostTestSignal(t, shutdownDone, "deferred plugin client shutdown")
+}
+
+func TestStreamInterceptorSessionWaitsForInflightRPCBeforeEnd(t *testing.T) {
+	payloadStarted := make(chan struct{})
+	endStarted := make(chan struct{})
+	releasePayload := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(releasePayload) })
+	}
+	t.Cleanup(release)
+
+	inner := &orderedStreamPluginClient{
+		payloadStarted: payloadStarted,
+		endStarted:     endStarted,
+		releasePayload: releasePayload,
+	}
+	host := New()
+	adapter := &rpcPluginAdapter{id: "ordered", host: host, client: newGuardedPluginClient(inner)}
+	setHostSnapshotForTest(host, true, capabilityRecord{
+		id: "ordered",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor:         adapter,
+			StreamChunkInterceptorStateful: true,
+		}},
+	})
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	t.Cleanup(session.Close)
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkHeaderInitIndex,
+	})
+
+	payloadCtx, cancelPayload := context.WithCancel(context.Background())
+	payloadDone := make(chan struct{})
+	go func() {
+		session.InterceptStreamChunk(payloadCtx, pluginapi.StreamChunkInterceptRequest{
+			StreamID:   "stream-1",
+			Body:       []byte("payload"),
+			ChunkIndex: 0,
+		})
+		close(payloadDone)
+	}()
+	waitForHostTestSignal(t, payloadStarted, "stateful payload RPC call")
+	cancelPayload()
+
+	endDone := make(chan struct{})
+	go func() {
+		session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+			StreamID:   "stream-1",
+			ChunkIndex: pluginapi.StreamChunkEndIndex,
+		})
+		close(endDone)
+	}()
+
+	select {
+	case <-endStarted:
+		t.Fatal("stream end entered the plugin before the canceled payload RPC exited")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	release()
+	waitForHostTestSignal(t, payloadDone, "stateful payload completion")
+	waitForHostTestSignal(t, endStarted, "stateful stream end RPC call")
+	waitForHostTestSignal(t, endDone, "stateful stream end completion")
+}
+
+func TestStreamInterceptorSessionSkipsCurrentPluginAfterExternalFuse(t *testing.T) {
+	var calls []int
+	host := newHostWithRecords(capabilityRecord{
+		id: "stateful",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					calls = append(calls, req.ChunkIndex)
+					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+				},
+			},
+			StreamChunkInterceptorStateful: true,
+		}},
+	})
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkHeaderInitIndex,
+	})
+	host.mu.Lock()
+	host.fused["stateful"] = "fused by concurrent request"
+	host.mu.Unlock()
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		Body:       []byte("skipped"),
+		ChunkIndex: 0,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+	session.Close()
+
+	if fmt.Sprint(calls) != "[-1 -2]" {
+		t.Fatalf("interceptor calls = %v, want init and one best-effort end after external fuse", calls)
+	}
+}
+
+func TestStreamInterceptorSessionIgnoresFuseForReplacementIdentity(t *testing.T) {
+	var oldCalls []int
+	host := newHostWithRecords(capabilityRecord{
+		id:      "privacy",
+		path:    "testdata/privacy-v1.plugin",
+		version: "v1",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					oldCalls = append(oldCalls, req.ChunkIndex)
+					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+				},
+			},
+			StreamChunkInterceptorStateful: true,
+		}},
+	})
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkHeaderInitIndex,
+	})
+	setHostSnapshotForTest(host, true, capabilityRecord{
+		id:      "privacy",
+		path:    "testdata/privacy-v2.plugin",
+		version: "v2",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+				},
+			},
+			StreamChunkInterceptorStateful: true,
+		}},
+	})
+	host.mu.Lock()
+	host.fused["privacy"] = "replacement fused"
+	host.mu.Unlock()
+
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		Body:       []byte("chunk"),
+		ChunkIndex: 0,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+	session.Close()
+
+	if fmt.Sprint(oldCalls) != "[-1 0 -2]" {
+		t.Fatalf("pinned plugin calls = %v, want old identity to ignore replacement fuse", oldCalls)
+	}
+}
+
+func TestSafePluginCallDoesNotFuseActivePluginForReplacementPanic(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id:      "privacy",
+		path:    "testdata/privacy-v1.plugin",
+		version: "v1",
+	})
+	replacement := &loadedPlugin{
+		id:      "privacy",
+		path:    "testdata/privacy-v2.plugin",
+		version: "v2",
+	}
+
+	if _, ok := host.safePluginCall(context.Background(), replacement, "register", func() pluginapi.Plugin {
+		panic("replacement registration panic")
+	}); ok {
+		t.Fatal("safePluginCall returned ok=true for a panicking register")
+	}
+
+	host.mu.Lock()
+	_, activeFused := host.fused["privacy"]
+	oldEpoch := host.fusedIdentities[makePluginIdentityKey("privacy", "testdata/privacy-v1.plugin", "v1")]
+	replacementEpoch := host.fusedIdentities[makePluginIdentityKey("privacy", replacement.path, replacement.version)]
+	host.mu.Unlock()
+	if activeFused {
+		t.Fatal("replacement register panic fused the active plugin")
+	}
+	if oldEpoch != 0 {
+		t.Fatalf("active identity fuse epoch = %d, want 0", oldEpoch)
+	}
+	if replacementEpoch == 0 {
+		t.Fatal("replacement identity fuse epoch was not advanced")
+	}
+}
+
+func TestStreamInterceptorSessionSurvivesFailedReplacementApplyConfig(t *testing.T) {
+	var oldCalls []int
+	oldPlugin := validTestPlugin("privacy")
+	oldPlugin.Capabilities = pluginapi.Capabilities{
+		StreamChunkInterceptor: responseInterceptorFunc{
+			interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+				oldCalls = append(oldCalls, req.ChunkIndex)
+				return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+			},
+		},
+		StreamChunkInterceptorStateful: true,
+	}
+	loader := newTestSymbolLoader()
+	loader.lookups["privacy"] = newTestSymbolLookup(&testPlugin{registerResult: oldPlugin})
+	host := NewForTest(loader)
+	t.Cleanup(host.ShutdownAll)
+	pluginsDir, paths := makeVersionedPluginDir(t, "privacy", "1.0.0")
+	host.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: map[string]config.PluginInstanceConfig{
+			"privacy": enabledPluginConfigWithStoreVersion(t, "1.0.0"),
+		},
+	}})
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	if session == nil {
+		t.Fatal("OpenStreamChunkInterceptorSession returned nil")
+	}
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkHeaderInitIndex,
+	})
+
+	loader.lookups["privacy"] = newTestSymbolLookup(&testPlugin{panicOnRegister: true})
+	paths["2.0.0"] = writeVersionedPluginFile(t, pluginsDir, "privacy", "2.0.0")
+	host.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: map[string]config.PluginInstanceConfig{
+			"privacy": enabledPluginConfigWithStoreVersion(t, "2.0.0"),
+		},
+	}})
+
+	host.mu.Lock()
+	_, activeFused := host.fused["privacy"]
+	oldEpoch := host.fusedIdentities[makePluginIdentityKey("privacy", paths["1.0.0"], "1.0.0")]
+	replacementEpoch := host.fusedIdentities[makePluginIdentityKey("privacy", paths["2.0.0"], "2.0.0")]
+	host.mu.Unlock()
+	if activeFused {
+		t.Fatal("failed replacement left the plugin ID fused")
+	}
+	if oldEpoch != 0 {
+		t.Fatalf("old identity fuse epoch = %d, want 0", oldEpoch)
+	}
+	if replacementEpoch == 0 {
+		t.Fatal("replacement identity fuse epoch was not advanced")
+	}
+
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		Body:       []byte("chunk"),
+		ChunkIndex: 0,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+	session.Close()
+
+	if fmt.Sprint(oldCalls) != "[-1 0 -2]" {
+		t.Fatalf("pinned plugin calls = %v, want old identity to survive failed replacement", oldCalls)
+	}
+}
+
+func TestFailedReplacementPreservesPreviousActiveCapabilities(t *testing.T) {
+	oldPlugin := validTestPlugin("privacy")
+	oldPlugin.Capabilities.RequestInterceptor = requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+		return pluginapi.RequestInterceptResponse{Body: append(req.Body, []byte("|v1")...)}, nil
+	})
+	loader := newTestSymbolLoader()
+	loader.lookups["privacy"] = newTestSymbolLookup(&testPlugin{registerResult: oldPlugin})
+	host := NewForTest(loader)
+	t.Cleanup(host.ShutdownAll)
+	pluginsDir, _ := makeVersionedPluginDir(t, "privacy", "1.0.0")
+	initialConfig := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: map[string]config.PluginInstanceConfig{
+			"privacy": enabledPluginConfigWithStoreVersion(t, "1.0.0"),
+		},
+	}}
+	host.ApplyConfig(context.Background(), initialConfig)
+
+	loader.lookups["privacy"] = newTestSymbolLookup(&testPlugin{panicOnRegister: true})
+	writeVersionedPluginFile(t, pluginsDir, "privacy", "2.0.0")
+	host.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: map[string]config.PluginInstanceConfig{
+			"privacy": enabledPluginConfigWithStoreVersion(t, "2.0.0"),
+		},
+	}})
+
+	got := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("request")})
+	if string(got.Body) != "request|v1" {
+		t.Fatalf("request response after failed replacement = %q, want %q", got.Body, "request|v1")
+	}
+}
+
+func TestFailedReplacementCanRetryAfterFusedPlugin(t *testing.T) {
+	loader := newTestSymbolLoader()
+	loader.lookups["privacy"] = newTestSymbolLookup(&testPlugin{registerResult: validTestPlugin("privacy")})
+	host := NewForTest(loader)
+	t.Cleanup(host.ShutdownAll)
+	pluginsDir, paths := makeVersionedPluginDir(t, "privacy", "1.0.0")
+	host.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: map[string]config.PluginInstanceConfig{
+			"privacy": enabledPluginConfigWithStoreVersion(t, "1.0.0"),
+		},
+	}})
+	host.fusePlugin(host.activeRecords()[0], "test", "fused v1")
+
+	failedShutdown := make(chan struct{})
+	failedLookup := newTestSymbolLookup(&testPlugin{panicOnRegister: true})
+	failedLookup.shutdownDone = failedShutdown
+	loader.lookups["privacy"] = failedLookup
+	paths["2.0.0"] = writeVersionedPluginFile(t, pluginsDir, "privacy", "2.0.0")
+	replacementConfig := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: map[string]config.PluginInstanceConfig{
+			"privacy": enabledPluginConfigWithStoreVersion(t, "2.0.0"),
+		},
+	}}
+	host.ApplyConfig(context.Background(), replacementConfig)
+
+	host.mu.Lock()
+	loadedPath := host.loaded["privacy"].path
+	host.mu.Unlock()
+	if loadedPath != paths["1.0.0"] {
+		t.Fatalf("loaded plugin path after failed replacement = %q, want old path %q", loadedPath, paths["1.0.0"])
+	}
+	waitForHostTestSignal(t, failedShutdown, "failed replacement shutdown")
+	deadline := time.Now().Add(time.Second)
+	for {
+		host.mu.Lock()
+		_, loading := host.loading["privacy"]
+		host.mu.Unlock()
+		if !loading {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("failed replacement load token was not cleared")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	newPlugin := validTestPlugin("privacy")
+	newPlugin.Capabilities.RequestInterceptor = requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+		return pluginapi.RequestInterceptResponse{Body: append(req.Body, []byte("|v2")...)}, nil
+	})
+	loader.lookups["privacy"] = newTestSymbolLookup(&testPlugin{registerResult: newPlugin})
+	host.ApplyConfig(context.Background(), replacementConfig)
+
+	if loader.openCalls != 3 {
+		t.Fatalf("Open calls = %d, want 3 after retrying replacement", loader.openCalls)
+	}
+	if host.isPluginFused("privacy") {
+		t.Fatal("old fuse marker remained after successful replacement retry")
+	}
+	got := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("request")})
+	if string(got.Body) != "request|v2" {
+		t.Fatalf("replacement response body = %q, want %q", got.Body, "request|v2")
+	}
+}
+
+func TestRuntimePanicAfterReplacementDoesNotFuseReplacement(t *testing.T) {
+	callStarted := make(chan struct{})
+	releaseCall := make(chan struct{})
+	oldPlugin := validTestPlugin("privacy")
+	oldPlugin.Capabilities.RequestInterceptor = requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+		close(callStarted)
+		<-releaseCall
+		panic("retired runtime panic")
+	})
+	newPlugin := validTestPlugin("privacy")
+	newPlugin.Capabilities.RequestInterceptor = requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+		return pluginapi.RequestInterceptResponse{Body: append(req.Body, []byte("|v2")...)}, nil
+	})
+
+	loader := newTestSymbolLoader()
+	loader.lookups["privacy"] = newTestSymbolLookup(&testPlugin{registerResult: oldPlugin})
+	host := NewForTest(loader)
+	t.Cleanup(host.ShutdownAll)
+	pluginsDir, paths := makeVersionedPluginDir(t, "privacy", "1.0.0")
+	host.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: map[string]config.PluginInstanceConfig{
+			"privacy": enabledPluginConfigWithStoreVersion(t, "1.0.0"),
+		},
+	}})
+
+	oldCallDone := make(chan struct{})
+	go func() {
+		host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("old")})
+		close(oldCallDone)
+	}()
+	waitForHostTestSignal(t, callStarted, "old runtime call")
+
+	loader.lookups["privacy"] = newTestSymbolLookup(&testPlugin{registerResult: newPlugin})
+	paths["2.0.0"] = writeVersionedPluginFile(t, pluginsDir, "privacy", "2.0.0")
+	host.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: map[string]config.PluginInstanceConfig{
+			"privacy": enabledPluginConfigWithStoreVersion(t, "2.0.0"),
+		},
+	}})
+	close(releaseCall)
+	waitForHostTestSignal(t, oldCallDone, "old runtime panic recovery")
+
+	host.mu.Lock()
+	_, activeFused := host.fused["privacy"]
+	oldEpoch := host.fusedIdentities[makePluginIdentityKey("privacy", paths["1.0.0"], "1.0.0")]
+	replacementEpoch := host.fusedIdentities[makePluginIdentityKey("privacy", paths["2.0.0"], "2.0.0")]
+	host.mu.Unlock()
+	if activeFused {
+		t.Fatal("retired runtime panic fused the active replacement")
+	}
+	if oldEpoch == 0 {
+		t.Fatal("retired identity fuse epoch was not advanced")
+	}
+	if replacementEpoch != 0 {
+		t.Fatalf("replacement identity fuse epoch = %d, want 0", replacementEpoch)
+	}
+
+	got := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("new")})
+	if string(got.Body) != "new|v2" {
+		t.Fatalf("replacement response body = %q, want %q", got.Body, "new|v2")
+	}
+}
+
+func TestFusedPluginRemainsDisabledUntilReplacementSnapshotCommit(t *testing.T) {
+	oldCalled := make(chan struct{}, 1)
+	oldPlugin := validTestPlugin("alpha")
+	oldPlugin.Capabilities.RequestInterceptor = requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+		oldCalled <- struct{}{}
+		return pluginapi.RequestInterceptResponse{Body: append(req.Body, []byte("|old")...)}, nil
+	})
+	newPlugin := validTestPlugin("alpha")
+	newPlugin.Capabilities.RequestInterceptor = requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+		return pluginapi.RequestInterceptResponse{Body: append(req.Body, []byte("|new")...)}, nil
+	})
+
+	loader := newTestSymbolLoader()
+	loader.lookups["alpha"] = newTestSymbolLookup(&testPlugin{registerResult: oldPlugin})
+	host := NewForTest(loader)
+	t.Cleanup(host.ShutdownAll)
+	pluginsDir, _ := makeVersionedPluginDir(t, "alpha", "1.0.0")
+	host.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: map[string]config.PluginInstanceConfig{
+			"alpha": enabledPluginConfigWithStoreVersion(t, "1.0.0"),
+		},
+	}})
+	host.fusePlugin(host.activeRecords()[0], "test", "fused old plugin")
+
+	loader.lookups["alpha"] = newTestSymbolLookup(&testPlugin{registerResult: newPlugin})
+	writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	blockerStarted := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseBlocker) }) }
+	t.Cleanup(release)
+	blockerLookup := newTestSymbolLookup(&testPlugin{registerResult: validTestPlugin("zeta")})
+	blockerLookup.registerOverride = func([]byte) pluginapi.Plugin {
+		close(blockerStarted)
+		<-releaseBlocker
+		return validTestPlugin("zeta")
+	}
+	loader.lookups["zeta"] = blockerLookup
+	writeVersionedPluginFile(t, pluginsDir, "zeta", "1.0.0")
+	replacementConfig := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: map[string]config.PluginInstanceConfig{
+			"alpha": enabledPluginConfigWithStoreVersion(t, "2.0.0"),
+			"zeta":  enabledPluginConfigWithStoreVersion(t, "1.0.0"),
+		},
+	}}
+
+	applyDone := make(chan struct{})
+	go func() {
+		host.ApplyConfig(context.Background(), replacementConfig)
+		close(applyDone)
+	}()
+	waitForHostTestSignal(t, blockerStarted, "replacement snapshot barrier")
+
+	got := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("request")})
+	if string(got.Body) != "request" {
+		t.Fatalf("old fused plugin response body = %q, want unchanged request", got.Body)
+	}
+	select {
+	case <-oldCalled:
+		t.Fatal("old fused plugin was invoked before replacement snapshot commit")
+	default:
+	}
+
+	release()
+	waitForHostTestSignal(t, applyDone, "replacement ApplyConfig completion")
+	if host.isPluginFused("alpha") {
+		t.Fatal("old fuse marker remained after replacement snapshot commit")
+	}
+	got = host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("request")})
+	if string(got.Body) != "request|new" {
+		t.Fatalf("replacement response body = %q, want %q", got.Body, "request|new")
+	}
+}
+
+func TestUnversionedReconfigurePanicFusesPinnedStreamIdentity(t *testing.T) {
+	var calls []int
+	plugin := &testPlugin{registerResult: validTestPlugin("privacy"), panicOnReload: true}
+	plugin.registerResult.Capabilities.StreamChunkInterceptor = responseInterceptorFunc{
+		interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+			calls = append(calls, req.ChunkIndex)
+			return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+		},
+	}
+	plugin.registerResult.Capabilities.StreamChunkInterceptorStateful = true
+
+	loader := newTestSymbolLoader()
+	loader.lookups["privacy"] = newTestSymbolLookup(plugin)
+	host := NewForTest(loader)
+	t.Cleanup(host.ShutdownAll)
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "privacy"),
+		Configs: enabledPluginConfigs("privacy"),
+	}}
+	host.ApplyConfig(context.Background(), cfg)
+	records := host.activeRecords()
+	if len(records) != 1 {
+		t.Fatalf("active records = %d, want 1", len(records))
+	}
+	if records[0].version != "1.0.0" {
+		t.Errorf("unversioned plugin identity version = %q, want metadata version %q", records[0].version, "1.0.0")
+	}
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkHeaderInitIndex,
+	})
+	host.ApplyConfig(context.Background(), cfg)
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		Body:       []byte("skipped"),
+		ChunkIndex: 0,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+	session.Close()
+
+	if fmt.Sprint(calls) != "[-1 -2]" {
+		t.Fatalf("pinned plugin calls = %v, want init and cleanup only after Reconfigure panic", calls)
+	}
+}
+
+func TestStreamInterceptorSessionRemembersPinnedIdentityFuseAcrossReload(t *testing.T) {
+	var oldCalls []int
+	host := newHostWithRecords(capabilityRecord{
+		id:      "privacy",
+		path:    "testdata/privacy-v1.plugin",
+		version: "v1",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					oldCalls = append(oldCalls, req.ChunkIndex)
+					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+				},
+			},
+			StreamChunkInterceptorStateful: true,
+		}},
+	})
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkHeaderInitIndex,
+	})
+	host.fusePlugin(host.activeRecords()[0], "test", "fused v1")
+	setHostSnapshotForTest(host, true, capabilityRecord{
+		id:      "privacy",
+		path:    "testdata/privacy-v2.plugin",
+		version: "v2",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+				},
+			},
+			StreamChunkInterceptorStateful: true,
+		}},
+	})
+	if host.isPluginFused("privacy") {
+		t.Fatal("old identity fuse remained attached to the replacement")
+	}
+
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		Body:       []byte("skipped"),
+		ChunkIndex: 0,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+	session.Close()
+
+	if fmt.Sprint(oldCalls) != "[-1 -2]" {
+		t.Fatalf("pinned plugin calls = %v, want init and cleanup only after fused identity reload", oldCalls)
+	}
+}
+
+func TestStreamInterceptorSessionPreservesCleanupAfterPayloadErrorAndFuse(t *testing.T) {
+	var calls []int
+	host := newHostWithRecords(capabilityRecord{
+		id: "stateful",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					calls = append(calls, req.ChunkIndex)
+					if req.ChunkIndex == 0 {
+						return pluginapi.StreamChunkInterceptResponse{}, errors.New("payload failed")
+					}
+					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+				},
+			},
+			StreamChunkInterceptorStateful: true,
+		}},
+	})
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkHeaderInitIndex,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		Body:       []byte("payload"),
+		ChunkIndex: 0,
+	})
+	host.mu.Lock()
+	host.fused["stateful"] = "fused after payload error"
+	host.mu.Unlock()
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+	session.Close()
+
+	if fmt.Sprint(calls) != "[-1 0 -2]" {
+		t.Fatalf("interceptor calls = %v, want init, failed payload, and one best-effort end", calls)
+	}
+}
+
+func TestStreamInterceptorSessionPreservesStateAfterPayloadError(t *testing.T) {
+	var calls []pluginapi.StreamChunkInterceptRequest
+	host := newHostWithRecords(capabilityRecord{
+		id: "stateful",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					calls = append(calls, req)
+					if req.ChunkIndex == 0 {
+						return pluginapi.StreamChunkInterceptResponse{}, errors.New("payload failed")
+					}
+					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+				},
+			},
+			StreamChunkInterceptorStateful: true,
+		}},
+	})
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkHeaderInitIndex,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		Body:       []byte("failed payload"),
+		ChunkIndex: 0,
+	})
+	if !session.CanOmitHeavyFields() {
+		t.Error("CanOmitHeavyFields() = false after transient payload error")
+	}
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		Body:       []byte("next payload"),
+		ChunkIndex: 1,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+
+	if len(calls) != 4 {
+		t.Fatalf("calls = %d, want init, failed payload, next payload, and end", len(calls))
+	}
+	for i, req := range calls {
+		if req.StreamID != "stream-1" {
+			t.Errorf("call %d StreamID = %q, want stream-1", i, req.StreamID)
+		}
+	}
+}
+
+func TestStreamInterceptorSessionMetadataIsolation(t *testing.T) {
+	t.Run("RPC defers isolation to serialization", func(t *testing.T) {
+		host := New()
+		client := newGuardedPluginClient(&capturePluginClient{})
+		adapter := &rpcPluginAdapter{id: "rpc", host: host, client: client}
+		setHostSnapshotForTest(host, true, capabilityRecord{
+			id: "rpc",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: adapter,
+			}},
+		})
+
+		probe := &metadataMarshalProbe{}
+		session := host.OpenStreamChunkInterceptorSession("")
+		session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+			Metadata:   map[string]any{"probe": probe},
+			ChunkIndex: 0,
+		})
+		session.Close()
+
+		if !probe.called {
+			t.Fatal("RPC metadata was cloned before serialization")
+		}
+	})
+
+	t.Run("local interceptor receives isolated metadata", func(t *testing.T) {
+		metadata := map[string]any{
+			"nested": map[string]any{"value": "original"},
+		}
+		host := newHostWithRecords(capabilityRecord{
+			id: "local",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						req.Metadata["added"] = true
+						req.Metadata["nested"].(map[string]any)["value"] = "mutated"
+						return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+					},
+				},
+			}},
+		})
+
+		session := host.OpenStreamChunkInterceptorSession("")
+		session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+			Metadata:   metadata,
+			ChunkIndex: 0,
+		})
+		session.Close()
+
+		if _, added := metadata["added"]; added {
+			t.Fatal("local interceptor mutated top-level metadata")
+		}
+		if got := metadata["nested"].(map[string]any)["value"]; got != "original" {
+			t.Fatalf("nested metadata value = %v, want original", got)
+		}
+	})
+}
+
+func TestStreamInterceptorSessionInitFailureForcesLegacyPayload(t *testing.T) {
+	var calls []pluginapi.StreamChunkInterceptRequest
+	host := newHostWithRecords(capabilityRecord{
+		id: "stateful",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					calls = append(calls, req)
+					if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex {
+						return pluginapi.StreamChunkInterceptResponse{}, errors.New("init failed")
+					}
+					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+				},
+			},
+			StreamChunkInterceptorStateful: true,
+		}},
+	})
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:    "stream-1",
+		RequestBody: []byte("request"),
+		ChunkIndex:  pluginapi.StreamChunkHeaderInitIndex,
+	})
+	if session.CanOmitHeavyFields() {
+		t.Fatal("CanOmitHeavyFields() = true after failed initialization")
+	}
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:        "stream-1",
+		OriginalRequest: []byte("original"),
+		RequestBody:     []byte("request"),
+		Body:            []byte("chunk"),
+		HistoryChunks:   [][]byte{[]byte("previous")},
+		ChunkIndex:      0,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+
+	if len(calls) != 3 {
+		t.Fatalf("calls = %d, want init, payload, and end", len(calls))
+	}
+	for i, call := range calls {
+		if call.StreamID != "stream-1" {
+			t.Fatalf("call %d StreamID = %q, want stream-1", i, call.StreamID)
+		}
+	}
+	if string(calls[1].RequestBody) != "request" || string(calls[1].OriginalRequest) != "original" || len(calls[1].HistoryChunks) != 1 {
+		t.Fatalf("fallback payload heavy fields = %#v", calls[1])
+	}
+}
+
+func TestStreamInterceptorSessionIgnoresDropChunkDuringLifecycleCalls(t *testing.T) {
+	var highCalls []int
+	var lowCalls []int
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "high",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						highCalls = append(highCalls, req.ChunkIndex)
+						return pluginapi.StreamChunkInterceptResponse{Body: req.Body, DropChunk: true}, nil
+					},
+				},
+				StreamChunkInterceptorStateful: true,
+			}},
+		},
+		capabilityRecord{
+			id:       "low",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						lowCalls = append(lowCalls, req.ChunkIndex)
+						return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+					},
+				},
+				StreamChunkInterceptorStateful: true,
+			}},
+		},
+	)
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	initResp := session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkHeaderInitIndex,
+	})
+	if initResp.DropChunk {
+		t.Fatal("header initialization propagated DropChunk")
+	}
+	payloadResp := session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		Body:       []byte("chunk"),
+		ChunkIndex: 0,
+	})
+	if !payloadResp.DropChunk {
+		t.Fatal("payload DropChunk = false, want true")
+	}
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+
+	if fmt.Sprint(highCalls) != "[-1 0 -2]" {
+		t.Fatalf("high-priority calls = %v, want lifecycle and payload calls", highCalls)
+	}
+	if fmt.Sprint(lowCalls) != "[-1 -2]" {
+		t.Fatalf("low-priority calls = %v, want init and end despite DropChunk", lowCalls)
+	}
+}
+
+func TestStreamInterceptorSessionDisablesPanickingRecordLocally(t *testing.T) {
+	panicCalls := 0
+	var fallbackCalls []int
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "panic",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						panicCalls++
+						panic("stream interceptor panic")
+					},
+				},
+				StreamChunkInterceptorStateful: true,
+			}},
+		},
+		capabilityRecord{
+			id:       "fallback",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						fallbackCalls = append(fallbackCalls, req.ChunkIndex)
+						return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+					},
+				},
+				StreamChunkInterceptorStateful: true,
+			}},
+		},
+	)
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:    "stream-1",
+		RequestBody: []byte("request"),
+		ChunkIndex:  pluginapi.StreamChunkHeaderInitIndex,
+	})
+	if session.CanOmitHeavyFields() {
+		t.Fatal("CanOmitHeavyFields() = true after one pinned interceptor panicked")
+	}
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:    "stream-1",
+		RequestBody: []byte("request"),
+		Body:        []byte("chunk"),
+		ChunkIndex:  0,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+	session.Close()
+
+	if panicCalls != 1 {
+		t.Fatalf("panicking interceptor calls = %d, want 1 before local disable", panicCalls)
+	}
+	if fmt.Sprint(fallbackCalls) != "[-1 0 -2]" {
+		t.Fatalf("fallback interceptor calls = %v, want [-1 0 -2]", fallbackCalls)
+	}
+}
+
+func TestStreamInterceptorSessionEndsRecordDisabledAfterPayloadPanic(t *testing.T) {
+	var calls []int
+	host := newHostWithRecords(capabilityRecord{
+		id: "panic",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					calls = append(calls, req.ChunkIndex)
+					if req.ChunkIndex == 0 {
+						panic("stream payload panic")
+					}
+					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+				},
+			},
+			StreamChunkInterceptorStateful: true,
+		}},
+	})
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:    "stream-1",
+		RequestBody: []byte("request"),
+		ChunkIndex:  pluginapi.StreamChunkHeaderInitIndex,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		Body:       []byte("panic"),
+		ChunkIndex: 0,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		Body:       []byte("skipped"),
+		ChunkIndex: 1,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+	session.Close()
+
+	if fmt.Sprint(calls) != "[-1 0 -2]" {
+		t.Fatalf("interceptor calls = %v, want init, panicking payload, and one best-effort end", calls)
+	}
+}
+
+func TestStreamInterceptorSessionEndsRecordDisabledAfterRetryInitPanic(t *testing.T) {
+	var calls []int
+	initCalls := 0
+	host := newHostWithRecords(capabilityRecord{
+		id: "panic",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					calls = append(calls, req.ChunkIndex)
+					if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex {
+						initCalls++
+						if initCalls == 2 {
+							panic("retry stream init panic")
+						}
+					}
+					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+				},
+			},
+			StreamChunkInterceptorStateful: true,
+		}},
+	})
+
+	session := host.OpenStreamChunkInterceptorSession("")
+	for range 2 {
+		session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+			StreamID:    "stream-1",
+			RequestBody: []byte("request"),
+			ChunkIndex:  pluginapi.StreamChunkHeaderInitIndex,
+		})
+	}
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		Body:       []byte("skipped"),
+		ChunkIndex: 0,
+	})
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+	session.Close()
+
+	if fmt.Sprint(calls) != "[-1 -1 -2]" {
+		t.Fatalf("interceptor calls = %v, want initial init, panicking retry init, and one best-effort end", calls)
+	}
+}
+
 func TestHasStreamInterceptorsReflectsActiveStreamInterceptors(t *testing.T) {
 	requestOnly := newHostWithRecords(capabilityRecord{
 		id: "request",
@@ -3152,6 +4659,61 @@ func normalizeTestCapabilityRecords(records []capabilityRecord) []capabilityReco
 type stringSliceAlias []string
 
 type mapSliceAlias []map[string]string
+
+type blockingStreamPluginClient struct {
+	callStarted  chan<- struct{}
+	releaseCall  <-chan struct{}
+	shutdownDone chan<- struct{}
+}
+
+func (c *blockingStreamPluginClient) Call(ctx context.Context, method string, request []byte) ([]byte, error) {
+	close(c.callStarted)
+	<-c.releaseCall
+	return marshalRPCResult(pluginapi.StreamChunkInterceptResponse{
+		Headers:   http.Header{"X-Plugin": []string{"mutated"}},
+		Body:      []byte("mutated"),
+		DropChunk: true,
+	})
+}
+
+func (c *blockingStreamPluginClient) Shutdown() {
+	close(c.shutdownDone)
+}
+
+type orderedStreamPluginClient struct {
+	mu             sync.Mutex
+	calls          int
+	payloadStarted chan<- struct{}
+	endStarted     chan<- struct{}
+	releasePayload <-chan struct{}
+}
+
+func (c *orderedStreamPluginClient) Call(context.Context, string, []byte) ([]byte, error) {
+	c.mu.Lock()
+	c.calls++
+	call := c.calls
+	c.mu.Unlock()
+
+	switch call {
+	case 2:
+		close(c.payloadStarted)
+		<-c.releasePayload
+	case 3:
+		close(c.endStarted)
+	}
+	return marshalRPCResult(pluginapi.StreamChunkInterceptResponse{})
+}
+
+func (*orderedStreamPluginClient) Shutdown() {}
+
+type metadataMarshalProbe struct {
+	called bool
+}
+
+func (p *metadataMarshalProbe) MarshalJSON() ([]byte, error) {
+	p.called = true
+	return []byte(`"probe"`), nil
+}
 
 type requestNormalizerFunc func(context.Context, pluginapi.RequestTransformRequest) (pluginapi.PayloadResponse, error)
 

@@ -20,7 +20,7 @@ func (h *Host) callRequestInterceptor(ctx context.Context, record capabilityReco
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, method, recovered)
+			h.fusePlugin(record, method, recovered)
 			out = pluginapi.RequestInterceptResponse{}
 			ok = false
 		}
@@ -39,7 +39,7 @@ func (h *Host) callResponseInterceptor(ctx context.Context, record capabilityRec
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "ResponseInterceptor.InterceptResponse", recovered)
+			h.fusePlugin(record, "ResponseInterceptor.InterceptResponse", recovered)
 			out = pluginapi.ResponseInterceptResponse{}
 			ok = false
 		}
@@ -58,7 +58,7 @@ func (h *Host) callStreamChunkInterceptor(ctx context.Context, record capability
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "StreamChunkInterceptor.InterceptStreamChunk", recovered)
+			h.fusePlugin(record, "StreamChunkInterceptor.InterceptStreamChunk", recovered)
 			out = pluginapi.StreamChunkInterceptResponse{}
 			ok = false
 		}
@@ -151,7 +151,7 @@ func (h *Host) CompleteRequestExcept(ctx context.Context, completion pluginapi.R
 		go func(record capabilityRecord, plugin pluginapi.RequestLifecyclePlugin, completion pluginapi.RequestCompletion) {
 			defer func() {
 				if recovered := recover(); recovered != nil {
-					h.fusePlugin(record.id, "RequestLifecyclePlugin.HandleRequestComplete", recovered)
+					h.fusePlugin(record, "RequestLifecyclePlugin.HandleRequestComplete", recovered)
 				}
 			}()
 			if errComplete := plugin.HandleRequestComplete(ctx, completion); errComplete != nil {

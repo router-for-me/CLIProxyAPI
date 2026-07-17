@@ -53,6 +53,8 @@ type rpcResponseNormalizer struct {
 	method string
 }
 
+const statefulStreamInterceptorSchemaVersion uint32 = 3
+
 func registerRPCPlugin(ctx context.Context, host *Host, id string, client pluginClient, method string, configYAML []byte) (pluginapi.Plugin, error) {
 	if client == nil {
 		return pluginapi.Plugin{}, fmt.Errorf("plugin client is nil")
@@ -124,6 +126,7 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	}
 	if resp.Capabilities.StreamChunkInterceptor {
 		plugin.Capabilities.StreamChunkInterceptor = adapter
+		plugin.Capabilities.StreamChunkInterceptorStateful = resp.SchemaVersion >= statefulStreamInterceptorSchemaVersion && resp.Capabilities.StreamChunkInterceptorStateful
 	}
 	if resp.Capabilities.ThinkingApplier {
 		plugin.Capabilities.ThinkingApplier = rpcThinkingApplier{rpcPluginAdapter: adapter}

@@ -11,9 +11,10 @@ import (
 )
 
 type pluginProviderApplier struct {
-	owner    string
-	priority int
-	applier  ProviderApplier
+	owner      string
+	generation string
+	priority   int
+	applier    ProviderApplier
 }
 
 var providerAppliersMu sync.RWMutex
@@ -60,7 +61,13 @@ func RegisterProvider(name string, applier ProviderApplier) {
 
 // RegisterPluginProvider registers a plugin-owned provider applier.
 func RegisterPluginProvider(owner string, name string, priority int, applier ProviderApplier) bool {
+	return RegisterPluginProviderGeneration(owner, "", name, priority, applier)
+}
+
+// RegisterPluginProviderGeneration registers a generation of a plugin-owned provider applier.
+func RegisterPluginProviderGeneration(owner string, generation string, name string, priority int, applier ProviderApplier) bool {
 	owner = strings.TrimSpace(owner)
+	generation = strings.TrimSpace(generation)
 	name = normalizedProviderName(name)
 	if owner == "" || name == "" || applier == nil {
 		return false
@@ -75,11 +82,28 @@ func RegisterPluginProvider(owner string, name string, priority int, applier Pro
 		return false
 	}
 	pluginProviderAppliers[name] = pluginProviderApplier{
-		owner:    owner,
-		priority: priority,
-		applier:  applier,
+		owner:      owner,
+		generation: generation,
+		priority:   priority,
+		applier:    applier,
 	}
 	return true
+}
+
+// UnregisterPluginProvidersGeneration removes provider appliers owned by one plugin generation.
+func UnregisterPluginProvidersGeneration(owner string, generation string) {
+	owner = strings.TrimSpace(owner)
+	generation = strings.TrimSpace(generation)
+	if owner == "" {
+		return
+	}
+	providerAppliersMu.Lock()
+	defer providerAppliersMu.Unlock()
+	for provider, record := range pluginProviderAppliers {
+		if record.owner == owner && record.generation == generation {
+			delete(pluginProviderAppliers, provider)
+		}
+	}
 }
 
 // UnregisterPluginProviders removes all provider appliers owned by one plugin.
