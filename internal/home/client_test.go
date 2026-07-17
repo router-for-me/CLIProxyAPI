@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
 )
 
 func TestAuthDispatchRequestIncludesCount(t *testing.T) {
@@ -311,6 +313,163 @@ func TestGetPluginTasksUsesPluginTasksKey(t *testing.T) {
 	want := []string{"get", "plugin-tasks"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("GET command = %#v, want %#v", got, want)
+	}
+}
+
+func TestGetPluginSyncUsesDedicatedCommandAndDecodesResponse(t *testing.T) {
+	response := pluginstore.PluginSyncResponse{
+		SchemaVersion: pluginstore.PluginSyncSchemaVersion,
+		ExpiresAt:     time.Now().UTC().Add(time.Minute),
+		Items: []pluginstore.PluginSyncItem{{
+			Manifest: pluginstore.Manifest{
+				SchemaVersion: pluginstore.SchemaVersionV2,
+				ID:            "sample",
+				Version:       "1.0.0",
+				Install: pluginstore.InstallPlan{Type: pluginstore.InstallTypeDirect, Artifacts: []pluginstore.Artifact{{
+					GOOS: "linux", GOARCH: "amd64", URL: "https://downloads.example/sample.zip",
+					SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				}}},
+			},
+			Auth: []pluginstore.ResolvedAuthConfig{{
+				Match: "https://downloads.example/", Type: pluginstore.AuthTypeBearer, Token: pluginstore.Secret("temporary-token"),
+			}},
+		}},
+	}
+	payload, errMarshal := json.Marshal(response)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	client, commands := newRedisCommandTestClient(t, func(args []string) string {
+		if len(args) > 0 && strings.EqualFold(args[0], "GET") {
+			return fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
+		}
+		return "-ERR unexpected command\r\n"
+	})
+	request := pluginstore.PluginSyncRequest{
+		SchemaVersion: pluginstore.PluginSyncSchemaVersion,
+		GOOS:          "linux",
+		GOARCH:        "amd64",
+		InstalledVersions: map[string]string{
+			"sample": "0.9.0",
+		},
+	}
+
+	gotResponse, errSync := client.GetPluginSync(context.Background(), request)
+	if errSync != nil {
+		t.Fatalf("GetPluginSync() error = %v", errSync)
+	}
+	defer gotResponse.Clear()
+	if len(gotResponse.Items) != 1 || string(gotResponse.Items[0].Auth[0].Token) != "temporary-token" {
+		t.Fatalf("response = %#v, want one item with temporary token", gotResponse)
+	}
+	got := commands.Last()
+	if len(got) != 3 || !strings.EqualFold(got[0], "get") || got[1] != "plugin-sync" {
+		t.Fatalf("plugin sync command = %#v, want GET plugin-sync <request>", got)
+	}
+	var gotRequest pluginstore.PluginSyncRequest
+	if errUnmarshal := json.Unmarshal([]byte(got[2]), &gotRequest); errUnmarshal != nil {
+		t.Fatalf("decode request command: %v", errUnmarshal)
+	}
+	if gotRequest.InstalledVersions["sample"] != "0.9.0" {
+		t.Fatalf("request = %#v, want installed sample 0.9.0", gotRequest)
+	}
+}
+
+func TestGetPluginSyncRecognizesUnsupportedHomeProtocol(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+	}{
+		{
+			name: "legacy json error",
+			response: func() string {
+				payload := `{"error":{"type":"error","message":"wrong number of arguments for 'get' command"}}`
+				return fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
+			}(),
+		},
+		{
+			name:     "redis unsupported key",
+			response: "-ERR unsupported key\r\n",
+		},
+		{
+			name: "structured unsupported type",
+			response: func() string {
+				payload := `{"error":{"type":"plugin_sync_unsupported","message":"plugin sync is unsupported"}}`
+				return fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
+			}(),
+		},
+		{
+			name:     "redis unsupported code",
+			response: "-ERR plugin_sync_unsupported\r\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, _ := newRedisCommandTestClient(t, func(args []string) string {
+				if len(args) > 0 && strings.EqualFold(args[0], "GET") {
+					return tt.response
+				}
+				return "-ERR unexpected command\r\n"
+			})
+			_, errSync := client.GetPluginSync(context.Background(), pluginstore.PluginSyncRequest{
+				SchemaVersion: pluginstore.PluginSyncSchemaVersion,
+				GOOS:          "linux",
+				GOARCH:        "amd64",
+			})
+			if !errors.Is(errSync, ErrPluginSyncUnsupported) {
+				t.Fatalf("GetPluginSync() error = %v, want ErrPluginSyncUnsupported", errSync)
+			}
+		})
+	}
+}
+
+func TestGetPluginSyncDoesNotFallbackForOtherHomeErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+	}{
+		{
+			name: "runtime not ready",
+			response: func() string {
+				payload := `{"error":{"type":"error","message":"runtime not ready"}}`
+				return fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
+			}(),
+		},
+		{
+			name: "unsupported key substring",
+			response: func() string {
+				payload := `{"error":{"type":"error","message":"plugin registry contains unsupported key metadata"}}`
+				return fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
+			}(),
+		},
+		{
+			name:     "wrong arguments substring",
+			response: "-ERR failed to get plugin sync: wrong number of arguments in credential resolver\r\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, _ := newRedisCommandTestClient(t, func(args []string) string {
+				if len(args) > 0 && strings.EqualFold(args[0], "GET") {
+					return tt.response
+				}
+				return "-ERR unexpected command\r\n"
+			})
+
+			_, errSync := client.GetPluginSync(context.Background(), pluginstore.PluginSyncRequest{
+				SchemaVersion: pluginstore.PluginSyncSchemaVersion,
+				GOOS:          "linux",
+				GOARCH:        "amd64",
+			})
+			if errSync == nil {
+				t.Fatal("GetPluginSync() error = nil, want plugin sync failure")
+			}
+			if errors.Is(errSync, ErrPluginSyncUnsupported) {
+				t.Fatalf("GetPluginSync() error = %v, want no legacy fallback", errSync)
+			}
+		})
 	}
 }
 

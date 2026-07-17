@@ -44,15 +44,15 @@ func ManifestFromPlugin(source Source, plugin Plugin) (Manifest, error) {
 	}
 	switch PluginInstallType(plugin) {
 	case InstallTypeDirect:
-		return Manifest{
+		manifest := manifestFromPlugin(source, plugin, Manifest{
 			SchemaVersion: SchemaVersionV2,
-			ID:            strings.TrimSpace(plugin.ID),
 			Version:       strings.TrimSpace(plugin.Version),
-			SourceID:      strings.TrimSpace(source.ID),
-			SourceName:    strings.TrimSpace(source.Name),
-			SourceURL:     strings.TrimSpace(source.URL),
-			Install:       InstallPlan{Type: InstallTypeDirect},
-		}, nil
+			Install:       NormalizeInstallPlan(plugin.Install),
+		})
+		if errValidate := manifest.Validate(); errValidate != nil {
+			return Manifest{}, errValidate
+		}
+		return manifest, nil
 	case InstallTypeGitHubRelease:
 		return Manifest{}, fmt.Errorf("github-release manifest requires a resolved release")
 	default:
@@ -118,7 +118,10 @@ func (m Manifest) Validate() error {
 		plan := NormalizeInstallPlan(m.Install)
 		plan.Type = InstallTypeDirect
 		if len(plan.Artifacts) > 0 {
-			return ValidateInstallPlan(plan)
+			if errValidate := ValidateInstallPlan(plan); errValidate != nil {
+				return errValidate
+			}
+			return validatePinnedArtifactURLs(plan.Artifacts)
 		}
 		return validateManifestSourceURL(m.SourceURL)
 	case InstallTypeGitHubRelease:
@@ -142,6 +145,22 @@ func (m Manifest) Validate() error {
 	default:
 		return fmt.Errorf("unsupported install type %q", m.Install.Type)
 	}
+}
+
+func validatePinnedArtifactURLs(artifacts []Artifact) error {
+	for index, artifact := range artifacts {
+		parsed, errParse := url.Parse(strings.TrimSpace(artifact.URL))
+		if errParse != nil {
+			return fmt.Errorf("artifacts[%d]: invalid artifact url", index)
+		}
+		if parsed.User != nil {
+			return fmt.Errorf("artifacts[%d]: pinned artifact url must not contain credentials", index)
+		}
+		if parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("artifacts[%d]: pinned artifact url must not contain query or fragment", index)
+		}
+	}
+	return nil
 }
 
 func validateManifestPluginID(id string) error {
