@@ -1951,6 +1951,179 @@ func TestResponsesWebsocketXAIWebsocketPassthroughCarriesPreviousResponseID(t *t
 	}
 }
 
+func TestResponsesWebsocketSwitchesPinnedAuthAcrossProviders(t *testing.T) {
+	for _, testCase := range []struct {
+		name                      string
+		xaiWebsockets             bool
+		returnToDifferentXAIModel bool
+	}{
+		{name: "xai SSE", xaiWebsockets: false},
+		{name: "xai websocket", xaiWebsockets: true},
+		{name: "xai websocket different model", xaiWebsockets: true, returnToDifferentXAIModel: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+
+			xaiModel := "xai-provider-switch-" + strings.ReplaceAll(testCase.name, " ", "-")
+			returnXAIModel := xaiModel
+			if testCase.returnToDifferentXAIModel {
+				returnXAIModel += "-return"
+			}
+			codexModel := "codex-provider-switch-" + strings.ReplaceAll(testCase.name, " ", "-")
+			xaiExecutor := &websocketDirectCaptureExecutor{provider: "xai"}
+			codexExecutor := &websocketDirectCaptureExecutor{provider: "codex"}
+
+			xaiAuth := &coreauth.Auth{
+				ID:       "auth-" + xaiModel,
+				Provider: "xai",
+				Status:   coreauth.StatusActive,
+			}
+			if testCase.xaiWebsockets {
+				xaiAuth.Attributes = map[string]string{"websockets": "true"}
+			}
+			codexAuth := &coreauth.Auth{
+				ID:         "auth-" + codexModel,
+				Provider:   "codex",
+				Status:     coreauth.StatusActive,
+				Attributes: map[string]string{"websockets": "true"},
+			}
+			selector := &orderedWebsocketSelector{order: []string{xaiAuth.ID, codexAuth.ID}}
+			manager := coreauth.NewManager(nil, selector, nil)
+			manager.RegisterExecutor(xaiExecutor)
+			manager.RegisterExecutor(codexExecutor)
+			if _, errRegister := manager.Register(context.Background(), xaiAuth); errRegister != nil {
+				t.Fatalf("Register xAI auth: %v", errRegister)
+			}
+			if _, errRegister := manager.Register(context.Background(), codexAuth); errRegister != nil {
+				t.Fatalf("Register Codex auth: %v", errRegister)
+			}
+
+			registry.GetGlobalRegistry().RegisterClient(xaiAuth.ID, xaiAuth.Provider, []*registry.ModelInfo{{ID: xaiModel}})
+			registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: codexModel}})
+			registeredAuthIDs := []string{xaiAuth.ID, codexAuth.ID}
+			xaiAlternateAuthID := ""
+			if testCase.xaiWebsockets {
+				xaiAlternateAuth := &coreauth.Auth{
+					ID:         "auth-alternate-" + xaiModel,
+					Provider:   "xai",
+					Status:     coreauth.StatusActive,
+					Attributes: map[string]string{"websockets": "true"},
+				}
+				xaiAlternateAuthID = xaiAlternateAuth.ID
+				selector.order = append(selector.order, xaiAlternateAuth.ID)
+				if _, errRegister := manager.Register(context.Background(), xaiAlternateAuth); errRegister != nil {
+					t.Fatalf("Register alternate xAI auth: %v", errRegister)
+				}
+				alternateModels := []*registry.ModelInfo{{ID: xaiModel}}
+				if testCase.returnToDifferentXAIModel {
+					alternateModels = []*registry.ModelInfo{{ID: returnXAIModel}}
+				}
+				registry.GetGlobalRegistry().RegisterClient(xaiAlternateAuth.ID, xaiAlternateAuth.Provider, alternateModels)
+				registeredAuthIDs = append(registeredAuthIDs, xaiAlternateAuth.ID)
+			}
+			t.Cleanup(func() {
+				for _, authID := range registeredAuthIDs {
+					registry.GetGlobalRegistry().UnregisterClient(authID)
+				}
+			})
+
+			base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+			h := NewOpenAIResponsesAPIHandler(base)
+			router := gin.New()
+			router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+			server := httptest.NewServer(router)
+			defer server.Close()
+
+			wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+			conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+			if errDial != nil {
+				t.Fatalf("dial websocket: %v", errDial)
+			}
+			defer func() {
+				if errClose := conn.Close(); errClose != nil {
+					t.Errorf("close websocket: %v", errClose)
+				}
+			}()
+
+			requests := []string{
+				fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","id":"msg-xai-1"}]}`, xaiModel),
+				fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","id":"msg-codex-1"}]}`, codexModel),
+				fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","id":"msg-xai-2"}]}`, returnXAIModel),
+				`{"type":"response.create","input":[{"type":"message","id":"msg-xai-3"}]}`,
+			}
+			for index, request := range requests {
+				if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(request)); errWrite != nil {
+					t.Fatalf("write websocket message %d: %v", index+1, errWrite)
+				}
+				_, payload, errRead := conn.ReadMessage()
+				if errRead != nil {
+					t.Fatalf("read websocket response %d: %v", index+1, errRead)
+				}
+				if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+					t.Fatalf("response %d type = %s, want %s: %s", index+1, got, wsEventTypeCompleted, payload)
+				}
+			}
+
+			wantReturnAuthID := xaiAuth.ID
+			if testCase.returnToDifferentXAIModel {
+				wantReturnAuthID = xaiAlternateAuthID
+			}
+			if got := xaiExecutor.AuthIDs(); len(got) != 3 || got[0] != xaiAuth.ID || got[1] != wantReturnAuthID || got[2] != wantReturnAuthID {
+				t.Fatalf("xAI auth IDs = %v, want [%s %s %s]", got, xaiAuth.ID, wantReturnAuthID, wantReturnAuthID)
+			}
+			if got := codexExecutor.AuthIDs(); len(got) != 1 || got[0] != codexAuth.ID {
+				t.Fatalf("Codex auth IDs = %v, want [%s]", got, codexAuth.ID)
+			}
+		})
+	}
+}
+
+func TestResponsesWebsocketPinnedAuthMatchesModel(t *testing.T) {
+	modelA := "xai-pinned-auth-model-a"
+	modelB := "xai-pinned-auth-model-b"
+	auth := &coreauth.Auth{ID: "xai-pinned-auth", Provider: "xai", Status: coreauth.StatusActive}
+	otherAuthID := "xai-pinned-auth-other"
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: modelA}})
+	registry.GetGlobalRegistry().RegisterClient(otherAuthID, auth.Provider, []*registry.ModelInfo{{ID: modelB}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		registry.GetGlobalRegistry().UnregisterClient(otherAuthID)
+	})
+
+	if !responsesWebsocketPinnedAuthMatchesModel(auth, modelA, modelA, false) {
+		t.Fatal("expected registered auth to match its supported model")
+	}
+	if responsesWebsocketPinnedAuthMatchesModel(auth, modelB, modelA, false) {
+		t.Fatal("registered auth matched an unsupported model from the same provider")
+	}
+
+	disabledAuth := auth.Clone()
+	disabledAuth.Disabled = true
+	if responsesWebsocketPinnedAuthMatchesModel(disabledAuth, modelA, modelA, false) {
+		t.Fatal("disabled auth matched a model")
+	}
+
+	cooldownAuth := auth.Clone()
+	cooldownAuth.ModelStates = map[string]*coreauth.ModelState{
+		modelA: {Unavailable: true, NextRetryAfter: time.Now().Add(time.Minute)},
+	}
+	if responsesWebsocketPinnedAuthMatchesModel(cooldownAuth, modelA, modelA, false) {
+		t.Fatal("auth in model cooldown matched a model")
+	}
+
+	unregisteredAuth := &coreauth.Auth{ID: "unregistered-auth", Provider: "xai", Status: coreauth.StatusActive}
+	if responsesWebsocketPinnedAuthMatchesModel(unregisteredAuth, modelA, modelA, false) {
+		t.Fatal("unregistered ordinary auth matched a model")
+	}
+	if !responsesWebsocketPinnedAuthMatchesModel(unregisteredAuth, modelA, modelA, true) {
+		t.Fatal("expected Home runtime auth to match its pinned model")
+	}
+	if responsesWebsocketPinnedAuthMatchesModel(unregisteredAuth, modelB, modelA, true) {
+		t.Fatal("Home runtime auth matched a different model")
+	}
+}
+
 func TestWebsocketUpstreamSupportsIncrementalInputForModel(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	auth := &coreauth.Auth{

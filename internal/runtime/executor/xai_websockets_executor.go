@@ -414,22 +414,15 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	if err != nil {
 		return nil, err
 	}
-	if idMapper != nil {
-		prepared.body = idMapper.upstreamRequestPayload(prepared.body)
-	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
-	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildXAIResponsesWebsocketURL(httpURL)
 	if err != nil {
 		return nil, err
 	}
-	wsHeaders := applyXAIWebsocketHeaders(http.Header{}, auth, token, prepared.sessionID)
-	wsReqBody := buildXAIWebsocketRequestBody(prepared.body)
-	warmupRequest := xaiWebsocketGenerateFalse(wsReqBody)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -445,6 +438,17 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			sess.reqMu.Lock()
 		}
 	}
+	if idMapper != nil {
+		if websocketSessionTargetChanged(sess, authID, wsURL) {
+			idMapper.upstreamPreviousID = ""
+		}
+		prepared.body = idMapper.upstreamRequestPayload(prepared.body)
+	}
+	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
+
+	wsHeaders := applyXAIWebsocketHeaders(http.Header{}, auth, token, prepared.sessionID)
+	wsReqBody := buildXAIWebsocketRequestBody(prepared.body)
+	warmupRequest := xaiWebsocketGenerateFalse(wsReqBody)
 
 	wsReqLog := helps.UpstreamRequestLog{
 		URL:       wsURL,
@@ -491,8 +495,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 
 	var readCh chan codexWebsocketRead
 	if sess != nil {
-		readCh = make(chan codexWebsocketRead, 4096)
-		sess.setActive(readCh)
+		readCh = sess.activate(conn)
 	}
 
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
@@ -504,13 +507,15 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				bodyErrRetry := websocketHandshakeBody(respHSRetry)
 				closeHTTPResponseBody(respHSRetry, "xai websockets executor: close handshake response body error")
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
-				sess.clearActive(readCh)
+				sess.clearActive(conn, readCh)
 				sess.reqMu.Unlock()
 				if respHSRetry != nil && respHSRetry.StatusCode > 0 {
 					return nil, xaiStatusErr(respHSRetry.StatusCode, bodyErrRetry)
 				}
 				return nil, errDialRetry
 			}
+			conn = connRetry
+			readCh = sess.activate(conn)
 			wsReqBodyRetry := buildXAIWebsocketRequestBody(prepared.body)
 			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 				URL:       wsURL,
@@ -526,14 +531,13 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			logXAIWebsocketRequest(executionSessionID, authID, wsURL, wsReqBodyRetry)
 			recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
 			reporter.StartResponseTTFT()
-			if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry != nil {
+			if errSendRetry := writeCodexWebsocketMessage(sess, conn, wsReqBodyRetry); errSendRetry != nil {
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
-				e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
-				sess.clearActive(readCh)
+				e.invalidateUpstreamConn(sess, conn, "send_error", errSendRetry)
+				sess.clearActive(conn, readCh)
 				sess.reqMu.Unlock()
 				return nil, errSendRetry
 			}
-			conn = connRetry
 			wsReqBody = wsReqBodyRetry
 		} else {
 			logXAIWebsocketDisconnected(executionSessionID, authID, wsURL, "send_error", errSend)
@@ -552,7 +556,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		defer close(out)
 		defer func() {
 			if sess != nil {
-				sess.clearActive(readCh)
+				sess.clearActive(conn, readCh)
 				sess.reqMu.Unlock()
 				return
 			}
@@ -938,6 +942,13 @@ func (e *XAIWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cl
 		return e.dialXAIWebsocket(ctx, auth, wsURL, headers)
 	}
 
+	if staleConn, staleAuthID, staleWSURL := detachMismatchedWebsocketSessionConn(sess, authID, wsURL); staleConn != nil {
+		logXAIWebsocketDisconnected(sess.sessionID, staleAuthID, staleWSURL, "target_changed", nil)
+		if errClose := staleConn.Close(); errClose != nil {
+			log.Errorf("xai websockets executor: close stale websocket error: %v", errClose)
+		}
+	}
+
 	sess.connMu.Lock()
 	conn := sess.conn
 	readerConn := sess.readerConn
@@ -1033,18 +1044,16 @@ func (e *XAIWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, co
 	for {
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
-			sess.activeMu.Lock()
-			ch := sess.activeCh
-			done := sess.activeDone
-			sess.activeMu.Unlock()
+			ch, done := sess.activeForConn(conn)
 			if ch != nil {
 				select {
 				case ch <- codexWebsocketRead{conn: conn, err: errRead}:
 				case <-done:
 				default:
 				}
-				sess.clearActive(ch)
-				close(ch)
+				if sess.clearActive(conn, ch) {
+					close(ch)
+				}
 			}
 			e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
 			return
@@ -1053,18 +1062,16 @@ func (e *XAIWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, co
 		if msgType != websocket.TextMessage {
 			if msgType == websocket.BinaryMessage {
 				errBinary := fmt.Errorf("xai websockets executor: unexpected binary message")
-				sess.activeMu.Lock()
-				ch := sess.activeCh
-				done := sess.activeDone
-				sess.activeMu.Unlock()
+				ch, done := sess.activeForConn(conn)
 				if ch != nil {
 					select {
 					case ch <- codexWebsocketRead{conn: conn, err: errBinary}:
 					case <-done:
 					default:
 					}
-					sess.clearActive(ch)
-					close(ch)
+					if sess.clearActive(conn, ch) {
+						close(ch)
+					}
 				}
 				e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
 				return
@@ -1072,10 +1079,7 @@ func (e *XAIWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, co
 			continue
 		}
 
-		sess.activeMu.Lock()
-		ch := sess.activeCh
-		done := sess.activeDone
-		sess.activeMu.Unlock()
+		ch, done := sess.activeForConn(conn)
 		if ch == nil {
 			continue
 		}
