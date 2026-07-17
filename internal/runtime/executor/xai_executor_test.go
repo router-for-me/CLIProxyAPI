@@ -3794,6 +3794,51 @@ func TestXAIChatBaseURL(t *testing.T) {
 			},
 			want: xaiauth.DefaultAPIBaseURL,
 		},
+		{
+			name: "OAuth with empty base_url defaults to chat proxy",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"auth_kind": "oauth"},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "OAuth metadata empty base_url defaults to chat proxy",
+			auth: &cliproxyauth.Auth{
+				Metadata: map[string]any{"auth_kind": "oauth"},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "OAuth using_api true empty base_url uses official api",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind":     "oauth",
+					xaiUsingAPIAttr: "true",
+				},
+			},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "OAuth using_api true custom base_url is honored",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind":     "oauth",
+					"base_url":      "https://gateway.example.com/v1",
+					xaiUsingAPIAttr: "true",
+				},
+			},
+			want: "https://gateway.example.com/v1",
+		},
+		{
+			name: "OAuth explicit CLI chat proxy base_url is preserved",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind": "oauth",
+					"base_url":  xaiauth.CLIChatProxyBaseURL,
+				},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
 	}
 
 	for _, tt := range tests {

@@ -827,7 +827,11 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 	if tokenEndpoint != "" {
 		auth.Metadata["token_endpoint"] = tokenEndpoint
 	}
-	if xaiMetadataString(auth.Metadata, "base_url") == "" {
+	// Preserve an explicit base_url. When missing, only backfill the official API
+	// base for using_api=true so chat stays on api.x.ai; OAuth chat (using_api=false)
+	// keeps base_url empty and resolves to CLIChatProxyBaseURL at request time.
+	// Media/websocket already fall back to DefaultAPIBaseURL when base_url is empty.
+	if xaiMetadataString(auth.Metadata, "base_url") == "" && xaiUsingAPI(auth) {
 		auth.Metadata["base_url"] = xaiauth.DefaultAPIBaseURL
 	}
 	auth.Metadata["last_refresh"] = time.Now().UTC().Format(time.RFC3339)
@@ -835,7 +839,7 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 		auth.Attributes = make(map[string]string)
 	}
 	auth.Attributes["auth_kind"] = "oauth"
-	if strings.TrimSpace(auth.Attributes["base_url"]) == "" {
+	if strings.TrimSpace(auth.Attributes["base_url"]) == "" && xaiUsingAPI(auth) {
 		auth.Attributes["base_url"] = xaiauth.DefaultAPIBaseURL
 	}
 	return auth, nil
@@ -1026,12 +1030,18 @@ func xaiUsingAPI(auth *cliproxyauth.Auth) bool {
 }
 
 // xaiChatBaseURL returns the base URL for non-image/video xAI HTTP chat requests.
-// When auth using_api is true, the official API base URL logic is used. When it
-// is false (including its OAuth default), empty or official default base_url is
-// rewritten to the CLI chat-proxy endpoint; an explicit non-default base_url is
-// still honored.
-// Websocket transport intentionally does not use this helper: cli-chat-proxy only
-// accepts HTTP POST and returns 405 for websocket upgrades.
+//
+// Resolution order:
+//  1. using_api=true (or non-OAuth): honor auth base_url; empty → DefaultAPIBaseURL.
+//  2. using_api=false / OAuth default: honor any non-empty base_url that is not the
+//     official DefaultAPIBaseURL (custom gateways and explicit CLIChatProxyBaseURL).
+//  3. Otherwise (empty base_url, or historical OAuth files that stored
+//     DefaultAPIBaseURL without using_api): CLIChatProxyBaseURL.
+//
+// To force chat through the official API for an OAuth account, set
+// using_api=true (and optionally base_url=https://api.x.ai/v1) on the auth file.
+// Websocket/media intentionally do not use this helper: they use xaiCreds and
+// fall back to DefaultAPIBaseURL (cli-chat-proxy rejects websocket upgrades).
 func xaiChatBaseURL(auth *cliproxyauth.Auth) string {
 	_, baseURL := xaiCreds(auth)
 	if xaiUsingAPI(auth) {
