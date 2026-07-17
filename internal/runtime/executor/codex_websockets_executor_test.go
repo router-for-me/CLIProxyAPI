@@ -40,6 +40,39 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 }
 
+func TestBuildCodexWebsocketRequestBodyShortensOverlongInputItemIDs(t *testing.T) {
+	longCallItemID := strings.Repeat("grok-call-item-", 6)
+	longOutputItemID := strings.Repeat("grok-output-item-", 6)
+	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"function_call","id":"` + longCallItemID + `","call_id":"call-1","name":"lookup"},{"type":"function_call_output","id":"` + longOutputItemID + `","call_id":"call-1","output":"ok"},{"type":"message","id":"msg-1"}]}`)
+
+	first := buildCodexWebsocketRequestBody(body)
+	second := buildCodexWebsocketRequestBody(body)
+
+	shortCallItemID := gjson.GetBytes(first, "input.0.id").String()
+	shortOutputItemID := gjson.GetBytes(first, "input.1.id").String()
+	if len([]rune(shortCallItemID)) > 64 || shortCallItemID == longCallItemID {
+		t.Fatalf("input.0.id was not shortened to at most 64 characters: %q", shortCallItemID)
+	}
+	if len([]rune(shortOutputItemID)) > 64 || shortOutputItemID == longOutputItemID {
+		t.Fatalf("input.1.id was not shortened to at most 64 characters: %q", shortOutputItemID)
+	}
+	if shortCallItemID == shortOutputItemID {
+		t.Fatalf("distinct long IDs produced the same shortened ID: %q", shortCallItemID)
+	}
+	if got := gjson.GetBytes(second, "input.0.id").String(); got != shortCallItemID {
+		t.Fatalf("input item ID shortening is not deterministic: first=%q second=%q", shortCallItemID, got)
+	}
+	if got := gjson.GetBytes(first, "input.0.call_id").String(); got != "call-1" {
+		t.Fatalf("function call_id = %q, want call-1", got)
+	}
+	if got := gjson.GetBytes(first, "input.1.call_id").String(); got != "call-1" {
+		t.Fatalf("function call output call_id = %q, want call-1", got)
+	}
+	if got := gjson.GetBytes(first, "input.2.id").String(); got != "msg-1" {
+		t.Fatalf("valid input item ID changed: %q", got)
+	}
+}
+
 func TestCodexWebsocketsExecuteResponsesLiteDoesNotInjectImageGenerationTool(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	capturedPayload := make(chan []byte, 1)
