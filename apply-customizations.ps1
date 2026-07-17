@@ -40,6 +40,7 @@ function Copy-CustomFile {
 }
 
 Replace-Once -RelativePath ".gitignore" -Old "temp/*`n" -New "temp/*`ndata/*`n"
+Insert-After-Once -RelativePath ".gitignore" -Anchor "*.exe`n" -Content "dist/backups/*.bak`n"
 Insert-After-Once -RelativePath "internal/managementasset/updater.go" -Anchor "func StartAutoUpdater(ctx context.Context, configFilePath string) {`n" -Content "`t_ = ctx`n`t_ = configFilePath`n`tlog.Debug(`"management asset remote updates disabled; using local management.html`")`n`treturn`n"
 Insert-After-Once -RelativePath "internal/managementasset/updater.go" -Anchor "func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string) bool {`n" -Content "`t_ = ctx`n`t_ = proxyURL`n`t_ = panelRepository`n`tstaticDir = strings.TrimSpace(staticDir)`n`tif staticDir == `"`" {`n`t`treturn false`n`t}`n`tif _, errLocal := os.Stat(filepath.Join(staticDir, managementAssetName)); errLocal != nil {`n`t`tlog.WithError(errLocal).Warn(`"local management.html is unavailable; remote download is disabled`")`n`t`treturn false`n`t}`n`treturn true`n"
 Insert-After-Once -RelativePath "internal/misc/antigravity_version.go" -Anchor "func StartAntigravityVersionUpdater(ctx context.Context) {`n" -Content "`t_ = ctx`n`tlog.Debug(`"antigravity version remote refresh disabled; using embedded fallback`")`n`treturn`n"

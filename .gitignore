@@ -1,6 +1,7 @@
 # Binaries
 cli-proxy-api
 *.exe
+dist/backups/*.bak
 
 # Configuration
 config.yaml
