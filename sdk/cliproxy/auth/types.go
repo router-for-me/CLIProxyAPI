@@ -92,6 +92,8 @@ type Auth struct {
 
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
+	// revision is an opaque process-local compare-and-swap token. It is never persisted.
+	revision string
 
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
@@ -256,34 +258,6 @@ func (a *Auth) RecentRequestsSnapshot(now time.Time) []RecentRequestBucket {
 	}
 
 	return out
-}
-
-// Clone shallow copies the Auth structure, duplicating maps to avoid accidental mutation.
-func (a *Auth) Clone() *Auth {
-	if a == nil {
-		return nil
-	}
-	copyAuth := *a
-	if len(a.Attributes) > 0 {
-		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
-		for key, value := range a.Attributes {
-			copyAuth.Attributes[key] = value
-		}
-	}
-	if len(a.Metadata) > 0 {
-		copyAuth.Metadata = make(map[string]any, len(a.Metadata))
-		for key, value := range a.Metadata {
-			copyAuth.Metadata[key] = value
-		}
-	}
-	if len(a.ModelStates) > 0 {
-		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
-		for key, state := range a.ModelStates {
-			copyAuth.ModelStates[key] = state.Clone()
-		}
-	}
-	copyAuth.Runtime = a.Runtime
-	return &copyAuth
 }
 
 func stableAuthIndex(seed string) string {

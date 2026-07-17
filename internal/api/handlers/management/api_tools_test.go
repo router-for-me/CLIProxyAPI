@@ -2,13 +2,37 @@ package management
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
+
+type apiToolsFailingStore struct {
+	saves int
+}
+
+func (s *apiToolsFailingStore) List(context.Context) ([]*coreauth.Auth, error) {
+	return nil, nil
+}
+
+func (s *apiToolsFailingStore) Save(context.Context, *coreauth.Auth) (string, error) {
+	s.saves++
+	if s.saves > 1 {
+		return "", errors.New("save failed")
+	}
+	return "synthetic-auth.json", nil
+}
+
+func (s *apiToolsFailingStore) Delete(context.Context, string) error {
+	return nil
+}
 
 func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
 	t.Parallel()
@@ -220,5 +244,46 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	}
 	if gotCompat.ID != compatAuth.ID {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
+	}
+}
+
+func TestRefreshAntigravityOAuthAccessTokenReturnsPersistenceFailure(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"new-token","expires_in":3600}`))
+	}))
+	defer tokenServer.Close()
+
+	previousTokenURL := antigravityOAuthTokenURL
+	antigravityOAuthTokenURL = tokenServer.URL
+	defer func() { antigravityOAuthTokenURL = previousTokenURL }()
+
+	store := &apiToolsFailingStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "synthetic-auth",
+		Provider: "antigravity",
+		ProxyURL: "direct",
+		Metadata: map[string]any{
+			"access_token":  "old-token",
+			"refresh_token": "synthetic-refresh-token",
+			"expired":       time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	h := &Handler{authManager: manager}
+	if _, errRefresh := h.refreshAntigravityOAuthAccessToken(context.Background(), auth); errRefresh == nil || !strings.Contains(errRefresh.Error(), "persist antigravity oauth token refresh") {
+		t.Fatalf("refresh error = %v, want persistence failure", errRefresh)
+	}
+
+	current, ok := manager.GetByID(auth.ID)
+	if !ok || current == nil {
+		t.Fatal("expected registered auth to remain available")
+	}
+	if got := current.Metadata["access_token"]; got != "old-token" {
+		t.Fatalf("runtime access_token = %v, want old-token", got)
 	}
 }

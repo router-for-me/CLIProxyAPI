@@ -1209,9 +1209,18 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 				result.Auth.Attributes[key] = value
 			}
 		}
-		if updated, errUpdate := s.coreManager.Update(context.Background(), result.Auth); errUpdate == nil && updated != nil {
-			activeAuth = updated.Clone()
+		updated, errUpdate := s.coreManager.Update(ctx, result.Auth)
+		if errUpdate != nil {
+			log.WithError(errUpdate).WithField("auth_id", a.ID).Error("failed to persist plugin auth update")
+			GlobalModelRegistry().UnregisterClient(a.ID)
+			return true
 		}
+		if updated == nil {
+			log.WithField("auth_id", a.ID).Warn("plugin auth update did not resolve to an active auth")
+			GlobalModelRegistry().UnregisterClient(a.ID)
+			return true
+		}
+		activeAuth = updated.Clone()
 	}
 	if activeAuth == nil {
 		activeAuth = a

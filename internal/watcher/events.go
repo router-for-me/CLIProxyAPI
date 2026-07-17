@@ -52,16 +52,23 @@ func (w *Watcher) processEvents(ctx context.Context) {
 			return
 		case event, ok := <-w.watcher.Events:
 			if !ok {
+				w.scheduleAuthReconciliation()
 				return
 			}
 			w.handleEvent(event)
 		case errWatch, ok := <-w.watcher.Errors:
 			if !ok {
+				w.scheduleAuthReconciliation()
 				return
 			}
-			log.Errorf("file watcher error: %v", errWatch)
+			w.handleWatcherError(errWatch)
 		}
 	}
+}
+
+func (w *Watcher) handleWatcherError(err error) {
+	log.WithError(err).Error("file watcher error")
+	w.scheduleAuthReconciliation()
 }
 
 func (w *Watcher) handleEvent(event fsnotify.Event) {
