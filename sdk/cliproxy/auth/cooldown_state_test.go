@@ -114,6 +114,7 @@ func TestFileCooldownStateStore_SaveLoadAndCleanStale(t *testing.T) {
 	}
 
 	nextRetry := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	nextProbe := time.Now().Add(5 * time.Minute).UTC().Truncate(time.Second)
 	updatedAt := time.Now().UTC().Truncate(time.Second)
 	record := CooldownStateRecord{
 		Provider:       "xai",
@@ -125,9 +126,10 @@ func TestFileCooldownStateStore_SaveLoadAndCleanStale(t *testing.T) {
 		Reason:         "quota",
 		Quota: QuotaState{
 			Exceeded:      true,
-			Reason:        "quota",
+			Reason:        "usage_limit_reached",
 			NextRecoverAt: nextRetry,
 			BackoffLevel:  1,
+			NextProbeAt:   nextProbe,
 		},
 		LastError: &Error{Message: "rate limited", HTTPStatus: 429},
 		UpdatedAt: updatedAt,
@@ -156,12 +158,110 @@ func TestFileCooldownStateStore_SaveLoadAndCleanStale(t *testing.T) {
 	if loaded[0].LastError == nil || loaded[0].LastError.HTTPStatus != 429 {
 		t.Fatalf("loaded last error = %+v, want HTTP 429", loaded[0].LastError)
 	}
+	if !loaded[0].Quota.NextProbeAt.Equal(nextProbe) {
+		t.Fatalf("loaded next probe = %v, want %v", loaded[0].Quota.NextProbeAt, nextProbe)
+	}
 
 	if errSave := store.Save(ctx, nil); errSave != nil {
 		t.Fatalf("Save(nil) returned error: %v", errSave)
 	}
 	if _, errStat := os.Stat(filepath.Join(authDir, "xai.cds")); !errors.Is(errStat, os.ErrNotExist) {
 		t.Fatalf("expected xai.cds to be removed, stat error = %v", errStat)
+	}
+}
+
+func TestFileCooldownStateStore_LoadsLegacyStateWithoutProbeField(t *testing.T) {
+	authDir := t.TempDir()
+	store := NewFileCooldownStateStoreWithAuthDir(authDir, authDir)
+	nextRetry := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	payload := []byte(`{"version":1,"auth_id":"legacy-auth","provider":"codex","records":[{"provider":"codex","auth_id":"legacy-auth","next_retry_after":"` + nextRetry.Format(time.RFC3339) + `","reason":"quota","quota":{"exceeded":true,"reason":"quota","next_recover_at":"` + nextRetry.Format(time.RFC3339) + `"},"updated_at":"` + time.Now().UTC().Format(time.RFC3339) + `"}]}`)
+	if errWrite := os.WriteFile(filepath.Join(authDir, "legacy.cds"), payload, 0o600); errWrite != nil {
+		t.Fatalf("write legacy state: %v", errWrite)
+	}
+	loaded, errLoad := store.Load(context.Background())
+	if errLoad != nil {
+		t.Fatalf("load legacy state: %v", errLoad)
+	}
+	if len(loaded) != 1 || !loaded[0].Quota.NextProbeAt.IsZero() {
+		t.Fatalf("legacy state = %+v, want one record with zero next probe", loaded)
+	}
+}
+
+func TestManager_RestoreCooldownStates_KeepsUsageLimitAfterProviderReset(t *testing.T) {
+	now := time.Now()
+	store := &recordingCooldownStateStore{load: []CooldownStateRecord{{
+		Provider:       "codex",
+		AuthID:         "usage-auth",
+		Status:         "cooling",
+		NextRetryAfter: now.Add(-time.Minute),
+		Reason:         "usage_limit_reached",
+		Quota: QuotaState{
+			Exceeded:      true,
+			Reason:        "usage_limit_reached",
+			NextRecoverAt: now.Add(-time.Minute),
+			NextProbeAt:   now.Add(time.Minute),
+		},
+		LastError: &Error{Code: "usage_limit_reached", Message: "usage limit", HTTPStatus: 429},
+		UpdatedAt: now.Add(-time.Hour),
+	}}}
+	manager := NewManager(nil, nil, nil)
+	manager.SetCooldownStateStore(store)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "usage-auth", Provider: "codex"}); errRegister != nil {
+		t.Fatalf("register usage auth: %v", errRegister)
+	}
+	if errRestore := manager.RestoreCooldownStates(context.Background()); errRestore != nil {
+		t.Fatalf("restore usage state: %v", errRestore)
+	}
+	auth, _ := manager.GetByID("usage-auth")
+	if !auth.Unavailable || !auth.Quota.Exceeded || auth.Quota.Reason != "usage_limit_reached" {
+		t.Fatalf("restored usage state was unlocked: %+v", auth.Quota)
+	}
+}
+
+func TestManager_RestoreCooldownStates_MigratesLegacyThreeHour429(t *testing.T) {
+	now := time.Now()
+	legacyRetry := now.Add(3 * time.Hour)
+	store := &recordingCooldownStateStore{load: []CooldownStateRecord{
+		{
+			Provider:       "codex",
+			AuthID:         "legacy-usage",
+			NextRetryAfter: legacyRetry,
+			Reason:         "quota",
+			Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: legacyRetry, BackoffLevel: 1},
+			LastError:      &Error{Code: "usage_limit_reached", Message: `{"error":{"type":"usage_limit_reached"}}`, HTTPStatus: 429},
+			UpdatedAt:      now,
+		},
+		{
+			Provider:       "codex",
+			AuthID:         "legacy-rate",
+			NextRetryAfter: legacyRetry,
+			Reason:         "quota",
+			Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: legacyRetry, BackoffLevel: 1},
+			LastError:      &Error{Code: "rate_limit", Message: "rate limit", HTTPStatus: 429},
+			UpdatedAt:      now,
+		},
+	}}
+	manager := NewManager(nil, nil, nil)
+	enableAdaptiveCooldown(manager, int((3 * time.Hour).Seconds()))
+	manager.SetCooldownStateStore(store)
+	for _, id := range []string{"legacy-usage", "legacy-rate"} {
+		if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: id, Provider: "codex"}); errRegister != nil {
+			t.Fatalf("register %s: %v", id, errRegister)
+		}
+	}
+	before := time.Now()
+	if errRestore := manager.RestoreCooldownStates(context.Background()); errRestore != nil {
+		t.Fatalf("restore legacy states: %v", errRestore)
+	}
+
+	usage, _ := manager.GetByID("legacy-usage")
+	if usage.Quota.Reason != "usage_limit_reached" || usage.Quota.NextProbeAt.IsZero() {
+		t.Fatalf("legacy usage state was not migrated: %+v", usage.Quota)
+	}
+	rate, _ := manager.GetByID("legacy-rate")
+	remaining := rate.NextRetryAfter.Sub(before)
+	if rate.Quota.Reason != "rate_limit" || remaining < 14*time.Second || remaining > 16*time.Second {
+		t.Fatalf("legacy transient state = %+v remaining=%v, want first adaptive window", rate.Quota, remaining)
 	}
 }
 

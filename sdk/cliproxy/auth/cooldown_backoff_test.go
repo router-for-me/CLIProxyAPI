@@ -114,7 +114,7 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 	quotaErr := &Error{Code: "rate_limit", Message: "quota", HTTPStatus: http.StatusTooManyRequests}
 	auth := &Auth{ID: "auth-level-quota"}
 
-	applyAuthFailureState(auth, quotaErr, nil, now, false)
+	applyAuthFailureState(auth, quotaErr, nil, now, false, codexCooldownPolicy{}, 0.5)
 	if auth.Quota.BackoffLevel != 1 {
 		t.Fatalf("expected BackoffLevel 1 after first failure, got %d", auth.Quota.BackoffLevel)
 	}
@@ -124,7 +124,7 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 	}
 
 	// In-window failure keeps the current window and level.
-	applyAuthFailureState(auth, quotaErr, nil, now.Add(100*time.Millisecond), false)
+	applyAuthFailureState(auth, quotaErr, nil, now.Add(100*time.Millisecond), false, codexCooldownPolicy{}, 0.5)
 	if auth.Quota.BackoffLevel != 1 {
 		t.Fatalf("expected BackoffLevel to stay 1 for in-window failure, got %d", auth.Quota.BackoffLevel)
 	}
@@ -133,22 +133,26 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 	}
 
 	// A failure after the window expired escalates to the next level.
-	applyAuthFailureState(auth, quotaErr, nil, now.Add(2*time.Second), false)
+	secondNow := now.Add(2 * time.Second)
+	applyAuthFailureState(auth, quotaErr, nil, secondNow, false, codexCooldownPolicy{}, 0.5)
 	if auth.Quota.BackoffLevel != 2 {
 		t.Fatalf("expected BackoffLevel 2 after post-window failure, got %d", auth.Quota.BackoffLevel)
 	}
-	if !auth.Quota.NextRecoverAt.Equal(now.Add(4 * time.Second)) {
-		t.Fatalf("expected second window to close at %v, got %v", now.Add(4*time.Second), auth.Quota.NextRecoverAt)
+	secondRecover := secondNow.Add(2 * time.Second)
+	if !auth.Quota.NextRecoverAt.Equal(secondRecover) {
+		t.Fatalf("expected second window to close at %v, got %v", secondRecover, auth.Quota.NextRecoverAt)
 	}
 
 	// A provider supplied retry hint always takes effect, even in-window.
 	retryAfter := 10 * time.Second
-	applyAuthFailureState(auth, quotaErr, &retryAfter, now.Add(3*time.Second), false)
+	retryNow := secondNow.Add(3 * time.Second)
+	applyAuthFailureState(auth, quotaErr, &retryAfter, retryNow, false, codexCooldownPolicy{}, 0.5)
 	if auth.Quota.BackoffLevel != 2 {
 		t.Fatalf("expected BackoffLevel to stay 2 with retry hint, got %d", auth.Quota.BackoffLevel)
 	}
-	if !auth.Quota.NextRecoverAt.Equal(now.Add(13 * time.Second)) {
-		t.Fatalf("expected retry hint window to close at %v, got %v", now.Add(13*time.Second), auth.Quota.NextRecoverAt)
+	retryRecover := retryNow.Add(retryAfter)
+	if !auth.Quota.NextRecoverAt.Equal(retryRecover) {
+		t.Fatalf("expected retry hint window to close at %v, got %v", retryRecover, auth.Quota.NextRecoverAt)
 	}
 }
 

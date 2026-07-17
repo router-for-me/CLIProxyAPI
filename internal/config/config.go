@@ -285,6 +285,23 @@ type CodexHeaderDefaults struct {
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
+	// QuotaCooldown configures Codex-specific 401 and 429 recovery behavior.
+	// It is disabled by default so existing installations keep upstream behavior.
+	QuotaCooldown CodexQuotaCooldownConfig `yaml:"quota-cooldown" json:"quota-cooldown"`
+}
+
+// CodexQuotaCooldownConfig controls adaptive Codex cooldown behavior.
+type CodexQuotaCooldownConfig struct {
+	// Enabled activates Codex-specific adaptive rate-limit cooldowns and quota probes.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// UnauthorizedCooldownSeconds overrides the legacy 30-minute 401 cooldown when positive.
+	UnauthorizedCooldownSeconds int `yaml:"unauthorized-cooldown-seconds" json:"unauthorized-cooldown-seconds"`
+	// TransientBackoffSeconds defines the progressive cooldown ladder for non-quota 429 responses.
+	// Empty uses 15, 30, 60, 120, and 300 seconds. Values are capped at five minutes.
+	TransientBackoffSeconds []int `yaml:"transient-backoff-seconds" json:"transient-backoff-seconds"`
+	// JitterPercent applies symmetric jitter to transient 429 cooldowns.
+	// Non-positive values use 20 percent. The final cooldown never exceeds five minutes.
+	JitterPercent int `yaml:"jitter-percent" json:"jitter-percent"`
 }
 
 // TLSConfig holds HTTPS server settings.

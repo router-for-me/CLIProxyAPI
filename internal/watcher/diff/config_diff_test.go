@@ -93,6 +93,19 @@ func TestBuildConfigChangeDetails_NoChanges(t *testing.T) {
 	}
 }
 
+func TestBuildConfigChangeDetails_CodexQuotaCooldown(t *testing.T) {
+	oldCfg := &config.Config{}
+	newCfg := &config.Config{}
+	newCfg.Codex.QuotaCooldown = config.CodexQuotaCooldownConfig{
+		Enabled:                     true,
+		UnauthorizedCooldownSeconds: 10800,
+		TransientBackoffSeconds:     []int{15, 30, 60, 120, 300},
+		JitterPercent:               20,
+	}
+	details := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, details, "codex.quota-cooldown: enabled false -> true")
+}
+
 func TestBuildConfigChangeDetails_GeminiVertexHeaders(t *testing.T) {
 	oldCfg := &config.Config{
 		GeminiKey: []config.GeminiKey{
