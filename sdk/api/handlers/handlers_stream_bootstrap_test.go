@@ -3,7 +3,9 @@ package handlers
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -16,8 +18,10 @@ import (
 )
 
 type failOnceStreamExecutor struct {
-	mu    sync.Mutex
-	calls int
+	mu                  sync.Mutex
+	calls               int
+	synchronousFailures int
+	synchronousErr      error
 }
 
 func (e *failOnceStreamExecutor) Identifier() string { return "codex" }
@@ -31,6 +35,17 @@ func (e *failOnceStreamExecutor) ExecuteStream(context.Context, *coreauth.Auth, 
 	e.calls++
 	call := e.calls
 	e.mu.Unlock()
+
+	if call <= e.synchronousFailures {
+		if e.synchronousErr != nil {
+			return nil, e.synchronousErr
+		}
+		return nil, &url.Error{
+			Op:  "Post",
+			URL: "https://upstream.invalid/responses",
+			Err: io.ErrUnexpectedEOF,
+		}
+	}
 
 	ch := make(chan coreexecutor.StreamChunk, 1)
 	if call == 1 {
@@ -80,8 +95,10 @@ func (e *failOnceStreamExecutor) Calls() int {
 }
 
 type payloadThenErrorStreamExecutor struct {
-	mu    sync.Mutex
-	calls int
+	mu          sync.Mutex
+	calls       int
+	payload     []byte
+	terminalErr error
 }
 
 func (e *payloadThenErrorStreamExecutor) Identifier() string { return "codex" }
@@ -95,16 +112,22 @@ func (e *payloadThenErrorStreamExecutor) ExecuteStream(context.Context, *coreaut
 	e.calls++
 	e.mu.Unlock()
 
-	ch := make(chan coreexecutor.StreamChunk, 2)
-	ch <- coreexecutor.StreamChunk{Payload: []byte("partial")}
-	ch <- coreexecutor.StreamChunk{
-		Err: &coreauth.Error{
+	payload := e.payload
+	if len(payload) == 0 {
+		payload = []byte("partial")
+	}
+	terminalErr := e.terminalErr
+	if terminalErr == nil {
+		terminalErr = &coreauth.Error{
 			Code:       "upstream_closed",
 			Message:    "upstream closed",
 			Retryable:  false,
 			HTTPStatus: http.StatusBadGateway,
-		},
+		}
 	}
+	ch := make(chan coreexecutor.StreamChunk, 2)
+	ch <- coreexecutor.StreamChunk{Payload: payload}
+	ch <- coreexecutor.StreamChunk{Err: terminalErr}
 	close(ch)
 	return &coreexecutor.StreamResult{Chunks: ch}, nil
 }
@@ -268,6 +291,121 @@ func (e *authAwareStreamExecutor) AuthIDs() []string {
 	out := make([]string, len(e.authIDs))
 	copy(out, e.authIDs)
 	return out
+}
+
+func newStreamBootstrapTestHandler(t *testing.T, executor coreauth.ProviderExecutor, bootstrapRetries int) *BaseAPIHandler {
+	t.Helper()
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{
+		ID:       "sync-failure-auth",
+		Provider: executor.Identifier(),
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "sync-failure@example.com"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register(auth): %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	return NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		PassthroughHeaders: true,
+		Streaming: sdkconfig.StreamingConfig{
+			BootstrapRetries: bootstrapRetries,
+		},
+	}, manager)
+}
+
+func TestExecuteStreamWithAuthManager_RetriesSynchronousUnexpectedEOF(t *testing.T) {
+	executor := &failOnceStreamExecutor{synchronousFailures: 1}
+	handler := newStreamBootstrapTestHandler(t, executor, 1)
+
+	dataChan, upstreamHeaders, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected error: %+v", msg)
+		}
+	}
+
+	if string(got) != "ok" {
+		t.Fatalf("payload = %q, want %q", string(got), "ok")
+	}
+	if calls := executor.Calls(); calls != 2 {
+		t.Fatalf("stream attempts = %d, want 2", calls)
+	}
+	if attempt := upstreamHeaders.Get("X-Upstream-Attempt"); attempt != "2" {
+		t.Fatalf("upstream attempt header = %q, want %q", attempt, "2")
+	}
+}
+
+func TestExecuteStreamWithAuthManager_ExhaustsSynchronousUnexpectedEOFRetries(t *testing.T) {
+	executor := &failOnceStreamExecutor{synchronousFailures: 4}
+	handler := newStreamBootstrapTestHandler(t, executor, 3)
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	for chunk := range dataChan {
+		t.Fatalf("unexpected payload: %q", string(chunk))
+	}
+	var gotErr *interfaces.ErrorMessage
+	for msg := range errChan {
+		if msg != nil {
+			gotErr = msg
+		}
+	}
+
+	if calls := executor.Calls(); calls != 4 {
+		t.Fatalf("stream attempts = %d, want 4", calls)
+	}
+	if gotErr == nil || !errors.Is(gotErr.Error, io.ErrUnexpectedEOF) {
+		t.Fatalf("terminal error = %v, want wrapped io.ErrUnexpectedEOF", gotErr)
+	}
+	if gotErr.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", gotErr.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+func TestExecuteStreamWithAuthManager_DoesNotRetrySynchronousNonEOFError(t *testing.T) {
+	translationErr := errors.New("request translation failed")
+	executor := &failOnceStreamExecutor{
+		synchronousFailures: 1,
+		synchronousErr:      translationErr,
+	}
+	handler := newStreamBootstrapTestHandler(t, executor, 3)
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan != nil {
+		t.Fatalf("expected nil data channel")
+	}
+	var gotErr *interfaces.ErrorMessage
+	for msg := range errChan {
+		if msg != nil {
+			gotErr = msg
+		}
+
+	}
+	if calls := executor.Calls(); calls != 1 {
+		t.Fatalf("stream attempts = %d, want 1", calls)
+	}
+	if gotErr == nil || !errors.Is(gotErr.Error, translationErr) {
+		t.Fatalf("terminal error = %v, want request translation failure", gotErr)
+	}
 }
 
 func TestExecuteStreamWithAuthManager_RetriesBeforeFirstByte(t *testing.T) {
@@ -463,6 +601,40 @@ func TestExecuteStreamWithAuthManager_DoesNotRetryAfterFirstByte(t *testing.T) {
 	}
 	if executor.Calls() != 1 {
 		t.Fatalf("expected 1 stream attempt, got %d", executor.Calls())
+	}
+}
+
+func TestExecuteStreamWithAuthManager_DoesNotRetryAfterToolCallPayload(t *testing.T) {
+	executor := &payloadThenErrorStreamExecutor{
+		payload:     []byte(`data: {"id":"chatcmpl-retry-guard","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_retry_guard_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}`),
+		terminalErr: io.ErrUnexpectedEOF,
+	}
+	handler := newStreamBootstrapTestHandler(t, executor, 3)
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+	var gotErr error
+	for msg := range errChan {
+		if msg != nil && msg.Error != nil {
+			gotErr = msg.Error
+		}
+	}
+
+	if strings.Count(string(got), "call_retry_guard_1") != 1 {
+		t.Fatalf("expected one tool call payload, got %q", string(got))
+	}
+	if !errors.Is(gotErr, io.ErrUnexpectedEOF) {
+		t.Fatalf("terminal error = %v, want io.ErrUnexpectedEOF", gotErr)
+	}
+	if calls := executor.Calls(); calls != 1 {
+		t.Fatalf("stream attempts = %d, want 1", calls)
 	}
 }
 
