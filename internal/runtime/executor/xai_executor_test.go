@@ -2250,6 +2250,98 @@ func TestXAIExecutorExecuteImagesUsesEditsEndpoint(t *testing.T) {
 	}
 }
 
+func TestNormalizeXAIImageRefsRewritesImageURLField(t *testing.T) {
+	t.Parallel()
+
+	in := []byte(`{
+		"model":"grok-imagine-image",
+		"prompt":"edit",
+		"image":{"type":"image_url","image_url":"https://example.com/a.png"},
+		"images":[{"image_url":{"url":"https://example.com/b.png"}},{"url":"https://example.com/c.png","image_url":"https://example.com/ignored.png"}],
+		"reference_images":[{"image_url":"https://example.com/d.png"}],
+		"nested":{"image":{"image_url":"https://example.com/e.png"}},
+		"content":[{"type":"image_url","image_url":{"url":"https://example.com/keep.png"}}]
+	}`)
+	out := normalizeXAIImageRefs(in)
+
+	if got := gjson.GetBytes(out, "image.url").String(); got != "https://example.com/a.png" {
+		t.Fatalf("image.url = %q, want https://example.com/a.png; body=%s", got, out)
+	}
+	if gjson.GetBytes(out, "image.image_url").Exists() {
+		t.Fatalf("image.image_url should be removed; body=%s", out)
+	}
+	if got := gjson.GetBytes(out, "image.type").String(); got != "image_url" {
+		t.Fatalf("image.type = %q, want image_url; body=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "images.0.url").String(); got != "https://example.com/b.png" {
+		t.Fatalf("images.0.url = %q, want https://example.com/b.png; body=%s", got, out)
+	}
+	if gjson.GetBytes(out, "images.0.image_url").Exists() {
+		t.Fatalf("images.0.image_url should be removed; body=%s", out)
+	}
+	if got := gjson.GetBytes(out, "images.1.url").String(); got != "https://example.com/c.png" {
+		t.Fatalf("images.1.url = %q, want existing url kept; body=%s", got, out)
+	}
+	if gjson.GetBytes(out, "images.1.image_url").Exists() {
+		t.Fatalf("images.1.image_url should be removed when url already set; body=%s", out)
+	}
+	if got := gjson.GetBytes(out, "reference_images.0.url").String(); got != "https://example.com/d.png" {
+		t.Fatalf("reference_images.0.url = %q, want https://example.com/d.png; body=%s", got, out)
+	}
+	if gjson.GetBytes(out, "reference_images.0.image_url").Exists() {
+		t.Fatalf("reference_images.0.image_url should be removed; body=%s", out)
+	}
+	if got := gjson.GetBytes(out, "nested.image.url").String(); got != "https://example.com/e.png" {
+		t.Fatalf("nested.image.url = %q, want https://example.com/e.png; body=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "content.0.image_url.url").String(); got != "https://example.com/keep.png" {
+		t.Fatalf("chat content image_url.url should be preserved, got %q; body=%s", got, out)
+	}
+	if gjson.GetBytes(out, "content.0.url").Exists() {
+		t.Fatalf("chat content parts must not be rewritten to url; body=%s", out)
+	}
+}
+
+func TestXAIExecutorExecuteImagesRewritesImageURLToURL(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":123,"data":[{"url":"https://x.ai/image.png"}]}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-imagine-image",
+		Payload: []byte(`{"model":"grok-imagine-image","prompt":"edit","image":{"image_url":"https://example.com/a.png"}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/edits",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := gjson.GetBytes(gotBody, "image.url").String(); got != "https://example.com/a.png" {
+		t.Fatalf("upstream image.url = %q, want https://example.com/a.png; body=%s", got, gotBody)
+	}
+	if gjson.GetBytes(gotBody, "image.image_url").Exists() {
+		t.Fatalf("upstream body still has image.image_url: %s", gotBody)
+	}
+}
+
 func TestXAIExecutorExecuteVideosCreate(t *testing.T) {
 	var gotPath string
 	var gotMethod string
