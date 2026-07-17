@@ -4,7 +4,7 @@ name: release-macos
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing git tag to build and release (example: v1.0.0)
+        description: Existing git tag to build and release
         required: true
         type: string
 
