@@ -45,6 +45,7 @@ const (
 	xaiNamespaceToolType       = "namespace"
 	xaiToolSearchType          = "tool_search"
 	xaiWebSearchToolType       = "web_search"
+	xaiXSearchToolType         = "x_search"
 	// Codex Desktop injects codex_app.automation_update with a large oneOf+$ref
 	// schema. xAI's free/build Responses path accepts the HTTP request but never
 	// emits SSE when that schema is present, so Desktop hangs on "thinking".
@@ -69,6 +70,11 @@ const (
 	// xaiUsingAPIAttr enables the official API path for non-media HTTP chat.
 	xaiUsingAPIAttr = "using_api"
 )
+
+// Always inject native x_search when the client did not declare it so Grok can
+// run X Search server-side. Internal subtool traces are still filtered downstream
+// when this native tool is present (see filterInternalXSearch).
+var xaiXSearchToolJSON = []byte(`{"type":"x_search"}`)
 
 // XAIExecutor is a stateless executor for xAI Grok's Responses API.
 type XAIExecutor struct {
@@ -183,11 +189,17 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
+	responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		if !bytes.HasPrefix(line, xaiDataTag) {
 			continue
 		}
 		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
+		eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
+		eventData = responseFilter.apply(eventData)
+		if len(eventData) == 0 {
+			continue
+		}
 		switch gjson.GetBytes(eventData, "type").String() {
 		case "response.output_item.done":
 			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -469,6 +481,13 @@ func xaiBuildSSEFrame(eventName string, data []byte) []byte {
 }
 
 func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, endpointPath string) (resp cliproxyexecutor.Response, err error) {
+	model := strings.TrimSpace(gjson.GetBytes(req.Payload, "model").String())
+	if model == "" {
+		model = strings.TrimSpace(req.Model)
+	}
+	reporter := helps.NewExecutorUsageReporter(ctx, e, model, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
 	token, baseURL := xaiCreds(auth)
 	if baseURL == "" {
 		baseURL = xaiauth.DefaultAPIBaseURL
@@ -478,15 +497,17 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 		endpointPath = xaiDefaultImageEndpointPath
 	}
 
+	payload := normalizeXAIImageRefs(req.Payload)
 	url := strings.TrimSuffix(baseURL, "/") + endpointPath
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(req.Payload))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return resp, err
 	}
 	applyXAIHeaders(httpReq, auth, token, false, "")
-	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), req.Payload)
+	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), payload)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -508,9 +529,11 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, xaiStatusErr(httpResp.StatusCode, data)
+		err = xaiStatusErr(httpResp.StatusCode, data)
+		return resp, err
 	}
 
+	reporter.EnsurePublished(ctx)
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }
 
@@ -521,15 +544,16 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 	}
 	logXAIResolvedBaseURL(ctx, baseURL)
 
+	payload := normalizeXAIImageRefs(req.Payload)
 	method := http.MethodPost
 	endpointPath := xaiVideosGenerationsPath
-	var body io.Reader = bytes.NewReader(req.Payload)
+	var body io.Reader = bytes.NewReader(payload)
 
 	switch path := xaiVideoEndpointPath(opts); path {
 	case xaiVideosGenerationsPath, xaiVideosEditsPath, xaiVideosExtensionsPath:
 		endpointPath = path
 	default:
-		if requestID := strings.TrimSpace(gjson.GetBytes(req.Payload, "request_id").String()); requestID != "" {
+		if requestID := strings.TrimSpace(gjson.GetBytes(payload, "request_id").String()); requestID != "" {
 			method = http.MethodGet
 			endpointPath = xaiVideosPath + "/" + url.PathEscape(requestID)
 			body = nil
@@ -550,7 +574,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 			httpReq.Header.Set("x-idempotency-key", key)
 		}
 	}
-	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), req.Payload)
+	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), payload)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
@@ -644,6 +668,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
+		responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
 		var pendingEventLine []byte
 		emitTranslatedLine := func(translatedLine []byte) bool {
 			chunks := sdktranslator.TranslateStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, translatedLine, &param)
@@ -672,6 +697,14 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				eventDataList := xaiNormalizeReasoningSummaryDataEvents(bytes.TrimSpace(line[len(xaiDataTag):]))
 				hasPendingEventLine := pendingEventLine != nil
 				for i, eventData := range eventDataList {
+					eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
+					eventData = responseFilter.apply(eventData)
+					if len(eventData) == 0 {
+						if hasPendingEventLine && i == 0 {
+							pendingEventLine = nil
+						}
+						continue
+					}
 					normalizedEventName := gjson.GetBytes(eventData, "type").String()
 					switch normalizedEventName {
 					case "response.output_item.done":
@@ -811,14 +844,35 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 }
 
 type xaiPreparedRequest struct {
-	baseModel       string
-	from            sdktranslator.Format
-	responseFormat  sdktranslator.Format
-	to              sdktranslator.Format
-	originalPayload []byte
-	body            []byte
-	sessionID       string
-	replayScope     xaiReasoningReplayScope
+	baseModel             string
+	from                  sdktranslator.Format
+	responseFormat        sdktranslator.Format
+	to                    sdktranslator.Format
+	originalPayload       []byte
+	body                  []byte
+	namespaceTools        map[string]xaiNamespaceToolRef
+	clientDeclaredTools   map[xaiClientToolKey]struct{}
+	sessionID             string
+	replayScope           xaiReasoningReplayScope
+	filterInternalXSearch bool
+}
+
+type xaiNamespaceToolRef struct {
+	namespace string
+	name      string
+}
+
+// xaiClientToolKey identifies a client-declared callable tool using the
+// post-restore Responses shape (short name + optional namespace) and the
+// effective upstream tool type after normalizeXAITool (client custom tools are
+// sent as function). Response call types are matched against this effective
+// kind so internal custom_tool_call traces are not exempted merely because a
+// client declared an ordinary function/custom tool with the same short name,
+// while legitimate function_call responses for normalized custom tools are kept.
+type xaiClientToolKey struct {
+	namespace string
+	name      string
+	toolType  string
 }
 
 func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*xaiPreparedRequest, error) {
@@ -852,17 +906,30 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
+	namespaceTools := collectXAINamespaceToolRefs(body)
+	// Collect before normalizeXAITools flattens namespace wrappers so keys match
+	// the post-restore (namespace, short-name) shape used by the response filter.
+	clientDeclaredTools := collectXAIClientDeclaredToolKeys(body)
 	body = normalizeXAITools(body)
+	// Drop choices that point at tools removed by normalizeXAITools before we
+	// inject native x_search, so a surviving allowed_tools / forced choice is not
+	// left pointing at a deleted tool once only x_search remains.
+	body = normalizeXAINamespaceToolChoice(body)
+	body = pruneXAIOrphanedToolChoice(body)
 	body = normalizeXAIToolChoiceForTools(body)
+	body = ensureXAINativeXSearchTool(body)
 	var replayScope xaiReasoningReplayScope
 	body, replayScope, err = applyXAIReasoningReplayCacheRequired(ctx, from, req, opts, body)
 	if err != nil {
 		return nil, err
 	}
+	body = normalizeXAIInputCustomToolCalls(body)
+	body = normalizeXAIInputNamespaceToolCalls(body)
 	body = normalizeXAIInputReasoningItems(body)
 	body = sanitizeXAIInputEncryptedContent(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
+	body = normalizeXAIImageRefs(body)
 
 	sessionID, errSession := xaiResolveComposerSessionID(ctx, req, opts, baseModel)
 	if errSession != nil {
@@ -873,14 +940,17 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	}
 
 	return &xaiPreparedRequest{
-		baseModel:       baseModel,
-		from:            from,
-		responseFormat:  responseFormat,
-		to:              to,
-		originalPayload: originalPayload,
-		body:            body,
-		sessionID:       sessionID,
-		replayScope:     replayScope,
+		baseModel:             baseModel,
+		from:                  from,
+		responseFormat:        responseFormat,
+		to:                    to,
+		originalPayload:       originalPayload,
+		body:                  body,
+		namespaceTools:        namespaceTools,
+		clientDeclaredTools:   clientDeclaredTools,
+		sessionID:             sessionID,
+		replayScope:           replayScope,
+		filterInternalXSearch: xaiRequestHasNativeXSearch(body),
 	}, nil
 }
 
@@ -1105,6 +1175,92 @@ func xaiImageEndpointPath(opts cliproxyexecutor.Options) string {
 	return xaiDefaultImageEndpointPath
 }
 
+// normalizeXAIImageRefs rewrites OpenAI-style image object fields to the xAI
+// image API shape before the payload is sent upstream:
+//
+//	{"image":{"image_url":"https://..."}} → {"image":{"url":"https://..."}}
+//
+// Applies to image / images / reference_images anywhere in the JSON tree,
+// including nested objects and array items. Does not rewrite chat content
+// parts shaped as {"type":"image_url","image_url":{...}}.
+func normalizeXAIImageRefs(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var payload any
+	if errDecode := decoder.Decode(&payload); errDecode != nil {
+		return body
+	}
+
+	if !normalizeXAIImageRefsValue(payload) {
+		return body
+	}
+	normalized, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		return body
+	}
+	return normalized
+}
+
+func normalizeXAIImageRefsValue(value any) bool {
+	changed := false
+	switch node := value.(type) {
+	case map[string]any:
+		for key, child := range node {
+			switch key {
+			case "image":
+				changed = normalizeXAIImageRef(child) || changed
+			case "images", "reference_images":
+				if refs, ok := child.([]any); ok {
+					for _, ref := range refs {
+						changed = normalizeXAIImageRef(ref) || changed
+					}
+				}
+			}
+			changed = normalizeXAIImageRefsValue(child) || changed
+		}
+	case []any:
+		for _, child := range node {
+			changed = normalizeXAIImageRefsValue(child) || changed
+		}
+	}
+	return changed
+}
+
+func normalizeXAIImageRef(value any) bool {
+	ref, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+
+	originalURL, _ := ref["url"].(string)
+	url := strings.TrimSpace(originalURL)
+	imageURL, hasImageURL := ref["image_url"]
+	if url == "" {
+		switch imageURL := imageURL.(type) {
+		case string:
+			url = strings.TrimSpace(imageURL)
+		case map[string]any:
+			url, _ = imageURL["url"].(string)
+			url = strings.TrimSpace(url)
+		}
+	}
+	if url == "" {
+		return false
+	}
+	if url == originalURL && !hasImageURL {
+		return false
+	}
+
+	// Always emit the xAI field name and drop the OpenAI alias.
+	ref["url"] = url
+	delete(ref, "image_url")
+	return true
+}
+
 func xaiIsVideoRequest(opts cliproxyexecutor.Options) bool {
 	return opts.SourceFormat.String() == xaiVideoHandlerType
 }
@@ -1157,12 +1313,214 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 	return body
 }
 
-func normalizeXAITools(body []byte) []byte {
-	tools := gjson.GetBytes(body, "tools")
-	if !tools.Exists() || !tools.IsArray() {
+// ensureXAINativeXSearchTool appends {"type":"x_search"} when the final tools
+// list does not already include native X Search. When tool_choice restricts the
+// model to allowed_tools, x_search is also added there (without duplicates) so
+// Grok can select the injected tool. HTTP and websocket executors both prepare
+// payloads through prepareResponsesRequestTo, so this runs once before the body
+// is submitted upstream.
+func ensureXAINativeXSearchTool(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
 		return body
 	}
+	if !xaiRequestHasNativeXSearch(body) {
+		tools := gjson.GetBytes(body, "tools")
+		if !tools.Exists() || !tools.IsArray() {
+			body, _ = sjson.SetRawBytes(body, "tools", []byte(`[{"type":"x_search"}]`))
+		} else {
+			body, _ = sjson.SetRawBytes(body, "tools.-1", xaiXSearchToolJSON)
+		}
+	}
+	return ensureXAINativeXSearchAllowedTools(body)
+}
 
+// ensureXAINativeXSearchAllowedTools appends x_search to tool_choice.tools when
+// the choice mode is allowed_tools and x_search is not already listed.
+func ensureXAINativeXSearchAllowedTools(body []byte) []byte {
+	choice := gjson.GetBytes(body, "tool_choice")
+	if !choice.IsObject() || choice.Get("type").String() != "allowed_tools" {
+		return body
+	}
+	allowed := choice.Get("tools")
+	if !allowed.Exists() || !allowed.IsArray() {
+		body, _ = sjson.SetRawBytes(body, "tool_choice.tools", []byte(`[{"type":"x_search"}]`))
+		return body
+	}
+	for _, tool := range allowed.Array() {
+		if strings.TrimSpace(tool.Get("type").String()) == xaiXSearchToolType {
+			return body
+		}
+	}
+	body, _ = sjson.SetRawBytes(body, "tool_choice.tools.-1", xaiXSearchToolJSON)
+	return body
+}
+
+// pruneXAIOrphanedToolChoice removes tool_choice entries that no longer match
+// any remaining tool after normalizeXAITools filtering. Forced choices that
+// reference a deleted tool are dropped entirely; allowed_tools lists keep only
+// choices that still resolve against the post-normalization tools set.
+func pruneXAIOrphanedToolChoice(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+	choice := gjson.GetBytes(body, "tool_choice")
+	if !choice.Exists() {
+		return body
+	}
+	available := collectXAIAvailableToolChoiceKeys(body)
+	if choice.Type == gjson.String {
+		// auto / none / required are not tool references.
+		return body
+	}
+	if !choice.IsObject() {
+		return body
+	}
+	choiceType := strings.TrimSpace(choice.Get("type").String())
+	switch choiceType {
+	case "allowed_tools":
+		return pruneXAIAllowedToolsChoice(body, available)
+	default:
+		if choiceType == "" {
+			return body
+		}
+		if xaiToolChoiceMatchesAvailable(choice, available) {
+			return body
+		}
+		body, _ = sjson.DeleteBytes(body, "tool_choice")
+		return body
+	}
+}
+
+func pruneXAIAllowedToolsChoice(body []byte, available map[xaiToolChoiceKey]struct{}) []byte {
+	allowed := gjson.GetBytes(body, "tool_choice.tools")
+	if !allowed.Exists() || !allowed.IsArray() {
+		body, _ = sjson.DeleteBytes(body, "tool_choice")
+		return body
+	}
+	filtered := []byte(`[]`)
+	changed := false
+	for _, tool := range allowed.Array() {
+		if !xaiToolChoiceMatchesAvailable(tool, available) {
+			changed = true
+			continue
+		}
+		updated, errSet := sjson.SetRawBytes(filtered, "-1", []byte(tool.Raw))
+		if errSet != nil {
+			return body
+		}
+		filtered = updated
+	}
+	if !changed {
+		return body
+	}
+	if len(gjson.ParseBytes(filtered).Array()) == 0 {
+		body, _ = sjson.DeleteBytes(body, "tool_choice")
+		return body
+	}
+	body, _ = sjson.SetRawBytes(body, "tool_choice.tools", filtered)
+	return body
+}
+
+// xaiToolChoiceKey identifies a selectable tool the way xAI tool_choice entries
+// reference it after namespace qualification: type alone for host tools, or
+// type+name for function tools.
+type xaiToolChoiceKey struct {
+	toolType string
+	name     string
+}
+
+func collectXAIAvailableToolChoiceKeys(body []byte) map[xaiToolChoiceKey]struct{} {
+	keys := make(map[xaiToolChoiceKey]struct{})
+	collect := func(tools gjson.Result) {
+		if !tools.IsArray() {
+			return
+		}
+		for _, tool := range tools.Array() {
+			toolType := strings.TrimSpace(tool.Get("type").String())
+			if toolType == "" {
+				continue
+			}
+			key := xaiToolChoiceKey{toolType: toolType}
+			if toolType == xaiFunctionToolType || toolType == xaiCustomToolType {
+				key.name = strings.TrimSpace(tool.Get("name").String())
+				if key.name == "" {
+					continue
+				}
+			}
+			keys[key] = struct{}{}
+		}
+	}
+	collect(gjson.GetBytes(body, "tools"))
+	input := gjson.GetBytes(body, "input")
+	if input.IsArray() {
+		for _, item := range input.Array() {
+			if item.Get("type").String() == "additional_tools" {
+				collect(item.Get("tools"))
+			}
+		}
+	}
+	return keys
+}
+
+func xaiToolChoiceMatchesAvailable(choice gjson.Result, available map[xaiToolChoiceKey]struct{}) bool {
+	toolType := strings.TrimSpace(choice.Get("type").String())
+	if toolType == "" {
+		return false
+	}
+	key := xaiToolChoiceKey{toolType: toolType}
+	if toolType == xaiFunctionToolType || toolType == xaiCustomToolType {
+		key.name = strings.TrimSpace(choice.Get("name").String())
+		if key.name == "" {
+			return false
+		}
+	}
+	_, ok := available[key]
+	return ok
+}
+
+func normalizeXAITools(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+	original := body
+	normalizeAtPath := func(path string) bool {
+		tools := gjson.GetBytes(body, path)
+		if !tools.Exists() || !tools.IsArray() {
+			return true
+		}
+		filtered, changed, ok := normalizeXAIToolArray(tools)
+		if !ok {
+			return false
+		}
+		if !changed {
+			return true
+		}
+		updated, errSet := sjson.SetRawBytes(body, path, filtered)
+		if errSet != nil {
+			return false
+		}
+		body = updated
+		return true
+	}
+
+	if !normalizeAtPath("tools") {
+		return original
+	}
+	input := gjson.GetBytes(body, "input")
+	if input.Exists() && input.IsArray() {
+		for index, item := range input.Array() {
+			if item.Get("type").String() != "additional_tools" {
+				continue
+			}
+			if !normalizeAtPath(fmt.Sprintf("input.%d.tools", index)) {
+				return original
+			}
+		}
+	}
+	return body
+}
+
+func normalizeXAIToolArray(tools gjson.Result) ([]byte, bool, bool) {
 	changed := false
 	filtered := []byte(`[]`)
 	for _, tool := range tools.Array() {
@@ -1174,7 +1532,7 @@ func normalizeXAITools(body []byte) []byte {
 				for _, nestedTool := range namespaceTools.Array() {
 					nestedRaw, nestedChanged, ok := normalizeXAITool(nestedTool, namespaceName)
 					if !ok {
-						return body
+						return nil, false, false
 					}
 					changed = changed || nestedChanged
 					if len(nestedRaw) == 0 {
@@ -1182,7 +1540,7 @@ func normalizeXAITools(body []byte) []byte {
 					}
 					updated, errSet := sjson.SetRawBytes(filtered, "-1", nestedRaw)
 					if errSet != nil {
-						return body
+						return nil, false, false
 					}
 					filtered = updated
 				}
@@ -1191,7 +1549,7 @@ func normalizeXAITools(body []byte) []byte {
 		}
 		raw, toolChanged, ok := normalizeXAITool(tool, "")
 		if !ok {
-			return body
+			return nil, false, false
 		}
 		changed = changed || toolChanged
 		if len(raw) == 0 {
@@ -1199,18 +1557,11 @@ func normalizeXAITools(body []byte) []byte {
 		}
 		updated, errSet := sjson.SetRawBytes(filtered, "-1", raw)
 		if errSet != nil {
-			return body
+			return nil, false, false
 		}
 		filtered = updated
 	}
-	if !changed {
-		return body
-	}
-	updated, errSet := sjson.SetRawBytes(body, "tools", filtered)
-	if errSet != nil {
-		return body
-	}
-	return updated
+	return filtered, changed, true
 }
 
 // normalizeXAIToolChoiceForTools drops tool_choice and parallel_tool_calls
@@ -1220,6 +1571,18 @@ func normalizeXAITools(body []byte) []byte {
 func normalizeXAIToolChoiceForTools(body []byte) []byte {
 	tools := gjson.GetBytes(body, "tools")
 	hasTools := tools.Exists() && tools.IsArray() && len(tools.Array()) > 0
+	if !hasTools {
+		input := gjson.GetBytes(body, "input")
+		if input.Exists() && input.IsArray() {
+			for _, item := range input.Array() {
+				additionalTools := item.Get("tools")
+				if item.Get("type").String() == "additional_tools" && additionalTools.IsArray() && len(additionalTools.Array()) > 0 {
+					hasTools = true
+					break
+				}
+			}
+		}
+	}
 	if hasTools {
 		return body
 	}
@@ -1231,6 +1594,51 @@ func normalizeXAIToolChoiceForTools(body []byte) []byte {
 	}
 	if gjson.GetBytes(body, "parallel_tool_calls").Exists() {
 		body, _ = sjson.DeleteBytes(body, "parallel_tool_calls")
+	}
+	return body
+}
+
+// normalizeXAINamespaceToolChoice qualifies namespaced function choices using
+// the same names sent in the flattened tools list. xAI does not accept the
+// Responses namespace field on tool choices.
+func normalizeXAINamespaceToolChoice(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+	original := body
+	normalizeAtPath := func(path string) bool {
+		toolChoice := gjson.GetBytes(body, path)
+		if !toolChoice.IsObject() || toolChoice.Get("type").String() != xaiFunctionToolType {
+			return true
+		}
+		namespaceName := strings.TrimSpace(toolChoice.Get("namespace").String())
+		toolName := strings.TrimSpace(toolChoice.Get("name").String())
+		qualifiedName := qualifyXAINamespaceToolName(namespaceName, toolName)
+		if namespaceName == "" || qualifiedName == "" {
+			return true
+		}
+		updated, errSet := sjson.SetBytes(body, path+".name", qualifiedName)
+		if errSet != nil {
+			return false
+		}
+		updated, errDelete := sjson.DeleteBytes(updated, path+".namespace")
+		if errDelete != nil {
+			return false
+		}
+		body = updated
+		return true
+	}
+
+	if !normalizeAtPath("tool_choice") {
+		return original
+	}
+	tools := gjson.GetBytes(body, "tool_choice.tools")
+	if tools.IsArray() {
+		for index := range tools.Array() {
+			if !normalizeAtPath(fmt.Sprintf("tool_choice.tools.%d", index)) {
+				return original
+			}
+		}
 	}
 	return body
 }
@@ -1270,9 +1678,8 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 		raw = updatedTool
 		changed = true
 	}
-	// Codex Desktop's codex_app.automation_update schema hangs xAI free/build
-	// streaming. Limit the workaround to that exact namespaced tool so unrelated
-	// tools keep their parameter contracts.
+	// Simplify the Codex Desktop automation schema and root unions that xAI
+	// rejects because function parameters must resolve exclusively to objects.
 	if toolType == xaiFunctionToolType && xaiFunctionParametersNeedSimplification(tool, namespaceName) {
 		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(xaiSafeFunctionParameters))
 		if errSet != nil {
@@ -1287,17 +1694,545 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 			raw = updatedTool
 		}
 		changed = true
-		log.Debugf("xai: simplified parameters for tool %s.%s to avoid upstream hang", namespaceName, tool.Get("name").String())
+		log.Debugf("xai: simplified parameters for tool %s.%s to avoid upstream schema rejection or hang", namespaceName, tool.Get("name").String())
+	}
+	if toolType == xaiFunctionToolType && strings.TrimSpace(namespaceName) != "" {
+		qualifiedName := qualifyXAINamespaceToolName(namespaceName, tool.Get("name").String())
+		if qualifiedName == "" {
+			return nil, false, false
+		}
+		updatedTool, errSet := sjson.SetBytes(raw, "name", qualifiedName)
+		if errSet != nil {
+			return nil, false, false
+		}
+		raw = updatedTool
+		changed = true
 	}
 	return raw, changed, true
 }
 
-// xaiFunctionParametersNeedSimplification reports whether a function tool is
-// the Codex Desktop automation tool known to hang xAI Responses streaming.
+func qualifyXAINamespaceToolName(namespaceName, toolName string) string {
+	namespaceName = strings.TrimSpace(namespaceName)
+	toolName = strings.TrimSpace(toolName)
+	if namespaceName == "" || toolName == "" || strings.HasPrefix(toolName, "mcp__") {
+		return toolName
+	}
+	prefix := namespaceName
+	if !strings.HasSuffix(prefix, "__") {
+		prefix += "__"
+	}
+	if strings.HasPrefix(toolName, prefix) {
+		return toolName
+	}
+	return prefix + toolName
+}
+
+func collectXAINamespaceToolRefs(body []byte) map[string]xaiNamespaceToolRef {
+	refs := make(map[string]xaiNamespaceToolRef)
+	collect := func(tools gjson.Result) {
+		if !tools.Exists() || !tools.IsArray() {
+			return
+		}
+		for _, tool := range tools.Array() {
+			if tool.Get("type").String() != xaiNamespaceToolType {
+				continue
+			}
+			namespaceName := strings.TrimSpace(tool.Get("name").String())
+			if namespaceName == "" {
+				continue
+			}
+			for _, nestedTool := range tool.Get("tools").Array() {
+				toolName := strings.TrimSpace(nestedTool.Get("name").String())
+				qualifiedName := qualifyXAINamespaceToolName(namespaceName, toolName)
+				if qualifiedName == "" {
+					continue
+				}
+				refs[qualifiedName] = xaiNamespaceToolRef{namespace: namespaceName, name: toolName}
+			}
+		}
+	}
+	collect(gjson.GetBytes(body, "tools"))
+	input := gjson.GetBytes(body, "input")
+	if input.Exists() && input.IsArray() {
+		for _, item := range input.Array() {
+			if item.Get("type").String() == "additional_tools" {
+				collect(item.Get("tools"))
+			}
+		}
+	}
+	return refs
+}
+
+func normalizeXAIInputCustomToolCalls(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+
+	changed := false
+	inputArray := input.Array()
+	items := make([]json.RawMessage, 0, len(inputArray))
+	for _, item := range inputArray {
+		var normalized []byte
+		switch item.Get("type").String() {
+		case "custom_tool_call":
+			callID := strings.TrimSpace(item.Get("call_id").String())
+			name := strings.TrimSpace(item.Get("name").String())
+			if callID == "" || name == "" {
+				changed = true
+				continue
+			}
+			normalized = []byte(`{"type":"function_call"}`)
+			normalized, _ = sjson.SetBytes(normalized, "call_id", callID)
+			normalized, _ = sjson.SetBytes(normalized, "name", name)
+			normalized, _ = sjson.SetBytes(normalized, "arguments", xaiCustomToolCallArguments(item.Get("input")))
+		case "custom_tool_call_output":
+			callID := strings.TrimSpace(item.Get("call_id").String())
+			if callID == "" {
+				changed = true
+				continue
+			}
+			normalized = []byte(`{"type":"function_call_output"}`)
+			normalized, _ = sjson.SetBytes(normalized, "call_id", callID)
+			normalized, _ = sjson.SetBytes(normalized, "output", xaiCustomToolCallOutput(item.Get("output")))
+		default:
+			items = append(items, json.RawMessage(item.Raw))
+			continue
+		}
+		items = append(items, json.RawMessage(normalized))
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+
+	rawInput, errMarshal := json.Marshal(items)
+	if errMarshal != nil {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "input", rawInput)
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
+
+func xaiCustomToolCallArguments(input gjson.Result) string {
+	if !input.Exists() {
+		return "{}"
+	}
+	if input.Type == gjson.String {
+		text := input.String()
+		trimmed := strings.TrimSpace(text)
+		if gjson.Valid(trimmed) {
+			parsed := gjson.Parse(trimmed)
+			if parsed.IsObject() {
+				return parsed.Raw
+			}
+		}
+		encoded, errMarshal := json.Marshal(text)
+		if errMarshal != nil {
+			return "{}"
+		}
+		return `{"input":` + string(encoded) + `}`
+	}
+	if input.IsObject() {
+		return input.Raw
+	}
+	if input.Raw != "" {
+		return `{"input":` + input.Raw + `}`
+	}
+	return "{}"
+}
+
+func xaiCustomToolCallOutput(output gjson.Result) string {
+	if !output.Exists() {
+		return ""
+	}
+	if output.Type == gjson.String {
+		return output.String()
+	}
+	return output.Raw
+}
+
+// xAI executes these x_search subtools server-side but exposes their trace as
+// client-style tool calls. Hide the trace so Responses clients do not execute it again.
+type xaiInternalXSearchResponseFilter struct {
+	enabled              bool
+	clientDeclaredTools  map[xaiClientToolKey]struct{}
+	droppedOutputIndexes map[int64]struct{}
+	droppedItemIDs       map[string]struct{}
+}
+
+func newXAIInternalXSearchResponseFilter(enabled bool, clientDeclaredTools map[xaiClientToolKey]struct{}) *xaiInternalXSearchResponseFilter {
+	filter := &xaiInternalXSearchResponseFilter{
+		enabled:             enabled,
+		clientDeclaredTools: clientDeclaredTools,
+	}
+	if enabled {
+		filter.droppedOutputIndexes = make(map[int64]struct{})
+		filter.droppedItemIDs = make(map[string]struct{})
+	}
+	return filter
+}
+
+func xaiRequestHasNativeXSearch(body []byte) bool {
+	if gjson.GetBytes(body, `tools.#(type=="x_search")`).Exists() {
+		return true
+	}
+	// Multipath queries return an array of matches; an empty array still Exists().
+	// Check the match count instead of Exists() for additional_tools injection.
+	return len(gjson.GetBytes(body, `input.#(type=="additional_tools")#.tools.#(type=="x_search")`).Array()) > 0
+}
+
+// collectXAIClientDeclaredToolKeys records client-declared function/custom tools
+// using the Responses post-restore identity (short name + optional namespace) and
+// the effective upstream tool type after normalizeXAITool. Client custom tools
+// are normalized to function before being sent to xAI, so keys use function for
+// both declaration kinds. Must run before normalizeXAITools flattens namespace wrappers.
+func collectXAIClientDeclaredToolKeys(body []byte) map[xaiClientToolKey]struct{} {
+	keys := make(map[xaiClientToolKey]struct{})
+	collect := func(tools gjson.Result) {
+		if !tools.Exists() || !tools.IsArray() {
+			return
+		}
+		for _, tool := range tools.Array() {
+			switch toolType := strings.TrimSpace(tool.Get("type").String()); toolType {
+			case xaiNamespaceToolType:
+				namespaceName := strings.TrimSpace(tool.Get("name").String())
+				if namespaceName == "" {
+					continue
+				}
+				for _, nestedTool := range tool.Get("tools").Array() {
+					nestedType := strings.TrimSpace(nestedTool.Get("type").String())
+					if nestedType != xaiFunctionToolType && nestedType != xaiCustomToolType {
+						continue
+					}
+					toolName := strings.TrimSpace(nestedTool.Get("name").String())
+					if toolName == "" {
+						continue
+					}
+					// normalizeXAITool converts custom → function before upstream send.
+					keys[xaiClientToolKey{namespace: namespaceName, name: toolName, toolType: xaiEffectiveDeclaredToolType(nestedType)}] = struct{}{}
+				}
+			case xaiFunctionToolType, xaiCustomToolType:
+				toolName := strings.TrimSpace(tool.Get("name").String())
+				if toolName == "" {
+					continue
+				}
+				// normalizeXAITool converts custom → function before upstream send.
+				keys[xaiClientToolKey{namespace: "", name: toolName, toolType: xaiEffectiveDeclaredToolType(toolType)}] = struct{}{}
+			}
+		}
+	}
+	collect(gjson.GetBytes(body, "tools"))
+	input := gjson.GetBytes(body, "input")
+	if input.Exists() && input.IsArray() {
+		for _, item := range input.Array() {
+			if item.Get("type").String() == "additional_tools" {
+				collect(item.Get("tools"))
+			}
+		}
+	}
+	return keys
+}
+
+// xaiEffectiveDeclaredToolType returns the tool type actually sent upstream
+// after normalizeXAITool. Client custom tools are rewritten to function.
+func xaiEffectiveDeclaredToolType(toolType string) string {
+	if strings.TrimSpace(toolType) == xaiCustomToolType {
+		return xaiFunctionToolType
+	}
+	return strings.TrimSpace(toolType)
+}
+
+func xaiIsInternalXSearchToolName(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "x_user_search", "x_semantic_search", "x_keyword_search", "x_thread_fetch":
+		return true
+	default:
+		return false
+	}
+}
+
+// xaiResponseCallDeclaredType maps a Responses output call type to the effective
+// upstream tool declaration kind used when matching client-declared tools.
+// Client custom tools are normalized to function before upstream send, so only
+// function_call can match a client-declared same-name tool; custom_tool_call
+// remains the internal X Search trace shape.
+func xaiResponseCallDeclaredType(itemType string) string {
+	switch strings.TrimSpace(itemType) {
+	case "function_call":
+		return xaiFunctionToolType
+	case "custom_tool_call":
+		return xaiCustomToolType
+	default:
+		return ""
+	}
+}
+
+// xaiIsInternalXSearchCallID reports whether call_id matches the evidenced xAI
+// X Search server-side trace prefix (xs_call...), as observed in Responses traffic
+// for native x_search subtools (see issue #4282 / PR #4284 fixtures).
+func xaiIsInternalXSearchCallID(callID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(callID), "xs_call")
+}
+
+// xaiIsInternalXSearchCall reports whether an output item is an xAI server-side
+// X Search subtool trace that should be hidden from Responses clients.
+//
+// Evidence from xAI Responses traffic (issue #4282 / PR #4284):
+//   - native x_search subtools are emitted as custom_tool_call items named
+//     x_user_search / x_semantic_search / x_keyword_search / x_thread_fetch
+//   - those traces commonly use call_id values prefixed with "xs_call"
+//
+// Client tools that share a short name are preserved only when the response call
+// kind matches the effective upstream declaration type. Because normalizeXAITool
+// rewrites client custom → function, a client custom x_keyword_search is keyed as
+// function and therefore preserves function_call while still filtering genuine
+// internal custom_tool_call / xs_call* traces. Namespaced restored client tools
+// are never treated as internal.
+func xaiIsInternalXSearchCall(item gjson.Result, clientDeclaredTools map[xaiClientToolKey]struct{}) bool {
+	itemType := strings.TrimSpace(item.Get("type").String())
+	declaredType := xaiResponseCallDeclaredType(itemType)
+	if declaredType == "" {
+		return false
+	}
+	name := strings.TrimSpace(item.Get("name").String())
+	if !xaiIsInternalXSearchToolName(name) {
+		return false
+	}
+	namespace := strings.TrimSpace(item.Get("namespace").String())
+	// Namespaced calls are restored client tools, never xAI internal X Search traces.
+	if namespace != "" {
+		return false
+	}
+	// Evidenced internal call_id prefix always identifies server-side X Search traces,
+	// even when a client tool reuses the same short name.
+	if xaiIsInternalXSearchCallID(item.Get("call_id").String()) {
+		return true
+	}
+	// Preserve only client tools whose effective upstream declaration kind matches
+	// this call type (function_call ↔ function after custom normalization).
+	if _, declared := clientDeclaredTools[xaiClientToolKey{namespace: namespace, name: name, toolType: declaredType}]; declared {
+		return false
+	}
+	return true
+}
+
+func (f *xaiInternalXSearchResponseFilter) apply(eventData []byte) []byte {
+	if f == nil || !f.enabled || len(eventData) == 0 || !gjson.ValidBytes(eventData) {
+		return eventData
+	}
+
+	if item := gjson.GetBytes(eventData, "item"); xaiIsInternalXSearchCall(item, f.clientDeclaredTools) {
+		f.recordDroppedItem(eventData, item)
+		return nil
+	}
+
+	eventData = f.filterCompletedOutput(eventData)
+	if f.referencesDroppedItem(eventData) {
+		return nil
+	}
+	return f.compactOutputIndex(eventData)
+}
+
+func (f *xaiInternalXSearchResponseFilter) recordDroppedItem(eventData []byte, item gjson.Result) {
+	if outputIndex := gjson.GetBytes(eventData, "output_index"); outputIndex.Exists() {
+		f.droppedOutputIndexes[outputIndex.Int()] = struct{}{}
+	}
+	for _, path := range []string{"id", "call_id"} {
+		if id := strings.TrimSpace(item.Get(path).String()); id != "" {
+			f.droppedItemIDs[id] = struct{}{}
+		}
+	}
+}
+
+func (f *xaiInternalXSearchResponseFilter) referencesDroppedItem(eventData []byte) bool {
+	if outputIndex := gjson.GetBytes(eventData, "output_index"); outputIndex.Exists() {
+		if _, dropped := f.droppedOutputIndexes[outputIndex.Int()]; dropped {
+			return true
+		}
+	}
+	for _, path := range []string{"item_id", "call_id"} {
+		id := strings.TrimSpace(gjson.GetBytes(eventData, path).String())
+		if _, dropped := f.droppedItemIDs[id]; id != "" && dropped {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *xaiInternalXSearchResponseFilter) compactOutputIndex(eventData []byte) []byte {
+	outputIndex := gjson.GetBytes(eventData, "output_index")
+	if !outputIndex.Exists() {
+		return eventData
+	}
+	original := outputIndex.Int()
+	removedBefore := int64(0)
+	for dropped := range f.droppedOutputIndexes {
+		if dropped < original {
+			removedBefore++
+		}
+	}
+	if removedBefore == 0 {
+		return eventData
+	}
+	updated, errSet := sjson.SetBytes(eventData, "output_index", original-removedBefore)
+	if errSet != nil {
+		return eventData
+	}
+	return updated
+}
+
+func (f *xaiInternalXSearchResponseFilter) filterCompletedOutput(eventData []byte) []byte {
+	output := gjson.GetBytes(eventData, "response.output")
+	if !output.IsArray() {
+		return eventData
+	}
+	var clientDeclaredTools map[xaiClientToolKey]struct{}
+	if f != nil {
+		clientDeclaredTools = f.clientDeclaredTools
+	}
+	items := make([]json.RawMessage, 0, len(output.Array()))
+	changed := false
+	for _, item := range output.Array() {
+		if xaiIsInternalXSearchCall(item, clientDeclaredTools) {
+			changed = true
+			continue
+		}
+		items = append(items, json.RawMessage(item.Raw))
+	}
+	if !changed {
+		return eventData
+	}
+	rawOutput, errMarshal := json.Marshal(items)
+	if errMarshal != nil {
+		return eventData
+	}
+	updated, errSet := sjson.SetRawBytes(eventData, "response.output", rawOutput)
+	if errSet != nil {
+		return eventData
+	}
+	return updated
+}
+
+func normalizeXAIInputNamespaceToolCalls(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+	for index, item := range input.Array() {
+		if item.Get("type").String() != "function_call" {
+			continue
+		}
+		namespaceName := strings.TrimSpace(item.Get("namespace").String())
+		toolName := strings.TrimSpace(item.Get("name").String())
+		qualifiedName := qualifyXAINamespaceToolName(namespaceName, toolName)
+		if namespaceName == "" || qualifiedName == "" {
+			continue
+		}
+		namePath := fmt.Sprintf("input.%d.name", index)
+		namespacePath := fmt.Sprintf("input.%d.namespace", index)
+		updated, errSet := sjson.SetBytes(body, namePath, qualifiedName)
+		if errSet != nil {
+			continue
+		}
+		updated, errDelete := sjson.DeleteBytes(updated, namespacePath)
+		if errDelete != nil {
+			continue
+		}
+		body = updated
+	}
+	return body
+}
+
+func restoreXAINamespaceToolCalls(data []byte, refs map[string]xaiNamespaceToolRef) []byte {
+	if len(refs) == 0 || len(data) == 0 || !gjson.ValidBytes(data) {
+		return data
+	}
+	data = restoreXAINamespaceToolCallAtPath(data, "item", refs)
+	output := gjson.GetBytes(data, "response.output")
+	if output.Exists() && output.IsArray() {
+		for index := range output.Array() {
+			data = restoreXAINamespaceToolCallAtPath(data, fmt.Sprintf("response.output.%d", index), refs)
+		}
+	}
+	return data
+}
+
+func restoreXAINamespaceToolCallAtPath(data []byte, path string, refs map[string]xaiNamespaceToolRef) []byte {
+	if gjson.GetBytes(data, path+".type").String() != "function_call" {
+		return data
+	}
+	qualifiedName := strings.TrimSpace(gjson.GetBytes(data, path+".name").String())
+	ref, ok := refs[qualifiedName]
+	if !ok {
+		return data
+	}
+	updated, errSet := sjson.SetBytes(data, path+".name", ref.name)
+	if errSet != nil {
+		return data
+	}
+	updated, errSet = sjson.SetBytes(updated, path+".namespace", ref.namespace)
+	if errSet != nil {
+		return data
+	}
+	return updated
+}
+
+// xaiFunctionParametersNeedSimplification reports whether a function tool, or
+// a custom tool normalized to a function, has a schema that xAI cannot accept.
 func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
-	return strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), xaiFunctionToolType) &&
-		strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
-		strings.EqualFold(strings.TrimSpace(tool.Get("name").String()), xaiAutomationUpdateToolName)
+	toolType := strings.TrimSpace(tool.Get("type").String())
+	isFunction := strings.EqualFold(toolType, xaiFunctionToolType)
+	isNormalizedCustom := strings.EqualFold(toolType, xaiCustomToolType)
+	if !isFunction && !isNormalizedCustom {
+		return false
+	}
+
+	toolName := strings.TrimSpace(tool.Get("name").String())
+	qualifiedAutomationName := xaiCodexAppNamespaceName + "__" + xaiAutomationUpdateToolName
+	if isFunction && (strings.EqualFold(toolName, qualifiedAutomationName) ||
+		(strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
+			strings.EqualFold(toolName, xaiAutomationUpdateToolName))) {
+		return true
+	}
+
+	parameters := tool.Get("parameters")
+	for _, unionName := range []string{"anyOf", "oneOf"} {
+		union := parameters.Get(unionName)
+		if !union.IsArray() {
+			continue
+		}
+		for _, branch := range union.Array() {
+			branchType := branch.Get("type")
+			if branchType.Type == gjson.String {
+				if !strings.EqualFold(strings.TrimSpace(branchType.String()), "object") {
+					return true
+				}
+				continue
+			}
+			if !branchType.IsArray() {
+				// Without an explicit object type, the branch may accept non-object
+				// values even when it only declares object-specific keywords.
+				return true
+			}
+			allowedTypes := branchType.Array()
+			if len(allowedTypes) == 0 {
+				return true
+			}
+			for _, allowedType := range allowedTypes {
+				if allowedType.Type != gjson.String || !strings.EqualFold(strings.TrimSpace(allowedType.String()), "object") {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func sanitizeXAIInputEncryptedContent(body []byte) []byte {

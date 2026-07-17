@@ -83,7 +83,11 @@ func SummarizeCodexModels(models []config.CodexModel) CodexModelsSummary {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName))
+			forceMapping := "false"
+			if model.ForceMapping {
+				forceMapping = "true"
+			}
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|force-mapping=" + forceMapping)
 		}
 	})
 	return CodexModelsSummary{

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,77 @@ func TestHostApplyConfig_DisabledGlobalSkipsSnapshot(t *testing.T) {
 	snap := h.Snapshot()
 	if snap.enabled || len(snap.records) != 0 {
 		t.Fatalf("Snapshot() = %+v, want empty disabled snapshot", snap)
+	}
+}
+
+func TestHostApplyConfig_DisabledGlobalDoesNotResolvePluginsDir(t *testing.T) {
+	loader := newTestSymbolLoader()
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	loader.lookups["alpha"] = newTestSymbolLookup(plugin)
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
+		},
+	})
+	if !h.PluginRegistered("alpha") {
+		t.Fatal("PluginRegistered(alpha) = false, want true before disable")
+	}
+
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	disabledCfg, errParseConfig := config.ParseConfigBytes([]byte(`
+plugins:
+  enabled: false
+  dir: "~/.cli-proxy-api/plugins"
+`))
+	if errParseConfig != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParseConfig)
+	}
+	h.ApplyConfig(context.Background(), disabledCfg)
+
+	if h.PluginRegistered("alpha") {
+		t.Fatal("PluginRegistered(alpha) = true, want false after disable")
+	}
+	if snap := h.Snapshot(); snap.enabled || len(snap.records) != 0 {
+		t.Fatalf("Snapshot() = %+v, want empty disabled snapshot", snap)
+	}
+}
+
+func TestHostApplyConfig_ExpandsPluginsDirLeadingTilde(t *testing.T) {
+	loader := newTestSymbolLoader()
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	loader.lookups["alpha"] = newTestSymbolLookup(plugin)
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+
+	pluginsDir := makePluginDir(t, "alpha")
+	homeDir := filepath.Dir(pluginsDir)
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     "~/" + filepath.ToSlash(filepath.Base(pluginsDir)),
+			Configs: enabledPluginConfigs("alpha"),
+		},
+	})
+
+	if loader.openCalls != 1 {
+		t.Fatalf("Open calls = %d, want 1", loader.openCalls)
+	}
+	if !h.PluginRegistered("alpha") {
+		t.Fatal("PluginRegistered(alpha) = false, want true")
 	}
 }
 

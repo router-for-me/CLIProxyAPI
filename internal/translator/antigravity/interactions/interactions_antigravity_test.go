@@ -5,6 +5,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 )
 
@@ -100,6 +101,71 @@ func TestConvertAntigravityResponseToInteractionsStreamFunctionCallStartHasCallI
 	payload := findAntigravityInteractionsEventPayload(events, "step.start")
 	if got := gjson.GetBytes(payload, "step.call_id").String(); got != "call_1" {
 		t.Fatalf("step.call_id = %q, want call_1. Payload: %s", got, string(payload))
+	}
+}
+
+func TestConvertInteractionsRequestToAntigravityDeduplicatesAndDisambiguatesTools(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	inputJSON := []byte(`{
+		"input":[
+			{"type":"function_call","name":"` + second + `","call_id":"call_1","arguments":{}},
+			{"type":"function_result","name":"` + second + `","call_id":"call_1","result":{}}
+		],
+		"tools":[
+			{"functionDeclarations":[{"name":"lookup"},{"name":"` + first + `"}]},
+			{"function_declarations":[{"name":"lookup"},{"name":"` + second + `"}]}
+		],
+		"tool_choice":{"type":"function","function":{"name":"` + second + `"}}
+	}`)
+
+	out := ConvertInteractionsRequestToAntigravity("antigravity-test", inputJSON, false)
+	declarations := gjson.GetBytes(out, "request.tools.0.functionDeclarations").Array()
+	if len(declarations) != 3 {
+		t.Fatalf("declaration count = %d, want 3. Output: %s", len(declarations), out)
+	}
+	firstMapped := declarations[1].Get("name").String()
+	secondMapped := declarations[2].Get("name").String()
+	if firstMapped == secondMapped || len(secondMapped) > 64 {
+		t.Fatalf("collision names = %q and %q, want distinct names <= 64 chars", firstMapped, secondMapped)
+	}
+	if got := gjson.GetBytes(out, "request.contents.0.parts.0.functionCall.name").String(); got != secondMapped {
+		t.Fatalf("functionCall.name = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+	if got := gjson.GetBytes(out, "request.contents.1.parts.0.functionResponse.name").String(); got != secondMapped {
+		t.Fatalf("functionResponse.name = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+	if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames.0").String(); got != secondMapped {
+		t.Fatalf("allowedFunctionNames.0 = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+}
+
+func TestConvertInteractionsRequestToAntigravityPreservesNameMappingWhitespace(t *testing.T) {
+	inputJSON := []byte(`{
+		"input":[{"type":"function_call","name":" read/file ","arguments":{}}],
+		"tools":[{"type":"function","name":" read/file ","parameters":{"type":"object"}}],
+		"tool_choice":{"type":"function","function":{"name":" read/file "}}
+	}`)
+
+	out := ConvertInteractionsRequestToAntigravity("antigravity-test", inputJSON, false)
+	declarationName := gjson.GetBytes(out, "request.tools.0.functionDeclarations.0.name").String()
+	callName := gjson.GetBytes(out, "request.contents.0.parts.0.functionCall.name").String()
+	allowedName := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames.0").String()
+	if declarationName == "" || callName != declarationName || allowedName != declarationName {
+		t.Fatalf("mapped names declaration=%q call=%q allowed=%q. Output: %s", declarationName, callName, allowedName, out)
+	}
+}
+
+func TestConvertAntigravityResponseToInteractionsRestoresDisambiguatedName(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	original := []byte(`{"tools":[{"name":"` + first + `"},{"name":"` + second + `"}]}`)
+	mapped := util.SanitizedFunctionNameMap(original)[second]
+	raw := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{}}}]}}]}}`)
+
+	out := ConvertAntigravityResponseToInteractionsNonStream(context.Background(), "antigravity-test", original, nil, raw, nil)
+	if got := gjson.GetBytes(out, "steps.0.name").String(); got != second {
+		t.Fatalf("function call name = %q, want %q. Output: %s", got, second, out)
 	}
 }
 

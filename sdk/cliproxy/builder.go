@@ -187,6 +187,10 @@ func (b *Builder) Build() (*Service, error) {
 	if b.configPath == "" {
 		return nil, fmt.Errorf("cliproxy: configuration path is required")
 	}
+	b.cfg.NormalizePluginsConfig()
+	if errResolvePluginsDir := b.cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && b.cfg.Plugins.Enabled {
+		return nil, fmt.Errorf("cliproxy: %w", errResolvePluginsDir)
+	}
 
 	tokenProvider := b.tokenProvider
 	if tokenProvider == nil {

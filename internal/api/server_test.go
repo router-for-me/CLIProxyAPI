@@ -67,6 +67,20 @@ func (s *codexSearchGinContextSelector) Pick(ctx context.Context, _ string, _ st
 	return auths[0], nil
 }
 
+type codexSearchAPIKeyFirstSelector struct{}
+
+func (s *codexSearchAPIKeyFirstSelector) Pick(_ context.Context, _ string, _ string, _ coreexecutor.Options, auths []*auth.Auth) (*auth.Auth, error) {
+	for _, candidate := range auths {
+		if candidate.AuthKind() == auth.AuthKindAPIKey {
+			return candidate, nil
+		}
+	}
+	if len(auths) == 0 {
+		return nil, nil
+	}
+	return auths[0], nil
+}
+
 func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *auth.Auth, req *http.Request) (*http.Response, error) {
 	e.request = req.Clone(req.Context())
 	e.authIDs = append(e.authIDs, selected.ID)
@@ -198,6 +212,117 @@ func TestCodexAlphaSearchForwardsRequest(t *testing.T) {
 	if got := rr.Header().Get("Content-Type"); got != "application/json" {
 		t.Fatalf("response Content-Type = %q", got)
 	}
+}
+
+func TestCodexAlphaSearchSanitizesResponsesOnlyFields(t *testing.T) {
+	server := newTestServer(t)
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	credential := &auth.Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Metadata: map[string]any{"access_token": "codex-token"},
+	}
+	if _, errRegister := server.handlers.AuthManager.Register(context.Background(), credential); errRegister != nil {
+		t.Fatalf("register Codex auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "gpt-5.6-sol"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(credential.ID)
+	})
+
+	payload := `{"id":"session-123","model":"gpt-5.6-sol","commands":{"search_query":[{"q":"golang channels"}]},"prompt_cache_key":"cache-123","prompt_cache_retention":"24h"}`
+	for _, path := range []string{"/v1/alpha/search", "/backend-api/codex/alpha/search"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(payload))
+			req.Header.Set("Authorization", "Bearer test-key")
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+			}
+			var upstreamBody map[string]json.RawMessage
+			if errUnmarshal := json.Unmarshal(executor.body, &upstreamBody); errUnmarshal != nil {
+				t.Fatalf("unmarshal upstream body: %v; body=%s", errUnmarshal, executor.body)
+			}
+			if _, exists := upstreamBody["prompt_cache_key"]; exists {
+				t.Fatalf("upstream body contains prompt_cache_key: %s", executor.body)
+			}
+			if _, exists := upstreamBody["prompt_cache_retention"]; exists {
+				t.Fatalf("upstream body contains prompt_cache_retention: %s", executor.body)
+			}
+			for _, field := range []string{"id", "model", "commands"} {
+				if _, exists := upstreamBody[field]; !exists {
+					t.Fatalf("upstream body missing %s: %s", field, executor.body)
+				}
+			}
+		})
+	}
+}
+
+func TestCodexAlphaSearchRequiresOAuthCredential(t *testing.T) {
+	newServer := func(t *testing.T, credentials ...*auth.Auth) (*Server, *codexSearchCaptureExecutor) {
+		t.Helper()
+		server := newTestServer(t)
+		server.handlers.AuthManager.SetSelector(&codexSearchAPIKeyFirstSelector{})
+		executor := &codexSearchCaptureExecutor{}
+		server.handlers.AuthManager.RegisterExecutor(executor)
+		for _, credential := range credentials {
+			if _, errRegister := server.handlers.AuthManager.Register(context.Background(), credential); errRegister != nil {
+				t.Fatalf("register Codex auth %s: %v", credential.ID, errRegister)
+			}
+		}
+		return server, executor
+	}
+	apiKeyCredential := func() *auth.Auth {
+		return &auth.Auth{
+			ID:         "codex-api-key",
+			Provider:   "codex",
+			Status:     auth.StatusActive,
+			Attributes: map[string]string{auth.AttributeAPIKey: "codex-key"},
+		}
+	}
+	oauthCredential := func() *auth.Auth {
+		return &auth.Auth{
+			ID:       "codex-oauth",
+			Provider: "codex",
+			Status:   auth.StatusActive,
+			Metadata: map[string]any{"access_token": "codex-token"},
+		}
+	}
+
+	t.Run("mixed credentials", func(t *testing.T) {
+		server, executor := newServer(t, apiKeyCredential(), oauthCredential())
+		req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"query":"GPT-5.6"}`))
+		req.Header.Set("Authorization", "Bearer test-key")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if got := executor.authIDs; len(got) != 1 || got[0] != "codex-oauth" {
+			t.Fatalf("selected auth IDs = %v, want [codex-oauth]", got)
+		}
+	})
+
+	t.Run("API key only", func(t *testing.T) {
+		server, executor := newServer(t, apiKeyCredential())
+		req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"query":"GPT-5.6"}`))
+		req.Header.Set("Authorization", "Bearer test-key")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+		}
+		if len(executor.authIDs) != 0 {
+			t.Fatalf("selected auth IDs = %v, want none", executor.authIDs)
+		}
+	})
 }
 
 func TestCodexAlphaSearchPassesGinContextToAuthSelection(t *testing.T) {
@@ -919,8 +1044,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := custom["display_name"].(string); got != "Custom Codex Model" {
 		t.Fatalf("custom display_name = %q, want Custom Codex Model", got)
 	}
-	if got := int(codexClientTestPriority(custom["priority"])); got != 129 {
-		t.Fatalf("custom priority = %v, want 129", custom["priority"])
+	wantCustomPriority := codexClientTestMaxTemplatePriority(t) + 100
+	if got := int(codexClientTestPriority(custom["priority"])); got != wantCustomPriority {
+		t.Fatalf("custom priority = %v, want %d", custom["priority"], wantCustomPriority)
 	}
 	if got, _ := custom["description"].(string); got != "Custom model from registry" {
 		t.Fatalf("custom description = %q, want Custom model from registry", got)
@@ -985,6 +1111,23 @@ func codexClientTestPriority(raw any) int {
 	default:
 		return -1
 	}
+}
+
+func codexClientTestMaxTemplatePriority(t *testing.T) int {
+	t.Helper()
+	var payload struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(registry.GetCodexClientModelsJSON(), &payload); err != nil {
+		t.Fatalf("parse Codex client model templates: %v", err)
+	}
+	maxPriority := 0
+	for _, model := range payload.Models {
+		if priority := codexClientTestPriority(model["priority"]); priority > maxPriority {
+			maxPriority = priority
+		}
+	}
+	return maxPriority
 }
 
 func assertCodexSupportedReasoningLevels(t *testing.T, model map[string]any, want []string) {

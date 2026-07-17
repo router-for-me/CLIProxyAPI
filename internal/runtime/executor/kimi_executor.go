@@ -14,6 +14,7 @@ import (
 	"time"
 
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -616,14 +617,14 @@ func (e *KimiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 }
 
 // applyKimiHeaders sets required headers for Kimi API requests.
-// Headers match kimi-cli client for compatibility.
+// Headers identify CLIProxyAPI with the current build version.
 func applyKimiHeaders(r *http.Request, token string, stream bool) {
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+token)
-	// Match kimi-cli headers exactly
-	r.Header.Set("User-Agent", "KimiCLI/1.10.6")
-	r.Header.Set("X-Msh-Platform", "kimi_cli")
-	r.Header.Set("X-Msh-Version", "1.10.6")
+	// Identify requests with the current CLIProxyAPI version.
+	r.Header.Set("User-Agent", "CLIProxyAPI/"+buildinfo.Version)
+	r.Header.Set("X-Msh-Platform", "CLIProxyAPI")
+	r.Header.Set("X-Msh-Version", buildinfo.Version)
 	r.Header.Set("X-Msh-Device-Name", getKimiHostname())
 	r.Header.Set("X-Msh-Device-Model", getKimiDeviceModel())
 	r.Header.Set("X-Msh-Device-Id", getKimiDeviceID())

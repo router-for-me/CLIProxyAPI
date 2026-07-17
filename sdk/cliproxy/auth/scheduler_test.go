@@ -2,12 +2,14 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"testing"
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -57,6 +59,23 @@ func (s *fakePluginScheduler) PickAuth(ctx context.Context, req pluginapi.Schedu
 
 type inactivePluginScheduler struct {
 	fakePluginScheduler
+}
+
+type authKindHomeDispatcher struct {
+	auths  []Auth
+	counts []int
+}
+
+func (d *authKindHomeDispatcher) HeartbeatOK() bool {
+	return true
+}
+
+func (d *authKindHomeDispatcher) RPopAuth(_ context.Context, _ string, _ string, _ http.Header, count int) ([]byte, error) {
+	d.counts = append(d.counts, count)
+	if count < 1 || count > len(d.auths) {
+		return nil, home.ErrAuthNotFound
+	}
+	return json.Marshal(homeAuthDispatchResponse{Auth: d.auths[count-1]})
 }
 
 func (s *inactivePluginScheduler) HasScheduler() bool {
@@ -424,6 +443,132 @@ func TestManagerPluginSchedulerSelectsAuthID(t *testing.T) {
 	}
 	if !scheduler.requests[0].Stream {
 		t.Fatalf("scheduler request Stream = false, want true")
+	}
+}
+
+func TestManagerSelectAuthByKindSkipsAPIKey(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	for _, candidate := range []*Auth{
+		{ID: "codex-api-key", Provider: "codex", Attributes: map[string]string{AttributeAPIKey: "test-key"}},
+		{ID: "codex-oauth", Provider: "codex", Metadata: map[string]any{"access_token": "test-token"}},
+	} {
+		if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", candidate.ID, errRegister)
+		}
+	}
+
+	scheduler := &fakePluginScheduler{
+		resp:    pluginapi.SchedulerPickResponse{Handled: true, AuthID: "codex-api-key"},
+		handled: true,
+	}
+	manager.SetPluginScheduler(scheduler)
+
+	selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", AuthKindOAuth, cliproxyexecutor.Options{})
+	if errSelect != nil {
+		t.Fatalf("SelectAuthByKind() error = %v", errSelect)
+	}
+	if selected == nil || selected.ID != "codex-oauth" {
+		t.Fatalf("SelectAuthByKind() auth = %#v, want codex-oauth", selected)
+	}
+	if scheduler.calls != 2 {
+		t.Fatalf("scheduler.calls = %d, want 2", scheduler.calls)
+	}
+}
+
+func TestManagerSelectAuthByKindReturnsErrorWhenUnavailable(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{
+		ID:         "codex-api-key",
+		Provider:   "codex",
+		Attributes: map[string]string{AttributeAPIKey: "test-key"},
+	}); errRegister != nil {
+		t.Fatalf("Register(codex-api-key) error = %v", errRegister)
+	}
+
+	selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", AuthKindOAuth, cliproxyexecutor.Options{})
+	if selected != nil {
+		t.Fatalf("SelectAuthByKind() auth = %#v, want nil", selected)
+	}
+	var authErr *Error
+	if !errors.As(errSelect, &authErr) || authErr.Code != "auth_not_found" {
+		t.Fatalf("SelectAuthByKind() error = %#v, want auth_not_found", errSelect)
+	}
+}
+
+func TestManagerSelectAuthByKindRejectsInvalidKind(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", "certificate", cliproxyexecutor.Options{})
+	if selected != nil {
+		t.Fatalf("SelectAuthByKind() auth = %#v, want nil", selected)
+	}
+	var authErr *Error
+	if !errors.As(errSelect, &authErr) || authErr.Code != "invalid_auth_kind" || authErr.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("SelectAuthByKind() error = %#v, want invalid_auth_kind", errSelect)
+	}
+}
+
+func TestManagerSelectAuthByKindAdvancesHomeAuthCount(t *testing.T) {
+	tests := []struct {
+		name       string
+		auths      []Auth
+		wantAuthID string
+		wantError  string
+	}{
+		{
+			name: "skips API key for OAuth",
+			auths: []Auth{
+				{ID: "home-api-key", Provider: "test", Attributes: map[string]string{AttributeAPIKey: "test-key"}},
+				{ID: "home-oauth", Provider: "test", Metadata: map[string]any{"access_token": "test-token"}},
+			},
+			wantAuthID: "home-oauth",
+		},
+		{
+			name: "returns not found without OAuth",
+			auths: []Auth{
+				{ID: "home-api-key", Provider: "test", Attributes: map[string]string{AttributeAPIKey: "test-key"}},
+			},
+			wantError: "auth_not_found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dispatcher := &authKindHomeDispatcher{auths: tt.auths}
+			oldCurrentHomeDispatcher := currentHomeDispatcher
+			currentHomeDispatcher = func() homeAuthDispatcher {
+				return dispatcher
+			}
+			t.Cleanup(func() {
+				currentHomeDispatcher = oldCurrentHomeDispatcher
+			})
+
+			manager := NewManager(nil, nil, nil)
+			manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+			manager.RegisterExecutor(schedulerTestExecutor{})
+
+			selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", AuthKindOAuth, cliproxyexecutor.Options{})
+			if tt.wantError != "" {
+				if selected != nil {
+					t.Fatalf("SelectAuthByKind() auth = %#v, want nil", selected)
+				}
+				var authErr *Error
+				if !errors.As(errSelect, &authErr) || authErr.Code != tt.wantError {
+					t.Fatalf("SelectAuthByKind() error = %#v, want %s", errSelect, tt.wantError)
+				}
+			} else {
+				if errSelect != nil {
+					t.Fatalf("SelectAuthByKind() error = %v", errSelect)
+				}
+				if selected == nil || selected.ID != tt.wantAuthID {
+					t.Fatalf("SelectAuthByKind() auth = %#v, want %s", selected, tt.wantAuthID)
+				}
+			}
+			if len(dispatcher.counts) != 2 || dispatcher.counts[0] != 1 || dispatcher.counts[1] != 2 {
+				t.Fatalf("home auth counts = %v, want [1 2]", dispatcher.counts)
+			}
+		})
 	}
 }
 

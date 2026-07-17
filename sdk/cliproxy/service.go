@@ -31,6 +31,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
@@ -105,11 +106,12 @@ type Service struct {
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
 
-	homeClient        *home.Client
-	homeCancel        context.CancelFunc
-	homeLogForwarder  *logging.HomeAppLogForwarder
-	homePluginSyncMu  sync.Mutex
-	homePluginSyncKey string
+	homeClient          *home.Client
+	homeCancel          context.CancelFunc
+	homeLogForwarder    *logging.HomeAppLogForwarder
+	homePluginSyncMu    sync.Mutex
+	homePluginSyncKey   string
+	homePluginSyncFetch func(context.Context, sdkpluginstore.PluginSyncRequest) (sdkpluginstore.PluginSyncResponse, error)
 }
 
 const (
@@ -1418,6 +1420,7 @@ func forceHomeRuntimeConfig(cfg *config.Config) {
 	cfg.WebsocketAuth = false
 	cfg.RemoteManagement.AllowRemote = false
 	cfg.RemoteManagement.DisableControlPanel = true
+	cfg.Plugins.StoreAuth = nil
 }
 
 func (s *Service) applyHomeOverlay(remoteCfg *config.Config) {
@@ -1446,21 +1449,25 @@ func (s *Service) applyHomeOverlayContext(ctx context.Context, remoteCfg *config
 	merged.Port = baseCfg.Port
 	merged.TLS = baseCfg.TLS
 	merged.Home = baseCfg.Home
+	storeAuth := merged.Plugins.StoreAuth
 	forceHomeRuntimeConfig(&merged)
+	syncCfg := merged
+	syncCfg.Plugins.StoreAuth = storeAuth
 
 	logHomeConfigChanges(baseCfg, &merged)
-	report, syncKey, didSync, errSync := s.syncHomePlugins(ctx, &merged)
-	if didSync {
-		if errSync != nil {
-			log.Warnf("failed to sync home plugins: %v", errSync)
-		}
+	report, syncKey, didSync, errSync := s.syncHomePlugins(ctx, &syncCfg)
+	if errSync != nil {
+		log.Warnf("failed to sync home plugins: %v", errSync)
 	}
 	s.applyConfigUpdate(&merged)
+	var errLoad error
 	if didSync {
-		errLoad := homeplugins.MarkLoadResults(&report, s.pluginHost)
+		errLoad = homeplugins.MarkLoadResults(&report, s.pluginHost)
 		if errLoad != nil {
 			log.Warnf("failed to load home plugins after config update: %v", errLoad)
 		}
+	}
+	if strings.TrimSpace(report.Task) != "" {
 		s.reportHomePluginStatus(ctx, &merged, report)
 		if errSync == nil && errLoad == nil {
 			s.markHomePluginsSynced(syncKey)
@@ -2027,6 +2034,14 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
+		if entry := s.resolveConfigXAIKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildXAIConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
@@ -2310,7 +2325,21 @@ func (s *Service) resolveConfigVertexCompatKey(auth *coreauth.Auth) *config.Vert
 }
 
 func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
-	if auth == nil || s.cfg == nil {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return resolveConfigCodexStyleKey(auth, s.cfg.CodexKey)
+}
+
+func (s *Service) resolveConfigXAIKey(auth *coreauth.Auth) *config.XAIKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return resolveConfigCodexStyleKey(auth, s.cfg.XAIKey)
+}
+
+func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey) *config.CodexKey {
+	if auth == nil {
 		return nil
 	}
 	var attrKey, attrBase string
@@ -2318,8 +2347,8 @@ func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range s.cfg.CodexKey {
-		entry := &s.cfg.CodexKey[i]
+	for i := range entries {
+		entry := &entries[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
 		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
@@ -2602,6 +2631,13 @@ func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "anthropic", "claude")
+}
+
+func buildXAIConfigModels(entry *config.XAIKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "xai", "xai")
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {

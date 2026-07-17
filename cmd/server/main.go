@@ -37,6 +37,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -107,7 +108,7 @@ func main() {
 	flag.BoolVar(&homeDisableClusterDiscovery, "home-disable-cluster-discovery", false, "Disable Home CLUSTER NODES discovery and keep using the configured -home-jwt address")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
-	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
+	flag.BoolVar(&localModel, "local-model", false, "Use embedded models.json and codex_client_models.json only, skip remote model catalog fetching")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -152,6 +153,7 @@ func main() {
 	var configLoadedFromHome bool
 	var homeClient *home.Client
 	var homePluginSyncReport homeplugins.SyncReport
+	var homePluginStatusReady bool
 	var (
 		usePostgresStore     bool
 		pgStoreDSN           string
@@ -303,16 +305,53 @@ func main() {
 		parsed.Home = homeCfg
 		parsed.Port = 8317 // Default to 8317 for home mode, can be overridden by home config
 		parsed.UsageStatisticsEnabled = true
-		ctxHomePlugins, cancelHomePlugins := context.WithTimeout(context.Background(), 30*time.Second)
+		pluginSyncCfg := *parsed
+		parsed.Plugins.StoreAuth = nil
 		var errHomePlugins error
-		homePluginSyncReport, errHomePlugins = homeplugins.SyncWithReport(ctxHomePlugins, parsed, pluginHost)
-		cancelHomePlugins()
-		errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, homeCfg.NodeID, homePluginSyncReport)
-		if errHomePlugins != nil {
-			log.Errorf("failed to fetch plugins from home: %v", errHomePlugins)
+		platform := homeplugins.CurrentPlatform()
+		if pluginSyncCfg.Plugins.Enabled {
+			ctxHomePlugins, cancelHomePlugins := context.WithTimeout(context.Background(), 30*time.Second)
+			installedVersions, errInstalledPlugins := homeplugins.InstalledVersions(&pluginSyncCfg)
+			if errInstalledPlugins != nil {
+				homePluginStatusReady = true
+				errHomePlugins = errInstalledPlugins
+				homePluginSyncReport = homeplugins.CompletedSyncReport(platform, errInstalledPlugins)
+			} else {
+				pluginSyncRequest := sdkpluginstore.PluginSyncRequest{
+					SchemaVersion:     sdkpluginstore.PluginSyncSchemaVersion,
+					GOOS:              platform.GOOS,
+					GOARCH:            platform.GOARCH,
+					InstalledVersions: installedVersions,
+				}
+				pluginSyncResponse, errFetchPlugins := homeClient.GetPluginSync(ctxHomePlugins, pluginSyncRequest)
+				errHomePlugins = errFetchPlugins
+				switch {
+				case errHomePlugins == nil:
+					homePluginStatusReady = true
+					homePluginSyncReport, errHomePlugins = homeplugins.SyncResolvedWithReport(ctxHomePlugins, &pluginSyncCfg, pluginSyncResponse.Items, pluginSyncResponse.ExpiresAt, pluginSyncRequest.InstalledVersions, pluginHost)
+				case errors.Is(errHomePlugins, home.ErrPluginSyncUnsupported):
+					homePluginStatusReady = true
+					homePluginSyncReport, errHomePlugins = homeplugins.SyncWithReport(ctxHomePlugins, &pluginSyncCfg, pluginHost)
+				default:
+					homePluginStatusReady = true
+					homePluginSyncReport = homeplugins.CompletedSyncReport(platform, errHomePlugins)
+				}
+				pluginSyncRequest.Clear()
+				pluginSyncResponse.Clear()
+			}
+			cancelHomePlugins()
+		} else {
+			homePluginStatusReady = true
+			homePluginSyncReport = homeplugins.CompletedSyncReport(platform, nil)
 		}
-		if errReportPlugins != nil {
-			log.Warnf("failed to report home plugin sync status: %v", errReportPlugins)
+		if errHomePlugins != nil {
+			log.Errorf("failed to sync plugins from home: %v", errHomePlugins)
+		}
+		if homePluginStatusReady {
+			errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, homeCfg.NodeID, homePluginSyncReport)
+			if errReportPlugins != nil {
+				log.Warnf("failed to report home plugin sync status: %v", errReportPlugins)
+			}
 		}
 		if errHomePlugins != nil {
 			return
@@ -570,7 +609,7 @@ func main() {
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
 	pluginHost.ApplyConfig(context.Background(), cfg)
-	if configLoadedFromHome {
+	if configLoadedFromHome && homePluginStatusReady {
 		errHomePluginLoad := homeplugins.MarkLoadResults(&homePluginSyncReport, pluginHost)
 		errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, cfg.Home.NodeID, homePluginSyncReport)
 		if errHomePluginLoad != nil {
@@ -621,18 +660,14 @@ func main() {
 			return
 		}
 		if localModel && (!tuiMode || standalone) {
-			log.Info("Local model mode: using embedded model catalog, remote model updates disabled")
+			log.Info("Local model mode: using embedded model catalogs, remote model updates disabled")
 		}
 		if tuiMode {
 			if standalone {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
 				misc.StartAntigravityVersionUpdater(context.Background())
-				if !localModel && !cfg.Home.Enabled {
-					registry.StartModelsUpdater(context.Background())
-				} else if cfg.Home.Enabled {
-					log.Info("Home mode: remote model updates disabled")
-				}
+				startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
 				log.AddHook(hook)
@@ -706,13 +741,31 @@ func main() {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
-			if !localModel && !cfg.Home.Enabled {
-				registry.StartModelsUpdater(context.Background())
-			} else if cfg.Home.Enabled {
-				log.Info("Home mode: remote model updates disabled")
-			}
+			startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
 			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
 		}
+	}
+}
+
+// modelCatalogUpdaterPlan decides which remote model catalogs should refresh.
+// Codex client templates still refresh under Home mode because the model list
+// comes from Home IDs while template metadata stays edge-local.
+func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCodexClient bool) {
+	if localModel {
+		return false, false
+	}
+	return !homeEnabled, true
+}
+
+func startModelCatalogUpdaters(localModel, homeEnabled bool) {
+	startModels, startCodexClient := modelCatalogUpdaterPlan(localModel, homeEnabled)
+	if startCodexClient {
+		registry.StartCodexClientModelsUpdater(context.Background())
+	}
+	if startModels {
+		registry.StartModelsUpdater(context.Background())
+	} else if homeEnabled {
+		log.Info("Home mode: remote models.json updates disabled; Codex client model list follows Home model IDs")
 	}
 }
 

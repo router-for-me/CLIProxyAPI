@@ -8,6 +8,7 @@ import (
 	"time"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -23,6 +24,7 @@ type antigravityToInteractionsStreamState struct {
 	ActiveStepType  string
 	ActiveStepIndex int
 	StepIndex       int
+	ToolNameMap     map[string]string
 }
 
 func ConvertAntigravityResponseToInteractions(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
@@ -34,7 +36,10 @@ func ConvertAntigravityResponseToInteractions(ctx context.Context, modelName str
 		param = &local
 	}
 	if *param == nil {
-		*param = &antigravityToInteractionsStreamState{ID: fmt.Sprintf("interaction_%d", time.Now().UnixNano())}
+		*param = &antigravityToInteractionsStreamState{
+			ID:          fmt.Sprintf("interaction_%d", time.Now().UnixNano()),
+			ToolNameMap: util.DisambiguatedToolNameMap(originalRequestRawJSON),
+		}
 	}
 	st := (*param).(*antigravityToInteractionsStreamState)
 	payloads := antigravityStreamPayloads(rawJSON)
@@ -49,6 +54,7 @@ func ConvertAntigravityResponseToInteractions(ctx context.Context, modelName str
 			continue
 		}
 		root := unwrapAntigravityResponse(gjson.ParseBytes(payload))
+		root = restoreInteractionsFunctionNames(root, st.ToolNameMap)
 		if !root.Exists() {
 			continue
 		}
@@ -79,6 +85,7 @@ func ConvertAntigravityResponseToInteractionsNonStream(ctx context.Context, mode
 	_ = originalRequestRawJSON
 	_ = requestRawJSON
 	root := unwrapAntigravityResponse(gjson.ParseBytes(rawJSON))
+	root = restoreInteractionsFunctionNames(root, util.DisambiguatedToolNameMap(originalRequestRawJSON))
 	out := []byte(`{"id":"","object":"interaction","status":"completed","model":"","steps":[]}`)
 	id := root.Get("responseId").String()
 	if id == "" {
@@ -125,6 +132,27 @@ func unwrapAntigravityResponse(root gjson.Result) gjson.Result {
 		return response
 	}
 	return restoreAntigravityUsageMetadata(root)
+}
+
+func restoreInteractionsFunctionNames(root gjson.Result, nameMap map[string]string) gjson.Result {
+	if !root.Exists() || len(nameMap) == 0 {
+		return root
+	}
+	raw := []byte(root.Raw)
+	candidates := root.Get("candidates")
+	for candidateIndex, candidate := range candidates.Array() {
+		for partIndex, part := range candidate.Get("content.parts").Array() {
+			for _, field := range []string{"functionCall", "functionResponse"} {
+				name := part.Get(field + ".name").String()
+				if name == "" {
+					continue
+				}
+				path := fmt.Sprintf("candidates.%d.content.parts.%d.%s.name", candidateIndex, partIndex, field)
+				raw, _ = sjson.SetBytes(raw, path, util.RestoreSanitizedToolName(nameMap, name))
+			}
+		}
+	}
+	return gjson.ParseBytes(raw)
 }
 
 func restoreAntigravityUsageMetadata(root gjson.Result) gjson.Result {
