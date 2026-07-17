@@ -642,6 +642,111 @@ func TestXAIExecutorPrepareDropsOrphanedToolChoiceBeforeXSearchInject(t *testing
 	}
 }
 
+func TestXAIExecutorPrepareResponsesRequestAddsObjectTypeToRootUnionBranches(t *testing.T) {
+	t.Parallel()
+
+	cropParameters := `{
+		"type":"object",
+		"additionalProperties":false,
+		"required":["imagePath","point"],
+		"oneOf":[
+			{"required":["radius"],"not":{"required":["size"]}},
+			{"required":["size"],"not":{"required":["radius"]}}
+		],
+		"properties":{
+			"imagePath":{"type":"string"},
+			"point":{"type":"array"},
+			"radius":{"type":"number"},
+			"size":{"type":"object"}
+		}
+	}`
+	tests := []struct {
+		name         string
+		sourceFormat sdktranslator.Format
+		payload      []byte
+	}{
+		{
+			name:         "OpenAI Responses",
+			sourceFormat: sdktranslator.FormatOpenAIResponse,
+			payload: []byte(`{
+				"model":"grok-4.5",
+				"input":"crop a region",
+				"tools":[{
+					"type":"function",
+					"name":"crop_around_point",
+					"parameters":` + cropParameters + `
+				}]
+			}`),
+		},
+		{
+			name:         "OpenAI Chat Completions",
+			sourceFormat: sdktranslator.FormatOpenAI,
+			payload: []byte(`{
+				"model":"grok-4.5",
+				"messages":[{"role":"user","content":"crop a region"}],
+				"tools":[{
+					"type":"function",
+					"function":{
+						"name":"crop_around_point",
+						"parameters":` + cropParameters + `
+					}
+				}]
+			}`),
+		},
+	}
+
+	exec := NewXAIExecutor(&config.Config{})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+				Model:   "grok-4.5",
+				Payload: tt.payload,
+			}, cliproxyexecutor.Options{
+				SourceFormat: tt.sourceFormat,
+				Stream:       true,
+			}, true)
+			if err != nil {
+				t.Fatalf("prepareResponsesRequest() error = %v", err)
+			}
+
+			var cropTool gjson.Result
+			for _, tool := range gjson.GetBytes(prepared.body, "tools").Array() {
+				if tool.Get("type").String() == xaiFunctionToolType && tool.Get("name").String() == "crop_around_point" {
+					cropTool = tool
+					break
+				}
+			}
+			if !cropTool.Exists() {
+				t.Fatalf("crop_around_point missing from upstream tools: %s", prepared.body)
+			}
+
+			parameters := cropTool.Get("parameters")
+			branches := parameters.Get("oneOf").Array()
+			if len(branches) != 2 {
+				t.Fatalf("oneOf branch count = %d, want 2; parameters=%s", len(branches), parameters.Raw)
+			}
+			for index, branch := range branches {
+				if got := branch.Get("type").String(); got != "object" {
+					t.Fatalf("oneOf.%d.type = %q, want object; parameters=%s", index, got, parameters.Raw)
+				}
+			}
+			for _, propertyName := range []string{"imagePath", "point", "radius", "size"} {
+				if !parameters.Get("properties." + propertyName).Exists() {
+					t.Fatalf("properties.%s missing: %s", propertyName, parameters.Raw)
+				}
+			}
+			if parameters.Get("additionalProperties").Type != gjson.False {
+				t.Fatalf("additionalProperties changed: %s", parameters.Raw)
+			}
+			if !branches[0].Get("not.required").Exists() || !branches[1].Get("not.required").Exists() {
+				t.Fatalf("oneOf constraints changed: %s", parameters.Raw)
+			}
+		})
+	}
+}
+
 func TestXAIExecutorPrepareAllowedToolsSyncsInjectedXSearch(t *testing.T) {
 	t.Parallel()
 
@@ -2608,7 +2713,7 @@ func TestXAIExecutorExecuteVideosUsesNativeEndpointFromRequestPath(t *testing.T)
 
 func TestNormalizeXAITools_SimplifiesCodexAppAutomationUpdateSchema(t *testing.T) {
 	// Large oneOf+$ref schema mimicking Codex Desktop codex_app.automation_update.
-	params := `{"oneOf":[{"type":"object","properties":{"mode":{"type":"string"}}}],"$defs":{"a":{"type":"string"}},"x":"` + strings.Repeat("y", 1600) + `"}`
+	params := `{"type":"object","oneOf":[{"properties":{"mode":{"type":"string"}}}],"$defs":{"a":{"type":"string"}},"x":"` + strings.Repeat("y", 1600) + `"}`
 	body := []byte(`{"model":"grok-4.5","tools":[{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"automation_update","description":"sched","strict":true,"parameters":` + params + `}]},{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`)
 	out := normalizeXAITools(body)
 
@@ -2651,14 +2756,14 @@ func TestNormalizeXAITools_SimplifiesCodexAppAutomationUpdateSchema(t *testing.T
 }
 
 func TestNormalizeXAITools_SimplifiesFlattenedAndInvalidRootSchemas(t *testing.T) {
-	body := []byte(`{"tools":[{"type":"function","name":"codex_app__automation_update","strict":true,"parameters":{"oneOf":[{"type":"object","properties":{"action":{"type":"string"}},"required":["action"]},{"type":"null"}]}},{"type":"function","name":"nullable_lookup","strict":true,"parameters":{"anyOf":[{"type":"object","properties":{"query":{"type":"string"}}},{"type":["object","null"]}]}},{"type":"custom","name":"nullable_custom","strict":true,"parameters":{"oneOf":[{"type":"object"},{"type":"null"}]}},{"type":"function","name":"echo_tool","strict":true,"parameters":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"],"additionalProperties":false}}]}`)
+	body := []byte(`{"tools":[{"type":"function","name":"codex_app__automation_update","strict":true,"parameters":{"oneOf":[{"type":"object","properties":{"action":{"type":"string"}},"required":["action"]},{"type":"null"}]}},{"type":"function","name":"nullable_lookup","strict":true,"parameters":{"anyOf":[{"type":"object","properties":{"query":{"type":"string"}}},{"type":["object","null"]}]}},{"type":"custom","name":"nullable_custom","strict":true,"parameters":{"oneOf":[{"type":"object"},{"type":"null"}]}},{"type":"function","name":"mixed_nullable","strict":true,"parameters":{"type":"object","oneOf":[{"required":["query"]},{"type":"null"}],"properties":{"query":{"type":"string"}}}},{"type":"function","name":"array_root_union","strict":true,"parameters":{"type":["object"],"anyOf":[{"required":["query"]},{"required":["id"]}],"properties":{"query":{"type":"string"},"id":{"type":"integer"}}}},{"type":"function","name":"echo_tool","strict":true,"parameters":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"],"additionalProperties":false}}]}`)
 	out := normalizeXAITools(body)
 
 	tools := gjson.GetBytes(out, "tools").Array()
-	if len(tools) != 4 {
-		t.Fatalf("tools length = %d, want 4; body=%s", len(tools), string(out))
+	if len(tools) != 6 {
+		t.Fatalf("tools length = %d, want 6; body=%s", len(tools), string(out))
 	}
-	for index, wantName := range []string{"codex_app__automation_update", "nullable_lookup", "nullable_custom"} {
+	for index, wantName := range []string{"codex_app__automation_update", "nullable_lookup", "nullable_custom", "mixed_nullable", "array_root_union"} {
 		tool := tools[index]
 		if got := tool.Get("name").String(); got != wantName {
 			t.Fatalf("tools.%d.name = %q, want %q; body=%s", index, got, wantName, string(out))
@@ -2677,7 +2782,7 @@ func TestNormalizeXAITools_SimplifiesFlattenedAndInvalidRootSchemas(t *testing.T
 		}
 	}
 
-	echoTool := tools[3]
+	echoTool := tools[5]
 	if got := echoTool.Get("parameters.properties.message.type").String(); got != "string" {
 		t.Fatalf("echo_tool schema changed, message type = %q; body=%s", got, string(out))
 	}
@@ -2686,6 +2791,98 @@ func TestNormalizeXAITools_SimplifiesFlattenedAndInvalidRootSchemas(t *testing.T
 	}
 	if echoTool.Get("parameters.additionalProperties").Type != gjson.False {
 		t.Fatalf("echo_tool additionalProperties changed: %s", string(out))
+	}
+}
+
+func TestNormalizeXAITools_AddsObjectTypeToRootUnionBranches(t *testing.T) {
+	body := []byte(`{
+		"tools":[
+			{
+				"type":"function",
+				"name":"crop_around_point",
+				"strict":true,
+				"parameters":{
+					"type":"object",
+					"additionalProperties":false,
+					"required":["imagePath","point"],
+					"oneOf":[
+						{"required":["radius"],"not":{"required":["size"]}},
+						{"required":["size"],"not":{"required":["radius"]}}
+					],
+					"properties":{
+						"imagePath":{"type":"string"},
+						"point":{"type":"array"},
+						"radius":{"type":"number"},
+						"size":{"type":"object"},
+						"nested":{"oneOf":[{"required":["value"]},{}]}
+					}
+				}
+			},
+			{
+				"type":"function",
+				"name":"lookup",
+				"strict":true,
+				"parameters":{
+					"type":"object",
+					"anyOf":[{"required":["query"]},{"required":["id"]}],
+					"properties":{"query":{"type":"string"},"id":{"type":"integer"}}
+				}
+			},
+			{
+				"type":"custom",
+				"name":"custom_lookup",
+				"strict":true,
+				"parameters":{
+					"type":"object",
+					"oneOf":[{"required":["query"]},{"required":["id"]}],
+					"properties":{"query":{"type":"string"},"id":{"type":"integer"}}
+				}
+			}
+		]
+	}`)
+	out := normalizeXAITools(body)
+
+	for toolIndex, unionName := range []string{"oneOf", "anyOf"} {
+		tool := gjson.GetBytes(out, fmt.Sprintf("tools.%d", toolIndex))
+		branches := tool.Get("parameters." + unionName).Array()
+		if len(branches) != 2 {
+			t.Fatalf("tools.%d %s branch count = %d, want 2; body=%s", toolIndex, unionName, len(branches), string(out))
+		}
+		for branchIndex, branch := range branches {
+			if got := branch.Get("type").String(); got != "object" {
+				t.Fatalf("tools.%d parameters.%s.%d.type = %q, want object; body=%s", toolIndex, unionName, branchIndex, got, string(out))
+			}
+		}
+		if tool.Get("strict").Type != gjson.True {
+			t.Fatalf("tools.%d strict changed: %s", toolIndex, string(out))
+		}
+	}
+
+	cropParameters := gjson.GetBytes(out, "tools.0.parameters")
+	if cropParameters.Get("additionalProperties").Type != gjson.False {
+		t.Fatalf("crop additionalProperties changed: %s", cropParameters.Raw)
+	}
+	if got := cropParameters.Get("required.#").Int(); got != 2 {
+		t.Fatalf("crop required length = %d, want 2; parameters=%s", got, cropParameters.Raw)
+	}
+	if !cropParameters.Get("oneOf.0.not.required").Exists() || !cropParameters.Get("oneOf.1.not.required").Exists() {
+		t.Fatalf("crop oneOf constraints changed: %s", cropParameters.Raw)
+	}
+	if cropParameters.Get("properties.nested.oneOf.0.type").Exists() {
+		t.Fatalf("nested union branch must not be changed: %s", cropParameters.Raw)
+	}
+
+	customTool := gjson.GetBytes(out, "tools.2")
+	if got := customTool.Get("type").String(); got != xaiFunctionToolType {
+		t.Fatalf("custom tool type = %q, want function; body=%s", got, string(out))
+	}
+	for branchIndex, branch := range customTool.Get("parameters.oneOf").Array() {
+		if got := branch.Get("type").String(); got != "object" {
+			t.Fatalf("custom tool oneOf.%d.type = %q, want object; body=%s", branchIndex, got, string(out))
+		}
+	}
+	if customTool.Get("strict").Type != gjson.True {
+		t.Fatalf("custom tool strict changed: %s", string(out))
 	}
 }
 
