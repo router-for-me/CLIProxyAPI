@@ -225,7 +225,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
 	responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
-	applyPatchAdapter := newXAIApplyPatchResponseAdapter(prepared.restoreApplyPatch)
+	applyPatchAdapter := newXAIApplyPatchResponseAdapter(prepared.applyPatchTools)
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		if !bytes.HasPrefix(line, xaiDataTag) {
 			continue
@@ -710,7 +710,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
-		applyPatchAdapter := newXAIApplyPatchResponseAdapter(prepared.restoreApplyPatch)
+		applyPatchAdapter := newXAIApplyPatchResponseAdapter(prepared.applyPatchTools)
 		var pendingEventLine []byte
 		emitTranslatedLine := func(translatedLine []byte) bool {
 			chunks := sdktranslator.TranslateStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, translatedLine, &param)
@@ -898,7 +898,7 @@ type xaiPreparedRequest struct {
 	sessionID             string
 	replayScope           xaiReasoningReplayScope
 	filterInternalXSearch bool
-	restoreApplyPatch     bool
+	applyPatchTools       map[xaiApplyPatchToolKey]struct{}
 }
 
 type xaiNamespaceToolRef struct {
@@ -954,7 +954,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	// Collect before normalizeXAITools flattens namespace wrappers so keys match
 	// the post-restore (namespace, short-name) shape used by the response filter.
 	clientDeclaredTools := collectXAIClientDeclaredToolKeys(body)
-	restoreApplyPatch := xaiHasCustomApplyPatchTool(body)
+	applyPatchTools := collectXAICustomApplyPatchToolKeys(body)
 	body = normalizeXAITools(body)
 	// Drop choices that point at tools removed by normalizeXAITools before we
 	// inject native x_search, so a surviving allowed_tools / forced choice is not
@@ -996,7 +996,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 		sessionID:             sessionID,
 		replayScope:           replayScope,
 		filterInternalXSearch: xaiRequestHasNativeXSearch(body),
-		restoreApplyPatch:     restoreApplyPatch,
+		applyPatchTools:       applyPatchTools,
 	}, nil
 }
 
@@ -1657,43 +1657,47 @@ func normalizeXAIToolChoiceForTools(body []byte) []byte {
 	return body
 }
 
-func xaiHasCustomApplyPatchTool(body []byte) bool {
-	found := false
-	var collect func(gjson.Result)
-	collect = func(tools gjson.Result) {
-		if found || !tools.IsArray() {
+type xaiApplyPatchToolKey struct {
+	namespace string
+	name      string
+}
+
+func collectXAICustomApplyPatchToolKeys(body []byte) map[xaiApplyPatchToolKey]struct{} {
+	keys := make(map[xaiApplyPatchToolKey]struct{})
+	var collect func(gjson.Result, string)
+	collect = func(tools gjson.Result, namespace string) {
+		if !tools.IsArray() {
 			return
 		}
 		for _, tool := range tools.Array() {
 			switch strings.TrimSpace(tool.Get("type").String()) {
 			case xaiCustomToolType:
 				if strings.TrimSpace(tool.Get("name").String()) == "apply_patch" {
-					found = true
-					return
+					keys[xaiApplyPatchToolKey{namespace: namespace, name: "apply_patch"}] = struct{}{}
 				}
 			case xaiNamespaceToolType:
-				collect(tool.Get("tools"))
+				collect(tool.Get("tools"), strings.TrimSpace(tool.Get("name").String()))
 			}
 		}
 	}
-	collect(gjson.GetBytes(body, "tools"))
+	collect(gjson.GetBytes(body, "tools"), "")
 	for _, item := range gjson.GetBytes(body, "input").Array() {
 		if item.Get("type").String() == "additional_tools" {
-			collect(item.Get("tools"))
+			collect(item.Get("tools"), "")
 		}
 	}
-	return found
+	return keys
 }
 
 type xaiApplyPatchResponseAdapter struct {
-	enabled   bool
+	tools     map[xaiApplyPatchToolKey]struct{}
 	itemIDs   map[string]struct{}
 	arguments map[string]*strings.Builder
 }
 
-func newXAIApplyPatchResponseAdapter(enabled bool) *xaiApplyPatchResponseAdapter {
-	adapter := &xaiApplyPatchResponseAdapter{enabled: enabled}
-	if enabled {
+func newXAIApplyPatchResponseAdapter(tools map[xaiApplyPatchToolKey]struct{}) *xaiApplyPatchResponseAdapter {
+	adapter := &xaiApplyPatchResponseAdapter{tools: tools}
+	if len(tools) > 0 {
 		adapter.itemIDs = make(map[string]struct{})
 		adapter.arguments = make(map[string]*strings.Builder)
 	}
@@ -1701,14 +1705,14 @@ func newXAIApplyPatchResponseAdapter(enabled bool) *xaiApplyPatchResponseAdapter
 }
 
 func (a *xaiApplyPatchResponseAdapter) apply(data []byte) []byte {
-	if a == nil || !a.enabled || len(data) == 0 || !gjson.ValidBytes(data) {
+	if a == nil || len(a.tools) == 0 || len(data) == 0 || !gjson.ValidBytes(data) {
 		return data
 	}
 
 	eventType := gjson.GetBytes(data, "type").String()
 	if eventType == "response.output_item.added" || eventType == "response.output_item.done" {
 		item := gjson.GetBytes(data, "item")
-		if item.Get("type").String() == "function_call" && strings.TrimSpace(item.Get("name").String()) == "apply_patch" {
+		if a.matches(item) {
 			itemID := strings.TrimSpace(item.Get("id").String())
 			if itemID != "" {
 				a.itemIDs[itemID] = struct{}{}
@@ -1743,7 +1747,7 @@ func (a *xaiApplyPatchResponseAdapter) apply(data []byte) []byte {
 	output := gjson.GetBytes(data, "response.output")
 	if output.IsArray() {
 		for index, item := range output.Array() {
-			if item.Get("type").String() != "function_call" || strings.TrimSpace(item.Get("name").String()) != "apply_patch" {
+			if !a.matches(item) {
 				continue
 			}
 			path := fmt.Sprintf("response.output.%d", index)
@@ -1751,6 +1755,18 @@ func (a *xaiApplyPatchResponseAdapter) apply(data []byte) []byte {
 		}
 	}
 	return data
+}
+
+func (a *xaiApplyPatchResponseAdapter) matches(item gjson.Result) bool {
+	if item.Get("type").String() != "function_call" {
+		return false
+	}
+	key := xaiApplyPatchToolKey{
+		namespace: strings.TrimSpace(item.Get("namespace").String()),
+		name:      strings.TrimSpace(item.Get("name").String()),
+	}
+	_, ok := a.tools[key]
+	return ok
 }
 
 func (a *xaiApplyPatchResponseAdapter) bufferedArguments(itemID string, arguments gjson.Result) string {

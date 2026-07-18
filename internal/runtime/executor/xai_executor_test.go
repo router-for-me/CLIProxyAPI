@@ -2988,7 +2988,9 @@ func TestNormalizeXAITools_ApplyPatchUsesFallbackGrammar(t *testing.T) {
 }
 
 func TestXAIApplyPatchResponseAdapterRestoresCustomCall(t *testing.T) {
-	adapter := newXAIApplyPatchResponseAdapter(true)
+	adapter := newXAIApplyPatchResponseAdapter(map[xaiApplyPatchToolKey]struct{}{
+		{namespace: "", name: "apply_patch"}: {},
+	})
 
 	added := adapter.apply([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_patch","type":"function_call","call_id":"call_patch","name":"apply_patch","arguments":""}}`))
 	if got := gjson.GetBytes(added, "item.type").String(); got != "custom_tool_call" {
@@ -3023,6 +3025,53 @@ func TestXAIApplyPatchResponseAdapterRestoresCustomCall(t *testing.T) {
 	completed := adapter.apply([]byte(`{"type":"response.completed","response":{"output":[{"id":"fc_patch","type":"function_call","call_id":"call_patch","name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** End Patch\"}"}]}}`))
 	if got := gjson.GetBytes(completed, "response.output.0.type").String(); got != "custom_tool_call" {
 		t.Fatalf("completed item type = %q; event=%s", got, completed)
+	}
+}
+
+func TestXAIApplyPatchResponseAdapterPreservesNamespacedFunctionWithSameShortName(t *testing.T) {
+	request := []byte(`{
+		"tools":[
+			{"type":"custom","name":"apply_patch"},
+			{"type":"namespace","name":"terminal","tools":[{"type":"function","name":"apply_patch","parameters":{"type":"object"}}]}
+		]
+	}`)
+	adapter := newXAIApplyPatchResponseAdapter(collectXAICustomApplyPatchToolKeys(request))
+	refs := collectXAINamespaceToolRefs(request)
+	event := []byte(`{"type":"response.output_item.done","item":{"id":"fc_namespaced","type":"function_call","name":"terminal__apply_patch","arguments":"{\"path\":\"file.txt\"}"}}`)
+
+	event = restoreXAINamespaceToolCalls(event, refs)
+	event = adapter.apply(event)
+	item := gjson.GetBytes(event, "item")
+	if got := item.Get("type").String(); got != "function_call" {
+		t.Fatalf("namespaced apply_patch type = %q, want function_call; event=%s", got, event)
+	}
+	if got := item.Get("namespace").String(); got != "terminal" {
+		t.Fatalf("namespaced apply_patch namespace = %q, want terminal; event=%s", got, event)
+	}
+	if got := gjson.Get(item.Get("arguments").String(), "path").String(); got != "file.txt" {
+		t.Fatalf("namespaced apply_patch arguments.path = %q, want file.txt; event=%s", got, event)
+	}
+}
+
+func TestXAIApplyPatchResponseAdapterRestoresNamespacedCustomCall(t *testing.T) {
+	request := []byte(`{
+		"tools":[{"type":"namespace","name":"editor","tools":[{"type":"custom","name":"apply_patch"}]}]
+	}`)
+	adapter := newXAIApplyPatchResponseAdapter(collectXAICustomApplyPatchToolKeys(request))
+	refs := collectXAINamespaceToolRefs(request)
+	event := []byte(`{"type":"response.output_item.done","item":{"id":"fc_namespaced_custom","type":"function_call","name":"editor__apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** End Patch\"}"}}`)
+
+	event = restoreXAINamespaceToolCalls(event, refs)
+	event = adapter.apply(event)
+	item := gjson.GetBytes(event, "item")
+	if got := item.Get("type").String(); got != "custom_tool_call" {
+		t.Fatalf("namespaced custom apply_patch type = %q, want custom_tool_call; event=%s", got, event)
+	}
+	if got := item.Get("namespace").String(); got != "editor" {
+		t.Fatalf("namespaced custom apply_patch namespace = %q, want editor; event=%s", got, event)
+	}
+	if got := item.Get("input").String(); got != "*** Begin Patch\n*** End Patch" {
+		t.Fatalf("namespaced custom apply_patch input = %q; event=%s", got, event)
 	}
 }
 
