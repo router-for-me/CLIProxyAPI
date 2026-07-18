@@ -77,7 +77,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 		if len(contentItems) > 0 {
 			message := []byte(`{"type":"message","role":"developer"}`)
-			message, _ = sjson.SetRawBytes(message, "content", marshalRawJSONArray(contentItems))
+			message, _ = sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray(contentItems))
 			inputItems = append(inputItems, message)
 		}
 	}
@@ -106,7 +106,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				if len(contentItems) > 0 {
 					message := []byte(`{"type":"message","role":""}`)
 					message, _ = sjson.SetBytes(message, "role", messageRole)
-					message, _ = sjson.SetRawBytes(message, "content", marshalRawJSONArray(contentItems))
+					message, _ = sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray(contentItems))
 					inputItems = append(inputItems, message)
 					contentItems = contentItems[:0]
 				}
@@ -237,7 +237,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 								}
 							}
 							if len(toolResultContentItems) > 0 {
-								functionCallOutputMessage, _ = sjson.SetRawBytes(functionCallOutputMessage, "output", marshalRawJSONArray(toolResultContentItems))
+								functionCallOutputMessage, _ = sjson.SetRawBytes(functionCallOutputMessage, "output", translatorcommon.JoinRawArray(toolResultContentItems))
 							} else {
 								functionCallOutputMessage, _ = sjson.SetBytes(functionCallOutputMessage, "output", messageContentResult.Get("content").String())
 							}
@@ -345,32 +345,11 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	template, _ = sjson.SetBytes(template, "store", false)
 	template, _ = sjson.SetBytes(template, "include", []string{"reasoning.encrypted_content"})
 	if toolsResult.IsArray() {
-		template, _ = sjson.SetRawBytes(template, "tools", marshalRawJSONArray(toolItems))
+		template, _ = sjson.SetRawBytes(template, "tools", translatorcommon.JoinRawArray(toolItems))
 	}
-	template, _ = sjson.SetRawBytes(template, "input", marshalRawJSONArray(inputItems))
+	template, _ = sjson.SetRawBytes(template, "input", translatorcommon.JoinRawArray(inputItems))
 
 	return template
-}
-
-func marshalRawJSONArray(items [][]byte) []byte {
-	size := 2
-	if len(items) > 1 {
-		size += len(items) - 1
-	}
-	for i := 0; i < len(items); i++ {
-		size += len(items[i])
-	}
-
-	result := make([]byte, 0, size)
-	result = append(result, '[')
-	for i := 0; i < len(items); i++ {
-		if i > 0 {
-			result = append(result, ',')
-		}
-		result = append(result, items[i]...)
-	}
-	result = append(result, ']')
-	return result
 }
 
 func codexClaudeTargetAcceptsGrokSignature(modelName string) bool {
