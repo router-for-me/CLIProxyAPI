@@ -1063,27 +1063,44 @@ attemptLoop:
 						reporter.Publish(ctx, detail)
 					}
 
-					out <- cliproxyexecutor.StreamChunk{Payload: payload}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: payload}:
+					case <-ctx.Done():
+						return
+					}
 				}
 				if errScan := scanner.Err(); errScan != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 					reporter.PublishFailure(ctx, errScan)
-					out <- cliproxyexecutor.StreamChunk{Err: errScan}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+					case <-ctx.Done():
+					}
 				} else {
 					reporter.EnsurePublished(ctx)
 				}
 			}(httpResp)
 
 			var buffer bytes.Buffer
-			for chunk := range out {
-				if chunk.Err != nil {
-					return resp, chunk.Err
-				}
-				if len(chunk.Payload) > 0 {
-					_, _ = buffer.Write(chunk.Payload)
-					_, _ = buffer.Write([]byte("\n"))
+			for {
+				select {
+				case chunk, ok := <-out:
+					if !ok {
+						goto claudeNonStreamDone
+					}
+					if chunk.Err != nil {
+						return resp, chunk.Err
+					}
+					if len(chunk.Payload) > 0 {
+						_, _ = buffer.Write(chunk.Payload)
+						_, _ = buffer.Write([]byte("\n"))
+					}
+				case <-ctx.Done():
+					err = ctx.Err()
+					return resp, err
 				}
 			}
+		claudeNonStreamDone:
 			resp = cliproxyexecutor.Response{Payload: e.convertStreamToNonStream(buffer.Bytes())}
 
 			resp.Payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, resp.Payload)
