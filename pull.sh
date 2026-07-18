@@ -8,6 +8,15 @@ SERVICE_NAME="cli-proxy-api"
 CONTAINER_NAME="cli-proxy-api"
 ROLLBACK_IMAGE="cli-proxy-api-plus:rollback-previous"
 
+if docker compose version >/dev/null 2>&1; then
+  COMPOSE_COMMAND=(docker compose)
+elif command -v docker-compose >/dev/null 2>&1; then
+  COMPOSE_COMMAND=(docker-compose)
+else
+  echo "Error: neither docker compose nor docker-compose is available."
+  exit 1
+fi
+
 if [[ -z "${IMAGE_REFERENCE}" ]]; then
   echo "Usage: ./pull.sh ghcr.io/austinhmh/cli-proxy-api-plus:sha-<40-hex-commit>"
   echo "   or: ./pull.sh ghcr.io/austinhmh/cli-proxy-api-plus@sha256:<digest>"
@@ -60,12 +69,12 @@ CANDIDATE_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${IMAGE_REFERENCE
 rollback() {
   echo "Candidate verification failed; restoring ${ROLLBACK_IMAGE}."
   export CLI_PROXY_IMAGE="${ROLLBACK_IMAGE}"
-  docker compose -f "${COMPOSE_FILE}" up -d --no-build --force-recreate "${SERVICE_NAME}"
+  "${COMPOSE_COMMAND[@]}" -f "${COMPOSE_FILE}" up -d --no-build --force-recreate "${SERVICE_NAME}"
   echo "Rollback completed."
 }
 
 export CLI_PROXY_IMAGE="${IMAGE_REFERENCE}"
-if ! docker compose -f "${COMPOSE_FILE}" up -d --no-build --force-recreate "${SERVICE_NAME}"; then
+if ! "${COMPOSE_COMMAND[@]}" -f "${COMPOSE_FILE}" up -d --no-build --force-recreate "${SERVICE_NAME}"; then
   rollback
   exit 1
 fi

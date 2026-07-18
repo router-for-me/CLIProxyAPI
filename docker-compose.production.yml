@@ -1,7 +1,6 @@
 services:
   cli-proxy-api:
     image: ${CLI_PROXY_IMAGE:?CLI_PROXY_IMAGE must reference a CI-built image}
-    pull_policy: never
     container_name: cli-proxy-api
     restart: unless-stopped
     ports:
