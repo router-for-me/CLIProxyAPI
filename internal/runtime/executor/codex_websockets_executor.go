@@ -2314,6 +2314,12 @@ func codexWebsocketStatuslessErrorStatus(payload []byte) int {
 	if code == "" {
 		code = strings.TrimSpace(gjson.GetBytes(payload, "code").String())
 	}
+	if code == "" {
+		errorValue := gjson.GetBytes(payload, "error")
+		if errorValue.Type == gjson.String {
+			code = strings.TrimSpace(errorValue.String())
+		}
+	}
 	errType := strings.TrimSpace(gjson.GetBytes(payload, "error.type").String())
 	if errType == "" {
 		errType = strings.TrimSpace(gjson.GetBytes(payload, "body.error.type").String())

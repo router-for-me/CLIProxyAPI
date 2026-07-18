@@ -128,6 +128,34 @@ func TestCodexWebsocketStatuslessErrorEventClassifiesRateLimits(t *testing.T) {
 	}
 }
 
+func TestCodexWebsocketStatuslessErrorEventClassifiesStringErrorCodes(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    []byte
+		wantStatus int
+	}{
+		{name: "rate limit", payload: []byte(`{"type":"error","error":"rate_limit_exceeded"}`), wantStatus: http.StatusTooManyRequests},
+		{name: "usage limit", payload: []byte(`{"type":"error","error":"usage_limit_reached"}`), wantStatus: http.StatusTooManyRequests},
+		{name: "previous response", payload: []byte(`{"type":"error","error":"previous_response_not_found"}`), wantStatus: http.StatusBadRequest},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err, ok := codexWebsocketStatuslessErrorEvent(test.payload)
+			if !ok {
+				t.Fatal("expected statusless websocket error")
+			}
+			statusErr, ok := err.(interface{ StatusCode() int })
+			if !ok || statusErr.StatusCode() != test.wantStatus {
+				t.Fatalf("status = %#v, want %d", err, test.wantStatus)
+			}
+			if got := gjson.Get(err.Error(), "error").String(); got == "" {
+				t.Fatalf("string error code was not preserved: %s", err.Error())
+			}
+		})
+	}
+}
+
 func durationPointer(value time.Duration) *time.Duration {
 	return &value
 }
