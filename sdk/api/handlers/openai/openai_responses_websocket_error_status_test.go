@@ -65,3 +65,33 @@ func TestResponsesWebsocketErrorMessageFromPayloadMapsUsageLimitStatus(t *testin
 		})
 	}
 }
+
+func TestResponsesWebsocketErrorMessageFromPayloadMapsAuthStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    string
+		wantStatus int
+	}{
+		{name: "authentication type", payload: `{"type":"error","error":{"type":"authentication_error","message":"expired token"}}`, wantStatus: http.StatusUnauthorized},
+		{name: "invalid API key", payload: `{"type":"error","code":"invalid_api_key"}`, wantStatus: http.StatusUnauthorized},
+		{name: "unauthorized", payload: `{"type":"error","code":"unauthorized"}`, wantStatus: http.StatusUnauthorized},
+		{name: "permission type", payload: `{"type":"error","error":{"type":"permission_error","message":"access denied"}}`, wantStatus: http.StatusForbidden},
+		{name: "forbidden", payload: `{"type":"error","code":"forbidden"}`, wantStatus: http.StatusForbidden},
+		{name: "permission denied", payload: `{"type":"error","code":"permission_denied"}`, wantStatus: http.StatusForbidden},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			errMsg := responsesWebsocketErrorMessageFromPayload([]byte(test.payload))
+			if errMsg == nil {
+				t.Fatal("error message is nil")
+			}
+			if errMsg.StatusCode != test.wantStatus {
+				t.Fatalf("status = %d, want %d", errMsg.StatusCode, test.wantStatus)
+			}
+			if !shouldReleaseResponsesWebsocketPinnedAuth(errMsg) {
+				t.Fatal("auth error should release pinned auth")
+			}
+		})
+	}
+}

@@ -2113,7 +2113,15 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 	}
 	if status <= 0 {
 		lowerErrText := strings.ToLower(errText)
-		if strings.EqualFold(errCode, "websocket_connection_limit_reached") ||
+		if strings.EqualFold(errCode, "invalid_api_key") ||
+			strings.EqualFold(errCode, "unauthorized") ||
+			strings.EqualFold(errType, "authentication_error") {
+			status = http.StatusUnauthorized
+		} else if strings.EqualFold(errCode, "forbidden") ||
+			strings.EqualFold(errCode, "permission_denied") ||
+			strings.EqualFold(errType, "permission_error") {
+			status = http.StatusForbidden
+		} else if strings.EqualFold(errCode, "websocket_connection_limit_reached") ||
 			strings.EqualFold(errCode, "rate_limit_exceeded") ||
 			strings.EqualFold(errCode, "usage_limit_reached") ||
 			strings.EqualFold(errType, "rate_limit_error") ||
