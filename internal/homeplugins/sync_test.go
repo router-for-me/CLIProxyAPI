@@ -6,13 +6,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
@@ -69,6 +72,207 @@ func TestSyncPlatformInstallsManifestArtifact(t *testing.T) {
 	}
 	if string(got) != "library-data" {
 		t.Fatalf("target data = %q, want library-data", string(got))
+	}
+}
+
+func TestSyncResolvedWithReportUsesTemporaryAuthAndClearsIt(t *testing.T) {
+	root := t.TempDir()
+	libraryName := "sample" + pluginExtension(runtime.GOOS)
+	archiveData := makeZip(t, map[string]string{libraryName: "library-data"})
+	checksum := sha256.Sum256(archiveData)
+	var authenticated bool
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer temporary-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		authenticated = true
+		_, _ = w.Write(archiveData)
+	}))
+	t.Cleanup(server.Close)
+	response, errUnauthenticated := server.Client().Get(server.URL + "/private/sample.zip")
+	if errUnauthenticated != nil {
+		t.Fatalf("unauthenticated GET error = %v", errUnauthenticated)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want 401", response.StatusCode)
+	}
+
+	originalClient := newResolvedPluginStoreClient
+	newResolvedPluginStoreClient = func(_ *config.Config, auth []sdkpluginstore.ResolvedAuthConfig, expiresAt time.Time) sdkpluginstore.Client {
+		return sdkpluginstore.NewClientWithResolvedAuthExpiry(server.Client(), "", auth, expiresAt)
+	}
+	defer func() { newResolvedPluginStoreClient = originalClient }()
+	token := sdkpluginstore.Secret("temporary-token")
+	backing := token
+	items := []sdkpluginstore.PluginSyncItem{{
+		Manifest: sdkpluginstore.Manifest{
+			SchemaVersion: sdkpluginstore.SchemaVersionV2,
+			ID:            "sample",
+			Version:       "1.0.0",
+			Install: sdkpluginstore.InstallPlan{Type: sdkpluginstore.InstallTypeDirect, Artifacts: []sdkpluginstore.Artifact{{
+				GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, URL: server.URL + "/private/sample.zip",
+				SHA256: hex.EncodeToString(checksum[:]), Size: int64(len(archiveData)),
+			}}},
+		},
+		Auth: []sdkpluginstore.ResolvedAuthConfig{{
+			Match: server.URL + "/private/", ApplyTo: []string{sdkpluginstore.RequestKindArtifact}, Type: sdkpluginstore.AuthTypeBearer, Token: token,
+		}},
+	}}
+	enabled := true
+	cfg := &config.Config{
+		Home:    config.HomeConfig{Enabled: true},
+		Plugins: config.PluginsConfig{Enabled: true, Dir: root, Configs: map[string]config.PluginInstanceConfig{"sample": {Enabled: &enabled}}},
+	}
+
+	report, errSync := SyncResolvedWithReport(context.Background(), cfg, items, time.Now().UTC().Add(time.Minute), map[string]string{"sample": "0.9.0"}, nil)
+	if errSync != nil {
+		t.Fatalf("SyncResolvedWithReport() error = %v", errSync)
+	}
+	if !authenticated || !report.OK || len(report.Plugins) != 1 || report.Plugins[0].Version != "1.0.0" {
+		t.Fatalf("authenticated=%v report=%+v, want successful authenticated install", authenticated, report)
+	}
+	for index, value := range backing {
+		if value != 0 {
+			t.Fatalf("token byte %d = %d, want zero after sync", index, value)
+		}
+	}
+	if items[0].Auth != nil {
+		t.Fatalf("sync item retained auth references: %#v", items[0].Auth)
+	}
+	target := pluginTestPath(root, runtime.GOOS, runtime.GOARCH, "sample", "1.0.0")
+	if got, errRead := os.ReadFile(target); errRead != nil || string(got) != "library-data" {
+		t.Fatalf("installed plugin = %q, error = %v", got, errRead)
+	}
+}
+
+func TestSyncResolvedWithReportIncludesUnchangedInstalledPlugins(t *testing.T) {
+	root := t.TempDir()
+	target := pluginTestPath(root, runtime.GOOS, runtime.GOARCH, "sample", "1.0.0")
+	if errMkdir := os.MkdirAll(filepath.Dir(target), 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdir)
+	}
+	if errWrite := os.WriteFile(target, []byte("plugin"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	cfg := &config.Config{
+		Home: config.HomeConfig{Enabled: true},
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     root,
+			Configs: map[string]config.PluginInstanceConfig{
+				"sample": pluginConfigFromYAML(t, `
+enabled: true
+store:
+  id: sample
+  name: Sample
+  description: Adds sample support.
+  author: owner
+  version: 1.0.0
+  release-tag: v1.0.0
+  repository: https://github.com/owner/sample-plugin
+`),
+			},
+		},
+	}
+
+	report, errSync := SyncResolvedWithReport(
+		context.Background(),
+		cfg,
+		nil,
+		time.Now().UTC().Add(time.Minute),
+		map[string]string{"sample": "1.0.0"},
+		nil,
+	)
+	if errSync != nil {
+		t.Fatalf("SyncResolvedWithReport() error = %v", errSync)
+	}
+	if len(report.Plugins) != 1 || report.Plugins[0].ID != "sample" || report.Plugins[0].InstallStatus != pluginInstallStatusSkipped {
+		t.Fatalf("report plugins = %+v, want unchanged installed sample", report.Plugins)
+	}
+	status := report.Plugins[0]
+	if status.Path != target || status.ReleaseTag != "v1.0.0" || status.Repository != "https://github.com/owner/sample-plugin" || status.InstallType != sdkpluginstore.InstallTypeGitHubRelease {
+		t.Fatalf("unchanged plugin status = %+v, want preserved path and manifest metadata", status)
+	}
+	if errLoad := MarkLoadResults(&report, fakePluginLoadInspector{}); errLoad == nil {
+		t.Fatal("MarkLoadResults() error = nil, want installed plugin load failure")
+	}
+	if report.Plugins[0].LoadStatus != pluginLoadStatusFailed {
+		t.Fatalf("load status = %q, want failed", report.Plugins[0].LoadStatus)
+	}
+}
+
+func TestSyncResolvedWithReportDoesNotMixInstalledAndConfiguredMetadata(t *testing.T) {
+	root := t.TempDir()
+	target := pluginTestPath(root, runtime.GOOS, runtime.GOARCH, "sample", "1.0.0")
+	if errMkdir := os.MkdirAll(filepath.Dir(target), 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdir)
+	}
+	if errWrite := os.WriteFile(target, []byte("plugin"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	cfg := &config.Config{
+		Home: config.HomeConfig{Enabled: true},
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     root,
+			Configs: map[string]config.PluginInstanceConfig{
+				"sample": pluginConfigFromYAML(t, `
+enabled: true
+store:
+  id: sample
+  name: Sample
+  description: Adds sample support.
+  author: owner
+  version: 2.0.0
+  release-tag: v2.0.0
+  repository: https://github.com/owner/sample-plugin-v2
+`),
+			},
+		},
+	}
+
+	report, errSync := SyncResolvedWithReport(
+		context.Background(),
+		cfg,
+		nil,
+		time.Now().UTC().Add(time.Minute),
+		map[string]string{"sample": "1.0.0"},
+		nil,
+	)
+	if errSync != nil {
+		t.Fatalf("SyncResolvedWithReport() error = %v", errSync)
+	}
+	if len(report.Plugins) != 1 {
+		t.Fatalf("report plugins = %+v, want one installed sample", report.Plugins)
+	}
+	status := report.Plugins[0]
+	if status.Version != "1.0.0" || status.Path != target {
+		t.Fatalf("installed plugin status = %+v, want version 1.0.0 at %s", status, target)
+	}
+	if status.ReleaseTag != "" || status.Repository != "" || status.InstallType != "" {
+		t.Fatalf("installed plugin status = %+v, want no metadata from configured version 2.0.0", status)
+	}
+}
+
+func TestInstalledVersionsUsesPluginFilesOnDisk(t *testing.T) {
+	root := t.TempDir()
+	target := pluginTestPath(root, runtime.GOOS, runtime.GOARCH, "sample", "2.3.4")
+	if errMkdir := os.MkdirAll(filepath.Dir(target), 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdir)
+	}
+	if errWrite := os.WriteFile(target, []byte("plugin"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	cfg := &config.Config{Plugins: config.PluginsConfig{Dir: root, Configs: map[string]config.PluginInstanceConfig{"sample": {}}}}
+
+	versions, errVersions := InstalledVersions(cfg)
+	if errVersions != nil {
+		t.Fatalf("InstalledVersions() error = %v", errVersions)
+	}
+	if versions["sample"] != "2.3.4" {
+		t.Fatalf("InstalledVersions() = %#v, want sample 2.3.4", versions)
 	}
 }
 
@@ -299,6 +503,89 @@ func TestMarkLoadResultsPreservesInstallFailure(t *testing.T) {
 	}
 	if report.Plugins[0].LoadStatus != pluginInstallStatusSkipped {
 		t.Fatalf("load status = %q, want skipped", report.Plugins[0].LoadStatus)
+	}
+}
+
+func TestMarkLoadResultsPreservesGlobalSyncFailure(t *testing.T) {
+	report := newSyncReport(Platform{GOOS: "linux", GOARCH: "amd64"})
+	report.Plugins = append(report.Plugins, PluginInstallStatus{
+		ID: "installed", InstallStatus: pluginInstallStatusInstalled,
+	})
+	errExpired := errors.New("home plugins: plugin sync response expired")
+	finishReport(&report, errExpired)
+
+	errLoad := MarkLoadResults(&report, fakePluginLoadInspector{"installed": true})
+	if errLoad == nil || !strings.Contains(errLoad.Error(), "plugin sync response expired") {
+		t.Fatalf("MarkLoadResults() error = %v, want preserved sync expiry", errLoad)
+	}
+	if report.OK || report.Status != pluginTaskStatusError || report.Phase != pluginTaskPhaseLoad {
+		t.Fatalf("report = %+v, want failed load phase", report)
+	}
+	if !strings.Contains(report.Error, "plugin sync response expired") {
+		t.Fatalf("report error = %q, want preserved sync expiry", report.Error)
+	}
+	if report.Plugins[0].LoadStatus != pluginLoadStatusLoaded {
+		t.Fatalf("load status = %q, want loaded", report.Plugins[0].LoadStatus)
+	}
+}
+
+func TestCompletedSyncReport(t *testing.T) {
+	tests := []struct {
+		name    string
+		errSync error
+		wantOK  bool
+	}{
+		{name: "success", wantOK: true},
+		{name: "failure", errSync: errors.New("home plugins: inspect installed plugins: access denied")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			report := CompletedSyncReport(Platform{GOOS: "linux", GOARCH: "amd64"}, tt.errSync)
+			if report.OK != tt.wantOK || report.Task != pluginTaskName || report.FinishedAt.IsZero() {
+				t.Fatalf("report = %+v, want completed plugin sync report with ok=%v", report, tt.wantOK)
+			}
+			if tt.errSync != nil && (report.Status != pluginTaskStatusError || report.Error != tt.errSync.Error()) {
+				t.Fatalf("report = %+v, want error %q", report, tt.errSync.Error())
+			}
+		})
+	}
+}
+
+func TestDeleteWithReportRejectsUnresolvedPluginsDir(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Chdir(workspace)
+
+	literalPluginsDir := filepath.Join(workspace, "~", ".cli-proxy-api", "plugins")
+	targetDir := filepath.Join(literalPluginsDir, runtime.GOOS, runtime.GOARCH)
+	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", targetDir, errMkdir)
+	}
+	target := filepath.Join(targetDir, "sample"+pluginExtension(runtime.GOOS))
+	if errWrite := os.WriteFile(target, []byte("library-data"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile(%s) error = %v", target, errWrite)
+	}
+	cfg := &config.Config{
+		Home: config.HomeConfig{Enabled: true},
+		Plugins: config.PluginsConfig{
+			Dir: "~/.cli-proxy-api/plugins",
+		},
+	}
+
+	report := DeleteWithReport(context.Background(), cfg, nil, 41, "sample")
+
+	if report.OK || report.Status != pluginTaskStatusError {
+		t.Fatalf("report = %+v, want failed delete task", report)
+	}
+	if len(report.Plugins) != 1 || report.Plugins[0].InstallStatus != pluginInstallStatusFailed {
+		t.Fatalf("plugin report = %+v, want failed status", report.Plugins)
+	}
+	if !strings.Contains(report.Plugins[0].Error, "resolve plugins directory") {
+		t.Fatalf("plugin error = %q, want directory resolution error", report.Plugins[0].Error)
+	}
+	if _, errStat := os.Stat(target); errStat != nil {
+		t.Fatalf("literal tilde target stat error = %v, want retained", errStat)
 	}
 }
 

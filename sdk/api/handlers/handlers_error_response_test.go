@@ -47,14 +47,18 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
 	c.Writer.Header().Set("X-Request-Id", "old-value")
+	c.Writer.Header().Set("x-cpa-trace-id", "local-trace")
+	c.Writer.Header().Set("Access-Control-Expose-Headers", "x-cpa-trace-id")
 
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true}, nil)
 	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
 		StatusCode: http.StatusTooManyRequests,
 		Error:      errors.New("rate limit"),
 		Addon: http.Header{
-			"Retry-After":  {"30"},
-			"X-Request-Id": {"new-1", "new-2"},
+			"Retry-After":                   {"30"},
+			"X-Request-Id":                  {"new-1", "new-2"},
+			"x-cpa-trace-id":                {"upstream-trace"},
+			"Access-Control-Expose-Headers": {"upstream-header"},
 		},
 	})
 
@@ -66,6 +70,12 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 	}
 	if got := recorder.Header().Values("X-Request-Id"); !reflect.DeepEqual(got, []string{"new-1", "new-2"}) {
 		t.Fatalf("X-Request-Id = %#v, want %#v", got, []string{"new-1", "new-2"})
+	}
+	if got := recorder.Header().Get("x-cpa-trace-id"); got != "local-trace" {
+		t.Fatalf("x-cpa-trace-id = %q, want local trace", got)
+	}
+	if got := recorder.Header().Get("Access-Control-Expose-Headers"); got != "x-cpa-trace-id" {
+		t.Fatalf("Access-Control-Expose-Headers = %q, want CPA value", got)
 	}
 }
 

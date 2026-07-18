@@ -265,6 +265,27 @@ nonstream-keepalive-interval: 0
 #       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
 #       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
 
+# xAI API keys
+# Uses the native xAI executor, including its Responses namespace-tool handling.
+# xai-api-key:
+#   - api-key: "xai-..."
+#     prefix: "xai" # optional: require calls like "xai/grok-4.5" to target this credential
+#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     base-url: "https://api.x.ai/v1" # xAI-compatible Responses API endpoint
+#     websockets: true # optional: use the xAI upstream websocket transport for downstream websocket requests
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     # proxy-url: "direct" # optional: explicit direct connect for this credential
+#     models:
+#       - name: "grok-4.5"       # upstream model name
+#         alias: "grok-latest"   # client alias mapped to the upstream model
+#         display-name: "Grok Latest" # optional catalog display name
+#         force-mapping: true     # optional: rewrite response model fields back to the alias
+#     excluded-models:
+#       - "grok-4.1"             # exclude specific models (exact match)
+#       - "grok-3-*"             # wildcard matching prefix
+
 # Claude API keys
 # claude-api-key:
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
@@ -384,14 +405,15 @@ nonstream-keepalive-interval: 0
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
 # Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai.
-# NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, claude-api-key, openai-compatibility, or vertex-api-key.
+# NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, claude-api-key, openai-compatibility, or vertex-api-key.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. For strict backend pinning, use
 # unique aliases/prefixes or avoid overlapping names.
 # You can repeat the same name with different aliases to expose multiple client model names.
-# Optional per-entry flags:
-#   fork: true          # keep the upstream model and also expose the alias as a separate client-visible model
-#   force-mapping: true # optional: rewrite upstream response model fields back to the client-visible alias (example below uses antigravity only)
+# Optional per-entry fields:
+#   fork: true                  # keep the upstream model and also expose the alias as a separate client-visible model
+#   display-name: "Model Name" # override the human-readable name shown in model catalogs
+#   force-mapping: true         # rewrite upstream response model fields back to the client-visible alias (example below uses antigravity only)
 # Per-auth OAuth aliases can also be stored in an OAuth auth JSON file as "model-aliases".
 # They apply only to that selected auth and take precedence over global aliases for the same client-visible alias.
 # Example auth JSON:
@@ -411,8 +433,9 @@ nonstream-keepalive-interval: 0
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"
 #   antigravity:
-#     - name: "gemini-pro-agent"          # upstream Antigravity model id
-#       alias: "gemini-3.1-pro-preview"   # client-visible id (Gemini 3.1 Pro Preview)
+#     - name: "gemini-pro-agent"                   # upstream Antigravity model id
+#       alias: "gemini-3.1-pro-preview"            # client-visible id (Gemini 3.1 Pro Preview)
+#       display-name: "Antigravity Gemini 3.1 Pro" # optional catalog display name
 #       fork: true
 #       force-mapping: true
 #   claude:

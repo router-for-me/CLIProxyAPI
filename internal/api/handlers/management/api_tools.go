@@ -583,6 +583,10 @@ func proxyURLFromAPIKeyConfig(cfg *config.Config, auth *coreauth.Auth) string {
 		if entry := resolveAPIKeyConfig(cfg.CodexKey, auth); entry != nil {
 			return strings.TrimSpace(entry.ProxyURL)
 		}
+	case "xai":
+		if entry := resolveAPIKeyConfig(cfg.XAIKey, auth); entry != nil {
+			return strings.TrimSpace(entry.ProxyURL)
+		}
 	}
 	return ""
 }

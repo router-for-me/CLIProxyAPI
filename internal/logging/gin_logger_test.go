@@ -59,6 +59,31 @@ func TestGinLogrusRecoveryHandlesRegularPanic(t *testing.T) {
 	}
 }
 
+func TestIsAIAPIPathIncludesPublicAPIGroups(t *testing.T) {
+	for _, path := range []string{
+		"/v1",
+		"/v1/models",
+		"/v1/alpha/search",
+		"/v1beta/interactions",
+		"/openai/v1/videos",
+		"/backend-api/codex/responses",
+	} {
+		if !isAIAPIPath(path) {
+			t.Fatalf("expected %s to be treated as AI API path", path)
+		}
+	}
+	for _, path := range []string{
+		"/v0/management/config",
+		"/v10/models",
+		"/openai/v10/videos",
+		"/backend-api/codex-status",
+	} {
+		if isAIAPIPath(path) {
+			t.Fatalf("expected %s not to be treated as AI API path", path)
+		}
+	}
+}
+
 func TestIsAIAPIPathIncludesImages(t *testing.T) {
 	if !isAIAPIPath("/v1/images/generations") {
 		t.Fatalf("expected /v1/images/generations to be treated as AI API path")

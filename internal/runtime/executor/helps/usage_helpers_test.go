@@ -457,41 +457,46 @@ func TestUsageReporterBuildRecordIncludesReasoningEffort(t *testing.T) {
 }
 
 func TestUsageReporterBuildRecordIncludesServiceTier(t *testing.T) {
-	ctx := usage.WithServiceTier(context.Background(), "priority")
+	ctx := usage.WithServiceTier(context.Background(), "auto")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
 
 	record := reporter.buildRecord(usage.Detail{TotalTokens: 3, ResponseServiceTier: "default"}, false)
-	if record.ServiceTier != "priority" {
-		t.Fatalf("service tier = %q, want %q", record.ServiceTier, "priority")
-	}
-	if record.RequestServiceTier != "priority" {
-		t.Fatalf("request service tier = %q, want priority", record.RequestServiceTier)
+	if record.ServiceTier != "auto" {
+		t.Fatalf("service tier = %q, want %q", record.ServiceTier, "auto")
 	}
 	if record.ResponseServiceTier != "default" {
 		t.Fatalf("response service tier = %q, want default", record.ResponseServiceTier)
 	}
 }
 
-func TestUsageReporterSetTranslatedReasoningEffortUpdatesServiceTier(t *testing.T) {
+func TestUsageReporterBuildRecordDefaultsGenerateTrue(t *testing.T) {
 	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if !usage.GenerateEnabled(record.Generate) {
+		t.Fatalf("generate = %v, want true", usage.GenerateEnabled(record.Generate))
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesGenerateFalse(t *testing.T) {
+	ctx := usage.WithGenerate(context.Background(), false)
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if usage.GenerateEnabled(record.Generate) {
+		t.Fatalf("generate = %v, want false", usage.GenerateEnabled(record.Generate))
+	}
+}
+
+func TestUsageReporterSetTranslatedReasoningEffortPreservesClientServiceTier(t *testing.T) {
+	ctx := usage.WithServiceTier(context.Background(), "auto")
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
 
 	reporter.SetTranslatedReasoningEffort([]byte(`{"service_tier":"priority"}`), "openai")
 
 	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
-	if record.ServiceTier != "priority" {
-		t.Fatalf("service tier = %q, want %q", record.ServiceTier, "priority")
-	}
-}
-
-func TestUsageReporterSetTranslatedReasoningEffortDefaultsServiceTierWhenRemoved(t *testing.T) {
-	ctx := usage.WithServiceTier(context.Background(), "priority")
-	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
-
-	reporter.SetTranslatedReasoningEffort([]byte(`{"model":"gpt-5.4"}`), "openai")
-
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
-	if record.ServiceTier != usage.DefaultServiceTier {
-		t.Fatalf("service tier = %q, want %q", record.ServiceTier, usage.DefaultServiceTier)
+	if record.ServiceTier != "auto" {
+		t.Fatalf("service tier = %q, want %q", record.ServiceTier, "auto")
 	}
 }
 

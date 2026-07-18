@@ -186,7 +186,11 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	h.applyMu.Lock()
 	defer h.applyMu.Unlock()
 
-	rc := runtimeConfigFromConfig(cfg)
+	rc, errRuntimeConfig := runtimeConfigFromConfig(cfg)
+	if errRuntimeConfig != nil {
+		log.WithError(errRuntimeConfig).Error("failed to apply plugin runtime config")
+		return
+	}
 	h.mu.Lock()
 	h.runtimeConfig = cfg
 	h.mu.Unlock()

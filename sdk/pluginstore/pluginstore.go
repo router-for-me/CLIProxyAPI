@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"time"
 
 	internalpluginstore "github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
 )
@@ -29,6 +30,8 @@ const (
 	AuthTypeBasic       = internalpluginstore.AuthTypeBasic
 	AuthTypeHeader      = internalpluginstore.AuthTypeHeader
 	AuthTypeGitHubToken = internalpluginstore.AuthTypeGitHubToken
+
+	PluginSyncSchemaVersion = internalpluginstore.PluginSyncSchemaVersion
 )
 
 type Source = internalpluginstore.Source
@@ -44,6 +47,11 @@ type Artifact = internalpluginstore.Artifact
 type Platform = internalpluginstore.Platform
 type Manifest = internalpluginstore.Manifest
 type AuthConfig = internalpluginstore.AuthConfig
+type Secret = internalpluginstore.Secret
+type ResolvedAuthConfig = internalpluginstore.ResolvedAuthConfig
+type PluginSyncRequest = internalpluginstore.PluginSyncRequest
+type PluginSyncItem = internalpluginstore.PluginSyncItem
+type PluginSyncResponse = internalpluginstore.PluginSyncResponse
 
 type HTTPDoer interface {
 	Do(*http.Request) (*http.Response, error)
@@ -68,6 +76,28 @@ func NewClientWithAuth(httpClient HTTPDoer, registryURL string, auth []AuthConfi
 		RegistryURL: strings.TrimSpace(registryURL),
 		Auth:        internalpluginstore.NormalizeAuthConfigs(auth),
 	}}
+}
+
+func NewClientWithResolvedAuth(httpClient HTTPDoer, registryURL string, auth []ResolvedAuthConfig) Client {
+	return NewClientWithResolvedAuthExpiry(httpClient, registryURL, auth, time.Time{})
+}
+
+func NewClientWithResolvedAuthExpiry(httpClient HTTPDoer, registryURL string, auth []ResolvedAuthConfig, expiresAt time.Time) Client {
+	return Client{inner: internalpluginstore.Client{
+		HTTPClient:            httpClient,
+		RegistryURL:           strings.TrimSpace(registryURL),
+		ResolvedAuth:          auth,
+		ResolvedAuthExpiresAt: expiresAt,
+	}}
+}
+
+func (c *Client) ClearAuth() {
+	if c == nil {
+		return
+	}
+	internalpluginstore.ClearResolvedAuthConfigs(c.inner.ResolvedAuth)
+	c.inner.ResolvedAuth = nil
+	c.inner.ResolvedAuthExpiresAt = time.Time{}
 }
 
 func DefaultSource() Source {
@@ -98,8 +128,28 @@ func PluginArtifacts(plugin Plugin) []Artifact {
 	return internalpluginstore.PluginArtifacts(plugin)
 }
 
+func SelectArtifact(plan InstallPlan, goos string, goarch string) (Artifact, error) {
+	return internalpluginstore.SelectArtifact(plan, goos, goarch)
+}
+
+func GitHubRepositoryParts(repository string) (string, string, error) {
+	return internalpluginstore.GitHubRepositoryParts(repository)
+}
+
 func NormalizeAuthConfigs(auth []AuthConfig) []AuthConfig {
 	return internalpluginstore.NormalizeAuthConfigs(auth)
+}
+
+func ClearResolvedAuthConfigs(auth []ResolvedAuthConfig) {
+	internalpluginstore.ClearResolvedAuthConfigs(auth)
+}
+
+func ResolvedAuthForRequest(auth []ResolvedAuthConfig, requestURL string, kind string) (ResolvedAuthConfig, bool) {
+	return internalpluginstore.ResolvedAuthForRequest(auth, requestURL, kind)
+}
+
+func ValidateResolvedAuthConfig(auth ResolvedAuthConfig) error {
+	return internalpluginstore.ValidateResolvedAuthConfig(auth)
 }
 
 func AuthConfigured(auth []AuthConfig, requestURL string, kind string) bool {

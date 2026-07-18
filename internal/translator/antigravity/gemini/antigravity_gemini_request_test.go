@@ -639,3 +639,82 @@ func TestFixCLIToolResponse_MultipleGroupsFIFO(t *testing.T) {
 		t.Errorf("Expected second group name 'Grep', got '%s'", name1)
 	}
 }
+
+func TestConvertGeminiRequestToAntigravityDeduplicatesRequestWideAndDisambiguatesTools(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	inputJSON := []byte(`{
+		"contents":[
+			{"role":"model","parts":[{"functionCall":{"name":"` + second + `","args":{}}}]},
+			{"role":"user","parts":[{"functionResponse":{"name":"` + second + `","response":{}}}]}
+		],
+		"tools":[
+			{"functionDeclarations":[
+				{"name":"lookup","parameters":{"type":"object"}},
+				{"name":"` + first + `","parameters":{"type":"object"}}
+			]},
+			{"function_declarations":[
+				{"name":"lookup","parameters":{"type":"object"}},
+				{"name":"` + second + `","parameters":{"type":"object"}}
+			]},
+			{"functionDeclarations":[{"name":"lookup","parameters":{"type":"object"}}]}
+		],
+		"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["` + second + `"]}}
+	}`)
+
+	out := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	if got := len(gjson.GetBytes(out, "request.tools").Array()); got != 2 {
+		t.Fatalf("tool count = %d, want 2 after removing the empty duplicate node. Output: %s", got, out)
+	}
+	camel := gjson.GetBytes(out, "request.tools.0.functionDeclarations").Array()
+	snake := gjson.GetBytes(out, "request.tools.1.function_declarations").Array()
+	if len(camel)+len(snake) != 3 {
+		t.Fatalf("declaration count = %d, want 3. Output: %s", len(camel)+len(snake), out)
+	}
+	if len(camel) != 2 || len(snake) != 1 {
+		t.Fatalf("declaration distribution = %d/%d, want 2/1. Output: %s", len(camel), len(snake), out)
+	}
+	firstMapped := camel[1].Get("name").String()
+	secondMapped := snake[0].Get("name").String()
+	if firstMapped == secondMapped || len(secondMapped) > 64 {
+		t.Fatalf("collision names = %q and %q, want distinct names <= 64 chars", firstMapped, secondMapped)
+	}
+	if !camel[0].Get("parametersJsonSchema").Exists() || !snake[0].Get("parametersJsonSchema").Exists() {
+		t.Fatalf("parameters were not normalized. Output: %s", out)
+	}
+	if got := gjson.GetBytes(out, "request.contents.0.parts.0.functionCall.name").String(); got != secondMapped {
+		t.Fatalf("functionCall.name = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+	if got := gjson.GetBytes(out, "request.contents.1.parts.0.functionResponse.name").String(); got != secondMapped {
+		t.Fatalf("functionResponse.name = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+	if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames.0").String(); got != secondMapped {
+		t.Fatalf("allowedFunctionNames.0 = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravityMapsSnakeCaseFunctionReferences(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents":[
+			{"role":"model","parts":[{"function_call":{"name":"read_file","args":{}}}]},
+			{"role":"user","parts":[{"function_response":{"name":"read_file","response":{}}}]}
+		],
+		"tools":[{"function_declarations":[{"name":"read/file"},{"name":"read_file"}]}],
+		"tool_config":{"function_calling_config":{"allowed_function_names":["read_file"]}}
+	}`)
+
+	out := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	mapped := gjson.GetBytes(out, "request.tools.0.function_declarations.1.name").String()
+	if mapped == "" {
+		t.Fatalf("mapped declaration name is empty. Output: %s", out)
+	}
+	for _, path := range []string{
+		"request.contents.0.parts.0.function_call.name",
+		"request.contents.1.parts.0.function_response.name",
+		"request.tool_config.function_calling_config.allowed_function_names.0",
+	} {
+		if got := gjson.GetBytes(out, path).String(); got != mapped {
+			t.Fatalf("%s = %q, want %q. Output: %s", path, got, mapped, out)
+		}
+	}
+}

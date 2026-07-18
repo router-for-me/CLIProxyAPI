@@ -52,6 +52,57 @@ func TestCodexExecutorExecuteResponsesLiteHeaderDoesNotInjectImageGenerationTool
 	if tools := gjson.GetBytes(gotBody, "tools"); tools.Exists() {
 		t.Fatalf("unexpected tools in responses-lite upstream payload: %s", tools.Raw)
 	}
+	parallelToolCalls := gjson.GetBytes(gotBody, "parallel_tool_calls")
+	if !parallelToolCalls.Exists() || parallelToolCalls.Bool() {
+		t.Fatalf("responses-lite parallel_tool_calls should be false: %s", gotBody)
+	}
+}
+
+func TestCodexExecutorExecuteStreamResponsesLiteHeaderForcesParallelToolCallsFalse(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read request body: %v", errRead)
+		}
+		gotBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":   "test",
+			"base_url":  server.URL,
+			"plan_type": "pro",
+		},
+	}
+	headers := make(http.Header)
+	headers.Set(codexResponsesLiteHeader, "true")
+
+	result, errExecute := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6-luna",
+		Payload: []byte(`{"model":"gpt-5.6-luna","input":"hello"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Headers:      headers,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	parallelToolCalls := gjson.GetBytes(gotBody, "parallel_tool_calls")
+	if !parallelToolCalls.Exists() || parallelToolCalls.Bool() {
+		t.Fatalf("responses-lite parallel_tool_calls should be false: %s", gotBody)
+	}
 }
 
 func TestEnsureImageGenerationTool_ResponsesLiteMetadataDoesNotInjectTool(t *testing.T) {

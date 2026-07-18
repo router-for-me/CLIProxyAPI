@@ -48,6 +48,15 @@ func TestBuildConfigModelsDisplayName(t *testing.T) {
 				}}})[0]
 			},
 		},
+		{
+			name: "xai",
+			want: "xAI Catalog Name",
+			got: func() *ModelInfo {
+				return buildXAIConfigModels(&config.XAIKey{Models: []config.XAIModel{{
+					Name: "grok-4.5", Alias: "grok-latest", DisplayName: "xAI Catalog Name",
+				}}})[0]
+			},
+		},
 	}
 
 	for _, tt := range tests {

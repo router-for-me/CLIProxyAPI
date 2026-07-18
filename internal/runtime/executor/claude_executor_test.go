@@ -2745,15 +2745,15 @@ func TestNormalizeClaudeSamplingForUpstream_RemovesTopPAndTopKForThinking(t *tes
 	}
 }
 
-func TestNormalizeClaudeSamplingForUpstream_NoThinkingRemovesOnlyTemperature(t *testing.T) {
+func TestNormalizeClaudeSamplingForUpstream_NoThinkingRemovesTemperatureAndTopP(t *testing.T) {
 	payload := []byte(`{"temperature":0,"top_p":0.9,"top_k":40,"messages":[{"role":"user","content":"hi"}]}`)
 	out := normalizeClaudeSamplingForUpstream(payload)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
 	}
-	if got := gjson.GetBytes(out, "top_p").Float(); got != 0.9 {
-		t.Fatalf("top_p = %v, want 0.9", got)
+	if gjson.GetBytes(out, "top_p").Exists() {
+		t.Fatalf("top_p should be removed")
 	}
 	if got := gjson.GetBytes(out, "top_k").Int(); got != 40 {
 		t.Fatalf("top_k = %v, want 40", got)

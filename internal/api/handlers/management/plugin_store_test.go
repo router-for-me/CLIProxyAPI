@@ -80,6 +80,35 @@ func TestListPluginStoreMergesInstalledStatus(t *testing.T) {
 	}
 }
 
+func TestPluginStoreDirectManifestPinsRequestedVersionArtifacts(t *testing.T) {
+	plugin := pluginstore.Plugin{
+		ID: "sample", Name: "Sample", Description: "Sample plugin", Author: "tester", Version: "1.0.0",
+		Install: pluginstore.InstallPlan{Type: pluginstore.InstallTypeDirect, Artifacts: []pluginstore.Artifact{{
+			GOOS: "linux", GOARCH: "amd64", URL: "https://downloads.example/sample-1.0.0.zip",
+			SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Size: 100,
+		}}},
+		Versions: []pluginstore.Version{{
+			Version: "0.9.0",
+			Install: pluginstore.InstallPlan{Type: pluginstore.InstallTypeDirect, Artifacts: []pluginstore.Artifact{{
+				GOOS: "linux", GOARCH: "amd64", URL: "https://downloads.example/sample-0.9.0.zip",
+				SHA256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", Size: 90,
+			}}},
+		}},
+	}
+
+	manifest, errManifest := pluginStoreDirectManifest(pluginstore.DefaultSource(), plugin, "0.9.0")
+	if errManifest != nil {
+		t.Fatalf("pluginStoreDirectManifest() error = %v", errManifest)
+	}
+	if manifest.Version != "0.9.0" || len(manifest.Install.Artifacts) != 1 {
+		t.Fatalf("manifest = %#v, want pinned historical version artifact", manifest)
+	}
+	artifact := manifest.Install.Artifacts[0]
+	if artifact.URL != "https://downloads.example/sample-0.9.0.zip" || artifact.Size != 90 {
+		t.Fatalf("artifact = %#v, want historical 0.9.0 artifact", artifact)
+	}
+}
+
 func TestListPluginStoreUsesVersionFromInstalledFilename(t *testing.T) {
 	t.Parallel()
 
@@ -690,23 +719,69 @@ func TestListPluginStoreReportsGitHubMetadataAuth(t *testing.T) {
 	}
 }
 
-func TestInstallPluginFromStoreWritesFileAndEnablesConfig(t *testing.T) {
-	t.Parallel()
+func TestInstallPluginFromStoreRejectsUnresolvedPluginsDir(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Chdir(workspace)
 
-	pluginsDir := t.TempDir()
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Dir:     "~/.cli-proxy-api/plugins",
+				Configs: map[string]config.PluginInstanceConfig{},
+			},
+		},
+		pluginStoreRegistryURL: "https://registry.example/registry.json",
+		pluginStoreHTTPClient:  fakePluginStoreHTTPClient{},
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install", nil)
+
+	h.InstallPluginFromStore(c)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	var body map[string]any
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatalf("Unmarshal() error = %v; body=%s", errDecode, rec.Body.String())
+	}
+	if body["error"] != "plugin_directory_invalid" {
+		t.Fatalf("error = %#v, want plugin_directory_invalid", body["error"])
+	}
+	if _, errStat := os.Stat(filepath.Join(workspace, "~")); !os.IsNotExist(errStat) {
+		t.Fatalf("literal tilde directory stat error = %v, want not exist", errStat)
+	}
+}
+
+func TestInstallPluginFromStoreWritesFileAndEnablesConfig(t *testing.T) {
+	workspace := t.TempDir()
+	homeDir := filepath.Join(workspace, "home")
+	if errMkdir := os.MkdirAll(homeDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", homeDir, errMkdir)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	t.Chdir(workspace)
+
+	cfg, errParse := config.ParseConfigBytes([]byte(`
+plugins:
+  enabled: false
+  dir: "~/.cli-proxy-api/plugins"
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	cfg.Plugins.Configs["sample-provider"] = pluginConfigFromYAML(t, "enabled: false\nmode: fast\n")
+	pluginsDir := filepath.Join(homeDir, ".cli-proxy-api", "plugins")
 	archiveData := makeManagementPluginStoreZip(t, "sample-provider"+managementPluginExtension(runtime.GOOS), "library-data")
 	archiveName := "sample-provider_0.1.0_" + runtime.GOOS + "_" + runtime.GOARCH + ".zip"
 	checksum := sha256.Sum256(archiveData)
 	h := &Handler{
-		cfg: &config.Config{
-			Plugins: config.PluginsConfig{
-				Enabled: false,
-				Dir:     pluginsDir,
-				Configs: map[string]config.PluginInstanceConfig{
-					"sample-provider": pluginConfigFromYAML(t, "enabled: false\nmode: fast\n"),
-				},
-			},
-		},
+		cfg:                    cfg,
 		configFilePath:         writeTestConfigFile(t),
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
@@ -841,11 +916,11 @@ func TestInstallPluginFromStoreInstallsDirectArtifact(t *testing.T) {
 	if manifest.SchemaVersion != pluginstore.SchemaVersionV2 || manifest.InstallType() != pluginstore.InstallTypeDirect || manifest.Version != "0.4.0" {
 		t.Fatalf("store manifest = %#v, want direct schema v2 0.4.0", manifest)
 	}
-	if manifest.SourceURL != "https://registry.example/registry.json" || len(manifest.Install.Artifacts) != 0 {
-		t.Fatalf("store manifest source/artifacts = %q/%d, want source URL without artifacts", manifest.SourceURL, len(manifest.Install.Artifacts))
+	if manifest.SourceURL != "https://registry.example/registry.json" || len(manifest.Install.Artifacts) == 0 {
+		t.Fatalf("store manifest source/artifacts = %q/%d, want source URL with pinned artifacts", manifest.SourceURL, len(manifest.Install.Artifacts))
 	}
-	if raw := marshalPluginRaw(t, h.cfg.Plugins.Configs["sample-provider"]); strings.Contains(raw, "artifacts:") {
-		t.Fatalf("direct store manifest should not persist artifacts:\n%s", raw)
+	if raw := marshalPluginRaw(t, h.cfg.Plugins.Configs["sample-provider"]); !strings.Contains(raw, "artifacts:") {
+		t.Fatalf("direct store manifest should persist pinned artifacts:\n%s", raw)
 	}
 }
 
@@ -901,8 +976,11 @@ func TestInstallPluginFromStoreHonorsDirectQueryVersion(t *testing.T) {
 		t.Fatalf("installed file = %q, want direct-history-data", data)
 	}
 	manifest := pluginStoreManifestFromConfig(t, h.cfg.Plugins.Configs["sample-provider"])
-	if manifest.Version != "0.3.0" || manifest.InstallType() != pluginstore.InstallTypeDirect || len(manifest.Install.Artifacts) != 0 {
-		t.Fatalf("store manifest = %#v, want source-backed direct 0.3.0", manifest)
+	if manifest.Version != "0.3.0" || manifest.InstallType() != pluginstore.InstallTypeDirect || len(manifest.Install.Artifacts) != 1 {
+		t.Fatalf("store manifest = %#v, want pinned direct 0.3.0", manifest)
+	}
+	if manifest.Install.Artifacts[0].URL != versionArtifactURL {
+		t.Fatalf("store manifest artifact = %#v, want requested version URL", manifest.Install.Artifacts[0])
 	}
 }
 
