@@ -62,6 +62,138 @@ func TestResolveClaudeRequestIdentityDerivesStableIdentityFromFirstUserMessage(t
 	}
 }
 
+func TestResolveClaudeRequestIdentityUsesEarliestUserQueryAcrossBootstrapChanges(t *testing.T) {
+	t.Parallel()
+
+	baselinePayload := []byte(`{"messages":[{"role":"user","content":"<user_info>stable</user_info><ide_state>state-a</ide_state>"},{"role":"assistant","content":"ready"},{"role":"user","content":"<user_query>\n分析这个问题\n</user_query>"},{"role":"user","content":"<user_query>later question</user_query>"}]}`)
+	changedBootstrapPayload := []byte(`{"messages":[{"role":"user","content":"<user_info>stable</user_info><ide_state>state-b</ide_state>"},{"role":"assistant","content":"ready"},{"role":"user","content":[{"type":"text","text":"<user_query>\n分析这个问题\n</user_query>"}]},{"role":"user","content":"<user_query>later question</user_query>"}]}`)
+	changedQueryPayload := []byte(`{"messages":[{"role":"user","content":"<user_info>stable</user_info><ide_state>state-a</ide_state>"},{"role":"assistant","content":"ready"},{"role":"user","content":"<user_query>\n分析另一个问题\n</user_query>"},{"role":"user","content":"<user_query>later question</user_query>"}]}`)
+
+	_, baselineIdentity, errBaseline := ResolveClaudeRequestIdentity(baselinePayload)
+	if errBaseline != nil {
+		t.Fatalf("baseline ResolveClaudeRequestIdentity() error = %v", errBaseline)
+	}
+	_, changedBootstrapIdentity, errChangedBootstrap := ResolveClaudeRequestIdentity(changedBootstrapPayload)
+	if errChangedBootstrap != nil {
+		t.Fatalf("changed-bootstrap ResolveClaudeRequestIdentity() error = %v", errChangedBootstrap)
+	}
+	_, changedQueryIdentity, errChangedQuery := ResolveClaudeRequestIdentity(changedQueryPayload)
+	if errChangedQuery != nil {
+		t.Fatalf("changed-query ResolveClaudeRequestIdentity() error = %v", errChangedQuery)
+	}
+
+	if !baselineIdentity.Deterministic || !changedBootstrapIdentity.Deterministic || !changedQueryIdentity.Deterministic {
+		t.Fatal("user-query requests should produce deterministic identities")
+	}
+	if baselineIdentity.UserID != changedBootstrapIdentity.UserID {
+		t.Fatalf("bootstrap-only changes produced different user IDs: %q and %q", baselineIdentity.UserID, changedBootstrapIdentity.UserID)
+	}
+	if baselineIdentity.UserID == changedQueryIdentity.UserID {
+		t.Fatalf("different user queries produced the same user ID: %q", baselineIdentity.UserID)
+	}
+}
+
+func TestResolveClaudeRequestIdentityPreservesMultimodalContentWithUserQuery(t *testing.T) {
+	t.Parallel()
+
+	baselinePayload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"<ide_state>state-a</ide_state>"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2UtYQ=="}},{"type":"text","text":"<user_query>explain the image</user_query>"}]}]}`)
+	changedAmbientTextPayload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"<ide_state>state-b</ide_state>"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2UtYQ=="}},{"type":"text","text":"<user_query>explain the image</user_query>"}]}]}`)
+	changedImagePayload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"<ide_state>state-a</ide_state>"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2UtYg=="}},{"type":"text","text":"<user_query>explain the image</user_query>"}]}]}`)
+
+	_, baselineIdentity, errBaseline := ResolveClaudeRequestIdentity(baselinePayload)
+	if errBaseline != nil {
+		t.Fatalf("baseline ResolveClaudeRequestIdentity() error = %v", errBaseline)
+	}
+	_, changedAmbientTextIdentity, errChangedAmbient := ResolveClaudeRequestIdentity(changedAmbientTextPayload)
+	if errChangedAmbient != nil {
+		t.Fatalf("changed-ambient ResolveClaudeRequestIdentity() error = %v", errChangedAmbient)
+	}
+	_, changedImageIdentity, errChangedImage := ResolveClaudeRequestIdentity(changedImagePayload)
+	if errChangedImage != nil {
+		t.Fatalf("changed-image ResolveClaudeRequestIdentity() error = %v", errChangedImage)
+	}
+
+	if baselineIdentity.UserID != changedAmbientTextIdentity.UserID {
+		t.Fatalf("sibling ambient text changed the user ID: %q and %q", baselineIdentity.UserID, changedAmbientTextIdentity.UserID)
+	}
+	if baselineIdentity.UserID == changedImageIdentity.UserID {
+		t.Fatalf("different image content produced the same user ID: %q", baselineIdentity.UserID)
+	}
+}
+
+func TestResolveClaudeRequestIdentityFallsBackForInvalidUserQueryMarkup(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name        string
+		markup      string
+		changedText string
+	}{
+		{
+			name:        "unclosed",
+			markup:      "<user_query><ide_state>state-a</ide_state>question",
+			changedText: "<user_query><ide_state>state-b</ide_state>question",
+		},
+		{
+			name:        "repeated",
+			markup:      "<user_query><ide_state>state-a</ide_state>one</user_query><user_query>two</user_query>",
+			changedText: "<user_query><ide_state>state-b</ide_state>one</user_query><user_query>two</user_query>",
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := []byte(fmt.Sprintf(`{"messages":[{"role":"user","content":%q},{"role":"user","content":"<user_query>later question</user_query>"}]}`, testCase.markup))
+			changedPayload := []byte(fmt.Sprintf(`{"messages":[{"role":"user","content":%q},{"role":"user","content":"<user_query>later question</user_query>"}]}`, testCase.changedText))
+
+			_, identity, errResolve := ResolveClaudeRequestIdentity(payload)
+			if errResolve != nil {
+				t.Fatalf("ResolveClaudeRequestIdentity() error = %v", errResolve)
+			}
+			_, repeatedIdentity, errRepeated := ResolveClaudeRequestIdentity(payload)
+			if errRepeated != nil {
+				t.Fatalf("repeated ResolveClaudeRequestIdentity() error = %v", errRepeated)
+			}
+			_, changedIdentity, errChanged := ResolveClaudeRequestIdentity(changedPayload)
+			if errChanged != nil {
+				t.Fatalf("changed ResolveClaudeRequestIdentity() error = %v", errChanged)
+			}
+
+			if !identity.Deterministic || !changedIdentity.Deterministic {
+				t.Fatal("invalid markup should fall back to deterministic full-message hashing")
+			}
+			if identity.UserID != repeatedIdentity.UserID {
+				t.Fatalf("fallback identity was not stable: %q and %q", identity.UserID, repeatedIdentity.UserID)
+			}
+			if identity.UserID == changedIdentity.UserID {
+				t.Fatalf("invalid markup was incorrectly extracted from different full messages: %q", identity.UserID)
+			}
+		})
+	}
+}
+
+func TestResolveClaudeRequestIdentityFallsBackForAmbiguousUserQueryParts(t *testing.T) {
+	t.Parallel()
+
+	firstPayload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"<user_query>first</user_query>"},{"type":"text","text":"<user_query>second</user_query>"}]},{"role":"user","content":"<user_query>later question</user_query>"}]}`)
+	secondPayload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"<user_query>first</user_query>"},{"type":"text","text":"<user_query>changed second</user_query>"}]},{"role":"user","content":"<user_query>later question</user_query>"}]}`)
+
+	_, firstIdentity, errFirst := ResolveClaudeRequestIdentity(firstPayload)
+	if errFirst != nil {
+		t.Fatalf("first ResolveClaudeRequestIdentity() error = %v", errFirst)
+	}
+	_, secondIdentity, errSecond := ResolveClaudeRequestIdentity(secondPayload)
+	if errSecond != nil {
+		t.Fatalf("second ResolveClaudeRequestIdentity() error = %v", errSecond)
+	}
+	if firstIdentity.UserID == secondIdentity.UserID {
+		t.Fatalf("ambiguous query parts did not fall back to full-message hashing: %q", firstIdentity.UserID)
+	}
+}
+
 func TestResolveClaudeRequestIdentityUsesDifferentTypedPartBoundaries(t *testing.T) {
 	t.Parallel()
 

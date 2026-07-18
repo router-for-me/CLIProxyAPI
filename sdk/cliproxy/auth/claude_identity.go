@@ -19,6 +19,8 @@ const (
 	claudeUserHashDomain    = "cli-proxy-api:claude-user-id:v1"
 	claudeAccountUUIDDomain = "cli-proxy-api:claude-account:v1"
 	claudeSessionUUIDDomain = "cli-proxy-api:claude-session:v1"
+	claudeUserQueryOpenTag  = "<user_query>"
+	claudeUserQueryCloseTag = "</user_query>"
 )
 
 var claudeUserIDPattern = regexp.MustCompile(`^user_([a-fA-F0-9]{64})_account_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_session_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`)
@@ -43,6 +45,19 @@ type canonicalClaudeContentPart struct {
 	Text    string          `json:"text,omitempty"`
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
+
+type claudeUserQuerySelection struct {
+	TextPartIndex int
+	QueryText     string
+}
+
+type claudeUserQueryStatus int
+
+const (
+	claudeUserQueryAbsent claudeUserQueryStatus = iota
+	claudeUserQueryValid
+	claudeUserQueryInvalid
+)
 
 // ParseClaudeUserID validates and decomposes a Claude Code user_id.
 func ParseClaudeUserID(userID string) (ClaudeRequestIdentity, bool) {
@@ -79,7 +94,8 @@ func GenerateRandomClaudeRequestIdentity() ClaudeRequestIdentity {
 }
 
 // ResolveClaudeRequestIdentity preserves a valid client identity or derives one
-// from the first user-authored message. Pure tool-result messages are skipped.
+// from the earliest wrapped user query, falling back to the first user-authored
+// message. Pure tool-result messages are skipped.
 func ResolveClaudeRequestIdentity(payload []byte) ([]byte, ClaudeRequestIdentity, error) {
 	existingUserID := gjson.GetBytes(payload, "metadata.user_id").String()
 	if existingIdentity, valid := ParseClaudeUserID(existingUserID); valid {
@@ -143,6 +159,49 @@ func firstCanonicalClaudeUserMessage(payload []byte) ([]byte, bool, error) {
 		return nil, false, nil
 	}
 
+	canonicalQueryMessage, foundQuery, errQuery := firstCanonicalClaudeUserQueryMessage(messages)
+	if errQuery != nil {
+		return nil, false, errQuery
+	}
+	if foundQuery {
+		return canonicalQueryMessage, true, nil
+	}
+
+	return firstCanonicalClaudeUserMessageFallback(messages)
+}
+
+func firstCanonicalClaudeUserQueryMessage(messages gjson.Result) ([]byte, bool, error) {
+	var canonicalMessage []byte
+	var canonicalError error
+	messages.ForEach(func(_, message gjson.Result) bool {
+		if message.Get("role").String() != "user" {
+			return true
+		}
+		selection, queryStatus := findClaudeUserQuerySelection(message)
+		if queryStatus == claudeUserQueryAbsent {
+			return true
+		}
+		if queryStatus == claudeUserQueryInvalid {
+			return false
+		}
+		canonical, userAuthored, errCanonical := canonicalizeClaudeUserMessageWithQuery(message, &selection)
+		if errCanonical != nil {
+			canonicalError = errCanonical
+			return false
+		}
+		if !userAuthored {
+			return true
+		}
+		canonicalMessage = canonical
+		return false
+	})
+	if canonicalError != nil {
+		return nil, false, canonicalError
+	}
+	return canonicalMessage, len(canonicalMessage) > 0, nil
+}
+
+func firstCanonicalClaudeUserMessageFallback(messages gjson.Result) ([]byte, bool, error) {
 	var canonicalMessage []byte
 	var canonicalError error
 	messages.ForEach(func(_, message gjson.Result) bool {
@@ -167,6 +226,10 @@ func firstCanonicalClaudeUserMessage(payload []byte) ([]byte, bool, error) {
 }
 
 func canonicalizeClaudeUserMessage(message gjson.Result) ([]byte, bool, error) {
+	return canonicalizeClaudeUserMessageWithQuery(message, nil)
+}
+
+func canonicalizeClaudeUserMessageWithQuery(message gjson.Result, selection *claudeUserQuerySelection) ([]byte, bool, error) {
 	content := message.Get("content")
 	parts := make([]canonicalClaudeContentPart, 0)
 	userAuthored := false
@@ -174,16 +237,29 @@ func canonicalizeClaudeUserMessage(message gjson.Result) ([]byte, bool, error) {
 
 	switch {
 	case content.Type == gjson.String:
-		if content.String() == "" {
+		text := content.String()
+		if selection != nil {
+			text = selection.QueryText
+		}
+		if text == "" {
 			return nil, false, nil
 		}
-		parts = append(parts, canonicalClaudeContentPart{Type: "text", Text: content.String()})
+		parts = append(parts, canonicalClaudeContentPart{Type: "text", Text: text})
 		userAuthored = true
 	case content.IsArray():
+		partIndex := 0
 		content.ForEach(func(_, part gjson.Result) bool {
+			currentPartIndex := partIndex
+			partIndex++
 			partType := strings.TrimSpace(part.Get("type").String())
 			if partType == "text" {
 				text := part.Get("text").String()
+				if selection != nil {
+					if currentPartIndex != selection.TextPartIndex {
+						return true
+					}
+					text = selection.QueryText
+				}
 				parts = append(parts, canonicalClaudeContentPart{Type: "text", Text: text})
 				if text != "" {
 					userAuthored = true
@@ -232,6 +308,77 @@ func canonicalizeClaudeUserMessage(message gjson.Result) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("marshal canonical Claude user message: %w", errMarshal)
 	}
 	return canonicalMessage, true, nil
+}
+
+func findClaudeUserQuerySelection(message gjson.Result) (claudeUserQuerySelection, claudeUserQueryStatus) {
+	content := message.Get("content")
+	if content.Type == gjson.String {
+		queryText, queryStatus := extractStandaloneClaudeUserQuery(content.String())
+		if queryStatus != claudeUserQueryValid {
+			return claudeUserQuerySelection{}, queryStatus
+		}
+		return claudeUserQuerySelection{TextPartIndex: 0, QueryText: queryText}, claudeUserQueryValid
+	}
+	if !content.IsArray() {
+		return claudeUserQuerySelection{}, claudeUserQueryAbsent
+	}
+
+	selectedPartIndex := -1
+	selectedQueryText := ""
+	partIndex := 0
+	queryStatus := claudeUserQueryAbsent
+	content.ForEach(func(_, part gjson.Result) bool {
+		currentPartIndex := partIndex
+		partIndex++
+		if strings.TrimSpace(part.Get("type").String()) != "text" {
+			return true
+		}
+		queryText, partQueryStatus := extractStandaloneClaudeUserQuery(part.Get("text").String())
+		if partQueryStatus == claudeUserQueryAbsent {
+			return true
+		}
+		if partQueryStatus == claudeUserQueryInvalid || selectedPartIndex >= 0 {
+			queryStatus = claudeUserQueryInvalid
+			return false
+		}
+		selectedPartIndex = currentPartIndex
+		selectedQueryText = queryText
+		queryStatus = claudeUserQueryValid
+		return true
+	})
+	if queryStatus != claudeUserQueryValid {
+		return claudeUserQuerySelection{}, queryStatus
+	}
+	return claudeUserQuerySelection{
+		TextPartIndex: selectedPartIndex,
+		QueryText:     selectedQueryText,
+	}, claudeUserQueryValid
+}
+
+func extractStandaloneClaudeUserQuery(text string) (string, claudeUserQueryStatus) {
+	trimmedText := strings.TrimSpace(text)
+	hasOpeningBoundary := strings.HasPrefix(trimmedText, claudeUserQueryOpenTag)
+	hasClosingBoundary := strings.HasSuffix(trimmedText, claudeUserQueryCloseTag)
+	if !hasOpeningBoundary && !hasClosingBoundary {
+		return "", claudeUserQueryAbsent
+	}
+	if !hasOpeningBoundary || !hasClosingBoundary {
+		return "", claudeUserQueryInvalid
+	}
+	if strings.Count(trimmedText, claudeUserQueryOpenTag) != 1 || strings.Count(trimmedText, claudeUserQueryCloseTag) != 1 {
+		return "", claudeUserQueryInvalid
+	}
+
+	queryStart := len(claudeUserQueryOpenTag)
+	queryEnd := len(trimmedText) - len(claudeUserQueryCloseTag)
+	if queryEnd < queryStart {
+		return "", claudeUserQueryInvalid
+	}
+	queryText := trimmedText[queryStart:queryEnd]
+	if strings.TrimSpace(queryText) == "" {
+		return "", claudeUserQueryInvalid
+	}
+	return queryText, claudeUserQueryValid
 }
 
 func canonicalizeJSON(rawJSON string) (json.RawMessage, error) {
