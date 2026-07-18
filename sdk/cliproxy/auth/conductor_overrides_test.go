@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 const requestScopedNotFoundMessage = "Item with id 'rs_0b5f3eb6f51f175c0169ca74e4a85881998539920821603a74' not found. Items are not persisted when `store` is set to false. Try again with `store` set to true, or remove this item from your input."
@@ -230,6 +230,29 @@ type retryAfterStatusError struct {
 	retryAfter time.Duration
 }
 
+type requestScopedStatusError struct {
+	status  int
+	message string
+}
+
+func (e *requestScopedStatusError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.message
+}
+
+func (e *requestScopedStatusError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.status
+}
+
+func (e *requestScopedStatusError) IsRequestScoped() bool {
+	return e != nil
+}
+
 func (e *retryAfterStatusError) Error() string {
 	if e == nil {
 		return ""
@@ -405,6 +428,158 @@ func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
 	}
 }
 
+func TestManagerExecute_AntigravityInvalidGrantFallsBackAndSuspendsAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	invalidGrantErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `bad response status code 400, message: {"error":"invalid_grant","error_description":"Bad Request"}, body: {"type":"error","error":{"type":"invalid_request_error","message":"{\"error\":\"invalid_grant\"}"}}`,
+	}
+	executor := &authFallbackExecutor{
+		id: "antigravity",
+		executeErrors: map[string]error{
+			"aa-bad-auth": invalidGrantErr,
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "gemini-3-pro-preview"
+	badAuth := &Auth{ID: "aa-bad-auth", Provider: "antigravity"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "antigravity"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "antigravity", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "antigravity", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	request := cliproxyexecutor.Request{Model: model}
+	for i := 0; i < 2; i++ {
+		resp, errExecute := m.Execute(context.Background(), []string{"antigravity"}, request, cliproxyexecutor.Options{})
+		if errExecute != nil {
+			t.Fatalf("execute %d error = %v, want success", i, errExecute)
+		}
+		if string(resp.Payload) != goodAuth.ID {
+			t.Fatalf("execute %d payload = %q, want %q", i, string(resp.Payload), goodAuth.ID)
+		}
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{badAuth.ID, goodAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	state := updatedBad.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state for %q", model)
+	}
+	if !state.Unavailable {
+		t.Fatalf("expected bad auth model state to be unavailable")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected bad auth model state cooldown to be set")
+	}
+	if state.StatusMessage != invalidGrantErr.Message {
+		t.Fatalf("status message = %q, want %q", state.StatusMessage, invalidGrantErr.Message)
+	}
+}
+
+func TestManagerExecuteStream_AntigravityInvalidGrantFallsBackAndSuspendsAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	invalidGrantErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `bad response status code 400, message: {"error":"invalid_grant","error_description":"Bad Request"}, body: {"type":"error","error":{"type":"invalid_request_error","message":"{\"error\":\"invalid_grant\"}"}}`,
+	}
+	executor := &authFallbackExecutor{
+		id: "antigravity",
+		streamFirstErrors: map[string]error{
+			"aa-bad-auth": invalidGrantErr,
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "gemini-3-pro-preview"
+	badAuth := &Auth{ID: "aa-bad-auth", Provider: "antigravity"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "antigravity"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "antigravity", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "antigravity", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	request := cliproxyexecutor.Request{Model: model}
+	for i := 0; i < 2; i++ {
+		streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"antigravity"}, request, cliproxyexecutor.Options{})
+		if errExecute != nil {
+			t.Fatalf("execute stream %d error = %v, want success", i, errExecute)
+		}
+		var payload []byte
+		for chunk := range streamResult.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("execute stream %d chunk error = %v, want success", i, chunk.Err)
+			}
+			payload = append(payload, chunk.Payload...)
+		}
+		if string(payload) != goodAuth.ID {
+			t.Fatalf("execute stream %d payload = %q, want %q", i, string(payload), goodAuth.ID)
+		}
+	}
+
+	got := executor.StreamCalls()
+	want := []string{badAuth.ID, goodAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stream call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	state := updatedBad.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state for %q", model)
+	}
+	if !state.Unavailable {
+		t.Fatalf("expected bad auth model state to be unavailable")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected bad auth model state cooldown to be set")
+	}
+}
+
 func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{
@@ -522,6 +697,163 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 	}
 }
 
+func TestManager_MarkResult_TransientErrorCooldownDefault(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(0)
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(prevQuota)
+		transientErrorCooldownSeconds.Store(prevTransient)
+	})
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-transient-default",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-transient-default"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusBadGateway, Message: "bad gateway"},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state to be present")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatal("expected transient error cooldown to keep the legacy default")
+	}
+	diff := time.Until(state.NextRetryAfter)
+	if diff < 55*time.Second || diff > 65*time.Second {
+		t.Fatalf("expected transient error cooldown to be ~60 seconds, got %v", diff)
+	}
+}
+
+func TestManager_MarkResult_TransientErrorCooldownDisabled(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(-1)
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(prevQuota)
+		transientErrorCooldownSeconds.Store(prevTransient)
+	})
+
+	m := NewManager(nil, nil, nil)
+
+	modelAuth := &Auth{
+		ID:       "auth-transient-model-disabled",
+		Provider: "claude",
+	}
+	if _, errRegisterModel := m.Register(context.Background(), modelAuth); errRegisterModel != nil {
+		t.Fatalf("register model auth: %v", errRegisterModel)
+	}
+
+	model := "test-model-transient-disabled"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   modelAuth.ID,
+		Provider: modelAuth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusBadGateway, Message: "bad gateway"},
+	})
+
+	updatedModelAuth, okModelAuth := m.GetByID(modelAuth.ID)
+	if !okModelAuth || updatedModelAuth == nil {
+		t.Fatalf("expected model auth to be present")
+	}
+	state := updatedModelAuth.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state to be present")
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected transient model cooldown to be disabled, got %v", state.NextRetryAfter)
+	}
+
+	authLevelAuth := &Auth{
+		ID:       "auth-transient-auth-disabled",
+		Provider: "claude",
+	}
+	if _, errRegisterAuth := m.Register(context.Background(), authLevelAuth); errRegisterAuth != nil {
+		t.Fatalf("register auth-level auth: %v", errRegisterAuth)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authLevelAuth.ID,
+		Provider: authLevelAuth.Provider,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "unavailable"},
+	})
+
+	updatedAuthLevel, okAuthLevel := m.GetByID(authLevelAuth.ID)
+	if !okAuthLevel || updatedAuthLevel == nil {
+		t.Fatalf("expected auth-level auth to be present")
+	}
+	if !updatedAuthLevel.NextRetryAfter.IsZero() {
+		t.Fatalf("expected transient auth cooldown to be disabled, got %v", updatedAuthLevel.NextRetryAfter)
+	}
+}
+
+func TestManager_MarkResult_TransientErrorCooldownDoesNotDisableAuthErrors(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(-1)
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(prevQuota)
+		transientErrorCooldownSeconds.Store(prevTransient)
+	})
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-transient-auth-error",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-auth-error"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusForbidden, Message: "forbidden"},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state to be present")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatal("expected auth error cooldown to remain enabled")
+	}
+	diff := time.Until(state.NextRetryAfter)
+	if diff < 29*time.Minute || diff > 31*time.Minute {
+		t.Fatalf("expected auth error cooldown to be ~30 minutes, got %v", diff)
+	}
+}
+
 func TestManager_MarkResult_RespectsAuthDisableCoolingOverride_On403(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
@@ -567,6 +899,60 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride_On403(t *testing.
 
 	if count := reg.GetModelCount(model); count <= 0 {
 		t.Fatalf("expected model count > 0 when disable_cooling=true, got %d", count)
+	}
+}
+
+func TestManager_MarkResult_CloudflareChallenge_On403(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-cf-403",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-cf-403"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: "claude",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusForbidden, Message: "cf-mitigated: challenge"},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state to be present")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected NextRetryAfter to be non-zero for cloudflare challenge")
+	}
+	diff := time.Until(state.NextRetryAfter)
+	if diff < 5*time.Second || diff > 25*time.Second {
+		t.Fatalf("expected NextRetryAfter to be ~10 seconds, got %v", diff)
+	}
+	if state.StatusMessage != "cloudflare challenge" {
+		t.Fatalf("expected StatusMessage to be 'cloudflare challenge', got %s", state.StatusMessage)
+	}
+
+	// Because Cloudflare Challenge is treated as transient (no suspension),
+	// the model should NOT be suspended in the global registry, so count > 0.
+	if count := reg.GetModelCount(model); count <= 0 {
+		t.Fatalf("expected model count > 0 for cloudflare challenge transient cooldown, got %d", count)
 	}
 }
 
@@ -738,6 +1124,110 @@ func TestManager_Execute_DisableCooling_RetriesAfter429RetryAfter(t *testing.T) 
 	calls := executor.ExecuteCalls()
 	if len(calls) != 4 {
 		t.Fatalf("execute calls = %d, want 4 (initial + 3 retries)", len(calls))
+	}
+}
+
+func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(t *testing.T) {
+	incompleteErr := &requestScopedStatusError{
+		status:  http.StatusRequestTimeout,
+		message: "stream error: stream disconnected before completion: stream closed before response.completed",
+	}
+	invalidRequestErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `{"error":{"type":"invalid_request_error","code":"invalid_value","message":"Invalid input."}}`,
+	}
+	badRequestErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `{"error":{"type":"bad_request_error","code":"invalid_value","message":"Bad input."}}`,
+	}
+	tests := []struct {
+		name       string
+		stream     bool
+		err        error
+		wantStatus int
+	}{
+		{name: "non-streaming incomplete", err: incompleteErr, wantStatus: http.StatusRequestTimeout},
+		{name: "streaming incomplete", stream: true, err: incompleteErr, wantStatus: http.StatusRequestTimeout},
+		{name: "non-streaming invalid request", err: invalidRequestErr, wantStatus: http.StatusBadRequest},
+		{name: "streaming invalid request", stream: true, err: invalidRequestErr, wantStatus: http.StatusBadRequest},
+		{name: "non-streaming bad request", err: badRequestErr, wantStatus: http.StatusBadRequest},
+		{name: "streaming bad request", stream: true, err: badRequestErr, wantStatus: http.StatusBadRequest},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			m.SetRetryConfig(2, 30*time.Second, 0)
+
+			executor := &authFallbackExecutor{id: "codex"}
+			if tc.stream {
+				executor.streamFirstErrors = map[string]error{"aa-bad-auth": tc.err}
+			} else {
+				executor.executeErrors = map[string]error{"aa-bad-auth": tc.err}
+			}
+			m.RegisterExecutor(executor)
+
+			model := "gpt-5.5"
+			badAuth := &Auth{ID: "aa-bad-auth", Provider: "codex"}
+			goodAuth := &Auth{ID: "bb-good-auth", Provider: "codex"}
+
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(badAuth.ID, badAuth.Provider, []*registry.ModelInfo{{ID: model}})
+			reg.RegisterClient(goodAuth.ID, goodAuth.Provider, []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() {
+				reg.UnregisterClient(badAuth.ID)
+				reg.UnregisterClient(goodAuth.ID)
+			})
+
+			if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+				t.Fatalf("register bad auth: %v", errRegister)
+			}
+			if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+				t.Fatalf("register good auth: %v", errRegister)
+			}
+
+			var errExecute error
+			if tc.stream {
+				result, errStream := m.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+				if result != nil {
+					for range result.Chunks {
+					}
+				}
+				errExecute = errStream
+			} else {
+				_, errExecute = m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+			}
+			if errExecute == nil {
+				t.Fatal("expected request-scoped stream error")
+			}
+			if got := statusCodeFromError(errExecute); got != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", got, tc.wantStatus)
+			}
+
+			var calls []string
+			if tc.stream {
+				calls = executor.StreamCalls()
+			} else {
+				calls = executor.ExecuteCalls()
+			}
+			if len(calls) != 1 || calls[0] != badAuth.ID {
+				t.Fatalf("credential calls = %v, want [%s]", calls, badAuth.ID)
+			}
+
+			updatedBad, ok := m.GetByID(badAuth.ID)
+			if !ok || updatedBad == nil {
+				t.Fatal("expected bad auth to remain registered")
+			}
+			if updatedBad.Unavailable {
+				t.Fatal("expected request-scoped error to keep auth available")
+			}
+			if !updatedBad.NextRetryAfter.IsZero() {
+				t.Fatalf("expected auth cooldown to remain unset, got %v", updatedBad.NextRetryAfter)
+			}
+			if state := updatedBad.ModelStates[model]; state != nil {
+				t.Fatalf("expected request-scoped error to avoid model cooldown state, got %#v", state)
+			}
+		})
 	}
 }
 

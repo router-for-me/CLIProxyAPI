@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -81,11 +81,36 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		return "call_" + b.String()
 	}
 
+	getGeminiCallID := func(value gjson.Result) string {
+		if callID := strings.TrimSpace(value.Get("id").String()); callID != "" {
+			return callID
+		}
+		return strings.TrimSpace(value.Get("call_id").String())
+	}
+
+	removePendingCallID := func(ids []string, callID string) []string {
+		if callID == "" {
+			return ids
+		}
+		for idx, pendingID := range ids {
+			if pendingID == callID {
+				return append(ids[:idx], ids[idx+1:]...)
+			}
+		}
+		return ids
+	}
+
 	// Model
 	out, _ = sjson.SetBytes(out, "model", modelName)
+	if serviceTier := normalizeGeminiCodexServiceTier(root.Get("service_tier")); serviceTier != "" {
+		out, _ = sjson.SetBytes(out, "service_tier", serviceTier)
+	}
 
 	// System instruction -> as a user message with input_text parts
 	sysParts := root.Get("system_instruction.parts")
+	if !sysParts.Exists() {
+		sysParts = root.Get("systemInstruction.parts")
+	}
 	if sysParts.IsArray() {
 		msg := []byte(`{"type":"message","role":"developer","content":[]}`)
 		arr := sysParts.Array()
@@ -137,6 +162,22 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					continue
 				}
 
+				if contentPart, ok := codexContentPartFromGeminiInlineData(p); ok {
+					msg := []byte(`{"type":"message","role":"","content":[]}`)
+					msg, _ = sjson.SetBytes(msg, "role", role)
+					msg, _ = sjson.SetRawBytes(msg, "content.-1", contentPart)
+					out, _ = sjson.SetRawBytes(out, "input.-1", msg)
+					continue
+				}
+
+				if contentPart, ok := codexContentPartFromGeminiFileData(p); ok {
+					msg := []byte(`{"type":"message","role":"","content":[]}`)
+					msg, _ = sjson.SetBytes(msg, "role", role)
+					msg, _ = sjson.SetRawBytes(msg, "content.-1", contentPart)
+					out, _ = sjson.SetRawBytes(out, "input.-1", msg)
+					continue
+				}
+
 				// function call from model
 				if fc := p.Get("functionCall"); fc.Exists() {
 					fn := []byte(`{"type":"function_call"}`)
@@ -152,10 +193,11 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					if args := fc.Get("args"); args.Exists() {
 						fn, _ = sjson.SetBytes(fn, "arguments", args.Raw)
 					}
-					// generate a paired random call_id and enqueue it so the
-					// corresponding functionResponse can pop the earliest id
-					// to preserve ordering when multiple calls are present.
-					id := genCallID()
+					// Reuse gateway-provided IDs when present, otherwise generate one for pairing.
+					id := getGeminiCallID(fc)
+					if id == "" {
+						id = genCallID()
+					}
 					fn, _ = sjson.SetBytes(fn, "call_id", id)
 					pendingCallIDs = append(pendingCallIDs, id)
 					out, _ = sjson.SetRawBytes(out, "input.-1", fn)
@@ -175,7 +217,10 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					// attach the oldest queued call_id to pair the response
 					// with its call. If the queue is empty, generate a new id.
 					var id string
-					if len(pendingCallIDs) > 0 {
+					if customID := getGeminiCallID(fr); customID != "" {
+						id = customID
+						pendingCallIDs = removePendingCallID(pendingCallIDs, id)
+					} else if len(pendingCallIDs) > 0 {
 						id = pendingCallIDs[0]
 						// pop the first element
 						pendingCallIDs = pendingCallIDs[1:]
@@ -240,12 +285,23 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 	// Fixed flags aligning with Codex expectations
 	out, _ = sjson.SetBytes(out, "parallel_tool_calls", true)
+	out = setCodexToolChoiceFromGeminiToolConfig(out, root.Get("toolConfig.functionCallingConfig"))
 
 	// Convert Gemini thinkingConfig to Codex reasoning.effort.
 	// Note: Google official Python SDK sends snake_case fields (thinking_level/thinking_budget).
 	effortSet := false
 	if genConfig := root.Get("generationConfig"); genConfig.Exists() {
-		if thinkingConfig := genConfig.Get("thinkingConfig"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
+		thinkingLevel := genConfig.Get("thinkingLevel")
+		if !thinkingLevel.Exists() {
+			thinkingLevel = genConfig.Get("thinking_level")
+		}
+		if thinkingLevel.Exists() {
+			effort := strings.ToLower(strings.TrimSpace(thinkingLevel.String()))
+			if effort != "" {
+				out, _ = sjson.SetBytes(out, "reasoning.effort", effort)
+				effortSet = true
+			}
+		} else if thinkingConfig := genConfig.Get("thinkingConfig"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
 			thinkingLevel := thinkingConfig.Get("thinkingLevel")
 			if !thinkingLevel.Exists() {
 				thinkingLevel = thinkingConfig.Get("thinking_level")
@@ -284,10 +340,158 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	util.Walk(toolsResult, "", "type", &pathsToLower)
 	for _, p := range pathsToLower {
 		fullPath := fmt.Sprintf("tools.%s", p)
-		out, _ = sjson.SetBytes(out, fullPath, strings.ToLower(gjson.GetBytes(out, fullPath).String()))
+		typeValue := gjson.GetBytes(out, fullPath)
+		if typeValue.Type != gjson.String {
+			continue
+		}
+		out, _ = sjson.SetBytes(out, fullPath, strings.ToLower(typeValue.String()))
 	}
 
 	return out
+}
+
+func setCodexToolChoiceFromGeminiToolConfig(out []byte, functionCallingConfig gjson.Result) []byte {
+	if !functionCallingConfig.Exists() {
+		return out
+	}
+	mode := functionCallingConfig.Get("mode").String()
+	switch mode {
+	case "NONE":
+		out, _ = sjson.SetBytes(out, "tool_choice", "none")
+	case "AUTO":
+		out, _ = sjson.SetBytes(out, "tool_choice", "auto")
+	case "ANY":
+		allowedNames := functionCallingConfig.Get("allowedFunctionNames")
+		if allowedNames.IsArray() && len(allowedNames.Array()) == 1 {
+			choice := []byte(`{"type":"function","name":""}`)
+			choice, _ = sjson.SetBytes(choice, "name", shortenNameIfNeeded(allowedNames.Array()[0].String()))
+			out, _ = sjson.SetRawBytes(out, "tool_choice", choice)
+		} else {
+			out, _ = sjson.SetBytes(out, "tool_choice", "required")
+		}
+	}
+	return out
+}
+
+func normalizeGeminiCodexServiceTier(serviceTier gjson.Result) string {
+	if !serviceTier.Exists() || serviceTier.Type != gjson.String {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(serviceTier.String())) {
+	case "priority", "fast":
+		return "priority"
+	}
+	return ""
+}
+
+func codexContentPartFromGeminiInlineData(part gjson.Result) ([]byte, bool) {
+	inlineData := part.Get("inlineData")
+	if !inlineData.Exists() {
+		inlineData = part.Get("inline_data")
+	}
+	if !inlineData.Exists() {
+		return nil, false
+	}
+	mimeType := inlineData.Get("mimeType").String()
+	if mimeType == "" {
+		mimeType = inlineData.Get("mime_type").String()
+	}
+	data := inlineData.Get("data").String()
+	if mimeType == "" || data == "" {
+		return nil, false
+	}
+	lowerMimeType := strings.ToLower(mimeType)
+	switch {
+	case strings.HasPrefix(lowerMimeType, "image/"):
+		contentPart := []byte(`{"type":"input_image","image_url":""}`)
+		contentPart, _ = sjson.SetBytes(contentPart, "image_url", fmt.Sprintf("data:%s;base64,%s", mimeType, data))
+		return contentPart, true
+	case strings.HasPrefix(lowerMimeType, "audio/"):
+		contentPart := []byte(`{"type":"input_audio","input_audio":{"data":"","format":""}}`)
+		contentPart, _ = sjson.SetBytes(contentPart, "input_audio.data", data)
+		contentPart, _ = sjson.SetBytes(contentPart, "input_audio.format", codexInputAudioFormatFromMIME(mimeType))
+		return contentPart, true
+	default:
+		contentPart := []byte(`{"type":"input_file","file_data":"","filename":""}`)
+		contentPart, _ = sjson.SetBytes(contentPart, "file_data", data)
+		contentPart, _ = sjson.SetBytes(contentPart, "filename", codexFileNameFromMIME(mimeType))
+		return contentPart, true
+	}
+}
+
+func codexContentPartFromGeminiFileData(part gjson.Result) ([]byte, bool) {
+	fileData := part.Get("fileData")
+	if !fileData.Exists() {
+		fileData = part.Get("file_data")
+	}
+	if !fileData.Exists() {
+		return nil, false
+	}
+	fileURI := fileData.Get("fileUri").String()
+	if fileURI == "" {
+		fileURI = fileData.Get("file_uri").String()
+	}
+	if fileURI == "" {
+		return nil, false
+	}
+	mimeType := fileData.Get("mimeType").String()
+	if mimeType == "" {
+		mimeType = fileData.Get("mime_type").String()
+	}
+	lowerMimeType := strings.ToLower(mimeType)
+	if strings.HasPrefix(lowerMimeType, "image/") {
+		contentPart := []byte(`{"type":"input_image","image_url":""}`)
+		contentPart, _ = sjson.SetBytes(contentPart, "image_url", fileURI)
+		return contentPart, true
+	}
+	if strings.HasPrefix(lowerMimeType, "video/") || strings.HasPrefix(lowerMimeType, "application/") || strings.HasPrefix(lowerMimeType, "text/") {
+		contentPart := []byte(`{"type":"input_file","file_url":"","filename":""}`)
+		contentPart, _ = sjson.SetBytes(contentPart, "file_url", fileURI)
+		contentPart, _ = sjson.SetBytes(contentPart, "filename", codexFileNameFromMIME(mimeType))
+		return contentPart, true
+	}
+	fileInfo := "File: " + fileURI
+	if mimeType != "" {
+		fileInfo += " (Type: " + mimeType + ")"
+	}
+	contentPart := []byte(`{"type":"input_text","text":""}`)
+	contentPart, _ = sjson.SetBytes(contentPart, "text", fileInfo)
+	return contentPart, true
+}
+
+func codexInputAudioFormatFromMIME(mimeType string) string {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "audio/wav", "audio/wave", "audio/x-wav":
+		return "wav"
+	case "audio/flac":
+		return "flac"
+	case "audio/opus", "audio/ogg":
+		return "opus"
+	case "audio/pcm", "audio/l16":
+		return "pcm16"
+	default:
+		return "mp3"
+	}
+}
+
+func codexFileNameFromMIME(mimeType string) string {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "application/pdf":
+		return "document.pdf"
+	case "text/plain":
+		return "document.txt"
+	case "text/csv":
+		return "document.csv"
+	case "application/json":
+		return "document.json"
+	case "application/xml", "text/xml":
+		return "document.xml"
+	default:
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(mimeType)), "video/") {
+			return "video"
+		}
+		return "document"
+	}
 }
 
 // shortenNameIfNeeded applies the simple shortening rule for a single name.

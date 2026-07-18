@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 )
 
@@ -124,5 +125,58 @@ func TestNoFinishReasonOnIntermediateChunks(t *testing.T) {
 	fr2 := gjson.GetBytes(result2[0], "choices.0.finish_reason")
 	if fr2.Exists() && fr2.String() != "" && fr2.Type.String() != "Null" {
 		t.Errorf("Expected no finish_reason on intermediate chunk, got: %v", fr2)
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAINonStreamRestoresDisambiguatedName(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	original := []byte(`{"tools":[
+		{"type":"function","function":{"name":"` + first + `"}},
+		{"type":"function","function":{"name":"` + second + `"}}
+	]}`)
+	mapped := util.SanitizedFunctionNameMap(original)[second]
+	responseJSON := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{}}}]}}]}}`)
+
+	output := ConvertAntigravityResponseToOpenAINonStream(context.Background(), "gemini-3-flash", original, nil, responseJSON, nil)
+	if got := gjson.GetBytes(output, "choices.0.message.tool_calls.0.function.name").String(); got != second {
+		t.Fatalf("function.name = %q, want %q. Output: %s", got, second, output)
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAINonStreamIncludesReasoningContent(t *testing.T) {
+	ctx := context.Background()
+	responseJSON := []byte(`{
+		"response": {
+			"candidates": [{
+				"index": 0,
+				"content": {
+					"parts": [
+						{"text": "I need to multiply 17 by 24.", "thought": true},
+						{"text": "408", "thoughtSignature": "sig-final-answer"}
+					]
+				},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {
+				"promptTokenCount": 16,
+				"candidatesTokenCount": 3,
+				"thoughtsTokenCount": 42,
+				"totalTokenCount": 61
+			},
+			"modelVersion": "gemini-3.1-pro-low",
+			"responseId": "resp-reasoning"
+		}
+	}`)
+
+	output := ConvertAntigravityResponseToOpenAINonStream(ctx, "gemini-3.1-pro-low", nil, nil, responseJSON, nil)
+	if got := gjson.GetBytes(output, "choices.0.message.reasoning_content").String(); got != "I need to multiply 17 by 24." {
+		t.Fatalf("reasoning_content = %q, want thought text. Output: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "choices.0.message.content").String(); got != "408" {
+		t.Fatalf("content = %q, want final answer. Output: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "usage.completion_tokens_details.reasoning_tokens").Int(); got != 42 {
+		t.Fatalf("reasoning_tokens = %d, want 42. Output: %s", got, output)
 	}
 }

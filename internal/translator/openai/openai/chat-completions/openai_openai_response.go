@@ -14,7 +14,7 @@ import (
 // Parameters:
 //   - ctx: The context for the request, used for cancellation and timeout handling
 //   - modelName: The name of the model being used for the response (unused in current implementation)
-//   - rawJSON: The raw JSON response from the Gemini CLI API
+//   - rawJSON: The raw JSON response from the OpenAI API
 //   - param: A pointer to a parameter object for maintaining state between calls
 //
 // Returns:
@@ -34,7 +34,7 @@ func ConvertOpenAIResponseToOpenAI(_ context.Context, _ string, originalRequestR
 // Parameters:
 //   - ctx: The context for the request, used for cancellation and timeout handling
 //   - modelName: The name of the model being used for the response
-//   - rawJSON: The raw JSON response from the Gemini CLI API
+//   - rawJSON: The raw JSON response from the OpenAI API
 //   - param: A pointer to a parameter object for the conversion
 //
 // Returns:

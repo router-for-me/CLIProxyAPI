@@ -1,14 +1,17 @@
 package gemini
 
 import (
+	"encoding/base64"
 	"fmt"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/tidwall/gjson"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
-func TestConvertGeminiRequestToAntigravity_PreserveValidSignature(t *testing.T) {
-	// Valid signature on functionCall should be preserved
+func TestConvertGeminiRequestToAntigravity_ReplacesClientSignatureOnFunctionCall(t *testing.T) {
+	// Client signatures on Gemini function calls are not portable to Antigravity.
 	validSignature := "abc123validSignature1234567890123456789012345678901234567890"
 	inputJSON := []byte(fmt.Sprintf(`{
 		"model": "gemini-3-pro-preview",
@@ -25,15 +28,205 @@ func TestConvertGeminiRequestToAntigravity_PreserveValidSignature(t *testing.T) 
 	output := ConvertGeminiRequestToAntigravity("gemini-3-pro-preview", inputJSON, false)
 	outputStr := string(output)
 
-	// Check that valid thoughtSignature is preserved
 	parts := gjson.Get(outputStr, "request.contents.0.parts").Array()
 	if len(parts) != 1 {
 		t.Fatalf("Expected 1 part, got %d", len(parts))
 	}
 
 	sig := parts[0].Get("thoughtSignature").String()
-	if sig != validSignature {
-		t.Errorf("Expected thoughtSignature '%s', got '%s'", validSignature, sig)
+	expectedSig := "skip_thought_signature_validator"
+	if sig != expectedSig {
+		t.Errorf("Expected thoughtSignature '%s', got '%s'", expectedSig, sig)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_ReplacesClientSignatureOnTextPart(t *testing.T) {
+	validSignature := "abc123validSignature1234567890123456789012345678901234567890"
+	inputJSON := []byte(fmt.Sprintf(`{
+		"model": "gemini-3-pro-preview",
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"text": "previous answer", "thoughtSignature": "%s"}
+				]
+			}
+		]
+	}`, validSignature))
+
+	output := ConvertGeminiRequestToAntigravity("gemini-3-pro-preview", inputJSON, false)
+	outputStr := string(output)
+
+	sig := gjson.Get(outputStr, "request.contents.0.parts.0.thoughtSignature").String()
+	expectedSig := "skip_thought_signature_validator"
+	if sig != expectedSig {
+		t.Errorf("Expected thoughtSignature '%s', got '%s'", expectedSig, sig)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_AddsSkipSentinelToStringThoughtPart(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-pro-preview",
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"thought": "internal reasoning"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertGeminiRequestToAntigravity("gemini-3-pro-preview", inputJSON, false)
+	outputStr := string(output)
+
+	sig := gjson.Get(outputStr, "request.contents.0.parts.0.thoughtSignature").String()
+	expectedSig := "skip_thought_signature_validator"
+	if sig != expectedSig {
+		t.Errorf("Expected thoughtSignature '%s', got '%s'", expectedSig, sig)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_SkipsUppercaseClaudeModel(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "Claude-Test",
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"name": "test_tool", "args": {}}}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertGeminiRequestToAntigravity("Claude-Test", inputJSON, false)
+	outputStr := string(output)
+
+	if sig := gjson.Get(outputStr, "request.contents.0.parts.0.thoughtSignature"); sig.Exists() {
+		t.Fatalf("Expected no thoughtSignature for Claude model, got %s", sig.Raw)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_ClaudeModelNormalizesStrictClaudeThoughtSignature(t *testing.T) {
+	nativeSig := testAntigravityGeminiClaudeSignature(t)
+	expectedSig, ok := signature.CompatibleAntigravityClaudeThinkingSignature(nativeSig)
+	if !ok {
+		t.Fatal("test Claude signature should be compatible with Antigravity Claude")
+	}
+
+	inputJSON := []byte(`{
+		"model": "claude-opus-4-6-thinking",
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"text": "internal reasoning", "thought": true, "thoughtSignature": "` + nativeSig + `"},
+					{"text": "visible answer"}
+				]
+			},
+			{
+				"role": "user",
+				"parts": [{"text": "continue"}]
+			}
+		]
+	}`)
+
+	output := ConvertGeminiRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
+
+	part := gjson.GetBytes(output, "request.contents.0.parts.0")
+	if !part.Get("thought").Bool() {
+		t.Fatalf("first part should remain thought. Output: %s", output)
+	}
+	if got := part.Get("thoughtSignature").String(); got != expectedSig {
+		t.Fatalf("thoughtSignature = %q, want %q. Output: %s", got, expectedSig, output)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_ClaudeModelDropsNonStrictEPrefixThoughtSignature(t *testing.T) {
+	looseEPrefix := base64.StdEncoding.EncodeToString([]byte{0x12, 0x01, 0x02})
+	if looseEPrefix[0] != 'E' {
+		t.Fatalf("test signature should start with E, got %q", looseEPrefix[:1])
+	}
+
+	inputJSON := []byte(`{
+		"model": "claude-opus-4-6-thinking",
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"text": "must not reach Claude", "thought": true, "thoughtSignature": "` + looseEPrefix + `"},
+					{"text": "visible answer"}
+				]
+			},
+			{
+				"role": "user",
+				"parts": [{"text": "continue"}]
+			}
+		]
+	}`)
+
+	output := ConvertGeminiRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
+
+	if gjson.GetBytes(output, `request.contents.#.parts.#(thought=true)#`).Int() != 0 {
+		t.Fatalf("non-strict E-prefix thought block should be dropped. Output: %s", output)
+	}
+	if got := gjson.GetBytes(output, "request.contents.0.parts.0.text").String(); got != "visible answer" {
+		t.Fatalf("visible text = %q, want visible answer. Output: %s", got, output)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_ClaudeModelDropsEmptyThoughtText(t *testing.T) {
+	nativeSig := testAntigravityGeminiClaudeSignature(t)
+	inputJSON := []byte(`{
+		"model": "claude-opus-4-6-thinking",
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"text": "", "thought": true, "thoughtSignature": "` + nativeSig + `"},
+					{"text": "visible answer"}
+				]
+			},
+			{
+				"role": "user",
+				"parts": [{"text": "continue"}]
+			}
+		]
+	}`)
+
+	output := ConvertGeminiRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
+
+	if gjson.GetBytes(output, `request.contents.#.parts.#(thought=true)#`).Int() != 0 {
+		t.Fatalf("empty-text thought block should be dropped for Antigravity Claude. Output: %s", output)
+	}
+	if got := gjson.GetBytes(output, "request.contents.0.parts.0.text").String(); got != "visible answer" {
+		t.Fatalf("visible text = %q, want visible answer. Output: %s", got, output)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_ClaudeModelStripsUnneededFunctionCallSignature(t *testing.T) {
+	nativeSig := testAntigravityGeminiClaudeSignature(t)
+	inputJSON := []byte(`{
+		"model": "claude-opus-4-6-thinking",
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"name": "test_tool", "args": {}}, "thoughtSignature": "` + nativeSig + `"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertGeminiRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
+
+	part := gjson.GetBytes(output, "request.contents.0.parts.0")
+	if !part.Get("functionCall").Exists() {
+		t.Fatalf("functionCall should be preserved. Output: %s", output)
+	}
+	if part.Get("thoughtSignature").Exists() {
+		t.Fatalf("functionCall thoughtSignature should be stripped for Claude target. Output: %s", output)
 	}
 }
 
@@ -60,6 +253,28 @@ func TestConvertGeminiRequestToAntigravity_AddSkipSentinelToFunctionCall(t *test
 	if sig != expectedSig {
 		t.Errorf("Expected skip sentinel '%s', got '%s'", expectedSig, sig)
 	}
+}
+
+func testAntigravityGeminiClaudeSignature(t *testing.T) string {
+	t.Helper()
+	channelBlock := []byte{}
+	channelBlock = protowire.AppendTag(channelBlock, 1, protowire.VarintType)
+	channelBlock = protowire.AppendVarint(channelBlock, 12)
+	channelBlock = protowire.AppendTag(channelBlock, 2, protowire.VarintType)
+	channelBlock = protowire.AppendVarint(channelBlock, 2)
+	channelBlock = protowire.AppendTag(channelBlock, 6, protowire.BytesType)
+	channelBlock = protowire.AppendString(channelBlock, "claude-sonnet-4-6")
+
+	container := []byte{}
+	container = protowire.AppendTag(container, 1, protowire.BytesType)
+	container = protowire.AppendBytes(container, channelBlock)
+
+	payload := []byte{}
+	payload = protowire.AppendTag(payload, 2, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, container)
+	payload = protowire.AppendTag(payload, 3, protowire.VarintType)
+	payload = protowire.AppendVarint(payload, 1)
+	return base64.StdEncoding.EncodeToString(payload)
 }
 
 func TestConvertGeminiRequestToAntigravity_ParallelFunctionCalls(t *testing.T) {
@@ -173,8 +388,7 @@ func TestFixCLIToolResponse_PreservesFunctionResponseParts(t *testing.T) {
 }
 
 func TestFixCLIToolResponse_BackfillsEmptyFunctionResponseName(t *testing.T) {
-	// When the Amp client sends functionResponse with an empty name,
-	// fixCLIToolResponse should backfill it from the corresponding functionCall.
+	// Empty functionResponse names are backfilled from the corresponding functionCall.
 	input := `{
 		"model": "gemini-3-pro-preview",
 		"request": {
@@ -423,5 +637,84 @@ func TestFixCLIToolResponse_MultipleGroupsFIFO(t *testing.T) {
 	}
 	if name1 != "Grep" {
 		t.Errorf("Expected second group name 'Grep', got '%s'", name1)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravityDeduplicatesRequestWideAndDisambiguatesTools(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	inputJSON := []byte(`{
+		"contents":[
+			{"role":"model","parts":[{"functionCall":{"name":"` + second + `","args":{}}}]},
+			{"role":"user","parts":[{"functionResponse":{"name":"` + second + `","response":{}}}]}
+		],
+		"tools":[
+			{"functionDeclarations":[
+				{"name":"lookup","parameters":{"type":"object"}},
+				{"name":"` + first + `","parameters":{"type":"object"}}
+			]},
+			{"function_declarations":[
+				{"name":"lookup","parameters":{"type":"object"}},
+				{"name":"` + second + `","parameters":{"type":"object"}}
+			]},
+			{"functionDeclarations":[{"name":"lookup","parameters":{"type":"object"}}]}
+		],
+		"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["` + second + `"]}}
+	}`)
+
+	out := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	if got := len(gjson.GetBytes(out, "request.tools").Array()); got != 2 {
+		t.Fatalf("tool count = %d, want 2 after removing the empty duplicate node. Output: %s", got, out)
+	}
+	camel := gjson.GetBytes(out, "request.tools.0.functionDeclarations").Array()
+	snake := gjson.GetBytes(out, "request.tools.1.function_declarations").Array()
+	if len(camel)+len(snake) != 3 {
+		t.Fatalf("declaration count = %d, want 3. Output: %s", len(camel)+len(snake), out)
+	}
+	if len(camel) != 2 || len(snake) != 1 {
+		t.Fatalf("declaration distribution = %d/%d, want 2/1. Output: %s", len(camel), len(snake), out)
+	}
+	firstMapped := camel[1].Get("name").String()
+	secondMapped := snake[0].Get("name").String()
+	if firstMapped == secondMapped || len(secondMapped) > 64 {
+		t.Fatalf("collision names = %q and %q, want distinct names <= 64 chars", firstMapped, secondMapped)
+	}
+	if !camel[0].Get("parametersJsonSchema").Exists() || !snake[0].Get("parametersJsonSchema").Exists() {
+		t.Fatalf("parameters were not normalized. Output: %s", out)
+	}
+	if got := gjson.GetBytes(out, "request.contents.0.parts.0.functionCall.name").String(); got != secondMapped {
+		t.Fatalf("functionCall.name = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+	if got := gjson.GetBytes(out, "request.contents.1.parts.0.functionResponse.name").String(); got != secondMapped {
+		t.Fatalf("functionResponse.name = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+	if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames.0").String(); got != secondMapped {
+		t.Fatalf("allowedFunctionNames.0 = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravityMapsSnakeCaseFunctionReferences(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents":[
+			{"role":"model","parts":[{"function_call":{"name":"read_file","args":{}}}]},
+			{"role":"user","parts":[{"function_response":{"name":"read_file","response":{}}}]}
+		],
+		"tools":[{"function_declarations":[{"name":"read/file"},{"name":"read_file"}]}],
+		"tool_config":{"function_calling_config":{"allowed_function_names":["read_file"]}}
+	}`)
+
+	out := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	mapped := gjson.GetBytes(out, "request.tools.0.function_declarations.1.name").String()
+	if mapped == "" {
+		t.Fatalf("mapped declaration name is empty. Output: %s", out)
+	}
+	for _, path := range []string{
+		"request.contents.0.parts.0.function_call.name",
+		"request.contents.1.parts.0.function_response.name",
+		"request.tool_config.function_calling_config.allowed_function_names.0",
+	} {
+		if got := gjson.GetBytes(out, path).String(); got != mapped {
+			t.Fatalf("%s = %q, want %q. Output: %s", path, got, mapped, out)
+		}
 	}
 }

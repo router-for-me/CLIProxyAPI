@@ -3,9 +3,9 @@ package cliproxy
 import (
 	"context"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
 func defaultWatcherFactory(configPath, authDir string, reload func(*config.Config)) (*WatcherWrapper, error) {
@@ -30,6 +30,15 @@ func defaultWatcherFactory(configPath, authDir string, reload func(*config.Confi
 		},
 		dispatchRuntimeUpdate: func(update watcher.AuthUpdate) bool {
 			return w.DispatchRuntimeAuthUpdate(update)
+		},
+		dispatchPersistedAuth: func(update watcher.AuthUpdate) bool {
+			return w.DispatchPersistedAuthUpdate(update)
+		},
+		setPluginAuthParser: func(parser PluginAuthParser) {
+			w.SetPluginAuthParser(parser)
+		},
+		reloadConfigIfChanged: func() {
+			w.ReloadConfigIfChanged()
 		},
 	}, nil
 }

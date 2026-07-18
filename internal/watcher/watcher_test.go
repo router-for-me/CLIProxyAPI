@@ -14,11 +14,12 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"gopkg.in/yaml.v3"
 )
 
@@ -62,20 +63,22 @@ func TestApplyAuthExcludedModelsMeta_OAuthProvider(t *testing.T) {
 
 func TestBuildAPIKeyClientsCounts(t *testing.T) {
 	cfg := &config.Config{
-		GeminiKey: []config.GeminiKey{{APIKey: "g1"}, {APIKey: "g2"}},
+		GeminiKey:       []config.GeminiKey{{APIKey: "g1"}, {APIKey: "g2"}},
+		InteractionsKey: []config.GeminiKey{{APIKey: "i1"}},
 		VertexCompatAPIKey: []config.VertexCompatKey{
 			{APIKey: "v1"},
 		},
 		ClaudeKey: []config.ClaudeKey{{APIKey: "c1"}},
-		CodexKey:  []config.CodexKey{{APIKey: "x1"}, {APIKey: "x2"}},
+		CodexKey:  []config.CodexKey{{APIKey: "c1"}, {APIKey: "c2"}},
+		XAIKey:    []config.XAIKey{{APIKey: "x1"}},
 		OpenAICompatibility: []config.OpenAICompatibility{
 			{APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "o1"}, {APIKey: "o2"}}},
 		},
 	}
 
-	gemini, vertex, claude, codex, compat := BuildAPIKeyClients(cfg)
-	if gemini != 2 || vertex != 1 || claude != 1 || codex != 2 || compat != 2 {
-		t.Fatalf("unexpected counts: %d %d %d %d %d", gemini, vertex, claude, codex, compat)
+	gemini, vertex, claude, codex, xai, compat := BuildAPIKeyClients(cfg)
+	if gemini != 3 || vertex != 1 || claude != 1 || codex != 2 || xai != 1 || compat != 2 {
+		t.Fatalf("unexpected counts: %d %d %d %d %d %d", gemini, vertex, claude, codex, xai, compat)
 	}
 }
 
@@ -140,30 +143,20 @@ func TestSnapshotCoreAuths_ConfigAndAuthFiles(t *testing.T) {
 				Headers:        map[string]string{"X-Req": "1"},
 			},
 		},
-		OAuthExcludedModels: map[string][]string{
-			"gemini-cli": {"Foo", "bar"},
-		},
 	}
 
 	w := &Watcher{authDir: authDir}
 	w.SetConfig(cfg)
 
 	auths := w.SnapshotCoreAuths()
-	if len(auths) != 4 {
-		t.Fatalf("expected 4 auth entries (1 config + 1 primary + 2 virtual), got %d", len(auths))
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 config auth entry, got %d", len(auths))
 	}
 
 	var geminiAPIKeyAuth *coreauth.Auth
-	var geminiPrimary *coreauth.Auth
-	virtuals := make([]*coreauth.Auth, 0)
 	for _, a := range auths {
-		switch {
-		case a.Provider == "gemini" && a.Attributes["api_key"] == "g-key":
+		if a.Provider == "gemini" && a.Attributes["api_key"] == "g-key" {
 			geminiAPIKeyAuth = a
-		case a.Attributes["gemini_virtual_primary"] == "true":
-			geminiPrimary = a
-		case strings.TrimSpace(a.Attributes["gemini_virtual_parent"]) != "":
-			virtuals = append(virtuals, a)
 		}
 	}
 	if geminiAPIKeyAuth == nil {
@@ -175,35 +168,6 @@ func TestSnapshotCoreAuths_ConfigAndAuthFiles(t *testing.T) {
 	}
 	if geminiAPIKeyAuth.Attributes["auth_kind"] != "apikey" {
 		t.Fatalf("expected auth_kind=apikey, got %s", geminiAPIKeyAuth.Attributes["auth_kind"])
-	}
-
-	if geminiPrimary == nil {
-		t.Fatal("expected primary gemini-cli auth from file")
-	}
-	if !geminiPrimary.Disabled || geminiPrimary.Status != coreauth.StatusDisabled {
-		t.Fatal("expected primary gemini-cli auth to be disabled when virtual auths are synthesized")
-	}
-	expectedOAuthHash := diff.ComputeExcludedModelsHash([]string{"Foo", "bar"})
-	if geminiPrimary.Attributes["excluded_models_hash"] != expectedOAuthHash {
-		t.Fatalf("expected OAuth excluded hash %s, got %s", expectedOAuthHash, geminiPrimary.Attributes["excluded_models_hash"])
-	}
-	if geminiPrimary.Attributes["auth_kind"] != "oauth" {
-		t.Fatalf("expected auth_kind=oauth, got %s", geminiPrimary.Attributes["auth_kind"])
-	}
-
-	if len(virtuals) != 2 {
-		t.Fatalf("expected 2 virtual auths, got %d", len(virtuals))
-	}
-	for _, v := range virtuals {
-		if v.Attributes["gemini_virtual_parent"] != geminiPrimary.ID {
-			t.Fatalf("virtual auth missing parent link to %s", geminiPrimary.ID)
-		}
-		if v.Attributes["excluded_models_hash"] != expectedOAuthHash {
-			t.Fatalf("expected virtual excluded hash %s, got %s", expectedOAuthHash, v.Attributes["excluded_models_hash"])
-		}
-		if v.Status != coreauth.StatusActive {
-			t.Fatalf("expected virtual auth to be active, got %s", v.Status)
-		}
 	}
 }
 
@@ -441,6 +405,34 @@ func TestRemoveClientRemovesHash(t *testing.T) {
 	}
 }
 
+func TestAuthFileClientChangesNotifyUsageSubscribersToRefresh(t *testing.T) {
+	tmpDir := t.TempDir()
+	authFile := filepath.Join(tmpDir, "sample.json")
+	if err := os.WriteFile(authFile, []byte(`{"type":"demo","api_key":"k"}`), 0o644); err != nil {
+		t.Fatalf("failed to create auth file: %v", err)
+	}
+
+	redisqueue.SetEnabled(false)
+	redisqueue.SetEnabled(true)
+	t.Cleanup(func() { redisqueue.SetEnabled(false) })
+
+	subscriber, unsubscribe := redisqueue.SubscribeUsage()
+	defer unsubscribe()
+	requireWatcherUsagePayload(t, subscriber, `{"support_refresh":true}`)
+
+	w := &Watcher{
+		authDir:        tmpDir,
+		lastAuthHashes: make(map[string]string),
+	}
+	w.SetConfig(&config.Config{AuthDir: tmpDir})
+
+	w.addOrUpdateClient(authFile)
+	requireWatcherUsagePayload(t, subscriber, `{"refresh":true}`)
+
+	w.removeClient(authFile)
+	requireWatcherUsagePayload(t, subscriber, `{"refresh":true}`)
+}
+
 func TestAuthFileEventsDoNotInvokeSnapshotCoreAuths(t *testing.T) {
 	tmpDir := t.TempDir()
 	authFile := filepath.Join(tmpDir, "sample.json")
@@ -450,9 +442,9 @@ func TestAuthFileEventsDoNotInvokeSnapshotCoreAuths(t *testing.T) {
 
 	origSnapshot := snapshotCoreAuthsFunc
 	var snapshotCalls int32
-	snapshotCoreAuthsFunc = func(cfg *config.Config, authDir string) []*coreauth.Auth {
+	snapshotCoreAuthsFunc = func(cfg *config.Config, authDir string, parser synthesizer.PluginAuthParser) []*coreauth.Auth {
 		atomic.AddInt32(&snapshotCalls, 1)
-		return origSnapshot(cfg, authDir)
+		return origSnapshot(cfg, authDir, parser)
 	}
 	defer func() { snapshotCoreAuthsFunc = origSnapshot }()
 
@@ -699,6 +691,25 @@ func TestReloadClientsHandlesNilConfig(t *testing.T) {
 	w.reloadClients(true, nil, false)
 }
 
+func TestReloadClientsNotifiesUsageSubscribersToRefresh(t *testing.T) {
+	tmp := t.TempDir()
+	redisqueue.SetEnabled(false)
+	redisqueue.SetEnabled(true)
+	t.Cleanup(func() { redisqueue.SetEnabled(false) })
+
+	subscriber, unsubscribe := redisqueue.SubscribeUsage()
+	defer unsubscribe()
+	requireWatcherUsagePayload(t, subscriber, `{"support_refresh":true}`)
+
+	w := &Watcher{
+		authDir: tmp,
+		config:  &config.Config{AuthDir: tmp},
+	}
+	w.reloadClients(false, nil, false)
+
+	requireWatcherUsagePayload(t, subscriber, `{"refresh":true}`)
+}
+
 func TestReloadClientsFiltersProvidersWithNilCurrentAuths(t *testing.T) {
 	tmp := t.TempDir()
 	w := &Watcher{
@@ -708,6 +719,22 @@ func TestReloadClientsFiltersProvidersWithNilCurrentAuths(t *testing.T) {
 	w.reloadClients(false, []string{"match"}, false)
 	if w.currentAuths != nil && len(w.currentAuths) != 0 {
 		t.Fatalf("expected currentAuths to be nil or empty, got %d", len(w.currentAuths))
+	}
+}
+
+func requireWatcherUsagePayload(t *testing.T, subscriber <-chan []byte, want string) {
+	t.Helper()
+
+	select {
+	case got, ok := <-subscriber:
+		if !ok {
+			t.Fatalf("subscriber closed before receiving %q", want)
+		}
+		if string(got) != want {
+			t.Fatalf("subscriber payload = %q, want %q", string(got), want)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timeout waiting for subscriber payload %q", want)
 	}
 }
 

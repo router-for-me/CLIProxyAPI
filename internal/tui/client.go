@@ -140,11 +140,6 @@ func (c *Client) PutConfigYAML(yamlContent string) error {
 	return err
 }
 
-// GetUsage fetches usage statistics.
-func (c *Client) GetUsage() (map[string]any, error) {
-	return c.getJSON("/v0/management/usage")
-}
-
 // GetAuthFiles lists auth credential files.
 // API returns {"files": [...]}.
 func (c *Client) GetAuthFiles() ([]map[string]any, error) {
@@ -295,6 +290,12 @@ func (c *Client) GetGeminiKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/gemini-api-key", "gemini-api-key")
 }
 
+// GetInteractionsKeys fetches native Interactions API keys.
+// API returns {"interactions-api-key": [...]}.
+func (c *Client) GetInteractionsKeys() ([]map[string]any, error) {
+	return c.getWrappedKeyList("/v0/management/interactions-api-key", "interactions-api-key")
+}
+
 // GetClaudeKeys fetches Claude API keys.
 func (c *Client) GetClaudeKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/claude-api-key", "claude-api-key")
@@ -303,6 +304,11 @@ func (c *Client) GetClaudeKeys() ([]map[string]any, error) {
 // GetCodexKeys fetches Codex API keys.
 func (c *Client) GetCodexKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/codex-api-key", "codex-api-key")
+}
+
+// GetXAIKeys fetches xAI API keys.
+func (c *Client) GetXAIKeys() ([]map[string]any, error) {
+	return c.getWrappedKeyList("/v0/management/xai-api-key", "xai-api-key")
 }
 
 // GetVertexKeys fetches Vertex API keys.
@@ -368,6 +374,25 @@ func (c *Client) GetAuthStatus(state string) (string, string, error) {
 	status := getString(wrapper, "status")
 	errMsg := getString(wrapper, "error")
 	return status, errMsg, nil
+}
+
+// CancelAuthSession cancels a pending OAuth session on the management server.
+func (c *Client) CancelAuthSession(state string) error {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return nil
+	}
+	query := url.Values{}
+	query.Set("state", state)
+	path := "/v0/management/oauth-session?" + query.Encode()
+	_, code, err := c.doRequest("DELETE", path, nil)
+	if err != nil {
+		return err
+	}
+	if code >= 400 {
+		return fmt.Errorf("HTTP %d", code)
+	}
+	return nil
 }
 
 // ----- Config field update methods -----

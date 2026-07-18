@@ -147,6 +147,9 @@ func websocketDownstreamSessionKey(req *http.Request) string {
 			return sessionID
 		}
 	}
+	if sessionID := strings.TrimSpace(req.Header.Get("Session-Id")); sessionID != "" {
+		return sessionID
+	}
 	if sessionID := strings.TrimSpace(req.Header.Get("Session_id")); sessionID != "" {
 		return sessionID
 	}
@@ -300,12 +303,12 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 				continue
 			}
 
-			if allowOrphanOutputs {
+			if _, ok := callPresent[callID]; ok {
 				filtered = append(filtered, item)
 				continue
 			}
 
-			if _, ok := callPresent[callID]; ok {
+			if allowOrphanOutputs {
 				filtered = append(filtered, item)
 				continue
 			}
@@ -337,6 +340,11 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 		}
 
 		if _, ok := outputPresent[callID]; ok {
+			filtered = append(filtered, item)
+			continue
+		}
+
+		if allowOrphanOutputs {
 			filtered = append(filtered, item)
 			continue
 		}

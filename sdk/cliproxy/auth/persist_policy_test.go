@@ -28,6 +28,13 @@ func TestWithSkipPersist_DisablesUpdatePersistence(t *testing.T) {
 		Metadata: map[string]any{"type": "antigravity"},
 	}
 
+	if _, err := mgr.Register(WithSkipPersist(context.Background()), auth); err != nil {
+		t.Fatalf("Register(skipPersist) returned error: %v", err)
+	}
+	if got := store.saveCount.Load(); got != 0 {
+		t.Fatalf("expected 0 Save calls, got %d", got)
+	}
+
 	if _, err := mgr.Update(context.Background(), auth); err != nil {
 		t.Fatalf("Update returned error: %v", err)
 	}
@@ -58,5 +65,29 @@ func TestWithSkipPersist_DisablesRegisterPersistence(t *testing.T) {
 	}
 	if got := store.saveCount.Load(); got != 0 {
 		t.Fatalf("expected 0 Save calls, got %d", got)
+	}
+}
+
+func TestPersist_SkipsConfigAPIKeyAuth(t *testing.T) {
+	store := &countingStore{}
+	mgr := NewManager(store, nil, nil)
+	auth := &Auth{
+		ID:       "codex:apikey:abc",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key": "secret",
+			"source":  "config:codex[abc]",
+		},
+		Metadata: map[string]any{"disable_cooling": true},
+	}
+	if _, err := mgr.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if got := store.saveCount.Load(); got != 0 {
+		t.Fatalf("expected 0 Save calls for config api key, got %d", got)
+	}
+	mgr.MarkResult(context.Background(), Result{AuthID: auth.ID, Provider: "codex", Model: "gpt-5", Success: true})
+	if got := store.saveCount.Load(); got != 0 {
+		t.Fatalf("expected MarkResult to skip persist for config api key, got %d Save calls", got)
 	}
 }

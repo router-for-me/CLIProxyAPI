@@ -1,12 +1,16 @@
 package helps
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 )
 
 type sessionIDCacheEntry struct {
@@ -19,6 +23,16 @@ var (
 	sessionIDCacheMu          sync.RWMutex
 	sessionIDCacheCleanupOnce sync.Once
 )
+
+type claudeIDKVClient interface {
+	KVGet(ctx context.Context, key string) ([]byte, bool, error)
+	KVSetNX(ctx context.Context, key string, value []byte, ttl time.Duration) (bool, error)
+	KVExpire(ctx context.Context, key string, ttl time.Duration) (bool, error)
+}
+
+var currentClaudeIDKVClient = func() (claudeIDKVClient, bool, error) {
+	return homekv.CurrentKVClient()
+}
 
 const (
 	sessionIDTTL                = time.Hour
@@ -53,8 +67,46 @@ func sessionIDCacheKey(apiKey string) string {
 
 // CachedSessionID returns a stable session UUID per apiKey, refreshing the TTL on each access.
 func CachedSessionID(apiKey string) string {
+	value, errValue := CachedSessionIDRequired(context.Background(), apiKey)
+	if errValue == nil && value != "" {
+		return value
+	}
+	return uuid.New().String()
+}
+
+// CachedSessionIDRequired returns a stable session UUID per apiKey for request-time paths.
+func CachedSessionIDRequired(ctx context.Context, apiKey string) (string, error) {
 	if apiKey == "" {
-		return uuid.New().String()
+		return uuid.New().String(), nil
+	}
+	client, homeMode, errClient := currentClaudeIDKVClient()
+	if homeMode {
+		if errClient != nil {
+			return "", errClient
+		}
+		key := claudeSessionIDKVKey(apiKey)
+		raw, found, errGet := client.KVGet(ctx, key)
+		if errGet != nil {
+			return "", errGet
+		}
+		if found && strings.TrimSpace(string(raw)) != "" {
+			if _, errExpire := client.KVExpire(ctx, key, sessionIDTTL); errExpire != nil {
+				return "", errExpire
+			}
+			return strings.TrimSpace(string(raw)), nil
+		}
+		newID := uuid.New().String()
+		if _, errSet := client.KVSetNX(ctx, key, []byte(newID), sessionIDTTL); errSet != nil {
+			return "", errSet
+		}
+		raw, found, errGet = client.KVGet(ctx, key)
+		if errGet != nil {
+			return "", errGet
+		}
+		if found && strings.TrimSpace(string(raw)) != "" {
+			return strings.TrimSpace(string(raw)), nil
+		}
+		return "", fmt.Errorf("home kv session id missing after set")
 	}
 
 	sessionIDCacheCleanupOnce.Do(startSessionIDCacheCleanup)
@@ -73,7 +125,7 @@ func CachedSessionID(apiKey string) string {
 			entry.expire = now.Add(sessionIDTTL)
 			sessionIDCache[key] = entry
 			sessionIDCacheMu.Unlock()
-			return entry.value
+			return entry.value, nil
 		}
 		sessionIDCacheMu.Unlock()
 	}
@@ -88,5 +140,9 @@ func CachedSessionID(apiKey string) string {
 	entry.expire = now.Add(sessionIDTTL)
 	sessionIDCache[key] = entry
 	sessionIDCacheMu.Unlock()
-	return entry.value
+	return entry.value, nil
+}
+
+func claudeSessionIDKVKey(apiKey string) string {
+	return "cpa:claude:session-id:" + homekv.HashKeyPart(apiKey)
 }

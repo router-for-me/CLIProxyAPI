@@ -136,14 +136,42 @@ func TestGetAvailableModelsReturnsClonedSupportedParameters(t *testing.T) {
 }
 
 func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
-	first := LookupModelInfo("glm-4.6")
+	first := LookupModelInfo("claude-sonnet-4-6")
 	if first == nil || first.Thinking == nil || len(first.Thinking.Levels) == 0 {
 		t.Fatalf("expected static model with thinking levels, got %+v", first)
 	}
 	first.Thinking.Levels[0] = "mutated"
 
-	second := LookupModelInfo("glm-4.6")
+	second := LookupModelInfo("claude-sonnet-4-6")
 	if second == nil || second.Thinking == nil || len(second.Thinking.Levels) == 0 || second.Thinking.Levels[0] == "mutated" {
 		t.Fatalf("expected static lookup clone, got %+v", second)
+	}
+}
+
+func TestLookupModelInfoIncludesClaudeSonnet5(t *testing.T) {
+	model := LookupModelInfo("claude-sonnet-5")
+	if model == nil {
+		t.Fatal("expected Claude Sonnet 5 static model")
+	}
+	if model.Type != "claude" {
+		t.Fatalf("Claude Sonnet 5 type = %q, want claude", model.Type)
+	}
+	if model.ContextLength != 1000000 {
+		t.Fatalf("Claude Sonnet 5 context length = %d, want 1000000", model.ContextLength)
+	}
+	if model.MaxCompletionTokens != 128000 {
+		t.Fatalf("Claude Sonnet 5 max completion tokens = %d, want 128000", model.MaxCompletionTokens)
+	}
+	if model.Thinking == nil || !model.Thinking.ZeroAllowed || !model.Thinking.DynamicAllowed || model.Thinking.Min != 0 || model.Thinking.Max != 0 {
+		t.Fatalf("expected Claude Sonnet 5 dynamic level-only thinking with zero allowed, got %+v", model.Thinking)
+	}
+	expectedLevels := []string{"low", "medium", "high", "xhigh", "max"}
+	if len(model.Thinking.Levels) != len(expectedLevels) {
+		t.Fatalf("Claude Sonnet 5 thinking levels = %+v, want %+v", model.Thinking.Levels, expectedLevels)
+	}
+	for i, level := range expectedLevels {
+		if model.Thinking.Levels[i] != level {
+			t.Fatalf("Claude Sonnet 5 thinking levels = %+v, want %+v", model.Thinking.Levels, expectedLevels)
+		}
 	}
 }

@@ -1,0 +1,93 @@
+package home
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
+)
+
+type recordingPluginStatusClient struct {
+	payload []byte
+	err     error
+}
+
+func (c *recordingPluginStatusClient) RPushPluginStatus(ctx context.Context, payload []byte) error {
+	c.payload = append([]byte(nil), payload...)
+	return c.err
+}
+
+func TestReportPluginStatusPushesNodeReport(t *testing.T) {
+	client := &recordingPluginStatusClient{}
+	report := homeplugins.SyncReport{
+		Task:    "plugin-sync",
+		Status:  "success",
+		OK:      true,
+		Plugins: []homeplugins.PluginInstallStatus{{ID: "sample", InstallStatus: "installed"}},
+	}
+
+	if errReport := ReportPluginStatus(context.Background(), client, " node-1 ", report); errReport != nil {
+		t.Fatalf("ReportPluginStatus() error = %v", errReport)
+	}
+	var payload homeplugins.SyncReport
+	if errUnmarshal := json.Unmarshal(client.payload, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal payload: %v", errUnmarshal)
+	}
+	if payload.NodeID != "node-1" || !payload.OK || len(payload.Plugins) != 1 {
+		t.Fatalf("payload = %+v, want node report", payload)
+	}
+	if payload.UpdatedAt.IsZero() {
+		t.Fatal("payload UpdatedAt is zero")
+	}
+}
+
+func TestReportPluginStatusPushesEmptyReport(t *testing.T) {
+	client := &recordingPluginStatusClient{}
+	report := homeplugins.SyncReport{
+		Task:    "plugin-sync",
+		Status:  "success",
+		OK:      true,
+		Plugins: []homeplugins.PluginInstallStatus{},
+	}
+
+	if errReport := ReportPluginStatus(context.Background(), client, "node-1", report); errReport != nil {
+		t.Fatalf("ReportPluginStatus() error = %v", errReport)
+	}
+	var payload homeplugins.SyncReport
+	if errUnmarshal := json.Unmarshal(client.payload, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal payload: %v", errUnmarshal)
+	}
+	if payload.NodeID != "node-1" || len(payload.Plugins) != 0 {
+		t.Fatalf("payload = %+v, want empty node report", payload)
+	}
+}
+
+func TestReportPluginStatusRequiresNodeID(t *testing.T) {
+	client := &recordingPluginStatusClient{}
+	report := homeplugins.SyncReport{
+		Plugins: []homeplugins.PluginInstallStatus{{ID: "sample", InstallStatus: "failed"}},
+	}
+
+	errReport := ReportPluginStatus(context.Background(), client, " ", report)
+	if errReport == nil || !strings.Contains(errReport.Error(), "node id") {
+		t.Fatalf("ReportPluginStatus() error = %v, want node id error", errReport)
+	}
+	if len(client.payload) != 0 {
+		t.Fatalf("client payload = %s, want none", client.payload)
+	}
+}
+
+func TestReportPluginStatusPropagatesPushError(t *testing.T) {
+	client := &recordingPluginStatusClient{err: errors.New("push failed")}
+	report := homeplugins.SyncReport{
+		Plugins: []homeplugins.PluginInstallStatus{{ID: "sample", InstallStatus: "installed"}},
+	}
+
+	errReport := ReportPluginStatus(context.Background(), client, "node-1", report)
+	if !errors.Is(errReport, client.err) {
+		t.Fatalf("ReportPluginStatus() error = %v, want push failed", errReport)
+	}
+}

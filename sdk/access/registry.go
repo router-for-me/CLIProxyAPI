@@ -21,9 +21,10 @@ type Result struct {
 }
 
 var (
-	registryMu sync.RWMutex
-	registry   = make(map[string]Provider)
-	order      []string
+	registryMu        sync.RWMutex
+	registry          = make(map[string]Provider)
+	order             []string
+	exclusiveProvider string
 )
 
 // RegisterProvider registers a pre-built provider instance for a given type identifier.
@@ -63,12 +64,33 @@ func UnregisterProvider(typ string) {
 	registryMu.Unlock()
 }
 
+// SetExclusiveProvider restricts RegisteredProviders to a single provider key when present.
+func SetExclusiveProvider(typ string) {
+	normalizedType := strings.TrimSpace(typ)
+	registryMu.Lock()
+	exclusiveProvider = normalizedType
+	registryMu.Unlock()
+}
+
+// ClearExclusiveProvider removes any active provider restriction.
+func ClearExclusiveProvider() {
+	registryMu.Lock()
+	exclusiveProvider = ""
+	registryMu.Unlock()
+}
+
 // RegisteredProviders returns the global provider instances in registration order.
 func RegisteredProviders() []Provider {
 	registryMu.RLock()
 	if len(order) == 0 {
 		registryMu.RUnlock()
 		return nil
+	}
+	if exclusiveProvider != "" {
+		if provider, exists := registry[exclusiveProvider]; exists && provider != nil {
+			registryMu.RUnlock()
+			return []Provider{provider}
+		}
 	}
 	providers := make([]Provider, 0, len(order))
 	for _, providerType := range order {

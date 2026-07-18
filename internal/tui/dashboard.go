@@ -22,14 +22,12 @@ type dashboardModel struct {
 
 	// Cached data for re-rendering on locale change
 	lastConfig    map[string]any
-	lastUsage     map[string]any
 	lastAuthFiles []map[string]any
 	lastAPIKeys   []string
 }
 
 type dashboardDataMsg struct {
 	config    map[string]any
-	usage     map[string]any
 	authFiles []map[string]any
 	apiKeys   []string
 	err       error
@@ -47,25 +45,24 @@ func (m dashboardModel) Init() tea.Cmd {
 
 func (m dashboardModel) fetchData() tea.Msg {
 	cfg, cfgErr := m.client.GetConfig()
-	usage, usageErr := m.client.GetUsage()
 	authFiles, authErr := m.client.GetAuthFiles()
 	apiKeys, keysErr := m.client.GetAPIKeys()
 
 	var err error
-	for _, e := range []error{cfgErr, usageErr, authErr, keysErr} {
+	for _, e := range []error{cfgErr, authErr, keysErr} {
 		if e != nil {
 			err = e
 			break
 		}
 	}
-	return dashboardDataMsg{config: cfg, usage: usage, authFiles: authFiles, apiKeys: apiKeys, err: err}
+	return dashboardDataMsg{config: cfg, authFiles: authFiles, apiKeys: apiKeys, err: err}
 }
 
 func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case localeChangedMsg:
 		// Re-render immediately with cached data using new locale
-		m.content = m.renderDashboard(m.lastConfig, m.lastUsage, m.lastAuthFiles, m.lastAPIKeys)
+		m.content = m.renderDashboard(m.lastConfig, m.lastAuthFiles, m.lastAPIKeys)
 		m.viewport.SetContent(m.content)
 		// Also fetch fresh data in background
 		return m, m.fetchData
@@ -78,11 +75,10 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			m.err = nil
 			// Cache data for locale switching
 			m.lastConfig = msg.config
-			m.lastUsage = msg.usage
 			m.lastAuthFiles = msg.authFiles
 			m.lastAPIKeys = msg.apiKeys
 
-			m.content = m.renderDashboard(msg.config, msg.usage, msg.authFiles, msg.apiKeys)
+			m.content = m.renderDashboard(msg.config, msg.authFiles, msg.apiKeys)
 		}
 		m.viewport.SetContent(m.content)
 		return m, nil
@@ -121,7 +117,7 @@ func (m dashboardModel) View() string {
 	return m.viewport.View()
 }
 
-func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []map[string]any, apiKeys []string) string {
+func (m dashboardModel) renderDashboard(cfg map[string]any, authFiles []map[string]any, apiKeys []string) string {
 	var sb strings.Builder
 
 	sb.WriteString(titleStyle.Render(T("dashboard_title")))
@@ -138,7 +134,7 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 	// ━━━ Stats Cards ━━━
 	cardWidth := 25
 	if m.width > 0 {
-		cardWidth = (m.width - 6) / 4
+		cardWidth = (m.width - 2) / 2
 		if cardWidth < 18 {
 			cardWidth = 18
 		}
@@ -173,34 +169,7 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s (%d %s)", T("auth_files_label"), activeAuth, T("active_suffix"))),
 	))
 
-	// Card 3: Total Requests
-	totalReqs := int64(0)
-	successReqs := int64(0)
-	failedReqs := int64(0)
-	totalTokens := int64(0)
-	if usage != nil {
-		if usageMap, ok := usage["usage"].(map[string]any); ok {
-			totalReqs = int64(getFloat(usageMap, "total_requests"))
-			successReqs = int64(getFloat(usageMap, "success_count"))
-			failedReqs = int64(getFloat(usageMap, "failure_count"))
-			totalTokens = int64(getFloat(usageMap, "total_tokens"))
-		}
-	}
-	card3 := cardStyle.Render(fmt.Sprintf(
-		"%s\n%s",
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(fmt.Sprintf("📈 %d", totalReqs)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s (✓%d ✗%d)", T("total_requests"), successReqs, failedReqs)),
-	))
-
-	// Card 4: Total Tokens
-	tokenStr := formatLargeNumber(totalTokens)
-	card4 := cardStyle.Render(fmt.Sprintf(
-		"%s\n%s",
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("170")).Render(fmt.Sprintf("🔤 %s", tokenStr)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render(T("total_tokens")),
-	))
-
-	sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, card1, " ", card2, " ", card3, " ", card4))
+	sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, card1, " ", card2))
 	sb.WriteString("\n\n")
 
 	// ━━━ Current Config ━━━
@@ -257,38 +226,6 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 	}
 
 	sb.WriteString("\n")
-
-	// ━━━ Per-Model Usage ━━━
-	if usage != nil {
-		if usageMap, ok := usage["usage"].(map[string]any); ok {
-			if apis, ok := usageMap["apis"].(map[string]any); ok && len(apis) > 0 {
-				sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(T("model_stats")))
-				sb.WriteString("\n")
-				sb.WriteString(strings.Repeat("─", minInt(m.width, 60)))
-				sb.WriteString("\n")
-
-				header := fmt.Sprintf("  %-40s %10s %12s", T("model"), T("requests"), T("tokens"))
-				sb.WriteString(tableHeaderStyle.Render(header))
-				sb.WriteString("\n")
-
-				for _, apiSnap := range apis {
-					if apiMap, ok := apiSnap.(map[string]any); ok {
-						if models, ok := apiMap["models"].(map[string]any); ok {
-							for model, v := range models {
-								if stats, ok := v.(map[string]any); ok {
-									reqs := int64(getFloat(stats, "total_requests"))
-									toks := int64(getFloat(stats, "total_tokens"))
-									row := fmt.Sprintf("  %-40s %10d %12s", truncate(model, 40), reqs, formatLargeNumber(toks))
-									sb.WriteString(tableCellStyle.Render(row))
-									sb.WriteString("\n")
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
 
 	return sb.String()
 }

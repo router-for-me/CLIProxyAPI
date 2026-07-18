@@ -57,10 +57,90 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert input array to messages
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		input.ForEach(func(_, item gjson.Result) bool {
+		inputItems := input.Array()
+		outputCallIDs := make(map[string]struct{})
+		for _, item := range inputItems {
+			itemType := item.Get("type").String()
+			if itemType != "function_call_output" && itemType != "custom_tool_call_output" {
+				continue
+			}
+			callID := strings.TrimSpace(item.Get("call_id").String())
+			if callID == "" {
+				continue
+			}
+			outputCallIDs[callID] = struct{}{}
+		}
+
+		pendingToolCalls := make([]interface{}, 0)
+		pendingToolCallIDs := make([]string, 0)
+		pendingReasoningContent := ""
+		awaitingToolOutputs := make(map[string]struct{})
+		deferredMessages := make([][]byte, 0)
+
+		takePendingReasoningContent := func() string {
+			reasoningContent := pendingReasoningContent
+			pendingReasoningContent = ""
+			return reasoningContent
+		}
+		flushPendingToolCalls := func() {
+			if len(pendingToolCalls) == 0 {
+				return
+			}
+			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
+			assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
+			if reasoningContent := takePendingReasoningContent(); reasoningContent != "" {
+				assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)
+			}
+			out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
+			for _, id := range pendingToolCallIDs {
+				if strings.TrimSpace(id) == "" {
+					continue
+				}
+				awaitingToolOutputs[id] = struct{}{}
+			}
+			pendingToolCalls = pendingToolCalls[:0]
+			pendingToolCallIDs = pendingToolCallIDs[:0]
+		}
+		flushDeferredMessages := func() {
+			for _, message := range deferredMessages {
+				out, _ = sjson.SetRawBytes(out, "messages.-1", message)
+			}
+			deferredMessages = deferredMessages[:0]
+		}
+		hasAwaitingToolOutput := func() bool {
+			for id := range awaitingToolOutputs {
+				if _, ok := outputCallIDs[id]; ok {
+					return true
+				}
+			}
+			return false
+		}
+		appendRegularMessage := func(message []byte) {
+			// Keep tool-call adjacency strict for providers that require
+			// assistant(tool_calls) -> tool(tool_call_id) with no message in between.
+			if hasAwaitingToolOutput() {
+				deferredMessages = append(deferredMessages, message)
+				return
+			}
+			out, _ = sjson.SetRawBytes(out, "messages.-1", message)
+		}
+		appendPendingReasoningMessage := func() {
+			reasoningContent := takePendingReasoningContent()
+			if reasoningContent == "" {
+				return
+			}
+			message := []byte(`{"role":"assistant","content":"","reasoning_content":""}`)
+			message, _ = sjson.SetBytes(message, "reasoning_content", reasoningContent)
+			appendRegularMessage(message)
+		}
+
+		for _, item := range inputItems {
 			itemType := item.Get("type").String()
 			if itemType == "" && item.Get("role").String() != "" {
 				itemType = "message"
+			}
+			if itemType != "function_call" && itemType != "custom_tool_call" {
+				flushPendingToolCalls()
 			}
 
 			switch itemType {
@@ -69,6 +149,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				role := item.Get("role").String()
 				if role == "developer" {
 					role = "user"
+				}
+				if role != "assistant" {
+					appendPendingReasoningMessage()
 				}
 				message := []byte(`{"role":"","content":[]}`)
 				message, _ = sjson.SetBytes(message, "role", role)
@@ -93,6 +176,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 							imageURL := contentItem.Get("image_url").String()
 							contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 							contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
+							if detail := contentItem.Get("detail"); detail.Exists() {
+								contentPart, _ = sjson.SetBytes(contentPart, "image_url.detail", detail.String())
+							}
 							message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
 						}
 						return true
@@ -109,12 +195,30 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					message, _ = sjson.SetBytes(message, "content", content.String())
 				}
 
-				out, _ = sjson.SetRawBytes(out, "messages.-1", message)
+				if role == "assistant" {
+					reasoningContent := item.Get("reasoning_content").String()
+					if reasoningContent == "" {
+						reasoningContent = takePendingReasoningContent()
+					} else {
+						pendingReasoningContent = ""
+					}
+					if reasoningContent != "" {
+						message, _ = sjson.SetBytes(message, "reasoning_content", reasoningContent)
+					}
+				}
+
+				appendRegularMessage(message)
+
+			case "reasoning":
+				reasoningContent := collectOpenAIResponsesReasoningContent(item)
+				if pendingReasoningContent == "" {
+					pendingReasoningContent = reasoningContent
+				} else {
+					pendingReasoningContent += reasoningContent
+				}
 
 			case "function_call":
-				// Handle function call conversion to assistant message with tool_calls
-				assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
-
+				// Buffer consecutive function calls and emit them as one assistant message.
 				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 
 				if callId := item.Get("call_id"); callId.Exists() {
@@ -128,16 +232,19 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if arguments := item.Get("arguments"); arguments.Exists() {
 					toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments.String())
 				}
-
-				assistantMessage, _ = sjson.SetRawBytes(assistantMessage, "tool_calls.0", toolCall)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
+				pendingToolCalls = append(pendingToolCalls, gjson.ParseBytes(toolCall).Value())
+				if callID := strings.TrimSpace(item.Get("call_id").String()); callID != "" {
+					pendingToolCallIDs = append(pendingToolCallIDs, callID)
+				}
 
 			case "function_call_output":
 				// Handle function call output conversion to tool message
 				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
+				callID := ""
 
 				if callId := item.Get("call_id"); callId.Exists() {
-					toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callId.String())
+					callID = strings.TrimSpace(callId.String())
+					toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
 				}
 
 				if output := item.Get("output"); output.Exists() {
@@ -145,10 +252,45 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 				out, _ = sjson.SetRawBytes(out, "messages.-1", toolMessage)
+				if callID != "" {
+					delete(awaitingToolOutputs, callID)
+				}
+				if len(awaitingToolOutputs) == 0 && len(deferredMessages) > 0 {
+					flushDeferredMessages()
+				}
+
+			case "custom_tool_call":
+				// Codex freeform tool call replay: wrap the raw input so it
+				// matches the {"input": string} function shape used when
+				// converting custom tool definitions.
+				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
+				toolCall, _ = sjson.SetBytes(toolCall, "id", item.Get("call_id").String())
+				toolCall, _ = sjson.SetBytes(toolCall, "function.name", item.Get("name").String())
+				wrappedArgs, _ := sjson.SetBytes([]byte(`{"input":""}`), "input", item.Get("input").String())
+				toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", string(wrappedArgs))
+				pendingToolCalls = append(pendingToolCalls, gjson.ParseBytes(toolCall).Value())
+				if callID := strings.TrimSpace(item.Get("call_id").String()); callID != "" {
+					pendingToolCallIDs = append(pendingToolCallIDs, callID)
+				}
+
+			case "custom_tool_call_output":
+				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
+				callID := strings.TrimSpace(item.Get("call_id").String())
+				toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
+				toolMessage, _ = sjson.SetBytes(toolMessage, "content", responsesToolOutputText(item.Get("output")))
+				out, _ = sjson.SetRawBytes(out, "messages.-1", toolMessage)
+				if callID != "" {
+					delete(awaitingToolOutputs, callID)
+				}
+				if len(awaitingToolOutputs) == 0 && len(deferredMessages) > 0 {
+					flushDeferredMessages()
+				}
 			}
 
-			return true
-		})
+		}
+		flushPendingToolCalls()
+		appendPendingReasoningMessage()
+		flushDeferredMessages()
 	} else if input.Type == gjson.String {
 		msg := []byte(`{}`)
 		msg, _ = sjson.SetBytes(msg, "role", "user")
@@ -156,46 +298,33 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 	}
 
-	// Convert tools from responses format to chat completions format
-	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		var chatCompletionsTools []interface{}
-
+	// Convert tools from responses format to chat completions format.
+	// Codex Desktop (Responses Lite) delivers tool definitions through an
+	// "additional_tools" input item instead of the top-level "tools" field,
+	// so merge both sources.
+	var chatCompletionsTools []interface{}
+	appendChatTools := func(tools gjson.Result) {
+		if !tools.Exists() || !tools.IsArray() {
+			return
+		}
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			// Built-in tools (e.g. {"type":"web_search"}) are already compatible with the Chat Completions schema.
-			// Only function tools need structural conversion because Chat Completions nests details under "function".
-			toolType := tool.Get("type").String()
-			if toolType != "" && toolType != "function" && tool.IsObject() {
-				// Almost all providers lack built-in tools, so we just ignore them.
-				// chatCompletionsTools = append(chatCompletionsTools, tool.Value())
-				return true
+			for _, chatTool := range convertResponsesToolToOpenAIChatTools(tool) {
+				chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
 			}
-
-			chatTool := []byte(`{"type":"function","function":{}}`)
-
-			// Convert tool structure from responses format to chat completions format
-			function := []byte(`{"name":"","description":"","parameters":{}}`)
-
-			if name := tool.Get("name"); name.Exists() {
-				function, _ = sjson.SetBytes(function, "name", name.String())
-			}
-
-			if description := tool.Get("description"); description.Exists() {
-				function, _ = sjson.SetBytes(function, "description", description.String())
-			}
-
-			if parameters := tool.Get("parameters"); parameters.Exists() {
-				function, _ = sjson.SetRawBytes(function, "parameters", []byte(parameters.Raw))
-			}
-
-			chatTool, _ = sjson.SetRawBytes(chatTool, "function", function)
-			chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
-
 			return true
 		})
-
-		if len(chatCompletionsTools) > 0 {
-			out, _ = sjson.SetBytes(out, "tools", chatCompletionsTools)
-		}
+	}
+	appendChatTools(root.Get("tools"))
+	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("type").String() == "additional_tools" {
+				appendChatTools(item.Get("tools"))
+			}
+			return true
+		})
+	}
+	if len(chatCompletionsTools) > 0 {
+		out, _ = sjson.SetBytes(out, "tools", chatCompletionsTools)
 	}
 
 	if reasoningEffort := root.Get("reasoning.effort"); reasoningEffort.Exists() {
@@ -207,8 +336,25 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert tool_choice if present
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetBytes(out, "tool_choice", toolChoice.String())
+		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
 	}
 
 	return out
+}
+
+func collectOpenAIResponsesReasoningContent(item gjson.Result) string {
+	var reasoningText strings.Builder
+	if summary := item.Get("summary"); summary.Exists() && summary.IsArray() {
+		summary.ForEach(func(_, summaryItem gjson.Result) bool {
+			if summaryItem.Get("type").String() != "summary_text" {
+				return true
+			}
+			reasoningText.WriteString(summaryItem.Get("text").String())
+			return true
+		})
+	}
+	if reasoningText.Len() == 0 {
+		return "[reasoning unavailable]"
+	}
+	return reasoningText.String()
 }

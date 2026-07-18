@@ -1,6 +1,6 @@
 // Package antigravity implements thinking configuration for Antigravity API format.
 //
-// Antigravity uses request.generationConfig.thinkingConfig.* path (same as gemini-cli)
+// Antigravity uses request.generationConfig.thinkingConfig.* path.
 // but requires additional normalization for Claude models:
 //   - Ensure thinking budget < max_tokens
 //   - Remove thinkingConfig if budget < minimum allowed
@@ -9,8 +9,8 @@ package antigravity
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -102,6 +102,10 @@ func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) 
 	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.include_thoughts")
 
 	if config.Mode == thinking.ModeNone {
+		if config.Budget == 0 && config.Level == "" {
+			result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig")
+			return result, nil
+		}
 		result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", false)
 		if config.Level != "" {
 			result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingLevel", string(config.Level))

@@ -176,6 +176,215 @@ func TestToolCallWithContent(t *testing.T) {
 	}
 }
 
+func TestToolCallOutputWithMultimodalContent(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Show me the generated result."},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{
+						"id": "call_output_1",
+						"type": "function",
+						"function": {"name": "render_output", "arguments": "{}"}
+					}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_output_1",
+				"content": [
+					{"type":"text","text":"Rendered result attached."},
+					{"type":"image_url","image_url":{"url":"https://example.com/generated.png","detail":"high"}},
+					{"type":"image_url","image_url":{"file_id":"file-img-123"}},
+					{"type":"file","file":{"file_id":"file-doc-123","filename":"doc.pdf"}},
+					{"type":"file","file":{"file_data":"SGVsbG8=","filename":"inline.txt"}},
+					{"type":"file","file":{"file_url":"https://example.com/report.pdf","filename":"report.pdf"}}
+				]
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {"name": "render_output", "description": "Render output", "parameters": {"type": "object", "properties": {}}}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	output := gjson.Get(result, "input.2.output")
+	if !output.IsArray() {
+		t.Fatalf("expected tool output to be an array, got: %s", output.Raw)
+	}
+
+	parts := output.Array()
+	if len(parts) != 6 {
+		t.Fatalf("expected 6 output parts, got %d: %s", len(parts), output.Raw)
+	}
+	if parts[0].Get("type").String() != "input_text" || parts[0].Get("text").String() != "Rendered result attached." {
+		t.Fatalf("part 0: expected input_text with rendered text, got %s", parts[0].Raw)
+	}
+	if parts[1].Get("type").String() != "input_image" {
+		t.Fatalf("part 1: expected input_image, got %s", parts[1].Raw)
+	}
+	if parts[1].Get("image_url").String() != "https://example.com/generated.png" {
+		t.Errorf("part 1: unexpected image_url %s", parts[1].Get("image_url").String())
+	}
+	if parts[1].Get("detail").String() != "high" {
+		t.Errorf("part 1: unexpected detail %s", parts[1].Get("detail").String())
+	}
+	if parts[2].Get("type").String() != "input_image" || parts[2].Get("file_id").String() != "file-img-123" {
+		t.Fatalf("part 2: expected file_id-backed input_image, got %s", parts[2].Raw)
+	}
+	if parts[3].Get("type").String() != "input_file" || parts[3].Get("file_id").String() != "file-doc-123" {
+		t.Fatalf("part 3: expected file_id-backed input_file, got %s", parts[3].Raw)
+	}
+	if parts[3].Get("filename").String() != "doc.pdf" {
+		t.Errorf("part 3: unexpected filename %s", parts[3].Get("filename").String())
+	}
+	if parts[4].Get("type").String() != "input_file" || parts[4].Get("file_data").String() != "SGVsbG8=" {
+		t.Fatalf("part 4: expected file_data-backed input_file, got %s", parts[4].Raw)
+	}
+	if parts[5].Get("type").String() != "input_file" || parts[5].Get("file_url").String() != "https://example.com/report.pdf" {
+		t.Fatalf("part 5: expected file_url-backed input_file, got %s", parts[5].Raw)
+	}
+}
+
+func TestToolCallOutputFallsBackForInvalidStructuredParts(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Check tool output."},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{"id": "call_invalid_parts", "type": "function", "function": {"name": "inspect", "arguments": "{}"}}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_invalid_parts",
+				"content": [
+					{"type":"image_url","image_url":{"detail":"low"}},
+					{"type":"file","file":{"filename":"orphan.txt"}},
+					{"type":"unknown_type","foo":"bar","nested":{"a":1}}
+				]
+			}
+		],
+		"tools": [
+			{"type": "function", "function": {"name": "inspect", "description": "Inspect", "parameters": {"type": "object", "properties": {}}}}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	parts := gjson.Get(result, "input.2.output").Array()
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 output parts, got %d: %s", len(parts), gjson.Get(result, "input.2.output").Raw)
+	}
+
+	expectedFallbacks := []string{
+		`{"type":"image_url","image_url":{"detail":"low"}}`,
+		`{"type":"file","file":{"filename":"orphan.txt"}}`,
+		`{"type":"unknown_type","foo":"bar","nested":{"a":1}}`,
+	}
+	for i, expectedFallback := range expectedFallbacks {
+		if parts[i].Get("type").String() != "input_text" {
+			t.Fatalf("part %d: expected input_text fallback, got %s", i, parts[i].Raw)
+		}
+		if parts[i].Get("text").String() != expectedFallback {
+			t.Fatalf("part %d: expected fallback %s, got %s", i, expectedFallback, parts[i].Get("text").String())
+		}
+	}
+}
+
+func TestToolCallOutputWithNonStringJSONContent(t *testing.T) {
+	tests := []struct {
+		name           string
+		content        string
+		expectedOutput string
+	}{
+		{name: "null", content: `null`, expectedOutput: `null`},
+		{name: "object", content: `{"status":"ok","count":2}`, expectedOutput: `{"status":"ok","count":2}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{
+				"model": "gpt-4o",
+				"messages": [
+					{"role": "user", "content": "Check tool output."},
+					{
+						"role": "assistant",
+						"content": null,
+						"tool_calls": [
+							{"id": "call_json", "type": "function", "function": {"name": "inspect", "arguments": "{}"}}
+						]
+					},
+					{
+						"role": "tool",
+						"tool_call_id": "call_json",
+						"content": ` + tt.content + `
+					}
+				],
+				"tools": [
+					{"type": "function", "function": {"name": "inspect", "description": "Inspect", "parameters": {"type": "object", "properties": {}}}}
+				]
+			}`)
+
+			out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+			result := string(out)
+
+			output := gjson.Get(result, "input.2.output")
+			if !output.Exists() {
+				t.Fatalf("expected output field to exist: %s", gjson.Get(result, "input.2").Raw)
+			}
+			if output.String() != tt.expectedOutput {
+				t.Fatalf("expected output %s, got %s", tt.expectedOutput, output.String())
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIRequestToCodexPreservesInputAudio(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.5",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "Transcribe this audio verbatim."},
+					{"type": "input_audio", "input_audio": {"data": "SUQzBA==", "format": "mp3"}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.5", input, true)
+	parts := gjson.GetBytes(out, "input.0.content").Array()
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 content parts, got %d: %s", len(parts), gjson.GetBytes(out, "input.0.content").Raw)
+	}
+	if parts[0].Get("type").String() != "input_text" || parts[0].Get("text").String() != "Transcribe this audio verbatim." {
+		t.Fatalf("part 0: expected input_text with prompt text, got %s", parts[0].Raw)
+	}
+	if parts[1].Get("type").String() != "input_audio" {
+		t.Fatalf("part 1: expected input_audio, got %s", parts[1].Raw)
+	}
+	if parts[1].Get("data").String() != "SUQzBA==" {
+		t.Fatalf("part 1: expected audio data to be preserved, got %s", parts[1].Get("data").String())
+	}
+	if parts[1].Get("format").String() != "mp3" {
+		t.Fatalf("part 1: expected audio format mp3, got %s", parts[1].Get("format").String())
+	}
+}
+
 // Parallel tool calls: assistant invokes 3 tools at once, all call_ids
 // and outputs must be translated and paired correctly.
 func TestMultipleToolCalls(t *testing.T) {
@@ -592,6 +801,273 @@ func TestCallIDsMatchBetweenCallAndOutput(t *testing.T) {
 	}
 	if funcOutputCount != 2 {
 		t.Errorf("expected 2 function_call_outputs, got %d", funcOutputCount)
+	}
+}
+
+func TestCustomToolCallHistory(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.6-sol",
+		"messages": [
+			{"role": "user", "content": "Update the specification."},
+			{
+				"role": "assistant",
+				"content": "I will update the file.",
+				"tool_calls": [
+					{
+						"id": "call_apply_patch",
+						"type": "custom",
+						"custom": {
+							"name": "apply_patch",
+							"input": "*** Begin Patch\n*** Add File: spec.md\n+done\n*** End Patch"
+						}
+					}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_apply_patch",
+				"content": "Added spec.md"
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "apply_patch",
+					"description": "Apply a freeform patch.",
+					"parameters": {
+						"type": "object",
+						"properties": {"input": {"type": "string"}},
+						"required": ["input"]
+					}
+				}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 4 {
+		t.Fatalf("expected 4 input items, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	}
+
+	customCall := items[2]
+	if customCall.Get("type").String() != "custom_tool_call" {
+		t.Fatalf("expected custom_tool_call, got %s", customCall.Raw)
+	}
+	if customCall.Get("call_id").String() != "call_apply_patch" {
+		t.Fatalf("expected custom call_id to be preserved, got %s", customCall.Raw)
+	}
+	if customCall.Get("name").String() != "apply_patch" {
+		t.Fatalf("expected custom tool name apply_patch, got %s", customCall.Raw)
+	}
+	if customCall.Get("input").String() != "*** Begin Patch\n*** Add File: spec.md\n+done\n*** End Patch" {
+		t.Fatalf("expected custom tool input to be preserved, got %s", customCall.Raw)
+	}
+
+	customOutput := items[3]
+	if customOutput.Get("type").String() != "custom_tool_call_output" {
+		t.Fatalf("expected custom_tool_call_output, got %s", customOutput.Raw)
+	}
+	if customOutput.Get("call_id").String() != "call_apply_patch" {
+		t.Fatalf("expected custom output call_id to be preserved, got %s", customOutput.Raw)
+	}
+	if customOutput.Get("output").String() != "Added spec.md" {
+		t.Fatalf("expected custom tool output to be preserved, got %s", customOutput.Raw)
+	}
+}
+
+func TestMixedToolCallHistoryPreservesCallFamilies(t *testing.T) {
+	input := []byte(`{
+		"messages": [
+			{"role":"user","content":"Run both tools."},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_function","type":"function","function":{"name":"lookup","arguments":"{}"}},
+				{"id":"call_custom","type":"custom","custom":{"name":"apply_patch","input":"patch"}}
+			]},
+			{"role":"tool","tool_call_id":"call_custom","content":"patched"},
+			{"role":"tool","tool_call_id":"call_function","content":"found"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 5 {
+		t.Fatalf("expected 5 input items, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	}
+
+	expectedTypes := []string{"message", "function_call", "custom_tool_call", "custom_tool_call_output", "function_call_output"}
+	for i, expectedType := range expectedTypes {
+		if got := items[i].Get("type").String(); got != expectedType {
+			t.Fatalf("item %d: expected type %s, got %s: %s", i, expectedType, got, items[i].Raw)
+		}
+	}
+	if got := items[3].Get("call_id").String(); got != "call_custom" {
+		t.Fatalf("expected custom output call_id call_custom, got %s", items[3].Raw)
+	}
+	if got := items[4].Get("call_id").String(); got != "call_function" {
+		t.Fatalf("expected function output call_id call_function, got %s", items[4].Raw)
+	}
+}
+
+func TestToolCallHistoryAllowsReusedCallIDAcrossRounds(t *testing.T) {
+	input := []byte(`{
+		"messages": [
+			{"role":"user","content":"Run the first tool."},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_reused","type":"function","function":{"name":"lookup","arguments":"{}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_reused","content":"found"},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_reused","type":"custom","custom":{"name":"apply_patch","input":"patch"}}
+			]},
+			{"role":"tool","tool_call_id":"call_reused","content":"patched"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 5 {
+		t.Fatalf("expected 5 input items, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	}
+	if got := items[2].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("expected first reused call output to remain function_call_output, got %s", items[2].Raw)
+	}
+	if got := items[4].Get("type").String(); got != "custom_tool_call_output" {
+		t.Fatalf("expected second reused call output to be custom_tool_call_output, got %s", items[4].Raw)
+	}
+}
+
+func TestCustomToolCallHistorySynthesizesMissingCallID(t *testing.T) {
+	input := []byte(`{
+		"messages": [
+			{"role":"tool","content":"orphan"},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"type":"custom","custom":{"name":"apply_patch","input":"patch"}}
+			]},
+			{"role":"tool","content":"patched"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 2 {
+		t.Fatalf("expected orphan output to be dropped and missing ID pair preserved, got %d items: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	}
+	if got := items[0].Get("type").String(); got != "custom_tool_call" {
+		t.Fatalf("expected custom_tool_call, got %s", items[0].Raw)
+	}
+	if got := items[1].Get("type").String(); got != "custom_tool_call_output" {
+		t.Fatalf("expected custom_tool_call_output, got %s", items[1].Raw)
+	}
+	callID := items[0].Get("call_id").String()
+	if callID == "" {
+		t.Fatalf("expected synthesized call_id, got %s", items[0].Raw)
+	}
+	if got := items[1].Get("call_id").String(); got != callID {
+		t.Fatalf("expected synthesized call_id %q on output, got %s", callID, items[1].Raw)
+	}
+}
+
+func TestToolCallHistoryClearsUnmatchedCallAtNewBatch(t *testing.T) {
+	input := []byte(`{
+		"messages": [
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_reused","type":"custom","custom":{"name":"apply_patch","input":"old patch"}}
+			]},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_reused","type":"function","function":{"name":"lookup","arguments":"{}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_reused","content":"found"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("expected two calls and one output, got %d items: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	}
+	if got := items[2].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("expected new batch output to match function call, got %s", items[2].Raw)
+	}
+}
+
+func TestToolCallOutputWithoutIDUsesPendingCall(t *testing.T) {
+	input := []byte(`{
+		"messages": [
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_explicit","type":"function","function":{"name":"lookup","arguments":"{}"}},
+				{"type":"custom","custom":{"name":"apply_patch","input":"patch"}}
+			]},
+			{"role":"tool","content":"found"},
+			{"role":"tool","content":"patched"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 4 {
+		t.Fatalf("expected two calls and two outputs, got %d items: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	}
+	if got := items[2].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("expected first empty-ID output to match function call, got %s", items[2].Raw)
+	}
+	if got := items[2].Get("call_id").String(); got != "call_explicit" {
+		t.Fatalf("expected explicit pending call_id, got %s", items[2].Raw)
+	}
+	if got := items[3].Get("type").String(); got != "custom_tool_call_output" {
+		t.Fatalf("expected second empty-ID output to match custom call, got %s", items[3].Raw)
+	}
+	if got := items[3].Get("call_id").String(); got == "" {
+		t.Fatalf("expected synthesized custom output call_id, got %s", items[3].Raw)
+	}
+}
+
+func TestAmbiguousDuplicateToolCallIDsAreDropped(t *testing.T) {
+	input := []byte(`{
+		"messages": [
+			{"role":"user","content":"Run both tools."},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_duplicate","type":"function","function":{"name":"lookup","arguments":"{}"}},
+				{"id":"call_duplicate","type":"custom","custom":{"name":"apply_patch","input":"patch"}}
+			]},
+			{"role":"tool","tool_call_id":"call_duplicate","content":"first"},
+			{"role":"tool","tool_call_id":"call_duplicate","content":"second"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 1 || items[0].Get("role").String() != "user" {
+		t.Fatalf("expected ambiguous calls and outputs to be dropped, got %s", gjson.GetBytes(out, "input").Raw)
+	}
+}
+
+func TestOrphanAndDuplicateToolCallOutputsAreDropped(t *testing.T) {
+	input := []byte(`{
+		"messages": [
+			{"role":"tool","tool_call_id":"call_orphan","content":"orphan"},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_custom","type":"custom","custom":{"name":"apply_patch","input":"patch"}}
+			]},
+			{"role":"tool","tool_call_id":"call_custom","content":"patched"},
+			{"role":"tool","tool_call_id":"call_custom","content":"duplicate"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 2 {
+		t.Fatalf("expected only the matched call and first output, got %d items: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	}
+	if got := items[0].Get("type").String(); got != "custom_tool_call" {
+		t.Fatalf("expected custom_tool_call, got %s", items[0].Raw)
+	}
+	if got := items[1].Get("type").String(); got != "custom_tool_call_output" {
+		t.Fatalf("expected custom_tool_call_output, got %s", items[1].Raw)
+	}
+	if got := items[1].Get("output").String(); got != "patched" {
+		t.Fatalf("expected first matched output to be preserved, got %s", items[1].Raw)
 	}
 }
 

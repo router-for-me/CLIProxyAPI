@@ -1,0 +1,29 @@
+services:
+  cli-proxy-api:
+    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
+    pull_policy: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-none}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    container_name: cli-proxy-api-cluster
+    environment:
+      HOME_JWT: ${HOME_JWT:-}
+    ports:
+      - "8317:8317"
+    volumes:
+      - ./home:/root/.cli-proxy-api
+      - ./logs:/CLIProxyAPI/logs
+    command: >
+      sh -eu -c '
+        if [ -z "$$HOME_JWT" ]; then
+          echo "HOME_JWT is required" >&2
+          exit 1
+        fi
+
+        exec ./CLIProxyAPI -home-jwt "$$HOME_JWT"
+      '
+    restart: unless-stopped

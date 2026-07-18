@@ -1,10 +1,15 @@
 package helps
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
+
+	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 )
 
 type userIDCacheEntry struct {
@@ -50,8 +55,46 @@ func userIDCacheKey(apiKey string) string {
 }
 
 func CachedUserID(apiKey string) string {
+	value, errValue := CachedUserIDRequired(context.Background(), apiKey)
+	if errValue == nil && value != "" {
+		return value
+	}
+	return generateFakeUserID()
+}
+
+// CachedUserIDRequired returns a stable fake user ID per apiKey for request-time paths.
+func CachedUserIDRequired(ctx context.Context, apiKey string) (string, error) {
 	if apiKey == "" {
-		return generateFakeUserID()
+		return generateFakeUserID(), nil
+	}
+	client, homeMode, errClient := currentClaudeIDKVClient()
+	if homeMode {
+		if errClient != nil {
+			return "", errClient
+		}
+		key := claudeUserIDKVKey(apiKey)
+		raw, found, errGet := client.KVGet(ctx, key)
+		if errGet != nil {
+			return "", errGet
+		}
+		if found && isValidUserID(strings.TrimSpace(string(raw))) {
+			if _, errExpire := client.KVExpire(ctx, key, userIDTTL); errExpire != nil {
+				return "", errExpire
+			}
+			return strings.TrimSpace(string(raw)), nil
+		}
+		newID := generateFakeUserID()
+		if _, errSet := client.KVSetNX(ctx, key, []byte(newID), userIDTTL); errSet != nil {
+			return "", errSet
+		}
+		raw, found, errGet = client.KVGet(ctx, key)
+		if errGet != nil {
+			return "", errGet
+		}
+		if found && isValidUserID(strings.TrimSpace(string(raw))) {
+			return strings.TrimSpace(string(raw)), nil
+		}
+		return "", fmt.Errorf("home kv user id missing after set")
 	}
 
 	userIDCacheCleanupOnce.Do(startUserIDCacheCleanup)
@@ -70,7 +113,7 @@ func CachedUserID(apiKey string) string {
 			entry.expire = now.Add(userIDTTL)
 			userIDCache[key] = entry
 			userIDCacheMu.Unlock()
-			return entry.value
+			return entry.value, nil
 		}
 		userIDCacheMu.Unlock()
 	}
@@ -85,5 +128,9 @@ func CachedUserID(apiKey string) string {
 	entry.expire = now.Add(userIDTTL)
 	userIDCache[key] = entry
 	userIDCacheMu.Unlock()
-	return entry.value
+	return entry.value, nil
+}
+
+func claudeUserIDKVKey(apiKey string) string {
+	return "cpa:claude:user-id:" + homekv.HashKeyPart(apiKey)
 }

@@ -15,10 +15,11 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/client"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 // gcInterval defines minimum time between garbage collection runs.
@@ -121,14 +122,14 @@ func (s *GitTokenStore) EnsureRepository() error {
 	authDir := filepath.Join(repoDir, "auths")
 	configDir := filepath.Join(repoDir, "config")
 	gitDir := filepath.Join(repoDir, ".git")
-	authMethod := s.gitAuth()
+	authMethod := s.gitClientOptions()
 	var initPaths []string
 	if _, err := os.Stat(gitDir); errors.Is(err, fs.ErrNotExist) {
 		if errMk := os.MkdirAll(repoDir, 0o700); errMk != nil {
 			s.dirLock.Unlock()
 			return fmt.Errorf("git token store: create repo dir: %w", errMk)
 		}
-		cloneOpts := &git.CloneOptions{Auth: authMethod, URL: s.remote}
+		cloneOpts := &git.CloneOptions{ClientOptions: authMethod, URL: s.remote}
 		if s.branch != "" {
 			cloneOpts.ReferenceName = plumbing.NewBranchReferenceName(s.branch)
 		}
@@ -209,7 +210,7 @@ func (s *GitTokenStore) EnsureRepository() error {
 				}
 			}
 		}
-		pullOpts := &git.PullOptions{Auth: authMethod, RemoteName: "origin"}
+		pullOpts := &git.PullOptions{ClientOptions: authMethod, RemoteName: "origin"}
 		if s.branch != "" {
 			pullOpts.ReferenceName = plumbing.NewBranchReferenceName(s.branch)
 		}
@@ -233,6 +234,10 @@ func (s *GitTokenStore) EnsureRepository() error {
 				return fmt.Errorf("git token store: pull: %w", errPull)
 			}
 		}
+	}
+	if err := disableGitCommitSigning(repoDir); err != nil {
+		s.dirLock.Unlock()
+		return err
 	}
 	if err := os.MkdirAll(s.baseDir, 0o700); err != nil {
 		s.dirLock.Unlock()
@@ -287,10 +292,18 @@ func (s *GitTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string
 
 	switch {
 	case auth.Storage != nil:
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		auth.Metadata["disabled"] = auth.Disabled
+		if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+			setter.SetMetadata(auth.Metadata)
+		}
 		if err = auth.Storage.SaveTokenToFile(path); err != nil {
 			return "", err
 		}
 	case auth.Metadata != nil:
+		auth.Metadata["disabled"] = auth.Disabled
 		raw, errMarshal := json.Marshal(auth.Metadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
@@ -316,7 +329,8 @@ func (s *GitTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
 	}
-	auth.Attributes["path"] = path
+	auth.Attributes[cliproxyauth.AttributePath] = path
+	auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourceGit
 
 	if strings.TrimSpace(auth.FileName) == "" {
 		auth.FileName = auth.ID
@@ -473,12 +487,15 @@ func (s *GitTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, 
 	}
 	id := s.idFor(path, baseDir)
 	auth := &cliproxyauth.Auth{
-		ID:               id,
-		Provider:         provider,
-		FileName:         id,
-		Label:            s.labelFor(metadata),
-		Status:           cliproxyauth.StatusActive,
-		Attributes:       map[string]string{"path": path},
+		ID:       id,
+		Provider: provider,
+		FileName: id,
+		Label:    s.labelFor(metadata),
+		Status:   cliproxyauth.StatusActive,
+		Attributes: map[string]string{
+			cliproxyauth.AttributePath:          path,
+			cliproxyauth.AttributeSourceBackend: cliproxyauth.AuthSourceGit,
+		},
 		Metadata:         metadata,
 		CreatedAt:        info.ModTime(),
 		UpdatedAt:        info.ModTime(),
@@ -489,6 +506,10 @@ func (s *GitTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, 
 		auth.Attributes["email"] = email
 	}
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
+	if disabled, ok := metadata["disabled"].(bool); ok && disabled {
+		auth.Disabled = true
+		auth.Status = cliproxyauth.StatusDisabled
+	}
 	return auth, nil
 }
 
@@ -562,7 +583,23 @@ func (s *GitTokenStore) repoDirSnapshot() string {
 	return s.repoDir
 }
 
-func (s *GitTokenStore) gitAuth() transport.AuthMethod {
+func disableGitCommitSigning(repoDir string) error {
+	repo, errOpen := git.PlainOpen(repoDir)
+	if errOpen != nil {
+		return fmt.Errorf("git token store: open repository config: %w", errOpen)
+	}
+	cfg, errConfig := repo.Config()
+	if errConfig != nil {
+		return fmt.Errorf("git token store: get repository config: %w", errConfig)
+	}
+	cfg.Commit.GpgSign = config.OptBoolFalse
+	if errSetConfig := repo.SetConfig(cfg); errSetConfig != nil {
+		return fmt.Errorf("git token store: disable commit signing: %w", errSetConfig)
+	}
+	return nil
+}
+
+func (s *GitTokenStore) gitClientOptions() []client.Option {
 	if s.username == "" && s.password == "" {
 		return nil
 	}
@@ -570,7 +607,7 @@ func (s *GitTokenStore) gitAuth() transport.AuthMethod {
 	if user == "" {
 		user = "git"
 	}
-	return &http.BasicAuth{Username: user, Password: s.password}
+	return []client.Option{client.WithHTTPAuth(&http.BasicAuth{Username: user, Password: s.password})}
 }
 
 func (s *GitTokenStore) relativeToRepo(path string) (string, error) {
@@ -596,7 +633,7 @@ func (s *GitTokenStore) relativeToRepo(path string) (string, error) {
 	return rel, nil
 }
 
-func (s *GitTokenStore) checkoutConfiguredBranch(repo *git.Repository, worktree *git.Worktree, authMethod transport.AuthMethod) error {
+func (s *GitTokenStore) checkoutConfiguredBranch(repo *git.Repository, worktree *git.Worktree, authMethod []client.Option) error {
 	branchRefName := plumbing.NewBranchReferenceName(s.branch)
 	headRef, errHead := repo.Head()
 	switch {
@@ -619,7 +656,7 @@ func (s *GitTokenStore) checkoutConfiguredBranch(repo *git.Repository, worktree 
 	return nil
 }
 
-func (s *GitTokenStore) checkoutConfiguredRemoteTrackingBranch(repo *git.Repository, worktree *git.Worktree, branchRefName plumbing.ReferenceName, authMethod transport.AuthMethod) error {
+func (s *GitTokenStore) checkoutConfiguredRemoteTrackingBranch(repo *git.Repository, worktree *git.Worktree, branchRefName plumbing.ReferenceName, authMethod []client.Option) error {
 	remoteRefName := plumbing.ReferenceName("refs/remotes/origin/" + s.branch)
 	remoteRef, err := repo.Reference(remoteRefName, true)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
@@ -650,8 +687,8 @@ func (s *GitTokenStore) checkoutConfiguredRemoteTrackingBranch(repo *git.Reposit
 	return nil
 }
 
-func syncRemoteReferences(repo *git.Repository, authMethod transport.AuthMethod) error {
-	if err := repo.Fetch(&git.FetchOptions{Auth: authMethod, RemoteName: "origin"}); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+func syncRemoteReferences(repo *git.Repository, authMethod []client.Option) error {
+	if err := repo.Fetch(&git.FetchOptions{ClientOptions: authMethod, RemoteName: "origin"}); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return err
 	}
 	return nil
@@ -659,7 +696,7 @@ func syncRemoteReferences(repo *git.Repository, authMethod transport.AuthMethod)
 
 // resolveRemoteDefaultBranch queries the origin remote to determine the remote's default branch
 // (the target of HEAD) and returns the corresponding local branch reference name (e.g. refs/heads/master).
-func resolveRemoteDefaultBranch(repo *git.Repository, authMethod transport.AuthMethod) (resolvedRemoteBranch, error) {
+func resolveRemoteDefaultBranch(repo *git.Repository, authMethod []client.Option) (resolvedRemoteBranch, error) {
 	if err := syncRemoteReferences(repo, authMethod); err != nil {
 		return resolvedRemoteBranch{}, fmt.Errorf("resolve remote default: sync remote refs: %w", err)
 	}
@@ -667,7 +704,7 @@ func resolveRemoteDefaultBranch(repo *git.Repository, authMethod transport.AuthM
 	if err != nil {
 		return resolvedRemoteBranch{}, fmt.Errorf("resolve remote default: get remote: %w", err)
 	}
-	refs, err := remote.List(&git.ListOptions{Auth: authMethod})
+	refs, err := remote.List(&git.ListOptions{ClientOptions: authMethod})
 	if err != nil {
 		if resolved, ok := resolveRemoteDefaultBranchFromLocal(repo); ok {
 			return resolved, nil
@@ -734,7 +771,7 @@ func shouldFallbackToCurrentBranch(repo *git.Repository, err error) bool {
 // checkoutRemoteDefaultBranch ensures the working tree is checked out to the remote's default branch
 // (the branch target of origin/HEAD). If the local branch does not exist it will be created to track
 // the remote branch.
-func checkoutRemoteDefaultBranch(repo *git.Repository, worktree *git.Worktree, authMethod transport.AuthMethod) error {
+func checkoutRemoteDefaultBranch(repo *git.Repository, worktree *git.Worktree, authMethod []client.Option) error {
 	resolved, err := resolveRemoteDefaultBranch(repo, authMethod)
 	if err != nil {
 		return err
@@ -846,8 +883,7 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 	} else if errRewrite := s.rewriteHeadAsSingleCommit(repo, headRef.Name(), commitHash, message, signature); errRewrite != nil {
 		return errRewrite
 	}
-	s.maybeRunGC(repo)
-	pushOpts := &git.PushOptions{Auth: s.gitAuth(), Force: true}
+	pushOpts := &git.PushOptions{ClientOptions: s.gitClientOptions(), Force: true}
 	if s.branch != "" {
 		pushOpts.RefSpecs = []config.RefSpec{config.RefSpec("refs/heads/" + s.branch + ":refs/heads/" + s.branch)}
 	} else {
@@ -862,6 +898,7 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 		}
 		return fmt.Errorf("git token store: push: %w", err)
 	}
+	s.maybeRunGC(repoDir)
 	return nil
 }
 
@@ -895,12 +932,17 @@ func (s *GitTokenStore) rewriteHeadAsSingleCommit(repo *git.Repository, branch p
 	return nil
 }
 
-func (s *GitTokenStore) maybeRunGC(repo *git.Repository) {
+func (s *GitTokenStore) maybeRunGC(repoDir string) {
 	now := time.Now()
 	if now.Sub(s.lastGC) < gcInterval {
 		return
 	}
 	s.lastGC = now
+
+	repo, err := git.PlainOpen(repoDir)
+	if err != nil {
+		return
+	}
 
 	pruneOpts := git.PruneOptions{
 		OnlyObjectsOlderThan: now,

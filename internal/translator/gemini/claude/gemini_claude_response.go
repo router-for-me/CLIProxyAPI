@@ -13,8 +13,8 @@ import (
 	"strings"
 	"sync/atomic"
 
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -29,6 +29,7 @@ type Params struct {
 	ToolNameMap      map[string]string
 	SanitizedNameMap map[string]string
 	SawToolCall      bool
+	HasFinalEvents   bool
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
@@ -75,6 +76,14 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 	appendEvent := func(event, payload string) {
 		output = translatorcommon.AppendSSEEventString(output, event, payload, 3)
 	}
+	appendSignatureDelta := func(signature string) {
+		if signature == "" || (*param).(*Params).ResponseType != 2 {
+			return
+		}
+		data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, (*param).(*Params).ResponseIndex)), "delta.signature", signature)
+		appendEvent("content_block_delta", string(data))
+		(*param).(*Params).HasContent = true
+	}
 
 	// Initialize the streaming session with a message_start event
 	// This is only sent for the very first response chunk
@@ -106,11 +115,25 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			// Extract the different types of content from each part
 			partTextResult := partResult.Get("text")
 			functionCallResult := partResult.Get("functionCall")
+			thoughtSignatureResult := partResult.Get("thoughtSignature")
+			if !thoughtSignatureResult.Exists() {
+				thoughtSignatureResult = partResult.Get("thought_signature")
+			}
+			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
+
+			if hasThoughtSignature && !partTextResult.Exists() && !functionCallResult.Exists() {
+				appendSignatureDelta(thoughtSignatureResult.String())
+				continue
+			}
 
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
 				// Process thinking content (internal reasoning)
-				if partResult.Get("thought").Bool() {
+				if partResult.Get("thought").Bool() || hasThoughtSignature {
+					if hasThoughtSignature && partTextResult.String() == "" {
+						appendSignatureDelta(thoughtSignatureResult.String())
+						continue
+					}
 					// Continue existing thinking block
 					if (*param).(*Params).ResponseType == 2 {
 						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex)), "delta.thinking", partTextResult.String())
@@ -136,6 +159,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 						(*param).(*Params).ResponseType = 2 // Set state to thinking
 						(*param).(*Params).HasContent = true
 					}
+					appendSignatureDelta(thoughtSignatureResult.String())
 				} else {
 					// Process regular text content (user-visible output)
 					// Continue existing text block
@@ -223,25 +247,28 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 	}
 
 	usageResult := gjson.GetBytes(rawJSON, "usageMetadata")
-	if usageResult.Exists() && bytes.Contains(rawJSON, []byte(`"finishReason"`)) {
-		if candidatesTokenCountResult := usageResult.Get("candidatesTokenCount"); candidatesTokenCountResult.Exists() {
-			// Only send final events if we have actually output content
-			if (*param).(*Params).HasContent {
+	if usageResult.Exists() && bytes.Contains(rawJSON, []byte(`"finishReason"`)) && !(*param).(*Params).HasFinalEvents {
+		// Only send final events if we have actually output content
+		if (*param).(*Params).HasContent {
+			if (*param).(*Params).ResponseType != 0 {
 				appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
-
-				template := []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-				if (*param).(*Params).SawToolCall {
-					template = []byte(`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-				} else if finish := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finish.Exists() && finish.String() == "MAX_TOKENS" {
-					template = []byte(`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-				}
-
-				thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
-				template, _ = sjson.SetBytes(template, "usage.output_tokens", candidatesTokenCountResult.Int()+thoughtsTokenCount)
-				template, _ = sjson.SetBytes(template, "usage.input_tokens", usageResult.Get("promptTokenCount").Int())
-
-				appendEvent("message_delta", string(template))
+				(*param).(*Params).ResponseType = 0
 			}
+
+			template := []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
+			if (*param).(*Params).SawToolCall {
+				template = []byte(`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
+			} else if finish := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finish.Exists() && finish.String() == "MAX_TOKENS" {
+				template = []byte(`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
+			}
+
+			thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
+			candidatesTokenCount := usageResult.Get("candidatesTokenCount").Int()
+			template, _ = sjson.SetBytes(template, "usage.output_tokens", candidatesTokenCount+thoughtsTokenCount)
+			template, _ = sjson.SetBytes(template, "usage.input_tokens", usageResult.Get("promptTokenCount").Int())
+
+			appendEvent("message_delta", string(template))
+			(*param).(*Params).HasFinalEvents = true
 		}
 	}
 

@@ -3,7 +3,7 @@ package diff
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 func TestComputeOpenAICompatModelsHash_Deterministic(t *testing.T) {
@@ -22,6 +22,17 @@ func TestComputeOpenAICompatModelsHash_Deterministic(t *testing.T) {
 	changed := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "gpt-4"}, {Name: "gpt-4.1"}})
 	if hash1 == changed {
 		t.Fatal("hash should change when model list changes")
+	}
+}
+
+func TestComputeOpenAICompatModelsHash_IncludesImageFlag(t *testing.T) {
+	textModel := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "gpt-image", Alias: "image"}})
+	imageModel := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "gpt-image", Alias: "image", Image: true}})
+	if textModel == "" || imageModel == "" {
+		t.Fatal("hashes should not be empty")
+	}
+	if textModel == imageModel {
+		t.Fatal("hash should change when image flag changes")
 	}
 }
 
@@ -115,6 +126,56 @@ func TestComputeCodexModelsHash_IgnoresBlankAndDedup(t *testing.T) {
 	}
 	if h1, h2 := ComputeCodexModelsHash(a), ComputeCodexModelsHash(b); h1 == "" || h1 != h2 {
 		t.Fatalf("expected same hash ignoring blanks/dupes, got %q / %q", h1, h2)
+	}
+}
+
+func TestComputeModelHashesIncludeDisplayName(t *testing.T) {
+	tests := []struct {
+		name    string
+		base    string
+		changed string
+	}{
+		{
+			name:    "openai compatibility",
+			base:    ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "m", Alias: "a", DisplayName: "One"}}),
+			changed: ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "m", Alias: "a", DisplayName: "Two"}}),
+		},
+		{
+			name:    "vertex",
+			base:    ComputeVertexCompatModelsHash([]config.VertexCompatModel{{Name: "m", Alias: "a", DisplayName: "One"}}),
+			changed: ComputeVertexCompatModelsHash([]config.VertexCompatModel{{Name: "m", Alias: "a", DisplayName: "Two"}}),
+		},
+		{
+			name:    "claude",
+			base:    ComputeClaudeModelsHash([]config.ClaudeModel{{Name: "m", Alias: "a", DisplayName: "One"}}),
+			changed: ComputeClaudeModelsHash([]config.ClaudeModel{{Name: "m", Alias: "a", DisplayName: "Two"}}),
+		},
+		{
+			name:    "codex",
+			base:    ComputeCodexModelsHash([]config.CodexModel{{Name: "m", Alias: "a", DisplayName: "One"}}),
+			changed: ComputeCodexModelsHash([]config.CodexModel{{Name: "m", Alias: "a", DisplayName: "Two"}}),
+		},
+		{
+			name:    "gemini",
+			base:    ComputeGeminiModelsHash([]config.GeminiModel{{Name: "m", Alias: "a", DisplayName: "One"}}),
+			changed: ComputeGeminiModelsHash([]config.GeminiModel{{Name: "m", Alias: "a", DisplayName: "Two"}}),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.base == "" || tt.base == tt.changed {
+				t.Fatalf("display name must change model hash: %q / %q", tt.base, tt.changed)
+			}
+		})
+	}
+}
+
+func TestComputeCodexModelsHashIncludesForceMapping(t *testing.T) {
+	withoutForceMapping := ComputeCodexModelsHash([]config.CodexModel{{Name: "m", Alias: "a"}})
+	withForceMapping := ComputeCodexModelsHash([]config.CodexModel{{Name: "m", Alias: "a", ForceMapping: true}})
+	if withoutForceMapping == "" || withoutForceMapping == withForceMapping {
+		t.Fatalf("force-mapping must change model hash: %q / %q", withoutForceMapping, withForceMapping)
 	}
 }
 

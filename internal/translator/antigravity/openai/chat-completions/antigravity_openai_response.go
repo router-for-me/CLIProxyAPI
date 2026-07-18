@@ -1,5 +1,5 @@
-// Package openai provides response translation functionality for Gemini CLI to OpenAI API compatibility.
-// This package handles the conversion of Gemini CLI API responses into OpenAI Chat Completions-compatible
+// Package openai provides response translation functionality for Antigravity to OpenAI API compatibility.
+// This package handles the conversion of Antigravity API responses into OpenAI Chat Completions-compatible
 // JSON format, transforming streaming events and non-streaming responses into the format
 // expected by OpenAI API clients. It supports both streaming and non-streaming modes,
 // handling text content, tool calls, reasoning content, and usage metadata appropriately.
@@ -13,10 +13,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/openai/chat-completions"
+	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/openai/chat-completions"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -34,15 +34,15 @@ type convertCliResponseToOpenAIChatParams struct {
 var functionCallIDCounter uint64
 
 // ConvertAntigravityResponseToOpenAI translates a single chunk of a streaming response from the
-// Gemini CLI API format to the OpenAI Chat Completions streaming format.
-// It processes various Gemini CLI event types and transforms them into OpenAI-compatible JSON responses.
+// Antigravity API format to the OpenAI Chat Completions streaming format.
+// It processes various Antigravity event types and transforms them into OpenAI-compatible JSON responses.
 // The function handles text content, tool calls, reasoning content, and usage metadata, outputting
 // responses that match the OpenAI API format. It supports incremental updates for streaming responses.
 //
 // Parameters:
 //   - ctx: The context for the request, used for cancellation and timeout handling
 //   - modelName: The name of the model being used for the response (unused in current implementation)
-//   - rawJSON: The raw JSON response from the Gemini CLI API
+//   - rawJSON: The raw JSON response from the Antigravity API
 //   - param: A pointer to a parameter object for maintaining state between calls
 //
 // Returns:
@@ -52,11 +52,11 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		*param = &convertCliResponseToOpenAIChatParams{
 			UnixTimestamp:    0,
 			FunctionIndex:    0,
-			SanitizedNameMap: util.SanitizedToolNameMap(originalRequestRawJSON),
+			SanitizedNameMap: util.DisambiguatedToolNameMap(originalRequestRawJSON),
 		}
 	}
 	if (*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap == nil {
-		(*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
+		(*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap = util.DisambiguatedToolNameMap(originalRequestRawJSON)
 	}
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
@@ -225,15 +225,15 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	return [][]byte{template}
 }
 
-// ConvertAntigravityResponseToOpenAINonStream converts a non-streaming Gemini CLI response to a non-streaming OpenAI response.
-// This function processes the complete Gemini CLI response and transforms it into a single OpenAI-compatible
+// ConvertAntigravityResponseToOpenAINonStream converts a non-streaming Antigravity response to a non-streaming OpenAI response.
+// This function processes the complete Antigravity response and transforms it into a single OpenAI-compatible
 // JSON response. It handles message content, tool calls, reasoning content, and usage metadata, combining all
 // the information into a single response that matches the OpenAI API format.
 //
 // Parameters:
 //   - ctx: The context for the request, used for cancellation and timeout handling
 //   - modelName: The name of the model being used for the response
-//   - rawJSON: The raw JSON response from the Gemini CLI API
+//   - rawJSON: The raw JSON response from the Antigravity API
 //   - param: A pointer to a parameter object for the conversion
 //
 // Returns:
@@ -241,7 +241,29 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 func ConvertAntigravityResponseToOpenAINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
 	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
-		return ConvertGeminiResponseToOpenAINonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, []byte(responseResult.Raw), param)
+		responseJSON := restoreAntigravityOpenAIFunctionNames([]byte(responseResult.Raw), originalRequestRawJSON)
+		return ConvertGeminiResponseToOpenAINonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, responseJSON, param)
 	}
 	return []byte{}
+}
+
+func restoreAntigravityOpenAIFunctionNames(rawJSON, originalRequestRawJSON []byte) []byte {
+	nameMap := util.DisambiguatedToolNameMap(originalRequestRawJSON)
+	if len(nameMap) == 0 {
+		return rawJSON
+	}
+	candidates := gjson.GetBytes(rawJSON, "candidates")
+	for candidateIndex, candidate := range candidates.Array() {
+		for partIndex, part := range candidate.Get("content.parts").Array() {
+			for _, field := range []string{"functionCall", "functionResponse"} {
+				name := part.Get(field + ".name").String()
+				if name == "" {
+					continue
+				}
+				path := fmt.Sprintf("candidates.%d.content.parts.%d.%s.name", candidateIndex, partIndex, field)
+				rawJSON, _ = sjson.SetBytes(rawJSON, path, util.RestoreSanitizedToolName(nameMap, name))
+			}
+		}
+	}
+	return rawJSON
 }
