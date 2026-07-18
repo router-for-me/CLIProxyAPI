@@ -1506,6 +1506,11 @@ func TestIsCountTokensEndpointNotFoundError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "gateway route 404 with request metadata",
+			err:  &Error{HTTPStatus: http.StatusNotFound, Message: `{"detail":"Not Found","request_id":"req-1","path":"/v1/messages/count_tokens"}`},
+			want: true,
+		},
+		{
 			name: "express route 404",
 			err:  &Error{HTTPStatus: http.StatusNotFound, Message: "Cannot POST /v1/messages/count_tokens"},
 			want: true,
@@ -1513,6 +1518,11 @@ func TestIsCountTokensEndpointNotFoundError(t *testing.T) {
 		{
 			name: "structured model 404",
 			err:  &Error{HTTPStatus: http.StatusNotFound, Message: `{"error":{"type":"not_found_error","message":"model claude-missing was not found"}}`},
+			want: false,
+		},
+		{
+			name: "generic text with model not found code",
+			err:  &Error{HTTPStatus: http.StatusNotFound, Message: `{"message":"Not Found","code":"model_not_found","model":"claude-missing"}`},
 			want: false,
 		},
 		{

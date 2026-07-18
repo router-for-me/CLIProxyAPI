@@ -4313,14 +4313,14 @@ func isCountTokensEndpointNotFoundError(err error) bool {
 		return false
 	}
 
-	normalized := strings.ToLower(strings.Join(strings.Fields(message), " "))
-	switch normalized {
+	lower := strings.ToLower(message)
+	switch lower {
 	case "not found", "404 not found", "404 page not found":
 		return true
 	}
 
 	var payload map[string]any
-	if errJSON := json.Unmarshal([]byte(message), &payload); errJSON == nil && len(payload) == 1 {
+	if errJSON := json.Unmarshal([]byte(message), &payload); errJSON == nil {
 		for _, key := range []string{"detail", "error", "message"} {
 			value, ok := payload[key].(string)
 			if !ok {
@@ -4328,20 +4328,25 @@ func isCountTokensEndpointNotFoundError(err error) bool {
 			}
 			switch strings.ToLower(strings.TrimSpace(value)) {
 			case "not found", "404 not found", "404 page not found":
+				if strings.Contains(lower, "model_not_found") ||
+					strings.Contains(lower, "model not found") ||
+					strings.Contains(lower, `"model"`) {
+					return false
+				}
 				return true
 			}
 		}
 	}
 
-	if strings.Contains(normalized, "count_tokens") {
-		if strings.Contains(normalized, "cannot post") ||
-			strings.Contains(normalized, "no route") ||
-			strings.Contains(normalized, "route not found") {
+	if strings.Contains(lower, "count_tokens") {
+		if strings.Contains(lower, "cannot post") ||
+			strings.Contains(lower, "no route") ||
+			strings.Contains(lower, "route not found") {
 			return true
 		}
 	}
-	return strings.Contains(normalized, "<title>404") &&
-		strings.Contains(normalized, "not found")
+	return strings.Contains(lower, "<title>404") &&
+		strings.Contains(lower, "not found")
 }
 
 // isRequestInvalidError returns true if the error represents a client request
