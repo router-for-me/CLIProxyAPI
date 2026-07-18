@@ -270,3 +270,29 @@ func TestNormalizeKimiToolMessageLinks_PreservesAssistantWithToolLinkOrReasoning
 		t.Fatalf("messages.3.content.0.text = %q, want %q", got, " visible ")
 	}
 }
+
+func TestNormalizeKimiUpstreamModel(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"kimi-k3[1m]", "k3"},
+		{"kimi-k3", "k3"},
+		{"Kimi-K3[1M]", "k3"},
+		{"k3[1m]", "k3"},
+		{"k3", "k3"},
+		{"kimi-k2.6", "k2.6"},
+		{"kimi-k2.6[1m]", "k2.6"},
+		{"kimi-k3(1024)", "k3(1024)"},
+		{"kimi-k3[1m](1024)", "k3(1024)"},
+		{"kimi-k2.6(high)", "k2.6(high)"},
+		{"kimi-k2.6[1m](high)", "k2.6(high)"},
+	}
+
+	for _, c := range cases {
+		got := normalizeKimiUpstreamModel(c.in)
+		if got != c.want {
+			t.Errorf("normalizeKimiUpstreamModel(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
