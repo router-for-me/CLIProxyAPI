@@ -3790,6 +3790,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 					} else {
 						switch statusCode {
+						case 400:
+							if disableCooling {
+								state.NextRetryAfter = time.Time{}
+							} else {
+								next := now.Add(30 * time.Minute)
+								state.NextRetryAfter = next
+								suspendReason = "bad_request"
+								shouldSuspendModel = true
+							}
 						case 401:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
@@ -4378,6 +4387,13 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		return
 	}
 	switch statusCode {
+	case 400:
+		auth.StatusMessage = "bad_request"
+		if disableCooling {
+			auth.NextRetryAfter = time.Time{}
+		} else {
+			auth.NextRetryAfter = now.Add(30 * time.Minute)
+		}
 	case 401:
 		auth.StatusMessage = "unauthorized"
 		if disableCooling {
