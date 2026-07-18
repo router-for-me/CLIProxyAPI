@@ -1295,8 +1295,11 @@ func TestClaudeExecutor_CountTokensUsesConfiguredSystemPromptMode(t *testing.T) 
 	tests := []struct {
 		name               string
 		cloak              *config.CloakConfig
+		disableCloak       bool
+		clientUserAgent    string
 		wantClientSystem   bool
 		wantSystemReminder bool
+		wantUncloaked      bool
 	}{
 		{
 			name:             "relaxed by default",
@@ -1314,6 +1317,23 @@ func TestClaudeExecutor_CountTokensUsesConfiguredSystemPromptMode(t *testing.T) 
 				RelaxedSystemPrompt: &relaxedSystemPromptEnabled,
 			},
 		},
+		{
+			name:          "mode never skips prompt transformation",
+			cloak:         &config.CloakConfig{Mode: "never", StrictMode: true},
+			wantUncloaked: true,
+		},
+		{
+			name:          "global disable skips prompt transformation",
+			cloak:         &config.CloakConfig{StrictMode: true},
+			disableCloak:  true,
+			wantUncloaked: true,
+		},
+		{
+			name:            "auto skips Claude Code client",
+			cloak:           &config.CloakConfig{StrictMode: true},
+			clientUserAgent: "claude-cli/2.1.63 (external, cli)",
+			wantUncloaked:   true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1327,17 +1347,24 @@ func TestClaudeExecutor_CountTokensUsesConfiguredSystemPromptMode(t *testing.T) 
 			}))
 			defer server.Close()
 
-			executor := NewClaudeExecutor(&config.Config{ClaudeKey: []config.ClaudeKey{{
-				APIKey: "key-123",
-				Cloak:  tt.cloak,
-			}}})
+			executor := NewClaudeExecutor(&config.Config{
+				DisableClaudeCloakMode: tt.disableCloak,
+				ClaudeKey: []config.ClaudeKey{{
+					APIKey: "key-123",
+					Cloak:  tt.cloak,
+				}},
+			})
 			auth := &cliproxyauth.Auth{Attributes: map[string]string{
 				"api_key":  "key-123",
 				"base_url": server.URL,
 			}}
 			payload := []byte(`{"system":"Client rule","messages":[{"role":"user","content":"hi"}]}`)
+			ctx := context.Background()
+			if tt.clientUserAgent != "" {
+				ctx = contextWithGinHeaders(map[string]string{"User-Agent": tt.clientUserAgent})
+			}
 
-			_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+			_, err := executor.CountTokens(ctx, auth, cliproxyexecutor.Request{
 				Model:   "claude-3-5-sonnet-20241022",
 				Payload: payload,
 			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
@@ -1346,6 +1373,15 @@ func TestClaudeExecutor_CountTokensUsesConfiguredSystemPromptMode(t *testing.T) 
 			}
 			if len(seenBody) == 0 {
 				t.Fatal("expected count_tokens request body to be captured")
+			}
+			if tt.wantUncloaked {
+				if got := gjson.GetBytes(seenBody, "system").String(); got != "Client rule" {
+					t.Fatalf("system = %q, want original client system prompt: %s", got, seenBody)
+				}
+				if got := gjson.GetBytes(seenBody, "messages.0.content").String(); strings.Contains(got, "<system-reminder>") {
+					t.Fatalf("unexpected system reminder in uncloaked request: %q", got)
+				}
+				return
 			}
 
 			blocks := gjson.GetBytes(seenBody, "system").Array()

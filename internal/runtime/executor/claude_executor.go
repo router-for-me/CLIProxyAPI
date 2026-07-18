@@ -785,10 +785,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
-		cloakCfg := resolveClaudeKeyCloakConfig(e.cfg, auth)
-		_, attrStrict, attrRelaxedSystemPrompt, _, _ := getCloakConfigFromAuth(auth)
-		strictMode, relaxedSystemPrompt := resolveClaudeSystemPromptModes(attrStrict, attrRelaxedSystemPrompt, cloakCfg)
-		body = checkSystemInstructionsWithSigningMode(body, strictMode, relaxedSystemPrompt, false, false, "2.1.63", "", "")
+		cloakSettings := resolveClaudeCloakSettings(e.cfg, auth)
+		if helps.ShouldCloak(cloakSettings.mode, getClientUserAgent(ctx)) {
+			body = checkSystemInstructionsWithSigningMode(body, cloakSettings.strictMode, cloakSettings.relaxedSystemPrompt, false, false, "2.1.63", "", "")
+		}
 	}
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
@@ -1905,6 +1905,45 @@ func resolveClaudeSystemPromptModes(attrStrict bool, attrRelaxedSystemPrompt *bo
 	return strictMode, relaxedSystemPrompt
 }
 
+type claudeCloakSettings struct {
+	mode                string
+	strictMode          bool
+	relaxedSystemPrompt bool
+	sensitiveWords      []string
+	cacheUserID         bool
+}
+
+func resolveClaudeCloakSettings(cfg *config.Config, auth *cliproxyauth.Auth) claudeCloakSettings {
+	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
+	attrMode, attrStrict, attrRelaxedSystemPrompt, attrWords, attrCache := getCloakConfigFromAuth(auth)
+	strictMode, relaxedSystemPrompt := resolveClaudeSystemPromptModes(attrStrict, attrRelaxedSystemPrompt, cloakCfg)
+	settings := claudeCloakSettings{
+		mode:                "auto",
+		strictMode:          strictMode,
+		relaxedSystemPrompt: relaxedSystemPrompt,
+		sensitiveWords:      attrWords,
+		cacheUserID:         attrCache,
+	}
+	if cfg != nil && cfg.DisableClaudeCloakMode {
+		settings.mode = "never"
+	}
+	if attrMode != "" {
+		settings.mode = attrMode
+	}
+	if cloakCfg != nil {
+		if mode := strings.TrimSpace(cloakCfg.Mode); mode != "" {
+			settings.mode = mode
+		}
+		if len(cloakCfg.SensitiveWords) > 0 {
+			settings.sensitiveWords = cloakCfg.SensitiveWords
+		}
+		if cloakCfg.CacheUserID != nil {
+			settings.cacheUserID = *cloakCfg.CacheUserID
+		}
+	}
+	return settings
+}
+
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
 // When useCache is false, a new user ID is generated for every call.
 func injectFakeUserID(ctx context.Context, payload []byte, apiKey string, useCache bool) ([]byte, error) {
@@ -2185,41 +2224,9 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	// Enable cch signing for OAuth tokens by default (not just experimental flag).
 	oauthToken := isClaudeOAuthToken(apiKey)
 	useCCHSigning := oauthToken || experimentalCCHSigningEnabled(cfg, auth)
-
-	// Get cloak config from ClaudeKey configuration
-	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
-	attrMode, attrStrict, attrRelaxedSystemPrompt, attrWords, attrCache := getCloakConfigFromAuth(auth)
-
-	// Determine cloak settings. Precedence (low -> high):
-	//   built-in "auto" default
-	//   -> global disable-claude-cloak-mode switch (forces "never")
-	//   -> per-credential settings from auth attributes/metadata
-	//   -> per claude-api-key cloak config
-	cloakMode := "auto"
-	if cfg != nil && cfg.DisableClaudeCloakMode {
-		cloakMode = "never"
-	}
-	strictMode, relaxedSystemPrompt := resolveClaudeSystemPromptModes(attrStrict, attrRelaxedSystemPrompt, cloakCfg)
-	sensitiveWords := attrWords
-	cacheUserID := attrCache
-
-	if attrMode != "" {
-		cloakMode = attrMode
-	}
-
-	if cloakCfg != nil {
-		if mode := strings.TrimSpace(cloakCfg.Mode); mode != "" {
-			cloakMode = mode
-		}
-		if len(cloakCfg.SensitiveWords) > 0 {
-			sensitiveWords = cloakCfg.SensitiveWords
-		}
-		if cloakCfg.CacheUserID != nil {
-			cacheUserID = *cloakCfg.CacheUserID
-		}
-	}
+	cloakSettings := resolveClaudeCloakSettings(cfg, auth)
 	// Determine if cloaking should be applied
-	if !helps.ShouldCloak(cloakMode, clientUserAgent) {
+	if !helps.ShouldCloak(cloakSettings.mode, clientUserAgent) {
 		return payload, nil
 	}
 
@@ -2228,19 +2235,19 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		billingVersion := helps.DefaultClaudeVersion(cfg)
 		entrypoint := parseEntrypointFromUA(clientUserAgent)
 		workload := getWorkloadFromContext(ctx)
-		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, relaxedSystemPrompt, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)
+		payload = checkSystemInstructionsWithSigningMode(payload, cloakSettings.strictMode, cloakSettings.relaxedSystemPrompt, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)
 	}
 
 	// Inject fake user ID
 	var errFakeUserID error
-	payload, errFakeUserID = injectFakeUserID(ctx, payload, apiKey, cacheUserID)
+	payload, errFakeUserID = injectFakeUserID(ctx, payload, apiKey, cloakSettings.cacheUserID)
 	if errFakeUserID != nil {
 		return nil, errFakeUserID
 	}
 
 	// Apply sensitive word obfuscation
-	if len(sensitiveWords) > 0 {
-		matcher := helps.BuildSensitiveWordMatcher(sensitiveWords)
+	if len(cloakSettings.sensitiveWords) > 0 {
+		matcher := helps.BuildSensitiveWordMatcher(cloakSettings.sensitiveWords)
 		payload = helps.ObfuscateSensitiveWords(payload, matcher)
 	}
 
