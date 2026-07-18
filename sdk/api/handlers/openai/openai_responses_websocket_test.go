@@ -1747,6 +1747,64 @@ func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
 	}
 }
 
+func TestResponsesWebsocketHeartbeatSendsPing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	releaseServer := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		done := make(chan struct{})
+		defer func() {
+			close(done)
+			_ = conn.Close()
+		}()
+		startResponsesWebsocketHeartbeat(conn, done, "test-session", 20*time.Millisecond)
+		<-releaseServer
+	}))
+	defer server.Close()
+	defer close(releaseServer)
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	pingCh := make(chan string, 1)
+	conn.SetPingHandler(func(appData string) error {
+		select {
+		case pingCh <- appData:
+		default:
+		}
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
+	})
+
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		for {
+			if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case got := <-pingCh:
+		if got != "ping" {
+			t.Fatalf("ping payload = %q, want ping", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for websocket ping")
+	}
+	_ = conn.Close()
+	<-readDone
+}
+
 func TestResponsesWebsocketClosesOnCodexUpstreamDisconnect(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

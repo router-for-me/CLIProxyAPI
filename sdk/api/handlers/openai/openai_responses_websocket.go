@@ -41,6 +41,12 @@ const (
 	codexLocalCompactionSummaryPrefix = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:"
 )
 
+const (
+	responsesWebsocketReadTimeout       = 60 * time.Second
+	responsesWebsocketWriteTimeout      = 10 * time.Second
+	responsesWebsocketHeartbeatInterval = 30 * time.Second
+)
+
 var responsesWebsocketUpgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
@@ -233,6 +239,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 	wsDone := make(chan struct{})
 	defer close(wsDone)
+	startResponsesWebsocketHeartbeat(conn, wsDone, passthroughSessionID, responsesWebsocketHeartbeatInterval)
 
 	if h != nil && h.AuthManager != nil {
 		type upstreamDisconnectSubscriber interface {
@@ -538,6 +545,32 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastResponsePendingToolCallIDs = append([]string(nil), completedPendingToolCallIDs...)
 		}
 	}
+}
+
+func startResponsesWebsocketHeartbeat(conn *websocket.Conn, done <-chan struct{}, sessionID string, interval time.Duration) {
+	if conn == nil || interval <= 0 {
+		return
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(responsesWebsocketReadTimeout))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(responsesWebsocketReadTimeout))
+	})
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(responsesWebsocketWriteTimeout)); err != nil {
+					log.Warnf("responses websocket: ping failed id=%s error=%v", sessionID, err)
+					_ = conn.Close()
+					return
+				}
+			}
+		}
+	}()
 }
 
 func websocketClientAddress(c *gin.Context) string {
