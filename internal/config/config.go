@@ -182,6 +182,8 @@ type PluginsConfig struct {
 	StoreSources []string `yaml:"store-sources,omitempty" json:"store-sources,omitempty"`
 	// StoreAuth defines optional auth rules for plugin store registry, metadata, and artifact requests.
 	StoreAuth []sdkpluginstore.AuthConfig `yaml:"store-auth,omitempty" json:"store-auth,omitempty"`
+	// SyncRevision changes when Home-managed plugin credentials change.
+	SyncRevision int64 `yaml:"sync-revision,omitempty" json:"sync-revision,omitempty"`
 	// Configs stores per-plugin instance configuration by plugin ID.
 	Configs map[string]PluginInstanceConfig `yaml:"configs" json:"configs"`
 }
@@ -360,6 +362,9 @@ type OAuthModelAlias struct {
 	Name  string `yaml:"name" json:"name"`
 	Alias string `yaml:"alias" json:"alias"`
 	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
+
+	// DisplayName is the optional human-readable name shown in model catalogs.
+	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 }
@@ -989,7 +994,13 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 				continue
 			}
 			seenAlias[aliasKey] = struct{}{}
-			clean = append(clean, OAuthModelAlias{Name: name, Alias: alias, Fork: entry.Fork, ForceMapping: entry.ForceMapping})
+			clean = append(clean, OAuthModelAlias{
+				Name:         name,
+				Alias:        alias,
+				Fork:         entry.Fork,
+				DisplayName:  strings.TrimSpace(entry.DisplayName),
+				ForceMapping: entry.ForceMapping,
+			})
 		}
 		if len(clean) > 0 {
 			out[channel] = clean

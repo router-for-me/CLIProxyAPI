@@ -187,6 +187,7 @@ func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
 	tests := []struct {
 		name            string
 		serviceTierJSON string
+		speedJSON       string
 		want            string
 		wantExists      bool
 	}{
@@ -197,7 +198,7 @@ func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
 			wantExists:      true,
 		},
 		{
-			name:            "Fast normalizes to priority",
+			name:            "Fast tier normalizes to priority",
 			serviceTierJSON: `"fast"`,
 			want:            "priority",
 			wantExists:      true,
@@ -210,17 +211,43 @@ func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
 			name:            "Non-string tier is omitted",
 			serviceTierJSON: `true`,
 		},
+		{
+			name:       "Fast speed maps to priority",
+			speedJSON:  `"fast"`,
+			want:       "priority",
+			wantExists: true,
+		},
+		{
+			name:      "Standard speed is omitted",
+			speedJSON: `"standard"`,
+		},
+		{
+			name:      "Non-string speed is omitted",
+			speedJSON: `true`,
+		},
+		{
+			name:            "Fast speed overrides unsupported Anthropic tier",
+			serviceTierJSON: `"auto"`,
+			speedJSON:       `"fast"`,
+			want:            "priority",
+			wantExists:      true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			inputJSON := `{
+			inputJSON := []byte(`{
 				"model": "gpt-5.4",
-				"service_tier": ` + tt.serviceTierJSON + `,
 				"messages": [{"role": "user", "content": "Reply with OK"}]
-			}`
+			}`)
+			if tt.serviceTierJSON != "" {
+				inputJSON, _ = sjson.SetRawBytes(inputJSON, "service_tier", []byte(tt.serviceTierJSON))
+			}
+			if tt.speedJSON != "" {
+				inputJSON, _ = sjson.SetRawBytes(inputJSON, "speed", []byte(tt.speedJSON))
+			}
 
-			result := ConvertClaudeRequestToCodex("gpt-5.4", []byte(inputJSON), false)
+			result := ConvertClaudeRequestToCodex("gpt-5.4", inputJSON, false)
 			serviceTierResult := gjson.GetBytes(result, "service_tier")
 			if serviceTierResult.Exists() != tt.wantExists {
 				t.Fatalf("service_tier exists = %v, want %v. Output: %s", serviceTierResult.Exists(), tt.wantExists, string(result))

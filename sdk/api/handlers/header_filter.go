@@ -36,6 +36,17 @@ var hopByHopHeaders = map[string]struct{}{
 	"Content-Encoding": {},
 }
 
+var cpaReservedResponseHeaders = map[string]struct{}{
+	"Access-Control-Expose-Headers": {},
+	"X-Cpa-Trace-Id":                {},
+}
+
+// IsCPAReservedResponseHeader reports whether a downstream response header is managed by CPA.
+func IsCPAReservedResponseHeader(name string) bool {
+	_, reserved := cpaReservedResponseHeaders[http.CanonicalHeaderKey(name)]
+	return reserved
+}
+
 // FilterUpstreamHeaders returns a copy of src with hop-by-hop and security-sensitive
 // headers removed. Returns nil if src is nil or empty after filtering.
 func FilterUpstreamHeaders(src http.Header) http.Header {
@@ -47,6 +58,9 @@ func FilterUpstreamHeaders(src http.Header) http.Header {
 	for key, values := range src {
 		canonicalKey := http.CanonicalHeaderKey(key)
 		if _, blocked := hopByHopHeaders[canonicalKey]; blocked {
+			continue
+		}
+		if _, reserved := cpaReservedResponseHeaders[canonicalKey]; reserved {
 			continue
 		}
 		if _, scoped := connectionScoped[canonicalKey]; scoped {

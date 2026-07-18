@@ -83,8 +83,28 @@ func TestManifestFromPluginBuildsDirectManifest(t *testing.T) {
 	if manifest.SchemaVersion != SchemaVersionV2 || manifest.InstallType() != InstallTypeDirect || manifest.ReleaseTag != "" {
 		t.Fatalf("manifest = %#v, want v2 direct without release tag", manifest)
 	}
-	if manifest.SourceURL != DefaultRegistryURL || len(manifest.Install.Artifacts) != 0 {
-		t.Fatalf("manifest source/artifacts = %q/%d, want source URL without artifacts", manifest.SourceURL, len(manifest.Install.Artifacts))
+	if manifest.SourceURL != DefaultRegistryURL || len(manifest.Install.Artifacts) != 1 {
+		t.Fatalf("manifest source/artifacts = %q/%d, want source URL and one pinned artifact", manifest.SourceURL, len(manifest.Install.Artifacts))
+	}
+	artifact := manifest.Install.Artifacts[0]
+	if artifact.GOOS != "linux" || artifact.GOARCH != "amd64" || artifact.URL != "https://downloads.example/sample-provider.zip" {
+		t.Fatalf("manifest artifact = %#v, want pinned linux/amd64 artifact", artifact)
+	}
+}
+
+func TestManifestFromPluginRejectsArtifactQuery(t *testing.T) {
+	_, errManifest := ManifestFromPlugin(DefaultSource(), Plugin{
+		ID: "sample-provider", Name: "Sample Provider", Description: "Sample", Author: "tester", Version: "1.0.0",
+		Install: InstallPlan{Type: InstallTypeDirect, Artifacts: []Artifact{{
+			GOOS: "linux", GOARCH: "amd64", URL: "https://downloads.example/sample.zip?X-Amz-Signature=secret",
+			SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		}}},
+	})
+	if errManifest == nil {
+		t.Fatal("ManifestFromPlugin() error = nil, want query rejection")
+	}
+	if strings.Contains(errManifest.Error(), "secret") {
+		t.Fatalf("ManifestFromPlugin() error leaked query value: %v", errManifest)
 	}
 }
 
