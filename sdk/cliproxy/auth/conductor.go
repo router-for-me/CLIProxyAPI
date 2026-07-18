@@ -171,6 +171,8 @@ type Result struct {
 	RetryAfter *time.Duration
 	// Error describes the failure when Success is false.
 	Error *Error
+	// Headers carries upstream response metadata used to synchronize provider quota state.
+	Headers http.Header
 }
 
 // Selector chooses an auth candidate for execution.
@@ -1843,7 +1845,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			}
 		}
 		if !failed {
-			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: true})
+			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: true, Headers: headers})
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
@@ -2627,6 +2629,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				authErr = errExec
 				continue
 			}
+			result.Headers = resp.Headers
 			m.MarkResult(execCtx, result)
 			rewriteForceMappedResponse(&resp, aliasResult)
 			return resp, nil
@@ -2740,6 +2743,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				authErr = errExec
 				continue
 			}
+			result.Headers = resp.Headers
 			m.MarkResult(execCtx, result)
 			rewriteForceMappedResponse(&resp, aliasResult)
 			return resp, nil
@@ -3714,6 +3718,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	setModelQuota := false
 	var authSnapshot *Auth
 	cooldownStateChanged := false
+	codexQuota, hasCodexQuota := ParseCodexQuotaHeaders(result.Headers)
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -3745,6 +3750,30 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				clearModelQuota = true
 			} else {
 				clearAuthStateOnSuccess(auth, now)
+			}
+			if strings.EqualFold(result.Provider, "codex") && result.Model != "" && hasCodexQuota {
+				if exhausted := codexQuota.exhaustedWindow(); exhausted != nil {
+					state := ensureModelState(auth, result.Model)
+					next := exhausted.ResetAt
+					if !next.After(now) {
+						next, _ = quotaCooldownAfterFailure(state.Quota, now)
+					}
+					state.Unavailable = true
+					state.Status = StatusError
+					state.StatusMessage = "quota"
+					state.NextRetryAfter = next
+					state.Quota = QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: next}
+					state.UpdatedAt = now
+					auth.Status = StatusError
+					auth.StatusMessage = "quota"
+					auth.UpdatedAt = now
+					updateAggregatedAvailability(auth, now)
+					shouldResumeModel = false
+					clearModelQuota = false
+					shouldSuspendModel = true
+					suspendReason = "quota"
+					setModelQuota = true
+				}
 			}
 		} else {
 			if result.Model != "" {
@@ -5509,6 +5538,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				m.MarkResult(creditsCtx, result)
 				continue
 			}
+			result.Headers = resp.Headers
 			m.MarkResult(creditsCtx, result)
 			rewriteForceMappedResponse(&resp, aliasResult)
 			return resp, true, nil

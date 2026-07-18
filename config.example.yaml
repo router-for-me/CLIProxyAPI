@@ -130,6 +130,13 @@ disable-cooling: false
 # Default is false; when false, cooldown status is kept in memory only.
 save-cooldown-status: false
 
+# Synchronize Codex quota from response headers and actively verify exhausted accounts.
+# codex-quota-refresh:
+#   enabled: true
+#   scan-interval: 15m
+#   min-account-interval: 30m
+#   account-stagger: 3s
+
 # Cooldown duration in seconds for transient upstream errors (408/500/502/503/504).
 # Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
 transient-error-cooldown-seconds: 0
