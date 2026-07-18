@@ -2926,7 +2926,7 @@ func TestNormalizeXAITools_WrapsApplyPatchCustomTool(t *testing.T) {
 		"tools":[{
 			"type":"custom",
 			"name":"apply_patch",
-			"format":{"type":"grammar","syntax":"lark","definition":"start: patch"}
+			"format":{"type":"grammar","syntax":"lark","definition":"start: begin_patch hunk+ end_patch\nchange_move: \"*** Move to: \" filename LF\neof_line: \"*** End of File\" LF"}
 		}],
 		"tool_choice":{"type":"custom","name":"apply_patch"}
 	}`)
@@ -2947,13 +2947,24 @@ func TestNormalizeXAITools_WrapsApplyPatchCustomTool(t *testing.T) {
 		t.Fatalf("apply_patch grammar leaked upstream; body=%s", out)
 	}
 	inputDescription := tool.Get("parameters.properties.input.description").String()
-	for _, want := range []string{"*** Add File:", "*** Update File:", "*** Delete File:", "Example:"} {
+	for _, want := range []string{"after JSON decoding", "start: begin_patch hunk+ end_patch", "*** Move to:", "*** End of File"} {
 		if !strings.Contains(inputDescription, want) {
 			t.Fatalf("apply_patch input description missing %q; body=%s", want, out)
 		}
 	}
 	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "function" {
 		t.Fatalf("tool_choice.type = %q, want function; body=%s", got, out)
+	}
+}
+
+func TestNormalizeXAITools_ApplyPatchUsesFallbackGrammar(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"custom","name":"apply_patch"}]}`)
+	out := normalizeXAITools(body)
+	description := gjson.GetBytes(out, "tools.0.parameters.properties.input.description").String()
+	for _, want := range []string{"start: begin_patch hunk+ end_patch", "add_line+", "change_move?", "eof_line?", "%import common.LF"} {
+		if !strings.Contains(description, want) {
+			t.Fatalf("fallback apply_patch grammar missing %q: %q", want, description)
+		}
 	}
 }
 

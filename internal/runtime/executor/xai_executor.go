@@ -47,8 +47,7 @@ const (
 	xaiWebSearchToolType       = "web_search"
 	xaiXSearchToolType         = "x_search"
 
-	xaiApplyPatchToolDescription  = "Apply file changes using an apply_patch document. Call this function with exactly one argument named `input`."
-	xaiApplyPatchInputDescription = "The complete decoded patch document, not nested JSON and not Markdown. It must start with `*** Begin Patch` and end with `*** End Patch`. Put no explanatory text or code fences around it. Use `*** Add File:`, `*** Update File:`, or `*** Delete File:` sections. Update hunks use `@@` and lines prefixed with space, `+`, or `-`.\n\nExample:\n*** Begin Patch\n*** Update File: app.py\n@@\n-old\n+new\n*** End Patch"
+	xaiApplyPatchToolDescription = "Apply file changes using an apply_patch document. Invoke this function with exactly one JSON argument object containing only `input`."
 	// Codex Desktop injects codex_app.automation_update with a large oneOf+$ref
 	// schema. xAI's free/build Responses path accepts the HTTP request but never
 	// emits SSE when that schema is present, so Desktop hangs on "thinking".
@@ -73,6 +72,39 @@ const (
 	// xaiUsingAPIAttr enables the official API path for non-media HTTP chat.
 	xaiUsingAPIAttr = "using_api"
 )
+
+const xaiApplyPatchFallbackLarkGrammar = `start: begin_patch hunk+ end_patch
+begin_patch: "*** Begin Patch" LF
+end_patch: "*** End Patch" LF?
+
+hunk: add_hunk | delete_hunk | update_hunk
+add_hunk: "*** Add File: " filename LF add_line+
+delete_hunk: "*** Delete File: " filename LF
+update_hunk: "*** Update File: " filename LF change_move? change?
+
+filename: /(.+)/
+add_line: "+" /(.*)/ LF -> line
+
+change_move: "*** Move to: " filename LF
+change: (change_context | change_line)+ eof_line?
+change_context: ("@@" | "@@ " /(.+)/) LF
+change_line: ("+" | "-" | " ") /(.*)/ LF
+eof_line: "*** End of File" LF
+
+%import common.LF`
+
+const xaiApplyPatchInputDescriptionPrefix = "The value of `input` must be the complete raw apply_patch document after JSON decoding. Do not put a JSON object, a second JSON-encoded string, Markdown code fences, or explanatory text inside `input`. The value must satisfy this Lark grammar:\n\n"
+
+func xaiApplyPatchInputDescription(tool gjson.Result) string {
+	definition := ""
+	if strings.EqualFold(strings.TrimSpace(tool.Get("format.syntax").String()), "lark") {
+		definition = strings.TrimSpace(tool.Get("format.definition").String())
+	}
+	if definition == "" {
+		definition = xaiApplyPatchFallbackLarkGrammar
+	}
+	return xaiApplyPatchInputDescriptionPrefix + definition
+}
 
 // Always inject native x_search when the client did not declare it so Grok can
 // run X Search server-side. Internal subtool traces are still filtered downstream
@@ -1852,7 +1884,7 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 		}
 		if strings.TrimSpace(tool.Get("name").String()) == "apply_patch" {
 			raw, _ = sjson.SetBytes(raw, "description", xaiApplyPatchToolDescription)
-			raw, _ = sjson.SetBytes(raw, "parameters.properties.input.description", xaiApplyPatchInputDescription)
+			raw, _ = sjson.SetBytes(raw, "parameters.properties.input.description", xaiApplyPatchInputDescription(tool))
 			schemaTool = gjson.ParseBytes(raw)
 		}
 		toolType = xaiFunctionToolType

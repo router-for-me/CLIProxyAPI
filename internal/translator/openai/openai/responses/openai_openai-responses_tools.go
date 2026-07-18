@@ -10,9 +10,40 @@ import (
 
 const applyPatchToolName = "apply_patch"
 
-const applyPatchCompatibilityDescription = "Chat Completions compatibility wrapper for the free-form apply_patch tool. Call this function with exactly one argument named `input`."
+const applyPatchCompatibilityDescription = "Chat Completions compatibility wrapper for the free-form apply_patch tool. Invoke it with exactly one JSON argument object containing only `input`."
 
-const applyPatchInputDescription = "The complete decoded patch document, not JSON and not Markdown. It must start with `*** Begin Patch` and end with `*** End Patch`. Put no explanatory text or code fences around it. Use `*** Add File:`, `*** Update File:`, or `*** Delete File:` sections. Update hunks use `@@` and lines prefixed with space, `+`, or `-`.\n\nExample:\n*** Begin Patch\n*** Update File: app.py\n@@\n-old\n+new\n*** End Patch"
+const applyPatchFallbackLarkGrammar = `start: begin_patch hunk+ end_patch
+begin_patch: "*** Begin Patch" LF
+end_patch: "*** End Patch" LF?
+
+hunk: add_hunk | delete_hunk | update_hunk
+add_hunk: "*** Add File: " filename LF add_line+
+delete_hunk: "*** Delete File: " filename LF
+update_hunk: "*** Update File: " filename LF change_move? change?
+
+filename: /(.+)/
+add_line: "+" /(.*)/ LF -> line
+
+change_move: "*** Move to: " filename LF
+change: (change_context | change_line)+ eof_line?
+change_context: ("@@" | "@@ " /(.+)/) LF
+change_line: ("+" | "-" | " ") /(.*)/ LF
+eof_line: "*** End of File" LF
+
+%import common.LF`
+
+const applyPatchInputDescriptionPrefix = "The value of `input` must be the complete raw apply_patch document after JSON decoding. Do not put a JSON object, a second JSON-encoded string, Markdown code fences, or explanatory text inside `input`. The value must satisfy this Lark grammar:\n\n"
+
+func applyPatchInputDescription(tool gjson.Result) string {
+	definition := ""
+	if strings.EqualFold(strings.TrimSpace(tool.Get("format.syntax").String()), "lark") {
+		definition = strings.TrimSpace(tool.Get("format.definition").String())
+	}
+	if definition == "" {
+		definition = applyPatchFallbackLarkGrammar
+	}
+	return applyPatchInputDescriptionPrefix + definition
+}
 
 func convertResponsesToolToOpenAIChatTools(tool gjson.Result) [][]byte {
 	toolType := strings.TrimSpace(tool.Get("type").String())
@@ -48,7 +79,7 @@ func convertResponsesCustomToolToOpenAIChat(tool gjson.Result, overrideName stri
 	chatTool, _ = sjson.SetBytes(chatTool, "function.name", name)
 	if name == applyPatchToolName {
 		chatTool, _ = sjson.SetBytes(chatTool, "function.description", applyPatchCompatibilityDescription)
-		chatTool, _ = sjson.SetBytes(chatTool, "function.parameters.properties.input.description", applyPatchInputDescription)
+		chatTool, _ = sjson.SetBytes(chatTool, "function.parameters.properties.input.description", applyPatchInputDescription(tool))
 	} else if description := responsesToolDescription(tool); description != "" {
 		chatTool, _ = sjson.SetBytes(chatTool, "function.description", description)
 	}

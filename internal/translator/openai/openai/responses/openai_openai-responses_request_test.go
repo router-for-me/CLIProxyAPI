@@ -338,7 +338,7 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_OptimizesApplyPatc
 			"type":"custom",
 			"name":"apply_patch",
 			"description":"original description",
-			"format":{"type":"grammar","syntax":"lark","definition":"start: patch"}
+			"format":{"type":"grammar","syntax":"lark","definition":"start: begin_patch hunk+ end_patch\nchange_move: \"*** Move to: \" filename LF\neof_line: \"*** End of File\" LF"}
 		}]
 	}`)
 
@@ -353,11 +353,25 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_OptimizesApplyPatc
 	if !tool.Get("parameters.additionalProperties").Exists() || tool.Get("parameters.additionalProperties").Bool() {
 		t.Fatalf("additionalProperties must be false; output=%s", out)
 	}
-	if description := tool.Get("parameters.properties.input.description").String(); !strings.Contains(description, "*** Begin Patch") || !strings.Contains(description, "*** End Patch") {
-		t.Fatalf("apply_patch input description missing patch boundaries: %q", description)
+	description := tool.Get("parameters.properties.input.description").String()
+	for _, want := range []string{"after JSON decoding", "start: begin_patch hunk+ end_patch", "*** Move to:", "*** End of File"} {
+		if !strings.Contains(description, want) {
+			t.Fatalf("apply_patch input description missing %q: %q", want, description)
+		}
 	}
 	if tool.Get("format").Exists() {
 		t.Fatalf("custom grammar must not leak into Chat Completions tool: %s", out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ApplyPatchUsesFallbackGrammar(t *testing.T) {
+	raw := []byte(`{"tools":[{"type":"custom","name":"apply_patch"}]}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", raw, false)
+	description := gjson.GetBytes(out, "tools.0.function.parameters.properties.input.description").String()
+	for _, want := range []string{"start: begin_patch hunk+ end_patch", "add_line+", "change_move?", "eof_line?", "%import common.LF"} {
+		if !strings.Contains(description, want) {
+			t.Fatalf("fallback apply_patch grammar missing %q: %q", want, description)
+		}
 	}
 }
 
