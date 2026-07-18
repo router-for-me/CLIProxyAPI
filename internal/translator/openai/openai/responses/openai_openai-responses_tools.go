@@ -1,11 +1,18 @@
 package responses
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+const applyPatchToolName = "apply_patch"
+
+const applyPatchCompatibilityDescription = "Chat Completions compatibility wrapper for the free-form apply_patch tool. Call this function with exactly one argument named `input`."
+
+const applyPatchInputDescription = "The complete decoded patch document, not JSON and not Markdown. It must start with `*** Begin Patch` and end with `*** End Patch`. Put no explanatory text or code fences around it. Use `*** Add File:`, `*** Update File:`, or `*** Delete File:` sections. Update hunks use `@@` and lines prefixed with space, `+`, or `-`.\n\nExample:\n*** Begin Patch\n*** Update File: app.py\n@@\n-old\n+new\n*** End Patch"
 
 func convertResponsesToolToOpenAIChatTools(tool gjson.Result) [][]byte {
 	toolType := strings.TrimSpace(tool.Get("type").String())
@@ -37,9 +44,12 @@ func convertResponsesCustomToolToOpenAIChat(tool gjson.Result, overrideName stri
 	if name == "" {
 		return nil, false
 	}
-	chatTool := []byte(`{"type":"function","function":{"name":"","description":"","parameters":{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}}}`)
+	chatTool := []byte(`{"type":"function","function":{"name":"","description":"","parameters":{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}}`)
 	chatTool, _ = sjson.SetBytes(chatTool, "function.name", name)
-	if description := responsesToolDescription(tool); description != "" {
+	if name == applyPatchToolName {
+		chatTool, _ = sjson.SetBytes(chatTool, "function.description", applyPatchCompatibilityDescription)
+		chatTool, _ = sjson.SetBytes(chatTool, "function.parameters.properties.input.description", applyPatchInputDescription)
+	} else if description := responsesToolDescription(tool); description != "" {
 		chatTool, _ = sjson.SetBytes(chatTool, "function.description", description)
 	}
 	return chatTool, true
@@ -229,6 +239,13 @@ func unwrapCustomToolInput(arguments string) string {
 			return v.String()
 		}
 		return v.Raw
+	}
+	trimmed := strings.TrimSpace(arguments)
+	if len(trimmed) > 1 && trimmed[0] == '"' && json.Valid([]byte(trimmed)) {
+		var decoded string
+		if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil {
+			return decoded
+		}
 	}
 	return arguments
 }

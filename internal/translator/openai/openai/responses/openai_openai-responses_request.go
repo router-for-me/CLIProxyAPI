@@ -336,7 +336,16 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert tool_choice if present
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
+		if toolChoice.IsObject() && toolChoice.Get("type").String() == "custom" {
+			name := strings.TrimSpace(toolChoice.Get("name").String())
+			if name != "" {
+				convertedChoice := []byte(`{"type":"function","function":{"name":""}}`)
+				convertedChoice, _ = sjson.SetBytes(convertedChoice, "function.name", name)
+				out, _ = sjson.SetRawBytes(out, "tool_choice", convertedChoice)
+			}
+		} else {
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
+		}
 	}
 
 	return out

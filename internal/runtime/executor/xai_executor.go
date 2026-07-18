@@ -46,6 +46,9 @@ const (
 	xaiToolSearchType          = "tool_search"
 	xaiWebSearchToolType       = "web_search"
 	xaiXSearchToolType         = "x_search"
+
+	xaiApplyPatchToolDescription  = "Apply file changes using an apply_patch document. Call this function with exactly one argument named `input`."
+	xaiApplyPatchInputDescription = "The complete decoded patch document, not nested JSON and not Markdown. It must start with `*** Begin Patch` and end with `*** End Patch`. Put no explanatory text or code fences around it. Use `*** Add File:`, `*** Update File:`, or `*** Delete File:` sections. Update hunks use `@@` and lines prefixed with space, `+`, or `-`.\n\nExample:\n*** Begin Patch\n*** Update File: app.py\n@@\n-old\n+new\n*** End Patch"
 	// Codex Desktop injects codex_app.automation_update with a large oneOf+$ref
 	// schema. xAI's free/build Responses path accepts the HTTP request but never
 	// emits SSE when that schema is present, so Desktop hangs on "thinking".
@@ -190,6 +193,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
 	responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
+	applyPatchAdapter := newXAIApplyPatchResponseAdapter(prepared.restoreApplyPatch)
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		if !bytes.HasPrefix(line, xaiDataTag) {
 			continue
@@ -197,6 +201,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
 		eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
 		eventData = responseFilter.apply(eventData)
+		eventData = applyPatchAdapter.apply(eventData)
 		if len(eventData) == 0 {
 			continue
 		}
@@ -673,6 +678,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
+		applyPatchAdapter := newXAIApplyPatchResponseAdapter(prepared.restoreApplyPatch)
 		var pendingEventLine []byte
 		emitTranslatedLine := func(translatedLine []byte) bool {
 			chunks := sdktranslator.TranslateStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, translatedLine, &param)
@@ -703,6 +709,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				for i, eventData := range eventDataList {
 					eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
 					eventData = responseFilter.apply(eventData)
+					eventData = applyPatchAdapter.apply(eventData)
 					if len(eventData) == 0 {
 						if hasPendingEventLine && i == 0 {
 							pendingEventLine = nil
@@ -859,6 +866,7 @@ type xaiPreparedRequest struct {
 	sessionID             string
 	replayScope           xaiReasoningReplayScope
 	filterInternalXSearch bool
+	restoreApplyPatch     bool
 }
 
 type xaiNamespaceToolRef struct {
@@ -914,6 +922,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	// Collect before normalizeXAITools flattens namespace wrappers so keys match
 	// the post-restore (namespace, short-name) shape used by the response filter.
 	clientDeclaredTools := collectXAIClientDeclaredToolKeys(body)
+	restoreApplyPatch := xaiHasCustomApplyPatchTool(body)
 	body = normalizeXAITools(body)
 	// Drop choices that point at tools removed by normalizeXAITools before we
 	// inject native x_search, so a surviving allowed_tools / forced choice is not
@@ -955,6 +964,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 		sessionID:             sessionID,
 		replayScope:           replayScope,
 		filterInternalXSearch: xaiRequestHasNativeXSearch(body),
+		restoreApplyPatch:     restoreApplyPatch,
 	}, nil
 }
 
@@ -1615,6 +1625,136 @@ func normalizeXAIToolChoiceForTools(body []byte) []byte {
 	return body
 }
 
+func xaiHasCustomApplyPatchTool(body []byte) bool {
+	found := false
+	var collect func(gjson.Result)
+	collect = func(tools gjson.Result) {
+		if found || !tools.IsArray() {
+			return
+		}
+		for _, tool := range tools.Array() {
+			switch strings.TrimSpace(tool.Get("type").String()) {
+			case xaiCustomToolType:
+				if strings.TrimSpace(tool.Get("name").String()) == "apply_patch" {
+					found = true
+					return
+				}
+			case xaiNamespaceToolType:
+				collect(tool.Get("tools"))
+			}
+		}
+	}
+	collect(gjson.GetBytes(body, "tools"))
+	for _, item := range gjson.GetBytes(body, "input").Array() {
+		if item.Get("type").String() == "additional_tools" {
+			collect(item.Get("tools"))
+		}
+	}
+	return found
+}
+
+type xaiApplyPatchResponseAdapter struct {
+	enabled   bool
+	itemIDs   map[string]struct{}
+	arguments map[string]*strings.Builder
+}
+
+func newXAIApplyPatchResponseAdapter(enabled bool) *xaiApplyPatchResponseAdapter {
+	return &xaiApplyPatchResponseAdapter{
+		enabled:   enabled,
+		itemIDs:   make(map[string]struct{}),
+		arguments: make(map[string]*strings.Builder),
+	}
+}
+
+func (a *xaiApplyPatchResponseAdapter) apply(data []byte) []byte {
+	if a == nil || !a.enabled || len(data) == 0 || !gjson.ValidBytes(data) {
+		return data
+	}
+
+	eventType := gjson.GetBytes(data, "type").String()
+	if eventType == "response.output_item.added" || eventType == "response.output_item.done" {
+		item := gjson.GetBytes(data, "item")
+		if item.Get("type").String() == "function_call" && strings.TrimSpace(item.Get("name").String()) == "apply_patch" {
+			itemID := strings.TrimSpace(item.Get("id").String())
+			if itemID != "" {
+				a.itemIDs[itemID] = struct{}{}
+			}
+			data = xaiRestoreApplyPatchItemAtPath(data, "item", a.bufferedArguments(itemID, item.Get("arguments")))
+			return data
+		}
+	}
+
+	itemID := strings.TrimSpace(gjson.GetBytes(data, "item_id").String())
+	if _, ok := a.itemIDs[itemID]; ok {
+		switch eventType {
+		case "response.function_call_arguments.delta":
+			if delta := gjson.GetBytes(data, "delta").String(); delta != "" {
+				buf := a.arguments[itemID]
+				if buf == nil {
+					buf = &strings.Builder{}
+					a.arguments[itemID] = buf
+				}
+				buf.WriteString(delta)
+			}
+			return nil
+		case "response.function_call_arguments.done":
+			input := a.bufferedArguments(itemID, gjson.GetBytes(data, "arguments"))
+			data, _ = sjson.SetBytes(data, "type", "response.custom_tool_call_input.done")
+			data, _ = sjson.SetBytes(data, "input", input)
+			data, _ = sjson.DeleteBytes(data, "arguments")
+			return data
+		}
+	}
+
+	output := gjson.GetBytes(data, "response.output")
+	if output.IsArray() {
+		for index, item := range output.Array() {
+			if item.Get("type").String() != "function_call" || strings.TrimSpace(item.Get("name").String()) != "apply_patch" {
+				continue
+			}
+			path := fmt.Sprintf("response.output.%d", index)
+			data = xaiRestoreApplyPatchItemAtPath(data, path, xaiApplyPatchInput(item.Get("arguments")))
+		}
+	}
+	return data
+}
+
+func (a *xaiApplyPatchResponseAdapter) bufferedArguments(itemID string, arguments gjson.Result) string {
+	if arguments.Exists() && strings.TrimSpace(arguments.String()) != "" {
+		return xaiApplyPatchInput(arguments)
+	}
+	if buf := a.arguments[itemID]; buf != nil {
+		return xaiApplyPatchInput(gjson.Result{Type: gjson.String, Str: buf.String()})
+	}
+	return ""
+}
+
+func xaiRestoreApplyPatchItemAtPath(data []byte, path, input string) []byte {
+	data, _ = sjson.SetBytes(data, path+".type", "custom_tool_call")
+	data, _ = sjson.SetBytes(data, path+".input", input)
+	data, _ = sjson.DeleteBytes(data, path+".arguments")
+	return data
+}
+
+func xaiApplyPatchInput(arguments gjson.Result) string {
+	raw := arguments.String()
+	if input := gjson.Get(raw, "input"); input.Exists() {
+		if input.Type == gjson.String {
+			return input.String()
+		}
+		return input.Raw
+	}
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) > 1 && trimmed[0] == '"' && json.Valid([]byte(trimmed)) {
+		var decoded string
+		if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil {
+			return decoded
+		}
+	}
+	return raw
+}
+
 // normalizeXAINamespaceToolChoice qualifies namespaced function choices using
 // the same names sent in the flattened tools list. xAI does not accept the
 // Responses namespace field on tool choices.
@@ -1625,7 +1765,20 @@ func normalizeXAINamespaceToolChoice(body []byte) []byte {
 	original := body
 	normalizeAtPath := func(path string) bool {
 		toolChoice := gjson.GetBytes(body, path)
-		if !toolChoice.IsObject() || toolChoice.Get("type").String() != xaiFunctionToolType {
+		if !toolChoice.IsObject() {
+			return true
+		}
+		toolType := toolChoice.Get("type").String()
+		if toolType == xaiCustomToolType {
+			updated, errSet := sjson.SetBytes(body, path+".type", xaiFunctionToolType)
+			if errSet != nil {
+				return false
+			}
+			body = updated
+			toolChoice = gjson.GetBytes(body, path)
+			toolType = xaiFunctionToolType
+		}
+		if toolType != xaiFunctionToolType {
 			return true
 		}
 		namespaceName := strings.TrimSpace(toolChoice.Get("namespace").String())
@@ -1666,10 +1819,6 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 	if toolType == xaiToolSearchType || toolType == xaiImageGenerationToolType {
 		return nil, true, true
 	}
-	if toolType == xaiCustomToolType && tool.Get("name").String() == "apply_patch" {
-		return nil, true, true
-	}
-
 	raw := []byte(tool.Raw)
 	schemaTool := tool
 	if toolType == xaiFunctionToolType || toolType == xaiCustomToolType {
@@ -1690,6 +1839,22 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 			return nil, false, false
 		}
 		raw = updatedTool
+		if !tool.Get("parameters").Exists() || strings.TrimSpace(tool.Get("name").String()) == "apply_patch" {
+			updatedTool, errSet = sjson.SetRawBytes(raw, "parameters", []byte(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}`))
+			if errSet != nil {
+				return nil, false, false
+			}
+			raw = updatedTool
+		}
+		updatedTool, errSet = sjson.DeleteBytes(raw, "format")
+		if errSet == nil {
+			raw = updatedTool
+		}
+		if strings.TrimSpace(tool.Get("name").String()) == "apply_patch" {
+			raw, _ = sjson.SetBytes(raw, "description", xaiApplyPatchToolDescription)
+			raw, _ = sjson.SetBytes(raw, "parameters.properties.input.description", xaiApplyPatchInputDescription)
+			schemaTool = gjson.ParseBytes(raw)
+		}
 		toolType = xaiFunctionToolType
 		changed = true
 	}

@@ -3,6 +3,7 @@ package responses
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -331,6 +332,35 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_FlattensNamespaceC
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_OptimizesApplyPatchCustomTool(t *testing.T) {
+	raw := []byte(`{
+		"tools":[{
+			"type":"custom",
+			"name":"apply_patch",
+			"description":"original description",
+			"format":{"type":"grammar","syntax":"lark","definition":"start: patch"}
+		}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", raw, false)
+	tool := gjson.GetBytes(out, "tools.0.function")
+	if got := tool.Get("name").String(); got != "apply_patch" {
+		t.Fatalf("tool name = %q, want apply_patch; output=%s", got, out)
+	}
+	if got := tool.Get("parameters.properties.input.type").String(); got != "string" {
+		t.Fatalf("input type = %q, want string; output=%s", got, out)
+	}
+	if !tool.Get("parameters.additionalProperties").Exists() || tool.Get("parameters.additionalProperties").Bool() {
+		t.Fatalf("additionalProperties must be false; output=%s", out)
+	}
+	if description := tool.Get("parameters.properties.input.description").String(); !strings.Contains(description, "*** Begin Patch") || !strings.Contains(description, "*** End Patch") {
+		t.Fatalf("apply_patch input description missing patch boundaries: %q", description)
+	}
+	if tool.Get("format").Exists() {
+		t.Fatalf("custom grammar must not leak into Chat Completions tool: %s", out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesStructuredToolChoice(t *testing.T) {
 	raw := []byte(`{
 		"input": [
@@ -353,6 +383,37 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesStructure
 	}
 	if got := gjson.GetBytes(out, "tool_choice.function.name").String(); got != "run_command" {
 		t.Fatalf("tool_choice.function.name = %q, want run_command; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ConvertsCustomToolChoice(t *testing.T) {
+	raw := []byte(`{"tool_choice":{"type":"custom","name":"apply_patch"}}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", raw, false)
+
+	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "function" {
+		t.Fatalf("tool_choice.type = %q, want function; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.function.name").String(); got != "apply_patch" {
+		t.Fatalf("tool_choice.function.name = %q, want apply_patch; output=%s", got, out)
+	}
+}
+
+func TestUnwrapCustomToolInputCompatibility(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "wrapped object", in: `{"input":"*** Begin Patch\n*** End Patch"}`, want: "*** Begin Patch\n*** End Patch"},
+		{name: "encoded string", in: `"*** Begin Patch\n*** End Patch"`, want: "*** Begin Patch\n*** End Patch"},
+		{name: "raw input", in: "*** Begin Patch\n*** End Patch", want: "*** Begin Patch\n*** End Patch"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := unwrapCustomToolInput(tt.in); got != tt.want {
+				t.Fatalf("unwrapCustomToolInput() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
