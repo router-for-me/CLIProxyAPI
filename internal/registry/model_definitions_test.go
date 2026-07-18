@@ -50,6 +50,57 @@ func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
 	t.Fatalf("expected xAI builtin model %s", xaiBuiltinVideo15PreviewModelID)
 }
 
+func TestGetStaticModelDefinitionsByChannelCopilotAliases(t *testing.T) {
+	want := GetCopilotModels()
+	if len(want) == 0 {
+		t.Fatal("GetCopilotModels returned no models")
+	}
+
+	wantIDs := modelIDSet(want)
+	required := []string{
+		"claude-fable-5",
+		"claude-opus-4-6",
+		"claude-opus-4-8",
+		"claude-sonnet-5",
+		"gemini-3.1-pro-preview",
+		"gemini-3.5-flash",
+		"mai-code-1-flash",
+		"kimi-k2.7-code",
+		"gpt-5.5",
+		"gpt-5.6-luna",
+		"gpt-5.6-sol",
+	}
+	for _, modelID := range required {
+		if _, ok := wantIDs[modelID]; !ok {
+			t.Fatalf("GetCopilotModels missing required model %q", modelID)
+		}
+	}
+
+	for _, channel := range []string{"copilot", "github-copilot", "github_copilot"} {
+		got := GetStaticModelDefinitionsByChannel(channel)
+		if len(got) != len(want) {
+			t.Fatalf("GetStaticModelDefinitionsByChannel(%q) length = %d, want %d", channel, len(got), len(want))
+		}
+		gotIDs := modelIDSet(got)
+		for modelID := range wantIDs {
+			if _, ok := gotIDs[modelID]; !ok {
+				t.Fatalf("GetStaticModelDefinitionsByChannel(%q) missing model %q", channel, modelID)
+			}
+		}
+	}
+}
+
+func modelIDSet(models []*ModelInfo) map[string]struct{} {
+	ids := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if model == nil || model.ID == "" {
+			continue
+		}
+		ids[model.ID] = struct{}{}
+	}
+	return ids
+}
+
 func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing.T) {
 	registryRef := GetGlobalRegistry()
 	registryRef.RegisterClient("test-antigravity-websearch-route", "antigravity", []*ModelInfo{

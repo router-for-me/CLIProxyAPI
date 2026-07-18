@@ -15,6 +15,19 @@ const (
 	xaiBuiltinVideo15PreviewModelID = "grok-imagine-video-1.5-preview"
 )
 
+var copilotSupportedModelIDs = []string{
+	"claude-fable-5",
+	"claude-opus-4-6",
+	"claude-opus-4-8",
+	"claude-sonnet-5",
+	"gemini-3.1-pro-preview",
+	"gemini-3.5-flash",
+	"kimi-k2.7-code",
+	"gpt-5.5",
+	"gpt-5.6-luna",
+	"gpt-5.6-sol",
+}
+
 // staticModelsJSON mirrors the top-level structure of models.json.
 type staticModelsJSON struct {
 	Claude      []*ModelInfo `json:"claude"`
@@ -68,6 +81,19 @@ func GetCodexPlusModels() []*ModelInfo {
 // GetCodexProModels returns model definitions for the Codex pro plan tier.
 func GetCodexProModels() []*ModelInfo {
 	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPro))
+}
+
+// GetCopilotModels returns static model definitions for GitHub Copilot.
+func GetCopilotModels() []*ModelInfo {
+	models := GetCodexProModels()
+	extras := make([]*ModelInfo, 0, len(copilotSupportedModelIDs)+1)
+	for _, modelID := range copilotSupportedModelIDs {
+		if model := LookupStaticModelInfo(modelID); model != nil {
+			extras = append(extras, model)
+		}
+	}
+	extras = append(extras, copilotMAICodeFlashModelInfo())
+	return upsertModelInfos(models, extras...)
 }
 
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
@@ -274,6 +300,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - vertex
 //   - aistudio
 //   - codex
+//   - copilot
 //   - kimi
 //   - antigravity
 //   - xai
@@ -290,6 +317,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAIStudioModels()
 	case "codex":
 		return GetCodexProModels()
+	case "copilot", "github-copilot", "github_copilot":
+		return GetCopilotModels()
 	case "kimi":
 		return GetKimiModels()
 	case "antigravity":
@@ -298,6 +327,17 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetXAIModels()
 	default:
 		return nil
+	}
+}
+
+func copilotMAICodeFlashModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          "mai-code-1-flash",
+		Object:      "model",
+		OwnedBy:     "microsoft",
+		Type:        "openai",
+		DisplayName: "MAI-Code-1-Flash",
+		Version:     "mai-code-1-flash",
 	}
 }
 
