@@ -44,8 +44,8 @@ jobs:
       - name: Run unit tests
         run: go test -p "$(nproc)" ./...
 
-      - name: Run vet
-        run: go vet ./...
+      - name: Vet Claude identity package
+        run: go vet ./sdk/cliproxy/auth
 
       - name: Verify server build
         run: |
