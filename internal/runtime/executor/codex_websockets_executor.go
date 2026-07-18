@@ -477,7 +477,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
 
-	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+	conn, respHS, readCh, errDial := e.ensureUpstreamConnForRequest(ctx, auth, sess, authID, wsURL, wsHeaders)
 	if errDial != nil {
 		bodyErr := websocketHandshakeBody(respHS)
 		if respHS != nil {
@@ -512,9 +512,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}()
 	}
 
-	var readCh chan codexWebsocketRead
 	if sess != nil {
-		readCh = sess.activate(conn)
 		defer func() {
 			sess.clearActive(conn, readCh)
 		}()
@@ -541,7 +539,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			// closing sockets between sequential requests within the same execution
 			// session, including close frames that race with the first resend.
 			for sendRetryAttempt := 0; ; sendRetryAttempt++ {
-				connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+				connRetry, respHSRetry, readChRetry, errDialRetry := e.ensureUpstreamConnForRequest(ctx, auth, sess, authID, wsURL, wsHeaders)
 				if errDialRetry != nil || connRetry == nil {
 					closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
 					if errDialRetry == nil {
@@ -552,7 +550,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 					return resp, errDialRetry
 				}
 				conn = connRetry
-				readCh = sess.activate(conn)
+				readCh = readChRetry
 				wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 					URL:       wsURL,
@@ -613,7 +611,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 					return resp, errRead
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "read_stale_terminal_close_retry", errRead)
-				connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+				connRetry, respHSRetry, readChRetry, errDialRetry := e.ensureUpstreamConnForRequest(ctx, auth, sess, authID, wsURL, wsHeaders)
 				if errDialRetry != nil || connRetry == nil {
 					closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
 					if errDialRetry == nil {
@@ -624,7 +622,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 					return resp, errDialRetry
 				}
 				conn = connRetry
-				readCh = sess.activate(conn)
+				readCh = readChRetry
 				wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 					URL:       wsURL,
@@ -657,7 +655,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "read_pre_payload_close_retry", errRead)
 				readRetryAttempt++
 				e.clearUpstreamConn(sess, conn, "pre_payload_close_retry", errRead, false)
-				connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+				connRetry, respHSRetry, readChRetry, errDialRetry := e.ensureUpstreamConnForRequest(ctx, auth, sess, authID, wsURL, wsHeaders)
 				if errDialRetry != nil || connRetry == nil {
 					closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
 					if errDialRetry == nil {
@@ -668,7 +666,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 					return resp, errDialRetry
 				}
 				conn = connRetry
-				readCh = sess.activate(conn)
+				readCh = readChRetry
 				wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 					URL:       wsURL,
@@ -889,7 +887,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
 
-	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+	conn, respHS, readCh, errDial := e.ensureUpstreamConnForRequest(ctx, auth, sess, authID, wsURL, wsHeaders)
 	var upstreamHeaders http.Header
 	if respHS != nil {
 		upstreamHeaders = respHS.Header.Clone()
@@ -923,11 +921,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		logCodexWebsocketConnected(executionSessionID, authID, wsURL)
 	}
 
-	var readCh chan codexWebsocketRead
-	if sess != nil {
-		readCh = sess.activate(conn)
-	}
-
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
 		if sess != nil {
@@ -957,7 +950,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 			// Retry with fresh websocket connections for the same execution session.
 			for sendRetryAttempt := 0; ; sendRetryAttempt++ {
-				connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+				connRetry, respHSRetry, readChRetry, errDialRetry := e.ensureUpstreamConnForRequest(ctx, auth, sess, authID, wsURL, wsHeaders)
 				if errDialRetry != nil || connRetry == nil {
 					closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
 					if errDialRetry == nil {
@@ -969,7 +962,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					return nil, errDialRetry
 				}
 				conn = connRetry
-				readCh = sess.activate(conn)
+				readCh = readChRetry
 				wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 					URL:       wsURL,
@@ -1088,7 +1081,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					}
 					terminateReason = "stale_terminal_close_retry"
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "read_stale_terminal_close_retry", errRead)
-					connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+					connRetry, respHSRetry, readChRetry, errDialRetry := e.ensureUpstreamConnForRequest(ctx, auth, sess, authID, wsURL, wsHeaders)
 					if errDialRetry != nil || connRetry == nil {
 						closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
 						if errDialRetry == nil {
@@ -1102,7 +1095,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 						return
 					}
 					conn = connRetry
-					readCh = sess.activate(conn)
+					readCh = readChRetry
 					wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 					helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 						URL:       wsURL,
@@ -1198,7 +1191,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "read_pre_payload_close_retry", errRead)
 					readRetryAttempt++
 					e.clearUpstreamConn(sess, conn, terminateReason, errRead, false)
-					connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+					connRetry, respHSRetry, readChRetry, errDialRetry := e.ensureUpstreamConnForRequest(ctx, auth, sess, authID, wsURL, wsHeaders)
 					if errDialRetry != nil || connRetry == nil {
 						closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
 						if errDialRetry == nil {
@@ -1212,7 +1205,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 						return
 					}
 					conn = connRetry
-					readCh = sess.activate(conn)
+					readCh = readChRetry
 					wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 					helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 						URL:       wsURL,
@@ -2601,7 +2594,7 @@ func (e *CodexWebsocketsExecutor) getSession(sessionID string) *codexWebsocketSe
 	return store.sessions[sessionID]
 }
 
-func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {
+func (e *CodexWebsocketsExecutor) ensureUpstreamConnWithReader(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header, startReader bool) (*websocket.Conn, *http.Response, error) {
 	if sess == nil {
 		return e.dialCodexWebsocket(ctx, auth, wsURL, headers)
 	}
@@ -2618,7 +2611,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	readerConn := sess.readerConn
 	sess.connMu.Unlock()
 	if conn != nil {
-		if readerConn != conn {
+		if startReader && readerConn != conn {
 			sess.connMu.Lock()
 			sess.readerConn = conn
 			sess.connMu.Unlock()
@@ -2645,11 +2638,16 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	sess.conn = conn
 	sess.wsURL = wsURL
 	sess.authID = authID
-	sess.readerConn = conn
+	sess.readerConn = nil
+	if startReader {
+		sess.readerConn = conn
+	}
 	sess.connMu.Unlock()
 
-	sess.configureConn(conn)
-	go e.readUpstreamLoop(sess, conn)
+	if startReader {
+		sess.configureConn(conn)
+		go e.readUpstreamLoop(sess, conn)
+	}
 	logCodexWebsocketConnected(sess.sessionID, authID, wsURL)
 	return conn, resp, nil
 }
