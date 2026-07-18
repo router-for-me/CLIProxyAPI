@@ -1,10 +1,135 @@
 package executor
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
+
+func TestNewKimiExecutorInitializesDelegatedClaudeConfig(t *testing.T) {
+	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
+	executor := NewKimiExecutor(cfg)
+
+	if executor.cfg != cfg {
+		t.Fatal("Kimi executor config was not initialized")
+	}
+	if executor.ClaudeExecutor.cfg != cfg {
+		t.Fatal("delegated Claude executor config was not initialized")
+	}
+}
+
+func TestKimiExecutorClaudeStreamForwardsAnthropicBetaAndLogsUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages?beta=true", nil)
+
+	var upstreamRequest *http.Request
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	ctx = context.WithValue(ctx, "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		upstreamRequest = req.Clone(req.Context())
+		upstreamRequest.Header = req.Header.Clone()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body: io.NopCloser(strings.NewReader(
+				"event: message_start\n" +
+					`data: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"kimi-k3","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}` + "\n\n" +
+					"event: message_stop\n" +
+					`data: {"type":"message_stop"}` + "\n\n",
+			)),
+		}, nil
+	}))
+
+	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
+	executor := NewKimiExecutor(cfg)
+	auth := &cliproxyauth.Auth{
+		ID:         "kimi-test-auth",
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-token"},
+	}
+	payload := []byte(`{"model":"kimi-k3","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`)
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		Stream:          true,
+		SourceFormat:    sdktranslator.FormatClaude,
+		OriginalRequest: payload,
+		Headers: http.Header{
+			"Anthropic-Beta": []string{"client-beta-one", "client-beta-two"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+	if upstreamRequest == nil {
+		t.Fatal("upstream request was not captured")
+	}
+	if got := upstreamRequest.URL.String(); got != "https://api.kimi.com/coding/v1/messages?beta=true" {
+		t.Fatalf("upstream URL = %q, want Kimi messages endpoint", got)
+	}
+	upstreamBetas := upstreamRequest.Header.Get("Anthropic-Beta")
+	for _, beta := range []string{"client-beta-one", "client-beta-two", "oauth-2025-04-20", "interleaved-thinking-2025-05-14"} {
+		if !strings.Contains(upstreamBetas, beta) {
+			t.Fatalf("Anthropic-Beta = %q, want %q", upstreamBetas, beta)
+		}
+	}
+
+	rawAPIRequest, existsRequest := ginCtx.Get("API_REQUEST")
+	apiRequest, okRequest := rawAPIRequest.([]byte)
+	if !existsRequest || !okRequest {
+		t.Fatalf("API_REQUEST = %#v, want captured bytes", rawAPIRequest)
+	}
+	apiRequestText := string(apiRequest)
+	for _, want := range []string{
+		"=== API REQUEST 1 ===",
+		"Upstream URL: https://api.kimi.com/coding/v1/messages?beta=true",
+		"Auth: provider=kimi",
+		"Anthropic-Beta: " + upstreamBetas,
+		`"model":"kimi-k3"`,
+	} {
+		if !strings.Contains(apiRequestText, want) {
+			t.Fatalf("API_REQUEST = %q, want %q", apiRequestText, want)
+		}
+	}
+	if strings.Contains(apiRequestText, "<missing>") {
+		t.Fatalf("API_REQUEST = %q, want captured upstream request", apiRequestText)
+	}
+
+	rawAPIResponse, existsResponse := ginCtx.Get("API_RESPONSE")
+	apiResponse, okResponse := rawAPIResponse.([]byte)
+	if !existsResponse || !okResponse {
+		t.Fatalf("API_RESPONSE = %#v, want captured bytes", rawAPIResponse)
+	}
+	apiResponseText := string(apiResponse)
+	for _, want := range []string{"=== API RESPONSE 1 ===", "Status: 200", `data: {"type":"message_stop"}`} {
+		if !strings.Contains(apiResponseText, want) {
+			t.Fatalf("API_RESPONSE = %q, want %q", apiResponseText, want)
+		}
+	}
+}
+
+type kimiRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f kimiRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func TestNormalizeKimiToolMessageLinks_UsesCallIDFallback(t *testing.T) {
 	body := []byte(`{
