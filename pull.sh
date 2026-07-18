@@ -66,15 +66,25 @@ echo "Pulling CI-built image: ${IMAGE_REFERENCE}"
 docker pull "${IMAGE_REFERENCE}"
 CANDIDATE_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${IMAGE_REFERENCE}")"
 
+replace_running_container() {
+  local target_image="$1"
+  # Existing production container may not belong to this compose project.
+  # Stop/remove the named container first so compose can recreate it cleanly.
+  if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+    docker stop "${CONTAINER_NAME}" >/dev/null
+    docker rm "${CONTAINER_NAME}" >/dev/null
+  fi
+  export CLI_PROXY_IMAGE="${target_image}"
+  "${COMPOSE_COMMAND[@]}" -f "${COMPOSE_FILE}" up -d --no-build --force-recreate "${SERVICE_NAME}"
+}
+
 rollback() {
   echo "Candidate verification failed; restoring ${ROLLBACK_IMAGE}."
-  export CLI_PROXY_IMAGE="${ROLLBACK_IMAGE}"
-  "${COMPOSE_COMMAND[@]}" -f "${COMPOSE_FILE}" up -d --no-build --force-recreate "${SERVICE_NAME}"
+  replace_running_container "${ROLLBACK_IMAGE}"
   echo "Rollback completed."
 }
 
-export CLI_PROXY_IMAGE="${IMAGE_REFERENCE}"
-if ! "${COMPOSE_COMMAND[@]}" -f "${COMPOSE_FILE}" up -d --no-build --force-recreate "${SERVICE_NAME}"; then
+if ! replace_running_container "${IMAGE_REFERENCE}"; then
   rollback
   exit 1
 fi
