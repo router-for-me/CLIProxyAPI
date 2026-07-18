@@ -782,6 +782,11 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	}
 	opts.Metadata = reqMeta
 	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	var errIdentity *interfaces.ErrorMessage
+	req, opts, errIdentity = normalizeClaudeIdentityBeforeAuth(entryProtocol, req, opts)
+	if errIdentity != nil {
+		return nil, nil, errIdentity
+	}
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
@@ -804,6 +809,31 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
 	body, responseHeaders := h.applyResponseInterceptors(ctx, responseProtocol, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
 	return body, responseHeaders, nil
+}
+
+func normalizeClaudeIdentityBeforeAuth(entryProtocol string, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Request, coreexecutor.Options, *interfaces.ErrorMessage) {
+	if entryProtocol != Claude {
+		return req, opts, nil
+	}
+	payload := req.Payload
+	if len(payload) == 0 {
+		payload = opts.OriginalRequest
+	}
+	normalizedPayload, identity, errResolve := coreauth.ResolveClaudeRequestIdentity(payload)
+	if errResolve != nil {
+		return req, opts, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("normalize Claude request identity: %w", errResolve),
+		}
+	}
+	req.Payload = cloneBytes(normalizedPayload)
+	opts.OriginalRequest = cloneBytes(normalizedPayload)
+	if opts.Metadata == nil {
+		opts.Metadata = make(map[string]any)
+	}
+	opts.Metadata[coreexecutor.ClaudeUserIDMetadataKey] = identity.UserID
+	opts.Metadata[coreexecutor.ClaudeSessionIDMetadataKey] = identity.SessionID
+	return req, opts, nil
 }
 
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
@@ -849,6 +879,11 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	}
 	opts.Metadata = reqMeta
 	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	var errIdentity *interfaces.ErrorMessage
+	req, opts, errIdentity = normalizeClaudeIdentityBeforeAuth(handlerType, req, opts)
+	if errIdentity != nil {
+		return nil, nil, errIdentity
+	}
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
@@ -881,6 +916,11 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 	req, opts := h.pluginExecutorRequest(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, false, execOptions)
 	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
 	req, opts = h.applyRequestInterceptorsAfterPluginExecutorRoute(ctx, host, executorPluginID, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	var errIdentity *interfaces.ErrorMessage
+	req, opts, errIdentity = normalizeClaudeIdentityBeforeAuth(entryProtocol, req, opts)
+	if errIdentity != nil {
+		return nil, nil, errIdentity
+	}
 	resp, errExecute := host.ExecutePluginExecutor(ctx, executorPluginID, req, opts)
 	if errExecute != nil {
 		return nil, nil, executionErrorMessage(errExecute)
@@ -899,6 +939,11 @@ func (h *BaseAPIHandler) countWithPluginExecutor(ctx context.Context, handlerTyp
 	req, opts := h.pluginExecutorRequest(ctx, handlerType, handlerType, modelName, originalRequestedModel, rawJSON, alt, false, execOptions)
 	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
 	req, opts = h.applyRequestInterceptorsAfterPluginExecutorRoute(ctx, host, executorPluginID, handlerType, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	var errIdentity *interfaces.ErrorMessage
+	req, opts, errIdentity = normalizeClaudeIdentityBeforeAuth(handlerType, req, opts)
+	if errIdentity != nil {
+		return nil, nil, errIdentity
+	}
 	resp, errCount := host.CountPluginExecutor(ctx, executorPluginID, req, opts)
 	if errCount != nil {
 		return nil, nil, executionErrorMessage(errCount)
@@ -1002,6 +1047,14 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 	req, opts := h.pluginExecutorRequest(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, true, execOptions)
 	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
 	req, opts = h.applyRequestInterceptorsAfterPluginExecutorRoute(ctx, host, executorPluginID, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	var errIdentity *interfaces.ErrorMessage
+	req, opts, errIdentity = normalizeClaudeIdentityBeforeAuth(entryProtocol, req, opts)
+	if errIdentity != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- errIdentity
+		close(errChan)
+		return nil, nil, errChan
+	}
 	streamResult, errStream := host.ExecutePluginExecutorStream(ctx, executorPluginID, req, opts)
 	if errStream != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -1186,6 +1239,14 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 	opts.Metadata = reqMeta
 	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	var errIdentity *interfaces.ErrorMessage
+	req, opts, errIdentity = normalizeClaudeIdentityBeforeAuth(entryProtocol, req, opts)
+	if errIdentity != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- errIdentity
+		close(errChan)
+		return nil, nil, errChan
+	}
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)

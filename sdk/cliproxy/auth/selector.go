@@ -7,7 +7,6 @@ import (
 	"hash/fnv"
 	"math"
 	"net/http"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -361,10 +360,6 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	return false, blockReasonNone, time.Time{}
 }
 
-// sessionPattern matches Claude Code user_id format:
-// user_{hash}_account__session_{uuid}
-var sessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
-
 // SessionAffinitySelector wraps another selector with session-sticky behavior.
 // It extracts session ID from multiple sources and maintains session-to-auth
 // mappings with automatic failover when the bound auth becomes unavailable.
@@ -524,10 +519,8 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 	if len(payload) > 0 {
 		userID := gjson.GetBytes(payload, "metadata.user_id").String()
 		if userID != "" {
-			// Old format: user_{hash}_account__session_{uuid}
-			if matches := sessionPattern.FindStringSubmatch(userID); len(matches) >= 2 {
-				id := "claude:" + matches[1]
-				return id, ""
+			if identity, valid := ParseClaudeUserID(userID); valid {
+				return "claude:" + identity.SessionID, ""
 			}
 			// New format: JSON object with session_id field
 			// e.g. {"device_id":"...","account_uuid":"...","session_id":"uuid"}

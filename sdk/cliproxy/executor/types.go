@@ -31,6 +31,12 @@ const ServiceTierMetadataKey = "service_tier"
 // Missing or true means generation is enabled; only an explicit false disables generation.
 const GenerateMetadataKey = "generate"
 
+// ClaudeUserIDMetadataKey stores the normalized Claude Code metadata.user_id.
+const ClaudeUserIDMetadataKey = "claude_user_id"
+
+// ClaudeSessionIDMetadataKey stores the session UUID embedded in ClaudeUserIDMetadataKey.
+const ClaudeSessionIDMetadataKey = "claude_session_id"
+
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"

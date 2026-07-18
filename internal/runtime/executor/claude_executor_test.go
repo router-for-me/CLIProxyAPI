@@ -112,6 +112,23 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeHeadersWithSessionOverridesConflictingClientHeader(t *testing.T) {
+	t.Parallel()
+
+	resolvedSessionID := "12345678-1234-1234-1234-123456789abc"
+	request := newClaudeHeaderTestRequest(t, http.Header{
+		"X-Claude-Code-Session-Id": []string{"client-conflict"},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-session-alignment"}}
+
+	if errHeaders := applyClaudeHeadersWithSession(request, auth, "key-session-alignment", false, nil, resolvedSessionID, &config.Config{}); errHeaders != nil {
+		t.Fatalf("applyClaudeHeadersWithSession() error = %v", errHeaders)
+	}
+	if got := request.Header.Get("X-Claude-Code-Session-Id"); got != resolvedSessionID {
+		t.Fatalf("X-Claude-Code-Session-Id = %q, want %q", got, resolvedSessionID)
+	}
+}
+
 func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 	stabilize := true
@@ -1435,6 +1452,59 @@ func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 	}
 	if !helps.IsValidUserID(userIDs[0]) || !helps.IsValidUserID(userIDs[1]) {
 		t.Fatalf("user_ids should be valid, got %q and %q", userIDs[0], userIDs[1])
+	}
+}
+
+func TestClaudeExecutor_PreservesResolvedIdentityThroughCloakAndHeaders(t *testing.T) {
+	t.Parallel()
+
+	var upstreamBody []byte
+	var upstreamSessionID string
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		upstreamBody, _ = io.ReadAll(request.Body)
+		upstreamSessionID = request.Header.Get("X-Claude-Code-Session-Id")
+		responseWriter.Header().Set("Content-Type", "application/json")
+		_, _ = responseWriter.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	requestPayload := []byte(`{"messages":[{"role":"user","content":"stable first message"}],"metadata":{"user_id":"invalid-client-value"}}`)
+	_, resolvedIdentity, errResolve := cliproxyauth.ResolveClaudeRequestIdentity(requestPayload)
+	if errResolve != nil {
+		t.Fatalf("ResolveClaudeRequestIdentity() error = %v", errResolve)
+	}
+
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey:  "key-resolved-identity",
+			BaseURL: server.URL,
+			Cloak:   &config.CloakConfig{Mode: "always"},
+		}},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-resolved-identity",
+		"base_url": server.URL,
+	}}
+
+	_, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: requestPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+		Metadata: map[string]any{
+			cliproxyexecutor.ClaudeUserIDMetadataKey:    resolvedIdentity.UserID,
+			cliproxyexecutor.ClaudeSessionIDMetadataKey: resolvedIdentity.SessionID,
+		},
+	})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+
+	if got := gjson.GetBytes(upstreamBody, "metadata.user_id").String(); got != resolvedIdentity.UserID {
+		t.Fatalf("upstream metadata.user_id = %q, want %q", got, resolvedIdentity.UserID)
+	}
+	if upstreamSessionID != resolvedIdentity.SessionID {
+		t.Fatalf("upstream X-Claude-Code-Session-Id = %q, want %q", upstreamSessionID, resolvedIdentity.SessionID)
 	}
 }
 

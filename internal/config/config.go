@@ -438,8 +438,8 @@ type CloakConfig struct {
 	// This can help bypass certain content filters.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
 
-	// CacheUserID controls whether Claude user_id values are cached per API key.
-	// When false, a fresh random user_id is generated for every request.
+	// CacheUserID preserves legacy per-credential user_id caching when a request
+	// does not carry the pre-auth normalized Claude identity metadata.
 	CacheUserID *bool `yaml:"cache-user-id,omitempty" json:"cache-user-id,omitempty"`
 }
 

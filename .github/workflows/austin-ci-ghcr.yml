@@ -1,0 +1,113 @@
+name: austin-ci-ghcr
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "feat/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/austinhmh/cli-proxy-api-plus
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check Go formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          unformatted_files="$(gofmt -l .)"
+          if [[ -n "${unformatted_files}" ]]; then
+            printf 'The following Go files require gofmt:\n%s\n' "${unformatted_files}"
+            exit 1
+          fi
+
+      - name: Refresh models catalog
+        run: bash .github/scripts/refresh-model-catalogs.sh
+
+      - name: Run unit tests
+        run: go test -p "$(nproc)" ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Verify server build
+        run: |
+          go build -p "$(nproc)" -o test-output ./cmd/server
+          rm -f test-output
+
+  image:
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=ref,event=branch
+
+      - name: Login to GitHub Container Registry
+        if: github.event_name != 'pull_request' && github.repository_owner == 'austinhmh'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate build metadata
+        shell: bash
+        run: |
+          echo "VERSION=sha-${GITHUB_SHA}" >> "${GITHUB_ENV}"
+          echo "COMMIT=${GITHUB_SHA}" >> "${GITHUB_ENV}"
+          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_ENV}"
+
+      - name: Build and optionally publish image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' && github.repository_owner == 'austinhmh' }}
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            COMMIT=${{ env.COMMIT }}
+            BUILD_DATE=${{ env.BUILD_DATE }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Publish image coordinates
+        shell: bash
+        run: |
+          {
+            echo "## GHCR image"
+            echo
+            echo "- Tag: \`${IMAGE_NAME}:sha-${GITHUB_SHA}\`"
+            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

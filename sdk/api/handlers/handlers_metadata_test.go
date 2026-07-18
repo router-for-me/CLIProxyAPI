@@ -7,7 +7,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/tidwall/gjson"
 	"golang.org/x/net/context"
 )
 
@@ -135,5 +137,55 @@ func TestSetGenerateMetadataHonorsExplicitFalse(t *testing.T) {
 
 	if got := meta[coreexecutor.GenerateMetadataKey]; got != false {
 		t.Fatalf("GenerateMetadataKey = %v, want false", got)
+	}
+}
+
+func TestNormalizeClaudeIdentityBeforeAuthSynchronizesRequestAndMetadata(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"messages":[{"role":"user","content":"first human message"}]}`)
+	req := coreexecutor.Request{Model: "claude-sonnet", Payload: payload}
+	opts := coreexecutor.Options{
+		OriginalRequest: []byte(`{"messages":[{"role":"user","content":"stale copy"}]}`),
+		Metadata:        map[string]any{"preserve": "value"},
+	}
+
+	normalizedRequest, normalizedOptions, errIdentity := normalizeClaudeIdentityBeforeAuth("claude", req, opts)
+	if errIdentity != nil {
+		t.Fatalf("normalizeClaudeIdentityBeforeAuth() error = %v", errIdentity.Error)
+	}
+	requestUserID := gjson.GetBytes(normalizedRequest.Payload, "metadata.user_id").String()
+	originalUserID := gjson.GetBytes(normalizedOptions.OriginalRequest, "metadata.user_id").String()
+	identity, valid := coreauth.ParseClaudeUserID(requestUserID)
+	if !valid {
+		t.Fatalf("normalized request user_id is invalid: %q", requestUserID)
+	}
+	if originalUserID != requestUserID {
+		t.Fatalf("OriginalRequest user_id = %q, want %q", originalUserID, requestUserID)
+	}
+	if got := normalizedOptions.Metadata[coreexecutor.ClaudeUserIDMetadataKey]; got != requestUserID {
+		t.Fatalf("ClaudeUserIDMetadataKey = %v, want %q", got, requestUserID)
+	}
+	if got := normalizedOptions.Metadata[coreexecutor.ClaudeSessionIDMetadataKey]; got != identity.SessionID {
+		t.Fatalf("ClaudeSessionIDMetadataKey = %v, want %q", got, identity.SessionID)
+	}
+	if got := normalizedOptions.Metadata["preserve"]; got != "value" {
+		t.Fatalf("existing metadata = %v, want %q", got, "value")
+	}
+}
+
+func TestNormalizeClaudeIdentityBeforeAuthLeavesOtherProtocolsUnchanged(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	req := coreexecutor.Request{Model: "gpt", Payload: payload}
+	opts := coreexecutor.Options{OriginalRequest: payload}
+
+	normalizedRequest, normalizedOptions, errIdentity := normalizeClaudeIdentityBeforeAuth("openai", req, opts)
+	if errIdentity != nil {
+		t.Fatalf("normalizeClaudeIdentityBeforeAuth() error = %v", errIdentity.Error)
+	}
+	if string(normalizedRequest.Payload) != string(payload) || string(normalizedOptions.OriginalRequest) != string(payload) {
+		t.Fatal("non-Claude protocol payload changed")
 	}
 }
