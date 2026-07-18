@@ -160,6 +160,7 @@ type authFallbackExecutor struct {
 	mu                sync.Mutex
 	executeCalls      []string
 	streamCalls       []string
+	refreshCalls      int
 	executeErrors     map[string]error
 	streamFirstErrors map[string]error
 }
@@ -197,6 +198,9 @@ func (e *authFallbackExecutor) ExecuteStream(_ context.Context, auth *Auth, _ cl
 }
 
 func (e *authFallbackExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	e.mu.Lock()
+	e.refreshCalls++
+	e.mu.Unlock()
 	return auth, nil
 }
 
@@ -222,6 +226,12 @@ func (e *authFallbackExecutor) StreamCalls() []string {
 	out := make([]string, len(e.streamCalls))
 	copy(out, e.streamCalls)
 	return out
+}
+
+func (e *authFallbackExecutor) RefreshCalls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.refreshCalls
 }
 
 type retryAfterStatusError struct {
@@ -854,7 +864,7 @@ func TestManager_MarkResult_TransientErrorCooldownDoesNotDisableAuthErrors(t *te
 	}
 }
 
-func TestManager_MarkResult_BadRequestCooldown(t *testing.T) {
+func TestManager_MarkResult_CredentialBillingErrorCooldown(t *testing.T) {
 	prevQuota := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
 	t.Cleanup(func() { quotaCooldownDisabled.Store(prevQuota) })
@@ -875,23 +885,210 @@ func TestManager_MarkResult_BadRequestCooldown(t *testing.T) {
 		Provider: auth.Provider,
 		Model:    model,
 		Success:  false,
-		Error:    &Error{HTTPStatus: http.StatusBadRequest, Message: "bad request"},
+		Error: &Error{
+			HTTPStatus: http.StatusBadRequest,
+			Message:    "Third-party apps now draw from extra usage. Please claim credit at console.anthropic.com/settings/usage",
+		},
 	})
 
 	updated, ok := m.GetByID(auth.ID)
 	if !ok || updated == nil {
 		t.Fatalf("expected auth to be present")
 	}
-	state := updated.ModelStates[model]
-	if state == nil {
-		t.Fatalf("expected model state to be present")
+	if !updated.Unavailable {
+		t.Fatal("expected credential billing error to make the auth unavailable")
 	}
-	if state.NextRetryAfter.IsZero() {
-		t.Fatal("expected bad request cooldown to be set so session affinity can fail over")
+	if state := updated.ModelStates[model]; state != nil {
+		t.Fatalf("expected credential-scoped error to avoid model-only state, got %#v", state)
 	}
-	diff := time.Until(state.NextRetryAfter)
+	if updated.NextRetryAfter.IsZero() {
+		t.Fatal("expected credential billing cooldown to be set")
+	}
+	diff := time.Until(updated.NextRetryAfter)
 	if diff < 29*time.Minute || diff > 31*time.Minute {
-		t.Fatalf("expected bad request cooldown to be ~30 minutes, got %v", diff)
+		t.Fatalf("expected credential billing cooldown to be ~30 minutes, got %v", diff)
+	}
+}
+
+func TestManager_CredentialBillingErrorFailsOverAndPreservesSessionAffinity(t *testing.T) {
+	selector := NewSessionAffinitySelector(&FillFirstSelector{})
+	t.Cleanup(selector.Stop)
+
+	manager := NewManager(nil, selector, nil)
+	billingMessage := "Upstream error: Third-party apps now draw from extra usage. Please claim credit at console.anthropic.com/settings/usage"
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-billing-auth": &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Message:    billingMessage,
+			},
+		},
+	}
+	manager.RegisterExecutor(executor)
+
+	model := "claude-haiku-4-5-20251001"
+	otherModel := "claude-sonnet-4-20250514"
+	badAuth := &Auth{
+		ID:       "aa-billing-auth",
+		Provider: "claude",
+		Metadata: map[string]any{"refresh_token": "must-not-refresh"},
+	}
+	goodAuth := &Auth{ID: "bb-oauth-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, badAuth.Provider, []*registry.ModelInfo{{ID: model}, {ID: otherModel}})
+	reg.RegisterClient(goodAuth.ID, goodAuth.Provider, []*registry.ModelInfo{{ID: model}, {ID: otherModel}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := manager.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register billing auth: %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register oauth auth: %v", errRegister)
+	}
+
+	request := cliproxyexecutor.Request{Model: model}
+	headers := make(http.Header)
+	headers.Set("X-Session-ID", "zhibin-stable-session")
+	options := cliproxyexecutor.Options{Headers: headers}
+	if sessionID := ExtractSessionID(options.Headers, nil, nil); sessionID != "header:zhibin-stable-session" {
+		t.Fatalf("session ID = %q, want %q", sessionID, "header:zhibin-stable-session")
+	}
+	cacheKey := "mixed::header:zhibin-stable-session::" + model
+	for requestIndex := 0; requestIndex < 2; requestIndex++ {
+		response, errExecute := manager.Execute(context.Background(), []string{"claude"}, request, options)
+		if errExecute != nil {
+			t.Fatalf("execute %d: %v", requestIndex, errExecute)
+		}
+		if string(response.Payload) != goodAuth.ID {
+			t.Fatalf("execute %d payload = %q, want %q", requestIndex, string(response.Payload), goodAuth.ID)
+		}
+		boundAuthID, cacheHit := selector.cache.Get(cacheKey)
+		if !cacheHit || boundAuthID != goodAuth.ID {
+			t.Fatalf("execute %d cache binding = %q (hit=%v), want %q", requestIndex, boundAuthID, cacheHit, goodAuth.ID)
+		}
+	}
+
+	updatedBad, ok := manager.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatal("expected billing auth to remain registered")
+	}
+	if !updatedBad.Unavailable || updatedBad.NextRetryAfter.IsZero() {
+		t.Fatalf("expected billing auth cooldown, got unavailable=%v retry_after=%v", updatedBad.Unavailable, updatedBad.NextRetryAfter)
+	}
+	if updatedBad.Status != StatusError || updatedBad.StatusMessage != "credential billing unavailable" {
+		t.Fatalf("unexpected billing auth status: status=%q message=%q", updatedBad.Status, updatedBad.StatusMessage)
+	}
+	if updatedBad.LastError == nil || updatedBad.LastError.Code != credentialScopedErrorCode || updatedBad.LastError.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("unexpected billing auth error: %#v", updatedBad.LastError)
+	}
+	if updatedBad.LastError.Message != billingMessage {
+		t.Fatalf("billing error message = %q, want %q", updatedBad.LastError.Message, billingMessage)
+	}
+	if cooldownDuration := time.Until(updatedBad.NextRetryAfter); cooldownDuration < 29*time.Minute || cooldownDuration > 31*time.Minute {
+		t.Fatalf("billing cooldown duration = %v, want approximately 30 minutes", cooldownDuration)
+	}
+	if state := updatedBad.ModelStates[model]; state != nil {
+		t.Fatalf("expected billing failure to block the credential across models, got %#v", state)
+	}
+	if blocked, _, _ := isAuthBlockedForModel(updatedBad, otherModel, time.Now()); !blocked {
+		t.Fatalf("expected credential billing cooldown to block other model %q", otherModel)
+	}
+	if refreshCalls := executor.RefreshCalls(); refreshCalls != 0 {
+		t.Fatalf("expected billing 400 not to refresh credential, got %d refresh calls", refreshCalls)
+	}
+
+	otherRequest := cliproxyexecutor.Request{Model: otherModel}
+	otherResponse, errOtherExecute := manager.Execute(context.Background(), []string{"claude"}, otherRequest, options)
+	if errOtherExecute != nil {
+		t.Fatalf("execute other model: %v", errOtherExecute)
+	}
+	if string(otherResponse.Payload) != goodAuth.ID {
+		t.Fatalf("other model payload = %q, want %q", string(otherResponse.Payload), goodAuth.ID)
+	}
+	otherCacheKey := "mixed::header:zhibin-stable-session::" + otherModel
+	if boundAuthID, cacheHit := selector.cache.Get(otherCacheKey); !cacheHit || boundAuthID != goodAuth.ID {
+		t.Fatalf("other model cache binding = %q (hit=%v), want %q", boundAuthID, cacheHit, goodAuth.ID)
+	}
+
+	originalRetryAfter := updatedBad.NextRetryAfter
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   badAuth.ID,
+		Provider: badAuth.Provider,
+		Model:    otherModel,
+		Success:  true,
+	})
+	afterLateModelSuccess, _ := manager.GetByID(badAuth.ID)
+	if afterLateModelSuccess == nil || !afterLateModelSuccess.NextRetryAfter.Equal(originalRetryAfter) {
+		t.Fatalf("expected late model success to preserve credential cooldown, got %#v", afterLateModelSuccess)
+	}
+	manager.MarkResult(context.Background(), Result{AuthID: badAuth.ID, Provider: badAuth.Provider, Success: true})
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   badAuth.ID,
+		Provider: badAuth.Provider,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "late auth-level failure"},
+	})
+	afterLateAuthResults, _ := manager.GetByID(badAuth.ID)
+	if afterLateAuthResults == nil || !afterLateAuthResults.NextRetryAfter.Equal(originalRetryAfter) || afterLateAuthResults.LastError == nil || afterLateAuthResults.LastError.Code != credentialScopedErrorCode {
+		t.Fatalf("expected late auth-level results to preserve credential cooldown, got %#v", afterLateAuthResults)
+	}
+
+	reloadedAuth := &Auth{
+		ID:             badAuth.ID,
+		Provider:       badAuth.Provider,
+		NextRetryAfter: originalRetryAfter,
+		ModelStates: map[string]*ModelState{
+			otherModel: {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: originalRetryAfter,
+				LastError:      &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "stale model state"},
+			},
+		},
+	}
+	if _, errUpdate := manager.Update(context.Background(), reloadedAuth); errUpdate != nil {
+		t.Fatalf("reload billing auth: %v", errUpdate)
+	}
+	manager.ReconcileRegistryModelStates(context.Background(), badAuth.ID)
+	reloadedBad, ok := manager.GetByID(badAuth.ID)
+	if !ok || reloadedBad == nil || !reloadedBad.Unavailable || reloadedBad.NextRetryAfter.IsZero() {
+		t.Fatalf("expected reload to preserve active credential cooldown, got %#v", reloadedBad)
+	}
+	if !reloadedBad.NextRetryAfter.Equal(originalRetryAfter) {
+		t.Fatalf("reloaded retry deadline = %v, want %v", reloadedBad.NextRetryAfter, originalRetryAfter)
+	}
+	if reloadedBad.LastError == nil || reloadedBad.LastError.Code != credentialScopedErrorCode || reloadedBad.LastError.HTTPStatus != http.StatusBadRequest || reloadedBad.LastError.Message != billingMessage || reloadedBad.StatusMessage != "credential billing unavailable" {
+		t.Fatalf("expected reload to preserve billing error details, got %#v", reloadedBad)
+	}
+
+	responseAfterReload, errExecute := manager.Execute(context.Background(), []string{"claude"}, request, options)
+	if errExecute != nil {
+		t.Fatalf("execute after reload: %v", errExecute)
+	}
+	if string(responseAfterReload.Payload) != goodAuth.ID {
+		t.Fatalf("payload after reload = %q, want %q", string(responseAfterReload.Payload), goodAuth.ID)
+	}
+	if boundAuthID, cacheHit := selector.cache.Get(cacheKey); !cacheHit || boundAuthID != goodAuth.ID {
+		t.Fatalf("cache binding after reload = %q (hit=%v), want %q", boundAuthID, cacheHit, goodAuth.ID)
+	}
+
+	gotCalls := executor.ExecuteCalls()
+	wantCalls := []string{badAuth.ID, goodAuth.ID, goodAuth.ID, goodAuth.ID, goodAuth.ID}
+	if len(gotCalls) != len(wantCalls) {
+		t.Fatalf("execute calls = %v, want %v", gotCalls, wantCalls)
+	}
+	for callIndex := range wantCalls {
+		if gotCalls[callIndex] != wantCalls[callIndex] {
+			t.Fatalf("execute call %d auth = %q, want %q", callIndex, gotCalls[callIndex], wantCalls[callIndex])
+		}
+	}
+	if refreshCalls := executor.RefreshCalls(); refreshCalls != 0 {
+		t.Fatalf("expected billing 400 never to refresh credential, got %d refresh calls", refreshCalls)
 	}
 }
 
@@ -1181,6 +1378,10 @@ func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(
 		HTTPStatus: http.StatusBadRequest,
 		Message:    `{"error":{"type":"bad_request_error","code":"invalid_value","message":"Bad input."}}`,
 	}
+	plainBadRequestErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `{"error":{"code":"validation_error","message":"Tool schema is invalid."}}`,
+	}
 	tests := []struct {
 		name       string
 		stream     bool
@@ -1193,6 +1394,8 @@ func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(
 		{name: "streaming invalid request", stream: true, err: invalidRequestErr, wantStatus: http.StatusBadRequest},
 		{name: "non-streaming bad request", err: badRequestErr, wantStatus: http.StatusBadRequest},
 		{name: "streaming bad request", stream: true, err: badRequestErr, wantStatus: http.StatusBadRequest},
+		{name: "non-streaming plain bad request", err: plainBadRequestErr, wantStatus: http.StatusBadRequest},
+		{name: "streaming plain bad request", stream: true, err: plainBadRequestErr, wantStatus: http.StatusBadRequest},
 	}
 
 	for _, tc := range tests {

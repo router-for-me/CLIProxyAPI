@@ -617,6 +617,34 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 	}
 }
 
+func TestIsAuthBlockedForModel_DoesNotExpandModelCooldownAcrossModels(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	coolingModel := "claude-haiku-4-5-20251001"
+	availableModel := "claude-sonnet-4-20250514"
+	auth := &Auth{
+		ID:             "model-scoped-cooldown",
+		Unavailable:    true,
+		NextRetryAfter: now.Add(30 * time.Minute),
+		LastError:      &Error{HTTPStatus: http.StatusUnauthorized, Message: "model credential rejected"},
+		ModelStates: map[string]*ModelState{
+			coolingModel: {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(30 * time.Minute),
+			},
+		},
+	}
+
+	if blocked, _, _ := isAuthBlockedForModel(auth, coolingModel, now); !blocked {
+		t.Fatalf("expected model %q to remain blocked", coolingModel)
+	}
+	if blocked, _, _ := isAuthBlockedForModel(auth, availableModel, now); blocked {
+		t.Fatalf("expected aggregate model state not to block unrelated model %q", availableModel)
+	}
+}
+
 func TestExtractSessionID_ClaudeCodePriorityOverHeader(t *testing.T) {
 	t.Parallel()
 
