@@ -899,9 +899,22 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header.Clone(), bodyErr)
 		}
 		if respHS != nil && respHS.StatusCode == http.StatusUpgradeRequired {
-			return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
+			if sess == nil {
+				return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
+			}
+			fallbackResult, errFallback := e.startCodexHTTPFallbackStream(ctx, auth, req, opts, reporter, func() {
+				sess.reqMu.Unlock()
+			})
+			if errFallback != nil {
+				sess.reqMu.Unlock()
+				return nil, errFallback
+			}
+			return fallbackResult, nil
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
+			if sess != nil {
+				sess.reqMu.Unlock()
+			}
 			return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
 		}
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
