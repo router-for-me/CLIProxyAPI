@@ -36,20 +36,28 @@ func TestCredentialFileName(t *testing.T) {
 			want:                  "codex-user@example.com-k12.json",
 		},
 		{
-			name:                  "plus ignores account hash",
+			name:                  "plus includes account hash",
 			email:                 " user@example.com ",
 			planType:              "Plus",
 			hashAccountID:         "abc12345",
 			includeProviderPrefix: true,
-			want:                  "codex-user@example.com-plus.json",
+			want:                  "codex-abc12345-user@example.com-plus.json",
 		},
 		{
-			name:                  "plan is normalized",
+			name:                  "normalized plan includes account hash",
 			email:                 "user@example.com",
 			planType:              " Team Plan ",
 			hashAccountID:         "abc12345",
 			includeProviderPrefix: true,
-			want:                  "codex-user@example.com-team-plan.json",
+			want:                  "codex-abc12345-user@example.com-team-plan.json",
+		},
+		{
+			name:                  "missing plan includes account hash",
+			email:                 "user@example.com",
+			planType:              "",
+			hashAccountID:         "abc12345",
+			includeProviderPrefix: true,
+			want:                  "codex-abc12345-user@example.com.json",
 		},
 	}
 
