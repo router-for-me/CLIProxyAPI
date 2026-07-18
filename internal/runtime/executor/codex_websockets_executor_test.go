@@ -399,8 +399,9 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 }
 
 func TestCodexWebsocketsExecuteIncompleteResponseIsSuccessful(t *testing.T) {
+	outputDone := []byte(`{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg-partial","role":"assistant","status":"incomplete","content":[{"type":"output_text","text":"partial answer"}]}}`)
 	incomplete := []byte(`{"type":"response.incomplete","response":{"id":"resp-incomplete","model":"gpt-5-codex","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}`)
-	server := newCodexWebsocketTerminalTestServer(t, incomplete)
+	server := newCodexWebsocketPayloadsTestServer(t, outputDone, incomplete)
 	defer server.Close()
 
 	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
@@ -426,6 +427,12 @@ func TestCodexWebsocketsExecuteIncompleteResponseIsSuccessful(t *testing.T) {
 	if got := gjson.GetBytes(resp.Payload, "incomplete_details.reason").String(); got != "max_output_tokens" {
 		t.Fatalf("incomplete reason = %q, want max_output_tokens; payload=%s", got, resp.Payload)
 	}
+	if got := gjson.GetBytes(resp.Payload, "output.0.id").String(); got != "msg-partial" {
+		t.Fatalf("incomplete output id = %q, want msg-partial; payload=%s", got, resp.Payload)
+	}
+	if got := gjson.GetBytes(resp.Payload, "output.0.content.0.text").String(); got != "partial answer" {
+		t.Fatalf("incomplete output text = %q, want partial answer; payload=%s", got, resp.Payload)
+	}
 }
 
 func TestCodexWebsocketsExecuteStreamIncompleteResponseTerminatesSuccessfully(t *testing.T) {
@@ -439,8 +446,9 @@ func TestCodexWebsocketsExecuteStreamIncompleteResponseTerminatesSuccessfully(t 
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			outputDone := []byte(`{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg-partial","role":"assistant","status":"incomplete","content":[{"type":"output_text","text":"partial answer"}]}}`)
 			incomplete := []byte(`{"type":"response.incomplete","response":{"id":"resp-incomplete","model":"gpt-5-codex","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}`)
-			server := newCodexWebsocketTerminalTestServer(t, incomplete)
+			server := newCodexWebsocketPayloadsTestServer(t, outputDone, incomplete)
 			defer server.Close()
 
 			exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
@@ -463,19 +471,27 @@ func TestCodexWebsocketsExecuteStreamIncompleteResponseTerminatesSuccessfully(t 
 			if err != nil {
 				t.Fatalf("ExecuteStream() error = %v", err)
 			}
-			select {
-			case chunk, ok := <-result.Chunks:
-				if !ok {
-					t.Fatal("stream closed before incomplete chunk")
+		terminalLoop:
+			for {
+				select {
+				case chunk, ok := <-result.Chunks:
+					if !ok {
+						t.Fatal("stream closed before incomplete chunk")
+					}
+					if chunk.Err != nil {
+						t.Fatalf("incomplete chunk error = %v", chunk.Err)
+					}
+					payload := bytes.TrimSpace(bytes.TrimPrefix(chunk.Payload, []byte("data: ")))
+					if gjson.GetBytes(payload, "type").String() != "response.incomplete" {
+						continue
+					}
+					if !tc.downstreamWebsocket && gjson.GetBytes(payload, "response.output.0.id").String() != "msg-partial" {
+						t.Fatalf("translated incomplete output was not repaired: %s", payload)
+					}
+					break terminalLoop
+				case <-ctx.Done():
+					t.Fatal("timed out waiting for incomplete chunk")
 				}
-				if chunk.Err != nil {
-					t.Fatalf("incomplete chunk error = %v", chunk.Err)
-				}
-				if got := gjson.GetBytes(bytes.TrimSpace(bytes.TrimPrefix(chunk.Payload, []byte("data: "))), "type").String(); got != "response.incomplete" {
-					t.Fatalf("terminal chunk type = %q, want response.incomplete; payload=%s", got, chunk.Payload)
-				}
-			case <-ctx.Done():
-				t.Fatal("timed out waiting for incomplete chunk")
 			}
 			select {
 			case chunk, ok := <-result.Chunks:
@@ -2134,6 +2150,10 @@ func waitForCodexWebsocketSessionConnCleared(t *testing.T, sess *codexWebsocketS
 }
 
 func newCodexWebsocketTerminalTestServer(t *testing.T, terminalPayload []byte) *httptest.Server {
+	return newCodexWebsocketPayloadsTestServer(t, terminalPayload)
+}
+
+func newCodexWebsocketPayloadsTestServer(t *testing.T, payloads ...[]byte) *httptest.Server {
 	t.Helper()
 
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -2149,8 +2169,11 @@ func newCodexWebsocketTerminalTestServer(t *testing.T, terminalPayload []byte) *
 			t.Errorf("read upstream websocket message: %v", errRead)
 			return
 		}
-		if errWrite := conn.WriteMessage(websocket.TextMessage, terminalPayload); errWrite != nil {
-			t.Errorf("write terminal websocket message: %v", errWrite)
+		for _, payload := range payloads {
+			if errWrite := conn.WriteMessage(websocket.TextMessage, payload); errWrite != nil {
+				t.Errorf("write websocket message: %v", errWrite)
+				return
+			}
 		}
 	}))
 }

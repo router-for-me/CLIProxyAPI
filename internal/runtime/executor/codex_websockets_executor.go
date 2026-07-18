@@ -766,9 +766,11 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		switch eventType {
 		case "response.output_item.done":
 			collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
-		case "response.completed":
+		case "response.completed", "response.incomplete":
 			payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
-			cacheCodexReasoningReplayFromCompleted(replayScope, payload)
+			if eventType == "response.completed" {
+				cacheCodexReasoningReplayFromCompleted(replayScope, payload)
+			}
 		}
 		if isCodexWebsocketSuccessfulTerminalEvent(eventType) {
 			if detail, ok := helps.ParseCodexUsage(payload); ok {
@@ -1398,14 +1400,17 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
 			}
 			completedPayload := payload
-			if eventType == "response.completed" || eventType == "response.done" {
+			patchTerminalOutput := eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete"
+			if patchTerminalOutput {
 				completedPayload = normalizeCodexWebsocketCompletion(completedPayload)
 				completedPayload = patchCodexCompletedOutput(completedPayload, outputItemsByIndex, outputItemsFallback)
-				cacheCodexReasoningReplayFromCompleted(replayScope, completedPayload)
+				if eventType == "response.completed" || eventType == "response.done" {
+					cacheCodexReasoningReplayFromCompleted(replayScope, completedPayload)
+				}
 			}
 			if isCodexWebsocketSuccessfulTerminalEvent(eventType) {
 				usagePayload := payload
-				if eventType == "response.completed" || eventType == "response.done" {
+				if patchTerminalOutput {
 					usagePayload = completedPayload
 				}
 				if detail, ok := helps.ParseCodexUsage(usagePayload); ok {
@@ -1449,7 +1454,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			payload = normalizeCodexWebsocketCompletion(payload)
-			if eventType == "response.completed" || eventType == "response.done" {
+			if patchTerminalOutput {
 				payload = completedPayload
 			}
 			eventType = gjson.GetBytes(payload, "type").String()
