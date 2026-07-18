@@ -508,6 +508,62 @@ func TestConvertClaudeRequestToCodex_AssistantThinkingSignatureToReasoningItem(t
 	}
 }
 
+func TestConvertClaudeRequestToCodex_PreservesContentOrderAcrossToolAndReasoningItems(t *testing.T) {
+	signature := validCodexReasoningSignature()
+	inputJSON := `{
+		"system": "system rules",
+		"messages": [
+			{"role":"assistant","content":[
+				{"type":"text","text":"before reasoning"},
+				{"type":"thinking","signature":"` + signature + `"},
+				{"type":"text","text":"before tool"},
+				{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"query":"test"}},
+				{"type":"text","text":"after tool"}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"toolu_1","content":[
+					{"type":"text","text":"tool output"},
+					{"type":"image","source":{"media_type":"image/png","data":"aW1hZ2U="}}
+				]},
+				{"type":"text","text":"continue"}
+			]}
+		],
+		"tools": [{"name":"lookup","input_schema":{"type":"object"}}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("gpt-5.4", []byte(inputJSON), false)
+	inputs := gjson.GetBytes(result, "input").Array()
+	if len(inputs) != 8 {
+		t.Fatalf("got %d input items, want 8. Output: %s", len(inputs), result)
+	}
+
+	wantTypes := []string{"message", "message", "reasoning", "message", "function_call", "message", "function_call_output", "message"}
+	for i := 0; i < len(wantTypes); i++ {
+		if got := inputs[i].Get("type").String(); got != wantTypes[i] {
+			t.Fatalf("input[%d].type = %q, want %q. Output: %s", i, got, wantTypes[i], result)
+		}
+	}
+
+	if got := inputs[1].Get("content.0.text").String(); got != "before reasoning" {
+		t.Fatalf("input[1] text = %q, want before reasoning", got)
+	}
+	if got := inputs[3].Get("content.0.text").String(); got != "before tool" {
+		t.Fatalf("input[3] text = %q, want before tool", got)
+	}
+	if got := inputs[5].Get("content.0.text").String(); got != "after tool" {
+		t.Fatalf("input[5] text = %q, want after tool", got)
+	}
+	if got := inputs[6].Get("output.0.type").String(); got != "input_text" {
+		t.Fatalf("tool result output.0.type = %q, want input_text", got)
+	}
+	if got := inputs[6].Get("output.1.image_url").String(); got != "data:image/png;base64,aW1hZ2U=" {
+		t.Fatalf("tool result image_url = %q, want data URL", got)
+	}
+	if got := inputs[7].Get("content.0.text").String(); got != "continue" {
+		t.Fatalf("input[7] text = %q, want continue", got)
+	}
+}
+
 func TestConvertClaudeRequestToCodex_AssistantGrokSignatureToReasoningItem(t *testing.T) {
 	signature := "HmlYdr2aCAqCYP/m9mr8PS6KOsdMs72FGDigmydR+Jsmuv8KX97yWPlbOwmXJgWn0CbHaCacdQD3+n5EvpgLfPNmafS3kdICBjRuDf4bzHy7uBiUhNVhqPtp/ee1y9q4imPE4LYgD1VZ4J+bp9mTeqA1+nC9Oue58CiNEMV9SVaGenCD+aBnVuSTzQhD32Y+68i6HLJW0Dx6ifaRfb8hxYtA/sPM+/FTvAMW11nRho5a2BBSkpnzfqqAz/e/vGJ77/bygpXM823QA9wL9i0X"
 	payload := []byte(`{"model":"grok-4.5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":""},{"type":"text","text":"answer"}]},{"role":"user","content":"next"}]}`)
