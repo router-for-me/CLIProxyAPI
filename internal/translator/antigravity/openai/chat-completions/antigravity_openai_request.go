@@ -210,6 +210,11 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								ext = sp[len(sp)-1]
 							}
 							if mimeType, ok := misc.MimeTypes[ext]; ok {
+								// fileData is a data URL ("data:<mime>;base64,<payload>"); Gemini
+								// wants the raw base64 payload only, not the whole data URL.
+								if i := strings.Index(fileData, ";base64,"); i >= 0 {
+									fileData = fileData[i+len(";base64,"):]
+								}
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mimeType", mimeType)
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", fileData)
 								p++
