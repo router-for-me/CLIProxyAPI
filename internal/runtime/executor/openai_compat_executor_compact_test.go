@@ -107,7 +107,7 @@ func TestOpenAICompatExecutorPayloadOverrideWinsOverThinkingSuffix(t *testing.T)
 	}
 }
 
-func TestOpenAICompatExecutorCopilotUsesResponsesEndpoint(t *testing.T) {
+func TestOpenAICompatExecutorCopilotUsesChatCompletionsEndpoint(t *testing.T) {
 	var gotPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -135,8 +135,52 @@ func TestOpenAICompatExecutorCopilotUsesResponsesEndpoint(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected Execute error")
 	}
-	if gotPath != "/v1/responses" {
-		t.Fatalf("path = %q, want %q", gotPath, "/v1/responses")
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/chat/completions")
+	}
+}
+
+func TestOpenAICompatExecutorCopilotClaudeGoogleUsesChatCompletionsPayload(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"forced"}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("copilot", &config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "copilot",
+		Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+			"api_key":  "test",
+		},
+	}
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gemini-3.5-flash",
+		Payload: []byte(`{"model":"gemini-3.5-flash","messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err == nil {
+		t.Fatalf("expected Execute error")
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/chat/completions")
+	}
+	body := gjson.ParseBytes(gotBody)
+	if !body.Get("messages").IsArray() {
+		t.Fatalf("Copilot request has no chat messages: %s", gotBody)
+	}
+	if body.Get("input").Exists() {
+		t.Fatalf("Responses input leaked into Copilot chat request: %s", gotBody)
+	}
+	if got := body.Get("model").String(); got != "gemini-3.5-flash" {
+		t.Fatalf("upstream model = %q, want gemini-3.5-flash", got)
 	}
 }
 
@@ -551,7 +595,7 @@ func TestOpenAICompatExecutorStreamSkipsKeepAliveUntilDataLine(t *testing.T) {
 	}
 }
 
-func TestOpenAICompatExecutorStreamCopilotUsesResponsesEndpoint(t *testing.T) {
+func TestOpenAICompatExecutorStreamCopilotUsesChatCompletionsEndpoint(t *testing.T) {
 	var gotPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -579,7 +623,7 @@ func TestOpenAICompatExecutorStreamCopilotUsesResponsesEndpoint(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected ExecuteStream error")
 	}
-	if gotPath != "/v1/responses" {
-		t.Fatalf("path = %q, want %q", gotPath, "/v1/responses")
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/chat/completions")
 	}
 }

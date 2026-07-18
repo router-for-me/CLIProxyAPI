@@ -106,9 +106,6 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if opts.Alt == "responses/compact" {
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
-	} else if shouldUseResponsesEndpointForCopilot(auth) {
-		to = sdktranslator.FromString("openai-response")
-		endpoint = "/responses"
 	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
@@ -312,10 +309,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
-	if shouldUseResponsesEndpointForCopilot(auth) {
-		to = sdktranslator.FromString("openai-response")
-		endpoint = "/responses"
-	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -469,22 +462,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
-}
-
-func shouldUseResponsesEndpointForCopilot(auth *cliproxyauth.Auth) bool {
-	if auth == nil {
-		return false
-	}
-	if strings.EqualFold(strings.TrimSpace(auth.Provider), "copilot") {
-		return true
-	}
-	if auth.Attributes == nil {
-		return false
-	}
-	if strings.EqualFold(strings.TrimSpace(auth.Attributes["provider_key"]), "copilot") {
-		return true
-	}
-	return strings.EqualFold(strings.TrimSpace(auth.Attributes["compat_name"]), "copilot")
 }
 
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {
