@@ -2178,12 +2178,33 @@
       "owned_by": "moonshot",
       "type": "kimi",
       "display_name": "Kimi K3",
-      "description": "Kimi K3 - Moonshot AI's next-generation flagship model (~2.5T MoE) with multimodal input and 1M context",
+      "description": "Kimi K3 - Moonshot AI's next-generation flagship model (~2.8T MoE) with multimodal input",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": false,
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "kimi-k3[1M]",
+      "object": "model",
+      "created": 1784073600,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K3",
+      "description": "Kimi K3 - Moonshot AI's next-generation flagship model (~2.8T MoE) with multimodal input and 1M context",
       "context_length": 1048576,
       "max_completion_tokens": 65536,
       "thinking": {
         "zero_allowed": false,
         "levels": [
+          "low",
+          "high",
           "max"
         ]
       }
