@@ -356,7 +356,8 @@ func TestSanitizeKimiToolSchemas_CoercesBooleanInCombinatorsAndItems(t *testing.
 				"type":"object",
 				"properties":{
 					"a":{"anyOf":[true,{"type":"string"}]},
-					"b":{"type":"array","items":true}
+					"b":{"type":"array","items":true},
+					"c":{"type":"array","items":[true,{"type":"string"}]}
 				}
 			}}}
 		]
@@ -372,6 +373,45 @@ func TestSanitizeKimiToolSchemas_CoercesBooleanInCombinatorsAndItems(t *testing.
 	}
 	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.b.items"); !got.IsObject() {
 		t.Fatalf("items boolean should be coerced to object, got %q", got.Raw)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.c.items.0"); !got.IsObject() {
+		t.Fatalf("tuple items[0] boolean should be coerced to object, got %q", got.Raw)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.c.items.1.type"); got.String() != "string" {
+		t.Fatalf("tuple items[1] should be preserved, got %q", got.Raw)
+	}
+}
+
+func TestSanitizeKimiToolSchemas_PreservesExactNumbersDuringCoercion(t *testing.T) {
+	// A boolean subschema forces a rewrite; unrelated numeric literals — incl.
+	// values above 2^53 — must survive the round-trip byte-exact rather than
+	// being rounded through float64.
+	body := []byte(`{
+		"tools":[
+			{"type":"function","function":{"name":"f","parameters":{
+				"type":"object",
+				"properties":{
+					"open":true,
+					"n":{"type":"integer","const":9007199254740993},
+					"m":{"type":"integer","enum":[9007199254740993,1]}
+				}
+			}}}
+		]
+	}`)
+
+	out, err := sanitizeKimiToolSchemas(body)
+	if err != nil {
+		t.Fatalf("sanitizeKimiToolSchemas() error = %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.open"); !got.IsObject() {
+		t.Fatalf("open `true` should be coerced to object, got %q", got.Raw)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.n.const").Raw; got != "9007199254740993" {
+		t.Fatalf("const should stay exact, got %q", got)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.m.enum.0").Raw; got != "9007199254740993" {
+		t.Fatalf("enum[0] should stay exact, got %q", got)
 	}
 }
 

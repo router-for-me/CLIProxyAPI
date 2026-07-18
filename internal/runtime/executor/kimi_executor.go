@@ -526,63 +526,91 @@ func coerceMFJSBooleanSubschema(v interface{}) (interface{}, bool) {
 // that are plain data (enum values, `additionalProperties`, const, default) are
 // left untouched. It returns the node and whether anything changed.
 func sanitizeMFJSSchemaNode(node interface{}) (interface{}, bool) {
-	switch n := node.(type) {
-	case map[string]interface{}:
-		changed := false
-		for key, child := range n {
-			switch {
-			case hasKey(mfjsBooleanLegalKeys, key):
-				// Boolean is a native MFJS feature here; recurse only into an
-				// object subschema, never coerce the boolean itself.
-				if _, isBool := child.(bool); isBool {
-					continue
-				}
-				if walked, c := sanitizeMFJSSchemaNode(child); c {
-					n[key] = walked
-					changed = true
-				}
-			case hasKey(mfjsSubschemaMapKeys, key):
-				childMap, ok := child.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				for name, sub := range childMap {
-					coerced, c1 := coerceMFJSBooleanSubschema(sub)
-					walked, c2 := sanitizeMFJSSchemaNode(coerced)
-					if c1 || c2 {
-						childMap[name] = walked
-						changed = true
-					}
-				}
-			case hasKey(mfjsSubschemaArrayKeys, key):
-				childArr, ok := child.([]interface{})
-				if !ok {
-					continue
-				}
-				for i, sub := range childArr {
-					coerced, c1 := coerceMFJSBooleanSubschema(sub)
-					walked, c2 := sanitizeMFJSSchemaNode(coerced)
-					if c1 || c2 {
-						childArr[i] = walked
-						changed = true
-					}
-				}
-			case hasKey(mfjsSubschemaValueKeys, key):
-				coerced, c1 := coerceMFJSBooleanSubschema(child)
-				walked, c2 := sanitizeMFJSSchemaNode(coerced)
-				if c1 || c2 {
-					n[key] = walked
+	n, ok := node.(map[string]interface{})
+	if !ok {
+		return node, false
+	}
+	changed := false
+	for key, child := range n {
+		switch {
+		case hasKey(mfjsBooleanLegalKeys, key):
+			// Boolean is a native MFJS feature here; recurse only into an object
+			// subschema, never coerce the boolean itself.
+			if _, isBool := child.(bool); isBool {
+				continue
+			}
+			if walked, c := sanitizeMFJSSchemaNode(child); c {
+				n[key] = walked
+				changed = true
+			}
+		case hasKey(mfjsSubschemaMapKeys, key):
+			if childMap, ok := child.(map[string]interface{}); ok {
+				if sanitizeMFJSSubschemaMap(childMap) {
+					n[key] = childMap
 					changed = true
 				}
 			}
-			// Non-schema keywords (type, enum, const, description, required,
-			// default, ...) are intentionally left untouched: a boolean there is
-			// data, not a subschema.
+		case hasKey(mfjsSubschemaArrayKeys, key):
+			if childArr, ok := child.([]interface{}); ok {
+				if sanitizeMFJSSubschemaArray(childArr) {
+					n[key] = childArr
+					changed = true
+				}
+			}
+		case hasKey(mfjsSubschemaValueKeys, key):
+			// `items` (draft-04/07) may be a single subschema OR an array of
+			// subschemas (tuple validation); handle both.
+			if childArr, ok := child.([]interface{}); ok {
+				if sanitizeMFJSSubschemaArray(childArr) {
+					n[key] = childArr
+					changed = true
+				}
+				continue
+			}
+			coerced, c1 := coerceMFJSBooleanSubschema(child)
+			walked, c2 := sanitizeMFJSSchemaNode(coerced)
+			if c1 || c2 {
+				n[key] = walked
+				changed = true
+			}
 		}
-		return n, changed
-	default:
-		return node, false
+		// Non-schema keywords (type, enum, const, description, required,
+		// default, ...) are intentionally left untouched: a boolean there is
+		// data, not a subschema.
 	}
+	return n, changed
+}
+
+// sanitizeMFJSSubschemaMap coerces boolean subschemas in a name->subschema map
+// (properties, patternProperties, $defs, ...) in place. Returns whether it
+// changed anything.
+func sanitizeMFJSSubschemaMap(m map[string]interface{}) bool {
+	changed := false
+	for name, sub := range m {
+		coerced, c1 := coerceMFJSBooleanSubschema(sub)
+		walked, c2 := sanitizeMFJSSchemaNode(coerced)
+		if c1 || c2 {
+			m[name] = walked
+			changed = true
+		}
+	}
+	return changed
+}
+
+// sanitizeMFJSSubschemaArray coerces boolean subschemas in an array of
+// subschemas (anyOf/oneOf/allOf/prefixItems, or tuple `items`) in place.
+// Returns whether it changed anything.
+func sanitizeMFJSSubschemaArray(arr []interface{}) bool {
+	changed := false
+	for i, sub := range arr {
+		coerced, c1 := coerceMFJSBooleanSubschema(sub)
+		walked, c2 := sanitizeMFJSSchemaNode(coerced)
+		if c1 || c2 {
+			arr[i] = walked
+			changed = true
+		}
+	}
+	return changed
 }
 
 func hasKey(set map[string]struct{}, key string) bool {
@@ -616,7 +644,12 @@ func sanitizeKimiToolSchemas(body []byte) ([]byte, error) {
 			continue
 		}
 		var decoded interface{}
-		if err := json.Unmarshal([]byte(params.Raw), &decoded); err != nil {
+		dec := json.NewDecoder(strings.NewReader(params.Raw))
+		// UseNumber keeps numeric literals (const/enum/bounds, incl. values above
+		// 2^53) exact instead of round-tripping them through float64, so boolean
+		// coercion never silently rewrites unrelated numbers in the tool contract.
+		dec.UseNumber()
+		if err := dec.Decode(&decoded); err != nil {
 			continue
 		}
 		sanitized, changed := sanitizeMFJSSchemaNode(decoded)
