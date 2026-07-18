@@ -2957,6 +2957,25 @@ func TestNormalizeXAITools_WrapsApplyPatchCustomTool(t *testing.T) {
 	}
 }
 
+func TestNormalizeXAITools_WrapsCustomToolWithoutParameters(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"custom","name":"custom_lookup"}]}`)
+	out := normalizeXAITools(body)
+	tool := gjson.GetBytes(out, "tools.0")
+
+	if got := tool.Get("type").String(); got != xaiFunctionToolType {
+		t.Fatalf("custom tool type = %q, want function; body=%s", got, out)
+	}
+	if got := tool.Get("parameters.properties.input.type").String(); got != "string" {
+		t.Fatalf("custom tool input type = %q, want string; body=%s", got, out)
+	}
+	if got := tool.Get("parameters.required.0").String(); got != "input" {
+		t.Fatalf("custom tool required.0 = %q, want input; body=%s", got, out)
+	}
+	if tool.Get("parameters.additionalProperties").Type != gjson.False {
+		t.Fatalf("custom tool additionalProperties must be false; body=%s", out)
+	}
+}
+
 func TestNormalizeXAITools_ApplyPatchUsesFallbackGrammar(t *testing.T) {
 	body := []byte(`{"tools":[{"type":"custom","name":"apply_patch"}]}`)
 	out := normalizeXAITools(body)

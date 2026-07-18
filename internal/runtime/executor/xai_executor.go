@@ -1873,7 +1873,8 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 		}
 		raw = updatedTool
 		toolName := strings.TrimSpace(tool.Get("name").String())
-		if !tool.Get("parameters").Exists() || toolName == "apply_patch" {
+		wrappedCustomInput := !tool.Get("parameters").Exists() || toolName == "apply_patch"
+		if wrappedCustomInput {
 			updatedTool, errSet = sjson.SetRawBytes(raw, "parameters", []byte(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}`))
 			if errSet != nil {
 				return nil, false, false
@@ -1887,6 +1888,8 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 		if toolName == "apply_patch" {
 			raw, _ = sjson.SetBytes(raw, "description", xaiApplyPatchToolDescription)
 			raw, _ = sjson.SetBytes(raw, "parameters.properties.input.description", xaiApplyPatchInputDescription(tool))
+		}
+		if wrappedCustomInput {
 			schemaTool = gjson.ParseBytes(raw)
 		}
 		toolType = xaiFunctionToolType
