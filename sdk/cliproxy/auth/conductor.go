@@ -2733,7 +2733,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(execCtx, result)
+				// Some Anthropic-compatible upstreams do not implement the
+				// count_tokens route and return a generic endpoint 404. Record
+				// the failure for hooks and metrics without suspending a model
+				// that remains usable through the messages endpoint.
+				m.recordResult(execCtx, result, !isCountTokensEndpointNotFoundError(errExec))
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
@@ -3703,6 +3707,10 @@ func waitForCooldown(ctx context.Context, wait, maxWait time.Duration) error {
 
 // MarkResult records an execution result and notifies hooks.
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
+	m.recordResult(ctx, result, true)
+}
+
+func (m *Manager) recordResult(ctx context.Context, result Result, updateAvailability bool) {
 	if result.AuthID == "" {
 		return
 	}
@@ -3746,7 +3754,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			} else {
 				clearAuthStateOnSuccess(auth, now)
 			}
-		} else {
+		} else if updateAvailability {
 			if result.Model != "" {
 				if !isRequestScopedResultError(result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
@@ -4294,6 +4302,51 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 
 func isRequestScopedResultError(err *Error) bool {
 	return err != nil && (err.IsRequestScoped() || isRequestScopedNotFoundResultError(err))
+}
+
+func isCountTokensEndpointNotFoundError(err error) bool {
+	if err == nil || statusCodeFromError(err) != http.StatusNotFound {
+		return false
+	}
+	message := strings.TrimSpace(err.Error())
+	if message == "" {
+		return false
+	}
+
+	lower := strings.ToLower(message)
+	switch lower {
+	case "not found", "404 not found", "404 page not found":
+		return true
+	}
+
+	var payload map[string]any
+	if errJSON := json.Unmarshal([]byte(message), &payload); errJSON == nil {
+		for _, key := range []string{"detail", "error", "message"} {
+			value, ok := payload[key].(string)
+			if !ok {
+				continue
+			}
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "not found", "404 not found", "404 page not found":
+				if strings.Contains(lower, "model_not_found") ||
+					strings.Contains(lower, "model not found") ||
+					strings.Contains(lower, `"model"`) {
+					return false
+				}
+				return true
+			}
+		}
+	}
+
+	if strings.Contains(lower, "count_tokens") {
+		if strings.Contains(lower, "cannot post") ||
+			strings.Contains(lower, "no route") ||
+			strings.Contains(lower, "route not found") {
+			return true
+		}
+	}
+	return strings.Contains(lower, "<title>404") &&
+		strings.Contains(lower, "not found")
 }
 
 // isRequestInvalidError returns true if the error represents a client request
