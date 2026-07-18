@@ -264,6 +264,10 @@ Those projects are ports of CLIProxyAPI or inspired by it:
 
 A Next.js implementation inspired by CLIProxyAPI, easy to install and use, built from scratch with format translation (OpenAI/Claude/Gemini/Ollama), combo system with auto-fallback, multi-account management with exponential backoff, a Next.js web dashboard, and support for CLI tools (Cursor, Claude Code, Cline, RooCode) - no API keys needed.
 
+### [Alex](https://github.com/madhavajay/alex)
+
+A local Rust LLM proxy with an optional UI, inspired by CLIProxyAPI. It routes coding agents across providers with local trace capture, scriptable middleware, subscription bonding, failover, and messenger-assisted re-authentication.
+
 ### [OmniRoute](https://github.com/diegosouzapw/OmniRoute)
 
 Never stop coding. Smart routing to FREE & low-cost AI models with automatic fallback.
