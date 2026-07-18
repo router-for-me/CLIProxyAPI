@@ -1,6 +1,7 @@
 package chat_completions
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -992,7 +993,7 @@ func TestToolCallHistoryClearsUnmatchedCallAtNewBatch(t *testing.T) {
 	}
 }
 
-func TestToolCallOutputWithoutIDUsesPendingCall(t *testing.T) {
+func TestToolCallOutputWithoutIDAmbiguousBatchIsDropped(t *testing.T) {
 	input := []byte(`{
 		"messages": [
 			{"role":"assistant","content":null,"tool_calls":[
@@ -1006,20 +1007,13 @@ func TestToolCallOutputWithoutIDUsesPendingCall(t *testing.T) {
 
 	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
 	items := gjson.GetBytes(out, "input").Array()
-	if len(items) != 4 {
-		t.Fatalf("expected two calls and two outputs, got %d items: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	if len(items) != 2 {
+		t.Fatalf("expected only the two calls because ID-less outputs are ambiguous, got %d items: %s", len(items), gjson.GetBytes(out, "input").Raw)
 	}
-	if got := items[2].Get("type").String(); got != "function_call_output" {
-		t.Fatalf("expected first empty-ID output to match function call, got %s", items[2].Raw)
-	}
-	if got := items[2].Get("call_id").String(); got != "call_explicit" {
-		t.Fatalf("expected explicit pending call_id, got %s", items[2].Raw)
-	}
-	if got := items[3].Get("type").String(); got != "custom_tool_call_output" {
-		t.Fatalf("expected second empty-ID output to match custom call, got %s", items[3].Raw)
-	}
-	if got := items[3].Get("call_id").String(); got == "" {
-		t.Fatalf("expected synthesized custom output call_id, got %s", items[3].Raw)
+	for i, item := range items {
+		if strings.HasSuffix(item.Get("type").String(), "_output") {
+			t.Fatalf("item %d: ambiguous ID-less output was guessed: %s", i, item.Raw)
+		}
 	}
 }
 
