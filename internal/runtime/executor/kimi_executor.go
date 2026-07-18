@@ -124,6 +124,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, err
 	}
 	applyKimiHeadersWithAuth(httpReq, token, false, auth)
+	applyKimiContext1mBeta(httpReq, upstreamModel)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -237,6 +238,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		return nil, err
 	}
 	applyKimiHeadersWithAuth(httpReq, token, true, auth)
+	applyKimiContext1mBeta(httpReq, upstreamModel)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -681,6 +683,40 @@ func applyKimiHeadersWithAuth(r *http.Request, token string, stream bool, auth *
 		r.Header.Set("X-Msh-Device-Id", deviceID)
 	}
 }
+
+// kimiContext1mBeta unlocks the 1M context window for k3 on the Kimi Code
+// upstream (api.kimi.com/coding): the full window is served only for the
+// "k3" model id + this beta. Claude Code strips the [1m] suffix on the wire
+// but does NOT send the beta for custom model names, and applyKimiHeaders
+// never forwards the client's Anthropic-Beta — so without this injection the
+// upstream caps k3 at 262144 tokens (observed: kaudex compaction at ~262k).
+const kimiContext1mBeta = "context-1m-2025-08-07"
+
+// applyKimiContext1mBeta merges the 1M-context beta into the upstream request
+// for k3-family model ids, preserving any beta already present. No-op for
+// other Kimi models (k2.x etc.) so their requests stay byte-identical.
+func applyKimiContext1mBeta(r *http.Request, upstreamModel string) {
+	base := strings.TrimSpace(upstreamModel)
+	if i := strings.Index(base, "("); i >= 0 { // strip thinking suffix, e.g. "k3(1024)"
+		base = base[:i]
+	}
+	base = strings.ToLower(base)
+	if base != "k3" && base != "k3[1m]" {
+		return
+	}
+	existing := strings.TrimSpace(r.Header.Get("Anthropic-Beta"))
+	if existing == "" {
+		r.Header.Set("Anthropic-Beta", kimiContext1mBeta)
+		return
+	}
+	for _, b := range strings.Split(existing, ",") {
+		if strings.TrimSpace(b) == kimiContext1mBeta {
+			return
+		}
+	}
+	r.Header.Set("Anthropic-Beta", existing+","+kimiContext1mBeta)
+}
+
 
 // getKimiHostname returns the machine hostname.
 func getKimiHostname() string {

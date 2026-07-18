@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -268,5 +269,51 @@ func TestNormalizeKimiToolMessageLinks_PreservesAssistantWithToolLinkOrReasoning
 	}
 	if got := messages[3].Get("content.0.text").String(); got != " visible " {
 		t.Fatalf("messages.3.content.0.text = %q, want %q", got, " visible ")
+	}
+}
+
+func TestApplyKimiContext1mBeta_InjectsForK3(t *testing.T) {
+	r, _ := http.NewRequest(http.MethodPost, "https://api.example/v1/messages", nil)
+	applyKimiContext1mBeta(r, "k3")
+	if got := r.Header.Get("Anthropic-Beta"); got != "context-1m-2025-08-07" {
+		t.Fatalf("Anthropic-Beta = %q, want %q", got, "context-1m-2025-08-07")
+	}
+}
+
+func TestApplyKimiContext1mBeta_MergesWithExistingBetas(t *testing.T) {
+	r, _ := http.NewRequest(http.MethodPost, "https://api.example/v1/messages", nil)
+	r.Header.Set("Anthropic-Beta", "interleaved-thinking-2025-05-14")
+	applyKimiContext1mBeta(r, "k3")
+	got := r.Header.Get("Anthropic-Beta")
+	want := "interleaved-thinking-2025-05-14,context-1m-2025-08-07"
+	if got != want {
+		t.Fatalf("Anthropic-Beta = %q, want %q", got, want)
+	}
+}
+
+func TestApplyKimiContext1mBeta_IdempotentWhenAlreadyPresent(t *testing.T) {
+	r, _ := http.NewRequest(http.MethodPost, "https://api.example/v1/messages", nil)
+	r.Header.Set("Anthropic-Beta", "context-1m-2025-08-07")
+	applyKimiContext1mBeta(r, "k3")
+	if got := r.Header.Get("Anthropic-Beta"); got != "context-1m-2025-08-07" {
+		t.Fatalf("Anthropic-Beta = %q, want unchanged single value", got)
+	}
+}
+
+func TestApplyKimiContext1mBeta_HandlesThinkingSuffix(t *testing.T) {
+	r, _ := http.NewRequest(http.MethodPost, "https://api.example/v1/messages", nil)
+	applyKimiContext1mBeta(r, "k3(1024)")
+	if got := r.Header.Get("Anthropic-Beta"); got != "context-1m-2025-08-07" {
+		t.Fatalf("Anthropic-Beta = %q, want %q", got, "context-1m-2025-08-07")
+	}
+}
+
+func TestApplyKimiContext1mBeta_SkipsNonK3Models(t *testing.T) {
+	for _, model := range []string{"kimi-k2.7-code", "k2", "k1.5"} {
+		r, _ := http.NewRequest(http.MethodPost, "https://api.example/v1/messages", nil)
+		applyKimiContext1mBeta(r, model)
+		if got := r.Header.Get("Anthropic-Beta"); got != "" {
+			t.Fatalf("model %q: Anthropic-Beta = %q, want empty", model, got)
+		}
 	}
 }
