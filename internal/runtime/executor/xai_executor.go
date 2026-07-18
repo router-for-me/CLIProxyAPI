@@ -1692,11 +1692,12 @@ type xaiApplyPatchResponseAdapter struct {
 }
 
 func newXAIApplyPatchResponseAdapter(enabled bool) *xaiApplyPatchResponseAdapter {
-	return &xaiApplyPatchResponseAdapter{
-		enabled:   enabled,
-		itemIDs:   make(map[string]struct{}),
-		arguments: make(map[string]*strings.Builder),
+	adapter := &xaiApplyPatchResponseAdapter{enabled: enabled}
+	if enabled {
+		adapter.itemIDs = make(map[string]struct{})
+		adapter.arguments = make(map[string]*strings.Builder)
 	}
+	return adapter
 }
 
 func (a *xaiApplyPatchResponseAdapter) apply(data []byte) []byte {
@@ -1778,7 +1779,7 @@ func xaiApplyPatchInput(arguments gjson.Result) string {
 		return input.Raw
 	}
 	trimmed := strings.TrimSpace(raw)
-	if len(trimmed) > 1 && trimmed[0] == '"' && json.Valid([]byte(trimmed)) {
+	if len(trimmed) > 1 && trimmed[0] == '"' {
 		var decoded string
 		if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil {
 			return decoded
@@ -1871,7 +1872,8 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 			return nil, false, false
 		}
 		raw = updatedTool
-		if !tool.Get("parameters").Exists() || strings.TrimSpace(tool.Get("name").String()) == "apply_patch" {
+		toolName := strings.TrimSpace(tool.Get("name").String())
+		if !tool.Get("parameters").Exists() || toolName == "apply_patch" {
 			updatedTool, errSet = sjson.SetRawBytes(raw, "parameters", []byte(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}`))
 			if errSet != nil {
 				return nil, false, false
@@ -1882,7 +1884,7 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 		if errSet == nil {
 			raw = updatedTool
 		}
-		if strings.TrimSpace(tool.Get("name").String()) == "apply_patch" {
+		if toolName == "apply_patch" {
 			raw, _ = sjson.SetBytes(raw, "description", xaiApplyPatchToolDescription)
 			raw, _ = sjson.SetBytes(raw, "parameters.properties.input.description", xaiApplyPatchInputDescription(tool))
 			schemaTool = gjson.ParseBytes(raw)

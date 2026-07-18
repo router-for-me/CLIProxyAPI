@@ -272,7 +272,7 @@ func unwrapCustomToolInput(arguments string) string {
 		return v.Raw
 	}
 	trimmed := strings.TrimSpace(arguments)
-	if len(trimmed) > 1 && trimmed[0] == '"' && json.Valid([]byte(trimmed)) {
+	if len(trimmed) > 1 && trimmed[0] == '"' {
 		var decoded string
 		if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil {
 			return decoded
