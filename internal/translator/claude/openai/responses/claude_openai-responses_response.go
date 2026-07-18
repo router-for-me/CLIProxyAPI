@@ -245,6 +245,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				st.ContentPartOpen = true
 			}
 		} else if typ == "tool_use" {
+			out = append(out, st.finalizeAssistantMessage(nextSeq)...)
 			st.InFuncBlock = true
 			st.CurrentFCID = cb.Get("id").String()
 			name := cb.Get("name").String()

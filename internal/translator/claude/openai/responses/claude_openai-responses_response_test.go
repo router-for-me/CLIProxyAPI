@@ -166,6 +166,103 @@ func TestConvertClaudeResponseToOpenAIResponses_AggregatesTextBlocksUntilMessage
 	}
 }
 
+func TestConvertClaudeResponseToOpenAIResponses_FinalizesMessageBeforeFunctionCall(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Checking the workspace."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_123","name":"exec_command","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"pwd\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
+
+	messageAddedPosition := -1
+	messageDonePosition := -1
+	functionAddedPosition := -1
+	functionDonePosition := -1
+	messageDoneCount := 0
+	functionDoneCount := 0
+	var completed gjson.Result
+	for position, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		itemType := data.Get("item.type").String()
+		switch {
+		case event == "response.output_item.added" && itemType == "message":
+			messageAddedPosition = position
+			if got := data.Get("output_index").Int(); got != 0 {
+				t.Fatalf("message added output_index = %d, want 0", got)
+			}
+		case event == "response.output_item.done" && itemType == "message":
+			messageDonePosition = position
+			messageDoneCount++
+			if got := data.Get("output_index").Int(); got != 0 {
+				t.Fatalf("message done output_index = %d, want 0", got)
+			}
+		case event == "response.output_item.added" && itemType == "function_call":
+			functionAddedPosition = position
+			if got := data.Get("output_index").Int(); got != 1 {
+				t.Fatalf("function added output_index = %d, want 1", got)
+			}
+		case event == "response.output_item.done" && itemType == "function_call":
+			functionDonePosition = position
+			functionDoneCount++
+			if got := data.Get("output_index").Int(); got != 1 {
+				t.Fatalf("function done output_index = %d, want 1", got)
+			}
+		case event == "response.completed":
+			completed = data
+		}
+	}
+
+	if messageAddedPosition < 0 || messageDonePosition < 0 || functionAddedPosition < 0 || functionDonePosition < 0 {
+		t.Fatalf(
+			"missing lifecycle event: message added=%d done=%d, function added=%d done=%d",
+			messageAddedPosition,
+			messageDonePosition,
+			functionAddedPosition,
+			functionDonePosition,
+		)
+	}
+	if messageDonePosition >= functionAddedPosition {
+		t.Fatalf(
+			"message done position = %d, want before function added position %d",
+			messageDonePosition,
+			functionAddedPosition,
+		)
+	}
+	if functionAddedPosition >= functionDonePosition {
+		t.Fatalf("function added position = %d, want before done position %d", functionAddedPosition, functionDonePosition)
+	}
+	if messageDoneCount != 1 {
+		t.Fatalf("message output_item.done count = %d, want 1", messageDoneCount)
+	}
+	if functionDoneCount != 1 {
+		t.Fatalf("function output_item.done count = %d, want 1", functionDoneCount)
+	}
+	if !completed.Exists() {
+		t.Fatal("expected response.completed event")
+	}
+	if got := completed.Get("response.output.#").Int(); got != 2 {
+		t.Fatalf("completed output count = %d, want 2", got)
+	}
+	if got := completed.Get("response.output.0.type").String(); got != "message" {
+		t.Fatalf("completed output[0] type = %q, want message", got)
+	}
+	if got := completed.Get("response.output.0.content.0.text").String(); got != "Checking the workspace." {
+		t.Fatalf("completed message text = %q", got)
+	}
+	if got := completed.Get("response.output.1.type").String(); got != "function_call" {
+		t.Fatalf("completed output[1] type = %q, want function_call", got)
+	}
+	if got := completed.Get("response.output.1.call_id").String(); got != "call_123" {
+		t.Fatalf("completed function call_id = %q, want call_123", got)
+	}
+}
+
 func TestConvertClaudeResponseToOpenAIResponses_ReportsCacheTokens(t *testing.T) {
 	chunks := [][]byte{
 		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":13,"output_tokens":1,"cache_read_input_tokens":100,"cache_creation_input_tokens":7}}}`),
