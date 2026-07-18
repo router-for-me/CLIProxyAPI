@@ -3,6 +3,7 @@ package responses
 import (
 	"strings"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -33,6 +34,11 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	root := gjson.ParseBytes(rawJSON)
 
+	messages := make([][]byte, 0)
+	appendMessage := func(message []byte) {
+		messages = append(messages, message)
+	}
+
 	// Set model name
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
@@ -52,7 +58,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	if instructions := root.Get("instructions"); instructions.Exists() {
 		systemMessage := []byte(`{"role":"system","content":""}`)
 		systemMessage, _ = sjson.SetBytes(systemMessage, "content", instructions.String())
-		out, _ = sjson.SetRawBytes(out, "messages.-1", systemMessage)
+		appendMessage(systemMessage)
 	}
 
 	// Convert input array to messages
@@ -91,7 +97,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			if reasoningContent := takePendingReasoningContent(); reasoningContent != "" {
 				assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)
 			}
-			out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
+			appendMessage(assistantMessage)
 			for _, id := range pendingToolCallIDs {
 				if strings.TrimSpace(id) == "" {
 					continue
@@ -103,7 +109,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		}
 		flushDeferredMessages := func() {
 			for _, message := range deferredMessages {
-				out, _ = sjson.SetRawBytes(out, "messages.-1", message)
+				appendMessage(message)
 			}
 			deferredMessages = deferredMessages[:0]
 		}
@@ -122,7 +128,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				deferredMessages = append(deferredMessages, message)
 				return
 			}
-			out, _ = sjson.SetRawBytes(out, "messages.-1", message)
+			appendMessage(message)
 		}
 		appendPendingReasoningMessage := func() {
 			reasoningContent := takePendingReasoningContent()
@@ -251,7 +257,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					toolMessage, _ = sjson.SetBytes(toolMessage, "content", output.String())
 				}
 
-				out, _ = sjson.SetRawBytes(out, "messages.-1", toolMessage)
+				appendMessage(toolMessage)
 				if callID != "" {
 					delete(awaitingToolOutputs, callID)
 				}
@@ -278,7 +284,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				callID := strings.TrimSpace(item.Get("call_id").String())
 				toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
 				toolMessage, _ = sjson.SetBytes(toolMessage, "content", responsesToolOutputText(item.Get("output")))
-				out, _ = sjson.SetRawBytes(out, "messages.-1", toolMessage)
+				appendMessage(toolMessage)
 				if callID != "" {
 					delete(awaitingToolOutputs, callID)
 				}
@@ -295,7 +301,11 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		msg := []byte(`{}`)
 		msg, _ = sjson.SetBytes(msg, "role", "user")
 		msg, _ = sjson.SetBytes(msg, "content", input.String())
-		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+		appendMessage(msg)
+	}
+
+	if len(messages) > 0 {
+		out, _ = sjson.SetRawBytes(out, "messages", translatorcommon.JoinRawArray(messages))
 	}
 
 	// Convert tools from responses format to chat completions format.
