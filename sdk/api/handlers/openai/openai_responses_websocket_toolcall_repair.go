@@ -218,8 +218,17 @@ func releaseResponsesWebsocketToolCaches(sessionKey string) {
 	}
 }
 
-func repairResponsesWebsocketToolCalls(sessionKey string, payload []byte) []byte {
-	return repairResponsesWebsocketToolCallsWithCaches(defaultWebsocketToolOutputCache, defaultWebsocketToolCallCache, sessionKey, payload)
+func resetResponsesWebsocketToolCaches(sessionKey string) {
+	if defaultWebsocketToolOutputCache != nil {
+		defaultWebsocketToolOutputCache.deleteSession(sessionKey)
+	}
+	if defaultWebsocketToolCallCache != nil {
+		defaultWebsocketToolCallCache.deleteSession(sessionKey)
+	}
+}
+
+func repairResponsesWebsocketToolCalls(sessionKey string, payload []byte, pendingCallIDs ...string) []byte {
+	return repairResponsesWebsocketToolCallsWithCachesAndPending(defaultWebsocketToolOutputCache, defaultWebsocketToolCallCache, sessionKey, payload, pendingCallIDs)
 }
 
 func repairResponsesWebsocketToolCallsWithCache(cache *websocketToolOutputCache, sessionKey string, payload []byte) []byte {
@@ -227,6 +236,10 @@ func repairResponsesWebsocketToolCallsWithCache(cache *websocketToolOutputCache,
 }
 
 func repairResponsesWebsocketToolCallsWithCaches(outputCache, callCache *websocketToolOutputCache, sessionKey string, payload []byte) []byte {
+	return repairResponsesWebsocketToolCallsWithCachesAndPending(outputCache, callCache, sessionKey, payload, nil)
+}
+
+func repairResponsesWebsocketToolCallsWithCachesAndPending(outputCache, callCache *websocketToolOutputCache, sessionKey string, payload []byte, pendingCallIDs []string) []byte {
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" || outputCache == nil || len(payload) == 0 {
 		return payload
@@ -238,7 +251,13 @@ func repairResponsesWebsocketToolCallsWithCaches(outputCache, callCache *websock
 	}
 
 	allowOrphanOutputs := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != ""
-	updatedRaw, errRepair := repairResponsesToolCallsArray(outputCache, callCache, sessionKey, input.Raw, allowOrphanOutputs)
+	pendingCalls := make(map[string]struct{}, len(pendingCallIDs))
+	for _, callID := range pendingCallIDs {
+		if callID = strings.TrimSpace(callID); callID != "" {
+			pendingCalls[callID] = struct{}{}
+		}
+	}
+	updatedRaw, errRepair := repairResponsesToolCallsArray(outputCache, callCache, sessionKey, input.Raw, allowOrphanOutputs, pendingCalls)
 	if errRepair != nil || updatedRaw == "" || updatedRaw == input.Raw {
 		return payload
 	}
@@ -250,7 +269,7 @@ func repairResponsesWebsocketToolCallsWithCaches(outputCache, callCache *websock
 	return updated
 }
 
-func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCache, sessionKey string, rawArray string, allowOrphanOutputs bool) (string, error) {
+func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCache, sessionKey string, rawArray string, allowOrphanOutputs bool, pendingCallIDs map[string]struct{}) (string, error) {
 	rawArray = strings.TrimSpace(rawArray)
 	if rawArray == "" {
 		return "[]", nil
@@ -361,6 +380,10 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 		}
 
 		if allowOrphanOutputs {
+			filtered = append(filtered, item)
+			continue
+		}
+		if _, pending := pendingCallIDs[callID]; pending {
 			filtered = append(filtered, item)
 			continue
 		}

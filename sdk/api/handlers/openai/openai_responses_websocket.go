@@ -226,7 +226,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	}
 	passthroughSessionID := uuid.NewString()
 	downstreamSessionKey := websocketScopedDownstreamSessionKey(c, websocketDownstreamSessionKey(c.Request))
-	retainResponsesWebsocketToolCaches(downstreamSessionKey)
+	toolSessionKey := responsesWebsocketToolSessionKey(downstreamSessionKey, passthroughSessionID)
+	retainResponsesWebsocketToolCaches(toolSessionKey)
 	clientIP := websocketClientAddress(c)
 	log.Infof("responses websocket: client connected id=%s remote=%s", passthroughSessionID, clientIP)
 
@@ -263,7 +264,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 	var wsTerminateErr error
 	defer func() {
-		releaseResponsesWebsocketToolCaches(downstreamSessionKey)
+		releaseResponsesWebsocketToolCaches(toolSessionKey)
 		if wsTerminateErr != nil {
 			appendWebsocketTimelineDisconnect(wsTimelineLog, wsTerminateErr, time.Now())
 			// log.Infof("responses websocket: session closing id=%s reason=%v", passthroughSessionID, wsTerminateErr)
@@ -448,6 +449,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				allowCompactionReplayBypass = h.websocketUpstreamSupportsCompactionReplayForModel(requestModelName)
 			}
 		}
+		requestReplacesToolTranscript := shouldReplaceWebsocketTranscript(payload, gjson.GetBytes(payload, "input")) ||
+			(allowCompactionReplayBypass && inputContainsFullTranscript(gjson.GetBytes(payload, "input")))
 
 		var requestJSON []byte
 		var updatedLastRequest []byte
@@ -546,7 +549,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				forceTranscriptReplayNextRequest = false
 			}
 		} else {
-			requestJSON = repairResponsesWebsocketToolCalls(downstreamSessionKey, requestJSON)
+			if !requestReplacesToolTranscript {
+				requestJSON = repairResponsesWebsocketToolCalls(toolSessionKey, requestJSON, lastResponsePendingToolCallIDs...)
+			}
 			requestJSON = dedupeResponsesWebsocketInputItemsByID(requestJSON)
 			updatedLastRequest = bytes.Clone(requestJSON)
 			lastRequest = updatedLastRequest
@@ -583,7 +588,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		interceptErr := func(errMsg *interfaces.ErrorMessage) bool {
 			return shouldRetryResponsesWebsocketAfterUpstreamStateLoss(errMsg, payload, previousLastRequest, stateLossReplayAttempted)
 		}
-		completedOutput, completedResponseID, completedPendingToolCallIDs, forwardErrMsg, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, wsTimelineLog, downstreamSessionKey, passthroughSessionID, interceptErr)
+		completedOutput, completedResponseID, completedPendingToolCallIDs, forwardErrMsg, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, wsTimelineLog, toolSessionKey, passthroughSessionID, interceptErr)
 		if errForward != nil {
 			wsTerminateErr = errForward
 			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
@@ -636,6 +641,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastResponseOutput = completedOutput
 			lastResponseID = strings.TrimSpace(completedResponseID)
 			lastResponsePendingToolCallIDs = append([]string(nil), completedPendingToolCallIDs...)
+			if requestReplacesToolTranscript {
+				resetResponsesWebsocketToolCaches(toolSessionKey)
+			}
 		} else if passthroughCanUpdateTranscript && forwardErrMsg == nil && strings.TrimSpace(completedResponseID) != "" {
 			lastRequest = passthroughTranscriptSnapshot
 			lastResponseOutput = completedOutput
@@ -1560,7 +1568,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	data <-chan []byte,
 	errs <-chan *interfaces.ErrorMessage,
 	wsTimelineLog websocketTimelineAppender,
-	downstreamSessionKey string,
+	toolSessionKey string,
 	sessionID string,
 	interceptError func(*interfaces.ErrorMessage) bool,
 ) ([]byte, string, []string, *interfaces.ErrorMessage, error) {
@@ -1571,7 +1579,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	var outputItemsFallback [][]byte
 	pendingToolCallIDs := make(map[string]struct{})
 	sentPayload := false
-	downstreamSessionKey = strings.TrimSpace(downstreamSessionKey)
+	toolSessionKey = strings.TrimSpace(toolSessionKey)
 
 	for {
 		select {
@@ -1656,7 +1664,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				if isResponsesWebsocketCompletionEvent(eventType) {
 					payloads[i] = restoreResponsesWebsocketCompletionOutput(payloads[i], outputItemsByIndex, outputItemsFallback)
 				}
-				recordResponsesWebsocketToolCallsFromPayload(downstreamSessionKey, payloads[i])
+				recordResponsesWebsocketToolCallsFromPayload(toolSessionKey, payloads[i])
 				recordPendingToolCallIDsFromPayload(pendingToolCallIDs, payloads[i])
 				var payloadErrMsg *interfaces.ErrorMessage
 				if eventType == wsEventTypeError {

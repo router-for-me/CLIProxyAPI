@@ -7,6 +7,24 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestRepairResponsesWebsocketToolCallsKeepsPendingCallInsteadOfCachedOutput(t *testing.T) {
+	outputCache := newWebsocketToolOutputCache(time.Minute, 10)
+	callCache := newWebsocketToolOutputCache(time.Minute, 10)
+	const sessionKey = "session-1"
+
+	outputCache.record(sessionKey, "call-1", []byte(`{"type":"function_call_output","call_id":"call-1","output":"stale"}`))
+	raw := []byte(`{"input":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool"},{"type":"message","id":"msg-1"}]}`)
+	repaired := repairResponsesWebsocketToolCallsWithCachesAndPending(outputCache, callCache, sessionKey, raw, []string{"call-1"})
+
+	input := gjson.GetBytes(repaired, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("repaired input len = %d, want 2: %s", len(input), repaired)
+	}
+	if input[0].Get("id").String() != "fc-1" || input[1].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected pending-call transcript: %s", repaired)
+	}
+}
+
 func TestRepairResponsesWebsocketToolCallsDropsOrphanToolSearchOutput(t *testing.T) {
 	outputCache := newWebsocketToolOutputCache(time.Minute, 10)
 	callCache := newWebsocketToolOutputCache(time.Minute, 10)
