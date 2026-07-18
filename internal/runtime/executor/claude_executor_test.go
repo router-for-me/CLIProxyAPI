@@ -1289,6 +1289,85 @@ func TestClaudeExecutor_ExecuteStreamDirectPassthroughEmitsCompleteSSEEvents(t *
 	}
 }
 
+func TestClaudeExecutor_CountTokensUsesConfiguredSystemPromptMode(t *testing.T) {
+	relaxedSystemPromptEnabled := true
+	relaxedSystemPromptDisabled := false
+	tests := []struct {
+		name               string
+		cloak              *config.CloakConfig
+		wantClientSystem   bool
+		wantSystemReminder bool
+	}{
+		{
+			name:             "relaxed by default",
+			wantClientSystem: true,
+		},
+		{
+			name:               "relaxed explicitly disabled",
+			cloak:              &config.CloakConfig{RelaxedSystemPrompt: &relaxedSystemPromptDisabled},
+			wantSystemReminder: true,
+		},
+		{
+			name: "strict overrides relaxed",
+			cloak: &config.CloakConfig{
+				StrictMode:          true,
+				RelaxedSystemPrompt: &relaxedSystemPromptEnabled,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var seenBody []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				seenBody = bytes.Clone(body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"input_tokens":42}`))
+			}))
+			defer server.Close()
+
+			executor := NewClaudeExecutor(&config.Config{ClaudeKey: []config.ClaudeKey{{
+				APIKey: "key-123",
+				Cloak:  tt.cloak,
+			}}})
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"api_key":  "key-123",
+				"base_url": server.URL,
+			}}
+			payload := []byte(`{"system":"Client rule","messages":[{"role":"user","content":"hi"}]}`)
+
+			_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "claude-3-5-sonnet-20241022",
+				Payload: payload,
+			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+			if err != nil {
+				t.Fatalf("CountTokens() error = %v", err)
+			}
+			if len(seenBody) == 0 {
+				t.Fatal("expected count_tokens request body to be captured")
+			}
+
+			blocks := gjson.GetBytes(seenBody, "system").Array()
+			if len(blocks) != 3 {
+				t.Fatalf("system block count = %d, want 3: %s", len(blocks), gjson.GetBytes(seenBody, "system").Raw)
+			}
+			if tt.wantClientSystem {
+				if got := blocks[2].Get("text").String(); got != "Client rule" {
+					t.Fatalf("system[2].text = %q, want client system prompt", got)
+				}
+			} else if got := blocks[2].Get("text").String(); got != expectedClaudeCodeStaticPrompt() {
+				t.Fatalf("system[2].text = %q, want static Claude Code prompt", got)
+			}
+
+			message := gjson.GetBytes(seenBody, "messages.0.content").String()
+			if got := strings.Contains(message, "<system-reminder>"); got != tt.wantSystemReminder {
+				t.Fatalf("system reminder present = %t, want %t: %q", got, tt.wantSystemReminder, message)
+			}
+		})
+	}
+}
+
 func TestClaudeExecutor_CountTokensStripsOpenAIEncryptedThinkingBeforeUpstream(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2721,12 +2800,14 @@ func TestClaudeExecutor_RebuildMidSystemMessageOptInMovesSystemMessages(t *testi
 }
 
 func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmitted(t *testing.T) {
+	relaxedSystemPrompt := true
 	cfg := &config.Config{
 		ClaudeKey: []config.ClaudeKey{{
 			APIKey: "key-123",
 			Cloak: &config.CloakConfig{
-				StrictMode:     true,
-				SensitiveWords: []string{"proxy"},
+				StrictMode:          true,
+				RelaxedSystemPrompt: &relaxedSystemPrompt,
+				SensitiveWords:      []string{"proxy"},
 			},
 		}},
 	}
@@ -2790,7 +2871,10 @@ func TestApplyCloaking_RelaxedSystemPromptCanBeDisabled(t *testing.T) {
 				APIKey: "key-123",
 				Cloak:  &config.CloakConfig{RelaxedSystemPrompt: &disabled},
 			}}},
-			auth: &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}},
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"api_key": "key-123"},
+				Metadata:   map[string]any{"cloak_relaxed_system_prompt": true},
+			},
 		},
 		{
 			name: "auth metadata boolean",
@@ -2834,7 +2918,10 @@ func TestApplyCloaking_RelaxedSystemPromptFromClaudeKeyConfig(t *testing.T) {
 			},
 		}},
 	}
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "key-123"},
+		Metadata:   map[string]any{"cloak_relaxed_system_prompt": false},
+	}
 	payload := []byte(`{"system":"Client rule","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 
 	out, errCloaking := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
@@ -2871,6 +2958,11 @@ func TestApplyCloaking_RelaxedSystemPromptFromAuthMetadata(t *testing.T) {
 		},
 	}
 	payload := []byte(`{"system":[{"type":"text","text":"Client rule"}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	_, _, relaxedSystemPrompt, _, _ := getCloakConfigFromAuth(auth)
+	if relaxedSystemPrompt == nil || !*relaxedSystemPrompt {
+		t.Fatalf("getCloakConfigFromAuth() relaxedSystemPrompt = %v, want explicit true", relaxedSystemPrompt)
+	}
 
 	out, errCloaking := applyCloaking(context.Background(), &config.Config{}, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
 	if errCloaking != nil {

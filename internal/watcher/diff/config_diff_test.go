@@ -517,6 +517,29 @@ func TestFormatProxyURL(t *testing.T) {
 	}
 }
 
+func TestBuildConfigChangeDetails_RelaxedSystemPromptUsesEffectiveDefault(t *testing.T) {
+	disabled := false
+	enabled := true
+	oldCfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
+		APIKey: "key",
+		Cloak:  &config.CloakConfig{},
+	}}}
+
+	disabledCfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
+		APIKey: "key",
+		Cloak:  &config.CloakConfig{RelaxedSystemPrompt: &disabled},
+	}}}
+	expectContains(t, BuildConfigChangeDetails(oldCfg, disabledCfg), "claude[0].cloak.relaxed-system-prompt: true -> false")
+
+	enabledCfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
+		APIKey: "key",
+		Cloak:  &config.CloakConfig{RelaxedSystemPrompt: &enabled},
+	}}}
+	if changes := BuildConfigChangeDetails(oldCfg, enabledCfg); len(changes) != 0 {
+		t.Fatalf("omitted and explicit true should have the same effective value, got %v", changes)
+	}
+}
+
 func TestBuildConfigChangeDetails_RemoteManagementSecretUpdated(t *testing.T) {
 	oldCfg := &config.Config{
 		RemoteManagement: config.RemoteManagement{

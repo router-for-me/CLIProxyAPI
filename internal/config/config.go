@@ -430,8 +430,8 @@ type CloakConfig struct {
 	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
 
 	// StrictMode controls how system prompts are handled when cloaking.
-	// - false (default): prepend Claude Code prompt to user system messages
-	// - true: strip all user system messages, keep only Claude Code prompt
+	// - false (default): handle client system prompts according to RelaxedSystemPrompt
+	// - true: strip all client system messages and keep only the Claude Code prompt
 	StrictMode bool `yaml:"strict-mode,omitempty" json:"strict-mode,omitempty"`
 
 	// RelaxedSystemPrompt preserves client system prompts as top-level Claude system blocks.
