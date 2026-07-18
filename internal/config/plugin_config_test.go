@@ -117,13 +117,13 @@ plugins:
 	}
 }
 
-func TestParseConfigBytes_PluginSyncRevision(t *testing.T) {
-	cfg, errParse := ParseConfigBytes([]byte("plugins:\n  sync-revision: 42\n"))
+func TestParseConfigBytes_PluginAuthRevision(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte("plugins:\n  auth-revision: 42\n"))
 	if errParse != nil {
 		t.Fatalf("ParseConfigBytes() error = %v", errParse)
 	}
-	if cfg.Plugins.SyncRevision != 42 {
-		t.Fatalf("Plugins.SyncRevision = %d, want 42", cfg.Plugins.SyncRevision)
+	if cfg.Plugins.AuthRevision != 42 {
+		t.Fatalf("Plugins.AuthRevision = %d, want 42", cfg.Plugins.AuthRevision)
 	}
 }
 
