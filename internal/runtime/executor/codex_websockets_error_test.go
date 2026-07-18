@@ -156,6 +156,34 @@ func TestCodexWebsocketStatuslessErrorEventClassifiesStringErrorCodes(t *testing
 	}
 }
 
+func TestCodexWebsocketStatuslessErrorEventClassifiesAuthErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    []byte
+		wantStatus int
+	}{
+		{name: "authentication type", payload: []byte(`{"type":"error","error":{"type":"authentication_error"}}`), wantStatus: http.StatusUnauthorized},
+		{name: "invalid API key", payload: []byte(`{"type":"error","code":"invalid_api_key"}`), wantStatus: http.StatusUnauthorized},
+		{name: "unauthorized", payload: []byte(`{"type":"error","code":"unauthorized"}`), wantStatus: http.StatusUnauthorized},
+		{name: "permission type", payload: []byte(`{"type":"error","error":{"type":"permission_error"}}`), wantStatus: http.StatusForbidden},
+		{name: "forbidden", payload: []byte(`{"type":"error","code":"forbidden"}`), wantStatus: http.StatusForbidden},
+		{name: "permission denied", payload: []byte(`{"type":"error","code":"permission_denied"}`), wantStatus: http.StatusForbidden},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err, ok := codexWebsocketStatuslessErrorEvent(test.payload)
+			if !ok {
+				t.Fatal("expected statusless websocket error")
+			}
+			statusErr, ok := err.(interface{ StatusCode() int })
+			if !ok || statusErr.StatusCode() != test.wantStatus {
+				t.Fatalf("status = %#v, want %d", err, test.wantStatus)
+			}
+		})
+	}
+}
+
 func durationPointer(value time.Duration) *time.Duration {
 	return &value
 }

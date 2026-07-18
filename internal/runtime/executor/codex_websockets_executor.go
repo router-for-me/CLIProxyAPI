@@ -2334,6 +2334,16 @@ func codexWebsocketStatuslessErrorStatus(payload []byte) int {
 	if message == "" {
 		message = strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "message").String()))
 	}
+	if strings.EqualFold(code, "invalid_api_key") ||
+		strings.EqualFold(code, "unauthorized") ||
+		strings.EqualFold(errType, "authentication_error") {
+		return http.StatusUnauthorized
+	}
+	if strings.EqualFold(code, "forbidden") ||
+		strings.EqualFold(code, "permission_denied") ||
+		strings.EqualFold(errType, "permission_error") {
+		return http.StatusForbidden
+	}
 	if strings.EqualFold(code, "rate_limit_exceeded") ||
 		strings.EqualFold(code, "usage_limit_reached") ||
 		strings.EqualFold(errType, "rate_limit_error") ||
