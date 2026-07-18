@@ -268,7 +268,6 @@ func (s *codexWebsocketSession) deliverActiveRead(ev codexWebsocketRead) bool {
 	case ch <- ev:
 		delivered = true
 	case <-done:
-	default:
 	}
 	s.clearActive(activeConn, ch)
 	return delivered

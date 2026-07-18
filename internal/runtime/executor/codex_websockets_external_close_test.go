@@ -87,3 +87,41 @@ func TestDeliverActiveReadLeavesCapturedChannelOpen(t *testing.T) {
 	default:
 	}
 }
+
+func TestDeliverActiveReadWaitsForFullChannel(t *testing.T) {
+	sess := &codexWebsocketSession{}
+	conn := &websocket.Conn{}
+	activeCh := make(chan codexWebsocketRead, 1)
+	sess.setActive(conn, activeCh)
+	activeCh <- codexWebsocketRead{conn: conn, payload: []byte("queued")}
+
+	closeErr := errors.New("upstream closed")
+	deliveredCh := make(chan bool, 1)
+	go func() {
+		deliveredCh <- sess.deliverActiveRead(codexWebsocketRead{conn: conn, err: closeErr})
+	}()
+
+	select {
+	case delivered := <-deliveredCh:
+		t.Fatalf("deliverActiveRead() returned %v before the full channel was drained", delivered)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	<-activeCh
+	select {
+	case event := <-activeCh:
+		if !errors.Is(event.err, closeErr) {
+			t.Fatalf("close error = %v, want %v", event.err, closeErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for close error after draining the channel")
+	}
+	select {
+	case delivered := <-deliveredCh:
+		if !delivered {
+			t.Fatal("deliverActiveRead() reported that the close error was not delivered")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("deliverActiveRead() did not return after delivering the close error")
+	}
+}
