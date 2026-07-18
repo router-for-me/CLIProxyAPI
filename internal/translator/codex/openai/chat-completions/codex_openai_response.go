@@ -522,32 +522,7 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 // buildReverseMapFromOriginalOpenAI builds a map of shortened tool name -> original tool name
 // from the original OpenAI-style request JSON using the same shortening logic.
 func buildReverseMapFromOriginalOpenAI(original []byte) map[string]string {
-	tools := gjson.GetBytes(original, "tools")
-	rev := map[string]string{}
-	if tools.IsArray() && len(tools.Array()) > 0 {
-		var names []string
-		arr := tools.Array()
-		for i := 0; i < len(arr); i++ {
-			t := arr[i]
-			if t.Get("type").String() != "function" {
-				continue
-			}
-			fn := t.Get("function")
-			if !fn.Exists() {
-				continue
-			}
-			if v := fn.Get("name"); v.Exists() {
-				names = append(names, v.String())
-			}
-		}
-		if len(names) > 0 {
-			m := buildShortNameMap(names)
-			for orig, short := range m {
-				rev[short] = orig
-			}
-		}
-	}
-	return rev
+	return buildToolCatalog(original).originalByShort
 }
 
 func mimeTypeFromCodexOutputFormat(outputFormat string) string {
