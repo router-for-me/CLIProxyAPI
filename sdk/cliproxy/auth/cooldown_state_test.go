@@ -282,8 +282,18 @@ func TestManager_ReconcileRegistryModelStates_PersistsCooldownRemoval(t *testing
 	store.mu.Lock()
 	recordsBeforeReconcile := cloneCooldownStateRecords(store.records)
 	store.mu.Unlock()
-	if len(recordsBeforeReconcile) != 1 || recordsBeforeReconcile[0].Model != model {
-		t.Fatalf("records before reconcile = %+v, want one model cooldown", recordsBeforeReconcile)
+	if len(recordsBeforeReconcile) != 2 {
+		t.Fatalf("records before reconcile = %+v, want aggregate and model cooldowns", recordsBeforeReconcile)
+	}
+	foundModelCooldown := false
+	for _, record := range recordsBeforeReconcile {
+		if record.Model == model {
+			foundModelCooldown = true
+			break
+		}
+	}
+	if !foundModelCooldown {
+		t.Fatalf("records before reconcile = %+v, want cooldown for model %q", recordsBeforeReconcile, model)
 	}
 
 	manager.ReconcileRegistryModelStates(context.Background(), auth.ID)
