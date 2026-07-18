@@ -63,6 +63,8 @@ var globalCodexWebsocketSessionStore = &codexWebsocketSessionStore{
 var errCodexWebsocketStaleTerminalClose = errors.New("codex websockets executor: upstream closed after previous terminal event")
 var errCodexWebsocketRequestWithoutUpstreamContext = errors.New("codex websockets executor: request requires existing websocket session")
 
+const codexWebsocketFreshContextResetReason = "fresh_context_reset"
+
 type codexWebsocketSession struct {
 	sessionID string
 
@@ -454,7 +456,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if sess != nil && codexWebsocketRequestStartsFreshContext(upstreamBody) {
 		sess.clearLostTerminalState()
 		if codexWebsocketRequestResetsUpstreamContext(upstreamBody) {
-			e.resetUpstreamConnForFreshContext(sess, "fresh_context_reset")
+			e.resetUpstreamConnForFreshContext(sess, codexWebsocketFreshContextResetReason)
 		}
 	}
 	if sess != nil && codexWebsocketRequestRequiresExistingUpstream(sess, upstreamBody) && !sess.hasUpstreamConn() {
@@ -863,7 +865,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if sess != nil && codexWebsocketRequestStartsFreshContext(upstreamBody) {
 		sess.clearLostTerminalState()
 		if codexWebsocketRequestResetsUpstreamContext(upstreamBody) {
-			e.resetUpstreamConnForFreshContext(sess, "fresh_context_reset")
+			e.resetUpstreamConnForFreshContext(sess, codexWebsocketFreshContextResetReason)
 		}
 	}
 	if sess != nil && codexWebsocketRequestRequiresExistingUpstream(sess, upstreamBody) && !sess.hasUpstreamConn() {
@@ -2766,6 +2768,14 @@ func (e *CodexWebsocketsExecutor) clearUpstreamConn(sess *codexWebsocketSession,
 	if current == nil || current != conn {
 		sess.connMu.Unlock()
 		return
+	}
+	if sess.terminalStateConn == conn {
+		if reason == codexWebsocketFreshContextResetReason {
+			sess.terminalStateConn = nil
+			sess.upstreamStateLost = false
+		} else {
+			sess.upstreamStateLost = true
+		}
 	}
 	sess.conn = nil
 	if sess.readerConn == conn {
