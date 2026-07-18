@@ -24,6 +24,14 @@ if [[ ! -f "${COMPOSE_FILE}" ]]; then
   exit 1
 fi
 
+if [[ "${IMAGE_REFERENCE}" == ghcr.io/* ]]; then
+  GHCR_TOKEN="${GHCR_TOKEN:-${GH_TOKEN:-}}"
+  GHCR_USERNAME="${GHCR_USERNAME:-austinhmh}"
+  if [[ -n "${GHCR_TOKEN}" ]]; then
+    printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io --username "${GHCR_USERNAME}" --password-stdin >/dev/null
+  fi
+fi
+
 CURRENT_IMAGE_ID="$(docker inspect --format '{{.Image}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
 if [[ -z "${CURRENT_IMAGE_ID}" ]]; then
   echo "Error: current ${CONTAINER_NAME} container was not found; refusing deployment without a rollback image."
