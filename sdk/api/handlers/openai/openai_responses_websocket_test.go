@@ -1782,6 +1782,70 @@ func TestResponsesWebsocketClosesOnCodexUpstreamDisconnect(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected downstream websocket to close after upstream disconnect")
 	}
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) {
+		t.Fatalf("downstream close error type = %T, want *websocket.CloseError: %v", err, err)
+	}
+	if closeErr.Code != websocket.CloseInternalServerErr {
+		t.Fatalf("downstream close code = %d, want %d", closeErr.Code, websocket.CloseInternalServerErr)
+	}
+	if closeErr.Text != "upstream websocket disconnected" {
+		t.Fatalf("downstream close reason = %q", closeErr.Text)
+	}
+}
+
+func TestResponsesWebsocketHeartbeatSendsPing(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	pingReceived := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("upgrade websocket: %v", errUpgrade)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		conn.SetPingHandler(func(appData string) error {
+			select {
+			case pingReceived <- struct{}{}:
+			default:
+			}
+			return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
+		})
+		for {
+			if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		t.Fatalf("dial websocket: %v", errDial)
+	}
+	defer func() { _ = conn.Close() }()
+
+	done := make(chan struct{})
+	heartbeatDone := make(chan struct{})
+	go func() {
+		runResponsesWebsocketHeartbeat(conn, done, 10*time.Millisecond, func(errHeartbeat error) {
+			t.Errorf("heartbeat failed: %v", errHeartbeat)
+		})
+		close(heartbeatDone)
+	}()
+
+	select {
+	case <-pingReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for downstream heartbeat ping")
+	}
+	close(done)
+	select {
+	case <-heartbeatDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for downstream heartbeat to stop")
+	}
 }
 
 func TestResponsesWebsocketCodexWebsocketPassthroughPassesCompactedRequestWithoutTranscriptMerge(t *testing.T) {

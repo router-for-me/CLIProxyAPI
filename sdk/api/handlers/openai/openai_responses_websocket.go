@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -29,14 +30,15 @@ import (
 )
 
 const (
-	wsRequestTypeCreate  = "response.create"
-	wsRequestTypeAppend  = "response.append"
-	wsEventTypeError     = "error"
-	wsEventTypeCompleted = "response.completed"
-	wsEventTypeDone      = "response.done"
-	wsDoneMarker         = "[DONE]"
-	wsTurnStateHeader    = "x-codex-turn-state"
-	wsTimelineBodyKey    = "WEBSOCKET_TIMELINE_OVERRIDE"
+	wsRequestTypeCreate                 = "response.create"
+	wsRequestTypeAppend                 = "response.append"
+	wsEventTypeError                    = "error"
+	wsEventTypeCompleted                = "response.completed"
+	wsEventTypeDone                     = "response.done"
+	wsDoneMarker                        = "[DONE]"
+	wsTurnStateHeader                   = "x-codex-turn-state"
+	wsTimelineBodyKey                   = "WEBSOCKET_TIMELINE_OVERRIDE"
+	responsesWebsocketHeartbeatInterval = 30 * time.Second
 
 	codexLocalCompactionSummaryPrefix = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:"
 )
@@ -47,6 +49,46 @@ var responsesWebsocketUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
+}
+
+type responsesWebsocketCloser struct {
+	conn *websocket.Conn
+	once sync.Once
+}
+
+func (c *responsesWebsocketCloser) close(code int, reason string) {
+	if c == nil || c.conn == nil {
+		return
+	}
+	c.once.Do(func() {
+		// WriteControl is safe alongside the response writer and gives the peer a
+		// protocol-level reason before the underlying connection is released.
+		_ = c.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Time{})
+		_ = c.conn.Close()
+	})
+}
+
+func runResponsesWebsocketHeartbeat(conn *websocket.Conn, done <-chan struct{}, interval time.Duration, onFailure func(error)) {
+	if conn == nil || done == nil || interval <= 0 {
+		return
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			// WebSocket control writes may run concurrently with the single response writer.
+			if errPing := conn.WriteControl(websocket.PingMessage, nil, time.Time{}); errPing != nil {
+				if onFailure != nil {
+					onFailure(errPing)
+				}
+				return
+			}
+		}
+	}
 }
 
 type websocketTimelineAppender interface {
@@ -227,7 +269,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	wsTimelineLog := newWebsocketTimelineLog(requestLogEnabled, websocketTimelineSourceFromContext(c))
 
 	wsDone := make(chan struct{})
-	defer close(wsDone)
+	downstreamCloser := &responsesWebsocketCloser{conn: conn}
+	go runResponsesWebsocketHeartbeat(conn, wsDone, responsesWebsocketHeartbeatInterval, func(errHeartbeat error) {
+		log.Infof("responses websocket: downstream heartbeat failed id=%s error=%v", passthroughSessionID, errHeartbeat)
+		downstreamCloser.close(websocket.CloseGoingAway, "websocket heartbeat failed")
+	})
 
 	if h != nil && h.AuthManager != nil {
 		type upstreamDisconnectSubscriber interface {
@@ -245,8 +291,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 						select {
 						case <-wsDone:
 							return
-						case <-disconnectCh:
-							_ = conn.Close()
+						case disconnectErr := <-disconnectCh:
+							if disconnectErr != nil {
+								log.Infof("responses websocket: upstream disconnected id=%s error=%v", passthroughSessionID, disconnectErr)
+							}
+							downstreamCloser.close(websocket.CloseInternalServerErr, "upstream websocket disconnected")
 						}
 					}()
 				}
@@ -256,6 +305,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 	var wsTerminateErr error
 	defer func() {
+		close(wsDone)
 		releaseResponsesWebsocketToolCaches(downstreamSessionKey)
 		if wsTerminateErr != nil {
 			appendWebsocketTimelineDisconnect(wsTimelineLog, wsTerminateErr, time.Now())
@@ -268,9 +318,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			log.Infof("responses websocket: upstream execution session closed id=%s", passthroughSessionID)
 		}
 		wsTimelineLog.SetContext(c)
-		if errClose := conn.Close(); errClose != nil {
-			log.Warnf("responses websocket: close connection error: %v", errClose)
-		}
+		downstreamCloser.close(websocket.CloseNormalClosure, "websocket session closed")
 	}()
 
 	var lastRequest []byte

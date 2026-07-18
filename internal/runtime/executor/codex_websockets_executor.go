@@ -35,9 +35,11 @@ import (
 )
 
 const (
-	codexResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-06"
-	codexResponsesWebsocketIdleTimeout     = 5 * time.Minute
-	codexResponsesWebsocketHandshakeTO     = 30 * time.Second
+	codexResponsesWebsocketBetaHeaderValue     = "responses_websockets=2026-02-06"
+	codexResponsesWebsocketIdleTimeout         = 5 * time.Minute
+	codexResponsesWebsocketHeartbeatInterval   = time.Minute
+	codexResponsesWebsocketControlWriteTimeout = 10 * time.Second
+	codexResponsesWebsocketHandshakeTO         = 30 * time.Second
 )
 
 // CodexWebsocketsExecutor executes Codex Responses requests using a WebSocket transport.
@@ -143,16 +145,39 @@ func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, 
 	return conn.WriteMessage(msgType, payload)
 }
 
+func (s *codexWebsocketSession) writeControl(conn *websocket.Conn, msgType int, payload []byte) error {
+	if s == nil {
+		return fmt.Errorf("codex websockets executor: session is nil")
+	}
+	if conn == nil {
+		return fmt.Errorf("codex websockets executor: websocket conn is nil")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return conn.WriteControl(msgType, payload, time.Now().Add(codexResponsesWebsocketControlWriteTimeout))
+}
+
 func (s *codexWebsocketSession) configureConn(conn *websocket.Conn) {
 	if s == nil || conn == nil {
 		return
 	}
 	conn.SetPingHandler(func(appData string) error {
-		s.writeMu.Lock()
-		defer s.writeMu.Unlock()
+		if errDeadline := refreshCodexWebsocketReadDeadline(conn); errDeadline != nil {
+			return errDeadline
+		}
 		// Reply pongs from the same write lock to avoid concurrent writes.
-		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
+		return s.writeControl(conn, websocket.PongMessage, []byte(appData))
 	})
+	conn.SetPongHandler(func(string) error {
+		return refreshCodexWebsocketReadDeadline(conn)
+	})
+}
+
+func refreshCodexWebsocketReadDeadline(conn *websocket.Conn) error {
+	if conn == nil {
+		return fmt.Errorf("codex websockets executor: websocket conn is nil")
+	}
+	return conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
 }
 
 func (s *codexWebsocketSession) notifyUpstreamDisconnect(err error) {
@@ -1409,6 +1434,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 			sess.connMu.Unlock()
 			sess.configureConn(conn)
 			go e.readUpstreamLoop(sess, conn)
+			go e.upstreamHeartbeatLoop(sess, conn, codexResponsesWebsocketHeartbeatInterval)
 		}
 		return conn, nil, nil
 	}
@@ -1435,6 +1461,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 
 	sess.configureConn(conn)
 	go e.readUpstreamLoop(sess, conn)
+	go e.upstreamHeartbeatLoop(sess, conn, codexResponsesWebsocketHeartbeatInterval)
 	logCodexWebsocketConnected(sess.sessionID, authID, wsURL)
 	return conn, resp, nil
 }
@@ -1444,7 +1471,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		return
 	}
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
+		_ = refreshCodexWebsocketReadDeadline(conn)
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
 			sess.activeMu.Lock()
@@ -1460,7 +1487,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 				sess.clearActive(ch)
 				close(ch)
 			}
-			e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
+			e.invalidateUpstreamConnWithNotify(sess, conn, "upstream_disconnected", errRead, ch != nil)
 			return
 		}
 
@@ -1480,7 +1507,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 					sess.clearActive(ch)
 					close(ch)
 				}
-				e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
+				e.invalidateUpstreamConnWithNotify(sess, conn, "unexpected_binary", errBinary, ch != nil)
 				return
 			}
 			continue
@@ -1500,7 +1527,36 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 	}
 }
 
+func (e *CodexWebsocketsExecutor) upstreamHeartbeatLoop(sess *codexWebsocketSession, conn *websocket.Conn, interval time.Duration) {
+	if e == nil || sess == nil || conn == nil || interval <= 0 {
+		return
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		sess.connMu.Lock()
+		current := sess.conn
+		sess.connMu.Unlock()
+		if current != conn {
+			return
+		}
+
+		if errPing := sess.writeControl(conn, websocket.PingMessage, nil); errPing != nil {
+			sess.activeMu.Lock()
+			notifyDownstream := sess.activeCh != nil
+			sess.activeMu.Unlock()
+			e.invalidateUpstreamConnWithNotify(sess, conn, "heartbeat_failed", errPing, notifyDownstream)
+			return
+		}
+	}
+}
+
 func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error) {
+	e.invalidateUpstreamConnWithNotify(sess, conn, reason, err, true)
+}
+
+func (e *CodexWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error, notifyDownstream bool) {
 	if sess == nil || conn == nil {
 		return
 	}
@@ -1521,7 +1577,9 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSes
 	sess.connMu.Unlock()
 
 	logCodexWebsocketDisconnected(sessionID, authID, wsURL, reason, err)
-	sess.notifyUpstreamDisconnect(err)
+	if notifyDownstream {
+		sess.notifyUpstreamDisconnect(err)
+	}
 	if errClose := conn.Close(); errClose != nil {
 		log.Errorf("codex websockets executor: close websocket error: %v", errClose)
 	}
