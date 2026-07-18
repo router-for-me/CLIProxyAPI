@@ -335,8 +335,8 @@ func TestRegisterModelsForAuth_CopilotUsesAvailableModelsMetadata(t *testing.T) 
 	service.registerModelsForAuth(context.Background(), auth)
 
 	models := modelRegistry.GetModelsForClient(auth.ID)
-	if len(models) != 2 {
-		t.Fatalf("registered model count = %d, want 2", len(models))
+	if len(models) <= 2 {
+		t.Fatalf("registered model count = %d, want more than 2", len(models))
 	}
 
 	got := make(map[string]struct{}, len(models))
@@ -350,5 +350,8 @@ func TestRegisterModelsForAuth_CopilotUsesAvailableModelsMetadata(t *testing.T) 
 		if _, ok := got[want]; !ok {
 			t.Fatalf("missing expected model %q, got=%v", want, got)
 		}
+	}
+	if _, ok := got["claude-sonnet-5"]; !ok {
+		t.Fatalf("missing expected static Copilot model %q, got=%v", "claude-sonnet-5", got)
 	}
 }
