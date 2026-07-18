@@ -221,23 +221,17 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if o.RebuildMidSystemMessage != n.RebuildMidSystemMessage {
 				changes = append(changes, fmt.Sprintf("claude[%d].rebuild-mid-system-message: %t -> %t", i, o.RebuildMidSystemMessage, n.RebuildMidSystemMessage))
 			}
+			oldRelaxedSystemPrompt := relaxedSystemPromptEnabled(o.Cloak)
+			newRelaxedSystemPrompt := relaxedSystemPromptEnabled(n.Cloak)
+			if oldRelaxedSystemPrompt != newRelaxedSystemPrompt {
+				changes = append(changes, fmt.Sprintf("claude[%d].cloak.relaxed-system-prompt: %t -> %t", i, oldRelaxedSystemPrompt, newRelaxedSystemPrompt))
+			}
 			if o.Cloak != nil && n.Cloak != nil {
 				if strings.TrimSpace(o.Cloak.Mode) != strings.TrimSpace(n.Cloak.Mode) {
 					changes = append(changes, fmt.Sprintf("claude[%d].cloak.mode: %s -> %s", i, o.Cloak.Mode, n.Cloak.Mode))
 				}
 				if o.Cloak.StrictMode != n.Cloak.StrictMode {
 					changes = append(changes, fmt.Sprintf("claude[%d].cloak.strict-mode: %t -> %t", i, o.Cloak.StrictMode, n.Cloak.StrictMode))
-				}
-				oldRelaxedSystemPrompt := true
-				if o.Cloak.RelaxedSystemPrompt != nil {
-					oldRelaxedSystemPrompt = *o.Cloak.RelaxedSystemPrompt
-				}
-				newRelaxedSystemPrompt := true
-				if n.Cloak.RelaxedSystemPrompt != nil {
-					newRelaxedSystemPrompt = *n.Cloak.RelaxedSystemPrompt
-				}
-				if oldRelaxedSystemPrompt != newRelaxedSystemPrompt {
-					changes = append(changes, fmt.Sprintf("claude[%d].cloak.relaxed-system-prompt: %t -> %t", i, oldRelaxedSystemPrompt, newRelaxedSystemPrompt))
 				}
 				if len(o.Cloak.SensitiveWords) != len(n.Cloak.SensitiveWords) {
 					changes = append(changes, fmt.Sprintf("claude[%d].cloak.sensitive-words: %d -> %d", i, len(o.Cloak.SensitiveWords), len(n.Cloak.SensitiveWords)))
@@ -405,6 +399,10 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	}
 
 	return changes
+}
+
+func relaxedSystemPromptEnabled(cloak *config.CloakConfig) bool {
+	return cloak == nil || cloak.RelaxedSystemPrompt == nil || *cloak.RelaxedSystemPrompt
 }
 
 func trimStrings(in []string) []string {

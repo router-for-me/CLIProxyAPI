@@ -520,23 +520,34 @@ func TestFormatProxyURL(t *testing.T) {
 func TestBuildConfigChangeDetails_RelaxedSystemPromptUsesEffectiveDefault(t *testing.T) {
 	disabled := false
 	enabled := true
-	oldCfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
-		APIKey: "key",
-		Cloak:  &config.CloakConfig{},
-	}}}
+	claudeConfig := func(cloak *config.CloakConfig) *config.Config {
+		return &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "key", Cloak: cloak}}}
+	}
 
-	disabledCfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
-		APIKey: "key",
-		Cloak:  &config.CloakConfig{RelaxedSystemPrompt: &disabled},
-	}}}
-	expectContains(t, BuildConfigChangeDetails(oldCfg, disabledCfg), "claude[0].cloak.relaxed-system-prompt: true -> false")
+	tests := []struct {
+		name string
+		old  *config.CloakConfig
+		new  *config.CloakConfig
+		want string
+	}{
+		{name: "omitted field to disabled", old: &config.CloakConfig{}, new: &config.CloakConfig{RelaxedSystemPrompt: &disabled}, want: "claude[0].cloak.relaxed-system-prompt: true -> false"},
+		{name: "absent block to disabled", old: nil, new: &config.CloakConfig{RelaxedSystemPrompt: &disabled}, want: "claude[0].cloak.relaxed-system-prompt: true -> false"},
+		{name: "disabled to absent block", old: &config.CloakConfig{RelaxedSystemPrompt: &disabled}, new: nil, want: "claude[0].cloak.relaxed-system-prompt: false -> true"},
+		{name: "omitted field to enabled", old: &config.CloakConfig{}, new: &config.CloakConfig{RelaxedSystemPrompt: &enabled}},
+		{name: "absent block to enabled", old: nil, new: &config.CloakConfig{RelaxedSystemPrompt: &enabled}},
+	}
 
-	enabledCfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
-		APIKey: "key",
-		Cloak:  &config.CloakConfig{RelaxedSystemPrompt: &enabled},
-	}}}
-	if changes := BuildConfigChangeDetails(oldCfg, enabledCfg); len(changes) != 0 {
-		t.Fatalf("omitted and explicit true should have the same effective value, got %v", changes)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			changes := BuildConfigChangeDetails(claudeConfig(tt.old), claudeConfig(tt.new))
+			if tt.want == "" {
+				if len(changes) != 0 {
+					t.Fatalf("expected no effective change, got %v", changes)
+				}
+				return
+			}
+			expectContains(t, changes, tt.want)
+		})
 	}
 }
 
