@@ -38,8 +38,9 @@ import (
 // ClaudeExecutor is a stateless executor for Anthropic Claude over the messages API.
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type ClaudeExecutor struct {
-	cfg                *config.Config
-	requestLogProvider string
+	cfg                     *config.Config
+	requestLogProvider      string
+	upstreamModelNormalizer func(string) string
 }
 
 // claudeToolPrefix is empty to match real Claude Code behavior (no tool name prefix).
@@ -161,6 +162,65 @@ func (e *ClaudeExecutor) upstreamRequestLogProvider() string {
 	return e.Identifier()
 }
 
+func (e *ClaudeExecutor) upstreamModel(baseModel string) string {
+	if e.upstreamModelNormalizer != nil {
+		return e.upstreamModelNormalizer(baseModel)
+	}
+	return baseModel
+}
+
+func (e *ClaudeExecutor) restoreResponseModel(payload []byte, model string) []byte {
+	if e.upstreamModelNormalizer == nil || strings.TrimSpace(model) == "" {
+		return payload
+	}
+	return restoreClaudeResponseModel(payload, model)
+}
+
+func restoreClaudeResponseModel(payload []byte, model string) []byte {
+	if updated, changed := setClaudeResponseModel(payload, model); changed {
+		return updated
+	}
+
+	trimmed := bytes.TrimSpace(payload)
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return payload
+	}
+	dataIndex := bytes.Index(payload, []byte("data:"))
+	if dataIndex < 0 {
+		return payload
+	}
+	rawJSON := bytes.TrimSpace(payload[dataIndex+len("data:"):])
+	updated, changed := setClaudeResponseModel(rawJSON, model)
+	if !changed {
+		return payload
+	}
+	rebuilt := make([]byte, 0, dataIndex+len("data: ")+len(updated))
+	rebuilt = append(rebuilt, payload[:dataIndex]...)
+	rebuilt = append(rebuilt, []byte("data: ")...)
+	rebuilt = append(rebuilt, updated...)
+	return rebuilt
+}
+
+func setClaudeResponseModel(payload []byte, model string) ([]byte, bool) {
+	if !gjson.ValidBytes(payload) {
+		return payload, false
+	}
+	updated := payload
+	changed := false
+	for _, path := range []string{"model", "message.model"} {
+		if !gjson.GetBytes(updated, path).Exists() {
+			continue
+		}
+		next, errSet := sjson.SetBytes(updated, path, model)
+		if errSet != nil {
+			continue
+		}
+		updated = next
+		changed = true
+	}
+	return updated, changed
+}
+
 // PrepareRequest injects Claude credentials into the outgoing HTTP request.
 func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if req == nil {
@@ -208,6 +268,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	upstreamModel := e.upstreamModel(baseModel)
 
 	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {
@@ -228,7 +289,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body, _ = sjson.SetBytes(body, "model", upstreamModel)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -383,6 +444,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 	}
 	data = restoreClaudeOAuthToolNamesFromResponse(data, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
+	data = e.restoreResponseModel(data, req.Model)
 	var param any
 	out := sdktranslator.TranslateNonStream(
 		ctx,
@@ -403,6 +465,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	upstreamModel := e.upstreamModel(baseModel)
 
 	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {
@@ -421,7 +484,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body, _ = sjson.SetBytes(body, "model", upstreamModel)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -580,6 +643,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					reporter.Publish(ctx, detail)
 				}
 				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
+				line = e.restoreResponseModel(line, req.Model)
 				event.Write(line)
 				event.WriteByte('\n')
 				if len(bytes.TrimSpace(line)) == 0 && !flushEvent() {
@@ -611,6 +675,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				reporter.Publish(ctx, detail)
 			}
 			line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
+			line = e.restoreResponseModel(line, req.Model)
 			chunks := sdktranslator.TranslateStream(
 				ctx,
 				to,
@@ -701,6 +766,7 @@ func validateClaudeStreamingResponse(data []byte) error {
 
 func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	upstreamModel := e.upstreamModel(baseModel)
 
 	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {
@@ -713,7 +779,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body, _ = sjson.SetBytes(body, "model", upstreamModel)
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}

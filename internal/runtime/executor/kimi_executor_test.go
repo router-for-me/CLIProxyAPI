@@ -28,6 +28,92 @@ func TestNewKimiExecutorInitializesDelegatedClaudeConfig(t *testing.T) {
 	}
 }
 
+func TestKimiExecutorClaudeRequestPreservesInternalModelSemantics(t *testing.T) {
+	var upstreamBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"msg_test","type":"message","role":"assistant","model":"k2.5","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+			)),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-token"},
+	}
+	const model = "kimi-k2.5(max)"
+	payload := []byte(`{"model":"kimi-k2.5(max)","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`)
+	response, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   model,
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		OriginalRequest: payload,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := gjson.GetBytes(upstreamBody, "model").String(); got != "k2.5" {
+		t.Fatalf("upstream model = %q, want k2.5", got)
+	}
+	if got := gjson.GetBytes(upstreamBody, "output_config.effort").String(); got != "high" {
+		t.Fatalf("upstream output_config.effort = %q, want high", got)
+	}
+	if got := gjson.GetBytes(response.Payload, "model").String(); got != model {
+		t.Fatalf("response model = %q, want %q", got, model)
+	}
+}
+
+func TestKimiExecutorCountTokensUsesCanonicalUpstreamModel(t *testing.T) {
+	var upstreamRequest *http.Request
+	var upstreamBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		upstreamRequest = req.Clone(req.Context())
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"input_tokens":42}`)),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-token"},
+	}
+	payload := []byte(`{"model":"kimi-k3[1m](high)","messages":[{"role":"user","content":"hello"}]}`)
+	_, err := executor.CountTokens(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3[1m](high)",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if err != nil {
+		t.Fatalf("CountTokens() error = %v", err)
+	}
+	if upstreamRequest == nil {
+		t.Fatal("upstream request was not captured")
+	}
+	if got := upstreamRequest.URL.String(); got != "https://api.kimi.com/coding/v1/messages/count_tokens?beta=true" {
+		t.Fatalf("upstream URL = %q, want Kimi count tokens endpoint", got)
+	}
+	if got := gjson.GetBytes(upstreamBody, "model").String(); got != "k3" {
+		t.Fatalf("upstream model = %q, want k3", got)
+	}
+}
+
 func TestKimiExecutorClaudeStreamForwardsAnthropicBetaAndLogsUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -44,7 +130,7 @@ func TestKimiExecutorClaudeStreamForwardsAnthropicBetaAndLogsUpstream(t *testing
 			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 			Body: io.NopCloser(strings.NewReader(
 				"event: message_start\n" +
-					`data: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"kimi-k3","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}` + "\n\n" +
+					`data: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"k3","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}` + "\n\n" +
 					"event: message_stop\n" +
 					`data: {"type":"message_stop"}` + "\n\n",
 			)),
@@ -73,10 +159,15 @@ func TestKimiExecutorClaudeStreamForwardsAnthropicBetaAndLogsUpstream(t *testing
 	if err != nil {
 		t.Fatalf("ExecuteStream() error = %v", err)
 	}
+	var output strings.Builder
 	for chunk := range result.Chunks {
 		if chunk.Err != nil {
 			t.Fatalf("stream chunk error = %v", chunk.Err)
 		}
+		output.Write(chunk.Payload)
+	}
+	if !strings.Contains(output.String(), `"model":"kimi-k3"`) {
+		t.Fatalf("stream output = %q, want requested model kimi-k3", output.String())
 	}
 	if upstreamRequest == nil {
 		t.Fatal("upstream request was not captured")
@@ -102,7 +193,7 @@ func TestKimiExecutorClaudeStreamForwardsAnthropicBetaAndLogsUpstream(t *testing
 		"Upstream URL: https://api.kimi.com/coding/v1/messages?beta=true",
 		"Auth: provider=kimi",
 		"Anthropic-Beta: " + upstreamBetas,
-		`"model":"kimi-k3"`,
+		`"model":"k3"`,
 	} {
 		if !strings.Contains(apiRequestText, want) {
 			t.Fatalf("API_REQUEST = %q, want %q", apiRequestText, want)
@@ -393,5 +484,31 @@ func TestNormalizeKimiToolMessageLinks_PreservesAssistantWithToolLinkOrReasoning
 	}
 	if got := messages[3].Get("content.0.text").String(); got != " visible " {
 		t.Fatalf("messages.3.content.0.text = %q, want %q", got, " visible ")
+	}
+}
+
+func TestNormalizeKimiUpstreamModel(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"kimi-k3[1m]", "k3"},
+		{"kimi-k3", "k3"},
+		{"Kimi-K3[1M]", "k3"},
+		{"k3[1m]", "k3"},
+		{"k3", "k3"},
+		{"kimi-k2.6", "k2.6"},
+		{"kimi-k2.6[1m]", "k2.6"},
+		{"kimi-k3(1024)", "k3(1024)"},
+		{"kimi-k3[1m](1024)", "k3(1024)"},
+		{"kimi-k2.6(high)", "k2.6(high)"},
+		{"kimi-k2.6[1m](high)", "k2.6(high)"},
+	}
+
+	for _, c := range cases {
+		got := normalizeKimiUpstreamModel(c.in)
+		if got != c.want {
+			t.Errorf("normalizeKimiUpstreamModel(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
