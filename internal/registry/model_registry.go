@@ -102,6 +102,11 @@ type ThinkingSupport struct {
 	// Levels defines discrete reasoning effort levels (e.g., "low", "medium", "high").
 	// When set, the model uses level-based reasoning instead of token budgets.
 	Levels []string `json:"levels,omitempty" yaml:"levels,omitempty"`
+	// LevelMapping maps requestable effort levels to a supported entry of Levels
+	// (e.g., "medium" -> "high"). Lookups are case-insensitive and applied before
+	// level validation and clamping, so mapped levels never trigger strict
+	// "unsupported level" errors on same-family paths.
+	LevelMapping map[string]string `json:"level_mapping,omitempty" yaml:"level-mapping,omitempty"`
 }
 
 // ModelRegistration tracks a model's availability
@@ -583,6 +588,12 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 		copyThinking := *model.Thinking
 		if len(model.Thinking.Levels) > 0 {
 			copyThinking.Levels = append([]string(nil), model.Thinking.Levels...)
+		}
+		if len(model.Thinking.LevelMapping) > 0 {
+			copyThinking.LevelMapping = make(map[string]string, len(model.Thinking.LevelMapping))
+			for key, value := range model.Thinking.LevelMapping {
+				copyThinking.LevelMapping[key] = value
+			}
 		}
 		copyModel.Thinking = &copyThinking
 	}

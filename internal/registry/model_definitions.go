@@ -9,6 +9,8 @@ import (
 const (
 	codexBuiltinImage15ModelID      = "gpt-image-1.5"
 	codexBuiltinImageModelID        = "gpt-image-2"
+	kimiBuiltinK3ModelID            = "k3"
+	kimiBuiltinK31MModelID          = "k3[1m]"
 	xaiBuiltinImageModelID          = "grok-imagine-image"
 	xaiBuiltinImageQualityModelID   = "grok-imagine-image-quality"
 	xaiBuiltinVideoModelID          = "grok-imagine-video"
@@ -72,7 +74,7 @@ func GetCodexProModels() []*ModelInfo {
 
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
 func GetKimiModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Kimi)
+	return WithKimiBuiltins(cloneModelInfos(getModels().Kimi))
 }
 
 // GetAntigravityModels returns the standard Antigravity model definitions.
@@ -117,6 +119,13 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo())
 }
 
+// WithKimiBuiltins injects hard-coded Kimi-only model definitions that should
+// not depend on remote models.json updates. Built-ins replace any matching IDs
+// already present in the provided slice.
+func WithKimiBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, kimiBuiltinK31MModelInfo(), kimiBuiltinK3ModelInfo())
+}
+
 // WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
@@ -140,6 +149,54 @@ func codexBuiltinImage15ModelInfo() *ModelInfo {
 		Type:        "openai",
 		DisplayName: "GPT Image 1.5",
 		Version:     codexBuiltinImage15ModelID,
+	}
+}
+
+func kimiBuiltinK31MModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                  kimiBuiltinK31MModelID,
+		Object:              "model",
+		Created:             1784073600, // 2026-07-15, same as kimi-k3
+		OwnedBy:             "moonshot",
+		Type:                "kimi",
+		DisplayName:         "Kimi K3 (1M Context)",
+		Description:         "Kimi K3 1M-context variant as documented by Kimi Code docs. On the wire, clients like Claude Code strip the [1m] suffix and send k3 + context-1m-2025-08-07 beta header; the upstream serves the 1M window only for that combination, while a verbatim k3[1m] request is capped at 262144 tokens.",
+		ContextLength:       1048576,
+		MaxCompletionTokens: 65536,
+		Thinking: &ThinkingSupport{
+			Levels: []string{"low", "high", "max"},
+			// Kimi's K3 guidance maps Claude Code's medium/xhigh efforts upward
+			// (medium -> high, xhigh -> max) rather than clamping them down to
+			// the nearest lower supported level.
+			// https://www.kimi.com/code/docs/third-party-tools/other-coding-agents.html
+			LevelMapping: map[string]string{
+				"medium": "high",
+				"xhigh":  "max",
+			},
+		},
+	}
+}
+
+func kimiBuiltinK3ModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                  kimiBuiltinK3ModelID,
+		Object:              "model",
+		Created:             1784073600, // 2026-07-15, same as kimi-k3
+		OwnedBy:             "moonshot",
+		Type:                "kimi",
+		DisplayName:         "Kimi K3",
+		Description:         "Kimi K3 - Moonshot AI's next-generation flagship model. Served at 262144 context by default; the full 1M window is unlocked upstream by the context-1m-2025-08-07 beta header (sent natively by Claude Code for k3[1m], which is stripped to k3 on the wire).",
+		ContextLength:       1048576,
+		MaxCompletionTokens: 65536,
+		Thinking: &ThinkingSupport{
+			Levels: []string{"low", "high", "max"},
+			// Same upward effort mapping as k3[1m]: the wire name k3 is the
+			// 1M-capable variant once the context-1m beta is present.
+			LevelMapping: map[string]string{
+				"medium": "high",
+				"xhigh":  "max",
+			},
+		},
 	}
 }
 
