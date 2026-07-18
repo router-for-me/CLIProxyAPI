@@ -412,6 +412,25 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ConvertsCustomTool
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_QualifiesNamespacedCustomToolChoice(t *testing.T) {
+	raw := []byte(`{
+		"tools":[{
+			"type":"namespace",
+			"name":"terminal",
+			"tools":[{"type":"custom","name":"exec"}]
+		}],
+		"tool_choice":{"type":"custom","namespace":"terminal","name":"exec"}
+	}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", raw, false)
+
+	if got := gjson.GetBytes(out, "tools.0.function.name").String(); got != "terminal__exec" {
+		t.Fatalf("tools.0.function.name = %q, want terminal__exec; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.function.name").String(); got != "terminal__exec" {
+		t.Fatalf("tool_choice.function.name = %q, want terminal__exec; output=%s", got, out)
+	}
+}
+
 func TestUnwrapCustomToolInputCompatibility(t *testing.T) {
 	tests := []struct {
 		name string

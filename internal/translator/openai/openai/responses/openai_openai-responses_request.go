@@ -338,6 +338,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
 		if toolChoice.IsObject() && toolChoice.Get("type").String() == "custom" {
 			name := strings.TrimSpace(toolChoice.Get("name").String())
+			name = qualifyResponsesNamespaceToolName(strings.TrimSpace(toolChoice.Get("namespace").String()), name)
 			if name != "" {
 				convertedChoice := []byte(`{"type":"function","function":{"name":""}}`)
 				convertedChoice, _ = sjson.SetBytes(convertedChoice, "function.name", name)
