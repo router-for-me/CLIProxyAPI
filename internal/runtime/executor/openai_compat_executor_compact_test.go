@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -136,6 +137,50 @@ func TestOpenAICompatExecutorCopilotUsesResponsesEndpoint(t *testing.T) {
 	}
 	if gotPath != "/v1/responses" {
 		t.Fatalf("path = %q, want %q", gotPath, "/v1/responses")
+	}
+}
+
+func TestOpenAICompatExecutorCopilotClaudeGoogleUsesResponsesPayload(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"forced"}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("copilot", &config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "copilot",
+		Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+			"api_key":  "test",
+		},
+	}
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gemini-3.5-flash",
+		Payload: []byte(`{"model":"gemini-3.5-flash","messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err == nil {
+		t.Fatalf("expected Execute error")
+	}
+	if gotPath != "/v1/responses" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/responses")
+	}
+	body := gjson.ParseBytes(gotBody)
+	if !body.Get("input").IsArray() {
+		t.Fatalf("Copilot request has no Responses input: %s", gotBody)
+	}
+	if body.Get("messages").Exists() {
+		t.Fatalf("Anthropic messages leaked to Copilot: %s", gotBody)
+	}
+	if got := body.Get("model").String(); got != "gemini-3.5-flash" {
+		t.Fatalf("upstream model = %q, want gemini-3.5-flash", got)
 	}
 }
 

@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	translatorregistry "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/translator"
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -38,6 +40,89 @@ func TestConvertOpenAIResponsesRequestToClaude_SanitizesToolCallIDsForClaude(t *
 	}
 	if toolResultID != toolUseID {
 		t.Fatalf("tool_result tool_use_id = %q, want same sanitized id %q", toolResultID, toolUseID)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAIResponses(t *testing.T) {
+	raw := []byte(`{
+		"model":"mai-code-1-flash",
+		"system":"You are helpful.",
+		"max_tokens":2048,
+		"messages":[
+			{"role":"user","content":"Inspect this file."},
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_read_1","name":"Read","input":{"path":"README.md"}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_read_1","content":"file contents"}]}
+		],
+		"tools":[{"name":"Read","description":"Read a file.","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}],
+		"tool_choice":{"type":"any"},
+		"stream":true
+	}`)
+
+	out := ConvertClaudeRequestToOpenAIResponses("mai-code-1-flash", raw, true)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("model").String(); got != "mai-code-1-flash" {
+		t.Fatalf("model = %q, want mai-code-1-flash; output=%s", got, out)
+	}
+	if root.Get("messages").Exists() {
+		t.Fatalf("Copilot Responses payload must not contain Anthropic messages: %s", out)
+	}
+	if got := root.Get("instructions").String(); got != "You are helpful." {
+		t.Fatalf("instructions = %q, want system prompt; output=%s", got, out)
+	}
+	if got := root.Get("max_output_tokens").Int(); got != 2048 {
+		t.Fatalf("max_output_tokens = %d, want 2048; output=%s", got, out)
+	}
+	if got := root.Get("input.0.content.0.type").String(); got != "input_text" {
+		t.Fatalf("input.0 content type = %q, want input_text; output=%s", got, out)
+	}
+	if got := root.Get("input.1.type").String(); got != "function_call" {
+		t.Fatalf("input.1 type = %q, want function_call; output=%s", got, out)
+	}
+	if got := root.Get("input.1.call_id").String(); got != "call_read_1" {
+		t.Fatalf("input.1 call_id = %q, want call_read_1; output=%s", got, out)
+	}
+	if got := root.Get("input.2.type").String(); got != "function_call_output" {
+		t.Fatalf("input.2 type = %q, want function_call_output; output=%s", got, out)
+	}
+	if got := root.Get("tools.0.name").String(); got != "Read" {
+		t.Fatalf("tool name = %q, want Read; output=%s", got, out)
+	}
+	if got := root.Get("tool_choice").String(); got != "required" {
+		t.Fatalf("tool_choice = %q, want required; output=%s", got, out)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAIResponsesGoogleCopilotModel(t *testing.T) {
+	raw := []byte(`{"model":"gemini-3.5-flash","messages":[{"role":"user","content":"Say hello."}]}`)
+
+	out := ConvertClaudeRequestToOpenAIResponses("gemini-3.5-flash", raw, false)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("model").String(); got != "gemini-3.5-flash" {
+		t.Fatalf("model = %q, want gemini-3.5-flash; output=%s", got, out)
+	}
+	if got := root.Get("input.0.role").String(); got != "user" {
+		t.Fatalf("input.0 role = %q, want user; output=%s", got, out)
+	}
+	if got := root.Get("input.0.content.0.text").String(); got != "Say hello." {
+		t.Fatalf("input.0 text = %q, want Say hello.; output=%s", got, out)
+	}
+	if root.Get("messages").Exists() {
+		t.Fatalf("Copilot Responses payload must not contain messages: %s", out)
+	}
+}
+
+func TestClaudeRequestToOpenAIResponsesTranslatorIsRegistered(t *testing.T) {
+	raw := []byte(`{"model":"gemini-3.1-pro-preview","messages":[{"role":"user","content":"Hello"}]}`)
+
+	out := translatorregistry.TranslateRequest(Claude, OpenaiResponse, "gemini-3.1-pro-preview", raw, true)
+	root := gjson.ParseBytes(out)
+	if !root.Get("input").IsArray() {
+		t.Fatalf("registered translator did not produce Responses input: %s", out)
+	}
+	if root.Get("messages").Exists() {
+		t.Fatalf("registered translator forwarded Anthropic messages: %s", out)
 	}
 }
 

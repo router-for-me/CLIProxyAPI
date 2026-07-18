@@ -16,4 +16,10 @@ func init() {
 			NonStream: ConvertClaudeResponseToOpenAIResponsesNonStream,
 		},
 	)
+	translator.Register(
+		Claude,
+		OpenaiResponse,
+		ConvertClaudeRequestToOpenAIResponses,
+		interfaces.TranslateResponse{},
+	)
 }
