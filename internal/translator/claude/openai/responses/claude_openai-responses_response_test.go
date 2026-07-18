@@ -2,6 +2,7 @@ package responses
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -260,6 +261,161 @@ func TestConvertClaudeResponseToOpenAIResponses_FinalizesMessageBeforeFunctionCa
 	}
 	if got := completed.Get("response.output.1.call_id").String(); got != "call_123" {
 		t.Fatalf("completed function call_id = %q, want call_123", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_UsesContiguousIndicesForReasoningTextAndTool(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srv_123","name":"web_search","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"Qwen3\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srv_123","content":[]}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"content_block_start","index":2,"content_block":{"type":"thinking","thinking":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":2,"delta":{"type":"thinking_delta","thinking":"Inspect first."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":2}`),
+		[]byte(`data: {"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"Checking the workspace."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":3}`),
+		[]byte(`data: {"type":"content_block_start","index":4,"content_block":{"type":"tool_use","id":"call_123","name":"exec_command","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":4,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"pwd\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":4}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
+
+	seen := map[string]int{}
+	var completed gjson.Result
+	for _, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		var itemType string
+		var wantIndex int64
+		switch {
+		case event == "response.output_item.added" || event == "response.output_item.done":
+			itemType = data.Get("item.type").String()
+			switch itemType {
+			case "reasoning":
+				wantIndex = 0
+			case "message":
+				wantIndex = 1
+			case "function_call":
+				wantIndex = 2
+			default:
+				continue
+			}
+		case strings.HasPrefix(event, "response.reasoning_"):
+			itemType = "reasoning"
+			wantIndex = 0
+		case strings.HasPrefix(event, "response.output_text.") || strings.HasPrefix(event, "response.content_part."):
+			itemType = "message"
+			wantIndex = 1
+		case strings.HasPrefix(event, "response.function_call_arguments."):
+			itemType = "function_call"
+			wantIndex = 2
+		case event == "response.completed":
+			completed = data
+			continue
+		default:
+			continue
+		}
+
+		if !data.Get("output_index").Exists() {
+			t.Fatalf("%s %s event missing output_index: %s", itemType, event, data.Raw)
+		}
+		if got := data.Get("output_index").Int(); got != wantIndex {
+			t.Fatalf("%s %s output_index = %d, want %d", itemType, event, got, wantIndex)
+		}
+		seen[itemType]++
+	}
+
+	for _, itemType := range []string{"reasoning", "message", "function_call"} {
+		if seen[itemType] == 0 {
+			t.Fatalf("no indexed %s events observed", itemType)
+		}
+	}
+	if got := completed.Get("response.output.#").Int(); got != 3 {
+		t.Fatalf("completed output count = %d, want 3", got)
+	}
+	for index, wantType := range []string{"reasoning", "message", "function_call"} {
+		if got := completed.Get(fmt.Sprintf("response.output.%d.type", index)).String(); got != wantType {
+			t.Fatalf("completed output[%d].type = %q, want %q", index, got, wantType)
+		}
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_HiddenServerToolsDoNotCreateOutputIndexGaps(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Searching. "}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"srv_123","name":"web_search","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"Qwen3\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"content_block_start","index":2,"content_block":{"type":"web_search_tool_result","tool_use_id":"srv_123","content":[]}}`),
+		[]byte(`data: {"type":"content_block_stop","index":2}`),
+		[]byte(`data: {"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"Found it."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":3}`),
+		[]byte(`data: {"type":"content_block_start","index":4,"content_block":{"type":"tool_use","id":"call_123","name":"exec_command","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":4,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"pwd\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":4}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
+
+	messageAddedCount := 0
+	messageDoneCount := 0
+	var outputTextDone gjson.Result
+	var completed gjson.Result
+	for _, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		switch {
+		case event == "response.output_item.added" && data.Get("item.type").String() == "message":
+			messageAddedCount++
+			if got := data.Get("output_index").Int(); got != 0 {
+				t.Fatalf("message added output_index = %d, want 0", got)
+			}
+		case event == "response.output_item.done" && data.Get("item.type").String() == "message":
+			messageDoneCount++
+			if got := data.Get("output_index").Int(); got != 0 {
+				t.Fatalf("message done output_index = %d, want 0", got)
+			}
+		case strings.HasPrefix(event, "response.output_text.") || strings.HasPrefix(event, "response.content_part."):
+			if got := data.Get("output_index").Int(); got != 0 {
+				t.Fatalf("%s output_index = %d, want 0", event, got)
+			}
+			if event == "response.output_text.done" {
+				outputTextDone = data
+			}
+		case event == "response.output_item.added" && data.Get("item.type").String() == "function_call",
+			event == "response.output_item.done" && data.Get("item.type").String() == "function_call",
+			strings.HasPrefix(event, "response.function_call_arguments."):
+			if got := data.Get("output_index").Int(); got != 1 {
+				t.Fatalf("%s output_index = %d, want 1", event, got)
+			}
+		case event == "response.completed":
+			completed = data
+		}
+	}
+
+	if messageAddedCount != 1 || messageDoneCount != 1 {
+		t.Fatalf("message lifecycle counts: added=%d done=%d, want 1 each", messageAddedCount, messageDoneCount)
+	}
+	if got := outputTextDone.Get("text").String(); got != "Searching. Found it." {
+		t.Fatalf("aggregated message text = %q, want %q", got, "Searching. Found it.")
+	}
+	if got := completed.Get("response.output.#").Int(); got != 2 {
+		t.Fatalf("completed output count = %d, want 2", got)
+	}
+	if got := completed.Get("response.output.0.type").String(); got != "message" {
+		t.Fatalf("completed output[0].type = %q, want message", got)
+	}
+	if got := completed.Get("response.output.1.type").String(); got != "function_call" {
+		t.Fatalf("completed output[1].type = %q, want function_call", got)
 	}
 }
 
