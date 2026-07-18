@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -113,6 +114,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, err = normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		return resp, err
+	}
+	body, err = sanitizeKimiToolSchemas(body)
 	if err != nil {
 		return resp, err
 	}
@@ -226,6 +231,10 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, err = normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		return nil, err
+	}
+	body, err = sanitizeKimiToolSchemas(body)
 	if err != nil {
 		return nil, err
 	}
@@ -452,6 +461,178 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 		}).Warn("kimi executor: tool messages missing tool_call_id with ambiguous candidates")
 	}
 
+	return out, nil
+}
+
+// mfjsBooleanLegalKeys are schema keywords whose value MAY be a bare JSON
+// boolean under Moonshot Flavored JSON Schema (MFJS). A boolean in these slots
+// is a native MFJS feature (open/closed object or tuple tail), not a subschema,
+// and must be preserved.
+var mfjsBooleanLegalKeys = map[string]struct{}{
+	"additionalProperties":  {},
+	"unevaluatedProperties": {},
+	"additionalItems":       {},
+	"unevaluatedItems":      {},
+}
+
+// mfjsSubschemaMapKeys are keywords whose value is an object mapping arbitrary
+// names to subschemas.
+var mfjsSubschemaMapKeys = map[string]struct{}{
+	"properties":        {},
+	"patternProperties": {},
+	"$defs":             {},
+	"definitions":       {},
+	"dependentSchemas":  {},
+}
+
+// mfjsSubschemaArrayKeys are keywords whose value is an array of subschemas.
+var mfjsSubschemaArrayKeys = map[string]struct{}{
+	"anyOf":       {},
+	"oneOf":       {},
+	"allOf":       {},
+	"prefixItems": {},
+}
+
+// mfjsSubschemaValueKeys are keywords whose value is a single subschema.
+var mfjsSubschemaValueKeys = map[string]struct{}{
+	"items":         {},
+	"contains":      {},
+	"propertyNames": {},
+	"if":            {},
+	"then":          {},
+	"else":          {},
+	"not":           {},
+	"contentSchema": {},
+}
+
+// coerceMFJSBooleanSubschema converts a bare boolean subschema to its object
+// form: `true` -> `{}` (accept anything), `false` -> `{"not": {}}` (accept
+// nothing). MFJS rejects boolean subschemas outside the additionalProperties
+// family with "property schema for '<name>' must be an object", even though a
+// boolean subschema is valid standard JSON Schema (draft-06+).
+func coerceMFJSBooleanSubschema(v interface{}) (interface{}, bool) {
+	b, ok := v.(bool)
+	if !ok {
+		return v, false
+	}
+	if b {
+		return map[string]interface{}{}, true
+	}
+	return map[string]interface{}{"not": map[string]interface{}{}}, true
+}
+
+// sanitizeMFJSSchemaNode walks a JSON-Schema node, coercing bare boolean
+// subschemas found in genuine subschema slots into their object form. Booleans
+// that are plain data (enum values, `additionalProperties`, const, default) are
+// left untouched. It returns the node and whether anything changed.
+func sanitizeMFJSSchemaNode(node interface{}) (interface{}, bool) {
+	switch n := node.(type) {
+	case map[string]interface{}:
+		changed := false
+		for key, child := range n {
+			switch {
+			case hasKey(mfjsBooleanLegalKeys, key):
+				// Boolean is a native MFJS feature here; recurse only into an
+				// object subschema, never coerce the boolean itself.
+				if _, isBool := child.(bool); isBool {
+					continue
+				}
+				if walked, c := sanitizeMFJSSchemaNode(child); c {
+					n[key] = walked
+					changed = true
+				}
+			case hasKey(mfjsSubschemaMapKeys, key):
+				childMap, ok := child.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				for name, sub := range childMap {
+					coerced, c1 := coerceMFJSBooleanSubschema(sub)
+					walked, c2 := sanitizeMFJSSchemaNode(coerced)
+					if c1 || c2 {
+						childMap[name] = walked
+						changed = true
+					}
+				}
+			case hasKey(mfjsSubschemaArrayKeys, key):
+				childArr, ok := child.([]interface{})
+				if !ok {
+					continue
+				}
+				for i, sub := range childArr {
+					coerced, c1 := coerceMFJSBooleanSubschema(sub)
+					walked, c2 := sanitizeMFJSSchemaNode(coerced)
+					if c1 || c2 {
+						childArr[i] = walked
+						changed = true
+					}
+				}
+			case hasKey(mfjsSubschemaValueKeys, key):
+				coerced, c1 := coerceMFJSBooleanSubschema(child)
+				walked, c2 := sanitizeMFJSSchemaNode(coerced)
+				if c1 || c2 {
+					n[key] = walked
+					changed = true
+				}
+			}
+			// Non-schema keywords (type, enum, const, description, required,
+			// default, ...) are intentionally left untouched: a boolean there is
+			// data, not a subschema.
+		}
+		return n, changed
+	default:
+		return node, false
+	}
+}
+
+func hasKey(set map[string]struct{}, key string) bool {
+	_, ok := set[key]
+	return ok
+}
+
+// sanitizeKimiToolSchemas rewrites each tool's parameters schema so bare boolean
+// subschemas become objects, which Moonshot's MFJS validator requires. Without
+// this, a tool whose schema carries a boolean subschema (e.g. `"outputSchema":
+// true`) makes Kimi 400 the entire turn with
+// "tools.function.parameters is not a valid moonshot flavored json schema".
+func sanitizeKimiToolSchemas(body []byte) ([]byte, error) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body, nil
+	}
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body, nil
+	}
+	out := body
+	for i, tool := range tools.Array() {
+		params := tool.Get("function.parameters")
+		path := fmt.Sprintf("tools.%d.function.parameters", i)
+		if !params.Exists() {
+			// Some dialects place parameters directly on the tool object.
+			params = tool.Get("parameters")
+			path = fmt.Sprintf("tools.%d.parameters", i)
+		}
+		if !params.Exists() || !params.IsObject() {
+			continue
+		}
+		var decoded interface{}
+		if err := json.Unmarshal([]byte(params.Raw), &decoded); err != nil {
+			continue
+		}
+		sanitized, changed := sanitizeMFJSSchemaNode(decoded)
+		if !changed {
+			continue
+		}
+		raw, err := json.Marshal(sanitized)
+		if err != nil {
+			return body, fmt.Errorf("kimi executor: marshal sanitized tool schema: %w", err)
+		}
+		next, err := sjson.SetRawBytes(out, path, raw)
+		if err != nil {
+			return body, fmt.Errorf("kimi executor: set sanitized tool schema: %w", err)
+		}
+		out = next
+	}
 	return out, nil
 }
 

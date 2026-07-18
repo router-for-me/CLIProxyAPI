@@ -270,3 +270,129 @@ func TestNormalizeKimiToolMessageLinks_PreservesAssistantWithToolLinkOrReasoning
 		t.Fatalf("messages.3.content.0.text = %q, want %q", got, " visible ")
 	}
 }
+
+func TestSanitizeKimiToolSchemas_CoercesBooleanSubschemaInProperties(t *testing.T) {
+	// Reproduces the real oh-my-pi `task` tool schema whose nested
+	// `outputSchema: true` boolean subschema makes Kimi 400 the whole turn with
+	// "tools.function.parameters is not a valid moonshot flavored json schema".
+	body := []byte(`{
+		"tools":[
+			{"type":"function","function":{"name":"task","parameters":{
+				"type":"object",
+				"properties":{
+					"tasks":{"type":"array","items":{
+						"type":"object",
+						"properties":{"task":{"type":"string"},"outputSchema":true},
+						"required":["task"]
+					}}
+				},
+				"required":["tasks"]
+			}}}
+		]
+	}`)
+
+	out, err := sanitizeKimiToolSchemas(body)
+	if err != nil {
+		t.Fatalf("sanitizeKimiToolSchemas() error = %v", err)
+	}
+
+	node := gjson.GetBytes(out, "tools.0.function.parameters.properties.tasks.items.properties.outputSchema")
+	if !node.IsObject() {
+		t.Fatalf("outputSchema should be coerced to an object, got %q", node.Raw)
+	}
+	if len(node.Map()) != 0 {
+		t.Fatalf("outputSchema `true` should coerce to `{}`, got %q", node.Raw)
+	}
+}
+
+func TestSanitizeKimiToolSchemas_CoercesFalseToNot(t *testing.T) {
+	body := []byte(`{
+		"tools":[
+			{"type":"function","function":{"name":"f","parameters":{
+				"type":"object",
+				"properties":{"blocked":false}
+			}}}
+		]
+	}`)
+
+	out, err := sanitizeKimiToolSchemas(body)
+	if err != nil {
+		t.Fatalf("sanitizeKimiToolSchemas() error = %v", err)
+	}
+
+	node := gjson.GetBytes(out, "tools.0.function.parameters.properties.blocked")
+	if !node.Get("not").IsObject() {
+		t.Fatalf("`false` subschema should coerce to {\"not\":{}}, got %q", node.Raw)
+	}
+}
+
+func TestSanitizeKimiToolSchemas_PreservesLegalBooleanKeywords(t *testing.T) {
+	// `additionalProperties: false` is native MFJS and must NOT be coerced.
+	body := []byte(`{
+		"tools":[
+			{"type":"function","function":{"name":"f","parameters":{
+				"type":"object",
+				"properties":{"name":{"type":"string"}},
+				"additionalProperties":false
+			}}}
+		]
+	}`)
+
+	out, err := sanitizeKimiToolSchemas(body)
+	if err != nil {
+		t.Fatalf("sanitizeKimiToolSchemas() error = %v", err)
+	}
+
+	node := gjson.GetBytes(out, "tools.0.function.parameters.additionalProperties")
+	if node.Type != gjson.False {
+		t.Fatalf("additionalProperties:false must stay a boolean, got %q", node.Raw)
+	}
+}
+
+func TestSanitizeKimiToolSchemas_CoercesBooleanInCombinatorsAndItems(t *testing.T) {
+	body := []byte(`{
+		"tools":[
+			{"type":"function","function":{"name":"f","parameters":{
+				"type":"object",
+				"properties":{
+					"a":{"anyOf":[true,{"type":"string"}]},
+					"b":{"type":"array","items":true}
+				}
+			}}}
+		]
+	}`)
+
+	out, err := sanitizeKimiToolSchemas(body)
+	if err != nil {
+		t.Fatalf("sanitizeKimiToolSchemas() error = %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.a.anyOf.0"); !got.IsObject() {
+		t.Fatalf("anyOf[0] boolean should be coerced to object, got %q", got.Raw)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.b.items"); !got.IsObject() {
+		t.Fatalf("items boolean should be coerced to object, got %q", got.Raw)
+	}
+}
+
+func TestSanitizeKimiToolSchemas_NoToolsIsNoOp(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+	out, err := sanitizeKimiToolSchemas(body)
+	if err != nil {
+		t.Fatalf("sanitizeKimiToolSchemas() error = %v", err)
+	}
+	if string(out) != string(body) {
+		t.Fatalf("body without tools should be unchanged, got %s", string(out))
+	}
+}
+
+func TestSanitizeKimiToolSchemas_CleanSchemaUnchanged(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{"x":{"type":"string"}}}}}]}`)
+	out, err := sanitizeKimiToolSchemas(body)
+	if err != nil {
+		t.Fatalf("sanitizeKimiToolSchemas() error = %v", err)
+	}
+	if string(out) != string(body) {
+		t.Fatalf("clean schema should be byte-identical, got %s", string(out))
+	}
+}
