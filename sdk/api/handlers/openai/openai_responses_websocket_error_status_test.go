@@ -95,3 +95,26 @@ func TestResponsesWebsocketErrorMessageFromPayloadMapsAuthStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestResponsesWebsocketErrorMessageFromPayloadMapsNotFoundStatus(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{name: "nested type", payload: `{"type":"error","error":{"type":"not_found_error","message":"model not found"}}`},
+		{name: "nested code", payload: `{"type":"error","error":{"code":"model_not_found","message":"model not found"}}`},
+		{name: "top-level code", payload: `{"type":"error","code":"not_found","message":"resource not found"}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			errMsg := responsesWebsocketErrorMessageFromPayload([]byte(test.payload))
+			if errMsg == nil {
+				t.Fatal("error message is nil")
+			}
+			if errMsg.StatusCode != http.StatusNotFound {
+				t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusNotFound)
+			}
+		})
+	}
+}

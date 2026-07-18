@@ -2129,6 +2129,10 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 			strings.EqualFold(errCode, "permission_denied") ||
 			strings.EqualFold(errType, "permission_error") {
 			status = http.StatusForbidden
+		} else if strings.EqualFold(errCode, "not_found") ||
+			strings.EqualFold(errCode, "model_not_found") ||
+			strings.EqualFold(errType, "not_found_error") {
+			status = http.StatusNotFound
 		} else if strings.EqualFold(errCode, "websocket_connection_limit_reached") ||
 			strings.EqualFold(errCode, "rate_limit_exceeded") ||
 			strings.EqualFold(errCode, "usage_limit_reached") ||
