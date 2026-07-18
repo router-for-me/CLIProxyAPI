@@ -333,6 +333,8 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 }
 
 func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
+	relaxedSystemPromptDisabled := false
+	relaxedSystemPromptEnabled := true
 	oldCfg := &config.Config{
 		Port:                          1,
 		AuthDir:                       "/a",
@@ -351,7 +353,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 			{APIKey: "g-old", BaseURL: "http://g-old", ProxyURL: "http://gp-old", Headers: map[string]string{"A": "1"}},
 		},
 		ClaudeKey: []config.ClaudeKey{
-			{APIKey: "c-old", BaseURL: "http://c-old", ProxyURL: "http://cp-old", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"x"}, Cloak: &config.CloakConfig{Mode: "auto", SensitiveWords: []string{"old"}}},
+			{APIKey: "c-old", BaseURL: "http://c-old", ProxyURL: "http://cp-old", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"x"}, Cloak: &config.CloakConfig{Mode: "auto", RelaxedSystemPrompt: &relaxedSystemPromptDisabled, SensitiveWords: []string{"old"}}},
 		},
 		CodexKey: []config.CodexKey{
 			{APIKey: "x-old", BaseURL: "http://x-old", ProxyURL: "http://xp-old", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"x"}},
@@ -400,7 +402,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 			{APIKey: "g-new", BaseURL: "http://g-new", ProxyURL: "http://gp-new", Headers: map[string]string{"A": "2"}, ExcludedModels: []string{"x", "y"}},
 		},
 		ClaudeKey: []config.ClaudeKey{
-			{APIKey: "c-new", BaseURL: "http://c-new", ProxyURL: "http://cp-new", Headers: map[string]string{"H": "2"}, ExcludedModels: []string{"x", "y"}, Cloak: &config.CloakConfig{Mode: "always", StrictMode: true, RelaxedSystemPrompt: true, SensitiveWords: []string{"new", "secret"}}},
+			{APIKey: "c-new", BaseURL: "http://c-new", ProxyURL: "http://cp-new", Headers: map[string]string{"H": "2"}, ExcludedModels: []string{"x", "y"}, Cloak: &config.CloakConfig{Mode: "always", StrictMode: true, RelaxedSystemPrompt: &relaxedSystemPromptEnabled, SensitiveWords: []string{"new", "secret"}}},
 		},
 		CodexKey: []config.CodexKey{
 			{APIKey: "x-new", BaseURL: "http://x-new", ProxyURL: "http://xp-new", Headers: map[string]string{"H": "2"}, ExcludedModels: []string{"x", "y"}},

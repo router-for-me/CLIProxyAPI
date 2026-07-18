@@ -435,9 +435,10 @@ type CloakConfig struct {
 	StrictMode bool `yaml:"strict-mode,omitempty" json:"strict-mode,omitempty"`
 
 	// RelaxedSystemPrompt preserves client system prompts as top-level Claude system blocks.
-	// - false (default): use the standard Claude Code system prompt and forwarding behavior
-	// - true: keep only the billing and agent identifier blocks, then append client system prompts
-	RelaxedSystemPrompt bool `yaml:"relaxed-system-prompt,omitempty" json:"relaxed-system-prompt,omitempty"`
+	// - true (default): keep only the billing and agent identifier blocks, then append client system prompts
+	// - false: use the standard Claude Code system prompt and forwarding behavior
+	// StrictMode takes precedence when both settings are enabled.
+	RelaxedSystemPrompt *bool `yaml:"relaxed-system-prompt,omitempty" json:"relaxed-system-prompt,omitempty"`
 
 	// SensitiveWords is a list of words to obfuscate with zero-width characters.
 	// This can help bypass certain content filters.

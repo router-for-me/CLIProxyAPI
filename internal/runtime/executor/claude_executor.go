@@ -1831,9 +1831,10 @@ func getWorkloadFromContext(ctx context.Context) string {
 // falling back to its stored metadata (the raw OAuth/token JSON). Returns
 // (cloakMode, strictMode, relaxedSystemPrompt, sensitiveWords, cacheUserID);
 // an empty cloakMode means the credential did not explicitly configure a mode.
-func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMode bool, relaxedSystemPrompt bool, sensitiveWords []string, cacheUserID bool) {
+// A nil relaxedSystemPrompt means the credential did not explicitly configure it.
+func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMode bool, relaxedSystemPrompt *bool, sensitiveWords []string, cacheUserID bool) {
 	if auth == nil {
-		return "", false, false, nil, false
+		return "", false, nil, nil, false
 	}
 
 	// lookupCloakAttr prefers the executor-facing Attributes, then falls back to the
@@ -1864,7 +1865,10 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMo
 	cloakMode = lookupCloakAttr("cloak_mode")
 
 	strictMode = strings.EqualFold(lookupCloakAttr("cloak_strict_mode"), "true")
-	relaxedSystemPrompt = strings.EqualFold(lookupCloakAttr("cloak_relaxed_system_prompt"), "true")
+	if value := lookupCloakAttr("cloak_relaxed_system_prompt"); value != "" {
+		enabled := strings.EqualFold(value, "true")
+		relaxedSystemPrompt = &enabled
+	}
 
 	if wordsStr := lookupCloakAttr("cloak_sensitive_words"); wordsStr != "" {
 		sensitiveWords = strings.Split(wordsStr, ",")
@@ -2172,7 +2176,10 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		cloakMode = "never"
 	}
 	strictMode := attrStrict
-	relaxedSystemPrompt := attrRelaxedSystemPrompt
+	relaxedSystemPrompt := true
+	if attrRelaxedSystemPrompt != nil {
+		relaxedSystemPrompt = *attrRelaxedSystemPrompt
+	}
 	sensitiveWords := attrWords
 	cacheUserID := attrCache
 
@@ -2187,8 +2194,8 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		if cloakCfg.StrictMode {
 			strictMode = true
 		}
-		if cloakCfg.RelaxedSystemPrompt {
-			relaxedSystemPrompt = true
+		if cloakCfg.RelaxedSystemPrompt != nil {
+			relaxedSystemPrompt = *cloakCfg.RelaxedSystemPrompt
 		}
 		if len(cloakCfg.SensitiveWords) > 0 {
 			sensitiveWords = cloakCfg.SensitiveWords
@@ -2196,6 +2203,11 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		if cloakCfg.CacheUserID != nil {
 			cacheUserID = *cloakCfg.CacheUserID
 		}
+	}
+	// Strict mode is the explicit opt-in to discard client system prompts, so it
+	// takes precedence over the relaxed default and an explicit relaxed setting.
+	if strictMode {
+		relaxedSystemPrompt = false
 	}
 
 	// Determine if cloaking should be applied

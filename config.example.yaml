@@ -318,9 +318,9 @@ nonstream-keepalive-interval: 0
 #       # "cloak_cache_user_id". The top-level
 #       # "disable-claude-cloak-mode: true" disables cloaking for all Claude credentials at once.
 #       strict-mode: false           # false (default): prepend Claude Code prompt to user system messages
-#                                    # true: strip all user system messages, keep only Claude Code prompt
-#       relaxed-system-prompt: false # false (default): use the standard Claude Code prompt and forward client system messages
-#                                    # true: keep the billing and agent system blocks, then append client system messages as top-level system blocks
+#                                    # true: strip all user system messages, keep only Claude Code prompt; overrides relaxed-system-prompt
+#       relaxed-system-prompt: true  # true (default): keep the billing and agent system blocks, then append client system messages as top-level system blocks
+#                                    # false: use the standard Claude Code prompt and forward client system messages
 #       sensitive-words:             # optional: words to obfuscate with zero-width characters
 #         - "API"
 #         - "proxy"

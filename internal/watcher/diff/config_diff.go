@@ -228,8 +228,16 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 				if o.Cloak.StrictMode != n.Cloak.StrictMode {
 					changes = append(changes, fmt.Sprintf("claude[%d].cloak.strict-mode: %t -> %t", i, o.Cloak.StrictMode, n.Cloak.StrictMode))
 				}
-				if o.Cloak.RelaxedSystemPrompt != n.Cloak.RelaxedSystemPrompt {
-					changes = append(changes, fmt.Sprintf("claude[%d].cloak.relaxed-system-prompt: %t -> %t", i, o.Cloak.RelaxedSystemPrompt, n.Cloak.RelaxedSystemPrompt))
+				oldRelaxedSystemPrompt := true
+				if o.Cloak.RelaxedSystemPrompt != nil {
+					oldRelaxedSystemPrompt = *o.Cloak.RelaxedSystemPrompt
+				}
+				newRelaxedSystemPrompt := true
+				if n.Cloak.RelaxedSystemPrompt != nil {
+					newRelaxedSystemPrompt = *n.Cloak.RelaxedSystemPrompt
+				}
+				if oldRelaxedSystemPrompt != newRelaxedSystemPrompt {
+					changes = append(changes, fmt.Sprintf("claude[%d].cloak.relaxed-system-prompt: %t -> %t", i, oldRelaxedSystemPrompt, newRelaxedSystemPrompt))
 				}
 				if len(o.Cloak.SensitiveWords) != len(n.Cloak.SensitiveWords) {
 					changes = append(changes, fmt.Sprintf("claude[%d].cloak.sensitive-words: %d -> %d", i, len(o.Cloak.SensitiveWords), len(n.Cloak.SensitiveWords)))

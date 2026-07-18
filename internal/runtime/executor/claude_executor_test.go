@@ -2742,6 +2742,9 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	if len(blocks) != 3 {
 		t.Fatalf("expected strict mode to keep the 3 injected Claude Code system blocks, got %d", len(blocks))
 	}
+	if got := blocks[2].Get("text").String(); got != expectedClaudeCodeStaticPrompt() {
+		t.Fatalf("strict mode should override the relaxed default and keep the static Claude Code prompt, got %q", got)
+	}
 	if got := gjson.GetBytes(out, "messages.0.content.#").Int(); got != 1 {
 		t.Fatalf("strict mode should not prepend a forwarded system reminder block, got %d content blocks", got)
 	}
@@ -2750,12 +2753,84 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	}
 }
 
+func TestApplyCloaking_RelaxedSystemPromptEnabledByDefault(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
+	payload := []byte(`{"system":"Client rule","messages":[{"role":"user","content":"hi"}]}`)
+
+	out, errCloaking := applyCloaking(context.Background(), &config.Config{}, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+	if errCloaking != nil {
+		t.Fatalf("applyCloaking() error = %v", errCloaking)
+	}
+
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("default relaxed system prompt should keep 2 injected blocks plus the client system block, got %d: %s", len(blocks), gjson.GetBytes(out, "system").Raw)
+	}
+	if got := blocks[2].Get("text").String(); got != "Client rule" {
+		t.Fatalf("blocks[2].text = %q, want client system prompt", got)
+	}
+	if strings.Contains(gjson.GetBytes(out, "system").Raw, expectedClaudeCodeStaticPrompt()) {
+		t.Fatal("default relaxed system prompt should not include the static Claude Code prompt")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != "hi" {
+		t.Fatalf("messages.0.content = %q, want original user content", got)
+	}
+}
+
+func TestApplyCloaking_RelaxedSystemPromptCanBeDisabled(t *testing.T) {
+	disabled := false
+	tests := []struct {
+		name string
+		cfg  *config.Config
+		auth *cliproxyauth.Auth
+	}{
+		{
+			name: "claude key config",
+			cfg: &config.Config{ClaudeKey: []config.ClaudeKey{{
+				APIKey: "key-123",
+				Cloak:  &config.CloakConfig{RelaxedSystemPrompt: &disabled},
+			}}},
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}},
+		},
+		{
+			name: "auth metadata boolean",
+			cfg:  &config.Config{},
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"api_key": "key-123"},
+				Metadata:   map[string]any{"cloak_relaxed_system_prompt": false},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := []byte(`{"system":"Client rule","messages":[{"role":"user","content":"hi"}]}`)
+			out, errCloaking := applyCloaking(context.Background(), tt.cfg, tt.auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+			if errCloaking != nil {
+				t.Fatalf("applyCloaking() error = %v", errCloaking)
+			}
+
+			blocks := gjson.GetBytes(out, "system").Array()
+			if len(blocks) != 3 {
+				t.Fatalf("standard system prompt should keep 3 injected blocks, got %d", len(blocks))
+			}
+			if got := blocks[2].Get("text").String(); got != expectedClaudeCodeStaticPrompt() {
+				t.Fatalf("explicit false should restore the static Claude Code prompt, got %q", got)
+			}
+			if got := gjson.GetBytes(out, "messages.0.content").String(); !strings.Contains(got, "<system-reminder>") {
+				t.Fatalf("explicit false should forward the client system prompt, got %q", got)
+			}
+		})
+	}
+}
+
 func TestApplyCloaking_RelaxedSystemPromptFromClaudeKeyConfig(t *testing.T) {
+	relaxedSystemPrompt := true
 	cfg := &config.Config{
 		ClaudeKey: []config.ClaudeKey{{
 			APIKey: "key-123",
 			Cloak: &config.CloakConfig{
-				RelaxedSystemPrompt: true,
+				RelaxedSystemPrompt: &relaxedSystemPrompt,
 			},
 		}},
 	}
