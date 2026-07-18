@@ -139,19 +139,22 @@ func websocketDownstreamSessionKey(req *http.Request) string {
 	if req == nil {
 		return ""
 	}
-	if requestID := strings.TrimSpace(req.Header.Get("X-Client-Request-Id")); requestID != "" {
-		return requestID
-	}
-	if raw := strings.TrimSpace(req.Header.Get("X-Codex-Turn-Metadata")); raw != "" {
-		if sessionID := strings.TrimSpace(gjson.Get(raw, "session_id").String()); sessionID != "" {
-			return sessionID
-		}
+	if sessionID := strings.TrimSpace(req.Header.Get("X-Session-ID")); sessionID != "" {
+		return sessionID
 	}
 	if sessionID := strings.TrimSpace(req.Header.Get("Session-Id")); sessionID != "" {
 		return sessionID
 	}
 	if sessionID := strings.TrimSpace(req.Header.Get("Session_id")); sessionID != "" {
 		return sessionID
+	}
+	if raw := strings.TrimSpace(req.Header.Get("X-Codex-Turn-Metadata")); raw != "" {
+		if sessionID := strings.TrimSpace(gjson.Get(raw, "session_id").String()); sessionID != "" {
+			return sessionID
+		}
+	}
+	if requestID := strings.TrimSpace(req.Header.Get("X-Client-Request-Id")); requestID != "" {
+		return requestID
 	}
 	return ""
 }

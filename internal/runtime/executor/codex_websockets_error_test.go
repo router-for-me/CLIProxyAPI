@@ -184,6 +184,31 @@ func TestCodexWebsocketStatuslessErrorEventClassifiesAuthErrors(t *testing.T) {
 	}
 }
 
+func TestCodexWebsocketStatuslessErrorEventClassifiesClientErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    []byte
+		wantStatus int
+	}{
+		{name: "bad request type", payload: []byte(`{"type":"error","error":{"type":"bad_request_error"}}`), wantStatus: http.StatusBadRequest},
+		{name: "not found type", payload: []byte(`{"type":"error","error":{"type":"not_found_error"}}`), wantStatus: http.StatusNotFound},
+		{name: "model not found code", payload: []byte(`{"type":"error","code":"model_not_found"}`), wantStatus: http.StatusNotFound},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err, ok := codexWebsocketStatuslessErrorEvent(test.payload)
+			if !ok {
+				t.Fatal("expected statusless websocket error")
+			}
+			statusErr, ok := err.(interface{ StatusCode() int })
+			if !ok || statusErr.StatusCode() != test.wantStatus {
+				t.Fatalf("status = %#v, want %d", err, test.wantStatus)
+			}
+		})
+	}
+}
+
 func durationPointer(value time.Duration) *time.Duration {
 	return &value
 }

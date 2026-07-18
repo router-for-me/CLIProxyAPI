@@ -2362,6 +2362,11 @@ func codexWebsocketStatuslessErrorStatus(payload []byte) int {
 		strings.EqualFold(errType, "permission_error") {
 		return http.StatusForbidden
 	}
+	if strings.EqualFold(code, "not_found") ||
+		strings.EqualFold(code, "model_not_found") ||
+		strings.EqualFold(errType, "not_found_error") {
+		return http.StatusNotFound
+	}
 	if strings.EqualFold(code, "rate_limit_exceeded") ||
 		strings.EqualFold(code, "usage_limit_reached") ||
 		strings.EqualFold(errType, "rate_limit_error") ||
@@ -2370,6 +2375,7 @@ func codexWebsocketStatuslessErrorStatus(payload []byte) int {
 	}
 	if strings.EqualFold(code, "previous_response_not_found") ||
 		strings.EqualFold(errType, "invalid_request_error") ||
+		strings.EqualFold(errType, "bad_request_error") ||
 		strings.Contains(message, "previous_response_not_found") ||
 		strings.Contains(message, "previous_response_id") && strings.Contains(message, "not found") {
 		return http.StatusBadRequest

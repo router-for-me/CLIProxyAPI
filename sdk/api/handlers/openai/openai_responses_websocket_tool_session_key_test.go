@@ -43,6 +43,30 @@ func TestResponsesWebsocketToolSessionKeyUsesConnectionFallback(t *testing.T) {
 	}
 }
 
+func TestWebsocketDownstreamSessionKeyPrefersStableSessionHeaders(t *testing.T) {
+	req := httptest.NewRequest("GET", "/v1/responses/ws", nil)
+	req.Header.Set("X-Session-ID", "x-session")
+	req.Header.Set("Session_id", "codex-session")
+	req.Header.Set("X-Codex-Turn-Metadata", `{"session_id":"turn-session"}`)
+	req.Header.Set("X-Client-Request-Id", "request-attempt")
+
+	if got := websocketDownstreamSessionKey(req); got != "x-session" {
+		t.Fatalf("session key = %q, want x-session", got)
+	}
+	req.Header.Del("X-Session-ID")
+	if got := websocketDownstreamSessionKey(req); got != "codex-session" {
+		t.Fatalf("session key = %q, want codex-session", got)
+	}
+	req.Header.Del("Session_id")
+	if got := websocketDownstreamSessionKey(req); got != "turn-session" {
+		t.Fatalf("session key = %q, want turn-session", got)
+	}
+	req.Header.Del("X-Codex-Turn-Metadata")
+	if got := websocketDownstreamSessionKey(req); got != "request-attempt" {
+		t.Fatalf("session key = %q, want request-attempt", got)
+	}
+}
+
 func TestResponsesWebsocketRecordsAnonymousToolCallUnderConnectionKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

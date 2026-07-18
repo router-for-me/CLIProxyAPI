@@ -2141,6 +2141,7 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 			status = http.StatusTooManyRequests
 		} else if strings.EqualFold(errCode, "previous_response_not_found") ||
 			strings.EqualFold(errType, "invalid_request_error") ||
+			strings.EqualFold(errType, "bad_request_error") ||
 			strings.Contains(lowerErrText, "previous_response_not_found") ||
 			strings.Contains(lowerErrText, "previous_response_id") && strings.Contains(lowerErrText, "not found") {
 			status = http.StatusBadRequest

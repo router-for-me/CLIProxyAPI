@@ -41,6 +41,16 @@ func TestResponsesWebsocketErrorMessageFromPayloadUsesTopLevelErrorType(t *testi
 	}
 }
 
+func TestResponsesWebsocketErrorMessageFromPayloadMapsBadRequestType(t *testing.T) {
+	errMsg := responsesWebsocketErrorMessageFromPayload([]byte(`{"type":"error","error":{"type":"bad_request_error","message":"bad request"}}`))
+	if errMsg == nil {
+		t.Fatal("error message is nil")
+	}
+	if errMsg.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusBadRequest)
+	}
+}
+
 func TestResponsesWebsocketErrorMessageFromPayloadMapsUsageLimitStatus(t *testing.T) {
 	tests := []struct {
 		name    string
