@@ -364,6 +364,62 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_OptimizesApplyPatc
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_OptimizesNamespacedApplyPatchCustomTool(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{
+			name: "top-level tools",
+			raw: []byte(`{
+				"tools":[{
+					"type":"namespace",
+					"name":"editor",
+					"tools":[{
+						"type":"custom",
+						"name":"apply_patch",
+						"format":{"type":"grammar","syntax":"lark","definition":"start: namespaced_apply_patch"}
+					}]
+				}]
+			}`),
+		},
+		{
+			name: "additional tools",
+			raw: []byte(`{
+				"input":[{
+					"type":"additional_tools",
+					"tools":[{
+						"type":"namespace",
+						"name":"editor",
+						"tools":[{
+							"type":"custom",
+							"name":"apply_patch",
+							"format":{"type":"grammar","syntax":"lark","definition":"start: namespaced_apply_patch"}
+						}]
+					}]
+				}]
+			}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", tt.raw, false)
+			tool := gjson.GetBytes(out, "tools.0.function")
+			if got := tool.Get("name").String(); got != "editor__apply_patch" {
+				t.Fatalf("tool name = %q, want editor__apply_patch; output=%s", got, out)
+			}
+			if got := tool.Get("description").String(); got != applyPatchCompatibilityDescription {
+				t.Fatalf("tool description = %q, want apply_patch compatibility description; output=%s", got, out)
+			}
+			inputDescription := tool.Get("parameters.properties.input.description").String()
+			if !strings.Contains(inputDescription, "start: namespaced_apply_patch") {
+				t.Fatalf("namespaced apply_patch grammar missing from input description: %q", inputDescription)
+			}
+		})
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ApplyPatchUsesFallbackGrammar(t *testing.T) {
 	raw := []byte(`{"tools":[{"type":"custom","name":"apply_patch"}]}`)
 	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", raw, false)

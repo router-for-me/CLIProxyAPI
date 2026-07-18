@@ -68,16 +68,17 @@ func convertResponsesToolToOpenAIChatTools(tool gjson.Result) [][]byte {
 // tool onto a Chat Completions function tool with a single freeform "input"
 // string, mirroring the function-based shape Codex uses for apply_patch.
 func convertResponsesCustomToolToOpenAIChat(tool gjson.Result, overrideName string) ([]byte, bool) {
+	sourceName := responsesToolName(tool)
 	name := strings.TrimSpace(overrideName)
 	if name == "" {
-		name = responsesToolName(tool)
+		name = sourceName
 	}
 	if name == "" {
 		return nil, false
 	}
 	chatTool := []byte(`{"type":"function","function":{"name":"","description":"","parameters":{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}}`)
 	chatTool, _ = sjson.SetBytes(chatTool, "function.name", name)
-	if name == applyPatchToolName {
+	if sourceName == applyPatchToolName {
 		chatTool, _ = sjson.SetBytes(chatTool, "function.description", applyPatchCompatibilityDescription)
 		chatTool, _ = sjson.SetBytes(chatTool, "function.parameters.properties.input.description", applyPatchInputDescription(tool))
 	} else if description := responsesToolDescription(tool); description != "" {
