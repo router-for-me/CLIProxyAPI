@@ -3,6 +3,7 @@ package chat_completions
 import (
 	"strings"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -34,6 +35,7 @@ func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result) []byt
 	if !messages.Exists() || !messages.IsArray() {
 		return out
 	}
+	inputItems := translatorcommon.NewRawArrayItems(messages.Get("#").Int())
 	var systemBuilder strings.Builder
 	messages.ForEach(func(_, message gjson.Result) bool {
 		role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
@@ -46,72 +48,77 @@ func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result) []byt
 				systemBuilder.WriteString(text)
 			}
 		default:
-			out = appendOpenAIMessageToInteractions(out, message)
+			appendOpenAIMessageToInteractions(&inputItems, message)
 		}
 		return true
 	})
 	if systemBuilder.Len() > 0 {
 		out, _ = sjson.SetBytes(out, "system_instruction", systemBuilder.String())
 	}
+	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
 	return out
 }
 
-func appendOpenAIMessageToInteractions(out []byte, message gjson.Result) []byte {
+func appendOpenAIMessageToInteractions(items *[][]byte, message gjson.Result) {
 	role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
 	switch role {
 	case "assistant":
 		if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
 			for _, text := range openAIReasoningTexts(reasoning) {
-				out, _ = sjson.SetRawBytes(out, "input.-1", interactionsTextStep("thought", text))
+				*items = append(*items, interactionsTextStep("thought", text))
 			}
 		}
 		if step, ok := openAIChatContentStep("model_output", message.Get("content")); ok {
-			out, _ = sjson.SetRawBytes(out, "input.-1", step)
+			*items = append(*items, step)
 		}
 		if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
 				if step, ok := openAIToolCallToInteractionsStep(toolCall); ok {
-					out, _ = sjson.SetRawBytes(out, "input.-1", step)
+					*items = append(*items, step)
 				}
 				return true
 			})
 		}
 	case "tool", "function":
-		out, _ = sjson.SetRawBytes(out, "input.-1", openAIToolResultToInteractions(message))
+		*items = append(*items, openAIToolResultToInteractions(message))
 	default:
 		if step, ok := openAIChatContentStep("user_input", message.Get("content")); ok {
-			out, _ = sjson.SetRawBytes(out, "input.-1", step)
+			*items = append(*items, step)
 		}
 	}
-	return out
 }
 
 func openAIChatContentStep(stepType string, content gjson.Result) ([]byte, bool) {
-	step := []byte(`{"type":"","content":[]}`)
-	step, _ = sjson.SetBytes(step, "type", stepType)
+	contentItems := make([][]byte, 0, 4)
 	if content.Type == gjson.String {
 		if content.String() == "" {
 			return nil, false
 		}
 		part := []byte(`{"type":"text","text":""}`)
 		part, _ = sjson.SetBytes(part, "text", content.String())
-		step, _ = sjson.SetRawBytes(step, "content.-1", part)
-		return step, true
-	}
-	appendPart := func(part gjson.Result) {
-		if converted, ok := openAIChatContentPartToInteractions(part); ok {
-			step, _ = sjson.SetRawBytes(step, "content.-1", converted)
+		contentItems = append(contentItems, part)
+	} else {
+		appendPart := func(part gjson.Result) {
+			if converted, ok := openAIChatContentPartToInteractions(part); ok {
+				contentItems = append(contentItems, converted)
+			}
+		}
+		if content.IsArray() {
+			content.ForEach(func(_, part gjson.Result) bool {
+				appendPart(part)
+				return true
+			})
+		} else if content.IsObject() {
+			appendPart(content)
 		}
 	}
-	if content.IsArray() {
-		content.ForEach(func(_, part gjson.Result) bool {
-			appendPart(part)
-			return true
-		})
-	} else if content.IsObject() {
-		appendPart(content)
+	if len(contentItems) == 0 {
+		return nil, false
 	}
-	return step, gjson.GetBytes(step, "content.#").Int() > 0
+	step := []byte(`{"type":"","content":[]}`)
+	step, _ = sjson.SetBytes(step, "type", stepType)
+	step, _ = sjson.SetRawBytes(step, "content", translatorcommon.JoinRawArray(contentItems))
+	return step, true
 }
 
 func openAIChatContentPartToInteractions(part gjson.Result) ([]byte, bool) {
@@ -226,12 +233,16 @@ func appendOpenAIChatToolsToInteractions(out []byte, tools gjson.Result) []byte 
 	if !tools.Exists() || !tools.IsArray() {
 		return out
 	}
+	var toolItems [][]byte
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		if converted, ok := openAIChatToolToInteractions(tool); ok {
-			out, _ = sjson.SetRawBytes(out, "tools.-1", converted)
+			toolItems = append(toolItems, converted)
 		}
 		return true
 	})
+	if len(toolItems) > 0 {
+		out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolItems))
+	}
 	return out
 }
 

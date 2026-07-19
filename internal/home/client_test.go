@@ -336,6 +336,26 @@ func TestGetPluginTasksUsesPluginTasksKey(t *testing.T) {
 	}
 }
 
+func TestPluginSyncCommandClientUsesDedicatedTimeout(t *testing.T) {
+	template := &redis.Options{
+		Addr:         "127.0.0.1:1",
+		ReadTimeout:  homeRedisOperationTimeout,
+		WriteTimeout: homeRedisOperationTimeout,
+		MaxRetries:   -1,
+	}
+	pluginSync := newPluginSyncCommandClient(context.Background(), template)
+	if pluginSync == nil {
+		t.Fatal("newPluginSyncCommandClient() = nil")
+	}
+	t.Cleanup(func() { _ = pluginSync.Close() })
+	if pluginSync.Options().ReadTimeout != homePluginSyncOperationTimeout || pluginSync.Options().WriteTimeout != homeRedisOperationTimeout {
+		t.Fatalf("plugin sync timeouts = %s/%s, want %s/%s", pluginSync.Options().ReadTimeout, pluginSync.Options().WriteTimeout, homePluginSyncOperationTimeout, homeRedisOperationTimeout)
+	}
+	if template.ReadTimeout != homeRedisOperationTimeout || template.WriteTimeout != homeRedisOperationTimeout || template.MaxRetries != -1 {
+		t.Fatalf("template options were mutated: read=%s write=%s retries=%d", template.ReadTimeout, template.WriteTimeout, template.MaxRetries)
+	}
+}
+
 func TestGetPluginSyncUsesDedicatedCommandAndDecodesResponse(t *testing.T) {
 	response := pluginstore.PluginSyncResponse{
 		SchemaVersion: pluginstore.PluginSyncSchemaVersion,
@@ -392,6 +412,139 @@ func TestGetPluginSyncUsesDedicatedCommandAndDecodesResponse(t *testing.T) {
 	}
 	if gotRequest.InstalledVersions["sample"] != "0.9.0" {
 		t.Fatalf("request = %#v, want installed sample 0.9.0", gotRequest)
+	}
+}
+
+func TestGetPluginSyncExceedsBaseTimeoutAndKeepsBaseClientUsable(t *testing.T) {
+	response := pluginstore.PluginSyncResponse{
+		SchemaVersion: pluginstore.PluginSyncSchemaVersion,
+		ExpiresAt:     time.Now().UTC().Add(time.Minute),
+		Items:         []pluginstore.PluginSyncItem{},
+	}
+	payload, errMarshal := json.Marshal(response)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	client, _ := newRedisCommandTestClient(t, func(args []string) string {
+		if len(args) < 2 || !strings.EqualFold(args[0], "GET") {
+			return "-ERR unexpected command\r\n"
+		}
+		switch args[1] {
+		case redisKeyPluginSync:
+			time.Sleep(3 * homeRedisTestOperationTimeout)
+			return fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
+		case redisKeyPluginTasks:
+			return "$2\r\n[]\r\n"
+		default:
+			return "-ERR unexpected key\r\n"
+		}
+	})
+	startedAt := time.Now()
+	got, errSync := client.GetPluginSync(context.Background(), pluginstore.PluginSyncRequest{
+		SchemaVersion: pluginstore.PluginSyncSchemaVersion, GOOS: "linux", GOARCH: "amd64",
+	})
+	if errSync != nil {
+		t.Fatalf("GetPluginSync() error = %v", errSync)
+	}
+	got.Clear()
+	if elapsed := time.Since(startedAt); elapsed < 2*homeRedisTestOperationTimeout {
+		t.Fatalf("GetPluginSync() elapsed = %s, want response beyond base timeout", elapsed)
+	}
+	if _, errTasks := client.GetPluginTasks(context.Background()); errTasks != nil {
+		t.Fatalf("GetPluginTasks() after plugin sync error = %v", errTasks)
+	}
+}
+
+func TestGetPluginSyncCancellationInterruptsRead(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	client, commands := newRedisCommandTestClient(t, func(args []string) string {
+		if len(args) >= 2 && args[1] == redisKeyPluginSync {
+			startOnce.Do(func() { close(started) })
+			<-release
+		}
+		return "-ERR cancelled\r\n"
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-started
+		cancel()
+	}()
+	startedAt := time.Now()
+	_, errSync := client.GetPluginSync(ctx, pluginstore.PluginSyncRequest{
+		SchemaVersion: pluginstore.PluginSyncSchemaVersion, GOOS: "linux", GOARCH: "amd64",
+	})
+	close(release)
+	if !errors.Is(errSync, context.Canceled) {
+		t.Fatalf("GetPluginSync() error = %v, want context.Canceled", errSync)
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("GetPluginSync() cancellation took %s", elapsed)
+	}
+	if count := commands.CountKey(redisKeyPluginSync); count != 1 {
+		t.Fatalf("plugin sync command count = %d, want 1", count)
+	}
+}
+
+func TestProcessPluginSyncCommandCancellationInterruptsTLSHandshake(t *testing.T) {
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen: %v", errListen)
+	}
+	defer func() { _ = listener.Close() }()
+	accepted := make(chan struct{})
+	release := make(chan struct{})
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, errAccept := listener.Accept()
+		if errAccept != nil {
+			serverDone <- errAccept
+			return
+		}
+		close(accepted)
+		<-release
+		serverDone <- conn.Close()
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-accepted
+		cancel()
+	}()
+	options := &redis.Options{
+		Addr:                  listener.Addr().String(),
+		TLSConfig:             &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}, //nolint:gosec -- the test peer intentionally never completes TLS.
+		DialTimeout:           time.Second,
+		ReadTimeout:           homeRedisTestOperationTimeout,
+		WriteTimeout:          homeRedisTestOperationTimeout,
+		MaxRetries:            -1,
+		ContextTimeoutEnabled: true,
+	}
+	command := redis.NewStringCmd(ctx, "get", redisKeyPluginSync, `{}`)
+	startedAt := time.Now()
+	errProcess := processPluginSyncCommand(ctx, options, command)
+	close(release)
+	if errServer := <-serverDone; errServer != nil {
+		t.Fatalf("server close error = %v", errServer)
+	}
+	if !errors.Is(errProcess, context.Canceled) {
+		t.Fatalf("processPluginSyncCommand() error = %v, want context.Canceled", errProcess)
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("TLS handshake cancellation took %s", elapsed)
+	}
+}
+
+func TestGetPluginTasksRetainsBaseTimeout(t *testing.T) {
+	client, _ := newRedisCommandTestClient(t, func(args []string) string {
+		if len(args) >= 2 && args[1] == redisKeyPluginTasks {
+			time.Sleep(3 * homeRedisTestOperationTimeout)
+			return "$2\r\n[]\r\n"
+		}
+		return "-ERR unexpected command\r\n"
+	})
+	if _, errTasks := client.GetPluginTasks(context.Background()); errTasks == nil {
+		t.Fatal("GetPluginTasks() error = nil, want base read timeout")
 	}
 }
 
@@ -513,6 +666,20 @@ func (l *redisCommandLog) Last() []string {
 	return append([]string(nil), l.commands[len(l.commands)-1]...)
 }
 
+func (l *redisCommandLog) CountKey(key string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	count := 0
+	for _, command := range l.commands {
+		if len(command) >= 2 && command[1] == key {
+			count++
+		}
+	}
+	return count
+}
+
+const homeRedisTestOperationTimeout = 50 * time.Millisecond
+
 func newRedisCommandTestClient(t *testing.T, handler func([]string) string) (*Client, *redisCommandLog) {
 	t.Helper()
 
@@ -551,13 +718,18 @@ func newRedisCommandTestClient(t *testing.T, handler func([]string) string) (*Cl
 		Port:                    port,
 		DisableClusterDiscovery: true,
 	})
-	client.cmd = redis.NewClient(&redis.Options{
+	options := &redis.Options{
 		Addr:                  listener.Addr().String(),
 		Protocol:              2,
 		DisableIdentity:       true,
+		DialTimeout:           homeRedisTestOperationTimeout,
+		ReadTimeout:           homeRedisTestOperationTimeout,
+		WriteTimeout:          homeRedisTestOperationTimeout,
 		MaxRetries:            -1,
 		ContextTimeoutEnabled: true,
-	})
+	}
+	client.cmdOptions = cloneRedisOptions(options)
+	client.cmd = redis.NewClient(options)
 	t.Cleanup(func() {
 		client.Close()
 	})
