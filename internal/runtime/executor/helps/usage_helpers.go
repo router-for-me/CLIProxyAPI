@@ -209,7 +209,12 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 
 func normalizeUsageDetailTotal(detail usage.Detail) usage.Detail {
 	if detail.TotalTokens == 0 {
-		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+		// Cache read/creation tokens are independent of InputTokens for
+		// Anthropic and subtracted-out for OpenAI/Gemini, so the fallback total
+		// must add them on top of input+output+reasoning for the dashboard
+		// breakdown to reconcile (Σ segments == total_tokens).
+		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens +
+			detail.CacheReadTokens + detail.CacheCreationTokens
 		if total > 0 {
 			detail.TotalTokens = total
 		}
@@ -580,8 +585,9 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if !outputNode.Exists() {
 		outputNode = usageNode.Get("output_tokens")
 	}
+	inputTokens := inputNode.Int()
 	detail := usage.Detail{
-		InputTokens:  inputNode.Int(),
+		InputTokens:  inputTokens,
 		OutputTokens: outputNode.Int(),
 		TotalTokens:  usageNode.Get("total_tokens").Int(),
 	}
@@ -590,8 +596,19 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 		cached = usageNode.Get("input_tokens_details.cached_tokens")
 	}
 	if cached.Exists() {
-		detail.CachedTokens = cached.Int()
-		detail.CacheReadTokens = cached.Int()
+		// OpenAI/Gemini-style providers fold cached prompt tokens into
+		// prompt_tokens/input_tokens. To keep the dashboard breakdown
+		// non-overlapping (input excludes cache-read), subtract the cached
+		// portion from input. Clamped to 0 to defend against upstream payloads
+		// where cached_tokens > input_tokens (should never happen for valid
+		// responses, but never trust upstream blindly).
+		cachedTokens := cached.Int()
+		if cachedTokens > inputTokens {
+			cachedTokens = inputTokens
+		}
+		detail.InputTokens = inputTokens - cachedTokens
+		detail.CachedTokens = cachedTokens
+		detail.CacheReadTokens = cachedTokens
 	}
 	cacheCreation := firstExistingUsageNode(
 		usageNode,
@@ -661,17 +678,27 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		CacheReadTokens:     cacheReadTokens,
 		CacheCreationTokens: cacheCreationTokens,
 	}
-	if detail.CachedTokens == 0 {
-		detail.CachedTokens = detail.CacheCreationTokens
-	}
+	// Anthropic reports cache_read and cache_creation as separate counters on
+	// top of input_tokens (input_tokens never includes cache tokens). Keep
+	// cached_tokens strictly cache-read so the dashboard's "Cached" segment
+	// never silently becomes cache-write when only creation was billed —
+	// cache-creation already has its own segment via CacheCreationTokens.
 	detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.CacheReadTokens + detail.CacheCreationTokens
 	return detail
 }
 
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 	cachedTokens := node.Get("cachedContentTokenCount").Int()
+	inputTokens := node.Get("promptTokenCount").Int()
+	// Gemini's promptTokenCount already includes cachedContentTokenCount. To
+	// make the dashboard breakdown non-overlapping (input excludes cache-read,
+	// mirroring the OpenAI parser), subtract the cached portion from input.
+	// Clamped to 0 to defend against malformed upstream payloads.
+	if cachedTokens > inputTokens {
+		cachedTokens = inputTokens
+	}
 	detail := usage.Detail{
-		InputTokens:     node.Get("promptTokenCount").Int(),
+		InputTokens:     inputTokens - cachedTokens,
 		OutputTokens:    node.Get("candidatesTokenCount").Int(),
 		ReasoningTokens: node.Get("thoughtsTokenCount").Int(),
 		TotalTokens:     node.Get("totalTokenCount").Int(),
@@ -686,23 +713,33 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 
 func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 	cacheRead := firstExistingUsageNode(node, "cache_read_tokens", "cacheReadTokens")
+	totalCached := firstExistingUsageNode(node, "cached_tokens", "cachedContentTokenCount", "total_cached_tokens")
 	detail := usage.Detail{
 		InputTokens:         firstExistingUsageNode(node, "input_tokens", "prompt_tokens", "total_input_tokens").Int(),
 		OutputTokens:        firstExistingUsageNode(node, "output_tokens", "completion_tokens", "total_output_tokens").Int(),
 		ReasoningTokens:     firstExistingUsageNode(node, "reasoning_tokens", "thoughtsTokenCount", "total_thought_tokens").Int(),
 		TotalTokens:         firstExistingUsageNode(node, "total_tokens", "totalTokenCount").Int(),
-		CachedTokens:        firstExistingUsageNode(node, "cached_tokens", "cachedContentTokenCount", "total_cached_tokens").Int(),
-		CacheReadTokens:     cacheRead.Int(),
 		CacheCreationTokens: firstExistingUsageNode(node, "cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens").Int(),
 	}
-	if !cacheRead.Exists() && detail.CachedTokens > 0 {
+	// cached_tokens is conventionally a cache-read counter. When the upstream
+	// payload exposes only an aggregate "cached_tokens"/"total_cached_tokens"
+	// (= cache_read + cache_creation), treat it as cache-read only if no
+	// cache_creation was reported separately — otherwise leave CachedTokens at
+	// 0 to avoid double-counting creation tokens as cache-read.
+	if cacheRead.Exists() {
+		detail.CacheReadTokens = cacheRead.Int()
+		detail.CachedTokens = detail.CacheReadTokens
+	} else if detail.CacheCreationTokens == 0 && totalCached.Exists() {
+		detail.CachedTokens = totalCached.Int()
 		detail.CacheReadTokens = detail.CachedTokens
 	}
 	if detail.TotalTokens == 0 {
-		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CacheCreationTokens
-		if cacheRead.Exists() {
-			detail.TotalTokens += detail.CacheReadTokens
-		}
+		// Σ segments must reconcile with total_tokens, so include the cache
+		// counters — they are independent of InputTokens for Anthropic and
+		// already subtracted for OpenAI/Gemini-style payloads that fold cache
+		// reads into input_tokens.
+		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens +
+			detail.CacheReadTokens + detail.CacheCreationTokens
 	}
 	return detail
 }

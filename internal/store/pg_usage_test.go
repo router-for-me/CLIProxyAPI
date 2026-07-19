@@ -48,6 +48,34 @@ func TestComputeCostCacheReadSeparateFromCachedInput(t *testing.T) {
 	}
 }
 
+// TestSegmentCostsSumEqualsComputeCost guards the dashboard-breakdown contract:
+// the per-segment dollar attribution (SegmentCosts, surfaced via
+// FillCostBreakdown) must equal the persisted cost_usd (ComputeCost). With
+// normalized parser output (cached_tokens strictly cache-read, cache_creation
+// distinct), both functions consume the same token counts and must agree to
+// within floating-point tolerance.
+func TestSegmentCostsSumEqualsComputeCost(t *testing.T) {
+	p := Pricing{InputPer1M: 5.0, OutputPer1M: 15.0, ReasoningPer1M: 10.0, CachedInputPer1M: 1.25, CachedReadPer1M: 0.5}
+	// Anthropic-style event: input excludes cache; cache_read and
+	// cache_creation are independent counters.
+	const input, output, reasoning, cacheRead, cacheCreation = 600, 200, 50, 400, 300
+	cost := ComputeCost(p, input, output, reasoning, cacheCreation, cacheRead)
+	breakdown := SegmentCosts(p, input, output, reasoning, cacheRead, cacheCreation)
+	// SegmentCosts argument order: input, output, reasoning, cachedRead, cacheCreation.
+	// ComputeCost argument order:      input, output, reasoning, cached (creation), cacheRead.
+	if !approxEqual(cost, breakdown.Sum()) {
+		t.Fatalf("segment sum %v != ComputeCost %v", breakdown.Sum(), cost)
+	}
+	// Sanity: cache-read billed at the discount rate, cache-creation at the
+	// write surcharge rate — they must NOT cancel out / mirror each other.
+	if !approxEqual(breakdown.CachedRead, 0.5*400/1_000_000) {
+		t.Fatalf("cached_read segment = %v, want %v", breakdown.CachedRead, 0.5*400/1_000_000)
+	}
+	if !approxEqual(breakdown.CacheCreation, 1.25*300/1_000_000) {
+		t.Fatalf("cache_creation segment = %v, want %v", breakdown.CacheCreation, 1.25*300/1_000_000)
+	}
+}
+
 func TestAggregateGroupClause(t *testing.T) {
 	cases := []struct {
 		groupBy   string

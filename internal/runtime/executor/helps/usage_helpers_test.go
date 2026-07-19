@@ -12,10 +12,12 @@ import (
 )
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
+	// prompt_tokens=1 with cached_tokens=4 is a malformed payload (cached >
+	// input); the parser clamps cached to input so InputTokens stays non-negative.
 	data := []byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
 	detail := ParseOpenAIUsage(data)
-	if detail.InputTokens != 1 {
-		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 1)
+	if detail.InputTokens != 0 {
+		t.Fatalf("input tokens = %d, want 0 (1 - clamped cached)", detail.InputTokens)
 	}
 	if detail.OutputTokens != 2 {
 		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 2)
@@ -23,11 +25,11 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	if detail.TotalTokens != 3 {
 		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 3)
 	}
-	if detail.CachedTokens != 4 {
-		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 4)
+	if detail.CachedTokens != 1 {
+		t.Fatalf("cached tokens = %d, want 1 (clamped to input)", detail.CachedTokens)
 	}
-	if detail.CacheReadTokens != 4 {
-		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 4)
+	if detail.CacheReadTokens != 1 {
+		t.Fatalf("cache read tokens = %d, want 1 (clamped to input)", detail.CacheReadTokens)
 	}
 	if detail.ReasoningTokens != 5 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 5)
@@ -37,8 +39,8 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 func TestParseOpenAIUsageResponses(t *testing.T) {
 	data := []byte(`{"service_tier":"default","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7},"output_tokens_details":{"reasoning_tokens":9}}}`)
 	detail := ParseOpenAIUsage(data)
-	if detail.InputTokens != 10 {
-		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 10)
+	if detail.InputTokens != 3 {
+		t.Fatalf("input tokens = %d, want 3 (10 - 7 cached)", detail.InputTokens)
 	}
 	if detail.OutputTokens != 20 {
 		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 20)
@@ -66,8 +68,8 @@ func TestParseCodexUsageIncludesCacheWriteTokens(t *testing.T) {
 	if !ok {
 		t.Fatal("ParseCodexUsage() ok = false, want true")
 	}
-	if detail.InputTokens != 100 {
-		t.Fatalf("input tokens = %d, want 100", detail.InputTokens)
+	if detail.InputTokens != 70 {
+		t.Fatalf("input tokens = %d, want 70 (100 - 30 cached)", detail.InputTokens)
 	}
 	if detail.OutputTokens != 20 {
 		t.Fatalf("output tokens = %d, want 20", detail.OutputTokens)
@@ -92,6 +94,9 @@ func TestParseCodexUsageIncludesCacheWriteTokens(t *testing.T) {
 func TestParseOpenAIUsageNormalizesCacheCreationAlias(t *testing.T) {
 	data := []byte(`{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"input_tokens_details":{"cache_creation_tokens":4}}}`)
 	detail := ParseOpenAIUsage(data)
+	if detail.InputTokens != 10 {
+		t.Fatalf("input tokens = %d, want 10 (no cached_tokens to subtract)", detail.InputTokens)
+	}
 	if detail.CacheCreationTokens != 4 {
 		t.Fatalf("cache creation tokens = %d, want 4", detail.CacheCreationTokens)
 	}
@@ -136,8 +141,8 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	if !ok {
 		t.Fatal("ParseOpenAIStreamUsage() ok = false, want true")
 	}
-	if detail.InputTokens != 8 {
-		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 8)
+	if detail.InputTokens != 5 {
+		t.Fatalf("input tokens = %d, want 5 (8 - 3 cached)", detail.InputTokens)
 	}
 	if detail.OutputTokens != 5 {
 		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 5)
@@ -285,19 +290,33 @@ func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
 	}
 }
 
-func TestParseClaudeUsageFallsBackCachedTokensToCacheCreation(t *testing.T) {
+func TestParseClaudeUsageNoCacheReadDoesNotFallBackToCreation(t *testing.T) {
+	// When only cache_creation_input_tokens is reported (no cache read), the
+	// parser must NOT alias creation tokens into cached_tokens — doing so
+	// caused the dashboard to render cache-creation tokens twice (as "Cached"
+	// and again as "Cache write") and attributed them at the cache-read
+	// discount rate, double-counting against cost_usd.
 	data := []byte(`{"usage":{"input_tokens":3085,"output_tokens":253,"cache_creation_input_tokens":19514}}`)
 	detail := ParseClaudeUsage(data)
-	if detail.CachedTokens != 19514 {
-		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 19514)
+	if detail.CachedTokens != 0 {
+		t.Fatalf("cached tokens = %d, want 0 (no cache read reported)", detail.CachedTokens)
+	}
+	if detail.CacheReadTokens != 0 {
+		t.Fatalf("cache read tokens = %d, want 0", detail.CacheReadTokens)
+	}
+	if detail.CacheCreationTokens != 19514 {
+		t.Fatalf("cache creation tokens = %d, want 19514", detail.CacheCreationTokens)
 	}
 	if detail.TotalTokens != 22852 {
-		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 22852)
+		t.Fatalf("total tokens = %d, want 22852 (input+output+creation, no read)", detail.TotalTokens)
 	}
 }
 
 func TestParseGeminiUsageNormalizesCachedContent(t *testing.T) {
 	detail := ParseGeminiUsage([]byte(`{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"cachedContentTokenCount":4,"totalTokenCount":12}}`))
+	if detail.InputTokens != 6 {
+		t.Fatalf("input tokens = %d, want 6 (10 - 4 cached)", detail.InputTokens)
+	}
 	if detail.CachedTokens != 4 {
 		t.Fatalf("cached tokens = %d, want 4", detail.CachedTokens)
 	}
@@ -306,7 +325,20 @@ func TestParseGeminiUsageNormalizesCachedContent(t *testing.T) {
 	}
 }
 
+func TestParseGeminiUsageWithoutCachedContent(t *testing.T) {
+	detail := ParseGeminiUsage([]byte(`{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}}`))
+	if detail.InputTokens != 10 {
+		t.Fatalf("input tokens = %d, want 10 (no cached to subtract)", detail.InputTokens)
+	}
+	if detail.CachedTokens != 0 {
+		t.Fatalf("cached tokens = %d, want 0", detail.CachedTokens)
+	}
+}
+
 func TestParseInteractionsUsage(t *testing.T) {
+	// input_tokens=3 with cached_tokens=2 (processed via interactions
+	// schema). cached_tokens here is cache-read; input_tokens in this schema
+	// is reported separately (no OpenAI-style folding), so input stays 3.
 	detail := ParseInteractionsUsage([]byte(`{"usage":{"input_tokens":3,"output_tokens":4,"reasoning_tokens":5,"cached_tokens":2}}`))
 	if detail.InputTokens != 3 {
 		t.Fatalf("input tokens = %d, want 3", detail.InputTokens)
@@ -317,8 +349,8 @@ func TestParseInteractionsUsage(t *testing.T) {
 	if detail.ReasoningTokens != 5 {
 		t.Fatalf("reasoning tokens = %d, want 5", detail.ReasoningTokens)
 	}
-	if detail.TotalTokens != 12 {
-		t.Fatalf("total tokens = %d, want 12", detail.TotalTokens)
+	if detail.TotalTokens != 14 {
+		t.Fatalf("total tokens = %d, want 14 (3+4+5+2 cached)", detail.TotalTokens)
 	}
 	if detail.CachedTokens != 2 {
 		t.Fatalf("cached tokens = %d, want 2", detail.CachedTokens)
@@ -365,8 +397,12 @@ func TestParseInteractionsStreamUsageOfficialMetadata(t *testing.T) {
 	if detail.CacheReadTokens != 1 {
 		t.Fatalf("cache read tokens = %d, want 1", detail.CacheReadTokens)
 	}
+	// Upstream total (11) is used as-is; the parser does not recompute it when
+	// the payload supplies one. Note the upstream's total here excludes the
+	// cached counter (2+6+3+1=12), which surfaces as a small "different by 1"
+	// in the dashboard — that drift originates upstream, not in normalization.
 	if detail.TotalTokens != 11 {
-		t.Fatalf("total tokens = %d, want 11", detail.TotalTokens)
+		t.Fatalf("total tokens = %d, want 11 (upstream-supplied)", detail.TotalTokens)
 	}
 }
 

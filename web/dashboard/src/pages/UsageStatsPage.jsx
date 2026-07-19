@@ -33,10 +33,15 @@ const EVENTS_PAGE_SIZE = 10;
 
 // Token breakdown segments rendered left-to-right in the stacked bar. Order
 // is deliberate: input-side tokens (input / cached / cache creation) first,
-// then output-side tokens (output / reasoning). cached/cache_creation are
-// normally subsets of input tokens, but the dashboard visualizes each field
-// as an independent segment — total_tokens is shown separately so the
-// operator can reconcile against the persisted row.
+// then output-side tokens (output / reasoning). Provider parsers normalize
+// the persisted fields so each segment is non-overlapping:
+//   - input_tokens          = billable non-cached prompt tokens (OpenAI/Gemini
+//                            subtract cached from prompt_tokens at parse time)
+//   - cached_tokens         = cache-read tokens (strictly; never cache-creation)
+//   - cache_creation_tokens = cache-write tokens
+// For post-fix rows the segment sum matches total_tokens exactly. Pre-fix
+// historical rows may still drift (cached_tokens used to fall back to
+// cache-creation for Anthropic); the "different by N" hint surfaces that.
 //
 // Each segment also carries its cost_breakdown field name so the cost bar
 // can attribute dollars to the same slices. The mapping mirrors Go's
