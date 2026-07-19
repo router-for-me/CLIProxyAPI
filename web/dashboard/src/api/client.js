@@ -201,13 +201,16 @@ export async function getUsageWindows(apiKeyId) {
 // non-secret key_alias (in place of the sealed api_key_principal). Used by
 // the dashboard's "Recent events" table.
 //   - params: same shape as getUsageTotals + page, page_size
+//   - params.include may contain "cost_breakdown" to ask the server to attach
+//     a per-segment dollar attribution to every row. Off by default.
 export async function getUsageEvents(params = {}) {
   const qs = toUsageQS(params);
   return fetchJSON(`/usage-stats/events${qs}`);
 }
 
 // Single usage event detail. Used by the dashboard modal when an operator
-// clicks a row in the events table.
+// clicks a row in the events table. The single-event payload always carries
+// the full cost breakdown (server-side guarantee, no include= flag needed).
 export async function getUsageEvent(id) {
   return fetchJSON(`/usage-stats/events/${encodeURIComponent(id)}`);
 }

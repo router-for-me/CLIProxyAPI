@@ -31,6 +31,227 @@ function presetToRange(preset) {
 
 const EVENTS_PAGE_SIZE = 10;
 
+// Token breakdown segments rendered left-to-right in the stacked bar. Order
+// is deliberate: input-side tokens (input / cached / cache creation) first,
+// then output-side tokens (output / reasoning). cached/cache_creation are
+// normally subsets of input tokens, but the dashboard visualizes each field
+// as an independent segment — total_tokens is shown separately so the
+// operator can reconcile against the persisted row.
+//
+// Each segment also carries its cost_breakdown field name so the cost bar
+// can attribute dollars to the same slices. The mapping mirrors Go's
+// SegmentCosts: cached_tokens → cached_read, cache_creation_tokens →
+// cache_creation (cache-write surcharge).
+const TOKEN_SEGMENTS = [
+  { key: 'input_tokens', costKey: 'input', label: 'Input', short: 'in', color: 'var(--accent)' },
+  { key: 'cached_tokens', costKey: 'cached_read', label: 'Cached', short: 'cch', color: 'var(--success)' },
+  { key: 'cache_creation_tokens', costKey: 'cache_creation', label: 'Cache write', short: 'ccw', color: '#38bdf8' },
+  { key: 'output_tokens', costKey: 'output', label: 'Output', short: 'out', color: 'var(--warning)' },
+  { key: 'reasoning_tokens', costKey: 'reasoning', label: 'Reasoning', short: 're', color: '#a78bfa' },
+];
+
+function tokenSegments(e) {
+  return TOKEN_SEGMENTS.map((s) => ({ ...s, value: Number(e[s.key] || 0) }));
+}
+
+function costSegments(e) {
+  const b = e.cost_breakdown || {};
+  return TOKEN_SEGMENTS.map((s) => ({ ...s, value: Number(b[s.costKey] || 0) }));
+}
+
+// fmtUSD renders a per-segment dollar amount with enough precision that the
+// operator can tell sub-cent slices apart. Zero is shown as "$0" so absent
+// (no pricing row) and free both read cleanly.
+function fmtUSD(v) {
+  if (!v || v <= 0) return '$0';
+  if (v < 0.01) return `$${v.toFixed(6)}`;
+  return `$${v.toFixed(4)}`;
+}
+
+// fmtUSDCompact renders a per-segment dollar amount with the minimum number
+// of digits needed to stay readable inside the dense table cell. Always
+// groups thousands-separated for legibility.
+function fmtUSDCompact(v) {
+  if (!v || v <= 0) return '0';
+  if (v < 0.01) return v.toFixed(6);
+  return v.toFixed(4);
+}
+
+// CompactTokenBreakdown renders the stacked token bar plus a single-line
+// numeric summary. Designed for the dense Recent Events table cell — hover
+// the bar or the row for a title tooltip with every segment's value. When
+// the event carries a cost_breakdown (include=cost_breakdown on the events
+// request), a second stacked bar attributes dollars to the same slices.
+function CompactTokenBreakdown({ e }) {
+  const segs = tokenSegments(e);
+  const sum = segs.reduce((a, s) => a + s.value, 0);
+  const pct = (v, base) => (base === 0 ? 0 : (v / base) * 100);
+  const title = segs.map((s) => `${s.label}: ${s.value.toLocaleString()}`).join(' · ');
+
+  const cSegs = costSegments(e);
+  const cSum = cSegs.reduce((a, s) => a + s.value, 0);
+  const hasCost = Boolean(e.cost_breakdown);
+
+  return (
+    <div title={`${title} · Total: ${Number(e.total_tokens || 0).toLocaleString()}${hasCost ? ` · Cost: ${fmtUSD(e.cost_usd || 0)}` : ''}`}>
+      <div style={{
+        display: 'flex', height: 7, width: '100%', borderRadius: 4,
+        overflow: 'hidden', background: 'var(--bg)',
+      }}>
+        {segs.map((s) => s.value > 0 && (
+          <div
+            key={s.key}
+            style={{
+              width: `${pct(s.value, sum)}%`,
+              background: s.color,
+              minWidth: s.value > 0 ? 2 : 0,
+            }}
+          />
+        ))}
+      </div>
+      <div className="mono" style={{ fontSize: 11, marginTop: 3, whiteSpace: 'nowrap' }}>
+        {segs.map((s, i) => (
+          <span key={s.key} style={{ marginLeft: i ? 6 : 0 }}>
+            <span style={{ color: s.color }}>●</span>{' '}
+            <span className="dim">{s.short}</span>{' '}{s.value.toLocaleString()}
+          </span>
+        ))}
+        <span className="dim" style={{ marginLeft: 6 }}>
+          · Σ {(e.total_tokens || 0).toLocaleString()}
+        </span>
+      </div>
+      {hasCost && (
+        <>
+          <div style={{
+            display: 'flex', height: 5, width: '100%', borderRadius: 3,
+            overflow: 'hidden', background: 'var(--bg)', marginTop: 4,
+          }}>
+            {cSegs.map((s) => s.value > 0 && (
+              <div
+                key={s.key}
+                style={{
+                  width: `${pct(s.value, cSum)}%`,
+                  background: s.color,
+                  opacity: 0.7,
+                  minWidth: s.value > 0 ? 2 : 0,
+                }}
+              />
+            ))}
+          </div>
+          <div className="mono" style={{ fontSize: 11, marginTop: 2, whiteSpace: 'nowrap' }}>
+            {cSegs.map((s, i) => (
+              <span key={s.key} style={{ marginLeft: i ? 6 : 0 }}>
+                <span style={{ color: s.color }}>●</span>{' '}
+                <span className="dim">{s.short}</span>{' '}{fmtUSDCompact(s.value)}
+              </span>
+            ))}
+            <span className="dim" style={{ marginLeft: 6 }}>
+              · Σ {fmtUSDCompact(e.cost_usd || 0)}
+            </span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// TokenBreakdownCard is the richer, full-width breakdown shown in the event
+// detail modal: stacked bar + legend with values, percentages, and the
+// persisted total for reconciliation. When the event carries a
+// cost_breakdown (always present on the single-event endpoint), a second bar
+// attributes dollar cost to the same slices with a parallel legend.
+function TokenBreakdownCard({ e }) {
+  const segs = tokenSegments(e);
+  const sum = segs.reduce((a, s) => a + s.value, 0);
+  const pct = (v, base) => (base === 0 ? 0 : (v / base) * 100);
+  const total = Number(e.total_tokens || 0);
+
+  const cSegs = costSegments(e);
+  const cSum = cSegs.reduce((a, s) => a + s.value, 0);
+  const hasCost = Boolean(e.cost_breakdown);
+
+  return (
+    <div style={{ gridColumn: '1 / -1' }}>
+      <div className="dim" style={{ fontSize: 11, marginBottom: 6 }}>Token breakdown</div>
+      <div style={{
+        display: 'flex', height: 12, width: '100%', borderRadius: 6,
+        overflow: 'hidden', background: 'var(--bg)',
+      }}>
+        {segs.map((s) => s.value > 0 && (
+          <div
+            key={s.key}
+            title={`${s.label}: ${s.value.toLocaleString()} (${pct(s.value, sum).toFixed(1)}%)`}
+            style={{
+              width: `${pct(s.value, sum)}%`,
+              background: s.color,
+              minWidth: s.value > 0 ? 2 : 0,
+            }}
+          />
+        ))}
+      </div>
+      <div className="row" style={{ flexWrap: 'wrap', gap: '4px 14px', marginTop: 10, fontSize: 12 }}>
+        {segs.map((s) => (
+          <span key={s.key} className="row gap-sm" style={{ alignItems: 'center' }}>
+            <span style={{
+              width: 10, height: 10, background: s.color,
+              display: 'inline-block', borderRadius: 2,
+            }} />
+            <span className="dim">{s.label}</span>
+            <span className="mono">{s.value.toLocaleString()}</span>
+            <span className="dim" style={{ fontSize: 11 }}>{pct(s.value, sum).toFixed(1)}%</span>
+          </span>
+        ))}
+        <span className="dim mono" style={{ marginLeft: 'auto' }}>
+          sum {sum.toLocaleString()} · total {(e.total_tokens || 0).toLocaleString()}
+          {sum !== total ? ` (different by ${(sum - total).toLocaleString()})` : ''}
+        </span>
+      </div>
+
+      {hasCost && (
+        <>
+          <div className="dim" style={{ fontSize: 11, marginTop: 14, marginBottom: 6 }}>
+            Cost breakdown <span className="dim" style={{ fontSize: 10 }}>(at-rest pricing)</span>
+          </div>
+          <div style={{
+            display: 'flex', height: 12, width: '100%', borderRadius: 6,
+            overflow: 'hidden', background: 'var(--bg)',
+          }}>
+            {cSegs.map((s) => s.value > 0 && (
+              <div
+                key={s.key}
+                title={`${s.label}: ${fmtUSD(s.value)} (${pct(s.value, cSum).toFixed(1)}%)`}
+                style={{
+                  width: `${pct(s.value, cSum)}%`,
+                  background: s.color,
+                  opacity: 0.85,
+                  minWidth: s.value > 0 ? 2 : 0,
+                }}
+              />
+            ))}
+          </div>
+          <div className="row" style={{ flexWrap: 'wrap', gap: '4px 14px', marginTop: 10, fontSize: 12 }}>
+            {cSegs.map((s) => (
+              <span key={s.key} className="row gap-sm" style={{ alignItems: 'center' }}>
+                <span style={{
+                  width: 10, height: 10, background: s.color,
+                  display: 'inline-block', borderRadius: 2, opacity: 0.85,
+                }} />
+                <span className="dim">{s.label}</span>
+                <span className="mono">{fmtUSD(s.value)}</span>
+                <span className="dim" style={{ fontSize: 11 }}>{pct(s.value, cSum).toFixed(1)}%</span>
+              </span>
+            ))}
+            <span className="dim mono" style={{ marginLeft: 'auto' }}>
+              sum {fmtUSD(cSum)} · total {fmtUSD(e.cost_usd || 0)}
+              {Math.abs(cSum - (e.cost_usd || 0)) > 1e-9 ? ` (different by ${fmtUSD(cSum - (e.cost_usd || 0))})` : ''}
+            </span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function UsageStatsPage() {
   const [presetIdx, setPresetIdx] = useState(3); // "Last 24h" default
   const [filter, setFilter] = useState({
@@ -79,7 +300,7 @@ export default function UsageStatsPage() {
 
   const [eventsPage, setEventsPage] = useState(1);
   const events = useAsync(
-    () => getUsageEvents({ ...baseFilter, page: eventsPage, page_size: EVENTS_PAGE_SIZE }),
+    () => getUsageEvents({ ...baseFilter, page: eventsPage, page_size: EVENTS_PAGE_SIZE, include: 'cost_breakdown' }),
     [JSON.stringify(baseFilter), eventsPage],
   );
   // Reset the events pager back to page 1 whenever the filter changes so the
@@ -365,7 +586,7 @@ function EventsTable({ events, page, pageSize, onPage, onRowClick }) {
                   <th>Key / Alias</th>
                   <th>Provider</th>
                   <th>Model</th>
-                  <th style={{ textAlign: 'right' }}>Tokens (in/out/total)</th>
+                  <th style={{ minWidth: 260 }}>Token breakdown</th>
                   <th style={{ textAlign: 'right' }}>Cost</th>
                   <th style={{ textAlign: 'right' }}>Latency</th>
                   <th>Status</th>
@@ -384,8 +605,8 @@ function EventsTable({ events, page, pageSize, onPage, onRowClick }) {
                     <td className="mono">{e.key_alias || e.api_key_id || '—'}</td>
                     <td>{e.provider || '—'}</td>
                     <td className="mono">{e.model || '—'}</td>
-                    <td className="mono" style={{ textAlign: 'right' }}>
-                      {(e.input_tokens || 0).toLocaleString()} / {(e.output_tokens || 0).toLocaleString()} / {(e.total_tokens || 0).toLocaleString()}
+                    <td>
+                      <CompactTokenBreakdown e={e} />
                     </td>
                     <td className="mono" style={{ textAlign: 'right' }}>${(e.cost_usd || 0).toFixed(4)}</td>
                     <td className="mono" style={{ textAlign: 'right' }}>{e.latency_ms ? `${e.latency_ms} ms` : '—'}</td>
@@ -447,12 +668,7 @@ function EventDetailModal({ id, onClose }) {
           <DetailRow label="Reasoning Effort" value={e.reasoning_effort || '—'} />
           <DetailRow label="Service Tier" value={e.service_tier || '—'} />
           <DetailRow label="Response Service Tier" value={e.response_service_tier || '—'} />
-          <DetailRow label="Input Tokens" value={(e.input_tokens || 0).toLocaleString()} mono />
-          <DetailRow label="Output Tokens" value={(e.output_tokens || 0).toLocaleString()} mono />
-          <DetailRow label="Reasoning Tokens" value={(e.reasoning_tokens || 0).toLocaleString()} mono />
-          <DetailRow label="Cached Tokens" value={(e.cached_tokens || 0).toLocaleString()} mono />
-          <DetailRow label="Cache Creation Tokens" value={(e.cache_creation_tokens || 0).toLocaleString()} mono />
-          <DetailRow label="Total Tokens" value={(e.total_tokens || 0).toLocaleString()} mono />
+          <TokenBreakdownCard e={e} />
           <DetailRow label="Cost (USD)" value={`$${(e.cost_usd || 0).toFixed(4)}`} mono />
           <DetailRow label="Latency" value={e.latency_ms ? `${e.latency_ms} ms` : '—'} mono />
           <DetailRow label="TTFT" value={e.ttft_ms ? `${e.ttft_ms} ms` : '—'} mono />
