@@ -915,6 +915,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	// the post-restore (namespace, short-name) shape used by the response filter.
 	clientDeclaredTools := collectXAIClientDeclaredToolKeys(body)
 	body = normalizeXAITools(body)
+	body = promoteXAIAdditionalTools(body)
 	// Drop choices that point at tools removed by normalizeXAITools before we
 	// inject native x_search, so a surviving allowed_tools / forced choice is not
 	// left pointing at a deleted tool once only x_search remains.
@@ -1535,6 +1536,64 @@ func normalizeXAITools(body []byte) []byte {
 		}
 	}
 	return body
+}
+
+// promoteXAIAdditionalTools moves Responses Lite tool declarations to the
+// top-level tools array because xAI does not accept additional_tools input items.
+func promoteXAIAdditionalTools(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+
+	inputItems := input.Array()
+	remainingInput := make([]json.RawMessage, 0, len(inputItems))
+	promotedTools := make([]json.RawMessage, 0)
+	for _, item := range inputItems {
+		if item.Get("type").String() != "additional_tools" {
+			remainingInput = append(remainingInput, json.RawMessage(item.Raw))
+			continue
+		}
+		for _, tool := range item.Get("tools").Array() {
+			promotedTools = append(promotedTools, json.RawMessage(tool.Raw))
+		}
+	}
+	if len(remainingInput) == len(inputItems) {
+		return body
+	}
+
+	rawInput, errMarshalInput := json.Marshal(remainingInput)
+	if errMarshalInput != nil {
+		return body
+	}
+	updated, errSetInput := sjson.SetRawBytes(body, "input", rawInput)
+	if errSetInput != nil {
+		return body
+	}
+	if len(promotedTools) == 0 {
+		return updated
+	}
+
+	topLevelTools := gjson.GetBytes(updated, "tools")
+	tools := make([]json.RawMessage, 0, len(topLevelTools.Array())+len(promotedTools))
+	if topLevelTools.IsArray() {
+		for _, tool := range topLevelTools.Array() {
+			tools = append(tools, json.RawMessage(tool.Raw))
+		}
+	}
+	tools = append(tools, promotedTools...)
+	rawTools, errMarshalTools := json.Marshal(tools)
+	if errMarshalTools != nil {
+		return body
+	}
+	updated, errSetTools := sjson.SetRawBytes(updated, "tools", rawTools)
+	if errSetTools != nil {
+		return body
+	}
+	return updated
 }
 
 func normalizeXAIToolArray(tools gjson.Result) ([]byte, bool, bool) {
