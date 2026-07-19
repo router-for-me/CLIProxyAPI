@@ -212,6 +212,14 @@ func TestCodexAlphaSearchForwardsRequest(t *testing.T) {
 	if got := rr.Header().Get("Content-Type"); got != "application/json" {
 		t.Fatalf("response Content-Type = %q", got)
 	}
+	traceID := rr.Header().Get(internallogging.CPATraceIDHeader)
+	parts := strings.Split(traceID, "-")
+	if len(parts) != 3 || parts[1] != credential.Index || len(parts[2]) != 8 {
+		t.Fatalf("trace ID = %q, want timestamp-%s-requestID", traceID, credential.Index)
+	}
+	if _, errParse := time.Parse("20060102150405", parts[0]); errParse != nil {
+		t.Fatalf("trace timestamp = %q: %v", parts[0], errParse)
+	}
 }
 
 func TestCodexAlphaSearchSanitizesResponsesOnlyFields(t *testing.T) {
@@ -808,6 +816,9 @@ func TestExampleAPIKeySafeModeShowsWarningAndKeepsManagement(t *testing.T) {
 		if !strings.Contains(rr.Body.String(), "/management.html?safe-mode=configure") {
 			t.Fatalf("body missing management link in message: %s", rr.Body.String())
 		}
+		if got := rr.Header().Get(internallogging.CPATraceIDHeader); got != "" {
+			t.Fatalf("trace ID = %q, want empty before auth selection", got)
+		}
 	})
 
 	t.Run("management endpoints still work", func(t *testing.T) {
@@ -817,6 +828,9 @@ func TestExampleAPIKeySafeModeShowsWarningAndKeepsManagement(t *testing.T) {
 		server.engine.ServeHTTP(rr, req)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if got := rr.Header().Get(internallogging.CPATraceIDHeader); got != "" {
+			t.Fatalf("management trace ID = %q, want empty", got)
 		}
 	})
 

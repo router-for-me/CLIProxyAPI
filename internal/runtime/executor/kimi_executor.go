@@ -34,7 +34,16 @@ type KimiExecutor struct {
 }
 
 // NewKimiExecutor creates a new Kimi executor.
-func NewKimiExecutor(cfg *config.Config) *KimiExecutor { return &KimiExecutor{cfg: cfg} }
+func NewKimiExecutor(cfg *config.Config) *KimiExecutor {
+	return &KimiExecutor{
+		ClaudeExecutor: ClaudeExecutor{
+			cfg:                     cfg,
+			requestLogProvider:      "kimi",
+			upstreamModelNormalizer: normalizeKimiUpstreamModel,
+		},
+		cfg: cfg,
+	}
+}
 
 // Identifier returns the executor identifier.
 func (e *KimiExecutor) Identifier() string { return "kimi" }
@@ -97,8 +106,8 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
 
-	// Strip kimi- prefix for upstream API
-	upstreamModel := stripKimiPrefix(baseModel)
+	// Strip kimi- prefix and any [1m] suffix for upstream API
+	upstreamModel := normalizeKimiUpstreamModel(baseModel)
 	body, err = sjson.SetBytes(body, "model", upstreamModel)
 	if err != nil {
 		return resp, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
@@ -206,8 +215,8 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), true)
 
-	// Strip kimi- prefix for upstream API
-	upstreamModel := stripKimiPrefix(baseModel)
+	// Strip kimi- prefix and any [1m] suffix for upstream API
+	upstreamModel := normalizeKimiUpstreamModel(baseModel)
 	body, err = sjson.SetBytes(body, "model", upstreamModel)
 	if err != nil {
 		return nil, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
@@ -753,4 +762,22 @@ func stripKimiPrefix(model string) string {
 		return model[5:]
 	}
 	return model
+}
+
+// normalizeKimiUpstreamModel returns the canonical upstream model ID for Kimi.
+// It strips the CLIProxyAPI "kimi-" prefix and any Claude Code "[1m]" context
+// suffix while preserving a trailing thinking suffix (e.g. "(1024)"), so that
+// the upstream API receives IDs such as "k3(1024)" instead of "kimi-k3[1m](1024)".
+func normalizeKimiUpstreamModel(model string) string {
+	model = strings.TrimSpace(model)
+	parsed := thinking.ParseSuffix(model)
+	base := parsed.ModelName
+	if strings.HasSuffix(strings.ToLower(base), "[1m]") {
+		base = base[:len(base)-len("[1m]")]
+	}
+	normalized := strings.ToLower(stripKimiPrefix(strings.TrimSpace(base)))
+	if parsed.HasSuffix {
+		return normalized + "(" + parsed.RawSuffix + ")"
+	}
+	return normalized
 }
