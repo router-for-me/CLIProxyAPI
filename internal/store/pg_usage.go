@@ -576,6 +576,49 @@ func ComputeCost(p Pricing, input, output, reasoning, cached, cacheRead int64) f
 		perM(p.CachedReadPer1M, cacheRead)
 }
 
+// CostBreakdown is the per-segment dollar attribution emitted alongside a
+// UsageEventRow. Each segment is the cost of one token kind evaluated against
+// the applicable Pricing row, so the sum of all segments equals the event's
+// total cost_usd (modulo floating-point rounding). A nil/missing Pricing row
+// leaves every segment at 0 — the same behavior as ComputeCost.
+type CostBreakdown struct {
+	Input         float64 `json:"input"`
+	Output        float64 `json:"output"`
+	Reasoning     float64 `json:"reasoning"`
+	CachedRead    float64 `json:"cached_read"`
+	CacheCreation float64 `json:"cache_creation"`
+}
+
+// SegmentCosts returns each segment's dollar cost independently so the
+// dashboard can render a per-segment breakdown bar. The mapping mirrors
+// ComputeCost's billing model:
+//   - input_tokens        × InputPer1M
+//   - output_tokens       × OutputPer1M
+//   - reasoning_tokens    × ReasoningPer1M
+//   - cache_creation_tokens × CachedInputPer1M (cache write surcharge)
+//   - cached_tokens       × CachedReadPer1M    (cache read discount)
+func SegmentCosts(p Pricing, input, output, reasoning, cachedRead, cacheCreation int64) CostBreakdown {
+	perM := func(value float64, tokens int64) float64 {
+		if tokens <= 0 || value <= 0 {
+			return 0
+		}
+		return float64(tokens) * value / 1_000_000
+	}
+	return CostBreakdown{
+		Input:         perM(p.InputPer1M, input),
+		Output:        perM(p.OutputPer1M, output),
+		Reasoning:     perM(p.ReasoningPer1M, reasoning),
+		CachedRead:    perM(p.CachedReadPer1M, cachedRead),
+		CacheCreation: perM(p.CachedInputPer1M, cacheCreation),
+	}
+}
+
+// Sum returns the total dollar cost of all segments. Equal to ComputeCost for
+// the same inputs (up to floating-point rounding).
+func (b CostBreakdown) Sum() float64 {
+	return b.Input + b.Output + b.Reasoning + b.CachedRead + b.CacheCreation
+}
+
 // ListPricing returns all model pricing rows (used for cache warming + management UI).
 func (s *UsageStore) ListPricing(ctx context.Context) ([]Pricing, error) {
 	if s == nil || s.db == nil {
@@ -819,33 +862,38 @@ func (s *UsageStore) SelectTotals(ctx context.Context, filter UsageFilter) (Usag
 // api_key_principal with the non-secret KeyAlias (resolved via a LEFT JOIN
 // on api_keys). The raw principal is never returned to API callers.
 type UsageEventRow struct {
-	ID                  int64     `json:"id"`
-	RequestID           string    `json:"request_id,omitempty"`
-	APIKeyID            string    `json:"api_key_id,omitempty"`
-	KeyAlias            string    `json:"key_alias,omitempty"`
-	Provider            string    `json:"provider"`
-	ExecutorType        string    `json:"executor_type,omitempty"`
-	Model               string    `json:"model"`
-	Alias               string    `json:"alias,omitempty"`
-	Endpoint            string    `json:"endpoint,omitempty"`
-	AuthType            string    `json:"auth_type,omitempty"`
-	Source              string    `json:"source,omitempty"`
-	ReasoningEffort     string    `json:"reasoning_effort,omitempty"`
-	ServiceTier         string    `json:"service_tier,omitempty"`
-	ResponseServiceTier string    `json:"response_service_tier,omitempty"`
-	InputTokens         int64     `json:"input_tokens"`
-	OutputTokens        int64     `json:"output_tokens"`
-	ReasoningTokens     int64     `json:"reasoning_tokens"`
-	CachedTokens        int64     `json:"cached_tokens"`
-	CacheCreationTokens int64     `json:"cache_creation_tokens"`
-	TotalTokens         int64     `json:"total_tokens"`
-	CostUSD             float64   `json:"cost_usd"`
-	LatencyMs           int64     `json:"latency_ms,omitempty"`
-	TTFTMs              int64     `json:"ttft_ms,omitempty"`
-	Failed              bool      `json:"failed"`
-	FailStatusCode      int       `json:"fail_status_code,omitempty"`
-	Generate            bool      `json:"generate,omitempty"`
-	RequestedAt         time.Time `json:"requested_at"`
+	ID                  int64   `json:"id"`
+	RequestID           string  `json:"request_id,omitempty"`
+	APIKeyID            string  `json:"api_key_id,omitempty"`
+	KeyAlias            string  `json:"key_alias,omitempty"`
+	Provider            string  `json:"provider"`
+	ExecutorType        string  `json:"executor_type,omitempty"`
+	Model               string  `json:"model"`
+	Alias               string  `json:"alias,omitempty"`
+	Endpoint            string  `json:"endpoint,omitempty"`
+	AuthType            string  `json:"auth_type,omitempty"`
+	Source              string  `json:"source,omitempty"`
+	ReasoningEffort     string  `json:"reasoning_effort,omitempty"`
+	ServiceTier         string  `json:"service_tier,omitempty"`
+	ResponseServiceTier string  `json:"response_service_tier,omitempty"`
+	InputTokens         int64   `json:"input_tokens"`
+	OutputTokens        int64   `json:"output_tokens"`
+	ReasoningTokens     int64   `json:"reasoning_tokens"`
+	CachedTokens        int64   `json:"cached_tokens"`
+	CacheCreationTokens int64   `json:"cache_creation_tokens"`
+	TotalTokens         int64   `json:"total_tokens"`
+	CostUSD             float64 `json:"cost_usd"`
+	// CostBreakdown is populated only when the caller asks for it
+	// (include=cost_breakdown on the events endpoints). It attributes
+	// cost_usd to each token kind using the model's pricing row. Stays nil
+	// otherwise so existing API consumers see no payload change.
+	CostBreakdown  *CostBreakdown `json:"cost_breakdown,omitempty"`
+	LatencyMs      int64          `json:"latency_ms,omitempty"`
+	TTFTMs         int64          `json:"ttft_ms,omitempty"`
+	Failed         bool           `json:"failed"`
+	FailStatusCode int            `json:"fail_status_code,omitempty"`
+	Generate       bool           `json:"generate,omitempty"`
+	RequestedAt    time.Time      `json:"requested_at"`
 }
 
 // eventRowSelectColumns is the column list used by both SelectEvents and
@@ -966,6 +1014,35 @@ func (s *UsageStore) GetEvent(ctx context.Context, id int64) (UsageEventRow, err
 
 // ErrUsageEventNotFound is returned by GetEvent when no row matches the id.
 var ErrUsageEventNotFound = errors.New("postgres store: usage event not found")
+
+// FillCostBreakdown populates the CostBreakdown field on every row by looking
+// up the model's pricing row and applying SegmentCosts. Missing pricing rows
+// leave the breakdown at a zero-value *CostBreakdown so the caller can
+// distinguish "no price set" (breakdown present, all-zero) from "breakdown
+// not requested" (nil pointer). The pricing lookup is deduplicated per model
+// id, so a page of 25 events for the same model costs a single GetPricing
+// round-trip. Safe to call on a nil store — returns nil immediately.
+func (s *UsageStore) FillCostBreakdown(ctx context.Context, rows []UsageEventRow) error {
+	if s == nil || s.db == nil || len(rows) == 0 {
+		return nil
+	}
+	cache := make(map[string]Pricing, len(rows))
+	for i := range rows {
+		r := &rows[i]
+		p, ok := cache[r.Model]
+		if !ok {
+			var err error
+			p, err = s.GetPricing(ctx, r.Model)
+			if err != nil {
+				return fmt.Errorf("postgres store: fill cost breakdown: %w", err)
+			}
+			cache[r.Model] = p
+		}
+		b := SegmentCosts(p, r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.CacheCreationTokens)
+		r.CostBreakdown = &b
+	}
+	return nil
+}
 
 // FilterOptions is the materialized set of distinct filter values for a usage
 // window. The dashboard renders these as dropdown options so operators never

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -25,6 +26,7 @@ type pagedEventsResponse struct {
 // Query parameters:
 //   - page      (default 1)
 //   - page_size (default 25, max 200)
+//   - include   (comma-separated extras; supported: "cost_breakdown")
 //   - api_key_id, provider, model, from, to, limit (same filter semantics as /usage-stats)
 //
 // Returns the newest events first, each with the resolved non-secret
@@ -43,6 +45,14 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": err.Error()}})
 		return
 	}
+	if wantsCostBreakdown(c.Query("include")) {
+		// Best-effort: a missing/errored pricing lookup should not block the
+		// events listing. The dashboard falls back to cost_usd alone.
+		if err := usage.FillCostBreakdown(c.Request.Context(), events); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+			return
+		}
+	}
 	c.JSON(http.StatusOK, pagedEventsResponse{
 		Events:   events,
 		Page:     page,
@@ -52,7 +62,9 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 }
 
 // GetUsageEvent handles GET /v0/management/usage-stats/events/:id.
-// Returns 404 when the primary key does not exist.
+// Returns 404 when the primary key does not exist. The single-event payload
+// always carries the full cost breakdown (the one extra GetPricing round-trip
+// is negligible at row granularity, so no include= flag is needed here).
 func (h *Handler) GetUsageEvent(c *gin.Context) {
 	_, usage, _, _, ok := h.requirePG(c)
 	if !ok {
@@ -72,7 +84,26 @@ func (h *Handler) GetUsageEvent(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
 	}
+	// Best-effort: a missing pricing row leaves the breakdown zero-valued but
+	// present, so the dashboard can show "no price set" rather than hiding
+	// the section. Errors here are logged but not surfaced to the API caller
+	// — the rest of the event payload is still useful.
+	if err := usage.FillCostBreakdown(c.Request.Context(), []store.UsageEventRow{event}); err != nil {
+		// Fall through with the zero-value breakdown; do not fail the request.
+		_ = err
+	}
 	c.JSON(http.StatusOK, gin.H{"event": event})
+}
+
+// wantsCostBreakdown reports whether the comma-separated include= query param
+// lists "cost_breakdown". Trims whitespace and is case-insensitive.
+func wantsCostBreakdown(include string) bool {
+	for _, part := range strings.Split(include, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), "cost_breakdown") {
+			return true
+		}
+	}
+	return false
 }
 
 // GetUsageFilters handles GET /v0/management/usage-stats/filters.
