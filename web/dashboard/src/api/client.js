@@ -197,6 +197,30 @@ export async function getUsageWindows(apiKeyId) {
   return fetchJSON(`/usage-windows/${encodeURIComponent(apiKeyId)}`);
 }
 
+// Paginated list of raw usage events. Each row carries the resolved
+// non-secret key_alias (in place of the sealed api_key_principal). Used by
+// the dashboard's "Recent events" table.
+//   - params: same shape as getUsageTotals + page, page_size
+export async function getUsageEvents(params = {}) {
+  const qs = toUsageQS(params);
+  return fetchJSON(`/usage-stats/events${qs}`);
+}
+
+// Single usage event detail. Used by the dashboard modal when an operator
+// clicks a row in the events table.
+export async function getUsageEvent(id) {
+  return fetchJSON(`/usage-stats/events/${encodeURIComponent(id)}`);
+}
+
+// Distinct { api_keys: [{id, alias}], providers, models } observed in the
+// filter window. Used by the dashboard to populate dropdown filter menus so
+// the operator never types a free-text value (which is impossible against
+// the sealed api_key_principal column).
+export async function getUsageFilterOptions(params = {}) {
+  const qs = toUsageQS(params);
+  return fetchJSON(`/usage-stats/filters${qs}`);
+}
+
 // --- Models Catalog + Pricing -----------------------------------------------
 
 export async function listModelsCatalog({
