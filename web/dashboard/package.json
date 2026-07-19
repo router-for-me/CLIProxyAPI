@@ -1,0 +1,22 @@
+{
+  "name": "nixllm-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "NixLLM Dashboard — management UI for API keys, usage stats, and model catalog backed by PostgreSQL.",
+  "scripts": {
+    "dev": "vite --port 9173 --host",
+    "build": "vite build",
+    "preview": "vite preview --port 9173 --host",
+    "lint": "eslint src --ext js,jsx --max-warnings 0"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.0"
+  }
+}

@@ -20,9 +20,16 @@ import (
 )
 
 const (
-	defaultConfigTable = "config_store"
-	defaultAuthTable   = "auth_store"
-	defaultConfigKey   = "config"
+	defaultConfigTable        = "config_store"
+	defaultAuthTable          = "auth_store"
+	defaultConfigKey          = "config"
+	defaultAPIKeysTable       = "api_keys"
+	defaultPoliciesTable      = "api_key_policies"
+	defaultUsageEventsTable   = "usage_events"
+	defaultUsageWindowsTable  = "usage_windows"
+	defaultModelsTable        = "models_catalog"
+	defaultModelPricingTable  = "model_pricing"
+	defaultErrorMessagesTable = "error_messages"
 )
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
@@ -32,6 +39,22 @@ type PostgresStoreConfig struct {
 	ConfigTable string
 	AuthTable   string
 	SpoolDir    string
+
+	// APIKeysTable is the table that stores client-facing API keys with per-key policy.
+	APIKeysTable string
+	// PoliciesTable stores per-key policy attached to APIKeysTable rows.
+	PoliciesTable string
+	// UsageEventsTable stores per-request usage records (async-flushed).
+	UsageEventsTable string
+	// UsageWindowsTable stores time-windowed aggregate counters for budget enforcement.
+	UsageWindowsTable string
+	// ModelsTable stores the model catalog mirrored from the registry updater.
+	ModelsTable string
+	// ModelPricingTable stores per-model unit pricing used to compute usage cost.
+	ModelPricingTable string
+	// ErrorMessagesTable stores operator-customized error responses keyed by
+	// HTTP status code. Served by the errormessages package.
+	ErrorMessagesTable string
 }
 
 // PostgresStore persists configuration and authentication metadata using PostgreSQL as backend
@@ -57,6 +80,27 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.AuthTable == "" {
 		cfg.AuthTable = defaultAuthTable
+	}
+	if cfg.APIKeysTable == "" {
+		cfg.APIKeysTable = defaultAPIKeysTable
+	}
+	if cfg.PoliciesTable == "" {
+		cfg.PoliciesTable = defaultPoliciesTable
+	}
+	if cfg.UsageEventsTable == "" {
+		cfg.UsageEventsTable = defaultUsageEventsTable
+	}
+	if cfg.UsageWindowsTable == "" {
+		cfg.UsageWindowsTable = defaultUsageWindowsTable
+	}
+	if cfg.ModelsTable == "" {
+		cfg.ModelsTable = defaultModelsTable
+	}
+	if cfg.ModelPricingTable == "" {
+		cfg.ModelPricingTable = defaultModelPricingTable
+	}
+	if cfg.ErrorMessagesTable == "" {
+		cfg.ErrorMessagesTable = defaultErrorMessagesTable
 	}
 
 	spoolRoot := strings.TrimSpace(cfg.SpoolDir)
@@ -140,6 +184,225 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	`, authTable)); err != nil {
 		return fmt.Errorf("postgres store: create auth table: %w", err)
 	}
+
+	if err := s.ensurePolicySchema(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensurePolicySchema creates the tables backing client-facing API keys, per-key policies,
+// usage events, usage windows, the model catalog, and per-model pricing. All statements are
+// idempotent (CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS).
+func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
+	apiKeysTable := s.fullTableName(s.cfg.APIKeysTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id           TEXT PRIMARY KEY,
+			name         TEXT NOT NULL,
+			key_hash     TEXT NOT NULL UNIQUE,
+			key_prefix   TEXT NOT NULL,
+			status       TEXT NOT NULL DEFAULT 'active',
+			created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			expires_at   TIMESTAMPTZ,
+			last_used_at TIMESTAMPTZ,
+			metadata     JSONB NOT NULL DEFAULT '{}'::jsonb
+		)
+	`, apiKeysTable)); err != nil {
+		return fmt.Errorf("postgres store: create api_keys table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON %s(key_hash)`, apiKeysTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create api_keys key_hash index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_api_keys_status ON %s(status) WHERE status = 'active'`, apiKeysTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create api_keys status index: %w", err)
+	}
+
+	policiesTable := s.fullTableName(s.cfg.PoliciesTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			api_key_id          TEXT PRIMARY KEY REFERENCES %s(id) ON DELETE CASCADE,
+			rpm_limit           INTEGER,
+			hourly_rate_limit   INTEGER,
+			budget_hourly_usd   NUMERIC(12,6),
+			budget_weekly_usd   NUMERIC(12,6),
+			budget_monthly_usd  NUMERIC(12,6),
+			allowed_models      JSONB NOT NULL DEFAULT '[]'::jsonb,
+			blocked_models      JSONB NOT NULL DEFAULT '[]'::jsonb,
+			updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, policiesTable, apiKeysTable)); err != nil {
+		return fmt.Errorf("postgres store: create api_key_policies table: %w", err)
+	}
+
+	usageEventsTable := s.fullTableName(s.cfg.UsageEventsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id                      BIGSERIAL PRIMARY KEY,
+			request_id              TEXT,
+			api_key_id              TEXT,
+			api_key_principal       TEXT,
+			provider                TEXT NOT NULL,
+			executor_type           TEXT,
+			model                   TEXT NOT NULL,
+			alias                   TEXT,
+			endpoint                TEXT,
+			auth_type               TEXT,
+			source                  TEXT,
+			reasoning_effort        TEXT,
+			service_tier            TEXT,
+			response_service_tier   TEXT,
+			input_tokens            BIGINT NOT NULL DEFAULT 0,
+			output_tokens           BIGINT NOT NULL DEFAULT 0,
+			reasoning_tokens        BIGINT NOT NULL DEFAULT 0,
+			cached_tokens           BIGINT NOT NULL DEFAULT 0,
+			cache_creation_tokens   BIGINT NOT NULL DEFAULT 0,
+			total_tokens            BIGINT NOT NULL DEFAULT 0,
+			cost_usd                NUMERIC(12,6) NOT NULL DEFAULT 0,
+			latency_ms              BIGINT,
+			ttft_ms                 BIGINT,
+			failed                  BOOLEAN NOT NULL DEFAULT FALSE,
+			fail_status_code        INTEGER,
+			generate                BOOLEAN NOT NULL DEFAULT FALSE,
+			requested_at            TIMESTAMPTZ NOT NULL,
+			flushed_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, usageEventsTable)); err != nil {
+		return fmt.Errorf("postgres store: create usage_events table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_usage_events_api_key ON %s(api_key_id, requested_at)`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create usage_events api_key index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_usage_events_model ON %s(model, requested_at)`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create usage_events model index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_usage_events_requested_at ON %s(requested_at DESC)`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create usage_events requested_at index: %w", err)
+	}
+
+	usageWindowsTable := s.fullTableName(s.cfg.UsageWindowsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			api_key_id    TEXT NOT NULL REFERENCES %s(id) ON DELETE CASCADE,
+			window_type   TEXT NOT NULL,
+			window_start  TIMESTAMPTZ NOT NULL,
+			window_end    TIMESTAMPTZ NOT NULL,
+			request_count BIGINT NOT NULL DEFAULT 0,
+			total_tokens  BIGINT NOT NULL DEFAULT 0,
+			cost_usd      NUMERIC(12,6) NOT NULL DEFAULT 0,
+			PRIMARY KEY (api_key_id, window_type, window_start)
+		)
+	`, usageWindowsTable, apiKeysTable)); err != nil {
+		return fmt.Errorf("postgres store: create usage_windows table: %w", err)
+	}
+
+	modelsTable := s.fullTableName(s.cfg.ModelsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id                            TEXT NOT NULL,
+			provider                      TEXT NOT NULL,
+			object                        TEXT NOT NULL DEFAULT 'model',
+			created                       BIGINT NOT NULL DEFAULT 0,
+			owned_by                      TEXT NOT NULL,
+			type                          TEXT NOT NULL,
+			display_name                  TEXT,
+			name                          TEXT,
+			version                       TEXT,
+			description                   TEXT,
+			input_token_limit             INTEGER,
+			output_token_limit            INTEGER,
+			supported_generation_methods  JSONB,
+			context_length                INTEGER NOT NULL DEFAULT 0,
+			max_completion_tokens         INTEGER NOT NULL DEFAULT 0,
+			supported_parameters          JSONB,
+			input_modalities              JSONB,
+			output_modalities             JSONB,
+			supports_web_search           BOOLEAN NOT NULL DEFAULT FALSE,
+			thinking_config               JSONB,
+			override_header               JSONB,
+			user_defined                  BOOLEAN NOT NULL DEFAULT FALSE,
+			updated_at                    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (id, provider)
+		)
+	`, modelsTable)); err != nil {
+		return fmt.Errorf("postgres store: create models_catalog table: %w", err)
+	}
+	// Backfill columns added in later schema iterations. Idempotent so
+	// existing deployments upgrade transparently on next startup.
+	for _, col := range []struct{ name, def string }{
+		{"name", "TEXT"},
+		{"version", "TEXT"},
+		{"description", "TEXT"},
+		{"supported_generation_methods", "JSONB"},
+		{"supported_parameters", "JSONB"},
+		{"input_modalities", "JSONB"},
+		{"output_modalities", "JSONB"},
+	} {
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+			`ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s`,
+			modelsTable, quoteIdentifier(col.name), col.def,
+		)); err != nil {
+			return fmt.Errorf("postgres store: alter models_catalog add column %s: %w", col.name, err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_models_catalog_provider ON %s(provider)`, modelsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create models_catalog provider index: %w", err)
+	}
+
+	modelPricingTable := s.fullTableName(s.cfg.ModelPricingTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id                       TEXT PRIMARY KEY,
+			input_per_1m_usd         NUMERIC(12,6) NOT NULL DEFAULT 0,
+			output_per_1m_usd        NUMERIC(12,6) NOT NULL DEFAULT 0,
+			cached_input_per_1m_usd  NUMERIC(12,6) NOT NULL DEFAULT 0,
+			cached_read_per_1m_usd   NUMERIC(12,6) NOT NULL DEFAULT 0,
+			reasoning_per_1m_usd     NUMERIC(12,6) NOT NULL DEFAULT 0,
+			updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, modelPricingTable)); err != nil {
+		return fmt.Errorf("postgres store: create model_pricing table: %w", err)
+	}
+	// Backfill cached_read_per_1m_usd for existing deployments that already
+	// have the table without this column (added in the pricing-cached-read
+	// schema iteration).
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS cached_read_per_1m_usd NUMERIC(12,6) NOT NULL DEFAULT 0`,
+		modelPricingTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter model_pricing add cached_read_per_1m_usd: %w", err)
+	}
+
+	// error_messages stores operator-customized error responses keyed by
+	// HTTP status code. The errormessages package caches rows in memory and
+	// falls back to a curated default when no override exists.
+	errorMessagesTable := s.fullTableName(s.cfg.ErrorMessagesTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			status_code   INTEGER PRIMARY KEY,
+			title         TEXT NOT NULL,
+			message       TEXT NOT NULL,
+			body_template TEXT,
+			enabled       BOOLEAN NOT NULL DEFAULT TRUE,
+			created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, errorMessagesTable)); err != nil {
+		return fmt.Errorf("postgres store: create error_messages table: %w", err)
+	}
 	return nil
 }
 
@@ -184,6 +447,80 @@ func (s *PostgresStore) WorkDir() string {
 // SetBaseDir implements the optional interface used by authenticators; it is a no-op because
 // the Postgres-backed store controls its own workspace.
 func (s *PostgresStore) SetBaseDir(string) {}
+
+// DB exposes the underlying *sql.DB connection for sibling store implementations
+// (api keys, usage, models). Callers must not close the handle.
+func (s *PostgresStore) DB() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	return s.db
+}
+
+// Schema returns the configured PostgreSQL schema (may be empty).
+func (s *PostgresStore) Schema() string {
+	if s == nil {
+		return ""
+	}
+	return s.cfg.Schema
+}
+
+// APIKeysTable returns the fully-qualified name of the client-facing API keys table.
+func (s *PostgresStore) APIKeysTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultAPIKeysTable)
+	}
+	return s.fullTableName(s.cfg.APIKeysTable)
+}
+
+// PoliciesTable returns the fully-qualified name of the per-key policy table.
+func (s *PostgresStore) PoliciesTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultPoliciesTable)
+	}
+	return s.fullTableName(s.cfg.PoliciesTable)
+}
+
+// UsageEventsTable returns the fully-qualified name of the per-request usage events table.
+func (s *PostgresStore) UsageEventsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultUsageEventsTable)
+	}
+	return s.fullTableName(s.cfg.UsageEventsTable)
+}
+
+// UsageWindowsTable returns the fully-qualified name of the time-windowed usage counter table.
+func (s *PostgresStore) UsageWindowsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultUsageWindowsTable)
+	}
+	return s.fullTableName(s.cfg.UsageWindowsTable)
+}
+
+// ModelsTable returns the fully-qualified name of the model catalog table.
+func (s *PostgresStore) ModelsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultModelsTable)
+	}
+	return s.fullTableName(s.cfg.ModelsTable)
+}
+
+// ModelPricingTable returns the fully-qualified name of the per-model pricing table.
+func (s *PostgresStore) ModelPricingTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultModelPricingTable)
+	}
+	return s.fullTableName(s.cfg.ModelPricingTable)
+}
+
+// ErrorMessagesTable returns the fully-qualified name of the operator-
+// customizable error messages table.
+func (s *PostgresStore) ErrorMessagesTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultErrorMessagesTable)
+	}
+	return s.fullTableName(s.cfg.ErrorMessagesTable)
+}
 
 // Save persists authentication metadata to disk and PostgreSQL.
 func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {

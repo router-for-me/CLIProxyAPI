@@ -1377,3 +1377,35 @@ func (r *ModelRegistry) GetModelsForClient(clientID string) []*ModelInfo {
 	}
 	return result
 }
+
+// AvailableModelIDs returns the set of model IDs currently available across
+// the major handler types (openai, claude, gemini). The union is deduplicated
+// in a map for O(1) membership tests. Used by the management API to filter
+// the persisted PG catalog down to "live" models so the dashboard shows only
+// what callers can actually invoke right now.
+func (r *ModelRegistry) AvailableModelIDs() map[string]struct{} {
+	out := make(map[string]struct{})
+	if r == nil {
+		return out
+	}
+	for _, handlerType := range []string{"openai", "claude", "gemini"} {
+		for _, m := range r.GetAvailableModels(handlerType) {
+			if id, ok := m["id"].(string); ok && id != "" {
+				out[id] = struct{}{}
+			}
+		}
+	}
+	return out
+}
+
+// AvailableModelIDList returns AvailableModelIDs as a sorted slice, for
+// callers (like PG queries with = ANY(text[])) that prefer slice form.
+func (r *ModelRegistry) AvailableModelIDList() []string {
+	set := r.AvailableModelIDs()
+	out := make([]string, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}

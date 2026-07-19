@@ -1,0 +1,75 @@
+[
+  {
+    "model": "claude-3-5-sonnet",
+    "source": "openrouter",
+    "input_per_1m_usd": 3.00,
+    "output_per_1m_usd": 15.00,
+    "cached_input_per_1m_usd": 3.75,
+    "cached_read_per_1m_usd": 0.30,
+    "reasoning_per_1m_usd": 0,
+    "notes": "OpenRouter mirrors Anthropic list prices; markup only applied for routing, not base rate."
+  },
+  {
+    "model": "gpt-4o",
+    "source": "openrouter",
+    "input_per_1m_usd": 2.50,
+    "output_per_1m_usd": 10.00,
+    "cached_input_per_1m_usd": 0,
+    "cached_read_per_1m_usd": 1.25,
+    "reasoning_per_1m_usd": 0
+  },
+  {
+    "model": "gpt-4o-mini",
+    "source": "openrouter",
+    "input_per_1m_usd": 0.15,
+    "output_per_1m_usd": 0.60,
+    "cached_input_per_1m_usd": 0,
+    "cached_read_per_1m_usd": 0.075,
+    "reasoning_per_1m_usd": 0
+  },
+  {
+    "model": "gemini-2.0-flash",
+    "source": "openrouter",
+    "input_per_1m_usd": 0.10,
+    "output_per_1m_usd": 0.40,
+    "cached_input_per_1m_usd": 0.025,
+    "cached_read_per_1m_usd": 0.025,
+    "reasoning_per_1m_usd": 0
+  },
+  {
+    "model": "deepseek-chat",
+    "source": "openrouter",
+    "input_per_1m_usd": 0.14,
+    "output_per_1m_usd": 0.28,
+    "cached_input_per_1m_usd": 0,
+    "cached_read_per_1m_usd": 0.014,
+    "reasoning_per_1m_usd": 0
+  },
+  {
+    "model": "deepseek-r1",
+    "source": "openrouter",
+    "input_per_1m_usd": 0.55,
+    "output_per_1m_usd": 2.19,
+    "cached_input_per_1m_usd": 0.14,
+    "cached_read_per_1m_usd": 0.055,
+    "reasoning_per_1m_usd": 2.19
+  },
+  {
+    "model": "llama-3.3-70b-instruct",
+    "source": "openrouter",
+    "input_per_1m_usd": 0.23,
+    "output_per_1m_usd": 0.40,
+    "cached_input_per_1m_usd": 0,
+    "cached_read_per_1m_usd": 0.023,
+    "reasoning_per_1m_usd": 0
+  },
+  {
+    "model": "qwen-2.5-72b-instruct",
+    "source": "openrouter",
+    "input_per_1m_usd": 0.23,
+    "output_per_1m_usd": 0.40,
+    "cached_input_per_1m_usd": 0,
+    "cached_read_per_1m_usd": 0.023,
+    "reasoning_per_1m_usd": 0
+  }
+]

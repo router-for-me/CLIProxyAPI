@@ -16,8 +16,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/errormessages"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -60,6 +64,27 @@ type Handler struct {
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginReleaseCacheMu    sync.Mutex
 	pluginReleaseCache      map[string]pluginReleaseCacheEntry
+
+	// PG-backed persistence handles. Empty when the PGSTORE_DSN backend is
+	// not configured; the management routes for these resources return 503
+	// in that case so callers can detect the absence cleanly.
+	pgAPIKeys *store.APIKeyStore
+	pgUsage   *store.UsageStore
+	pgModels  *store.ModelsStore
+	pgSync    *registry.PGSync
+	policySvc policy.PolicyService
+
+	// v1ModelsHandler is the http.Handler that serves GET /v1/models. It is
+	// wired by api.Server after route setup so the management handler can
+	// trigger an in-process sync into models_catalog without a network
+	// round-trip. nil when no PG backend is configured (sync endpoint then
+	// returns 503 from requirePG before reaching this handler).
+	v1ModelsHandler http.Handler
+
+	// pgErrorMessages stores operator-customized error response text,
+	// keyed by HTTP status code. nil when PG is not configured — handlers
+	// under error_messages.go return 503 in that case.
+	pgErrorMessages errormessages.Store
 }
 
 type configReloadSnapshot struct {
@@ -69,8 +94,19 @@ type configReloadSnapshot struct {
 
 // NewHandler creates a new management handler instance.
 func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Manager) *Handler {
+	// MANAGEMENT_PASSWORD is the canonical env var for the management API
+	// secret. NIXLLM_DASHBOARD_PASSWORD is an optional alias surfaced for
+	// operators who want the dashboard to use a dedicated secret that does
+	// not unlock the broader management API (the dashboard UI scopes itself
+	// to PG-backed routes only). When both are set, MANAGEMENT_PASSWORD
+	// wins so existing deployments are unaffected.
 	envSecret, _ := os.LookupEnv("MANAGEMENT_PASSWORD")
 	envSecret = strings.TrimSpace(envSecret)
+	if envSecret == "" {
+		if dashSecret, _ := os.LookupEnv("NIXLLM_DASHBOARD_PASSWORD"); strings.TrimSpace(dashSecret) != "" {
+			envSecret = strings.TrimSpace(dashSecret)
+		}
+	}
 
 	h := &Handler{
 		cfg:                 cfg,
@@ -118,6 +154,56 @@ func (h *Handler) purgeStaleAttempts() {
 // NewHandler creates a new management handler instance.
 func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manager) *Handler {
 	return NewHandler(cfg, "", manager)
+}
+
+// SetPostgresStores wires the optional PG-backed stores and services. All
+// parameters may be nil when the PGSTORE_DSN backend is inactive; the
+// management routes for PG resources will return 503 in that case.
+func (h *Handler) SetPostgresStores(
+	apiKeys *store.APIKeyStore,
+	usage *store.UsageStore,
+	models *store.ModelsStore,
+	pgSync *registry.PGSync,
+	policySvc policy.PolicyService,
+) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pgAPIKeys = apiKeys
+	h.pgUsage = usage
+	h.pgModels = models
+	h.pgSync = pgSync
+	h.policySvc = policySvc
+}
+
+// SetV1ModelsHandler wires the http.Handler that serves GET /v1/models on
+// the main API server. The management handler uses it to run in-process sync
+// probes against the live caller-facing model list (rather than issuing a
+// network loopback call). Set to nil to disable the /models-catalog/sync
+// route.
+func (h *Handler) SetV1ModelsHandler(handler http.Handler) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.v1ModelsHandler = handler
+}
+
+// SetErrorMessagesStore wires the PG-backed store for operator-customized
+// error responses. nil disables the /v0/management/error-messages routes
+// (they return 503 in that case).
+func (h *Handler) SetErrorMessagesStore(store errormessages.Store) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pgErrorMessages = store
+	// Mirror into the registry so Respond() can consult the same store.
+	errormessages.SetStore(store)
 }
 
 // SetConfig updates the in-memory config reference when the server hot-reloads.

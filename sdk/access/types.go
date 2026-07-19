@@ -28,6 +28,12 @@ const (
 	// AccessProviderTypeConfigAPIKey is the built-in provider validating inline API keys.
 	AccessProviderTypeConfigAPIKey = "config-api-key"
 
+	// AccessProviderTypePGAPIKey is the PG-backed provider validating
+	// per-key credentials stored in PostgreSQL. Activated only when the
+	// PGSTORE_DSN backend is configured; otherwise the inline config provider
+	// remains authoritative.
+	AccessProviderTypePGAPIKey = "pg-api-key"
+
 	// DefaultAccessProviderName is applied when no provider name is supplied.
 	DefaultAccessProviderName = "config-inline"
 )

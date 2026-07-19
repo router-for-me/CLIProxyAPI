@@ -1,0 +1,39 @@
+[
+  {
+    "model": "@cf/meta/llama-3.1-8b-instruct",
+    "source": "cloudflare",
+    "input_per_1m_usd": 0.050,
+    "output_per_1m_usd": 0.080,
+    "cached_input_per_1m_usd": 0,
+    "cached_read_per_1m_usd": 0,
+    "reasoning_per_1m_usd": 0,
+    "notes": "Cloudflare Workers AI Neuron pricing converted to per-1M-token USD at 1 neuron ≈ 1 token."
+  },
+  {
+    "model": "@cf/meta/llama-3.1-70b-instruct",
+    "source": "cloudflare",
+    "input_per_1m_usd": 0.325,
+    "output_per_1m_usd": 0.475,
+    "cached_input_per_1m_usd": 0,
+    "cached_read_per_1m_usd": 0,
+    "reasoning_per_1m_usd": 0
+  },
+  {
+    "model": "@cf/qwen/qwen2.5-coder-32b-instruct",
+    "source": "cloudflare",
+    "input_per_1m_usd": 0.165,
+    "output_per_1m_usd": 0.225,
+    "cached_input_per_1m_usd": 0,
+    "cached_read_per_1m_usd": 0,
+    "reasoning_per_1m_usd": 0
+  },
+  {
+    "model": "@cf/mistral/mistral-7b-instruct-v0.3",
+    "source": "cloudflare",
+    "input_per_1m_usd": 0.035,
+    "output_per_1m_usd": 0.083,
+    "cached_input_per_1m_usd": 0,
+    "cached_read_per_1m_usd": 0,
+    "reasoning_per_1m_usd": 0
+  }
+]

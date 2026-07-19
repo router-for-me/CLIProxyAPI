@@ -36,6 +36,12 @@ remote-management:
 auth-dir: "~/.cli-proxy-api"
 
 # API keys for authentication
+#
+# These keys are the legacy, globally-permissive caller credentials. They
+# are always honored when present, regardless of whether a PostgreSQL store
+# is configured. For per-key policy (RPM, hourly rate, budget caps, model
+# allow/deny lists, expiry, regenerate), set PGSTORE_DSN and manage keys
+# via the management API at /v0/management/api-keys-pg instead.
 api-keys:
   - "your-api-key-1"
   - "your-api-key-2"

@@ -1,0 +1,58 @@
+[
+  {
+    "model": "gpt-4o",
+    "source": "openai-official",
+    "input_per_1m_usd": 2.50,
+    "output_per_1m_usd": 10.00,
+    "cached_input_per_1m_usd": 0,
+    "cached_read_per_1m_usd": 1.25,
+    "reasoning_per_1m_usd": 0,
+    "notes": "OpenAI 'cached_tokens' is conventionally cache-read; billed at 0.5x input."
+  },
+  {
+    "model": "gpt-4o-mini",
+    "source": "openai-official",
+    "input_per_1m_usd": 0.15,
+    "output_per_1m_usd": 0.60,
+    "cached_input_per_1m_usd": 0,
+    "cached_read_per_1m_usd": 0.075,
+    "reasoning_per_1m_usd": 0
+  },
+  {
+    "model": "gpt-4.1",
+    "source": "openai-official",
+    "input_per_1m_usd": 2.00,
+    "output_per_1m_usd": 8.00,
+    "cached_input_per_1m_usd": 0,
+    "cached_read_per_1m_usd": 0.50,
+    "reasoning_per_1m_usd": 0
+  },
+  {
+    "model": "gpt-4.1-mini",
+    "source": "openai-official",
+    "input_per_1m_usd": 0.40,
+    "output_per_1m_usd": 1.60,
+    "cached_input_per_1m_usd": 0,
+    "cached_read_per_1m_usd": 0.10,
+    "reasoning_per_1m_usd": 0
+  },
+  {
+    "model": "o1",
+    "source": "openai-official",
+    "input_per_1m_usd": 15.00,
+    "output_per_1m_usd": 60.00,
+    "cached_input_per_1m_usd": 7.50,
+    "cached_read_per_1m_usd": 7.50,
+    "reasoning_per_1m_usd": 60.00,
+    "notes": "o1 reasoning tokens billed at output rate."
+  },
+  {
+    "model": "o3-mini",
+    "source": "openai-official",
+    "input_per_1m_usd": 1.10,
+    "output_per_1m_usd": 4.40,
+    "cached_input_per_1m_usd": 0.55,
+    "cached_read_per_1m_usd": 0.55,
+    "reasoning_per_1m_usd": 4.40
+  }
+]

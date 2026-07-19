@@ -18,16 +18,19 @@ import (
 
 	"github.com/joho/godotenv"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
+	pgaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/pg_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/errormessages"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
@@ -37,6 +40,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
 	log "github.com/sirupsen/logrus"
 )
@@ -606,6 +610,80 @@ func main() {
 		sdkAuth.RegisterTokenStore(sdkAuth.NewFileTokenStore())
 	}
 
+	// When the PG backend is active, wire the API key + usage + model stores,
+	// the policy service, the async usage flusher, and the pg-access provider.
+	// These remain nil when the PG backend is inactive; downstream features
+	// detect the nil state and degrade to file-only behavior.
+	var (
+		pgAPIKeyStore *store.APIKeyStore
+		pgUsageStore  *store.UsageStore
+		pgModelsStore *store.ModelsStore
+		pgSyncAdapter *registry.PGSync
+		policySvc     policy.PolicyService
+		usageFlusher  *store.UsageFlusher
+	)
+	if usePostgresStore {
+		pgAPIKeyStore = store.NewAPIKeyStore(pgStoreInst)
+		pgUsageStore = store.NewUsageStore(pgStoreInst)
+		pgModelsStore = store.NewModelsStore(pgStoreInst)
+		pgSyncAdapter = registry.NewPGSync(store.NewPGModelsAdapter(pgModelsStore))
+		policySvc = policy.NewService(pgAPIKeyStore, pgUsageStore, policy.ServiceConfig{})
+		// Start the policy service background goroutine (sliding-window
+		// cleanup). The goroutine exits when the context is canceled or
+		// Stop() is invoked at shutdown.
+		if svc, ok := policySvc.(interface{ Start(context.Context) error }); ok {
+			if errStart := svc.Start(context.Background()); errStart != nil {
+				log.Errorf("failed to start policy service: %v", errStart)
+			}
+		}
+		// Register the async PG usage flusher as a usage plugin so completed
+		// requests persist to usage_events. The flusher is started first so
+		// it is draining the queue by the time records start arriving; the
+		// plugin registration then wires it into the usage manager's fan-out
+		// so HandleUsage invocations actually happen (without this the
+		// flusher goroutine would spin idle forever).
+		usageFlusher = store.NewUsageFlusher(pgUsageStore, pgAPIKeyStore, store.DefaultFlusherConfig())
+		if errFlusherStart := usageFlusher.Start(context.Background()); errFlusherStart != nil {
+			log.Errorf("failed to start PG usage flusher: %v", errFlusherStart)
+		}
+		coreusage.RegisterPlugin(usageFlusher)
+		// Register the policy usage plugin so budget windows are
+		// incremented as requests complete.
+		if plugin := policy.NewUsagePlugin(policySvc); plugin != nil {
+			coreusage.RegisterPlugin(plugin)
+		}
+		// Register the PG-backed access provider alongside the inline config
+		// provider; the manager falls through from pg-store to config-inline
+		// so legacy file-based keys keep working.
+		pgaccess.Register(pgAPIKeyStore)
+		// Wire the PG-backed error messages store + warm the cache so the
+		// policy middleware + handlers can serve customized error text
+		// without a per-request DB round-trip.
+		pgErrorMessages := store.NewErrorMessageStore(pgStoreInst)
+		errorMessagesCtx, errorMessagesCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		errormessages.SetStore(pgErrorMessages)
+		errormessages.RefreshFromDB(errorMessagesCtx)
+		errorMessagesCancel()
+		// Seed model catalog when empty so the registry can load from PG.
+		seedCtx, seedCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if count, countErr := pgModelsStore.Count(seedCtx); countErr == nil && count == 0 {
+			if loadErr := loadEmbeddedModelsToPG(seedCtx, pgSyncAdapter); loadErr != nil {
+				log.Warnf("failed to seed model catalog to PostgreSQL: %v", loadErr)
+			}
+		}
+		seedCancel()
+		// Expose the PG stores + policy service to the API server so the
+		// policy middleware and PG management routes are activated.
+		serverOptions = append(serverOptions, api.WithPolicyService(policySvc, &api.PgStoreHandles{
+			APIKeys:       pgAPIKeyStore,
+			Usage:         pgUsageStore,
+			Models:        pgModelsStore,
+			PGSync:        pgSyncAdapter,
+			Policy:        policySvc,
+			ErrorMessages: pgErrorMessages,
+		}))
+	}
+
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
 	pluginHost.ApplyConfig(context.Background(), cfg)
@@ -767,6 +845,21 @@ func startModelCatalogUpdaters(localModel, homeEnabled bool) {
 	} else if homeEnabled {
 		log.Info("Home mode: remote models.json updates disabled; Codex client model list follows Home model IDs")
 	}
+}
+
+// loadEmbeddedModelsToPG seeds the PostgreSQL models_catalog table from the
+// embedded JSON catalog on first run (when the table is empty). It is
+// idempotent: subsequent calls re-upsert the same rows without producing
+// duplicates because the table's primary key is (id, provider).
+func loadEmbeddedModelsToPG(ctx context.Context, pgSync *registry.PGSync) error {
+	if pgSync == nil || !pgSync.Enabled() {
+		return nil
+	}
+	models := registry.EmbeddedModelsForSeed()
+	if len(models) == 0 {
+		return nil
+	}
+	return pgSync.UpsertModels(ctx, models)
 }
 
 func pluginBootstrapConfigPath(args []string, defaultPath string) string {

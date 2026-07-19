@@ -13,8 +13,13 @@ go run ./cmd/server # Run dev server
 go test ./... # Run all tests
 go test -v -run TestName ./path/to/pkg # Run single test
 go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRED after changes)
+# NixLLM dashboard (React + Vite SPA under web/dashboard/):
+cd web/dashboard && npm install && npm run dev  # Dev SPA on :9173 (proxies /v0 to the Go API)
+cd web/dashboard && npm run build                # Build dist/ (embedded via internal/dashboardasset)
+make dash-embed                                  # Build SPA + rebuild Go binary so /dashboard serves it
 ```
 - Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no-browser`, `--oauth-callback-port <port>`
+- Dashboard env vars: `MANAGEMENT_PASSWORD` (or `NIXLLM_DASHBOARD_PASSWORD` alias) gates `/v0/management` and the dashboard login screen; `PGSTORE_DSN` is required for the PG-backed routes the dashboard surfaces.
 
 ## Config
 - Default config: `config.yaml` (template: `config.example.yaml`)
@@ -31,6 +36,8 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - `internal/translator/` — Provider protocol translators (and shared `common`)
 - `internal/registry/` — Model registry + remote updater (`StartModelsUpdater`); `--local-model` disables remote updates
 - `internal/store/` — Storage implementations and secret resolution
+- `internal/policy/` — Per-API-key policy enforcement (RPM, budget, model access)
+- `internal/dashboardasset/` — Embeds the NixLLM dashboard SPA (served at `/dashboard`)
 - `internal/managementasset/` — Config snapshots and management assets
 - `internal/cache/` — Request signature caching
 - `internal/watcher/` — Config hot-reload and watchers
@@ -38,6 +45,7 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - `internal/usage/` — Usage and token accounting
 - `internal/tui/` — Bubbletea terminal UI (`--tui`, `--standalone`)
 - `sdk/cliproxy/` — Embeddable SDK entry (service/builder/watchers/pipeline)
+- `web/dashboard/` — NixLLM dashboard SPA (React + Vite, served at `/dashboard`)
 - `test/` — Cross-module integration tests
 
 ## Code Conventions
