@@ -1400,19 +1400,22 @@ func TestClaudeExecutorExecuteStreamRetainsStartedCacheStateUntilStreamEnds(t *t
 		t.Fatalf("ExecuteStream() error = %v", errStream)
 	}
 
-	var upstreamBody []byte
 	select {
-	case upstreamBody = <-capturedBody:
+	case <-capturedBody:
 	case <-testContext.Done():
 		t.Fatalf("timed out waiting for captured upstream body: %v", testContext.Err())
 	}
+	// Re-plan from the original, unmodified payload (not the captured upstream
+	// body, which already carries the breakpoints the first planning pass
+	// added): adaptive planning now short-circuits once cache_control is
+	// present, so re-feeding the already-planned body would return a nil plan.
 	_, matchingPlan := executor.planAdaptiveClaudePromptCache(
 		context.Background(),
 		auth,
 		"key-123",
 		server.URL,
 		"claude-sonnet-4-5",
-		upstreamBody,
+		bytes.Clone(payload),
 	)
 	if matchingPlan == nil || len(matchingPlan.Prefixes) == 0 {
 		t.Fatal("adaptive planner returned no prefixes for stream lifecycle probe")
@@ -1446,6 +1449,84 @@ func TestClaudeExecutorExecuteStreamRetainsStartedCacheStateUntilStreamEnds(t *t
 		if chunk.Err != nil {
 			t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
 		}
+	}
+}
+
+func TestClaudeExecutorAdaptiveDoesNotTouchUserCacheControl(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudePromptCache: config.ClaudePromptCacheConfig{Mode: config.ClaudePromptCacheModeAdaptive},
+	})
+	auth := &cliproxyauth.Auth{ID: "user-marked-auth"}
+
+	// Client already placed 4 in-body cache_control breakpoints (at Anthropic's limit).
+	payload := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"tools":[{"name":"Read","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],
+		"system":[{"type":"text","text":"system","cache_control":{"type":"ephemeral"}}],
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"first","cache_control":{"type":"ephemeral"}}]},
+			{"role":"assistant","content":[{"type":"text","text":"answer"}]},
+			{"role":"user","content":[{"type":"text","text":"second","cache_control":{"type":"ephemeral"}}]}
+		]
+	}`)
+
+	plannedBody, plan := executor.planAdaptiveClaudePromptCache(
+		context.Background(),
+		auth,
+		"key-user-marked",
+		"https://api.anthropic.com",
+		"claude-sonnet-4-5",
+		bytes.Clone(payload),
+	)
+
+	if plan != nil {
+		t.Fatalf("adaptive planner must not produce a plan when the client already owns cache_control, got %+v", plan.Summary)
+	}
+	if !bytes.Equal(plannedBody, payload) {
+		t.Fatalf("adaptive planner modified a user-marked request:\nbefore=%s\nafter=%s", payload, plannedBody)
+	}
+	if gjson.GetBytes(plannedBody, "cache_control").Exists() {
+		t.Fatal("adaptive planner must not add a top-level automatic-history cache_control when the client already marked breakpoints")
+	}
+}
+
+func TestClaudeExecutorAdaptiveLeavesOverLimitUserCacheControlForUpstreamToReject(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudePromptCache: config.ClaudePromptCacheConfig{Mode: config.ClaudePromptCacheModeAdaptive},
+	})
+	auth := &cliproxyauth.Auth{ID: "over-limit-auth"}
+
+	// Client marked 5 breakpoints -- one over Anthropic's limit. Adaptive mode
+	// must not "fix" this by deleting or moving any of them; the upstream
+	// alone decides whether to accept or reject the request.
+	payload := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"tools":[{"name":"Read","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],
+		"system":[{"type":"text","text":"system","cache_control":{"type":"ephemeral"}}],
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"first","cache_control":{"type":"ephemeral"}}]},
+			{"role":"assistant","content":[{"type":"text","text":"answer","cache_control":{"type":"ephemeral"}}]},
+			{"role":"user","content":[{"type":"text","text":"second","cache_control":{"type":"ephemeral"}}]}
+		]
+	}`)
+
+	plannedBody, plan := executor.planAdaptiveClaudePromptCache(
+		context.Background(),
+		auth,
+		"key-over-limit",
+		"https://api.anthropic.com",
+		"claude-sonnet-4-5",
+		bytes.Clone(payload),
+	)
+
+	if plan != nil {
+		t.Fatalf("adaptive planner must not produce a plan for an over-limit user-marked request, got %+v", plan.Summary)
+	}
+	if got := countCacheControls(plannedBody); got != 5 {
+		t.Fatalf("cache_control count = %d, want 5 (untouched)", got)
+	}
+	if !bytes.Equal(plannedBody, payload) {
+		t.Fatal("adaptive planner must leave an over-limit user-marked request byte-for-byte unchanged")
 	}
 }
 

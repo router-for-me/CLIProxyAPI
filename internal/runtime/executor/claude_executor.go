@@ -227,6 +227,13 @@ func (e *ClaudeExecutor) planAdaptiveClaudePromptCache(
 	if e == nil || e.promptCacheRuntime == nil || e.claudePromptCacheMode() != config.ClaudePromptCacheModeAdaptive {
 		return body, nil
 	}
+	if claudeRequestHasUserCacheControl(body) {
+		// The client already owns its cache_control strategy (top-level or
+		// in-body). Do not add, remove, move, or normalize anything, even if
+		// the client's own breakpoints exceed Anthropic's limit; let the
+		// upstream accept or reject the request as sent.
+		return body, nil
+	}
 	officialAnthropic := isOfficialAnthropicBaseURL(baseURL)
 	scopeKey := claudePromptCacheScopeKey(auth, apiKey, baseURL, baseModel)
 	body = normalizeCacheControlTTL(body)
@@ -2838,6 +2845,21 @@ func ensureCacheControl(payload []byte) []byte {
 	payload = injectMessagesCacheControl(payload)
 
 	return payload
+}
+
+// claudeRequestHasUserCacheControl reports whether the client already placed any
+// cache_control breakpoint (top-level automatic history or in-body). When true,
+// adaptive planning must not touch the request: the client owns its own cache
+// strategy, so the proxy must not add, remove, move, or normalize any breakpoint,
+// even if the client's own breakpoints exceed Anthropic's limit.
+func claudeRequestHasUserCacheControl(payload []byte) bool {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return false
+	}
+	if gjson.GetBytes(payload, "cache_control").Exists() {
+		return true
+	}
+	return countCacheControls(payload) > 0
 }
 
 func countCacheControls(payload []byte) int {
