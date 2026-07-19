@@ -1610,7 +1610,7 @@ func promoteXAIAdditionalToolsToTopLevel(body []byte) []byte {
 		return body
 	}
 	body = updated
-	if len(gjson.ParseBytes(mergedTools).Array()) == 0 {
+	if gjson.GetBytes(mergedTools, "#").Int() == 0 {
 		if gjson.GetBytes(body, "tools").Exists() {
 			body, _ = sjson.DeleteBytes(body, "tools")
 		}

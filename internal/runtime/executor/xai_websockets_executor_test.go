@@ -202,9 +202,23 @@ func TestXAIWebsocketsExecuteStreamRestoresNamespaceToolCalls(t *testing.T) {
 
 	select {
 	case payload := <-capturedPayload:
-		tool := gjson.GetBytes(payload, "input.0.tools.0")
-		if got := tool.Get("name").String(); got != "mcp__exa__web_search_exa" {
-			t.Fatalf("upstream tool name = %q, want qualified name; payload=%s", got, payload)
+		// additional_tools are promoted to top-level tools for xAI ModelInput.
+		for _, item := range gjson.GetBytes(payload, "input").Array() {
+			if item.Get("type").String() == "additional_tools" {
+				t.Fatalf("upstream input still contains additional_tools: %s", payload)
+			}
+		}
+		var tool gjson.Result
+		found := false
+		for _, candidate := range gjson.GetBytes(payload, "tools").Array() {
+			if candidate.Get("name").String() == "mcp__exa__web_search_exa" {
+				tool = candidate
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("upstream tools missing promoted mcp__exa__web_search_exa; payload=%s", payload)
 		}
 		if tool.Get("tools").Exists() {
 			t.Fatalf("upstream tool should not contain namespace children: %s", payload)
