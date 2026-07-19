@@ -19,7 +19,7 @@ cd web/dashboard && npm run build                # Build dist/ (embedded via int
 make dash-embed                                  # Build SPA + rebuild Go binary so /dashboard serves it
 ```
 - Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no-browser`, `--oauth-callback-port <port>`
-- Dashboard env vars: `MANAGEMENT_PASSWORD` (or `NIXLLM_DASHBOARD_PASSWORD` alias) gates `/v0/management` and the dashboard login screen; `PGSTORE_DSN` is required for the PG-backed routes the dashboard surfaces.
+- Dashboard env vars: `MANAGEMENT_PASSWORD` (or `NIXLLM_DASHBOARD_PASSWORD` alias) gates `/v0/management` and the dashboard login screen; `PGSTORE_DSN` is required for the PG-backed routes the dashboard surfaces. `PGSTORE_ENCRYPTION_KEY` (optional) AES-GCM-seals the `api_key_principal` column of `usage_events` at rest; unset = plaintext (legacy rows remain readable).
 
 ## Config
 - Default config: `config.yaml` (template: `config.example.yaml`)

@@ -55,10 +55,10 @@ func TestSourcesReturnsNonEmpty(t *testing.T) {
 func TestStripDateSuffix(t *testing.T) {
 	cases := map[string]string{
 		"claude-3-5-sonnet-20241022": "claude-3-5-sonnet",
-		"gpt-4o-2024-07-18":         "gpt-4o-2024-07-18", // not -YYYYMMDD format, kept as-is
-		"short":                     "short",
-		"gpt-4o":                    "gpt-4o",
-		"":                          "",
+		"gpt-4o-2024-07-18":          "gpt-4o-2024-07-18", // not -YYYYMMDD format, kept as-is
+		"short":                      "short",
+		"gpt-4o":                     "gpt-4o",
+		"":                           "",
 	}
 	for in, want := range cases {
 		if got := stripDateSuffix(in); got != want {
