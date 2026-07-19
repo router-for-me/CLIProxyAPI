@@ -1400,22 +1400,27 @@ func TestClaudeExecutorExecuteStreamRetainsStartedCacheStateUntilStreamEnds(t *t
 		t.Fatalf("ExecuteStream() error = %v", errStream)
 	}
 
+	var upstreamBody []byte
 	select {
-	case <-capturedBody:
+	case upstreamBody = <-capturedBody:
 	case <-testContext.Done():
 		t.Fatalf("timed out waiting for captured upstream body: %v", testContext.Err())
 	}
-	// Re-plan from the original, unmodified payload (not the captured upstream
-	// body, which already carries the breakpoints the first planning pass
-	// added): adaptive planning now short-circuits once cache_control is
-	// present, so re-feeding the already-planned body would return a nil plan.
-	_, matchingPlan := executor.planAdaptiveClaudePromptCache(
-		context.Background(),
-		auth,
-		"key-123",
-		server.URL,
-		"claude-sonnet-4-5",
-		bytes.Clone(payload),
+	// Recompute the plan directly against the runtime (not through
+	// executor.planAdaptiveClaudePromptCache, which now short-circuits once
+	// cache_control is present) using the actual bytes sent upstream. This
+	// reads the ground-truth breakpoint locations the first planning pass
+	// already committed, so the resulting prefix keys exactly match the ones
+	// registered when the in-flight request acquired its flight.
+	scopeKey := claudePromptCacheScopeKey(auth, "key-123", server.URL, "claude-sonnet-4-5")
+	officialAnthropic := isOfficialAnthropicBaseURL(server.URL)
+	_, matchingPlan := runtime.PlanClaudePromptCache(
+		scopeKey,
+		upstreamBody,
+		helps.ClaudePromptCacheCapabilities{
+			AutomaticHistory: officialAnthropic,
+			ExplicitHistory:  !officialAnthropic,
+		},
 	)
 	if matchingPlan == nil || len(matchingPlan.Prefixes) == 0 {
 		t.Fatal("adaptive planner returned no prefixes for stream lifecycle probe")
