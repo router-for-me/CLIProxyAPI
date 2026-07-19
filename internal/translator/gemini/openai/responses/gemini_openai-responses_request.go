@@ -32,7 +32,6 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 		part := []byte(`{"text":""}`)
 		part, _ = sjson.SetBytes(part, "text", instructions.String())
 		systemParts = append(systemParts, part)
-		out, _ = sjson.SetRawBytes(out, "systemInstruction", geminiSystemInstruction(systemParts))
 	}
 
 	// Convert input messages to Gemini contents format
@@ -409,25 +408,16 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 	// Handle temperature if present
 	if temperature := root.Get("temperature"); temperature.Exists() {
-		if !gjson.GetBytes(out, "generationConfig").Exists() {
-			out, _ = sjson.SetRawBytes(out, "generationConfig", []byte(`{}`))
-		}
 		out, _ = sjson.SetBytes(out, "generationConfig.temperature", temperature.Float())
 	}
 
 	// Handle top_p if present
 	if topP := root.Get("top_p"); topP.Exists() {
-		if !gjson.GetBytes(out, "generationConfig").Exists() {
-			out, _ = sjson.SetRawBytes(out, "generationConfig", []byte(`{}`))
-		}
 		out, _ = sjson.SetBytes(out, "generationConfig.topP", topP.Float())
 	}
 
 	// Handle stop sequences
 	if stopSequences := root.Get("stop_sequences"); stopSequences.Exists() && stopSequences.IsArray() {
-		if !gjson.GetBytes(out, "generationConfig").Exists() {
-			out, _ = sjson.SetRawBytes(out, "generationConfig", []byte(`{}`))
-		}
 		var sequences []string
 		stopSequences.ForEach(func(_, seq gjson.Result) bool {
 			sequences = append(sequences, seq.String())
@@ -594,12 +584,9 @@ func applyOpenAIResponsesTextFormatToGemini(out []byte, root gjson.Result) []byt
 	formatType := strings.ToLower(strings.TrimSpace(textFormat.Get("type").String()))
 	switch formatType {
 	case "json_object":
-		out = ensureGeminiGenerationConfig(out)
 		out, _ = sjson.SetBytes(out, "generationConfig.responseMimeType", "application/json")
 	case "json_schema":
-		out = ensureGeminiGenerationConfig(out)
 		out, _ = sjson.SetBytes(out, "generationConfig.responseMimeType", "application/json")
-		out, _ = sjson.DeleteBytes(out, "generationConfig.responseSchema")
 
 		schema := textFormat.Get("schema")
 		if !schema.Exists() {
@@ -610,12 +597,5 @@ func applyOpenAIResponsesTextFormatToGemini(out []byte, root gjson.Result) []byt
 		}
 	}
 
-	return out
-}
-
-func ensureGeminiGenerationConfig(out []byte) []byte {
-	if !gjson.GetBytes(out, "generationConfig").Exists() {
-		out, _ = sjson.SetRawBytes(out, "generationConfig", []byte(`{}`))
-	}
 	return out
 }

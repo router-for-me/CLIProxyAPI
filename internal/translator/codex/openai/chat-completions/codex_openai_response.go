@@ -459,12 +459,10 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 		// Set content and reasoning content if found
 		if contentText != "" {
 			template, _ = sjson.SetBytes(template, "choices.0.message.content", contentText)
-			template, _ = sjson.SetBytes(template, "choices.0.message.role", "assistant")
 		}
 
 		if reasoningText != "" {
 			template, _ = sjson.SetBytes(template, "choices.0.message.reasoning_content", reasoningText)
-			template, _ = sjson.SetBytes(template, "choices.0.message.role", "assistant")
 		}
 
 		// Add tool calls if any
@@ -473,7 +471,6 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 			for _, toolCall := range toolCalls {
 				template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls.-1", toolCall)
 			}
-			template, _ = sjson.SetBytes(template, "choices.0.message.role", "assistant")
 		}
 
 		// Add images if any
@@ -482,7 +479,6 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 			for _, image := range images {
 				template, _ = sjson.SetRawBytes(template, "choices.0.message.images.-1", image)
 			}
-			template, _ = sjson.SetBytes(template, "choices.0.message.role", "assistant")
 		}
 	}
 

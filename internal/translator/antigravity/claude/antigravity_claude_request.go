@@ -587,30 +587,33 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				}
 				clientContentJSON := antigravityClaudeContent(role, partItems)
 				if role == "model" && len(partItems) > 1 {
-					var thinkingParts []gjson.Result
-					var regularParts []gjson.Result
-					var functionCallParts []gjson.Result
+					var thinkingParts [][]byte
+					var regularParts [][]byte
+					var functionCallParts [][]byte
+					needsReorder := false
+					previousCategory := -1
 					for _, partJSON := range partItems {
 						part := gjson.ParseBytes(partJSON)
+						category := 1
 						if part.Get("thought").Bool() {
-							thinkingParts = append(thinkingParts, part)
+							category = 0
+							thinkingParts = append(thinkingParts, partJSON)
 						} else if part.Get("functionCall").Exists() {
-							functionCallParts = append(functionCallParts, part)
+							category = 2
+							functionCallParts = append(functionCallParts, partJSON)
 						} else {
-							regularParts = append(regularParts, part)
+							regularParts = append(regularParts, partJSON)
 						}
+						needsReorder = needsReorder || category < previousCategory
+						previousCategory = category
 					}
-					newParts := make([]interface{}, 0, len(partItems))
-					for _, part := range thinkingParts {
-						newParts = append(newParts, part.Value())
+					if needsReorder {
+						newParts := make([][]byte, 0, len(partItems))
+						newParts = append(newParts, thinkingParts...)
+						newParts = append(newParts, regularParts...)
+						newParts = append(newParts, functionCallParts...)
+						clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts", translatorcommon.JoinRawArray(newParts))
 					}
-					for _, part := range regularParts {
-						newParts = append(newParts, part.Value())
-					}
-					for _, part := range functionCallParts {
-						newParts = append(newParts, part.Value())
-					}
-					clientContentJSON, _ = sjson.SetBytes(clientContentJSON, "parts", newParts)
 				}
 				contentItems = append(contentItems, clientContentJSON)
 			} else if contentsResult.Type == gjson.String {
@@ -642,7 +645,12 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				inputSchema := util.CleanJSONSchemaForAntigravity(inputSchemaResult.Raw)
 				tool, _ := sjson.DeleteBytes([]byte(toolResult.Raw), "input_schema")
 				tool, _ = sjson.SetRawBytes(tool, "parametersJsonSchema", []byte(inputSchema))
-				tool, _ = sjson.SetBytes(tool, "name", util.MapSanitizedFunctionName(functionNameMap, gjson.GetBytes(tool, "name").String()))
+				nameResult := gjson.GetBytes(tool, "name")
+				originalName := nameResult.String()
+				mappedName := util.MapSanitizedFunctionName(functionNameMap, originalName)
+				if nameResult.Type != gjson.String || mappedName != originalName {
+					tool, _ = sjson.SetBytes(tool, "name", mappedName)
+				}
 				for toolKey := range gjson.ParseBytes(tool).Map() {
 					if util.InArray(allowedToolKeys, toolKey) {
 						continue
