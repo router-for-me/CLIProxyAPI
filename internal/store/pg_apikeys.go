@@ -37,10 +37,14 @@ var ErrAPIKeyNotFound = errors.New("postgres store: api key not found")
 
 // APIKey mirrors a row in the api_keys table. The plaintext secret is never
 // persisted: only KeyHash (SHA-256) is stored. KeyPrefix exposes the first
-// characters of the secret for display in management UIs.
+// characters of the secret for display in management UIs. KeyAlias is an
+// operator-supplied, non-secret human label used for filtering/display in
+// usage stats (the sealed api_key_principal column cannot be queried for
+// filtering).
 type APIKey struct {
 	ID         string         `json:"id"`
 	Name       string         `json:"name"`
+	KeyAlias   string         `json:"key_alias,omitempty"`
 	KeyHash    string         `json:"-"`
 	KeyPrefix  string         `json:"key_prefix"`
 	Status     string         `json:"status"`
@@ -121,8 +125,9 @@ func GenerateSecret() (string, error) {
 // Create inserts a new API key and (optionally) its policy in a single
 // transaction. It returns the freshly generated plaintext secret; the caller is
 // responsible for surfacing it to the user exactly once as the secret is never
-// recoverable from the database.
-func (s *APIKeyStore) Create(ctx context.Context, name string, secret string, expiresAt *time.Time, metadata map[string]any, policy *Policy) (*APIKey, string, error) {
+// recoverable from the database. The alias is an optional non-secret label
+// stored alongside the key for filtering/display in usage stats.
+func (s *APIKeyStore) Create(ctx context.Context, name string, alias string, secret string, expiresAt *time.Time, metadata map[string]any, policy *Policy) (*APIKey, string, error) {
 	if s == nil || s.db == nil {
 		return nil, "", fmt.Errorf("postgres store: api key store not initialized")
 	}
@@ -155,9 +160,9 @@ func (s *APIKeyStore) Create(ctx context.Context, name string, secret string, ex
 	defer func() { _ = tx.Rollback() }()
 
 	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, name, key_hash, key_prefix, status, expires_at, metadata)
-		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-	`, s.apiKeysTable), id, displayName, hash, prefix, APIKeyStatusActive, expiresAt, string(metaJSON)); err != nil {
+		INSERT INTO %s (id, name, key_alias, key_hash, key_prefix, status, expires_at, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+	`, s.apiKeysTable), id, displayName, nullableString(alias), hash, prefix, APIKeyStatusActive, expiresAt, string(metaJSON)); err != nil {
 		return nil, "", fmt.Errorf("postgres store: insert api key: %w", err)
 	}
 
@@ -175,7 +180,7 @@ func (s *APIKeyStore) Create(ctx context.Context, name string, secret string, ex
 	if err != nil {
 		// Best-effort reconstruction when the row is not yet visible.
 		created = &APIKey{
-			ID: id, Name: displayName, KeyHash: hash, KeyPrefix: prefix,
+			ID: id, Name: displayName, KeyAlias: alias, KeyHash: hash, KeyPrefix: prefix,
 			Status: APIKeyStatusActive, ExpiresAt: expiresAt, Metadata: meta,
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
@@ -204,7 +209,7 @@ func (s *APIKeyStore) LookupByHash(ctx context.Context, hash string) (*APIKey, *
 		return nil, nil, fmt.Errorf("postgres store: api key store not initialized")
 	}
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT k.id, k.name, k.key_hash, k.key_prefix, k.status,
+		SELECT k.id, k.name, COALESCE(k.key_alias, ''), k.key_hash, k.key_prefix, k.status,
 		       k.created_at, k.updated_at, k.expires_at, k.last_used_at, k.metadata,
 		       p.rpm_limit, p.hourly_rate_limit, p.budget_hourly_usd, p.budget_weekly_usd,
 		       p.budget_monthly_usd, p.allowed_models, p.blocked_models, p.updated_at
@@ -228,7 +233,7 @@ func (s *APIKeyStore) LookupByID(ctx context.Context, id string) (*APIKey, *Poli
 		return nil, nil, fmt.Errorf("postgres store: api key store not initialized")
 	}
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT k.id, k.name, k.key_hash, k.key_prefix, k.status,
+		SELECT k.id, k.name, COALESCE(k.key_alias, ''), k.key_hash, k.key_prefix, k.status,
 		       k.created_at, k.updated_at, k.expires_at, k.last_used_at, k.metadata,
 		       p.rpm_limit, p.hourly_rate_limit, p.budget_hourly_usd, p.budget_weekly_usd,
 		       p.budget_monthly_usd, p.allowed_models, p.blocked_models, p.updated_at
@@ -260,7 +265,7 @@ func scanAPIKeyRow(row *sql.Row) (*APIKey, *Policy, error) {
 		policyUpdatedAt sql.NullTime
 	)
 	if err := row.Scan(
-		&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &key.Status,
+		&key.ID, &key.Name, &key.KeyAlias, &key.KeyHash, &key.KeyPrefix, &key.Status,
 		&key.CreatedAt, &key.UpdatedAt, &key.ExpiresAt, &key.LastUsedAt, &metadata,
 		&rpmLimit, &hourlyRateLimit, &budgetHourly, &budgetWeekly, &budgetMonthly,
 		&allowedModels, &blockedModels, &policyUpdatedAt,
@@ -325,7 +330,7 @@ func (s *APIKeyStore) List(ctx context.Context) ([]*APIKey, error) {
 		return nil, fmt.Errorf("postgres store: api key store not initialized")
 	}
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, name, key_hash, key_prefix, status,
+		SELECT id, name, COALESCE(key_alias, ''), key_hash, key_prefix, status,
 		       created_at, updated_at, expires_at, last_used_at, metadata
 		FROM %s
 		ORDER BY created_at DESC
@@ -341,7 +346,7 @@ func (s *APIKeyStore) List(ctx context.Context) ([]*APIKey, error) {
 			key      APIKey
 			metadata []byte
 		)
-		if err = rows.Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &key.Status,
+		if err = rows.Scan(&key.ID, &key.Name, &key.KeyAlias, &key.KeyHash, &key.KeyPrefix, &key.Status,
 			&key.CreatedAt, &key.UpdatedAt, &key.ExpiresAt, &key.LastUsedAt, &metadata); err != nil {
 			return nil, fmt.Errorf("postgres store: scan api key row: %w", err)
 		}
@@ -386,7 +391,7 @@ func (s *APIKeyStore) ListPaged(ctx context.Context, page, pageSize int, statusF
 	}
 
 	listQuery := fmt.Sprintf(`
-		SELECT id, name, key_hash, key_prefix, status,
+		SELECT id, name, COALESCE(key_alias, ''), key_hash, key_prefix, status,
 		       created_at, updated_at, expires_at, last_used_at, metadata
 		FROM %s
 	`, s.apiKeysTable)
@@ -410,7 +415,7 @@ func (s *APIKeyStore) ListPaged(ctx context.Context, page, pageSize int, statusF
 			key      APIKey
 			metadata []byte
 		)
-		if err = rows.Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &key.Status,
+		if err = rows.Scan(&key.ID, &key.Name, &key.KeyAlias, &key.KeyHash, &key.KeyPrefix, &key.Status,
 			&key.CreatedAt, &key.UpdatedAt, &key.ExpiresAt, &key.LastUsedAt, &metadata); err != nil {
 			return nil, 0, fmt.Errorf("postgres store: scan api key row (paged): %w", err)
 		}
@@ -551,6 +556,21 @@ func (s *APIKeyStore) Rename(ctx context.Context, id, name string) error {
 	), trimOr(name, "unnamed"), id)
 	if err != nil {
 		return fmt.Errorf("postgres store: rename api key: %w", err)
+	}
+	return assertRowsAffected(res, id, "api key")
+}
+
+// UpdateAlias changes the non-secret key_alias label used for filtering and
+// display in usage stats. Pass an empty string to clear the alias.
+func (s *APIKeyStore) UpdateAlias(ctx context.Context, id, alias string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: api key store not initialized")
+	}
+	res, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE %s SET key_alias = $1, updated_at = NOW() WHERE id = $2`, s.apiKeysTable,
+	), nullableString(alias), id)
+	if err != nil {
+		return fmt.Errorf("postgres store: update api key alias: %w", err)
 	}
 	return assertRowsAffected(res, id, "api key")
 }

@@ -144,7 +144,7 @@ func TestAPIKeyCreateLookupAndGetLifecycle(t *testing.T) {
 		AllowedModels:    []string{"gpt-4o", "claude-3-5-sonnet"},
 		BlockedModels:    []string{"claude-opus-4"},
 	}
-	key, secret, err := apiKeys.Create(ctx, "test-key", "", &expires, map[string]any{"owner": "ops"}, &policy)
+	key, secret, err := apiKeys.Create(ctx, "test-key", "alias-1", "", &expires, map[string]any{"owner": "ops"}, &policy)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestAPIKeyUpdatePolicyReplaces(t *testing.T) {
 	ctx := cancelableTestCtx(t)
 	apiKeys := NewAPIKeyStore(store)
 
-	key, _, err := apiKeys.Create(ctx, "pkey", "", nil, nil, nil)
+	key, _, err := apiKeys.Create(ctx, "pkey", "", "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
