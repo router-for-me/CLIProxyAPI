@@ -29,6 +29,7 @@ const DEFAULT_PAGE_SIZE = 25;
 export default function ModelsCatalogPage() {
   const [page, setPage] = useState(1);
   const [provider, setProvider] = useState('');
+  const [officialProvider, setOfficialProvider] = useState('');
   const [availableOnly, setAvailableOnly] = useState(true);
   const [manualSyncing, setManualSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState('');
@@ -44,8 +45,8 @@ export default function ModelsCatalogPage() {
   const {
     data, error, loading, reload,
   } = useAsync(
-    () => listModelsCatalog({ page, pageSize: DEFAULT_PAGE_SIZE, provider, availableOnly: false }),
-    [page, provider],
+    () => listModelsCatalog({ page, pageSize: DEFAULT_PAGE_SIZE, provider, officialProvider, availableOnly: false }),
+    [page, provider, officialProvider],
   );
   const { data: countData } = useAsync(() => getModelsCatalogCount(), []);
 
@@ -96,6 +97,10 @@ export default function ModelsCatalogPage() {
     setProvider(e.target.value);
     setPage(1);
   }
+  function handleOfficialProviderChange(e) {
+    setOfficialProvider(e.target.value);
+    setPage(1);
+  }
   function toggleAvailableOnly(e) {
     setAvailableOnly(e.target.checked);
     setPage(1);
@@ -129,12 +134,21 @@ export default function ModelsCatalogPage() {
       <div className="card">
         <div className="row gap-lg" style={{ flexWrap: 'wrap' }}>
           <div className="row gap-sm">
-            <label className="form__label" style={{ marginTop: 6 }}>Provider</label>
+            <label className="form__label" style={{ marginTop: 6 }}>Upstream Provider</label>
             <input
               type="text" style={{ width: 200 }}
               value={provider}
               onChange={handleProviderChange}
-              placeholder="e.g. openai"
+              placeholder="e.g. openai (proxy/router)"
+            />
+          </div>
+          <div className="row gap-sm">
+            <label className="form__label" style={{ marginTop: 6 }}>Provider</label>
+            <input
+              type="text" style={{ width: 200 }}
+              value={officialProvider}
+              onChange={handleOfficialProviderChange}
+              placeholder="e.g. openai (official)"
             />
           </div>
           <label className="row gap-sm" style={{ cursor: 'pointer' }}>
@@ -180,6 +194,7 @@ export default function ModelsCatalogPage() {
               <thead>
                 <tr>
                   <th>Model ID</th>
+                  <th>Upstream Provider</th>
                   <th>Provider</th>
                   <th>Display name</th>
                   <th>Context</th>
@@ -248,6 +263,7 @@ function ModelRow({ model, onEdit }) {
         )}
       </td>
       <td><span className="badge badge--muted">{model.provider}</span></td>
+      <td><span className="badge">{model.official_provider || '—'}</span></td>
       <td>{model.display_name || '—'}</td>
       <td className="mono">{model.context_length ? model.context_length.toLocaleString() : '—'}</td>
       <td className="mono">{model.max_completion_tokens ? model.max_completion_tokens.toLocaleString() : '—'}</td>

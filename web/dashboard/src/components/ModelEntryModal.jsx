@@ -17,6 +17,7 @@ import { Modal, Spinner } from './Primitives.jsx';
 const EMPTY_ENTRY = {
   id: '',
   provider: '',
+  official_provider: '',
   object: 'model',
   created: 0,
   owned_by: '',
@@ -89,6 +90,7 @@ export default function ModelEntryModal({ mode, initial, onClose, onSaved, onDel
       created: Number(form.created) || 0,
       owned_by: form.owned_by || provider,
       type: form.type || provider,
+      official_provider: form.official_provider || '',
       display_name: form.display_name,
       name: form.name,
       version: form.version,
@@ -144,7 +146,7 @@ export default function ModelEntryModal({ mode, initial, onClose, onSaved, onDel
       {error && <div className="error-banner">{error}</div>}
       <form onSubmit={handleSubmit}>
         {/* Identity (locked when editing) */}
-        <div className="grid grid--2">
+        <div className="grid grid--3">
           <div className="form__row">
             <label className="form__label">Model ID *</label>
             <input
@@ -155,13 +157,22 @@ export default function ModelEntryModal({ mode, initial, onClose, onSaved, onDel
             />
           </div>
           <div className="form__row">
-            <label className="form__label">Provider *</label>
+            <label className="form__label">Upstream Provider *</label>
             <input
               type="text" required value={form.provider}
               onChange={(e) => update({ provider: e.target.value })}
               disabled={!isCreate}
-              placeholder="e.g. openai"
+              placeholder="e.g. openai (proxy/router name)"
             />
+          </div>
+          <div className="form__row">
+            <label className="form__label">Provider (official)</label>
+            <input
+              type="text" value={form.official_provider}
+              onChange={(e) => update({ official_provider: e.target.value })}
+              placeholder="e.g. openai (official name)"
+            />
+            <div className="form__hint">Official provider behind this model. Leave blank when same as upstream.</div>
           </div>
         </div>
 
@@ -348,6 +359,7 @@ function buildFormFromInitial(initial, isCreate) {
   return {
     id: initial.id || '',
     provider: initial.provider || '',
+    official_provider: initial.official_provider || initial.provider || '',
     object: initial.object || 'model',
     created: initial.created || 0,
     owned_by: initial.owned_by || initial.provider || '',

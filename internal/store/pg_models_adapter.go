@@ -88,6 +88,7 @@ func ToStoredModel(m *registry.ModelInfo) StoredModel {
 	out := StoredModel{
 		ID:                         m.ID,
 		Provider:                   provider,
+		OfficialProvider:           m.OwnedBy,
 		Object:                     m.Object,
 		Created:                    m.Created,
 		OwnedBy:                    m.OwnedBy,

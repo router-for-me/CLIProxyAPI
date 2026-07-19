@@ -332,6 +332,7 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		CREATE TABLE IF NOT EXISTS %s (
 			id                            TEXT NOT NULL,
 			provider                      TEXT NOT NULL,
+			official_provider             TEXT,
 			object                        TEXT NOT NULL DEFAULT 'model',
 			created                       BIGINT NOT NULL DEFAULT 0,
 			owned_by                      TEXT NOT NULL,
@@ -368,6 +369,7 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		{"supported_parameters", "JSONB"},
 		{"input_modalities", "JSONB"},
 		{"output_modalities", "JSONB"},
+		{"official_provider", "TEXT"},
 	} {
 		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
 			`ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s`,
@@ -376,10 +378,24 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			return fmt.Errorf("postgres store: alter models_catalog add column %s: %w", col.name, err)
 		}
 	}
+	// Backfill official_provider from provider for rows that predate the
+	// column. Idempotent: only touches rows with NULL/empty values so the
+	// operator's later hand-edits are preserved.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE %s SET official_provider = provider WHERE official_provider IS NULL OR official_provider = ''`,
+		modelsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: backfill models_catalog.official_provider: %w", err)
+	}
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
 		`CREATE INDEX IF NOT EXISTS idx_models_catalog_provider ON %s(provider)`, modelsTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: create models_catalog provider index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_models_catalog_official_provider ON %s(official_provider)`, modelsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create models_catalog official_provider index: %w", err)
 	}
 
 	modelPricingTable := s.fullTableName(s.cfg.ModelPricingTable)

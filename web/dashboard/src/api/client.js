@@ -230,12 +230,14 @@ export async function listModelsCatalog({
   page = 1,
   pageSize = 25,
   provider = '',
+  officialProvider = '',
   availableOnly = true,
 } = {}) {
   const qs = new URLSearchParams();
   qs.set('page', String(page));
   qs.set('page_size', String(pageSize));
   if (provider) qs.set('provider', provider);
+  if (officialProvider) qs.set('official_provider', officialProvider);
   // Default to filtering down to models the active registry reports as
   // available — the dashboard should show live models only. Pass
   // availableOnly:false to browse the full persisted catalog.

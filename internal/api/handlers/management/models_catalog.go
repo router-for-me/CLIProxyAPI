@@ -19,10 +19,13 @@ import (
 // ListModelsCatalog handles GET /v0/management/models-catalog.
 //
 // Query parameters:
-//   - page            (default 1, 1-indexed)
-//   - page_size       (default 25, max 200)
-//   - provider        (optional, scopes both page and count)
-//   - available_only  (default false): when "1" or "true", filters the
+//   - page                (default 1, 1-indexed)
+//   - page_size           (default 25, max 200)
+//   - provider            (optional, scopes both page and count to the
+//     upstream/proxy provider column)
+//   - official_provider   (optional, scopes both page and count to the
+//     official provider column)
+//   - available_only      (default false): when "1" or "true", filters the
 //     persisted catalog down to the IDs the active in-memory registry reports
 //     as currently available (across openai/claude/gemini handler types).
 //     This is what the dashboard should call to show "live" models only.
@@ -43,6 +46,7 @@ func (h *Handler) ListModelsCatalog(c *gin.Context) {
 		pageSize = 200
 	}
 	provider := c.Query("provider")
+	officialProvider := c.Query("official_provider")
 	availableOnly := boolFromQuery(c.Query("available_only"))
 
 	var idFilter []string
@@ -63,7 +67,7 @@ func (h *Handler) ListModelsCatalog(c *gin.Context) {
 		}
 	}
 
-	stored, total, err := models.SelectAllPaged(c.Request.Context(), page, pageSize, provider, idFilter)
+	stored, total, err := models.SelectAllPaged(c.Request.Context(), page, pageSize, provider, officialProvider, idFilter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
@@ -208,12 +212,13 @@ func (h *Handler) SyncModelsFromV1(c *gin.Context) {
 			provider = "unknown"
 		}
 		stored = append(stored, store.StoredModel{
-			ID:       m.ID,
-			Provider: provider,
-			Object:   strOrDefault(m.Object, "model"),
-			Created:  m.Created,
-			OwnedBy:  strOrDefault(m.OwnedBy, provider),
-			Type:     provider,
+			ID:               m.ID,
+			Provider:         provider,
+			OfficialProvider: strOrDefault(m.OwnedBy, provider),
+			Object:           strOrDefault(m.Object, "model"),
+			Created:          m.Created,
+			OwnedBy:          strOrDefault(m.OwnedBy, provider),
+			Type:             provider,
 		})
 	}
 	if err := models.UpsertModels(c.Request.Context(), stored); err != nil {
@@ -352,10 +357,11 @@ type pricingSuggestion struct {
 
 // pricingSuggestionRow is the per-model entry the preview endpoint returns.
 type pricingSuggestionRow struct {
-	ModelID        string              `json:"model_id"`
-	Provider       string              `json:"provider,omitempty"`
-	CurrentPricing *store.Pricing      `json:"current_pricing,omitempty"`
-	Suggestions    []pricingSuggestion `json:"suggestions"`
+	ModelID          string              `json:"model_id"`
+	Provider         string              `json:"provider,omitempty"`
+	OfficialProvider string              `json:"official_provider,omitempty"`
+	CurrentPricing   *store.Pricing      `json:"current_pricing,omitempty"`
+	Suggestions      []pricingSuggestion `json:"suggestions"`
 }
 
 // SyncPricingPreview handles POST /v0/management/models-catalog/sync-pricing-preview.
@@ -406,10 +412,11 @@ func (h *Handler) SyncPricingPreview(c *gin.Context) {
 	for _, m := range allModels {
 		suggestions := toPricingSuggestions(matches[m.ID])
 		row := pricingSuggestionRow{
-			ModelID:        m.ID,
-			Provider:       m.Provider,
-			CurrentPricing: currentByID[m.ID],
-			Suggestions:    suggestions,
+			ModelID:          m.ID,
+			Provider:         m.Provider,
+			OfficialProvider: m.OfficialProvider,
+			CurrentPricing:   currentByID[m.ID],
+			Suggestions:      suggestions,
 		}
 		rows = append(rows, row)
 	}
@@ -569,7 +576,7 @@ func selectAllStreamed(ctx context.Context, models *store.ModelsStore) ([]store.
 	const batch = 500
 	page := 1
 	for {
-		rows, _, err := models.SelectAllPaged(ctx, page, batch, "", nil)
+		rows, _, err := models.SelectAllPaged(ctx, page, batch, "", "", nil)
 		if err != nil {
 			return nil, err
 		}
@@ -619,6 +626,7 @@ type ModelEntryRequest struct {
 	Created                    int64             `json:"created"`
 	OwnedBy                    string            `json:"owned_by"`
 	Type                       string            `json:"type"`
+	OfficialProvider           string            `json:"official_provider"`
 	DisplayName                string            `json:"display_name"`
 	Name                       string            `json:"name"`
 	Version                    string            `json:"version"`
@@ -671,6 +679,7 @@ func (h *Handler) PutModelEntry(c *gin.Context) {
 	entry := store.StoredModel{
 		ID:                         id,
 		Provider:                   provider,
+		OfficialProvider:           req.OfficialProvider,
 		Object:                     strOrDefault(req.Object, "model"),
 		Created:                    req.Created,
 		OwnedBy:                    strOrDefault(req.OwnedBy, provider),

@@ -18,6 +18,7 @@ import (
 type StoredModel struct {
 	ID                         string            `json:"id"`
 	Provider                   string            `json:"provider"`
+	OfficialProvider           string            `json:"official_provider,omitempty"`
 	Object                     string            `json:"object"`
 	Created                    int64             `json:"created"`
 	OwnedBy                    string            `json:"owned_by"`
@@ -74,7 +75,7 @@ func (s *ModelsStore) UpsertModels(ctx context.Context, models []StoredModel) er
 		if end > len(models) {
 			end = len(models)
 		}
-		if err := s.upsertBatch(ctx, models[i:end]); err != nil {
+		if err := s.upsertBatch(ctx, models[i:end], true); err != nil {
 			return err
 		}
 	}
@@ -83,20 +84,27 @@ func (s *ModelsStore) UpsertModels(ctx context.Context, models []StoredModel) er
 
 const upsertBatchSize = 50
 
-func (s *ModelsStore) upsertBatch(ctx context.Context, models []StoredModel) error {
+// upsertBatch writes a batch of models via INSERT ... ON CONFLICT. The
+// protectUserDefined flag governs conflict behavior:
+//   - true  (sync paths: /v1/models mirror, registry hooks): the UPDATE is
+//     skipped when the existing row is user-defined, so operator edits made
+//     via the dashboard are not clobbered by periodic auto-syncs.
+//   - false (dashboard edit path): the row is always replaced so the
+//     operator's explicit edit takes effect even on a user-defined row.
+func (s *ModelsStore) upsertBatch(ctx context.Context, models []StoredModel, protectUserDefined bool) error {
 	var b strings.Builder
 	b.WriteString(`
 		INSERT INTO `)
 	b.WriteString(s.modelsTable)
 	b.WriteString(` (
-			id, provider, object, created, owned_by, type, display_name,
+			id, provider, official_provider, object, created, owned_by, type, display_name,
 			name, version, description, input_token_limit, output_token_limit,
 			supported_generation_methods, context_length, max_completion_tokens,
 			supported_parameters, input_modalities, output_modalities,
 			supports_web_search, thinking_config, override_header, user_defined, updated_at
 		) VALUES `)
-	args := make([]any, 0, len(models)*23)
-	const placeholders = 23
+	args := make([]any, 0, len(models)*24)
+	const placeholders = 24
 	for i, m := range models {
 		if i > 0 {
 			b.WriteByte(',')
@@ -137,7 +145,7 @@ func (s *ModelsStore) upsertBatch(ctx context.Context, models []StoredModel) err
 		}
 
 		args = append(args,
-			m.ID, m.Provider, defaultIfEmpty(m.Object, "model"), m.Created,
+			m.ID, m.Provider, m.OfficialProvider, defaultIfEmpty(m.Object, "model"), m.Created,
 			m.OwnedBy, m.Type, m.DisplayName, m.Name, m.Version, m.Description,
 			m.InputTokenLimit, m.OutputTokenLimit, genMethods, m.ContextLength,
 			m.MaxCompletionTokens, params, inputMod, outputMod,
@@ -146,6 +154,9 @@ func (s *ModelsStore) upsertBatch(ctx context.Context, models []StoredModel) err
 	}
 	b.WriteString(`
 		ON CONFLICT (id, provider) DO UPDATE SET
+			official_provider = COALESCE(NULLIF(EXCLUDED.official_provider, ''), `)
+	b.WriteString(s.modelsTable)
+	b.WriteString(`.official_provider),
 			object = EXCLUDED.object,
 			created = EXCLUDED.created,
 			owned_by = EXCLUDED.owned_by,
@@ -168,6 +179,12 @@ func (s *ModelsStore) upsertBatch(ctx context.Context, models []StoredModel) err
 			user_defined = EXCLUDED.user_defined,
 			updated_at = NOW()
 	`)
+	if protectUserDefined {
+		b.WriteString(`WHERE `)
+		b.WriteString(s.modelsTable)
+		b.WriteString(`.user_defined = FALSE
+`)
+	}
 	if _, err := s.db.ExecContext(ctx, b.String(), args...); err != nil {
 		return fmt.Errorf("postgres store: upsert models batch: %w", err)
 	}
@@ -201,7 +218,7 @@ func (s *ModelsStore) SelectAll(ctx context.Context) ([]StoredModel, error) {
 		return nil, fmt.Errorf("postgres store: models store not initialized")
 	}
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, provider, object, created, owned_by, type, display_name,
+		SELECT id, provider, official_provider, object, created, owned_by, type, display_name,
 		       name, version, description, input_token_limit, output_token_limit,
 		       supported_generation_methods, context_length, max_completion_tokens,
 		       supported_parameters, input_modalities, output_modalities,
@@ -225,7 +242,7 @@ func (s *ModelsStore) SelectAll(ctx context.Context) ([]StoredModel, error) {
 			thinking   []byte
 			override   []byte
 		)
-		if err = rows.Scan(&m.ID, &m.Provider, &m.Object, &m.Created, &m.OwnedBy,
+		if err = rows.Scan(&m.ID, &m.Provider, &m.OfficialProvider, &m.Object, &m.Created, &m.OwnedBy,
 			&m.Type, &m.DisplayName, &m.Name, &m.Version, &m.Description,
 			&m.InputTokenLimit, &m.OutputTokenLimit, &genMethods, &m.ContextLength,
 			&m.MaxCompletionTokens, &params, &inputMod, &outputMod,
@@ -249,10 +266,12 @@ func (s *ModelsStore) SelectAll(ctx context.Context) ([]StoredModel, error) {
 
 // SelectAllPaged returns one page of models plus the total count. Page is
 // 1-indexed; pageSize must be > 0. When provider is non-empty, both the
-// page and the count are scoped to that provider. When idFilter is non-empty,
-// results are restricted to those IDs (typically populated from an
-// availability registry, so the catalog page only shows live models).
-func (s *ModelsStore) SelectAllPaged(ctx context.Context, page, pageSize int, provider string, idFilter []string) ([]StoredModel, int64, error) {
+// page and the count are scoped to that provider (the upstream/proxy
+// provider). When officialProvider is non-empty, both are scoped to that
+// official provider. When idFilter is non-empty, results are restricted to
+// those IDs (typically populated from an availability registry, so the
+// catalog page only shows live models).
+func (s *ModelsStore) SelectAllPaged(ctx context.Context, page, pageSize int, provider, officialProvider string, idFilter []string) ([]StoredModel, int64, error) {
 	if s == nil || s.db == nil {
 		return nil, 0, fmt.Errorf("postgres store: models store not initialized")
 	}
@@ -270,6 +289,10 @@ func (s *ModelsStore) SelectAllPaged(ctx context.Context, page, pageSize int, pr
 	if provider != "" {
 		args = append(args, provider)
 		whereParts = append(whereParts, fmt.Sprintf("provider = $%d", len(args)))
+	}
+	if officialProvider != "" {
+		args = append(args, officialProvider)
+		whereParts = append(whereParts, fmt.Sprintf("official_provider = $%d", len(args)))
 	}
 	if len(idFilter) > 0 {
 		// Build an ANY(text[]) predicate; PostgreSQL handles it natively
@@ -291,7 +314,7 @@ func (s *ModelsStore) SelectAllPaged(ctx context.Context, page, pageSize int, pr
 	listArgs := append([]any{}, args...)
 	listArgs = append(listArgs, pageSize, (page-1)*pageSize)
 	listQuery := fmt.Sprintf(`
-		SELECT id, provider, object, created, owned_by, type, display_name,
+		SELECT id, provider, official_provider, object, created, owned_by, type, display_name,
 		       name, version, description, input_token_limit, output_token_limit,
 		       supported_generation_methods, context_length, max_completion_tokens,
 		       supported_parameters, input_modalities, output_modalities,
@@ -317,7 +340,7 @@ func (s *ModelsStore) SelectAllPaged(ctx context.Context, page, pageSize int, pr
 			thinking   []byte
 			override   []byte
 		)
-		if err = rows.Scan(&m.ID, &m.Provider, &m.Object, &m.Created, &m.OwnedBy,
+		if err = rows.Scan(&m.ID, &m.Provider, &m.OfficialProvider, &m.Object, &m.Created, &m.OwnedBy,
 			&m.Type, &m.DisplayName, &m.Name, &m.Version, &m.Description,
 			&m.InputTokenLimit, &m.OutputTokenLimit, &genMethods, &m.ContextLength,
 			&m.MaxCompletionTokens, &params, &inputMod, &outputMod,
@@ -361,7 +384,7 @@ func (s *ModelsStore) SelectByProvider(ctx context.Context, provider string) ([]
 		return nil, fmt.Errorf("postgres store: models store not initialized")
 	}
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, provider, object, created, owned_by, type, display_name,
+		SELECT id, provider, official_provider, object, created, owned_by, type, display_name,
 		       name, version, description, input_token_limit, output_token_limit,
 		       supported_generation_methods, context_length, max_completion_tokens,
 		       supported_parameters, input_modalities, output_modalities,
@@ -386,7 +409,7 @@ func (s *ModelsStore) SelectByProvider(ctx context.Context, provider string) ([]
 			thinking   []byte
 			override   []byte
 		)
-		if err = rows.Scan(&m.ID, &m.Provider, &m.Object, &m.Created, &m.OwnedBy,
+		if err = rows.Scan(&m.ID, &m.Provider, &m.OfficialProvider, &m.Object, &m.Created, &m.OwnedBy,
 			&m.Type, &m.DisplayName, &m.Name, &m.Version, &m.Description,
 			&m.InputTokenLimit, &m.OutputTokenLimit, &genMethods, &m.ContextLength,
 			&m.MaxCompletionTokens, &params, &inputMod, &outputMod,
@@ -444,6 +467,8 @@ func (s *ModelsStore) DeleteByProvider(ctx context.Context, provider string) (in
 // UpsertOne inserts or updates a single model row. Use this for ad-hoc edits
 // from the dashboard (e.g. an operator adjusting display_name, context_length,
 // or adding a user-defined model not present in the upstream registry).
+// Unlike the sync path, this always replaces the existing row so the
+// operator's explicit edit wins even on a previously user-defined row.
 func (s *ModelsStore) UpsertOne(ctx context.Context, m StoredModel) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("postgres store: models store not initialized")
@@ -451,7 +476,7 @@ func (s *ModelsStore) UpsertOne(ctx context.Context, m StoredModel) error {
 	if strings.TrimSpace(m.ID) == "" || strings.TrimSpace(m.Provider) == "" {
 		return fmt.Errorf("postgres store: upsert model requires non-empty id and provider")
 	}
-	return s.upsertBatch(ctx, []StoredModel{m})
+	return s.upsertBatch(ctx, []StoredModel{m}, false)
 }
 
 // SelectOne returns a single model row by (id, provider) primary key. Returns
@@ -461,7 +486,7 @@ func (s *ModelsStore) SelectOne(ctx context.Context, id, provider string) (*Stor
 		return nil, fmt.Errorf("postgres store: models store not initialized")
 	}
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT id, provider, object, created, owned_by, type, display_name,
+		SELECT id, provider, official_provider, object, created, owned_by, type, display_name,
 		       name, version, description, input_token_limit, output_token_limit,
 		       supported_generation_methods, context_length, max_completion_tokens,
 		       supported_parameters, input_modalities, output_modalities,
@@ -478,7 +503,7 @@ func (s *ModelsStore) SelectOne(ctx context.Context, id, provider string) (*Stor
 		thinking   []byte
 		override   []byte
 	)
-	err := row.Scan(&m.ID, &m.Provider, &m.Object, &m.Created, &m.OwnedBy,
+	err := row.Scan(&m.ID, &m.Provider, &m.OfficialProvider, &m.Object, &m.Created, &m.OwnedBy,
 		&m.Type, &m.DisplayName, &m.Name, &m.Version, &m.Description,
 		&m.InputTokenLimit, &m.OutputTokenLimit, &genMethods, &m.ContextLength,
 		&m.MaxCompletionTokens, &params, &inputMod, &outputMod,
