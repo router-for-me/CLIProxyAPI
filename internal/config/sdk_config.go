@@ -55,6 +55,24 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// TorProxy is the TOR SOCKS proxy URL (e.g., "socks5://127.0.0.1:9050").
+	// When set, TOR-related connections (IP check, etc.) use this proxy.
+	TorProxy string `yaml:"tor-proxy,omitempty" json:"tor-proxy,omitempty"`
+	// TorControl specifies the TOR control port address (e.g., "127.0.0.1:9051").
+	// When set, IP rotation is available via TOR's NEWNYM signal.
+	TorControl string `yaml:"tor-control,omitempty" json:"tor-control,omitempty"`
+
+	// TorPassword is the optional password for the TOR control port.
+	TorPassword string `yaml:"tor-password,omitempty" json:"tor-password,omitempty"`
+
+	// TorRetryableCodes are HTTP status codes that trigger TOR IP rotation.
+	// Defaults to [429] when TOR control is configured but this is empty.
+	TorRetryableCodes []int `yaml:"tor-retryable-codes,omitempty" json:"tor-retryable-codes,omitempty"`
+
+	// TorMaxRetries sets max retry attempts when upstream returns a retryable code.
+	// 0 = unlimited (default).
+	TorMaxRetries int `yaml:"tor-max-retries" json:"tor-max-retries"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.

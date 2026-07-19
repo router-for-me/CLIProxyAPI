@@ -195,6 +195,33 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					message, _ = sjson.SetBytes(message, "content", content.String())
 				}
 
+				// Handle top-level tool_calls on message items (e.g., assistant messages
+				// with tool_calls as a direct field rather than inside content array items).
+				if toolCalls := item.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
+					var chatToolCalls []interface{}
+					toolCalls.ForEach(func(_, tc gjson.Result) bool {
+						tcID := tc.Get("id").String()
+						fnName := tc.Get("function.name").String()
+						fnArgs := tc.Get("function.arguments").String()
+						if tcID == "" {
+							tcID = tc.Get("call_id").String()
+						}
+						ctc := map[string]interface{}{
+							"id":   tcID,
+							"type": "function",
+							"function": map[string]string{
+								"name":      fnName,
+								"arguments": fnArgs,
+							},
+						}
+						chatToolCalls = append(chatToolCalls, ctc)
+						return true
+					})
+					if len(chatToolCalls) > 0 {
+						message, _ = sjson.SetBytes(message, "tool_calls", chatToolCalls)
+					}
+				}
+
 				if role == "assistant" {
 					reasoningContent := item.Get("reasoning_content").String()
 					if reasoningContent == "" {

@@ -326,3 +326,51 @@ func (h *Handler) DeleteProxyURL(c *gin.Context) {
 	h.cfg.ProxyURL = ""
 	h.persist(c)
 }
+
+
+// TOR Control
+func (h *Handler) GetTorControl(c *gin.Context) { c.JSON(200, gin.H{"tor-control": h.cfg.TorControl}) }
+func (h *Handler) PutTorControl(c *gin.Context) {
+	h.updateStringField(c, func(v string) { h.cfg.TorControl = v })
+}
+
+// TOR Password
+func (h *Handler) GetTorPassword(c *gin.Context) { c.JSON(200, gin.H{"tor-password": h.cfg.TorPassword}) }
+func (h *Handler) PutTorPassword(c *gin.Context) {
+	h.updateStringField(c, func(v string) { h.cfg.TorPassword = v })
+}
+
+
+// TOR Proxy
+func (h *Handler) GetTorProxy(c *gin.Context) { c.JSON(200, gin.H{"tor-proxy": h.cfg.TorProxy}) }
+func (h *Handler) PutTorProxy(c *gin.Context) {
+	h.updateStringField(c, func(v string) {
+		v = strings.TrimSpace(v)
+		if v != "" && !strings.Contains(v, "://") {
+			v = "socks5://" + v
+		}
+		h.cfg.TorProxy = v
+	})
+}
+// TOR Retryable Codes
+func (h *Handler) GetTorRetryableCodes(c *gin.Context) { c.JSON(200, gin.H{"tor-retryable-codes": h.cfg.TorRetryableCodes}) }
+func (h *Handler) PutTorRetryableCodes(c *gin.Context) {
+	var body struct {
+		Value []int `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	h.cfg.TorRetryableCodes = body.Value
+	h.persist(c)
+}
+// TOR Max Retries
+func (h *Handler) GetTorMaxRetries(c *gin.Context) {
+	val := h.cfg.TorMaxRetries
+	// If 0 (unset), still 0 means unlimited; show user what's stored
+	c.JSON(200, gin.H{"tor-max-retries": val})
+}
+func (h *Handler) PutTorMaxRetries(c *gin.Context) {
+	h.updateIntField(c, func(v int) { h.cfg.TorMaxRetries = v })
+}

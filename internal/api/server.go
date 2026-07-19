@@ -958,6 +958,25 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 		mgmt.DELETE("/oauth-session", s.mgmt.CancelAuthSession)
+
+		// TOR control and IP rotation
+		mgmt.GET("/tor-control", s.mgmt.GetTorControl)
+		mgmt.PUT("/tor-control", s.mgmt.PutTorControl)
+		mgmt.PATCH("/tor-control", s.mgmt.PutTorControl)
+		mgmt.GET("/tor-password", s.mgmt.GetTorPassword)
+		mgmt.PUT("/tor-password", s.mgmt.PutTorPassword)
+		mgmt.PATCH("/tor-password", s.mgmt.PutTorPassword)
+		mgmt.GET("/tor-proxy", s.mgmt.GetTorProxy)
+		mgmt.PUT("/tor-proxy", s.mgmt.PutTorProxy)
+		mgmt.PATCH("/tor-proxy", s.mgmt.PutTorProxy)
+		mgmt.GET("/tor-retryable-codes", s.mgmt.GetTorRetryableCodes)
+		mgmt.PUT("/tor-retryable-codes", s.mgmt.PutTorRetryableCodes)
+		mgmt.PATCH("/tor-retryable-codes", s.mgmt.PutTorRetryableCodes)
+		mgmt.GET("/tor-max-retries", s.mgmt.GetTorMaxRetries)
+		mgmt.PUT("/tor-max-retries", s.mgmt.PutTorMaxRetries)
+		mgmt.PATCH("/tor-max-retries", s.mgmt.PutTorMaxRetries)
+		mgmt.POST("/tor-control/rotate", s.mgmt.PostTorRotate)
+		mgmt.GET("/tor-control/check-ip", s.mgmt.GetTorCheckIP)
 	}
 }
 
@@ -1094,7 +1113,239 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
-	c.File(filePath)
+	// Inject TOR config fields into Network Configuration section
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		log.WithError(err).Error("failed to read management control panel asset")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	torScript := `<script>
+;(function(){
+  try {
+    var K = '';
+    // Intercept auth keys from SPA's XHR/fetch calls
+    var _origOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function() {
+      this.addEventListener('readystatechange', function() {
+        if (this.readyState === 1 && !K) {
+          var hdr = this.getRequestHeader && this.getRequestHeader('Authorization');
+          // Can't reliably read back headers, so we patch setRequestHeader instead
+        }
+      });
+      return _origOpen.apply(this, arguments);
+    };
+    var _origSetHdr = XMLHttpRequest.prototype.setRequestHeader;
+    XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+      if (!K && name.toLowerCase() === 'authorization' && value.indexOf('Bearer ') === 0) {
+        K = value.slice(7).trim();
+      }
+      return _origSetHdr.apply(this, arguments);
+    };
+    var _origFetch = window.fetch;
+    window.fetch = function(url, opts) {
+      if (!K && opts && opts.headers) {
+        var h = opts.headers;
+        if (h instanceof Headers) { if (h.has('Authorization')) { var v = h.get('Authorization'); if (v.indexOf('Bearer ')===0) K = v.slice(7).trim(); } }
+        else if (typeof h === 'object') {
+          var v = h['Authorization'] || h['authorization'];
+          if (v && v.indexOf('Bearer ')===0) K = v.slice(7).trim();
+        }
+      }
+      return _origFetch.call(this, url, opts);
+    };
+    // Also try to extract from URL hash fragment
+    if (!K) { var m = window.location.hash.match(/[?&]key=([^&]+)/); if (m) K = decodeURIComponent(m[1]); }
+    function api(path, method, body) {
+      var hdrs = {'Content-Type': 'application/json'};
+      if (K) hdrs['X-Management-Key'] = K;
+      return fetch(window.location.origin + '/v0/management' + path, {
+        method: method || 'GET',
+        headers: hdrs,
+        body: body ? JSON.stringify(body) : undefined
+      }).then(function(r){return r.json()}).catch(function(){return {}});
+    }
+    function torHTML() {
+      return '<div class="VisualConfigEditor-module__sectionGrid___KHy6p" style="border-top:1px solid #333;padding-top:12px;margin-top:4px">'
+        + '<div style="display:flex;align-items:center;gap:10px;margin:0 0 10px 2px">'
+        + '<span style="font-size:13px;font-weight:600;color:#e0e0e0">\u24d8 TOR Configuration</span>'
+        + '<span id="_tor_toggle_" style="position:relative;display:inline-block;width:36px;height:20px;cursor:pointer;flex-shrink:0;background:#666;border-radius:10px;transition:background .25s" data-on="false">'
+        + '<span id="_tor_thumb_" style="position:absolute;top:2px;left:2px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .25s"></span></span>'
+        + '<span id="_tor_toglabel_" style="font-size:11px;color:#aaa;font-weight:600;user-select:none">OFF</span></div>'
+        + '<div id="_tor_fields_" style="opacity:1;transition:opacity .2s">'
+        + '<div class="form-group"><label for="_tor_proxy_">TOR SOCKS Proxy</label><div><input id="_tor_proxy_" class="input" placeholder="127.0.0.1:9050" value=""></div></div>'
+        + '<div class="form-group" style="margin-top:6px"><label for="_tor_ctrl_">TOR Control</label><div><input id="_tor_ctrl_" class="input" placeholder="127.0.0.1:9051" value=""></div></div>'
+        + '<div class="form-group" style="margin-top:6px"><label for="_tor_pass_">Control Password</label><div style="position:relative"><input id="_tor_pass_" class="input" type="password" placeholder="(optional)" value="" style="padding-right:32px"><span id="_tor_pw_toggle_" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);cursor:pointer;line-height:1;display:flex;padding:4px;color:#888"><span id="_tor_pw_eye_"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"></line></svg></span></span></div></div>'
+        + '<div class="form-group" style="margin-top:6px"><label for="_tor_codes_">Retry on Codes</label><div><input id="_tor_codes_" class="input" placeholder="429,502,503,504,500" value=""></div><div class="hint" style="font-size:11px;color:#777;margin-top:2px">TOR IP rotation triggered on these HTTP error codes</div></div>'
+        + '<div class="form-group" style="margin-top:6px"><label for="_tor_retries_">Max Retries</label><div><input id="_tor_retries_" class="input" type="number" min="0" max="50" placeholder="0" value=""></div><div class="hint" style="font-size:11px;color:#777;margin-top:2px">0 = unlimited (default), &gt;0 = max retry attempts while rotating TOR IP</div></div>'
+        + '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px">'
+        + '<button id="_tor_save_" class="btn btn-primary btn-sm">Save TOR Config</button>'
+        + '<button id="_tor_checkip_" class="btn btn-sm" style="background:#2a2a3e;color:#ccc;border:1px solid #444">Check IP</button>'
+        + '<button id="_tor_rotate_" class="btn btn-sm" style="background:#3e2a2a;color:#ccc;border:1px solid #644">Rotate IP</button>'
+        + '<span id="_tor_st_" style="font-size:12px;color:#888"></span></div>'
+        + '</div></div>';
+    }
+    function _torSetUI(on) {
+      var t=document.getElementById('_tor_toggle_');
+      var h=document.getElementById('_tor_thumb_');
+      var l=document.getElementById('_tor_toglabel_');
+      var f=document.getElementById('_tor_fields_');
+      if(!t)return;
+      t.setAttribute('data-on',on?'true':'false');
+      t.style.background=on?'#4caf50':'#666';
+      if(h)h.style.transform=on?'translateX(16px)':'translateX(0)';
+      if(l)l.textContent=on?'ON':'OFF';
+      if(f)f.style.opacity=on?'1':'0.35';
+      var inputs=f?f.querySelectorAll('input,button'):[];
+      for(var i=0;i<inputs.length;i++)inputs[i].disabled=!on && inputs[i].id!=='_tor_pass_';
+      if(!on && window._cachedProxy===undefined) {
+        var p=document.getElementById('_tor_proxy_');
+        if(p)window._cachedProxy=p.value;
+      } else if(on && window._cachedProxy) {
+        var p=document.getElementById('_tor_proxy_');
+        if(p&&!p.value) { p.value=window._cachedProxy; }
+        window._cachedProxy=undefined;
+      }
+    }
+    function fill() {
+      if (window._torFilled) return;
+      window._torFilled = true;
+      api('/tor-proxy').then(function(d){
+        var v=d['tor-proxy']||'';
+        var on=!!v;
+        window._cachedProxy=on?v:undefined;
+        var e=document.getElementById('_tor_proxy_');
+        if(e&&!e.value)e.value=v.replace(/^socks5?:\/\//,'');
+        _torSetUI(on);
+      });
+      api('/tor-control').then(function(d){var e=document.getElementById('_tor_ctrl_');if(e&&!e.value)e.value=d['tor-control']||''});
+      api('/tor-password').then(function(d){var e=document.getElementById('_tor_pass_');if(e&&!e.value)e.value=d['tor-password']||''});
+      api('/tor-retryable-codes').then(function(d){var e=document.getElementById('_tor_codes_');if(e&&!e.value)e.value=Array.isArray(d['tor-retryable-codes'])?d['tor-retryable-codes'].join(','):''});
+      api('/tor-max-retries').then(function(d){var e=document.getElementById('_tor_retries_');if(e&&!e.value){(function(v){e.value=v!==undefined?v.toString():'0'})(d['tor-max-retries'])}});
+    }
+    function wire() {
+      var saveBtn=document.getElementById('_tor_save_');
+      var ckBtn=document.getElementById('_tor_checkip_');
+      var rotBtn=document.getElementById('_tor_rotate_');
+      var tog=document.getElementById('_tor_toggle_');
+      if(tog && !tog._w) {
+        tog._w=1;
+        tog.onclick=function(){var on=tog.getAttribute('data-on')!=='true';_torSetUI(on);};
+      }
+      if(saveBtn && !saveBtn._w) {
+        saveBtn._w=1;
+        saveBtn.onclick=function(){
+          if (window._torSaving) return;
+          window._torSaving = true;
+          var b=this; b.disabled=true; st('saving...');
+          var tog=document.getElementById('_tor_toggle_');
+          var on=tog?tog.getAttribute('data-on')==='true':false;
+          var proxyVal=document.getElementById('_tor_proxy_').value.trim();
+          var proxy=on && proxyVal ? (proxyVal.indexOf('://')===-1?'socks5://'+proxyVal:proxyVal) : '';
+          var ctrl=on ? document.getElementById('_tor_ctrl_').value.trim() : '';
+          var pass=on ? document.getElementById('_tor_pass_').value : '';
+          var cs=on ? document.getElementById('_tor_codes_').value.trim() : '';
+          var codes=cs?cs.split(',').map(function(s){return parseInt(s.trim(),10)}).filter(function(n){return !isNaN(n)}):[];
+          Promise.all([
+            api('/tor-proxy','PUT',{value:proxy}),
+            api('/tor-control','PUT',{value:ctrl}),
+            api('/tor-password','PUT',{value:pass}),
+            api('/tor-retryable-codes','PUT',{value:codes}),
+            api('/tor-max-retries','PUT',{value:parseInt(document.getElementById('_tor_retries_').value,10)||0})
+          ]).then(function(){st('\u2713 saved','#4caf50');setTimeout(function(){st('')},2000);window._torSaving=false})
+          .catch(function(){st('\u2717 error','#f44336');window._torSaving=false})
+          .finally(function(){b.disabled=false});
+        };
+      }
+      if(ckBtn && !ckBtn._w) { ckBtn._w=1; ckBtn.onclick=checkIP; }
+      if(rotBtn && !rotBtn._w) { rotBtn._w=1; rotBtn.onclick=rotateIP; }
+    }
+    function st(msg,color) {
+      var el=document.getElementById('_tor_st_');
+      if(!el)return;
+      el.textContent=msg;
+      el.style.color=color||'#888';
+    }
+    function checkIP() {
+      var btn=document.getElementById('_tor_checkip_');
+      if(!btn)return;
+      btn.disabled=true; st('checking...');
+      api('/tor-control/check-ip').then(function(d){
+        if(d.ip) st('IP: '+d.ip,'#4caf50');
+        else if(d.query) st('IP: '+d.query,'#4caf50');
+        else if(d.error) st(d.error,'#f44336');
+        else st(JSON.stringify(d).slice(0,50));
+      }).catch(function(){
+        st('check failed','#f44336');
+      }).finally(function(){btn.disabled=false});
+    }
+    function rotateIP() {
+      var btn=document.getElementById('_tor_rotate_');
+      if(!btn)return;
+      btn.disabled=true; st('rotating...');
+      api('/tor-control/rotate','POST').then(function(d){
+        if(d.status==='ok') { st('\u2713 rotated','#4caf50'); setTimeout(checkIP,2000); }
+        else st(d.error||d.message||'error','#f44336');
+      }).catch(function(){
+        st('rotate failed','#f44336');
+      }).finally(function(){btn.disabled=false});
+    }
+    function doInject() {
+      if (document.getElementById('_tor_save_')) return true;
+      window._torFilled = false;
+      var stack = document.querySelector('section#network [class*="sectionStack"]');
+      if (!stack) return false;
+      var div = document.createElement('div');
+      div.innerHTML = torHTML();
+      stack.appendChild(div.firstElementChild);
+      fill(); wire();
+      return true;
+    }
+    // password toggle
+    (function pt(){
+      var tog=document.getElementById('_tor_pw_toggle_');
+      var inp=document.getElementById('_tor_pass_');
+      if(tog && inp) {
+        tog._w=1;
+        var eyeEl=document.getElementById('_tor_pw_eye_');
+        var eyeOpen='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+        var eyeClosed='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"></line></svg>';
+        tog.onclick=function(){
+          if(inp.type==='password'){inp.type='text';if(eyeEl)eyeEl.innerHTML=eyeOpen;}
+          else{inp.type='password';if(eyeEl)eyeEl.innerHTML=eyeClosed;}
+        };
+      }
+      else if(!tog) setTimeout(pt, 500);
+    })();
+    // Tier 1: inject after DOM ready
+    document.addEventListener('DOMContentLoaded', doInject);
+    var netSec = document.getElementById('network') || document.querySelector('section#network');
+    if (netSec) {
+      var mo = new MutationObserver(function() {
+        if (!document.getElementById('_tor_save_') && document.querySelector('section#network')) {
+          doInject();
+        }
+      });
+      mo.observe(netSec, {childList:true, subtree:true});
+    }
+    window.addEventListener('hashchange', function() { setTimeout(doInject, 2000); });
+    (function poll() {
+      if (!document.getElementById('_tor_save_') && document.querySelector('section#network')) {
+        doInject();
+      }
+      if (!document.getElementById('_tor_save_')) { setTimeout(poll, 1000); }
+    })();
+  } catch(e) { console.warn('TOR:', e.message); }
+})();
+</script>`
+	contentStr := string(content)
+	if idx := strings.LastIndex(contentStr, "</body>"); idx >= 0 {
+		contentStr = contentStr[:idx] + torScript + contentStr[idx:]
+	}
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(contentStr))
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
