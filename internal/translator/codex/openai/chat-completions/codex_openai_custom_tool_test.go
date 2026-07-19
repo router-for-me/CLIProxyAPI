@@ -353,3 +353,28 @@ func TestExistingFunctionCallRoundTripRemainsFunction(t *testing.T) {
 		t.Fatalf("function call data regressed: %s", gjson.GetBytes(out, "input").Raw)
 	}
 }
+
+func TestCustomDeclarationAndToolChoicePreserveFieldsAndShortName(t *testing.T) {
+	longName := "ApplyPatch_" + strings.Repeat("namespace_", 8)
+	shortName := shortenNameIfNeeded(longName)
+	input := []byte(`{"tools":[{"type":"custom","name":"","description":"Apply a freeform patch.","format":{"type":"text"}}],"tool_choice":{"type":"custom","name":"","vendor_extension":"keep"}}`)
+	input, _ = sjson.SetBytes(input, "tools.0.name", longName)
+	input, _ = sjson.SetBytes(input, "tool_choice.name", longName)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	tool := gjson.GetBytes(out, "tools.0")
+	if tool.Get("type").String() != "custom" || tool.Get("name").String() != shortName {
+		t.Fatalf("custom declaration type/name regressed: %s", tool.Raw)
+	}
+	if tool.Get("description").String() != "Apply a freeform patch." || tool.Get("format.type").String() != "text" {
+		t.Fatalf("custom declaration fields were not preserved: %s", tool.Raw)
+	}
+
+	choice := gjson.GetBytes(out, "tool_choice")
+	if choice.Get("type").String() != "custom" || choice.Get("name").String() != shortName {
+		t.Fatalf("custom tool choice type/name regressed: %s", choice.Raw)
+	}
+	if choice.Get("vendor_extension").String() != "keep" {
+		t.Fatalf("custom tool choice fields were not preserved: %s", choice.Raw)
+	}
+}
