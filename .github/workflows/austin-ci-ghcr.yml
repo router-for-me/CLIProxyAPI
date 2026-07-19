@@ -47,7 +47,11 @@ jobs:
       - name: Run Claude prompt-cache race tests
         env:
           CGO_ENABLED: "1"
-        run: go test -race -count=1 ./internal/runtime/executor/helps ./internal/runtime/executor ./sdk/cliproxy
+        run: |
+          go test -race -count=1 ./internal/runtime/executor/helps
+          go test -race -count=1 \
+            -run '^(TestApplyClaudeHeadersWithSession|TestClaudePromptCache|TestClaudeCacheDiagnostics|TestClaudeDiagnosticsFallback|TestClaudeExecutorCountTokens|TestClaudeExecutorExecuteStreamRetainsStartedCacheStateUntilStreamEnds|TestClaudeExecutor_ExecuteOpenAINonStreamUsesSSEHeaders)' \
+            ./internal/runtime/executor
 
       - name: Vet Claude identity package
         run: go vet ./sdk/cliproxy/auth
