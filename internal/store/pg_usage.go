@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // UsageWindowType distinguishes the granularity at which a budget window rolls.
@@ -110,23 +112,56 @@ type UsageWindow struct {
 // is safe for concurrent use: the parent *sql.DB manages pooling.
 type UsageStore struct {
 	db           *sql.DB
+	apiKeysTable string
 	eventsTable  string
 	windowsTable string
 	pricingTable string
+	// sealer encrypts api_key_principal at rest. nil when no passphrase was
+	// configured (writes stay plaintext; reads tolerate plaintext rows).
+	sealer *Sealer
 }
 
 // NewUsageStore builds a UsageStore from a PostgresStore connection. Returns
 // nil when the parent store is nil so feature-detection is a single nil check.
+// The sealer is derived from the parent's UsageEncryptionKey: when empty,
+// encryption is disabled and the column is stored in plaintext.
 func NewUsageStore(parent *PostgresStore) *UsageStore {
 	if parent == nil {
 		return nil
 	}
+	sealer, err := NewSealer(parent.cfg.UsageEncryptionKey)
+	if err != nil {
+		log.Printf("postgres store: usage encryption disabled due to key error: %v", err)
+		sealer = nil
+	}
 	return &UsageStore{
 		db:           parent.DB(),
+		apiKeysTable: parent.APIKeysTable(),
 		eventsTable:  parent.UsageEventsTable(),
 		windowsTable: parent.UsageWindowsTable(),
 		pricingTable: parent.ModelPricingTable(),
+		sealer:       sealer,
 	}
+}
+
+// SetSealer overrides the in-memory sealer. Used by tests that construct a
+// UsageStore directly without going through NewPostgresStore. Production
+// callers should rely on NewUsageStore instead.
+func (s *UsageStore) SetSealer(sealer *Sealer) {
+	if s == nil {
+		return
+	}
+	s.sealer = sealer
+}
+
+// Sealer exposes the configured sealer (may be nil when encryption is
+// disabled). Callers that need to seal/open fields outside the hot insert
+// path (e.g. deriving a filter value) should reuse this.
+func (s *UsageStore) Sealer() *Sealer {
+	if s == nil {
+		return nil
+	}
+	return s.sealer
 }
 
 const usageEventColumnList = `
@@ -137,7 +172,9 @@ const usageEventColumnList = `
 	ttft_ms, failed, fail_status_code, generate, requested_at
 `
 
-// InsertEvent records a single usage event.
+// InsertEvent records a single usage event. The api_key_principal field is
+// sealed at rest via the configured Sealer before being bound. When the
+// sealer is nil (no passphrase configured), the value is stored as-is.
 func (s *UsageStore) InsertEvent(ctx context.Context, e UsageEvent) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("postgres store: usage store not initialized")
@@ -145,12 +182,19 @@ func (s *UsageStore) InsertEvent(ctx context.Context, e UsageEvent) error {
 	if e.RequestedAt.IsZero() {
 		e.RequestedAt = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+	principal, err := s.sealer.Seal(e.APIKeyPrincipal)
+	if err != nil {
+		// Best-effort: drop the principal rather than failing the request,
+		// but surface the error so operators can detect misconfiguration.
+		log.WithError(err).Warn("postgres store: seal api_key_principal failed; persisting empty")
+		principal = ""
+	}
+	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (%s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
 			$24, $25, $26)
 	`, s.eventsTable, usageEventColumnList),
-		e.RequestID, nullableString(e.APIKeyID), nullableString(e.APIKeyPrincipal),
+		e.RequestID, nullableString(e.APIKeyID), nullableString(principal),
 		e.Provider, e.ExecutorType, e.Model, e.Alias, e.Endpoint, e.AuthType,
 		e.Source, e.ReasoningEffort, e.ServiceTier, e.ResponseServiceTier,
 		e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens,
@@ -196,7 +240,14 @@ func (s *UsageStore) BatchInsertEvents(ctx context.Context, events []UsageEvent)
 		if ev.RequestedAt.IsZero() {
 			ev.RequestedAt = time.Now().UTC()
 		}
-		args = append(args, ev.RequestID, nullableString(ev.APIKeyID), nullableString(ev.APIKeyPrincipal),
+		// Seal the principal once per event; failures fall back to an
+		// empty value so a malformed row never aborts the whole batch.
+		principal, err := s.sealer.Seal(ev.APIKeyPrincipal)
+		if err != nil {
+			log.WithError(err).Warn("postgres store: seal api_key_principal failed in batch; persisting empty")
+			principal = ""
+		}
+		args = append(args, ev.RequestID, nullableString(ev.APIKeyID), nullableString(principal),
 			ev.Provider, ev.ExecutorType, ev.Model, ev.Alias, ev.Endpoint, ev.AuthType,
 			ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
 			ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
@@ -318,9 +369,10 @@ func (s *UsageStore) ListWindows(ctx context.Context, apiKeyID string, limit int
 
 // SelectAggregate runs a grouped sum query over usage_events. The grouping
 // dimension is derived from filter.GroupBy. The result rows always expose
-// (bucket, principal, request_count, failed_count, token sums, cost): the
-// principal column is null when GROUP BY is not api_key_id (one bucket may
-// contain many principals).
+// (bucket, key_alias, request_count, failed_count, token sums, cost): the
+// alias column is null when GROUP BY is not api_key_id (one bucket may
+// contain many keys). The raw api_key_principal is sealed at rest and never
+// projected; operators should resolve the human label via api_keys.key_alias.
 func (s *UsageStore) SelectAggregate(ctx context.Context, filter UsageFilter) ([]UsageAggregate, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store: usage store not initialized")
@@ -330,7 +382,9 @@ func (s *UsageStore) SelectAggregate(ctx context.Context, filter UsageFilter) ([
 		return nil, err
 	}
 	// Build the SELECT clause. We always project two leading columns for
-	// Scan: bucket (TEXT) and principal (TEXT, nullable). Both columns must
+	// Scan: bucket (TEXT) and principal (TEXT, nullable) — the latter is
+	// populated from the api_keys.key_alias column via a LEFT JOIN so the
+	// sealed api_key_principal never leaves the database. Both columns must
 	// appear in GROUP BY when grouping is active.
 	var b strings.Builder
 	b.WriteString("SELECT ")
@@ -338,7 +392,7 @@ func (s *UsageStore) SelectAggregate(ctx context.Context, filter UsageFilter) ([
 		b.WriteString("'total' AS bucket, NULL::text AS principal")
 	} else {
 		b.WriteString(groupExpr)
-		b.WriteString(" AS bucket, MAX(api_key_principal) AS principal")
+		b.WriteString(" AS bucket, MAX(COALESCE(NULLIF(k.key_alias, ''), k.name)) AS principal")
 	}
 	b.WriteString(`
 		, COALESCE(SUM(CASE WHEN NOT failed THEN 1 ELSE 0 END), 0) AS request_count,
@@ -351,36 +405,33 @@ func (s *UsageStore) SelectAggregate(ctx context.Context, filter UsageFilter) ([
 		COALESCE(SUM(cost_usd), 0) AS cost_usd
 	FROM `)
 	b.WriteString(s.eventsTable)
-	b.WriteString(" WHERE 1=1")
+	b.WriteString(" e LEFT JOIN ")
+	b.WriteString(s.apiKeysTable)
+	b.WriteString(" k ON k.id = e.api_key_id WHERE 1=1")
 	args := []any{}
 	if filter.APIKeyID != "" {
 		args = append(args, filter.APIKeyID)
-		b.WriteString(" AND api_key_id = $")
-		b.WriteString(itoa(len(args)))
-	}
-	if filter.Principal != "" {
-		args = append(args, filter.Principal)
-		b.WriteString(" AND api_key_principal = $")
+		b.WriteString(" AND e.api_key_id = $")
 		b.WriteString(itoa(len(args)))
 	}
 	if filter.Provider != "" {
 		args = append(args, filter.Provider)
-		b.WriteString(" AND provider = $")
+		b.WriteString(" AND e.provider = $")
 		b.WriteString(itoa(len(args)))
 	}
 	if filter.Model != "" {
 		args = append(args, filter.Model)
-		b.WriteString(" AND model = $")
+		b.WriteString(" AND e.model = $")
 		b.WriteString(itoa(len(args)))
 	}
 	if !filter.From.IsZero() {
 		args = append(args, filter.From)
-		b.WriteString(" AND requested_at >= $")
+		b.WriteString(" AND e.requested_at >= $")
 		b.WriteString(itoa(len(args)))
 	}
 	if !filter.To.IsZero() {
 		args = append(args, filter.To)
-		b.WriteString(" AND requested_at < $")
+		b.WriteString(" AND e.requested_at < $")
 		b.WriteString(itoa(len(args)))
 	}
 	if groupCol != "" {
@@ -433,15 +484,15 @@ func aggregateGroupClause(groupBy string) (groupExpr, groupCol string, err error
 	case "", "total":
 		return "", "", nil
 	case "api_key_id", "apikey", "key":
-		return "api_key_id", "api_key_id", nil
+		return "e.api_key_id", "e.api_key_id", nil
 	case "model":
-		return "model", "model", nil
+		return "e.model", "e.model", nil
 	case "provider":
-		return "provider", "provider", nil
+		return "e.provider", "e.provider", nil
 	case "day":
-		return "date_trunc('day', requested_at)", "date_trunc('day', requested_at)", nil
+		return "date_trunc('day', e.requested_at)", "date_trunc('day', e.requested_at)", nil
 	case "hour":
-		return "date_trunc('hour', requested_at)", "date_trunc('hour', requested_at)", nil
+		return "date_trunc('hour', e.requested_at)", "date_trunc('hour', e.requested_at)", nil
 	default:
 		return "", "", fmt.Errorf("unsupported group_by: %q", groupBy)
 	}
@@ -635,6 +686,7 @@ func (s *UsageStore) SelectTimeSeries(ctx context.Context, filter UsageFilter, i
 		COALESCE(SUM(total_tokens), 0), COALESCE(SUM(cost_usd), 0)
 	FROM `)
 	b.WriteString(s.eventsTable)
+	b.WriteString(" e")
 	args := buildWhereClause(&b, filter)
 	b.WriteString(" GROUP BY bucket, bucket_ts ORDER BY bucket ASC")
 	if filter.Limit > 0 {
@@ -664,13 +716,14 @@ func (s *UsageStore) SelectTimeSeries(ctx context.Context, filter UsageFilter, i
 
 // SelectTop returns the top-N rows ordered by a chosen metric across the
 // supplied dimension. dimension must be one of: "model", "provider",
-// "api_key_id", "api_key_principal". metric must be one of:
-// "request_count", "total_tokens", "cost_usd" (default request_count).
+// "api_key_id", "api_key_principal" (the last resolves to key_alias). metric
+// must be one of: "request_count", "total_tokens", "cost_usd" (default
+// request_count).
 func (s *UsageStore) SelectTop(ctx context.Context, filter UsageFilter, dimension, metric string, limit int) ([]TopEntry, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store: usage store not initialized")
 	}
-	dimCol, err := dimensionColumn(dimension)
+	dimCol, needsJoin, err := dimensionColumn(dimension)
 	if err != nil {
 		return nil, err
 	}
@@ -690,11 +743,19 @@ func (s *UsageStore) SelectTop(ctx context.Context, filter UsageFilter, dimensio
 	b.WriteString(` AS key,
 		COALESCE(SUM(CASE WHEN NOT failed THEN 1 ELSE 0 END), 0) AS request_count,
 		COALESCE(SUM(CASE WHEN failed THEN 1 ELSE 0 END), 0) AS failed_count,
-		COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-		COALESCE(SUM(reasoning_tokens), 0),
-		COALESCE(SUM(total_tokens), 0), COALESCE(SUM(cost_usd), 0)
+		COALESCE(SUM(input_tokens), 0) AS input_tokens,
+		COALESCE(SUM(output_tokens), 0) AS output_tokens,
+		COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+		COALESCE(SUM(total_tokens), 0) AS total_tokens,
+		COALESCE(SUM(cost_usd), 0) AS cost_usd
 	FROM `)
 	b.WriteString(s.eventsTable)
+	b.WriteString(" e")
+	if needsJoin {
+		b.WriteString(" LEFT JOIN ")
+		b.WriteString(s.apiKeysTable)
+		b.WriteString(" k ON k.id = e.api_key_id")
+	}
 	args := buildWhereClause(&b, filter)
 	b.WriteString(" GROUP BY key ORDER BY ")
 	b.WriteString(metricExpr)
@@ -735,6 +796,7 @@ func (s *UsageStore) SelectTotals(ctx context.Context, filter UsageFilter) (Usag
 		COALESCE(SUM(total_tokens), 0), COALESCE(SUM(cost_usd), 0)
 	FROM `)
 	b.WriteString(s.eventsTable)
+	b.WriteString(" e")
 	args := buildWhereClause(&b, filter)
 	row := s.db.QueryRowContext(ctx, b.String(), args...)
 	var (
@@ -752,84 +814,346 @@ func (s *UsageStore) SelectTotals(ctx context.Context, filter UsageFilter) (Usag
 	return a, nil
 }
 
+// UsageEventRow is the dashboard-friendly projection of a single
+// usage_events row. It mirrors UsageEvent but replaces the sealed
+// api_key_principal with the non-secret KeyAlias (resolved via a LEFT JOIN
+// on api_keys). The raw principal is never returned to API callers.
+type UsageEventRow struct {
+	ID                  int64     `json:"id"`
+	RequestID           string    `json:"request_id,omitempty"`
+	APIKeyID            string    `json:"api_key_id,omitempty"`
+	KeyAlias            string    `json:"key_alias,omitempty"`
+	Provider            string    `json:"provider"`
+	ExecutorType        string    `json:"executor_type,omitempty"`
+	Model               string    `json:"model"`
+	Alias               string    `json:"alias,omitempty"`
+	Endpoint            string    `json:"endpoint,omitempty"`
+	AuthType            string    `json:"auth_type,omitempty"`
+	Source              string    `json:"source,omitempty"`
+	ReasoningEffort     string    `json:"reasoning_effort,omitempty"`
+	ServiceTier         string    `json:"service_tier,omitempty"`
+	ResponseServiceTier string    `json:"response_service_tier,omitempty"`
+	InputTokens         int64     `json:"input_tokens"`
+	OutputTokens        int64     `json:"output_tokens"`
+	ReasoningTokens     int64     `json:"reasoning_tokens"`
+	CachedTokens        int64     `json:"cached_tokens"`
+	CacheCreationTokens int64     `json:"cache_creation_tokens"`
+	TotalTokens         int64     `json:"total_tokens"`
+	CostUSD             float64   `json:"cost_usd"`
+	LatencyMs           int64     `json:"latency_ms,omitempty"`
+	TTFTMs              int64     `json:"ttft_ms,omitempty"`
+	Failed              bool      `json:"failed"`
+	FailStatusCode      int       `json:"fail_status_code,omitempty"`
+	Generate            bool      `json:"generate,omitempty"`
+	RequestedAt         time.Time `json:"requested_at"`
+}
+
+// eventRowSelectColumns is the column list used by both SelectEvents and
+// GetEvent. The api_key_principal column is intentionally not projected;
+// KeyAlias is resolved via the api_keys LEFT JOIN.
+const eventRowSelectColumns = `
+	e.id, e.request_id, e.api_key_id,
+	COALESCE(NULLIF(k.key_alias, ''), k.name, '') AS key_alias,
+	e.provider, e.executor_type, e.model, e.alias, e.endpoint, e.auth_type,
+	e.source, e.reasoning_effort, e.service_tier, e.response_service_tier,
+	e.input_tokens, e.output_tokens, e.reasoning_tokens,
+	e.cached_tokens, e.cache_creation_tokens, e.total_tokens, e.cost_usd,
+	e.latency_ms, e.ttft_ms, e.failed, e.fail_status_code, e.generate,
+	e.requested_at
+`
+
+func (s *UsageStore) eventJoin() string {
+	return s.eventsTable + " e LEFT JOIN " + s.apiKeysTable + " k ON k.id = e.api_key_id"
+}
+
+// scanEventRow scans one row from the column order defined above. Shared by
+// SelectEvents and GetEvent so the two stay in sync.
+func scanEventRow(scanner interface {
+	Scan(dest ...any) error
+}) (UsageEventRow, error) {
+	var r UsageEventRow
+	if err := scanner.Scan(
+		&r.ID, &r.RequestID, &r.APIKeyID, &r.KeyAlias,
+		&r.Provider, &r.ExecutorType, &r.Model, &r.Alias, &r.Endpoint, &r.AuthType,
+		&r.Source, &r.ReasoningEffort, &r.ServiceTier, &r.ResponseServiceTier,
+		&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens,
+		&r.CacheCreationTokens, &r.TotalTokens, &r.CostUSD, &r.LatencyMs, &r.TTFTMs,
+		&r.Failed, &r.FailStatusCode, &r.Generate, &r.RequestedAt,
+	); err != nil {
+		return UsageEventRow{}, err
+	}
+	return r, nil
+}
+
+// SelectEvents returns a page of raw usage events, newest first, with the
+// non-secret KeyAlias projected from the JOINed api_keys row. page is
+// 1-indexed; pageSize is clamped to [1, 200]. The returned total reflects the
+// same filter so the caller can render a pager.
+func (s *UsageStore) SelectEvents(ctx context.Context, filter UsageFilter, page, pageSize int) ([]UsageEventRow, int64, error) {
+	if s == nil || s.db == nil {
+		return nil, 0, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 25
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+	// Count first so the pager math is correct even when the page is empty.
+	var b strings.Builder
+	b.WriteString("SELECT COUNT(*) FROM ")
+	b.WriteString(s.eventJoin())
+	countArgs := buildWhereClause(&b, filter)
+	var total int64
+	if err := s.db.QueryRowContext(ctx, b.String(), countArgs...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("postgres store: count usage events: %w", err)
+	}
+
+	b.Reset()
+	b.WriteString("SELECT ")
+	b.WriteString(eventRowSelectColumns)
+	b.WriteString(" FROM ")
+	b.WriteString(s.eventJoin())
+	args := buildWhereClause(&b, filter)
+	b.WriteString(" ORDER BY e.requested_at DESC, e.id DESC")
+	args = append(args, pageSize, (page-1)*pageSize)
+	b.WriteString(" LIMIT $")
+	b.WriteString(itoa(len(args) - 1))
+	b.WriteString(" OFFSET $")
+	b.WriteString(itoa(len(args)))
+
+	rows, err := s.db.QueryContext(ctx, b.String(), args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("postgres store: select usage events: %w", err)
+	}
+	defer rows.Close()
+	out := make([]UsageEventRow, 0, pageSize)
+	for rows.Next() {
+		r, err := scanEventRow(rows)
+		if err != nil {
+			return nil, 0, fmt.Errorf("postgres store: scan usage event row: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, total, rows.Err()
+}
+
+// GetEvent returns a single usage event by its primary key. The principal
+// column is replaced by KeyAlias (resolved via the api_keys LEFT JOIN).
+func (s *UsageStore) GetEvent(ctx context.Context, id int64) (UsageEventRow, error) {
+	if s == nil || s.db == nil {
+		return UsageEventRow{}, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	var b strings.Builder
+	b.WriteString("SELECT ")
+	b.WriteString(eventRowSelectColumns)
+	b.WriteString(" FROM ")
+	b.WriteString(s.eventJoin())
+	b.WriteString(" WHERE e.id = $1")
+	row := s.db.QueryRowContext(ctx, b.String(), id)
+	r, err := scanEventRow(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return UsageEventRow{}, ErrUsageEventNotFound
+		}
+		return UsageEventRow{}, fmt.Errorf("postgres store: get usage event: %w", err)
+	}
+	return r, nil
+}
+
+// ErrUsageEventNotFound is returned by GetEvent when no row matches the id.
+var ErrUsageEventNotFound = errors.New("postgres store: usage event not found")
+
+// FilterOptions is the materialized set of distinct filter values for a usage
+// window. The dashboard renders these as dropdown options so operators never
+// have to type free-text filter values (which would be impossible against the
+// sealed api_key_principal column anyway).
+type FilterOptions struct {
+	APIKeys   []APIKeyOption `json:"api_keys"`
+	Providers []string       `json:"providers"`
+	Models    []string       `json:"models"`
+}
+
+// APIKeyOption pairs an api_key_id with its non-secret alias/name so the
+// dashboard's API Key dropdown can show the human label while binding the
+// id back into the filter.
+type APIKeyOption struct {
+	ID    string `json:"id"`
+	Alias string `json:"alias"`
+}
+
+// SelectFilterOptions returns the distinct api_keys / providers / models
+// observed in usage_events for the supplied filter window. The api_keys list
+// is sourced from a JOIN so it surfaces only keys that actually have usage in
+// the window (rather than the full catalog).
+func (s *UsageStore) SelectFilterOptions(ctx context.Context, filter UsageFilter) (FilterOptions, error) {
+	if s == nil || s.db == nil {
+		return FilterOptions{}, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	out := FilterOptions{}
+
+	// Distinct API keys contributing events in the window, with alias/name.
+	var b strings.Builder
+	b.WriteString(`SELECT DISTINCT e.api_key_id, COALESCE(NULLIF(k.key_alias, ''), k.name, '') AS alias
+		FROM `)
+	b.WriteString(s.eventJoin())
+	args := buildWhereClause(&b, filter)
+	b.WriteString(" AND e.api_key_id IS NOT NULL AND e.api_key_id <> '' ORDER BY alias ASC")
+	rows, err := s.db.QueryContext(ctx, b.String(), args...)
+	if err != nil {
+		return FilterOptions{}, fmt.Errorf("postgres store: select usage filter api_keys: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var opt APIKeyOption
+		if err = rows.Scan(&opt.ID, &opt.Alias); err != nil {
+			return FilterOptions{}, fmt.Errorf("postgres store: scan usage filter api_keys: %w", err)
+		}
+		out.APIKeys = append(out.APIKeys, opt)
+	}
+	if err = rows.Err(); err != nil {
+		return FilterOptions{}, err
+	}
+
+	// Distinct providers.
+	b.Reset()
+	b.WriteString("SELECT DISTINCT e.provider FROM ")
+	b.WriteString(s.eventJoin())
+	args = buildWhereClause(&b, filter)
+	b.WriteString(" AND e.provider IS NOT NULL AND e.provider <> '' ORDER BY e.provider ASC")
+	rows2, err := s.db.QueryContext(ctx, b.String(), args...)
+	if err != nil {
+		return FilterOptions{}, fmt.Errorf("postgres store: select usage filter providers: %w", err)
+	}
+	defer rows2.Close()
+	for rows2.Next() {
+		var p string
+		if err = rows2.Scan(&p); err != nil {
+			return FilterOptions{}, fmt.Errorf("postgres store: scan usage filter providers: %w", err)
+		}
+		out.Providers = append(out.Providers, p)
+	}
+	if err = rows2.Err(); err != nil {
+		return FilterOptions{}, err
+	}
+
+	// Distinct models.
+	b.Reset()
+	b.WriteString("SELECT DISTINCT e.model FROM ")
+	b.WriteString(s.eventJoin())
+	args = buildWhereClause(&b, filter)
+	b.WriteString(" AND e.model IS NOT NULL AND e.model <> '' ORDER BY e.model ASC")
+	rows3, err := s.db.QueryContext(ctx, b.String(), args...)
+	if err != nil {
+		return FilterOptions{}, fmt.Errorf("postgres store: select usage filter models: %w", err)
+	}
+	defer rows3.Close()
+	for rows3.Next() {
+		var m string
+		if err = rows3.Scan(&m); err != nil {
+			return FilterOptions{}, fmt.Errorf("postgres store: scan usage filter models: %w", err)
+		}
+		out.Models = append(out.Models, m)
+	}
+	if err = rows3.Err(); err != nil {
+		return FilterOptions{}, err
+	}
+	return out, nil
+}
+
 // buildWhereClause appends a parameterized WHERE clause to the supplied
 // builder based on the parts of filter the caller populated. Returns the
-// args slice (with new parameters appended) so callers can chain LIMIT.
+// args slice (with new parameters appended) so callers can chain LIMIT. This
+// is shared by all usage_events queries that share the same filter shape.
+//
+// The Principal field is intentionally NOT applied: api_key_principal is
+// sealed at rest and cannot be matched against a plaintext WHERE value.
+// Operators should filter via APIKeyID (resolved in the dashboard from the
+// alias-driven dropdown).
 func buildWhereClause(b *strings.Builder, filter UsageFilter) []any {
 	b.WriteString(" WHERE 1=1")
 	args := []any{}
 	if filter.APIKeyID != "" {
 		args = append(args, filter.APIKeyID)
-		b.WriteString(" AND api_key_id = $")
-		b.WriteString(itoa(len(args)))
-	}
-	if filter.Principal != "" {
-		args = append(args, filter.Principal)
-		b.WriteString(" AND api_key_principal = $")
+		b.WriteString(" AND e.api_key_id = $")
 		b.WriteString(itoa(len(args)))
 	}
 	if filter.Provider != "" {
 		args = append(args, filter.Provider)
-		b.WriteString(" AND provider = $")
+		b.WriteString(" AND e.provider = $")
 		b.WriteString(itoa(len(args)))
 	}
 	if filter.Model != "" {
 		args = append(args, filter.Model)
-		b.WriteString(" AND model = $")
+		b.WriteString(" AND e.model = $")
 		b.WriteString(itoa(len(args)))
 	}
 	if !filter.From.IsZero() {
 		args = append(args, filter.From)
-		b.WriteString(" AND requested_at >= $")
+		b.WriteString(" AND e.requested_at >= $")
 		b.WriteString(itoa(len(args)))
 	}
 	if !filter.To.IsZero() {
 		args = append(args, filter.To)
-		b.WriteString(" AND requested_at < $")
+		b.WriteString(" AND e.requested_at < $")
 		b.WriteString(itoa(len(args)))
 	}
 	return args
 }
 
-// intervalExpr maps a granularity name to a PG date_trunc expression.
+// intervalExpr maps a granularity name to a PG date_trunc expression. The
+// returned expression references the e alias used by all usage_events queries
+// in this file.
 func intervalExpr(interval string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(interval)) {
 	case "", "hour":
-		return "date_trunc('hour', requested_at)", nil
+		return "date_trunc('hour', e.requested_at)", nil
 	case "minute":
-		return "date_trunc('minute', requested_at)", nil
+		return "date_trunc('minute', e.requested_at)", nil
 	case "day":
-		return "date_trunc('day', requested_at)", nil
+		return "date_trunc('day', e.requested_at)", nil
 	default:
 		return "", fmt.Errorf("unsupported interval: %q (use minute|hour|day)", interval)
 	}
 }
 
 // dimensionColumn returns the column reference for a top-N query dimension.
-func dimensionColumn(dimension string) (string, error) {
+// The bool return is true when the caller must LEFT JOIN api_keys (used by
+// the principal dimension so it resolves to key_alias rather than the sealed
+// api_key_principal value).
+func dimensionColumn(dimension string) (string, bool, error) {
 	switch strings.ToLower(strings.TrimSpace(dimension)) {
 	case "model":
-		return "model", nil
+		return "e.model", false, nil
 	case "provider":
-		return "provider", nil
+		return "e.provider", false, nil
 	case "api_key_id", "key", "apikey":
-		return "api_key_id", nil
+		return "e.api_key_id", false, nil
 	case "principal", "api_key_principal":
-		return "api_key_principal", nil
+		// Resolve to the human label (key_alias, falling back to name) via
+		// the api_keys join. The raw api_key_principal column is sealed and
+		// never projected to API callers.
+		return "COALESCE(NULLIF(k.key_alias, ''), k.name)", true, nil
 	default:
-		return "", fmt.Errorf("unsupported dimension: %q", dimension)
+		return "", false, fmt.Errorf("unsupported dimension: %q", dimension)
 	}
 }
 
-// metricExpr returns the SQL expression to order a top-N query by.
+// metricExpr returns the SQL aggregate expression to order a top-N query by.
+// We return the underlying SUM(...) expression (rather than the SELECT alias)
+// so PostgreSQL does not mis-resolve ORDER BY against the un-grouped base
+// column (which triggers SQLSTATE 42803 when GROUP BY is active).
 func metricExpr(metric string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(metric)) {
 	case "", "request_count", "requests":
-		return "request_count", nil
+		return "COALESCE(SUM(CASE WHEN NOT failed THEN 1 ELSE 0 END), 0)", nil
 	case "total_tokens", "tokens":
-		return "total_tokens", nil
+		return "COALESCE(SUM(total_tokens), 0)", nil
 	case "cost_usd", "cost":
-		return "cost_usd", nil
+		return "COALESCE(SUM(cost_usd), 0)", nil
 	default:
 		return "", fmt.Errorf("unsupported metric: %q", metric)
 	}

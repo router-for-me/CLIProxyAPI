@@ -112,7 +112,7 @@ func TestUsageStoreIntegrationSmoke(t *testing.T) {
 
 	// Insert a usage event and verify cost computation.
 	apiKeys := NewAPIKeyStore(store)
-	key, secret, err := apiKeys.Create(ctx, "uk", "", nil, nil, nil)
+	key, secret, err := apiKeys.Create(ctx, "uk", "", "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Create api key: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestUsageStoreBatchInsert(t *testing.T) {
 	ctx := cancelableTestCtx(t)
 	us := NewUsageStore(store)
 	apiKeys := NewAPIKeyStore(store)
-	key, _, err := apiKeys.Create(ctx, "bk", "", nil, nil, nil)
+	key, _, err := apiKeys.Create(ctx, "bk", "", "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

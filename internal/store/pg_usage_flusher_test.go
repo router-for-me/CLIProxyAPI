@@ -18,7 +18,7 @@ func TestUsageFlusherHandleUsageQueuesRecord(t *testing.T) {
 	}
 	t.Cleanup(flusher.Stop)
 
-	key, _, err := apiKeys.Create(ctx, "fk", "", nil, nil, nil)
+	key, _, err := apiKeys.Create(ctx, "fk", "", "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
