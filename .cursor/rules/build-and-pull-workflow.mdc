@@ -1,0 +1,24 @@
+---
+description: Enforce CI-only verification and scripted image deployment
+alwaysApply: true
+---
+
+# CI Build, Test, and Deployment Workflow
+
+## No Local Build or Test
+
+- Never run local build or test commands, including `go build`, `go test`, `docker build`, or equivalent commands.
+- Local formatting and read-only inspection are allowed, but all compilation, tests, and Docker image validation must run in GitHub Actions.
+- GitHub Actions must run the Go test suite, build the Docker image, and execute the Docker smoke test before publishing the image.
+
+## Required Scripts
+
+- Use `./build-push.sh` to push the current commit, wait for GitHub Actions, and obtain the immutable image reference.
+- After CI succeeds, use `./pull.sh <immutable-image-reference>` to pull and deploy the image.
+- Do not replace either script with ad hoc commands unless the user explicitly requests it.
+
+## Failure Handling
+
+- If `build-push.sh` or `pull.sh` fails, diagnose and fix the script or workflow problem first.
+- Re-run the required script after the fix until the CI or deployment flow is operational.
+- Report the failure cause, the applied fix, and the final verification result.

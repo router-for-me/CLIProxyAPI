@@ -10,7 +10,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 env:
   IMAGE_NAME: ghcr.io/austinhmh/cli-proxy-api-plus
@@ -64,6 +63,8 @@ jobs:
   image:
     runs-on: ubuntu-latest
     needs: verify
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -79,6 +80,73 @@ jobs:
           tags: |
             type=sha,format=long,prefix=sha-
 
+      - name: Generate build metadata
+        shell: bash
+        run: |
+          echo "VERSION=sha-${GITHUB_SHA}" >> "${GITHUB_ENV}"
+          echo "COMMIT=${GITHUB_SHA}" >> "${GITHUB_ENV}"
+          echo "BUILD_DATE=$(git show -s --format=%cI "${GITHUB_SHA}")" >> "${GITHUB_ENV}"
+
+      - name: Build Docker image for verification
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            COMMIT=${{ env.COMMIT }}
+            BUILD_DATE=${{ env.BUILD_DATE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify Docker image startup and metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_reference="${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          container_name="cli-proxy-api-smoke-${GITHUB_RUN_ID}"
+          trap 'docker rm -f "${container_name}" >/dev/null 2>&1 || true' EXIT
+
+          cat > "${RUNNER_TEMP}/ci-smoke-config.yaml" <<'EOF'
+          host: "0.0.0.0"
+          port: 8317
+          remote-management:
+            allow-remote: false
+            secret-key: ""
+            disable-control-panel: true
+          auth-dir: "/tmp/cli-proxy-api-auths"
+          api-keys:
+            - "ci-smoke-key"
+          EOF
+
+          docker run --detach \
+            --name "${container_name}" \
+            --publish 127.0.0.1:18317:8317 \
+            --volume "${RUNNER_TEMP}/ci-smoke-config.yaml:/tmp/ci-smoke-config.yaml:ro" \
+            "${image_reference}" \
+            ./CLIProxyAPI --config /tmp/ci-smoke-config.yaml --local-model
+
+          healthy=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error --max-time 2 http://127.0.0.1:18317/healthz >/dev/null; then
+              healthy=true
+              break
+            fi
+            sleep 2
+          done
+          if [[ "${healthy}" != "true" ]]; then
+            docker logs "${container_name}"
+            exit 1
+          fi
+
+          container_logs="$(docker logs "${container_name}" 2>&1)"
+          printf '%s\n' "${container_logs}"
+          grep -Fxq -- "CLIProxyAPI Version: ${VERSION}, Commit: ${COMMIT}, BuiltAt: ${BUILD_DATE}" <<< "${container_logs}"
+
       - name: Login to GitHub Container Registry
         if: github.event_name != 'pull_request' && github.repository_owner == 'austinhmh'
         uses: docker/login-action@v3
@@ -87,35 +155,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_PAT }}
 
-      - name: Generate build metadata
+      - name: Publish verified Docker image
+        if: github.event_name != 'pull_request' && github.repository_owner == 'austinhmh'
         shell: bash
         run: |
-          echo "VERSION=sha-${GITHUB_SHA}" >> "${GITHUB_ENV}"
-          echo "COMMIT=${GITHUB_SHA}" >> "${GITHUB_ENV}"
-          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_ENV}"
-
-      - name: Build and optionally publish image
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' && github.repository_owner == 'austinhmh' }}
-          build-args: |
-            VERSION=${{ env.VERSION }}
-            COMMIT=${{ env.COMMIT }}
-            BUILD_DATE=${{ env.BUILD_DATE }}
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          set -euo pipefail
+          image_reference="${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          docker push "${image_reference}"
 
       - name: Publish image coordinates
+        if: github.event_name != 'pull_request' && github.repository_owner == 'austinhmh'
         shell: bash
         run: |
           {
             echo "## GHCR image"
             echo
             echo "- Tag: \`${IMAGE_NAME}:sha-${GITHUB_SHA}\`"
-            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
+            echo "- Local image ID: \`$(docker image inspect --format '{{.Id}}' "${IMAGE_NAME}:sha-${GITHUB_SHA}")\`"
           } >> "${GITHUB_STEP_SUMMARY}"

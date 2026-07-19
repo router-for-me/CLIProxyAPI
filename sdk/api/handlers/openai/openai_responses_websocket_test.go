@@ -671,6 +671,7 @@ func TestNormalizeResponsesWebsocketRequestReplacesCodexLocalCompactionTranscrip
 	]`)
 	raw := []byte(fmt.Sprintf(`{"type":"response.create","input":[
 		{"type":"additional_tools","role":"developer","tools":[]},
+		{"type":"reasoning","id":"reasoning-1"},
 		{"role":"developer","id":"initial-context","content":"workspace context"},
 		{"type":"message","role":"user","id":"compacted-user","content":[{"type":"input_text","text":"retained context"}]},
 		{"role":"user","id":"local-summary","content":%q},
@@ -689,7 +690,7 @@ func TestNormalizeResponsesWebsocketRequestReplacesCodexLocalCompactionTranscrip
 		t.Fatalf("replacement input did not preserve the complete new transcript:\n got: %s\nwant: %s", got, want)
 	}
 	input := gjson.GetBytes(normalized, "input").Array()
-	wantIDs := []string{"", "initial-context", "compacted-user", "local-summary", "turn-context", "incoming-user"}
+	wantIDs := []string{"", "reasoning-1", "initial-context", "compacted-user", "local-summary", "turn-context", "incoming-user"}
 	if len(input) != len(wantIDs) {
 		t.Fatalf("replacement input len = %d, want %d: %s", len(input), len(wantIDs), normalized)
 	}
