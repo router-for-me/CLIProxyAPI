@@ -368,6 +368,105 @@ func TestIsKimiUsageAuth_StatusDisabled(t *testing.T) {
 	}
 }
 
+// Native Kimi OAuth auths (Provider == "kimi") carry the bearer token in
+// Metadata and have no api_key/base_url attributes. The probe must cover them
+// too — they are the primary Kimi login path.
+
+func TestIsKimiUsageAuth_NativeOAuth_MetadataToken(t *testing.T) {
+	t.Parallel()
+	// Native OAuth record as produced by sdk/auth/kimi.go: Provider "kimi",
+	// bearer token in Metadata, no api_key/base_url attributes.
+	auth := &Auth{
+		Provider: "kimi",
+		Metadata: map[string]any{
+			"access_token": "oauth-bearer-token",
+		},
+	}
+	if !isKimiUsageAuth(auth) {
+		t.Error("native kimi OAuth auth with Metadata access_token should match")
+	}
+}
+
+func TestIsKimiUsageAuth_NativeOAuth_NoToken(t *testing.T) {
+	t.Parallel()
+	// Provider "kimi" but no usable token anywhere → nothing to authenticate
+	// the /v1/usages call with, so skip.
+	auth := &Auth{
+		Provider: "kimi",
+		// No Metadata, no Attributes.
+	}
+	if isKimiUsageAuth(auth) {
+		t.Error("native kimi auth without any token should be rejected")
+	}
+}
+
+func TestIsKimiUsageAuth_NativeOAuth_Disabled(t *testing.T) {
+	t.Parallel()
+	auth := &Auth{
+		Provider: "kimi",
+		Disabled: true,
+		Metadata: map[string]any{
+			"access_token": "oauth-bearer-token",
+		},
+	}
+	if isKimiUsageAuth(auth) {
+		t.Error("disabled native kimi OAuth auth should be rejected")
+	}
+}
+
+func TestHasKimiBearerToken_Table(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		auth *Auth
+		want bool
+	}{
+		{
+			name: "metadata access_token",
+			auth: &Auth{Metadata: map[string]any{"access_token": "tok"}},
+			want: true,
+		},
+		{
+			name: "attributes access_token",
+			auth: &Auth{Attributes: map[string]string{"access_token": "tok"}},
+			want: true,
+		},
+		{
+			name: "attributes api_key",
+			auth: &Auth{Attributes: map[string]string{"api_key": "tok"}},
+			want: true,
+		},
+		{
+			name: "metadata empty string ignored",
+			auth: &Auth{Metadata: map[string]any{"access_token": "  "}},
+			want: false,
+		},
+		{
+			name: "metadata non-string ignored",
+			auth: &Auth{Metadata: map[string]any{"access_token": 123}},
+			want: false,
+		},
+		{
+			name: "nil auth",
+			auth: nil,
+			want: false,
+		},
+		{
+			name: "no token anywhere",
+			auth: &Auth{Provider: "kimi"},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hasKimiBearerToken(tc.auth); got != tc.want {
+				t.Errorf("hasKimiBearerToken(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWindowFromDetail_Normal(t *testing.T) {
 	t.Parallel()
 	d := kimiUsageDetail{

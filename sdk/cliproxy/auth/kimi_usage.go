@@ -137,7 +137,12 @@ func windowFromDetail(d kimiUsageDetail, name string) kimiUsageWindow {
 }
 
 // isKimiUsageAuth checks whether an auth is a Kimi Coding auth with a queryable
-// /v1/usages endpoint. It matches by base_url prefix, not by config provider type.
+// /v1/usages endpoint. Two shapes are covered:
+//   - Native OAuth auths (Provider == "kimi") identified by provider and a bearer
+//     token in Metadata; their base URL defaults to the Kimi coding endpoint.
+//   - Manually configured openai-compatible (API key) auths identified by a
+//     base_url prefix match.
+//
 // Disabled auths are excluded to avoid sending background traffic to credentials
 // the operator has taken out of service (consistent with routing in selector.go).
 func isKimiUsageAuth(auth *Auth) bool {
@@ -150,6 +155,18 @@ func isKimiUsageAuth(auth *Auth) bool {
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return false
 	}
+
+	// Native Kimi OAuth auths (Provider == "kimi") carry the bearer token in
+	// Metadata and have no api_key/base_url attributes. The Kimi executor reads
+	// that token and defaults the base URL, so the probe polls them through the
+	// same credential path as inference requests — covering the primary Kimi
+	// login flow, not just manually configured compatibility keys.
+	if auth.Provider == "kimi" {
+		return hasKimiBearerToken(auth)
+	}
+
+	// openai-compatible (API key) auths: identify Kimi by base_url and require
+	// an api_key, since the compat path injects the key from Attributes.
 	if auth.Attributes == nil || strings.TrimSpace(auth.Attributes["api_key"]) == "" {
 		return false
 	}
@@ -163,6 +180,30 @@ func isKimiUsageAuth(auth *Auth) bool {
 	return u == kimiUsageBaseURL || strings.HasPrefix(u, kimiUsageBaseURL+"/")
 }
 
+// hasKimiBearerToken reports whether auth carries a usable Kimi bearer token,
+// checking OAuth Metadata first then API-key Attributes. This mirrors the
+// precedence of the Kimi executor's credential lookup so the probe treats a
+// token the same way the request path does.
+func hasKimiBearerToken(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["access_token"].(string); ok && strings.TrimSpace(v) != "" {
+			return true
+		}
+	}
+	if auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["access_token"]); v != "" {
+			return true
+		}
+		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // fetchKimiUsage queries the /v1/usages endpoint for a Kimi auth. It reuses
 // Manager.NewHttpRequest/HttpRequest for automatic Bearer injection and per-auth
 // proxy routing (same path as inference requests). On failure it returns an error;
@@ -171,9 +212,12 @@ func (m *Manager) fetchKimiUsage(ctx context.Context, auth *Auth) ([]kimiUsageWi
 	if m == nil || auth == nil {
 		return nil, fmt.Errorf("kimi usage: nil manager or auth")
 	}
+	// Native Kimi OAuth auths have no base_url attribute; default to the known
+	// Kimi coding base URL (same constant the executor uses). Compatibility
+	// (API key) auths carry their configured base_url.
 	baseURL := strings.TrimSpace(auth.Attributes["base_url"])
 	if baseURL == "" {
-		return nil, fmt.Errorf("kimi usage: empty base_url for auth %s", auth.ID)
+		baseURL = kimiUsageBaseURL
 	}
 	// Normalize versioned base URLs (e.g. https://api.kimi.com/coding/v1) so
 	// that appending "/v1/usages" does not produce ".../v1/v1/usages".
