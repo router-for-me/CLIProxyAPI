@@ -56,3 +56,12 @@ _bmad-output/*
 .DS_Store
 ._*
 .gocache/
+
+# Local artifacts
+/server
+/test-output
+/.zcode/
+
+# Dashboard build output + dependencies
+web/dashboard/node_modules/
+web/dashboard/dist/

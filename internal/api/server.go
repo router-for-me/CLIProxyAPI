@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,14 +30,18 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/dashboardasset"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/errormessages"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -86,6 +91,23 @@ type serverOptionConfig struct {
 	pluginHost            *pluginhost.Host
 	configReloadHook      func(context.Context, *config.Config)
 	exampleAPIKeySafeMode bool
+	// policyService, when non-nil, enables per-API-key policy enforcement.
+	policyService policy.PolicyService
+	// pgStores, when non-nil, exposes the PG-backed stores to the management
+	// API handlers so /api-keys-pg, /usage-stats, and /models-catalog work.
+	pgStores *PgStoreHandles
+}
+
+// PgStoreHandles bundles the optional PG-backed stores and adapters that the
+// management handlers and middleware consume. All fields may be nil when the
+// PGSTORE_DSN backend is inactive; callers should nil-check before use.
+type PgStoreHandles struct {
+	APIKeys       *store.APIKeyStore
+	Usage         *store.UsageStore
+	Models        *store.ModelsStore
+	PGSync        *registry.PGSync
+	Policy        policy.PolicyService
+	ErrorMessages errormessages.Store
 }
 
 // ServerOption customises HTTP server construction.
@@ -192,6 +214,17 @@ func WithExampleAPIKeySafeMode() ServerOption {
 	}
 }
 
+// WithPolicyService enables per-API-key policy enforcement (RPM, hourly
+// rate, model access, budget caps) and exposes the PG-backed stores to the
+// management API handlers. Pass nil handles to disable; the option is
+// idempotent and safe to call multiple times.
+func WithPolicyService(svc policy.PolicyService, handles *PgStoreHandles) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.policyService = svc
+		cfg.pgStores = handles
+	}
+}
+
 // Server represents the main API server.
 // It encapsulates the Gin engine, HTTP server, handlers, and configuration.
 type Server struct {
@@ -219,6 +252,16 @@ type Server struct {
 
 	// accessManager handles request authentication providers.
 	accessManager *sdkaccess.Manager
+
+	// policyService enforces per-API-key limits (RPM, budget, model access)
+	// after authentication. nil when the PGSTORE_DSN backend is inactive so
+	// the policy middleware is a fast pass-through.
+	policyService policy.PolicyService
+
+	// pgStores holds the optional PostgreSQL-backed stores used by the
+	// management routes for API Keys, Usage Stats, and Model Catalog. nil
+	// when the PG backend is inactive.
+	pgStores *PgStoreHandles
 
 	// requestLogger is the request logger instance for dynamic configuration updates.
 	requestLogger logging.RequestLogger
@@ -330,6 +373,8 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		handlers:            handlers.NewBaseAPIHandlers(effectiveSDKConfig(cfg), authManager),
 		cfg:                 cfg,
 		accessManager:       accessManager,
+		policyService:       optionState.policyService,
+		pgStores:            optionState.pgStores,
 		requestLogger:       requestLogger,
 		loggerToggle:        toggle,
 		configFilePath:      configFilePath,
@@ -364,6 +409,37 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
+	// Wire the optional PG-backed stores and policy service into the
+	// management handler so the /api-keys-pg, /usage-stats, and
+	// /models-catalog routes resolve correctly. All parameters may be nil
+	// when the PG backend is inactive.
+	if handles := optionState.pgStores; handles != nil {
+		s.mgmt.SetPostgresStores(handles.APIKeys, handles.Usage, handles.Models, handles.PGSync, handles.Policy)
+		s.mgmt.SetErrorMessagesStore(handles.ErrorMessages)
+	}
+	// Wire the /v1/models invoker so the management endpoint
+	// POST /v0/management/models-catalog/sync-from-v1 can probe the live
+	// caller-facing model list in-process (no network loopback). The
+	// handler wraps the gin engine: when invoked it rewrites the request
+	// URL to /v1/models so the full AuthMiddleware + PolicyMiddleware +
+	// unifiedModelsHandler pipeline runs exactly as a real caller would
+	// experience. The wrapper is a no-op when the engine is nil.
+	s.mgmt.SetV1ModelsHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.engine == nil {
+			http.Error(w, "server engine not ready", http.StatusServiceUnavailable)
+			return
+		}
+		// http.Handler may receive a Request with /v1/models already set; if
+		// not (caller passes a generic path), normalize so engine dispatch
+		// finds the route. The original method and headers are preserved.
+		if r.URL == nil {
+			r.URL = &url.URL{Path: "/v1/models"}
+		} else if r.URL.Path == "" || r.URL.Path == "/" {
+			r.URL.Path = "/v1/models"
+			r.URL.RawPath = ""
+		}
+		s.engine.ServeHTTP(w, r)
+	}))
 	logDir := logging.ResolveLogDirectory(cfg)
 	s.mgmt.SetLogDirectory(logDir)
 	if optionState.postAuthHook != nil {
@@ -513,6 +589,7 @@ func (s *Server) setupRoutes() {
 	s.engine.HEAD("/healthz", healthzHandler)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	s.mountDashboardRoutes()
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
@@ -521,6 +598,7 @@ func (s *Server) setupRoutes() {
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
 	v1.Use(AuthMiddleware(s.accessManager))
+	v1.Use(s.policyMiddleware())
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -542,6 +620,7 @@ func (s *Server) setupRoutes() {
 
 	openaiV1 := s.engine.Group("/openai/v1")
 	openaiV1.Use(AuthMiddleware(s.accessManager))
+	openaiV1.Use(s.policyMiddleware())
 	{
 		openaiV1.POST("/videos", openaiHandlers.VideosCreate)
 		openaiV1.GET("/videos/:video_id/content", openaiHandlers.VideosContent)
@@ -551,6 +630,7 @@ func (s *Server) setupRoutes() {
 	// Codex CLI direct route aliases (chatgpt_base_url compatible)
 	codexDirect := s.engine.Group("/backend-api/codex")
 	codexDirect.Use(AuthMiddleware(s.accessManager))
+	codexDirect.Use(s.policyMiddleware())
 	{
 		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
@@ -561,6 +641,7 @@ func (s *Server) setupRoutes() {
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))
+	v1beta.Use(s.policyMiddleware())
 	{
 		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
 		v1beta.POST("/interactions", geminiHandlers.Interactions)
@@ -868,6 +949,43 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
+
+		// PG-backed API keys + policy management. These routes return 503
+		// when the PG store is not configured so callers can detect absence.
+		mgmt.GET("/api-keys-pg", s.mgmt.ListPGAPIKeys)
+		mgmt.POST("/api-keys-pg", s.mgmt.CreatePGAPIKey)
+		mgmt.GET("/api-keys-pg/:id", s.mgmt.GetPGAPIKey)
+		mgmt.PATCH("/api-keys-pg/:id", s.mgmt.PatchPGAPIKey)
+		mgmt.PUT("/api-keys-pg/:id/policy", s.mgmt.PutPGAPIKeyPolicy)
+		mgmt.POST("/api-keys-pg/:id/regenerate", s.mgmt.RegeneratePGAPIKey)
+		mgmt.DELETE("/api-keys-pg/:id", s.mgmt.DeletePGAPIKey)
+
+		// Aggregate usage stats powered by the PG usage_events table.
+		mgmt.GET("/usage-stats", s.mgmt.GetUsageStats)
+		mgmt.GET("/usage-stats/summary", s.mgmt.GetUsageSummary)
+		mgmt.GET("/usage-stats/totals", s.mgmt.GetUsageTotals)
+		mgmt.GET("/usage-stats/timeseries", s.mgmt.GetUsageTimeSeries)
+		mgmt.GET("/usage-stats/top", s.mgmt.GetUsageTop)
+		mgmt.GET("/usage-windows/:api_key_id", s.mgmt.GetUsageWindows)
+
+		// Operator-customizable error response text, keyed by HTTP status code.
+		mgmt.GET("/error-messages", s.mgmt.ListErrorMessages)
+		mgmt.GET("/error-messages/preview", s.mgmt.PreviewErrorMessage)
+		mgmt.GET("/error-messages/:code", s.mgmt.GetErrorMessage)
+		mgmt.PUT("/error-messages/:code", s.mgmt.PutErrorMessage)
+		mgmt.DELETE("/error-messages/:code", s.mgmt.DeleteErrorMessage)
+
+		// PG-backed model catalog and pricing management.
+		mgmt.GET("/models-catalog", s.mgmt.ListModelsCatalog)
+		mgmt.GET("/models-catalog/count", s.mgmt.GetModelsCatalogCount)
+		mgmt.GET("/models-catalog/:id/pricing", s.mgmt.GetModelPricing)
+		mgmt.PUT("/models-catalog/:id/pricing", s.mgmt.PutModelPricing)
+		mgmt.POST("/models-catalog/sync-from-v1", s.mgmt.SyncModelsFromV1)
+		mgmt.POST("/models-catalog/sync-pricing-preview", s.mgmt.SyncPricingPreview)
+		mgmt.POST("/models-catalog/sync-pricing-apply", s.mgmt.SyncPricingApply)
+		mgmt.GET("/models-catalog/entry/:id/:provider", s.mgmt.GetModelEntry)
+		mgmt.PUT("/models-catalog/entry/:id/:provider", s.mgmt.PutModelEntry)
+		mgmt.DELETE("/models-catalog/entry/:id/:provider", s.mgmt.DeleteModelEntry)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -2028,6 +2146,20 @@ func configuredSignatureCacheEnabled(cfg *config.Config) bool {
 	return true
 }
 
+// policyMiddleware returns the per-API-key policy middleware binding the
+// server's PolicyService (if any). When no policy service is wired (file-only
+// deployments without PGSTORE_DSN), the returned middleware is a fast
+// pass-through so routes pay no overhead.
+func (s *Server) policyMiddleware() gin.HandlerFunc {
+	if s == nil {
+		return func(c *gin.Context) { c.Next() }
+	}
+	if s.policyService == nil {
+		return func(c *gin.Context) { c.Next() }
+	}
+	return middleware.PolicyMiddleware(s.policyService)
+}
+
 func applySignatureCacheConfig(oldCfg, cfg *config.Config) {
 	newVal := configuredSignatureCacheEnabled(cfg)
 	newStrict := configuredSignatureBypassStrict(cfg)
@@ -2054,3 +2186,56 @@ func configuredSignatureBypassStrict(cfg *config.Config) bool {
 	}
 	return false
 }
+
+// mountDashboardRoutes serves the embedded NixLLM dashboard SPA under
+// /dashboard. When no dashboard build is embedded (e.g. dev mode where the
+// user runs `npm run dev` on :9173), the route returns a short instruction
+// page instead of a 404. The SPA is served unauthenticated so the browser
+// can load the bundle before prompting for the management password; all
+// data operations go through the authenticated /v0/management routes.
+func (s *Server) mountDashboardRoutes() {
+	if !dashboardasset.Available() {
+		s.engine.GET("/dashboard", func(c *gin.Context) {
+			c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(devDashboardNotice))
+		})
+		return
+	}
+	dashFS := dashboardasset.FileSystem()
+	assetFS := http.FileServer(http.FS(dashFS))
+	s.engine.GET("/dashboard", gin.WrapH(assetFS))
+	s.engine.GET("/dashboard/*filepath", func(c *gin.Context) {
+		// SPA fallback: serve index.html for unknown sub-paths so React
+		// Router can handle client-side routes like /dashboard/api-keys/:id.
+		path := strings.TrimPrefix(c.Param("filepath"), "/")
+		if path == "" {
+			assetFS.ServeHTTP(c.Writer, c.Request)
+			return
+		}
+		// Try the file first; if missing, fall back to index.html.
+		if f, err := dashFS.Open(path); err == nil {
+			_ = f.Close()
+			assetFS.ServeHTTP(c.Writer, c.Request)
+			return
+		}
+		// Strip the path so http.FileServer serves /index.html instead of 404.
+		c.Request.URL.Path = "/"
+		assetFS.ServeHTTP(c.Writer, c.Request)
+	})
+}
+
+const devDashboardNotice = `<!doctype html><html><head><meta charset="utf-8">
+<title>NixLLM Dashboard — dev mode</title>
+<style>
+body{font-family:-apple-system,sans-serif;background:#0b1220;color:#e7ecf5;margin:0;padding:40px;line-height:1.6}
+code{background:#13203a;padding:2px 6px;border-radius:3px;font-family:monospace}
+a{color:#5eead4}
+.card{max-width:620px;margin:0 auto;background:#18243d;border:1px solid #233049;border-radius:8px;padding:24px}
+h1{margin-top:0;font-weight:600}
+</style></head><body><div class="card">
+<h1>NixLLM Dashboard — not built</h1>
+<p>The dashboard SPA is not embedded in this binary. Run it in development mode:</p>
+<p><code>cd web/dashboard &amp;&amp; npm install &amp;&amp; npm run dev</code></p>
+<p>Then open <a href="http://127.0.0.1:9173/">http://127.0.0.1:9173/</a>.</p>
+<p>For production, build the bundle and rebuild the Go server:</p>
+<p><code>cd web/dashboard &amp;&amp; npm run build</code> then <code>go build ./cmd/server</code></p>
+</div></body></html>`
