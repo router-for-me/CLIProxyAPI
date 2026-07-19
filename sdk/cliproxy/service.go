@@ -97,6 +97,9 @@ type Service struct {
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
 
+	// claudePromptCacheRuntime preserves bounded cache knowledge across executor reloads.
+	claudePromptCacheRuntime *executor.ClaudePromptCacheRuntime
+
 	// pluginHost owns dynamic plugin lifecycle and runtime capability adapters.
 	pluginHost *pluginhost.Host
 
@@ -1080,7 +1083,15 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	case "antigravity":
 		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	case "claude":
-		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
+		if s.claudePromptCacheRuntime == nil {
+			s.claudePromptCacheRuntime = executor.NewClaudePromptCacheRuntime()
+		}
+		s.coreManager.RegisterExecutor(
+			executor.NewClaudeExecutorWithPromptCacheRuntime(
+				s.cfg,
+				s.claudePromptCacheRuntime,
+			),
+		)
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "xai":

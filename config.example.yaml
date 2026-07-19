@@ -340,6 +340,13 @@ nonstream-keepalive-interval: 0
 #   timeout: "600"
 #   stabilize-device-profile: false  # optional, default false; set true to enable per-auth/API-key fingerprint pinning
 
+# Claude prompt-cache planning. Missing configuration preserves the legacy
+# all-or-nothing cache_control injection behavior for backward compatibility.
+# claude-prompt-cache:
+#   mode: "legacy"                  # "legacy", "adaptive", or "passthrough"
+#   cold-start-max-wait-seconds: 15 # adaptive mode only; 0 disables follower waiting
+#   diagnostics: false              # opt in to Anthropic cache-diagnosis on official endpoints
+
 # Default headers for Codex OAuth model requests.
 # These are used only for file-backed/OAuth Codex requests when the client
 # does not send the header. `user-agent` applies to HTTP and websocket requests;

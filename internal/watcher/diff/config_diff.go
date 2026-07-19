@@ -54,6 +54,15 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.DisableClaudeCloakMode != newCfg.DisableClaudeCloakMode {
 		changes = append(changes, fmt.Sprintf("disable-claude-cloak-mode: %t -> %t", oldCfg.DisableClaudeCloakMode, newCfg.DisableClaudeCloakMode))
 	}
+	if oldCfg.ClaudePromptCache.EffectiveMode() != newCfg.ClaudePromptCache.EffectiveMode() {
+		changes = append(changes, fmt.Sprintf("claude-prompt-cache.mode: %s -> %s", oldCfg.ClaudePromptCache.EffectiveMode(), newCfg.ClaudePromptCache.EffectiveMode()))
+	}
+	if oldCfg.ClaudePromptCache.EffectiveColdStartMaxWaitSeconds() != newCfg.ClaudePromptCache.EffectiveColdStartMaxWaitSeconds() {
+		changes = append(changes, fmt.Sprintf("claude-prompt-cache.cold-start-max-wait-seconds: %d -> %d", oldCfg.ClaudePromptCache.EffectiveColdStartMaxWaitSeconds(), newCfg.ClaudePromptCache.EffectiveColdStartMaxWaitSeconds()))
+	}
+	if oldCfg.ClaudePromptCache.Diagnostics != newCfg.ClaudePromptCache.Diagnostics {
+		changes = append(changes, fmt.Sprintf("claude-prompt-cache.diagnostics: %t -> %t", oldCfg.ClaudePromptCache.Diagnostics, newCfg.ClaudePromptCache.Diagnostics))
+	}
 	if oldCfg.DisableImageGeneration != newCfg.DisableImageGeneration {
 		changes = append(changes, fmt.Sprintf("disable-image-generation: %v -> %v", oldCfg.DisableImageGeneration, newCfg.DisableImageGeneration))
 	}

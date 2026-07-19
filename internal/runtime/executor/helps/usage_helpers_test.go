@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -293,6 +294,73 @@ func TestParseClaudeUsageFallsBackCachedTokensToCacheCreation(t *testing.T) {
 	}
 	if detail.TotalTokens != 22852 {
 		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 22852)
+	}
+}
+
+func TestClaudeStreamUsageAccumulatorMergesUsageAndDiagnostics(t *testing.T) {
+	accumulator := &ClaudeStreamUsageAccumulator{}
+	accumulator.Observe([]byte(`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-sonnet-4-5","usage":{"input_tokens":5,"output_tokens":0,"cache_read_input_tokens":7,"cache_creation_input_tokens":11},"diagnostics":{"cache_miss_reason":{"type":"tools_changed","cache_missed_input_tokens":19}}}}`))
+	accumulator.Observe([]byte(`data: {"type":"message_delta","usage":{"output_tokens":13}}`))
+	accumulator.Observe([]byte(`data: {"type":"message_stop"}`))
+
+	if !accumulator.CompletedSuccessfully() {
+		t.Fatal("CompletedSuccessfully() = false, want true")
+	}
+	if got := accumulator.MessageID(); got != "msg_123" {
+		t.Fatalf("MessageID() = %q, want msg_123", got)
+	}
+	reason, missedTokens := accumulator.CacheMissReason()
+	if reason != "tools_changed" || missedTokens != 19 {
+		t.Fatalf("CacheMissReason() = (%q, %d), want (%q, %d)", reason, missedTokens, "tools_changed", 19)
+	}
+	detail := accumulator.Detail()
+	if detail.InputTokens != 5 || detail.OutputTokens != 13 {
+		t.Fatalf("merged input/output tokens = (%d, %d), want (5, 13)", detail.InputTokens, detail.OutputTokens)
+	}
+	if detail.CacheReadTokens != 7 || detail.CacheCreationTokens != 11 {
+		t.Fatalf("merged cache tokens = (%d, %d), want (7, 11)", detail.CacheReadTokens, detail.CacheCreationTokens)
+	}
+	if detail.TotalTokens != 36 {
+		t.Fatalf("total tokens = %d, want 36", detail.TotalTokens)
+	}
+}
+
+func TestClaudeStreamUsageAccumulatorRejectsErrorAndIncompleteStreams(t *testing.T) {
+	incompleteAccumulator := &ClaudeStreamUsageAccumulator{}
+	incompleteAccumulator.Observe([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":5}}}`))
+	if incompleteAccumulator.CompletedSuccessfully() {
+		t.Fatal("incomplete stream was reported as successful")
+	}
+
+	errorAccumulator := &ClaudeStreamUsageAccumulator{}
+	errorAccumulator.Observe([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":5}}}`))
+	errorAccumulator.Observe([]byte(`data: {"type":"error","error":{"message":"upstream failed"}}`))
+	errorAccumulator.Observe([]byte(`data: {"type":"message_stop"}`))
+	if errorAccumulator.CompletedSuccessfully() {
+		t.Fatal("error stream was reported as successful")
+	}
+
+	invalidSequences := [][]byte{
+		[]byte(`data: {"type":"message_stop"}`),
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-5","usage":{"input_tokens":1}}}` + "\n" + `data: {"type":"message_stop"}`),
+		[]byte(`data: {"type":"message_delta","usage":{"output_tokens":1}}` + "\n" + `data: {"type":"message_stop"}`),
+		[]byte(`data: not-json` + "\n" + `data: {"type":"message_stop"}`),
+	}
+	for testIndex, invalidSequence := range invalidSequences {
+		invalidAccumulator := &ClaudeStreamUsageAccumulator{}
+		for _, line := range bytes.Split(invalidSequence, []byte("\n")) {
+			invalidAccumulator.Observe(line)
+		}
+		if invalidAccumulator.CompletedSuccessfully() {
+			t.Fatalf("invalid sequence %d was reported as successful", testIndex)
+		}
+	}
+
+	doneAccumulator := &ClaudeStreamUsageAccumulator{}
+	doneAccumulator.Observe([]byte(`data: {"usage":{"input_tokens":2,"output_tokens":3}}`))
+	doneAccumulator.Observe([]byte(`data: [DONE]`))
+	if !doneAccumulator.CompletedSuccessfully() {
+		t.Fatal("compatible-provider [DONE] stream was not reported as successful")
 	}
 }
 

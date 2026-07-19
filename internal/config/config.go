@@ -142,6 +142,10 @@ type Config struct {
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
 
+	// ClaudePromptCache configures Claude prompt-cache planning and diagnostics.
+	// The zero value preserves the legacy cache-control behavior.
+	ClaudePromptCache ClaudePromptCacheConfig `yaml:"claude-prompt-cache" json:"claude-prompt-cache"`
+
 	// DisableClaudeCloakMode globally disables Claude request cloaking when true.
 	// Cloaking disguises requests as the official Claude Code CLI and replaces the
 	// system prompt. When true, every Claude credential defaults to no cloaking
@@ -272,6 +276,56 @@ type ClaudeHeaderDefaults struct {
 	Arch                   string `yaml:"arch" json:"arch"`
 	Timeout                string `yaml:"timeout" json:"timeout"`
 	StabilizeDeviceProfile *bool  `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
+}
+
+const (
+	ClaudePromptCacheModeLegacy      = "legacy"
+	ClaudePromptCacheModeAdaptive    = "adaptive"
+	ClaudePromptCacheModePassthrough = "passthrough"
+
+	defaultClaudePromptCacheColdStartMaxWaitSeconds = 15
+	maxClaudePromptCacheColdStartMaxWaitSeconds     = 60
+)
+
+// ClaudePromptCacheConfig configures prompt-cache planning for Claude requests.
+type ClaudePromptCacheConfig struct {
+	// Mode controls automatic cache-control behavior: legacy, adaptive, or passthrough.
+	// Empty and unknown values preserve the legacy behavior.
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
+
+	// ColdStartMaxWaitSeconds limits how long a request waits for another request
+	// to start creating an identical cache prefix. Zero disables waiting.
+	ColdStartMaxWaitSeconds *int `yaml:"cold-start-max-wait-seconds,omitempty" json:"cold-start-max-wait-seconds,omitempty"`
+
+	// Diagnostics enables Anthropic's cache-diagnosis beta for official endpoints.
+	Diagnostics bool `yaml:"diagnostics,omitempty" json:"diagnostics,omitempty"`
+}
+
+// EffectiveMode returns the normalized prompt-cache mode.
+func (c ClaudePromptCacheConfig) EffectiveMode() string {
+	switch strings.ToLower(strings.TrimSpace(c.Mode)) {
+	case ClaudePromptCacheModeAdaptive:
+		return ClaudePromptCacheModeAdaptive
+	case ClaudePromptCacheModePassthrough:
+		return ClaudePromptCacheModePassthrough
+	default:
+		return ClaudePromptCacheModeLegacy
+	}
+}
+
+// EffectiveColdStartMaxWaitSeconds returns the bounded follower wait duration.
+func (c ClaudePromptCacheConfig) EffectiveColdStartMaxWaitSeconds() int {
+	if c.ColdStartMaxWaitSeconds == nil {
+		return defaultClaudePromptCacheColdStartMaxWaitSeconds
+	}
+	configuredSeconds := *c.ColdStartMaxWaitSeconds
+	if configuredSeconds < 0 {
+		return defaultClaudePromptCacheColdStartMaxWaitSeconds
+	}
+	if configuredSeconds > maxClaudePromptCacheColdStartMaxWaitSeconds {
+		return maxClaudePromptCacheColdStartMaxWaitSeconds
+	}
+	return configuredSeconds
 }
 
 // CodexHeaderDefaults configures fallback header values injected into Codex

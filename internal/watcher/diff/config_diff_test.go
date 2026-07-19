@@ -93,6 +93,38 @@ func TestBuildConfigChangeDetails_NoChanges(t *testing.T) {
 	}
 }
 
+func TestBuildConfigChangeDetailsClaudePromptCache(t *testing.T) {
+	disabledWait := 0
+	oldCfg := &config.Config{}
+	newCfg := &config.Config{
+		ClaudePromptCache: config.ClaudePromptCacheConfig{
+			Mode:                    config.ClaudePromptCacheModeAdaptive,
+			ColdStartMaxWaitSeconds: &disabledWait,
+			Diagnostics:             true,
+		},
+	}
+
+	details := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, details, "claude-prompt-cache.mode: legacy -> adaptive")
+	expectContains(t, details, "claude-prompt-cache.cold-start-max-wait-seconds: 15 -> 0")
+	expectContains(t, details, "claude-prompt-cache.diagnostics: false -> true")
+}
+
+func TestBuildConfigChangeDetailsClaudePromptCacheNormalizedValuesAreEquivalent(t *testing.T) {
+	defaultWait := 15
+	oldCfg := &config.Config{}
+	newCfg := &config.Config{
+		ClaudePromptCache: config.ClaudePromptCacheConfig{
+			Mode:                    config.ClaudePromptCacheModeLegacy,
+			ColdStartMaxWaitSeconds: &defaultWait,
+		},
+	}
+
+	if details := BuildConfigChangeDetails(oldCfg, newCfg); len(details) != 0 {
+		t.Fatalf("normalized equivalent values produced changes: %v", details)
+	}
+}
+
 func TestBuildConfigChangeDetails_GeminiVertexHeaders(t *testing.T) {
 	oldCfg := &config.Config{
 		GeminiKey: []config.GeminiKey{

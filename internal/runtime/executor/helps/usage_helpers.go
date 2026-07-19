@@ -646,9 +646,147 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
 	if !usageNode.Exists() {
+		usageNode = gjson.GetBytes(payload, "message.usage")
+	}
+	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
 	return parseClaudeUsageNode(usageNode), true
+}
+
+// ClaudeStreamUsageAccumulator merges Anthropic's split stream usage. Input
+// and cache counters normally arrive on message_start, while output counters
+// arrive on message_delta.
+type ClaudeStreamUsageAccumulator struct {
+	detail                 usage.Detail
+	hasUsage               bool
+	messageStart           bool
+	messageDelta           bool
+	messageStop            bool
+	doneMarker             bool
+	errorEvent             bool
+	malformedEvent         bool
+	messageID              string
+	cacheMissReason        string
+	cacheMissedInputTokens int64
+}
+
+// Observe records usage and terminal state from one SSE line.
+func (accumulator *ClaudeStreamUsageAccumulator) Observe(line []byte) {
+	if accumulator == nil {
+		return
+	}
+	trimmed := bytes.TrimSpace(line)
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		trimmed = bytes.TrimSpace(trimmed[len("data:"):])
+	}
+	if bytes.Equal(trimmed, []byte("[DONE]")) {
+		accumulator.doneMarker = true
+		return
+	}
+
+	payload := jsonPayload(line)
+	if len(payload) == 0 {
+		return
+	}
+	if !gjson.ValidBytes(payload) {
+		accumulator.malformedEvent = true
+		return
+	}
+	eventType := gjson.GetBytes(payload, "type").String()
+	switch eventType {
+	case "message_start":
+		accumulator.messageID = strings.TrimSpace(gjson.GetBytes(payload, "message.id").String())
+		messageModel := strings.TrimSpace(gjson.GetBytes(payload, "message.model").String())
+		if accumulator.messageID == "" || messageModel == "" {
+			accumulator.malformedEvent = true
+			break
+		}
+		accumulator.messageStart = true
+		accumulator.observeDiagnostics(gjson.GetBytes(payload, "message.diagnostics"))
+	case "message_delta":
+		accumulator.messageDelta = true
+	case "message_stop":
+		accumulator.messageStop = true
+	case "error":
+		accumulator.errorEvent = true
+	}
+	if detail, ok := ParseClaudeStreamUsage(line); ok {
+		accumulator.detail = mergeClaudeStreamUsage(accumulator.detail, detail)
+		accumulator.hasUsage = true
+	}
+}
+
+func (accumulator *ClaudeStreamUsageAccumulator) observeDiagnostics(diagnostics gjson.Result) {
+	if accumulator == nil || !diagnostics.Exists() {
+		return
+	}
+	reason := diagnostics.Get("cache_miss_reason")
+	if !reason.Exists() || !reason.IsObject() {
+		return
+	}
+	accumulator.cacheMissReason = strings.TrimSpace(reason.Get("type").String())
+	accumulator.cacheMissedInputTokens = reason.Get("cache_missed_input_tokens").Int()
+}
+
+// Detail returns the merged stream usage.
+func (accumulator *ClaudeStreamUsageAccumulator) Detail() usage.Detail {
+	if accumulator == nil {
+		return usage.Detail{}
+	}
+	return accumulator.detail
+}
+
+// CompletedSuccessfully reports whether a terminal success marker was seen.
+func (accumulator *ClaudeStreamUsageAccumulator) CompletedSuccessfully() bool {
+	if accumulator == nil || accumulator.errorEvent || accumulator.malformedEvent {
+		return false
+	}
+	if accumulator.messageStop {
+		return accumulator.messageStart && accumulator.messageDelta
+	}
+	return accumulator.doneMarker && accumulator.hasUsage
+}
+
+// MessageID returns the response ID used by the next diagnostic request.
+func (accumulator *ClaudeStreamUsageAccumulator) MessageID() string {
+	if accumulator == nil {
+		return ""
+	}
+	return accumulator.messageID
+}
+
+// CacheMissReason returns Anthropic's non-sensitive divergence category.
+func (accumulator *ClaudeStreamUsageAccumulator) CacheMissReason() (string, int64) {
+	if accumulator == nil {
+		return "", 0
+	}
+	return accumulator.cacheMissReason, accumulator.cacheMissedInputTokens
+}
+
+func mergeClaudeStreamUsage(current, update usage.Detail) usage.Detail {
+	current.InputTokens = maxInt64(current.InputTokens, update.InputTokens)
+	current.OutputTokens = maxInt64(current.OutputTokens, update.OutputTokens)
+	current.ReasoningTokens = maxInt64(current.ReasoningTokens, update.ReasoningTokens)
+	current.CacheReadTokens = maxInt64(current.CacheReadTokens, update.CacheReadTokens)
+	current.CacheCreationTokens = maxInt64(current.CacheCreationTokens, update.CacheCreationTokens)
+	if update.ResponseServiceTier != "" {
+		current.ResponseServiceTier = update.ResponseServiceTier
+	}
+	current.CachedTokens = current.CacheReadTokens
+	if current.CachedTokens == 0 {
+		current.CachedTokens = current.CacheCreationTokens
+	}
+	current.TotalTokens = current.InputTokens + current.OutputTokens +
+		current.ReasoningTokens + current.CacheReadTokens + current.CacheCreationTokens
+	return current
+}
+
+func maxInt64(left, right int64) int64 {
+	if right > left {
+		return right
+	}
+	return left
 }
 
 func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {

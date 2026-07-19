@@ -44,6 +44,11 @@ jobs:
       - name: Run unit tests
         run: go test -p "$(nproc)" ./...
 
+      - name: Run Claude prompt-cache race tests
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race -count=1 ./internal/runtime/executor/helps ./internal/runtime/executor ./sdk/cliproxy
+
       - name: Vet Claude identity package
         run: go vet ./sdk/cliproxy/auth
 
@@ -69,7 +74,6 @@ jobs:
           images: ${{ env.IMAGE_NAME }}
           tags: |
             type=sha,format=long,prefix=sha-
-            type=ref,event=branch
 
       - name: Login to GitHub Container Registry
         if: github.event_name != 'pull_request' && github.repository_owner == 'austinhmh'
