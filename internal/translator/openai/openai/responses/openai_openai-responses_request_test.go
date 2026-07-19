@@ -275,6 +275,33 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_FlattensNamespaceT
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_QualifiesNamespaceFunctionCallHistory(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"function_call","call_id":"call_get_me","name":"get_me","namespace":"mcp__github","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_get_me","output":"ok"}
+		],
+		"tools": [
+			{
+				"type":"namespace",
+				"name":"mcp__github",
+				"tools":[{"type":"function","name":"get_me","parameters":{"type":"object"}}]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", raw, false)
+
+	gotHistoryName := gjson.GetBytes(out, "messages.0.tool_calls.0.function.name").String()
+	gotDeclaredName := gjson.GetBytes(out, "tools.0.function.name").String()
+	if gotHistoryName != "mcp__github__get_me" {
+		t.Fatalf("history function name = %q, want mcp__github__get_me; output=%s", gotHistoryName, out)
+	}
+	if gotHistoryName != gotDeclaredName {
+		t.Fatalf("history function name = %q, declared function name = %q; output=%s", gotHistoryName, gotDeclaredName, out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_FlattensNamespaceCustomTools(t *testing.T) {
 	tests := []struct {
 		name string

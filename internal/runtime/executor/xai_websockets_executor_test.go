@@ -202,7 +202,15 @@ func TestXAIWebsocketsExecuteStreamRestoresNamespaceToolCalls(t *testing.T) {
 
 	select {
 	case payload := <-capturedPayload:
-		tool := gjson.GetBytes(payload, "input.0.tools.0")
+		for _, item := range gjson.GetBytes(payload, "input").Array() {
+			if got := item.Get("type").String(); got == "additional_tools" {
+				t.Fatalf("upstream input contains unsupported additional_tools item: %s", payload)
+			}
+		}
+		if got := gjson.GetBytes(payload, "input.0.role").String(); got != "user" {
+			t.Fatalf("input.0.role = %q, want user; payload=%s", got, payload)
+		}
+		tool := gjson.GetBytes(payload, "tools.0")
 		if got := tool.Get("name").String(); got != "mcp__exa__web_search_exa" {
 			t.Fatalf("upstream tool name = %q, want qualified name; payload=%s", got, payload)
 		}

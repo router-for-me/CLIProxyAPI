@@ -223,7 +223,11 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 				if name := item.Get("name"); name.Exists() {
-					toolCall, _ = sjson.SetBytes(toolCall, "function.name", name.String())
+					functionName := name.String()
+					if namespace := strings.TrimSpace(item.Get("namespace").String()); namespace != "" {
+						functionName = qualifyResponsesNamespaceToolName(namespace, functionName)
+					}
+					toolCall, _ = sjson.SetBytes(toolCall, "function.name", functionName)
 				}
 
 				if arguments := item.Get("arguments"); arguments.Exists() {
