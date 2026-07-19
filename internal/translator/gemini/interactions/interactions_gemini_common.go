@@ -39,9 +39,9 @@ func ConvertInteractionsRequestToGemini(modelName string, inputRawJSON []byte, s
 	out = copyInteractionsTools(out, root)
 	out = copyInteractionsToolChoice(out, root)
 	out = copyInteractionsServiceTier(out, root)
-	contentItems := make([][]byte, 0, 16)
+	contentItems := translatorcommon.NewRawArrayItems(root.Get("input.#").Int())
 	appendInteractionsInput(&contentItems, root.Get("input"))
-	out, _ = sjson.SetRawBytes(out, "contents", translatorcommon.JoinRawArray(contentItems))
+	out = translatorcommon.SetRawArrayItems(out, "contents", contentItems)
 	return out
 }
 
@@ -56,7 +56,7 @@ func ConvertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, s
 		out = normalizeGeminiThinkingConfigForInteractions(out)
 	}
 	out = copyGeminiToolsToInteractions(out, root)
-	inputItems := make([][]byte, 0, 16)
+	inputItems := translatorcommon.NewRawArrayItems(root.Get("contents.#").Int())
 	root.Get("contents").ForEach(func(_, content gjson.Result) bool {
 		role := content.Get("role").String()
 		stepType := "user_input"
@@ -88,13 +88,13 @@ func ConvertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, s
 			}
 			step := []byte(`{"type":"","content":[]}`)
 			step, _ = sjson.SetBytes(step, "type", currentStepType)
-			step, _ = sjson.SetRawBytes(step, "content", translatorcommon.JoinRawArray([][]byte{item}))
+			step = translatorcommon.SetRawArrayItems(step, "content", [][]byte{item})
 			inputItems = append(inputItems, step)
 			return true
 		})
 		return true
 	})
-	out, _ = sjson.SetRawBytes(out, "input", translatorcommon.JoinRawArray(inputItems))
+	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
 	out, _ = sjson.SetBytes(out, "stream", stream)
 	return out
 }

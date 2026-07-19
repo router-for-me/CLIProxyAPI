@@ -11,12 +11,24 @@ import (
 )
 
 func BenchmarkRequestTranslationLargeHistory(b *testing.B) {
+	benchmarkRequestTranslation(b, 64)
+}
+
+func BenchmarkRequestTranslationHistorySizes(b *testing.B) {
+	for _, turns := range []int{0, 1, 4, 16, 64} {
+		b.Run(fmt.Sprintf("turns_%d", turns), func(b *testing.B) {
+			benchmarkRequestTranslation(b, turns)
+		})
+	}
+}
+
+func benchmarkRequestTranslation(b *testing.B, turns int) {
 	requests := map[string][]byte{
-		"claude":          benchmarkClaudeRequest(64),
-		"gemini":          benchmarkGeminiRequest(64),
-		"openai":          benchmarkOpenAIRequest(64),
-		"openai-response": benchmarkOpenAIResponsesRequest(64),
-		"interactions":    benchmarkInteractionsRequest(64),
+		"claude":          benchmarkClaudeRequest(turns),
+		"gemini":          benchmarkGeminiRequest(turns),
+		"openai":          benchmarkOpenAIRequest(turns),
+		"openai-response": benchmarkOpenAIResponsesRequest(turns),
+		"interactions":    benchmarkInteractionsRequest(turns),
 	}
 	routes := []struct {
 		source  string

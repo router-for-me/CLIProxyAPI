@@ -128,7 +128,11 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
 	// instructions -> as a leading message (use role user for Claude API compatibility)
-	messageBlocks := make([][]byte, 0, 16)
+	messageCapacity := root.Get("input.#").Int()
+	if instructions := root.Get("instructions"); instructions.Type == gjson.String && instructions.String() != "" {
+		messageCapacity++
+	}
+	messageBlocks := common.NewRawArrayItems(messageCapacity)
 	instructionsText := ""
 	extractedFromSystem := false
 	if instr := root.Get("instructions"); instr.Exists() && instr.Type == gjson.String {
@@ -419,14 +423,14 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 	flushPendingReasoning()
 	flushPendingToolUses()
-	out, _ = sjson.SetRawBytes(out, "messages", common.JoinRawArray(messageBlocks))
+	out = common.SetRawArrayItems(out, "messages", messageBlocks)
 
 	includedToolNames := map[string]struct{}{}
 	toolNameMap := map[string]string{}
 
 	// tools mapping: parameters -> input_schema
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		toolItems := make([][]byte, 0, 8)
+		var toolItems [][]byte
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			convertedTools := convertResponsesToolToClaudeTools(tool, toolNameMap)
 			for _, tJSON := range convertedTools {

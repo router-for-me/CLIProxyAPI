@@ -227,7 +227,7 @@ func responsesInputItemToInteractions(item gjson.Result, functionNamesByCallID m
 }
 
 func appendResponsesContentToInteractions(step []byte, content gjson.Result) []byte {
-	contentItems := make([][]byte, 0, 4)
+	var contentItems [][]byte
 	if content.Type == gjson.String {
 		part := []byte(`{"type":"text","text":""}`)
 		part, _ = sjson.SetBytes(part, "text", content.String())
@@ -245,7 +245,7 @@ func appendResponsesContentToInteractions(step []byte, content gjson.Result) []b
 		}
 	}
 	if len(contentItems) > 0 {
-		step, _ = sjson.SetRawBytes(step, "content", translatorcommon.JoinRawArray(contentItems))
+		step = translatorcommon.SetRawArrayItems(step, "content", contentItems)
 	}
 	return step
 }
@@ -328,7 +328,7 @@ func appendResponsesToolsToInteractions(out []byte, tools gjson.Result) []byte {
 	if !tools.Exists() || !tools.IsArray() {
 		return out
 	}
-	toolItems := make([][]byte, 0, 8)
+	var toolItems [][]byte
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		switch tool.Get("type").String() {
 		case "function", "":
@@ -434,7 +434,7 @@ func interactionsInputItemToResponses(item gjson.Result) []byte {
 }
 
 func interactionsMessageToResponses(item gjson.Result, role string) []byte {
-	contentItems := make([][]byte, 0, 4)
+	var contentItems [][]byte
 	content := item.Get("content")
 	if content.Type == gjson.String {
 		partType := "input_text"
@@ -455,19 +455,19 @@ func interactionsMessageToResponses(item gjson.Result, role string) []byte {
 	}
 	out := []byte(`{"type":"message","role":"","content":[]}`)
 	out, _ = sjson.SetBytes(out, "role", role)
-	out, _ = sjson.SetRawBytes(out, "content", translatorcommon.JoinRawArray(contentItems))
+	out = translatorcommon.SetRawArrayItems(out, "content", contentItems)
 	return out
 }
 
 func interactionsThoughtToResponses(item gjson.Result) []byte {
-	summaryItems := make([][]byte, 0, 2)
+	var summaryItems [][]byte
 	for _, text := range interactionsContentTexts(item.Get("content")) {
 		part := []byte(`{"type":"summary_text","text":""}`)
 		part, _ = sjson.SetBytes(part, "text", text)
 		summaryItems = append(summaryItems, part)
 	}
 	out := []byte(`{"type":"reasoning","summary":[]}`)
-	out, _ = sjson.SetRawBytes(out, "summary", translatorcommon.JoinRawArray(summaryItems))
+	out = translatorcommon.SetRawArrayItems(out, "summary", summaryItems)
 	return out
 }
 
@@ -551,7 +551,7 @@ func appendInteractionsToolsToResponses(out []byte, tools gjson.Result) []byte {
 	if !tools.Exists() || !tools.IsArray() {
 		return out
 	}
-	toolItems := make([][]byte, 0, 8)
+	var toolItems [][]byte
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		if converted, ok := responsesToolFromInteractionsTool(tool); ok {
 			toolItems = append(toolItems, converted)

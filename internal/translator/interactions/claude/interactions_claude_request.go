@@ -116,12 +116,12 @@ func appendClaudeMessagesToInteractions(out []byte, messages gjson.Result) []byt
 	if !messages.Exists() || !messages.IsArray() {
 		return out
 	}
-	inputItems := make([][]byte, 0, 16)
+	inputItems := translatorcommon.NewRawArrayItems(messages.Get("#").Int())
 	messages.ForEach(func(_, message gjson.Result) bool {
 		appendClaudeMessageToInteractions(&inputItems, message)
 		return true
 	})
-	out, _ = sjson.SetRawBytes(out, "input", translatorcommon.JoinRawArray(inputItems))
+	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
 	return out
 }
 
@@ -247,7 +247,7 @@ func copyClaudeToolsToInteractions(out []byte, root gjson.Result) []byte {
 	if !tools.Exists() || !tools.IsArray() {
 		return out
 	}
-	toolItems := make([][]byte, 0, 8)
+	var toolItems [][]byte
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		name := strings.TrimSpace(tool.Get("name").String())
 		if name == "" {

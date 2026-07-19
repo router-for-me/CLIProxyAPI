@@ -134,7 +134,11 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Process contents (Gemini messages) -> OpenAI messages
-	messageItems := make([][]byte, 0, 16)
+	messageCapacity := root.Get("contents.#").Int()
+	if root.Get("systemInstruction").Exists() || root.Get("system_instruction").Exists() {
+		messageCapacity++
+	}
+	messageItems := translatorcommon.NewRawArrayItems(messageCapacity)
 	var toolCallIDs []string // Track tool call IDs for matching with tool results
 	toolCallConsumeIdx := 0
 
@@ -288,11 +292,11 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			return true
 		})
 	}
-	out, _ = sjson.SetRawBytes(out, "messages", translatorcommon.JoinRawArray(messageItems))
+	out = translatorcommon.SetRawArrayItems(out, "messages", messageItems)
 
 	// Tools mapping: Gemini tools -> OpenAI tools
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		toolItems := make([][]byte, 0, 8)
+		var toolItems [][]byte
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			if functionDeclarations := tool.Get("functionDeclarations"); functionDeclarations.Exists() && functionDeclarations.IsArray() {
 				functionDeclarations.ForEach(func(_, funcDecl gjson.Result) bool {

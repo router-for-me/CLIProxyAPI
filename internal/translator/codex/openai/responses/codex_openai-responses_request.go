@@ -121,7 +121,7 @@ func normalizeCodexBuiltinToolArray(rawJSON []byte, path string) []byte {
 	}
 
 	changed := false
-	toolItems := make([][]byte, 0, 8)
+	var toolItems [][]byte
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		item := []byte(tool.Raw)
 		currentType := tool.Get("type").String()

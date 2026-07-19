@@ -67,7 +67,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	out := []byte(fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID))
 
 	root := gjson.ParseBytes(rawJSON)
-	messageItems := make([][]byte, 0, 16)
+	messageItems := translatorcommon.NewRawArrayItems(root.Get("contents.#").Int())
 
 	// Helper for generating tool call IDs in the form: toolu_<alphanum>
 	// This ensures unique identifiers for tool calls in the Claude Code format
@@ -359,7 +359,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			return true
 		})
 	}
-	out, _ = sjson.SetRawBytes(out, "messages", translatorcommon.JoinRawArray(messageItems))
+	out = translatorcommon.SetRawArrayItems(out, "messages", messageItems)
 
 	// Tools mapping: Gemini functionDeclarations -> Claude Code tools
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {

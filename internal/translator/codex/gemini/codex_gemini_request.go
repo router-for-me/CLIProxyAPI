@@ -42,7 +42,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	out := []byte(`{"model":"","instructions":"","input":[]}`)
 
 	root := gjson.ParseBytes(rawJSON)
-	inputItems := make([][]byte, 0, 16)
+	inputItems := translatorcommon.NewRawArrayItems(root.Get("contents.#").Int())
 
 	// Pre-compute tool name shortening map from declared functionDeclarations
 	shortMap := map[string]string{}
@@ -230,12 +230,12 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		}
 	}
 
-	out, _ = sjson.SetRawBytes(out, "input", translatorcommon.JoinRawArray(inputItems))
+	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
 
 	// Tools mapping: Gemini functionDeclarations -> Codex tools
 	tools := root.Get("tools")
 	if tools.IsArray() {
-		toolItems := make([][]byte, 0, 8)
+		var toolItems [][]byte
 		out, _ = sjson.SetBytes(out, "tool_choice", "auto")
 		tarr := tools.Array()
 		for i := 0; i < len(tarr); i++ {

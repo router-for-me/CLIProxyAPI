@@ -16,10 +16,14 @@ func ConvertInteractionsRequestToOpenAI(modelName string, inputRawJSON []byte, s
 	if stream || root.Get("stream").Bool() {
 		out, _ = sjson.SetBytes(out, "stream", true)
 	}
-	messageItems := make([][]byte, 0, 16)
+	messageCapacity := root.Get("input.#").Int()
+	if interactionsText(root.Get("system_instruction")) != "" {
+		messageCapacity++
+	}
+	messageItems := translatorcommon.NewRawArrayItems(messageCapacity)
 	appendInteractionsSystemToOpenAI(&messageItems, root)
 	appendInteractionsInputToOpenAIMessages(&messageItems, root.Get("input"))
-	out, _ = sjson.SetRawBytes(out, "messages", translatorcommon.JoinRawArray(messageItems))
+	out = translatorcommon.SetRawArrayItems(out, "messages", messageItems)
 	out = copyInteractionsToolsToOpenAI(out, root)
 	out = copyInteractionsGenerationConfigToOpenAI(out, root)
 	out = copyInteractionsOpenAITopLevel(out, root)
@@ -143,7 +147,7 @@ func appendInteractionsFunctionCallToOpenAI(items *[][]byte, step gjson.Result) 
 	toolCall, _ = sjson.SetBytes(toolCall, "id", callID)
 	toolCall, _ = sjson.SetBytes(toolCall, "function.name", step.Get("name").String())
 	toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", jsonStringValue(step.Get("arguments"), "{}"))
-	msg, _ = sjson.SetRawBytes(msg, "tool_calls", translatorcommon.JoinRawArray([][]byte{toolCall}))
+	msg = translatorcommon.SetRawArrayItems(msg, "tool_calls", [][]byte{toolCall})
 	*items = append(*items, msg)
 }
 
@@ -159,7 +163,7 @@ func copyInteractionsToolsToOpenAI(out []byte, root gjson.Result) []byte {
 	if !tools.Exists() || !tools.IsArray() {
 		return out
 	}
-	toolItems := make([][]byte, 0, 8)
+	var toolItems [][]byte
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		if converted, ok := openAIToolFromInteractionsTool(tool); ok {
 			toolItems = append(toolItems, converted)

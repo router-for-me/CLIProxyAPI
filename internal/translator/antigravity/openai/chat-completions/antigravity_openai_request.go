@@ -302,7 +302,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		if len(systemParts) > 0 {
 			out, _ = sjson.SetRawBytes(out, "request.systemInstruction", antigravityOpenAIContent("user", systemParts))
 		}
-		out, _ = sjson.SetRawBytes(out, "request.contents", translatorcommon.JoinRawArray(contentItems))
+		out = translatorcommon.SetRawArrayItems(out, "request.contents", contentItems)
 	}
 
 	// tools -> request.tools[].functionDeclarations + request.tools[].googleSearch/codeExecution/urlContext passthrough

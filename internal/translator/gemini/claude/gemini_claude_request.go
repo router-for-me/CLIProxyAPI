@@ -63,7 +63,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 
 	// contents
 	if messagesResult := gjson.GetBytes(rawJSON, "messages"); messagesResult.IsArray() {
-		contentItems := make([][]byte, 0, 16)
+		contentItems := translatorcommon.NewRawArrayItems(messagesResult.Get("#").Int())
 		messagesResult.ForEach(func(_, messageResult gjson.Result) bool {
 			roleResult := messageResult.Get("role")
 			if roleResult.Type != gjson.String {
@@ -187,12 +187,12 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				}
 			}
 		}
-		out, _ = sjson.SetRawBytes(out, "contents", translatorcommon.JoinRawArray(contentItems))
+		out = translatorcommon.SetRawArrayItems(out, "contents", contentItems)
 	}
 
 	// tools
 	if toolsResult := gjson.GetBytes(rawJSON, "tools"); toolsResult.IsArray() {
-		toolItems := make([][]byte, 0, 8)
+		var toolItems [][]byte
 		toolsResult.ForEach(func(_, toolResult gjson.Result) bool {
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {

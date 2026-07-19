@@ -303,7 +303,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		if len(contentItems) > 0 && gjson.GetBytes(contentItems[len(contentItems)-1], "role").String() == "model" {
 			contentItems = contentItems[:len(contentItems)-1]
 		}
-		out, _ = sjson.SetRawBytes(out, "contents", translatorcommon.JoinRawArray(contentItems))
+		out = translatorcommon.SetRawArrayItems(out, "contents", contentItems)
 	}
 
 	// tools -> tools[].functionDeclarations + tools[].googleSearch/codeExecution/urlContext passthrough

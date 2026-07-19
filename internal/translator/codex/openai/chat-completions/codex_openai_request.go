@@ -122,7 +122,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 
 	// Build input from messages, handling all message types including tool calls
 	out, _ = sjson.SetRawBytes(out, "input", []byte(`[]`))
-	inputItems := make([][]byte, 0, 16)
+	inputItems := translatorcommon.NewRawArrayItems(messages.Get("#").Int())
 	if messages.IsArray() {
 		arr := messages.Array()
 		for i := 0; i < len(arr); i++ {
@@ -343,7 +343,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			}
 		}
 	}
-	out, _ = sjson.SetRawBytes(out, "input", translatorcommon.JoinRawArray(inputItems))
+	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
 
 	// Map response_format and text settings to Responses API text.format
 	rf := gjson.GetBytes(rawJSON, "response_format")

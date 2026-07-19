@@ -163,7 +163,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				message, _ = sjson.SetBytes(message, "role", role)
 
 				if content := item.Get("content"); content.Exists() && content.IsArray() {
-					contentItems := make([][]byte, 0, 4)
+					var contentItems [][]byte
 					content.ForEach(func(_, contentItem gjson.Result) bool {
 						contentType := contentItem.Get("type").String()
 						if contentType == "" {
@@ -187,7 +187,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 						}
 						return true
 					})
-					message, _ = sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray(contentItems))
+					message = translatorcommon.SetRawArrayItems(message, "content", contentItems)
 				} else if content.Type == gjson.String {
 					message, _ = sjson.SetBytes(message, "content", content.String())
 				}

@@ -289,13 +289,13 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			out, _ = sjson.SetRawBytes(out, "system", common.JoinRawArray(systemBlocks))
 		}
 		if len(messageBlocks) > 0 {
-			out, _ = sjson.SetRawBytes(out, "messages", common.JoinRawArray(messageBlocks))
+			out = common.SetRawArrayItems(out, "messages", messageBlocks)
 		}
 	}
 
 	// Tools mapping: OpenAI tools -> Claude Code tools
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
-		anthropicTools := make([][]byte, 0, 8)
+		var anthropicTools [][]byte
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			if tool.Get("type").String() == "function" {
 				function := tool.Get("function")

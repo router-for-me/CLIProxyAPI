@@ -20,9 +20,9 @@ func ConvertInteractionsRequestToClaude(modelName string, inputRawJSON []byte, s
 	}
 	out = copyInteractionsSystemToClaude(out, root)
 	out = copyInteractionsGenerationConfigToClaude(out, root)
-	messageItems := make([][]byte, 0, 16)
+	messageItems := translatorcommon.NewRawArrayItems(root.Get("input.#").Int())
 	appendInteractionsInputToClaudeMessages(&messageItems, root.Get("input"))
-	out, _ = sjson.SetRawBytes(out, "messages", translatorcommon.JoinRawArray(messageItems))
+	out = translatorcommon.SetRawArrayItems(out, "messages", messageItems)
 	out = copyInteractionsToolsToClaude(out, root)
 	return out
 }
@@ -297,7 +297,7 @@ func copyInteractionsToolsToClaude(out []byte, root gjson.Result) []byte {
 	if !tools.Exists() || !tools.IsArray() {
 		return out
 	}
-	toolItems := make([][]byte, 0, 8)
+	var toolItems [][]byte
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		if tool.Get("function_declarations").IsArray() {
 			tool.Get("function_declarations").ForEach(func(_, decl gjson.Result) bool {

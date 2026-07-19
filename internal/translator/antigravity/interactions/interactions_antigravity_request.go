@@ -22,9 +22,9 @@ func ConvertInteractionsRequestToAntigravity(modelName string, inputRawJSON []by
 	}
 	out = copyInteractionsSystemToAntigravity(out, root)
 	out = copyInteractionsGenerationConfigToAntigravity(out, root)
-	contentItems := make([][]byte, 0, 16)
+	contentItems := translatorcommon.NewRawArrayItems(root.Get("input.#").Int())
 	appendInteractionsInputToAntigravity(&contentItems, root.Get("input"))
-	out, _ = sjson.SetRawBytes(out, "request.contents", translatorcommon.JoinRawArray(contentItems))
+	out = translatorcommon.SetRawArrayItems(out, "request.contents", contentItems)
 	out = copyInteractionsToolsToAntigravity(out, root, functionNameMap)
 	out = rewriteInteractionsFunctionNames(out, functionNameMap)
 	out = attachDefaultAntigravitySafetySettings(out)
@@ -46,7 +46,7 @@ func rewriteInteractionsFunctionNames(out []byte, functionNameMap map[string]str
 	}
 	if canBatchContents {
 		contentsChanged := false
-		contentItems := make([][]byte, 0, 16)
+		contentItems := translatorcommon.NewRawArrayItems(contents.Get("#").Int())
 		contents.ForEach(func(_, content gjson.Result) bool {
 			contentJSON := []byte(content.Raw)
 			partsChanged := false
@@ -507,8 +507,8 @@ func copyInteractionsToolsToAntigravity(out []byte, root gjson.Result, functionN
 		out, _ = sjson.SetRawBytes(out, "request.tools", []byte(tools.Raw))
 		return out
 	}
-	functionDeclarations := make([][]byte, 0, 8)
-	otherTools := make([][]byte, 0)
+	var functionDeclarations [][]byte
+	var otherTools [][]byte
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		if decls := tool.Get("functionDeclarations"); decls.Exists() && decls.IsArray() {
 			decls.ForEach(func(_, decl gjson.Result) bool {

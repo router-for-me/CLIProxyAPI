@@ -99,7 +99,11 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Process messages and system.
-	messageItems := make([][]byte, 0, 16)
+	messageCapacity := root.Get("messages.#").Int()
+	if root.Get("system").Exists() {
+		messageCapacity++
+	}
+	messageItems := translatorcommon.NewRawArrayItems(messageCapacity)
 
 	// Handle system message first.
 	systemContentItems := make([][]byte, 0, 2)
@@ -285,12 +289,12 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	// Set messages.
 	if len(messageItems) > 0 {
-		out, _ = sjson.SetRawBytes(out, "messages", translatorcommon.JoinRawArray(messageItems))
+		out = translatorcommon.SetRawArrayItems(out, "messages", messageItems)
 	}
 
 	// Process tools - convert Anthropic tools to OpenAI functions
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		toolItems := make([][]byte, 0, 8)
+		var toolItems [][]byte
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			openAIToolJSON := []byte(`{"type":"function","function":{"name":"","description":""}}`)
 			openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.name", tool.Get("name").String())

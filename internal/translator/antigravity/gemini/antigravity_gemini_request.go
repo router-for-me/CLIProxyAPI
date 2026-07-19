@@ -60,7 +60,7 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	// Normalize roles in request.contents: default to valid values if missing/invalid
 	contents := gjson.GetBytes(rawJSON, "request.contents")
 	if contents.IsArray() {
-		contentItems := make([][]byte, 0, 16)
+		contentItems := translatorcommon.NewRawArrayItems(contents.Get("#").Int())
 		rolesChanged := false
 		previousRole := ""
 		contents.ForEach(func(_, value gjson.Result) bool {
@@ -87,7 +87,7 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	toolsResult := gjson.GetBytes(rawJSON, "request.tools")
 	if toolsResult.IsArray() {
 		seenFunctionNames := make(map[string]struct{})
-		toolItems := make([][]byte, 0, 8)
+		var toolItems [][]byte
 		toolsResult.ForEach(func(toolIndex, tool gjson.Result) bool {
 			toolJSON := []byte(tool.Raw)
 			for _, key := range []string{"functionDeclarations", "function_declarations"} {
@@ -96,7 +96,7 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					continue
 				}
 
-				declarationItems := make([][]byte, 0, 8)
+				var declarationItems [][]byte
 				declarations.ForEach(func(_, declaration gjson.Result) bool {
 					mappedName := util.MapSanitizedFunctionName(functionNameMap, declaration.Get("name").String())
 					if mappedName != "" {
@@ -140,7 +140,7 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 func removeEmptyGeminiFunctionTools(rawJSON []byte) []byte {
 	tools := gjson.GetBytes(rawJSON, "request.tools")
-	cleanedTools := make([][]byte, 0, 8)
+	var cleanedTools [][]byte
 	for _, tool := range tools.Array() {
 		toolJSON := []byte(tool.Raw)
 		if tool.IsObject() {
@@ -178,7 +178,7 @@ func rewriteGeminiFunctionNames(rawJSON []byte, functionNameMap map[string]strin
 	}
 	if canBatchContents {
 		contentsChanged := false
-		contentItems := make([][]byte, 0, 16)
+		contentItems := translatorcommon.NewRawArrayItems(contents.Get("#").Int())
 		contents.ForEach(func(_, content gjson.Result) bool {
 			contentJSON := []byte(content.Raw)
 			partsChanged := false
@@ -512,7 +512,7 @@ func fixCLIToolResponse(input string) (string, error) {
 	}
 
 	// Initialize data structures for processing and grouping
-	contentItems := make([][]byte, 0, 16)
+	contentItems := translatorcommon.NewRawArrayItems(contents.Get("#").Int())
 	var pendingGroups []*FunctionCallGroup // Groups awaiting completion with responses
 	var collectedResponses []gjson.Result  // Standalone responses to be matched
 	appendFunctionResponses := func(responses []gjson.Result, callNames []string) {

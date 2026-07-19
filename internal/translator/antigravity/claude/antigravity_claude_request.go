@@ -342,7 +342,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 
 	// contents
-	contentItems := make([][]byte, 0, 16)
+	contentItems := translatorcommon.NewRawArrayItems(gjson.GetBytes(rawJSON, "messages.#").Int())
 
 	// tool_use_id → tool_name lookup, populated incrementally during the main loop.
 	// Claude's tool_result references tool_use by ID; Gemini requires functionResponse.name.
@@ -629,7 +629,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	allowedToolKeys := []string{"name", "description", "behavior", "parameters", "parametersJsonSchema", "response", "responseJsonSchema"}
 	toolsResult := gjson.GetBytes(rawJSON, "tools")
 	if toolsResult.IsArray() {
-		functionDeclarations := make([][]byte, 0, 8)
+		var functionDeclarations [][]byte
 		toolsResults := toolsResult.Array()
 		for i := 0; i < len(toolsResults); i++ {
 			toolResult := toolsResults[i]
@@ -686,7 +686,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		out, _ = sjson.SetRawBytes(out, "request.systemInstruction", antigravityClaudeContent("user", systemParts))
 	}
 	if len(contentItems) > 0 {
-		out, _ = sjson.SetRawBytes(out, "request.contents", translatorcommon.JoinRawArray(contentItems))
+		out = translatorcommon.SetRawArrayItems(out, "request.contents", contentItems)
 	}
 	if toolDeclCount > 0 {
 		out, _ = sjson.SetRawBytes(out, "request.tools", toolsJSON)

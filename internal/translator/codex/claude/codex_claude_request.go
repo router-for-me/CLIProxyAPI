@@ -46,7 +46,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	rootResult := gjson.ParseBytes(rawJSON)
 	toolNameMap := buildReverseMapFromClaudeOriginalToShort(rawJSON)
 	template, _ = sjson.SetBytes(template, "model", modelName)
-	inputItems := make([][]byte, 0, 16)
+	inputItems := translatorcommon.NewRawArrayItems(rootResult.Get("messages.#").Int())
 
 	// Process system messages and convert them to input content format.
 	systemsResult := rootResult.Get("system")
@@ -347,7 +347,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	if toolsResult.IsArray() {
 		template, _ = sjson.SetRawBytes(template, "tools", translatorcommon.JoinRawArray(toolItems))
 	}
-	template, _ = sjson.SetRawBytes(template, "input", translatorcommon.JoinRawArray(inputItems))
+	template = translatorcommon.SetRawArrayItems(template, "input", inputItems)
 
 	return template
 }

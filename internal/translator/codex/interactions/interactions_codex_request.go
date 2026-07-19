@@ -20,9 +20,9 @@ func ConvertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, st
 	}
 	out = copyInteractionsSystemToCodex(out, root)
 	out = copyInteractionsGenerationConfigToCodex(out, root)
-	inputItems := make([][]byte, 0, 16)
+	inputItems := translatorcommon.NewRawArrayItems(root.Get("input.#").Int())
 	appendInteractionsInputToCodex(&inputItems, root.Get("input"))
-	out, _ = sjson.SetRawBytes(out, "input", translatorcommon.JoinRawArray(inputItems))
+	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
 	out = copyInteractionsToolsToCodex(out, root)
 	out = copyInteractionsCodexTopLevel(out, root)
 	return out

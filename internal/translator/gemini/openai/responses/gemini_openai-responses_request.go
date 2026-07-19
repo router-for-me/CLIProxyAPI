@@ -359,12 +359,12 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 		if len(contentItems) > 0 && shouldStripTrailingOpenAIResponsesModelPrefill(gjson.ParseBytes(contentItems[len(contentItems)-1])) {
 			contentItems = contentItems[:len(contentItems)-1]
 		}
-		out, _ = sjson.SetRawBytes(out, "contents", translatorcommon.JoinRawArray(contentItems))
+		out = translatorcommon.SetRawArrayItems(out, "contents", contentItems)
 	} else if input.Exists() && input.Type == gjson.String {
 		// Simple string input conversion to user message.
 		part := []byte(`{"text":""}`)
 		part, _ = sjson.SetBytes(part, "text", input.String())
-		out, _ = sjson.SetRawBytes(out, "contents", translatorcommon.JoinRawArray([][]byte{geminiContent("user", [][]byte{part})}))
+		out = translatorcommon.SetRawArrayItems(out, "contents", [][]byte{geminiContent("user", [][]byte{part})})
 	}
 	if len(systemParts) > 0 {
 		out, _ = sjson.SetRawBytes(out, "systemInstruction", geminiSystemInstruction(systemParts))
@@ -372,7 +372,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 	// Convert tools to Gemini functionDeclarations format
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		functionDeclarations := make([][]byte, 0, 8)
+		var functionDeclarations [][]byte
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			if tool.Get("type").String() == "function" {
 				funcDecl := []byte(`{"name":"","description":"","parametersJsonSchema":{}}`)

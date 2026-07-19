@@ -35,7 +35,7 @@ func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result) []byt
 	if !messages.Exists() || !messages.IsArray() {
 		return out
 	}
-	inputItems := make([][]byte, 0, 16)
+	inputItems := translatorcommon.NewRawArrayItems(messages.Get("#").Int())
 	var systemBuilder strings.Builder
 	messages.ForEach(func(_, message gjson.Result) bool {
 		role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
@@ -55,7 +55,7 @@ func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result) []byt
 	if systemBuilder.Len() > 0 {
 		out, _ = sjson.SetBytes(out, "system_instruction", systemBuilder.String())
 	}
-	out, _ = sjson.SetRawBytes(out, "input", translatorcommon.JoinRawArray(inputItems))
+	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
 	return out
 }
 
@@ -233,7 +233,7 @@ func appendOpenAIChatToolsToInteractions(out []byte, tools gjson.Result) []byte 
 	if !tools.Exists() || !tools.IsArray() {
 		return out
 	}
-	toolItems := make([][]byte, 0, 8)
+	var toolItems [][]byte
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		if converted, ok := openAIChatToolToInteractions(tool); ok {
 			toolItems = append(toolItems, converted)

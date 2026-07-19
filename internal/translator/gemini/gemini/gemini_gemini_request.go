@@ -31,7 +31,7 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 
 	toolsResult := gjson.GetBytes(rawJSON, "tools")
 	if toolsResult.Exists() && toolsResult.IsArray() {
-		toolItems := make([][]byte, 0, 8)
+		var toolItems [][]byte
 		toolsChanged := false
 		toolsResult.ForEach(func(_, toolResult gjson.Result) bool {
 			tool := []byte(toolResult.Raw)
@@ -44,7 +44,7 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 
 			declarations := gjson.GetBytes(tool, "function_declarations")
 			if declarations.IsArray() {
-				declarationItems := make([][]byte, 0, 8)
+				var declarationItems [][]byte
 				declarationsChanged := false
 				declarations.ForEach(func(_, declarationResult gjson.Result) bool {
 					declaration := []byte(declarationResult.Raw)
@@ -86,7 +86,7 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 		})
 		if rolesChanged {
 			prevRole = ""
-			contentItems := make([][]byte, 0, 16)
+			contentItems := translatorcommon.NewRawArrayItems(contents.Get("#").Int())
 			contents.ForEach(func(_, value gjson.Result) bool {
 				role := value.Get("role").String()
 				item := []byte(value.Raw)
@@ -161,7 +161,7 @@ func backfillEmptyFunctionResponseNames(data []byte) []byte {
 	}
 
 	changed := false
-	contentItems := make([][]byte, 0, 16)
+	contentItems := translatorcommon.NewRawArrayItems(contents.Get("#").Int())
 	var pendingCallNames []string
 
 	contents.ForEach(func(contentIdx, content gjson.Result) bool {
