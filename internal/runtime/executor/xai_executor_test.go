@@ -215,13 +215,17 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	}
 }
 
-func TestXAIExecutorExecuteRestoresAdditionalToolsNamespaceCalls(t *testing.T) {
+func TestXAIExecutorExecuteFlattensAdditionalToolsAndRestoresNamespaceCalls(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var errRead error
 		gotBody, errRead = io.ReadAll(r.Body)
 		if errRead != nil {
 			t.Fatalf("read body: %v", errRead)
+		}
+		if gjson.GetBytes(gotBody, `input.#(type=="additional_tools")`).Exists() {
+			http.Error(w, `{"error":"data did not match any variant of untagged enum ModelInput"}`, http.StatusUnprocessableEntity)
+			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"name\":\"mcp__exa__web_search_exa\",\"call_id\":\"call_1\",\"arguments\":\"{}\"}}\n\n"))
@@ -253,9 +257,15 @@ func TestXAIExecutorExecuteRestoresAdditionalToolsNamespaceCalls(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	tool := gjson.GetBytes(gotBody, "input.0.tools.0")
+	if got := gjson.GetBytes(gotBody, "input.0.role").String(); got != "user" {
+		t.Fatalf("input.0.role = %q, want user after flattening; body=%s", got, gotBody)
+	}
+	if gjson.GetBytes(gotBody, "input.1").Exists() {
+		t.Fatalf("additional_tools input item was not removed: %s", gotBody)
+	}
+	tool := gjson.GetBytes(gotBody, "tools.0")
 	if got := tool.Get("name").String(); got != "mcp__exa__web_search_exa" {
-		t.Fatalf("upstream additional tool name = %q, want qualified name; body=%s", got, gotBody)
+		t.Fatalf("upstream tool name = %q, want qualified name; body=%s", got, gotBody)
 	}
 	if got := tool.Get("type").String(); got != "function" {
 		t.Fatalf("upstream additional tool type = %q, want function; body=%s", got, gotBody)
@@ -269,6 +279,13 @@ func TestXAIExecutorExecuteRestoresAdditionalToolsNamespaceCalls(t *testing.T) {
 	}
 	if got := output.Get("namespace").String(); got != "mcp__exa" {
 		t.Fatalf("response output namespace = %q, want mcp__exa; payload=%s", got, resp.Payload)
+	}
+}
+
+func TestFlattenXAIAdditionalToolsLeavesOrdinaryRequestsUnchanged(t *testing.T) {
+	body := []byte(`{"model":"grok-4.3","input":[{"type":"message","role":"user","content":"hello"}],"tools":[{"type":"function","name":"lookup"}]}`)
+	if got := flattenXAIAdditionalTools(body); !bytes.Equal(got, body) {
+		t.Fatalf("ordinary request changed: got=%s want=%s", got, body)
 	}
 }
 

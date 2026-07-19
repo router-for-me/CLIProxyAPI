@@ -910,6 +910,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
+	body = flattenXAIAdditionalTools(body)
 	namespaceTools := collectXAINamespaceToolRefs(body)
 	// Collect before normalizeXAITools flattens namespace wrappers so keys match
 	// the post-restore (namespace, short-name) shape used by the response filter.
@@ -1535,6 +1536,78 @@ func normalizeXAITools(body []byte) []byte {
 		}
 	}
 	return body
+}
+
+// flattenXAIAdditionalTools converts Codex Responses Lite tool declarations
+// into the top-level tools array accepted by xAI Responses. OpenAI's Codex
+// upstream accepts additional_tools as an input item, but xAI rejects that
+// item before generation because it is not a supported ModelInput variant.
+func flattenXAIAdditionalTools(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+	hasAdditionalTools := false
+	input.ForEach(func(_, item gjson.Result) bool {
+		if item.Get("type").String() == "additional_tools" {
+			hasAdditionalTools = true
+			return false
+		}
+		return true
+	})
+	if !hasAdditionalTools {
+		return body
+	}
+
+	topLevelTools := gjson.GetBytes(body, "tools")
+	if topLevelTools.Exists() && !topLevelTools.IsArray() {
+		return body
+	}
+
+	tools := make([]json.RawMessage, 0, len(topLevelTools.Array()))
+	for _, tool := range topLevelTools.Array() {
+		tools = append(tools, json.RawMessage(tool.Raw))
+	}
+
+	inputItems := input.Array()
+	items := make([]json.RawMessage, 0, len(inputItems))
+	for _, item := range inputItems {
+		if item.Get("type").String() != "additional_tools" {
+			items = append(items, json.RawMessage(item.Raw))
+			continue
+		}
+		additionalTools := item.Get("tools")
+		if additionalTools.Exists() && !additionalTools.IsArray() {
+			return body
+		}
+		for _, tool := range additionalTools.Array() {
+			tools = append(tools, json.RawMessage(tool.Raw))
+		}
+	}
+
+	rawInput, errMarshalInput := json.Marshal(items)
+	if errMarshalInput != nil {
+		return body
+	}
+	updated, errSetInput := sjson.SetRawBytes(body, "input", rawInput)
+	if errSetInput != nil {
+		return body
+	}
+	if len(tools) == 0 {
+		return updated
+	}
+	rawTools, errMarshalTools := json.Marshal(tools)
+	if errMarshalTools != nil {
+		return body
+	}
+	updated, errSetTools := sjson.SetRawBytes(updated, "tools", rawTools)
+	if errSetTools != nil {
+		return body
+	}
+	return updated
 }
 
 func normalizeXAIToolArray(tools gjson.Result) ([]byte, bool, bool) {
