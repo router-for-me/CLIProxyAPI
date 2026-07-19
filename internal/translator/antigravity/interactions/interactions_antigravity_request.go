@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
@@ -459,12 +458,8 @@ func appendInteractionsContentToAntigravityPart(_ []byte, content gjson.Result, 
 	case "file":
 		filename := content.Get("file.filename").String()
 		fileData := content.Get("file.file_data").String()
-		ext := ""
-		if sp := strings.Split(filename, "."); len(sp) > 1 {
-			ext = sp[len(sp)-1]
-		}
-		if mimeType, ok := misc.MimeTypes[ext]; ok && fileData != "" {
-			return antigravityInlineDataPartJSON(gjson.Parse(fmt.Sprintf(`{"mime_type":%q,"data":%q}`, mimeType, fileData)))
+		if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData(filename, "", fileData); ok {
+			return antigravityInlineDataPartJSON(gjson.Parse(fmt.Sprintf(`{"mime_type":%q,"data":%q}`, mimeType, data)))
 		}
 	}
 	return nil

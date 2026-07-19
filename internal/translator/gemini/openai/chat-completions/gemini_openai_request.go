@@ -5,7 +5,6 @@ package chat_completions
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
@@ -198,14 +197,10 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						case "file":
 							filename := item.Get("file.filename").String()
 							fileData := item.Get("file.file_data").String()
-							ext := ""
-							if pieces := strings.Split(filename, "."); len(pieces) > 1 {
-								ext = pieces[len(pieces)-1]
-							}
-							if mimeType, ok := misc.MimeTypes[ext]; ok {
-								partItems = append(partItems, geminiInlineDataPart(mimeType, fileData, ""))
+							if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData(filename, "", fileData); ok {
+								partItems = append(partItems, geminiInlineDataPart(mimeType, data, ""))
 							} else {
-								log.Warnf("Unknown file name extension '%s' in user message, skip", ext)
+								log.Warn("Invalid file data or unknown file name extension in user message, skip")
 							}
 						case "input_audio":
 							audioData := item.Get("input_audio.data").String()
