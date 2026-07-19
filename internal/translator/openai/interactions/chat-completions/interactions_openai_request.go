@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -15,87 +16,87 @@ func ConvertInteractionsRequestToOpenAI(modelName string, inputRawJSON []byte, s
 	if stream || root.Get("stream").Bool() {
 		out, _ = sjson.SetBytes(out, "stream", true)
 	}
-	out = copyInteractionsSystemToOpenAI(out, root)
-	out = appendInteractionsInputToOpenAIMessages(out, root.Get("input"))
+	messageCapacity := root.Get("input.#").Int()
+	if interactionsText(root.Get("system_instruction")) != "" {
+		messageCapacity++
+	}
+	messageItems := translatorcommon.NewRawArrayItems(messageCapacity)
+	appendInteractionsSystemToOpenAI(&messageItems, root)
+	appendInteractionsInputToOpenAIMessages(&messageItems, root.Get("input"))
+	out = translatorcommon.SetRawArrayItems(out, "messages", messageItems)
 	out = copyInteractionsToolsToOpenAI(out, root)
 	out = copyInteractionsGenerationConfigToOpenAI(out, root)
 	out = copyInteractionsOpenAITopLevel(out, root)
 	return out
 }
 
-func copyInteractionsSystemToOpenAI(out []byte, root gjson.Result) []byte {
+func appendInteractionsSystemToOpenAI(items *[][]byte, root gjson.Result) {
 	text := interactionsText(root.Get("system_instruction"))
 	if text == "" {
-		return out
+		return
 	}
 	msg := []byte(`{"role":"system","content":""}`)
 	msg, _ = sjson.SetBytes(msg, "content", text)
-	out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
-	return out
+	*items = append(*items, msg)
 }
 
-func appendInteractionsInputToOpenAIMessages(out []byte, input gjson.Result) []byte {
+func appendInteractionsInputToOpenAIMessages(items *[][]byte, input gjson.Result) {
 	if input.Type == gjson.String {
 		msg := []byte(`{"role":"user","content":""}`)
 		msg, _ = sjson.SetBytes(msg, "content", input.String())
-		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
-		return out
+		*items = append(*items, msg)
+		return
 	}
 	if input.IsArray() {
 		input.ForEach(func(_, step gjson.Result) bool {
-			out = appendInteractionsStepToOpenAI(out, step, "user")
+			appendInteractionsStepToOpenAI(items, step, "user")
 			return true
 		})
-		return out
+		return
 	}
 	if input.IsObject() {
-		return appendInteractionsStepToOpenAI(out, input, "user")
+		appendInteractionsStepToOpenAI(items, input, "user")
 	}
-	return out
 }
 
-func appendInteractionsStepToOpenAI(out []byte, step gjson.Result, defaultRole string) []byte {
+func appendInteractionsStepToOpenAI(items *[][]byte, step gjson.Result, defaultRole string) {
 	switch step.Get("type").String() {
 	case "user_input":
-		return appendInteractionsMessageToOpenAI(out, step, "user")
+		appendInteractionsMessageToOpenAI(items, step, "user")
 	case "model_output":
-		return appendInteractionsMessageToOpenAI(out, step, "assistant")
+		appendInteractionsMessageToOpenAI(items, step, "assistant")
 	case "thought":
-		return appendInteractionsThoughtToOpenAI(out, step)
+		appendInteractionsThoughtToOpenAI(items, step)
 	case "function_call":
-		return appendInteractionsFunctionCallToOpenAI(out, step)
+		appendInteractionsFunctionCallToOpenAI(items, step)
 	case "function_result":
-		return appendInteractionsFunctionResultToOpenAI(out, step)
+		appendInteractionsFunctionResultToOpenAI(items, step)
 	default:
 		if step.Type == gjson.String {
 			msg := []byte(`{"role":"","content":""}`)
 			msg, _ = sjson.SetBytes(msg, "role", defaultRole)
 			msg, _ = sjson.SetBytes(msg, "content", step.String())
-			out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+			*items = append(*items, msg)
 		}
 	}
-	return out
 }
 
-func appendInteractionsMessageToOpenAI(out []byte, step gjson.Result, role string) []byte {
+func appendInteractionsMessageToOpenAI(items *[][]byte, step gjson.Result, role string) {
 	msg := []byte(`{"role":"","content":""}`)
 	msg, _ = sjson.SetBytes(msg, "role", role)
 	content := step.Get("content")
 	if content.Type == gjson.String {
 		msg, _ = sjson.SetBytes(msg, "content", content.String())
-		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
-		return out
+	} else {
+		msg = appendInteractionsContentToOpenAIMessage(msg, content, role)
 	}
-	msg = appendInteractionsContentToOpenAIMessage(msg, content, role)
-	out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
-	return out
+	*items = append(*items, msg)
 }
 
-func appendInteractionsThoughtToOpenAI(out []byte, step gjson.Result) []byte {
+func appendInteractionsThoughtToOpenAI(items *[][]byte, step gjson.Result) {
 	msg := []byte(`{"role":"assistant","content":"","reasoning_content":""}`)
 	msg, _ = sjson.SetBytes(msg, "reasoning_content", interactionsText(step.Get("content")))
-	out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
-	return out
+	*items = append(*items, msg)
 }
 
 func appendInteractionsContentToOpenAIMessage(msg []byte, content gjson.Result, role string) []byte {
@@ -106,7 +107,7 @@ func appendInteractionsContentToOpenAIMessage(msg []byte, content gjson.Result, 
 		msg, _ = sjson.SetBytes(msg, "content", content.String())
 		return msg
 	}
-	contentWrapper := []byte(`{"items":[]}`)
+	contentItems := make([][]byte, 0, 4)
 	textOnly := true
 	var textBuilder strings.Builder
 	appendPart := func(part gjson.Result) {
@@ -119,7 +120,7 @@ func appendInteractionsContentToOpenAIMessage(msg []byte, content gjson.Result, 
 		} else {
 			textOnly = false
 		}
-		contentWrapper, _ = sjson.SetRawBytes(contentWrapper, "items.-1", converted)
+		contentItems = append(contentItems, converted)
 	}
 	if content.IsArray() {
 		content.ForEach(func(_, part gjson.Result) bool {
@@ -129,34 +130,32 @@ func appendInteractionsContentToOpenAIMessage(msg []byte, content gjson.Result, 
 	} else if content.IsObject() {
 		appendPart(content)
 	}
-	if count := gjson.GetBytes(contentWrapper, "items.#").Int(); count > 0 {
+	if len(contentItems) > 0 {
 		if textOnly {
 			msg, _ = sjson.SetBytes(msg, "content", textBuilder.String())
 		} else {
-			msg, _ = sjson.SetRawBytes(msg, "content", []byte(gjson.GetBytes(contentWrapper, "items").Raw))
+			msg, _ = sjson.SetRawBytes(msg, "content", translatorcommon.JoinRawArray(contentItems))
 		}
 	}
 	return msg
 }
 
-func appendInteractionsFunctionCallToOpenAI(out []byte, step gjson.Result) []byte {
+func appendInteractionsFunctionCallToOpenAI(items *[][]byte, step gjson.Result) {
 	msg := []byte(`{"role":"assistant","content":"","tool_calls":[]}`)
 	toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":"{}"}}`)
 	callID := firstNonEmpty(step.Get("call_id").String(), step.Get("id").String(), "call_0")
 	toolCall, _ = sjson.SetBytes(toolCall, "id", callID)
 	toolCall, _ = sjson.SetBytes(toolCall, "function.name", step.Get("name").String())
 	toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", jsonStringValue(step.Get("arguments"), "{}"))
-	msg, _ = sjson.SetRawBytes(msg, "tool_calls.-1", toolCall)
-	out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
-	return out
+	msg = translatorcommon.SetRawArrayItems(msg, "tool_calls", [][]byte{toolCall})
+	*items = append(*items, msg)
 }
 
-func appendInteractionsFunctionResultToOpenAI(out []byte, step gjson.Result) []byte {
+func appendInteractionsFunctionResultToOpenAI(items *[][]byte, step gjson.Result) {
 	msg := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
 	msg, _ = sjson.SetBytes(msg, "tool_call_id", firstNonEmpty(step.Get("call_id").String(), step.Get("id").String()))
 	msg, _ = sjson.SetBytes(msg, "content", jsonStringValue(firstExisting(step.Get("result"), step.Get("output")), ""))
-	out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
-	return out
+	*items = append(*items, msg)
 }
 
 func copyInteractionsToolsToOpenAI(out []byte, root gjson.Result) []byte {
@@ -164,20 +163,24 @@ func copyInteractionsToolsToOpenAI(out []byte, root gjson.Result) []byte {
 	if !tools.Exists() || !tools.IsArray() {
 		return out
 	}
+	var toolItems [][]byte
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		if converted, ok := openAIToolFromInteractionsTool(tool); ok {
-			out, _ = sjson.SetRawBytes(out, "tools.-1", converted)
+			toolItems = append(toolItems, converted)
 		}
 		if decls := firstExisting(tool.Get("function_declarations"), tool.Get("functionDeclarations")); decls.Exists() && decls.IsArray() {
 			decls.ForEach(func(_, decl gjson.Result) bool {
 				if converted, ok := openAIToolFromInteractionsTool(decl); ok {
-					out, _ = sjson.SetRawBytes(out, "tools.-1", converted)
+					toolItems = append(toolItems, converted)
 				}
 				return true
 			})
 		}
 		return true
 	})
+	if len(toolItems) > 0 {
+		out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolItems))
+	}
 	return out
 }
 

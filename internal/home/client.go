@@ -19,7 +19,9 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9/maintnotifications"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -31,21 +33,26 @@ const (
 	redisKeyAppLog       = "app-log"
 	redisKeyPluginStatus = "plugin-status"
 	redisKeyPluginTasks  = "plugin-tasks"
+	redisKeyPluginSync   = "plugin-sync"
 
 	homeReconnectInterval          = time.Second
 	homeReconnectFailoverThreshold = 3
 	homeRedisOperationTimeout      = 3 * time.Second
+	homePluginSyncOperationTimeout = 2 * time.Minute
 	homeSubscriptionReceiveTimeout = 3 * time.Second
 	redisChannelCluster            = "cluster"
 )
 
+const pluginSyncUnsupportedErrorType = "plugin_sync_unsupported"
+
 var (
-	ErrDisabled       = errors.New("home client disabled")
-	ErrNotConnected   = errors.New("home not connected")
-	ErrEmptyResponse  = errors.New("home returned empty response")
-	ErrAuthNotFound   = errors.New("home auth not found")
-	ErrConfigNotFound = errors.New("home config not found")
-	ErrModelsNotFound = errors.New("home models not found")
+	ErrDisabled              = errors.New("home client disabled")
+	ErrNotConnected          = errors.New("home not connected")
+	ErrEmptyResponse         = errors.New("home returned empty response")
+	ErrAuthNotFound          = errors.New("home auth not found")
+	ErrConfigNotFound        = errors.New("home config not found")
+	ErrModelsNotFound        = errors.New("home models not found")
+	ErrPluginSyncUnsupported = errors.New("home plugin sync is unsupported")
 )
 
 type clusterNode struct {
@@ -85,8 +92,9 @@ type Client struct {
 	seedHost string
 	seedPort int
 
-	cmd *redis.Client
-	sub *redis.Client
+	cmd        *redis.Client
+	cmdOptions *redis.Options
+	sub        *redis.Client
 
 	heartbeatOK       atomic.Bool
 	clusterNodes      []clusterNode
@@ -138,6 +146,7 @@ func (c *Client) closeClientsLocked() {
 		_ = c.sub.Close()
 	}
 	c.cmd = nil
+	c.cmdOptions = nil
 	c.sub = nil
 }
 
@@ -181,6 +190,7 @@ func (c *Client) ensureClients() error {
 		if errOptions != nil {
 			return errOptions
 		}
+		c.cmdOptions = cloneRedisOptions(options)
 		c.cmd = redis.NewClient(options)
 	}
 	if c.sub == nil {
@@ -208,6 +218,21 @@ func (c *Client) redisOptionsLocked(addr string) (*redis.Options, error) {
 		DialerRetries:         1,
 		ContextTimeoutEnabled: true,
 	}, nil
+}
+
+func cloneRedisOptions(options *redis.Options) *redis.Options {
+	if options == nil {
+		return nil
+	}
+	cloned := *options
+	if options.TLSConfig != nil {
+		cloned.TLSConfig = options.TLSConfig.Clone()
+	}
+	if options.MaintNotificationsConfig != nil {
+		maintNotifications := *options.MaintNotificationsConfig
+		cloned.MaintNotificationsConfig = &maintNotifications
+	}
+	return &cloned
 }
 
 func (c *Client) homeTLSConfigLocked(addr string) (*tls.Config, error) {
@@ -295,6 +320,19 @@ func (c *Client) commandClient() (*redis.Client, error) {
 		return nil, ErrNotConnected
 	}
 	return cmd, nil
+}
+
+func (c *Client) pluginSyncCommandOptions() (*redis.Options, error) {
+	if errEnsure := c.ensureClients(); errEnsure != nil {
+		return nil, errEnsure
+	}
+	c.mu.Lock()
+	options := cloneRedisOptions(c.cmdOptions)
+	c.mu.Unlock()
+	if options == nil {
+		return nil, ErrNotConnected
+	}
+	return options, nil
 }
 
 func (c *Client) subscriptionClient() (*redis.Client, error) {
@@ -642,6 +680,40 @@ func (c *Client) KVSetNX(ctx context.Context, key string, value []byte, ttl time
 	return c.KVSet(ctx, key, value, opts)
 }
 
+// KVCompareAndSwap atomically replaces a value only when its current state matches the expected state.
+func (c *Client) KVCompareAndSwap(ctx context.Context, key string, expected []byte, expectedExists bool, value []byte, ttl time.Duration) (bool, error) {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return false, errClient
+	}
+	const script = `
+local current = redis.call("GET", KEYS[1])
+if ARGV[1] == "1" then
+  if not current or current ~= ARGV[2] then
+    return 0
+  end
+elseif current then
+  return 0
+end
+local ttl = tonumber(ARGV[4])
+if ttl and ttl > 0 then
+  redis.call("SET", KEYS[1], ARGV[3], "PX", ttl)
+else
+  redis.call("SET", KEYS[1], ARGV[3])
+end
+return 1
+`
+	expectedFlag := "0"
+	if expectedExists {
+		expectedFlag = "1"
+	}
+	result, errEval := cmd.Eval(ctx, script, []string{key}, expectedFlag, expected, value, durationCeil(ttl, time.Millisecond)).Int64()
+	if errEval != nil {
+		return false, errEval
+	}
+	return result == 1, nil
+}
+
 func (c *Client) KVDel(ctx context.Context, keys ...string) (int64, error) {
 	if len(keys) == 0 {
 		return 0, nil
@@ -928,6 +1000,181 @@ func (c *Client) GetPluginTasks(ctx context.Context) ([]PluginTask, error) {
 		return nil, errUnmarshal
 	}
 	return tasks, nil
+}
+
+func (c *Client) GetPluginSync(ctx context.Context, request pluginstore.PluginSyncRequest) (pluginstore.PluginSyncResponse, error) {
+	options, errOptions := c.pluginSyncCommandOptions()
+	if errOptions != nil {
+		return pluginstore.PluginSyncResponse{}, errOptions
+	}
+	payload, errMarshal := json.Marshal(request)
+	if errMarshal != nil {
+		return pluginstore.PluginSyncResponse{}, fmt.Errorf("marshal plugin sync request: %w", errMarshal)
+	}
+	requestCmd := redis.NewStringCmd(ctx, "get", redisKeyPluginSync, string(payload))
+	if errProcess := processPluginSyncCommand(ctx, options, requestCmd); errProcess != nil {
+		if message, ok := pluginSyncUnsupportedMessage(errProcess.Error()); ok {
+			return pluginstore.PluginSyncResponse{}, fmt.Errorf("%w: %s", ErrPluginSyncUnsupported, message)
+		}
+		return pluginstore.PluginSyncResponse{}, errProcess
+	}
+	raw, errBytes := requestCmd.Bytes()
+	if errBytes != nil {
+		return pluginstore.PluginSyncResponse{}, errBytes
+	}
+	defer func() {
+		requestCmd.SetVal("")
+		for index := range raw {
+			raw[index] = 0
+		}
+	}()
+	if len(raw) == 0 {
+		return pluginstore.PluginSyncResponse{}, ErrEmptyResponse
+	}
+	if message, ok := pluginSyncUnsupportedResponse(raw); ok {
+		return pluginstore.PluginSyncResponse{}, fmt.Errorf("%w: %s", ErrPluginSyncUnsupported, message)
+	}
+	var response pluginstore.PluginSyncResponse
+	if errUnmarshal := json.Unmarshal(raw, &response); errUnmarshal != nil {
+		response.Clear()
+		return pluginstore.PluginSyncResponse{}, fmt.Errorf("decode plugin sync response: %w", errUnmarshal)
+	}
+	if errValidate := response.Validate(time.Now().UTC()); errValidate != nil {
+		response.Clear()
+		return pluginstore.PluginSyncResponse{}, errValidate
+	}
+	return response, nil
+}
+
+func processPluginSyncCommand(ctx context.Context, options *redis.Options, command redis.Cmder) error {
+	if options == nil {
+		return ErrNotConnected
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	pluginSyncClient := newPluginSyncCommandClient(ctx, options)
+	if pluginSyncClient == nil {
+		return ErrNotConnected
+	}
+	errProcess := pluginSyncClient.Process(ctx, command)
+	errClose := pluginSyncClient.Close()
+	if errContext := ctx.Err(); errContext != nil {
+		return errContext
+	}
+	if errProcess != nil {
+		return errProcess
+	}
+	if errClose != nil {
+		return fmt.Errorf("close plugin sync command client: %w", errClose)
+	}
+	return nil
+}
+
+func newPluginSyncCommandClient(ctx context.Context, template *redis.Options) *redis.Client {
+	options := cloneRedisOptions(template)
+	if options == nil {
+		return nil
+	}
+	options.MaintNotificationsConfig = &maintnotifications.Config{Mode: maintnotifications.ModeDisabled}
+	baseDialer := options.Dialer
+	if baseDialer == nil {
+		baseDialer = pluginSyncDialer(options)
+	}
+	options.Dialer = func(dialCtx context.Context, network string, address string) (net.Conn, error) {
+		conn, errDial := baseDialer(dialCtx, network, address)
+		if errDial != nil {
+			return nil, errDial
+		}
+		return newPluginSyncCancelableConn(ctx, conn), nil
+	}
+	options.ReadTimeout = homePluginSyncOperationTimeout
+	options.MaxRetries = -1
+	return redis.NewClient(options)
+}
+
+func pluginSyncDialer(options *redis.Options) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network string, address string) (net.Conn, error) {
+		dialer := &net.Dialer{Timeout: options.DialTimeout, KeepAlive: 5 * time.Minute}
+		conn, errDial := dialer.DialContext(ctx, network, address)
+		if errDial != nil {
+			return nil, errDial
+		}
+		if options.TLSConfig == nil {
+			return conn, nil
+		}
+		tlsConn := tls.Client(conn, options.TLSConfig)
+		if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+			return nil, errors.Join(errHandshake, conn.Close())
+		}
+		return tlsConn, nil
+	}
+}
+
+type pluginSyncCancelableConn struct {
+	net.Conn
+	done chan struct{}
+	once sync.Once
+}
+
+func newPluginSyncCancelableConn(ctx context.Context, conn net.Conn) net.Conn {
+	wrapped := &pluginSyncCancelableConn{Conn: conn, done: make(chan struct{})}
+	go func() {
+		select {
+		case <-ctx.Done():
+			if errDeadline := conn.SetDeadline(time.Now()); errDeadline != nil {
+				_ = conn.Close()
+			}
+		case <-wrapped.done:
+		}
+	}()
+	return wrapped
+}
+
+func (c *pluginSyncCancelableConn) Close() error {
+	if c == nil || c.Conn == nil {
+		return net.ErrClosed
+	}
+	c.once.Do(func() { close(c.done) })
+	return c.Conn.Close()
+}
+
+func pluginSyncUnsupportedResponse(raw []byte) (string, bool) {
+	var response struct {
+		Error struct {
+			Code    string `json:"code"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if errUnmarshal := json.Unmarshal(raw, &response); errUnmarshal != nil {
+		return "", false
+	}
+	if pluginSyncUnsupportedCode(response.Error.Code) || pluginSyncUnsupportedCode(response.Error.Type) {
+		message := strings.TrimSpace(response.Error.Message)
+		if message == "" {
+			message = pluginSyncUnsupportedErrorType
+		}
+		return message, true
+	}
+	return pluginSyncUnsupportedMessage(response.Error.Message)
+}
+
+func pluginSyncUnsupportedCode(code string) bool {
+	return strings.EqualFold(strings.TrimSpace(code), pluginSyncUnsupportedErrorType)
+}
+
+func pluginSyncUnsupportedMessage(message string) (string, bool) {
+	message = strings.ToLower(strings.TrimSpace(message))
+	message = strings.TrimSpace(strings.TrimPrefix(message, "err "))
+	switch message {
+	case pluginSyncUnsupportedErrorType,
+		"unsupported key",
+		"wrong number of arguments for 'get' command":
+		return message, true
+	default:
+		return "", false
+	}
 }
 
 func (c *Client) handleSubscriptionPayload(ctx context.Context, channel string, payload string, onConfig func([]byte) error) error {

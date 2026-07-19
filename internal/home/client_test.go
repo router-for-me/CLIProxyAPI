@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
 )
 
 func TestAuthDispatchRequestIncludesCount(t *testing.T) {
@@ -252,6 +254,26 @@ func TestKVSetConditionUnmetReturnsFalse(t *testing.T) {
 	}
 }
 
+func TestKVCompareAndSwapReturnsScriptResult(t *testing.T) {
+	client, commands := newRedisCommandTestClient(t, func(args []string) string {
+		if len(args) > 0 && strings.EqualFold(args[0], "EVAL") {
+			return ":1\r\n"
+		}
+		return "-ERR unexpected command\r\n"
+	})
+
+	swapped, errCAS := client.KVCompareAndSwap(context.Background(), "key", []byte("old"), true, []byte("new"), 1500*time.Millisecond)
+	if errCAS != nil {
+		t.Fatalf("KVCompareAndSwap() error = %v", errCAS)
+	}
+	if !swapped {
+		t.Fatal("KVCompareAndSwap() swapped = false, want true")
+	}
+	if lastCommand := commands.Last(); len(lastCommand) < 2 || !strings.EqualFold(lastCommand[0], "EVAL") {
+		t.Fatalf("last command = %#v, want EVAL", lastCommand)
+	}
+}
+
 func TestKVMSetUsesStableKeyOrder(t *testing.T) {
 	client, commands := newRedisCommandTestClient(t, func(args []string) string {
 		if len(args) > 0 && strings.EqualFold(args[0], "MSET") {
@@ -314,6 +336,316 @@ func TestGetPluginTasksUsesPluginTasksKey(t *testing.T) {
 	}
 }
 
+func TestPluginSyncCommandClientUsesDedicatedTimeout(t *testing.T) {
+	template := &redis.Options{
+		Addr:         "127.0.0.1:1",
+		ReadTimeout:  homeRedisOperationTimeout,
+		WriteTimeout: homeRedisOperationTimeout,
+		MaxRetries:   -1,
+	}
+	pluginSync := newPluginSyncCommandClient(context.Background(), template)
+	if pluginSync == nil {
+		t.Fatal("newPluginSyncCommandClient() = nil")
+	}
+	t.Cleanup(func() { _ = pluginSync.Close() })
+	if pluginSync.Options().ReadTimeout != homePluginSyncOperationTimeout || pluginSync.Options().WriteTimeout != homeRedisOperationTimeout {
+		t.Fatalf("plugin sync timeouts = %s/%s, want %s/%s", pluginSync.Options().ReadTimeout, pluginSync.Options().WriteTimeout, homePluginSyncOperationTimeout, homeRedisOperationTimeout)
+	}
+	if template.ReadTimeout != homeRedisOperationTimeout || template.WriteTimeout != homeRedisOperationTimeout || template.MaxRetries != -1 {
+		t.Fatalf("template options were mutated: read=%s write=%s retries=%d", template.ReadTimeout, template.WriteTimeout, template.MaxRetries)
+	}
+}
+
+func TestGetPluginSyncUsesDedicatedCommandAndDecodesResponse(t *testing.T) {
+	response := pluginstore.PluginSyncResponse{
+		SchemaVersion: pluginstore.PluginSyncSchemaVersion,
+		ExpiresAt:     time.Now().UTC().Add(time.Minute),
+		Items: []pluginstore.PluginSyncItem{{
+			Manifest: pluginstore.Manifest{
+				SchemaVersion: pluginstore.SchemaVersionV2,
+				ID:            "sample",
+				Version:       "1.0.0",
+				Install: pluginstore.InstallPlan{Type: pluginstore.InstallTypeDirect, Artifacts: []pluginstore.Artifact{{
+					GOOS: "linux", GOARCH: "amd64", URL: "https://downloads.example/sample.zip",
+					SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				}}},
+			},
+			Auth: []pluginstore.ResolvedAuthConfig{{
+				Match: "https://downloads.example/", Type: pluginstore.AuthTypeBearer, Token: pluginstore.Secret("temporary-token"),
+			}},
+		}},
+	}
+	payload, errMarshal := json.Marshal(response)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	client, commands := newRedisCommandTestClient(t, func(args []string) string {
+		if len(args) > 0 && strings.EqualFold(args[0], "GET") {
+			return fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
+		}
+		return "-ERR unexpected command\r\n"
+	})
+	request := pluginstore.PluginSyncRequest{
+		SchemaVersion: pluginstore.PluginSyncSchemaVersion,
+		GOOS:          "linux",
+		GOARCH:        "amd64",
+		InstalledVersions: map[string]string{
+			"sample": "0.9.0",
+		},
+	}
+
+	gotResponse, errSync := client.GetPluginSync(context.Background(), request)
+	if errSync != nil {
+		t.Fatalf("GetPluginSync() error = %v", errSync)
+	}
+	defer gotResponse.Clear()
+	if len(gotResponse.Items) != 1 || string(gotResponse.Items[0].Auth[0].Token) != "temporary-token" {
+		t.Fatalf("response = %#v, want one item with temporary token", gotResponse)
+	}
+	got := commands.Last()
+	if len(got) != 3 || !strings.EqualFold(got[0], "get") || got[1] != "plugin-sync" {
+		t.Fatalf("plugin sync command = %#v, want GET plugin-sync <request>", got)
+	}
+	var gotRequest pluginstore.PluginSyncRequest
+	if errUnmarshal := json.Unmarshal([]byte(got[2]), &gotRequest); errUnmarshal != nil {
+		t.Fatalf("decode request command: %v", errUnmarshal)
+	}
+	if gotRequest.InstalledVersions["sample"] != "0.9.0" {
+		t.Fatalf("request = %#v, want installed sample 0.9.0", gotRequest)
+	}
+}
+
+func TestGetPluginSyncExceedsBaseTimeoutAndKeepsBaseClientUsable(t *testing.T) {
+	response := pluginstore.PluginSyncResponse{
+		SchemaVersion: pluginstore.PluginSyncSchemaVersion,
+		ExpiresAt:     time.Now().UTC().Add(time.Minute),
+		Items:         []pluginstore.PluginSyncItem{},
+	}
+	payload, errMarshal := json.Marshal(response)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	client, _ := newRedisCommandTestClient(t, func(args []string) string {
+		if len(args) < 2 || !strings.EqualFold(args[0], "GET") {
+			return "-ERR unexpected command\r\n"
+		}
+		switch args[1] {
+		case redisKeyPluginSync:
+			time.Sleep(3 * homeRedisTestOperationTimeout)
+			return fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
+		case redisKeyPluginTasks:
+			return "$2\r\n[]\r\n"
+		default:
+			return "-ERR unexpected key\r\n"
+		}
+	})
+	startedAt := time.Now()
+	got, errSync := client.GetPluginSync(context.Background(), pluginstore.PluginSyncRequest{
+		SchemaVersion: pluginstore.PluginSyncSchemaVersion, GOOS: "linux", GOARCH: "amd64",
+	})
+	if errSync != nil {
+		t.Fatalf("GetPluginSync() error = %v", errSync)
+	}
+	got.Clear()
+	if elapsed := time.Since(startedAt); elapsed < 2*homeRedisTestOperationTimeout {
+		t.Fatalf("GetPluginSync() elapsed = %s, want response beyond base timeout", elapsed)
+	}
+	if _, errTasks := client.GetPluginTasks(context.Background()); errTasks != nil {
+		t.Fatalf("GetPluginTasks() after plugin sync error = %v", errTasks)
+	}
+}
+
+func TestGetPluginSyncCancellationInterruptsRead(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	client, commands := newRedisCommandTestClient(t, func(args []string) string {
+		if len(args) >= 2 && args[1] == redisKeyPluginSync {
+			startOnce.Do(func() { close(started) })
+			<-release
+		}
+		return "-ERR cancelled\r\n"
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-started
+		cancel()
+	}()
+	startedAt := time.Now()
+	_, errSync := client.GetPluginSync(ctx, pluginstore.PluginSyncRequest{
+		SchemaVersion: pluginstore.PluginSyncSchemaVersion, GOOS: "linux", GOARCH: "amd64",
+	})
+	close(release)
+	if !errors.Is(errSync, context.Canceled) {
+		t.Fatalf("GetPluginSync() error = %v, want context.Canceled", errSync)
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("GetPluginSync() cancellation took %s", elapsed)
+	}
+	if count := commands.CountKey(redisKeyPluginSync); count != 1 {
+		t.Fatalf("plugin sync command count = %d, want 1", count)
+	}
+}
+
+func TestProcessPluginSyncCommandCancellationInterruptsTLSHandshake(t *testing.T) {
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen: %v", errListen)
+	}
+	defer func() { _ = listener.Close() }()
+	accepted := make(chan struct{})
+	release := make(chan struct{})
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, errAccept := listener.Accept()
+		if errAccept != nil {
+			serverDone <- errAccept
+			return
+		}
+		close(accepted)
+		<-release
+		serverDone <- conn.Close()
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-accepted
+		cancel()
+	}()
+	options := &redis.Options{
+		Addr:                  listener.Addr().String(),
+		TLSConfig:             &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}, //nolint:gosec -- the test peer intentionally never completes TLS.
+		DialTimeout:           time.Second,
+		ReadTimeout:           homeRedisTestOperationTimeout,
+		WriteTimeout:          homeRedisTestOperationTimeout,
+		MaxRetries:            -1,
+		ContextTimeoutEnabled: true,
+	}
+	command := redis.NewStringCmd(ctx, "get", redisKeyPluginSync, `{}`)
+	startedAt := time.Now()
+	errProcess := processPluginSyncCommand(ctx, options, command)
+	close(release)
+	if errServer := <-serverDone; errServer != nil {
+		t.Fatalf("server close error = %v", errServer)
+	}
+	if !errors.Is(errProcess, context.Canceled) {
+		t.Fatalf("processPluginSyncCommand() error = %v, want context.Canceled", errProcess)
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("TLS handshake cancellation took %s", elapsed)
+	}
+}
+
+func TestGetPluginTasksRetainsBaseTimeout(t *testing.T) {
+	client, _ := newRedisCommandTestClient(t, func(args []string) string {
+		if len(args) >= 2 && args[1] == redisKeyPluginTasks {
+			time.Sleep(3 * homeRedisTestOperationTimeout)
+			return "$2\r\n[]\r\n"
+		}
+		return "-ERR unexpected command\r\n"
+	})
+	if _, errTasks := client.GetPluginTasks(context.Background()); errTasks == nil {
+		t.Fatal("GetPluginTasks() error = nil, want base read timeout")
+	}
+}
+
+func TestGetPluginSyncRecognizesUnsupportedHomeProtocol(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+	}{
+		{
+			name: "legacy json error",
+			response: func() string {
+				payload := `{"error":{"type":"error","message":"wrong number of arguments for 'get' command"}}`
+				return fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
+			}(),
+		},
+		{
+			name:     "redis unsupported key",
+			response: "-ERR unsupported key\r\n",
+		},
+		{
+			name: "structured unsupported type",
+			response: func() string {
+				payload := `{"error":{"type":"plugin_sync_unsupported","message":"plugin sync is unsupported"}}`
+				return fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
+			}(),
+		},
+		{
+			name:     "redis unsupported code",
+			response: "-ERR plugin_sync_unsupported\r\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, _ := newRedisCommandTestClient(t, func(args []string) string {
+				if len(args) > 0 && strings.EqualFold(args[0], "GET") {
+					return tt.response
+				}
+				return "-ERR unexpected command\r\n"
+			})
+			_, errSync := client.GetPluginSync(context.Background(), pluginstore.PluginSyncRequest{
+				SchemaVersion: pluginstore.PluginSyncSchemaVersion,
+				GOOS:          "linux",
+				GOARCH:        "amd64",
+			})
+			if !errors.Is(errSync, ErrPluginSyncUnsupported) {
+				t.Fatalf("GetPluginSync() error = %v, want ErrPluginSyncUnsupported", errSync)
+			}
+		})
+	}
+}
+
+func TestGetPluginSyncDoesNotFallbackForOtherHomeErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+	}{
+		{
+			name: "runtime not ready",
+			response: func() string {
+				payload := `{"error":{"type":"error","message":"runtime not ready"}}`
+				return fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
+			}(),
+		},
+		{
+			name: "unsupported key substring",
+			response: func() string {
+				payload := `{"error":{"type":"error","message":"plugin registry contains unsupported key metadata"}}`
+				return fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
+			}(),
+		},
+		{
+			name:     "wrong arguments substring",
+			response: "-ERR failed to get plugin sync: wrong number of arguments in credential resolver\r\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, _ := newRedisCommandTestClient(t, func(args []string) string {
+				if len(args) > 0 && strings.EqualFold(args[0], "GET") {
+					return tt.response
+				}
+				return "-ERR unexpected command\r\n"
+			})
+
+			_, errSync := client.GetPluginSync(context.Background(), pluginstore.PluginSyncRequest{
+				SchemaVersion: pluginstore.PluginSyncSchemaVersion,
+				GOOS:          "linux",
+				GOARCH:        "amd64",
+			})
+			if errSync == nil {
+				t.Fatal("GetPluginSync() error = nil, want plugin sync failure")
+			}
+			if errors.Is(errSync, ErrPluginSyncUnsupported) {
+				t.Fatalf("GetPluginSync() error = %v, want no legacy fallback", errSync)
+			}
+		})
+	}
+}
+
 type redisCommandLog struct {
 	mu       sync.Mutex
 	commands [][]string
@@ -333,6 +665,20 @@ func (l *redisCommandLog) Last() []string {
 	}
 	return append([]string(nil), l.commands[len(l.commands)-1]...)
 }
+
+func (l *redisCommandLog) CountKey(key string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	count := 0
+	for _, command := range l.commands {
+		if len(command) >= 2 && command[1] == key {
+			count++
+		}
+	}
+	return count
+}
+
+const homeRedisTestOperationTimeout = 50 * time.Millisecond
 
 func newRedisCommandTestClient(t *testing.T, handler func([]string) string) (*Client, *redisCommandLog) {
 	t.Helper()
@@ -372,13 +718,18 @@ func newRedisCommandTestClient(t *testing.T, handler func([]string) string) (*Cl
 		Port:                    port,
 		DisableClusterDiscovery: true,
 	})
-	client.cmd = redis.NewClient(&redis.Options{
+	options := &redis.Options{
 		Addr:                  listener.Addr().String(),
 		Protocol:              2,
 		DisableIdentity:       true,
+		DialTimeout:           homeRedisTestOperationTimeout,
+		ReadTimeout:           homeRedisTestOperationTimeout,
+		WriteTimeout:          homeRedisTestOperationTimeout,
 		MaxRetries:            -1,
 		ContextTimeoutEnabled: true,
-	})
+	}
+	client.cmdOptions = cloneRedisOptions(options)
+	client.cmd = redis.NewClient(options)
 	t.Cleanup(func() {
 		client.Close()
 	})
