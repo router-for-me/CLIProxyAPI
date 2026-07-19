@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import ModelMultiSelect from './ModelMultiSelect.jsx';
 
 // PolicyForm — reusable form for editing a Policy object.
 //
@@ -9,14 +10,19 @@ import React, { useState, useEffect } from 'react';
 // The component is controlled: callers receive the up-to-date policy object
 // via onChange. Submit is delegated to the parent — this keeps worries about
 // API calls (POST vs PUT) out of the form itself.
+//
+// Model allow/blacklist fields are arrays of strings (model IDs or wildcard
+// tokens like `gpt-4*`). The ModelMultiSelect component loads the available
+// models from /v0/management/models-catalog and lets the operator pick or
+// type custom tokens.
 const EMPTY_POLICY = {
   rpm_limit: '',
   hourly_rate_limit: '',
   budget_hourly_usd: '',
   budget_weekly_usd: '',
   budget_monthly_usd: '',
-  allowed_models: '',
-  blocked_models: '',
+  allowed_models: [],
+  blocked_models: [],
 };
 
 export function policyToForm(policy) {
@@ -27,8 +33,8 @@ export function policyToForm(policy) {
     budget_hourly_usd: policy.budget_hourly_usd ?? '',
     budget_weekly_usd: policy.budget_weekly_usd ?? '',
     budget_monthly_usd: policy.budget_monthly_usd ?? '',
-    allowed_models: (policy.allowed_models || []).join('\n'),
-    blocked_models: (policy.blocked_models || []).join('\n'),
+    allowed_models: Array.isArray(policy.allowed_models) ? [...policy.allowed_models] : [],
+    blocked_models: Array.isArray(policy.blocked_models) ? [...policy.blocked_models] : [],
   };
 }
 
@@ -40,8 +46,8 @@ export function formToPolicy(form, apiKeyId) {
     budget_hourly_usd: floatOrNull(form.budget_hourly_usd),
     budget_weekly_usd: floatOrNull(form.budget_weekly_usd),
     budget_monthly_usd: floatOrNull(form.budget_monthly_usd),
-    allowed_models: listFromTextarea(form.allowed_models),
-    blocked_models: listFromTextarea(form.blocked_models),
+    allowed_models: dedupe(listFromField(form.allowed_models)),
+    blocked_models: dedupe(listFromField(form.blocked_models)),
   };
   return policy;
 }
@@ -52,16 +58,22 @@ function numOrNull(s) {
   return Number.isFinite(n) ? n : null;
 }
 function floatOrNull(s) { return numOrNull(s); }
-function listFromTextarea(s) {
-  if (!s) return [];
-  return s.split('\n').map((l) => l.trim()).filter(Boolean);
+// Accept either an array of strings or a newline-joined textarea string so
+// the helper stays resilient if a caller ever hands it raw text.
+function listFromField(v) {
+  if (Array.isArray(v)) return v.map((s) => String(s).trim()).filter(Boolean);
+  if (typeof v === 'string') return v.split('\n').map((l) => l.trim()).filter(Boolean);
+  return [];
+}
+function dedupe(arr) {
+  return Array.from(new Set(arr));
 }
 
 export default function PolicyForm({ initial, onChange }) {
   const [form, setForm] = useState(() => policyToForm(initial));
 
   // Keep parent in sync whenever the form changes. We only call onChange with
-  // the raw string form — the parent decides when to convert via formToPolicy.
+  // the raw form — the parent decides when to convert via formToPolicy.
   useEffect(() => {
     onChange?.(form);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -100,18 +112,20 @@ export default function PolicyForm({ initial, onChange }) {
             onChange={(e) => update({ budget_monthly_usd: e.target.value })} placeholder="unset" />
         </div>
       </div>
-      <div className="form__row">
-        <label className="form__label">Allowed models (one per line, supports `gpt-4*` wildcards)</label>
-        <textarea rows={3} value={form.allowed_models}
-          onChange={(e) => update({ allowed_models: e.target.value })}
-          placeholder="leave empty for all models" />
-      </div>
-      <div className="form__row">
-        <label className="form__label">Blocked models (one per line)</label>
-        <textarea rows={3} value={form.blocked_models}
-          onChange={(e) => update({ blocked_models: e.target.value })}
-          placeholder="models that should always be rejected" />
-      </div>
+      <ModelMultiSelect
+        label="Allowed models"
+        value={form.allowed_models}
+        onChange={(v) => update({ allowed_models: v })}
+        placeholder="leave empty for all models"
+        hint="Pick from the available catalog or press Enter to add a custom / wildcard token (e.g. gpt-4*). Empty = all models."
+      />
+      <ModelMultiSelect
+        label="Blocked models"
+        value={form.blocked_models}
+        onChange={(v) => update({ blocked_models: v })}
+        placeholder="models that should always be rejected"
+        hint="Takes precedence over the allowed list. Supports wildcards like claude-*."
+      />
     </div>
   );
 }
