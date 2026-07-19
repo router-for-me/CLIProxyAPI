@@ -1,0 +1,58 @@
+[
+  {
+    "model": "claude-3-5-sonnet",
+    "source": "anthropic-official",
+    "input_per_1m_usd": 3.00,
+    "output_per_1m_usd": 15.00,
+    "cached_input_per_1m_usd": 3.75,
+    "cached_read_per_1m_usd": 0.30,
+    "reasoning_per_1m_usd": 0,
+    "notes": "Prompt cache: write = 1.25x input, read = 0.1x input."
+  },
+  {
+    "model": "claude-3-5-haiku",
+    "source": "anthropic-official",
+    "input_per_1m_usd": 0.80,
+    "output_per_1m_usd": 4.00,
+    "cached_input_per_1m_usd": 1.00,
+    "cached_read_per_1m_usd": 0.08,
+    "reasoning_per_1m_usd": 0
+  },
+  {
+    "model": "claude-3-7-sonnet",
+    "source": "anthropic-official",
+    "input_per_1m_usd": 3.00,
+    "output_per_1m_usd": 15.00,
+    "cached_input_per_1m_usd": 3.75,
+    "cached_read_per_1m_usd": 0.30,
+    "reasoning_per_1m_usd": 15.00,
+    "notes": "Extended thinking tokens billed at output rate."
+  },
+  {
+    "model": "claude-opus-4",
+    "source": "anthropic-official",
+    "input_per_1m_usd": 15.00,
+    "output_per_1m_usd": 75.00,
+    "cached_input_per_1m_usd": 18.75,
+    "cached_read_per_1m_usd": 1.50,
+    "reasoning_per_1m_usd": 0
+  },
+  {
+    "model": "claude-sonnet-4",
+    "source": "anthropic-official",
+    "input_per_1m_usd": 3.00,
+    "output_per_1m_usd": 15.00,
+    "cached_input_per_1m_usd": 3.75,
+    "cached_read_per_1m_usd": 0.30,
+    "reasoning_per_1m_usd": 0
+  },
+  {
+    "model": "claude-haiku-4",
+    "source": "anthropic-official",
+    "input_per_1m_usd": 1.00,
+    "output_per_1m_usd": 5.00,
+    "cached_input_per_1m_usd": 1.25,
+    "cached_read_per_1m_usd": 0.10,
+    "reasoning_per_1m_usd": 0
+  }
+]
