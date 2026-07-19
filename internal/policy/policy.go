@@ -24,12 +24,33 @@ type Decision struct {
 // budget windows. All fields are best-effort: callers that cannot determine a
 // given counter should pass zero rather than skip the call.
 type TokenCounts struct {
-	Input     int64
-	Output    int64
-	Reasoning int64
-	Cached    int64
-	Total     int64
-	Cost      float64
+	Input         int64
+	Output        int64
+	Reasoning     int64
+	Cached        int64 // cache-read tokens (subset-of-input semantics already normalized by the parser)
+	CacheCreation int64 // cache-write tokens
+	Total         int64
+	Cost          float64
+}
+
+// computeCostFromTokens mirrors the UsageFlusher's ComputeCost computation so
+// the budget windows tracked by the policy service stay in sync with the
+// cost_usd persisted on usage_events. Argument order matches store.ComputeCost
+// (cached = cache-creation / write, cacheRead = cache-read):
+//
+//	input         × InputPer1M
+//	output        × OutputPer1M
+//	reasoning     × ReasoningPer1M
+//	cacheCreation × CachedInputPer1M (write surcharge)
+//	cached        × CachedReadPer1M    (read discount)
+//
+// Pre-fix the policy Consume path always wrote Cost=0, so usage_windows.cost_usd
+// (and budget enforcement against USD caps) was permanently stuck at 0 even
+// when pricing was configured. Centralizing the formula here makes that
+// contract testable without a live PG connection.
+func computeCostFromTokens(p store.Pricing, tokens TokenCounts) float64 {
+	return store.ComputeCost(p, tokens.Input, tokens.Output,
+		tokens.Reasoning, tokens.CacheCreation, tokens.Cached)
 }
 
 // Policy is a store-level policy snapshot cached in memory to avoid a DB

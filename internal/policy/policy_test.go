@@ -1,8 +1,11 @@
 package policy
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 )
@@ -210,5 +213,121 @@ func storePolicy(rpm int, monthly float64) store.Policy {
 		APIKeyID:         "k1",
 		RPMLimit:         &rpm,
 		BudgetMonthlyUSD: &monthly,
+	}
+}
+
+// TestComputeCostFromTokensMirrorsStoreComputeCost guards the budget-window
+// cost computation against drift from the flusher's persisted cost_usd. Before
+// the fix, Consume always wrote Cost=0 to usage_windows.cost_usd — so the
+// dashboard's "Budget Windows" card showed every window at $0 and budget caps
+// never fired. computeCostFromTokens must equal store.ComputeCost for the same
+// inputs (mirror of the flusher's formula).
+func TestComputeCostFromTokensMirrorsStoreComputeCost(t *testing.T) {
+	p := store.Pricing{
+		InputPer1M: 5.0, OutputPer1M: 15.0, ReasoningPer1M: 10.0,
+		CachedInputPer1M: 1.25, CachedReadPer1M: 0.5,
+	}
+	tokens := TokenCounts{
+		Input: 600, Output: 200, Reasoning: 50,
+		Cached: 400, CacheCreation: 300,
+	}
+	got := computeCostFromTokens(p, tokens)
+	want := store.ComputeCost(p, tokens.Input, tokens.Output, tokens.Reasoning, tokens.CacheCreation, tokens.Cached)
+	if got != want {
+		t.Fatalf("computeCostFromTokens = %v, want store.ComputeCost = %v", got, want)
+	}
+	if got <= 0 {
+		t.Fatalf("cost must be > 0 with non-zero tokens + pricing; got %v (regression: budget windows would stay at $0)", got)
+	}
+}
+
+// TestComputeCostFromTokensZeroPricingIsZero documents the fail-safe: missing
+// pricing ⇒ zero cost. checkBudget's `cap > 0` guard then ensures windows with
+// no pricing configured do not degenerate into always-reject.
+func TestComputeCostFromTokensZeroPricingIsZero(t *testing.T) {
+	tokens := TokenCounts{Input: 1000, Output: 500, Cached: 200, CacheCreation: 100}
+	if got := computeCostFromTokens(store.Pricing{}, tokens); got != 0 {
+		t.Fatalf("zero pricing must yield zero cost; got %v", got)
+	}
+}
+
+// TestUsagePluginForwardsCacheCreationToConsume guards the propagation of
+// CacheCreationTokens from the in-memory Record into TokenCounts. Pre-fix the
+// plugin populated Cached but not CacheCreation, so cache-write tokens were
+// silently dropped from budget cost attribution (Anthropic cache-creation is
+// the dominant cost driver for cache-heavy workloads). This test does not need
+// a live policy service: it stubs a minimal PolicyService that records the
+// tokens it received.
+type recordingService struct {
+	got   TokenCounts
+	calls int
+}
+
+func (r *recordingService) Active() bool { return true }
+func (r *recordingService) Check(_ context.Context, _, _ string) (Decision, error) {
+	return Decision{Allow: true}, nil
+}
+func (r *recordingService) Consume(_ context.Context, _, _ string, tokens TokenCounts) error {
+	r.got = tokens
+	r.calls++
+	return nil
+}
+func (r *recordingService) InvalidateKey(_ context.Context, _ string) error { return nil }
+func (r *recordingService) InvalidateAll()                                  {}
+
+func TestUsagePluginForwardsCacheTokens(t *testing.T) {
+	rec := &recordingService{}
+	plugin := NewUsagePlugin(rec)
+	if plugin == nil {
+		t.Fatal("NewUsagePlugin() = nil for non-nil svc")
+	}
+	record := coreusage.Record{
+		APIKey: "cpa_test",
+		Model:  "claude-test",
+		Detail: coreusage.Detail{
+			InputTokens:         500,
+			OutputTokens:        200,
+			ReasoningTokens:     50,
+			CachedTokens:        400, // cache-read
+			CacheCreationTokens: 300, // cache-write
+		},
+	}
+	plugin.HandleUsage(context.Background(), record)
+	if rec.calls != 1 {
+		t.Fatalf("Consume calls = %d, want 1", rec.calls)
+	}
+	if rec.got.Cached != 400 {
+		t.Errorf("Cached = %d, want 400 (cache-read must propagate)", rec.got.Cached)
+	}
+	if rec.got.CacheCreation != 300 {
+		t.Errorf("CacheCreation = %d, want 300 (cache-write must propagate so computeCostFromTokens bills the write surcharge)", rec.got.CacheCreation)
+	}
+	if rec.got.Input != 500 || rec.got.Output != 200 || rec.got.Reasoning != 50 {
+		t.Errorf("token counters lost: %+v", rec.got)
+	}
+	// Pre-fix the plugin left Cost at zero intentionally; Consume recomputes it
+	// from pricing on its side. Assert that contract here so a future change
+	// does not silently start double-billing.
+	if rec.got.Cost != 0 {
+		t.Errorf("Cost = %v, want 0 (plugin must defer cost computation to Consume/ComputeCost)", rec.got.Cost)
+	}
+}
+
+func TestUsagePluginNoopWhenInactive(t *testing.T) {
+	// When the policy service reports Active()==false the plugin must short-
+	// circuit without invoking Consume. Construct with a nil svc, which yields
+	// a nil plugin (no-op at registration).
+	if got := NewUsagePlugin(nil); got != nil {
+		t.Fatalf("NewUsagePlugin(nil) = %v, want nil (inactive services must produce no-op plugin)", got)
+	}
+	// And a plugin with an active service must still call Consume (sanity).
+	rec := &recordingService{}
+	plugin := NewUsagePlugin(rec)
+	if plugin == nil {
+		t.Fatal("plugin must not be nil for an active service")
+	}
+	plugin.HandleUsage(context.Background(), coreusage.Record{APIKey: "cpa_x"})
+	if rec.calls != 1 {
+		t.Fatalf("expected one Consume call for active service; got %d", rec.calls)
 	}
 }

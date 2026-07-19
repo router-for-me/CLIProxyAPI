@@ -268,10 +268,21 @@ func (s *service) Consume(ctx context.Context, principal, model string, tokens T
 	if total == 0 {
 		total = tokens.Input + tokens.Output + tokens.Reasoning
 	}
+	// Resolve cost when the caller did not supply one. The usage plugin path
+	// passes Cost=0 (it does not have access to the pricing table); computing
+	// it here keeps budget enforcement accurate and the dashboard's
+	// usage-windows cost_usd up to date. Missing pricing ⇒ 0 (same behavior as
+	// ComputeCost), which is safe because checkBudget guards on cap > 0.
+	cost := tokens.Cost
+	if cost == 0 && model != "" {
+		if pricing, err := s.usage.GetPricing(ctx, model); err == nil {
+			cost = computeCostFromTokens(pricing, tokens)
+		}
+	}
 	now := time.Now()
 	for _, wt := range []string{store.WindowTypeHourly, store.WindowTypeWeekly, store.WindowTypeMonthly} {
 		start, end := windowFor(wt, now)
-		if err := s.usage.UpsertWindow(ctx, snap.APIKey.ID, wt, start, end, 1, total, tokens.Cost); err != nil {
+		if err := s.usage.UpsertWindow(ctx, snap.APIKey.ID, wt, start, end, 1, total, cost); err != nil {
 			log.WithError(err).WithField("window", wt).Debug("policy: upsert window failed")
 			// Continue: a single failed upsert should not break the others.
 		}

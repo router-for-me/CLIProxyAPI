@@ -47,19 +47,20 @@ func (p *usagePlugin) HandleUsage(ctx context.Context, record coreusage.Record) 
 	if total == 0 {
 		total = record.Detail.InputTokens + record.Detail.OutputTokens + record.Detail.ReasoningTokens
 	}
-	// The PG flusher computes cost from the pricing table; here we submit a
-	// zero cost so the policy Consume path is decoupled from pricing lookups.
-	// This keeps the budget enforcement resilient to pricing-table misses:
-	// even when no pricing is configured, no-cost signals still increment
-	// request counts and budget windows when a USD limit is set to 0 (which
-	// would otherwise be a degenerate "always-reject" — handled by the > 0
-	// guard in checkBudget).
+	// Cost is intentionally left at zero here: pricing lookup lives in the
+	// store layer (UsageStore.GetPricing + ComputeCost), which the policy
+	// service has access to but this plugin does not. Consume resolves the
+	// cost from the pricing table on its side using the token breakdown below
+	// and applies it to the budget windows. A zero Cost is therefore not a
+	// loss of accuracy — only the resolved-later signal that Consume should
+	// recompute it.
 	tokens := TokenCounts{
-		Input:     record.Detail.InputTokens,
-		Output:    record.Detail.OutputTokens,
-		Reasoning: record.Detail.ReasoningTokens,
-		Cached:    record.Detail.CachedTokens,
-		Total:     total,
+		Input:         record.Detail.InputTokens,
+		Output:        record.Detail.OutputTokens,
+		Reasoning:     record.Detail.ReasoningTokens,
+		Cached:        record.Detail.CachedTokens,
+		CacheCreation: record.Detail.CacheCreationTokens,
+		Total:         total,
 	}
 	consumeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
