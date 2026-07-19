@@ -1,0 +1,635 @@
+package store
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	log "github.com/sirupsen/logrus"
+)
+
+// API key lifecycle statuses.
+const (
+	APIKeyStatusActive   = "active"
+	APIKeyStatusDisabled = "disabled"
+	APIKeyStatusRevoked  = "revoked"
+	APIKeyStatusExpired  = "expired"
+)
+
+// APIKeyPrefixLen is the number of characters retained (after the optional sk-
+// style suffix is stripped) for display purposes. Never enough to reconstruct
+// the secret.
+const APIKeyPrefixLen = 8
+
+// SecretPrefix is the human-readable prefix attached to every generated secret
+// so callers can identify these keys as proxy-managed.
+const SecretPrefix = "sk-"
+
+// ErrAPIKeyNotFound is returned when no API key matches the supplied identifier.
+var ErrAPIKeyNotFound = errors.New("postgres store: api key not found")
+
+// APIKey mirrors a row in the api_keys table. The plaintext secret is never
+// persisted: only KeyHash (SHA-256) is stored. KeyPrefix exposes the first
+// characters of the secret for display in management UIs.
+type APIKey struct {
+	ID         string         `json:"id"`
+	Name       string         `json:"name"`
+	KeyHash    string         `json:"-"`
+	KeyPrefix  string         `json:"key_prefix"`
+	Status     string         `json:"status"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+	ExpiresAt  *time.Time     `json:"expires_at,omitempty"`
+	LastUsedAt *time.Time     `json:"last_used_at,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+}
+
+// Policy captures the limits enforced on an API key. Pointer-typed scalar
+// fields distinguish "unset / unlimited" (nil) from explicit zero values.
+type Policy struct {
+	APIKeyID         string    `json:"api_key_id"`
+	RPMLimit         *int      `json:"rpm_limit,omitempty"`
+	HourlyRateLimit  *int      `json:"hourly_rate_limit,omitempty"`
+	BudgetHourlyUSD  *float64  `json:"budget_hourly_usd,omitempty"`
+	BudgetWeeklyUSD  *float64  `json:"budget_weekly_usd,omitempty"`
+	BudgetMonthlyUSD *float64  `json:"budget_monthly_usd,omitempty"`
+	AllowedModels    []string  `json:"allowed_models,omitempty"`
+	BlockedModels    []string  `json:"blocked_models,omitempty"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+// APIKeyStore provides CRUD operations for client-facing API keys and their
+// policies. It is backed by the same *sql.DB connection as PostgresStore.
+type APIKeyStore struct {
+	db            *sql.DB
+	apiKeysTable  string
+	policiesTable string
+}
+
+// NewAPIKeyStore builds an APIKeyStore that reuses the PostgresStore connection
+// and table names. Returns nil if the parent store is nil so callers can
+// feature-detect the absence of the PG backend with a nil check.
+func NewAPIKeyStore(parent *PostgresStore) *APIKeyStore {
+	if parent == nil {
+		return nil
+	}
+	return &APIKeyStore{
+		db:            parent.DB(),
+		apiKeysTable:  parent.APIKeysTable(),
+		policiesTable: parent.PoliciesTable(),
+	}
+}
+
+// HashSecret returns the SHA-256 hex digest of a plaintext API key secret.
+// This digest is the only representation persisted to the database.
+func HashSecret(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
+}
+
+// prefixOf returns the displayable prefix of a secret. The prefix exposes the
+// first APIKeyPrefixLen characters of the secret body (without the SecretPrefix
+// marker), which is insufficient to reconstruct the secret.
+func prefixOf(secret string) string {
+	body := secret
+	if len(body) > len(SecretPrefix) && body[:len(SecretPrefix)] == SecretPrefix {
+		body = body[len(SecretPrefix):]
+	}
+	if len(body) > APIKeyPrefixLen {
+		body = body[:APIKeyPrefixLen]
+	}
+	return body
+}
+
+// GenerateSecret produces a new opaque plaintext secret. The caller is the only
+// party that ever sees the plaintext: the hashed form is what gets persisted.
+func GenerateSecret() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("postgres store: generate secret: %w", err)
+	}
+	return SecretPrefix + hex.EncodeToString(buf), nil
+}
+
+// Create inserts a new API key and (optionally) its policy in a single
+// transaction. It returns the freshly generated plaintext secret; the caller is
+// responsible for surfacing it to the user exactly once as the secret is never
+// recoverable from the database.
+func (s *APIKeyStore) Create(ctx context.Context, name string, secret string, expiresAt *time.Time, metadata map[string]any, policy *Policy) (*APIKey, string, error) {
+	if s == nil || s.db == nil {
+		return nil, "", fmt.Errorf("postgres store: api key store not initialized")
+	}
+	id := uuid.NewString()
+	if secret == "" {
+		var err error
+		secret, err = GenerateSecret()
+		if err != nil {
+			return nil, "", err
+		}
+	} else if err := validateSecret(secret); err != nil {
+		return nil, "", err
+	}
+	hash := HashSecret(secret)
+	prefix := prefixOf(secret)
+	displayName := trimOr(name, "unnamed")
+	meta := metadata
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		return nil, "", fmt.Errorf("postgres store: marshal metadata: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("postgres store: begin api key create tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO %s (id, name, key_hash, key_prefix, status, expires_at, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+	`, s.apiKeysTable), id, displayName, hash, prefix, APIKeyStatusActive, expiresAt, string(metaJSON)); err != nil {
+		return nil, "", fmt.Errorf("postgres store: insert api key: %w", err)
+	}
+
+	if policy != nil {
+		policy.APIKeyID = id
+		if err = upsertPolicyTx(ctx, tx, s.policiesTable, *policy); err != nil {
+			return nil, "", err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, "", fmt.Errorf("postgres store: commit api key: %w", err)
+	}
+
+	created, _, err := s.LookupByHash(ctx, hash)
+	if err != nil {
+		// Best-effort reconstruction when the row is not yet visible.
+		created = &APIKey{
+			ID: id, Name: displayName, KeyHash: hash, KeyPrefix: prefix,
+			Status: APIKeyStatusActive, ExpiresAt: expiresAt, Metadata: meta,
+			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		}
+	}
+	return created, secret, nil
+}
+
+func validateSecret(secret string) error {
+	if len(secret) < 16 {
+		return fmt.Errorf("postgres store: api key secret too short (min 16 chars)")
+	}
+	return nil
+}
+
+func trimOr(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+// LookupByHash returns the API key and its policy matching the supplied
+// SHA-256 secret hash. ErrAPIKeyNotFound is returned when no row matches.
+func (s *APIKeyStore) LookupByHash(ctx context.Context, hash string) (*APIKey, *Policy, error) {
+	if s == nil || s.db == nil {
+		return nil, nil, fmt.Errorf("postgres store: api key store not initialized")
+	}
+	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT k.id, k.name, k.key_hash, k.key_prefix, k.status,
+		       k.created_at, k.updated_at, k.expires_at, k.last_used_at, k.metadata,
+		       p.rpm_limit, p.hourly_rate_limit, p.budget_hourly_usd, p.budget_weekly_usd,
+		       p.budget_monthly_usd, p.allowed_models, p.blocked_models, p.updated_at
+		FROM %s k
+		LEFT JOIN %s p ON p.api_key_id = k.id
+		WHERE k.key_hash = $1
+	`, s.apiKeysTable, s.policiesTable), hash)
+	key, policy, err := scanAPIKeyRow(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil, ErrAPIKeyNotFound
+		}
+		return nil, nil, err
+	}
+	return key, policy, nil
+}
+
+// LookupByID returns the API key (and its policy, if any) by its ID.
+func (s *APIKeyStore) LookupByID(ctx context.Context, id string) (*APIKey, *Policy, error) {
+	if s == nil || s.db == nil {
+		return nil, nil, fmt.Errorf("postgres store: api key store not initialized")
+	}
+	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT k.id, k.name, k.key_hash, k.key_prefix, k.status,
+		       k.created_at, k.updated_at, k.expires_at, k.last_used_at, k.metadata,
+		       p.rpm_limit, p.hourly_rate_limit, p.budget_hourly_usd, p.budget_weekly_usd,
+		       p.budget_monthly_usd, p.allowed_models, p.blocked_models, p.updated_at
+		FROM %s k
+		LEFT JOIN %s p ON p.api_key_id = k.id
+		WHERE k.id = $1
+	`, s.apiKeysTable, s.policiesTable), id)
+	key, policy, err := scanAPIKeyRow(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil, ErrAPIKeyNotFound
+		}
+		return nil, nil, err
+	}
+	return key, policy, nil
+}
+
+func scanAPIKeyRow(row *sql.Row) (*APIKey, *Policy, error) {
+	var (
+		key             APIKey
+		metadata        []byte
+		rpmLimit        sql.NullInt64
+		hourlyRateLimit sql.NullInt64
+		budgetHourly    sql.NullFloat64
+		budgetWeekly    sql.NullFloat64
+		budgetMonthly   sql.NullFloat64
+		allowedModels   []byte
+		blockedModels   []byte
+		policyUpdatedAt sql.NullTime
+	)
+	if err := row.Scan(
+		&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &key.Status,
+		&key.CreatedAt, &key.UpdatedAt, &key.ExpiresAt, &key.LastUsedAt, &metadata,
+		&rpmLimit, &hourlyRateLimit, &budgetHourly, &budgetWeekly, &budgetMonthly,
+		&allowedModels, &blockedModels, &policyUpdatedAt,
+	); err != nil {
+		return nil, nil, err
+	}
+	if len(metadata) > 0 {
+		_ = json.Unmarshal(metadata, &key.Metadata)
+	}
+	if key.Metadata == nil {
+		key.Metadata = map[string]any{}
+	}
+
+	var policy *Policy
+	if policyUpdatedAt.Valid {
+		p := Policy{APIKeyID: key.ID, UpdatedAt: policyUpdatedAt.Time}
+		if rpmLimit.Valid {
+			v := int(rpmLimit.Int64)
+			p.RPMLimit = &v
+		}
+		if hourlyRateLimit.Valid {
+			v := int(hourlyRateLimit.Int64)
+			p.HourlyRateLimit = &v
+		}
+		if budgetHourly.Valid {
+			v := budgetHourly.Float64
+			p.BudgetHourlyUSD = &v
+		}
+		if budgetWeekly.Valid {
+			v := budgetWeekly.Float64
+			p.BudgetWeeklyUSD = &v
+		}
+		if budgetMonthly.Valid {
+			v := budgetMonthly.Float64
+			p.BudgetMonthlyUSD = &v
+		}
+		p.AllowedModels = decodeStringArray(allowedModels)
+		p.BlockedModels = decodeStringArray(blockedModels)
+		policy = &p
+	}
+	return &key, policy, nil
+}
+
+func decodeStringArray(raw []byte) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// List returns all API keys ordered by creation time (newest first). Policies
+// are not loaded here; use LookupByID to fetch the policy for a specific key.
+func (s *APIKeyStore) List(ctx context.Context) ([]*APIKey, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: api key store not initialized")
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT id, name, key_hash, key_prefix, status,
+		       created_at, updated_at, expires_at, last_used_at, metadata
+		FROM %s
+		ORDER BY created_at DESC
+	`, s.apiKeysTable))
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: list api keys: %w", err)
+	}
+	defer rows.Close()
+
+	keys := make([]*APIKey, 0, 32)
+	for rows.Next() {
+		var (
+			key      APIKey
+			metadata []byte
+		)
+		if err = rows.Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &key.Status,
+			&key.CreatedAt, &key.UpdatedAt, &key.ExpiresAt, &key.LastUsedAt, &metadata); err != nil {
+			return nil, fmt.Errorf("postgres store: scan api key row: %w", err)
+		}
+		if len(metadata) > 0 {
+			_ = json.Unmarshal(metadata, &key.Metadata)
+		}
+		if key.Metadata == nil {
+			key.Metadata = map[string]any{}
+		}
+		keys = append(keys, &key)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres store: iterate api keys: %w", err)
+	}
+	return keys, nil
+}
+
+// ListPaged returns a page of API keys plus the total row count (for pager UI
+// math). Page is 1-indexed; pageSize must be > 0. When statusFilter is
+// non-empty (e.g. "active"), results are restricted to that status and the
+// total reflects the same filter.
+func (s *APIKeyStore) ListPaged(ctx context.Context, page, pageSize int, statusFilter string) ([]*APIKey, int64, error) {
+	if s == nil || s.db == nil {
+		return nil, 0, fmt.Errorf("postgres store: api key store not initialized")
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 25
+	}
+
+	var total int64
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s`, s.apiKeysTable)
+	countArgs := []any{}
+	if statusFilter != "" {
+		countQuery += " WHERE status = $1"
+		countArgs = append(countArgs, statusFilter)
+	}
+	if err := s.db.QueryRowContext(ctx, countQuery, countArgs...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("postgres store: count api keys (paged): %w", err)
+	}
+
+	listQuery := fmt.Sprintf(`
+		SELECT id, name, key_hash, key_prefix, status,
+		       created_at, updated_at, expires_at, last_used_at, metadata
+		FROM %s
+	`, s.apiKeysTable)
+	listArgs := []any{}
+	if statusFilter != "" {
+		listArgs = append(listArgs, statusFilter)
+		listQuery += fmt.Sprintf(" WHERE status = $%d", len(listArgs))
+	}
+	listArgs = append(listArgs, pageSize, (page-1)*pageSize)
+	listQuery += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", len(listArgs)-1, len(listArgs))
+
+	rows, err := s.db.QueryContext(ctx, listQuery, listArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("postgres store: list api keys (paged): %w", err)
+	}
+	defer rows.Close()
+
+	keys := make([]*APIKey, 0, pageSize)
+	for rows.Next() {
+		var (
+			key      APIKey
+			metadata []byte
+		)
+		if err = rows.Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &key.Status,
+			&key.CreatedAt, &key.UpdatedAt, &key.ExpiresAt, &key.LastUsedAt, &metadata); err != nil {
+			return nil, 0, fmt.Errorf("postgres store: scan api key row (paged): %w", err)
+		}
+		if len(metadata) > 0 {
+			_ = json.Unmarshal(metadata, &key.Metadata)
+		}
+		if key.Metadata == nil {
+			key.Metadata = map[string]any{}
+		}
+		keys = append(keys, &key)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("postgres store: iterate api keys (paged): %w", err)
+	}
+	return keys, total, nil
+}
+
+// UpdatePolicy creates or replaces the policy attached to api_key_id.
+func (s *APIKeyStore) UpdatePolicy(ctx context.Context, id string, policy Policy) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: api key store not initialized")
+	}
+	policy.APIKeyID = id
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("postgres store: begin update policy tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err = upsertPolicyTx(ctx, tx, s.policiesTable, policy); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE %s SET updated_at = NOW() WHERE id = $1`, s.apiKeysTable,
+	), id); err != nil {
+		return fmt.Errorf("postgres store: bump api key updated_at: %w", err)
+	}
+	return tx.Commit()
+}
+
+func upsertPolicyTx(ctx context.Context, tx *sql.Tx, policiesTable string, policy Policy) error {
+	allowed, _ := json.Marshal(normalizeStringSlice(policy.AllowedModels))
+	blocked, _ := json.Marshal(normalizeStringSlice(policy.BlockedModels))
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO %s (
+			api_key_id, rpm_limit, hourly_rate_limit,
+			budget_hourly_usd, budget_weekly_usd, budget_monthly_usd,
+			allowed_models, blocked_models, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, NOW())
+		ON CONFLICT (api_key_id) DO UPDATE SET
+			rpm_limit = EXCLUDED.rpm_limit,
+			hourly_rate_limit = EXCLUDED.hourly_rate_limit,
+			budget_hourly_usd = EXCLUDED.budget_hourly_usd,
+			budget_weekly_usd = EXCLUDED.budget_weekly_usd,
+			budget_monthly_usd = EXCLUDED.budget_monthly_usd,
+			allowed_models = EXCLUDED.allowed_models,
+			blocked_models = EXCLUDED.blocked_models,
+			updated_at = NOW()
+	`, policiesTable),
+		policy.APIKeyID, policy.RPMLimit, policy.HourlyRateLimit,
+		policy.BudgetHourlyUSD, policy.BudgetWeeklyUSD, policy.BudgetMonthlyUSD,
+		string(allowed), string(blocked),
+	); err != nil {
+		return fmt.Errorf("postgres store: upsert policy: %w", err)
+	}
+	return nil
+}
+
+func normalizeStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// UpdateStatus changes the lifecycle status of an API key.
+func (s *APIKeyStore) UpdateStatus(ctx context.Context, id, status string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: api key store not initialized")
+	}
+	res, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE %s SET status = $1, updated_at = NOW() WHERE id = $2`, s.apiKeysTable,
+	), status, id)
+	if err != nil {
+		return fmt.Errorf("postgres store: update api key status: %w", err)
+	}
+	return assertRowsAffected(res, id, "api key")
+}
+
+// UpdateMetadata merges metadata for an API key.
+func (s *APIKeyStore) UpdateMetadata(ctx context.Context, id string, metadata map[string]any) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: api key store not initialized")
+	}
+	meta := metadata
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("postgres store: marshal metadata: %w", err)
+	}
+	res, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE %s SET metadata = $1::jsonb, updated_at = NOW() WHERE id = $2`, s.apiKeysTable,
+	), string(metaJSON), id)
+	if err != nil {
+		return fmt.Errorf("postgres store: update api key metadata: %w", err)
+	}
+	return assertRowsAffected(res, id, "api key")
+}
+
+// UpdateExpiry sets (or clears, when expiresAt is nil) the expiry timestamp.
+func (s *APIKeyStore) UpdateExpiry(ctx context.Context, id string, expiresAt *time.Time) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: api key store not initialized")
+	}
+	res, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE %s SET expires_at = $1, updated_at = NOW() WHERE id = $2`, s.apiKeysTable,
+	), expiresAt, id)
+	if err != nil {
+		return fmt.Errorf("postgres store: update api key expiry: %w", err)
+	}
+	return assertRowsAffected(res, id, "api key")
+}
+
+// Rename changes the human-readable label of an API key.
+func (s *APIKeyStore) Rename(ctx context.Context, id, name string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: api key store not initialized")
+	}
+	res, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE %s SET name = $1, updated_at = NOW() WHERE id = $2`, s.apiKeysTable,
+	), trimOr(name, "unnamed"), id)
+	if err != nil {
+		return fmt.Errorf("postgres store: rename api key: %w", err)
+	}
+	return assertRowsAffected(res, id, "api key")
+}
+
+// Regenerate issues a new secret for the given key ID. The key ID, policy,
+// metadata, and lifecycle status are preserved; only the hash changes.
+func (s *APIKeyStore) Regenerate(ctx context.Context, id string) (string, error) {
+	if s == nil || s.db == nil {
+		return "", fmt.Errorf("postgres store: api key store not initialized")
+	}
+	secret, err := GenerateSecret()
+	if err != nil {
+		return "", err
+	}
+	hash := HashSecret(secret)
+	prefix := prefixOf(secret)
+	res, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE %s SET key_hash = $1, key_prefix = $2, updated_at = NOW() WHERE id = $3`,
+		s.apiKeysTable,
+	), hash, prefix, id)
+	if err != nil {
+		return "", fmt.Errorf("postgres store: regenerate api key: %w", err)
+	}
+	if err = assertRowsAffected(res, id, "api key"); err != nil {
+		return "", err
+	}
+	return secret, nil
+}
+
+// Delete permanently removes the API key and its policy (cascade).
+func (s *APIKeyStore) Delete(ctx context.Context, id string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: api key store not initialized")
+	}
+	res, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`DELETE FROM %s WHERE id = $1`, s.apiKeysTable,
+	), id)
+	if err != nil {
+		return fmt.Errorf("postgres store: delete api key: %w", err)
+	}
+	return assertRowsAffected(res, id, "api key")
+}
+
+// TouchLastUsed records the current time as the last_used_at timestamp. It is
+// invoked from the request hot-path and is best-effort; errors are logged but
+// not surfaced so callers can keep operating.
+func (s *APIKeyStore) TouchLastUsed(ctx context.Context, id string) {
+	if s == nil || s.db == nil {
+		return
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE %s SET last_used_at = NOW() WHERE id = $1`, s.apiKeysTable,
+	), id); err != nil {
+		log.WithError(err).Debug("postgres store: touch last_used_at failed")
+	}
+}
+
+// CountActive returns the number of keys currently in 'active' status.
+func (s *APIKeyStore) CountActive(ctx context.Context) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("postgres store: api key store not initialized")
+	}
+	var count int64
+	err := s.db.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT COUNT(*) FROM %s WHERE status = $1`, s.apiKeysTable,
+	), APIKeyStatusActive).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("postgres store: count active api keys: %w", err)
+	}
+	return count, nil
+}
+
+func assertRowsAffected(res sql.Result, id, label string) error {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("postgres store: %s rows affected: %w", label, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: id=%s", ErrAPIKeyNotFound, id)
+	}
+	return nil
+}
