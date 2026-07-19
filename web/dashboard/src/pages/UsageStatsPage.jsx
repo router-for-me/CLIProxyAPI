@@ -1,10 +1,11 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   getUsageTotals, getUsageTimeSeries, getUsageTop, getUsageStats,
+  getUsageEvents, getUsageEvent, getUsageFilterOptions,
 } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import {
-  Spinner, ErrorBanner, EmptyState, Stat,
+  Spinner, ErrorBanner, EmptyState, Stat, Modal, StatusBadge,
 } from '../components/Primitives.jsx';
 import { Sparkline, BarChart, MultiBarChart } from '../components/Charts.jsx';
 
@@ -28,6 +29,8 @@ function presetToRange(preset) {
   return { from: from.toISOString(), to: now.toISOString(), interval: preset.interval };
 }
 
+const EVENTS_PAGE_SIZE = 10;
+
 export default function UsageStatsPage() {
   const [presetIdx, setPresetIdx] = useState(3); // "Last 24h" default
   const [filter, setFilter] = useState({
@@ -39,6 +42,7 @@ export default function UsageStatsPage() {
     customFrom: '',
     customTo: '',
     useCustomRange: false,
+    interval: 'hour',
   });
 
   const rangeParams = useMemo(() => {
@@ -46,11 +50,11 @@ export default function UsageStatsPage() {
       return {
         from: filter.customFrom ? toUTC(filter.customFrom) : undefined,
         to: filter.customTo ? toUTC(filter.customTo) : undefined,
-        interval: 'hour',
+        interval: filter.interval || 'hour',
       };
     }
     return presetToRange(PRESETS[presetIdx]);
-  }, [presetIdx, filter.useCustomRange, filter.customFrom, filter.customTo]);
+  }, [presetIdx, filter.useCustomRange, filter.customFrom, filter.customTo, filter.interval]);
 
   const baseFilter = useMemo(() => ({
     api_key_id: filter.api_key_id || undefined,
@@ -66,13 +70,33 @@ export default function UsageStatsPage() {
   const topKeys = useAsync(() => getUsageTop({ dimension: 'api_key_id', metric: 'request_count', limit: 10, ...baseFilter }), [JSON.stringify(baseFilter)]);
   const topProviders = useAsync(() => getUsageTop({ dimension: 'provider', metric: 'request_count', limit: 10, ...baseFilter }), [JSON.stringify(baseFilter)]);
 
+  // Filter dropdown options. Refetched whenever the time range changes so the
+  // operator sees only values that actually appear in the window.
+  const filterOptions = useAsync(
+    () => getUsageFilterOptions(baseFilter),
+    [JSON.stringify({ from: baseFilter.from, to: baseFilter.to })],
+  );
+
+  const [eventsPage, setEventsPage] = useState(1);
+  const events = useAsync(
+    () => getUsageEvents({ ...baseFilter, page: eventsPage, page_size: EVENTS_PAGE_SIZE }),
+    [JSON.stringify(baseFilter), eventsPage],
+  );
+  // Reset the events pager back to page 1 whenever the filter changes so the
+  // operator doesn't end up staring at an out-of-range page on a new window.
+  useEffect(() => { setEventsPage(1); }, [JSON.stringify(baseFilter)]);
+
+  const [selectedEventId, setSelectedEventId] = useState(null);
+
   const reloadAll = useCallback(() => {
     totals.reload();
     ts.reload();
     topModels.reload();
     topKeys.reload();
     topProviders.reload();
-  }, [totals, ts, topModels, topKeys, topProviders]);
+    filterOptions.reload();
+    events.reload();
+  }, [totals, ts, topModels, topKeys, topProviders, filterOptions, events]);
 
   function updateFilter(partial) {
     setFilter((f) => ({ ...f, ...partial }));
@@ -96,8 +120,9 @@ export default function UsageStatsPage() {
         <div>
           <h1 className="main__title">Usage Statistics</h1>
           <div className="main__subtitle">
-            Aggregate request volume, tokens, cost, and per-key / per-model
-            leaderboards from the PG usage_events table.
+            Aggregate request volume, tokens, cost, per-key / per-model
+            leaderboards, single-event drill-down, and dropdown-driven filters
+            from the PG usage_events table.
           </div>
         </div>
         <button onClick={reloadAll}>Refresh</button>
@@ -128,22 +153,40 @@ export default function UsageStatsPage() {
         </div>
         <div className="grid grid--4">
           <div className="form__row">
-            <label className="form__label">API Key ID</label>
-            <input type="text" value={filter.api_key_id} onChange={(e) => updateFilter({ api_key_id: e.target.value })} placeholder="any" />
+            <label className="form__label">API Key</label>
+            <FilterSelect
+              loading={filterOptions.loading}
+              options={(filterOptions.data?.api_keys || []).map((k) => ({ value: k.id, label: k.alias || k.id }))}
+              value={filter.api_key_id}
+              onChange={(v) => updateFilter({ api_key_id: v })}
+              anyLabel="any key"
+            />
           </div>
           <div className="form__row">
             <label className="form__label">Provider</label>
-            <input type="text" value={filter.provider} onChange={(e) => updateFilter({ provider: e.target.value })} placeholder="any" />
+            <FilterSelect
+              loading={filterOptions.loading}
+              options={(filterOptions.data?.providers || []).map((p) => ({ value: p, label: p }))}
+              value={filter.provider}
+              onChange={(v) => updateFilter({ provider: v })}
+              anyLabel="any provider"
+            />
           </div>
           <div className="form__row">
             <label className="form__label">Model</label>
-            <input type="text" value={filter.model} onChange={(e) => updateFilter({ model: e.target.value })} placeholder="any" />
+            <FilterSelect
+              loading={filterOptions.loading}
+              options={(filterOptions.data?.models || []).map((m) => ({ value: m, label: m }))}
+              value={filter.model}
+              onChange={(v) => updateFilter({ model: v })}
+              anyLabel="any model"
+            />
           </div>
           <div className="form__row">
             <label className="form__label">Interval</label>
             <select
               value={rangeParams.interval}
-              onChange={(e) => {/* interval tied to preset; allow override via custom range */}}
+              onChange={(e) => updateFilter({ interval: e.target.value })}
               disabled={!filter.useCustomRange}
             >
               <option value="minute">minute</option>
@@ -266,7 +309,170 @@ export default function UsageStatsPage() {
           metric="request_count"
         />
       </div>
+
+      {/* Recent events table */}
+      <EventsTable
+        events={events}
+        page={eventsPage}
+        pageSize={EVENTS_PAGE_SIZE}
+        onPage={setEventsPage}
+        onRowClick={setSelectedEventId}
+      />
+
+      {selectedEventId != null && (
+        <EventDetailModal id={selectedEventId} onClose={() => setSelectedEventId(null)} />
+      )}
     </>
+  );
+}
+
+// FilterSelect renders a dropdown populated with distinct values from the
+// usage_events table. Includes a leading "any" option that clears the filter.
+// Shows a small "loading…" placeholder while the options request is in flight.
+function FilterSelect({ options, value, onChange, anyLabel, loading }) {
+  return (
+    <select value={value || ''} onChange={(e) => onChange(e.target.value)} disabled={loading}>
+      <option value="">{anyLabel}</option>
+      {options.map((opt) => (
+        <option key={opt.value} value={opt.value}>{opt.label}</option>
+      ))}
+    </select>
+  );
+}
+
+function EventsTable({ events, page, pageSize, onPage, onRowClick }) {
+  const total = events.data?.total || 0;
+  const rows = events.data?.events || [];
+  const totalPages = total === 0 ? 1 : Math.ceil(total / pageSize);
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <div className="row row--between" style={{ marginBottom: 12 }}>
+        <h3 className="card__title" style={{ margin: 0 }}>Recent events</h3>
+        <button onClick={events.reload} style={{ padding: '2px 8px', fontSize: 12 }}>↻</button>
+      </div>
+      {events.loading && <Spinner label="Loading…" />}
+      {events.error && <ErrorBanner error={events.error} />}
+      {!events.loading && !events.error && rows.length === 0 && (
+        <EmptyState title="No events for this window" />
+      )}
+      {!events.loading && !events.error && rows.length > 0 && (
+        <>
+          <div style={{ overflowX: 'auto' }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Time (UTC)</th>
+                  <th>Key / Alias</th>
+                  <th>Provider</th>
+                  <th>Model</th>
+                  <th style={{ textAlign: 'right' }}>Tokens (in/out/total)</th>
+                  <th style={{ textAlign: 'right' }}>Cost</th>
+                  <th style={{ textAlign: 'right' }}>Latency</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((e) => (
+                  <tr
+                    key={String(e.id)}
+                    onClick={() => onRowClick(e.id)}
+                    style={{ cursor: 'pointer' }}
+                  >
+                    <td className="mono" style={{ whiteSpace: 'nowrap' }}>
+                      {e.requested_at ? new Date(e.requested_at).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z') : '—'}
+                    </td>
+                    <td className="mono">{e.key_alias || e.api_key_id || '—'}</td>
+                    <td>{e.provider || '—'}</td>
+                    <td className="mono">{e.model || '—'}</td>
+                    <td className="mono" style={{ textAlign: 'right' }}>
+                      {(e.input_tokens || 0).toLocaleString()} / {(e.output_tokens || 0).toLocaleString()} / {(e.total_tokens || 0).toLocaleString()}
+                    </td>
+                    <td className="mono" style={{ textAlign: 'right' }}>${(e.cost_usd || 0).toFixed(4)}</td>
+                    <td className="mono" style={{ textAlign: 'right' }}>{e.latency_ms ? `${e.latency_ms} ms` : '—'}</td>
+                    <td>{e.failed ? <StatusBadge status="failed" /> : <StatusBadge status="active" />}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="row row--between" style={{ marginTop: 12, fontSize: 12 }}>
+            <span className="dim">
+              {total.toLocaleString()} event{total === 1 ? '' : 's'} · page {page} of {totalPages}
+            </span>
+            <div className="row gap-sm">
+              <button
+                disabled={page <= 1}
+                onClick={() => onPage(Math.max(1, page - 1))}
+                style={{ padding: '4px 10px' }}
+              >
+                ← Prev
+              </button>
+              <button
+                disabled={page >= totalPages}
+                onClick={() => onPage(Math.min(totalPages, page + 1))}
+                style={{ padding: '4px 10px' }}
+              >
+                Next →
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// EventDetailModal fetches and renders a single usage event. The sealed
+// api_key_principal is intentionally never shown; the operator sees the
+// non-secret key_alias and the other fields needed for triage.
+function EventDetailModal({ id, onClose }) {
+  const detail = useAsync(() => getUsageEvent(id), [id]);
+  const e = detail.data?.event;
+  return (
+    <Modal title={`Event #${id}`} onClose={onClose}>
+      {detail.loading && <Spinner label="Loading…" />}
+      {detail.error && <ErrorBanner error={detail.error} />}
+      {!detail.loading && !detail.error && e && (
+        <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+          <DetailRow label="Time (UTC)" value={e.requested_at ? new Date(e.requested_at).toISOString() : '—'} mono />
+          <DetailRow label="Request ID" value={e.request_id || '—'} mono />
+          <DetailRow label="API Key ID" value={e.api_key_id || '—'} mono />
+          <DetailRow label="Key Alias" value={e.key_alias || '—'} mono />
+          <DetailRow label="Provider" value={e.provider || '—'} />
+          <DetailRow label="Model" value={e.model || '—'} mono />
+          <DetailRow label="Alias" value={e.alias || '—'} mono />
+          <DetailRow label="Executor" value={e.executor_type || '—'} />
+          <DetailRow label="Auth Type" value={e.auth_type || '—'} />
+          <DetailRow label="Source" value={e.source || '—'} />
+          <DetailRow label="Reasoning Effort" value={e.reasoning_effort || '—'} />
+          <DetailRow label="Service Tier" value={e.service_tier || '—'} />
+          <DetailRow label="Response Service Tier" value={e.response_service_tier || '—'} />
+          <DetailRow label="Input Tokens" value={(e.input_tokens || 0).toLocaleString()} mono />
+          <DetailRow label="Output Tokens" value={(e.output_tokens || 0).toLocaleString()} mono />
+          <DetailRow label="Reasoning Tokens" value={(e.reasoning_tokens || 0).toLocaleString()} mono />
+          <DetailRow label="Cached Tokens" value={(e.cached_tokens || 0).toLocaleString()} mono />
+          <DetailRow label="Cache Creation Tokens" value={(e.cache_creation_tokens || 0).toLocaleString()} mono />
+          <DetailRow label="Total Tokens" value={(e.total_tokens || 0).toLocaleString()} mono />
+          <DetailRow label="Cost (USD)" value={`$${(e.cost_usd || 0).toFixed(4)}`} mono />
+          <DetailRow label="Latency" value={e.latency_ms ? `${e.latency_ms} ms` : '—'} mono />
+          <DetailRow label="TTFT" value={e.ttft_ms ? `${e.ttft_ms} ms` : '—'} mono />
+          <DetailRow label="Failed" value={e.failed ? 'yes' : 'no'} mono />
+          <DetailRow label="Fail Status" value={e.fail_status_code ? String(e.fail_status_code) : '—'} mono />
+          <DetailRow label="Generate" value={e.generate ? 'true' : 'false'} mono />
+          <DetailRow label="Endpoint" value={e.endpoint || '—'} mono />
+        </div>
+      )}
+      {!detail.loading && !detail.error && !e && <EmptyState title="Event not found" />}
+    </Modal>
+  );
+}
+
+function DetailRow({ label, value, mono }) {
+  return (
+    <div>
+      <div className="dim" style={{ fontSize: 11 }}>{label}</div>
+      <div className={mono ? 'mono' : ''} style={{ fontSize: 13, wordBreak: 'break-all' }}>{value}</div>
+    </div>
   );
 }
 

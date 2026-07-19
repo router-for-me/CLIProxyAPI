@@ -37,6 +37,7 @@ export function EmptyState({ title = 'Nothing here yet', hint }) {
 export function StatusBadge({ status }) {
   const cls = {
     active: 'badge--active',
+    failed: 'badge--revoked',
     disabled: 'badge--disabled',
     revoked: 'badge--revoked',
     expired: 'badge--expired',

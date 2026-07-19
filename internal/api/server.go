@@ -966,6 +966,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage-stats/totals", s.mgmt.GetUsageTotals)
 		mgmt.GET("/usage-stats/timeseries", s.mgmt.GetUsageTimeSeries)
 		mgmt.GET("/usage-stats/top", s.mgmt.GetUsageTop)
+		mgmt.GET("/usage-stats/events", s.mgmt.GetUsageEvents)
+		mgmt.GET("/usage-stats/events/:id", s.mgmt.GetUsageEvent)
+		mgmt.GET("/usage-stats/filters", s.mgmt.GetUsageFilters)
 		mgmt.GET("/usage-windows/:api_key_id", s.mgmt.GetUsageWindows)
 
 		// Operator-customizable error response text, keyed by HTTP status code.

@@ -51,6 +51,7 @@ func (h *Handler) requirePG(c *gin.Context) (*store.APIKeyStore, *store.UsageSto
 // pgCreateKeyRequest is the JSON payload for POST /api-keys-pg.
 type pgCreateKeyRequest struct {
 	Name      string         `json:"name"`
+	Alias     string         `json:"alias,omitempty"`
 	Secret    string         `json:"secret,omitempty"` // optional; auto-generated when empty
 	ExpiresAt *time.Time     `json:"expires_at,omitempty"`
 	Metadata  map[string]any `json:"metadata,omitempty"`
@@ -136,7 +137,7 @@ func (h *Handler) CreatePGAPIKey(c *gin.Context) {
 	if req.Name == "" {
 		req.Name = "unnamed"
 	}
-	key, secret, err := apiKeys.Create(c.Request.Context(), req.Name, req.Secret, req.ExpiresAt, req.Metadata, req.Policy)
+	key, secret, err := apiKeys.Create(c.Request.Context(), req.Name, req.Alias, req.Secret, req.ExpiresAt, req.Metadata, req.Policy)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
@@ -168,11 +169,12 @@ func (h *Handler) GetPGAPIKey(c *gin.Context) {
 }
 
 // pgPatchKeyRequest supports partial updates on a key (status, metadata,
-// name, expiry). Pointer-typed fields are applied only when non-nil.
+// name, expiry, alias). Pointer-typed fields are applied only when non-nil.
 type pgPatchKeyRequest struct {
 	Status      *string         `json:"status,omitempty"`
 	Metadata    *map[string]any `json:"metadata,omitempty"`
 	Name        *string         `json:"name,omitempty"`
+	Alias       *string         `json:"alias,omitempty"`
 	ExpiresAt   *time.Time      `json:"expires_at,omitempty"` // nil clears the expiry
 	ClearExpiry *bool           `json:"clear_expiry,omitempty"`
 }
@@ -192,6 +194,12 @@ func (h *Handler) PatchPGAPIKey(c *gin.Context) {
 	ctx := c.Request.Context()
 	if req.Name != nil {
 		if err := apiKeys.Rename(ctx, id, *req.Name); err != nil {
+			h.translateKeyError(c, err)
+			return
+		}
+	}
+	if req.Alias != nil {
+		if err := apiKeys.UpdateAlias(ctx, id, *req.Alias); err != nil {
 			h.translateKeyError(c, err)
 			return
 		}

@@ -55,6 +55,13 @@ type PostgresStoreConfig struct {
 	// ErrorMessagesTable stores operator-customized error responses keyed by
 	// HTTP status code. Served by the errormessages package.
 	ErrorMessagesTable string
+
+	// UsageEncryptionKey is the passphrase used to derive an AES-256-GCM
+	// key for sealing sensitive columns (api_key_principal in usage_events)
+	// at rest. Empty/nil disables encryption: writes stay in plaintext and
+	// reads tolerate existing plaintext rows. Held in memory only; never
+	// persisted to the database or to disk.
+	UsageEncryptionKey []byte
 }
 
 // PostgresStore persists configuration and authentication metadata using PostgreSQL as backend
@@ -211,6 +218,19 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		)
 	`, apiKeysTable)); err != nil {
 		return fmt.Errorf("postgres store: create api_keys table: %w", err)
+	}
+	// Backfill the key_alias column added in the usage-stats-encryption
+	// schema iteration. Idempotent so existing deployments upgrade
+	// transparently on next startup.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS key_alias TEXT`, apiKeysTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter api_keys add key_alias: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_api_keys_key_alias ON %s(key_alias) WHERE key_alias IS NOT NULL`, apiKeysTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create api_keys key_alias index: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
 		`CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON %s(key_hash)`, apiKeysTable,

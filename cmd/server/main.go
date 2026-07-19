@@ -163,6 +163,7 @@ func main() {
 		pgStoreDSN           string
 		pgStoreSchema        string
 		pgStoreLocalPath     string
+		pgStoreEncryptionKey []byte
 		pgStoreInst          *store.PostgresStore
 		useGitStore          bool
 		gitStoreRemoteURL    string
@@ -229,6 +230,13 @@ func main() {
 			} else {
 				pgStoreLocalPath = wd
 			}
+		}
+		// Optional passphrase used to AES-GCM-seal sensitive columns
+		// (api_key_principal in usage_events) at rest. When unset, encryption
+		// is disabled and the column is stored in plaintext for backward
+		// compatibility. Held in memory only.
+		if value, ok := lookupEnv("PGSTORE_ENCRYPTION_KEY", "pgstore_encryption_key"); ok {
+			pgStoreEncryptionKey = []byte(value)
 		}
 		useGitStore = false
 	}
@@ -381,9 +389,10 @@ func main() {
 		pgStoreLocalPath = filepath.Join(pgStoreLocalPath, "pgstore")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		pgStoreInst, err = store.NewPostgresStore(ctx, store.PostgresStoreConfig{
-			DSN:      pgStoreDSN,
-			Schema:   pgStoreSchema,
-			SpoolDir: pgStoreLocalPath,
+			DSN:                pgStoreDSN,
+			Schema:             pgStoreSchema,
+			SpoolDir:           pgStoreLocalPath,
+			UsageEncryptionKey: pgStoreEncryptionKey,
 		})
 		cancel()
 		if err != nil {
