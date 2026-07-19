@@ -2942,6 +2942,55 @@ func TestNormalizeXAITools_AdditionalToolsNamespace(t *testing.T) {
 	}
 }
 
+
+func TestNormalizeXAIInputAgentMessages(t *testing.T) {
+	body := []byte(`{
+"model":"grok-4.5",
+"input":[
+{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[
+{"type":"input_text","text":"Message Type: NEW_TASK"},
+{"type":"encrypted_content","encrypted_content":"gAAAAABqX"}
+]}
+]
+}`)
+	out := normalizeXAIInputAgentMessages(body)
+	input := gjson.GetBytes(out, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("input length = %d, want 2; body=%s", len(input), string(out))
+	}
+	if got := input[1].Get("type").String(); got != "message" {
+		t.Fatalf("input.1.type = %q, want message; body=%s", got, string(out))
+	}
+	if got := input[1].Get("role").String(); got != "user" {
+		t.Fatalf("input.1.role = %q, want user; body=%s", got, string(out))
+	}
+	if input[1].Get("author").Exists() || input[1].Get("recipient").Exists() {
+		t.Fatalf("author/recipient should be stripped: %s", string(out))
+	}
+	parts := input[1].Get("content").Array()
+	if len(parts) != 1 {
+		t.Fatalf("content parts = %d, want 1 (encrypted dropped); body=%s", len(parts), string(out))
+	}
+	if got := parts[0].Get("type").String(); got != "input_text" {
+		t.Fatalf("content.0.type = %q, want input_text; body=%s", got, string(out))
+	}
+	if got := parts[0].Get("text").String(); got != "Message Type: NEW_TASK" {
+		t.Fatalf("content.0.text = %q; body=%s", got, string(out))
+	}
+}
+
+func TestSanitizeXAIResponsesBodyDropsServiceTierAndClientMetadata(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","service_tier":"priority","client_metadata":{"x":"y"},"input":[]}`)
+	out := sanitizeXAIResponsesBody(body, "grok-4.5")
+	if gjson.GetBytes(out, "service_tier").Exists() {
+		t.Fatalf("service_tier should be removed: %s", string(out))
+	}
+	if gjson.GetBytes(out, "client_metadata").Exists() {
+		t.Fatalf("client_metadata should be removed: %s", string(out))
+	}
+}
+
 func TestPromoteXAIAdditionalToolsToTopLevel(t *testing.T) {
 	body := []byte(`{
 "tools":[{"type":"x_search"}],

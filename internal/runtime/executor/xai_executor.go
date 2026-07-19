@@ -933,6 +933,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	}
 	body = normalizeXAIInputCustomToolCalls(body)
 	body = normalizeXAIInputNamespaceToolCalls(body)
+	body = normalizeXAIInputAgentMessages(body)
 	body = normalizeXAIInputReasoningItems(body)
 	body = sanitizeXAIInputEncryptedContent(body)
 	body = normalizeCodexInstructions(body)
@@ -1330,6 +1331,13 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 		if reasoning := gjson.GetBytes(body, "reasoning"); reasoning.Exists() && reasoning.IsObject() && len(reasoning.Map()) == 0 {
 			body, _ = sjson.DeleteBytes(body, "reasoning")
 		}
+	}
+	// OpenAI service tiers (priority/flex) are not part of xAI Responses.
+	if gjson.GetBytes(body, "service_tier").Exists() {
+		body, _ = sjson.DeleteBytes(body, "service_tier")
+	}
+	if gjson.GetBytes(body, "client_metadata").Exists() {
+		body, _ = sjson.DeleteBytes(body, "client_metadata")
 	}
 	return body
 }
@@ -2466,6 +2474,102 @@ func sanitizeXAIInputEncryptedContent(body []byte) []byte {
 		}).Debug("xai executor: removed invalid encrypted_content before upstream")
 	}
 	return mergeAdjacentXAIInputReasoningSummaries(updated)
+}
+
+
+// normalizeXAIInputAgentMessages rewrites Codex multi-agent "agent_message"
+// input items to plain "message" items. xAI ModelInput has no agent_message
+// variant, so multi-agent subagent turns otherwise fail with HTTP 422.
+// Nested content parts of type encrypted_content are also dropped — they are
+// Codex collaboration payloads, not xAI message content.
+func normalizeXAIInputAgentMessages(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+
+	changed := false
+	items := make([]json.RawMessage, 0, len(input.Array()))
+	for _, item := range input.Array() {
+		if item.Get("type").String() != "agent_message" {
+			items = append(items, json.RawMessage(item.Raw))
+			continue
+		}
+		changed = true
+		raw := []byte(item.Raw)
+		updated, errSet := sjson.SetBytes(raw, "type", "message")
+		if errSet != nil {
+			return body
+		}
+		raw = updated
+		if !item.Get("role").Exists() || strings.TrimSpace(item.Get("role").String()) == "" {
+			updated, errSet = sjson.SetBytes(raw, "role", "user")
+			if errSet != nil {
+				return body
+			}
+			raw = updated
+		}
+		for _, field := range []string{"author", "recipient", "name", "id"} {
+			if item.Get(field).Exists() {
+				updated, errDel := sjson.DeleteBytes(raw, field)
+				if errDel != nil {
+					return body
+				}
+				raw = updated
+			}
+		}
+		content := item.Get("content")
+		if content.IsArray() {
+			filtered := []byte(`[]`)
+			kept := 0
+			for _, part := range content.Array() {
+				partType := strings.TrimSpace(part.Get("type").String())
+				if partType == "encrypted_content" || partType == "" {
+					continue
+				}
+				next, errSet := sjson.SetRawBytes(filtered, "-1", []byte(part.Raw))
+				if errSet != nil {
+					return body
+				}
+				filtered = next
+				kept++
+			}
+			if kept == 0 {
+				author := strings.TrimSpace(item.Get("author").String())
+				recipient := strings.TrimSpace(item.Get("recipient").String())
+				placeholder := "[agent_message]"
+				if author != "" || recipient != "" {
+					placeholder = fmt.Sprintf("[agent_message %s -> %s]", author, recipient)
+				}
+				partJSON, errMarshal := json.Marshal([]map[string]string{{
+					"type": "input_text",
+					"text": placeholder,
+				}})
+				if errMarshal != nil {
+					return body
+				}
+				filtered = partJSON
+			}
+			updated, errSet = sjson.SetRawBytes(raw, "content", filtered)
+			if errSet != nil {
+				return body
+			}
+			raw = updated
+		}
+		items = append(items, json.RawMessage(raw))
+	}
+	if !changed {
+		return body
+	}
+	rawInput, errMarshal := json.Marshal(items)
+	if errMarshal != nil {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "input", rawInput)
+	if errSet != nil {
+		return body
+	}
+	return updated
 }
 
 func normalizeXAIInputReasoningItems(body []byte) []byte {
