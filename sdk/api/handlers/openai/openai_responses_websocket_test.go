@@ -816,13 +816,26 @@ func TestCodexLocalCompactionSummaryAdditionalToolsConstraints(t *testing.T) {
 	}
 }
 
+func TestCodexLocalCompactionSummaryAllowsReasoningItem(t *testing.T) {
+	compactedInput := gjson.Parse(fmt.Sprintf(`[
+		{"type":"reasoning","id":"reasoning-1"},
+		{"type":"message","role":"user","content":[{"type":"input_text","text":%q}]}
+	]`, codexLocalCompactionSummaryPrefix+"\nSummary body."))
+
+	if !inputHasCodexLocalCompactionSummary(compactedInput) {
+		t.Fatal("compaction summary carrying a reasoning item must still be recognized")
+	}
+	if !shouldReplaceWebsocketTranscript([]byte(`{"type":"response.create"}`), compactedInput) {
+		t.Fatal("compaction summary carrying a reasoning item must replace the websocket transcript")
+	}
+}
+
 func TestCodexLocalCompactionSummaryRejectsOrdinaryHistoryItems(t *testing.T) {
 	tests := []struct {
 		name        string
 		historyItem string
 		wantReplace bool
 	}{
-		{name: "reasoning", historyItem: `{"type":"reasoning","id":"reasoning-1"}`},
 		{name: "assistant", historyItem: `{"type":"message","role":"assistant","id":"assistant-1"}`, wantReplace: true},
 		{name: "function call", historyItem: `{"type":"function_call","call_id":"call-1"}`, wantReplace: true},
 		{name: "function call output", historyItem: `{"type":"function_call_output","call_id":"call-1"}`},

@@ -793,6 +793,9 @@ func inputHasCodexLocalCompactionSummary(input gjson.Result) bool {
 			}
 			continue
 		}
+		if itemType == "reasoning" {
+			continue
+		}
 		if itemType != "" && itemType != "message" {
 			return false
 		}
