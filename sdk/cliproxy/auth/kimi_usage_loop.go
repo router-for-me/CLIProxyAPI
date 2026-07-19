@@ -70,8 +70,10 @@ func (m *Manager) StopKimiUsageProbe() {
 		m.usageProbeCancel()
 		m.usageProbeCancel = nil
 	}
-	m.usageProbeMu.Unlock()
+	// Wait inside the lock so WatcherGroup.Add in StartKimiUsageProbe
+	// cannot run concurrently with Wait (sync.WatcherGroup rule).
 	m.usageProbeWG.Wait()
+	m.usageProbeMu.Unlock()
 }
 
 // runKimiUsageProbeOnce executes one sweep: snapshots all auths, filters for

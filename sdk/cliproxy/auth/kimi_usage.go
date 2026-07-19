@@ -96,7 +96,7 @@ func parseKimiResetTime(v any) (time.Time, bool) {
 		if x <= 0 {
 			return time.Time{}, false
 		}
-		// 数值 >= 1e12 视为毫秒，否则秒。
+		// Values >= 1e12 are treated as milliseconds; smaller values are seconds.
 		if x >= 1e12 {
 			return time.UnixMilli(int64(x)), true
 		}
