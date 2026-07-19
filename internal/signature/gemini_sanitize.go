@@ -45,6 +45,8 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 			return true
 		}
 
+		// 追踪在当前模型轮次中是否已经处理/保留了第一个签名
+		seenSignatureInTurn := false
 		parts.ForEach(func(partIdx, part gjson.Result) bool {
 			partPath := fmt.Sprintf("%s.%d.parts.%d", contentsPath, contentIdx.Int(), partIdx.Int())
 			if part.Get("functionResponse").Exists() {
@@ -71,6 +73,11 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 				return true
 			}
 
+			// 如果在当前模型轮次中已经处理过首个签名，则直接跳过，不再补齐写入
+			if seenSignatureInTurn {
+				return true
+			}
+
 			blockKind := SignatureBlockKindGeminiModelPart
 			if hasFunctionCall {
 				blockKind = SignatureBlockKindGeminiFunctionCall
@@ -79,6 +86,8 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 			decision := DecideSignatureCompatibility(SignatureProviderGemini, rawSignature, blockKind)
 			replaySignature := GeminiReplaySignatureOrBypass(rawSignature, blockKind)
 			payload, _ = sjson.SetBytes(payload, partPath+".thoughtSignature", replaySignature)
+			// 标记当前模型轮次已分配/处理过首个签名
+			seenSignatureInTurn = true
 			if decision.Action != SignatureActionPreserve {
 				logGeminiThoughtSignatureSanitize(contentsPath, int(contentIdx.Int()), int(partIdx.Int()), decision, rawSignature, hasSignature)
 			}
