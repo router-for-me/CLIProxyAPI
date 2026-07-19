@@ -254,6 +254,49 @@ func TestToolCallOutputWithMultimodalContent(t *testing.T) {
 	}
 }
 
+func TestToolCallOutputWithStringifiedCodexImageContent(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.6-sol",
+		"messages": [
+			{"role": "user", "content": "Inspect the screenshot."},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{"id": "call_screenshot", "type": "function", "function": {"name": "view_image", "arguments": "{}"}}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_screenshot",
+				"content": "[{\"detail\":\"original\",\"image_url\":\"data:image/png;base64,AA==\",\"type\":\"input_image\"}]"
+			}
+		],
+		"tools": [
+			{"type": "function", "function": {"name": "view_image", "parameters": {"type": "object", "properties": {}}}}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	output := gjson.GetBytes(out, "input.2.output")
+	if !output.IsArray() {
+		t.Fatalf("expected stringified image output to be an array, got: %s", output.Raw)
+	}
+	parts := output.Array()
+	if len(parts) != 1 {
+		t.Fatalf("expected one output part, got %d: %s", len(parts), output.Raw)
+	}
+	if parts[0].Get("type").String() != "input_image" {
+		t.Fatalf("expected input_image, got: %s", parts[0].Raw)
+	}
+	if parts[0].Get("image_url").String() != "data:image/png;base64,AA==" {
+		t.Fatalf("unexpected image URL: %s", parts[0].Get("image_url").String())
+	}
+	if parts[0].Get("detail").String() != "original" {
+		t.Fatalf("unexpected image detail: %s", parts[0].Get("detail").String())
+	}
+}
+
 func TestToolCallOutputFallsBackForInvalidStructuredParts(t *testing.T) {
 	input := []byte(`{
 		"model": "gpt-4o",
