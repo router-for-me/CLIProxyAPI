@@ -253,9 +253,23 @@ func TestXAIExecutorExecuteRestoresAdditionalToolsNamespaceCalls(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	tool := gjson.GetBytes(gotBody, "input.0.tools.0")
-	if got := tool.Get("name").String(); got != "mcp__exa__web_search_exa" {
-		t.Fatalf("upstream additional tool name = %q, want qualified name; body=%s", got, gotBody)
+	// additional_tools must be promoted out of input (xAI ModelInput 422).
+	for _, item := range gjson.GetBytes(gotBody, "input").Array() {
+		if item.Get("type").String() == "additional_tools" {
+			t.Fatalf("upstream input still contains additional_tools: %s", gotBody)
+		}
+	}
+	var tool gjson.Result
+	found := false
+	for _, candidate := range gjson.GetBytes(gotBody, "tools").Array() {
+		if candidate.Get("name").String() == "mcp__exa__web_search_exa" {
+			tool = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("upstream tools missing promoted mcp__exa__web_search_exa; body=%s", gotBody)
 	}
 	if got := tool.Get("type").String(); got != "function" {
 		t.Fatalf("upstream additional tool type = %q, want function; body=%s", got, gotBody)
@@ -2925,6 +2939,124 @@ func TestNormalizeXAITools_AdditionalToolsNamespace(t *testing.T) {
 	}
 	if got := tools[0].Get("type").String(); got != "function" {
 		t.Fatalf("additional tool type = %q, want function; body=%s", got, string(out))
+	}
+}
+
+
+func TestNormalizeXAIInputAgentMessages(t *testing.T) {
+	body := []byte(`{
+"model":"grok-4.5",
+"input":[
+{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[
+{"type":"input_text","text":"Message Type: NEW_TASK"},
+{"type":"encrypted_content","encrypted_content":"gAAAAABqX"}
+]}
+]
+}`)
+	out := normalizeXAIInputAgentMessages(body)
+	input := gjson.GetBytes(out, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("input length = %d, want 2; body=%s", len(input), string(out))
+	}
+	if got := input[1].Get("type").String(); got != "message" {
+		t.Fatalf("input.1.type = %q, want message; body=%s", got, string(out))
+	}
+	if got := input[1].Get("role").String(); got != "user" {
+		t.Fatalf("input.1.role = %q, want user; body=%s", got, string(out))
+	}
+	if input[1].Get("author").Exists() || input[1].Get("recipient").Exists() {
+		t.Fatalf("author/recipient should be stripped: %s", string(out))
+	}
+	parts := input[1].Get("content").Array()
+	if len(parts) != 1 {
+		t.Fatalf("content parts = %d, want 1 (encrypted dropped); body=%s", len(parts), string(out))
+	}
+	if got := parts[0].Get("type").String(); got != "input_text" {
+		t.Fatalf("content.0.type = %q, want input_text; body=%s", got, string(out))
+	}
+	if got := parts[0].Get("text").String(); got != "Message Type: NEW_TASK" {
+		t.Fatalf("content.0.text = %q; body=%s", got, string(out))
+	}
+}
+
+func TestSanitizeXAIResponsesBodyDropsServiceTierAndClientMetadata(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","service_tier":"priority","client_metadata":{"x":"y"},"input":[]}`)
+	out := sanitizeXAIResponsesBody(body, "grok-4.5")
+	if gjson.GetBytes(out, "service_tier").Exists() {
+		t.Fatalf("service_tier should be removed: %s", string(out))
+	}
+	if gjson.GetBytes(out, "client_metadata").Exists() {
+		t.Fatalf("client_metadata should be removed: %s", string(out))
+	}
+}
+
+func TestPromoteXAIAdditionalToolsToTopLevel(t *testing.T) {
+	body := []byte(`{
+"tools":[{"type":"x_search"}],
+"input":[
+{"type":"additional_tools","role":"developer","tools":[
+{"type":"function","name":"read_file","parameters":{"type":"object"}},
+{"type":"custom","name":"shell","description":"Run","format":{"type":"text"},"parameters":{"type":"object","properties":{}}}
+]},
+{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}
+]
+}`)
+	out := promoteXAIAdditionalToolsToTopLevel(body)
+
+	for _, item := range gjson.GetBytes(out, "input").Array() {
+		if item.Get("type").String() == "additional_tools" {
+			t.Fatalf("additional_tools should be removed from input: %s", string(out))
+		}
+	}
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 3 {
+		t.Fatalf("tools length = %d, want 3; body=%s", len(tools), string(out))
+	}
+	if got := tools[0].Get("type").String(); got != "x_search" {
+		t.Fatalf("tools.0.type = %q, want x_search; body=%s", got, string(out))
+	}
+	if got := tools[1].Get("name").String(); got != "read_file" {
+		t.Fatalf("tools.1.name = %q, want read_file; body=%s", got, string(out))
+	}
+	if got := tools[2].Get("name").String(); got != "shell" {
+		t.Fatalf("tools.2.name = %q, want shell; body=%s", got, string(out))
+	}
+	if tools[2].Get("format").Exists() {
+		t.Fatalf("promoted custom tool should strip format: %s", string(out))
+	}
+	if len(gjson.GetBytes(out, "input").Array()) != 1 {
+		t.Fatalf("input should keep only the user message: %s", string(out))
+	}
+}
+
+func TestPromoteXAIAdditionalToolsAfterNormalize(t *testing.T) {
+	body := []byte(`{
+"input":[
+{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"shell","format":{"type":"text"}}]},
+{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}
+]
+}`)
+	out := normalizeXAITools(body)
+	out = promoteXAIAdditionalToolsToTopLevel(out)
+
+	for _, item := range gjson.GetBytes(out, "input").Array() {
+		if item.Get("type").String() == "additional_tools" {
+			t.Fatalf("additional_tools should be removed from input: %s", string(out))
+		}
+	}
+	tool := gjson.GetBytes(out, "tools.0")
+	if got := tool.Get("type").String(); got != "function" {
+		t.Fatalf("tools.0.type = %q, want function; body=%s", got, string(out))
+	}
+	if got := tool.Get("name").String(); got != "shell" {
+		t.Fatalf("tools.0.name = %q, want shell; body=%s", got, string(out))
+	}
+	if tool.Get("format").Exists() {
+		t.Fatalf("format should be stripped: %s", string(out))
+	}
+	if !tool.Get("parameters").Exists() {
+		t.Fatalf("parameters should be injected for custom→function: %s", string(out))
 	}
 }
 

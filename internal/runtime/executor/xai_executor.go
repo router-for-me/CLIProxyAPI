@@ -915,6 +915,10 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	// the post-restore (namespace, short-name) shape used by the response filter.
 	clientDeclaredTools := collectXAIClientDeclaredToolKeys(body)
 	body = normalizeXAITools(body)
+	// Codex Responses Lite declares tools via input[].type=additional_tools.
+	// xAI's Responses endpoint rejects that item as ModelInput (HTTP 422). Promote
+	// the declared tools into the top-level tools array and drop the items.
+	body = promoteXAIAdditionalToolsToTopLevel(body)
 	// Drop choices that point at tools removed by normalizeXAITools before we
 	// inject native x_search, so a surviving allowed_tools / forced choice is not
 	// left pointing at a deleted tool once only x_search remains.
@@ -929,6 +933,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	}
 	body = normalizeXAIInputCustomToolCalls(body)
 	body = normalizeXAIInputNamespaceToolCalls(body)
+	body = normalizeXAIInputAgentMessages(body)
 	body = normalizeXAIInputReasoningItems(body)
 	body = sanitizeXAIInputEncryptedContent(body)
 	body = normalizeCodexInstructions(body)
@@ -1327,6 +1332,13 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 			body, _ = sjson.DeleteBytes(body, "reasoning")
 		}
 	}
+	// OpenAI service tiers (priority/flex) are not part of xAI Responses.
+	if gjson.GetBytes(body, "service_tier").Exists() {
+		body, _ = sjson.DeleteBytes(body, "service_tier")
+	}
+	if gjson.GetBytes(body, "client_metadata").Exists() {
+		body, _ = sjson.DeleteBytes(body, "client_metadata")
+	}
 	return body
 }
 
@@ -1537,6 +1549,80 @@ func normalizeXAITools(body []byte) []byte {
 	return body
 }
 
+// promoteXAIAdditionalToolsToTopLevel merges Codex "additional_tools" input
+// items into the top-level tools array and removes those items from input.
+// Upstream xAI (cli-chat-proxy) rejects additional_tools as a ModelInput
+// variant with HTTP 422, even after nested tool normalization.
+func promoteXAIAdditionalToolsToTopLevel(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+
+	tools := gjson.GetBytes(body, "tools")
+	mergedTools := []byte(`[]`)
+	if tools.Exists() && tools.IsArray() {
+		mergedTools = []byte(tools.Raw)
+	}
+
+	newInput := []byte(`[]`)
+	changed := false
+	for _, item := range input.Array() {
+		if item.Get("type").String() != "additional_tools" {
+			updated, errSet := sjson.SetRawBytes(newInput, "-1", []byte(item.Raw))
+			if errSet != nil {
+				return body
+			}
+			newInput = updated
+			continue
+		}
+		changed = true
+		nested := item.Get("tools")
+		if !nested.Exists() || !nested.IsArray() {
+			continue
+		}
+		for _, tool := range nested.Array() {
+			raw := []byte(tool.Raw)
+			// custom tool format is not valid on function tools after rewrite.
+			if tool.Get("format").Exists() {
+				stripped, errDel := sjson.DeleteBytes(raw, "format")
+				if errDel != nil {
+					return body
+				}
+				raw = stripped
+			}
+			updated, errSet := sjson.SetRawBytes(mergedTools, "-1", raw)
+			if errSet != nil {
+				return body
+			}
+			mergedTools = updated
+		}
+	}
+	if !changed {
+		return body
+	}
+
+	updated, errSet := sjson.SetRawBytes(body, "input", newInput)
+	if errSet != nil {
+		return body
+	}
+	body = updated
+	if gjson.GetBytes(mergedTools, "#").Int() == 0 {
+		if gjson.GetBytes(body, "tools").Exists() {
+			body, _ = sjson.DeleteBytes(body, "tools")
+		}
+		return body
+	}
+	updated, errSet = sjson.SetRawBytes(body, "tools", mergedTools)
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
+
 func normalizeXAIToolArray(tools gjson.Result) ([]byte, bool, bool) {
 	changed := false
 	filtered := []byte(`[]`)
@@ -1690,6 +1776,15 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 			return nil, false, false
 		}
 		raw = updatedTool
+		// Codex custom tools carry a freeform "format" field that is invalid on
+		// xAI function tools and can contribute to upstream rejection.
+		if gjson.GetBytes(raw, "format").Exists() {
+			stripped, errDel := sjson.DeleteBytes(raw, "format")
+			if errDel != nil {
+				return nil, false, false
+			}
+			raw = stripped
+		}
 		toolType = xaiFunctionToolType
 		changed = true
 	}
@@ -2379,6 +2474,102 @@ func sanitizeXAIInputEncryptedContent(body []byte) []byte {
 		}).Debug("xai executor: removed invalid encrypted_content before upstream")
 	}
 	return mergeAdjacentXAIInputReasoningSummaries(updated)
+}
+
+
+// normalizeXAIInputAgentMessages rewrites Codex multi-agent "agent_message"
+// input items to plain "message" items. xAI ModelInput has no agent_message
+// variant, so multi-agent subagent turns otherwise fail with HTTP 422.
+// Nested content parts of type encrypted_content are also dropped — they are
+// Codex collaboration payloads, not xAI message content.
+func normalizeXAIInputAgentMessages(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+
+	changed := false
+	items := make([]json.RawMessage, 0, len(input.Array()))
+	for _, item := range input.Array() {
+		if item.Get("type").String() != "agent_message" {
+			items = append(items, json.RawMessage(item.Raw))
+			continue
+		}
+		changed = true
+		raw := []byte(item.Raw)
+		updated, errSet := sjson.SetBytes(raw, "type", "message")
+		if errSet != nil {
+			return body
+		}
+		raw = updated
+		if !item.Get("role").Exists() || strings.TrimSpace(item.Get("role").String()) == "" {
+			updated, errSet = sjson.SetBytes(raw, "role", "user")
+			if errSet != nil {
+				return body
+			}
+			raw = updated
+		}
+		for _, field := range []string{"author", "recipient", "name", "id"} {
+			if item.Get(field).Exists() {
+				updated, errDel := sjson.DeleteBytes(raw, field)
+				if errDel != nil {
+					return body
+				}
+				raw = updated
+			}
+		}
+		content := item.Get("content")
+		if content.IsArray() {
+			filtered := []byte(`[]`)
+			kept := 0
+			for _, part := range content.Array() {
+				partType := strings.TrimSpace(part.Get("type").String())
+				if partType == "encrypted_content" || partType == "" {
+					continue
+				}
+				next, errSet := sjson.SetRawBytes(filtered, "-1", []byte(part.Raw))
+				if errSet != nil {
+					return body
+				}
+				filtered = next
+				kept++
+			}
+			if kept == 0 {
+				author := strings.TrimSpace(item.Get("author").String())
+				recipient := strings.TrimSpace(item.Get("recipient").String())
+				placeholder := "[agent_message]"
+				if author != "" || recipient != "" {
+					placeholder = fmt.Sprintf("[agent_message %s -> %s]", author, recipient)
+				}
+				partJSON, errMarshal := json.Marshal([]map[string]string{{
+					"type": "input_text",
+					"text": placeholder,
+				}})
+				if errMarshal != nil {
+					return body
+				}
+				filtered = partJSON
+			}
+			updated, errSet = sjson.SetRawBytes(raw, "content", filtered)
+			if errSet != nil {
+				return body
+			}
+			raw = updated
+		}
+		items = append(items, json.RawMessage(raw))
+	}
+	if !changed {
+		return body
+	}
+	rawInput, errMarshal := json.Marshal(items)
+	if errMarshal != nil {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "input", rawInput)
+	if errSet != nil {
+		return body
+	}
+	return updated
 }
 
 func normalizeXAIInputReasoningItems(body []byte) []byte {
