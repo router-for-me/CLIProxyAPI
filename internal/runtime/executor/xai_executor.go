@@ -915,6 +915,10 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	// the post-restore (namespace, short-name) shape used by the response filter.
 	clientDeclaredTools := collectXAIClientDeclaredToolKeys(body)
 	body = normalizeXAITools(body)
+	// Codex Responses Lite declares tools via input[].type=additional_tools.
+	// xAI's Responses endpoint rejects that item as ModelInput (HTTP 422). Promote
+	// the declared tools into the top-level tools array and drop the items.
+	body = promoteXAIAdditionalToolsToTopLevel(body)
 	// Drop choices that point at tools removed by normalizeXAITools before we
 	// inject native x_search, so a surviving allowed_tools / forced choice is not
 	// left pointing at a deleted tool once only x_search remains.
@@ -1537,6 +1541,80 @@ func normalizeXAITools(body []byte) []byte {
 	return body
 }
 
+// promoteXAIAdditionalToolsToTopLevel merges Codex "additional_tools" input
+// items into the top-level tools array and removes those items from input.
+// Upstream xAI (cli-chat-proxy) rejects additional_tools as a ModelInput
+// variant with HTTP 422, even after nested tool normalization.
+func promoteXAIAdditionalToolsToTopLevel(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+
+	tools := gjson.GetBytes(body, "tools")
+	mergedTools := []byte(`[]`)
+	if tools.Exists() && tools.IsArray() {
+		mergedTools = []byte(tools.Raw)
+	}
+
+	newInput := []byte(`[]`)
+	changed := false
+	for _, item := range input.Array() {
+		if item.Get("type").String() != "additional_tools" {
+			updated, errSet := sjson.SetRawBytes(newInput, "-1", []byte(item.Raw))
+			if errSet != nil {
+				return body
+			}
+			newInput = updated
+			continue
+		}
+		changed = true
+		nested := item.Get("tools")
+		if !nested.Exists() || !nested.IsArray() {
+			continue
+		}
+		for _, tool := range nested.Array() {
+			raw := []byte(tool.Raw)
+			// custom tool format is not valid on function tools after rewrite.
+			if tool.Get("format").Exists() {
+				stripped, errDel := sjson.DeleteBytes(raw, "format")
+				if errDel != nil {
+					return body
+				}
+				raw = stripped
+			}
+			updated, errSet := sjson.SetRawBytes(mergedTools, "-1", raw)
+			if errSet != nil {
+				return body
+			}
+			mergedTools = updated
+		}
+	}
+	if !changed {
+		return body
+	}
+
+	updated, errSet := sjson.SetRawBytes(body, "input", newInput)
+	if errSet != nil {
+		return body
+	}
+	body = updated
+	if len(gjson.ParseBytes(mergedTools).Array()) == 0 {
+		if gjson.GetBytes(body, "tools").Exists() {
+			body, _ = sjson.DeleteBytes(body, "tools")
+		}
+		return body
+	}
+	updated, errSet = sjson.SetRawBytes(body, "tools", mergedTools)
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
+
 func normalizeXAIToolArray(tools gjson.Result) ([]byte, bool, bool) {
 	changed := false
 	filtered := []byte(`[]`)
@@ -1690,6 +1768,15 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 			return nil, false, false
 		}
 		raw = updatedTool
+		// Codex custom tools carry a freeform "format" field that is invalid on
+		// xAI function tools and can contribute to upstream rejection.
+		if gjson.GetBytes(raw, "format").Exists() {
+			stripped, errDel := sjson.DeleteBytes(raw, "format")
+			if errDel != nil {
+				return nil, false, false
+			}
+			raw = stripped
+		}
 		toolType = xaiFunctionToolType
 		changed = true
 	}
