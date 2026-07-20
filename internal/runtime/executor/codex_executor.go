@@ -35,6 +35,7 @@ import (
 )
 
 const (
+	codexDefaultVersion        = "0.144.6"
 	codexUserAgent             = "codex-tui/0.144.6 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.144.6)"
 	codexOriginator            = "codex-tui"
 	codexDefaultImageToolModel = "gpt-image-2"
@@ -1994,7 +1995,7 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	if profileHeaders != nil && profileHeaders.Get("X-Codex-Beta-Features") != "" {
 		r.Header.Set("X-Codex-Beta-Features", profileHeaders.Get("X-Codex-Beta-Features"))
 	}
-	misc.EnsureHeader(r.Header, profileHeaders, "Version", "")
+	codexEnsureVersionHeader(r.Header, profileHeaders, !codexAuthUsesAPIKey(auth))
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
@@ -2017,7 +2018,7 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 			isAPIKey = true
 		}
 	}
-	if originator := strings.TrimSpace(profileHeaders.Get("Originator")); originator != "" {
+	if originator := firstNonEmptyHeaderValue(r.Header, profileHeaders, "Originator"); originator != "" {
 		r.Header.Set("Originator", originator)
 	} else if !isAPIKey {
 		r.Header.Set("Originator", codexOriginator)

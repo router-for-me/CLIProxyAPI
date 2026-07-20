@@ -1067,7 +1067,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-metadata", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-client-request-id", "")
 	misc.EnsureHeader(headers, profileHeaders, "x-responsesapi-include-timing-metrics", "")
-	misc.EnsureHeader(headers, profileHeaders, "Version", "")
+	codexEnsureVersionHeader(headers, profileHeaders, !isAPIKey)
 	if isAPIKey {
 		ensureHeaderWithPriority(headers, profileHeaders, "User-Agent", "", "")
 	} else {
@@ -1087,7 +1087,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		sessionFallback = uuid.NewString()
 	}
 	ensureCodexWebsocketSessionHeader(headers, ginHeaders, sessionFallback)
-	if originator := strings.TrimSpace(profileHeaders.Get("Originator")); originator != "" {
+	if originator := firstNonEmptyHeaderValue(headers, profileHeaders, "Originator"); originator != "" {
 		headers.Set("Originator", originator)
 	} else if !isAPIKey {
 		headers.Set("Originator", codexOriginator)

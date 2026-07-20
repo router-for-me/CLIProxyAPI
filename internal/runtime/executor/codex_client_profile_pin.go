@@ -3,13 +3,13 @@ package executor
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
-
-const codexClientProfilePinnedMetadataKey = "codex_client_profile_pinned"
 
 var codexPinnedClientProfileHeaders = []string{
 	"X-Codex-Beta-Features",
@@ -19,14 +19,40 @@ var codexPinnedClientProfileHeaders = []string{
 	"x-responsesapi-include-timing-metrics",
 }
 
+type codexClientProfile struct {
+	headers http.Header
+}
+
+type codexClientProfileKey struct {
+	id   string
+	auth *cliproxyauth.Auth
+}
+
+var (
+	codexClientProfilesMu sync.RWMutex
+	codexClientProfiles   = make(map[codexClientProfileKey]codexClientProfile)
+)
+
 func codexPinClientProfileFromFirstRequest(_ context.Context, auth *cliproxyauth.Auth, target http.Header, source http.Header, cfg *config.Config) {
-	if auth == nil || (target == nil && source == nil) || codexClientProfilePinned(auth) {
+	key, ok := codexClientProfileKeyForAuth(auth)
+	if !ok || (target == nil && source == nil) {
 		return
 	}
 
-	codexEnsureAuthMetadata(auth)
-	auth.Metadata[codexClientProfilePinnedMetadataKey] = true
+	codexClientProfilesMu.RLock()
+	_, pinned := codexClientProfiles[key]
+	codexClientProfilesMu.RUnlock()
+	if pinned {
+		return
+	}
 
+	codexClientProfilesMu.Lock()
+	defer codexClientProfilesMu.Unlock()
+	if _, pinned = codexClientProfiles[key]; pinned {
+		return
+	}
+
+	pinnedHeaders := make(http.Header)
 	for _, headerName := range codexPinnedClientProfileHeaders {
 		if codexAuthHeaderFixed(auth, headerName) {
 			continue
@@ -37,19 +63,27 @@ func codexPinClientProfileFromFirstRequest(_ context.Context, auth *cliproxyauth
 				value = cfgUserAgent
 			}
 		}
+		if strings.EqualFold(headerName, "Version") && (value == "" || !codexVersionAtLeast(value, codexDefaultVersion)) {
+			if value != "" || !codexAuthUsesAPIKey(auth) {
+				value = codexDefaultVersion
+			}
+		}
 		if value == "" {
 			continue
 		}
-		codexSetAuthMetadataHeader(auth, headerName, value)
-		codexSetAuthAttribute(auth, "header:"+headerName, value)
+		pinnedHeaders.Set(headerName, value)
 	}
+	codexClientProfiles[key] = codexClientProfile{headers: pinnedHeaders}
 }
 
 func codexClientProfilePinned(auth *cliproxyauth.Auth) bool {
-	if auth == nil || len(auth.Metadata) == 0 {
+	key, ok := codexClientProfileKeyForAuth(auth)
+	if !ok {
 		return false
 	}
-	pinned, _ := auth.Metadata[codexClientProfilePinnedMetadataKey].(bool)
+	codexClientProfilesMu.RLock()
+	_, pinned := codexClientProfiles[key]
+	codexClientProfilesMu.RUnlock()
 	return pinned
 }
 
@@ -61,35 +95,41 @@ func codexClientProfileSourceHeaders(auth *cliproxyauth.Auth, source http.Header
 }
 
 func codexPreparePinnedClientProfileHeaders(headers http.Header, auth *cliproxyauth.Auth) {
-	if headers == nil || !codexClientProfilePinned(auth) {
+	if headers == nil {
 		return
 	}
+	key, ok := codexClientProfileKeyForAuth(auth)
+	if !ok {
+		return
+	}
+
+	codexClientProfilesMu.RLock()
+	profile, pinned := codexClientProfiles[key]
+	codexClientProfilesMu.RUnlock()
+	if !pinned {
+		return
+	}
+
 	for _, headerName := range codexPinnedClientProfileHeaders {
-		if !codexAuthHeaderFixed(auth, headerName) {
-			headers.Del(headerName)
+		if codexAuthHeaderFixed(auth, headerName) {
+			continue
+		}
+		if value := profile.headers.Get(headerName); value != "" {
+			setHeaderCasePreserved(headers, headerName, value)
+		} else {
+			deleteHeaderCaseInsensitive(headers, headerName)
 		}
 	}
 }
 
-func codexEnsureAuthMetadata(auth *cliproxyauth.Auth) {
-	if auth != nil && auth.Metadata == nil {
-		auth.Metadata = make(map[string]any)
-	}
-}
-
-func codexSetAuthAttribute(auth *cliproxyauth.Auth, key string, value string) {
+func codexClientProfileKeyForAuth(auth *cliproxyauth.Auth) (codexClientProfileKey, bool) {
 	if auth == nil {
-		return
+		return codexClientProfileKey{}, false
 	}
-	key = strings.TrimSpace(key)
-	value = strings.TrimSpace(value)
-	if key == "" || value == "" {
-		return
+	if id := strings.TrimSpace(auth.ID); id != "" {
+		return codexClientProfileKey{id: id}, true
 	}
-	if auth.Attributes == nil {
-		auth.Attributes = make(map[string]string)
-	}
-	auth.Attributes[key] = value
+	return codexClientProfileKey{auth: auth}, true
 }
 
 func codexAuthHeaderFixed(auth *cliproxyauth.Auth, name string) bool {
@@ -107,9 +147,6 @@ func codexAuthHeaderFixed(auth *cliproxyauth.Auth, name string) bool {
 				return true
 			}
 		}
-	}
-	if len(auth.Metadata) == 0 {
-		return false
 	}
 	return codexMetadataHeaderValue(auth.Metadata, name) != ""
 }
@@ -142,41 +179,65 @@ func codexMetadataHeaderValue(metadata map[string]any, name string) string {
 	return ""
 }
 
-func codexSetAuthMetadataHeader(auth *cliproxyauth.Auth, name string, value string) {
-	if auth == nil {
-		return
-	}
-	name = strings.TrimSpace(name)
-	value = strings.TrimSpace(value)
-	if name == "" || value == "" {
-		return
-	}
-	if auth.Metadata == nil {
-		auth.Metadata = make(map[string]any)
-	}
-	headers, ok := auth.Metadata["headers"].(map[string]any)
-	if !ok || headers == nil {
-		headers = make(map[string]any)
-		if existing, okExisting := auth.Metadata["headers"].(map[string]string); okExisting {
-			for key, existingValue := range existing {
-				if strings.TrimSpace(key) != "" && strings.TrimSpace(existingValue) != "" {
-					headers[key] = strings.TrimSpace(existingValue)
-				}
-			}
-		}
-		auth.Metadata["headers"] = headers
-	}
-	for key := range headers {
-		if strings.EqualFold(strings.TrimSpace(key), name) {
-			delete(headers, key)
-		}
-	}
-	headers[name] = value
-}
-
 func firstNonEmptyHeaderValue(primary http.Header, secondary http.Header, key string) string {
 	if value := headerValueCaseInsensitive(primary, key); value != "" {
 		return value
 	}
 	return headerValueCaseInsensitive(secondary, key)
+}
+
+func codexEnsureVersionHeader(target http.Header, source http.Header, useDefault bool) {
+	if target == nil {
+		return
+	}
+	version := firstNonEmptyHeaderValue(target, source, "Version")
+	if version == "" && useDefault {
+		version = codexDefaultVersion
+	}
+	if version == "" {
+		return
+	}
+	if !codexVersionAtLeast(version, codexDefaultVersion) {
+		version = codexDefaultVersion
+	}
+	setHeaderCasePreserved(target, "Version", version)
+}
+
+func codexVersionAtLeast(version string, minimum string) bool {
+	currentParts, okCurrent := codexParseVersionParts(version)
+	minimumParts, okMinimum := codexParseVersionParts(minimum)
+	if !okCurrent || !okMinimum {
+		return true
+	}
+	for i := 0; i < len(currentParts); i++ {
+		if currentParts[i] > minimumParts[i] {
+			return true
+		}
+		if currentParts[i] < minimumParts[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func codexParseVersionParts(version string) ([3]int, bool) {
+	version = strings.TrimSpace(strings.TrimPrefix(version, "v"))
+	if version == "" {
+		return [3]int{}, false
+	}
+	fields := strings.FieldsFunc(version, func(r rune) bool {
+		return r == '.' || r == '-'
+	})
+	if len(fields) < 3 {
+		return [3]int{}, false
+	}
+	var parts [3]int
+	for i := 0; i < len(parts); i++ {
+		value, err := strconv.Atoi(fields[i])
+		if err != nil {
+			return [3]int{}, false
+		}
+		parts[i] = value
+	}
+	return parts, true
 }

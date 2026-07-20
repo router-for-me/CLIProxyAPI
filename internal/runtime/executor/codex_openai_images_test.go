@@ -70,7 +70,7 @@ func TestCodexExecutorDirectOpenAIImageGenerationUsesImagesEndpoint(t *testing.T
 
 	ctx := contextWithGinHeaders(map[string]string{
 		"User-Agent":            "downstream-client/9.9",
-		"Version":               "0.135.0",
+		"Version":               codexDefaultVersion,
 		"X-Codex-Turn-Metadata": `{"turn_id":"turn-1"}`,
 		"X-Client-Request-Id":   "client-request-1",
 		"Originator":            "Codex Desktop",
@@ -96,8 +96,8 @@ func TestCodexExecutorDirectOpenAIImageGenerationUsesImagesEndpoint(t *testing.T
 	if gotUA != codexUserAgent {
 		t.Fatalf("User-Agent = %q, want codex default %q", gotUA, codexUserAgent)
 	}
-	if gotVersion != "0.135.0" {
-		t.Fatalf("Version = %q, want %q", gotVersion, "0.135.0")
+	if gotVersion != codexDefaultVersion {
+		t.Fatalf("Version = %q, want %q", gotVersion, codexDefaultVersion)
 	}
 	if gotTurnMetadata != `{"turn_id":"turn-1"}` {
 		t.Fatalf("X-Codex-Turn-Metadata = %q, want %q", gotTurnMetadata, `{"turn_id":"turn-1"}`)
