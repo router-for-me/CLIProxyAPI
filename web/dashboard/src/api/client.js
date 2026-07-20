@@ -875,10 +875,22 @@ export async function fetchProviderModelsFromAuth(authName) {
 // the response body at 4 MiB, and uses an 8s timeout. The dashboard
 // receives the same shape as before so the inline component does not
 // need to change.
-export async function fetchOpenAICompatModels({ baseUrl, apiKey }) {
+export async function fetchOpenAICompatModels({ baseUrl, apiKey, name }) {
   const res = await cpaFetch('/remote-probe/models', {
     method: 'POST',
-    body: JSON.stringify({ base_url: baseUrl, api_key: apiKey || '' }),
+    // The dashboard ALSO sends `name` so the server can resolve the
+    // per-provider credential from cfg.OpenAICompatibility[*] when the
+    // dashboard's locally-known apiKey is empty, stale, or read from a
+    // JSON path that the dashboard could not normalize (kebab-case
+    // `api-key-entries[*].api-key` vs. the JS underscore convention).
+    // When `name` matches a configured entry the server overrides
+    // body.api_key with the entry's first configured key, so the
+    // upstream probe uses the correct per-provider credential.
+    body: JSON.stringify({
+      base_url: baseUrl,
+      api_key: apiKey || '',
+      ...(name ? { name } : {}),
+    }),
   });
   const list = Array.isArray(res?.models) ? res.models : [];
   return list.map((m) => ({

@@ -44,6 +44,11 @@ export default function FetchModelsModal({
   baseUrl = '',
   // 'openai' mode + 'entry-name' scope: the entry's `name` to apply to.
   entryName = '',
+  // 'openai' mode: the entry's first configured API key, forwarded by
+  // ProvidersTab from list[i].api_key_entries[0]['api-key']. Used to
+  // pre-fill the bearer token so the modal probes the upstream with the
+  // per-provider credential instead of the global proxy caller key.
+  entryApiKey = '',
   // 'entry-index' scope: row index to apply to.
   entryIndex = 0,
   // Optional list of existing names (for OpenAI-Compat).
@@ -60,10 +65,14 @@ export default function FetchModelsModal({
   const [filter, setFilter] = useState('');
 
   // OpenAI-Compat-only: a bearer token the operator can paste for the
-  // remote probe. We pre-fill with the stored caller key (used elsewhere
-  // for /v1/models sync) so the modal works out of the box for operators
-  // who already configured one.
-  const [callerKey, setCallerKey] = useState(() => getStoredCallerKey() || '');
+  // remote probe. We pre-fill in this priority:
+  //   1. The entry's own first configured API key (entryApiKey prop) —
+  //      this is the per-provider credential and is the source of truth.
+  //   2. The stored caller key from localStorage (used elsewhere for
+  //      /v1/models sync) so the modal still works for operators who
+  //      configured one but haven't yet wired up an OpenAI-Compat entry.
+  //   3. Empty — operators can type a custom token for one-off probing.
+  const [callerKey, setCallerKey] = useState(() => entryApiKey || getStoredCallerKey() || '');
   const [rememberKey, setRememberKey] = useState(false);
 
   useEffect(() => {
@@ -74,7 +83,15 @@ export default function FetchModelsModal({
     setSelected({});
 
     const runner = isOpenai
-      ? fetchOpenAICompatModels({ baseUrl, apiKey: callerKey }).catch((err) => {
+      ? fetchOpenAICompatModels({
+          baseUrl,
+          apiKey: callerKey,
+          // Always forward the entry's name so the server can resolve
+          // the per-provider credential server-side, regardless of
+          // whether the dashboard could read api_key_entries[*].api-key
+          // from the wire JSON (kebab vs. underscore ambiguity).
+          name: entryName || '',
+        }).catch((err) => {
           throw err;
         })
       : fetchProviderModelsFromAuth(authName);
@@ -91,9 +108,10 @@ export default function FetchModelsModal({
         setStage('error');
       });
     return () => { cancelled = true; };
-    // Re-run when the operator changes the caller key (debounced via button).
+    // Re-run when the operator changes the caller key (debounced via button),
+    // or when the parent switches to a different OpenAI-Compat entry.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, authName, baseUrl]);
+  }, [mode, authName, baseUrl, entryApiKey]);
 
   const filtered = useMemo(() => {
     if (!filter) return fetched;
@@ -153,7 +171,7 @@ export default function FetchModelsModal({
     setStage('fetching');
     setError('');
     if (isOpenai) {
-      fetchOpenAICompatModels({ baseUrl, apiKey: callerKey })
+      fetchOpenAICompatModels({ baseUrl, apiKey: callerKey, name: entryName || '' })
         .then((list) => {
           setFetched(Array.isArray(list) ? list : []);
           setStage('ready');
@@ -209,6 +227,9 @@ export default function FetchModelsModal({
           <div className="form-section__hint">
             Calls <code className="mono">{normalizeForHint(baseUrl)}/v1/models</code> with
             the bearer token below. Some providers reject the call without auth.
+            {entryApiKey
+              ? ' The field is pre-filled with this entry\'s configured API key — override only if the upstream expects a different token.'
+              : ''}
           </div>
           <div className="form-section__row">
             <div className="form__row">
