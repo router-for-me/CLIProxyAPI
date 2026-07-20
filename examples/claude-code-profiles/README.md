@@ -5,7 +5,7 @@ tier before starting `claude`:
 
 | Profile | Main | Opus tier | Sonnet tier | Fast/Haiku/Fable tier | Subagents |
 | --- | --- | --- | --- | --- | --- |
-| `openai` | `gpt-5.5` | `gpt-5.5` | `gpt-5.5` | `gpt-4o-mini` | `gpt-5.5` |
+| `openai` | `gpt-5.6-luna(high)` | `gpt-5.6-sol(medium)` | `gpt-5.6-luna(max)` | Haiku: `gpt-5.5`; Fable: `gpt-5.6-sol(high)` | `gpt-5.5(high)` |
 | `claude` | `claude-sonnet-5` | `claude-opus-4.6` | `claude-sonnet-5` | `claude-fable-5` | `claude-sonnet-5` |
 | `mixed` | `claude-sonnet-5` | `gpt-5.5` | `claude-sonnet-5` | `kimi-k2.7-code` | `gpt-5.5` |
 

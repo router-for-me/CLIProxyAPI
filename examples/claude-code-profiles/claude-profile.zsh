@@ -75,13 +75,13 @@ claude-profile() {
 
   case "$profile" in
     openai)
-      export ANTHROPIC_MODEL="gpt-5.5"
-      export ANTHROPIC_DEFAULT_OPUS_MODEL="gpt-5.5"
-      export ANTHROPIC_DEFAULT_SONNET_MODEL="gpt-5.5"
-      export ANTHROPIC_DEFAULT_HAIKU_MODEL="gpt-4o-mini"
-      export ANTHROPIC_DEFAULT_FABLE_MODEL="gpt-4o-mini"
-      export ANTHROPIC_SMALL_FAST_MODEL="gpt-4o-mini"
-      export CLAUDE_CODE_SUBAGENT_MODEL="gpt-5.5"
+      export ANTHROPIC_MODEL="gpt-5.6-luna(high)"
+      export ANTHROPIC_DEFAULT_OPUS_MODEL="gpt-5.6-sol(medium)"
+      export ANTHROPIC_DEFAULT_SONNET_MODEL="gpt-5.6-luna(max)"
+      export ANTHROPIC_DEFAULT_HAIKU_MODEL="gpt-5.5"
+      export ANTHROPIC_DEFAULT_FABLE_MODEL="gpt-5.6-sol(high)"
+      export ANTHROPIC_SMALL_FAST_MODEL="gpt-5.5"
+      export CLAUDE_CODE_SUBAGENT_MODEL="gpt-5.5(high)"
       ;;
     claude)
       export ANTHROPIC_MODEL="claude-sonnet-5"
