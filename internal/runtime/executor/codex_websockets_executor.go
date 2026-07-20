@@ -2374,8 +2374,8 @@ func CloseCodexWebsocketSessionsForAuthID(authID string, reason string) {
 }
 
 // CodexAutoExecutor routes Codex requests to the websocket transport when the
-// Claude Responses bridge is streaming or when the downstream transport is
-// websocket and the selected auth enables websockets.
+// selected auth enables websockets and either the Claude Responses bridge is
+// streaming or the downstream transport is websocket.
 //
 // Otherwise, it uses the legacy HTTP implementation.
 type CodexAutoExecutor struct {
@@ -2423,7 +2423,7 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if e == nil || e.httpExec == nil || e.wsExec == nil {
 		return nil, fmt.Errorf("codex auto executor: executor is nil")
 	}
-	if opts.Alt == constant.ClaudeResponsesBridgeAlt || (cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth)) {
+	if codexWebsocketsEnabled(auth) && (opts.Alt == constant.ClaudeResponsesBridgeAlt || cliproxyexecutor.DownstreamWebsocket(ctx)) {
 		return e.wsExec.ExecuteStream(ctx, auth, req, opts)
 	}
 	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
