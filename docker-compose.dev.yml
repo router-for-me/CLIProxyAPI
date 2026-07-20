@@ -1,11 +1,11 @@
 services:
-  cli-proxy-api:
+  cli-proxy-api-dev:
     image: golang:1.26-bookworm
-    container_name: cli-proxy-api
+    container_name: cli-proxy-api-dev
     working_dir: /CLIProxyAPI
     environment:
-      DEPLOY: ${DEPLOY:-}
       TZ: Asia/Shanghai
+      DEPLOY: ${DEPLOY:-}
     ports:
       - "8317:8317"
       - "8085:8085"

@@ -1,20 +1,17 @@
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
-    pull_policy: always
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        VERSION: ${VERSION:-dev}
-        COMMIT: ${COMMIT:-none}
-        BUILD_DATE: ${BUILD_DATE:-unknown}
+    image: golang:1.26-bookworm
     container_name: cli-proxy-api-cluster
+    working_dir: /CLIProxyAPI
     environment:
       HOME_JWT: ${HOME_JWT:-}
+      TZ: Asia/Shanghai
     ports:
       - "8317:8317"
     volumes:
+      - .:/CLIProxyAPI
+      - go-mod-cache:/go/pkg/mod
+      - go-build-cache:/root/.cache/go-build
       - ./home:/root/.cli-proxy-api
       - ./logs:/CLIProxyAPI/logs
     command: >
@@ -24,6 +21,10 @@ services:
           exit 1
         fi
 
-        exec ./CLIProxyAPI -home-jwt "$$HOME_JWT"
+        cd /CLIProxyAPI && exec go run -buildvcs=false ./cmd/server/ -home-jwt "$$HOME_JWT"
       '
     restart: unless-stopped
+
+volumes:
+  go-mod-cache:
+  go-build-cache:

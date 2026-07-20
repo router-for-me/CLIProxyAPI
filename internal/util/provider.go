@@ -5,6 +5,7 @@ package util
 
 import (
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -285,4 +286,114 @@ func shouldMaskQueryParam(key string) bool {
 		return true
 	}
 	return false
+}
+
+// suggestMaxDistance is the maximum normalized Levenshtein distance (0..1) for a
+// registered model ID to be offered as a "did you mean" suggestion. A wrong
+// suggestion is worse than none, so this is kept strict.
+const suggestMaxDistance = 0.34
+
+// SuggestClosestModels returns up to limit registered model IDs that are close
+// to modelName, to help users recover from an "unknown provider" error caused by
+// a typo, a wrong alias, or a stale thinking suffix.
+//
+// modelName should already be suffix-stripped by the caller (the base model
+// name). Registered IDs are matched after stripping any "provider/" prefix.
+// Only matches within a normalized Levenshtein distance are returned.
+//
+// This runs only on the error path and GetAvailableModels is cached, so there
+// is no hot-path impact.
+func SuggestClosestModels(modelName string, limit int) []string {
+	modelName = strings.ToLower(strings.TrimSpace(modelName))
+	if modelName == "" || limit <= 0 {
+		return nil
+	}
+
+	type candidate struct {
+		id   string
+		dist int
+	}
+	var cands []candidate
+	for _, m := range registry.GetGlobalRegistry().GetAvailableModels("") {
+		id, _ := m["id"].(string)
+		if id == "" {
+			continue
+		}
+		base := stripProviderPrefix(id)
+		d := levenshtein(modelName, strings.ToLower(base))
+		maxLen := len(modelName)
+		if len(base) > maxLen {
+			maxLen = len(base)
+		}
+		if maxLen == 0 {
+			continue
+		}
+		if float64(d)/float64(maxLen) <= suggestMaxDistance {
+			cands = append(cands, candidate{id: id, dist: d})
+		}
+	}
+
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].dist != cands[j].dist {
+			return cands[i].dist < cands[j].dist
+		}
+		return cands[i].id < cands[j].id
+	})
+
+	out := make([]string, 0, limit)
+	for i := 0; i < limit && i < len(cands); i++ {
+		out = append(out, cands[i].id)
+	}
+	return out
+}
+
+// stripProviderPrefix returns the trailing segment after the last "/",
+// mirroring handlers.routeModelBaseName without creating a cross-package
+// dependency (internal/util must not import sdk/api/handlers).
+func stripProviderPrefix(model string) string {
+	model = strings.TrimSpace(model)
+	if idx := strings.LastIndex(model, "/"); idx >= 0 && idx < len(model)-1 {
+		return strings.TrimSpace(model[idx+1:])
+	}
+	return model
+}
+
+// levenshtein computes the edit distance between two strings using a standard
+// two-row dynamic programming algorithm. Pure stdlib, no external dependency.
+func levenshtein(a, b string) int {
+	ra, rb := []rune(a), []rune(b)
+	la, lb := len(ra), len(rb)
+	if la == 0 {
+		return lb
+	}
+	if lb == 0 {
+		return la
+	}
+
+	prev := make([]int, lb+1)
+	curr := make([]int, lb+1)
+	for j := 0; j <= lb; j++ {
+		prev[j] = j
+	}
+	for i := 1; i <= la; i++ {
+		curr[0] = i
+		for j := 1; j <= lb; j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			ins := curr[j-1] + 1
+			del := prev[j] + 1
+			sub := prev[j-1] + cost
+			curr[j] = ins
+			if del < curr[j] {
+				curr[j] = del
+			}
+			if sub < curr[j] {
+				curr[j] = sub
+			}
+		}
+		prev, curr = curr, prev
+	}
+	return prev[lb]
 }
