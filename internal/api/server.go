@@ -936,6 +936,11 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.POST("/api-call", s.mgmt.APICall)
 
+		// Server-side remote probe used by the dashboard's "Discover
+		// models" section. Avoids CORS: the browser would otherwise
+		// block cross-origin GET <upstream>/v1/models from the page.
+		mgmt.POST("/remote-probe/models", s.mgmt.RemoteProbeModels)
+
 		mgmt.GET("/quota-exceeded/switch-project", s.mgmt.GetSwitchProject)
 		mgmt.PUT("/quota-exceeded/switch-project", s.mgmt.PutSwitchProject)
 		mgmt.PATCH("/quota-exceeded/switch-project", s.mgmt.PutSwitchProject)

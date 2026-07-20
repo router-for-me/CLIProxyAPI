@@ -1,0 +1,255 @@
+package management
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
+)
+
+// RemoteProbeModels handles POST /v0/management/remote-probe/models.
+//
+// Used by the "Manage CPA → AI Providers → Discover models" inline
+// section to fetch the model list of an OpenAI-Compat upstream from the
+// server side, so the browser is not blocked by CORS. The dashboard
+// sends the upstream's base_url + an optional bearer token; the server
+// performs GET <base_url>/v1/models with a short timeout, normalizes
+// the response, and returns a list of {id, display_name, type,
+// owned_by, context_length, max_completion_tokens} records.
+//
+// We deliberately do NOT persist anything here — this is a read-only
+// preview. The Apply step uses the existing per-provider PATCH/PUT
+// endpoints so the server's sanitize + persist + reload pipeline stays
+// the single source of truth.
+//
+// Body: { "base_url": "https://...", "api_key": "sk-..." (optional) }
+// Response: { "models": [ ... ] }
+func (h *Handler) RemoteProbeModels(c *gin.Context) {
+	var body struct {
+		BaseURL string `json:"base_url"`
+		APIKey  string `json:"api_key"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{
+				"type":    "invalid_request",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	baseURL := strings.TrimSpace(body.BaseURL)
+	baseURL = strings.TrimRight(baseURL, "/")
+	if baseURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{
+				"type":    "invalid_request",
+				"message": "base_url is required",
+			},
+		})
+		return
+	}
+	// Defensive: only allow http/https schemes to avoid the server being
+	// abused to probe arbitrary file:// or other handlers.
+	if !strings.HasPrefix(strings.ToLower(baseURL), "http://") &&
+		!strings.HasPrefix(strings.ToLower(baseURL), "https://") {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{
+				"type":    "invalid_request",
+				"message": "base_url must start with http:// or https://",
+			},
+		})
+		return
+	}
+
+	probeURL := baseURL + "/v1/models"
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, probeURL, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": gin.H{
+				"type":    "request_create_failed",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+	req.Header.Set("Accept", "application/json")
+	if k := strings.TrimSpace(body.APIKey); k != "" {
+		req.Header.Set("Authorization", "Bearer "+k)
+	}
+
+	// 8s timeout keeps the modal responsive even if the upstream is slow.
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error": gin.H{
+				"type":    "upstream_unreachable",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.WithError(errClose).Debug("failed to close remote-probe response body")
+		}
+	}()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20)) // 4 MiB cap
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error": gin.H{
+				"type":    "upstream_read_failed",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Try to extract a friendly error message from the upstream body
+		// so the dashboard can show the operator something more useful
+		// than "Upstream returned 401".
+		message := fmt.Sprintf("Upstream returned %d", resp.StatusCode)
+		var parsed map[string]any
+		if err := json.Unmarshal(respBody, &parsed); err == nil {
+			if errObj, ok := parsed["error"]; ok {
+				switch e := errObj.(type) {
+				case map[string]any:
+					if m, ok := e["message"].(string); ok && m != "" {
+						message = m
+					}
+				case string:
+					if e != "" {
+						message = e
+					}
+				}
+			}
+		}
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error": gin.H{
+				"type":    "upstream_error",
+				"message": message,
+				"status":  resp.StatusCode,
+			},
+		})
+		return
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error": gin.H{
+				"type":    "upstream_decode_failed",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	models := pickRemoteModelsList(parsed)
+	c.JSON(http.StatusOK, gin.H{"models": models})
+}
+
+// pickRemoteModelsList accepts the three array shapes we have seen
+// across OpenAI-Compat providers (data[], models[], result[]) and falls
+// back to an empty list when the upstream returns something else.
+func pickRemoteModelsList(body map[string]any) []remoteModel {
+	raw := any(nil)
+	if v, ok := body["data"]; ok {
+		raw = v
+	} else if v, ok := body["models"]; ok {
+		raw = v
+	} else if v, ok := body["result"]; ok {
+		raw = v
+	} else {
+		return []remoteModel{}
+	}
+	arr, ok := raw.([]any)
+	if !ok {
+		return []remoteModel{}
+	}
+	out := make([]remoteModel, 0, len(arr))
+	for _, item := range arr {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		id := stringFromMap(obj, "id", "name", "model")
+		if id == "" {
+			continue
+		}
+		out = append(out, remoteModel{
+			ID:                  id,
+			DisplayName:         stringFromMap(obj, "display_name", "displayName", "name"),
+			Type:                stringFromMap(obj, "type", "object"),
+			OwnedBy:             stringFromMap(obj, "owned_by", "ownedBy"),
+			ContextLength:       intFromMap(obj, "context_length", "contextLength"),
+			MaxCompletionTokens: intFromMap(obj, "max_completion_tokens", "maxCompletionTokens"),
+		})
+	}
+	return out
+}
+
+// stringFromMap reads the first non-empty string from a map[string]any
+// under any of the given keys. Returns "" when none of the keys are
+// present or every value is empty after trimming.
+func stringFromMap(obj map[string]any, keys ...string) string {
+	for _, k := range keys {
+		v, ok := obj[k]
+		if !ok {
+			continue
+		}
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		if trimmed := strings.TrimSpace(s); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// intFromMap reads the first positive integer from a map[string]any
+// under any of the given keys. JSON numbers decode as float64.
+func intFromMap(obj map[string]any, keys ...string) int {
+	for _, k := range keys {
+		v, ok := obj[k]
+		if !ok {
+			continue
+		}
+		switch n := v.(type) {
+		case float64:
+			if n > 0 {
+				return int(n)
+			}
+		case int:
+			if n > 0 {
+				return n
+			}
+		case int64:
+			if n > 0 {
+				return int(n)
+			}
+		}
+	}
+	return 0
+}
+
+// remoteModel is the normalized shape returned to the dashboard.
+type remoteModel struct {
+	ID                  string `json:"id"`
+	DisplayName         string `json:"display_name,omitempty"`
+	Type                string `json:"type,omitempty"`
+	OwnedBy             string `json:"owned_by,omitempty"`
+	ContextLength       int    `json:"context_length,omitempty"`
+	MaxCompletionTokens int    `json:"max_completion_tokens,omitempty"`
+}
