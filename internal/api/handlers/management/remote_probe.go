@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -27,12 +28,30 @@ import (
 // endpoints so the server's sanitize + persist + reload pipeline stays
 // the single source of truth.
 //
-// Body: { "base_url": "https://...", "api_key": "sk-..." (optional) }
+// Body:
+//
+//	{
+//	  "base_url": "https://...",    // required when name is not set
+//	  "api_key":  "sk-...",         // optional; ignored when name resolves
+//	  "name":     "Mimo CN"         // optional OpenAI-Compat entry name
+//	}
+//
+// When `name` matches a configured, non-disabled entry under
+// cfg.OpenAICompatibility, the server resolves the per-provider
+// credential from that entry's first api-key-entries[*].api-key and
+// overrides body.api_key — preventing the dashboard from accidentally
+// probing the upstream with the global proxy caller key (or any stale
+// value). The supplied base_url also falls back to the entry's
+// configured base URL when omitted. When `name` is empty or does not
+// resolve, the server behaves exactly as before (body.api_key and
+// body.base_url are used verbatim).
+//
 // Response: { "models": [ ... ] }
 func (h *Handler) RemoteProbeModels(c *gin.Context) {
 	var body struct {
-		BaseURL string `json:"base_url"`
-		APIKey  string `json:"api_key"`
+		BaseURL string  `json:"base_url"`
+		APIKey  string  `json:"api_key"`
+		Name    *string `json:"name"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -42,6 +61,57 @@ func (h *Handler) RemoteProbeModels(c *gin.Context) {
 			},
 		})
 		return
+	}
+
+	// Optional resolve-by-name: when the dashboard identified a specific
+	// OpenAI-Compat entry, pull the per-provider credential from
+	// cfg.OpenAICompatibility instead of trusting the body's api_key.
+	// The body's api_key may be empty, stale, or belong to a different
+	// entry; the configured entry is the source of truth.
+	if body.Name != nil {
+		match := strings.TrimSpace(*body.Name)
+		if match != "" {
+			h.mu.Lock()
+			var resolved *config.OpenAICompatibility
+			for i := range h.cfg.OpenAICompatibility {
+				entry := &h.cfg.OpenAICompatibility[i]
+				if entry.Disabled {
+					continue
+				}
+				if strings.EqualFold(strings.TrimSpace(entry.Name), match) {
+					resolved = entry
+					break
+				}
+			}
+			var resolvedKey string
+			var resolvedBase string
+			if resolved != nil {
+				if len(resolved.APIKeyEntries) > 0 {
+					resolvedKey = strings.TrimSpace(resolved.APIKeyEntries[0].APIKey)
+				}
+				resolvedBase = strings.TrimSpace(resolved.BaseURL)
+			}
+			h.mu.Unlock()
+
+			if resolved == nil {
+				c.JSON(http.StatusNotFound, gin.H{
+					"error": gin.H{
+						"type":    "entry_not_found",
+						"message": fmt.Sprintf("OpenAI-Compat entry %q not found in config", match),
+					},
+				})
+				return
+			}
+			log.WithFields(log.Fields{
+				"name":     strings.TrimSpace(resolved.Name),
+				"base_url": resolvedBase,
+				"has_key":  resolvedKey != "",
+			}).Debug("remote-probe resolved entry from config")
+			body.APIKey = resolvedKey
+			if strings.TrimSpace(body.BaseURL) == "" && resolvedBase != "" {
+				body.BaseURL = resolvedBase
+			}
+		}
 	}
 
 	baseURL := strings.TrimSpace(body.BaseURL)
