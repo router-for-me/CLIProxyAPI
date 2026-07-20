@@ -1057,17 +1057,21 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	}
 
 	isAPIKey := codexAuthUsesAPIKey(auth)
+	codexPinClientProfileFromFirstRequest(ctx, auth, headers, ginHeaders, cfg)
+	codexPreparePinnedClientProfileHeaders(headers, auth)
+	profileHeaders := codexClientProfileSourceHeaders(auth, ginHeaders)
+
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
+	ensureHeaderWithPriority(headers, profileHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-metadata", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-client-request-id", "")
-	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
-	misc.EnsureHeader(headers, ginHeaders, "Version", "")
+	misc.EnsureHeader(headers, profileHeaders, "x-responsesapi-include-timing-metrics", "")
+	misc.EnsureHeader(headers, profileHeaders, "Version", "")
 	if isAPIKey {
-		ensureHeaderWithPriority(headers, ginHeaders, "User-Agent", "", "")
+		ensureHeaderWithPriority(headers, profileHeaders, "User-Agent", "", "")
 	} else {
-		ensureHeaderWithConfigPrecedence(headers, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+		ensureHeaderWithConfigPrecedence(headers, profileHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 	}
 
 	betaHeader := strings.TrimSpace(headers.Get("OpenAI-Beta"))
@@ -1083,7 +1087,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		sessionFallback = uuid.NewString()
 	}
 	ensureCodexWebsocketSessionHeader(headers, ginHeaders, sessionFallback)
-	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
+	if originator := strings.TrimSpace(profileHeaders.Get("Originator")); originator != "" {
 		headers.Set("Originator", originator)
 	} else if !isAPIKey {
 		headers.Set("Originator", codexOriginator)

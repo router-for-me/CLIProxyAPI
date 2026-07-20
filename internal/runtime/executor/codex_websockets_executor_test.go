@@ -692,6 +692,48 @@ func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing
 	}
 }
 
+func TestApplyCodexWebsocketHeadersPinsClientProfilePerAuth(t *testing.T) {
+	auth := &cliproxyauth.Auth{Provider: "codex", Metadata: map[string]any{"email": "user@example.com"}}
+
+	firstCtx := contextWithGinHeaders(map[string]string{
+		"Originator":                            "Codex Desktop",
+		"User-Agent":                            "codex_cli_rs/0.1.0",
+		"Version":                               "0.115.0-alpha.27",
+		"X-Codex-Beta-Features":                 "first-beta",
+		"x-responsesapi-include-timing-metrics": "true",
+		"X-Codex-Turn-Metadata":                 `{"turn_id":"turn-1"}`,
+	})
+	first := applyCodexWebsocketHeaders(firstCtx, http.Header{}, auth, "", nil)
+	if got := first.Get("User-Agent"); got != "codex_cli_rs/0.1.0" {
+		t.Fatalf("first User-Agent = %q, want %q", got, "codex_cli_rs/0.1.0")
+	}
+
+	secondCtx := contextWithGinHeaders(map[string]string{
+		"Originator":            "Other Client",
+		"User-Agent":            "other-client/9.9",
+		"Version":               "9.9.9",
+		"X-Codex-Beta-Features": "second-beta",
+		"X-Codex-Turn-Metadata": `{"turn_id":"turn-2"}`,
+	})
+	second := applyCodexWebsocketHeaders(secondCtx, http.Header{}, auth, "", nil)
+
+	if got := second.Get("User-Agent"); got != "codex_cli_rs/0.1.0" {
+		t.Fatalf("second User-Agent = %q, want pinned first value", got)
+	}
+	if got := second.Get("Originator"); got != "Codex Desktop" {
+		t.Fatalf("second Originator = %q, want pinned first value", got)
+	}
+	if got := second.Get("Version"); got != "0.115.0-alpha.27" {
+		t.Fatalf("second Version = %q, want pinned first value", got)
+	}
+	if got := second.Get("X-Codex-Beta-Features"); got != "first-beta" {
+		t.Fatalf("second X-Codex-Beta-Features = %q, want pinned first value", got)
+	}
+	if got := second.Get("X-Codex-Turn-Metadata"); got != `{"turn_id":"turn-2"}` {
+		t.Fatalf("second X-Codex-Turn-Metadata = %q, want per-request value", got)
+	}
+}
+
 func TestApplyCodexWebsocketHeadersCanonicalizesLegacyUnderscoreSessionHeader(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		Provider: "codex",
@@ -1234,6 +1276,52 @@ func TestApplyCodexHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
 	}
 	if got := req.Header.Get("X-Client-Request-Id"); got != "019d2233-e240-7162-992d-38df0a2a0e0d" {
 		t.Fatalf("X-Client-Request-Id = %s, want %s", got, "019d2233-e240-7162-992d-38df0a2a0e0d")
+	}
+}
+
+func TestApplyCodexHeadersPinsClientProfilePerAuth(t *testing.T) {
+	auth := &cliproxyauth.Auth{Provider: "codex", Metadata: map[string]any{"email": "user@example.com"}}
+
+	firstReq, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	firstReq = firstReq.WithContext(contextWithGinHeaders(map[string]string{
+		"Originator":            "Codex Desktop",
+		"User-Agent":            "codex_cli_rs/0.1.0",
+		"Version":               "0.115.0-alpha.27",
+		"X-Codex-Beta-Features": "first-beta",
+		"X-Codex-Turn-Metadata": `{"turn_id":"turn-1"}`,
+	}))
+	applyCodexHeaders(firstReq, auth, "oauth-token", true, nil)
+
+	secondReq, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	secondReq = secondReq.WithContext(contextWithGinHeaders(map[string]string{
+		"Originator":            "Other Client",
+		"User-Agent":            "other-client/9.9",
+		"Version":               "9.9.9",
+		"X-Codex-Beta-Features": "second-beta",
+		"X-Codex-Turn-Metadata": `{"turn_id":"turn-2"}`,
+	}))
+	applyCodexHeaders(secondReq, auth, "oauth-token", true, nil)
+
+	if got := secondReq.Header.Get("User-Agent"); got != "codex_cli_rs/0.1.0" {
+		t.Fatalf("second User-Agent = %q, want pinned first value", got)
+	}
+	if got := secondReq.Header.Get("Originator"); got != "Codex Desktop" {
+		t.Fatalf("second Originator = %q, want pinned first value", got)
+	}
+	if got := secondReq.Header.Get("Version"); got != "0.115.0-alpha.27" {
+		t.Fatalf("second Version = %q, want pinned first value", got)
+	}
+	if got := secondReq.Header.Get("X-Codex-Beta-Features"); got != "first-beta" {
+		t.Fatalf("second X-Codex-Beta-Features = %q, want pinned first value", got)
+	}
+	if got := secondReq.Header.Get("X-Codex-Turn-Metadata"); got != `{"turn_id":"turn-2"}` {
+		t.Fatalf("second X-Codex-Turn-Metadata = %q, want per-request value", got)
 	}
 }
 
