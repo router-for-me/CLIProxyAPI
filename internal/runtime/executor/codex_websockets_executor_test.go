@@ -498,6 +498,173 @@ func TestCodexWebsocketsExecuteStreamPropagatesUpstreamErrorForDownstreamWebsock
 	}
 }
 
+func TestSendTerminalWebsocketReadInvalidatesBeforeWaitingForCapacity(t *testing.T) {
+	terminalErr := &websocket.CloseError{Code: websocket.CloseMessageTooBig}
+
+	t.Run("available channel keeps fast path ordering", func(t *testing.T) {
+		ch := make(chan codexWebsocketRead, 1)
+		done := make(chan struct{})
+		invalidateCalls := 0
+		invalidated := sendTerminalWebsocketRead(ch, done, codexWebsocketRead{err: terminalErr}, func() {
+			invalidateCalls++
+		})
+		if invalidated {
+			t.Fatal("available channel should not invalidate before delivery")
+		}
+		if invalidateCalls != 0 {
+			t.Fatalf("invalidate calls = %d, want 0", invalidateCalls)
+		}
+		event := <-ch
+		if !errors.Is(event.err, terminalErr) {
+			t.Fatalf("terminal error = %v, want %v", event.err, terminalErr)
+		}
+	})
+
+	t.Run("full channel invalidates before waiting", func(t *testing.T) {
+		ch := make(chan codexWebsocketRead, 1)
+		ch <- codexWebsocketRead{payload: []byte("queued")}
+		done := make(chan struct{})
+		invalidateCalled := make(chan struct{})
+		result := make(chan bool, 1)
+
+		go func() {
+			result <- sendTerminalWebsocketRead(ch, done, codexWebsocketRead{err: terminalErr}, func() {
+				close(invalidateCalled)
+			})
+		}()
+
+		select {
+		case <-invalidateCalled:
+		case <-time.After(time.Second):
+			t.Fatal("invalidation did not happen before waiting for channel capacity")
+		}
+		select {
+		case <-result:
+			t.Fatal("terminal sender returned before capacity was released")
+		default:
+		}
+
+		<-ch
+		select {
+		case event := <-ch:
+			if !errors.Is(event.err, terminalErr) {
+				t.Fatalf("terminal error = %v, want %v", event.err, terminalErr)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for terminal read")
+		}
+		select {
+		case invalidated := <-result:
+			if !invalidated {
+				t.Fatal("full channel should report early invalidation")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("terminal sender did not finish")
+		}
+	})
+
+	t.Run("full channel stops when invalidation cancels active read", func(t *testing.T) {
+		ch := make(chan codexWebsocketRead, 1)
+		ch <- codexWebsocketRead{payload: []byte("queued")}
+		done := make(chan struct{})
+		invalidated := sendTerminalWebsocketRead(ch, done, codexWebsocketRead{err: terminalErr}, func() {
+			close(done)
+		})
+		if !invalidated {
+			t.Fatal("full channel should report early invalidation")
+		}
+		if len(ch) != 1 {
+			t.Fatalf("channel length = %d, want queued payload only", len(ch))
+		}
+	})
+}
+
+func TestMapCodexWebsocketWriteErrorStopsRetryForMessageTooBig(t *testing.T) {
+	networkWriteErr := errors.New("write: broken pipe")
+	tests := []struct {
+		name       string
+		closeCode  int
+		writeErr   error
+		wantStatus int
+		wantRetry  bool
+	}{
+		{
+			name:       "close sent after message too big is request scoped",
+			closeCode:  websocket.CloseMessageTooBig,
+			writeErr:   websocket.ErrCloseSent,
+			wantStatus: http.StatusRequestEntityTooLarge,
+			wantRetry:  false,
+		},
+		{
+			name:       "network write error after message too big is request scoped",
+			closeCode:  websocket.CloseMessageTooBig,
+			writeErr:   networkWriteErr,
+			wantStatus: http.StatusRequestEntityTooLarge,
+			wantRetry:  false,
+		},
+		{
+			name:      "other close keeps stale connection retry",
+			closeCode: websocket.CloseNormalClosure,
+			writeErr:  websocket.ErrCloseSent,
+			wantRetry: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sess := &codexWebsocketSession{}
+			conn := &websocket.Conn{}
+			sess.resetUpstreamDisconnectError(conn)
+			sess.setUpstreamDisconnectError(conn, &websocket.CloseError{Code: tt.closeCode})
+
+			mappedErr := mapCodexWebsocketWriteError(sess, conn, tt.writeErr)
+			if got := shouldRetryCodexWebsocketSend(mappedErr); got != tt.wantRetry {
+				t.Fatalf("shouldRetryCodexWebsocketSend() = %v, want %v; err=%v", got, tt.wantRetry, mappedErr)
+			}
+			if tt.wantStatus == 0 {
+				if !errors.Is(mappedErr, tt.writeErr) {
+					t.Fatalf("mapped error = %v, want %v", mappedErr, tt.writeErr)
+				}
+				return
+			}
+			statusErr, ok := mappedErr.(interface{ StatusCode() int })
+			if !ok || statusErr.StatusCode() != tt.wantStatus {
+				t.Fatalf("mapped status = %v, want %d; err=%v", statusErr, tt.wantStatus, mappedErr)
+			}
+			requestErr, ok := mappedErr.(interface{ IsRequestScoped() bool })
+			if !ok || !requestErr.IsRequestScoped() {
+				t.Fatalf("mapped error should be request scoped, got %T", mappedErr)
+			}
+		})
+	}
+}
+
+func TestMapCodexWebsocketWriteErrorDoesNotReusePriorConnectionClose(t *testing.T) {
+	sess := &codexWebsocketSession{}
+	priorConn := &websocket.Conn{}
+	replacementConn := &websocket.Conn{}
+
+	sess.resetUpstreamDisconnectError(priorConn)
+	sess.setUpstreamDisconnectError(priorConn, &websocket.CloseError{Code: websocket.CloseMessageTooBig})
+	priorErr := mapCodexWebsocketWriteError(sess, priorConn, websocket.ErrCloseSent)
+	if shouldRetryCodexWebsocketSend(priorErr) {
+		t.Fatalf("prior connection 1009 should not retry, got %v", priorErr)
+	}
+
+	sess.resetUpstreamDisconnectError(replacementConn)
+	// A late close callback from the prior connection must not overwrite the
+	// replacement connection's close state.
+	sess.setUpstreamDisconnectError(priorConn, &websocket.CloseError{Code: websocket.CloseMessageTooBig})
+	sess.setUpstreamDisconnectError(replacementConn, &websocket.CloseError{Code: websocket.CloseNormalClosure})
+	replacementErr := mapCodexWebsocketWriteError(sess, replacementConn, websocket.ErrCloseSent)
+	if !errors.Is(replacementErr, websocket.ErrCloseSent) {
+		t.Fatalf("replacement connection error = %v, want %v", replacementErr, websocket.ErrCloseSent)
+	}
+	if !shouldRetryCodexWebsocketSend(replacementErr) {
+		t.Fatalf("replacement connection should keep stale-connection retry, got %v", replacementErr)
+	}
+}
+
 func TestCodexWebsocketsExecuteStreamMapsMessageTooBigClose(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -555,6 +722,10 @@ func TestCodexWebsocketsExecuteStreamMapsMessageTooBigClose(t *testing.T) {
 		if got := gjson.Get(chunk.Err.Error(), "error.code").String(); got != "message_too_big" {
 			t.Fatalf("error code = %q, want message_too_big; err=%v", got, chunk.Err)
 		}
+		requestErr, ok := chunk.Err.(interface{ IsRequestScoped() bool })
+		if !ok || !requestErr.IsRequestScoped() {
+			t.Fatalf("message-too-big error should be request scoped, got %T", chunk.Err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for error stream chunk")
 	}
@@ -585,6 +756,7 @@ func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) 
 	defer func() { _ = conn.Close() }()
 
 	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
 	sessionID := "sess-1"
 	disconnectCh := exec.UpstreamDisconnectChan(sessionID)
 	if disconnectCh == nil {

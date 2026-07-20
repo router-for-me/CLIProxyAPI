@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -23,6 +24,275 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
 )
+
+func TestWriteWebsocketCloseForUpstreamErrorMirrorsMessageTooBig(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		reason string
+	}{
+		{
+			name: "raw close error",
+			err: &websocket.CloseError{
+				Code: websocket.CloseMessageTooBig,
+				Text: "message too big",
+			},
+			reason: "message too big",
+		},
+		{
+			name: "mapped stream error",
+			err: websocketPinnedFailoverStatusError{
+				status: http.StatusRequestEntityTooLarge,
+				msg:    `{"error":{"message":"upstream websocket message too big","code":"message_too_big"}}`,
+			},
+			reason: "upstream websocket message too big",
+		},
+		{
+			name: "multibyte reason stays valid",
+			err: &websocket.CloseError{
+				Code: websocket.CloseMessageTooBig,
+				Text: strings.Repeat("🙂", 31),
+			},
+			reason: strings.Repeat("🙂", 30),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			serverErr := make(chan error, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+				if err != nil {
+					serverErr <- err
+					return
+				}
+				matched, errWrite := writeWebsocketCloseForUpstreamError(conn, tt.err)
+				if !matched && errWrite == nil {
+					errWrite = errors.New("message-too-big error did not match")
+				}
+				if errClose := conn.Close(); errWrite == nil {
+					errWrite = errClose
+				}
+				serverErr <- errWrite
+			}))
+			defer server.Close()
+
+			wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+			conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+			if err != nil {
+				t.Fatalf("dial websocket: %v", err)
+			}
+			defer func() { _ = conn.Close() }()
+
+			if err = conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+				t.Fatalf("set read deadline: %v", err)
+			}
+			_, _, err = conn.ReadMessage()
+			var closeErr *websocket.CloseError
+			if !errors.As(err, &closeErr) {
+				t.Fatalf("expected websocket close error, got %v", err)
+			}
+			if closeErr.Code != websocket.CloseMessageTooBig {
+				t.Fatalf("expected close code 1009, got %d", closeErr.Code)
+			}
+			if closeErr.Text != tt.reason {
+				t.Fatalf("expected close reason %q, got %q", tt.reason, closeErr.Text)
+			}
+			if err = <-serverErr; err != nil {
+				t.Fatalf("close server websocket: %v", err)
+			}
+		})
+	}
+}
+
+func TestResponsesWebsocketWriterCloseDoesNotWaitForActiveDataWriter(t *testing.T) {
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		writer := newResponsesWebsocketWriter(conn)
+
+		// Holding writeMu models a data writer blocked inside WriteMessage. The
+		// upstream-close path must hard-close the socket instead of waiting for it.
+		writer.writeMu.Lock()
+		closeDone := make(chan error, 1)
+		go func() {
+			matched, errClose := writer.closeForUpstreamError(&websocket.CloseError{
+				Code: websocket.CloseMessageTooBig,
+				Text: "message too big",
+			})
+			if !matched && errClose == nil {
+				errClose = errors.New("message-too-big error did not match")
+			}
+			closeDone <- errClose
+		}()
+
+		select {
+		case errClose := <-closeDone:
+			writer.writeMu.Unlock()
+			serverErrCh <- errClose
+		case <-time.After(time.Second):
+			writer.writeMu.Unlock()
+			serverErrCh <- errors.New("close waited behind active data writer")
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if err = conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if _, _, err = conn.ReadMessage(); err == nil {
+		t.Fatal("client read succeeded, want connection closure")
+	}
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatalf("server error: %v", errServer)
+	}
+}
+
+func TestTruncateWebsocketCloseReason(t *testing.T) {
+	tests := []struct {
+		name     string
+		reason   string
+		maxBytes int
+		want     string
+	}{
+		{
+			name:     "non-positive limit",
+			reason:   "message too big",
+			maxBytes: 0,
+			want:     "",
+		},
+		{
+			name:     "short valid reason unchanged",
+			reason:   "message too big",
+			maxBytes: wsCloseReasonMaxBytes,
+			want:     "message too big",
+		},
+		{
+			name:     "long ascii reason",
+			reason:   strings.Repeat("x", 1<<20),
+			maxBytes: wsCloseReasonMaxBytes,
+			want:     strings.Repeat("x", wsCloseReasonMaxBytes),
+		},
+		{
+			name:     "long invalid reason",
+			reason:   strings.Repeat("\xff", 1<<20),
+			maxBytes: wsCloseReasonMaxBytes,
+			want:     strings.Repeat("�", wsCloseReasonMaxBytes/utf8.RuneLen(utf8.RuneError)),
+		},
+		{
+			name:     "multibyte rune does not fit",
+			reason:   "ab🙂cd",
+			maxBytes: 5,
+			want:     "ab",
+		},
+		{
+			name:     "invalid bytes become replacement runes",
+			reason:   string([]byte{'a', 0xff, 0xfe, 'b'}),
+			maxBytes: 8,
+			want:     "a��b",
+		},
+		{
+			name:     "invalid replacement does not cross limit",
+			reason:   string([]byte{'a', 'b', 0xff, 'c'}),
+			maxBytes: 4,
+			want:     "ab",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateWebsocketCloseReason(tt.reason, tt.maxBytes)
+			if got != tt.want {
+				t.Fatalf("truncateWebsocketCloseReason() = %q, want %q", got, tt.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("truncateWebsocketCloseReason() returned invalid UTF-8: %q", got)
+			}
+			if tt.maxBytes > 0 && len(got) > tt.maxBytes {
+				t.Fatalf("truncateWebsocketCloseReason() returned %d bytes, limit %d", len(got), tt.maxBytes)
+			}
+		})
+	}
+}
+
+func TestForwardResponsesWebsocketMirrorsMappedMessageTooBig(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+		data := make(chan []byte)
+		errCh := make(chan *interfaces.ErrorMessage, 1)
+		errCh <- &interfaces.ErrorMessage{
+			StatusCode: http.StatusRequestEntityTooLarge,
+			Error: websocketPinnedFailoverStatusError{
+				status: http.StatusRequestEntityTooLarge,
+				msg:    `{"error":{"message":"upstream websocket message too big","code":"message_too_big"}}`,
+			},
+		}
+
+		h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+		_, _, _, errMsg, errForward := h.forwardResponsesWebsocket(
+			ctx,
+			newResponsesWebsocketWriter(conn),
+			func(...interface{}) {},
+			data,
+			errCh,
+			newInMemoryWebsocketTimelineLog(),
+			"session-1",
+		)
+		if errMsg == nil || errMsg.StatusCode != http.StatusRequestEntityTooLarge {
+			serverErrCh <- fmt.Errorf("forward error message = %#v, want status %d", errMsg, http.StatusRequestEntityTooLarge)
+			return
+		}
+		if !errors.Is(errForward, websocket.ErrCloseSent) {
+			serverErrCh <- fmt.Errorf("forward error = %v, want %v", errForward, websocket.ErrCloseSent)
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if err = conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	_, _, err = conn.ReadMessage()
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) {
+		t.Fatalf("expected websocket close error, got %v", err)
+	}
+	if closeErr.Code != websocket.CloseMessageTooBig {
+		t.Fatalf("close code = %d, want %d", closeErr.Code, websocket.CloseMessageTooBig)
+	}
+	if err = <-serverErrCh; err != nil {
+		t.Fatalf("server error: %v", err)
+	}
+}
 
 type websocketCaptureExecutor struct {
 	streamCalls int
@@ -234,11 +504,17 @@ func (e *websocketDirectCaptureExecutor) AuthIDs() []string {
 
 type websocketUpstreamDisconnectExecutor struct {
 	mu         sync.Mutex
+	provider   string
 	subscribed chan string
 	sessions   map[string]chan error
 }
 
-func (e *websocketUpstreamDisconnectExecutor) Identifier() string { return "codex" }
+func (e *websocketUpstreamDisconnectExecutor) Identifier() string {
+	if provider := strings.TrimSpace(e.provider); provider != "" {
+		return provider
+	}
+	return "codex"
+}
 
 func (e *websocketUpstreamDisconnectExecutor) UpstreamDisconnectChan(sessionID string) <-chan error {
 	sessionID = strings.TrimSpace(sessionID)
@@ -1369,7 +1645,7 @@ func TestForwardResponsesWebsocketRestoresAndForwardsCompletedOutput(t *testing.
 		timelineLog := newInMemoryWebsocketTimelineLog()
 		completedOutput, completedResponseID, pendingToolCallIDs, errMsg, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
-			conn,
+			newResponsesWebsocketWriter(conn),
 			func(...interface{}) {},
 			data,
 			errCh,
@@ -1472,7 +1748,7 @@ func TestForwardResponsesWebsocketTreatsResponseDoneAsTerminalWithoutRewriting(t
 		timelineLog := newInMemoryWebsocketTimelineLog()
 		completedOutput, completedResponseID, pendingToolCallIDs, errMsg, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
-			conn,
+			newResponsesWebsocketWriter(conn),
 			func(...interface{}) {},
 			data,
 			errCh,
@@ -1556,7 +1832,7 @@ func TestForwardResponsesWebsocketTreatsErrorPayloadAsTerminal(t *testing.T) {
 
 		_, _, _, errMsg, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
-			conn,
+			newResponsesWebsocketWriter(conn),
 			func(...interface{}) {},
 			data,
 			errCh,
@@ -1647,7 +1923,7 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 
 		_, _, _, _, err = (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
-			conn,
+			newResponsesWebsocketWriter(conn),
 			func(...interface{}) {},
 			data,
 			errCh,
@@ -1747,40 +2023,54 @@ func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
 	}
 }
 
-func TestResponsesWebsocketClosesOnCodexUpstreamDisconnect(t *testing.T) {
+func TestResponsesWebsocketMirrorsUpstreamMessageTooBigDisconnect(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	executor := &websocketUpstreamDisconnectExecutor{subscribed: make(chan string, 1)}
-	manager := coreauth.NewManager(nil, nil, nil)
-	manager.RegisterExecutor(executor)
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
-	h := NewOpenAIResponsesAPIHandler(base)
+	for _, provider := range []string{"codex", "xai"} {
+		t.Run(provider, func(t *testing.T) {
+			executor := &websocketUpstreamDisconnectExecutor{provider: provider, subscribed: make(chan string, 1)}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.RegisterExecutor(executor)
+			base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+			h := NewOpenAIResponsesAPIHandler(base)
 
-	router := gin.New()
-	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
-	server := httptest.NewServer(router)
-	defer server.Close()
+			router := gin.New()
+			router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+			server := httptest.NewServer(router)
+			defer server.Close()
 
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial websocket: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
+			wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+			conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+			if err != nil {
+				t.Fatalf("dial websocket: %v", err)
+			}
+			defer func() { _ = conn.Close() }()
 
-	var sessionID string
-	select {
-	case sessionID = <-executor.subscribed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for upstream disconnect subscription")
-	}
+			var sessionID string
+			select {
+			case sessionID = <-executor.subscribed:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for upstream disconnect subscription")
+			}
 
-	executor.TriggerDisconnect(sessionID, errors.New("upstream disconnected"))
+			executor.TriggerDisconnect(sessionID, &websocket.CloseError{
+				Code: websocket.CloseMessageTooBig,
+				Text: "message too big",
+			})
 
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, _, err = conn.ReadMessage()
-	if err == nil {
-		t.Fatalf("expected downstream websocket to close after upstream disconnect")
+			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			_, _, err = conn.ReadMessage()
+			var closeErr *websocket.CloseError
+			if !errors.As(err, &closeErr) {
+				t.Fatalf("expected downstream websocket close error, got %v", err)
+			}
+			if closeErr.Code != websocket.CloseMessageTooBig {
+				t.Fatalf("downstream close code = %d, want %d", closeErr.Code, websocket.CloseMessageTooBig)
+			}
+			if closeErr.Text != "message too big" {
+				t.Fatalf("downstream close reason = %q, want message too big", closeErr.Text)
+			}
+		})
 	}
 }
 
