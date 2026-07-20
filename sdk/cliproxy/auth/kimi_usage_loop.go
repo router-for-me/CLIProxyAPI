@@ -125,16 +125,29 @@ func (m *Manager) probeSingleKimiAuth(ctx context.Context, auth *Auth) error {
 		return nil
 	}
 
-	if kimiUsageFullyAvailable(windows) && hasKimiUsageCooldown(auth) {
-		// Only clear cooldown states that were set by this probe (kimiUsageReason),
-		// to avoid resetting cooldowns from other causes (e.g. Cloudflare challenges,
-		// generic 429 backoff). hasKimiUsageCooldown matches any Kimi-probe state,
-		// including ones whose NextRetryAfter has already passed, so the probe also
-		// resumes registry-suspended models after the reset time.
-		if errClear := m.clearKimiUsageCooldown(ctx, auth, now); errClear != nil {
-			return errClear
+	if kimiUsageFullyAvailable(windows) {
+		// When the probe confirms all windows are healthy, clear both the
+		// probe's own cooldowns and any generic 402/403 fallback cooldowns
+		// that were set by the normal error path (MarkResult). Without this,
+		// a request that hit 403 shortly before the reset window would leave
+		// the auth blocked for the full 30-minute fixed backoff even though
+		// the probe has verified remaining > 0.
+		cleared := false
+		if hasKimiUsageCooldown(auth) {
+			if errClear := m.clearKimiUsageCooldown(ctx, auth, now); errClear != nil {
+				return errClear
+			}
+			cleared = true
 		}
-		log.Infof("kimi usage probe auth=%s: quota recovered, cooldown cleared", auth.ID)
+		if hasGenericPaymentFallbackCooldown(auth) {
+			if errClear := m.clearGenericPaymentFallbackCooldown(ctx, auth, now); errClear != nil {
+				return errClear
+			}
+			cleared = true
+		}
+		if cleared {
+			log.Infof("kimi usage probe auth=%s: quota recovered, cooldown cleared", auth.ID)
+		}
 	}
 	return nil
 }

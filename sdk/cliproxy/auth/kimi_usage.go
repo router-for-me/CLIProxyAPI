@@ -403,8 +403,14 @@ func (m *Manager) SetAuthQuotaExceeded(ctx context.Context, authID string, recov
 				continue
 			}
 		case state.Quota.Reason != "":
-			// Explicit non-Kimi backoff (Cloudflare, 429): preserve.
-			continue
+			// Explicit non-Kimi backoff (Cloudflare, 429): if the existing
+			// cooldown ends before the Kimi quota reset, extend it to the
+			// probe's recoverAt so the model is not unblocked while the
+			// account-level Kimi quota is still exhausted. Only preserve
+			// cooldowns that already last at least until recoverAt.
+			if !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(recoverAt) {
+				continue
+			}
 		case state.NextRetryAfter.IsZero():
 			// Fresh model with no cooldown: set.
 		case isGenericPaymentFallback(state):
@@ -562,6 +568,90 @@ func (m *Manager) clearKimiUsageCooldown(ctx context.Context, auth *Auth, now ti
 		// the Kimi cooldown left no remaining model error, restore the auth-level
 		// status so management views and scheduler metadata no longer report a
 		// recovered credential as errored.
+		if !live.Disabled && live.Status != StatusDisabled && !hasModelError(live, now) {
+			live.LastError = nil
+			live.StatusMessage = ""
+			live.Status = StatusActive
+		}
+	}
+	_ = m.persist(ctx, live)
+	snapshot = live.Clone()
+	if trackCooldownState {
+		after := m.cooldownStateRecordsForAuthLocked(live, now)
+		cooldownStateChanged = !cooldownStateRecordsEqual(cooldownRecordsBefore, after)
+	}
+	m.mu.Unlock()
+
+	for _, modelKey := range clearedModels {
+		registry.GetGlobalRegistry().ClearModelQuotaExceeded(auth.ID, modelKey)
+		registry.GetGlobalRegistry().ResumeClientModel(auth.ID, modelKey)
+	}
+	if m.scheduler != nil && snapshot != nil {
+		m.scheduler.upsertAuth(snapshot)
+	}
+	if snapshot != nil && cooldownStateChanged {
+		m.persistCooldownStates(context.Background())
+	}
+	return nil
+}
+
+// hasGenericPaymentFallbackCooldown reports whether any model state still carries
+// a generic 402/403 payment_required fallback cooldown set by MarkResult. Unlike
+// hasKimiUsageCooldown, this matches cooldowns with empty Quota.Reason (the
+// MarkResult path for 402/403 does not set Quota) and LastError.HTTPStatus 402/403.
+// The probe uses this to decide whether the healthy /v1/usages response should
+// also clear these imprecise fallback cooldowns.
+func hasGenericPaymentFallbackCooldown(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	for _, state := range auth.ModelStates {
+		if isGenericPaymentFallback(state) {
+			return true
+		}
+	}
+	return false
+}
+
+// clearGenericPaymentFallbackCooldown clears only the model-level cooldown states
+// that are generic 402/403 payment_required fallbacks (isGenericPaymentFallback).
+// It follows the same lock/concurrency pattern as clearKimiUsageCooldown.
+func (m *Manager) clearGenericPaymentFallbackCooldown(ctx context.Context, auth *Auth, now time.Time) error {
+	if m == nil || auth == nil {
+		return nil
+	}
+
+	var snapshot *Auth
+	clearedModels := make([]string, 0)
+	cooldownStateChanged := false
+
+	m.mu.Lock()
+	live, ok := m.auths[auth.ID]
+	if !ok || live == nil {
+		m.mu.Unlock()
+		return nil
+	}
+
+	var cooldownRecordsBefore []CooldownStateRecord
+	trackCooldownState := m.cooldownStore != nil
+	if trackCooldownState {
+		cooldownRecordsBefore = m.cooldownStateRecordsForAuthLocked(live, now)
+	}
+
+	for modelKey, state := range live.ModelStates {
+		modelKey = strings.TrimSpace(modelKey)
+		if modelKey == "" || state == nil {
+			continue
+		}
+		if !isGenericPaymentFallback(state) {
+			continue
+		}
+		resetModelState(state, now)
+		clearedModels = append(clearedModels, modelKey)
+	}
+
+	if len(clearedModels) > 0 {
+		updateAggregatedAvailability(live, now)
 		if !live.Disabled && live.Status != StatusDisabled && !hasModelError(live, now) {
 			live.LastError = nil
 			live.StatusMessage = ""

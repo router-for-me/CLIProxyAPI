@@ -627,18 +627,17 @@ func TestKimiUsageCooldown_ShorterThanGeneric403(t *testing.T) {
 	}
 }
 
-// TestSetAuthQuotaExceeded_PreservesCloudflareBackoff verifies that a model
-// under a Cloudflare challenge backoff (Quota.Exceeded=true, Reason="cloudflare
-// challenge" as set by MarkResult) is NOT overwritten by the Kimi probe. A
-// Cloudflare/edge block is unrelated to Kimi quota, so overwriting it and later
-// clearing it would let requests through before the backoff elapses.
-func TestSetAuthQuotaExceeded_PreservesCloudflareBackoff(t *testing.T) {
+// TestSetAuthQuotaExceeded_ExtendsShorterNonKimiCooldown verifies that when a
+// model already has a non-Kimi cooldown (e.g. Cloudflare challenge) that ends
+// before the probe's recoverAt, the cooldown is extended to recoverAt so the
+// model is not unblocked while the account-level Kimi quota is still exhausted.
+func TestSetAuthQuotaExceeded_ExtendsShorterNonKimiCooldown(t *testing.T) {
 	t.Parallel()
 	manager := NewManager(nil, nil, nil)
 	ctx := context.Background()
-	authID := "kimi-cf-auth"
+	authID := "kimi-cf-short-auth"
 	model := "kimi-k2"
-	// Realistic Cloudflare state from MarkResult: Exceeded=true, explicit reason.
+	// Cloudflare backoff ending in 5 minutes.
 	cfAfter := time.Now().Add(5 * time.Minute)
 
 	reg := registry.GetGlobalRegistry()
@@ -663,7 +662,7 @@ func TestSetAuthQuotaExceeded_PreservesCloudflareBackoff(t *testing.T) {
 		t.Fatalf("register auth: %v", err)
 	}
 
-	// Probe says quota exhausted, recovering in 10 minutes.
+	// Probe says quota exhausted, recovering in 10 minutes (longer than CF backoff).
 	recoverAt := time.Now().Add(10 * time.Minute)
 	snapshot, err := manager.SetAuthQuotaExceeded(ctx, authID, recoverAt, kimiUsageReason)
 	if err != nil {
@@ -677,12 +676,14 @@ func TestSetAuthQuotaExceeded_PreservesCloudflareBackoff(t *testing.T) {
 	if state == nil {
 		t.Fatal("model state missing after SetAuthQuotaExceeded")
 	}
-	// Cloudflare backoff must be untouched.
-	if state.Quota.Reason != "cloudflare challenge" {
-		t.Errorf("Quota.Reason = %q, want cloudflare challenge (preserved)", state.Quota.Reason)
+	// The shorter Cloudflare cooldown must be extended to the Kimi recoverAt
+	// so the model stays blocked until the account-level quota recovers.
+	if !state.NextRetryAfter.Equal(recoverAt) {
+		t.Errorf("NextRetryAfter = %v, want %v (extended to Kimi recoverAt)", state.NextRetryAfter, recoverAt)
 	}
-	if !state.NextRetryAfter.Equal(cfAfter) {
-		t.Errorf("NextRetryAfter = %v, want %v (Cloudflare backoff preserved)", state.NextRetryAfter, cfAfter)
+	// Extension replaces the reason with Kimi reason so the probe can clear it later.
+	if state.Quota.Reason != kimiUsageReason {
+		t.Errorf("Quota.Reason = %q, want %q (extended to Kimi reason)", state.Quota.Reason, kimiUsageReason)
 	}
 }
 
@@ -958,3 +959,335 @@ func TestClearKimiUsageCooldown_PreservesOverwrittenByNonQuotaFailure(t *testing
 		t.Errorf("Status = %v, want StatusError (401 cooldown preserved)", state.Status)
 	}
 }
+
+// TestSetAuthQuotaExceeded_PreservesLongerNonKimiCooldown verifies that when a
+// model has a non-Kimi cooldown that already lasts longer than the probe's
+// recoverAt, it is preserved (not shortened to the Kimi reset time). This
+// avoids replacing a longer backoff with a shorter one.
+func TestSetAuthQuotaExceeded_PreservesLongerNonKimiCooldown(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	authID := "kimi-cf-long-auth"
+	model := "kimi-k2"
+	// Cloudflare backoff ending in 30 minutes (longer than probe's 10 min).
+	cfAfter := time.Now().Add(30 * time.Minute)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "openai-compatible-kimi", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	if _, err := manager.Register(ctx, &Auth{
+		ID:       authID,
+		Provider: "openai-compatible-kimi",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusError,
+				StatusMessage:  "cloudflare challenge",
+				Unavailable:    true,
+				NextRetryAfter: cfAfter,
+				Quota:          QuotaState{Exceeded: true, Reason: "cloudflare challenge", NextRecoverAt: cfAfter},
+				UpdatedAt:      time.Now(),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	// Probe says quota exhausted, recovering in 10 minutes (shorter than CF backoff).
+	recoverAt := time.Now().Add(10 * time.Minute)
+	snapshot, err := manager.SetAuthQuotaExceeded(ctx, authID, recoverAt, kimiUsageReason)
+	if err != nil {
+		t.Fatalf("SetAuthQuotaExceeded() error = %v", err)
+	}
+	if snapshot == nil {
+		t.Fatal("SetAuthQuotaExceeded() returned nil snapshot")
+	}
+
+	state := snapshot.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state missing after SetAuthQuotaExceeded")
+	}
+	// The longer Cloudflare cooldown must be preserved.
+	if state.Quota.Reason != "cloudflare challenge" {
+		t.Errorf("Quota.Reason = %q, want cloudflare challenge (preserved)", state.Quota.Reason)
+	}
+	if !state.NextRetryAfter.Equal(cfAfter) {
+		t.Errorf("NextRetryAfter = %v, want %v (preserved longer CF backoff)", state.NextRetryAfter, cfAfter)
+	}
+}
+
+// TestHasGenericPaymentFallbackCooldown verifies detection of the generic
+// 402/403 payment_required fallback state set by MarkResult.
+func TestHasGenericPaymentFallbackCooldown(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		auth *Auth
+		want bool
+	}{
+		{
+			name: "nil auth",
+			auth: nil,
+			want: false,
+		},
+		{
+			name: "empty model states",
+			auth: &Auth{ModelStates: map[string]*ModelState{}},
+			want: false,
+		},
+		{
+			name: "403 payment_required fallback",
+			auth: &Auth{
+				ModelStates: map[string]*ModelState{
+					"kimi-k2": {
+						NextRetryAfter: time.Now().Add(30 * time.Minute),
+						Quota:          QuotaState{}, // empty Reason as MarkResult leaves it
+						LastError:      &Error{HTTPStatus: http.StatusForbidden},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "402 payment_required fallback",
+			auth: &Auth{
+				ModelStates: map[string]*ModelState{
+					"kimi-k2": {
+						NextRetryAfter: time.Now().Add(30 * time.Minute),
+						Quota:          QuotaState{},
+						LastError:      &Error{HTTPStatus: http.StatusPaymentRequired},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "401 unauthorized ignored",
+			auth: &Auth{
+				ModelStates: map[string]*ModelState{
+					"kimi-k2": {
+						NextRetryAfter: time.Now().Add(30 * time.Minute),
+						Quota:          QuotaState{},
+						LastError:      &Error{HTTPStatus: http.StatusUnauthorized},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "kimi-probe cooldown with Reason set",
+			auth: &Auth{
+				ModelStates: map[string]*ModelState{
+					"kimi-k2": {
+						NextRetryAfter: time.Now().Add(time.Hour),
+						Quota:          QuotaState{Exceeded: true, Reason: kimiUsageReason},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "nil LastError",
+			auth: &Auth{
+				ModelStates: map[string]*ModelState{
+					"kimi-k2": {
+						NextRetryAfter: time.Now().Add(30 * time.Minute),
+						Quota:          QuotaState{},
+						LastError:      nil,
+					},
+				},
+			},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hasGenericPaymentFallbackCooldown(tc.auth); got != tc.want {
+				t.Errorf("hasGenericPaymentFallbackCooldown(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestClearGenericPaymentFallbackCooldown verifies that clearing the generic
+// 402/403 fallback restores the auth-level status and clears model-level state.
+func TestClearGenericPaymentFallbackCooldown(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	authID := "kimi-clear-generic-auth"
+	model := "kimi-k2"
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "openai-compatible-kimi", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	if _, err := manager.Register(ctx, &Auth{
+		ID:       authID,
+		Provider: "openai-compatible-kimi",
+		Status:   StatusError,
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusError,
+				StatusMessage:  "quota exhausted, refreshed in the next cycle",
+				Unavailable:    true,
+				NextRetryAfter: time.Now().Add(30 * time.Minute),
+				Quota:          QuotaState{}, // generic 403 fallback
+				LastError:      &Error{HTTPStatus: http.StatusForbidden, Message: "quota exhausted"},
+				UpdatedAt:      time.Now(),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	live := manager.snapshotAuths()
+	var target *Auth
+	for i := range live {
+		if live[i].ID == authID {
+			target = live[i]
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("auth not found in snapshot")
+	}
+
+	now := time.Now()
+	if err := manager.clearGenericPaymentFallbackCooldown(ctx, target, now); err != nil {
+		t.Fatalf("clearGenericPaymentFallbackCooldown() error = %v", err)
+	}
+
+	// Verify the auth status is restored.
+	live = manager.snapshotAuths()
+	var after *Auth
+	for i := range live {
+		if live[i].ID == authID {
+			after = live[i]
+			break
+		}
+	}
+	if after == nil {
+		t.Fatal("auth not found in snapshot after clear")
+	}
+	if after.Status != StatusActive {
+		t.Errorf("post-clear Status = %v, want StatusActive", after.Status)
+	}
+	if after.StatusMessage != "" {
+		t.Errorf("post-clear StatusMessage = %q, want empty", after.StatusMessage)
+	}
+
+	// Verify the model state is reset.
+	state := after.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state missing after clear")
+	}
+	if state.Unavailable {
+		t.Error("expected Unavailable=false after clear")
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Errorf("NextRetryAfter = %v, want zero", state.NextRetryAfter)
+	}
+}
+
+// TestClearGenericPaymentFallbackCooldown_Preserves401Cooldown verifies that a
+// generic 401 unauthorized cooldown is NOT cleared by the generic fallback
+// clearing path — only 402/403 states are targeted.
+func TestClearGenericPaymentFallbackCooldown_Preserves401Cooldown(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	authID := "kimi-clear-mixed-auth"
+	model403 := "kimi-k2"     // 403 fallback — should be cleared
+	model401 := "kimi-k2-401" // 401 unauthorized — must be preserved
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "openai-compatible-kimi", []*registry.ModelInfo{
+		{ID: model403},
+		{ID: model401},
+	})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	unauthAfter := time.Now().Add(30 * time.Minute)
+	if _, err := manager.Register(ctx, &Auth{
+		ID:       authID,
+		Provider: "openai-compatible-kimi",
+		Status:   StatusError,
+		ModelStates: map[string]*ModelState{
+			model403: {
+				Status:         StatusError,
+				StatusMessage:  "quota exhausted",
+				Unavailable:    true,
+				NextRetryAfter: time.Now().Add(30 * time.Minute),
+				Quota:          QuotaState{},
+				LastError:      &Error{HTTPStatus: http.StatusForbidden},
+				UpdatedAt:      time.Now(),
+			},
+			model401: {
+				Status:         StatusError,
+				StatusMessage:  "unauthorized",
+				Unavailable:    true,
+				NextRetryAfter: unauthAfter,
+				Quota:          QuotaState{},
+				LastError:      &Error{HTTPStatus: http.StatusUnauthorized},
+				UpdatedAt:      time.Now(),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	live := manager.snapshotAuths()
+	var target *Auth
+	for i := range live {
+		if live[i].ID == authID {
+			target = live[i]
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("auth not found in snapshot")
+	}
+
+	now := time.Now()
+	if err := manager.clearGenericPaymentFallbackCooldown(ctx, target, now); err != nil {
+		t.Fatalf("clearGenericPaymentFallbackCooldown() error = %v", err)
+	}
+
+	live = manager.snapshotAuths()
+	var after *Auth
+	for i := range live {
+		if live[i].ID == authID {
+			after = live[i]
+			break
+		}
+	}
+	if after == nil {
+		t.Fatal("auth not found in snapshot after clear")
+	}
+
+	// 403 model should be cleared.
+	state403 := after.ModelStates[model403]
+	if state403 == nil {
+		t.Fatal("model 403 state missing")
+	}
+	if state403.Unavailable {
+		t.Error("expected Unavailable=false for 403 model after clear")
+	}
+
+	// 401 model must be preserved.
+	state401 := after.ModelStates[model401]
+	if state401 == nil {
+		t.Fatal("model 401 state missing")
+	}
+	if !state401.Unavailable {
+		t.Error("expected Unavailable=true for 401 model (preserved)")
+	}
+	if !state401.NextRetryAfter.Equal(unauthAfter) {
+		t.Errorf("NextRetryAfter = %v, want %v (401 cooldown preserved)", state401.NextRetryAfter, unauthAfter)
+	}
+}
+
