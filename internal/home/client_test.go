@@ -24,7 +24,7 @@ import (
 )
 
 func TestAuthDispatchRequestIncludesCount(t *testing.T) {
-	req := newAuthDispatchRequest("gpt-5.4", "session-1", http.Header{"Authorization": {"Bearer test"}}, 2)
+	req := newAuthDispatchRequest("gpt-5.4", "request-1", "dispatch-1", "session-1", http.Header{"Authorization": {"Bearer test"}}, 2)
 
 	raw, err := json.Marshal(&req)
 	if err != nil {
@@ -38,10 +38,13 @@ func TestAuthDispatchRequestIncludesCount(t *testing.T) {
 	if got := int(payload["count"].(float64)); got != 2 {
 		t.Fatalf("count = %d, want 2", got)
 	}
+	if payload["request_id"] != "request-1" || payload["dispatch_id"] != "dispatch-1" {
+		t.Fatalf("identity = request:%v dispatch:%v", payload["request_id"], payload["dispatch_id"])
+	}
 }
 
 func TestAuthDispatchRequestDefaultsCountToOne(t *testing.T) {
-	req := newAuthDispatchRequest("gpt-5.4", "", nil, 0)
+	req := newAuthDispatchRequest("gpt-5.4", "", "", "", nil, 0)
 
 	if req.Count != 1 {
 		t.Fatalf("count = %d, want 1", req.Count)

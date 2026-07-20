@@ -52,6 +52,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 	apiKey := strings.TrimSpace(record.APIKey)
 	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
+	leaseID := coreusage.HomeLeaseIDFromContext(ctx)
 	reasoningEffort := strings.TrimSpace(record.ReasoningEffort)
 	if reasoningEffort == "" {
 		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
@@ -111,6 +112,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		AuthType:            authType,
 		APIKey:              apiKey,
 		RequestID:           requestID,
+		LeaseID:             leaseID,
 		ReasoningEffort:     reasoningEffort,
 		ServiceTier:         serviceTier,
 		ResponseServiceTier: responseServiceTier,
@@ -131,6 +133,7 @@ type queuedUsageDetail struct {
 	AuthType            string `json:"auth_type"`
 	APIKey              string `json:"api_key"`
 	RequestID           string `json:"request_id"`
+	LeaseID             string `json:"lease_id,omitempty"`
 	ReasoningEffort     string `json:"reasoning_effort"`
 	ServiceTier         string `json:"service_tier"`
 	ResponseServiceTier string `json:"response_service_tier,omitempty"`

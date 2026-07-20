@@ -864,20 +864,26 @@ func queryToLowerMap(query url.Values) map[string]string {
 	return out
 }
 
-func newAuthDispatchRequest(requestedModel string, sessionID string, headers http.Header, count int) authDispatchRequest {
+func newAuthDispatchRequest(requestedModel string, requestID string, dispatchID string, sessionID string, headers http.Header, count int) authDispatchRequest {
 	if count <= 0 {
 		count = 1
 	}
 	return authDispatchRequest{
-		Type:      "auth",
-		Model:     requestedModel,
-		Count:     count,
-		SessionID: strings.TrimSpace(sessionID),
-		Headers:   headersToLowerMap(headers),
+		Type:       "auth",
+		Model:      requestedModel,
+		Count:      count,
+		RequestID:  strings.TrimSpace(requestID),
+		DispatchID: strings.TrimSpace(dispatchID),
+		SessionID:  strings.TrimSpace(sessionID),
+		Headers:    headersToLowerMap(headers),
 	}
 }
 
 func (c *Client) RPopAuth(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int) ([]byte, error) {
+	return c.RPopAuthWithIdentity(ctx, requestedModel, "", "", sessionID, headers, count)
+}
+
+func (c *Client) RPopAuthWithIdentity(ctx context.Context, requestedModel string, requestID string, dispatchID string, sessionID string, headers http.Header, count int) ([]byte, error) {
 	cmd, errClient := c.commandClient()
 	if errClient != nil {
 		return nil, errClient
@@ -886,7 +892,7 @@ func (c *Client) RPopAuth(ctx context.Context, requestedModel string, sessionID 
 	if requestedModel == "" {
 		return nil, fmt.Errorf("home: requested model is empty")
 	}
-	req := newAuthDispatchRequest(requestedModel, sessionID, headers, count)
+	req := newAuthDispatchRequest(requestedModel, requestID, dispatchID, sessionID, headers, count)
 	keyBytes, err := json.Marshal(&req)
 	if err != nil {
 		return nil, err
@@ -903,6 +909,33 @@ func (c *Client) RPopAuth(ctx context.Context, requestedModel string, sessionID 
 		return nil, ErrEmptyResponse
 	}
 	return raw, nil
+}
+
+func (c *Client) RenewInFlightLease(ctx context.Context, leaseID string) (bool, error) {
+	return c.pushInFlightLease(ctx, inFlightLeaseRequest{Action: "renew", LeaseID: strings.TrimSpace(leaseID)})
+}
+
+func (c *Client) ReleaseInFlightLease(ctx context.Context, leaseID string, reason string) (bool, error) {
+	return c.pushInFlightLease(ctx, inFlightLeaseRequest{Action: "release", LeaseID: strings.TrimSpace(leaseID), Reason: strings.TrimSpace(reason)})
+}
+
+func (c *Client) pushInFlightLease(ctx context.Context, req inFlightLeaseRequest) (bool, error) {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return false, errClient
+	}
+	if req.LeaseID == "" {
+		return false, nil
+	}
+	payload, errMarshal := json.Marshal(req)
+	if errMarshal != nil {
+		return false, errMarshal
+	}
+	count, errPush := cmd.LPush(ctx, "in-flight", payload).Result()
+	if errPush != nil {
+		return false, errPush
+	}
+	return count > 0, nil
 }
 
 func (c *Client) GetRefreshAuth(ctx context.Context, authIndex string) ([]byte, error) {
