@@ -1065,6 +1065,47 @@ func TestOrphanAndDuplicateToolCallOutputsAreDropped(t *testing.T) {
 	}
 }
 
+func TestServiceTierTranslatedForCodexFastMode(t *testing.T) {
+	tests := []struct {
+		name        string
+		serviceTier string
+		want        string
+		wantExists  bool
+	}{
+		{name: "priority", serviceTier: `"priority"`, want: "priority", wantExists: true},
+		{name: "fast alias", serviceTier: `"fast"`, want: "priority", wantExists: true},
+		{name: "whitespace priority omitted", serviceTier: `" PRIORITY "`},
+		{name: "uppercase fast omitted", serviceTier: `"FAST"`},
+		{name: "default omitted", serviceTier: `"default"`},
+		{name: "auto omitted", serviceTier: `"auto"`},
+		{name: "flex omitted", serviceTier: `"flex"`},
+		{name: "empty omitted", serviceTier: `""`},
+		{name: "non string omitted", serviceTier: `true`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{"model":"gpt-5.6-sol","messages":[{"role":"user","content":"Reply OK"}],"service_tier":` + tt.serviceTier + `}`)
+			out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+			serviceTier := gjson.GetBytes(out, "service_tier")
+			if serviceTier.Exists() != tt.wantExists {
+				t.Fatalf("service_tier exists = %v, want %v; output=%s", serviceTier.Exists(), tt.wantExists, out)
+			}
+			if tt.wantExists && serviceTier.String() != tt.want {
+				t.Fatalf("service_tier = %q, want %q; output=%s", serviceTier.String(), tt.want, out)
+			}
+		})
+	}
+}
+
+func TestServiceTierOmittedWhenAbsent(t *testing.T) {
+	input := []byte(`{"model":"gpt-5.6-sol","messages":[{"role":"user","content":"Reply OK"}]}`)
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	if serviceTier := gjson.GetBytes(out, "service_tier"); serviceTier.Exists() {
+		t.Fatalf("service_tier should be omitted when absent; output=%s", out)
+	}
+}
+
 // Tools array should carry over to the Responses format output.
 func TestToolsDefinitionTranslated(t *testing.T) {
 	input := []byte(`{

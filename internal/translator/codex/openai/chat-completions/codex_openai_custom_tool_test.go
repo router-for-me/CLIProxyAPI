@@ -122,8 +122,12 @@ func TestApplyPatchCustomToolRoundTrip(t *testing.T) {
 	followUp, _ = sjson.SetBytes(followUp, "messages.1.tool_calls.0.function.name", call.Name)
 	followUp, _ = sjson.SetBytes(followUp, "messages.1.tool_calls.0.function.arguments", call.Arguments)
 	followUp, _ = sjson.SetBytes(followUp, "messages.2.tool_call_id", call.ID)
+	followUp, _ = sjson.SetBytes(followUp, "service_tier", "fast")
 
 	upstream := ConvertOpenAIRequestToCodex("gpt-5.6-sol", followUp, true)
+	if got := gjson.GetBytes(upstream, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want priority; output=%s", got, upstream)
+	}
 	items := gjson.GetBytes(upstream, "input").Array()
 	if len(items) != 3 {
 		t.Fatalf("expected user, custom call, and custom output; got %d: %s", len(items), gjson.GetBytes(upstream, "input").Raw)

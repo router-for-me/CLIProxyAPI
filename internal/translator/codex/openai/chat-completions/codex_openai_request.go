@@ -38,6 +38,13 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	// Stream must be set to true
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
+	if serviceTier := root.Get("service_tier"); serviceTier.Type == gjson.String {
+		switch serviceTier.String() {
+		case "fast", "priority":
+			out, _ = sjson.SetBytes(out, "service_tier", "priority")
+		}
+	}
+
 	// Codex not support temperature, top_p, top_k, max_output_tokens, so comment them
 	// if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() {
 	// 	out, _ = sjson.SetBytes(out, "temperature", v.Value())
