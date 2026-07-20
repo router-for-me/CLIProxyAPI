@@ -85,7 +85,13 @@ func (e *KimiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	from := opts.SourceFormat
 	if from.String() == "claude" {
+		// The Claude-compatible path is served by the embedded ClaudeExecutor.
+		// Mark the compression identity so a future "kimi/anthropic" capability
+		// entry would apply here instead of the delegate's "claude" one; today
+		// Kimi is not compression-capable on any probed endpoint, so this
+		// currently keeps the body uncompressed under every hint.
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
+		ctx = helps.WithRequestCompressionProvider(ctx, "kimi/anthropic")
 		return e.ClaudeExecutor.Execute(ctx, auth, req, opts)
 	}
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -128,9 +134,13 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := kimiauth.KimiAPIBaseURL + "/v1/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	wireBody, contentEncoding := helps.MaybeCompressRequestBody(e.cfg, e.Identifier(), body)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wireBody))
 	if err != nil {
 		return resp, err
+	}
+	if contentEncoding != "" {
+		httpReq.Header.Set("Content-Encoding", contentEncoding)
 	}
 	applyKimiHeadersWithAuth(httpReq, token, false, auth)
 	var attrs map[string]string
@@ -195,7 +205,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	from := opts.SourceFormat
 	if from.String() == "claude" {
+		// See Execute: the Claude-compatible path overrides the compression
+		// identity to "kimi/anthropic".
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
+		ctx = helps.WithRequestCompressionProvider(ctx, "kimi/anthropic")
 		return e.ClaudeExecutor.ExecuteStream(ctx, auth, req, opts)
 	}
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -241,9 +254,13 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := kimiauth.KimiAPIBaseURL + "/v1/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	wireBody, contentEncoding := helps.MaybeCompressRequestBody(e.cfg, e.Identifier(), body)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wireBody))
 	if err != nil {
 		return nil, err
+	}
+	if contentEncoding != "" {
+		httpReq.Header.Set("Content-Encoding", contentEncoding)
 	}
 	applyKimiHeadersWithAuth(httpReq, token, true, auth)
 	var attrs map[string]string
@@ -336,6 +353,8 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 // CountTokens estimates token count for Kimi requests.
 func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
+	req.Model = normalizeKimiUpstreamModel(req.Model)
+	ctx = helps.WithRequestCompressionProvider(ctx, "kimi/anthropic")
 	return e.ClaudeExecutor.CountTokens(ctx, auth, req, opts)
 }
 

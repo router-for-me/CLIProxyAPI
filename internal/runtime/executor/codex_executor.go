@@ -1815,9 +1815,13 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	if identityState.promptCacheKey != "" {
 		cache.ID = identityState.promptCacheKey
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
+	wireBody, contentEncoding := helps.MaybeCompressRequestBody(e.cfg, e.Identifier(), rawJSON)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wireBody))
 	if err != nil {
 		return nil, nil, codexIdentityConfuseState{}, err
+	}
+	if contentEncoding != "" {
+		httpReq.Header.Set("Content-Encoding", contentEncoding)
 	}
 	if cache.ID != "" {
 		httpReq.Header.Set("Session_id", cache.ID)

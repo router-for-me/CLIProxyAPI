@@ -63,6 +63,12 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.RequestLog != newCfg.RequestLog {
 		changes = append(changes, fmt.Sprintf("request-log: %t -> %t", oldCfg.RequestLog, newCfg.RequestLog))
 	}
+	if oldCfg.EffectiveRequestCompressionMode() != newCfg.EffectiveRequestCompressionMode() {
+		changes = append(changes, fmt.Sprintf("request-compression: %s -> %s", oldCfg.EffectiveRequestCompressionMode(), newCfg.EffectiveRequestCompressionMode()))
+	}
+	if oldCfg.EffectiveRequestCompressionMinBytes() != newCfg.EffectiveRequestCompressionMinBytes() {
+		changes = append(changes, fmt.Sprintf("request-compression-min-size: %dk -> %dk", oldCfg.EffectiveRequestCompressionMinBytes()/1024, newCfg.EffectiveRequestCompressionMinBytes()/1024))
+	}
 	if oldCfg.LogsMaxTotalSizeMB != newCfg.LogsMaxTotalSizeMB {
 		changes = append(changes, fmt.Sprintf("logs-max-total-size-mb: %d -> %d", oldCfg.LogsMaxTotalSizeMB, newCfg.LogsMaxTotalSizeMB))
 	}
