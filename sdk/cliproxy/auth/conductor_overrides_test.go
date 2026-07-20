@@ -1159,6 +1159,7 @@ func TestManager_Execute_DisableCooling_RetriesAfter429RetryAfter(t *testing.T) 
 
 func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(t *testing.T) {
 	const cyberPolicyBody = `{"error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk.","param":null}}`
+	const contentPolicyBody = `{"error":{"type":"invalid_request_error","code":"content_policy_violation","message":"The request was rejected by the safety system.","param":null}}`
 	incompleteErr := &requestScopedStatusError{
 		status:  http.StatusRequestTimeout,
 		message: "stream error: stream disconnected before completion: stream closed before response.completed",
@@ -1186,6 +1187,9 @@ func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(
 		{name: "streaming bad request", stream: true, err: badRequestErr, wantStatus: http.StatusBadRequest},
 		{name: "non-streaming cyber policy", err: &Error{HTTPStatus: http.StatusBadRequest, Message: cyberPolicyBody}, wantStatus: http.StatusBadRequest, wantBody: cyberPolicyBody},
 		{name: "streaming cyber policy", stream: true, err: &Error{HTTPStatus: http.StatusBadRequest, Message: cyberPolicyBody}, wantStatus: http.StatusBadRequest, wantBody: cyberPolicyBody},
+		{name: "wrapped non-streaming cyber policy", err: fmt.Errorf("wrapped upstream error: %w", &retryAfterStatusError{status: http.StatusBadRequest, message: cyberPolicyBody}), wantStatus: http.StatusBadRequest},
+		{name: "wrapped streaming cyber policy", stream: true, err: fmt.Errorf("wrapped upstream error: %w", &Error{HTTPStatus: http.StatusBadRequest, Message: cyberPolicyBody}), wantStatus: http.StatusBadRequest},
+		{name: "non-streaming content policy", err: &Error{HTTPStatus: http.StatusBadRequest, Message: contentPolicyBody}, wantStatus: http.StatusBadRequest, wantBody: contentPolicyBody},
 	}
 
 	for _, tc := range tests {

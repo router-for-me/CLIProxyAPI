@@ -4580,12 +4580,22 @@ func isNonRetryablePolicyError(err error) bool {
 	if err == nil || statusCodeFromError(err) != http.StatusBadRequest {
 		return false
 	}
+	errMessage := err.Error()
+	var apiErr *Error
+	if errors.As(err, &apiErr) && apiErr != nil {
+		errMessage = apiErr.Message
+	} else {
+		for unwrapped := errors.Unwrap(err); unwrapped != nil; unwrapped = errors.Unwrap(err) {
+			err = unwrapped
+			errMessage = err.Error()
+		}
+	}
 	var payload struct {
 		Error struct {
 			Code string `json:"code"`
 		} `json:"error"`
 	}
-	if json.Unmarshal([]byte(strings.TrimSpace(err.Error())), &payload) != nil {
+	if json.Unmarshal([]byte(errMessage), &payload) != nil {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(payload.Error.Code)) {

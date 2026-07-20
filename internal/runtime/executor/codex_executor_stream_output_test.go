@@ -523,6 +523,11 @@ func TestCodexTerminalFailureErrClassifiesStatus(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 		},
 		{
+			name:       "content policy code without recognized type",
+			event:      `{"type":"error","error":{"code":"content_policy_violation","message":"The request was rejected by the safety system."}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
 			name:       "authentication",
 			event:      `{"type":"response.failed","response":{"error":{"type":"authentication_error","code":"invalid_api_key","message":"Invalid token."}}}`,
 			wantStatus: http.StatusUnauthorized,

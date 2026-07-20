@@ -161,7 +161,7 @@ func codexTerminalFailureStatus(body []byte) int {
 	errorType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))
 	errorCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
 	switch {
-	case errorType == "invalid_request", errorType == "invalid_request_error", errorType == "bad_request_error", errorCode == "cyber_policy":
+	case errorType == "invalid_request", errorType == "invalid_request_error", errorType == "bad_request_error", errorCode == "cyber_policy", errorCode == "content_policy_violation":
 		return http.StatusBadRequest
 	case errorType == "authentication_error", errorCode == "invalid_api_key", errorCode == "unauthorized":
 		return http.StatusUnauthorized
