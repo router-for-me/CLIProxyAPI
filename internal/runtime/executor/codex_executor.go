@@ -1327,7 +1327,12 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body = normalizeCodexInstructions(body)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
+	// Detect Responses Lite from client_metadata before it gets stripped below.
 	body = normalizeCodexParallelToolCalls(body, opts.Headers)
+	// The compact upstream rejects fields that ordinary /responses requests
+	// commonly include (e.g. store, temperature, client_metadata); strip them
+	// last so the checks above still see the original client-supplied body.
+	body = stripUnsupportedCodexCompactFields(body)
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
@@ -1335,6 +1340,18 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	httpReq, upstreamBody, identityState, err := e.cacheHelper(ctx, from, url, auth, req, originalPayloadSource, body, opts.Headers)
 	if err != nil {
 		return resp, err
+	}
+	// Identity Confuse rewrites client_metadata.x-codex-installation-id from the
+	// original user payload, which can reintroduce the client_metadata object
+	// removed above. Re-apply the compact allowlist to the exact bytes about to be
+	// sent so identity obfuscation can never resurrect an unsupported field.
+	if cleaned := stripUnsupportedCodexCompactFields(upstreamBody); !bytes.Equal(cleaned, upstreamBody) {
+		upstreamBody = cleaned
+		httpReq.Body = io.NopCloser(bytes.NewReader(upstreamBody))
+		httpReq.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(upstreamBody)), nil
+		}
+		httpReq.ContentLength = int64(len(upstreamBody))
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg)
 	applyModelHeaderOverrides(httpReq.Header, baseModel)
@@ -2116,6 +2133,54 @@ func normalizeCodexInstructions(body []byte) []byte {
 	instructions := gjson.GetBytes(body, "instructions")
 	if !instructions.Exists() || instructions.Type == gjson.Null {
 		body, _ = sjson.SetBytes(body, "instructions", "")
+	}
+	return body
+}
+
+// codexCompactUnsupportedFields lists top-level Responses request fields that the
+// Codex /responses/compact upstream unconditionally rejects with "Unknown
+// parameter"/"Unsupported parameter" errors, confirmed against the live endpoint.
+// Regular /responses clients commonly populate these fields with SDK defaults (e.g.
+// store, temperature, previous_response_id: null), so they must be stripped before
+// forwarding a compact request instead of being passed through unchanged.
+// service_tier is handled separately because the endpoint accepts some values.
+var codexCompactUnsupportedFields = []string{
+	"store",
+	"temperature",
+	"top_p",
+	"max_output_tokens",
+	"max_completion_tokens",
+	"truncation",
+	"background",
+	"previous_response_id",
+	"metadata",
+	"safety_identifier",
+	"user",
+	"tool_choice",
+	"include",
+	"frequency_penalty",
+	"presence_penalty",
+	"conversation",
+	"max_tool_calls",
+	"moderation",
+	"client_metadata",
+	"context_management",
+}
+
+// stripUnsupportedCodexCompactFields removes request fields that the Codex
+// /responses/compact endpoint does not accept, so ordinary Responses clients that
+// reuse their default request builder for compact calls do not fail upstream.
+func stripUnsupportedCodexCompactFields(body []byte) []byte {
+	for _, field := range codexCompactUnsupportedFields {
+		if gjson.GetBytes(body, field).Exists() {
+			body, _ = sjson.DeleteBytes(body, field)
+		}
+	}
+	// The compact endpoint confirms "priority" (and rejects "auto"/"flex"/other
+	// values with "Unsupported service_tier: <value>"), mirroring the conditional
+	// handling already applied to ordinary Codex /responses requests.
+	if serviceTier := gjson.GetBytes(body, "service_tier"); serviceTier.Exists() && serviceTier.String() != "priority" {
+		body, _ = sjson.DeleteBytes(body, "service_tier")
 	}
 	return body
 }
