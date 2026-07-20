@@ -200,7 +200,7 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 	// corrupt the body. Disable heartbeats there, as forwardGeminiStream already does.
 	var keepAliveInterval *time.Duration
 	if alt != "" {
-		keepAliveInterval = new(time.Duration(0))
+		keepAliveInterval = new(time.Duration)
 	}
 
 	h.BootstrapStream(c, flusher, handlers.StreamBootstrapOptions{
@@ -311,7 +311,7 @@ func (h *GeminiAPIHandler) handleGenerateContent(c *gin.Context, modelName strin
 func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flusher, alt string, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 	var keepAliveInterval *time.Duration
 	if alt != "" {
-		keepAliveInterval = new(time.Duration(0))
+		keepAliveInterval = new(time.Duration)
 	}
 
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{

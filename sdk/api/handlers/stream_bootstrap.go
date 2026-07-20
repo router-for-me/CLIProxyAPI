@@ -101,10 +101,13 @@ func (h *BaseAPIHandler) BootstrapStream(c *gin.Context, flusher http.Flusher, o
 	)
 
 	if keepAliveInterval > 0 {
-		resultChan = make(chan bootstrapResult, 1)
+		// Capture the channel in a local the goroutine owns, so a later reassignment of
+		// resultChan in the select loop can never be observed by this send.
+		ch := make(chan bootstrapResult, 1)
+		resultChan = ch
 		go func() {
 			data, headers, errs := opts.Execute()
-			resultChan <- bootstrapResult{data: data, headers: headers, errs: errs}
+			ch <- bootstrapResult{data: data, headers: headers, errs: errs}
 		}()
 
 		ticker := time.NewTicker(keepAliveInterval)
@@ -115,6 +118,7 @@ func (h *BaseAPIHandler) BootstrapStream(c *gin.Context, flusher http.Flusher, o
 	}
 
 	headersCommitted := false
+	upstreamHeadersApplied := false
 
 	writeError := func(errMsg *interfaces.ErrorMessage) {
 		if headersCommitted {
@@ -149,6 +153,14 @@ func (h *BaseAPIHandler) BootstrapStream(c *gin.Context, flusher http.Flusher, o
 					opts.SetSSEHeaders()
 				}
 				headersCommitted = true
+			}
+			// If the upstream headers are already known (Execute returned them before the
+			// first payload, e.g. the plugin-executor path), apply them now so a slow first
+			// chunk does not drop them. On the auth-manager path they are still nil here and
+			// OnFirstChunk applies them on the uncommitted path as before.
+			if !upstreamHeadersApplied && upstreamHeaders != nil {
+				WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+				upstreamHeadersApplied = true
 			}
 			_, _ = c.Writer.Write([]byte(KeepAliveSSEComment))
 			flusher.Flush()
