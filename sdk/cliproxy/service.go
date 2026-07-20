@@ -1628,11 +1628,11 @@ func (s *Service) Run(ctx context.Context) error {
 		redisqueue.SetUsageStatisticsEnabled(true)
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer shutdownCancel()
 	defer func() {
-		if err := s.Shutdown(shutdownCtx); err != nil {
-			log.Errorf("service shutdown returned error: %v", err)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer shutdownCancel()
+		if errShutdown := s.Shutdown(shutdownCtx); errShutdown != nil {
+			log.Errorf("service shutdown returned error: %v", errShutdown)
 		}
 	}()
 
@@ -1806,20 +1806,6 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			ctx = context.Background()
 		}
 
-		if s.homeCancel != nil {
-			s.homeCancel()
-			s.homeCancel = nil
-		}
-		if s.homeClient != nil {
-			s.homeClient.Close()
-			s.homeClient = nil
-		}
-		if s.homeLogForwarder != nil {
-			s.homeLogForwarder.Stop()
-			s.homeLogForwarder = nil
-		}
-		home.ClearCurrent()
-
 		// legacy refresh loop removed; only stopping core auth manager below
 
 		if s.watcherCancel != nil {
@@ -1859,13 +1845,35 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.server != nil {
 			shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
-			if err := s.server.Stop(shutdownCtx); err != nil {
-				log.Errorf("error stopping API server: %v", err)
+			if errStop := s.server.Stop(shutdownCtx); errStop != nil {
+				log.Errorf("error stopping API server: %v", errStop)
 				if shutdownErr == nil {
-					shutdownErr = err
+					shutdownErr = errStop
 				}
 			}
 		}
+
+		if s.coreManager != nil {
+			if errShutdownHomeLeases := s.coreManager.ShutdownHomeLeaseReleases(ctx); errShutdownHomeLeases != nil {
+				log.Errorf("failed to drain Home lease releases: %v", errShutdownHomeLeases)
+				if shutdownErr == nil {
+					shutdownErr = errShutdownHomeLeases
+				}
+			}
+		}
+		if s.homeCancel != nil {
+			s.homeCancel()
+			s.homeCancel = nil
+		}
+		if s.homeClient != nil {
+			s.homeClient.Close()
+			s.homeClient = nil
+		}
+		if s.homeLogForwarder != nil {
+			s.homeLogForwarder.Stop()
+			s.homeLogForwarder = nil
+		}
+		home.ClearCurrent()
 
 		if s.pluginHost != nil {
 			sdktranslator.SetPluginHooks(nil)

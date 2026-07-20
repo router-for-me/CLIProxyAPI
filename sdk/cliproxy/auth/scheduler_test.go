@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -62,11 +63,13 @@ type inactivePluginScheduler struct {
 }
 
 type authKindHomeDispatcher struct {
+	mu          sync.Mutex
 	auths       []Auth
 	counts      []int
 	requestIDs  []string
 	dispatchIDs []string
 	releasedIDs []string
+	released    chan struct{}
 }
 
 func (d *authKindHomeDispatcher) HeartbeatOK() bool {
@@ -78,14 +81,18 @@ func (d *authKindHomeDispatcher) RPopAuth(_ context.Context, _ string, _ string,
 }
 
 func (d *authKindHomeDispatcher) RPopAuthWithIdentity(_ context.Context, _ string, requestID string, dispatchID string, _ string, _ http.Header, count int) ([]byte, error) {
+	d.mu.Lock()
 	d.counts = append(d.counts, count)
 	d.requestIDs = append(d.requestIDs, requestID)
 	d.dispatchIDs = append(d.dispatchIDs, dispatchID)
 	if count < 1 || count > len(d.auths) {
+		d.mu.Unlock()
 		return nil, home.ErrAuthNotFound
 	}
+	auth := d.auths[count-1]
+	d.mu.Unlock()
 	return json.Marshal(homeAuthDispatchResponse{
-		Auth:            d.auths[count-1],
+		Auth:            auth,
 		LeaseID:         dispatchID,
 		LeaseTTLSeconds: 60,
 	})
@@ -96,7 +103,16 @@ func (d *authKindHomeDispatcher) RenewInFlightLease(context.Context, string) (bo
 }
 
 func (d *authKindHomeDispatcher) ReleaseInFlightLease(_ context.Context, leaseID string, _ string) (bool, error) {
+	d.mu.Lock()
 	d.releasedIDs = append(d.releasedIDs, leaseID)
+	released := d.released
+	d.mu.Unlock()
+	if released != nil {
+		select {
+		case released <- struct{}{}:
+		default:
+		}
+	}
 	return true, nil
 }
 
@@ -557,7 +573,10 @@ func TestManagerSelectAuthByKindAdvancesHomeAuthCount(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dispatcher := &authKindHomeDispatcher{auths: tt.auths}
+			dispatcher := &authKindHomeDispatcher{
+				auths:    tt.auths,
+				released: make(chan struct{}, len(tt.auths)),
+			}
 			oldCurrentHomeDispatcher := currentHomeDispatcher
 			currentHomeDispatcher = func() homeAuthDispatcher {
 				return dispatcher
@@ -588,6 +607,15 @@ func TestManagerSelectAuthByKindAdvancesHomeAuthCount(t *testing.T) {
 				}
 				manager.ReleaseHomeLease(selected, "test_completed")
 			}
+			for releaseIndex := 0; releaseIndex < len(tt.auths); releaseIndex++ {
+				select {
+				case <-dispatcher.released:
+				case <-time.After(time.Second):
+					t.Fatalf("timed out waiting for lease release %d", releaseIndex+1)
+				}
+			}
+			dispatcher.mu.Lock()
+			defer dispatcher.mu.Unlock()
 			if len(dispatcher.counts) != 2 || dispatcher.counts[0] != 1 || dispatcher.counts[1] != 2 {
 				t.Fatalf("home auth counts = %v, want [1 2]", dispatcher.counts)
 			}

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sync"
 	"testing"
@@ -62,20 +63,24 @@ func (e *leaseIdentityExecutor) ExecuteStream(ctx context.Context, auth *Auth, r
 }
 
 type leaseTestDispatcher struct {
-	mu             sync.Mutex
-	requestIDs     []string
-	dispatchIDs    []string
-	renewedIDs     []string
-	releasedIDs    []string
-	releaseReason  []string
-	renewed        chan struct{}
-	released       chan struct{}
-	releaseErrors  int
-	dispatchErrors int
-	dispatchError  error
-	busy           bool
-	busyResponses  int
-	busyCode       string
+	mu              sync.Mutex
+	requestIDs      []string
+	dispatchIDs     []string
+	renewedIDs      []string
+	releasedIDs     []string
+	releaseReason   []string
+	renewed         chan struct{}
+	released        chan struct{}
+	releaseStarted  chan struct{}
+	releaseBlock    <-chan struct{}
+	releaseErrors   int
+	dispatchErrors  int
+	dispatchError   error
+	leaseTTLSeconds int64
+	leaseExpiresAt  time.Time
+	busy            bool
+	busyResponses   int
+	busyCode        string
 }
 
 func (d *leaseTestDispatcher) HeartbeatOK() bool { return true }
@@ -95,6 +100,8 @@ func (d *leaseTestDispatcher) RPopAuthWithIdentity(_ context.Context, requestedM
 	}
 	busyCode := d.busyCode
 	dispatchError := d.dispatchError
+	leaseTTLSeconds := d.leaseTTLSeconds
+	leaseExpiresAt := d.leaseExpiresAt
 	if d.dispatchErrors > 0 {
 		d.dispatchErrors--
 		d.mu.Unlock()
@@ -110,12 +117,20 @@ func (d *leaseTestDispatcher) RPopAuthWithIdentity(_ context.Context, requestedM
 		}
 		return []byte(`{"error":{"type":"` + busyCode + `","message":"busy","retryable":true,"retry_after_ms":250,"scope":"credential"}}`), nil
 	}
+	if leaseTTLSeconds <= 0 {
+		leaseTTLSeconds = 60
+	}
+	leaseExpiresAtRaw := ""
+	if !leaseExpiresAt.IsZero() {
+		leaseExpiresAtRaw = leaseExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
 	return json.Marshal(homeAuthDispatchResponse{
 		Model:           requestedModel,
 		Provider:        "test",
 		AuthIndex:       "home-auth-1",
 		LeaseID:         dispatchID,
-		LeaseTTLSeconds: 60,
+		LeaseTTLSeconds: leaseTTLSeconds,
+		LeaseExpiresAt:  leaseExpiresAtRaw,
 		Auth: Auth{
 			ID:       "home-auth-1",
 			Provider: "test",
@@ -142,19 +157,80 @@ func (d *leaseTestDispatcher) ReleaseInFlightLease(_ context.Context, leaseID st
 	d.mu.Lock()
 	d.releasedIDs = append(d.releasedIDs, leaseID)
 	d.releaseReason = append(d.releaseReason, reason)
-	if d.released != nil {
-		select {
-		case d.released <- struct{}{}:
-		default:
-		}
-	}
-	if d.releaseErrors > 0 {
+	released := d.released
+	releaseStarted := d.releaseStarted
+	releaseBlock := d.releaseBlock
+	releaseFails := d.releaseErrors > 0
+	if releaseFails {
 		d.releaseErrors--
-		d.mu.Unlock()
-		return false, context.DeadlineExceeded
 	}
 	d.mu.Unlock()
+	for _, signal := range []chan struct{}{released, releaseStarted} {
+		if signal != nil {
+			select {
+			case signal <- struct{}{}:
+			default:
+			}
+		}
+	}
+	if releaseBlock != nil {
+		<-releaseBlock
+	}
+	if releaseFails {
+		return false, context.DeadlineExceeded
+	}
 	return true, nil
+}
+
+type selectiveBlockingReleaseDispatcher struct {
+	firstStarted chan struct{}
+	firstBlock   <-chan struct{}
+	secondDone   chan struct{}
+}
+
+func (d *selectiveBlockingReleaseDispatcher) RenewInFlightLease(context.Context, string) (bool, error) {
+	return true, nil
+}
+
+func (d *selectiveBlockingReleaseDispatcher) ReleaseInFlightLease(ctx context.Context, leaseID string, _ string) (bool, error) {
+	switch leaseID {
+	case "lease-blocked":
+		select {
+		case d.firstStarted <- struct{}{}:
+		default:
+		}
+		select {
+		case <-d.firstBlock:
+			return true, nil
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	case "lease-fast":
+		select {
+		case d.secondDone <- struct{}{}:
+		default:
+		}
+		return true, nil
+	default:
+		return true, nil
+	}
+}
+
+func waitForLeaseReleaseCount(t *testing.T, dispatcher *leaseTestDispatcher, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		dispatcher.mu.Lock()
+		got := len(dispatcher.releasedIDs)
+		dispatcher.mu.Unlock()
+		if got >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %d lease release(s); got %d", want, got)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func TestHomeDispatchIdentityAndLeaseRelease(t *testing.T) {
@@ -172,6 +248,7 @@ func TestHomeDispatchIdentityAndLeaseRelease(t *testing.T) {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
 	identity := <-captured
+	waitForLeaseReleaseCount(t, dispatcher, 1)
 
 	dispatcher.mu.Lock()
 	defer dispatcher.mu.Unlock()
@@ -189,6 +266,41 @@ func TestHomeDispatchIdentityAndLeaseRelease(t *testing.T) {
 	}
 	if identity.requestID != "request-lease-1" || identity.leaseID != dispatcher.dispatchIDs[0] || identity.authIndex != "home-auth-1" || identity.model != "model-a" {
 		t.Fatalf("execution identity = %+v", identity)
+	}
+}
+
+func TestHomeSuccessfulExecutionDoesNotWaitForReleaseRPC(t *testing.T) {
+	unblockRelease := make(chan struct{})
+	defer close(unblockRelease)
+	dispatcher := &leaseTestDispatcher{
+		releaseStarted: make(chan struct{}, 1),
+		releaseBlock:   unblockRelease,
+	}
+	oldCurrentHomeDispatcher := currentHomeDispatcher
+	currentHomeDispatcher = func() homeAuthDispatcher { return dispatcher }
+	t.Cleanup(func() { currentHomeDispatcher = oldCurrentHomeDispatcher })
+
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.RegisterExecutor(schedulerTestExecutor{})
+	done := make(chan error, 1)
+	go func() {
+		_, errExecute := manager.Execute(context.Background(), []string{"test"}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{})
+		done <- errExecute
+	}()
+
+	select {
+	case errExecute := <-done:
+		if errExecute != nil {
+			t.Fatalf("Execute() error = %v", errExecute)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Execute() waited for the Home lease release RPC")
+	}
+	select {
+	case <-dispatcher.releaseStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the asynchronous release RPC")
 	}
 }
 
@@ -225,6 +337,7 @@ func TestHomeDispatchTransportRetryReusesDispatchIdentity(t *testing.T) {
 	if _, errExecute := manager.Execute(ctx, []string{"test"}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{}); errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
+	waitForLeaseReleaseCount(t, dispatcher, 1)
 
 	dispatcher.mu.Lock()
 	defer dispatcher.mu.Unlock()
@@ -239,9 +352,41 @@ func TestHomeDispatchTransportRetryReusesDispatchIdentity(t *testing.T) {
 	}
 }
 
+func TestHomeDispatchUsesReportedExpiryForFirstRenewal(t *testing.T) {
+	dispatcher := &leaseTestDispatcher{
+		leaseTTLSeconds: int64((30 * time.Minute) / time.Second),
+		leaseExpiresAt:  time.Now().Add(3 * time.Second),
+	}
+	oldCurrentHomeDispatcher := currentHomeDispatcher
+	currentHomeDispatcher = func() homeAuthDispatcher { return dispatcher }
+	t.Cleanup(func() { currentHomeDispatcher = oldCurrentHomeDispatcher })
+
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.RegisterExecutor(schedulerTestExecutor{})
+	auth, _, _, errPick := manager.pickNextViaHome(logging.WithRequestID(context.Background(), "request-near-expiry"), "model-a", cliproxyexecutor.Options{}, nil)
+	if errPick != nil || auth == nil {
+		t.Fatalf("pickNextViaHome() = %#v, %v", auth, errPick)
+	}
+	lease := homeLeaseFromAuth(auth)
+	if lease == nil {
+		t.Fatal("home lease = nil")
+	}
+	if lease.firstRenewAfter <= 0 || lease.firstRenewAfter >= 2*time.Second || lease.firstRenewAfter >= lease.renewEvery {
+		t.Fatalf("first renewal = %v, cadence = %v, want an earlier near-expiry renewal", lease.firstRenewAfter, lease.renewEvery)
+	}
+	manager.ReleaseHomeLease(auth, "test_completed")
+	waitForLeaseReleaseCount(t, dispatcher, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if errShutdown := manager.ShutdownHomeLeaseReleases(ctx); errShutdown != nil {
+		t.Fatalf("release queue shutdown error = %v", errShutdown)
+	}
+}
+
 func TestHomeLeaseRenewsUntilRelease(t *testing.T) {
 	dispatcher := &leaseTestDispatcher{renewed: make(chan struct{}, 1)}
-	lease := newHomeLeaseHandle(dispatcher, "lease-renew", time.Minute)
+	lease := newHomeLeaseHandle(dispatcher, "lease-renew", time.Minute, time.Time{}, nil)
 	if lease == nil {
 		t.Fatal("newHomeLeaseHandle() = nil")
 	}
@@ -254,6 +399,7 @@ func TestHomeLeaseRenewsUntilRelease(t *testing.T) {
 		t.Fatal("timed out waiting for lease renewal")
 	}
 	lease.release("completed")
+	waitForLeaseReleaseCount(t, dispatcher, 1)
 
 	dispatcher.mu.Lock()
 	defer dispatcher.mu.Unlock()
@@ -265,9 +411,226 @@ func TestHomeLeaseRenewsUntilRelease(t *testing.T) {
 	}
 }
 
+func TestHomeLeaseStartsWhenExecutionClaimsIt(t *testing.T) {
+	dispatcher := &leaseTestDispatcher{renewed: make(chan struct{}, 1)}
+	lease := newHomeLeaseHandle(dispatcher, "lease-claimed", time.Minute, time.Time{}, nil)
+	if lease == nil {
+		t.Fatal("newHomeLeaseHandle() = nil")
+	}
+	lease.renewEvery = 5 * time.Millisecond
+	auth := &Auth{}
+	setHomeLease(auth, lease)
+
+	select {
+	case <-dispatcher.renewed:
+		t.Fatal("lease renewed before execution claimed it")
+	case <-time.After(25 * time.Millisecond):
+	}
+	ctx := contextWithHomeLease(context.Background(), auth)
+	if got := cliproxyusage.HomeLeaseIDFromContext(ctx); got != "lease-claimed" {
+		t.Fatalf("HomeLeaseIDFromContext() = %q, want lease-claimed", got)
+	}
+	select {
+	case <-dispatcher.renewed:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for claimed lease renewal")
+	}
+	lease.release("completed")
+	waitForLeaseReleaseCount(t, dispatcher, 1)
+}
+
+func TestHomeLeaseStartBindsCancellation(t *testing.T) {
+	dispatcher := &leaseTestDispatcher{}
+	releases := newHomeLeaseReleaseQueue()
+	lease := newHomeLeaseHandle(dispatcher, "lease-context-cancel", time.Minute, time.Time{}, releases)
+	if lease == nil {
+		t.Fatal("newHomeLeaseHandle() = nil")
+	}
+	auth := &Auth{}
+	setHomeLease(auth, lease)
+	ctx, cancel := context.WithCancel(context.Background())
+	startHomeLease(ctx, auth)
+	cancel()
+	waitForLeaseReleaseCount(t, dispatcher, 1)
+
+	dispatcher.mu.Lock()
+	if len(dispatcher.releaseReason) != 1 || dispatcher.releaseReason[0] != "request_canceled" {
+		dispatcher.mu.Unlock()
+		t.Fatalf("release reasons = %v, want request_canceled", dispatcher.releaseReason)
+	}
+	dispatcher.mu.Unlock()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+	defer shutdownCancel()
+	if errShutdown := releases.shutdown(shutdownCtx); errShutdown != nil {
+		t.Fatalf("release queue shutdown error = %v", errShutdown)
+	}
+}
+
+func TestHomeLeaseRenewsBeforeReportedExpiry(t *testing.T) {
+	dispatcher := &leaseTestDispatcher{renewed: make(chan struct{}, 1)}
+	releases := newHomeLeaseReleaseQueue()
+	lease := newHomeLeaseHandle(dispatcher, "lease-near-expiry", 30*time.Minute, time.Now().Add(60*time.Millisecond), releases)
+	if lease == nil {
+		t.Fatal("newHomeLeaseHandle() = nil")
+	}
+	lease.start()
+
+	select {
+	case <-dispatcher.renewed:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for renewal before reported expiry")
+	}
+	lease.release("completed")
+	waitForLeaseReleaseCount(t, dispatcher, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if errShutdown := releases.shutdown(ctx); errShutdown != nil {
+		t.Fatalf("release queue shutdown error = %v", errShutdown)
+	}
+}
+
+func TestHomeLeaseReleaseQueueShutdownDrains(t *testing.T) {
+	unblockRelease := make(chan struct{})
+	dispatcher := &leaseTestDispatcher{
+		releaseStarted: make(chan struct{}, 1),
+		releaseBlock:   unblockRelease,
+	}
+	releases := newHomeLeaseReleaseQueue()
+	lease := newHomeLeaseHandle(dispatcher, "lease-shutdown-drain", time.Minute, time.Time{}, releases)
+	if lease == nil {
+		t.Fatal("newHomeLeaseHandle() = nil")
+	}
+	lease.release("completed")
+	select {
+	case <-dispatcher.releaseStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for queued release to start")
+	}
+
+	shutdownDone := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go func() {
+		shutdownDone <- releases.shutdown(ctx)
+	}()
+	select {
+	case errShutdown := <-shutdownDone:
+		t.Fatalf("release queue shutdown returned before draining: %v", errShutdown)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(unblockRelease)
+	select {
+	case errShutdown := <-shutdownDone:
+		if errShutdown != nil {
+			t.Fatalf("release queue shutdown error = %v", errShutdown)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for release queue shutdown")
+	}
+	if releases.enqueue(homeLeaseReleaseRequest{client: dispatcher, leaseID: "lease-after-shutdown"}) {
+		t.Fatal("release queue accepted work after shutdown")
+	}
+}
+
+func TestHomeLeaseReleaseQueueIsBounded(t *testing.T) {
+	unblockRelease := make(chan struct{})
+	dispatcher := &leaseTestDispatcher{
+		releaseStarted: make(chan struct{}, 1),
+		releaseBlock:   unblockRelease,
+	}
+	releases := newHomeLeaseReleaseQueue()
+	releases.limit = 2
+	releases.workers = 1
+	if !releases.enqueue(homeLeaseReleaseRequest{client: dispatcher, leaseID: "lease-running"}) {
+		t.Fatal("release queue rejected the running request")
+	}
+	if !releases.enqueue(homeLeaseReleaseRequest{client: dispatcher, leaseID: "lease-pending"}) {
+		t.Fatal("release queue rejected the immediate pending request")
+	}
+	if releases.enqueue(homeLeaseReleaseRequest{client: dispatcher, leaseID: "lease-overflow"}) {
+		t.Fatal("release queue accepted work beyond its bound")
+	}
+	select {
+	case <-dispatcher.releaseStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the running release")
+	}
+	close(unblockRelease)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if errShutdown := releases.shutdown(ctx); errShutdown != nil {
+		t.Fatalf("release queue shutdown error = %v", errShutdown)
+	}
+	waitForLeaseReleaseCount(t, dispatcher, 2)
+}
+
+func TestHomeLeaseReleaseWorkersAvoidHeadOfLineBlocking(t *testing.T) {
+	unblockFirst := make(chan struct{})
+	dispatcher := &selectiveBlockingReleaseDispatcher{
+		firstStarted: make(chan struct{}, 1),
+		firstBlock:   unblockFirst,
+		secondDone:   make(chan struct{}, 1),
+	}
+	releases := newHomeLeaseReleaseQueue()
+	releases.workers = 2
+	if !releases.enqueue(homeLeaseReleaseRequest{client: dispatcher, leaseID: "lease-blocked"}) {
+		t.Fatal("release queue rejected the blocked release")
+	}
+	select {
+	case <-dispatcher.firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the blocked release")
+	}
+	if !releases.enqueue(homeLeaseReleaseRequest{client: dispatcher, leaseID: "lease-fast"}) {
+		t.Fatal("release queue rejected the fast release")
+	}
+	select {
+	case <-dispatcher.secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("fast release was blocked behind the failing release")
+	}
+	close(unblockFirst)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if errShutdown := releases.shutdown(ctx); errShutdown != nil {
+		t.Fatalf("release queue shutdown error = %v", errShutdown)
+	}
+}
+
+func TestHomeLeaseReleaseShutdownSkipsPendingWorkAfterTimeout(t *testing.T) {
+	dispatcher := &selectiveBlockingReleaseDispatcher{
+		firstStarted: make(chan struct{}, 1),
+		firstBlock:   make(chan struct{}),
+		secondDone:   make(chan struct{}, 1),
+	}
+	releases := newHomeLeaseReleaseQueue()
+	releases.workers = 1
+	if !releases.enqueue(homeLeaseReleaseRequest{client: dispatcher, leaseID: "lease-blocked"}) {
+		t.Fatal("release queue rejected the blocked release")
+	}
+	select {
+	case <-dispatcher.firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the blocked release")
+	}
+	if !releases.enqueue(homeLeaseReleaseRequest{client: dispatcher, leaseID: "lease-fast"}) {
+		t.Fatal("release queue rejected the pending release")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	if errShutdown := releases.shutdown(ctx); !errors.Is(errShutdown, context.DeadlineExceeded) {
+		t.Fatalf("release queue shutdown error = %v, want deadline exceeded", errShutdown)
+	}
+	select {
+	case <-dispatcher.secondDone:
+		t.Fatal("pending release ran after shutdown cancellation")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestHomeLeaseRetriesFailedRelease(t *testing.T) {
 	dispatcher := &leaseTestDispatcher{released: make(chan struct{}, 2), releaseErrors: 1}
-	lease := newHomeLeaseHandle(dispatcher, "lease-release-retry", time.Minute)
+	lease := newHomeLeaseHandle(dispatcher, "lease-release-retry", time.Minute, time.Time{}, nil)
 	if lease == nil {
 		t.Fatal("newHomeLeaseHandle() = nil")
 	}
@@ -298,7 +661,7 @@ func TestHomeLeaseDoesNotReplaceAuthRuntime(t *testing.T) {
 	dispatcher := &leaseTestDispatcher{}
 	runtimeState := &struct{ name string }{name: "provider-runtime"}
 	auth := &Auth{Runtime: runtimeState}
-	lease := newHomeLeaseHandle(dispatcher, "lease-runtime", time.Minute)
+	lease := newHomeLeaseHandle(dispatcher, "lease-runtime", time.Minute, time.Time{}, nil)
 	setHomeLease(auth, lease)
 	t.Cleanup(func() { releaseHomeLease(auth, "test_cleanup") })
 
@@ -327,6 +690,7 @@ func TestHomeCountReleasesLeaseAfterCompletion(t *testing.T) {
 		t.Fatalf("ExecuteCount() error = %v", errExecute)
 	}
 	identity := <-captured
+	waitForLeaseReleaseCount(t, dispatcher, 1)
 
 	dispatcher.mu.Lock()
 	defer dispatcher.mu.Unlock()
@@ -358,6 +722,7 @@ func TestHomeCountEndpointErrorReleasesEveryReservedLease(t *testing.T) {
 	if errExecute == nil || statusCodeFromError(errExecute) != http.StatusNotFound {
 		t.Fatalf("ExecuteCount() error = %v, want endpoint 404", errExecute)
 	}
+	waitForLeaseReleaseCount(t, dispatcher, 2)
 
 	dispatcher.mu.Lock()
 	defer dispatcher.mu.Unlock()
@@ -386,6 +751,7 @@ func TestHomeInvalidRequestReleasesLease(t *testing.T) {
 		t.Fatalf("Execute() error = %v, want 400", errExecute)
 	}
 	identity := <-captured
+	waitForLeaseReleaseCount(t, dispatcher, 1)
 
 	dispatcher.mu.Lock()
 	defer dispatcher.mu.Unlock()
@@ -395,6 +761,29 @@ func TestHomeInvalidRequestReleasesLease(t *testing.T) {
 	if identity.requestID == "" || identity.leaseID != dispatcher.releasedIDs[0] || identity.authIndex != "home-auth-1" || identity.model != "model-a" {
 		t.Fatalf("failure identity = %+v", identity)
 	}
+}
+
+type leasePreBootstrapStalledExecutor struct{ leaseIdentityExecutor }
+
+func (e *leasePreBootstrapStalledExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.capture(ctx, auth, req)
+	return &cliproxyexecutor.StreamResult{Chunks: make(chan cliproxyexecutor.StreamChunk)}, nil
+}
+
+type leaseStalledStreamExecutor struct {
+	leaseIdentityExecutor
+	unblock <-chan struct{}
+}
+
+func (e *leaseStalledStreamExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.capture(ctx, auth, req)
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"type":"response.output_text.delta","delta":"hello"}`)}
+	go func() {
+		<-e.unblock
+		close(chunks)
+	}()
+	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 }
 
 type leaseCanceledStreamExecutor struct{ leaseIdentityExecutor }
@@ -502,6 +891,89 @@ func TestHomeStreamCancellationReleasesLease(t *testing.T) {
 	}
 }
 
+func TestHomePreBootstrapCancellationReleasesLease(t *testing.T) {
+	dispatcher := &leaseTestDispatcher{}
+	oldCurrentHomeDispatcher := currentHomeDispatcher
+	currentHomeDispatcher = func() homeAuthDispatcher { return dispatcher }
+	t.Cleanup(func() { currentHomeDispatcher = oldCurrentHomeDispatcher })
+
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	captured := make(chan leaseExecutionIdentity, 1)
+	manager.RegisterExecutor(&leasePreBootstrapStalledExecutor{leaseIdentityExecutor: leaseIdentityExecutor{captured: captured}})
+	ctx, cancel := context.WithCancel(logging.WithRequestID(context.Background(), "request-pre-bootstrap-cancel"))
+	done := make(chan error, 1)
+	go func() {
+		_, errExecute := manager.ExecuteStream(ctx, []string{"test"}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{})
+		done <- errExecute
+	}()
+	identity := <-captured
+	cancel()
+	select {
+	case errExecute := <-done:
+		if !errors.Is(errExecute, context.Canceled) {
+			t.Fatalf("ExecuteStream() error = %v, want context canceled", errExecute)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pre-bootstrap stream did not return after cancellation")
+	}
+	waitForLeaseReleaseCount(t, dispatcher, 1)
+	if identity.requestID != "request-pre-bootstrap-cancel" || identity.leaseID == "" {
+		t.Fatalf("pre-bootstrap stream identity = %+v", identity)
+	}
+
+	dispatcher.mu.Lock()
+	defer dispatcher.mu.Unlock()
+	if len(dispatcher.releaseReason) != 1 || dispatcher.releaseReason[0] != "request_canceled" {
+		t.Fatalf("release reasons = %v, want request_canceled", dispatcher.releaseReason)
+	}
+}
+
+func TestHomeStalledStreamCancellationReleasesLease(t *testing.T) {
+	dispatcher := &leaseTestDispatcher{}
+	oldCurrentHomeDispatcher := currentHomeDispatcher
+	currentHomeDispatcher = func() homeAuthDispatcher { return dispatcher }
+	t.Cleanup(func() { currentHomeDispatcher = oldCurrentHomeDispatcher })
+
+	unblock := make(chan struct{})
+	defer close(unblock)
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	captured := make(chan leaseExecutionIdentity, 1)
+	manager.RegisterExecutor(&leaseStalledStreamExecutor{
+		leaseIdentityExecutor: leaseIdentityExecutor{captured: captured},
+		unblock:               unblock,
+	})
+	ctx, cancel := context.WithCancel(logging.WithRequestID(context.Background(), "request-stalled-stream-cancel"))
+	result, errExecute := manager.ExecuteStream(ctx, []string{"test"}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{})
+	if errExecute != nil || result == nil {
+		t.Fatalf("ExecuteStream() = %#v, %v", result, errExecute)
+	}
+	if _, ok := <-result.Chunks; !ok {
+		t.Fatal("stream closed before the first chunk")
+	}
+	cancel()
+	select {
+	case _, ok := <-result.Chunks:
+		if ok {
+			t.Fatal("stream returned an unexpected chunk after cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stalled stream did not close after cancellation")
+	}
+	waitForLeaseReleaseCount(t, dispatcher, 1)
+	identity := <-captured
+	if identity.requestID != "request-stalled-stream-cancel" || identity.leaseID == "" {
+		t.Fatalf("stalled stream identity = %+v", identity)
+	}
+
+	dispatcher.mu.Lock()
+	defer dispatcher.mu.Unlock()
+	if len(dispatcher.releaseReason) != 1 || dispatcher.releaseReason[0] != "request_canceled" {
+		t.Fatalf("release reasons = %v, want request_canceled", dispatcher.releaseReason)
+	}
+}
+
 func TestHomeConcurrencyErrorMapsToRetryable429(t *testing.T) {
 	for _, errorCode := range []string{"credential_concurrency_exceeded", "credential_model_concurrency_exceeded"} {
 		t.Run(errorCode, func(t *testing.T) {
@@ -538,6 +1010,7 @@ func TestHomeConcurrencyBusyRetriesWithStableRequestIdentity(t *testing.T) {
 	if _, errExecute := manager.Execute(ctx, []string{"test"}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{}); errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
+	waitForLeaseReleaseCount(t, dispatcher, 1)
 
 	dispatcher.mu.Lock()
 	defer dispatcher.mu.Unlock()

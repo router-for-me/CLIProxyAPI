@@ -230,6 +230,8 @@ type Manager struct {
 	// homeRuntimeAuths caches auths returned by Home so websocket sessions can
 	// reuse an established upstream credential without dispatching every turn.
 	homeRuntimeAuths map[string]map[string]*Auth
+	// homeLeaseReleases serializes and bounds asynchronous Home lease releases.
+	homeLeaseReleases *homeLeaseReleaseQueue
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
 	providerOffsets map[string]int
 
@@ -274,14 +276,15 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:            store,
-		executors:        make(map[string]ProviderExecutor),
-		selector:         selector,
-		hook:             hook,
-		auths:            make(map[string]*Auth),
-		homeRuntimeAuths: make(map[string]map[string]*Auth),
-		providerOffsets:  make(map[string]int),
-		modelPoolOffsets: make(map[string]int),
+		store:             store,
+		executors:         make(map[string]ProviderExecutor),
+		selector:          selector,
+		hook:              hook,
+		auths:             make(map[string]*Auth),
+		homeRuntimeAuths:  make(map[string]map[string]*Auth),
+		homeLeaseReleases: newHomeLeaseReleaseQueue(),
+		providerOffsets:   make(map[string]int),
+		modelPoolOffsets:  make(map[string]int),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -1832,13 +1835,30 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		}
 		for _, chunk := range buffered {
 			if ok := emit(chunk); !ok {
-				discardStreamChunks(remaining)
 				return
 			}
 		}
-		for chunk := range remaining {
-			if ok := emit(chunk); !ok {
-				discardStreamChunks(remaining)
+		// Executors receive ctx and must stop producing when it is cancelled.
+		// Do not start an unbounded drainer for a channel that may never close.
+		for {
+			var (
+				chunk cliproxyexecutor.StreamChunk
+				ok    bool
+			)
+			if ctx == nil {
+				chunk, ok = <-remaining
+			} else {
+				select {
+				case <-ctx.Done():
+					releaseReason = "request_canceled"
+					return
+				case chunk, ok = <-remaining:
+				}
+			}
+			if !ok {
+				break
+			}
+			if okEmit := emit(chunk); !okEmit {
 				return
 			}
 		}
@@ -1907,7 +1927,6 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
-				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
 			}
 			if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(ctx, auth, bootstrapErr, didRefreshOnUnauthorized); okRefresh {
@@ -1929,6 +1948,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 		}
 		if bootstrapErr != nil {
+			if errCtx := ctx.Err(); errCtx != nil {
+				return nil, errCtx
+			}
 			if isRequestInvalidError(bootstrapErr) {
 				rerr := resultErrorFromError(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
@@ -4965,8 +4987,10 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 }
 
 // SelectAuth selects one credential through the configured scheduling strategy.
-// In Home mode the returned auth can carry a reserved in-flight lease; callers
-// that do not pass it to Execute must release it with ReleaseHomeLease.
+// In Home mode the returned auth can carry a reserved in-flight lease. Renewal
+// remains stopped so existing selection-only callers cannot leak it forever.
+// Call StartHomeLease for work that may outlive the reported lease TTL, and
+// always release the reservation with ReleaseHomeLease when work finishes.
 func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts cliproxyexecutor.Options) (*Auth, error) {
 	if m.HomeEnabled() {
 		ctx = ensureExecutionRequestID(ctx)
@@ -5022,10 +5046,27 @@ func (m *Manager) SelectAuthByKind(ctx context.Context, provider, model, require
 	}
 }
 
-// ReleaseHomeLease releases an in-flight reservation attached to an auth
-// returned by a Home-mode selection API. It is a no-op for standalone auths.
+// StartHomeLease starts renewal for an in-flight reservation returned by a
+// Home-mode selection API and releases it if ctx is cancelled. It is a no-op
+// for standalone auths.
+func (m *Manager) StartHomeLease(ctx context.Context, auth *Auth) {
+	startHomeLease(ctx, auth)
+}
+
+// ReleaseHomeLease asynchronously releases an in-flight reservation attached
+// to an auth returned by a Home-mode selection API. It is a no-op for
+// standalone auths.
 func (m *Manager) ReleaseHomeLease(auth *Auth, reason string) {
 	releaseHomeLease(auth, reason)
+}
+
+// ShutdownHomeLeaseReleases stops accepting release work and waits for queued
+// Home lease releases to finish or for ctx to expire.
+func (m *Manager) ShutdownHomeLeaseReleases(ctx context.Context) error {
+	if m == nil || m.homeLeaseReleases == nil {
+		return nil
+	}
+	return m.homeLeaseReleases.shutdown(ctx)
 }
 
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
@@ -5668,7 +5709,11 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	}
 	leaseClient, _ := client.(homeInFlightLeaseDispatcher)
 	leaseTTL := time.Duration(dispatch.LeaseTTLSeconds) * time.Second
-	lease := newHomeLeaseHandle(leaseClient, dispatch.LeaseID, leaseTTL)
+	leaseExpiresAt := time.Time{}
+	if rawExpiresAt := strings.TrimSpace(dispatch.LeaseExpiresAt); rawExpiresAt != "" {
+		leaseExpiresAt, _ = time.Parse(time.RFC3339Nano, rawExpiresAt)
+	}
+	lease := newHomeLeaseHandle(leaseClient, dispatch.LeaseID, leaseTTL, leaseExpiresAt, m.homeLeaseReleases)
 	releaseLease := func(reason string) {
 		if lease != nil {
 			lease.release(reason)
