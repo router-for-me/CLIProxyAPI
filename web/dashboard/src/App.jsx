@@ -12,6 +12,10 @@ import InternalUserDetailPage from './pages/InternalUserDetailPage.jsx';
 import ModelsCatalogPage from './pages/ModelsCatalogPage.jsx';
 import ErrorMessagesPage from './pages/ErrorMessagesPage.jsx';
 import SettingsPage from './pages/SettingsPage.jsx';
+import ManageCpaLayout from './pages/manage-cpa/ManageCpaLayout.jsx';
+import OverviewTab from './pages/manage-cpa/OverviewTab.jsx';
+import ProvidersTab from './pages/manage-cpa/ProvidersTab.jsx';
+import RawConfigTab from './pages/manage-cpa/RawConfigTab.jsx';
 
 // App is the root component and owns the auth session.
 //
@@ -106,6 +110,11 @@ export default function App() {
           <Route path="/models" element={<ModelsCatalogPage />} />
           <Route path="/error-messages" element={<ErrorMessagesPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/manage-cpa" element={<ManageCpaLayout />}>
+            <Route index element={<OverviewTab />} />
+            <Route path="providers" element={<ProvidersTab />} />
+            <Route path="raw-config" element={<RawConfigTab />} />
+          </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
@@ -120,6 +129,7 @@ function Sidebar({ onLogout, currentPath }) {
     { to: '/internal-users', label: 'Internal Users', icon: 'users' },
     { to: '/models', label: 'Models Catalog', icon: 'cube' },
     { to: '/error-messages', label: 'Error Messages', icon: 'alert' },
+    { to: '/manage-cpa', label: 'Manage CPA', icon: 'cpa' },
     { to: '/settings', label: 'Settings', icon: 'gear' },
   ];
   return (
@@ -169,5 +179,6 @@ const ICON_MAP = {
   users: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="5.5" r="2" /><path d="M2.5 13.5c0-2 1.5-3.5 3.5-3.5s3.5 1.5 3.5 3.5" /><circle cx="11" cy="6.5" r="1.7" /><path d="M9 13.5c0-1.6 1-3 2.5-3s2.5 1.4 2.5 3" /></svg>,
   cube: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><path d="M8 1l6 3.5v7L8 15l-6-3.5v-7L8 1zM8 1v14M2 4.5l6 3.5 6-3.5" /></svg>,
   alert: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><path d="M8 1l7 13H1L8 1zM8 6v4M8 11.5v0.5" strokeLinecap="round" /></svg>,
+  cpa: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><rect x="2" y="2" width="5" height="5" rx="1" /><rect x="9" y="2" width="5" height="5" rx="1" /><rect x="2" y="9" width="5" height="5" rx="1" /><rect x="9" y="9" width="5" height="5" rx="1" /></svg>,
   gear: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="2" /><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3" strokeLinecap="round" /></svg>,
 };

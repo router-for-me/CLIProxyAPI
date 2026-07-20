@@ -417,12 +417,38 @@ code, pre {
   width: 100%;
   max-width: 520px;
   max-height: 90vh;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.modal--sm { max-width: 420px; }
+.modal--md { max-width: 520px; }
+.modal--lg { max-width: 720px; }
+.modal--xl { max-width: 900px; }
+
+.modal__header {
+  margin-bottom: 16px;
+  flex-shrink: 0;
 }
 .modal__title {
   font-size: 16px;
   font-weight: 600;
-  margin: 0 0 16px;
+  margin: 0;
+}
+.modal__body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0;
+  padding-right: 4px;
+  margin-right: -4px; /* keep scrollbar tucked into the padding gutter */
+}
+.modal__footer {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 ul.list-bare { list-style: none; padding: 0; margin: 0; }
@@ -559,3 +585,341 @@ ul.list-bare li { padding: 4px 0; }
 .model-multiselect__status--error {
   color: var(--warning);
 }
+
+/* Tabs (sub-navigation, e.g. inside /manage-cpa) ----------------------- */
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.tab {
+  padding: 9px 16px;
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  font-size: 13px;
+  font-weight: 500;
+  background: transparent;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: color 0.12s ease, background 0.12s ease, border-color 0.12s ease;
+}
+.tab:hover {
+  color: var(--text);
+  background: var(--bg-elevated);
+}
+.tab.active {
+  color: var(--accent);
+  background: var(--bg-card);
+  border-color: var(--border);
+  position: relative;
+  top: 1px;
+}
+.tab.active:hover {
+  color: var(--accent);
+}
+
+/* Code / pre formatting tweaks for the raw-config viewer. */
+.code-block {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  max-height: 640px;
+  overflow: auto;
+  white-space: pre;
+  color: var(--text);
+  margin: 0;
+}
+.yaml-textarea {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  min-height: 480px;
+  resize: vertical;
+}
+
+/* Section title inside cards (used by ProviderKeyEditor blocks). */
+.section-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 12px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* Subtle horizontal divider between major sub-sections inside one tab. */
+.subdivider {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 24px 0;
+}
+
+/* ----- Form sub-section (used by Manage-CPA modal) --------------------- */
+
+.form-section {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.form-section:last-child {
+  margin-bottom: 0;
+}
+.form-section__title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 4px;
+}
+.form-section__hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin: 0 0 14px;
+}
+.form-section__row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.form-section__row--full {
+  grid-template-columns: 1fr;
+}
+@media (max-width: 600px) {
+  .form-section__row { grid-template-columns: 1fr; }
+}
+
+/* ----- Form validation states ----------------------------------------- */
+
+.form__label--required::after {
+  content: ' *';
+  color: var(--danger);
+}
+.form__error {
+  color: var(--danger);
+  font-size: 11px;
+  margin-top: 2px;
+}
+input.has-error,
+textarea.has-error,
+select.has-error {
+  border-color: var(--danger);
+}
+input.has-error:focus,
+textarea.has-error:focus,
+select.has-error:focus {
+  border-color: var(--danger);
+}
+.error-summary {
+  background: var(--danger-dim);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  margin-bottom: 14px;
+}
+.error-summary ul { margin: 4px 0 0 16px; padding: 0; }
+
+/* ----- Password input with show/hide toggle -------------------------- */
+
+.password-input {
+  position: relative;
+}
+.password-input input {
+  padding-right: 64px;
+}
+.password-toggle {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.password-toggle:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ----- List editors (models, headers, excluded-models) ---------------- */
+
+.list-editor {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.list-editor__empty {
+  color: var(--text-dim);
+  font-size: 11px;
+  text-align: center;
+  padding: 8px;
+}
+.list-editor__row {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.list-editor__row > input,
+.list-editor__row > select,
+.list-editor__row > textarea {
+  flex: 1 1 120px;
+  min-width: 0;
+}
+.list-editor__row--chip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  padding: 4px 0;
+}
+.list-editor__row--chip .chip-input {
+  flex: 0 0 auto;
+  min-width: 140px;
+}
+.list-editor__remove {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+  border-radius: var(--radius-sm);
+  flex: 0 0 28px;
+}
+.list-editor__remove:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--danger-dim);
+}
+.list-editor__add {
+  align-self: flex-start;
+  font-size: 11px;
+  padding: 4px 10px;
+}
+
+/* Small chip used for tag-style entries (e.g. excluded-models). */
+.entry-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 2px 4px 2px 10px;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--text);
+}
+.entry-chip__remove {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 4px;
+  font-size: 14px;
+  line-height: 1;
+}
+.entry-chip__remove:hover { color: var(--danger); }
+
+/* Header-row layout for a list-editor block (label + add button on the right). */
+.list-editor-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 4px;
+}
+
+/* ----- Compact toggle switch (used for boolean fields) --------------- */
+
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+}
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.toggle-switch__slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 20px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.toggle-switch__slider::before {
+  position: absolute;
+  content: '';
+  height: 14px;
+  width: 14px;
+  left: 2px;
+  top: 2px;
+  background: var(--text-muted);
+  border-radius: 50%;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.toggle-switch input:checked + .toggle-switch__slider {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+.toggle-switch input:checked + .toggle-switch__slider::before {
+  transform: translateX(16px);
+  background: var(--accent);
+}
+.toggle-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.toggle-row:last-child { border-bottom: none; }
+.toggle-row__label {
+  font-size: 13px;
+  color: var(--text);
+}
+.toggle-row__hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+
