@@ -93,6 +93,10 @@ type Auth struct {
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
 
+	// homeLease tracks a Home in-flight reservation without occupying Runtime,
+	// which remains reserved for provider and plugin state.
+	homeLease *homeLeaseHandle
+
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
 

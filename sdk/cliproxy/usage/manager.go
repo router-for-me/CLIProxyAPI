@@ -75,6 +75,7 @@ type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
 type generateContextKey struct{}
+type homeLeaseIDContextKey struct{}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
@@ -102,6 +103,29 @@ func RequestedModelAliasFromContext(ctx context.Context) string {
 	default:
 		return ""
 	}
+}
+
+// WithHomeLeaseID stores the Home dispatch lease for usage correlation.
+// Usage may describe one upstream attempt before the overall request finishes,
+// so consumers must not treat this field as a terminal lease-release signal.
+func WithHomeLeaseID(ctx context.Context, leaseID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	leaseID = strings.TrimSpace(leaseID)
+	if leaseID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, homeLeaseIDContextKey{}, leaseID)
+}
+
+// HomeLeaseIDFromContext returns the Home dispatch lease stored in ctx.
+func HomeLeaseIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	leaseID, _ := ctx.Value(homeLeaseIDContextKey{}).(string)
+	return strings.TrimSpace(leaseID)
 }
 
 // WithReasoningEffort stores the client-requested reasoning effort for usage sinks.

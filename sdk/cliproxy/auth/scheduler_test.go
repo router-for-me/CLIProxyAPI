@@ -62,8 +62,11 @@ type inactivePluginScheduler struct {
 }
 
 type authKindHomeDispatcher struct {
-	auths  []Auth
-	counts []int
+	auths       []Auth
+	counts      []int
+	requestIDs  []string
+	dispatchIDs []string
+	releasedIDs []string
 }
 
 func (d *authKindHomeDispatcher) HeartbeatOK() bool {
@@ -71,11 +74,30 @@ func (d *authKindHomeDispatcher) HeartbeatOK() bool {
 }
 
 func (d *authKindHomeDispatcher) RPopAuth(_ context.Context, _ string, _ string, _ http.Header, count int) ([]byte, error) {
+	return d.RPopAuthWithIdentity(context.Background(), "", "", "", "", nil, count)
+}
+
+func (d *authKindHomeDispatcher) RPopAuthWithIdentity(_ context.Context, _ string, requestID string, dispatchID string, _ string, _ http.Header, count int) ([]byte, error) {
 	d.counts = append(d.counts, count)
+	d.requestIDs = append(d.requestIDs, requestID)
+	d.dispatchIDs = append(d.dispatchIDs, dispatchID)
 	if count < 1 || count > len(d.auths) {
 		return nil, home.ErrAuthNotFound
 	}
-	return json.Marshal(homeAuthDispatchResponse{Auth: d.auths[count-1]})
+	return json.Marshal(homeAuthDispatchResponse{
+		Auth:            d.auths[count-1],
+		LeaseID:         dispatchID,
+		LeaseTTLSeconds: 60,
+	})
+}
+
+func (d *authKindHomeDispatcher) RenewInFlightLease(context.Context, string) (bool, error) {
+	return true, nil
+}
+
+func (d *authKindHomeDispatcher) ReleaseInFlightLease(_ context.Context, leaseID string, _ string) (bool, error) {
+	d.releasedIDs = append(d.releasedIDs, leaseID)
+	return true, nil
 }
 
 func (s *inactivePluginScheduler) HasScheduler() bool {
@@ -564,9 +586,18 @@ func TestManagerSelectAuthByKindAdvancesHomeAuthCount(t *testing.T) {
 				if selected == nil || selected.ID != tt.wantAuthID {
 					t.Fatalf("SelectAuthByKind() auth = %#v, want %s", selected, tt.wantAuthID)
 				}
+				manager.ReleaseHomeLease(selected, "test_completed")
 			}
 			if len(dispatcher.counts) != 2 || dispatcher.counts[0] != 1 || dispatcher.counts[1] != 2 {
 				t.Fatalf("home auth counts = %v, want [1 2]", dispatcher.counts)
+			}
+			for index, requestID := range dispatcher.requestIDs {
+				if requestID == "" || dispatcher.dispatchIDs[index] == "" {
+					t.Fatalf("dispatch identity at %d = request:%q dispatch:%q", index, requestID, dispatcher.dispatchIDs[index])
+				}
+			}
+			if len(dispatcher.releasedIDs) != len(tt.auths) {
+				t.Fatalf("released leases = %v, want %d", dispatcher.releasedIDs, len(tt.auths))
 			}
 		})
 	}

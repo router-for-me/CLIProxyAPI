@@ -691,6 +691,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
+	defer s.handlers.AuthManager.ReleaseHomeLease(selected, "codex_alpha_search_terminal")
 	logging.SetGinCPATraceID(c, selected.EnsureIndex())
 
 	headers := make(http.Header)
