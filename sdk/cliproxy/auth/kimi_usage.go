@@ -52,12 +52,14 @@ type kimiUsageDetail struct {
 }
 
 // kimiUsageResponse is the top-level structure of /v1/usages: limits[] holds
-// 5-hour window details (possibly multiple), usage holds the weekly/cycle window.
+// 5-hour window details (possibly multiple), usage holds the weekly/cycle window,
+// totalQuota is an additional account-level quota window (reported separately).
 type kimiUsageResponse struct {
 	Limits []struct {
 		Detail kimiUsageDetail `json:"detail"`
 	} `json:"limits"`
-	Usage kimiUsageDetail `json:"usage"`
+	Usage      kimiUsageDetail `json:"usage"`
+	TotalQuota kimiUsageDetail `json:"totalQuota"`
 }
 
 // kimiUsageWindow is the parsed observable state of a single window.
@@ -261,11 +263,16 @@ func (m *Manager) fetchKimiUsage(ctx context.Context, auth *Auth) ([]kimiUsageWi
 		return nil, fmt.Errorf("kimi usage: parse: %w", err)
 	}
 
-	windows := make([]kimiUsageWindow, 0, len(parsed.Limits)+1)
+	windows := make([]kimiUsageWindow, 0, len(parsed.Limits)+2)
 	for _, lim := range parsed.Limits {
 		windows = append(windows, windowFromDetail(lim.Detail, "five_hour"))
 	}
 	windows = append(windows, windowFromDetail(parsed.Usage, "weekly"))
+	// totalQuota is an additional account-level window reported separately from
+	// limits[] and usage. When exhausted (remaining=0) while the parsed windows
+	// are still positive, kimiUsageFullyAvailable would otherwise clear the
+	// cooldown prematurely. Treat it as a separate observable window.
+	windows = append(windows, windowFromDetail(parsed.TotalQuota, "total_quota"))
 	return windows, nil
 }
 

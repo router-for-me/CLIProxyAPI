@@ -1882,14 +1882,17 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
 
 		// Dynamically restart the Kimi usage probe when the management center
-		// changes the relevant config fields.
+		// changes the relevant config fields. Home mode delegates credential
+		// management to the Home control plane; the local probe must not run.
 		prevEnabled := false
 		prevInterval := 0
 		if oldCfg != nil {
 			prevEnabled = oldCfg.KimiUsageQueryEnabled
 			prevInterval = oldCfg.KimiUsageQueryIntervalSeconds
 		}
-		if !prevEnabled && cfg.KimiUsageQueryEnabled {
+		if cfg.Home.Enabled {
+			s.handlers.AuthManager.StopKimiUsageProbe()
+		} else if !prevEnabled && cfg.KimiUsageQueryEnabled {
 			interval := time.Duration(cfg.KimiUsageQueryIntervalSeconds) * time.Second
 			s.handlers.AuthManager.StartKimiUsageProbe(context.Background(), interval)
 		} else if prevEnabled && !cfg.KimiUsageQueryEnabled {

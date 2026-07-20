@@ -1569,3 +1569,42 @@ func TestClearGenericPaymentFallbackCooldown_StaleReason403(t *testing.T) {
 	}
 }
 
+// TestKimiUsageFullyAvailable_TotalQuotaExhausted verifies that when totalQuota
+// is exhausted (remaining=0) while the other windows are positive, the account
+// is not considered fully available. Without this, the probe would clear
+// cooldowns prematurely even though totalQuota is still exhausted.
+func TestKimiUsageFullyAvailable_TotalQuotaExhausted(t *testing.T) {
+	t.Parallel()
+	windows := []kimiUsageWindow{
+		{Name: "five_hour", Limit: 100, Remaining: 50},
+		{Name: "weekly", Limit: 1000, Remaining: 800},
+		{Name: "total_quota", Limit: 100, Remaining: 0},
+	}
+	if kimiUsageFullyAvailable(windows) {
+		t.Error("expected not fully available when total_quota is exhausted")
+	}
+}
+
+// TestKimiUsageCooldown_TotalQuotaExhausted verifies that totalQuota exhaustion
+// contributes to the cooldown calculation. When totalQuota is exhausted and has
+// a resetTime, the account recovers at the latest reset among all exhausted
+// windows.
+func TestKimiUsageCooldown_TotalQuotaExhausted(t *testing.T) {
+	t.Parallel()
+	totalReset := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	fiveHourReset := time.Date(2026, 7, 15, 18, 0, 0, 0, time.UTC)
+	windows := []kimiUsageWindow{
+		{Name: "five_hour", Limit: 100, Remaining: 0, ResetAt: fiveHourReset, HasReset: true},
+		{Name: "weekly", Limit: 1000, Remaining: 500, HasReset: false},
+		{Name: "total_quota", Limit: 100, Remaining: 0, ResetAt: totalReset, HasReset: true},
+	}
+	recoverAt, ok := kimiUsageCooldown(windows)
+	if !ok {
+		t.Fatal("expected ok when total_quota is exhausted with resetTime")
+	}
+	// Should return the latest reset among exhausted windows.
+	if !recoverAt.Equal(totalReset) {
+		t.Errorf("recoverAt=%v, want %v (total_quota reset is later)", recoverAt, totalReset)
+	}
+}
+
