@@ -21,11 +21,18 @@ GOFMT    := gofmt
 GOCOVER  := $(GO) tool cover
 
 # --- Paths --------------------------------------------------------------------
-ROOT         := $(CURDIR)
-BIN_DIR      := $(ROOT)/bin
-SERVER_BIN   := $(BIN_DIR)/cli-proxy-api
-COVERAGE_OUT := $(BIN_DIR)/coverage.out
+ROOT          := $(CURDIR)
+BIN_DIR       := $(ROOT)/bin
+SERVER_BIN    := $(BIN_DIR)/cli-proxy-api
+COVERAGE_OUT  := $(BIN_DIR)/coverage.out
 COVERAGE_HTML := $(BIN_DIR)/coverage.html
+DEV_PORT_FILE := $(BIN_DIR)/dev.ports
+RUN_LOG       := $(BIN_DIR)/run.log
+DASH_LOG      := $(BIN_DIR)/dash-dev.log
+
+# Development service ports. Keep API_PORT aligned with the active server config.
+API_PORT  ?= 8317
+DASH_PORT ?= 9173
 
 # --- Packages ----------------------------------------------------------------
 # Packages touched by the PostgreSQL persistence work. Used by targeted test
@@ -51,7 +58,7 @@ PG_PORT    ?= 5433
 PG_CONTAINER := cliproxy-pg-test
 
 # --- Phony targets -----------------------------------------------------------
-.PHONY: help all build run fmt vet tidy test test-unit test-pg test-pg-only \
+.PHONY: help all build run dev-up dev-down fmt vet tidy test test-unit test-pg test-pg-only \
         test-cover cover-html pg-up pg-down pg-reset pg-shell \
         dash-install dash-dev dash-build dash-preview dash-embed \
         clean verify check-deps
@@ -69,6 +76,31 @@ build: ## Build the server binary into ./bin.
 
 run: build ## Build and run the dev server (`go run` equivalent with cached binary).
 	$(SERVER_BIN)
+
+# --- Development services -----------------------------------------------------
+dev-up: ## Run the API and dashboard as background services.
+	@mkdir -p $(BIN_DIR)
+	@printf 'API_PORT=%s\nDASH_PORT=%s\n' '$(API_PORT)' '$(DASH_PORT)' > $(DEV_PORT_FILE)
+	@nohup $(MAKE) run >$(RUN_LOG) 2>&1 &
+	@nohup env VITE_API_HOST=http://127.0.0.1:$(API_PORT) $(MAKE) dash-dev >$(DASH_LOG) 2>&1 &
+	@echo "API starting on port $(API_PORT) (log: $(RUN_LOG))"
+	@echo "Dashboard starting on port $(DASH_PORT) (log: $(DASH_LOG))"
+	@echo "Ports recorded in $(DEV_PORT_FILE)"
+
+dev-down: ## Stop the API and dashboard by finding listener PIDs from recorded ports.
+	@test -f $(DEV_PORT_FILE) || { echo "Port file not found: $(DEV_PORT_FILE)"; exit 1; }
+	@command -v lsof >/dev/null || { echo "lsof not found in PATH"; exit 1; }
+	@source $(DEV_PORT_FILE); \
+	for service_port in "$$API_PORT" "$$DASH_PORT"; do \
+		pids=$$(lsof -tiTCP:"$$service_port" -sTCP:LISTEN 2>/dev/null || true); \
+		if [[ -n "$$pids" ]]; then \
+			echo "Stopping PID(s) $$(echo $$pids | tr '\n' ' ') listening on port $$service_port"; \
+			kill $$pids; \
+		else \
+			echo "No process is listening on port $$service_port"; \
+		fi; \
+	done
+	@rm -f $(DEV_PORT_FILE)
 
 # --- Formatting & hygiene ----------------------------------------------------
 fmt: ## Apply gofmt to the entire module.
