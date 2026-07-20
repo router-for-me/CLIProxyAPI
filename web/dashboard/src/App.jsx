@@ -7,6 +7,8 @@ import LoginPage from './pages/LoginPage.jsx';
 import ApiKeysPage from './pages/ApiKeysPage.jsx';
 import ApiKeyDetailPage from './pages/ApiKeyDetailPage.jsx';
 import UsageStatsPage from './pages/UsageStatsPage.jsx';
+import InternalUsersPage from './pages/InternalUsersPage.jsx';
+import InternalUserDetailPage from './pages/InternalUserDetailPage.jsx';
 import ModelsCatalogPage from './pages/ModelsCatalogPage.jsx';
 import ErrorMessagesPage from './pages/ErrorMessagesPage.jsx';
 import SettingsPage from './pages/SettingsPage.jsx';
@@ -99,6 +101,8 @@ export default function App() {
           <Route path="/" element={<ApiKeysPage />} />
           <Route path="/api-keys/:id" element={<ApiKeyDetailPage />} />
           <Route path="/usage" element={<UsageStatsPage />} />
+          <Route path="/internal-users" element={<InternalUsersPage />} />
+          <Route path="/internal-users/:id" element={<InternalUserDetailPage />} />
           <Route path="/models" element={<ModelsCatalogPage />} />
           <Route path="/error-messages" element={<ErrorMessagesPage />} />
           <Route path="/settings" element={<SettingsPage />} />
@@ -113,6 +117,7 @@ function Sidebar({ onLogout, currentPath }) {
   const links = [
     { to: '/', label: 'API Keys', icon: 'key' },
     { to: '/usage', label: 'Usage Stats', icon: 'chart' },
+    { to: '/internal-users', label: 'Internal Users', icon: 'users' },
     { to: '/models', label: 'Models Catalog', icon: 'cube' },
     { to: '/error-messages', label: 'Error Messages', icon: 'alert' },
     { to: '/settings', label: 'Settings', icon: 'gear' },
@@ -161,6 +166,7 @@ const BRAND_SVG = `<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
 const ICON_MAP = {
   key: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="5" cy="11" r="2.5" /><path d="M7 9l6-6M10 6l2 2" strokeLinecap="round" /></svg>,
   chart: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M2 14V2M2 14h12M5 11V7M8 11V4M11 11V8" /></svg>,
+  users: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="5.5" r="2" /><path d="M2.5 13.5c0-2 1.5-3.5 3.5-3.5s3.5 1.5 3.5 3.5" /><circle cx="11" cy="6.5" r="1.7" /><path d="M9 13.5c0-1.6 1-3 2.5-3s2.5 1.4 2.5 3" /></svg>,
   cube: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><path d="M8 1l6 3.5v7L8 15l-6-3.5v-7L8 1zM8 1v14M2 4.5l6 3.5 6-3.5" /></svg>,
   alert: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><path d="M8 1l7 13H1L8 1zM8 6v4M8 11.5v0.5" strokeLinecap="round" /></svg>,
   gear: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="2" /><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3" strokeLinecap="round" /></svg>,

@@ -28,6 +28,7 @@ type UsageEvent struct {
 	RequestID           string    `json:"request_id,omitempty"`
 	APIKeyID            string    `json:"api_key_id,omitempty"`
 	APIKeyPrincipal     string    `json:"api_key_principal,omitempty"`
+	UserID              string    `json:"user_id,omitempty"`
 	Provider            string    `json:"provider"`
 	ExecutorType        string    `json:"executor_type,omitempty"`
 	Model               string    `json:"model"`
@@ -71,10 +72,11 @@ type UsageFilter struct {
 	Principal string
 	Provider  string
 	Model     string
+	UserID    string
 	From      time.Time
 	To        time.Time
 	// GroupBy selects the aggregation dimension: "api_key_id" | "model" |
-	// "provider" | "day" | "hour" | "" (no grouping, totals only).
+	// "provider" | "user_id" | "day" | "hour" | "" (no grouping, totals only).
 	GroupBy string
 	Limit   int
 }
@@ -111,11 +113,12 @@ type UsageWindow struct {
 // UsageStore wraps the database handle with usage-persistence operations. It
 // is safe for concurrent use: the parent *sql.DB manages pooling.
 type UsageStore struct {
-	db           *sql.DB
-	apiKeysTable string
-	eventsTable  string
-	windowsTable string
-	pricingTable string
+	db                 *sql.DB
+	apiKeysTable       string
+	eventsTable        string
+	windowsTable       string
+	pricingTable       string
+	internalUsersTable string
 	// sealer encrypts api_key_principal at rest. nil when no passphrase was
 	// configured (writes stay plaintext; reads tolerate plaintext rows).
 	sealer *Sealer
@@ -135,12 +138,13 @@ func NewUsageStore(parent *PostgresStore) *UsageStore {
 		sealer = nil
 	}
 	return &UsageStore{
-		db:           parent.DB(),
-		apiKeysTable: parent.APIKeysTable(),
-		eventsTable:  parent.UsageEventsTable(),
-		windowsTable: parent.UsageWindowsTable(),
-		pricingTable: parent.ModelPricingTable(),
-		sealer:       sealer,
+		db:                 parent.DB(),
+		apiKeysTable:       parent.APIKeysTable(),
+		eventsTable:        parent.UsageEventsTable(),
+		windowsTable:       parent.UsageWindowsTable(),
+		pricingTable:       parent.ModelPricingTable(),
+		internalUsersTable: parent.InternalUsersTable(),
+		sealer:             sealer,
 	}
 }
 
@@ -165,7 +169,7 @@ func (s *UsageStore) Sealer() *Sealer {
 }
 
 const usageEventColumnList = `
-	request_id, api_key_id, api_key_principal, provider, executor_type, model,
+	request_id, api_key_id, api_key_principal, user_id, provider, executor_type, model,
 	alias, endpoint, auth_type, source, reasoning_effort, service_tier,
 	response_service_tier, input_tokens, output_tokens, reasoning_tokens,
 	cached_tokens, cache_creation_tokens, total_tokens, cost_usd, latency_ms,
@@ -192,9 +196,10 @@ func (s *UsageStore) InsertEvent(ctx context.Context, e UsageEvent) error {
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (%s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
-			$24, $25, $26)
+			$24, $25, $26, $27)
 	`, s.eventsTable, usageEventColumnList),
 		e.RequestID, nullableString(e.APIKeyID), nullableString(principal),
+		nullableString(e.UserID),
 		e.Provider, e.ExecutorType, e.Model, e.Alias, e.Endpoint, e.AuthType,
 		e.Source, e.ReasoningEffort, e.ServiceTier, e.ResponseServiceTier,
 		e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens,
@@ -223,18 +228,18 @@ func (s *UsageStore) BatchInsertEvents(ctx context.Context, events []UsageEvent)
 	b.WriteString(" (")
 	b.WriteString(usageEventColumnList)
 	b.WriteString(") VALUES ")
-	args := make([]any, 0, len(events)*26)
+	args := make([]any, 0, len(events)*27)
 	for i, ev := range events {
 		if i > 0 {
 			b.WriteByte(',')
 		}
 		b.WriteByte('(')
-		for j := 1; j <= 26; j++ {
+		for j := 1; j <= 27; j++ {
 			if j > 1 {
 				b.WriteByte(',')
 			}
 			b.WriteByte('$')
-			b.WriteString(itoa(i*26 + j))
+			b.WriteString(itoa(i*27 + j))
 		}
 		b.WriteByte(')')
 		if ev.RequestedAt.IsZero() {
@@ -248,6 +253,7 @@ func (s *UsageStore) BatchInsertEvents(ctx context.Context, events []UsageEvent)
 			principal = ""
 		}
 		args = append(args, ev.RequestID, nullableString(ev.APIKeyID), nullableString(principal),
+			nullableString(ev.UserID),
 			ev.Provider, ev.ExecutorType, ev.Model, ev.Alias, ev.Endpoint, ev.AuthType,
 			ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
 			ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
@@ -414,6 +420,11 @@ func (s *UsageStore) SelectAggregate(ctx context.Context, filter UsageFilter) ([
 		b.WriteString(" AND e.api_key_id = $")
 		b.WriteString(itoa(len(args)))
 	}
+	if filter.UserID != "" {
+		args = append(args, filter.UserID)
+		b.WriteString(" AND e.user_id = $")
+		b.WriteString(itoa(len(args)))
+	}
 	if filter.Provider != "" {
 		args = append(args, filter.Provider)
 		b.WriteString(" AND e.provider = $")
@@ -489,6 +500,8 @@ func aggregateGroupClause(groupBy string) (groupExpr, groupCol string, err error
 		return "e.model", "e.model", nil
 	case "provider":
 		return "e.provider", "e.provider", nil
+	case "user_id", "user":
+		return "e.user_id", "e.user_id", nil
 	case "day":
 		return "date_trunc('day', e.requested_at)", "date_trunc('day', e.requested_at)", nil
 	case "hour":
@@ -774,7 +787,7 @@ func (s *UsageStore) SelectTop(ctx context.Context, filter UsageFilter, dimensio
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store: usage store not initialized")
 	}
-	dimCol, needsJoin, err := dimensionColumn(dimension)
+	dimCol, joinExtra, err := dimensionColumn(dimension, s.apiKeysTable, s.internalUsersTable)
 	if err != nil {
 		return nil, err
 	}
@@ -802,10 +815,8 @@ func (s *UsageStore) SelectTop(ctx context.Context, filter UsageFilter, dimensio
 	FROM `)
 	b.WriteString(s.eventsTable)
 	b.WriteString(" e")
-	if needsJoin {
-		b.WriteString(" LEFT JOIN ")
-		b.WriteString(s.apiKeysTable)
-		b.WriteString(" k ON k.id = e.api_key_id")
+	if joinExtra != "" {
+		b.WriteString(joinExtra)
 	}
 	args := buildWhereClause(&b, filter)
 	b.WriteString(" GROUP BY key ORDER BY ")
@@ -1057,15 +1068,24 @@ func (s *UsageStore) FillCostBreakdown(ctx context.Context, rows []UsageEventRow
 // have to type free-text filter values (which would be impossible against the
 // sealed api_key_principal column anyway).
 type FilterOptions struct {
-	APIKeys   []APIKeyOption `json:"api_keys"`
-	Providers []string       `json:"providers"`
-	Models    []string       `json:"models"`
+	APIKeys   []APIKeyOption       `json:"api_keys"`
+	Providers []string             `json:"providers"`
+	Models    []string             `json:"models"`
+	Users     []InternalUserOption `json:"users"`
 }
 
 // APIKeyOption pairs an api_key_id with its non-secret alias/name so the
 // dashboard's API Key dropdown can show the human label while binding the
 // id back into the filter.
 type APIKeyOption struct {
+	ID    string `json:"id"`
+	Alias string `json:"alias"`
+}
+
+// InternalUserOption pairs an internal user id with its non-secret
+// alias/email so the dashboard's Internal User dropdown can show the human
+// label while binding the id back into the filter.
+type InternalUserOption struct {
 	ID    string `json:"id"`
 	Alias string `json:"alias"`
 }
@@ -1146,6 +1166,33 @@ func (s *UsageStore) SelectFilterOptions(ctx context.Context, filter UsageFilter
 	if err = rows3.Err(); err != nil {
 		return FilterOptions{}, err
 	}
+
+	// Distinct internal users contributing events in the window, with alias.
+	b.Reset()
+	b.WriteString(`SELECT DISTINCT e.user_id,
+		COALESCE(NULLIF(u.user_alias, ''), u.user_email, e.user_id) AS alias
+		FROM `)
+	b.WriteString(s.eventsTable)
+	b.WriteString(" e LEFT JOIN ")
+	b.WriteString(s.internalUsersTable)
+	b.WriteString(" u ON u.id = e.user_id")
+	args = buildWhereClause(&b, filter)
+	b.WriteString(" AND e.user_id IS NOT NULL AND e.user_id <> '' ORDER BY alias ASC")
+	rows4, err := s.db.QueryContext(ctx, b.String(), args...)
+	if err != nil {
+		return FilterOptions{}, fmt.Errorf("postgres store: select usage filter users: %w", err)
+	}
+	defer rows4.Close()
+	for rows4.Next() {
+		var opt InternalUserOption
+		if err = rows4.Scan(&opt.ID, &opt.Alias); err != nil {
+			return FilterOptions{}, fmt.Errorf("postgres store: scan usage filter users: %w", err)
+		}
+		out.Users = append(out.Users, opt)
+	}
+	if err = rows4.Err(); err != nil {
+		return FilterOptions{}, err
+	}
 	return out, nil
 }
 
@@ -1164,6 +1211,11 @@ func buildWhereClause(b *strings.Builder, filter UsageFilter) []any {
 	if filter.APIKeyID != "" {
 		args = append(args, filter.APIKeyID)
 		b.WriteString(" AND e.api_key_id = $")
+		b.WriteString(itoa(len(args)))
+	}
+	if filter.UserID != "" {
+		args = append(args, filter.UserID)
+		b.WriteString(" AND e.user_id = $")
 		b.WriteString(itoa(len(args)))
 	}
 	if filter.Provider != "" {
@@ -1206,24 +1258,32 @@ func intervalExpr(interval string) (string, error) {
 }
 
 // dimensionColumn returns the column reference for a top-N query dimension.
-// The bool return is true when the caller must LEFT JOIN api_keys (used by
-// the principal dimension so it resolves to key_alias rather than the sealed
-// api_key_principal value).
-func dimensionColumn(dimension string) (string, bool, error) {
+// The returned joinExtra (when non-empty) is extra LEFT JOIN clauses the
+// caller must append after the `usage_events e` table. apiKeysTable and
+// internalUsersTable are the fully-qualified table names the caller has
+// resolved; either may be empty when its respective dimension is not used.
+func dimensionColumn(dimension, apiKeysTable, internalUsersTable string) (column string, joinExtra string, err error) {
 	switch strings.ToLower(strings.TrimSpace(dimension)) {
 	case "model":
-		return "e.model", false, nil
+		return "e.model", "", nil
 	case "provider":
-		return "e.provider", false, nil
+		return "e.provider", "", nil
 	case "api_key_id", "key", "apikey":
-		return "e.api_key_id", false, nil
+		return "e.api_key_id", "", nil
 	case "principal", "api_key_principal":
 		// Resolve to the human label (key_alias, falling back to name) via
 		// the api_keys join. The raw api_key_principal column is sealed and
 		// never projected to API callers.
-		return "COALESCE(NULLIF(k.key_alias, ''), k.name)", true, nil
+		return "COALESCE(NULLIF(k.key_alias, ''), k.name)",
+			" LEFT JOIN " + apiKeysTable + " k ON k.id = e.api_key_id", nil
+	case "user_id", "user":
+		// Resolve the internal user's alias (falling back to email/id) via the
+		// internal_users join. The user_id column on usage_events is plaintext
+		// and safe to GROUP BY directly.
+		return "COALESCE(NULLIF(u.user_alias, ''), u.user_email, e.user_id)",
+			" LEFT JOIN " + internalUsersTable + " u ON u.id = e.user_id", nil
 	default:
-		return "", false, fmt.Errorf("unsupported dimension: %q", dimension)
+		return "", "", fmt.Errorf("unsupported dimension: %q", dimension)
 	}
 }
 

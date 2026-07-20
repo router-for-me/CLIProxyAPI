@@ -627,6 +627,7 @@ func main() {
 		pgAPIKeyStore *store.APIKeyStore
 		pgUsageStore  *store.UsageStore
 		pgModelsStore *store.ModelsStore
+		pgUserStore   *store.UserStore
 		pgSyncAdapter *registry.PGSync
 		policySvc     policy.PolicyService
 		usageFlusher  *store.UsageFlusher
@@ -635,8 +636,14 @@ func main() {
 		pgAPIKeyStore = store.NewAPIKeyStore(pgStoreInst)
 		pgUsageStore = store.NewUsageStore(pgStoreInst)
 		pgModelsStore = store.NewModelsStore(pgStoreInst)
+		pgUserStore = store.NewUserStore(pgStoreInst)
 		pgSyncAdapter = registry.NewPGSync(store.NewPGModelsAdapter(pgModelsStore))
 		policySvc = policy.NewService(pgAPIKeyStore, pgUsageStore, policy.ServiceConfig{})
+		// Attach the user store so per-user budget/RPM enforcement is
+		// active. When left unset, only per-key enforcement runs.
+		if svc, ok := policySvc.(interface{ SetUserStore(*store.UserStore) }); ok {
+			svc.SetUserStore(pgUserStore)
+		}
 		// Start the policy service background goroutine (sliding-window
 		// cleanup). The goroutine exits when the context is canceled or
 		// Stop() is invoked at shutdown.
@@ -687,6 +694,7 @@ func main() {
 			APIKeys:       pgAPIKeyStore,
 			Usage:         pgUsageStore,
 			Models:        pgModelsStore,
+			Users:         pgUserStore,
 			PGSync:        pgSyncAdapter,
 			Policy:        policySvc,
 			ErrorMessages: pgErrorMessages,

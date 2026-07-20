@@ -71,6 +71,7 @@ type Handler struct {
 	pgAPIKeys *store.APIKeyStore
 	pgUsage   *store.UsageStore
 	pgModels  *store.ModelsStore
+	pgUsers   *store.UserStore
 	pgSync    *registry.PGSync
 	policySvc policy.PolicyService
 
@@ -176,6 +177,19 @@ func (h *Handler) SetPostgresStores(
 	h.pgModels = models
 	h.pgSync = pgSync
 	h.policySvc = policySvc
+}
+
+// SetUserStore wires the optional PG-backed internal users store. When nil,
+// the /v0/management/internal-users routes return 503. User-level budget/RPM
+// enforcement depends on this store AND on the policy service having a
+// UserStore attached (see policy.Service.SetUserStore).
+func (h *Handler) SetUserStore(users *store.UserStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pgUsers = users
 }
 
 // SetV1ModelsHandler wires the http.Handler that serves GET /v1/models on

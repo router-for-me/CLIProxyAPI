@@ -105,6 +105,7 @@ type PgStoreHandles struct {
 	APIKeys       *store.APIKeyStore
 	Usage         *store.UsageStore
 	Models        *store.ModelsStore
+	Users         *store.UserStore
 	PGSync        *registry.PGSync
 	Policy        policy.PolicyService
 	ErrorMessages errormessages.Store
@@ -416,6 +417,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	if handles := optionState.pgStores; handles != nil {
 		s.mgmt.SetPostgresStores(handles.APIKeys, handles.Usage, handles.Models, handles.PGSync, handles.Policy)
 		s.mgmt.SetErrorMessagesStore(handles.ErrorMessages)
+		s.mgmt.SetUserStore(handles.Users)
 	}
 	// Wire the /v1/models invoker so the management endpoint
 	// POST /v0/management/models-catalog/sync-from-v1 can probe the live
@@ -959,6 +961,33 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-keys-pg/:id/policy", s.mgmt.PutPGAPIKeyPolicy)
 		mgmt.POST("/api-keys-pg/:id/regenerate", s.mgmt.RegeneratePGAPIKey)
 		mgmt.DELETE("/api-keys-pg/:id", s.mgmt.DeletePGAPIKey)
+
+		// Internal Users (LiteLLM-style key owners with per-user
+		// budget/RPM/TPM enforcement, max-p concurrent-request caps, and
+		// benchmark dashboards). Return 503 when the PG store is not
+		// configured. Path prefix /internal-users/* mirrors LiteLLM's
+		// /user/* (kept for backward compatibility — see internal_users.go
+		// file-level comment for the equivalence table).
+		mgmt.GET("/internal-users", s.mgmt.ListInternalUsers)
+		mgmt.POST("/internal-users", s.mgmt.CreateInternalUser)
+		mgmt.GET("/internal-users/leaderboard", s.mgmt.GetInternalUsersLeaderboard)
+		mgmt.POST("/internal-users/reconcile-all", s.mgmt.ReconcileAllSpend)
+		mgmt.GET("/internal-users/:id", s.mgmt.GetInternalUser)
+		mgmt.PATCH("/internal-users/:id", s.mgmt.PatchInternalUser)
+		mgmt.DELETE("/internal-users/:id", s.mgmt.DeleteInternalUser)
+		mgmt.POST("/internal-users/:id/reset-spend", s.mgmt.ResetInternalUserSpend)
+		mgmt.POST("/internal-users/:id/reconcile-spend", s.mgmt.ReconcileInternalUserSpend)
+		mgmt.GET("/internal-users/:id/keys", s.mgmt.ListInternalUserKeys)
+		mgmt.POST("/internal-users/:id/keys/:keyId/attach", s.mgmt.AttachKeyToUser)
+		mgmt.DELETE("/internal-users/:id/keys/:keyId", s.mgmt.DetachKeyFromUser)
+		// Per-user benchmark endpoints (mirror /usage-stats but scoped to a user).
+		mgmt.GET("/internal-users/:id/totals", s.mgmt.GetInternalUserTotals)
+		mgmt.GET("/internal-users/:id/timeseries", s.mgmt.GetInternalUserTimeSeries)
+		mgmt.GET("/internal-users/:id/top", s.mgmt.GetInternalUserTop)
+		mgmt.GET("/internal-users/:id/events", s.mgmt.GetInternalUserEvents)
+		mgmt.GET("/internal-users/:id/windows", s.mgmt.GetInternalUserWindows)
+		mgmt.GET("/internal-users/:id/model-spend", s.mgmt.GetInternalUserModelSpend)
+		mgmt.GET("/internal-users/:id/models", s.mgmt.GetInternalUserModels)
 
 		// Aggregate usage stats powered by the PG usage_events table.
 		mgmt.GET("/usage-stats", s.mgmt.GetUsageStats)

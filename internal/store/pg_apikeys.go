@@ -48,6 +48,9 @@ type APIKey struct {
 	KeyHash    string         `json:"-"`
 	KeyPrefix  string         `json:"key_prefix"`
 	Status     string         `json:"status"`
+	UserID     string         `json:"user_id,omitempty"`
+	UserAlias  string         `json:"user_alias,omitempty"`
+	UserEmail  string         `json:"user_email,omitempty"`
 	CreatedAt  time.Time      `json:"created_at"`
 	UpdatedAt  time.Time      `json:"updated_at"`
 	ExpiresAt  *time.Time     `json:"expires_at,omitempty"`
@@ -58,23 +61,25 @@ type APIKey struct {
 // Policy captures the limits enforced on an API key. Pointer-typed scalar
 // fields distinguish "unset / unlimited" (nil) from explicit zero values.
 type Policy struct {
-	APIKeyID         string    `json:"api_key_id"`
-	RPMLimit         *int      `json:"rpm_limit,omitempty"`
-	HourlyRateLimit  *int      `json:"hourly_rate_limit,omitempty"`
-	BudgetHourlyUSD  *float64  `json:"budget_hourly_usd,omitempty"`
-	BudgetWeeklyUSD  *float64  `json:"budget_weekly_usd,omitempty"`
-	BudgetMonthlyUSD *float64  `json:"budget_monthly_usd,omitempty"`
-	AllowedModels    []string  `json:"allowed_models,omitempty"`
-	BlockedModels    []string  `json:"blocked_models,omitempty"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	APIKeyID            string    `json:"api_key_id"`
+	RPMLimit            *int      `json:"rpm_limit,omitempty"`
+	HourlyRateLimit     *int      `json:"hourly_rate_limit,omitempty"`
+	BudgetHourlyUSD     *float64  `json:"budget_hourly_usd,omitempty"`
+	BudgetWeeklyUSD     *float64  `json:"budget_weekly_usd,omitempty"`
+	BudgetMonthlyUSD    *float64  `json:"budget_monthly_usd,omitempty"`
+	MaxParallelRequests *int      `json:"max_parallel_requests,omitempty"`
+	AllowedModels       []string  `json:"allowed_models,omitempty"`
+	BlockedModels       []string  `json:"blocked_models,omitempty"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 // APIKeyStore provides CRUD operations for client-facing API keys and their
 // policies. It is backed by the same *sql.DB connection as PostgresStore.
 type APIKeyStore struct {
-	db            *sql.DB
-	apiKeysTable  string
-	policiesTable string
+	db                 *sql.DB
+	apiKeysTable       string
+	policiesTable      string
+	internalUsersTable string
 }
 
 // NewAPIKeyStore builds an APIKeyStore that reuses the PostgresStore connection
@@ -85,9 +90,10 @@ func NewAPIKeyStore(parent *PostgresStore) *APIKeyStore {
 		return nil
 	}
 	return &APIKeyStore{
-		db:            parent.DB(),
-		apiKeysTable:  parent.APIKeysTable(),
-		policiesTable: parent.PoliciesTable(),
+		db:                 parent.DB(),
+		apiKeysTable:       parent.APIKeysTable(),
+		policiesTable:      parent.PoliciesTable(),
+		internalUsersTable: parent.InternalUsersTable(),
 	}
 }
 
@@ -126,7 +132,8 @@ func GenerateSecret() (string, error) {
 // transaction. It returns the freshly generated plaintext secret; the caller is
 // responsible for surfacing it to the user exactly once as the secret is never
 // recoverable from the database. The alias is an optional non-secret label
-// stored alongside the key for filtering/display in usage stats.
+// stored alongside the key for filtering/display in usage stats. To attach the
+// key to an internal user owner, call UpdateUserID after creation.
 func (s *APIKeyStore) Create(ctx context.Context, name string, alias string, secret string, expiresAt *time.Time, metadata map[string]any, policy *Policy) (*APIKey, string, error) {
 	if s == nil || s.db == nil {
 		return nil, "", fmt.Errorf("postgres store: api key store not initialized")
@@ -210,13 +217,17 @@ func (s *APIKeyStore) LookupByHash(ctx context.Context, hash string) (*APIKey, *
 	}
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT k.id, k.name, COALESCE(k.key_alias, ''), k.key_hash, k.key_prefix, k.status,
+		       COALESCE(k.user_id, ''),
+		       COALESCE(u.user_alias, ''), COALESCE(u.user_email, ''),
 		       k.created_at, k.updated_at, k.expires_at, k.last_used_at, k.metadata,
 		       p.rpm_limit, p.hourly_rate_limit, p.budget_hourly_usd, p.budget_weekly_usd,
-		       p.budget_monthly_usd, p.allowed_models, p.blocked_models, p.updated_at
+		       p.budget_monthly_usd, p.max_parallel_requests,
+		       p.allowed_models, p.blocked_models, p.updated_at
 		FROM %s k
+		LEFT JOIN %s u ON u.id = k.user_id
 		LEFT JOIN %s p ON p.api_key_id = k.id
 		WHERE k.key_hash = $1
-	`, s.apiKeysTable, s.policiesTable), hash)
+	`, s.apiKeysTable, s.internalUsersTable, s.policiesTable), hash)
 	key, policy, err := scanAPIKeyRow(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -234,13 +245,17 @@ func (s *APIKeyStore) LookupByID(ctx context.Context, id string) (*APIKey, *Poli
 	}
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT k.id, k.name, COALESCE(k.key_alias, ''), k.key_hash, k.key_prefix, k.status,
+		       COALESCE(k.user_id, ''),
+		       COALESCE(u.user_alias, ''), COALESCE(u.user_email, ''),
 		       k.created_at, k.updated_at, k.expires_at, k.last_used_at, k.metadata,
 		       p.rpm_limit, p.hourly_rate_limit, p.budget_hourly_usd, p.budget_weekly_usd,
-		       p.budget_monthly_usd, p.allowed_models, p.blocked_models, p.updated_at
+		       p.budget_monthly_usd, p.max_parallel_requests,
+		       p.allowed_models, p.blocked_models, p.updated_at
 		FROM %s k
+		LEFT JOIN %s u ON u.id = k.user_id
 		LEFT JOIN %s p ON p.api_key_id = k.id
 		WHERE k.id = $1
-	`, s.apiKeysTable, s.policiesTable), id)
+	`, s.apiKeysTable, s.internalUsersTable, s.policiesTable), id)
 	key, policy, err := scanAPIKeyRow(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -260,14 +275,18 @@ func scanAPIKeyRow(row *sql.Row) (*APIKey, *Policy, error) {
 		budgetHourly    sql.NullFloat64
 		budgetWeekly    sql.NullFloat64
 		budgetMonthly   sql.NullFloat64
+		maxParallel     sql.NullInt64
 		allowedModels   []byte
 		blockedModels   []byte
 		policyUpdatedAt sql.NullTime
 	)
 	if err := row.Scan(
 		&key.ID, &key.Name, &key.KeyAlias, &key.KeyHash, &key.KeyPrefix, &key.Status,
+		&key.UserID,
+		&key.UserAlias, &key.UserEmail,
 		&key.CreatedAt, &key.UpdatedAt, &key.ExpiresAt, &key.LastUsedAt, &metadata,
 		&rpmLimit, &hourlyRateLimit, &budgetHourly, &budgetWeekly, &budgetMonthly,
+		&maxParallel,
 		&allowedModels, &blockedModels, &policyUpdatedAt,
 	); err != nil {
 		return nil, nil, err
@@ -302,6 +321,10 @@ func scanAPIKeyRow(row *sql.Row) (*APIKey, *Policy, error) {
 			v := budgetMonthly.Float64
 			p.BudgetMonthlyUSD = &v
 		}
+		if maxParallel.Valid {
+			v := int(maxParallel.Int64)
+			p.MaxParallelRequests = &v
+		}
 		p.AllowedModels = decodeStringArray(allowedModels)
 		p.BlockedModels = decodeStringArray(blockedModels)
 		policy = &p
@@ -330,11 +353,14 @@ func (s *APIKeyStore) List(ctx context.Context) ([]*APIKey, error) {
 		return nil, fmt.Errorf("postgres store: api key store not initialized")
 	}
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, name, COALESCE(key_alias, ''), key_hash, key_prefix, status,
-		       created_at, updated_at, expires_at, last_used_at, metadata
-		FROM %s
-		ORDER BY created_at DESC
-	`, s.apiKeysTable))
+		SELECT k.id, k.name, COALESCE(k.key_alias, ''), k.key_hash, k.key_prefix, k.status,
+		       COALESCE(k.user_id, ''),
+		       COALESCE(u.user_alias, ''), COALESCE(u.user_email, ''),
+		       k.created_at, k.updated_at, k.expires_at, k.last_used_at, k.metadata
+		FROM %s k
+		LEFT JOIN %s u ON u.id = k.user_id
+		ORDER BY k.created_at DESC
+	`, s.apiKeysTable, s.internalUsersTable))
 	if err != nil {
 		return nil, fmt.Errorf("postgres store: list api keys: %w", err)
 	}
@@ -347,6 +373,8 @@ func (s *APIKeyStore) List(ctx context.Context) ([]*APIKey, error) {
 			metadata []byte
 		)
 		if err = rows.Scan(&key.ID, &key.Name, &key.KeyAlias, &key.KeyHash, &key.KeyPrefix, &key.Status,
+			&key.UserID,
+			&key.UserAlias, &key.UserEmail,
 			&key.CreatedAt, &key.UpdatedAt, &key.ExpiresAt, &key.LastUsedAt, &metadata); err != nil {
 			return nil, fmt.Errorf("postgres store: scan api key row: %w", err)
 		}
@@ -391,17 +419,20 @@ func (s *APIKeyStore) ListPaged(ctx context.Context, page, pageSize int, statusF
 	}
 
 	listQuery := fmt.Sprintf(`
-		SELECT id, name, COALESCE(key_alias, ''), key_hash, key_prefix, status,
-		       created_at, updated_at, expires_at, last_used_at, metadata
-		FROM %s
-	`, s.apiKeysTable)
+		SELECT k.id, k.name, COALESCE(k.key_alias, ''), k.key_hash, k.key_prefix, k.status,
+		       COALESCE(k.user_id, ''),
+		       COALESCE(u.user_alias, ''), COALESCE(u.user_email, ''),
+		       k.created_at, k.updated_at, k.expires_at, k.last_used_at, k.metadata
+		FROM %s k
+		LEFT JOIN %s u ON u.id = k.user_id
+	`, s.apiKeysTable, s.internalUsersTable)
 	listArgs := []any{}
 	if statusFilter != "" {
 		listArgs = append(listArgs, statusFilter)
-		listQuery += fmt.Sprintf(" WHERE status = $%d", len(listArgs))
+		listQuery += fmt.Sprintf(" WHERE k.status = $%d", len(listArgs))
 	}
 	listArgs = append(listArgs, pageSize, (page-1)*pageSize)
-	listQuery += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", len(listArgs)-1, len(listArgs))
+	listQuery += fmt.Sprintf(" ORDER BY k.created_at DESC LIMIT $%d OFFSET $%d", len(listArgs)-1, len(listArgs))
 
 	rows, err := s.db.QueryContext(ctx, listQuery, listArgs...)
 	if err != nil {
@@ -416,6 +447,8 @@ func (s *APIKeyStore) ListPaged(ctx context.Context, page, pageSize int, statusF
 			metadata []byte
 		)
 		if err = rows.Scan(&key.ID, &key.Name, &key.KeyAlias, &key.KeyHash, &key.KeyPrefix, &key.Status,
+			&key.UserID,
+			&key.UserAlias, &key.UserEmail,
 			&key.CreatedAt, &key.UpdatedAt, &key.ExpiresAt, &key.LastUsedAt, &metadata); err != nil {
 			return nil, 0, fmt.Errorf("postgres store: scan api key row (paged): %w", err)
 		}
@@ -462,20 +495,23 @@ func upsertPolicyTx(ctx context.Context, tx *sql.Tx, policiesTable string, polic
 		INSERT INTO %s (
 			api_key_id, rpm_limit, hourly_rate_limit,
 			budget_hourly_usd, budget_weekly_usd, budget_monthly_usd,
+			max_parallel_requests,
 			allowed_models, blocked_models, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, NOW())
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, NOW())
 		ON CONFLICT (api_key_id) DO UPDATE SET
 			rpm_limit = EXCLUDED.rpm_limit,
 			hourly_rate_limit = EXCLUDED.hourly_rate_limit,
 			budget_hourly_usd = EXCLUDED.budget_hourly_usd,
 			budget_weekly_usd = EXCLUDED.budget_weekly_usd,
 			budget_monthly_usd = EXCLUDED.budget_monthly_usd,
+			max_parallel_requests = EXCLUDED.max_parallel_requests,
 			allowed_models = EXCLUDED.allowed_models,
 			blocked_models = EXCLUDED.blocked_models,
 			updated_at = NOW()
 	`, policiesTable),
 		policy.APIKeyID, policy.RPMLimit, policy.HourlyRateLimit,
 		policy.BudgetHourlyUSD, policy.BudgetWeeklyUSD, policy.BudgetMonthlyUSD,
+		policy.MaxParallelRequests,
 		string(allowed), string(blocked),
 	); err != nil {
 		return fmt.Errorf("postgres store: upsert policy: %w", err)
@@ -571,6 +607,23 @@ func (s *APIKeyStore) UpdateAlias(ctx context.Context, id, alias string) error {
 	), nullableString(alias), id)
 	if err != nil {
 		return fmt.Errorf("postgres store: update api key alias: %w", err)
+	}
+	return assertRowsAffected(res, id, "api key")
+}
+
+// UpdateUserID attaches (or detaches, when userID is empty) an API key to an
+// internal user. The association drives per-user budgeting, attribution in
+// usage_events (stamped by the usage flusher), and the Internal Users
+// dashboard.
+func (s *APIKeyStore) UpdateUserID(ctx context.Context, id, userID string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: api key store not initialized")
+	}
+	res, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE %s SET user_id = $1, updated_at = NOW() WHERE id = $2`, s.apiKeysTable,
+	), nullableString(userID), id)
+	if err != nil {
+		return fmt.Errorf("postgres store: update api key user_id: %w", err)
 	}
 	return assertRowsAffected(res, id, "api key")
 }

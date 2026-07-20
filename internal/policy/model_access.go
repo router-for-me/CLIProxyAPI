@@ -45,6 +45,36 @@ func modelMatches(entry, requested string) bool {
 	return false
 }
 
+// modelAllowed reports whether the supplied model is in the user's grant list.
+// An empty list means "all allowed" (matches LiteLLM's permission semantics).
+func modelAllowed(allowed []string, model string) bool {
+	if model == "" {
+		return true
+	}
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, entry := range allowed {
+		if modelMatches(entry, model) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAdminRole reports whether the supplied internal-user role bypasses
+// per-user budget/RPM enforcement. proxy_admin and proxy_admin_viewer still
+// honor per-key budgets (those run unconditionally); only the user-level caps
+// are skipped so operators are not throttled by their own user rows.
+func isAdminRole(role string) bool {
+	switch role {
+	case "proxy_admin", "proxy_admin_viewer":
+		return true
+	default:
+		return false
+	}
+}
+
 // hourlyWindow returns the [start, end) boundaries of the hourly window
 // containing t.
 func hourlyWindow(t time.Time) (time.Time, time.Time) {

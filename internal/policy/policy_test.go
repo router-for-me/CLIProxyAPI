@@ -274,6 +274,10 @@ func (r *recordingService) Consume(_ context.Context, _, _ string, tokens TokenC
 }
 func (r *recordingService) InvalidateKey(_ context.Context, _ string) error { return nil }
 func (r *recordingService) InvalidateAll()                                  {}
+func (r *recordingService) AcquireParallel(_ context.Context, _ string) (bool, error) {
+	return true, nil
+}
+func (r *recordingService) ReleaseParallel(_ context.Context, _ string) error { return nil }
 
 func TestUsagePluginForwardsCacheTokens(t *testing.T) {
 	rec := &recordingService{}

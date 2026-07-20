@@ -30,6 +30,8 @@ const (
 	defaultModelsTable        = "models_catalog"
 	defaultModelPricingTable  = "model_pricing"
 	defaultErrorMessagesTable = "error_messages"
+	defaultInternalUsersTable = "internal_users"
+	defaultUserWindowsTable   = "user_windows"
 )
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
@@ -55,6 +57,14 @@ type PostgresStoreConfig struct {
 	// ErrorMessagesTable stores operator-customized error responses keyed by
 	// HTTP status code. Served by the errormessages package.
 	ErrorMessagesTable string
+
+	// InternalUsersTable stores the internal-user entity (a key owner with
+	// per-user budget, role, and model access). Referenced by api_keys.user_id
+	// and usage_events.user_id.
+	InternalUsersTable string
+	// UserWindowsTable stores time-windowed aggregate counters for per-user
+	// budget enforcement, parallel to UsageWindowsTable but keyed by user_id.
+	UserWindowsTable string
 
 	// UsageEncryptionKey is the passphrase used to derive an AES-256-GCM
 	// key for sealing sensitive columns (api_key_principal in usage_events)
@@ -108,6 +118,12 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.ErrorMessagesTable == "" {
 		cfg.ErrorMessagesTable = defaultErrorMessagesTable
+	}
+	if cfg.InternalUsersTable == "" {
+		cfg.InternalUsersTable = defaultInternalUsersTable
+	}
+	if cfg.UserWindowsTable == "" {
+		cfg.UserWindowsTable = defaultUserWindowsTable
 	}
 
 	spoolRoot := strings.TrimSpace(cfg.SpoolDir)
@@ -242,6 +258,18 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: create api_keys status index: %w", err)
 	}
+	// Backfill the user_id column (linking an API key to an internal user
+	// owner). Idempotent so existing deployments upgrade transparently.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS user_id TEXT`, apiKeysTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter api_keys add user_id: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON %s(user_id) WHERE user_id IS NOT NULL`, apiKeysTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create api_keys user_id index: %w", err)
+	}
 
 	policiesTable := s.fullTableName(s.cfg.PoliciesTable)
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
@@ -258,6 +286,13 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		)
 	`, policiesTable, apiKeysTable)); err != nil {
 		return fmt.Errorf("postgres store: create api_key_policies table: %w", err)
+	}
+	// Backfill max_parallel_requests on api_key_policies (key-level in-flight
+	// cap; LiteLLM equivalent). Idempotent.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS max_parallel_requests INTEGER`, policiesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter api_key_policies add max_parallel_requests: %w", err)
 	}
 
 	usageEventsTable := s.fullTableName(s.cfg.UsageEventsTable)
@@ -310,6 +345,18 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: create usage_events requested_at index: %w", err)
 	}
+	// Backfill the user_id column on usage_events, stamped by the usage
+	// flusher when resolving the API key. Idempotent.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS user_id TEXT`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter usage_events add user_id: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_usage_events_user_id ON %s(user_id, requested_at) WHERE user_id IS NOT NULL`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create usage_events user_id index: %w", err)
+	}
 
 	usageWindowsTable := s.fullTableName(s.cfg.UsageWindowsTable)
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
@@ -325,6 +372,56 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		)
 	`, usageWindowsTable, apiKeysTable)); err != nil {
 		return fmt.Errorf("postgres store: create usage_windows table: %w", err)
+	}
+
+	internalUsersTable := s.fullTableName(s.cfg.InternalUsersTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id                TEXT PRIMARY KEY,
+			user_alias        TEXT,
+			user_email        TEXT UNIQUE,
+			user_role         TEXT NOT NULL DEFAULT 'internal_user',
+			models            JSONB NOT NULL DEFAULT '[]'::jsonb,
+			metadata          JSONB NOT NULL DEFAULT '{}'::jsonb,
+			max_budget        NUMERIC(12,6),
+			budget_duration   TEXT,
+			budget_reset_at   TIMESTAMPTZ,
+			rpm_limit         BIGINT,
+			tpm_limit         BIGINT,
+			spend             NUMERIC(12,6) NOT NULL DEFAULT 0,
+			created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, internalUsersTable)); err != nil {
+		return fmt.Errorf("postgres store: create internal_users table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_internal_users_role ON %s(user_role)`, internalUsersTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create internal_users role index: %w", err)
+	}
+	// Backfill max_parallel_requests (LiteLLM InternalUser equivalent) for
+	// deployments that already have internal_users without the column.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS max_parallel_requests INTEGER`, internalUsersTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter internal_users add max_parallel_requests: %w", err)
+	}
+
+	userWindowsTable := s.fullTableName(s.cfg.UserWindowsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			user_id       TEXT NOT NULL REFERENCES %s(id) ON DELETE CASCADE,
+			window_type   TEXT NOT NULL,
+			window_start  TIMESTAMPTZ NOT NULL,
+			window_end    TIMESTAMPTZ NOT NULL,
+			request_count BIGINT NOT NULL DEFAULT 0,
+			total_tokens  BIGINT NOT NULL DEFAULT 0,
+			cost_usd      NUMERIC(12,6) NOT NULL DEFAULT 0,
+			PRIMARY KEY (user_id, window_type, window_start)
+		)
+	`, userWindowsTable, internalUsersTable)); err != nil {
+		return fmt.Errorf("postgres store: create user_windows table: %w", err)
 	}
 
 	modelsTable := s.fullTableName(s.cfg.ModelsTable)
@@ -556,6 +653,24 @@ func (s *PostgresStore) ErrorMessagesTable() string {
 		return quoteIdentifier(defaultErrorMessagesTable)
 	}
 	return s.fullTableName(s.cfg.ErrorMessagesTable)
+}
+
+// InternalUsersTable returns the fully-qualified name of the internal users
+// (key owners with per-user budget) table.
+func (s *PostgresStore) InternalUsersTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultInternalUsersTable)
+	}
+	return s.fullTableName(s.cfg.InternalUsersTable)
+}
+
+// UserWindowsTable returns the fully-qualified name of the per-user
+// time-windowed usage counter table.
+func (s *PostgresStore) UserWindowsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultUserWindowsTable)
+	}
+	return s.fullTableName(s.cfg.UserWindowsTable)
 }
 
 // Save persists authentication metadata to disk and PostgreSQL.

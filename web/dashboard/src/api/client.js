@@ -109,10 +109,15 @@ export async function getAPIKey(id) {
   return fetchJSON(`/api-keys-pg/${encodeURIComponent(id)}`);
 }
 
-export async function createAPIKey({ name, secret, expires_at, metadata, policy }) {
+// createAPIKey creates a new caller-facing API key. user_id is REQUIRED
+// (LiteLLM workflow): every key is owned by an Internal User; the server
+// returns 400 when it is missing. Per-key policy fields are optional —
+// when a budget cap is left unset on the policy, enforcement falls back to
+// the owning internal user's max_budget.
+export async function createAPIKey({ name, secret, user_id, expires_at, metadata, policy }) {
   return fetchJSON('/api-keys-pg', {
     method: 'POST',
-    body: JSON.stringify({ name, secret, expires_at, metadata, policy }),
+    body: JSON.stringify({ name, secret, user_id, expires_at, metadata, policy }),
   });
 }
 
@@ -222,6 +227,175 @@ export async function getUsageEvent(id) {
 export async function getUsageFilterOptions(params = {}) {
   const qs = toUsageQS(params);
   return fetchJSON(`/usage-stats/filters${qs}`);
+}
+
+// --- Internal Users (LiteLLM-style key owners) ----------------------------
+//
+// Internal Users are proxy-managed entities that own API keys. Budget/RPM
+// enforcement runs at the user level (in addition to the per-key path), and
+// the dashboard surfaces per-user benchmark metrics (spend, tokens, requests,
+// latency, RPM) modeled after LiteLLM's Internal Users feature.
+
+export async function listInternalUsers({
+  page = 1,
+  pageSize = 25,
+  role = '',
+  search = '',
+  sortBy = 'spend',
+  sortOrder = 'desc',
+} = {}) {
+  const qs = new URLSearchParams();
+  qs.set('page', String(page));
+  qs.set('page_size', String(pageSize));
+  if (role) qs.set('role', role);
+  if (search) qs.set('search', search);
+  qs.set('sort_by', sortBy);
+  qs.set('sort_order', sortOrder);
+  return fetchJSON(`/internal-users?${qs}`);
+}
+
+// createInternalUser creates a new internal user. When payload.auto_create_key
+// is not explicitly false, the server auto-provisions a default API key bound
+// to the new user and returns the plaintext secret ONCE in the response body
+// (fields `secret` + `api_key`). LiteLLM-equivalent of POST /user/new.
+export async function createInternalUser(payload) {
+  return fetchJSON('/internal-users', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+// reconcileInternalUserSpend recomputes the user's running spend from
+// usage_events and writes the SUM back to internal_users.spend. Recovers
+// from IncrementSpend failures (transient PG errors during Consume).
+// Optional from/to bounds scope the SUM to a window.
+export async function reconcileInternalUserSpend(id, { from = '', to = '' } = {}) {
+  const qs = new URLSearchParams();
+  if (from) qs.set('from', from);
+  if (to) qs.set('to', to);
+  const suffix = qs.toString() ? `?${qs}` : '';
+  return fetchJSON(`/internal-users/${encodeURIComponent(id)}/reconcile-spend${suffix}`, {
+    method: 'POST',
+  });
+}
+
+// reconcileAllSpend runs a bulk reconciliation across every user with events
+// newer than `since`. Empty since recomputes the entire history (slow).
+export async function reconcileAllSpend(since = '') {
+  const qs = new URLSearchParams();
+  if (since) qs.set('since', since);
+  const suffix = qs.toString() ? `?${qs}` : '';
+  return fetchJSON(`/internal-users/reconcile-all${suffix}`, { method: 'POST' });
+}
+
+// getInternalUserModelSpend returns per-model aggregations (cost / tokens /
+// request count) computed on-the-fly from usage_events. Optional from/to
+// bounds scope the window. Ordered by cost_usd descending.
+export async function getInternalUserModelSpend(id, { from = '', to = '' } = {}) {
+  const qs = new URLSearchParams();
+  if (from) qs.set('from', from);
+  if (to) qs.set('to', to);
+  const suffix = qs.toString() ? `?${qs}` : '';
+  return fetchJSON(`/internal-users/${encodeURIComponent(id)}/model-spend${suffix}`);
+}
+
+// getInternalUserModels returns the configured allowed_models grant list +
+// optional per-model max-budget JSON (stored in metadata.model_max_budgets)
+// + the realized per-model spend computed on-the-fly from usage_events.
+export async function getInternalUserModels(id) {
+  return fetchJSON(`/internal-users/${encodeURIComponent(id)}/models`);
+}
+
+export async function getInternalUser(id) {
+  return fetchJSON(`/internal-users/${encodeURIComponent(id)}`);
+}
+
+export async function patchInternalUser(id, patch) {
+  return fetchJSON(`/internal-users/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteInternalUser(id) {
+  await fetchJSON(`/internal-users/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export async function resetInternalUserSpend(id) {
+  return fetchJSON(`/internal-users/${encodeURIComponent(id)}/reset-spend`, {
+    method: 'POST',
+  });
+}
+
+// Per-user benchmark endpoints — mirror /usage-stats but scoped to a user.
+
+export async function getInternalUserTotals(id, params = {}) {
+  const qs = toUsageQS(params);
+  return fetchJSON(`/internal-users/${encodeURIComponent(id)}/totals${qs}`);
+}
+
+export async function getInternalUserTimeSeries(id, params = {}, interval = 'hour') {
+  const qs = toUsageQS({ ...params, interval });
+  return fetchJSON(`/internal-users/${encodeURIComponent(id)}/timeseries${qs}`);
+}
+
+export async function getInternalUserTop(id, {
+  dimension = 'model',
+  metric = 'request_count',
+  limit = 10,
+  ...filter
+} = {}) {
+  const qs = toUsageQS({ ...filter, dimension, metric, limit });
+  return fetchJSON(`/internal-users/${encodeURIComponent(id)}/top${qs}`);
+}
+
+export async function getInternalUserEvents(id, params = {}) {
+  const qs = toUsageQS(params);
+  return fetchJSON(`/internal-users/${encodeURIComponent(id)}/events${qs}`);
+}
+
+export async function getInternalUserWindows(id) {
+  return fetchJSON(`/internal-users/${encodeURIComponent(id)}/windows`);
+}
+
+// List of an internal user's owned API keys (with key_alias + status).
+export async function listInternalUserKeys(id, { page = 1, pageSize = 50, status = '' } = {}) {
+  const qs = new URLSearchParams();
+  qs.set('page', String(page));
+  qs.set('page_size', String(pageSize));
+  if (status) qs.set('status', status);
+  return fetchJSON(`/internal-users/${encodeURIComponent(id)}/keys?${qs}`);
+}
+
+// Attach (or detach with empty keyId) an existing API key to this user.
+export async function attachKeyToUser(userId, keyId) {
+  return fetchJSON(
+    `/internal-users/${encodeURIComponent(userId)}/keys/${encodeURIComponent(keyId)}/attach`,
+    { method: 'POST' },
+  );
+}
+
+export async function detachKeyFromUser(userId, keyId) {
+  await fetchJSON(
+    `/internal-users/${encodeURIComponent(userId)}/keys/${encodeURIComponent(keyId)}`,
+    { method: 'DELETE' },
+  );
+}
+
+// Leaderboard: top-N internal users by spend (default running spend) or, when
+// from/to params are supplied, by the chosen metric over that window.
+export async function getInternalUsersLeaderboard({
+  limit = 10,
+  metric = 'cost_usd',
+  from = '',
+  to = '',
+} = {}) {
+  const qs = new URLSearchParams();
+  qs.set('limit', String(limit));
+  qs.set('metric', metric);
+  if (from) qs.set('from', from);
+  if (to) qs.set('to', to);
+  return fetchJSON(`/internal-users/leaderboard?${qs}`);
 }
 
 // --- Models Catalog + Pricing -----------------------------------------------

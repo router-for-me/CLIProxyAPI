@@ -15,6 +15,7 @@ import (
 type usageStatsQuery struct {
 	APIKeyID  string
 	Principal string
+	UserID    string
 	Provider  string
 	Model     string
 	From      time.Time
@@ -27,6 +28,7 @@ func parseUsageStatsQuery(c *gin.Context) usageStatsQuery {
 	q := usageStatsQuery{
 		APIKeyID:  c.Query("api_key_id"),
 		Principal: c.Query("api_key_principal"),
+		UserID:    c.Query("user_id"),
 		Provider:  c.Query("provider"),
 		Model:     c.Query("model"),
 		GroupBy:   c.DefaultQuery("group_by", "model"),
@@ -63,6 +65,7 @@ func (h *Handler) GetUsageStats(c *gin.Context) {
 	aggs, err := usage.SelectAggregate(c.Request.Context(), store.UsageFilter{
 		APIKeyID:  q.APIKeyID,
 		Principal: q.Principal,
+		UserID:    q.UserID,
 		Provider:  q.Provider,
 		Model:     q.Model,
 		From:      q.From,
@@ -252,6 +255,7 @@ func filterFromQuery(q usageStatsQuery) store.UsageFilter {
 	f := store.UsageFilter{
 		APIKeyID:  q.APIKeyID,
 		Principal: q.Principal,
+		UserID:    q.UserID,
 		Provider:  q.Provider,
 		Model:     q.Model,
 		From:      q.From,
