@@ -524,18 +524,39 @@ func isKimiProbeOwnedCooldown(state *ModelState) bool {
 // payment_required fallback set by MarkResult - the imprecise cooldown this probe
 // is meant to replace. MarkResult does not touch state.Quota for 402/403 (so
 // Quota.Reason is empty); 401/404/model_not_supported also have an empty reason,
-// so the discriminator is LastError.HTTPStatus. Cloudflare challenges also return
-// HTTP 403 but set Quota.Reason = "cloudflare challenge", so we additionally
-// require Quota.Reason == "" to avoid misclassifying them as generic fallbacks.
+// so the discriminator is LastError.HTTPStatus.
+//
+// There are two cases:
+//  1. Quota.Reason == "" and LastError is 402/403 — the common case, a fresh
+//     generic fallback on a model that never had a Kimi probe cooldown.
+//  2. Quota.Reason == kimiUsageReason but isKimiProbeOwnedCooldown is false and
+//     LastError is 402/403 — stale Reason from an expired probe cooldown, now
+//     overwritten by a fresh 402/403 fallback. The stale Reason prevents the
+//     empty-Reason path from matching, so we match it explicitly here.
+//
+// Cloudflare challenges return HTTP 403 but set Quota.Reason = "cloudflare
+// challenge", so they are excluded by both paths.
 func isGenericPaymentFallback(state *ModelState) bool {
 	if state == nil || state.LastError == nil {
 		return false
 	}
-	if state.Quota.Reason != "" {
+	s := state.LastError.HTTPStatus
+	if s != http.StatusPaymentRequired && s != http.StatusForbidden {
 		return false
 	}
-	s := state.LastError.HTTPStatus
-	return s == http.StatusPaymentRequired || s == http.StatusForbidden
+	// Case 1: empty Reason (the common MarkResult 402/403 path).
+	if state.Quota.Reason == "" {
+		return true
+	}
+	// Case 2: stale kimiUsageReason from an expired probe cooldown, now
+	// overwritten by a fresh 402/403 fallback. The stale Reason would
+	// otherwise hide this state from both hasKimiUsageCooldown and
+	// hasGenericPaymentFallbackCooldown, leaving the model blocked even
+	// after the probe confirms quota is available.
+	if state.Quota.Reason == kimiUsageReason && !isKimiProbeOwnedCooldown(state) {
+		return true
+	}
+	return false
 }
 
 // clearKimiUsageCooldown clears only the model-level cooldown states that were

@@ -1114,6 +1114,19 @@ func TestHasGenericPaymentFallbackCooldown(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			name: "stale kimiUsageReason + fresh 403 fallback (matched)",
+			auth: &Auth{
+				ModelStates: map[string]*ModelState{
+					"kimi-k2": {
+						NextRetryAfter: time.Now().Add(30 * time.Minute),
+						Quota:          QuotaState{Exceeded: true, Reason: kimiUsageReason, NextRecoverAt: time.Now().Add(-time.Hour)},
+						LastError:      &Error{HTTPStatus: http.StatusForbidden},
+					},
+				},
+			},
+			want: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1464,6 +1477,95 @@ func TestSetAuthQuotaExceeded_PreservesStaleReasonWith401Overwrite(t *testing.T)
 	// Stale Reason stays; the probe must not have touched it.
 	if state.Quota.Reason != kimiUsageReason {
 		t.Errorf("Quota.Reason = %q, want %q (stale reason preserved, not overwritten)", state.Quota.Reason, kimiUsageReason)
+	}
+}
+
+// TestClearGenericPaymentFallbackCooldown_StaleReason403 verifies that when a
+// Kimi probe cooldown has expired and a fresh 403 generic fallback was layered
+// on top (Quota.Reason == kimiUsageReason but NextRetryAfter diverges), the
+// probe's healthy-window clearing still recognizes and clears it. Without this,
+// the stale Reason hides the state from both hasKimiUsageCooldown and
+// hasGenericPaymentFallbackCooldown, leaving the model permanently blocked.
+func TestClearGenericPaymentFallbackCooldown_StaleReason403(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	authID := "kimi-clear-stale-403-auth"
+	model := "kimi-k2"
+
+	pastRecover := time.Now().Add(-time.Hour)
+	freshRetry := time.Now().Add(30 * time.Minute)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "openai-compatible-kimi", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	if _, err := manager.Register(ctx, &Auth{
+		ID:       authID,
+		Provider: "openai-compatible-kimi",
+		Status:   StatusError,
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusError,
+				StatusMessage:  "quota exhausted, refreshed in the next cycle",
+				Unavailable:    true,
+				NextRetryAfter: freshRetry, // overwritten by fresh 403 fallback
+				Quota: QuotaState{ // stale probe fields
+					Exceeded:      true,
+					Reason:        kimiUsageReason,
+					NextRecoverAt: pastRecover,
+				},
+				LastError: &Error{HTTPStatus: http.StatusForbidden, Message: "quota exhausted"},
+				UpdatedAt: time.Now(),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	// Verify hasGenericPaymentFallbackCooldown recognizes this state.
+	live := manager.snapshotAuths()
+	var target *Auth
+	for i := range live {
+		if live[i].ID == authID {
+			target = live[i]
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("auth not found in snapshot")
+	}
+	if !hasGenericPaymentFallbackCooldown(target) {
+		t.Fatal("hasGenericPaymentFallbackCooldown should recognize stale reason + 403")
+	}
+
+	// Clear the generic fallback (simulating the probe seeing healthy windows).
+	now := time.Now()
+	if err := manager.clearGenericPaymentFallbackCooldown(ctx, target, now); err != nil {
+		t.Fatalf("clearGenericPaymentFallbackCooldown() error = %v", err)
+	}
+
+	// Verify the state was cleared.
+	live = manager.snapshotAuths()
+	var after *Auth
+	for i := range live {
+		if live[i].ID == authID {
+			after = live[i]
+			break
+		}
+	}
+	if after == nil {
+		t.Fatal("auth not found in snapshot after clear")
+	}
+	state := after.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state missing after clear")
+	}
+	if state.Unavailable {
+		t.Error("expected Unavailable=false after clearing stale reason 403")
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Errorf("NextRetryAfter = %v, want zero", state.NextRetryAfter)
 	}
 }
 
