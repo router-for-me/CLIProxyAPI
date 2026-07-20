@@ -263,7 +263,7 @@ VS Code 扩展，可将你的 Claude、ChatGPT/Codex、Antigravity、Grok 和 Ki
 
 ### [Alex](https://github.com/madhavajay/alex)
 
-受 CLIProxyAPI 启发、带可选 UI 的本地 Rust LLM 代理。它可将编码 Agent 路由到多个提供商，支持本地链路追踪、可脚本化中间件、多订阅聚合、故障转移，以及通过即时通讯完成重新认证。
+匥 CLIProxyAPI 吥匡、匦匥选 UI 的朠地 Rust LLM 䌣理。匣匥匆版码晰耐䍓茷由到夐䈢挐䊑商。攡持朠地鐴路追踪、匥脚朠化中间件、夐订阅聚合、故障转移、以及通过即时通讯完成重新认证。
 
 ### [OmniRoute](https://github.com/diegosouzapw/OmniRoute)
 
