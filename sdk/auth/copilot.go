@@ -91,12 +91,13 @@ func (a CopilotAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		"expires_at":          sessionToken.ExpiresAt.UTC().Format(time.RFC3339),
 		"base_url":            sessionToken.Endpoint,
 		"headers":             copilot.DefaultRequestHeaders(),
+		"available_models":    []string{},
 	}
-	if availableModelCatalog != nil && len(availableModelCatalog.ModelIDs) > 0 {
+	if errModels == nil && availableModelCatalog != nil {
 		metadata["available_models"] = availableModelCatalog.ModelIDs
-	}
-	if availableModelCatalog != nil && len(availableModelCatalog.ResponsesOnlyIDs) > 0 {
-		metadata["responses_models"] = availableModelCatalog.ResponsesOnlyIDs
+		if len(availableModelCatalog.ResponsesOnlyIDs) > 0 {
+			metadata["responses_models"] = availableModelCatalog.ResponsesOnlyIDs
+		}
 	}
 
 	fmt.Println("GitHub Copilot authentication successful")

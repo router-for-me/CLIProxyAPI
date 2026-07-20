@@ -881,14 +881,7 @@ func (e *OpenAICompatExecutor) refreshCopilotAuth(ctx context.Context, auth *cli
 	if _, ok := updated.Metadata["headers"]; !ok {
 		updated.Metadata["headers"] = copilot.DefaultRequestHeaders()
 	}
-	if availableModelCatalog != nil && len(availableModelCatalog.ModelIDs) > 0 {
-		updated.Metadata["available_models"] = availableModelCatalog.ModelIDs
-	}
-	if availableModelCatalog != nil && len(availableModelCatalog.ResponsesOnlyIDs) > 0 {
-		updated.Metadata["responses_models"] = availableModelCatalog.ResponsesOnlyIDs
-	} else {
-		delete(updated.Metadata, "responses_models")
-	}
+	applyCopilotModelCatalogMetadata(updated.Metadata, availableModelCatalog, errModels)
 	if updated.Attributes == nil {
 		updated.Attributes = make(map[string]string)
 	}
@@ -896,6 +889,18 @@ func (e *OpenAICompatExecutor) refreshCopilotAuth(ctx context.Context, auth *cli
 	updated.Attributes["base_url"] = sessionToken.Endpoint
 	cliproxyauth.ApplyCustomHeadersFromMetadata(updated)
 	return updated, nil
+}
+
+func applyCopilotModelCatalogMetadata(metadata map[string]any, catalog *copilot.AvailableModelCatalog, catalogErr error) {
+	if metadata == nil || catalogErr != nil || catalog == nil {
+		return
+	}
+	metadata["available_models"] = catalog.ModelIDs
+	if len(catalog.ResponsesOnlyIDs) > 0 {
+		metadata["responses_models"] = catalog.ResponsesOnlyIDs
+	} else {
+		delete(metadata, "responses_models")
+	}
 }
 
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {

@@ -355,3 +355,23 @@ func TestRegisterModelsForAuth_CopilotUsesAvailableModelsMetadata(t *testing.T) 
 		t.Fatalf("unexpected static Copilot model %q, got=%v", "claude-sonnet-5", got)
 	}
 }
+
+func TestRegisterModelsForAuth_CopilotKnownEmptyCatalogFailsClosed(t *testing.T) {
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "auth-copilot-empty-catalog",
+		Provider: "copilot",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"available_models": []string{}},
+	}
+
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	if models := modelRegistry.GetModelsForClient(auth.ID); len(models) != 0 {
+		t.Fatalf("known empty Copilot catalog registered static subscription models: %#v", models)
+	}
+}

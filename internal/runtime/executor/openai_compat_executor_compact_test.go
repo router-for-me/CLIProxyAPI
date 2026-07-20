@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -19,6 +21,39 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
+
+func TestApplyCopilotModelCatalogMetadataPreservesSnapshotOnFailure(t *testing.T) {
+	metadata := map[string]any{
+		"available_models": []string{"mai-code-1-flash-picker"},
+		"responses_models": []string{"mai-code-1-flash-picker"},
+	}
+
+	applyCopilotModelCatalogMetadata(metadata, nil, errors.New("temporary models failure"))
+
+	if got := metadataStringSlice(metadata, "available_models"); len(got) != 1 || got[0] != "mai-code-1-flash-picker" {
+		t.Fatalf("available_models changed after failed discovery: %#v", metadata)
+	}
+	if got := metadataStringSlice(metadata, "responses_models"); len(got) != 1 || got[0] != "mai-code-1-flash-picker" {
+		t.Fatalf("responses_models changed after failed discovery: %#v", metadata)
+	}
+}
+
+func TestApplyCopilotModelCatalogMetadataReplacesSnapshotOnSuccess(t *testing.T) {
+	metadata := map[string]any{
+		"available_models": []string{"old-model"},
+		"responses_models": []string{"old-model"},
+	}
+	catalog := &copilot.AvailableModelCatalog{ModelIDs: []string{"new-model"}}
+
+	applyCopilotModelCatalogMetadata(metadata, catalog, nil)
+
+	if got := metadataStringSlice(metadata, "available_models"); len(got) != 1 || got[0] != "new-model" {
+		t.Fatalf("available_models was not replaced: %#v", metadata)
+	}
+	if got := metadataStringSlice(metadata, "responses_models"); len(got) != 0 {
+		t.Fatalf("stale responses_models survived successful discovery: %#v", metadata)
+	}
+}
 
 func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	var gotPath string

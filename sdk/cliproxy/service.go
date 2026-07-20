@@ -2417,9 +2417,12 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 
 func resolveCopilotModelsForAuth(auth *coreauth.Auth) []*ModelInfo {
 	defaultModels := registry.GetCopilotModels()
-	modelIDs := copilotAvailableModelIDs(auth)
-	if len(modelIDs) == 0 {
+	modelIDs, catalogKnown := copilotAvailableModelIDs(auth)
+	if !catalogKnown {
 		return defaultModels
+	}
+	if len(modelIDs) == 0 {
+		return nil
 	}
 	catalog := copilotKnownModelsByID()
 	models := make([]*ModelInfo, 0, len(modelIDs))
@@ -2444,13 +2447,16 @@ func resolveCopilotModelsForAuth(auth *coreauth.Auth) []*ModelInfo {
 	return models
 }
 
-func copilotAvailableModelIDs(auth *coreauth.Auth) []string {
+func copilotAvailableModelIDs(auth *coreauth.Auth) ([]string, bool) {
 	if auth == nil || auth.Metadata == nil {
-		return nil
+		return nil, false
 	}
 	raw, ok := auth.Metadata["available_models"]
-	if !ok || raw == nil {
-		return nil
+	if !ok {
+		return nil, false
+	}
+	if raw == nil {
+		return nil, true
 	}
 
 	seen := map[string]struct{}{}
@@ -2483,7 +2489,7 @@ func copilotAvailableModelIDs(auth *coreauth.Auth) []string {
 			add(item)
 		}
 	}
-	return models
+	return models, true
 }
 
 func copilotKnownModelsByID() map[string]*ModelInfo {
