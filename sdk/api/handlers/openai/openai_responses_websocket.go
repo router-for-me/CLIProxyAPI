@@ -1771,7 +1771,15 @@ func collectResponsesWebsocketOutputItem(payload []byte, outputItemsByIndex map[
 func restoreResponsesWebsocketCompletionOutput(payload []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) []byte {
 	output := gjson.GetBytes(payload, "response.output")
 	if output.Exists() && output.IsArray() && len(output.Array()) > 0 {
-		return payload
+		reconciledOutput, changed := reconcileResponsesWebsocketCompletionToolCalls(output, outputItemsByIndex, outputItemsFallback)
+		if !changed {
+			return payload
+		}
+		restored, errSet := sjson.SetRawBytes(payload, "response.output", reconciledOutput)
+		if errSet != nil {
+			return payload
+		}
+		return restored
 	}
 	if len(outputItemsByIndex) == 0 && len(outputItemsFallback) == 0 {
 		return payload
@@ -1782,6 +1790,81 @@ func restoreResponsesWebsocketCompletionOutput(payload []byte, outputItemsByInde
 		return payload
 	}
 	return restored
+}
+
+func reconcileResponsesWebsocketCompletionToolCalls(output gjson.Result, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) ([]byte, bool) {
+	collectedToolCalls := make(map[string]json.RawMessage)
+	recordCollectedToolCall := func(raw []byte) {
+		item := gjson.ParseBytes(raw)
+		if !isCompleteResponsesWebsocketToolCall(item) {
+			return
+		}
+		callID := strings.TrimSpace(item.Get("call_id").String())
+		collectedToolCalls[callID] = append(json.RawMessage(nil), raw...)
+	}
+
+	indexes := make([]int64, 0, len(outputItemsByIndex))
+	for index := range outputItemsByIndex {
+		indexes = append(indexes, index)
+	}
+	sort.Slice(indexes, func(i, j int) bool {
+		return indexes[i] < indexes[j]
+	})
+	for _, index := range indexes {
+		recordCollectedToolCall(outputItemsByIndex[index])
+	}
+	for _, item := range outputItemsFallback {
+		recordCollectedToolCall(item)
+	}
+	if len(collectedToolCalls) == 0 {
+		return nil, false
+	}
+
+	items := output.Array()
+	reconciled := make([]json.RawMessage, 0, len(items))
+	changed := false
+	for _, item := range items {
+		raw := json.RawMessage(item.Raw)
+		if isResponsesToolCallType(item.Get("type").String()) {
+			callID := strings.TrimSpace(item.Get("call_id").String())
+			if collected, ok := collectedToolCalls[callID]; ok && !bytes.Equal(raw, collected) {
+				raw = collected
+				changed = true
+			}
+		}
+		reconciled = append(reconciled, raw)
+	}
+	if !changed {
+		return nil, false
+	}
+
+	marshaledOutput, errMarshal := json.Marshal(reconciled)
+	if errMarshal != nil {
+		return nil, false
+	}
+	return marshaledOutput, true
+}
+
+func isCompleteResponsesWebsocketToolCall(item gjson.Result) bool {
+	if !item.Exists() || !item.IsObject() {
+		return false
+	}
+	callID := item.Get("call_id")
+	name := item.Get("name")
+	if callID.Type != gjson.String || strings.TrimSpace(callID.String()) == "" || name.Type != gjson.String || strings.TrimSpace(name.String()) == "" {
+		return false
+	}
+
+	switch strings.TrimSpace(item.Get("type").String()) {
+	case "function_call":
+		arguments := item.Get("arguments")
+		return arguments.Exists() && arguments.Type == gjson.String
+	case "custom_tool_call":
+		input := item.Get("input")
+		return input.Exists() && input.Type == gjson.String
+	default:
+		return false
+	}
 }
 
 func responseCompletedOutputFromPayload(payload []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) []byte {
@@ -1802,11 +1885,18 @@ func responseCompletedOutputFromPayload(payload []byte, outputItemsByIndex map[i
 	})
 
 	items := make([]json.RawMessage, 0, len(outputItemsByIndex)+len(outputItemsFallback))
+	appendCollectedItem := func(raw []byte) {
+		item := gjson.ParseBytes(raw)
+		if isResponsesToolCallType(item.Get("type").String()) && !isCompleteResponsesWebsocketToolCall(item) {
+			return
+		}
+		items = append(items, append(json.RawMessage(nil), raw...))
+	}
 	for _, index := range indexes {
-		items = append(items, json.RawMessage(outputItemsByIndex[index]))
+		appendCollectedItem(outputItemsByIndex[index])
 	}
 	for _, item := range outputItemsFallback {
-		items = append(items, json.RawMessage(item))
+		appendCollectedItem(item)
 	}
 
 	marshaledOutput, errMarshal := json.Marshal(items)
@@ -1839,10 +1929,11 @@ func updatePendingToolCallIDsFromItem(pending map[string]struct{}, item gjson.Re
 	}
 	switch strings.TrimSpace(item.Get("type").String()) {
 	case "function_call", "custom_tool_call":
-		callID := strings.TrimSpace(item.Get("call_id").String())
-		if callID != "" {
-			pending[callID] = struct{}{}
+		if !isCompleteResponsesWebsocketToolCall(item) {
+			return
 		}
+		callID := strings.TrimSpace(item.Get("call_id").String())
+		pending[callID] = struct{}{}
 	case "function_call_output", "custom_tool_call_output":
 		callID := strings.TrimSpace(item.Get("call_id").String())
 		if callID != "" {

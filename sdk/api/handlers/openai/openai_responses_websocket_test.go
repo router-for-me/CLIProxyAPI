@@ -1225,6 +1225,27 @@ func TestResponseCompletedOutputFromPayload(t *testing.T) {
 	}
 }
 
+func TestResponseCompletedOutputFromPayloadDropsIncompleteCollectedToolCalls(t *testing.T) {
+	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[]}}`)
+	collector := map[int64][]byte{
+		0: []byte(`{"type":"message","id":"msg-1"}`),
+		1: []byte(`{"type":"function_call","call_id":"call-1","name":"exec"}`),
+		2: []byte(`{"type":"custom_tool_call","call_id":"call-2","name":"exec","input":"pwd"}`),
+	}
+
+	output := responseCompletedOutputFromPayload(payload, collector, nil)
+	items := gjson.ParseBytes(output).Array()
+	if len(items) != 2 {
+		t.Fatalf("output len = %d, want 2: %s", len(items), output)
+	}
+	if items[0].Get("type").String() != "message" || items[0].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected first output item: %s", items[0].Raw)
+	}
+	if items[1].Get("type").String() != "custom_tool_call" || items[1].Get("call_id").String() != "call-2" {
+		t.Fatalf("unexpected second output item: %s", items[1].Raw)
+	}
+}
+
 func TestRestoreResponsesWebsocketCompletionOutputPreservesNonEmptyOutput(t *testing.T) {
 	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"message","id":"out-1"}]}}`)
 	collector := map[int64][]byte{0: []byte(`{"type":"function_call","id":"call-1","call_id":"call-1"}`)}
@@ -1232,6 +1253,100 @@ func TestRestoreResponsesWebsocketCompletionOutputPreservesNonEmptyOutput(t *tes
 	restored := restoreResponsesWebsocketCompletionOutput(payload, collector, nil)
 	if string(restored) != string(payload) {
 		t.Fatalf("non-empty completion output was overwritten: %s", restored)
+	}
+}
+
+func TestRestoreResponsesWebsocketCompletionOutputReconcilesConflictingToolCall(t *testing.T) {
+	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"message","id":"msg-1"},{"type":"function_call","call_id":"call-1","name":"exec"}]}}`)
+	collector := map[int64][]byte{0: []byte(`{"type":"custom_tool_call","id":"ctc-1","call_id":"call-1","name":"exec","input":"pwd","status":"completed"}`)}
+
+	restored := restoreResponsesWebsocketCompletionOutput(payload, collector, nil)
+	output := gjson.GetBytes(restored, "response.output").Array()
+	if len(output) != 2 {
+		t.Fatalf("restored output len = %d, want 2: %s", len(output), restored)
+	}
+	if output[0].Get("type").String() != "message" || output[0].Get("id").String() != "msg-1" {
+		t.Fatalf("unrelated completion item changed: %s", output[0].Raw)
+	}
+	if output[1].Get("type").String() != "custom_tool_call" || output[1].Get("call_id").String() != "call-1" {
+		t.Fatalf("conflicting tool call was not reconciled: %s", output[1].Raw)
+	}
+	if input := output[1].Get("input"); input.Type != gjson.String || input.String() != "pwd" {
+		t.Fatalf("reconciled custom tool input = %s, want string pwd", input.Raw)
+	}
+
+	lastRequest := []byte(`{"model":"gpt-test","stream":true,"input":[{"type":"message","id":"user-1","role":"user","content":"run pwd"}]}`)
+	nextRequest := []byte(`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"custom_tool_call_output","call_id":"call-1","output":"ok"}]}`)
+	completedOutput := []byte(gjson.GetBytes(restored, "response.output").Raw)
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithIncrementalState(
+		nextRequest,
+		lastRequest,
+		completedOutput,
+		"resp-1",
+		[]string{"call-1"},
+		false,
+		false,
+	)
+	if errMsg != nil {
+		t.Fatalf("normalize next request: %v", errMsg.Error)
+	}
+	if gjson.GetBytes(normalized, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id must not be forwarded to HTTP/SSE upstream: %s", normalized)
+	}
+	input := gjson.GetBytes(normalized, "input").Array()
+	if len(input) != 4 {
+		t.Fatalf("replayed input len = %d, want 4: %s", len(input), normalized)
+	}
+	if input[2].Get("type").String() != "custom_tool_call" || input[2].Get("input").String() != "pwd" {
+		t.Fatalf("replayed tool call is invalid: %s", input[2].Raw)
+	}
+	if input[3].Get("type").String() != "custom_tool_call_output" || input[3].Get("call_id").String() != "call-1" {
+		t.Fatalf("replayed tool output is invalid: %s", input[3].Raw)
+	}
+
+	cache := newWebsocketToolOutputCache(time.Minute, 10)
+	donePayload := []byte(`{"type":"response.output_item.done","item":{"type":"custom_tool_call","id":"ctc-1","call_id":"call-1","name":"exec","input":"pwd","status":"completed"}}`)
+	recordResponsesWebsocketToolCallsFromPayloadWithCache(cache, "session-1", donePayload)
+	recordResponsesWebsocketToolCallsFromPayloadWithCache(cache, "session-1", restored)
+	cached, ok := cache.get("session-1", "call-1")
+	if !ok {
+		t.Fatalf("reconciled custom tool call was not cached")
+	}
+	if gjson.GetBytes(cached, "type").String() != "custom_tool_call" || gjson.GetBytes(cached, "input").String() != "pwd" {
+		t.Fatalf("cached tool call is invalid: %s", cached)
+	}
+}
+
+func TestRestoreResponsesWebsocketCompletionOutputIgnoresIncompleteCollectedToolCall(t *testing.T) {
+	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"function_call","call_id":"call-1","name":"exec"}]}}`)
+	collector := map[int64][]byte{0: []byte(`{"type":"custom_tool_call","call_id":"call-1","name":"exec"}`)}
+
+	restored := restoreResponsesWebsocketCompletionOutput(payload, collector, nil)
+	if string(restored) != string(payload) {
+		t.Fatalf("incomplete collected tool call overwrote completion output: %s", restored)
+	}
+}
+
+func TestIsCompleteResponsesWebsocketToolCallRequiresStringFields(t *testing.T) {
+	tests := []struct {
+		name string
+		item string
+		want bool
+	}{
+		{name: "numeric call id", item: `{"type":"function_call","call_id":123,"name":"exec","arguments":"{}"}`},
+		{name: "boolean name", item: `{"type":"function_call","call_id":"call-1","name":true,"arguments":"{}"}`},
+		{name: "numeric arguments", item: `{"type":"function_call","call_id":"call-1","name":"exec","arguments":123}`},
+		{name: "object custom input", item: `{"type":"custom_tool_call","call_id":"call-1","name":"exec","input":{}}`},
+		{name: "valid function call", item: `{"type":"function_call","call_id":"call-1","name":"exec","arguments":""}`, want: true},
+		{name: "valid custom tool call", item: `{"type":"custom_tool_call","call_id":"call-1","name":"exec","input":""}`, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isCompleteResponsesWebsocketToolCall(gjson.Parse(tt.item)); got != tt.want {
+				t.Fatalf("isCompleteResponsesWebsocketToolCall() = %t, want %t", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1564,6 +1679,22 @@ func TestRepairResponsesWebsocketToolCallsDropsOrphanCustomToolOutputWhenCallMis
 	}
 	if input[0].Get("type").String() != "message" || input[0].Get("id").String() != "msg-1" {
 		t.Fatalf("unexpected remaining item: %s", input[0].Raw)
+	}
+}
+
+func TestRecordResponsesWebsocketToolCallsIgnoresIncompleteCall(t *testing.T) {
+	cache := newWebsocketToolOutputCache(time.Minute, 10)
+	pending := make(map[string]struct{})
+	payload := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","call_id":"call-1","name":"exec"}}`)
+
+	recordResponsesWebsocketToolCallsFromPayloadWithCache(cache, "session-1", payload)
+	recordPendingToolCallIDsFromPayload(pending, payload)
+
+	if cached, ok := cache.get("session-1", "call-1"); ok {
+		t.Fatalf("incomplete tool call was cached: %s", cached)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("incomplete tool call was recorded as pending: %v", pending)
 	}
 }
 
@@ -3765,7 +3896,7 @@ func TestResponsesWebsocketOutputCollectorRestoresCompletedOutput(t *testing.T) 
 	for _, payload := range [][]byte{
 		[]byte(`{"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"reply-1","role":"assistant"}}`),
 		[]byte(`{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"summary-1","summary":[]}}`),
-		[]byte(`{"type":"response.output_item.done","item":{"type":"function_call","id":"call-1","call_id":"call-1"}}`),
+		[]byte(`{"type":"response.output_item.done","item":{"type":"function_call","id":"call-1","call_id":"call-1","name":"exec","arguments":"{}"}}`),
 	} {
 		collectResponsesWebsocketOutputItem(payload, outputItemsByIndex, &outputItemsFallback)
 	}
