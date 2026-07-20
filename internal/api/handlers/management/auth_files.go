@@ -388,6 +388,74 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	c.JSON(200, gin.H{"models": result})
 }
 
+// RefreshAuthFile refreshes one runtime auth selected by auth ID or filename.
+func (h *Handler) RefreshAuthFile(c *gin.Context) {
+	if h == nil || h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	var req struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if errBind := c.ShouldBindJSON(&req); errBind != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	selector := strings.TrimSpace(req.ID)
+	if selector == "" {
+		selector = strings.TrimSpace(req.Name)
+	}
+	if selector == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id or name is required"})
+		return
+	}
+
+	targetAuth := h.findAuthByNameOrID(selector)
+	if targetAuth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		return
+	}
+	refreshed, errRefresh := h.authManager.RefreshAuth(c.Request.Context(), targetAuth.ID)
+	if errRefresh != nil {
+		log.WithError(errRefresh).WithField("auth_id", targetAuth.ID).Warn("failed to refresh auth file")
+		switch {
+		case errors.Is(errRefresh, coreauth.ErrAuthNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		case errors.Is(errRefresh, coreauth.ErrAuthNotRefreshable):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "auth file is not refreshable"})
+		default:
+			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to refresh auth file"})
+		}
+		return
+	}
+	if refreshed == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "refreshed auth unavailable"})
+		return
+	}
+
+	name := strings.TrimSpace(refreshed.FileName)
+	if name == "" {
+		name = refreshed.ID
+	}
+	response := gin.H{
+		"status":   "ok",
+		"id":       refreshed.ID,
+		"name":     name,
+		"provider": strings.TrimSpace(refreshed.Provider),
+	}
+	if refreshed.Attributes != nil {
+		if planType := strings.TrimSpace(refreshed.Attributes["plan_type"]); planType != "" {
+			response["plan_type"] = planType
+		}
+	}
+	if !refreshed.LastRefreshedAt.IsZero() {
+		response["last_refresh"] = refreshed.LastRefreshedAt
+	}
+	c.JSON(http.StatusOK, response)
+}
+
 // List auth files from disk when the auth manager is unavailable.
 func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 	entries, err := os.ReadDir(h.cfg.AuthDir)
@@ -835,20 +903,11 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 			if !strings.HasSuffix(strings.ToLower(name), ".json") {
 				continue
 			}
-			full := filepath.Join(h.cfg.AuthDir, name)
-			if !filepath.IsAbs(full) {
-				if abs, errAbs := filepath.Abs(full); errAbs == nil {
-					full = abs
-				}
+			if _, status, errDelete := h.deleteAuthFileByName(ctx, name); errDelete != nil {
+				c.JSON(status, gin.H{"error": errDelete.Error()})
+				return
 			}
-			if err = os.Remove(full); err == nil {
-				if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {
-					c.JSON(500, gin.H{"error": errDel.Error()})
-					return
-				}
-				deleted++
-				h.removeAuth(ctx, full)
-			}
+			deleted++
 		}
 		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
 		return
@@ -1046,14 +1105,30 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 			targetPath = abs
 		}
 	}
-	if errRemove := os.Remove(targetPath); errRemove != nil {
-		if os.IsNotExist(errRemove) {
+	removeStoredCredential := func() error {
+		if errRemove := os.Remove(targetPath); errRemove != nil {
+			if os.IsNotExist(errRemove) {
+				return errAuthFileNotFound
+			}
+			return fmt.Errorf("failed to remove file: %w", errRemove)
+		}
+		if errDeleteRecord := h.deleteTokenRecord(ctx, targetPath); errDeleteRecord != nil {
+			return errDeleteRecord
+		}
+		return nil
+	}
+
+	var errDelete error
+	if targetID != "" {
+		errDelete = h.authManager.RemoveWithCleanup(ctx, targetID, removeStoredCredential)
+	} else {
+		errDelete = removeStoredCredential()
+	}
+	if errDelete != nil {
+		if errors.Is(errDelete, errAuthFileNotFound) {
 			return filepath.Base(name), http.StatusNotFound, errAuthFileNotFound
 		}
-		return filepath.Base(name), http.StatusInternalServerError, fmt.Errorf("failed to remove file: %w", errRemove)
-	}
-	if errDeleteRecord := h.deleteTokenRecord(ctx, targetPath); errDeleteRecord != nil {
-		return filepath.Base(name), http.StatusInternalServerError, errDeleteRecord
+		return filepath.Base(name), http.StatusInternalServerError, errDelete
 	}
 	h.removeAuthsForPath(ctx, targetPath, targetID)
 	return filepath.Base(name), http.StatusOK, nil
@@ -1074,6 +1149,10 @@ func isPluginVirtualSourceDelete(name string, auth *coreauth.Auth) bool {
 }
 
 func (h *Handler) findAuthForDelete(name string) *coreauth.Auth {
+	return h.findAuthByNameOrID(name)
+}
+
+func (h *Handler) findAuthByNameOrID(name string) *coreauth.Auth {
 	if h == nil || h.authManager == nil {
 		return nil
 	}
