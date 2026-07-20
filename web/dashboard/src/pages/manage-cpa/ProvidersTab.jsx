@@ -625,11 +625,25 @@ function ProviderKeyCard({ kind }) {
   function openFetchForFirst() {
     if (kind.id === 'openai') {
       if (list.length === 0) return;
+      // Pull the first configured API key for this entry so the modal
+      // probes the upstream with the per-provider credential, not the
+      // global proxy caller key stored in localStorage.
+      const firstRow = list[0];
+      const firstEntry = Array.isArray(firstRow?.['api-key-entries'])
+        ? firstRow['api-key-entries'][0]
+        : Array.isArray(firstRow?.api_key_entries)
+          ? firstRow.api_key_entries[0]
+          : null;
+      const entryApiKey =
+        firstEntry?.['api-key']
+        || firstEntry?.api_key
+        || '';
       setFetchTarget({
         mode: 'openai',
-        baseUrl: list[0].base_url || '',
+        baseUrl: firstRow.base_url || '',
         entryIndex: 0,
-        entryName: list[0].name || '',
+        entryName: firstRow.name || '',
+        entryApiKey,
       });
       return;
     }
@@ -643,14 +657,26 @@ function ProviderKeyCard({ kind }) {
   // openFetchForRow — per-row "Fetch" button. For OAuth providers the
   // server's auth-files/models endpoint needs an auth id, so we pick the
   // first matching auth-file when the row doesn't carry one. For
-  // OpenAI-Compat we always use the row's own base_url + name.
+  // OpenAI-Compat we always use the row's own base_url + name + first
+  // configured API key (the per-provider credential, not the proxy's
+  // global caller key).
   function openFetchForRow(item, idx) {
     if (kind.id === 'openai') {
+      const firstEntry = Array.isArray(item?.['api-key-entries'])
+        ? item['api-key-entries'][0]
+        : Array.isArray(item?.api_key_entries)
+          ? item.api_key_entries[0]
+          : null;
+      const entryApiKey =
+        firstEntry?.['api-key']
+        || firstEntry?.api_key
+        || '';
       setFetchTarget({
         mode: 'openai',
         baseUrl: item.base_url || '',
         entryIndex: idx,
         entryName: item.name || '',
+        entryApiKey,
       });
       return;
     }
@@ -835,6 +861,7 @@ function ProviderKeyCard({ kind }) {
           baseUrl={fetchTarget.baseUrl || ''}
           entryIndex={fetchTarget.entryIndex ?? 0}
           entryName={fetchTarget.entryName || ''}
+          entryApiKey={fetchTarget.entryApiKey || ''}
           siblingNames={siblingNames}
           onClose={() => setFetchTarget(null)}
           onApplied={(n) => {
@@ -891,12 +918,24 @@ function providerIdToAuthType(id) {
 // keyDisplayFor / keyCriteriaFor — provider-specific accessors. Each provider
 // has its own field name for the secret ("api-key", "api_key_entries[*].api-key",
 // etc.) — we look at the schema and return the right thing.
+//
+// Wire-format note: the Go server serializes OpenAI-Compat with the json
+// tag `api-key-entries` (kebab-case), so JSON.parse keeps that literal
+// key. We try both kebab and snake/underscore variants defensively so
+// the UI works regardless of which shape arrived.
 function keyDisplayFor(provider, item) {
   if (!item) return '';
   if (provider === 'openai') {
-    // OpenAI-Compat: array of api-key-entries; show first or "name"
-    if (Array.isArray(item.api_key_entries) && item.api_key_entries.length > 0) {
-      return item.api_key_entries[0]?.['api-key'] || item.name || '';
+    // OpenAI-Compat: array of api-key-entries; show first or "name".
+    // Try both kebab (current Go tag) and snake (legacy / mirrored).
+    const entries = Array.isArray(item['api-key-entries'])
+      ? item['api-key-entries']
+      : Array.isArray(item.api_key_entries)
+        ? item.api_key_entries
+        : null;
+    if (entries && entries.length > 0) {
+      const first = entries[0] || {};
+      return first['api-key'] || first.api_key || item.name || '';
     }
     return item.name || '';
   }
