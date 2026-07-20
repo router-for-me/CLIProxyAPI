@@ -579,13 +579,15 @@ function buildForm(provider, initial) {
   }
   if (provider === 'openai') {
     out.name = initial.name || '';
-    // OpenAI-Compat stores keys in api_key_entries[]; accept either the
-    // array form (current server) or a single api-key field (older
-    // hand-edited configs).
-    const firstEntry =
-      Array.isArray(initial.api_key_entries) && initial.api_key_entries.length > 0
-        ? initial.api_key_entries[0]
-        : null;
+    // OpenAI-Compat stores keys in api-key-entries[]; accept either the
+    // kebab-case wire format (current server json tag), the legacy
+    // snake_case mirror, or a single api-key field (older hand-edited
+    // configs).
+    const entries =
+      Array.isArray(initial['api-key-entries']) ? initial['api-key-entries']
+        : Array.isArray(initial.api_key_entries) ? initial.api_key_entries
+          : null;
+    const firstEntry = entries && entries.length > 0 ? entries[0] : null;
     out.api_key = firstEntry?.['api-key']
       || firstEntry?.api_key
       || initial['api-key']
@@ -637,8 +639,15 @@ export default function ProviderKeyEditModal({
   // didn't change `editing` between mount and re-mount.
   const initialIdentity = useMemo(() => {
     if (!initial) return '';
-    const providerKey = initial['api-key'] || initial.api_key
-      || initial.api_key_entries?.[0]?.['api-key'] || '';
+    // Try both kebab-case (current Go json tag) and snake_case (legacy)
+    // when reading the first configured api-key for an OpenAI-Compat
+    // entry. Same defensive style as buildForm above.
+    const openaiEntries =
+      Array.isArray(initial['api-key-entries']) ? initial['api-key-entries']
+        : Array.isArray(initial.api_key_entries) ? initial.api_key_entries
+          : null;
+    const openaiFirstKey = openaiEntries?.[0]?.['api-key'] || '';
+    const providerKey = initial['api-key'] || initial.api_key || openaiFirstKey || '';
     const baseUrl = initial.base_url || '';
     const name = initial.name || '';
     return `${kind.id}|${providerKey}|${baseUrl}|${name}`;
