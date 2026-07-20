@@ -53,11 +53,16 @@ func rewriteInteractionsFunctionNames(out []byte, functionNameMap map[string]str
 			content.Get("parts").ForEach(func(_, part gjson.Result) bool {
 				partJSON := []byte(part.Raw)
 				for _, field := range []string{"functionCall", "functionResponse"} {
-					name := part.Get(field + ".name").String()
+					nameResult := part.Get(field + ".name")
+					name := nameResult.String()
 					if name == "" {
 						continue
 					}
-					partJSON, _ = sjson.SetBytes(partJSON, field+".name", util.MapSanitizedFunctionName(functionNameMap, name))
+					mappedName := util.MapSanitizedFunctionName(functionNameMap, name)
+					if nameResult.Type == gjson.String && mappedName == name {
+						continue
+					}
+					partJSON, _ = sjson.SetBytes(partJSON, field+".name", mappedName)
 					partsChanged = true
 				}
 				partItems = append(partItems, partJSON)
@@ -77,12 +82,17 @@ func rewriteInteractionsFunctionNames(out []byte, functionNameMap map[string]str
 		for contentIndex, content := range contents.Array() {
 			for partIndex, part := range content.Get("parts").Array() {
 				for _, field := range []string{"functionCall", "functionResponse"} {
-					name := part.Get(field + ".name").String()
+					nameResult := part.Get(field + ".name")
+					name := nameResult.String()
 					if name == "" {
 						continue
 					}
+					mappedName := util.MapSanitizedFunctionName(functionNameMap, name)
+					if nameResult.Type == gjson.String && mappedName == name {
+						continue
+					}
 					path := fmt.Sprintf("request.contents.%d.parts.%d.%s.name", contentIndex, partIndex, field)
-					out, _ = sjson.SetBytes(out, path, util.MapSanitizedFunctionName(functionNameMap, name))
+					out, _ = sjson.SetBytes(out, path, mappedName)
 				}
 			}
 		}
@@ -91,17 +101,26 @@ func rewriteInteractionsFunctionNames(out []byte, functionNameMap map[string]str
 	allowedPath := "request.toolConfig.functionCallingConfig.allowedFunctionNames"
 	allowedNames := gjson.GetBytes(out, allowedPath)
 	if allowedNames.IsArray() {
+		namesChanged := false
 		nameItems := make([][]byte, 0, 4)
 		allowedNames.ForEach(func(_, name gjson.Result) bool {
-			mappedName, _ := json.Marshal(util.MapSanitizedFunctionName(functionNameMap, name.String()))
-			nameItems = append(nameItems, mappedName)
+			mappedName := util.MapSanitizedFunctionName(functionNameMap, name.String())
+			namesChanged = namesChanged || name.Type != gjson.String || mappedName != name.String()
+			mappedNameJSON, _ := json.Marshal(mappedName)
+			nameItems = append(nameItems, mappedNameJSON)
 			return true
 		})
-		out, _ = sjson.SetRawBytes(out, allowedPath, translatorcommon.JoinRawArray(nameItems))
+		if namesChanged {
+			out, _ = sjson.SetRawBytes(out, allowedPath, translatorcommon.JoinRawArray(nameItems))
+		}
 	} else {
 		for index, name := range allowedNames.Array() {
+			mappedName := util.MapSanitizedFunctionName(functionNameMap, name.String())
+			if name.Type == gjson.String && mappedName == name.String() {
+				continue
+			}
 			path := fmt.Sprintf("%s.%d", allowedPath, index)
-			out, _ = sjson.SetBytes(out, path, util.MapSanitizedFunctionName(functionNameMap, name.String()))
+			out, _ = sjson.SetBytes(out, path, mappedName)
 		}
 	}
 	return out
@@ -572,7 +591,6 @@ func antigravityFunctionDeclarationJSON(decl gjson.Result, functionNameMap map[s
 	if responseSchema := fn.Get("responseJsonSchema"); responseSchema.Exists() {
 		out, _ = sjson.SetRawBytes(out, "responseJsonSchema", []byte(responseSchema.Raw))
 	}
-	out, _ = sjson.DeleteBytes(out, "strict")
 	return out
 }
 

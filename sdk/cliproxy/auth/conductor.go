@@ -230,6 +230,8 @@ type Manager struct {
 	// homeRuntimeAuths caches auths returned by Home so websocket sessions can
 	// reuse an established upstream credential without dispatching every turn.
 	homeRuntimeAuths map[string]map[string]*Auth
+	// homeLeaseReleases serializes and bounds asynchronous Home lease releases.
+	homeLeaseReleases *homeLeaseReleaseQueue
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
 	providerOffsets map[string]int
 
@@ -274,14 +276,15 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:            store,
-		executors:        make(map[string]ProviderExecutor),
-		selector:         selector,
-		hook:             hook,
-		auths:            make(map[string]*Auth),
-		homeRuntimeAuths: make(map[string]map[string]*Auth),
-		providerOffsets:  make(map[string]int),
-		modelPoolOffsets: make(map[string]int),
+		store:             store,
+		executors:         make(map[string]ProviderExecutor),
+		selector:          selector,
+		hook:              hook,
+		auths:             make(map[string]*Auth),
+		homeRuntimeAuths:  make(map[string]map[string]*Auth),
+		homeLeaseReleases: newHomeLeaseReleaseQueue(),
+		providerOffsets:   make(map[string]int),
+		modelPoolOffsets:  make(map[string]int),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -1776,6 +1779,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
+		releaseReason := "stream_terminal"
+		defer func() {
+			releaseHomeLease(auth, releaseReason)
+		}()
 		var failed bool
 		forward := true
 		var rewriter *StreamRewriter
@@ -1798,6 +1805,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				}
 				select {
 				case <-ctx.Done():
+					releaseReason = "request_canceled"
 					forward = false
 					return false
 				case out <- chunk:
@@ -1818,6 +1826,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			}
 			select {
 			case <-ctx.Done():
+				releaseReason = "request_canceled"
 				forward = false
 				return false
 			case out <- chunk:
@@ -1826,15 +1835,35 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		}
 		for _, chunk := range buffered {
 			if ok := emit(chunk); !ok {
-				discardStreamChunks(remaining)
 				return
 			}
 		}
-		for chunk := range remaining {
-			if ok := emit(chunk); !ok {
-				discardStreamChunks(remaining)
+		// Executors receive ctx and must stop producing when it is cancelled.
+		// Do not start an unbounded drainer for a channel that may never close.
+		for {
+			var (
+				chunk cliproxyexecutor.StreamChunk
+				ok    bool
+			)
+			if ctx == nil {
+				chunk, ok = <-remaining
+			} else {
+				select {
+				case <-ctx.Done():
+					releaseReason = "request_canceled"
+					return
+				case chunk, ok = <-remaining:
+				}
+			}
+			if !ok {
+				break
+			}
+			if okEmit := emit(chunk); !okEmit {
 				return
 			}
+		}
+		if ctx != nil && ctx.Err() != nil {
+			releaseReason = "request_canceled"
 		}
 		if tail := finishForceMappedStreamChunks(rewriter); len(tail) > 0 {
 			tailChunk := cliproxyexecutor.StreamChunk{Payload: tail}
@@ -1854,6 +1883,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
+	homeLease := homeLeaseFromAuth(auth)
 	var lastErr error
 	didRefreshOnUnauthorized := false
 	for idx, execModel := range execModels {
@@ -1872,6 +1902,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(ctx, auth, errStream, didRefreshOnUnauthorized); okRefresh {
 				auth = refreshed
+				preserveHomeLease(auth, homeLease)
 				didRefreshOnUnauthorized = true
 				streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, execOpts)
 				if errStream != nil {
@@ -1896,12 +1927,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
-				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
 			}
 			if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(ctx, auth, bootstrapErr, didRefreshOnUnauthorized); okRefresh {
 				discardStreamChunks(streamResult.Chunks)
 				auth = refreshed
+				preserveHomeLease(auth, homeLease)
 				didRefreshOnUnauthorized = true
 				retryStream, retryErr := executor.ExecuteStream(ctx, auth, execReq, execOpts)
 				if retryErr != nil {
@@ -1917,6 +1948,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 		}
 		if bootstrapErr != nil {
+			if errCtx := ctx.Err(); errCtx != nil {
+				return nil, errCtx
+			}
 			if isRequestInvalidError(bootstrapErr) {
 				rerr := resultErrorFromError(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
@@ -2330,6 +2364,7 @@ func (m *Manager) Load(ctx context.Context) error {
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	ctx = ensureExecutionRequestID(ctx)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -2368,6 +2403,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	ctx = ensureExecutionRequestID(ctx)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -2400,6 +2436,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	ctx = ensureExecutionRequestID(ctx)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -2573,20 +2610,25 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		execCtx = contextWithHomeLease(execCtx, auth)
 
 		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
 		if len(models) == 0 {
+			releaseHomeLease(auth, "no_execution_model")
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		homeLease := homeLeaseFromAuth(auth)
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare)}
 			m.MarkResult(execCtx, result)
+			releaseHomeLease(auth, "prepare_failed")
 			lastErr = errPrepare
 			continue
 		}
+		preserveHomeLease(auth, homeLease)
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
@@ -2601,14 +2643,17 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
+					releaseHomeLease(auth, "request_canceled")
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(execCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
 					auth = refreshed
+					preserveHomeLease(auth, homeLease)
 					didRefreshOnUnauthorized = true
 					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
 					if errExec != nil {
 						if errCtx := execCtx.Err(); errCtx != nil {
+							releaseHomeLease(auth, "request_canceled")
 							return cliproxyexecutor.Response{}, errCtx
 						}
 					}
@@ -2622,19 +2667,23 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				}
 				m.MarkResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
+					releaseHomeLease(auth, "request_invalid")
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
 				continue
 			}
 			m.MarkResult(execCtx, result)
+			releaseHomeLease(auth, "completed")
 			rewriteForceMappedResponse(&resp, aliasResult)
 			return resp, nil
 		}
 		if authErr != nil {
 			if isRequestInvalidError(authErr) {
+				releaseHomeLease(auth, "request_invalid")
 				return cliproxyexecutor.Response{}, authErr
 			}
+			releaseHomeLease(auth, "attempt_failed")
 			lastErr = authErr
 			if homeMode {
 				homeAuthCount++
@@ -2686,20 +2735,25 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		execCtx = contextWithHomeLease(execCtx, auth)
 
 		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
 		if len(models) == 0 {
+			releaseHomeLease(auth, "no_execution_model")
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		homeLease := homeLeaseFromAuth(auth)
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare)}
 			m.MarkResult(execCtx, result)
+			releaseHomeLease(auth, "prepare_failed")
 			lastErr = errPrepare
 			continue
 		}
+		preserveHomeLease(auth, homeLease)
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
@@ -2714,14 +2768,17 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
+					releaseHomeLease(auth, "request_canceled")
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(execCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
 					auth = refreshed
+					preserveHomeLease(auth, homeLease)
 					didRefreshOnUnauthorized = true
 					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
 					if errExec != nil {
 						if errCtx := execCtx.Err(); errCtx != nil {
+							releaseHomeLease(auth, "request_canceled")
 							return cliproxyexecutor.Response{}, errCtx
 						}
 					}
@@ -2743,19 +2800,23 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					m.MarkResult(execCtx, result)
 				}
 				if isRequestInvalidError(errExec) {
+					releaseHomeLease(auth, "request_invalid")
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
 				continue
 			}
 			m.MarkResult(execCtx, result)
+			releaseHomeLease(auth, "completed")
 			rewriteForceMappedResponse(&resp, aliasResult)
 			return resp, nil
 		}
 		if authErr != nil {
 			if isRequestInvalidError(authErr) {
+				releaseHomeLease(auth, "request_invalid")
 				return cliproxyexecutor.Response{}, authErr
 			}
+			releaseHomeLease(auth, "attempt_failed")
 			lastErr = authErr
 			if homeMode {
 				homeAuthCount++
@@ -2806,19 +2867,24 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
+		execCtx = contextWithHomeLease(execCtx, auth)
 		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
 		if len(models) == 0 {
+			releaseHomeLease(auth, "no_execution_model")
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		homeLease := homeLeaseFromAuth(auth)
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare)}
 			m.MarkResult(execCtx, result)
+			releaseHomeLease(auth, "prepare_failed")
 			lastErr = errPrepare
 			continue
 		}
+		preserveHomeLease(auth, homeLease)
 		execReq := sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, req)
 		streamExecutionModel := ""
 		if restoreExecutionModel {
@@ -2827,11 +2893,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, opts, routeModel, streamExecutionModel, models, pooled, aliasResult)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
+				releaseHomeLease(auth, "request_canceled")
 				return nil, errCtx
 			}
 			if isRequestInvalidError(errStream) {
+				releaseHomeLease(auth, "request_invalid")
 				return nil, errStream
 			}
+			releaseHomeLease(auth, "attempt_failed")
 			lastErr = errStream
 			if homeMode {
 				homeAuthCount++
@@ -3015,6 +3084,16 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 		return saved, nil
 	}
 	return updated, nil
+}
+
+func ensureExecutionRequestID(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(logging.GetRequestID(ctx)) != "" {
+		return ctx
+	}
+	return logging.WithRequestID(ctx, uuid.NewString())
 }
 
 func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.Options, fallback string) context.Context {
@@ -3659,7 +3738,15 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if status != http.StatusTooManyRequests {
 		return 0, false
 	}
-	if !m.retryAllowed(attempt, providers) {
+	if m.HomeEnabled() && isHomeConcurrencyError(err) {
+		defaultRetry := int(m.requestRetry.Load())
+		if defaultRetry < 0 {
+			defaultRetry = 0
+		}
+		if attempt >= defaultRetry {
+			return 0, false
+		}
+	} else if !m.retryAllowed(attempt, providers) {
 		return 0, false
 	}
 	retryAfter := retryAfterFromError(err)
@@ -4900,8 +4987,14 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 }
 
 // SelectAuth selects one credential through the configured scheduling strategy.
-// It does not execute or alter the selected credential's result state.
+// In Home mode the returned auth can carry a reserved in-flight lease. Renewal
+// remains stopped so existing selection-only callers cannot leak it forever.
+// Call StartHomeLease for work that may outlive the reported lease TTL, and
+// always release the reservation with ReleaseHomeLease when work finishes.
 func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts cliproxyexecutor.Options) (*Auth, error) {
+	if m.HomeEnabled() {
+		ctx = ensureExecutionRequestID(ctx)
+	}
 	selected, _, errPick := m.pickNext(ctx, provider, model, opts, nil)
 	if errPick != nil {
 		return nil, errPick
@@ -4918,6 +5011,9 @@ func (m *Manager) SelectAuthByKind(ctx context.Context, provider, model, require
 	}
 
 	homeMode := m.HomeEnabled()
+	if homeMode {
+		ctx = ensureExecutionRequestID(ctx)
+	}
 	homeAuthCount := homeAuthCountFromMetadata(opts.Metadata)
 	tried := make(map[string]struct{})
 	for {
@@ -4935,6 +5031,7 @@ func (m *Manager) SelectAuthByKind(ctx context.Context, provider, model, require
 		if selected.AuthKind() == requiredKind {
 			return selected, nil
 		}
+		releaseHomeLease(selected, "ineligible_auth_kind")
 		authID := strings.TrimSpace(selected.ID)
 		if authID == "" {
 			return nil, &Error{Code: "auth_not_found", Message: "selected auth has no ID"}
@@ -4947,6 +5044,29 @@ func (m *Manager) SelectAuthByKind(ctx context.Context, provider, model, require
 			homeAuthCount++
 		}
 	}
+}
+
+// StartHomeLease starts renewal for an in-flight reservation returned by a
+// Home-mode selection API and releases it if ctx is cancelled. It is a no-op
+// for standalone auths.
+func (m *Manager) StartHomeLease(ctx context.Context, auth *Auth) {
+	startHomeLease(ctx, auth)
+}
+
+// ReleaseHomeLease asynchronously releases an in-flight reservation attached
+// to an auth returned by a Home-mode selection API. It is a no-op for
+// standalone auths.
+func (m *Manager) ReleaseHomeLease(auth *Auth, reason string) {
+	releaseHomeLease(auth, reason)
+}
+
+// ShutdownHomeLeaseReleases stops accepting release work and waits for queued
+// Home lease releases to finish or for ctx to expire.
+func (m *Manager) ShutdownHomeLeaseReleases(ctx context.Context) error {
+	if m == nil || m.homeLeaseReleases == nil {
+		return nil
+	}
+	return m.homeLeaseReleases.shutdown(ctx)
 }
 
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
@@ -5208,9 +5328,59 @@ type homeErrorEnvelope struct {
 }
 
 type homeErrorDetail struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
-	Code    string `json:"code,omitempty"`
+	Type         string `json:"type"`
+	Message      string `json:"message"`
+	Code         string `json:"code,omitempty"`
+	Retryable    bool   `json:"retryable,omitempty"`
+	RetryAfterMS int64  `json:"retry_after_ms,omitempty"`
+	Scope        string `json:"scope,omitempty"`
+}
+
+type homeRemoteError struct {
+	cause      *Error
+	retryAfter *time.Duration
+}
+
+func isHomeConcurrencyError(err error) bool {
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(authErr.Code)) {
+	case "credential_concurrency_exceeded", "credential_model_concurrency_exceeded":
+		return true
+	default:
+		return false
+	}
+}
+
+func (e *homeRemoteError) Error() string {
+	if e == nil || e.cause == nil {
+		return "home returned error"
+	}
+	return e.cause.Error()
+}
+
+func (e *homeRemoteError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *homeRemoteError) StatusCode() int {
+	if e == nil || e.cause == nil {
+		return 0
+	}
+	return e.cause.StatusCode()
+}
+
+func (e *homeRemoteError) RetryAfter() *time.Duration {
+	if e == nil || e.retryAfter == nil {
+		return nil
+	}
+	value := *e.retryAfter
+	return &value
 }
 
 const (
@@ -5256,18 +5426,25 @@ func repeatedHomeAuthError() *Error {
 }
 
 type homeAuthDispatchResponse struct {
-	Model         string `json:"model"`
-	Provider      string `json:"provider"`
-	AuthIndex     string `json:"auth_index"`
-	UserAPIKey    string `json:"user_api_key"`
-	ForceMapping  bool   `json:"force_mapping"`
-	OriginalAlias string `json:"original_alias"`
-	Auth          Auth   `json:"auth"`
+	Model           string `json:"model"`
+	Provider        string `json:"provider"`
+	AuthIndex       string `json:"auth_index"`
+	UserAPIKey      string `json:"user_api_key"`
+	ForceMapping    bool   `json:"force_mapping"`
+	OriginalAlias   string `json:"original_alias"`
+	LeaseID         string `json:"lease_id"`
+	LeaseTTLSeconds int64  `json:"lease_ttl_seconds"`
+	LeaseExpiresAt  string `json:"lease_expires_at"`
+	Auth            Auth   `json:"auth"`
 }
 
 type homeAuthDispatcher interface {
 	HeartbeatOK() bool
 	RPopAuth(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int) ([]byte, error)
+}
+
+type homeAuthIdentityDispatcher interface {
+	RPopAuthWithIdentity(ctx context.Context, requestedModel string, requestID string, dispatchID string, sessionID string, headers http.Header, count int) ([]byte, error)
 }
 
 var currentHomeDispatcher = func() homeAuthDispatcher {
@@ -5462,16 +5639,6 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	}
 	executionSessionID := homeExecutionSessionIDFromMetadata(opts.Metadata)
 	count := homeAuthCountFromMetadata(opts.Metadata)
-	if cliproxyexecutor.DownstreamWebsocket(ctx) && executionSessionID != "" && count <= 1 {
-		if pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata); pinnedAuthID != "" {
-			_, alreadyTried := tried[pinnedAuthID]
-			if !alreadyTried {
-				if auth, executor, providerKey, ok := m.homeRuntimeAuthByID(executionSessionID, pinnedAuthID); ok {
-					return auth, executor, providerKey, nil
-				}
-			}
-		}
-	}
 
 	client := currentHomeDispatcher()
 	if client == nil || !client.HeartbeatOK() {
@@ -5481,8 +5648,23 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	requestedModel := requestedModelFromMetadata(opts.Metadata, model)
 	sessionID := ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata)
 	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers)
+	requestID := logging.GetRequestID(ctx)
+	dispatchID := uuid.NewString()
 
-	raw, err := client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, count)
+	identityClient, supportsIdentity := client.(homeAuthIdentityDispatcher)
+	dispatchAuth := func() ([]byte, error) {
+		if supportsIdentity {
+			return identityClient.RPopAuthWithIdentity(ctx, requestedModel, requestID, dispatchID, sessionID, dispatchHeaders, count)
+		}
+		return client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, count)
+	}
+	raw, err := dispatchAuth()
+	if err != nil && supportsIdentity && !errors.Is(err, home.ErrAuthNotFound) && ctx.Err() == nil {
+		// The first RPOP may have reserved a lease even when its response was
+		// lost. Retry once with the same dispatch ID so Home can return that
+		// idempotent reservation instead of leaving a ghost slot until TTL.
+		raw, err = dispatchAuth()
+	}
 	if err != nil {
 		if errors.Is(err, home.ErrAuthNotFound) {
 			return nil, nil, "", &Error{Code: "auth_not_found", Message: err.Error(), HTTPStatus: http.StatusServiceUnavailable}
@@ -5506,19 +5688,43 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 			status = http.StatusNotFound
 		case "authentication_error", "unauthorized", "no_credentials", "invalid_credential":
 			status = http.StatusUnauthorized
+		case "credential_concurrency_exceeded", "credential_model_concurrency_exceeded":
+			status = http.StatusTooManyRequests
+		case "dispatch_replayed":
+			status = http.StatusConflict
+		case "concurrency_identity_required", "concurrency_tracker_unavailable":
+			status = http.StatusServiceUnavailable
 		}
-		return nil, nil, "", &Error{Code: code, Message: msg, HTTPStatus: status}
+		cause := &Error{Code: code, Message: msg, Retryable: env.Error.Retryable, HTTPStatus: status}
+		if env.Error.RetryAfterMS > 0 {
+			retryAfter := time.Duration(env.Error.RetryAfterMS) * time.Millisecond
+			return nil, nil, "", &homeRemoteError{cause: cause, retryAfter: &retryAfter}
+		}
+		return nil, nil, "", cause
 	}
 
 	var dispatch homeAuthDispatchResponse
 	if errUnmarshal := json.Unmarshal(raw, &dispatch); errUnmarshal != nil {
 		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned invalid auth payload", HTTPStatus: http.StatusBadGateway}
 	}
+	leaseClient, _ := client.(homeInFlightLeaseDispatcher)
+	leaseTTL := time.Duration(dispatch.LeaseTTLSeconds) * time.Second
+	leaseExpiresAt := time.Time{}
+	if rawExpiresAt := strings.TrimSpace(dispatch.LeaseExpiresAt); rawExpiresAt != "" {
+		leaseExpiresAt, _ = time.Parse(time.RFC3339Nano, rawExpiresAt)
+	}
+	lease := newHomeLeaseHandle(leaseClient, dispatch.LeaseID, leaseTTL, leaseExpiresAt, m.homeLeaseReleases)
+	releaseLease := func(reason string) {
+		if lease != nil {
+			lease.release(reason)
+		}
+	}
 	setHomeUserAPIKeyOnGinContext(ctx, dispatch.UserAPIKey)
 	auth := dispatch.Auth
 	if strings.TrimSpace(auth.ID) == "" {
 		// Backward compatibility: older home instances returned the auth directly.
 		if errUnmarshal := json.Unmarshal(raw, &auth); errUnmarshal != nil {
+			releaseLease("invalid_auth")
 			return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned invalid auth payload", HTTPStatus: http.StatusBadGateway}
 		}
 	}
@@ -5536,13 +5742,16 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 		auth.Attributes[homeOriginalAliasAttributeKey] = originalAlias
 	}
 	if strings.TrimSpace(auth.ID) == "" {
+		releaseLease("invalid_auth")
 		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned auth without id", HTTPStatus: http.StatusBadGateway}
 	}
 	if homeAuthAlreadyTried(tried, auth.ID) {
+		releaseLease("repeated_auth")
 		return nil, nil, "", repeatedHomeAuthError()
 	}
 	providerKey := executorKeyFromAuth(&auth)
 	if providerKey == "" {
+		releaseLease("invalid_provider")
 		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned auth without provider", HTTPStatus: http.StatusBadGateway}
 	}
 
@@ -5562,10 +5771,12 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 		}
 	}
 	if !ok {
+		releaseLease("executor_not_found")
 		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered", HTTPStatus: http.StatusBadGateway}
 	}
 
 	authCopy := auth.Clone()
+	setHomeLease(authCopy, lease)
 	if cliproxyexecutor.DownstreamWebsocket(ctx) && executionSessionID != "" && authWebsocketsEnabled(authCopy) {
 		m.rememberHomeRuntimeAuth(executionSessionID, authCopy)
 	}

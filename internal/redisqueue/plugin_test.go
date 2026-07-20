@@ -16,6 +16,7 @@ import (
 func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := internallogging.WithRequestID(context.Background(), "ctx-request-id")
+		ctx = coreusage.WithHomeLeaseID(ctx, "lease-1")
 		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
 		ctx = internallogging.WithResponseStatusHolder(ctx)
 		internallogging.SetResponseStatus(ctx, http.StatusOK)
@@ -57,6 +58,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireStringField(t, payload, "auth_type", "apikey")
 		requireMissingField(t, payload, "user_api_key")
 		requireStringField(t, payload, "request_id", "ctx-request-id")
+		requireStringField(t, payload, "lease_id", "lease-1")
 		requireStringField(t, payload, "reasoning_effort", "medium")
 		requireStringField(t, payload, "service_tier", "auto")
 		requireMissingField(t, payload, "request_service_tier")

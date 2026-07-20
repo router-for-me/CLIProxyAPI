@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -62,8 +63,13 @@ type inactivePluginScheduler struct {
 }
 
 type authKindHomeDispatcher struct {
-	auths  []Auth
-	counts []int
+	mu          sync.Mutex
+	auths       []Auth
+	counts      []int
+	requestIDs  []string
+	dispatchIDs []string
+	releasedIDs []string
+	released    chan struct{}
 }
 
 func (d *authKindHomeDispatcher) HeartbeatOK() bool {
@@ -71,11 +77,43 @@ func (d *authKindHomeDispatcher) HeartbeatOK() bool {
 }
 
 func (d *authKindHomeDispatcher) RPopAuth(_ context.Context, _ string, _ string, _ http.Header, count int) ([]byte, error) {
+	return d.RPopAuthWithIdentity(context.Background(), "", "", "", "", nil, count)
+}
+
+func (d *authKindHomeDispatcher) RPopAuthWithIdentity(_ context.Context, _ string, requestID string, dispatchID string, _ string, _ http.Header, count int) ([]byte, error) {
+	d.mu.Lock()
 	d.counts = append(d.counts, count)
+	d.requestIDs = append(d.requestIDs, requestID)
+	d.dispatchIDs = append(d.dispatchIDs, dispatchID)
 	if count < 1 || count > len(d.auths) {
+		d.mu.Unlock()
 		return nil, home.ErrAuthNotFound
 	}
-	return json.Marshal(homeAuthDispatchResponse{Auth: d.auths[count-1]})
+	auth := d.auths[count-1]
+	d.mu.Unlock()
+	return json.Marshal(homeAuthDispatchResponse{
+		Auth:            auth,
+		LeaseID:         dispatchID,
+		LeaseTTLSeconds: 60,
+	})
+}
+
+func (d *authKindHomeDispatcher) RenewInFlightLease(context.Context, string) (bool, error) {
+	return true, nil
+}
+
+func (d *authKindHomeDispatcher) ReleaseInFlightLease(_ context.Context, leaseID string, _ string) (bool, error) {
+	d.mu.Lock()
+	d.releasedIDs = append(d.releasedIDs, leaseID)
+	released := d.released
+	d.mu.Unlock()
+	if released != nil {
+		select {
+		case released <- struct{}{}:
+		default:
+		}
+	}
+	return true, nil
 }
 
 func (s *inactivePluginScheduler) HasScheduler() bool {
@@ -535,7 +573,10 @@ func TestManagerSelectAuthByKindAdvancesHomeAuthCount(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dispatcher := &authKindHomeDispatcher{auths: tt.auths}
+			dispatcher := &authKindHomeDispatcher{
+				auths:    tt.auths,
+				released: make(chan struct{}, len(tt.auths)),
+			}
 			oldCurrentHomeDispatcher := currentHomeDispatcher
 			currentHomeDispatcher = func() homeAuthDispatcher {
 				return dispatcher
@@ -564,9 +605,27 @@ func TestManagerSelectAuthByKindAdvancesHomeAuthCount(t *testing.T) {
 				if selected == nil || selected.ID != tt.wantAuthID {
 					t.Fatalf("SelectAuthByKind() auth = %#v, want %s", selected, tt.wantAuthID)
 				}
+				manager.ReleaseHomeLease(selected, "test_completed")
 			}
+			for releaseIndex := 0; releaseIndex < len(tt.auths); releaseIndex++ {
+				select {
+				case <-dispatcher.released:
+				case <-time.After(time.Second):
+					t.Fatalf("timed out waiting for lease release %d", releaseIndex+1)
+				}
+			}
+			dispatcher.mu.Lock()
+			defer dispatcher.mu.Unlock()
 			if len(dispatcher.counts) != 2 || dispatcher.counts[0] != 1 || dispatcher.counts[1] != 2 {
 				t.Fatalf("home auth counts = %v, want [1 2]", dispatcher.counts)
+			}
+			for index, requestID := range dispatcher.requestIDs {
+				if requestID == "" || dispatcher.dispatchIDs[index] == "" {
+					t.Fatalf("dispatch identity at %d = request:%q dispatch:%q", index, requestID, dispatcher.dispatchIDs[index])
+				}
+			}
+			if len(dispatcher.releasedIDs) != len(tt.auths) {
+				t.Fatalf("released leases = %v, want %d", dispatcher.releasedIDs, len(tt.auths))
 			}
 		})
 	}

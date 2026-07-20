@@ -10,7 +10,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
-func TestPickNextViaHomeReusesPinnedWebsocketAuthWithoutHomeDispatch(t *testing.T) {
+func TestPickNextViaHomeDoesNotBypassHomeForPinnedWebsocketAuth(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
 	manager.RegisterExecutor(schedulerTestExecutor{})
@@ -42,21 +42,16 @@ func TestPickNextViaHomeReusesPinnedWebsocketAuthWithoutHomeDispatch(t *testing.
 	}
 
 	got, executor, provider, errPick := manager.pickNextViaHome(ctx, "gpt-5.4", opts, nil)
-	if errPick != nil {
-		t.Fatalf("pickNextViaHome() error = %v", errPick)
+	var authErr *Error
+	if !errors.As(errPick, &authErr) || authErr.Code != "home_unavailable" {
+		t.Fatalf("pickNextViaHome() error = %v, want home_unavailable", errPick)
 	}
-	if got == nil || got.ID != "home-auth-1" {
-		t.Fatalf("pickNextViaHome() auth = %#v, want home-auth-1", got)
-	}
-	if executor == nil {
-		t.Fatal("pickNextViaHome() executor is nil")
-	}
-	if provider != "test" {
-		t.Fatalf("pickNextViaHome() provider = %q, want test", provider)
+	if got != nil || executor != nil || provider != "" {
+		t.Fatalf("pickNextViaHome() bypassed Home: auth=%#v executor=%#v provider=%q", got, executor, provider)
 	}
 }
 
-func TestPickNextViaHomeKeepsSameAuthIDPayloadSessionScoped(t *testing.T) {
+func TestRememberedHomeWebsocketAuthKeepsSameAuthIDPayloadSessionScoped(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
 	manager.RegisterExecutor(schedulerTestExecutor{})
@@ -80,34 +75,20 @@ func TestPickNextViaHomeKeepsSameAuthIDPayloadSessionScoped(t *testing.T) {
 		},
 	})
 
-	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
-	optsSession1 := cliproxyexecutor.Options{
-		Metadata: map[string]any{
-			cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
-			cliproxyexecutor.PinnedAuthMetadataKey:       "home-auth-1",
-		},
-	}
-	optsSession2 := cliproxyexecutor.Options{
-		Metadata: map[string]any{
-			cliproxyexecutor.ExecutionSessionMetadataKey: "session-2",
-			cliproxyexecutor.PinnedAuthMetadataKey:       "home-auth-1",
-		},
-	}
-
-	gotSession1, _, _, errSession1 := manager.pickNextViaHome(ctx, "gpt-5.4", optsSession1, nil)
-	if errSession1 != nil {
-		t.Fatalf("pickNextViaHome(session-1) error = %v", errSession1)
+	gotSession1, okSession1 := manager.GetExecutionSessionAuthByID("session-1", "home-auth-1")
+	if !okSession1 {
+		t.Fatal("session-1 remembered auth not found")
 	}
 	if got := gotSession1.Attributes[homeUpstreamModelAttributeKey]; got != "upstream-model-a" {
-		t.Fatalf("pickNextViaHome(session-1) upstream model = %q, want upstream-model-a", got)
+		t.Fatalf("session-1 upstream model = %q, want upstream-model-a", got)
 	}
 
-	gotSession2, _, _, errSession2 := manager.pickNextViaHome(ctx, "gpt-5.4", optsSession2, nil)
-	if errSession2 != nil {
-		t.Fatalf("pickNextViaHome(session-2) error = %v", errSession2)
+	gotSession2, okSession2 := manager.GetExecutionSessionAuthByID("session-2", "home-auth-1")
+	if !okSession2 {
+		t.Fatal("session-2 remembered auth not found")
 	}
 	if got := gotSession2.Attributes[homeUpstreamModelAttributeKey]; got != "upstream-model-b" {
-		t.Fatalf("pickNextViaHome(session-2) upstream model = %q, want upstream-model-b", got)
+		t.Fatalf("session-2 upstream model = %q, want upstream-model-b", got)
 	}
 }
 
