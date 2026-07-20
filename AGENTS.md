@@ -36,7 +36,8 @@ make dash-embed                                  # Build SPA + rebuild Go binary
 - `internal/translator/` — Provider protocol translators (and shared `common`)
 - `internal/registry/` — Model registry + remote updater (`StartModelsUpdater`); `--local-model` disables remote updates
 - `internal/store/` — Storage implementations and secret resolution
-- `internal/policy/` — Per-API-key policy enforcement (RPM, budget, model access)
+- `internal/policy/` — Per-API-key + per-Internal-User policy enforcement (RPM, TPM, hourly rate, max_parallel_requests, budget caps, model access). Per-user caps act as fallback when per-key caps are unset, mirroring the LiteLLM user→key hierarchy.
+- `internal/api/handlers/management/internal_users.go` — LiteLLM `/user/*` equivalence class under `/v0/management/internal-users/*` (path kept for backward compatibility; see the file-level comment for the route-by-route mapping). Implements auto-create-key on user creation, per-user TPM/parallel caps, per-model spend via on-the-fly SELECT, and spend reconciliation.
 - `internal/dashboardasset/` — Embeds the NixLLM dashboard SPA (served at `/dashboard`)
 - `internal/managementasset/` — Config snapshots and management assets
 - `internal/cache/` — Request signature caching

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
@@ -49,10 +50,17 @@ func (h *Handler) requirePG(c *gin.Context) (*store.APIKeyStore, *store.UsageSto
 }
 
 // pgCreateKeyRequest is the JSON payload for POST /api-keys-pg.
+//
+// UserID is now REQUIRED (LiteLLM workflow): every API key is owned by an
+// internal user. Budget/RPM enforcement still runs on the per-key policy,
+// with a fallback to the internal user's max_budget when the per-key cap is
+// unset (see policy.Check). Pass an empty value at your own risk — the
+// handler returns 400 when unset.
 type pgCreateKeyRequest struct {
 	Name      string         `json:"name"`
 	Alias     string         `json:"alias,omitempty"`
 	Secret    string         `json:"secret,omitempty"` // optional; auto-generated when empty
+	UserID    string         `json:"user_id"`          // REQUIRED — owner of the key
 	ExpiresAt *time.Time     `json:"expires_at,omitempty"`
 	Metadata  map[string]any `json:"metadata,omitempty"`
 	Policy    *store.Policy  `json:"policy,omitempty"`
@@ -124,6 +132,13 @@ func (h *Handler) ListPGAPIKeys(c *gin.Context) {
 }
 
 // CreatePGAPIKey handles POST /v0/management/api-keys-pg.
+//
+// Workflow (LiteLLM-style): a key is meaningless without an owning Internal
+// User, so the request body MUST include user_id pointing at a row in the
+// internal_users table. Budget/RPM enforcement runs on the per-key policy;
+// when the key's policy leaves a budget cap unset, enforcement falls back to
+// the user's max_budget (the per-user window accumulates spend in any case,
+// see policy.Consume).
 func (h *Handler) CreatePGAPIKey(c *gin.Context) {
 	apiKeys, _, _, policySvc, ok := h.requirePG(c)
 	if !ok {
@@ -137,16 +152,76 @@ func (h *Handler) CreatePGAPIKey(c *gin.Context) {
 	if req.Name == "" {
 		req.Name = "unnamed"
 	}
+	userID := strings.TrimSpace(req.UserID)
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"type":    "invalid_request",
+			"message": "user_id is required: every API key must be owned by an Internal User",
+		}})
+		return
+	}
+	// Validate the owner exists; surface a 404 (with a helpful hint) when the
+	// caller picked a stale id. Skipped when the UserStore is wired separately
+	// and the lookup fails — that surfaces as 500 below.
+	h.mu.Lock()
+	users := h.pgUsers
+	h.mu.Unlock()
+	if users == nil {
+		h.pgNotConfigured(c)
+		return
+	}
+	if _, err := users.Get(c.Request.Context(), userID); err != nil {
+		if errors.Is(err, store.ErrInternalUserNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{
+				"type":    "not_found",
+				"message": "internal user not found: create the user before assigning keys to it",
+			}})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+		return
+	}
 	key, secret, err := apiKeys.Create(c.Request.Context(), req.Name, req.Alias, req.Secret, req.ExpiresAt, req.Metadata, req.Policy)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
 	}
+	// Stamp the owner assignment. The Create path keeps the secret/routine
+	// unchanged; user_id is written via a dedicated UPDATE so the schema-
+	// migration column is populated atomically with the new key.
+	keyID := key.ID
+	if err := apiKeys.UpdateUserID(c.Request.Context(), keyID, userID); err != nil {
+		// Roll back: drop the orphaned key rather than presenting a half-
+		// assigned row. Best-effort — log the cleanup failure.
+		if delErr := apiKeys.Delete(c.Request.Context(), keyID); delErr != nil {
+			log.WithError(delErr).WithField("api_key_id", keyID).
+				Warn("management: failed to roll back orphaned key after user_id attach failure")
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+		return
+	}
+	// Re-read so the response carries the freshly-stamped user_id (Create's
+	// returned *APIKey predates the assignment). On failure, roll the key
+	// back so we never present an inconsistent half-assigned row.
+	reloaded, reloadedPolicy, err := apiKeys.LookupByID(c.Request.Context(), keyID)
+	if err != nil {
+		if delErr := apiKeys.Delete(c.Request.Context(), keyID); delErr != nil {
+			log.WithError(delErr).WithField("api_key_id", keyID).
+				Warn("management: failed to roll back orphaned key after re-read failure")
+		}
+		h.translateKeyError(c, err)
+		return
+	}
+	key = reloaded
+	respPolicy := req.Policy
+	if respPolicy == nil {
+		respPolicy = reloadedPolicy
+	}
 	// Invalidate policy cache so the new key is immediately enforceable.
 	if svc := *policySvc; svc != nil {
 		_ = svc.InvalidateKey(c.Request.Context(), secret)
 	}
-	c.JSON(http.StatusCreated, pgKeyResponse{APIKey: key, Secret: secret, Policy: req.Policy})
+	c.JSON(http.StatusCreated, pgKeyResponse{APIKey: key, Secret: secret, Policy: respPolicy})
 }
 
 // GetPGAPIKey handles GET /v0/management/api-keys-pg/:id.

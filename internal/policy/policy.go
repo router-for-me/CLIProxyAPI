@@ -69,9 +69,13 @@ type Policy struct {
 
 // APIKeySnapshot pairs a key's identity with its resolved policy for caching.
 type APIKeySnapshot struct {
-	APIKey   store.APIKey
-	Policy   *store.Policy
-	LoadedAt time.Time
+	APIKey store.APIKey
+	Policy *store.Policy
+	// InternalUser is resolved when the snapshotted API key attaches to an
+	// internal user owner. nil when the key is unassigned or when the
+	// UserStore was not wired (older deployments).
+	InternalUser *store.InternalUser
+	LoadedAt     time.Time
 }
 
 // PolicyService is the contract consumed by request middleware and by the
@@ -100,4 +104,15 @@ type PolicyService interface {
 	// InvalidateAll flushes the entire cache. Used by bulk operations and
 	// tests.
 	InvalidateAll()
+
+	// AcquireParallel reserves an in-flight slot for the principal under the
+	// configured max_parallel_requests cap (per-key takes precedence; when
+	// unset, falls back to the owner user's cap). Returns false when the
+	// limit is hit — the middleware then surfaces HTTP 429. The middleware
+	// MUST call ReleaseParallel with the same principal at request end.
+	AcquireParallel(ctx context.Context, principal string) (bool, error)
+
+	// ReleaseParallel releases an in-flight slot acquired by AcquireParallel.
+	// Idempotent; safe to call after a failed Acquire (no-op).
+	ReleaseParallel(ctx context.Context, principal string) error
 }

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
   getAPIKey, patchAPIKey, putAPIKeyPolicy, regenerateAPIKey, deleteAPIKey, getUsageWindows,
+  getInternalUser,
 } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import { Spinner, ErrorBanner, StatusBadge, Modal } from '../components/Primitives.jsx';
@@ -30,12 +31,142 @@ export default function ApiKeyDetailPage() {
 
       <div className="grid grid--2">
         <KeyDetailsCard apiKey={data} onUpdated={reload} />
-        <PolicyCard apiKeyId={data.id} policy={data.policy} onUpdated={reload} />
+        <OwnerCard apiKey={data} />
       </div>
-
-      <UsageWindowsCard apiKeyId={data.id} />
+      <div className="grid grid--2">
+        <PolicyCard apiKeyId={data.id} policy={data.policy} onUpdated={reload} />
+        <UsageWindowsCard apiKeyId={data.id} />
+      </div>
     </>
   );
+}
+
+// OwnerCard shows the Internal User that owns this key and surfaces the
+// fallback-budget indicator: when the per-key Policy leaves a budget cap
+// unset, enforcement falls back to the owner's max_budget (LiteLLM-style
+// workflow). Spend attribution always flows to the user via the
+// usage_events.user_id / user_windows rows.
+function OwnerCard({ apiKey }) {
+  const userId = apiKey.user_id || '';
+  const owner = useAsync(
+    () => (userId ? getInternalUser(userId) : Promise.resolve(null)),
+    [userId],
+  );
+
+  if (!userId) {
+    return (
+      <div className="card">
+        <h3 className="card__title">Owner</h3>
+        <p className="muted" style={{ marginBottom: 12 }}>
+          This key is not assigned to any Internal User. Spend attribution
+          and per-user fallback budgets are inactive for it.
+        </p>
+        <div className="form__hint">
+          New keys must be created with an owner; use the Internal Users page
+          to manage owners.
+        </div>
+      </div>
+    );
+  }
+
+  if (owner.loading) return <div className="card"><Spinner label="Loading owner…" /></div>;
+  if (owner.error) {
+    return (
+      <div className="card">
+        <h3 className="card__title">Owner</h3>
+        <ErrorBanner error={owner.error} onRetry={owner.reload} />
+      </div>
+    );
+  }
+  const u = owner.data;
+  if (!u) return null;
+
+  // Detect which per-key budget caps are unset; for each unset cap, the
+  // owner's max_budget is the effective cap (running spend in this window).
+  const policy = apiKey.policy || {};
+  const hourlyUnset = policy.budget_hourly_usd === null || policy.budget_hourly_usd === undefined;
+  const weeklyUnset = policy.budget_weekly_usd === null || policy.budget_weekly_usd === undefined;
+  const monthlyUnset = policy.budget_monthly_usd === null || policy.budget_monthly_usd === undefined;
+  const rpmUnset = policy.rpm_limit === null || policy.rpm_limit === undefined;
+  const maxParallelUnset = policy.max_parallel_requests === null || policy.max_parallel_requests === undefined;
+  const anyUnset = hourlyUnset || weeklyUnset || monthlyUnset || rpmUnset || maxParallelUnset;
+  const userHasCap = u.max_budget && Number(u.max_budget) > 0;
+
+  return (
+    <div className="card">
+      <div className="row row--between" style={{ marginBottom: 12 }}>
+        <h3 className="card__title" style={{ margin: 0 }}>Owner</h3>
+        <Link to={`/internal-users/${encodeURIComponent(u.id)}`}>
+          <button>View user</button>
+        </Link>
+      </div>
+      <div className="form__row">
+        <div className="form__label">Internal User</div>
+        <div>
+          <Link to={`/internal-users/${encodeURIComponent(u.id)}`}>
+            {u.user_alias || u.id}
+          </Link>
+          <span className="dim mono" style={{ marginLeft: 8 }}>{u.id}</span>
+        </div>
+      </div>
+      <div className="form__row">
+        <div className="form__label">Email</div>
+        <div className="mono dim">{u.user_email || '—'}</div>
+      </div>
+      <div className="form__row">
+        <div className="form__label">User role</div>
+        <span className={`badge ${u.user_role === 'proxy_admin' ? 'badge--revoked' : 'badge--active'}`}>
+          {u.user_role}
+        </span>
+      </div>
+      <div className="form__row">
+        <div className="form__label">User max_budget</div>
+        <div className="mono">
+          {userHasCap ? `$${Number(u.max_budget).toFixed(2)}` : 'unlimited'}
+          {userHasCap && (
+            <span className="dim" style={{ marginLeft: 8 }}>
+              ({((u.spend || 0) / Number(u.max_budget) * 100).toFixed(1)}% used ·
+              ${Number(u.spend || 0).toFixed(2)} running)
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="form__row">
+        <div className="form__label">User RPM limit</div>
+        <div className="mono">{u.rpm_limit ?? '—'}</div>
+      </div>
+      <div className="form__hint" style={{ marginTop: 12 }}>
+        {anyUnset ? (
+          userHasCap ? (
+            <>
+              <strong>Fallback active:</strong> per-key caps that are unset
+              ({describeUnset({ hourlyUnset, weeklyUnset, monthlyUnset, rpmUnset, maxParallelUnset })})
+              fall back to this user's max_budget / rpm_limit / max_parallel_requests.
+              Spend attributed to the key is also tallied against the user.
+            </>
+          ) : (
+            <>
+              Per-key caps that are unset
+              ({describeUnset({ hourlyUnset, weeklyUnset, monthlyUnset, rpmUnset, maxParallelUnset })})
+              have no fallback — the owner's max_budget is also unlimited.
+            </>
+          )
+        ) : (
+          <>All per-key caps are set; the user-level fallback is not engaged.</>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function describeUnset({ hourlyUnset, weeklyUnset, monthlyUnset, rpmUnset, maxParallelUnset }) {
+  const parts = [];
+  if (hourlyUnset) parts.push('hourly USD');
+  if (weeklyUnset) parts.push('weekly USD');
+  if (monthlyUnset) parts.push('monthly USD');
+  if (rpmUnset) parts.push('RPM');
+  if (maxParallelUnset) parts.push('max-parallel');
+  return parts.length ? parts.join(', ') : 'none';
 }
 
 function KeyDetailsCard({ apiKey, onUpdated }) {
@@ -241,6 +372,7 @@ function PolicyCard({ apiKeyId, policy: initial, onUpdated }) {
         <PolicyStat label="Hourly Budget" value={fmtUSD(initial.budget_hourly_usd)} />
         <PolicyStat label="Weekly Budget" value={fmtUSD(initial.budget_weekly_usd)} />
         <PolicyStat label="Monthly Budget" value={fmtUSD(initial.budget_monthly_usd)} />
+        <PolicyStat label="Max Parallel" value={initial.max_parallel_requests ?? 'unlimited'} />
       </div>
       {initial.allowed_models && initial.allowed_models.length > 0 && (
         <div className="form__row">

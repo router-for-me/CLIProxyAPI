@@ -52,6 +52,14 @@ func (m *mockPolicyService) InvalidateKey(_ context.Context, principal string) e
 
 func (m *mockPolicyService) InvalidateAll() { m.invalidateAll = true }
 
+func (m *mockPolicyService) AcquireParallel(_ context.Context, _ string) (bool, error) {
+	return true, nil
+}
+
+func (m *mockPolicyService) ReleaseParallel(_ context.Context, _ string) error {
+	return nil
+}
+
 func newTestRouter(svc policy.PolicyService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

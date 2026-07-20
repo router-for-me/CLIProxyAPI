@@ -6,6 +6,7 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -74,6 +75,27 @@ func PolicyMiddleware(svc policy.PolicyService) gin.HandlerFunc {
 			// (e.g. custom 429 / 402 text) apply without a server restart.
 			errormessages.Respond(c, status, decision.Reason)
 			return
+		}
+
+		// Acquire an in-flight slot under the configured max_parallel_requests
+		// cap. The slot is released in a defer so the counter does not leak,
+		// including the upstream handler's panic / early-return paths. When
+		// Acquire returns false we surface HTTP 429 immediately.
+		acquired, acqErr := svc.AcquireParallel(c.Request.Context(), principalStr)
+		if acqErr != nil {
+			log.WithError(acqErr).
+				WithField("route", c.Request.URL.Path).
+				Warn("policy middleware: AcquireParallel failed; failing open")
+			acquired = true // fail open so a transient error does not leak state
+		} else if !acquired {
+			errormessages.Respond(c, http.StatusTooManyRequests,
+				"max concurrent requests exceeded for this principal")
+			return
+		}
+		if acquired {
+			defer func() {
+				_ = svc.ReleaseParallel(context.Background(), principalStr)
+			}()
 		}
 		c.Next()
 	}

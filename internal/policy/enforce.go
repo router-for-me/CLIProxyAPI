@@ -45,13 +45,18 @@ func defaultServiceConfig(c ServiceConfig) ServiceConfig {
 type service struct {
 	apiKeys *store.APIKeyStore
 	usage   *store.UsageStore
+	users   *store.UserStore
 	cfg     ServiceConfig
 
 	mu    sync.RWMutex
 	cache map[string]APIKeySnapshot // keyed by principal (plaintext key)
 
-	rpmWindow    *slidingWindow
-	hourlyWindow *slidingWindow
+	rpmWindow        *slidingWindow
+	hourlyWindow     *slidingWindow
+	userRPMWindow    *slidingWindow
+	userHourlyWindow *slidingWindow
+	userTPMWindow    *slidingWindow
+	parallel         *parallelLimiter
 
 	stop chan struct{}
 	done chan struct{}
@@ -65,15 +70,32 @@ func NewService(apiKeys *store.APIKeyStore, usage *store.UsageStore, cfg Service
 		return &service{cfg: defaultServiceConfig(cfg)}
 	}
 	return &service{
-		apiKeys:      apiKeys,
-		usage:        usage,
-		cfg:          defaultServiceConfig(cfg),
-		cache:        make(map[string]APIKeySnapshot),
-		rpmWindow:    newSlidingWindow(),
-		hourlyWindow: newSlidingWindow(),
-		stop:         make(chan struct{}),
-		done:         make(chan struct{}),
+		apiKeys:          apiKeys,
+		usage:            usage,
+		cfg:              defaultServiceConfig(cfg),
+		cache:            make(map[string]APIKeySnapshot),
+		rpmWindow:        newSlidingWindow(),
+		hourlyWindow:     newSlidingWindow(),
+		userRPMWindow:    newSlidingWindow(),
+		userHourlyWindow: newSlidingWindow(),
+		userTPMWindow:    newSlidingWindow(),
+		parallel:         newParallelLimiter(),
+		stop:             make(chan struct{}),
+		done:             make(chan struct{}),
 	}
+}
+
+// SetUserStore wires the per-user budget/RPM enforcement store. Optional: when
+// left unset (nil), the per-user enforcement path is skipped but per-key
+// enforcement still runs as before. The windows are allocated eagerly so the
+// cleanup loop can sweep them even when no UserStore is attached.
+func (s *service) SetUserStore(users *store.UserStore) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.users = users
+	s.mu.Unlock()
 }
 
 // Active reports whether PG-backed policy enforcement is enabled.
@@ -103,6 +125,18 @@ func (s *service) Start(ctx context.Context) error {
 			case <-ticker.C:
 				s.rpmWindow.Cleanup(s.cfg.WindowRetention)
 				s.hourlyWindow.Cleanup(s.cfg.WindowRetention)
+				if s.userRPMWindow != nil {
+					s.userRPMWindow.Cleanup(s.cfg.WindowRetention)
+				}
+				if s.userHourlyWindow != nil {
+					s.userHourlyWindow.Cleanup(s.cfg.WindowRetention)
+				}
+				if s.userTPMWindow != nil {
+					s.userTPMWindow.Cleanup(s.cfg.WindowRetention)
+				}
+				if s.parallel != nil {
+					s.parallel.Compact()
+				}
 			}
 		}
 	}()
@@ -192,6 +226,67 @@ func (s *service) Check(ctx context.Context, principal, model string) (Decision,
 		// Budget caps are checked against the persisted usage_windows row.
 		if decision, denied := s.checkBudget(ctx, snap.APIKey.ID, snap.Policy); denied {
 			return decision, nil
+		}
+	}
+	// Per-user enforcement. This acts as the fallback budget/RPM cap for
+	// API keys whose own Policy leaves a limit unset (LiteLLM workflow): a
+	// key can be created with all-zero per-key caps, and the owning
+	// internal user's max_budget / rpm_limit / tpm_limit / Models grant
+	// still apply. Bypassed for admin roles so operators are not throttled
+	// by their own user-level caps.
+	if snap.InternalUser != nil && !isAdminRole(snap.InternalUser.UserRole) {
+		u := snap.InternalUser
+		// Auto-reset spend window when the configured duration has elapsed.
+		if u.BudgetResetAt != nil && !time.Now().Before(*u.BudgetResetAt) {
+			if errReset := s.users.ResetSpend(ctx, u.ID); errReset == nil {
+				// Refresh the in-scope copy so the budget cap below reads zero.
+				refreshed, errGet := s.users.Get(ctx, u.ID)
+				if errGet == nil {
+					u = &refreshed
+					snap.InternalUser = u
+				}
+			} else {
+				log.WithError(errReset).WithField("user_id", u.ID).
+					Debug("policy: reset internal user spend failed")
+			}
+		}
+		// Model access (allowed list). Denied models block here.
+		if len(u.Models) > 0 && !modelAllowed(u.Models, model) {
+			return Decision{
+				Allow:      false,
+				Reason:     fmt.Sprintf("model %q is not permitted for internal user %q", model, u.ID),
+				StatusCode: 403,
+			}, nil
+		}
+		if u.RPMLimit != nil && *u.RPMLimit > 0 {
+			if !s.userRPMWindow.AllowAndIncrement(u.ID, int(*u.RPMLimit), time.Minute) {
+				return Decision{
+					Allow:      false,
+					Reason:     fmt.Sprintf("user rate limit exceeded: %d requests per minute", *u.RPMLimit),
+					StatusCode: 429,
+				}, nil
+			}
+		}
+		// TPM check (read-only precheck). The actual token count is unknown
+		// at admission; reject only when the running total is already over
+		// the limit. Consume then accrues the real total via AllowAndAddN.
+		if u.TPMLimit != nil && *u.TPMLimit > 0 {
+			if !s.userTPMWindow.PreAddCheck(u.ID, int(*u.TPMLimit), time.Minute) {
+				return Decision{
+					Allow:      false,
+					Reason:     fmt.Sprintf("user TPM limit exceeded: %d tokens per minute", *u.TPMLimit),
+					StatusCode: 429,
+				}, nil
+			}
+		}
+		if u.MaxBudget != nil && *u.MaxBudget > 0 {
+			if u.Spend >= *u.MaxBudget {
+				return Decision{
+					Allow:      false,
+					Reason:     fmt.Sprintf("user budget exceeded: %.2f USD spent of %.2f USD limit", u.Spend, *u.MaxBudget),
+					StatusCode: 402,
+				}, nil
+			}
 		}
 	}
 	// Touch last_used_at asynchronously so the hot path is not delayed.
@@ -287,6 +382,29 @@ func (s *service) Consume(ctx context.Context, principal, model string, tokens T
 			// Continue: a single failed upsert should not break the others.
 		}
 	}
+	// Per-user accounting (best-effort). Failures do not abort the request;
+	// the dashboard's benchmark numbers will simply not advance until the
+	// next successful Consume.
+	if snap.InternalUser != nil {
+		uid := snap.InternalUser.ID
+		for _, wt := range []string{store.WindowTypeHourly, store.WindowTypeWeekly, store.WindowTypeMonthly} {
+			start, end := windowFor(wt, now)
+			if err := s.users.UpsertUserWindow(ctx, uid, wt, start, end, 1, total, cost); err != nil {
+				log.WithError(err).WithField("window", wt).Debug("policy: upsert user window failed")
+			}
+		}
+		if cost > 0 {
+			if err := s.users.IncrementSpend(ctx, uid, cost); err != nil {
+				log.WithError(err).WithField("user_id", uid).Debug("policy: increment user spend failed")
+			}
+		}
+		// Accrue TPM tokens to the in-memory sliding window. Post-request
+		// increment — the Check path's read-only precheck already rejected
+		// requests when the running total was over the cap.
+		if snap.InternalUser.TPMLimit != nil && *snap.InternalUser.TPMLimit > 0 && total > 0 {
+			s.userTPMWindow.AllowAndAddN(uid, int(*snap.InternalUser.TPMLimit), time.Minute, total)
+		}
+	}
 	return nil
 }
 
@@ -303,6 +421,18 @@ func (s *service) InvalidateKey(_ context.Context, principal string) error {
 	// not falsely throttled.
 	s.rpmWindow.Forget(principal)
 	s.hourlyWindow.Forget(principal)
+	if s.userRPMWindow != nil {
+		s.userRPMWindow.Forget(principal)
+	}
+	if s.userHourlyWindow != nil {
+		s.userHourlyWindow.Forget(principal)
+	}
+	if s.userTPMWindow != nil {
+		s.userTPMWindow.Forget(principal)
+	}
+	if s.parallel != nil {
+		s.parallel.Forget(principal)
+	}
 	return nil
 }
 
@@ -313,6 +443,18 @@ func (s *service) InvalidateAll() {
 	s.cache = make(map[string]APIKeySnapshot)
 	s.rpmWindow.Reset()
 	s.hourlyWindow.Reset()
+	if s.userRPMWindow != nil {
+		s.userRPMWindow.Reset()
+	}
+	if s.userHourlyWindow != nil {
+		s.userHourlyWindow.Reset()
+	}
+	if s.userTPMWindow != nil {
+		s.userTPMWindow.Reset()
+	}
+	if s.parallel != nil {
+		s.parallel.Reset()
+	}
 }
 
 func (s *service) snapshot(ctx context.Context, principal string) (APIKeySnapshot, error) {
@@ -333,6 +475,21 @@ func (s *service) snapshot(ctx context.Context, principal string) (APIKeySnapsho
 		return APIKeySnapshot{}, err
 	}
 	snap := APIKeySnapshot{APIKey: *key, Policy: policy, LoadedAt: time.Now()}
+	// Resolve the owning internal user (if any) so Check/Consume can enforce
+	// per-user budget/RPM. Failures are non-fatal: per-key enforcement still
+	// runs. Lookups are cached alongside the snapshot so the per-request hot
+	// path pays at most one extra DB round-trip every CacheTTL.
+	s.mu.RLock()
+	users := s.users
+	s.mu.RUnlock()
+	if users != nil && key.UserID != "" && snap.APIKey.UserID != "" {
+		if u, errLookup := users.Get(ctx, key.UserID); errLookup == nil {
+			snap.InternalUser = &u
+		} else if !errors.Is(errLookup, store.ErrInternalUserNotFound) {
+			log.WithError(errLookup).WithField("user_id", key.UserID).
+				Debug("policy: lookup internal user failed; skipping per-user enforcement")
+		}
+	}
 	s.mu.Lock()
 	s.cache[principal] = snap
 	s.mu.Unlock()
@@ -366,3 +523,66 @@ func safePrefix(principal string) string {
 
 // Compile-time assertion that *service implements PolicyService.
 var _ PolicyService = (*service)(nil)
+
+// AcquireParallel reserves an in-flight slot for the principal under the
+// effective max_parallel_requests cap. The cap is resolved as min(key cap,
+// user cap fallback) where key cap = snap.Policy.MaxParallelRequests and
+// user cap = snap.InternalUser.MaxParallelRequests. Either may be nil
+// (unset = unlimited); nil on both means no cap (always allow).
+//
+// The middleware MUST call ReleaseParallel once the request completes (or
+// fails) so the counter does not leak. Idempotent on failed Acquire.
+func (s *service) AcquireParallel(ctx context.Context, principal string) (bool, error) {
+	if s == nil || principal == "" {
+		return true, nil
+	}
+	snap, err := s.snapshot(ctx, principal)
+	if err != nil {
+		// Fail open on infra errors — mirrors the Check() guard.
+		log.WithError(err).WithField("principal_prefix", safePrefix(principal)).
+			Debug("policy: AcquireParallel lookup failed; skipping cap")
+		return true, nil
+	}
+	limit := effectiveParallelLimit(snap)
+	if limit <= 0 {
+		return true, nil
+	}
+	if s.parallel.Acquire(principal, limit) {
+		return true, nil
+	}
+	// Build a more informative reason for the middleware's 429 surface.
+	// Returned to the caller; the middleware attaches reason to the response.
+	return false, nil
+}
+
+// ReleaseParallel releases a slot previously acquired by AcquireParallel.
+// Safe to call after a failed Acquire and never decrements below zero.
+func (s *service) ReleaseParallel(_ context.Context, principal string) error {
+	if s == nil || principal == "" {
+		return nil
+	}
+	s.parallel.Release(principal)
+	return nil
+}
+
+// effectiveParallelLimit returns the lower of the key-level and per-user
+// max_parallel_requests caps. Zero means "no cap / unlimited".
+func effectiveParallelLimit(snap APIKeySnapshot) int {
+	limits := []int{}
+	if snap.Policy != nil && snap.Policy.MaxParallelRequests != nil && *snap.Policy.MaxParallelRequests > 0 {
+		limits = append(limits, *snap.Policy.MaxParallelRequests)
+	}
+	if snap.InternalUser != nil && snap.InternalUser.MaxParallelRequests != nil && *snap.InternalUser.MaxParallelRequests > 0 {
+		limits = append(limits, *snap.InternalUser.MaxParallelRequests)
+	}
+	if len(limits) == 0 {
+		return 0
+	}
+	min := limits[0]
+	for _, v := range limits[1:] {
+		if v < min {
+			min = v
+		}
+	}
+	return min
+}

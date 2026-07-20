@@ -21,6 +21,7 @@ const EMPTY_POLICY = {
   budget_hourly_usd: '',
   budget_weekly_usd: '',
   budget_monthly_usd: '',
+  max_parallel_requests: '',
   allowed_models: [],
   blocked_models: [],
 };
@@ -33,6 +34,7 @@ export function policyToForm(policy) {
     budget_hourly_usd: policy.budget_hourly_usd ?? '',
     budget_weekly_usd: policy.budget_weekly_usd ?? '',
     budget_monthly_usd: policy.budget_monthly_usd ?? '',
+    max_parallel_requests: policy.max_parallel_requests ?? '',
     allowed_models: Array.isArray(policy.allowed_models) ? [...policy.allowed_models] : [],
     blocked_models: Array.isArray(policy.blocked_models) ? [...policy.blocked_models] : [],
   };
@@ -46,6 +48,7 @@ export function formToPolicy(form, apiKeyId) {
     budget_hourly_usd: floatOrNull(form.budget_hourly_usd),
     budget_weekly_usd: floatOrNull(form.budget_weekly_usd),
     budget_monthly_usd: floatOrNull(form.budget_monthly_usd),
+    max_parallel_requests: numOrNull(form.max_parallel_requests),
     allowed_models: dedupe(listFromField(form.allowed_models)),
     blocked_models: dedupe(listFromField(form.blocked_models)),
   };
@@ -110,6 +113,12 @@ export default function PolicyForm({ initial, onChange }) {
           <label className="form__label">Monthly budget (USD)</label>
           <input type="number" step="0.01" min="0" value={form.budget_monthly_usd}
             onChange={(e) => update({ budget_monthly_usd: e.target.value })} placeholder="unset" />
+        </div>
+        <div className="form__row">
+          <label className="form__label">Max parallel requests</label>
+          <input type="number" min="0" value={form.max_parallel_requests}
+            onChange={(e) => update({ max_parallel_requests: e.target.value })}
+            placeholder="unset = unlimited concurrent" />
         </div>
       </div>
       <ModelMultiSelect

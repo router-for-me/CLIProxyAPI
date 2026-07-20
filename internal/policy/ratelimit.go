@@ -35,7 +35,15 @@ func newSlidingWindow() *slidingWindow {
 //
 // When limit <= 0 the function is a no-op (no throttling).
 func (w *slidingWindow) AllowAndIncrement(key string, limit int, windowSize time.Duration) bool {
-	if w == nil || limit <= 0 {
+	return w.AllowAndAddN(key, limit, windowSize, 1)
+}
+
+// AllowAndAddN is the multi-unit variant — used by TPM where a single Consume
+// call (post-request) adds `n` tokens to the current window. The Check path
+// uses PreAddCheck (read-only) since the actual token count is unknown at
+// request admission. When `n <= 0` the call is a no-op (always allowed).
+func (w *slidingWindow) AllowAndAddN(key string, limit int, windowSize time.Duration, n int64) bool {
+	if w == nil || limit <= 0 || n <= 0 {
 		return true
 	}
 	now := time.Now()
@@ -52,8 +60,20 @@ func (w *slidingWindow) AllowAndIncrement(key string, limit int, windowSize time
 	if entry.count >= int64(limit) {
 		return false
 	}
-	entry.count++
+	entry.count += n
 	return true
+}
+
+// PreAddCheck is the read-only precheck used by the Check path to admit or
+// reject based on the current window count, without mutating state. The actual
+// increment happens via Consume's AllowAndAddN. Used by TPM where the request
+// body token count is unknown at admission time — we reject only when the
+// running total is already over the limit.
+func (w *slidingWindow) PreAddCheck(key string, limit int, windowSize time.Duration) bool {
+	if w == nil || limit <= 0 {
+		return true
+	}
+	return w.SnapshotCurrent(key, windowSize) < int64(limit)
 }
 
 // SnapshotCurrent returns the current window count for a principal (for

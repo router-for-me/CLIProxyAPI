@@ -211,11 +211,12 @@ func (f *UsageFlusher) drain(ctx context.Context) {
 // via the UsageStore. Errors are logged but not surfaced; the flusher is
 // best-effort by design (the upstream usage pub/sub does not retry).
 func (f *UsageFlusher) flushOne(ctx context.Context, record coreusage.Record) int {
-	event, apiKeyID, ok := f.toEvent(ctx, record)
+	event, apiKeyID, userID, ok := f.toEvent(ctx, record)
 	if !ok {
 		return 0
 	}
 	event.APIKeyID = apiKeyID
+	event.UserID = userID
 	if err := f.store.InsertEvent(ctx, event); err != nil {
 		// Fallback for very high-throughput bursts: batch the next flush.
 		log.WithError(err).Debug("postgres usage flusher: single insert failed; will retry next tick")
@@ -226,9 +227,9 @@ func (f *UsageFlusher) flushOne(ctx context.Context, record coreusage.Record) in
 }
 
 // toEvent converts a coreusage.Record into the persisted UsageEvent shape and
-// resolves the (api_key_id, cost_usd) tuple that the hot path does not know.
-// Returns ok=false when the record is malformed enough to skip.
-func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (UsageEvent, string, bool) {
+// resolves the (api_key_id, user_id, cost_usd) tuple that the hot path does not
+// know. Returns ok=false when the record is malformed enough to skip.
+func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (UsageEvent, string, string, bool) {
 	model := record.Model
 	if model == "" {
 		model = record.Alias
@@ -246,12 +247,15 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 	}
 	principal := record.APIKey
 	apiKeyID := ""
+	userID := ""
 	if f.apiKeyStore != nil && principal != "" {
-		// Resolve api_key_id via the hashed secret. Lookup failures (legacy
-		// file-only keys) leave the id empty but still persist the principal.
+		// Resolve api_key_id (and the owning internal user id) via the hashed
+		// secret. Lookup failures (legacy file-only keys) leave the ids empty
+		// but still persist the principal.
 		hash := HashSecret(principal)
 		if key, _, err := f.apiKeyStore.LookupByHash(ctx, hash); err == nil {
 			apiKeyID = key.ID
+			userID = key.UserID
 		}
 	}
 	// Resolve cost via pricing row; missing pricing → 0 (no revenue lost).
@@ -300,7 +304,7 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 		FailStatusCode:      failStatus,
 		Generate:            generateEnabled(record.Generate),
 		RequestedAt:         now,
-	}, apiKeyID, true
+	}, apiKeyID, userID, true
 }
 
 func generateEnabled(flag *bool) bool {
