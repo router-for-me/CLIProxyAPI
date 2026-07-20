@@ -60,6 +60,8 @@ pprof:
 # Per-plugin enabled only controls plugins.configs.<pluginID>.enabled and does not implicitly change global plugins.enabled.
 plugins:
   enabled: false
+  # Relative to the process working directory (Docker image WORKDIR: /CLIProxyAPI).
+  # For Docker Compose, mount a host directory here so plugins survive image upgrades.
   dir: "plugins"
   # Additional plugin store registries. The built-in official registry is always included.
   # store-sources:

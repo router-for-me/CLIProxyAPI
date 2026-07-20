@@ -124,6 +124,21 @@ PackyCode provides special discounts for our software users: register using <a h
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+### Operator notes (Homebrew & Docker)
+
+- **Homebrew config path:** if you want the service to read `~/.cli-proxy-api/config.yaml`, run:
+
+  ```bash
+  mkdir -p ~/.cli-proxy-api
+  if [ ! -f ~/.cli-proxy-api/config.yaml ]; then
+    cp "$(brew --prefix)/etc/cliproxyapi.conf" ~/.cli-proxy-api/config.yaml
+  fi
+  ln -sf ~/.cli-proxy-api/config.yaml "$(brew --prefix)/etc/cliproxyapi.conf"
+  ```
+
+  A missing symlink target makes the service exit immediately. Guard with `test -f ~/.cli-proxy-api/config.yaml` before `brew services start cliproxyapi`.
+- **Docker plugins across upgrades:** installed plugins live under `plugins.dir` (default `plugins`). `docker-compose.yml` mounts `./plugins` → `/CLIProxyAPI/plugins` so **later** container recreations keep plugins. **First time you add the volume**, copy plugins out of the **running old container** before recreate: `mkdir -p ./plugins && docker cp cli-proxy-api:/CLIProxyAPI/plugins/. ./plugins/`. A newly created empty host bind directory **obscures** the container’s existing plugin files and does **not** copy them to the host. Without a volume, plugins disappear when the container is recreated and must be reinstalled.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
