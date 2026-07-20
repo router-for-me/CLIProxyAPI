@@ -2111,7 +2111,7 @@ func sanitizeResponsesInputArrayForHTTP(input []byte) []byte {
 	}
 	out := bytes.Clone(input)
 	for i, item := range items.Array() {
-		if !item.Get("action").Exists() {
+		if strings.TrimSpace(item.Get("type").String()) == "local_shell_call" || !item.Get("action").Exists() {
 			continue
 		}
 		updated, err := sjson.DeleteBytes(out, fmt.Sprintf("%d.action", i))

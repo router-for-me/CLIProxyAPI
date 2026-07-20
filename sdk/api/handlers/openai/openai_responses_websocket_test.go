@@ -1368,6 +1368,9 @@ func TestResponseCompletedOutputFromPayloadKeepsCollectedSearchAndShellCalls(t *
 	if items[1].Get("type").String() != "local_shell_call" || items[1].Get("call_id").String() != "shell-1" {
 		t.Fatalf("local shell call was not preserved: %s", output)
 	}
+	if items[1].Get("action.type").String() != "exec" || items[1].Get("action.command").String() != "pwd" {
+		t.Fatalf("local shell action was not preserved: %s", output)
+	}
 }
 
 func TestRestoreResponsesWebsocketCompletionOutputPreservesNonEmptyOutput(t *testing.T) {
