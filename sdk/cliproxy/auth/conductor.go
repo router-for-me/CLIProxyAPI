@@ -89,6 +89,13 @@ const (
 	transientErrorCooldown    = time.Minute
 )
 
+var (
+	// ErrAuthNotFound indicates that a requested auth no longer exists in the manager.
+	ErrAuthNotFound = errors.New("auth not found")
+	// ErrAuthNotRefreshable indicates that an auth has no refresh mechanism available.
+	ErrAuthNotRefreshable = errors.New("auth is not refreshable")
+)
+
 var quotaCooldownDisabled atomic.Bool
 var transientErrorCooldownSeconds atomic.Int64
 
@@ -215,6 +222,9 @@ func (NoopHook) OnAuthUpdated(context.Context, *Auth) {}
 // OnResult implements Hook.
 func (NoopHook) OnResult(context.Context, Result) {}
 
+// PostRefreshHook runs after refreshed credentials have been updated in the manager.
+type PostRefreshHook = PostAuthHook
+
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
 	store         Store
@@ -263,6 +273,8 @@ type Manager struct {
 	// refreshLocks serializes credential refresh per auth ID so concurrent
 	// 401 recoveries and auto-refresh workers do not race the same refresh_token.
 	refreshLocks sync.Map
+
+	postRefreshHook PostRefreshHook
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -499,6 +511,16 @@ func (m *Manager) SetCooldownStateStore(store CooldownStateStore) {
 func (m *Manager) SetRoundTripperProvider(p RoundTripperProvider) {
 	m.mu.Lock()
 	m.rtProvider = p
+	m.mu.Unlock()
+}
+
+// SetPostRefreshHook registers a callback invoked after a successful credential refresh.
+func (m *Manager) SetPostRefreshHook(hook PostRefreshHook) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.postRefreshHook = hook
 	m.mu.Unlock()
 }
 
@@ -2190,6 +2212,11 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 
 // Update replaces an existing auth entry and notifies hooks.
 func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
+	updated, _ := m.updateWithPersistResult(ctx, auth)
+	return updated, nil
+}
+
+func (m *Manager) updateWithPersistResult(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
@@ -2227,31 +2254,45 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.scheduler.upsertAuth(authClone)
 	}
 	m.queueRefreshReschedule(auth.ID)
-	_ = m.persist(ctx, auth)
+	errPersist := m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	if clearedCooldown {
 		m.persistCooldownStates(ctx)
 	}
-	return auth.Clone(), nil
+	return auth.Clone(), errPersist
 }
 
 // Remove deletes an auth from runtime state without persisting.
 // Disk and token-store deletion must be handled by the caller.
 func (m *Manager) Remove(ctx context.Context, id string) {
+	_ = m.RemoveWithCleanup(ctx, id, nil)
+}
+
+// RemoveWithCleanup serializes cleanup and runtime removal against credential refresh.
+// cleanup runs while the auth refresh lock is held and must remove any external persisted
+// credential before the auth is removed from runtime state.
+func (m *Manager) RemoveWithCleanup(ctx context.Context, id string, cleanup func() error) error {
 	if m == nil {
-		return
+		return errors.New("auth manager is nil")
 	}
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return
+		return errors.New("auth id is empty")
 	}
-	_ = ctx
+	refreshLock := m.refreshLockFor(id)
+	refreshLock.mu.Lock()
+	defer refreshLock.mu.Unlock()
+	if cleanup != nil {
+		if errCleanup := cleanup(); errCleanup != nil {
+			return errCleanup
+		}
+	}
 
 	m.mu.Lock()
 	existing := m.auths[id]
 	if existing == nil {
 		m.mu.Unlock()
-		return
+		return nil
 	}
 	provider := strings.TrimSpace(existing.Provider)
 	delete(m.auths, id)
@@ -2286,6 +2327,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 		}
 	}
 	m.persistCooldownStates(ctx)
+	return nil
 }
 
 func (m *Manager) invalidateSessionAffinity(authID string) {
@@ -6123,6 +6165,17 @@ type authRefreshLock struct {
 	mu sync.Mutex
 }
 
+func (m *Manager) refreshLockFor(id string) *authRefreshLock {
+	lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{})
+	lock, _ := lockValue.(*authRefreshLock)
+	if lock != nil {
+		return lock
+	}
+	lock = &authRefreshLock{}
+	m.refreshLocks.Store(id, lock)
+	return lock
+}
+
 func authAccessToken(auth *Auth) string {
 	if token := authMetadataString(auth, "access_token"); token != "" {
 		return token
@@ -6180,6 +6233,29 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	_, _ = m.refreshAuthForRequest(ctx, id, "")
 }
 
+// RefreshAuth synchronously refreshes one auth while serializing concurrent refreshes by auth ID.
+func (m *Manager) RefreshAuth(ctx context.Context, id string) (*Auth, error) {
+	if m == nil {
+		return nil, errors.New("auth manager is nil")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, errors.New("auth id is empty")
+	}
+	m.mu.RLock()
+	auth := m.auths[id]
+	m.mu.RUnlock()
+	if auth == nil {
+		return nil, ErrAuthNotFound
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	homeRefreshEnabled := cfg != nil && cfg.Home.Enabled
+	if !homeRefreshEnabled && !authHasRefreshCredential(auth) {
+		return nil, ErrAuthNotRefreshable
+	}
+	return m.refreshAuthForRequest(ctx, id, "")
+}
+
 // refreshAuthForRequest performs a synchronous credential refresh for the given auth.
 // failedAccessToken lets concurrent callers reuse a refresh that already replaced the
 // access token that produced the unauthorized response.
@@ -6195,12 +6271,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		return nil, errors.New("auth id is empty")
 	}
 
-	lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{})
-	lock, _ := lockValue.(*authRefreshLock)
-	if lock == nil {
-		lock = &authRefreshLock{}
-		m.refreshLocks.Store(id, lock)
-	}
+	lock := m.refreshLockFor(id)
 	lock.mu.Lock()
 	defer lock.mu.Unlock()
 
@@ -6211,8 +6282,11 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		exec = m.executors[auth.Provider]
 	}
 	m.mu.RUnlock()
-	if auth == nil || exec == nil {
-		return nil, errors.New("auth or executor not found")
+	if auth == nil {
+		return nil, ErrAuthNotFound
+	}
+	if exec == nil {
+		return nil, errors.New("auth executor not found")
 	}
 
 	// Another request may already have refreshed this credential.
@@ -6277,17 +6351,31 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
-	saved, errUpdate := m.Update(ctx, updated)
+	saved, errUpdate := m.updateWithPersistResult(ctx, updated)
 	for _, model := range modelsToResume {
 		registry.GetGlobalRegistry().ResumeClientModel(id, model)
 	}
+	if saved == nil {
+		return nil, ErrAuthNotFound
+	}
+	m.mu.RLock()
+	postRefreshHook := m.postRefreshHook
+	m.mu.RUnlock()
+	if postRefreshHook != nil {
+		if errHook := postRefreshHook(ctx, saved.Clone()); errHook != nil {
+			if errUpdate != nil {
+				return saved, errors.Join(
+					fmt.Errorf("persist refreshed auth %s (%s): %w", auth.Provider, auth.ID, errUpdate),
+					fmt.Errorf("post-refresh hook failed: %w", errHook),
+				)
+			}
+			return saved, fmt.Errorf("post-refresh hook failed: %w", errHook)
+		}
+	}
 	if errUpdate != nil {
-		log.Debugf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
+		return saved, fmt.Errorf("persist refreshed auth %s (%s): %w", auth.Provider, auth.ID, errUpdate)
 	}
-	if saved != nil {
-		return saved, nil
-	}
-	return updated.Clone(), nil
+	return saved, nil
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {

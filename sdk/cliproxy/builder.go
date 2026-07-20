@@ -290,8 +290,10 @@ func (b *Builder) Build() (*Service, error) {
 	if b.postAuthHook != nil {
 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))
 	}
+	runtimeAuthSyncHook := service.runtimeAuthSyncHook()
+	coreManager.SetPostRefreshHook(service.runtimeAuthRefreshHook())
 	service.serverOptions = append(service.serverOptions,
-		api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),
+		api.WithPostAuthPersistHook(runtimeAuthSyncHook),
 		api.WithPluginHost(pluginHost),
 		api.WithConfigReloadHook(func(_ context.Context, _ *config.Config) {
 			service.reloadConfigFromWatcher()
@@ -302,19 +304,9 @@ func (b *Builder) Build() (*Service, error) {
 
 func (s *Service) runtimeAuthSyncHook() coreauth.PostAuthHook {
 	return func(ctx context.Context, auth *coreauth.Auth) error {
-		if s == nil || auth == nil || auth.ID == "" {
+		update, ok := s.runtimeAuthUpdate(auth)
+		if !ok {
 			return nil
-		}
-		action := watcher.AuthUpdateActionAdd
-		if s.coreManager != nil {
-			if _, ok := s.coreManager.GetByID(auth.ID); ok {
-				action = watcher.AuthUpdateActionModify
-			}
-		}
-		update := watcher.AuthUpdate{
-			Action: action,
-			ID:     auth.ID,
-			Auth:   auth,
 		}
 		if s.watcher != nil && s.watcher.DispatchPersistedAuthUpdate(update) {
 			return nil
@@ -322,4 +314,32 @@ func (s *Service) runtimeAuthSyncHook() coreauth.PostAuthHook {
 		s.handleAuthUpdate(coreauth.WithSkipPersist(ctx), update)
 		return nil
 	}
+}
+
+func (s *Service) runtimeAuthRefreshHook() coreauth.PostRefreshHook {
+	return func(ctx context.Context, auth *coreauth.Auth) error {
+		update, ok := s.runtimeAuthUpdate(auth)
+		if !ok {
+			return nil
+		}
+		s.handleAuthUpdate(coreauth.WithSkipPersist(ctx), update)
+		return nil
+	}
+}
+
+func (s *Service) runtimeAuthUpdate(auth *coreauth.Auth) (watcher.AuthUpdate, bool) {
+	if s == nil || auth == nil || auth.ID == "" {
+		return watcher.AuthUpdate{}, false
+	}
+	action := watcher.AuthUpdateActionAdd
+	if s.coreManager != nil {
+		if _, ok := s.coreManager.GetByID(auth.ID); ok {
+			action = watcher.AuthUpdateActionModify
+		}
+	}
+	return watcher.AuthUpdate{
+		Action: action,
+		ID:     auth.ID,
+		Auth:   auth,
+	}, true
 }
