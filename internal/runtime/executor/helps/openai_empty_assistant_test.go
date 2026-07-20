@@ -86,3 +86,11 @@ func TestDropEmptyAssistantMessagesNoChange(t *testing.T) {
 		t.Fatalf("payload changed without empty assistant messages: %s", out)
 	}
 }
+
+func TestDropEmptyAssistantKeepsReasoningContent(t *testing.T) {
+	payload := `{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"","reasoning_content":"thinking"},{"role":"user","content":"ok"}]}`
+	out := DropEmptyAssistantMessages([]byte(payload))
+	if n := len(gjson.GetBytes(out, "messages").Array()); n != 3 {
+		t.Fatalf("reasoning-only assistant was dropped: %d messages, want 3: %s", n, out)
+	}
+}

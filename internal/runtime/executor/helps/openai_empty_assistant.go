@@ -27,6 +27,9 @@ func DropEmptyAssistantMessages(payload []byte) []byte {
 		if toolCalls := message.Get("tool_calls"); toolCalls.IsArray() && len(toolCalls.Array()) > 0 {
 			return true
 		}
+		if rc := message.Get("reasoning_content"); rc.Exists() && rc.String() != "" {
+			return true
+		}
 		if !isEmptyOpenAIMessageContent(message.Get("content")) {
 			return true
 		}
