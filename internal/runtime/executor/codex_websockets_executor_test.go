@@ -585,6 +585,7 @@ func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) 
 	defer func() { _ = conn.Close() }()
 
 	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
 	sessionID := "sess-1"
 	disconnectCh := exec.UpstreamDisconnectChan(sessionID)
 	if disconnectCh == nil {
@@ -616,6 +617,113 @@ func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) 
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for disconnect signal")
 	}
+}
+
+func TestCodexWebsocketsIdleUpstreamDisconnectDoesNotCloseDownstreamSession(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	serverReady := make(chan struct{})
+	closeServerConn := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("upgrade websocket: %v", errUpgrade)
+			return
+		}
+		close(serverReady)
+		<-closeServerConn
+		_ = conn.Close()
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		t.Fatalf("dial websocket: %v", errDial)
+	}
+	defer func() { _ = conn.Close() }()
+	<-serverReady
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	sess := exec.getOrCreateSession("idle-session")
+	disconnectCh := sess.upstreamDisconnectCh
+	sess.connMu.Lock()
+	sess.conn = conn
+	sess.readerConn = conn
+	sess.connMu.Unlock()
+
+	readLoopDone := make(chan struct{})
+	go func() {
+		exec.readUpstreamLoop(sess, conn)
+		close(readLoopDone)
+	}()
+	close(closeServerConn)
+
+	select {
+	case <-readLoopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for idle upstream reader to stop")
+	}
+
+	sess.connMu.Lock()
+	current := sess.conn
+	sess.connMu.Unlock()
+	if current != nil {
+		t.Fatal("idle disconnected upstream connection was not invalidated")
+	}
+
+	select {
+	case errDisconnect, ok := <-disconnectCh:
+		t.Fatalf("idle upstream disconnect unexpectedly notified downstream: error=%v open=%v", errDisconnect, ok)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestCodexWebsocketsHeartbeatSendsPing(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	pingReceived := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("upgrade websocket: %v", errUpgrade)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		conn.SetPingHandler(func(appData string) error {
+			select {
+			case pingReceived <- struct{}{}:
+			default:
+			}
+			return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
+		})
+		for {
+			if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		t.Fatalf("dial websocket: %v", errDial)
+	}
+	defer func() { _ = conn.Close() }()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	sess := &codexWebsocketSession{conn: conn}
+	go exec.upstreamHeartbeatLoop(sess, conn, 10*time.Millisecond)
+
+	select {
+	case <-pingReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream heartbeat ping")
+	}
+
+	sess.connMu.Lock()
+	sess.conn = nil
+	sess.connMu.Unlock()
 }
 
 func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) {
