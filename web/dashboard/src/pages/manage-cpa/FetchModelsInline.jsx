@@ -78,10 +78,24 @@ export default function FetchModelsInline({
   //   2. form has no base_url (only happens in Add mode without a
   //      typed base_url) -> fall back to the registry view IF an
   //      auth-file matches; otherwise show a friendly hint.
-  const formApiKey =
-    form?.api_key?.trim() ||
-    form?.api_key_entries?.[0]?.['api-key']?.trim?.() ||
-    '';
+  // The form's stored key uses `api_key_entries[*].api-key` (underscore +
+// kebab in the wire JSON). Read both shapes defensively since the wire
+// format can land as either depending on how the upstream Go struct is
+// serialized — kebab-case (`api-key-entries`) is the actual Go tag, but
+// some proxies have historically emitted snake_case. The form's own
+// `api_key` field (the typed-in scalar) is the canonical source for
+// New entries; for Edit, fall back to the first configured key.
+const formApiKey =
+    form?.api_key?.trim()
+    || (Array.isArray(form?.api_key_entries) && form.api_key_entries[0]?.['api-key']?.trim?.())
+    || (Array.isArray(form?.['api-key-entries']) && form['api-key-entries'][0]?.['api-key']?.trim?.())
+    || '';
+  // The form's `name` (for OpenAI-Compat) lets the server resolve the
+  // per-provider credential from cfg.OpenAICompatibility server-side,
+  // bypassing any JS-side JSON path ambiguity.
+  const formName =
+    (typeof form?.name === 'string' && form.name.trim())
+    || '';
   const formBaseUrl = form?.base_url?.trim() || '';
   const hasFormBaseUrl = !!formBaseUrl;
   const canFetch = !disabled && (hasFormBaseUrl || isEdit);
@@ -99,7 +113,17 @@ export default function FetchModelsInline({
       if (hasFormBaseUrl) {
         const list = await fetchOpenAICompatModels({
           baseUrl: formBaseUrl,
-          apiKey: callerKey || formApiKey,
+          // The form's API key is the source of truth — the operator
+          // typed it for this exact entry. The callerKey from localStorage
+          // is only a fallback when the form is empty (Add mode, no key
+          // typed yet) so we still surface the proxy's last-used token.
+          apiKey: formApiKey || callerKey,
+          // Forward the entry's name so the server can resolve the
+          // per-provider credential itself, regardless of whether the
+          // dashboard could parse api-key-entries[*].api-key out of the
+          // wire JSON (the Go json tag is `api-key-entries`, which the
+          // browser keeps as a kebab-case string).
+          name: formName,
         });
         setFetched(list);
         setStage('ready');
@@ -128,6 +152,7 @@ export default function FetchModelsInline({
     hasFormBaseUrl,
     formBaseUrl,
     formApiKey,
+    formName,
     callerKey,
   ]);
 
