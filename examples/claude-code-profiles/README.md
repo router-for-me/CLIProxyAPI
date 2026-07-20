@@ -1,12 +1,13 @@
 # Claude Code Model Profiles
 
-This example provides three zsh profiles for switching every Claude Code model
+This example provides four zsh profiles for switching every Claude Code model
 tier before starting `claude`:
 
 | Profile | Main | Opus tier | Sonnet tier | Fast/Haiku/Fable tier | Subagents |
 | --- | --- | --- | --- | --- | --- |
 | `openai` | `gpt-5.6-luna(high)` | `gpt-5.6-sol(medium)` | `gpt-5.6-luna(max)` | Haiku: `gpt-5.5`; Fable: `gpt-5.6-sol(high)` | `gpt-5.5(high)` |
 | `claude` | `claude-sonnet-5` | `claude-opus-4.6` | `claude-sonnet-5` | `claude-fable-5` | `claude-sonnet-5` |
+| `kimi` | `kimi-k2.7-code` | `kimi-k2.7-code` | `kimi-k2.7-code` | `kimi-k2.7-code` | `kimi-k2.7-code` |
 | `mixed` | `claude-sonnet-5` | `gpt-5.5` | `claude-sonnet-5` | `kimi-k2.7-code` | `gpt-5.5` |
 
 The profiles configure Claude Code only. CLIProxyAPI is used as the local
@@ -74,6 +75,11 @@ claude
 
 ```bash
 claude-profile claude
+claude
+```
+
+```bash
+claude-profile kimi
 claude
 ```
 
@@ -172,6 +178,7 @@ Then select each profile and verify its printed model assignments:
 ```bash
 claude-profile openai
 claude-profile claude
+claude-profile kimi
 claude-profile mixed
 ```
 

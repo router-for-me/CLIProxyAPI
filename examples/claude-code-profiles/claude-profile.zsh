@@ -48,14 +48,14 @@ claude-profile() {
   local router_token
 
   case "$profile" in
-    openai|claude|mixed) ;;
+    openai|claude|kimi|mixed) ;;
     off|clear)
       _claude_profile_clear
       print "Claude profile cleared; Claude Code will use its native login/configuration."
       return
       ;;
     *)
-      print "Usage: claude-profile {openai|claude|mixed|clear}"
+      print "Usage: claude-profile {openai|claude|kimi|mixed|clear}"
       return 2
       ;;
   esac
@@ -91,6 +91,15 @@ claude-profile() {
       export ANTHROPIC_DEFAULT_FABLE_MODEL="claude-fable-5"
       export ANTHROPIC_SMALL_FAST_MODEL="claude-fable-5"
       export CLAUDE_CODE_SUBAGENT_MODEL="claude-sonnet-5"
+      ;;
+    kimi)
+      export ANTHROPIC_MODEL="kimi-k2.7-code"
+      export ANTHROPIC_DEFAULT_OPUS_MODEL="kimi-k2.7-code"
+      export ANTHROPIC_DEFAULT_SONNET_MODEL="kimi-k2.7-code"
+      export ANTHROPIC_DEFAULT_HAIKU_MODEL="kimi-k2.7-code"
+      export ANTHROPIC_DEFAULT_FABLE_MODEL="kimi-k2.7-code"
+      export ANTHROPIC_SMALL_FAST_MODEL="kimi-k2.7-code"
+      export CLAUDE_CODE_SUBAGENT_MODEL="kimi-k2.7-code"
       ;;
     mixed)
       export ANTHROPIC_MODEL="claude-sonnet-5"
