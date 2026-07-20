@@ -341,6 +341,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		for {
 			select {
+			case <-ctx.Done():
+				return
 			case now := <-usageTicks:
 				if snapshot, emit := usageEstimator.ObserveTime(now); emit {
 					thinkingTokenUpdate := thinkingTokenEmitter.Event(snapshot)

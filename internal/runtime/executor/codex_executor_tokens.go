@@ -74,7 +74,11 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	body = helps.SetBoolIfDifferent(body, "stream", false)
 	body = normalizeCodexInstructions(body)
 
-	count, err := estimateCodexInputTokens(baseModel, body)
+	enc, err := tokenizerForCodexModel(baseModel)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("codex executor: tokenizer init failed: %w", err)
+	}
+	count, err := countCodexInputTokens(enc, body)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex executor: token counting failed: %w", err)
 	}
