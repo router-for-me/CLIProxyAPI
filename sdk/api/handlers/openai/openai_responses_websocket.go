@@ -2022,18 +2022,25 @@ func isCompleteResponsesWebsocketToolCall(item gjson.Result) bool {
 		return false
 	}
 	callID := item.Get("call_id")
-	name := item.Get("name")
-	if callID.Type != gjson.String || strings.TrimSpace(callID.String()) == "" || name.Type != gjson.String || strings.TrimSpace(name.String()) == "" {
+	if callID.Type != gjson.String || strings.TrimSpace(callID.String()) == "" {
 		return false
 	}
 
 	switch strings.TrimSpace(item.Get("type").String()) {
 	case "function_call":
+		name := item.Get("name")
 		arguments := item.Get("arguments")
-		return arguments.Exists() && arguments.Type == gjson.String
+		return name.Type == gjson.String && strings.TrimSpace(name.String()) != "" && arguments.Exists() && arguments.Type == gjson.String
 	case "custom_tool_call":
+		name := item.Get("name")
 		input := item.Get("input")
-		return input.Exists() && input.Type == gjson.String
+		return name.Type == gjson.String && strings.TrimSpace(name.String()) != "" && input.Exists() && input.Type == gjson.String
+	case "tool_search_call":
+		arguments := item.Get("arguments")
+		return arguments.Exists() && arguments.IsObject()
+	case "local_shell_call":
+		action := item.Get("action")
+		return action.Exists() && action.IsObject()
 	default:
 		return false
 	}

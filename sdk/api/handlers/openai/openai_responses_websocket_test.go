@@ -1350,6 +1350,26 @@ func TestResponseCompletedOutputFromPayloadDropsIncompleteCollectedToolCalls(t *
 	}
 }
 
+func TestResponseCompletedOutputFromPayloadKeepsCollectedSearchAndShellCalls(t *testing.T) {
+	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[]}}`)
+	collector := map[int64][]byte{
+		0: []byte(`{"type":"tool_search_call","call_id":"search-1","status":"completed","execution":"client","arguments":{"query":"tools"}}`),
+		1: []byte(`{"type":"local_shell_call","call_id":"shell-1","status":"completed","action":{"type":"exec","command":"pwd"}}`),
+	}
+
+	output := responseCompletedOutputFromPayload(payload, collector, nil)
+	items := gjson.ParseBytes(output).Array()
+	if len(items) != 2 {
+		t.Fatalf("output len = %d, want 2: %s", len(items), output)
+	}
+	if items[0].Get("type").String() != "tool_search_call" || items[0].Get("call_id").String() != "search-1" {
+		t.Fatalf("tool search call was not preserved: %s", output)
+	}
+	if items[1].Get("type").String() != "local_shell_call" || items[1].Get("call_id").String() != "shell-1" {
+		t.Fatalf("local shell call was not preserved: %s", output)
+	}
+}
+
 func TestRestoreResponsesWebsocketCompletionOutputPreservesNonEmptyOutput(t *testing.T) {
 	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"message","id":"out-1"}]}}`)
 	collector := map[int64][]byte{0: []byte(`{"type":"function_call","id":"call-1","call_id":"call-1"}`)}
@@ -1441,8 +1461,12 @@ func TestIsCompleteResponsesWebsocketToolCallRequiresStringFields(t *testing.T) 
 		{name: "boolean name", item: `{"type":"function_call","call_id":"call-1","name":true,"arguments":"{}"}`},
 		{name: "numeric arguments", item: `{"type":"function_call","call_id":"call-1","name":"exec","arguments":123}`},
 		{name: "object custom input", item: `{"type":"custom_tool_call","call_id":"call-1","name":"exec","input":{}}`},
+		{name: "missing tool search arguments", item: `{"type":"tool_search_call","call_id":"call-1"}`},
+		{name: "missing local shell action", item: `{"type":"local_shell_call","call_id":"call-1"}`},
 		{name: "valid function call", item: `{"type":"function_call","call_id":"call-1","name":"exec","arguments":""}`, want: true},
 		{name: "valid custom tool call", item: `{"type":"custom_tool_call","call_id":"call-1","name":"exec","input":""}`, want: true},
+		{name: "valid tool search call", item: `{"type":"tool_search_call","call_id":"call-1","arguments":{"query":"tools"}}`, want: true},
+		{name: "valid local shell call", item: `{"type":"local_shell_call","call_id":"call-1","action":{"type":"exec","command":"pwd"}}`, want: true},
 	}
 
 	for _, tt := range tests {
@@ -1815,6 +1839,37 @@ func TestRecordResponsesWebsocketToolCallsFromPayloadWithCache(t *testing.T) {
 	}
 	if gjson.GetBytes(cached, "type").String() != "function_call" || gjson.GetBytes(cached, "call_id").String() != "call-1" {
 		t.Fatalf("unexpected cached tool call: %s", cached)
+	}
+}
+
+func TestRecordResponsesWebsocketSearchAndShellCallsWithCache(t *testing.T) {
+	tests := []struct {
+		name    string
+		callID  string
+		payload []byte
+	}{
+		{
+			name:    "tool search",
+			callID:  "search-1",
+			payload: []byte(`{"type":"response.output_item.done","item":{"type":"tool_search_call","call_id":"search-1","status":"completed","execution":"client","arguments":{"query":"tools"}}}`),
+		},
+		{
+			name:    "local shell",
+			callID:  "shell-1",
+			payload: []byte(`{"type":"response.output_item.done","item":{"type":"local_shell_call","call_id":"shell-1","status":"completed","action":{"type":"exec","command":"pwd"}}}`),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cache := newWebsocketToolOutputCache(time.Minute, 10)
+			recordResponsesWebsocketToolCallsFromPayloadWithCache(cache, "session-1", test.payload)
+			if cached, ok := cache.get("session-1", test.callID); !ok {
+				t.Fatalf("expected cached %s call", test.name)
+			} else if gjson.GetBytes(cached, "call_id").String() != test.callID {
+				t.Fatalf("cached call id = %q, want %q: %s", gjson.GetBytes(cached, "call_id").String(), test.callID, cached)
+			}
+		})
 	}
 }
 
