@@ -184,7 +184,38 @@ func TestOpenAICompatExecutorCopilotClaudeGoogleUsesChatCompletionsPayload(t *te
 	}
 }
 
-func TestOpenAICompatExecutorCopilotClaudeGoogleUsesResponsesPayload(t *testing.T) {
+func TestOpenAICompatExecutorCopilotStripsUnsupportedReasoningEffort(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("copilot", &config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "copilot",
+		Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+			"api_key":  "test",
+		},
+	}
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "kimi-k2.7-code",
+		Payload: []byte(`{"model":"kimi-k2.7-code","max_tokens":128,"thinking":{"type":"enabled","budget_tokens":24576},"messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gjson.GetBytes(gotBody, "reasoning_effort").Exists() {
+		t.Fatalf("Copilot request contains unsupported reasoning_effort: %s", gotBody)
+	}
+}
+
+func TestOpenAICompatExecutorCopilotResponsesOnlyModelUsesResponsesEndpoint(t *testing.T) {
 	var gotPath string
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -203,12 +234,15 @@ func TestOpenAICompatExecutorCopilotClaudeGoogleUsesResponsesPayload(t *testing.
 			"base_url": server.URL + "/v1",
 			"api_key":  "test",
 		},
+		Metadata: map[string]any{
+			"responses_models": []any{"mai-code-1-flash-picker"},
+		},
 	}
 	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "gemini-3.5-flash",
-		Payload: []byte(`{"model":"gemini-3.5-flash","messages":[{"role":"user","content":"hello"}]}`),
+		Model:   "mai-code-1-flash-picker",
+		Payload: []byte(`{"model":"mai-code-1-flash-picker","messages":[{"role":"user","content":"hello"}]}`),
 	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("claude"),
+		SourceFormat: sdktranslator.FromString("openai"),
 	})
 	if err == nil {
 		t.Fatalf("expected Execute error")
@@ -218,13 +252,21 @@ func TestOpenAICompatExecutorCopilotClaudeGoogleUsesResponsesPayload(t *testing.
 	}
 	body := gjson.ParseBytes(gotBody)
 	if !body.Get("input").IsArray() {
-		t.Fatalf("Copilot request has no Responses input: %s", gotBody)
+		t.Fatalf("Copilot Responses request has no input array: %s", gotBody)
 	}
 	if body.Get("messages").Exists() {
-		t.Fatalf("Anthropic messages leaked to Copilot: %s", gotBody)
+		t.Fatalf("chat messages leaked into Copilot Responses request: %s", gotBody)
 	}
-	if got := body.Get("model").String(); got != "gemini-3.5-flash" {
-		t.Fatalf("upstream model = %q, want gemini-3.5-flash", got)
+}
+
+func TestWrapCopilotResponsesNonStream(t *testing.T) {
+	body := []byte(`{"id":"resp_1","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}]}`)
+	wrapped := gjson.ParseBytes(wrapCopilotResponsesNonStream(body))
+	if got := wrapped.Get("type").String(); got != "response.completed" {
+		t.Fatalf("type = %q, want response.completed", got)
+	}
+	if got := wrapped.Get("response.output.0.content.0.text").String(); got != "OK" {
+		t.Fatalf("wrapped output text = %q, want OK", got)
 	}
 }
 
@@ -597,8 +639,10 @@ func TestOpenAICompatExecutorStreamSkipsKeepAliveUntilDataLine(t *testing.T) {
 
 func TestOpenAICompatExecutorStreamCopilotUsesChatCompletionsEndpoint(t *testing.T) {
 	var gotPath string
+	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":{"message":"forced"}}`))
@@ -615,7 +659,7 @@ func TestOpenAICompatExecutorStreamCopilotUsesChatCompletionsEndpoint(t *testing
 	}
 	_, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.5",
-		Payload: []byte(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+		Payload: []byte(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high","stream":true}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FromString("openai"),
 		Stream:       true,
@@ -625,5 +669,8 @@ func TestOpenAICompatExecutorStreamCopilotUsesChatCompletionsEndpoint(t *testing
 	}
 	if gotPath != "/v1/chat/completions" {
 		t.Fatalf("path = %q, want %q", gotPath, "/v1/chat/completions")
+	}
+	if gjson.GetBytes(gotBody, "reasoning_effort").Exists() {
+		t.Fatalf("Copilot streaming request contains unsupported reasoning_effort: %s", gotBody)
 	}
 }

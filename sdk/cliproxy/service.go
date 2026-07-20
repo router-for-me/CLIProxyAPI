@@ -2441,7 +2441,7 @@ func resolveCopilotModelsForAuth(auth *coreauth.Auth) []*ModelInfo {
 	if len(models) == 0 {
 		return defaultModels
 	}
-	return mergeModelInfosByID(models, defaultModels)
+	return models
 }
 
 func copilotAvailableModelIDs(auth *coreauth.Auth) []string {
@@ -2503,39 +2503,6 @@ func copilotKnownModelsByID() map[string]*ModelInfo {
 		}
 	}
 	return models
-}
-
-func mergeModelInfosByID(primary, extras []*ModelInfo) []*ModelInfo {
-	if len(primary) == 0 {
-		return extras
-	}
-	if len(extras) == 0 {
-		return primary
-	}
-
-	out := make([]*ModelInfo, 0, len(primary)+len(extras))
-	seen := make(map[string]struct{}, len(primary)+len(extras))
-	add := func(models []*ModelInfo) {
-		for _, model := range models {
-			if model == nil {
-				continue
-			}
-			modelID := strings.TrimSpace(model.ID)
-			if modelID == "" {
-				continue
-			}
-			key := strings.ToLower(modelID)
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			seen[key] = struct{}{}
-			clone := *model
-			out = append(out, &clone)
-		}
-	}
-	add(primary)
-	add(extras)
-	return out
 }
 
 func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix bool) []*ModelInfo {

@@ -23,6 +23,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -106,6 +107,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if opts.Alt == "responses/compact" {
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
+	} else if shouldUseCopilotResponsesEndpoint(auth, baseModel) {
+		to = sdktranslator.FromString("codex")
+		endpoint = "/responses"
 	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
@@ -123,6 +127,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	if endpoint == "/chat/completions" {
+		translated = sanitizeCopilotChatCompletionsPayload(auth, translated)
+	}
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
@@ -195,7 +202,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter.EnsurePublished(ctx)
 	// Translate response back to source format when needed
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, body, &param)
+	translationBody := body
+	if endpoint == "/responses" {
+		translationBody = wrapCopilotResponsesNonStream(body)
+	}
+	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, translationBody, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -309,6 +320,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
+	if shouldUseCopilotResponsesEndpoint(auth, baseModel) {
+		to = sdktranslator.FromString("codex")
+		endpoint = "/responses"
+	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -325,6 +340,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	if endpoint == "/chat/completions" {
+		translated = sanitizeCopilotChatCompletionsPayload(auth, translated)
+	}
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
@@ -462,6 +480,68 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func sanitizeCopilotChatCompletionsPayload(auth *cliproxyauth.Auth, payload []byte) []byte {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "copilot") {
+		return payload
+	}
+	updated, err := sjson.DeleteBytes(payload, "reasoning_effort")
+	if err != nil {
+		return payload
+	}
+	return updated
+}
+
+func shouldUseCopilotResponsesEndpoint(auth *cliproxyauth.Auth, model string) bool {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "copilot") {
+		return false
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	for _, candidate := range metadataStringSlice(auth.Metadata, "responses_models") {
+		if strings.EqualFold(strings.TrimSpace(candidate), model) {
+			return true
+		}
+	}
+	return false
+}
+
+func wrapCopilotResponsesNonStream(body []byte) []byte {
+	root := gjson.ParseBytes(body)
+	if root.Get("type").String() != "" || root.Get("object").String() != "response" {
+		return body
+	}
+	eventType := "response.completed"
+	if root.Get("status").String() == "incomplete" {
+		eventType = "response.incomplete"
+	}
+	wrapper := []byte(`{"type":"","response":{}}`)
+	wrapper, _ = sjson.SetBytes(wrapper, "type", eventType)
+	wrapper, _ = sjson.SetRawBytes(wrapper, "response", body)
+	return wrapper
+}
+
+func metadataStringSlice(metadata map[string]any, key string) []string {
+	if metadata == nil {
+		return nil
+	}
+	switch values := metadata[key].(type) {
+	case []string:
+		return values
+	case []any:
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			if text, ok := value.(string); ok {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -783,7 +863,7 @@ func (e *OpenAICompatExecutor) refreshCopilotAuth(ctx context.Context, auth *cli
 	if err != nil {
 		return auth, err
 	}
-	availableModels, errModels := authSvc.FetchAvailableModels(ctx, sessionToken.Token, sessionToken.Endpoint)
+	availableModelCatalog, errModels := authSvc.FetchAvailableModelCatalog(ctx, sessionToken.Token, sessionToken.Endpoint)
 	if errModels != nil {
 		log.Debugf("openai compat executor: copilot fetch available models failed: %v", errModels)
 	}
@@ -801,8 +881,13 @@ func (e *OpenAICompatExecutor) refreshCopilotAuth(ctx context.Context, auth *cli
 	if _, ok := updated.Metadata["headers"]; !ok {
 		updated.Metadata["headers"] = copilot.DefaultRequestHeaders()
 	}
-	if len(availableModels) > 0 {
-		updated.Metadata["available_models"] = availableModels
+	if availableModelCatalog != nil && len(availableModelCatalog.ModelIDs) > 0 {
+		updated.Metadata["available_models"] = availableModelCatalog.ModelIDs
+	}
+	if availableModelCatalog != nil && len(availableModelCatalog.ResponsesOnlyIDs) > 0 {
+		updated.Metadata["responses_models"] = availableModelCatalog.ResponsesOnlyIDs
+	} else {
+		delete(updated.Metadata, "responses_models")
 	}
 	if updated.Attributes == nil {
 		updated.Attributes = make(map[string]string)

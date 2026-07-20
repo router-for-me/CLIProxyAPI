@@ -53,7 +53,13 @@ type modelListResponse struct {
 }
 
 type modelListEntry struct {
-	ID string `json:"id"`
+	ID                 string   `json:"id"`
+	SupportedEndpoints []string `json:"supported_endpoints"`
+}
+
+type AvailableModelCatalog struct {
+	ModelIDs         []string
+	ResponsesOnlyIDs []string
 }
 
 type tokenResponse struct {
@@ -284,6 +290,14 @@ func (a *Auth) FetchSessionToken(ctx context.Context, githubAccessToken string) 
 }
 
 func (a *Auth) FetchAvailableModels(ctx context.Context, sessionToken, endpoint string) ([]string, error) {
+	catalog, err := a.FetchAvailableModelCatalog(ctx, sessionToken, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	return catalog.ModelIDs, nil
+}
+
+func (a *Auth) FetchAvailableModelCatalog(ctx context.Context, sessionToken, endpoint string) (*AvailableModelCatalog, error) {
 	sessionToken = strings.TrimSpace(sessionToken)
 	if sessionToken == "" {
 		return nil, fmt.Errorf("copilot: session token is required")
@@ -293,7 +307,7 @@ func (a *Auth) FetchAvailableModels(ctx context.Context, sessionToken, endpoint 
 		endpoint = DefaultEndpointURL
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/v1/models", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/models", nil)
 	if err != nil {
 		return nil, fmt.Errorf("copilot: create models request failed: %w", err)
 	}
@@ -324,8 +338,11 @@ func (a *Auth) FetchAvailableModels(ctx context.Context, sessionToken, endpoint 
 	}
 
 	seen := make(map[string]struct{}, len(parsed.Data))
+	responsesOnlySeen := make(map[string]struct{})
 	models := make([]string, 0, len(parsed.Data))
-	add := func(modelID string) {
+	responsesOnlyModels := make([]string, 0)
+	add := func(item modelListEntry) {
+		modelID := item.ID
 		modelID = strings.TrimSpace(modelID)
 		if modelID == "" {
 			return
@@ -335,21 +352,30 @@ func (a *Auth) FetchAvailableModels(ctx context.Context, sessionToken, endpoint 
 		}
 		seen[modelID] = struct{}{}
 		models = append(models, modelID)
+		if isResponsesOnlyModel(item.SupportedEndpoints) {
+			responsesOnlySeen[modelID] = struct{}{}
+			responsesOnlyModels = append(responsesOnlyModels, modelID)
+		}
 	}
 	for _, item := range parsed.Data {
-		add(item.ID)
+		add(item)
 	}
 	if raw := bytes.TrimSpace(parsed.RawModels); len(raw) > 0 {
 		var modelList []modelListEntry
 		if errArray := json.Unmarshal(raw, &modelList); errArray == nil {
 			for _, item := range modelList {
-				add(item.ID)
+				add(item)
 			}
 		} else {
 			var modelMap map[string]json.RawMessage
 			if errMap := json.Unmarshal(raw, &modelMap); errMap == nil {
-				for key := range modelMap {
-					add(key)
+				for key, value := range modelMap {
+					item := modelListEntry{ID: key}
+					_ = json.Unmarshal(value, &item)
+					if strings.TrimSpace(item.ID) == "" {
+						item.ID = key
+					}
+					add(item)
 				}
 			}
 		}
@@ -357,7 +383,23 @@ func (a *Auth) FetchAvailableModels(ctx context.Context, sessionToken, endpoint 
 	if len(models) == 0 {
 		return nil, fmt.Errorf("copilot: models response missing model identifiers")
 	}
-	return models, nil
+	return &AvailableModelCatalog{
+		ModelIDs:         models,
+		ResponsesOnlyIDs: responsesOnlyModels,
+	}, nil
+}
+
+func isResponsesOnlyModel(endpoints []string) bool {
+	hasResponses := false
+	for _, endpoint := range endpoints {
+		switch strings.TrimSpace(endpoint) {
+		case "/responses", "/v1/responses":
+			hasResponses = true
+		case "/chat/completions", "/v1/chat/completions":
+			return false
+		}
+	}
+	return hasResponses
 }
 
 func parseExpiry(value any, expiresIn int64) time.Time {

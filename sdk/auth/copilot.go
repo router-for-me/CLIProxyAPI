@@ -77,7 +77,7 @@ func (a CopilotAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 	if err != nil {
 		return nil, err
 	}
-	availableModels, errModels := authSvc.FetchAvailableModels(ctx, sessionToken.Token, sessionToken.Endpoint)
+	availableModelCatalog, errModels := authSvc.FetchAvailableModelCatalog(ctx, sessionToken.Token, sessionToken.Endpoint)
 	if errModels != nil {
 		log.Debugf("copilot auth: fetch available models failed: %v", errModels)
 	}
@@ -92,8 +92,11 @@ func (a CopilotAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		"base_url":            sessionToken.Endpoint,
 		"headers":             copilot.DefaultRequestHeaders(),
 	}
-	if len(availableModels) > 0 {
-		metadata["available_models"] = availableModels
+	if availableModelCatalog != nil && len(availableModelCatalog.ModelIDs) > 0 {
+		metadata["available_models"] = availableModelCatalog.ModelIDs
+	}
+	if availableModelCatalog != nil && len(availableModelCatalog.ResponsesOnlyIDs) > 0 {
+		metadata["responses_models"] = availableModelCatalog.ResponsesOnlyIDs
 	}
 
 	fmt.Println("GitHub Copilot authentication successful")
