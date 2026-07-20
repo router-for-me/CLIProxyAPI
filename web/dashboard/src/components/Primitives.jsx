@@ -45,15 +45,20 @@ export function StatusBadge({ status }) {
   return <span className={`badge ${cls}`}>{status || 'unknown'}</span>;
 }
 
-export function Modal({ title, onClose, children }) {
+export function Modal({ title, onClose, size = 'md', children, footer }) {
+  // size: 'sm' (420px), 'md' (520px, default), 'lg' (720px), 'xl' (900px).
+  // Wide modals are used by the Manage-CPA provider-key editor which has
+  // many fields; narrow ones stay focused for OAuth-connect / confirm dialogs.
+  const sizeClass = ` modal--${size}`;
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="row row--between" style={{ marginBottom: 16 }}>
+      <div className={`modal${sizeClass}`} onClick={(e) => e.stopPropagation()}>
+        <div className="row row--between modal__header">
           <h3 className="modal__title">{title}</h3>
-          <button onClick={onClose} style={{ padding: '4px 10px' }}>Close</button>
+          <button onClick={onClose} style={{ padding: '4px 10px' }} aria-label="Close">Close</button>
         </div>
-        {children}
+        <div className="modal__body">{children}</div>
+        {footer && <div className="modal__footer">{footer}</div>}
       </div>
     </div>
   );
