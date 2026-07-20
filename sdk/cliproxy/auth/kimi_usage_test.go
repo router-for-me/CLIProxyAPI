@@ -1101,6 +1101,19 @@ func TestHasGenericPaymentFallbackCooldown(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			name: "Cloudflare 403 not matched (Reason set)",
+			auth: &Auth{
+				ModelStates: map[string]*ModelState{
+					"kimi-k2": {
+						NextRetryAfter: time.Now().Add(30 * time.Minute),
+						Quota:          QuotaState{Exceeded: true, Reason: "cloudflare challenge"},
+						LastError:      &Error{HTTPStatus: http.StatusForbidden},
+					},
+				},
+			},
+			want: false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1193,25 +1206,29 @@ func TestClearGenericPaymentFallbackCooldown(t *testing.T) {
 	}
 }
 
-// TestClearGenericPaymentFallbackCooldown_Preserves401Cooldown verifies that a
-// generic 401 unauthorized cooldown is NOT cleared by the generic fallback
-// clearing path — only 402/403 states are targeted.
-func TestClearGenericPaymentFallbackCooldown_Preserves401Cooldown(t *testing.T) {
+// TestClearGenericPaymentFallbackCooldown_Preserves401AndCloudflareCooldown verifies that
+// a generic 401 unauthorized cooldown and a Cloudflare 403 challenge (Quota.Reason set)
+// are NOT cleared by the generic fallback clearing path — only 402/403 with empty Reason
+// states are targeted.
+func TestClearGenericPaymentFallbackCooldown_Preserves401AndCloudflareCooldown(t *testing.T) {
 	t.Parallel()
 	manager := NewManager(nil, nil, nil)
 	ctx := context.Background()
 	authID := "kimi-clear-mixed-auth"
-	model403 := "kimi-k2"     // 403 fallback — should be cleared
-	model401 := "kimi-k2-401" // 401 unauthorized — must be preserved
+	model403 := "kimi-k2"      // 403 fallback — should be cleared
+	model401 := "kimi-k2-401"  // 401 unauthorized — must be preserved
+	modelCF := "kimi-k2-cf"    // Cloudflare 403 — must be preserved
 
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(authID, "openai-compatible-kimi", []*registry.ModelInfo{
 		{ID: model403},
 		{ID: model401},
+		{ID: modelCF},
 	})
 	t.Cleanup(func() { reg.UnregisterClient(authID) })
 
 	unauthAfter := time.Now().Add(30 * time.Minute)
+	cfAfter := time.Now().Add(30 * time.Minute)
 	if _, err := manager.Register(ctx, &Auth{
 		ID:       authID,
 		Provider: "openai-compatible-kimi",
@@ -1233,6 +1250,15 @@ func TestClearGenericPaymentFallbackCooldown_Preserves401Cooldown(t *testing.T) 
 				NextRetryAfter: unauthAfter,
 				Quota:          QuotaState{},
 				LastError:      &Error{HTTPStatus: http.StatusUnauthorized},
+				UpdatedAt:      time.Now(),
+			},
+			modelCF: {
+				Status:         StatusError,
+				StatusMessage:  "cloudflare challenge",
+				Unavailable:    true,
+				NextRetryAfter: cfAfter,
+				Quota:          QuotaState{Exceeded: true, Reason: "cloudflare challenge"},
+				LastError:      &Error{HTTPStatus: http.StatusForbidden, Message: "cloudflare challenge"},
 				UpdatedAt:      time.Now(),
 			},
 		},
@@ -1288,6 +1314,21 @@ func TestClearGenericPaymentFallbackCooldown_Preserves401Cooldown(t *testing.T) 
 	}
 	if !state401.NextRetryAfter.Equal(unauthAfter) {
 		t.Errorf("NextRetryAfter = %v, want %v (401 cooldown preserved)", state401.NextRetryAfter, unauthAfter)
+	}
+
+	// Cloudflare 403 model must be preserved.
+	stateCF := after.ModelStates[modelCF]
+	if stateCF == nil {
+		t.Fatal("model Cloudflare 403 state missing")
+	}
+	if !stateCF.Unavailable {
+		t.Error("expected Unavailable=true for Cloudflare 403 model (preserved)")
+	}
+	if !stateCF.NextRetryAfter.Equal(cfAfter) {
+		t.Errorf("NextRetryAfter = %v, want %v (Cloudflare 403 cooldown preserved)", stateCF.NextRetryAfter, cfAfter)
+	}
+	if stateCF.Quota.Reason != "cloudflare challenge" {
+		t.Errorf("Quota.Reason = %q, want cloudflare challenge (preserved)", stateCF.Quota.Reason)
 	}
 }
 

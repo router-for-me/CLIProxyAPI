@@ -512,9 +512,14 @@ func isKimiProbeOwnedCooldown(state *ModelState) bool {
 // payment_required fallback set by MarkResult - the imprecise cooldown this probe
 // is meant to replace. MarkResult does not touch state.Quota for 402/403 (so
 // Quota.Reason is empty); 401/404/model_not_supported also have an empty reason,
-// so the discriminator is LastError.HTTPStatus.
+// so the discriminator is LastError.HTTPStatus. Cloudflare challenges also return
+// HTTP 403 but set Quota.Reason = "cloudflare challenge", so we additionally
+// require Quota.Reason == "" to avoid misclassifying them as generic fallbacks.
 func isGenericPaymentFallback(state *ModelState) bool {
 	if state == nil || state.LastError == nil {
+		return false
+	}
+	if state.Quota.Reason != "" {
 		return false
 	}
 	s := state.LastError.HTTPStatus
