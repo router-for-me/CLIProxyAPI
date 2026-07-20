@@ -1725,6 +1725,9 @@ func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("codex executor: refresh called")
 	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
+		if err == nil {
+			syncCodexPlanTypeFromMetadata(refreshed)
+		}
 		return refreshed, err
 	}
 	if auth == nil {
@@ -1749,6 +1752,7 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	}
 	auth.Metadata["id_token"] = td.IDToken
 	auth.Metadata["access_token"] = td.AccessToken
+	syncCodexPlanType(auth, td.IDToken)
 	if td.RefreshToken != "" {
 		auth.Metadata["refresh_token"] = td.RefreshToken
 	}
@@ -1762,6 +1766,37 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
+}
+
+func syncCodexPlanTypeFromMetadata(auth *cliproxyauth.Auth) {
+	if auth == nil || auth.Metadata == nil {
+		return
+	}
+	idToken, _ := auth.Metadata["id_token"].(string)
+	syncCodexPlanType(auth, idToken)
+}
+
+func syncCodexPlanType(auth *cliproxyauth.Auth, idToken string) {
+	if auth == nil || strings.TrimSpace(idToken) == "" {
+		return
+	}
+	claims, errParse := codexauth.ParseJWTToken(idToken)
+	if errParse != nil {
+		log.Warnf("codex executor: failed to parse refreshed ID token: %v", errParse)
+		return
+	}
+	planType := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+	if planType == "" {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Attributes["plan_type"] = planType
+	auth.Metadata["plan_type"] = planType
 }
 
 type codexIdentityConfuseState struct {
