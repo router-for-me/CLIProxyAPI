@@ -3,6 +3,7 @@ package helps
 import (
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -14,7 +15,7 @@ func StripVertexOpenAIResponsesToolCallIDs(payload []byte, sourceFormat string) 
 		return payload
 	}
 
-	contents := gjson.GetBytes(payload, "contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "contents")
 	if !contents.IsArray() || !vertexContentsHaveToolCallIDs(contents) {
 		return payload
 	}

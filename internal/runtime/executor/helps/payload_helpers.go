@@ -832,7 +832,7 @@ func setPayloadValueIfDifferent(payload []byte, path string, value any) []byte {
 		if expected.Raw == "" {
 			return payload
 		}
-		if current.Raw == expected.Raw {
+		if len(current.Indexes) == 0 && current.Raw == expected.Raw {
 			return payload
 		}
 		updated, errSet := sjson.SetRawBytes(payload, path, []byte(expected.Raw))

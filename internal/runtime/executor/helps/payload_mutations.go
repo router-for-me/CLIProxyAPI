@@ -36,7 +36,7 @@ func SetBoolIfDifferent(payload []byte, path string, value bool) []byte {
 // SetRawIfDifferent updates path only when the existing raw JSON is identical.
 func SetRawIfDifferent(payload []byte, path string, value []byte) []byte {
 	current := gjson.GetBytes(payload, path)
-	if current.Exists() && current.Raw == string(value) {
+	if current.Exists() && len(current.Indexes) == 0 && current.Raw == string(value) {
 		return payload
 	}
 	updated, errSet := sjson.SetRawBytes(payload, path, value)

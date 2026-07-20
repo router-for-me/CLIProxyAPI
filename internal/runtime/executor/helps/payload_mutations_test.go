@@ -92,6 +92,38 @@ func TestApplyPayloadConfigReusesCanonicalOverrides(t *testing.T) {
 	}
 }
 
+func TestApplyPayloadConfigProjectionOverrideWritesEveryMatch(t *testing.T) {
+	cfg := &config.Config{Payload: config.PayloadConfig{
+		Override: []config.PayloadRule{{
+			Models: []config.PayloadModelRule{{Name: "gpt-test", Protocol: "openai"}},
+			Params: map[string]any{"items.#.value": []any{1, 2}},
+		}},
+	}}
+	input := []byte(`{"items":[{"value":1},{"value":2}]}`)
+	output := ApplyPayloadConfigWithRoot(cfg, "gpt-test", "openai", "", input, nil, "", "")
+	for _, path := range []string{"items.0.value", "items.1.value"} {
+		if got := gjson.GetBytes(output, path).Raw; got != `[1,2]` {
+			t.Fatalf("%s = %s, want [1,2]", path, got)
+		}
+	}
+}
+
+func TestApplyPayloadConfigProjectionOverrideRawWritesEveryMatch(t *testing.T) {
+	cfg := &config.Config{Payload: config.PayloadConfig{
+		OverrideRaw: []config.PayloadRule{{
+			Models: []config.PayloadModelRule{{Name: "gpt-test", Protocol: "openai"}},
+			Params: map[string]any{"items.#.value": `[1,2]`},
+		}},
+	}}
+	input := []byte(`{"items":[{"value":1},{"value":2}]}`)
+	output := ApplyPayloadConfigWithRoot(cfg, "gpt-test", "openai", "", input, nil, "", "")
+	for _, path := range []string{"items.0.value", "items.1.value"} {
+		if got := gjson.GetBytes(output, path).Raw; got != `[1,2]` {
+			t.Fatalf("%s = %s, want [1,2]", path, got)
+		}
+	}
+}
+
 func TestApplyPayloadConfigNormalizesByteSliceOverride(t *testing.T) {
 	cfg := &config.Config{Payload: config.PayloadConfig{
 		Override: []config.PayloadRule{{
