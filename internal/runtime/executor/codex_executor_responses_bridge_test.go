@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
@@ -125,6 +126,131 @@ func TestCodexExecutorClaudeResponsesBridgeStreamUsesOAuthToken(t *testing.T) {
 		t.Fatalf("normal stream bridge injected context_management: %s", gotBody)
 	}
 	assertClaudeBridgeUsageStream(t, output.String())
+}
+
+func TestCodexExecutorExecuteStreamCancellationClosesIdleStream(t *testing.T) {
+	tests := []struct {
+		name string
+		alt  string
+	}{
+		{name: "Claude bridge usage ticks", alt: constant.ClaudeResponsesBridgeAlt},
+		{name: "nil usage ticks"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			started := make(chan struct{})
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				close(started)
+				<-r.Context().Done()
+			}))
+			defer upstream.Close()
+
+			executor := NewCodexExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				Attributes: map[string]string{"base_url": upstream.URL},
+				Metadata:   map[string]any{"access_token": "oauth-token"},
+			}
+			requestBody := []byte(`{"model":"gpt-5.6-sol","stream":true,"max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`)
+			ctx, cancel := context.WithCancel(context.Background())
+			opts := claudeResponsesBridgeOptions(requestBody, true)
+			opts.Alt = tt.alt
+			stream, errExecute := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+				Model:   "gpt-5.6-sol",
+				Payload: requestBody,
+			}, opts)
+			if errExecute != nil {
+				cancel()
+				t.Fatalf("ExecuteStream error: %v", errExecute)
+			}
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				cancel()
+				t.Fatal("timed out waiting for idle upstream stream")
+			}
+
+			cancel()
+			closed := make(chan struct{})
+			go func() {
+				for range stream.Chunks {
+				}
+				close(closed)
+			}()
+			select {
+			case <-closed:
+			case <-time.After(2 * time.Second):
+				t.Fatal("stream chunks did not close after context cancellation")
+			}
+		})
+	}
+}
+
+func TestCodexAutoExecutorClaudeResponsesBridgeUsesHTTPWithoutWebsocketAuth(t *testing.T) {
+	var gotMethod string
+	var gotUpgrade string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotUpgrade = r.Header.Get("Upgrade")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_http\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+	}))
+	defer upstream.Close()
+
+	executor := NewCodexAutoExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"base_url": upstream.URL},
+		Metadata:   map[string]any{"access_token": "oauth-token"},
+	}
+	requestBody := []byte(`{"model":"gpt-5.6-sol","stream":true,"max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`)
+	stream, errExecute := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol",
+		Payload: requestBody,
+	}, claudeResponsesBridgeOptions(requestBody, true))
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream error: %v", errExecute)
+	}
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream error: %v", chunk.Err)
+		}
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %q, want POST", gotMethod)
+	}
+	if gotUpgrade != "" {
+		t.Fatalf("Upgrade = %q, want normal HTTP request", gotUpgrade)
+	}
+}
+
+func TestCodexExecutorCountTokensReturnsExactInputCount(t *testing.T) {
+	executor := NewCodexExecutor(&config.Config{})
+	requestBody := []byte(`{"model":"gpt-5.6-sol","max_tokens":128,"messages":[{"role":"user","content":"count these exact tokens"}]}`)
+	translatedBody := sdktranslator.TranslateRequest(sdktranslator.FormatClaude, sdktranslator.FromString("codex"), "gpt-5.6-sol", requestBody, false)
+	enc, errTokenizer := tokenizerForCodexModel("gpt-5.6-sol")
+	if errTokenizer != nil {
+		t.Fatalf("tokenizer: %v", errTokenizer)
+	}
+	want, errCount := countCodexInputTokens(enc, translatedBody)
+	if errCount != nil {
+		t.Fatalf("count exact tokens: %v", errCount)
+	}
+
+	response, errPublic := executor.CountTokens(context.Background(), nil, cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol",
+		Payload: requestBody,
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatClaude,
+		ResponseFormat: sdktranslator.FormatClaude,
+	})
+	if errPublic != nil {
+		t.Fatalf("CountTokens error: %v", errPublic)
+	}
+	if got := gjson.GetBytes(response.Payload, "input_tokens").Int(); got != want {
+		t.Fatalf("input_tokens = %d, want exact %d; response=%s", got, want, response.Payload)
+	}
 }
 
 func TestValidateClaudeBridgeContextWindowRejectsOversizedInput(t *testing.T) {
