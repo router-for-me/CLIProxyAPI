@@ -4549,6 +4549,9 @@ func isRequestInvalidError(err error) bool {
 	if isModelSupportError(err) {
 		return false
 	}
+	if isNonRetryablePolicyError(err) {
+		return true
+	}
 	status := statusCodeFromError(err)
 	switch status {
 	case http.StatusBadRequest:
@@ -4565,6 +4568,29 @@ func isRequestInvalidError(err error) bool {
 		msg := err.Error()
 		return strings.Contains(msg, "\"status\":\"UNKNOWN\"") ||
 			strings.Contains(msg, "\"status\": \"UNKNOWN\"")
+	default:
+		return false
+	}
+}
+
+// isNonRetryablePolicyError identifies structured upstream policy rejections.
+// These errors are tied to the request content, so rotating credentials cannot
+// make the request succeed and must not put a healthy credential on cooldown.
+func isNonRetryablePolicyError(err error) bool {
+	if err == nil || statusCodeFromError(err) != http.StatusBadRequest {
+		return false
+	}
+	var payload struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(err.Error())), &payload) != nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(payload.Error.Code)) {
+	case "cyber_policy", "content_policy_violation":
+		return true
 	default:
 		return false
 	}

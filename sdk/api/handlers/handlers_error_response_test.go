@@ -79,6 +79,27 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 	}
 }
 
+func TestWriteErrorResponse_PreservesUpstreamJSONBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	const body = `{"error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk.","param":null}}`
+	handler := NewBaseAPIHandlers(nil, nil)
+	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(body),
+	})
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	if got := recorder.Body.String(); got != body {
+		t.Fatalf("body = %q, want exact upstream body %q", got, body)
+	}
+}
+
 func TestEnrichAuthSelectionError_DefaultsTo503WithContext(t *testing.T) {
 	in := &coreauth.Error{Code: "auth_not_found", Message: "no auth available"}
 	out := enrichAuthSelectionError(in, []string{"claude"}, "claude-sonnet-4-6")
