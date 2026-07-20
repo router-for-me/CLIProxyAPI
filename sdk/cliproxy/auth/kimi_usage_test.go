@@ -1332,3 +1332,138 @@ func TestClearGenericPaymentFallbackCooldown_Preserves401AndCloudflareCooldown(t
 	}
 }
 
+// TestSetAuthQuotaExceeded_OverwritesStaleReasonWith403Fallback verifies that
+// when a Kimi probe cooldown has expired and a fresh 402/403 generic fallback
+// was layered on top (Quota.Reason == kimiUsageReason but NextRetryAfter
+// diverges from NextRecoverAt), the probe still replaces it with the precise
+// upstream reset time. The probe must not treat the state as still probe-owned
+// (isKimiProbeOwnedCooldown already rejects it), but it also must not preserve
+// it as a non-Kimi backoff — the stale Reason is misleading.
+func TestSetAuthQuotaExceeded_OverwritesStaleReasonWith403Fallback(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	authID := "kimi-stale-403-auth"
+	model := "kimi-k2"
+
+	// Simulate: probe set a cooldown 1 hour ago (now expired).
+	// Then a request hit the generic 403 fallback; MarkResult updated
+	// NextRetryAfter to +30 min but left Quota.Reason == kimiUsageReason.
+	pastRecover := time.Now().Add(-time.Hour)
+	freshRetry := time.Now().Add(30 * time.Minute)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "openai-compatible-kimi", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	if _, err := manager.Register(ctx, &Auth{
+		ID:       authID,
+		Provider: "openai-compatible-kimi",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusError,
+				StatusMessage:  "quota exhausted, refreshed in the next cycle",
+				Unavailable:    true,
+				NextRetryAfter: freshRetry, // overwritten by fresh 403 fallback
+				Quota: QuotaState{ // stale probe fields
+					Exceeded:      true,
+					Reason:        kimiUsageReason,
+					NextRecoverAt: pastRecover,
+				},
+				LastError: &Error{HTTPStatus: http.StatusForbidden, Message: "quota exhausted"},
+				UpdatedAt: time.Now(),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	// Probe's precise reset time is 10 minutes (shorter than generic 30 min).
+	recoverAt := time.Now().Add(10 * time.Minute)
+	snapshot, err := manager.SetAuthQuotaExceeded(ctx, authID, recoverAt, kimiUsageReason)
+	if err != nil {
+		t.Fatalf("SetAuthQuotaExceeded() error = %v", err)
+	}
+	if snapshot == nil {
+		t.Fatal("SetAuthQuotaExceeded() returned nil snapshot")
+	}
+
+	state := snapshot.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state missing after SetAuthQuotaExceeded")
+	}
+	// Should be overwritten with the probe's precise time + Kimi reason.
+	if state.Quota.Reason != kimiUsageReason {
+		t.Errorf("Quota.Reason = %q, want %q", state.Quota.Reason, kimiUsageReason)
+	}
+	if !state.NextRetryAfter.Equal(recoverAt) {
+		t.Errorf("NextRetryAfter = %v, want %v (probe precise reset)", state.NextRetryAfter, recoverAt)
+	}
+}
+
+// TestSetAuthQuotaExceeded_PreservesStaleReasonWith401Overwrite verifies that
+// when a Kimi probe cooldown has expired and a fresh 401 unauthorized failure
+// was layered on top, the probe does NOT overwrite it. The stale
+// kimiUsageReason is misleading, but LastError.HTTPStatus == 401 confirms it
+// is not a generic 402/403 fallback, so the fresh 401 cooldown is preserved.
+func TestSetAuthQuotaExceeded_PreservesStaleReasonWith401Overwrite(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	authID := "kimi-stale-401-auth"
+	model := "kimi-k2"
+
+	pastRecover := time.Now().Add(-time.Hour)
+	freshRetry := time.Now().Add(30 * time.Minute)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "openai-compatible-kimi", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	if _, err := manager.Register(ctx, &Auth{
+		ID:       authID,
+		Provider: "openai-compatible-kimi",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusError,
+				StatusMessage:  "unauthorized",
+				Unavailable:    true,
+				NextRetryAfter: freshRetry, // overwritten by fresh 401
+				Quota: QuotaState{ // stale probe fields
+					Exceeded:      true,
+					Reason:        kimiUsageReason,
+					NextRecoverAt: pastRecover,
+				},
+				LastError: &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
+				UpdatedAt: time.Now(),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	recoverAt := time.Now().Add(10 * time.Minute)
+	snapshot, err := manager.SetAuthQuotaExceeded(ctx, authID, recoverAt, kimiUsageReason)
+	if err != nil {
+		t.Fatalf("SetAuthQuotaExceeded() error = %v", err)
+	}
+	if snapshot == nil {
+		t.Fatal("SetAuthQuotaExceeded() returned nil snapshot")
+	}
+
+	state := snapshot.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state missing after SetAuthQuotaExceeded")
+	}
+	// 401 cooldown must be preserved.
+	if !state.NextRetryAfter.Equal(freshRetry) {
+		t.Errorf("NextRetryAfter = %v, want %v (401 cooldown preserved)", state.NextRetryAfter, freshRetry)
+	}
+	// Stale Reason stays; the probe must not have touched it.
+	if state.Quota.Reason != kimiUsageReason {
+		t.Errorf("Quota.Reason = %q, want %q (stale reason preserved, not overwritten)", state.Quota.Reason, kimiUsageReason)
+	}
+}
+

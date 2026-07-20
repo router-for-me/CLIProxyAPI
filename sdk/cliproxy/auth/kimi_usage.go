@@ -397,9 +397,21 @@ func (m *Manager) SetAuthQuotaExceeded(ctx context.Context, authID string, recov
 		// cooldown. The probe's job is to replace the imprecise generic 402/403
 		// fallback; every other cooldown must be preserved.
 		switch {
-		case state.Quota.Reason == reason:
+		case state.Quota.Reason == reason && isKimiProbeOwnedCooldown(state):
 			// Probe's own cooldown: only extend, never shorten.
 			if !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(recoverAt) {
+				continue
+			}
+		case state.Quota.Reason == reason:
+			// Stale kimiUsageReason from an expired probe cooldown, now
+			// overwritten by a fresh failure. If the fresh failure is a
+			// generic 402/403 payment_required fallback, replace it with
+			// the probe's precise reset time. Otherwise preserve the
+			// fresh cooldown (401/404/etc.).
+			// NOTE: isGenericPaymentFallback requires Quota.Reason == "",
+			// which is false here (it is kimiUsageReason). Check
+			// LastError.HTTPStatus directly instead.
+			if state.LastError == nil || (state.LastError.HTTPStatus != http.StatusPaymentRequired && state.LastError.HTTPStatus != http.StatusForbidden) {
 				continue
 			}
 		case state.Quota.Reason != "":
