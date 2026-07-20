@@ -1880,9 +1880,9 @@ func canRetryCodexWebsocketRequestAfterStaleTerminalClose(sess *codexWebsocketSe
 }
 
 func codexHTTPFallbackRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
-	req.Payload = sanitizeCodexHTTPFallbackPayload(req.Payload)
+	req.Payload = helps.SanitizeCodexHTTPFallbackPayload(req.Payload)
 	if len(opts.OriginalRequest) > 0 {
-		opts.OriginalRequest = sanitizeCodexHTTPFallbackPayload(opts.OriginalRequest)
+		opts.OriginalRequest = helps.SanitizeCodexHTTPFallbackPayload(opts.OriginalRequest)
 	}
 	return req, opts
 }
@@ -2419,6 +2419,11 @@ func codexWebsocketStatuslessErrorEvent(payload []byte) (error, bool) {
 }
 
 func codexWebsocketStatuslessErrorStatus(payload []byte) int {
+	for _, path := range []string{"error.status_code", "error.status", "body.error.status_code", "body.error.status"} {
+		if status := int(gjson.GetBytes(payload, path).Int()); status >= 400 && status <= 599 {
+			return status
+		}
+	}
 	if isCodexWebsocketConnectionLimitError(payload) {
 		return http.StatusTooManyRequests
 	}

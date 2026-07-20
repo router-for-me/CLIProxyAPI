@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"testing"
@@ -9,7 +9,7 @@ import (
 func TestSanitizeCodexHTTPFallbackPayloadDropsOrphanToolSearchOutput(t *testing.T) {
 	payload := []byte(`{"type":"response.create","model":"gpt-5-codex","generate":false,"input":[{"type":"message","id":"msg-1"},{"type":"tool_search_output","call_id":"call-1","status":"completed","execution":"client","tools":[]},{"type":"message","id":"msg-2"}]}`)
 
-	sanitized := sanitizeCodexHTTPFallbackPayload(payload)
+	sanitized := SanitizeCodexHTTPFallbackPayload(payload)
 
 	if gjson.GetBytes(sanitized, "type").Exists() {
 		t.Fatalf("websocket request type leaked into HTTP fallback: %s", sanitized)
@@ -29,7 +29,7 @@ func TestSanitizeCodexHTTPFallbackPayloadDropsOrphanToolSearchOutput(t *testing.
 func TestSanitizeCodexHTTPFallbackPayloadKeepsMatchedToolSearchPair(t *testing.T) {
 	payload := []byte(`{"type":"response.create","model":"gpt-5-codex","input":[{"type":"tool_search_call","id":"tsc-1","call_id":"call-1","status":"completed","execution":"client","arguments":{"query":"tools"},"action":{"type":"unexpected"}},{"type":"tool_search_output","id":"tso-1","call_id":"call-1","status":"completed","execution":"client","tools":[],"action":{"type":"unexpected"}}]}`)
 
-	sanitized := sanitizeCodexHTTPFallbackPayload(payload)
+	sanitized := SanitizeCodexHTTPFallbackPayload(payload)
 
 	input := gjson.GetBytes(sanitized, "input").Array()
 	if len(input) != 2 {
@@ -46,7 +46,7 @@ func TestSanitizeCodexHTTPFallbackPayloadKeepsMatchedToolSearchPair(t *testing.T
 func TestSanitizeCodexHTTPFallbackPayloadKeepsServerToolSearchOutput(t *testing.T) {
 	payload := []byte(`{"type":"response.create","model":"gpt-5-codex","input":[{"type":"tool_search_output","id":"tso-1","call_id":"call-1","status":"completed","execution":"server","tools":[]},{"type":"message","id":"msg-1"}]}`)
 
-	sanitized := sanitizeCodexHTTPFallbackPayload(payload)
+	sanitized := SanitizeCodexHTTPFallbackPayload(payload)
 
 	input := gjson.GetBytes(sanitized, "input").Array()
 	if len(input) != 2 {

@@ -83,6 +83,41 @@ func TestCodexWebsocketStatuslessErrorEventUsesTopLevelErrorType(t *testing.T) {
 	}
 }
 
+func TestCodexWebsocketStatuslessErrorEventUsesNestedStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    []byte
+		wantStatus int
+	}{
+		{
+			name:       "error status",
+			payload:    []byte(`{"type":"error","error":{"status":429,"message":"Rate limit reached."}}`),
+			wantStatus: http.StatusTooManyRequests,
+		},
+		{
+			name:       "error status code",
+			payload:    []byte(`{"type":"error","error":{"status_code":403,"message":"Forbidden."}}`),
+			wantStatus: http.StatusForbidden,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err, ok := codexWebsocketStatuslessErrorEvent(test.payload)
+			if !ok {
+				t.Fatal("expected statusless websocket error")
+			}
+			statusErr, ok := err.(interface{ StatusCode() int })
+			if !ok || statusErr.StatusCode() != test.wantStatus {
+				t.Fatalf("status = %#v, want %d", err, test.wantStatus)
+			}
+			if got := gjson.Get(err.Error(), "status").Int(); got != int64(test.wantStatus) {
+				t.Fatalf("payload status = %d, want %d; payload=%s", got, test.wantStatus, err.Error())
+			}
+		})
+	}
+}
+
 func TestCodexWebsocketStatuslessErrorEventClassifiesRateLimits(t *testing.T) {
 	tests := []struct {
 		name           string

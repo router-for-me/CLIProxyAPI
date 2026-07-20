@@ -18,6 +18,7 @@ import (
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -47,7 +48,7 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 func TestSanitizeCodexHTTPFallbackPayloadDropsWebSearchAction(t *testing.T) {
 	payload := []byte(`{"type":"response.create","model":"gpt-5-codex","generate":false,"input":[{"type":"message","id":"msg-1"},{"type":"web_search_call","id":"ws-1","status":"completed","action":{"type":"search","query":"weather"}},{"type":"message","id":"msg-2","action":{"type":"open_page"}}]}`)
 
-	sanitized := sanitizeCodexHTTPFallbackPayload(payload)
+	sanitized := helps.SanitizeCodexHTTPFallbackPayload(payload)
 
 	if gjson.GetBytes(sanitized, "type").Exists() {
 		t.Fatalf("websocket request type leaked into HTTP fallback: %s", sanitized)

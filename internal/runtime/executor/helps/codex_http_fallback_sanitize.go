@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"bytes"
@@ -10,7 +10,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-func sanitizeCodexHTTPFallbackPayload(payload []byte) []byte {
+func SanitizeCodexHTTPFallbackPayload(payload []byte) []byte {
 	if len(payload) == 0 {
 		return payload
 	}
