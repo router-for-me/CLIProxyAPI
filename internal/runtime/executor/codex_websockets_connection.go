@@ -154,6 +154,67 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 	}
 }
 
+func startStandaloneCodexWebsocketReader(ctx context.Context, conn *websocket.Conn) chan codexWebsocketRead {
+	readCh := make(chan codexWebsocketRead, 64)
+	var ctxDone <-chan struct{}
+	if ctx != nil {
+		ctxDone = ctx.Done()
+	}
+	go func() {
+		defer close(readCh)
+		for {
+			_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
+			msgType, payload, errRead := conn.ReadMessage()
+			event := codexWebsocketRead{conn: conn, msgType: msgType, payload: payload, err: errRead}
+			select {
+			case readCh <- event:
+			case <-ctxDone:
+				return
+			}
+			if errRead != nil {
+				return
+			}
+		}
+	}()
+	return readCh
+}
+
+func readCodexWebsocketMessageOrTick(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead, usageTicks <-chan time.Time) (msgType int, payload []byte, tickAt time.Time, tick bool, err error) {
+	if usageTicks == nil {
+		msgType, payload, err = readCodexWebsocketMessage(ctx, sess, conn, readCh)
+		return msgType, payload, time.Time{}, false, err
+	}
+	if conn == nil {
+		return 0, nil, time.Time{}, false, fmt.Errorf("codex websockets executor: websocket conn is nil")
+	}
+	if readCh == nil {
+		return 0, nil, time.Time{}, false, fmt.Errorf("codex websockets executor: usage-aware read channel is nil")
+	}
+	var ctxDone <-chan struct{}
+	if ctx != nil {
+		ctxDone = ctx.Done()
+	}
+	for {
+		select {
+		case <-ctxDone:
+			return 0, nil, time.Time{}, false, ctx.Err()
+		case now := <-usageTicks:
+			return 0, nil, now, true, nil
+		case event, ok := <-readCh:
+			if !ok {
+				return 0, nil, time.Time{}, false, fmt.Errorf("codex websockets executor: read channel closed")
+			}
+			if event.conn != conn {
+				continue
+			}
+			if event.err != nil {
+				return 0, nil, time.Time{}, false, event.err
+			}
+			return event.msgType, event.payload, time.Time{}, false, nil
+		}
+	}
+}
+
 func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *websocket.Dialer {
 	dialer := &websocket.Dialer{
 		Proxy:             http.ProxyFromEnvironment,
