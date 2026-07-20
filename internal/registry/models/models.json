@@ -620,15 +620,15 @@
       }
     },
     {
-      "id": "gemini-3-pro-preview",
+      "id": "gemini-3-pro",
       "object": "model",
       "created": 1737158400,
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3 Pro Preview",
-      "name": "models/gemini-3-pro-preview",
+      "display_name": "Gemini 3 Pro",
+      "name": "models/gemini-3-pro",
       "version": "3.0",
-      "description": "Gemini 3 Pro Preview",
+      "description": "Gemini 3 Pro",
       "inputTokenLimit": 1048576,
       "outputTokenLimit": 65536,
       "supportedGenerationMethods": [
@@ -648,13 +648,13 @@
       }
     },
     {
-      "id": "gemini-3-flash-preview",
+      "id": "gemini-3-flash",
       "object": "model",
       "created": 1765929600,
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3 Flash Preview",
-      "name": "models/gemini-3-flash-preview",
+      "display_name": "Gemini 3 Flash",
+      "name": "models/gemini-3-flash",
       "version": "3.0",
       "description": "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
       "inputTokenLimit": 1048576,
@@ -678,15 +678,15 @@
       }
     },
     {
-      "id": "gemini-3.1-pro-preview",
+      "id": "gemini-3.1-pro",
       "object": "model",
       "created": 1771459200,
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3.1 Pro Preview",
-      "name": "models/gemini-3.1-pro-preview",
+      "display_name": "Gemini 3.1 Pro",
+      "name": "models/gemini-3.1-pro",
       "version": "3.1",
-      "description": "Gemini 3.1 Pro Preview",
+      "description": "Gemini 3.1 Pro",
       "inputTokenLimit": 1048576,
       "outputTokenLimit": 65536,
       "supportedGenerationMethods": [
@@ -707,15 +707,15 @@
       }
     },
     {
-      "id": "gemini-3.1-flash-image-preview",
+      "id": "gemini-3.1-flash-image",
       "object": "model",
       "created": 1771459200,
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3.1 Flash Image Preview",
-      "name": "models/gemini-3.1-flash-image-preview",
+      "display_name": "Gemini 3.1 Flash Image",
+      "name": "models/gemini-3.1-flash-image",
       "version": "3.1",
-      "description": "Gemini 3.1 Flash Image Preview",
+      "description": "Gemini 3.1 Flash Image",
       "inputTokenLimit": 1048576,
       "outputTokenLimit": 65536,
       "supportedGenerationMethods": [
@@ -765,15 +765,15 @@
       }
     },
     {
-      "id": "gemini-3-pro-image-preview",
+      "id": "gemini-3-pro-image",
       "object": "model",
       "created": 1737158400,
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3 Pro Image Preview",
-      "name": "models/gemini-3-pro-image-preview",
+      "display_name": "Gemini 3 Pro Image",
+      "name": "models/gemini-3-pro-image",
       "version": "3.0",
-      "description": "Gemini 3 Pro Image Preview",
+      "description": "Gemini 3 Pro Image",
       "inputTokenLimit": 1048576,
       "outputTokenLimit": 65536,
       "supportedGenerationMethods": [
@@ -2178,12 +2178,14 @@
       "owned_by": "moonshot",
       "type": "kimi",
       "display_name": "Kimi K3",
-      "description": "Kimi K3 - Moonshot AI's next-generation flagship model (~2.5T MoE) with multimodal input and 1M context",
-      "context_length": 1048576,
+      "description": "Kimi K3 - Moonshot AI's next-generation flagship model (~2.8T MoE) with multimodal input",
+      "context_length": 262144,
       "max_completion_tokens": 65536,
       "thinking": {
         "zero_allowed": false,
         "levels": [
+          "low",
+          "high",
           "max"
         ]
       }

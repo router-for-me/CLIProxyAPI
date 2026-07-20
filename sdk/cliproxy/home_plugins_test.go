@@ -215,7 +215,7 @@ func TestHomePluginSyncKeyIncludesCredentialRevision(t *testing.T) {
 	cfg.Plugins.Enabled = true
 	cfg.Plugins.Configs = map[string]config.PluginInstanceConfig{}
 	first := homePluginSyncKey(cfg)
-	cfg.Plugins.SyncRevision = 2
+	cfg.Plugins.AuthRevision = 2
 	second := homePluginSyncKey(cfg)
 	if first == second {
 		t.Fatalf("homePluginSyncKey() unchanged after sync revision update: %q", first)

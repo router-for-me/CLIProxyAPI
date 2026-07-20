@@ -115,7 +115,11 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
 		output := make([]byte, 0, 256)
-		// Only send final events if we have actually output content
+		if params.HasFirstResponse && !params.HasContent {
+			output = translatorcommon.AppendSSEEventString(output, "content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex), 3)
+			params.ResponseType = 1
+			params.HasContent = true
+		}
 		if params.HasContent {
 			appendFinalEvents(params, &output, true)
 			output = translatorcommon.AppendSSEEventString(output, "message_stop", `{"type":"message_stop"}`, 3)
@@ -450,7 +454,7 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 		}
 	}
 
-	responseJSON := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":null,"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
+	responseJSON := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
 	responseJSON, _ = sjson.SetBytes(responseJSON, "id", root.Get("response.responseId").String())
 	responseJSON, _ = sjson.SetBytes(responseJSON, "model", root.Get("response.modelVersion").String())
 	responseJSON, _ = sjson.SetBytes(responseJSON, "usage.input_tokens", promptTokens)

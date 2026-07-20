@@ -180,6 +180,74 @@ func TestConvertAntigravityResponseToClaudeStream_WebSearchMessageStartOutputTok
 	}
 }
 
+func TestConvertAntigravityResponseToClaudeNonStream_EmptyCandidateReturnsContentArray(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
+	output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, testEmptyAntigravityResponse(), nil)
+
+	content := gjson.GetBytes(output, "content")
+	if !content.IsArray() || len(content.Array()) != 0 {
+		t.Fatalf("content = %s, want empty array: %s", content.Raw, output)
+	}
+	if got := gjson.GetBytes(output, "stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: %s", got, output)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeStream_EmptyCandidateClosesMessage(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
+	responseJSON := testEmptyAntigravityResponse()
+
+	var param any
+	output := bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, responseJSON, &param), nil)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	lastIndex := -1
+	for _, eventName := range []string{"message_start", "content_block_start", "content_block_stop", "message_delta", "message_stop"} {
+		index := strings.Index(outputText, "event: "+eventName+"\n")
+		if index < 0 {
+			t.Fatalf("event %q not found in:\n%s", eventName, outputText)
+		}
+		if index <= lastIndex {
+			t.Fatalf("event %q is out of order in:\n%s", eventName, outputText)
+		}
+		lastIndex = index
+	}
+
+	contentBlockStart := sseDataForEvent(t, outputText, "content_block_start")
+	if got := gjson.Get(contentBlockStart, "content_block.type").String(); got != "text" {
+		t.Fatalf("empty content block type = %q, want text: %s", got, contentBlockStart)
+	}
+	if text := gjson.Get(contentBlockStart, "content_block.text"); !text.Exists() || text.String() != "" {
+		t.Fatalf("empty content block text = %s, want empty string: %s", text.Raw, contentBlockStart)
+	}
+
+	messageDelta := sseDataForEvent(t, outputText, "message_delta")
+	if got := gjson.Get(messageDelta, "delta.stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: %s", got, messageDelta)
+	}
+	if got := gjson.Get(messageDelta, "usage.input_tokens").Int(); got != 64214 {
+		t.Fatalf("input_tokens = %d, want 64214: %s", got, messageDelta)
+	}
+	if got := gjson.Get(messageDelta, "usage.output_tokens").Int(); got != 0 {
+		t.Fatalf("output_tokens = %d, want 0: %s", got, messageDelta)
+	}
+}
+
+func testEmptyAntigravityResponse() []byte {
+	return []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {"role": "model", "parts": [{"text": ""}]},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {"promptTokenCount": 64214, "totalTokenCount": 64214},
+			"modelVersion": "gemini-3-flash-a",
+			"responseId": "eBNcat8X5evPsg_lhqyQAg"
+		}
+	}`)
+}
+
 func TestWebSearchResultsFromGrounding_DeduplicatesAndSkipsEmptyURLs(t *testing.T) {
 	groundingMetadata := gjson.Parse(`{
 		"groundingChunks": [

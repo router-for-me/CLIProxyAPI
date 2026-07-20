@@ -41,6 +41,8 @@ func assertSignatureDebugDoesNotLeak(t *testing.T, hook *test.Hook, forbidden st
 	}
 }
 
+var benchmarkSanitizeGeminiRequestOutput []byte
+
 func TestSanitizeGeminiRequestThoughtSignaturesPreservesGeminiSignature(t *testing.T) {
 	sig := testGemini3ThoughtSignature([]byte{0x01, 0x0c, 0x39})
 	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"f","args":{}},"thoughtSignature":"` + sig + `"}]}]}`)
@@ -49,6 +51,35 @@ func TestSanitizeGeminiRequestThoughtSignaturesPreservesGeminiSignature(t *testi
 
 	if got := gjson.GetBytes(out, "contents.0.parts.0.thoughtSignature").String(); got != sig {
 		t.Fatalf("thoughtSignature = %q, want %q. Output: %s", got, sig, string(out))
+	}
+	if &out[0] != &input[0] {
+		t.Fatal("compatible canonical signature payload was copied")
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignaturesNormalizesDuplicateCanonicalField(t *testing.T) {
+	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"f","args":{}},"thoughtSignature":"` + GeminiSkipThoughtSignatureValidator + `","thoughtSignature":"bad","thoughtSignature":"worse"}]}]}`)
+
+	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	if got := gjson.GetBytes(out, "contents.0.parts.0.thoughtSignature").String(); got != GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("thoughtSignature = %q, want bypass sentinel. Output: %s", got, out)
+	}
+	if count := strings.Count(string(out), `"thoughtSignature"`); count != 1 {
+		t.Fatalf("thoughtSignature field count = %d, want 1. Output: %s", count, out)
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignaturesReusesUnsignedFunctionResponsePayload(t *testing.T) {
+	input := []byte(`{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"f","response":{"result":"ok"}}}]}]}`)
+
+	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	if &out[0] != &input[0] {
+		t.Fatal("unsigned function response payload was copied")
+	}
+	if string(out) != string(input) {
+		t.Fatalf("payload changed:\n got: %s\nwant: %s", out, input)
 	}
 }
 
@@ -108,8 +139,46 @@ func TestSanitizeGeminiRequestThoughtSignaturesReplacesField2WrappedUUIDFunction
 	}
 }
 
+func BenchmarkSanitizeGeminiRequestThoughtSignaturesNormalizedHistory(b *testing.B) {
+	for _, turns := range []int{1, 16, 64} {
+		b.Run(fmt.Sprintf("turns_%d", turns), func(b *testing.B) {
+			input := normalizedGeminiSignatureHistory(turns, 8<<20)
+			output := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+			if &output[0] != &input[0] {
+				b.Fatal("normalized payload was copied")
+			}
+			b.ReportAllocs()
+			b.SetBytes(int64(len(input)))
+			b.ResetTimer()
+
+			for b.Loop() {
+				benchmarkSanitizeGeminiRequestOutput = SanitizeGeminiRequestThoughtSignatures(input, "contents")
+			}
+		})
+	}
+}
+
+func normalizedGeminiSignatureHistory(turns, totalPayloadBytes int) []byte {
+	payload := strings.Repeat("x", totalPayloadBytes/turns)
+	var builder strings.Builder
+	builder.Grow(totalPayloadBytes + turns*256)
+	builder.WriteString(`{"contents":[`)
+	for i := 0; i < turns; i++ {
+		if i > 0 {
+			builder.WriteByte(',')
+		}
+		builder.WriteString(`{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"value":"`)
+		builder.WriteString(payload)
+		builder.WriteString(`"}},"thoughtSignature":"`)
+		builder.WriteString(GeminiSkipThoughtSignatureValidator)
+		builder.WriteString(`"}]},{"role":"user","parts":[{"functionResponse":{"name":"lookup","response":{"result":"ok"}}}]}`)
+	}
+	builder.WriteString(`]}`)
+	return []byte(builder.String())
+}
+
 func TestSanitizeGeminiRequestThoughtSignaturesRemovesFunctionResponseSignature(t *testing.T) {
-	input := []byte(`{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"f","response":{"result":"ok"},"thoughtSignature":"bad"},"thoughtSignature":"bad"}]}]}`)
+	input := []byte(`{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"f","response":{"result":"ok"},"thoughtSignature":"bad","thoughtSignature":"worse"},"thoughtSignature":"bad"}]}]}`)
 
 	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
 

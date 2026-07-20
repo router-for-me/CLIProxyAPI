@@ -266,8 +266,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
-	body, _ = sjson.SetBytes(body, "stream", true)
+	body = helps.SetStringIfDifferent(body, "model", baseModel)
+	body = helps.SetBoolIfDifferent(body, "stream", true)
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body = normalizeCodexInstructions(body)
@@ -515,7 +515,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
@@ -862,7 +862,7 @@ func normalizeCodexWebsocketParallelToolCalls(body []byte, headers http.Header) 
 	if !isCodexResponsesLiteRequest(body, headers) {
 		return body
 	}
-	body, _ = sjson.SetBytes(body, "parallel_tool_calls", false)
+	body = helps.SetBoolIfDifferent(body, "parallel_tool_calls", false)
 	return body
 }
 
@@ -1035,7 +1035,7 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 	}
 
 	if cache.ID != "" {
-		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
+		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", cache.ID)
 		setHeaderCasePreserved(headers, "session_id", cache.ID)
 		headers.Set("Conversation_id", cache.ID)
 	}

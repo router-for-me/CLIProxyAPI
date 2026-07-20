@@ -2733,7 +2733,15 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(execCtx, result)
+				// Some Anthropic-compatible upstreams do not implement the
+				// count_tokens route and return a generic endpoint 404. Record
+				// the failure for hooks and metrics without suspending a model
+				// that remains usable through the messages endpoint.
+				if isCountTokensEndpointNotFoundError(errExec, execReq.Model) {
+					m.recordAvailabilityNeutralResult(execCtx, result)
+				} else {
+					m.MarkResult(execCtx, result)
+				}
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
@@ -3891,6 +3899,30 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.publishErrorEvent(result, authSnapshot)
 }
 
+func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Result) {
+	if result.AuthID == "" {
+		return
+	}
+
+	var authSnapshot *Auth
+	m.mu.Lock()
+	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
+		now := time.Now()
+		auth.recordRecentRequest(now, result.Success)
+		if result.Success {
+			auth.Success++
+		} else {
+			auth.Failed++
+		}
+		_ = m.persist(ctx, auth)
+		authSnapshot = auth.Clone()
+	}
+	m.mu.Unlock()
+
+	m.hook.OnResult(ctx, result)
+	m.publishErrorEvent(result, authSnapshot)
+}
+
 func ensureModelState(auth *Auth, model string) *ModelState {
 	if auth == nil || model == "" {
 		return nil
@@ -4096,9 +4128,15 @@ func resultErrorFromError(err error) *Error {
 	if err == nil {
 		return nil
 	}
-	resultErr := &Error{
-		Message:    err.Error(),
-		HTTPStatus: statusCodeFromError(err),
+	var sourceErr *Error
+	var resultErr *Error
+	if errors.As(err, &sourceErr) && sourceErr != nil {
+		resultErr = cloneError(sourceErr)
+	} else {
+		resultErr = &Error{Message: err.Error()}
+	}
+	if resultErr.HTTPStatus == 0 {
+		resultErr.HTTPStatus = statusCodeFromError(err)
 	}
 	if isRequestScopedError(err) || isRequestInvalidError(err) {
 		resultErr.Code = requestScopedErrorCode
@@ -4294,6 +4332,199 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 
 func isRequestScopedResultError(err *Error) bool {
 	return err != nil && (err.IsRequestScoped() || isRequestScopedNotFoundResultError(err))
+}
+
+func isCountTokensEndpointNotFoundError(err error, requestedModel string) bool {
+	if err == nil || statusCodeFromError(err) != http.StatusNotFound {
+		return false
+	}
+	baseModel := thinking.ParseSuffix(requestedModel).ModelName
+	return !isExplicitModelNotFoundError(err, baseModel)
+}
+
+func isExplicitModelNotFoundError(err error, requestedModel string) bool {
+	if err == nil {
+		return false
+	}
+	if authErr, ok := err.(*Error); ok && authErr != nil {
+		if isModelNotFoundIdentifier(authErr.Code) || isStructuredModelNotFoundError(authErr.Message, requestedModel) {
+			return true
+		}
+	} else if isStructuredModelNotFoundError(err.Error(), requestedModel) {
+		return true
+	}
+
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, nested := range wrapped.Unwrap() {
+			if isExplicitModelNotFoundError(nested, requestedModel) {
+				return true
+			}
+		}
+	case interface{ Unwrap() error }:
+		return isExplicitModelNotFoundError(wrapped.Unwrap(), requestedModel)
+	}
+	return false
+}
+
+func isStructuredModelNotFoundError(message, requestedModel string) bool {
+	var payload any
+	if errJSON := json.Unmarshal([]byte(strings.TrimSpace(message)), &payload); errJSON != nil {
+		return false
+	}
+	return containsStructuredModelNotFound(payload, requestedModel)
+}
+
+func containsStructuredModelNotFound(value any, requestedModel string) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		notFoundType := false
+		exactModelReference := false
+		for key, item := range typed {
+			text, isString := item.(string)
+			if isString {
+				switch strings.ToLower(strings.TrimSpace(key)) {
+				case "code":
+					if isModelNotFoundIdentifier(text) {
+						return true
+					}
+				case "type":
+					if isModelNotFoundIdentifier(text) {
+						return true
+					}
+					notFoundType = notFoundType || isNotFoundErrorIdentifier(text)
+				case "error", "message", "detail", "error_description", "title":
+					if isExplicitModelNotFoundMessage(text, requestedModel) {
+						return true
+					}
+					exactModelReference = exactModelReference || isExactRequestedModelReference(text, requestedModel)
+				}
+			}
+			switch item.(type) {
+			case map[string]any, []any:
+				if containsStructuredModelNotFound(item, requestedModel) {
+					return true
+				}
+			}
+		}
+		return notFoundType && exactModelReference
+	case []any:
+		for _, item := range typed {
+			if text, isString := item.(string); isString && isExplicitModelNotFoundMessage(text, requestedModel) {
+				return true
+			}
+			if containsStructuredModelNotFound(item, requestedModel) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isModelNotFoundIdentifier(value string) bool {
+	candidate := strings.ToLower(strings.TrimSpace(value))
+	if fragment := strings.LastIndex(candidate, "#"); fragment >= 0 && fragment+1 < len(candidate) {
+		candidate = candidate[fragment+1:]
+	} else {
+		if query := strings.Index(candidate, "?"); query >= 0 {
+			candidate = candidate[:query]
+		}
+		candidate = strings.TrimRight(candidate, "/")
+		if separator := strings.LastIndexAny(candidate, "/:"); separator >= 0 {
+			candidate = candidate[separator+1:]
+		}
+	}
+	normalized := strings.NewReplacer("-", "_", " ", "_").Replace(candidate)
+	switch normalized {
+	case "model_not_found", "model_not_found_error", "unknown_model", "model_does_not_exist", "model_not_exist":
+		return true
+	default:
+		return false
+	}
+}
+
+func isNotFoundErrorIdentifier(value string) bool {
+	normalized := strings.NewReplacer("-", "_", " ", "_").Replace(strings.ToLower(strings.TrimSpace(value)))
+	return normalized == "not_found" || normalized == "not_found_error"
+}
+
+func isExplicitModelNotFoundMessage(message, requestedModel string) bool {
+	lower := strings.Trim(strings.ToLower(strings.TrimSpace(message)), " .!;\t\r\n")
+	if lower == "" {
+		return false
+	}
+	normalized := strings.NewReplacer("-", "_", " ", "_").Replace(lower)
+	if strings.Contains(normalized, "model_not_found") || strings.Contains(normalized, "unknown_model") {
+		return true
+	}
+	for _, prefix := range []string{"no such model", "unknown model"} {
+		if lower != prefix && !strings.HasPrefix(lower, prefix+" ") && !strings.HasPrefix(lower, prefix+":") {
+			continue
+		}
+		remainder := strings.TrimSpace(strings.TrimPrefix(lower, prefix))
+		remainder = strings.TrimSpace(strings.TrimPrefix(remainder, ":"))
+		if remainder == "" {
+			return true
+		}
+		missingSuffix, matches := trimRequestedModelReference(remainder, requestedModel)
+		return matches && missingSuffix == ""
+	}
+	for _, prefix := range []string{"the requested model", "requested model", "the model", "model"} {
+		if lower != prefix && !strings.HasPrefix(lower, prefix+" ") && !strings.HasPrefix(lower, prefix+":") {
+			continue
+		}
+		remainder := strings.TrimSpace(strings.TrimPrefix(lower, prefix))
+		remainder = strings.TrimSpace(strings.TrimPrefix(remainder, ":"))
+		if isMissingModelPhrase(remainder) {
+			return true
+		}
+		missingSuffix, matches := trimRequestedModelReference(remainder, requestedModel)
+		return matches && isMissingModelPhrase(missingSuffix)
+	}
+	return false
+}
+
+func isExactRequestedModelReference(message, requestedModel string) bool {
+	lower := strings.Trim(strings.ToLower(strings.TrimSpace(message)), " .!;\t\r\n")
+	for _, prefix := range []string{"the requested model", "requested model", "the model", "model"} {
+		if lower != prefix && !strings.HasPrefix(lower, prefix+" ") && !strings.HasPrefix(lower, prefix+":") {
+			continue
+		}
+		remainder := strings.TrimSpace(strings.TrimPrefix(lower, prefix))
+		remainder = strings.TrimSpace(strings.TrimPrefix(remainder, ":"))
+		suffix, matches := trimRequestedModelReference(remainder, requestedModel)
+		return matches && suffix == ""
+	}
+	return false
+}
+
+func trimRequestedModelReference(value, requestedModel string) (string, bool) {
+	model := strings.ToLower(strings.TrimSpace(requestedModel))
+	if model == "" {
+		return "", false
+	}
+	for _, candidate := range []string{model, "'" + model + "'", `"` + model + `"`, "`" + model + "`"} {
+		if value == candidate {
+			return "", true
+		}
+		if !strings.HasPrefix(value, candidate) {
+			continue
+		}
+		remainder := value[len(candidate):]
+		if remainder == "" || strings.ContainsRune(" :,", rune(remainder[0])) {
+			return strings.TrimLeft(remainder, " :,"), true
+		}
+	}
+	return "", false
+}
+
+func isMissingModelPhrase(value string) bool {
+	switch strings.Trim(value, " .!;\t\r\n") {
+	case "not found", "was not found", "could not be found", "does not exist", "doesn't exist", "not exist", "is unknown":
+		return true
+	default:
+		return false
+	}
 }
 
 // isRequestInvalidError returns true if the error represents a client request

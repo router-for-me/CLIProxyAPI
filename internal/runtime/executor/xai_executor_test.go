@@ -253,15 +253,23 @@ func TestXAIExecutorExecuteRestoresAdditionalToolsNamespaceCalls(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	tool := gjson.GetBytes(gotBody, "input.0.tools.0")
+	for _, item := range gjson.GetBytes(gotBody, "input").Array() {
+		if got := item.Get("type").String(); got == "additional_tools" {
+			t.Fatalf("upstream input contains unsupported additional_tools item: %s", gotBody)
+		}
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.role").String(); got != "user" {
+		t.Fatalf("input.0.role = %q, want user; body=%s", got, gotBody)
+	}
+	tool := gjson.GetBytes(gotBody, "tools.0")
 	if got := tool.Get("name").String(); got != "mcp__exa__web_search_exa" {
-		t.Fatalf("upstream additional tool name = %q, want qualified name; body=%s", got, gotBody)
+		t.Fatalf("upstream tool name = %q, want qualified name; body=%s", got, gotBody)
 	}
 	if got := tool.Get("type").String(); got != "function" {
-		t.Fatalf("upstream additional tool type = %q, want function; body=%s", got, gotBody)
+		t.Fatalf("upstream tool type = %q, want function; body=%s", got, gotBody)
 	}
 	if tool.Get("tools").Exists() {
-		t.Fatalf("upstream additional tool should not contain namespace children: %s", gotBody)
+		t.Fatalf("upstream tool should not contain namespace children: %s", gotBody)
 	}
 	output := gjson.GetBytes(resp.Payload, "output.0")
 	if got := output.Get("name").String(); got != "web_search_exa" {
@@ -2907,24 +2915,39 @@ func TestNormalizeXAITools_QualifiesSameNamedNamespaceTools(t *testing.T) {
 	}
 }
 
-func TestNormalizeXAITools_AdditionalToolsNamespace(t *testing.T) {
+func TestPromoteXAIAdditionalTools(t *testing.T) {
 	body := []byte(`{
+		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],
 		"input":[
 			{"type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"mcp__exa","tools":[{"type":"function","name":"search","parameters":{"type":"object"}}]}]},
-			{"role":"user","content":"hello"}
+			{"role":"user","content":"hello"},
+			{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"custom_lookup"}]}
 		]
 	}`)
-	out := normalizeXAITools(body)
+	out := promoteXAIAdditionalTools(normalizeXAITools(body))
 
-	tools := gjson.GetBytes(out, "input.0.tools").Array()
-	if len(tools) != 1 {
-		t.Fatalf("additional tools length = %d, want 1; body=%s", len(tools), string(out))
+	input := gjson.GetBytes(out, "input").Array()
+	if len(input) != 1 || input[0].Get("role").String() != "user" {
+		t.Fatalf("input should contain only the user message: %s", string(out))
 	}
-	if got := tools[0].Get("name").String(); got != "mcp__exa__search" {
-		t.Fatalf("additional tool name = %q, want mcp__exa__search; body=%s", got, string(out))
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 3 {
+		t.Fatalf("tools length = %d, want 3; body=%s", len(tools), string(out))
 	}
-	if got := tools[0].Get("type").String(); got != "function" {
-		t.Fatalf("additional tool type = %q, want function; body=%s", got, string(out))
+	if got := tools[0].Get("name").String(); got != "lookup" {
+		t.Fatalf("tools.0.name = %q, want lookup; body=%s", got, string(out))
+	}
+	if got := tools[1].Get("name").String(); got != "mcp__exa__search" {
+		t.Fatalf("tools.1.name = %q, want mcp__exa__search; body=%s", got, string(out))
+	}
+	if got := tools[2].Get("name").String(); got != "custom_lookup" {
+		t.Fatalf("tools.2.name = %q, want custom_lookup; body=%s", got, string(out))
+	}
+	if got := tools[2].Get("type").String(); got != "function" {
+		t.Fatalf("tools.2.type = %q, want function; body=%s", got, string(out))
+	}
+	if !tools[2].Get("parameters").Exists() {
+		t.Fatalf("tools.2.parameters missing: %s", string(out))
 	}
 }
 

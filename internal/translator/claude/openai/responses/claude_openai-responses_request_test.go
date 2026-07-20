@@ -116,7 +116,7 @@ func TestConvertClaudeRequestToOpenAIResponsesGoogleCopilotModel(t *testing.T) {
 func TestClaudeRequestToOpenAIResponsesTranslatorIsRegistered(t *testing.T) {
 	raw := []byte(`{"model":"gemini-3.1-pro-preview","messages":[{"role":"user","content":"Hello"}]}`)
 
-	out := translatorregistry.TranslateRequest(Claude, OpenaiResponse, "gemini-3.1-pro-preview", raw, true)
+	out := translatorregistry.Request(Claude, OpenaiResponse, "gemini-3.1-pro-preview", raw, true)
 	root := gjson.ParseBytes(out)
 	if !root.Get("input").IsArray() {
 		t.Fatalf("registered translator did not produce Responses input: %s", out)
