@@ -6222,9 +6222,12 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	}
 	log.Debugf("unauthorized response for %s (%s), refreshing credentials before fallback", auth.Provider, auth.ID)
 	refreshed, errRefresh := m.refreshAuthForRequest(ctx, auth.ID, authAccessToken(auth))
-	if errRefresh != nil || refreshed == nil {
+	if refreshed == nil {
 		log.Debugf("credential refresh before fallback failed for %s (%s): %v", auth.Provider, auth.ID, errRefresh)
 		return auth, false
+	}
+	if errRefresh != nil {
+		log.Debugf("credential refresh before fallback updated runtime auth for %s (%s) with follow-up error: %v", auth.Provider, auth.ID, errRefresh)
 	}
 	return refreshed, true
 }

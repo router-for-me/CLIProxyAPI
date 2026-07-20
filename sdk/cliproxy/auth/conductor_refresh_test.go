@@ -310,3 +310,43 @@ func TestManager_RefreshAuthReturnsPersistenceFailureAfterPostRefreshHook(t *tes
 		t.Fatal("post-refresh hook was not called for the updated runtime auth")
 	}
 }
+
+func TestManager_TryRefreshAfterUnauthorizedRetriesWithRuntimeAuthAfterPersistenceFailure(t *testing.T) {
+	ctx := context.Background()
+	persistErr := errors.New("save failed")
+	manager := NewManager(&refreshFailingStore{err: persistErr}, nil, nil)
+	manager.RegisterExecutor(planRefreshExecutor{})
+	auth := &Auth{
+		ID:       "codex-401-refresh-persist-failure",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"access_token":  "stale-access-token",
+			"refresh_token": "refresh-token",
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	refreshed, retry := manager.tryRefreshAfterUnauthorized(ctx, auth, &Error{
+		Code:       "unauthorized",
+		Message:    "access token expired",
+		HTTPStatus: http.StatusUnauthorized,
+	}, false)
+	if !retry {
+		t.Fatal("tryRefreshAfterUnauthorized() retry = false, want true")
+	}
+	if refreshed == nil {
+		t.Fatal("tryRefreshAfterUnauthorized() auth = nil")
+	}
+	if got := authAccessToken(refreshed); got != "fresh-access-token" {
+		t.Fatalf("refreshed access token = %q, want fresh-access-token", got)
+	}
+	current, ok := manager.GetByID(auth.ID)
+	if !ok || current == nil {
+		t.Fatal("refreshed runtime auth missing from manager")
+	}
+	if got := authAccessToken(current); got != "fresh-access-token" {
+		t.Fatalf("runtime access token = %q, want fresh-access-token", got)
+	}
+}
