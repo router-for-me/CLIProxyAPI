@@ -550,19 +550,41 @@ func codexRewriteOpenAIImageEditMultipartToJSON(payload []byte, model string, bo
 		out = codexSetOpenAIImageEditFormValues(out, key, values)
 	}
 
-	for _, fileHeader := range codexMultipartImageFiles(form) {
-		dataURL, errData := codexMultipartFileToDataURL(fileHeader)
-		if errData != nil {
-			return nil, "", errData
-		}
-		out, _ = sjson.SetBytes(out, "images.-1.image_url", dataURL)
-	}
 	if maskFiles := form.File["mask"]; len(maskFiles) > 0 && maskFiles[0] != nil {
 		dataURL, errData := codexMultipartFileToDataURL(maskFiles[0])
 		if errData != nil {
 			return nil, "", errData
 		}
 		out, _ = sjson.SetBytes(out, "mask.image_url", dataURL)
+	}
+
+	imageFiles := codexMultipartImageFiles(form)
+	if existingImages := gjson.GetBytes(out, "images"); !existingImages.Exists() || existingImages.IsArray() {
+		existingItems := existingImages.Array()
+		imageItems := make([][]byte, 0, len(existingItems)+len(imageFiles))
+		for _, image := range existingItems {
+			imageItems = append(imageItems, []byte(image.Raw))
+		}
+		for _, fileHeader := range imageFiles {
+			dataURL, errData := codexMultipartFileToDataURL(fileHeader)
+			if errData != nil {
+				return nil, "", errData
+			}
+			item := []byte(`{"image_url":""}`)
+			item, _ = sjson.SetBytes(item, "image_url", dataURL)
+			imageItems = append(imageItems, item)
+		}
+		if len(imageFiles) > 0 {
+			out, _ = sjson.SetRawBytes(out, "images", helps.JoinRawJSONArray(imageItems))
+		}
+	} else {
+		for _, fileHeader := range imageFiles {
+			dataURL, errData := codexMultipartFileToDataURL(fileHeader)
+			if errData != nil {
+				return nil, "", errData
+			}
+			out, _ = sjson.SetBytes(out, "images.-1.image_url", dataURL)
+		}
 	}
 
 	return out, "application/json", nil
@@ -579,11 +601,11 @@ func codexSetOpenAIImageEditFormValues(out []byte, key string, values []string) 
 	if len(values) == 1 {
 		return codexSetOpenAIImageEditFormValue(out, path, values[0])
 	}
-	out, _ = sjson.SetRawBytes(out, path, []byte(`[]`))
+	items := make([][]byte, 0, len(values))
 	for _, value := range values {
-		item := codexOpenAIImageEditFormJSONValue(key, value)
-		out, _ = sjson.SetRawBytes(out, path+".-1", item)
+		items = append(items, codexOpenAIImageEditFormJSONValue(key, value))
 	}
+	out, _ = sjson.SetRawBytes(out, path, helps.JoinRawJSONArray(items))
 	return out
 }
 
@@ -660,8 +682,8 @@ func (e *CodexExecutor) prepareCodexOpenAIImageBody(body []byte, req cliproxyexe
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	out = helps.ApplyPayloadConfigWithRequest(e.cfg, mainModel, "codex", codexOpenAIImageSourceFormat, "", out, body, requestedModel, requestPath, opts.Headers)
-	out, _ = sjson.SetBytes(out, "model", mainModel)
-	out, _ = sjson.SetBytes(out, "stream", true)
+	out = helps.SetStringIfDifferent(out, "model", mainModel)
+	out = helps.SetBoolIfDifferent(out, "stream", true)
 	out, _ = sjson.DeleteBytes(out, "previous_response_id")
 	out, _ = sjson.DeleteBytes(out, "prompt_cache_retention")
 	out, _ = sjson.DeleteBytes(out, "safety_identifier")
@@ -854,27 +876,38 @@ func codexBuildOpenAIImageTool(rawJSON []byte, routeModel string, action string,
 }
 
 func codexBuildImagesResponsesRequest(prompt string, images []string, toolJSON []byte) []byte {
-	req := []byte(`{"instructions":"","stream":true,"reasoning":{"effort":"medium","summary":"auto"},"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"model":"","store":false,"tool_choice":{"type":"image_generation"}}`)
+	req := []byte(`{"instructions":"","stream":true,"reasoning":{"effort":"medium","summary":"auto"},"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"model":"","store":false,"tool_choice":{"type":"image_generation"},"tools":[]}`)
 	req, _ = sjson.SetBytes(req, "model", codexOpenAIImagesMainModel)
+	if len(toolJSON) > 0 && json.Valid(toolJSON) {
+		req, _ = sjson.SetRawBytes(req, "tools", helps.JoinRawJSONArray([][]byte{toolJSON}))
+	}
 
-	input := []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`)
-	input, _ = sjson.SetBytes(input, "0.content.0.text", prompt)
-	contentIndex := 1
+	textPart := []byte(`{"type":"input_text","text":""}`)
+	textPart, _ = sjson.SetBytes(textPart, "text", prompt)
+	contentItems := make([][]byte, 0, len(images)+1)
+	contentItems = append(contentItems, textPart)
 	for _, img := range images {
 		if strings.TrimSpace(img) == "" {
 			continue
 		}
 		part := []byte(`{"type":"input_image","image_url":""}`)
 		part, _ = sjson.SetBytes(part, "image_url", img)
-		input, _ = sjson.SetRawBytes(input, fmt.Sprintf("0.content.%d", contentIndex), part)
-		contentIndex++
+		contentItems = append(contentItems, part)
 	}
+	inputSize := len(`[{"type":"message","role":"user","content":[]}]`) + len(contentItems)
+	for _, item := range contentItems {
+		inputSize += len(item)
+	}
+	input := make([]byte, 0, inputSize)
+	input = append(input, `[{"type":"message","role":"user","content":[`...)
+	for index, item := range contentItems {
+		if index > 0 {
+			input = append(input, ',')
+		}
+		input = append(input, item...)
+	}
+	input = append(input, ']', '}', ']')
 	req, _ = sjson.SetRawBytes(req, "input", input)
-
-	req, _ = sjson.SetRawBytes(req, "tools", []byte(`[]`))
-	if len(toolJSON) > 0 && json.Valid(toolJSON) {
-		req, _ = sjson.SetRawBytes(req, "tools.-1", toolJSON)
-	}
 	return req
 }
 
@@ -998,19 +1031,6 @@ func codexExtractImageResults(completed []byte, itemsByIndex map[int64][]byte, f
 func codexBuildImagesAPIResponse(results []codexImageCallResult, createdAt int64, usageRaw []byte, firstMeta codexImageCallResult, responseFormat string) ([]byte, error) {
 	out := []byte(`{"created":0,"data":[]}`)
 	out, _ = sjson.SetBytes(out, "created", createdAt)
-	responseFormat = codexNormalizeImageResponseFormat(responseFormat)
-	for _, img := range results {
-		item := []byte(`{}`)
-		if responseFormat == "url" {
-			item, _ = sjson.SetBytes(item, "url", "data:"+codexMimeTypeFromOutputFormat(img.OutputFormat)+";base64,"+img.Result)
-		} else {
-			item, _ = sjson.SetBytes(item, "b64_json", img.Result)
-		}
-		if img.RevisedPrompt != "" {
-			item, _ = sjson.SetBytes(item, "revised_prompt", img.RevisedPrompt)
-		}
-		out, _ = sjson.SetRawBytes(out, "data.-1", item)
-	}
 	if firstMeta.Background != "" {
 		out, _ = sjson.SetBytes(out, "background", firstMeta.Background)
 	}
@@ -1026,6 +1046,22 @@ func codexBuildImagesAPIResponse(results []codexImageCallResult, createdAt int64
 	if len(usageRaw) > 0 && json.Valid(usageRaw) {
 		out, _ = sjson.SetRawBytes(out, "usage", usageRaw)
 	}
+
+	responseFormat = codexNormalizeImageResponseFormat(responseFormat)
+	items := make([][]byte, 0, len(results))
+	for _, img := range results {
+		item := []byte(`{}`)
+		if img.RevisedPrompt != "" {
+			item, _ = sjson.SetBytes(item, "revised_prompt", img.RevisedPrompt)
+		}
+		if responseFormat == "url" {
+			item, _ = sjson.SetBytes(item, "url", "data:"+codexMimeTypeFromOutputFormat(img.OutputFormat)+";base64,"+img.Result)
+		} else {
+			item, _ = sjson.SetBytes(item, "b64_json", img.Result)
+		}
+		items = append(items, item)
+	}
+	out, _ = sjson.SetRawBytes(out, "data", helps.JoinRawJSONArray(items))
 	return out, nil
 }
 
@@ -1051,13 +1087,13 @@ func codexBuildImageCompletedFrame(img codexImageCallResult, usageRaw []byte, re
 	eventName := strings.TrimSpace(streamPrefix) + ".completed"
 	data := []byte(`{"type":""}`)
 	data, _ = sjson.SetBytes(data, "type", eventName)
+	if len(usageRaw) > 0 && json.Valid(usageRaw) {
+		data, _ = sjson.SetRawBytes(data, "usage", usageRaw)
+	}
 	if codexNormalizeImageResponseFormat(responseFormat) == "url" {
 		data, _ = sjson.SetBytes(data, "url", "data:"+codexMimeTypeFromOutputFormat(img.OutputFormat)+";base64,"+img.Result)
 	} else {
 		data, _ = sjson.SetBytes(data, "b64_json", img.Result)
-	}
-	if len(usageRaw) > 0 && json.Valid(usageRaw) {
-		data, _ = sjson.SetRawBytes(data, "usage", usageRaw)
 	}
 	return codexBuildSSEFrame(eventName, data)
 }
