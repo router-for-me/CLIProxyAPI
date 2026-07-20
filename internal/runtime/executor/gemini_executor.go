@@ -157,7 +157,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = capGeminiMaxOutputTokens(body, baseModel)
 
 	action := "generateContent"
@@ -270,7 +270,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = capGeminiMaxOutputTokens(body, baseModel)
 
 	baseURL := resolveGeminiBaseURL(auth)
@@ -388,7 +388,7 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 
 	body := translateGeminiInteractionsRequestBody(targetName, req.Payload, opts, false)
 	if gjson.GetBytes(body, "model").Exists() && targetName != "" {
-		body, _ = sjson.SetBytes(body, "model", targetName)
+		body = helps.SetStringIfDifferent(body, "model", targetName)
 	}
 	body, err = applyGeminiInteractionsThinking(body, req.Model)
 	if err != nil {
@@ -464,7 +464,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 
 	body := translateGeminiInteractionsRequestBody(targetName, req.Payload, opts, true)
 	if gjson.GetBytes(body, "model").Exists() && targetName != "" {
-		body, _ = sjson.SetBytes(body, "model", targetName)
+		body = helps.SetStringIfDifferent(body, "model", targetName)
 	}
 	body, err = applyGeminiInteractionsThinking(body, req.Model)
 	if err != nil {
@@ -475,7 +475,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	fromProtocol := opts.SourceFormat.String()
 	originalTranslated := geminiInteractionsPayloadConfigSource(targetName, req.Payload, opts, true)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
-	body, _ = sjson.SetBytes(body, "stream", true)
+	body = helps.SetBoolIfDifferent(body, "stream", true)
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/interactions", baseURL, glAPIVersion)
 	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -625,7 +625,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
-	translatedReq, _ = sjson.SetBytes(translatedReq, "model", baseModel)
+	translatedReq = helps.SetStringIfDifferent(translatedReq, "model", baseModel)
 
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, "countTokens")

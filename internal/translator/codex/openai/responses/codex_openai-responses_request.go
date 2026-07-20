@@ -16,33 +16,70 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	if inputResult.Type == gjson.String {
 		input, _ := sjson.SetBytes([]byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`), "0.content.0.text", inputResult.String())
 		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", input)
+		inputResult = gjson.GetBytes(rawJSON, "input")
 	}
 
-	rawJSON, _ = sjson.SetBytes(rawJSON, "stream", true)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "store", false)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "parallel_tool_calls", true)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "include", []string{"reasoning.encrypted_content"})
+	rawJSON = setCodexRequiredBool(rawJSON, "stream", true)
+	rawJSON = setCodexRequiredBool(rawJSON, "store", false)
+	rawJSON = setCodexRequiredBool(rawJSON, "parallel_tool_calls", true)
+	rawJSON = setCodexRequiredInclude(rawJSON)
 	// Codex Responses rejects token limit fields, so strip them out before forwarding.
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_output_tokens")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_completion_tokens")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "temperature")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "top_p")
-	if v := gjson.GetBytes(rawJSON, "service_tier"); v.Exists() {
-		if v.String() != "priority" {
-			rawJSON, _ = sjson.DeleteBytes(rawJSON, "service_tier")
-		}
+	rawJSON = deleteCodexRequestFields(rawJSON, "max_output_tokens", "max_completion_tokens", "temperature", "top_p")
+	if serviceTier := gjson.GetBytes(rawJSON, "service_tier"); serviceTier.Exists() && serviceTier.String() != "priority" {
+		rawJSON = deleteCodexRequestFields(rawJSON, "service_tier")
 	}
 
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "truncation")
+	rawJSON = deleteCodexRequestFields(rawJSON, "truncation")
 	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
 
 	// Delete the user field as it is not supported by the Codex upstream.
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
+	rawJSON = deleteCodexRequestFields(rawJSON, "user")
 
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
-	rawJSON = convertSystemRoleToDeveloper(rawJSON)
+	rawJSON = convertSystemRoleToDeveloperWithInput(rawJSON, inputResult)
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
 
+	return rawJSON
+}
+
+func setCodexRequiredBool(rawJSON []byte, path string, value bool) []byte {
+	current := gjson.GetBytes(rawJSON, path)
+	if value && current.Type == gjson.True || !value && current.Type == gjson.False {
+		return rawJSON
+	}
+
+	updated, errSet := sjson.SetBytes(rawJSON, path, value)
+	if errSet != nil {
+		return rawJSON
+	}
+	return updated
+}
+
+func setCodexRequiredInclude(rawJSON []byte) []byte {
+	current := gjson.GetBytes(rawJSON, "include")
+	values := current.Array()
+	if current.IsArray() && len(values) == 1 && values[0].Type == gjson.String && values[0].String() == "reasoning.encrypted_content" {
+		return rawJSON
+	}
+
+	updated, errSet := sjson.SetRawBytes(rawJSON, "include", []byte(`["reasoning.encrypted_content"]`))
+	if errSet != nil {
+		return rawJSON
+	}
+	return updated
+}
+
+func deleteCodexRequestFields(rawJSON []byte, paths ...string) []byte {
+	for _, path := range paths {
+		if !gjson.GetBytes(rawJSON, path).Exists() {
+			continue
+		}
+
+		updated, errDelete := sjson.DeleteBytes(rawJSON, path)
+		if errDelete == nil {
+			rawJSON = updated
+		}
+	}
 	return rawJSON
 }
 
@@ -67,13 +104,27 @@ func applyResponsesCompactionCompatibility(rawJSON []byte) []byte {
 // with role "system" to role "developer". This is necessary because Codex API does not
 // accept "system" role in the input array.
 func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
-	inputResult := gjson.GetBytes(rawJSON, "input")
+	return convertSystemRoleToDeveloperWithInput(rawJSON, gjson.GetBytes(rawJSON, "input"))
+}
+
+func convertSystemRoleToDeveloperWithInput(rawJSON []byte, inputResult gjson.Result) []byte {
 	if !inputResult.IsArray() {
 		return rawJSON
 	}
 
 	inputItems := inputResult.Array()
 	if len(inputItems) == 0 {
+		return rawJSON
+	}
+
+	hasSystemRole := false
+	for _, item := range inputItems {
+		if item.IsObject() && item.Get("role").String() == "system" {
+			hasSystemRole = true
+			break
+		}
+	}
+	if !hasSystemRole {
 		return rawJSON
 	}
 

@@ -42,7 +42,9 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	templateBytes, _ := sjson.SetRawBytes([]byte(template), "request", rawJSON)
 	templateBytes, _ = sjson.SetBytes(templateBytes, "model", modelName)
 	template = string(templateBytes)
-	template, _ = sjson.Delete(template, "request.model")
+	if gjson.Get(template, "request.model").Exists() {
+		template, _ = sjson.Delete(template, "request.model")
+	}
 
 	template, errFixCLIToolResponse := fixCLIToolResponse(template)
 	if errFixCLIToolResponse != nil {
@@ -87,44 +89,61 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	toolsResult := gjson.GetBytes(rawJSON, "request.tools")
 	if toolsResult.IsArray() {
 		seenFunctionNames := make(map[string]struct{})
+		toolsChanged := false
 		var toolItems [][]byte
 		toolsResult.ForEach(func(toolIndex, tool gjson.Result) bool {
 			toolJSON := []byte(tool.Raw)
+			toolChanged := false
 			for _, key := range []string{"functionDeclarations", "function_declarations"} {
 				declarations := tool.Get(key)
 				if !declarations.IsArray() {
 					continue
 				}
 
+				declarationsChanged := false
 				var declarationItems [][]byte
 				declarations.ForEach(func(_, declaration gjson.Result) bool {
-					mappedName := util.MapSanitizedFunctionName(functionNameMap, declaration.Get("name").String())
+					nameResult := declaration.Get("name")
+					originalName := nameResult.String()
+					mappedName := util.MapSanitizedFunctionName(functionNameMap, originalName)
 					if mappedName != "" {
 						if _, exists := seenFunctionNames[mappedName]; exists {
+							declarationsChanged = true
 							return true
 						}
 						seenFunctionNames[mappedName] = struct{}{}
 					}
 
 					declarationJSON := []byte(declaration.Raw)
-					declarationJSON, _ = sjson.SetBytes(declarationJSON, "name", mappedName)
+					if nameResult.Type != gjson.String || mappedName != originalName {
+						declarationJSON, _ = sjson.SetBytes(declarationJSON, "name", mappedName)
+						declarationsChanged = true
+					}
 					if parameters := declaration.Get("parameters"); parameters.Exists() {
 						declarationJSON, _ = sjson.SetRawBytes(declarationJSON, "parametersJsonSchema", []byte(parameters.Raw))
 						declarationJSON, _ = sjson.DeleteBytes(declarationJSON, "parameters")
+						declarationsChanged = true
 					}
 					declarationItems = append(declarationItems, declarationJSON)
 					return true
 				})
-				var errSet error
-				toolJSON, errSet = sjson.SetRawBytes(toolJSON, key, translatorcommon.JoinRawArray(declarationItems))
-				if errSet != nil {
-					log.Warnf("failed to normalize function declarations in tool %d: %v", toolIndex.Int(), errSet)
+				if declarationsChanged {
+					var errSet error
+					toolJSON, errSet = sjson.SetRawBytes(toolJSON, key, translatorcommon.JoinRawArray(declarationItems))
+					if errSet != nil {
+						log.Warnf("failed to normalize function declarations in tool %d: %v", toolIndex.Int(), errSet)
+					} else {
+						toolChanged = true
+					}
 				}
 			}
+			toolsChanged = toolsChanged || toolChanged
 			toolItems = append(toolItems, toolJSON)
 			return true
 		})
-		rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.tools", translatorcommon.JoinRawArray(toolItems))
+		if toolsChanged {
+			rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.tools", translatorcommon.JoinRawArray(toolItems))
+		}
 		rawJSON = removeEmptyGeminiFunctionTools(rawJSON)
 	}
 	rawJSON = rewriteGeminiFunctionNames(rawJSON, functionNameMap)
@@ -140,6 +159,11 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 func removeEmptyGeminiFunctionTools(rawJSON []byte) []byte {
 	tools := gjson.GetBytes(rawJSON, "request.tools")
+	if tools.IsArray() && len(tools.Array()) == 0 {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, "request.tools")
+		return rawJSON
+	}
+	changed := false
 	var cleanedTools [][]byte
 	for _, tool := range tools.Array() {
 		toolJSON := []byte(tool.Raw)
@@ -147,13 +171,18 @@ func removeEmptyGeminiFunctionTools(rawJSON []byte) []byte {
 			for _, key := range []string{"functionDeclarations", "function_declarations"} {
 				if declarations := tool.Get(key); declarations.IsArray() && len(declarations.Array()) == 0 {
 					toolJSON, _ = sjson.DeleteBytes(toolJSON, key)
+					changed = true
 				}
 			}
 			if len(gjson.ParseBytes(toolJSON).Map()) == 0 {
+				changed = true
 				continue
 			}
 		}
 		cleanedTools = append(cleanedTools, toolJSON)
+	}
+	if !changed {
+		return rawJSON
 	}
 	if len(cleanedTools) == 0 {
 		rawJSON, _ = sjson.DeleteBytes(rawJSON, "request.tools")
@@ -186,11 +215,16 @@ func rewriteGeminiFunctionNames(rawJSON []byte, functionNameMap map[string]strin
 			content.Get("parts").ForEach(func(_, part gjson.Result) bool {
 				partJSON := []byte(part.Raw)
 				for _, field := range []string{"functionCall", "functionResponse", "function_call", "function_response"} {
-					name := part.Get(field + ".name").String()
+					nameResult := part.Get(field + ".name")
+					name := nameResult.String()
 					if name == "" {
 						continue
 					}
-					partJSON, _ = sjson.SetBytes(partJSON, field+".name", util.MapSanitizedFunctionName(functionNameMap, name))
+					mappedName := util.MapSanitizedFunctionName(functionNameMap, name)
+					if nameResult.Type == gjson.String && mappedName == name {
+						continue
+					}
+					partJSON, _ = sjson.SetBytes(partJSON, field+".name", mappedName)
 					partsChanged = true
 				}
 				partItems = append(partItems, partJSON)
@@ -210,12 +244,17 @@ func rewriteGeminiFunctionNames(rawJSON []byte, functionNameMap map[string]strin
 		for contentIndex, content := range contents.Array() {
 			for partIndex, part := range content.Get("parts").Array() {
 				for _, field := range []string{"functionCall", "functionResponse", "function_call", "function_response"} {
-					name := part.Get(field + ".name").String()
+					nameResult := part.Get(field + ".name")
+					name := nameResult.String()
 					if name == "" {
 						continue
 					}
+					mappedName := util.MapSanitizedFunctionName(functionNameMap, name)
+					if nameResult.Type == gjson.String && mappedName == name {
+						continue
+					}
 					path := fmt.Sprintf("request.contents.%d.parts.%d.%s.name", contentIndex, partIndex, field)
-					rawJSON, _ = sjson.SetBytes(rawJSON, path, util.MapSanitizedFunctionName(functionNameMap, name))
+					rawJSON, _ = sjson.SetBytes(rawJSON, path, mappedName)
 				}
 			}
 		}
@@ -227,17 +266,26 @@ func rewriteGeminiFunctionNames(rawJSON []byte, functionNameMap map[string]strin
 	} {
 		allowedNames := gjson.GetBytes(rawJSON, allowedPath)
 		if allowedNames.IsArray() {
+			namesChanged := false
 			nameItems := make([][]byte, 0, 4)
 			allowedNames.ForEach(func(_, name gjson.Result) bool {
-				mappedName, _ := json.Marshal(util.MapSanitizedFunctionName(functionNameMap, name.String()))
-				nameItems = append(nameItems, mappedName)
+				mappedName := util.MapSanitizedFunctionName(functionNameMap, name.String())
+				namesChanged = namesChanged || name.Type != gjson.String || mappedName != name.String()
+				mappedNameJSON, _ := json.Marshal(mappedName)
+				nameItems = append(nameItems, mappedNameJSON)
 				return true
 			})
-			rawJSON, _ = sjson.SetRawBytes(rawJSON, allowedPath, translatorcommon.JoinRawArray(nameItems))
+			if namesChanged {
+				rawJSON, _ = sjson.SetRawBytes(rawJSON, allowedPath, translatorcommon.JoinRawArray(nameItems))
+			}
 		} else {
 			for index, name := range allowedNames.Array() {
+				mappedName := util.MapSanitizedFunctionName(functionNameMap, name.String())
+				if name.Type == gjson.String && mappedName == name.String() {
+					continue
+				}
 				path := fmt.Sprintf("%s.%d", allowedPath, index)
-				rawJSON, _ = sjson.SetBytes(rawJSON, path, util.MapSanitizedFunctionName(functionNameMap, name.String()))
+				rawJSON, _ = sjson.SetBytes(rawJSON, path, mappedName)
 			}
 		}
 	}
@@ -509,6 +557,26 @@ func fixCLIToolResponse(input string) (string, error) {
 	if !contents.Exists() {
 		// log.Debugf(input)
 		return input, fmt.Errorf("contents not found in input")
+	}
+
+	needsGrouping := false
+	allContentsAreObjects := true
+	contents.ForEach(func(_, content gjson.Result) bool {
+		if !content.IsObject() {
+			allContentsAreObjects = false
+			return true
+		}
+		content.Get("parts").ForEach(func(_, part gjson.Result) bool {
+			if part.Get("functionResponse").Exists() {
+				needsGrouping = true
+				return false
+			}
+			return true
+		})
+		return !needsGrouping
+	})
+	if contents.IsArray() && allContentsAreObjects && !needsGrouping {
+		return input, nil
 	}
 
 	// Initialize data structures for processing and grouping

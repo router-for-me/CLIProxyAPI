@@ -904,8 +904,8 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
-	body, _ = sjson.SetBytes(body, "stream", stream)
+	body = helps.SetStringIfDifferent(body, "model", baseModel)
+	body = helps.SetBoolIfDifferent(body, "stream", stream)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
@@ -941,7 +941,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 		return nil, errSession
 	}
 	if sessionID != "" {
-		body, _ = sjson.SetBytes(body, "prompt_cache_key", sessionID)
+		body = helps.SetStringIfDifferent(body, "prompt_cache_key", sessionID)
 	}
 
 	return &xaiPreparedRequest{
@@ -1415,27 +1415,24 @@ func pruneXAIAllowedToolsChoice(body []byte, available map[xaiToolChoiceKey]stru
 		body, _ = sjson.DeleteBytes(body, "tool_choice")
 		return body
 	}
-	filtered := []byte(`[]`)
+	allowedItems := allowed.Array()
+	filtered := make([][]byte, 0, len(allowedItems))
 	changed := false
-	for _, tool := range allowed.Array() {
+	for _, tool := range allowedItems {
 		if !xaiToolChoiceMatchesAvailable(tool, available) {
 			changed = true
 			continue
 		}
-		updated, errSet := sjson.SetRawBytes(filtered, "-1", []byte(tool.Raw))
-		if errSet != nil {
-			return body
-		}
-		filtered = updated
+		filtered = append(filtered, []byte(tool.Raw))
 	}
 	if !changed {
 		return body
 	}
-	if len(gjson.ParseBytes(filtered).Array()) == 0 {
+	if len(filtered) == 0 {
 		body, _ = sjson.DeleteBytes(body, "tool_choice")
 		return body
 	}
-	body, _ = sjson.SetRawBytes(body, "tool_choice.tools", filtered)
+	body, _ = sjson.SetRawBytes(body, "tool_choice.tools", helps.JoinRawJSONArray(filtered))
 	return body
 }
 
@@ -1597,9 +1594,10 @@ func promoteXAIAdditionalTools(body []byte) []byte {
 }
 
 func normalizeXAIToolArray(tools gjson.Result) ([]byte, bool, bool) {
+	toolItems := tools.Array()
+	filtered := make([][]byte, 0, len(toolItems))
 	changed := false
-	filtered := []byte(`[]`)
-	for _, tool := range tools.Array() {
+	for _, tool := range toolItems {
 		toolType := tool.Get("type").String()
 		if toolType == xaiNamespaceToolType {
 			changed = true
@@ -1611,14 +1609,9 @@ func normalizeXAIToolArray(tools gjson.Result) ([]byte, bool, bool) {
 						return nil, false, false
 					}
 					changed = changed || nestedChanged
-					if len(nestedRaw) == 0 {
-						continue
+					if len(nestedRaw) > 0 {
+						filtered = append(filtered, nestedRaw)
 					}
-					updated, errSet := sjson.SetRawBytes(filtered, "-1", nestedRaw)
-					if errSet != nil {
-						return nil, false, false
-					}
-					filtered = updated
 				}
 			}
 			continue
@@ -1628,16 +1621,14 @@ func normalizeXAIToolArray(tools gjson.Result) ([]byte, bool, bool) {
 			return nil, false, false
 		}
 		changed = changed || toolChanged
-		if len(raw) == 0 {
-			continue
+		if len(raw) > 0 {
+			filtered = append(filtered, raw)
 		}
-		updated, errSet := sjson.SetRawBytes(filtered, "-1", raw)
-		if errSet != nil {
-			return nil, false, false
-		}
-		filtered = updated
 	}
-	return filtered, changed, true
+	if !changed {
+		return nil, false, true
+	}
+	return helps.JoinRawJSONArray(filtered), true, true
 }
 
 // normalizeXAIToolChoiceForTools drops tool_choice and parallel_tool_calls

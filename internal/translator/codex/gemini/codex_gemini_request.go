@@ -262,16 +262,10 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					tool, _ = sjson.SetBytes(tool, "description", v.String())
 				}
 				if prm := fn.Get("parameters"); prm.Exists() {
-					// Remove optional $schema field if present
-					cleaned := []byte(prm.Raw)
-					cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
-					cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
+					cleaned := cleanGeminiCodexToolParameters(prm)
 					tool, _ = sjson.SetRawBytes(tool, "parameters", cleaned)
 				} else if prm = fn.Get("parametersJsonSchema"); prm.Exists() {
-					// Remove optional $schema field if present
-					cleaned := []byte(prm.Raw)
-					cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
-					cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
+					cleaned := cleanGeminiCodexToolParameters(prm)
 					tool, _ = sjson.SetRawBytes(tool, "parameters", cleaned)
 				}
 				tool, _ = sjson.SetBytes(tool, "strict", false)
@@ -342,7 +336,11 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		if typeValue.Type != gjson.String {
 			continue
 		}
-		out, _ = sjson.SetBytes(out, fullPath, strings.ToLower(typeValue.String()))
+		normalizedType := strings.ToLower(typeValue.String())
+		if normalizedType == typeValue.String() {
+			continue
+		}
+		out, _ = sjson.SetBytes(out, fullPath, normalizedType)
 	}
 
 	return out
@@ -357,7 +355,10 @@ func setCodexToolChoiceFromGeminiToolConfig(out []byte, functionCallingConfig gj
 	case "NONE":
 		out, _ = sjson.SetBytes(out, "tool_choice", "none")
 	case "AUTO":
-		out, _ = sjson.SetBytes(out, "tool_choice", "auto")
+		current := gjson.GetBytes(out, "tool_choice")
+		if current.Type != gjson.String || current.String() != "auto" {
+			out, _ = sjson.SetBytes(out, "tool_choice", "auto")
+		}
 	case "ANY":
 		allowedNames := functionCallingConfig.Get("allowedFunctionNames")
 		allowedNameItems := allowedNames.Array()
@@ -370,6 +371,17 @@ func setCodexToolChoiceFromGeminiToolConfig(out []byte, functionCallingConfig gj
 		}
 	}
 	return out
+}
+
+func cleanGeminiCodexToolParameters(parameters gjson.Result) []byte {
+	cleaned := []byte(parameters.Raw)
+	if parameters.Get("$schema").Exists() {
+		cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
+	}
+	if additionalProperties := parameters.Get("additionalProperties"); additionalProperties.Type != gjson.False {
+		cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
+	}
+	return cleaned
 }
 
 func codexMessageWithPart(role string, part []byte) []byte {

@@ -459,11 +459,11 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 		}
 		if toolCallsCount > 0 {
 			out, _ = sjson.SetBytes(out, "choices.0.finish_reason", "tool_calls")
-		} else {
-			out, _ = sjson.SetBytes(out, "choices.0.finish_reason", mapAnthropicStopReasonToOpenAI(stopReason))
+		} else if finishReason := mapAnthropicStopReasonToOpenAI(stopReason); finishReason != "stop" {
+			out, _ = sjson.SetBytes(out, "choices.0.finish_reason", finishReason)
 		}
-	} else {
-		out, _ = sjson.SetBytes(out, "choices.0.finish_reason", mapAnthropicStopReasonToOpenAI(stopReason))
+	} else if finishReason := mapAnthropicStopReasonToOpenAI(stopReason); finishReason != "stop" {
+		out, _ = sjson.SetBytes(out, "choices.0.finish_reason", finishReason)
 	}
 
 	return out

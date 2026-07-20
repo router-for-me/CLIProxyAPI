@@ -326,7 +326,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
-	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
@@ -634,10 +634,10 @@ func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType 
 	contentType = strings.TrimSpace(contentType)
 	if json.Valid(payload) {
 		if model != "" {
-			payload, _ = sjson.SetBytes(payload, "model", model)
+			payload = helps.SetStringIfDifferent(payload, "model", model)
 		}
 		if stream {
-			payload, _ = sjson.SetBytes(payload, "stream", true)
+			payload = helps.SetBoolIfDifferent(payload, "stream", true)
 		} else {
 			payload, _ = sjson.DeleteBytes(payload, "stream")
 		}
@@ -778,8 +778,7 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 	if len(payload) == 0 || model == "" {
 		return payload
 	}
-	payload, _ = sjson.SetBytes(payload, "model", model)
-	return payload
+	return helps.SetStringIfDifferent(payload, "model", model)
 }
 
 type statusErr struct {
