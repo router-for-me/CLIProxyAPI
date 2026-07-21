@@ -1098,6 +1098,8 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 		targetID = strings.TrimSpace(targetAuth.ID)
 		if path := strings.TrimSpace(authAttribute(targetAuth, "path")); path != "" {
 			targetPath = path
+		} else if path := strings.TrimSpace(authAttribute(targetAuth, coreauth.AttributeVirtualSource)); path != "" {
+			targetPath = path
 		}
 	}
 	if !filepath.IsAbs(targetPath) {
@@ -1118,9 +1120,23 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 		return nil
 	}
 
-	var errDelete error
+	targetIDs := h.authIDsSharingCredentialPath(targetPath)
 	if targetID != "" {
-		errDelete = h.authManager.RemoveWithCleanup(ctx, targetID, removeStoredCredential)
+		found := false
+		for _, id := range targetIDs {
+			if id == targetID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			targetIDs = append(targetIDs, targetID)
+		}
+	}
+
+	var errDelete error
+	if len(targetIDs) > 0 {
+		errDelete = h.authManager.RemovePathWithCleanup(ctx, targetIDs, removeStoredCredential)
 	} else {
 		errDelete = removeStoredCredential()
 	}
@@ -1132,6 +1148,31 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 	}
 	h.removeAuthsForPath(ctx, targetPath, targetID)
 	return filepath.Base(name), http.StatusOK, nil
+}
+
+// authIDsSharingCredentialPath returns runtime auth IDs that share a credential path.
+// Plugin-owned files can expand into multiple virtual auths that must be locked together
+// during delete so an in-flight sibling refresh cannot restore the file.
+func (h *Handler) authIDsSharingCredentialPath(path string) []string {
+	if h == nil || h.authManager == nil {
+		return nil
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	var ids []string
+	for _, auth := range h.authManager.List() {
+		if auth == nil {
+			continue
+		}
+		if sameAuthFilePath(authAttribute(auth, "path"), path) || sameAuthFilePath(authAttribute(auth, coreauth.AttributeVirtualSource), path) {
+			if id := strings.TrimSpace(auth.ID); id != "" {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
 }
 
 func isPluginVirtualSourceDelete(name string, auth *coreauth.Auth) bool {

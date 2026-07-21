@@ -2272,40 +2272,69 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 // cleanup runs while the auth refresh lock is held and must remove any external persisted
 // credential before the auth is removed from runtime state.
 func (m *Manager) RemoveWithCleanup(ctx context.Context, id string, cleanup func() error) error {
-	if m == nil {
-		return errors.New("auth manager is nil")
-	}
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return errors.New("auth id is empty")
 	}
-	refreshLock := m.refreshLockFor(id)
-	refreshLock.mu.Lock()
-	defer refreshLock.mu.Unlock()
+	return m.RemovePathWithCleanup(ctx, []string{id}, cleanup)
+}
+
+// RemovePathWithCleanup serializes cleanup and runtime removal against credential refresh
+// for every provided auth ID. Locks are acquired in sorted ID order to avoid deadlocks with
+// concurrent multi-auth cleanup. cleanup runs after all refresh locks are held so a sibling
+// refresh that shares the same credential path cannot recreate the file after deletion.
+func (m *Manager) RemovePathWithCleanup(ctx context.Context, ids []string, cleanup func() error) error {
+	if m == nil {
+		return errors.New("auth manager is nil")
+	}
+	normalized := uniqueSortedAuthIDs(ids)
+	if len(normalized) == 0 {
+		if cleanup != nil {
+			return cleanup()
+		}
+		return nil
+	}
+
+	locks := make([]*authRefreshLock, 0, len(normalized))
+	for _, id := range normalized {
+		lock := m.refreshLockFor(id)
+		lock.mu.Lock()
+		locks = append(locks, lock)
+	}
+	defer func() {
+		for i := len(locks) - 1; i >= 0; i-- {
+			locks[i].mu.Unlock()
+		}
+	}()
+
 	if cleanup != nil {
 		if errCleanup := cleanup(); errCleanup != nil {
 			return errCleanup
 		}
 	}
 
+	providers := make(map[string]struct{})
 	m.mu.Lock()
-	existing := m.auths[id]
-	if existing == nil {
-		m.mu.Unlock()
-		return nil
-	}
-	provider := strings.TrimSpace(existing.Provider)
-	delete(m.auths, id)
-	if m.modelPoolOffsets != nil {
-		delete(m.modelPoolOffsets, id)
-	}
-	for sessionID, sessionAuths := range m.homeRuntimeAuths {
-		if sessionAuths == nil {
+	for _, id := range normalized {
+		existing := m.auths[id]
+		if existing == nil {
 			continue
 		}
-		delete(sessionAuths, id)
-		if len(sessionAuths) == 0 {
-			delete(m.homeRuntimeAuths, sessionID)
+		if provider := strings.TrimSpace(existing.Provider); provider != "" {
+			providers[provider] = struct{}{}
+		}
+		delete(m.auths, id)
+		if m.modelPoolOffsets != nil {
+			delete(m.modelPoolOffsets, id)
+		}
+		for sessionID, sessionAuths := range m.homeRuntimeAuths {
+			if sessionAuths == nil {
+				continue
+			}
+			delete(sessionAuths, id)
+			if len(sessionAuths) == 0 {
+				delete(m.homeRuntimeAuths, sessionID)
+			}
 		}
 	}
 	m.mu.Unlock()
@@ -2313,13 +2342,14 @@ func (m *Manager) RemoveWithCleanup(ctx context.Context, id string, cleanup func
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
-	if m.scheduler != nil {
-		m.scheduler.removeAuth(id)
+	for _, id := range normalized {
+		if m.scheduler != nil {
+			m.scheduler.removeAuth(id)
+		}
+		m.queueRefreshUnschedule(id)
+		m.invalidateSessionAffinity(id)
 	}
-	m.queueRefreshUnschedule(id)
-	m.invalidateSessionAffinity(id)
-
-	if provider != "" {
+	for provider := range providers {
 		if exec, ok := m.Executor(provider); ok && exec != nil {
 			if closer, okCloser := exec.(ExecutionSessionCloser); okCloser {
 				closer.CloseExecutionSession(CloseAllExecutionSessionsID)
@@ -2328,6 +2358,27 @@ func (m *Manager) RemoveWithCleanup(ctx context.Context, id string, cleanup func
 	}
 	m.persistCooldownStates(ctx)
 	return nil
+}
+
+func uniqueSortedAuthIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (m *Manager) invalidateSessionAffinity(authID string) {
@@ -6190,6 +6241,24 @@ func authHasRefreshCredential(auth *Auth) bool {
 	return authMetadataString(auth, "refreshToken") != ""
 }
 
+func authHasStorageRefreshMaterial(auth *Auth) bool {
+	if auth == nil || auth.Storage == nil {
+		return false
+	}
+	rawProvider, ok := auth.Storage.(interface{ RawJSON() []byte })
+	if !ok {
+		return false
+	}
+	return len(bytes.TrimSpace(rawProvider.RawJSON())) > 0
+}
+
+// authIsExplicitlyRefreshable reports whether an auth has local refresh material.
+// Plugin credentials may keep refresh state in Storage.RawJSON instead of a top-level
+// refresh_token field.
+func authIsExplicitlyRefreshable(auth *Auth) bool {
+	return authHasRefreshCredential(auth) || authHasStorageRefreshMaterial(auth)
+}
+
 func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 	if auth == nil || len(auth.ModelStates) == 0 {
 		return nil
@@ -6253,7 +6322,7 @@ func (m *Manager) RefreshAuth(ctx context.Context, id string) (*Auth, error) {
 	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	homeRefreshEnabled := cfg != nil && cfg.Home.Enabled
-	if !homeRefreshEnabled && !authHasRefreshCredential(auth) {
+	if !homeRefreshEnabled && !authIsExplicitlyRefreshable(auth) {
 		return nil, ErrAuthNotRefreshable
 	}
 	return m.refreshAuthForRequest(ctx, id, "")

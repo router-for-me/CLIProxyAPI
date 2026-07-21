@@ -350,3 +350,129 @@ func TestManager_TryRefreshAfterUnauthorizedRetriesWithRuntimeAuthAfterPersisten
 		t.Fatalf("runtime access token = %q, want fresh-access-token", got)
 	}
 }
+
+type rawJSONRefreshStorage struct {
+	raw []byte
+}
+
+func (s *rawJSONRefreshStorage) SaveTokenToFile(string) error { return nil }
+
+func (s *rawJSONRefreshStorage) RawJSON() []byte {
+	if s == nil {
+		return nil
+	}
+	return append([]byte(nil), s.raw...)
+}
+
+func TestManager_RefreshAuthAllowsPluginStorageWithoutRefreshToken(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(planRefreshExecutor{})
+	auth := &Auth{
+		ID:       "plugin-storage-refresh",
+		Provider: "codex",
+		Storage:  &rawJSONRefreshStorage{raw: []byte(`{"type":"plugin","token":"stored-refresh-material"}`)},
+		Metadata: map[string]any{"access_token": "access-token"},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	refreshed, errRefresh := manager.RefreshAuth(ctx, auth.ID)
+	if errRefresh != nil {
+		t.Fatalf("RefreshAuth() error = %v", errRefresh)
+	}
+	if refreshed == nil {
+		t.Fatal("RefreshAuth() auth = nil")
+	}
+	if got := authAccessToken(refreshed); got != "fresh-access-token" {
+		t.Fatalf("access token = %q, want fresh-access-token", got)
+	}
+}
+
+func TestManager_RemovePathWithCleanupLocksSiblingAuthsBeforeDelete(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "plugin-shared.json")
+	if errWrite := os.WriteFile(path, []byte("stale-credential"), 0o600); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	store := &fileRefreshStore{path: path}
+	manager := NewManager(store, nil, nil)
+	executor := blockingPlanRefreshExecutor{
+		entered: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	manager.RegisterExecutor(executor)
+
+	authA := &Auth{
+		ID:       "plugin-shared-a",
+		Provider: "codex",
+		Attributes: map[string]string{
+			AttributePath:          path,
+			AttributeVirtualSource: path,
+			AttributePluginVirtual: pluginVirtualAttrEnabled,
+		},
+		Metadata: map[string]any{
+			"access_token":  "stale-access-a",
+			"refresh_token": "refresh-token-a",
+		},
+	}
+	authB := &Auth{
+		ID:       "plugin-shared-b",
+		Provider: "codex",
+		Attributes: map[string]string{
+			AttributePath:          path,
+			AttributeVirtualSource: path,
+			AttributePluginVirtual: pluginVirtualAttrEnabled,
+		},
+		Metadata: map[string]any{
+			"access_token":  "stale-access-b",
+			"refresh_token": "refresh-token-b",
+		},
+	}
+	if _, errRegister := manager.Register(ctx, authA); errRegister != nil {
+		t.Fatalf("Register(A) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(ctx, authB); errRegister != nil {
+		t.Fatalf("Register(B) error = %v", errRegister)
+	}
+
+	refreshResult := make(chan error, 1)
+	go func() {
+		_, errRefresh := manager.RefreshAuth(ctx, authB.ID)
+		refreshResult <- errRefresh
+	}()
+	<-executor.entered
+
+	cleanupEntered := make(chan struct{})
+	removeResult := make(chan error, 1)
+	go func() {
+		removeResult <- manager.RemovePathWithCleanup(ctx, []string{authA.ID, authB.ID}, func() error {
+			close(cleanupEntered)
+			return os.Remove(path)
+		})
+	}()
+
+	select {
+	case <-cleanupEntered:
+		t.Fatal("cleanup ran before the sibling refresh released its auth lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(executor.release)
+	if errRefresh := <-refreshResult; errRefresh != nil {
+		t.Fatalf("RefreshAuth() error = %v", errRefresh)
+	}
+	if errRemove := <-removeResult; errRemove != nil {
+		t.Fatalf("RemovePathWithCleanup() error = %v", errRemove)
+	}
+	if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
+		t.Fatalf("credential file still exists after multi-auth removal: %v", errStat)
+	}
+	if _, ok := manager.GetByID(authA.ID); ok {
+		t.Fatal("auth A remains registered after multi-auth removal")
+	}
+	if _, ok := manager.GetByID(authB.ID); ok {
+		t.Fatal("auth B remains registered after multi-auth removal")
+	}
+}
