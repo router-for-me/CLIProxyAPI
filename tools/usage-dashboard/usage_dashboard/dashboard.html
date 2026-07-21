@@ -271,15 +271,47 @@ renderRequests(reqs.requests);
 renderTopModels(sum.models||[]);
 renderTopAccounts(sum.accounts||[]);
 $('loadMore').style.display=cursor?'inline-block':'none';
-$('updated')&&($('updated').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN'));
+	// charts: spark from summary.hours, main from timeseries grouped by model
+	drawSpark(sum.hours||[]);
+	try{const ts=await getJSON('/api/v1/timeseries?'+qs+'&group_by=hour');drawMain(ts.series||[],sum.models||[]);}catch(e){drawMain([],sum.models||[]);}
+	$('updated')&&($('updated').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN'));
 }catch(e){$('main').classList.add('stale');}
 }
 function renderHealth(h){
 const t=h.ok?'正常':(h.degraded?'降级':'异常');
 $('health').querySelector('.dot').className='dot '+(h.ok?'':(h.degraded?'warn':'bad'));
 $('healthText').textContent=t+(h.last_usage_timestamp?(' · '+new Date(h.last_usage_timestamp).toLocaleTimeString('zh-CN')):'');
-}
-/* ---- placeholders filled by later tasks ---- */
+	}
+	/* ---- pricing (client-side cost approximation for charts) ---- */
+	let priceMap={}; // model -> {input_per_million, output_per_million, cached_input_per_million, reasoning_per_million}
+	async function loadPriceMap(){
+	try{const d=await getJSON('/api/v1/prices');priceMap={};(d.models||[]).filter(m=>m.effective_now).forEach(m=>{priceMap[m.model]={input_per_million:m.input_per_million||0,output_per_million:m.output_per_million||0,cached_input_per_million:m.cached_input_per_million||0,reasoning_per_million:m.reasoning_per_million||0};});}catch(e){priceMap={};}
+	}
+	function approxCost(model,tok){
+	const p=priceMap[model];if(!p)return 0;
+	tok=tok||{};const M=1e6;
+	return (tok.input_tokens||0)*p.input_per_million/M+(tok.output_tokens||0)*p.output_per_million/M+(tok.cached_tokens||0)*p.cached_input_per_million/M+(tok.reasoning_tokens||0)*p.reasoning_per_million/M;
+	}
+	/* ---- charts ---- */
+	function drawSpark(hours){
+	const ctx=$('heroSpark').getContext('2d');
+	const labels=hours.map(h=>String(h.hour||'').slice(11,16));
+	const data=hours.map(h=>h.total_tokens||0); // spark uses token volume as activity proxy
+	if(window.__spark&&window.__spark.destroy)window.__spark.destroy();
+	window.__spark=new Chart(ctx,{type:'line',data:{labels,datasets:[{data,borderColor:'#3b82f6',backgroundColor:'rgba(59,130,246,.2)',fill:true,tension:.3,pointRadius:0,borderWidth:1.5}]},options:{plugins:{legend:{display:false},tooltip:{enabled:false}},scales:{x:{display:false},y:{display:false}},responsive:true,maintainAspectRatio:false}});
+	}
+	function drawMain(series,models){
+	const ctx=$('mainChart').getContext('2d');
+	// series is grouped by bucket; re-bucket into {bucket: {model: cost}}
+	const buckets=[];const byBucket={};
+	(series||[]).forEach(r=>{if(!byBucket[r.bucket]){byBucket[r.bucket]={};buckets.push(r.bucket);}byBucket[r.bucket][r.model||'unknown']=(byBucket[r.bucket][r.model||'unknown']||0)+approxCost(r.model||'unknown',r);});
+	const topModels=(models||[]).slice(0,6).map(m=>m.model);
+	const palette=['#3b82f6','#10b981','#f59e0b','#ef4444','#a855f7','#06b6d4'];
+	const datasets=topModels.map((m,i)=>({label:m,data:buckets.map(b=>(byBucket[b][m]||0).toFixed(6)),backgroundColor:palette[i%palette.length],borderColor:palette[i%palette.length],borderWidth:0,stack:'cost'}));
+	if(window.__main&&window.__main.destroy)window.__main.destroy();
+	window.__main=new Chart(ctx,{type:'bar',data:{labels:buckets,datasets},options:{plugins:{legend:{position:'bottom',labels:{color:'#8b95a7',boxWidth:10,font:{size:11}}},tooltip:{callbacks:{label:c=>c.dataset.label+': $'+Number(c.raw).toFixed(4)}}},scales:{x:{stacked:true,ticks:{color:'#8b95a7',maxRotation:0,autoSkip:true,font:{size:10}},grid:{color:'#1c2333'}},y:{stacked:true,ticks:{color:'#8b95a7',callback:v=>'$'+Number(v).toFixed(2),font:{size:10}},grid:{color:'#1c2333'}}},responsive:true,maintainAspectRatio:false}});
+	}
+	/* ---- placeholders filled by later tasks ---- */
 function renderRequests(rows){
 const b=$('requestsBody');
 b.innerHTML=rows.length?rows.map(r=>'<tr class="row-link"><td>'+esc(r.local_time)+'</td><td title="'+esc(r.account)+'">'+esc(String(r.account||'').slice(0,12))+'</td><td>'+esc(r.model)+'</td><td class="num">'+fmt(r.total_tokens)+'</td><td class="num">'+fmtMs(r.ttft_ms)+'</td><td class="num">'+fmtMs(r.latency_ms)+'</td><td>'+(r.failed?'<span class="bad">'+r.fail_status+'</span>':'<span class="good">'+r.fail_status+'</span>')+'</td></tr>').join(''):'<tr><td colspan="7" class="empty">暂无数据</td></tr>';
@@ -311,7 +343,8 @@ wireMf('modelWrap','modelBtn','modelPanel','modelOptions','modelFilter','modelSu
 wireMf('accountWrap','accountBtn','accountPanel','accountOptions','accountFilter','accountSummary','账号',()=>load());
 document.addEventListener('click',e=>{if(!e.target.closest('.mf'))document.querySelectorAll('.mf-panel.open').forEach(p=>{p.classList.remove('open');p.setAttribute('hidden','');const b=document.querySelector('.mf-btn[aria-expanded="true"]');if(b)b.setAttribute('aria-expanded','false');});});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){$('drawer').classList.remove('open');document.querySelectorAll('.mf-panel.open').forEach(p=>p.classList.remove('open'));}});
-ensureToken().then(ok=>{if(ok){loadFilters().then(()=>load());setInterval(load,30000);}else{document.body.insertAdjacentHTML('afterbegin','<div style="padding:24px;text-align:center;color:var(--red)">未提供有效令牌，刷新页面重试。</div>');}});
+loadPriceMap();
+	ensureToken().then(ok=>{if(ok){loadFilters().then(()=>load());setInterval(load,30000);}else{document.body.insertAdjacentHTML('afterbegin','<div style="padding:24px;text-align:center;color:var(--red)">未提供有效令牌，刷新页面重试。</div>');}});
 </script>
 </body>
 </html>
