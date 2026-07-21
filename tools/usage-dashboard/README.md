@@ -106,7 +106,11 @@ preset, and an optional repeated `model` filter. Explicit `from`/`to` wins.
 - `GET /api/v1/summary?range=24h&model=ts-gpt-56`
 - `GET /api/v1/timeseries?from=...&to=...&group_by=model|provider|day|hour`
 - `GET /api/v1/models?range=7d`
+- `GET /api/v1/accounts?range=24h` — distinct account hashes in the time range, ordered by volume
+- `GET /api/v1/errors?range=24h&model=...` — aggregate failed requests by status × model
+- `GET /api/v1/prices` — read-only list of currently-effective model pricing intervals
 - `GET /api/v1/requests?range=24h&model=...&limit=100&cursor=...`
+- `GET /static/chart.js` — vendored Chart.js (public, no token required, immutable cache)
 
 Legacy endpoints (`/api/summary`, `/api/requests`, `/api/health`) remain for the
 embedded HTML dashboard.
@@ -126,4 +130,25 @@ embedded HTML dashboard.
 
 - `usage_dashboard/` — package (config, storage, collector, pricing, query, server).
 - `usage_dashboard.py` — thin shim that runs the package CLI.
-- `dashboard.html` — the served dashboard, embedded by the server.
+- `usage_dashboard/static/` — vendored frontend assets (Chart.js, MIT license).
+- `usage_dashboard/dashboard.html` — the served dashboard (v2 dark theme).
+
+## Dashboard UI
+
+The dashboard (v2) is a dark single-page panel with a Linear/Vercel-inspired
+design. No CDN dependencies — Chart.js is vendored locally.
+
+**Layout (top to bottom):**
+1. **Toolbar** — time range selector, custom from/to, model multi-select,
+   account multi-select, refresh button, and collector health indicator.
+2. **Cost hero** — estimated cost for the selected range with a token-volume
+   sparkline and price-coverage status.
+3. **KPI row** — requests, total tokens, failure rate, average latency.
+4. **Main chart** — cost trend over time, stacked by model (Chart.js).
+5. **Top rankings** — Top models by cost/token, Top accounts by token volume.
+6. **Tabbed panels** — request history (with side drawer for per-row details),
+   error aggregation (grouped by status × model, click to drill down to
+   requests), and read-only pricing table.
+
+The initial load fetches all panels simultaneously. The page auto-refreshes
+every 30 seconds.
