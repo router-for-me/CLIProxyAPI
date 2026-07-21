@@ -9,6 +9,23 @@ export function Spinner({ label = 'Loading…' }) {
   );
 }
 
+// CatalogSkeleton renders placeholder shimmer rows matching the catalog
+// table column count while the page is fetching. columns is the number of
+// <td> cells per row; rows is how many skeletons to paint (default 5).
+export function CatalogSkeleton({ columns = 7, rows = 5 }) {
+  return (
+    <>
+      {Array.from({ length: rows }).map((_, i) => (
+        <tr key={i} className="skeleton-row">
+          {Array.from({ length: columns }).map((__, j) => (
+            <td key={j}><span className="skeleton-line" /></td>
+          ))}
+        </tr>
+      ))}
+    </>
+  );
+}
+
 export function ErrorBanner({ error, onRetry }) {
   if (!error) return null;
   return (

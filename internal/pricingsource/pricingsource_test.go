@@ -83,3 +83,69 @@ func TestMatchAllMultipleSources(t *testing.T) {
 		t.Errorf("expected openai-official + openrouter sources; got %v", sources)
 	}
 }
+
+func TestWordTokens(t *testing.T) {
+	cases := map[string][]string{
+		"semut-glm-5.2":     {"semut", "glm"},
+		"claude-3-5-sonnet": {"claude", "sonnet"},
+		"gpt-4o":            {"gpt"},
+		"5":                 nil,
+		"20241022":          nil,
+		"":                  nil,
+		"ab":                nil, // too short
+		"glm":               {"glm"},
+		"foo_bar-baz":       {"foo", "bar", "baz"},
+	}
+	for in, want := range cases {
+		got := wordTokens(in)
+		if len(got) != len(want) {
+			t.Errorf("wordTokens(%q) = %v; want %v", in, got, want)
+			continue
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Errorf("wordTokens(%q)[%d] = %q; want %q", in, i, got[i], want[i])
+			}
+		}
+	}
+}
+
+func TestMatchAllTokenFallback(t *testing.T) {
+	// "vendor-claude-custom" shares the "claude" token with bundled
+	// anthropic-official entries (e.g. "claude-sonnet-4"). Exact /
+	// date-strip / prefix all miss, so the token fallback must kick in.
+	got := MatchAll([]string{"vendor-claude-custom"})
+	if len(got["vendor-claude-custom"]) == 0 {
+		t.Fatal("expected token-fallback match for vendor-claude-custom via 'claude' token")
+	}
+}
+
+func TestMatchAllTokenFallbackSkipsNumericOnly(t *testing.T) {
+	// A purely numeric query token must not borrow pricing from a model
+	// that happens to share the same digits — verify "12345" does not
+	// accidentally pair with any catalog entry.
+	got := MatchAll([]string{"12345"})
+	if _, ok := got["12345"]; ok {
+		t.Fatal("expected no token match for purely-numeric id 12345")
+	}
+}
+
+func TestTokensShareWord(t *testing.T) {
+	cases := []struct {
+		query, candidate string
+		want             bool
+	}{
+		{"semut-glm-5.2", "glm-5.2", true}, // shared "glm"
+		{"semut-glm-5.2", "gpt-4o", false}, // no shared word token
+		{"gpt-4o", "gpt-4o-mini", true},    // shared "gpt"
+		{"12345", "67890", false},          // numeric-only tokens ignored
+		{"abc", "", false},                 // empty candidate
+		{"", "abc", false},                 // empty query
+	}
+	for _, c := range cases {
+		q := wordTokens(c.query)
+		if got := tokensShareWord(q, c.candidate); got != c.want {
+			t.Errorf("tokensShareWord(%q tokens, %q) = %v; want %v", c.query, c.candidate, got, c.want)
+		}
+	}
+}

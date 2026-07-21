@@ -680,6 +680,13 @@ func main() {
 		errormessages.SetStore(pgErrorMessages)
 		errormessages.RefreshFromDB(errorMessagesCtx)
 		errorMessagesCancel()
+		// Wire the PG-backed external pricing sources store
+		// (LiteLLM-format JSON URLs / uploaded catalogs). On startup the
+		// SetPricingSourcesStore call bootstraps the pricingsource registry
+		// from the persisted rows so MatchAll can surface external
+		// suggestions without waiting for an operator refresh.
+		pgPricingSources := store.NewPricingSourceStore(pgStoreInst)
+		pgPricingSourcesDir := pgStoreInst.PricingSourcesDir()
 		// Seed model catalog when empty so the registry can load from PG.
 		seedCtx, seedCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		if count, countErr := pgModelsStore.Count(seedCtx); countErr == nil && count == 0 {
@@ -691,13 +698,15 @@ func main() {
 		// Expose the PG stores + policy service to the API server so the
 		// policy middleware and PG management routes are activated.
 		serverOptions = append(serverOptions, api.WithPolicyService(policySvc, &api.PgStoreHandles{
-			APIKeys:       pgAPIKeyStore,
-			Usage:         pgUsageStore,
-			Models:        pgModelsStore,
-			Users:         pgUserStore,
-			PGSync:        pgSyncAdapter,
-			Policy:        policySvc,
-			ErrorMessages: pgErrorMessages,
+			APIKeys:           pgAPIKeyStore,
+			Usage:             pgUsageStore,
+			Models:            pgModelsStore,
+			Users:             pgUserStore,
+			PGSync:            pgSyncAdapter,
+			Policy:            policySvc,
+			ErrorMessages:     pgErrorMessages,
+			PricingSources:    pgPricingSources,
+			PricingSourcesDir: pgPricingSourcesDir,
 		}))
 	}
 

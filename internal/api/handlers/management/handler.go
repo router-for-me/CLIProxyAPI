@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/pricingsource"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -82,10 +83,30 @@ type Handler struct {
 	// returns 503 from requirePG before reaching this handler).
 	v1ModelsHandler http.Handler
 
+	// modelsSyncMeta tracks the outcome of the most recent /v1/models →
+	// models_catalog sync, surfaced via the GET
+	// /v0/management/models-catalog/sync-status endpoint so the dashboard can
+	// show "last synced N ago · key sk-abcd…" and actionable error hints.
+	// Guarded by modelsSyncMu (RLock for reads, Lock for writes).
+	modelsSyncMu            sync.RWMutex
+	modelsSyncAt            time.Time
+	modelsSyncCount         int
+	modelsSyncErr           string
+	modelsSyncErrType       string
+	modelsSyncCallerKeyPref string
+
 	// pgErrorMessages stores operator-customized error response text,
 	// keyed by HTTP status code. nil when PG is not configured — handlers
 	// under error_messages.go return 503 in that case.
 	pgErrorMessages errormessages.Store
+
+	// pgPricingSources stores operator-managed external pricing catalogs
+	// (LiteLLM JSON URLs / uploaded files). nil when PG is not configured —
+	// handlers under pricing_sources.go return 503 in that case.
+	pgPricingSources store.PricingSourceStore
+	// pgPricingSourcesDir is the local directory backing uploaded catalog
+	// files for source_type=file pricing sources.
+	pgPricingSourcesDir string
 }
 
 type configReloadSnapshot struct {
@@ -218,6 +239,33 @@ func (h *Handler) SetErrorMessagesStore(store errormessages.Store) {
 	h.pgErrorMessages = store
 	// Mirror into the registry so Respond() can consult the same store.
 	errormessages.SetStore(store)
+}
+
+// SetPricingSourcesStore wires the PG-backed store for operator-managed
+// external pricing catalogs plus the directory backing uploaded catalog
+// files. nil disables the /v0/management/pricing-sources routes (they
+// return 503 in that case).
+func (h *Handler) SetPricingSourcesStore(store store.PricingSourceStore, uploadDir string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pgPricingSources = store
+	h.pgPricingSourcesDir = uploadDir
+	// Bootstrap the pricingsource registry from the persisted rows so
+	// MatchAll can surface external suggestions without waiting for the
+	// operator to click "Refresh" after a server restart.
+	if store != nil {
+		rows, err := store.List(context.Background())
+		if err == nil {
+			list := make([]pricingsource.ExternalSource, 0, len(rows))
+			for _, r := range rows {
+				list = append(list, toExternalSource(r))
+			}
+			pricingsource.SetExternalSources(list)
+		}
+	}
 }
 
 // SetConfig updates the in-memory config reference when the server hot-reloads.

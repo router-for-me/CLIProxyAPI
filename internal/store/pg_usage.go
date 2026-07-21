@@ -170,6 +170,16 @@ func (s *UsageStore) Sealer() *Sealer {
 	return s.sealer
 }
 
+// PricingTable returns the fully-qualified name of the model_pricing
+// table backing this store. Used by callers that need to JOIN against it
+// from outside the UsageStore API (e.g. the models catalog summary view).
+func (s *UsageStore) PricingTable() string {
+	if s == nil {
+		return ""
+	}
+	return s.pricingTable
+}
+
 const usageEventColumnList = `
 	request_id, api_key_id, api_key_principal, user_id, provider, executor_type, model,
 	alias, endpoint, auth_type, source, reasoning_effort, service_tier,

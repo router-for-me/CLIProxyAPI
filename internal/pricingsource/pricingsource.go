@@ -131,6 +131,43 @@ func MatchAll(modelIDs []string) map[string][]SuggestedPrice {
 				out[id] = append(out[id], entries...)
 			}
 		}
+		// Last resort: token matching. Split both the query and every
+		// catalog key into word tokens (alphanumeric, length ≥ 3, not
+		// purely numeric) and pair them when they share at least one
+		// non-numeric token. This lets vendor-namespaced IDs like
+		// "semut-glm-5.2" borrow pricing published for "glm-5.2" via
+		// the shared "glm" token. Applied only when all preceding
+		// strategies missed, so exact matches are never shadowed.
+		if _, ok := out[id]; !ok {
+			queryTokens := wordTokens(key)
+			if len(queryTokens) > 0 {
+				for catalogKey, entries := range pakIndex.entries {
+					if tokensShareWord(queryTokens, catalogKey) {
+						out[id] = append(out[id], entries...)
+					}
+				}
+			}
+		}
+		// Merge in suggestions from operator-managed external catalogs
+		// (LiteLLM URLs / uploaded files). These are additive — they fill
+		// gaps the bundled data does not cover — so they are appended even
+		// when the bundled catalog already matched. Duplicates by Source
+		// name are dropped so a multi-source preview does not list the same
+		// external source twice for one model.
+		extEntries := externalEntriesFor(key)
+		if len(extEntries) > 0 {
+			seenSources := map[string]struct{}{}
+			for _, e := range out[id] {
+				seenSources[e.Source] = struct{}{}
+			}
+			for _, e := range extEntries {
+				if _, dup := seenSources[e.Source]; dup {
+					continue
+				}
+				seenSources[e.Source] = struct{}{}
+				out[id] = append(out[id], e)
+			}
+		}
 	}
 	return out
 }
@@ -155,6 +192,78 @@ func stripDateSuffix(id string) string {
 	return id[:len(id)-9]
 }
 
+// wordTokens splits an id into the word-shaped tokens used by the fuzzy
+// pricing match. A token is a maximal run of letters/digits at least 3
+// characters long that is not purely numeric — pure-numeric tokens (e.g.
+// "5", "20241022") carry no identifying signal and are skipped to avoid
+// spurious pairings across unrelated models that happen to share a version
+// digit. Tokens are returned in input order and are already lower-cased
+// (callers pass a lower-cased id).
+func wordTokens(id string) []string {
+	var out []string
+	start := -1
+	flush := func(s, e int) {
+		if s < 0 {
+			return
+		}
+		tok := id[s:e]
+		if len(tok) >= 3 && !isAllDigits(tok) {
+			out = append(out, tok)
+		}
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		isWord := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+		if isWord {
+			if start < 0 {
+				start = i
+			}
+		} else {
+			flush(start, i)
+			start = -1
+		}
+	}
+	flush(start, len(id))
+	return out
+}
+
+// isAllDigits reports whether s is non-empty and consists solely of ASCII
+// digits. Used to skip numeric-only tokens during fuzzy token matching.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// tokensShareWord reports whether the query token set and the candidate id
+// share at least one non-numeric word token. The candidate is split on the
+// fly so callers do not need to pre-tokenize the entire catalog.
+func tokensShareWord(queryTokens []string, candidate string) bool {
+	if len(queryTokens) == 0 {
+		return false
+	}
+	candTokens := wordTokens(candidate)
+	if len(candTokens) == 0 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(candTokens))
+	for _, t := range candTokens {
+		seen[t] = struct{}{}
+	}
+	for _, t := range queryTokens {
+		if _, ok := seen[t]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // Sources returns a sorted list of source identifiers present in the
 // bundled catalog (e.g. "anthropic-official", "cloudflare", "openrouter").
 // Useful for the dashboard to render a filter dropdown.
@@ -174,6 +283,13 @@ func Sources() []string {
 			if e.Source != "" {
 				seen[e.Source] = struct{}{}
 			}
+		}
+	}
+	// Include operator-managed external sources so the dashboard filter
+	// dropdown offers them as a filter option.
+	for _, snap := range ListExternalSources() {
+		if snap.Source.Enabled && snap.Source.Name != "" {
+			seen[snap.Source.Name] = struct{}{}
 		}
 	}
 	out := make([]string, 0, len(seen))

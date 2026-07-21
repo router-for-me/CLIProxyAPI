@@ -1,15 +1,31 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
-  listModelsCatalog, getModelsCatalogCount, getModelPricing, putModelPricing,
-  syncModelsFromV1, ApiError,
+  listModelsCatalog, getModelsCatalogSummary, getModelsCatalogDistinct,
+  getModelPricing, putModelPricing,
+  syncModelsFromV1, getModelsCatalogSyncStatus, ApiError,
 } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
-import { Spinner, ErrorBanner, EmptyState, Modal } from '../components/Primitives.jsx';
+import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
+import { Spinner, ErrorBanner, EmptyState, Modal, CatalogSkeleton } from '../components/Primitives.jsx';
 import Pager from '../components/Pager.jsx';
 import SyncPricingModal from '../components/SyncPricingModal.jsx';
+import PricingSourcesModal from '../components/PricingSourcesModal.jsx';
 import ModelEntryModal from '../components/ModelEntryModal.jsx';
 
 const DEFAULT_PAGE_SIZE = 25;
+// Suppress the redundant sync if the last sync happened within this window.
+const SYNC_SUPPRESS_WINDOW_MS = 30 * 1000;
+const AUTO_REFRESH_INTERVAL_MS = 60 * 1000;
+const DENSITY_STORAGE = 'nixllm.dashboard.modelsDensity';
+const AUTOREFRESH_STORAGE = 'nixllm.dashboard.modelsAutorefresh';
+
+const SORT_COLUMNS = [
+  { key: 'id', label: 'Model ID' },
+  { key: 'provider', label: 'Upstream Provider' },
+  { key: 'official_provider', label: 'Provider' },
+  { key: 'context_length', label: 'Context' },
+  { key: 'max_completion_tokens', label: 'Max output' },
+];
 
 // ModelsCatalogPage — paginated catalog view, synchronized from the live
 // caller-facing /v1/models endpoint.
@@ -22,51 +38,95 @@ const DEFAULT_PAGE_SIZE = 25;
 //     pipeline, and upserts the returned list into models_catalog.
 //   - The page then renders the paginated catalog directly from PG.
 //
-// When "Show available only" is checked the dashboard calls sync first
-// (one-shot), then fetches the catalog with availableOnly:false (the synced
-// rows ARE the available models). When unchecked, the page shows the full
-// persisted catalog regardless of current availability.
+// "Show available only" controls the `available_only` query flag sent to
+// ListModelsCatalog: when checked, the server filters down to the IDs the
+// in-memory registry reports as live right now. So the toggle is a live
+// filter, not just a sync trigger. The auto-sync on mount (silent) keeps
+// models_catalog fresh so the filtered view reflects current availability.
 export default function ModelsCatalogPage() {
   const [page, setPage] = useState(1);
   const [provider, setProvider] = useState('');
   const [officialProvider, setOfficialProvider] = useState('');
   const [availableOnly, setAvailableOnly] = useState(true);
+  const [staleFilter, setStaleFilter] = useState('live'); // 'live' | 'stale' | 'all'
+  const [query, setQuery] = useState('');
+  const [sortKey, setSortKey] = useState('id');
+  const [sortAsc, setSortAsc] = useState(true);
   const [manualSyncing, setManualSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState('');
   const [syncError, setSyncError] = useState('');
+  const [syncErrorType, setSyncErrorType] = useState('');
   const [initialSyncDone, setInitialSyncDone] = useState(false);
   const [showPricingSync, setShowPricingSync] = useState(false);
+  const [showPricingSources, setShowPricingSources] = useState(false);
   const [editingModel, setEditingModel] = useState(null); // null | {mode, initial}
   const [showCreateModel, setShowCreateModel] = useState(false);
+  const [syncStatus, setSyncStatus] = useState(null);
+  const [summary, setSummary] = useState(null);
+  const [expandedId, setExpandedId] = useState(null);
+  const [density, setDensity] = useState(() => readDensity());
+  const [autoRefresh, setAutoRefresh] = useState(() => readAutoRefresh());
+  // lastSyncTsRef tracks the time of the most recent successful or attempted
+  // sync so the availableOnly toggle can suppress redundant re-syncs.
+  const lastSyncTsRef = useRef(0);
+  // Debounce the free-text search so typing 8 chars doesn't fire 8 queries.
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query.trim()), 250);
+    return () => clearTimeout(t);
+  }, [query]);
 
-  // The catalog fetch always pulls from PG. When the user has "Show
-  // available only" enabled, we re-sync before fetching so the catalog
-  // reflects the current /v1/models output.
+  // staleFilter maps onto availableOnly + client post-filter:
+  //   'live'  → availableOnly=true
+  //   'stale' → availableOnly=false + hide rows whose id is in live_ids
+  //   'all'   → availableOnly=false
+  const effectiveAvailableOnly = staleFilter === 'live';
+
+  const sortParam = useMemo(() => {
+    return (sortAsc ? '' : '-') + sortKey;
+  }, [sortKey, sortAsc]);
+
   const {
     data, error, loading, reload,
   } = useAsync(
-    () => listModelsCatalog({ page, pageSize: DEFAULT_PAGE_SIZE, provider, officialProvider, availableOnly: false }),
-    [page, provider, officialProvider],
+    () => listModelsCatalog({
+      page, pageSize: DEFAULT_PAGE_SIZE, provider, officialProvider,
+      availableOnly: effectiveAvailableOnly, q: debouncedQuery, sort: sortParam,
+    }),
+    [page, provider, officialProvider, effectiveAvailableOnly, debouncedQuery, sortParam],
   );
-  const { data: countData } = useAsync(() => getModelsCatalogCount(), []);
+  const { data: statusData, reload: reloadStatus } = useAsync(() => getModelsCatalogSyncStatus(), []);
+  const { data: summaryData, reload: reloadSummary } = useAsync(() => getModelsCatalogSummary(), []);
+  const { data: distinctProviders } = useAsync(() => getModelsCatalogDistinct('provider'), []);
+  const { data: distinctOfficial } = useAsync(() => getModelsCatalogDistinct('official_provider'), []);
+
+  useEffect(() => { if (statusData) setSyncStatus(statusData); }, [statusData]);
+  useEffect(() => { if (summaryData) setSummary(summaryData); }, [summaryData]);
+
+  const refreshSyncStatus = useCallback(() => { reloadStatus(); reloadSummary(); }, [reloadStatus, reloadSummary]);
 
   // runSync fires the in-process /v1/models -> models_catalog sync.
   // When silent=true the spinner does not show (used for the initial
-  // background sync on mount).
+  // background sync on mount and the suppressed availableOnly re-sync).
   const runSync = useCallback(async (silent = false) => {
     if (!silent) setManualSyncing(true);
     setSyncError('');
+    setSyncErrorType('');
     try {
       const result = await syncModelsFromV1();
-      setSyncMessage(result?.message || '');
-      setSyncMessage((_) => `Synced ${result.synced || 0} models from /v1/models`);
+      lastSyncTsRef.current = Date.now();
+      const n = result?.synced ?? 0;
+      setSyncMessage(`Synced ${n} models from /v1/models`);
       reload();
+      refreshSyncStatus();
     } catch (err) {
+      const type = err?.payload?.error?.type || '';
+      setSyncErrorType(type);
       setSyncError(err.message || 'Sync failed');
     } finally {
       if (!silent) setManualSyncing(false);
     }
-  }, [reload]);
+  }, [reload, refreshSyncStatus]);
 
   // Initial mount: auto-sync once so the catalog reflects current availability
   // before the user sees a (potentially stale) page. Subsequent syncs are
@@ -77,17 +137,33 @@ export default function ModelsCatalogPage() {
     runSync(true);
   }, [initialSyncDone, runSync]);
 
-  // When the "available only" toggle is flipped on, re-sync before the next
-  // catalog fetch so the filtered view is fresh.
+  // When the staleFilter flips to "live", re-sync first if the last sync is
+  // older than SYNC_SUPPRESS_WINDOW_MS so the filtered view reflects current
+  // availability. 'stale' and 'all' do not need a fresh sync — they read the
+  // persisted catalog as-is.
   useEffect(() => {
-    if (availableOnly) {
-      runSync(true);
-    }
-  }, [availableOnly, runSync]);
+    if (staleFilter !== 'live') return;
+    const since = Date.now() - lastSyncTsRef.current;
+    if (since < SYNC_SUPPRESS_WINDOW_MS) return;
+    runSync(true);
+  }, [staleFilter, runSync]);
 
-  const models = data?.models || [];
-  const total = data?.total ?? 0;
+  // Auto-refresh: re-fetch catalog + sync status every 60s while visible.
+  useAutoRefresh(() => { reload(); refreshSyncStatus(); }, AUTO_REFRESH_INTERVAL_MS, autoRefresh);
+
+  const models = useMemo(() => {
+    const rows = data?.models || [];
+    if (staleFilter !== 'stale') return rows;
+    // Client-side "stale only" filter: rows whose id is NOT in live_ids.
+    const liveIDs = data?.live_ids || {};
+    return rows.filter((m) => !liveIDs[String(m.id || '').toLowerCase()]);
+  }, [data, staleFilter]);
+  const total = (staleFilter === 'stale')
+    ? models.length // client-filtered; use the post-filter count for the pager label
+    : (data?.total ?? 0);
   const totalPages = data?.total_pages ?? 0;
+  const liveIDs = data?.live_ids || {};
+  const initialSyncRunning = initialSyncDone && !syncStatus?.last_synced_at && !syncError;
 
   function handlePageChange(newPage) {
     if (newPage < 1 || newPage > totalPages) return;
@@ -101,8 +177,30 @@ export default function ModelsCatalogPage() {
     setOfficialProvider(e.target.value);
     setPage(1);
   }
-  function toggleAvailableOnly(e) {
-    setAvailableOnly(e.target.checked);
+  function handleSortChange(col) {
+    if (col === sortKey) {
+      setSortAsc((v) => !v);
+    } else {
+      setSortKey(col);
+      setSortAsc(true);
+    }
+  }
+  function toggleStaleFilter(next) {
+    setStaleFilter(next);
+    setPage(1);
+  }
+  function handleDensityChange(next) {
+    setDensity(next);
+    writeDensity(next);
+  }
+  function handleToggleAutoRefresh() {
+    setAutoRefresh((v) => { const nv = !v; writeAutoRefresh(nv); return nv; });
+  }
+  function handleStatClick(preset) {
+    // quick-preset switching on the staleFilter
+    if (preset === 'live') setStaleFilter('live');
+    else if (preset === 'stale') setStaleFilter('stale');
+    else if (preset === 'priced' || preset === 'unpriced' || preset === 'all') setStaleFilter('all');
     setPage(1);
   }
 
@@ -112,94 +210,148 @@ export default function ModelsCatalogPage() {
         <div>
           <h1 className="main__title">Available Models</h1>
           <div className="main__subtitle">
-            Synced from the live caller-facing <code>GET /v1/models</code> endpoint.
+            Catalog mirrored from the live caller-facing <code>GET /v1/models</code> endpoint.
             The server auto-uses the first <code>api-keys</code> entry from
             config_store as the auth token.
           </div>
         </div>
-        <div className="row gap-sm">
-          <button className="primary" onClick={() => setShowCreateModel(true)}>
-            + Add model
-          </button>
-          <button onClick={() => setShowPricingSync(true)}>
-            Sync pricing…
-          </button>
-          <button onClick={() => runSync(false)} disabled={manualSyncing}>
+        <div className="row gap-sm" style={{ flexWrap: 'wrap' }}>
+          <button className="primary" onClick={() => runSync(false)} disabled={manualSyncing}>
             {manualSyncing ? 'Syncing…' : 'Sync now'}
           </button>
-          <button onClick={reload}>Refresh</button>
+          <button onClick={() => setShowPricingSync(true)}>Sync pricing…</button>
+          <button onClick={() => setShowPricingSources(true)}>Pricing sources…</button>
+          <button onClick={() => setShowCreateModel(true)}>+ Add model</button>
         </div>
       </div>
 
+      <SyncStatusPill status={syncStatus} loading={initialSyncRunning} />
+
+      {/* Header stat cards — clickable to flip the stale filter / scope. */}
+      <StatsGrid summary={summary} staleFilter={staleFilter} onStatClick={handleStatClick} />
+
       <div className="card">
-        <div className="row gap-lg" style={{ flexWrap: 'wrap' }}>
-          <div className="row gap-sm">
-            <label className="form__label" style={{ marginTop: 6 }}>Upstream Provider</label>
-            <input
-              type="text" style={{ width: 200 }}
-              value={provider}
-              onChange={handleProviderChange}
-              placeholder="e.g. openai (proxy/router)"
-            />
+        {/* Toolbar: search + provider dropdowns + stale filter + density + autorefresh */}
+        <div className="catalog-toolbar">
+          <input
+            type="text"
+            className="search-input"
+            placeholder="Search model id, name, provider…"
+            value={query}
+            onChange={(e) => { setQuery(e.target.value); setPage(1); }}
+          />
+          <select value={provider} onChange={handleProviderChange} style={{ width: 180 }}>
+            <option value="">All upstream providers</option>
+            {(distinctProviders?.values || []).map((p) => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+          <select value={officialProvider} onChange={handleOfficialProviderChange} style={{ width: 180 }}>
+            <option value="">All providers</option>
+            {(distinctOfficial?.values || []).map((p) => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+          <div className="seg-group">
+            <button
+              className={`seg-btn ${staleFilter === 'live' ? 'seg-btn--active' : ''}`}
+              onClick={() => toggleStaleFilter('live')}
+              title="Only models the in-memory registry reports as live right now"
+            >Live only</button>
+            <button
+              className={`seg-btn ${staleFilter === 'stale' ? 'seg-btn--active' : ''}`}
+              onClick={() => toggleStaleFilter('stale')}
+              title="Models in the catalog but not live in the registry"
+            >Stale only</button>
+            <button
+              className={`seg-btn ${staleFilter === 'all' ? 'seg-btn--active' : ''}`}
+              onClick={() => toggleStaleFilter('all')}
+              title="Full persisted catalog regardless of live status"
+            >All</button>
           </div>
-          <div className="row gap-sm">
-            <label className="form__label" style={{ marginTop: 6 }}>Provider</label>
-            <input
-              type="text" style={{ width: 200 }}
-              value={officialProvider}
-              onChange={handleOfficialProviderChange}
-              placeholder="e.g. openai (official)"
-            />
+          <div className="seg-group">
+            <button
+              className={`seg-btn ${density === 'compact' ? 'seg-btn--active' : ''}`}
+              onClick={() => handleDensityChange('compact')}
+            >Compact</button>
+            <button
+              className={`seg-btn ${density === 'comfortable' ? 'seg-btn--active' : ''}`}
+              onClick={() => handleDensityChange('comfortable')}
+            >Comfortable</button>
           </div>
-          <label className="row gap-sm" style={{ cursor: 'pointer' }}>
-            <input
-              type="checkbox"
-              checked={availableOnly}
-              onChange={toggleAvailableOnly}
-              style={{ width: 'auto' }}
-            />
-            <span className="form__label" style={{ margin: 0 }}>
-              Sync from /v1/models (auto-uses first caller key)
-            </span>
-          </label>
-          {countData && (
-            <span className="dim mono" style={{ marginLeft: 'auto' }}>
-              catalog rows: {countData.count}
-            </span>
-          )}
+          <div className="catalog-toolbar__spacer" />
+          <span
+            className={`autorefresh-chip ${autoRefresh ? '' : 'autorefresh-chip--off'}`}
+            role="button"
+            tabIndex={0}
+            onClick={handleToggleAutoRefresh}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleToggleAutoRefresh(); } }}
+            title={autoRefresh ? 'Auto-refresh every 60s. Click to pause.' : 'Auto-refresh paused. Click to resume.'}
+          >
+            <span className="autorefresh-chip__dot" />
+            {autoRefresh ? 'Auto-refresh on' : 'Auto-refresh off'}
+          </span>
+          <span className="catalog-toolbar__count">
+            {loading ? 'loading…' : `${total} result${total === 1 ? '' : 's'}`}
+          </span>
         </div>
-        {syncMessage && (
+        {syncMessage && !syncError && (
           <div className="dim" style={{ marginTop: 8, fontSize: 12 }}>{syncMessage}</div>
         )}
       </div>
 
       {syncError && (
-        <div className="error-banner">
-          <strong>Sync failed:</strong> {syncError}
-        </div>
+        <SyncErrorBanner type={syncErrorType} message={syncError} />
       )}
       <ErrorBanner error={error} onRetry={reload} />
 
       <div className="card" style={{ padding: 0 }}>
-        {loading && <Spinner label="Loading catalog…" />}
+        {loading && (
+          <table className={`table table--${density}`}>
+            <thead>
+              <tr>{SORT_COLUMNS.map((c) => <th key={c.key}>{c.label}</th>)}<th>Pricing</th><th></th></tr>
+            </thead>
+            <tbody>
+              <CatalogSkeleton columns={SORT_COLUMNS.length + 2} rows={6} />
+            </tbody>
+          </table>
+        )}
         {!loading && !error && models.length === 0 && (
           <EmptyState
-            title="Catalog is empty"
-            hint="Click 'Sync now' to mirror /v1/models into PostgreSQL, or start the server with PGSTORE_DSN configured."
+            title={
+              staleFilter === 'stale'
+                ? 'No stale models'
+                : effectiveAvailableOnly
+                  ? 'No live models available'
+                  : 'Catalog is empty'
+            }
+            hint={
+              staleFilter === 'stale'
+                ? 'Every persisted catalog row is currently live in the registry.'
+                : effectiveAvailableOnly
+                  ? 'The in-memory registry has no live clients. Start a provider client, or switch to "All" to browse the full persisted catalog.'
+                  : "Click 'Sync now' to mirror /v1/models into PostgreSQL, or start the server with PGSTORE_DSN configured."
+            }
           />
         )}
         {!loading && !error && models.length > 0 && (
           <>
-            <table className="table">
+            <table className={`table table--${density}`}>
               <thead>
                 <tr>
-                  <th>Model ID</th>
-                  <th>Upstream Provider</th>
-                  <th>Provider</th>
-                  <th>Display name</th>
-                  <th>Context</th>
-                  <th>Max output</th>
-                  <th>Type</th>
+                  {SORT_COLUMNS.map((c) => (
+                    <th
+                      key={c.key}
+                      className={`th-sortable ${sortKey === c.key ? 'th-sort--active' : ''}`}
+                      onClick={() => handleSortChange(c.key)}
+                    >
+                      {c.label}
+                      <span className="th-sort__icon">
+                        {sortKey === c.key ? (sortAsc ? '▲' : '▼') : '↕'}
+                      </span>
+                    </th>
+                  ))}
+                  <th>Pricing</th>
                   <th></th>
                 </tr>
               </thead>
@@ -208,20 +360,28 @@ export default function ModelsCatalogPage() {
                   <ModelRow
                     key={`${m.id}|${m.provider}|${i}`}
                     model={m}
+                    liveIDs={liveIDs}
+                    density={density}
+                    expanded={expandedId === `${m.id}|${m.provider}`}
+                    onToggleExpand={() => setExpandedId((cur) =>
+                      cur === `${m.id}|${m.provider}` ? null : `${m.id}|${m.provider}`,
+                    )}
                     onEdit={() => setEditingModel({ mode: 'edit', initial: m })}
                   />
                 ))}
               </tbody>
             </table>
-            <div style={{ padding: '0 16px 16px' }}>
-              <Pager
-                page={page}
-                totalPages={totalPages}
-                total={total}
-                pageSize={DEFAULT_PAGE_SIZE}
-                onPageChange={handlePageChange}
-              />
-            </div>
+            {staleFilter !== 'stale' && (
+              <div style={{ padding: '0 16px 16px' }}>
+                <Pager
+                  page={page}
+                  totalPages={totalPages}
+                  total={total}
+                  pageSize={DEFAULT_PAGE_SIZE}
+                  onPageChange={handlePageChange}
+                />
+              </div>
+            )}
           </>
         )}
       </div>
@@ -229,7 +389,13 @@ export default function ModelsCatalogPage() {
       {showPricingSync && (
         <SyncPricingModal
           onClose={() => setShowPricingSync(false)}
-          onApplied={() => reload()}
+          onApplied={() => { reload(); reloadSummary(); }}
+        />
+      )}
+      {showPricingSources && (
+        <PricingSourcesModal
+          onClose={() => setShowPricingSources(false)}
+          onChanged={() => { reload(); reloadSummary(); }}
         />
       )}
       {showCreateModel && (
@@ -237,7 +403,7 @@ export default function ModelsCatalogPage() {
           mode="create"
           initial={null}
           onClose={() => setShowCreateModel(false)}
-          onSaved={() => { setShowCreateModel(false); reload(); }}
+          onSaved={() => { setShowCreateModel(false); reload(); reloadSummary(); }}
         />
       )}
       {editingModel && (
@@ -245,40 +411,82 @@ export default function ModelsCatalogPage() {
           mode="edit"
           initial={editingModel.initial}
           onClose={() => setEditingModel(null)}
-          onSaved={() => { setEditingModel(null); reload(); }}
-          onDeleted={() => { setEditingModel(null); reload(); }}
+          onSaved={() => { setEditingModel(null); reload(); reloadSummary(); }}
+          onDeleted={() => { setEditingModel(null); reload(); reloadSummary(); }}
         />
       )}
     </>
   );
 }
 
-function ModelRow({ model, onEdit }) {
+function ModelRow({ model, liveIDs, density, expanded, onToggleExpand, onEdit }) {
+  const isLive = liveIDs ? !!liveIDs[String(model.id || '').toLowerCase()] : true;
   return (
-    <tr>
-      <td>
-        <div className="mono">{model.id}</div>
-        {model.user_defined && (
-          <span className="badge badge--muted" style={{ marginTop: 2 }}>user-defined</span>
-        )}
-      </td>
-      <td><span className="badge badge--muted">{model.provider}</span></td>
-      <td><span className="badge">{model.official_provider || '—'}</span></td>
-      <td>{model.display_name || '—'}</td>
-      <td className="mono">{model.context_length ? model.context_length.toLocaleString() : '—'}</td>
-      <td className="mono">{model.max_completion_tokens ? model.max_completion_tokens.toLocaleString() : '—'}</td>
-      <td className="muted">{model.type}</td>
-      <td>
-        <div className="row gap-sm" style={{ justifyContent: 'flex-end' }}>
-          {onEdit && (
-            <button onClick={onEdit} style={{ padding: '4px 10px', fontSize: 12 }}>
-              Edit
-            </button>
+    <>
+      <tr style={{ cursor: 'pointer' }} onClick={onToggleExpand}>
+        <td>
+          <div className="mono">
+            <LiveBadge live={isLive} />
+            {model.id}
+          </div>
+          {model.user_defined && (
+            <span className="badge badge--muted" style={{ marginTop: 2 }}>user-defined</span>
           )}
-          <PricingButton modelId={model.id} />
-        </div>
-      </td>
-    </tr>
+        </td>
+        <td><span className="badge badge--muted">{model.provider}</span></td>
+        <td><span className="badge">{model.official_provider || '—'}</span></td>
+        <td className="mono">{formatTokens(model.context_length)}</td>
+        <td className="mono">{formatTokens(model.max_completion_tokens)}</td>
+        <td><InlinePricing model={model} /></td>
+        <td onClick={(e) => e.stopPropagation()}>
+          <div className="row-actions">
+            <button className="row-actions__btn--primary" onClick={onEdit}>Edit</button>
+            <PricingButton modelId={model.id} />
+          </div>
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="row-expanded">
+          <td colSpan={7}>
+            <div className="row-expanded__grid">
+              <ExpandedField label="Display name" value={model.display_name || '—'} />
+              <ExpandedField label="Type" value={model.type || '—'} />
+              <ExpandedField label="Name" value={model.name || '—'} />
+              <ExpandedField label="Version" value={model.version || '—'} />
+              <ExpandedField label="Object" value={model.object || '—'} />
+              <ExpandedField label="Input token limit" value={model.input_token_limit ? model.input_token_limit.toLocaleString() : '—'} />
+              <ExpandedField label="Output token limit" value={model.output_token_limit ? model.output_token_limit.toLocaleString() : '—'} />
+              <ExpandedField label="Supports web search" value={model.supports_web_search ? 'yes' : 'no'} />
+              <ExpandedField label="Input modalities" value={(model.input_modalities || []).join(', ') || '—'} />
+              <ExpandedField label="Output modalities" value={(model.output_modalities || []).join(', ') || '—'} />
+              <ExpandedField label="Updated" value={model.updated_at ? new Date(model.updated_at).toLocaleString() : '—'} />
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function ExpandedField({ label, value }) {
+  return (
+    <div className="row-expanded__field">
+      <div className="row-expanded__label">{label}</div>
+      <div className="row-expanded__value">{value}</div>
+    </div>
+  );
+}
+
+function InlinePricing({ model }) {
+  const p = model.pricing;
+  if (!p) {
+    return <span className="pricing-inline pricing-inline--unset" title="Click Pricing to set">unpriced</span>;
+  }
+  return (
+    <span className="pricing-inline mono" title="Click Pricing to edit">
+      <span>I: ${fmtUSD(p.input_per_1m_usd)}/M</span>
+      <span>O: ${fmtUSD(p.output_per_1m_usd)}/M</span>
+    </span>
   );
 }
 
@@ -286,9 +494,7 @@ function PricingButton({ modelId }) {
   const [open, setOpen] = useState(false);
   return (
     <>
-      <button onClick={() => setOpen(true)} style={{ padding: '4px 10px', fontSize: 12 }}>
-        Pricing
-      </button>
+      <button onClick={() => setOpen(true)}>Pricing</button>
       {open && <PricingModal modelId={modelId} onClose={() => setOpen(false)} />}
     </>
   );
@@ -380,4 +586,158 @@ function PricingModal({ modelId, onClose }) {
       )}
     </Modal>
   );
+}
+
+// StatsGrid renders the 5 header stat cards sourced from /models-catalog/summary.
+// Cards are clickable to flip the stale filter / scope as a quick preset.
+function StatsGrid({ summary, staleFilter, onStatClick }) {
+  if (!summary) return null;
+  const cards = [
+    { key: 'total', label: 'Total', value: summary.total ?? 0, hint: 'persisted catalog rows', preset: 'all', active: staleFilter === 'all' },
+    { key: 'live', label: 'Live', value: summary.live ?? 0, hint: 'in registry right now', preset: 'live', active: staleFilter === 'live' },
+    { key: 'stale', label: 'Stale', value: summary.stale ?? 0, hint: 'persisted but not live', preset: 'stale', active: staleFilter === 'stale' },
+    { key: 'priced', label: 'Priced', value: summary.priced ?? 0, hint: 'has non-zero pricing', preset: 'priced', active: false },
+    { key: 'unpriced', label: 'Unpriced', value: summary.unpriced ?? 0, hint: 'no pricing set', preset: 'unpriced', active: false },
+  ];
+  return (
+    <div className="stats-grid">
+      {cards.map((c) => (
+        <div
+          key={c.key}
+          className={`stat-card ${c.active ? 'stat-card--active' : ''}`}
+          role="button"
+          tabIndex={0}
+          onClick={() => onStatClick(c.preset)}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onStatClick(c.preset); } }}
+        >
+          <div className="stat-card__value">{c.value.toLocaleString()}</div>
+          <div className="stat-card__label">{c.label}</div>
+          <div className="stat-card__hint">{c.hint}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// LiveBadge renders the small dot in front of a model ID indicating whether
+// the in-memory registry currently reports it as available. When live_ids is
+// missing we default to neutral (no badge) rather than implying stale.
+function LiveBadge({ live }) {
+  if (live) {
+    return <span className="live-dot live-dot--on" title="Live in registry" aria-label="live" />;
+  }
+  return <span className="live-dot live-dot--off" title="Not in current registry" aria-label="stale" />;
+}
+
+// formatRelativeTime renders a short "2m ago" / "just now" string from an
+// RFC3339 timestamp. Returns '—' when the input is empty/invalid.
+function formatRelativeTime(iso) {
+  if (!iso) return '—';
+  const t = new Date(iso);
+  const ms = Date.now() - t.getTime();
+  if (Number.isNaN(ms)) return '—';
+  if (ms < 30 * 1000) return 'just now';
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+// formatTokens renders a token count as a compact short form (e.g. 128000 →
+// "128K"; 4000 → "4K"; 1000000 → "1M"). Returns '—' for zero/missing.
+function formatTokens(n) {
+  if (!n || n <= 0) return '—';
+  if (n >= 1_000_000) {
+    const v = n / 1_000_000;
+    return (v % 1 === 0 ? v.toFixed(0) : v.toFixed(1)) + 'M';
+  }
+  if (n >= 1000) {
+    const v = n / 1000;
+    return (v % 1 === 0 ? v.toFixed(0) : v.toFixed(1)) + 'K';
+  }
+  return String(n);
+}
+
+// fmtUSD renders a USD-per-1M-tokens float as a compact readable string.
+function fmtUSD(v) {
+  if (v == null || v === 0) return '0';
+  if (v < 0.01) return v.toFixed(4);
+  if (v < 1) return v.toFixed(3);
+  return v.toFixed(2);
+}
+
+// SyncStatusPill renders the "last synced N ago · key sk-abcd…" summary
+// under the header, plus a refreshing hint while the initial mount sync is
+// still in flight (no prior sync recorded).
+function SyncStatusPill({ status, loading }) {
+  if (loading) {
+    return (
+      <div className="sync-pill sync-pill--loading">
+        <span className="spinner spinner--sm" /> Refreshing catalog from /v1/models…
+      </div>
+    );
+  }
+  if (!status) return null;
+  const hasError = !!status.last_error;
+  const ts = formatRelativeTime(status.last_synced_at);
+  return (
+    <div className={`sync-pill ${hasError ? 'sync-pill--error' : ''}`}>
+      {hasError ? (
+        <>
+          <span className="sync-pill__dot sync-pill__dot--err" />
+          <span>Last sync failed{status.last_error_type ? ` · ${status.last_error_type}` : ''}</span>
+        </>
+      ) : (
+        <>
+          <span className="sync-pill__dot" />
+          <span>Last synced <strong>{ts}</strong> · {status.last_synced_count ?? 0} models</span>
+        </>
+      )}
+      {status.caller_key_prefix && (
+        <span className="dim mono" style={{ marginLeft: 4 }}>· key {status.caller_key_prefix}</span>
+      )}
+      {typeof status.live_available_count === 'number' && (
+        <span className="dim" style={{ marginLeft: 4 }}>· {status.live_available_count} live in registry</span>
+      )}
+    </div>
+  );
+}
+
+// SyncErrorBanner renders a sync failure with an actionable hint derived
+// from the error type so operators know what to fix.
+function SyncErrorBanner({ type, message }) {
+  let hint = '';
+  if (type === 'no_caller_key') {
+    hint = 'Add an entry under api-keys: in your config (or set a PG-managed key), then click "Sync now" again.';
+  } else if (type === 'v1_models_probe_failed') {
+    hint = 'The in-process /v1/models probe could not run. Check that a provider client is connected and the caller key is valid.';
+  } else if (type === 'v1_models_decode_failed') {
+    hint = 'The /v1/models response was not valid JSON. This usually means the registry is mid-refresh — retry.';
+  }
+  return (
+    <div className="error-banner">
+      <strong>Sync failed:</strong> {message}
+      {hint && <div className="dim" style={{ marginTop: 4, fontSize: 12 }}>{hint}</div>}
+    </div>
+  );
+}
+
+// readDensity / writeDensity persist the user's density preference so it
+// survives reloads. Defaults to 'comfortable'.
+function readDensity() {
+  try { return localStorage.getItem(DENSITY_STORAGE) || 'comfortable'; } catch { return 'comfortable'; }
+}
+function writeDensity(v) {
+  try { localStorage.setItem(DENSITY_STORAGE, v); } catch { /* ignore */ }
+}
+
+// readAutoRefresh / writeAutoRefresh persist the user's auto-refresh toggle.
+function readAutoRefresh() {
+  try { return localStorage.getItem(AUTOREFRESH_STORAGE) !== 'off'; } catch { return true; }
+}
+function writeAutoRefresh(v) {
+  try { localStorage.setItem(AUTOREFRESH_STORAGE, v ? 'on' : 'off'); } catch { /* ignore */ }
 }
