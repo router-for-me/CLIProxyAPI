@@ -1,12 +1,14 @@
 import React, { useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   getAPIKey, patchAPIKey, putAPIKeyPolicy, regenerateAPIKey, deleteAPIKey, getUsageWindows,
   getInternalUser,
 } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
-import { Spinner, ErrorBanner, StatusBadge, Modal } from '../components/Primitives.jsx';
+import { Spinner, ErrorBanner, StatusBadge, Modal, RoleBadge } from '../components/Primitives.jsx';
 import PolicyForm, { formToPolicy } from '../components/PolicyForm.jsx';
+import CopyButton from '../components/CopyButton.jsx';
+import { useToast } from '../components/Toast.jsx';
 
 export default function ApiKeyDetailPage() {
   const { id } = useParams();
@@ -18,17 +20,7 @@ export default function ApiKeyDetailPage() {
 
   return (
     <>
-      <div className="main__header">
-        <div>
-          <h1 className="main__title">{data.name}</h1>
-          <div className="main__subtitle mono dim">{data.id}</div>
-        </div>
-        <div className="row gap-sm">
-          <Link to="/"><button>Back</button></Link>
-          <button onClick={reload}>Refresh</button>
-        </div>
-      </div>
-
+      <KeyHeader apiKey={data} onUpdated={reload} />
       <div className="grid grid--2">
         <KeyDetailsCard apiKey={data} onUpdated={reload} />
         <OwnerCard apiKey={data} />
@@ -41,11 +33,80 @@ export default function ApiKeyDetailPage() {
   );
 }
 
+// KeyHeader — top summary band: name, id (copy), prefix (copy), status pill,
+// and a grouped actions cluster (Refresh / Regenerate / Delete). Keeps the
+// high-signal identity + danger actions above the fold instead of buried in
+// a details card.
+function KeyHeader({ apiKey, onUpdated }) {
+  const toast = useToast();
+  const [showRegen, setShowRegen] = useState(false);
+  const [showDelete, setShowDelete] = useState(false);
+
+  return (
+    <div className="card key-header-strip">
+      <div className="key-header-strip__main">
+        <div className="row" style={{ gap: 12, alignItems: 'baseline', flexWrap: 'wrap' }}>
+          <h1 className="main__title" style={{ margin: 0 }}>{apiKey.name}</h1>
+          <StatusBadge status={apiKey.status} />
+        </div>
+        <div className="key-header-strip__meta">
+          <span className="key-header-strip__meta-item">
+            <span className="dim">id:</span>
+            <span className="mono">{apiKey.id}</span>
+            <CopyButton value={apiKey.id} label="Copy" small />
+          </span>
+          <span className="key-header-strip__meta-item">
+            <span className="dim">prefix:</span>
+            <code className="mono">{apiKey.key_prefix}…</code>
+            <CopyButton value={`${apiKey.key_prefix}…`} label="Copy" small />
+          </span>
+          <span className="key-header-strip__meta-item">
+            <span className="dim">owner:</span>
+            {apiKey.user_id ? (
+              <Link to={`/internal-users/${encodeURIComponent(apiKey.user_id)}`} className="mono">
+                {apiKey.user_alias
+                  ? `${apiKey.user_alias}${apiKey.user_email ? ` · ${apiKey.user_email}` : ''}`
+                  : apiKey.user_id.slice(0, 8)}
+              </Link>
+            ) : <span className="dim">unassigned</span>}
+          </span>
+        </div>
+      </div>
+      <div className="key-header-strip__actions">
+        <button onClick={() => { onUpdated(); toast.info('Key refreshed'); }}>Refresh</button>
+        <button onClick={() => setShowRegen(true)}>Regenerate</button>
+        <button className="danger" onClick={() => setShowDelete(true)}>Delete</button>
+      </div>
+
+      {showRegen && (
+        <RegenerateModal
+          apiKeyId={apiKey.id}
+          keyName={apiKey.name}
+          onClose={() => setShowRegen(false)}
+          onDone={() => { setShowRegen(false); onUpdated(); }}
+        />
+      )}
+      {showDelete && (
+        <DeleteModal
+          apiKeyId={apiKey.id}
+          name={apiKey.name}
+          onClose={() => setShowDelete(false)}
+          onDone={() => { setShowDelete(false); }}
+        />
+      )}
+    </div>
+  );
+}
+
 // OwnerCard shows the Internal User that owns this key and surfaces the
 // fallback-budget indicator: when the per-key Policy leaves a budget cap
 // unset, enforcement falls back to the owner's max_budget (LiteLLM-style
 // workflow). Spend attribution always flows to the user via the
 // usage_events.user_id / user_windows rows.
+//
+// The key payload already joins user_alias/user_email, so the basic identity
+// row is rendered immediately from apiKey; we only fetch the full internal
+// user record for the spend/percentage + RPM fallback display.
 function OwnerCard({ apiKey }) {
   const userId = apiKey.user_id || '';
   const owner = useAsync(
@@ -69,17 +130,11 @@ function OwnerCard({ apiKey }) {
     );
   }
 
-  if (owner.loading) return <div className="card"><Spinner label="Loading owner…" /></div>;
-  if (owner.error) {
-    return (
-      <div className="card">
-        <h3 className="card__title">Owner</h3>
-        <ErrorBanner error={owner.error} onRetry={owner.reload} />
-      </div>
-    );
-  }
+  // Render identity from the joined key payload immediately; only block on the
+  // full user fetch for the spend/role/fallback figures.
   const u = owner.data;
-  if (!u) return null;
+  const loadingOwner = owner.loading;
+  const ownerError = owner.error;
 
   // Detect which per-key budget caps are unset; for each unset cap, the
   // owner's max_budget is the effective cap (running spend in this window).
@@ -90,71 +145,77 @@ function OwnerCard({ apiKey }) {
   const rpmUnset = policy.rpm_limit === null || policy.rpm_limit === undefined;
   const maxParallelUnset = policy.max_parallel_requests === null || policy.max_parallel_requests === undefined;
   const anyUnset = hourlyUnset || weeklyUnset || monthlyUnset || rpmUnset || maxParallelUnset;
-  const userHasCap = u.max_budget && Number(u.max_budget) > 0;
+  const userHasCap = u && u.max_budget && Number(u.max_budget) > 0;
 
   return (
     <div className="card">
       <div className="row row--between" style={{ marginBottom: 12 }}>
         <h3 className="card__title" style={{ margin: 0 }}>Owner</h3>
-        <Link to={`/internal-users/${encodeURIComponent(u.id)}`}>
+        <Link to={`/internal-users/${encodeURIComponent(userId)}`}>
           <button>View user</button>
         </Link>
       </div>
       <div className="form__row">
         <div className="form__label">Internal User</div>
         <div>
-          <Link to={`/internal-users/${encodeURIComponent(u.id)}`}>
-            {u.user_alias || u.id}
+          <Link to={`/internal-users/${encodeURIComponent(userId)}`}>
+            {apiKey.user_alias || userId}
           </Link>
-          <span className="dim mono" style={{ marginLeft: 8 }}>{u.id}</span>
+          <span className="dim mono" style={{ marginLeft: 8 }}>{userId}</span>
         </div>
       </div>
       <div className="form__row">
         <div className="form__label">Email</div>
-        <div className="mono dim">{u.user_email || '—'}</div>
+        <div className="mono dim">{apiKey.user_email || (u && u.user_email) || '—'}</div>
       </div>
-      <div className="form__row">
-        <div className="form__label">User role</div>
-        <span className={`badge ${u.user_role === 'proxy_admin' ? 'badge--revoked' : 'badge--active'}`}>
-          {u.user_role}
-        </span>
-      </div>
-      <div className="form__row">
-        <div className="form__label">User max_budget</div>
-        <div className="mono">
-          {userHasCap ? `$${Number(u.max_budget).toFixed(2)}` : 'unlimited'}
-          {userHasCap && (
-            <span className="dim" style={{ marginLeft: 8 }}>
-              ({((u.spend || 0) / Number(u.max_budget) * 100).toFixed(1)}% used ·
-              ${Number(u.spend || 0).toFixed(2)} running)
-            </span>
-          )}
-        </div>
-      </div>
-      <div className="form__row">
-        <div className="form__label">User RPM limit</div>
-        <div className="mono">{u.rpm_limit ?? '—'}</div>
-      </div>
-      <div className="form__hint" style={{ marginTop: 12 }}>
-        {anyUnset ? (
-          userHasCap ? (
-            <>
-              <strong>Fallback active:</strong> per-key caps that are unset
-              ({describeUnset({ hourlyUnset, weeklyUnset, monthlyUnset, rpmUnset, maxParallelUnset })})
-              fall back to this user's max_budget / rpm_limit / max_parallel_requests.
-              Spend attributed to the key is also tallied against the user.
-            </>
-          ) : (
-            <>
-              Per-key caps that are unset
-              ({describeUnset({ hourlyUnset, weeklyUnset, monthlyUnset, rpmUnset, maxParallelUnset })})
-              have no fallback — the owner's max_budget is also unlimited.
-            </>
-          )
-        ) : (
-          <>All per-key caps are set; the user-level fallback is not engaged.</>
-        )}
-      </div>
+      {loadingOwner ? (
+        <Spinner label="Loading owner details…" />
+      ) : ownerError ? (
+        <ErrorBanner error={ownerError} onRetry={owner.reload} />
+      ) : u ? (
+        <>
+          <div className="form__row">
+            <div className="form__label">User role</div>
+            <RoleBadge role={u.user_role} />
+          </div>
+          <div className="form__row">
+            <div className="form__label">User max_budget</div>
+            <div className="mono">
+              {userHasCap ? `$${Number(u.max_budget).toFixed(2)}` : 'unlimited'}
+              {userHasCap && (
+                <span className="dim" style={{ marginLeft: 8 }}>
+                  ({((u.spend || 0) / Number(u.max_budget) * 100).toFixed(1)}% used ·
+                  ${Number(u.spend || 0).toFixed(2)} running)
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="form__row">
+            <div className="form__label">User RPM limit</div>
+            <div className="mono">{u.rpm_limit ?? '—'}</div>
+          </div>
+          <div className="form__hint" style={{ marginTop: 12 }}>
+            {anyUnset ? (
+              userHasCap ? (
+                <>
+                  <strong>Fallback active:</strong> per-key caps that are unset
+                  ({describeUnset({ hourlyUnset, weeklyUnset, monthlyUnset, rpmUnset, maxParallelUnset })})
+                  fall back to this user's max_budget / rpm_limit / max_parallel_requests.
+                  Spend attributed to the key is also tallied against the user.
+                </>
+              ) : (
+                <>
+                  Per-key caps that are unset
+                  ({describeUnset({ hourlyUnset, weeklyUnset, monthlyUnset, rpmUnset, maxParallelUnset })})
+                  have no fallback — the owner's max_budget is also unlimited.
+                </>
+              )
+            ) : (
+              <>All per-key caps are set; the user-level fallback is not engaged.</>
+            )}
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }
@@ -170,175 +231,102 @@ function describeUnset({ hourlyUnset, weeklyUnset, monthlyUnset, rpmUnset, maxPa
 }
 
 function KeyDetailsCard({ apiKey, onUpdated }) {
-  const [showRegen, setShowRegen] = useState(false);
-  const [showDelete, setShowDelete] = useState(false);
+  const toast = useToast();
+  const [savingStatus, setSavingStatus] = useState(false);
   const [newStatus, setNewStatus] = useState(apiKey.status);
+
+  // expired is server-computed and not a mutable status — render it read-only.
+  const isExpired = apiKey.status === 'expired';
 
   async function handleStatusChange(e) {
     const status = e.target.value;
     setNewStatus(status);
+    setSavingStatus(true);
     try {
       await patchAPIKey(apiKey.id, { status });
+      toast.success(`Status set to ${status}`);
       onUpdated();
     } catch (err) {
-      alert(err.message);
+      toast.error(err.message || 'Failed to update status');
       setNewStatus(apiKey.status);
+    } finally {
+      setSavingStatus(false);
     }
   }
 
   return (
     <div className="card">
       <h3 className="card__title">Key Details</h3>
-      <div className="form__row">
-        <div className="form__label">Prefix</div>
-        <div className="mono"><code>{apiKey.key_prefix}…</code></div>
-      </div>
+
+      {/* Status control: inline select + spinner. Replaces the old
+          immediate-PATCH-with-alert() pattern. */}
       <div className="form__row">
         <div className="form__label">Status</div>
-        <div className="row gap-sm">
-          <StatusBadge status={apiKey.status} />
-          <select value={newStatus} onChange={handleStatusChange} style={{ width: 'auto' }}>
-            <option value="active">active</option>
-            <option value="disabled">disabled</option>
-            <option value="revoked">revoked</option>
-          </select>
+        <div className={`status-control ${savingStatus ? 'status-control--saving' : ''}`}>
+          {isExpired ? (
+            <StatusBadge status="expired" />
+          ) : (
+            <>
+              <StatusBadge status={apiKey.status} />
+              <select
+                value={newStatus}
+                onChange={handleStatusChange}
+                disabled={savingStatus}
+              >
+                <option value="active">active</option>
+                <option value="disabled">disabled</option>
+                <option value="revoked">revoked</option>
+              </select>
+              {savingStatus && <div className="spinner spinner--sm" />}
+            </>
+          )}
         </div>
       </div>
-      <div className="form__row">
-        <div className="form__label">Created</div>
-        <div>{new Date(apiKey.created_at).toLocaleString()}</div>
+
+      <div className="grid grid--3" style={{ gap: 10, marginBottom: 16 }}>
+        <KeyStat label="Created" value={formatDate(apiKey.created_at)} />
+        <KeyStat label="Last used" value={apiKey.last_used_at ? formatDate(apiKey.last_used_at) : 'never'} />
+        <KeyStat label="Expires" value={apiKey.expires_at ? formatDate(apiKey.expires_at) : 'never'} />
       </div>
+
       <div className="form__row">
-        <div className="form__label">Last used</div>
-        <div>{apiKey.last_used_at ? new Date(apiKey.last_used_at).toLocaleString() : 'never'}</div>
+        <div className="form__label">Prefix</div>
+        <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+          <code className="mono">{apiKey.key_prefix}…</code>
+          <CopyButton value={`${apiKey.key_prefix}…`} label="Copy" small />
+        </div>
       </div>
-      <div className="form__row">
-        <div className="form__label">Expires</div>
-        <div>{apiKey.expires_at ? new Date(apiKey.expires_at).toLocaleString() : 'never'}</div>
-      </div>
+
       {apiKey.metadata && Object.keys(apiKey.metadata).length > 0 && (
         <div className="form__row">
           <div className="form__label">Metadata</div>
-          <pre className="copyable" style={{ whiteSpace: 'pre-wrap' }}>
-            {JSON.stringify(apiKey.metadata, null, 2)}
-          </pre>
+          <div className="row" style={{ gap: 8, alignItems: 'flex-start' }}>
+            <pre className="copyable" style={{ whiteSpace: 'pre-wrap', flex: 1 }}>
+              {JSON.stringify(apiKey.metadata, null, 2)}
+            </pre>
+            <CopyButton value={JSON.stringify(apiKey.metadata, null, 2)} label="Copy" small />
+          </div>
         </div>
-      )}
-      <div className="form__actions">
-        <button onClick={() => setShowRegen(true)}>Regenerate</button>
-        <button className="danger" onClick={() => setShowDelete(true)}>Delete</button>
-      </div>
-
-      {showRegen && (
-        <RegenerateModal
-          apiKeyId={apiKey.id}
-          onClose={() => setShowRegen(false)}
-          onDone={() => { setShowRegen(false); onUpdated(); }}
-        />
-      )}
-      {showDelete && (
-        <DeleteModal
-          apiKeyId={apiKey.id}
-          name={apiKey.name}
-          onClose={() => setShowDelete(false)}
-          onDone={() => { setShowDelete(false); window.location.href = '/'; }}
-        />
       )}
     </div>
   );
 }
 
-function RegenerateModal({ apiKeyId, onClose, onDone }) {
-  const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState('');
-
-  async function handleRegen() {
-    setSubmitting(true);
-    setError('');
-    try {
-      const r = await regenerateAPIKey(apiKeyId);
-      setResult(r);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
+function KeyStat({ label, value }) {
   return (
-    <Modal title="Regenerate Secret" onClose={onClose}>
-      {result ? (
-        <>
-          <div className="form__row">
-            <label className="form__label">New plaintext secret (shown once)</label>
-            <div className="copyable">{result.secret}</div>
-            <div className="form__hint">The key ID, policy, and metadata are unchanged.</div>
-          </div>
-          <div className="form__actions">
-            <button className="primary" onClick={onDone}>Done</button>
-          </div>
-        </>
-      ) : (
-        <>
-          {error && <div className="error-banner">{error}</div>}
-          <p className="muted">
-            This will issue a new secret for the key. The old secret stops working
-            immediately; the key ID, policy, and metadata are preserved.
-          </p>
-          <div className="form__actions">
-            <button onClick={onClose} disabled={submitting}>Cancel</button>
-            <button className="danger" onClick={handleRegen} disabled={submitting}>
-              {submitting ? 'Regenerating…' : 'Regenerate'}
-            </button>
-          </div>
-        </>
-      )}
-    </Modal>
+    <div className="key-stat">
+      <div className="key-stat__label">{label}</div>
+      <div className="key-stat__value">{value}</div>
+    </div>
   );
 }
 
-function DeleteModal({ apiKeyId, name, onClose, onDone }) {
-  const [confirm, setConfirm] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState('');
-
-  async function handleDelete() {
-    if (confirm !== name) return;
-    setSubmitting(true);
-    setError('');
-    try {
-      await deleteAPIKey(apiKeyId);
-      onDone();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <Modal title="Delete Key" onClose={onClose}>
-      {error && <div className="error-banner">{error}</div>}
-      <p>
-        Permanently delete <strong>{name}</strong>? This removes the key, its policy,
-        and all associated usage windows (cascade).
-      </p>
-      <div className="form__row">
-        <label className="form__label">Type the key name to confirm</label>
-        <input type="text" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder={name} />
-      </div>
-      <div className="form__actions">
-        <button onClick={onClose} disabled={submitting}>Cancel</button>
-        <button className="danger" onClick={handleDelete} disabled={submitting || confirm !== name}>
-          {submitting ? 'Deleting…' : 'Delete Forever'}
-        </button>
-      </div>
-    </Modal>
-  );
+function formatDate(s) {
+  return new Date(s).toLocaleString();
 }
 
 function PolicyCard({ apiKeyId, policy: initial, onUpdated }) {
+  const toast = useToast();
   const [editing, setEditing] = useState(false);
   if (!initial && !editing) {
     return (
@@ -359,7 +347,7 @@ function PolicyCard({ apiKeyId, policy: initial, onUpdated }) {
         apiKeyId={apiKeyId}
         initial={initial || {}}
         onCancel={() => setEditing(false)}
-        onSaved={() => { setEditing(false); onUpdated(); }}
+        onSaved={() => { setEditing(false); onUpdated(); toast.success('Policy saved'); }}
       />
     );
   }
@@ -466,7 +454,7 @@ function UsageWindowsCard({ apiKeyId }) {
             <tr><th>Type</th><th>Window start</th><th>Window end</th><th>Requests</th><th>Tokens</th><th>Cost (USD)</th></tr>
           </thead>
           <tbody>
-            {data.windows.map((w, i) => (
+            {data.windows.map((w) => (
               <tr key={`${w.window_type}-${w.window_start}`}>
                 <td><span className="badge badge--muted">{w.window_type}</span></td>
                 <td className="mono">{new Date(w.window_start).toLocaleString()}</td>
@@ -480,6 +468,120 @@ function UsageWindowsCard({ apiKeyId }) {
         </table>
       )}
     </div>
+  );
+}
+
+function RegenerateModal({ apiKeyId, keyName, onClose, onDone }) {
+  const toast = useToast();
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState('');
+  const [secretCopied, setSecretCopied] = useState(false);
+
+  async function handleRegen() {
+    setSubmitting(true);
+    setError('');
+    try {
+      const r = await regenerateAPIKey(apiKeyId);
+      setResult(r);
+      toast.success(`Secret regenerated for "${keyName}"`);
+    } catch (err) {
+      setError(err.message);
+      toast.error(err.message || 'Failed to regenerate');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Modal title="Regenerate Secret" onClose={onClose}>
+      {result ? (
+        <>
+          <div className="form__row">
+            <label className="form__label">New plaintext secret (shown once)</label>
+            <div className="row" style={{ gap: 8, alignItems: 'flex-start' }}>
+              <div className="copyable" style={{ flex: 1 }}>{result.secret}</div>
+              <CopyButton value={result.secret} label="Copy" small />
+            </div>
+            <div className="form__hint">The key ID, policy, and metadata are unchanged.</div>
+          </div>
+          <label className="row gap-sm" style={{ cursor: 'pointer', marginTop: 12 }}>
+            <input
+              type="checkbox"
+              checked={secretCopied}
+              onChange={(e) => setSecretCopied(e.target.checked)}
+              style={{ width: 'auto' }}
+            />
+            <span className="form__label" style={{ margin: 0 }}>
+              I've stored the new secret securely
+            </span>
+          </label>
+          <div className="form__actions">
+            <button className="primary" onClick={onDone} disabled={!secretCopied}>Done</button>
+          </div>
+        </>
+      ) : (
+        <>
+          {error && <div className="error-banner">{error}</div>}
+          <p className="muted">
+            This will issue a new secret for the key. The old secret stops working
+            immediately; the key ID, policy, and metadata are preserved.
+          </p>
+          <div className="form__actions">
+            <button onClick={onClose} disabled={submitting}>Cancel</button>
+            <button className="danger" onClick={handleRegen} disabled={submitting}>
+              {submitting ? 'Regenerating…' : 'Regenerate'}
+            </button>
+          </div>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function DeleteModal({ apiKeyId, name, onClose, onDone }) {
+  const toast = useToast();
+  const navigate = useNavigate();
+  const [confirm, setConfirm] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  async function handleDelete() {
+    if (confirm !== name) return;
+    setSubmitting(true);
+    setError('');
+    try {
+      await deleteAPIKey(apiKeyId);
+      toast.success(`Key "${name}" deleted`);
+      onDone();
+      // SPA navigation instead of a hard full-page reload (window.location.href).
+      navigate('/', { replace: true });
+    } catch (err) {
+      setError(err.message);
+      toast.error(err.message || 'Failed to delete key');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Modal title="Delete Key" onClose={onClose}>
+      {error && <div className="error-banner">{error}</div>}
+      <p>
+        Permanently delete <strong>{name}</strong>? This removes the key, its policy,
+        and all associated usage windows (cascade).
+      </p>
+      <div className="form__row">
+        <label className="form__label">Type the key name to confirm</label>
+        <input type="text" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder={name} />
+      </div>
+      <div className="form__actions">
+        <button onClick={onClose} disabled={submitting}>Cancel</button>
+        <button className="danger" onClick={handleDelete} disabled={submitting || confirm !== name}>
+          {submitting ? 'Deleting…' : 'Delete Forever'}
+        </button>
+      </div>
+    </Modal>
   );
 }
 
