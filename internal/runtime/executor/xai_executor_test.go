@@ -37,6 +37,97 @@ func testContextWithAPIKey(apiKey string) context.Context {
 	return context.WithValue(context.Background(), "gin", ginCtx)
 }
 
+func TestXAICapacityEventStatusErr(t *testing.T) {
+	tests := []string{
+		`{"code":"SOME RESOURCE HAS BEEN EXHAUSTED"}`,
+		`{"error":"The service is temporarily at capacity. Please retry your request shortly."}`,
+		`{"error":{"message":"Service is at capacity"}}`,
+		`{"message":"resource has been exhausted"}`,
+		`{"response":{"error":{"code":"resource has been exhausted"}}}`,
+		`{"response":{"error":{"message":"temporarily at capacity"}}}`,
+	}
+	for _, event := range tests {
+		err, ok := xaiCapacityEventStatusErr([]byte(event))
+		if !ok {
+			t.Fatalf("xaiCapacityEventStatusErr(%s) did not detect capacity error", event)
+		}
+		if got := err.StatusCode(); got != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want %d", got, http.StatusServiceUnavailable)
+		}
+	}
+
+	if _, ok := xaiCapacityEventStatusErr([]byte(`{"type":"response.in_progress"}`)); ok {
+		t.Fatal("ordinary response event detected as capacity error")
+	}
+}
+
+func TestXAIExecutorExecuteReturnsCapacityErrorFromSuccessfulSSE(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"code\":\"Some resource has been exhausted\",\"error\":\"The service is temporarily at capacity. Please retry your request shortly.\"}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.5",
+		Payload: []byte(`{"model":"grok-4.5","input":"hello"}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want capacity error")
+	}
+	var statusCodeErr interface{ StatusCode() int }
+	if !errors.As(err, &statusCodeErr) || statusCodeErr.StatusCode() != http.StatusServiceUnavailable {
+		t.Fatalf("Execute() error = %v, want status %d", err, http.StatusServiceUnavailable)
+	}
+}
+
+func TestXAIExecutorExecuteStreamEmitsCapacityErrorBeforePayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: error\ndata: {\"response\":{\"error\":{\"message\":\"The service is at capacity\"}}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.5",
+		Payload: []byte(`{"model":"grok-4.5","input":"hello"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var payload bytes.Buffer
+	var streamErr error
+	for chunk := range result.Chunks {
+		payload.Write(chunk.Payload)
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+		}
+	}
+	if payload.Len() != 0 {
+		t.Fatalf("payload emitted before capacity error: %q", payload.String())
+	}
+	var statusCodeErr interface{ StatusCode() int }
+	if !errors.As(streamErr, &statusCodeErr) || statusCodeErr.StatusCode() != http.StatusServiceUnavailable {
+		t.Fatalf("stream error = %v, want status %d", streamErr, http.StatusServiceUnavailable)
+	}
+}
+
 func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	var gotPath string
 	var gotAuth string
