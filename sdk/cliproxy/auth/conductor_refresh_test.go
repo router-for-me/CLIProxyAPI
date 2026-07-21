@@ -390,14 +390,15 @@ func TestManager_RefreshAuthAllowsPluginStorageWithoutRefreshToken(t *testing.T)
 	}
 }
 
-func TestManager_RefreshAuthRejectsTypeOnlyStoragePayload(t *testing.T) {
+func TestManager_RefreshAuthDefersPluginStorageRefreshabilityToExecutor(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(nil, nil, nil)
 	manager.RegisterExecutor(planRefreshExecutor{})
+	// Nested provider-specific fields only; host must not reject before the executor runs.
 	auth := &Auth{
-		ID:       "plugin-type-only-storage",
+		ID:       "plugin-nested-storage",
 		Provider: "codex",
-		Storage:  &rawJSONRefreshStorage{raw: []byte(`{"type":"plugin","access_token":"access-only"}`)},
+		Storage:  &rawJSONRefreshStorage{raw: []byte(`{"type":"plugin","creds":{"refresh":"nested-material"}}`)},
 		Metadata: map[string]any{"access_token": "access-only"},
 	}
 	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
@@ -405,26 +406,14 @@ func TestManager_RefreshAuthRejectsTypeOnlyStoragePayload(t *testing.T) {
 	}
 
 	refreshed, errRefresh := manager.RefreshAuth(ctx, auth.ID)
-	if !errors.Is(errRefresh, ErrAuthNotRefreshable) {
-		t.Fatalf("RefreshAuth() error = %v, want ErrAuthNotRefreshable", errRefresh)
+	if errRefresh != nil {
+		t.Fatalf("RefreshAuth() error = %v", errRefresh)
 	}
-	if refreshed != nil {
-		t.Fatalf("RefreshAuth() auth = %#v, want nil", refreshed)
+	if refreshed == nil {
+		t.Fatal("RefreshAuth() auth = nil")
 	}
-}
-
-func TestStoragePayloadHasRefreshMaterial(t *testing.T) {
-	if !storagePayloadHasRefreshMaterial([]byte(`{"type":"plugin","token":"x"}`)) {
-		t.Fatal("expected token field to count as refresh material")
-	}
-	if storagePayloadHasRefreshMaterial([]byte(`{"type":"plugin","access_token":"x"}`)) {
-		t.Fatal("access_token alone must not count as refresh material")
-	}
-	if storagePayloadHasRefreshMaterial([]byte(`{"type":"plugin"}`)) {
-		t.Fatal("type-only payload must not count as refresh material")
-	}
-	if !storagePayloadHasRefreshMaterial([]byte("opaque-refresh-blob")) {
-		t.Fatal("opaque non-JSON payload should count as refresh material")
+	if got := authAccessToken(refreshed); got != "fresh-access-token" {
+		t.Fatalf("access token = %q, want fresh-access-token", got)
 	}
 }
 

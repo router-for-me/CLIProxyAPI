@@ -1785,6 +1785,9 @@ func syncCodexPlanType(auth *cliproxyauth.Auth, idToken string) {
 		log.Warnf("codex executor: failed to parse refreshed ID token: %v", errParse)
 		return
 	}
+	if claims == nil {
+		return
+	}
 	planType := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
 	if planType == "" {
 		return
