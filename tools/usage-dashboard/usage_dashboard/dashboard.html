@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CLIProxyAPI 用量统计</title>
+<style>
+:root{color-scheme:light;--bg:#f6f7f9;--panel:#fff;--text:#17202a;--muted:#667085;--line:#a0aec0;--blue:#2563eb;--green:#0f9f6e;--red:#d92d20;--amber:#92400e}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text)}
+header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 24px;border-bottom:1px solid var(--line);background:#fff;position:sticky;top:0;z-index:2;flex-wrap:wrap}
+h1{font-size:20px;margin:0}
+main{padding:20px 24px 32px;max-width:1440px;margin:0 auto}
+button,select,input{border:1px solid var(--line);background:#fff;color:var(--text);border-radius:6px;padding:8px 10px;font-size:14px}
+button.primary{background:var(--blue);color:#fff;border-color:var(--blue);cursor:pointer}
+button.primary:hover{background:#1e4bbf}
+.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.grid{display:grid;gap:14px}
+.kpis{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
+.two{grid-template-columns:1.2fr .8fr;margin-top:14px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;min-width:0}
+.panel h2{margin:0 0 12px;font-size:15px}
+.kpi .label{color:var(--muted);font-size:12px}
+.kpi .value{font-size:22px;font-weight:700;margin-top:6px}
+.kpi .sub{color:var(--muted);font-size:12px;margin-top:4px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;border-bottom:1px solid var(--line);padding:8px;white-space:nowrap}
+th{color:var(--muted);font-weight:600}
+td.num,th.num{text-align:right}
+.scroll{overflow:auto;max-height:420px;position:relative}
+.status{display:inline-flex;align-items:center;gap:6px}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--green)}
+.dot.bad{background:var(--red)}
+.dot.warn{background:var(--amber)}
+.muted{color:var(--muted)}
+.warn{color:var(--amber)}
+canvas{width:100%;height:260px;display:block}
+#modelFilter{min-width:220px}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.degraded-banner{background:#fef3cd;border:1px solid var(--amber);color:var(--text);padding:10px 16px;border-radius:6px;margin-bottom:14px;display:none}
+.empty{color:var(--muted);text-align:center;padding:32px 8px;font-style:italic}
+.stale{opacity:.7}
+:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+label{margin-right:4px;font-size:14px;color:var(--text)}
+@media(max-width:960px){.kpis,.two{grid-template-columns:1fr}header{align-items:flex-start;flex-direction:column}}
+</style>
+</head>
+<body>
+<header>
+<h1>CLIProxyAPI 用量统计</h1>
+<div class="toolbar">
+<label for="range">时间范围</label><select id="range"><option value="today">今天</option><option value="1h">最近 1 小时</option><option value="5h">最近 5 小时</option><option value="24h" selected>最近 24 小时</option><option value="7d">最近 7 天</option><option value="30d">最近 30 天</option></select>
+<label for="from">从</label><input type="datetime-local" id="from" aria-label="自定义起始时间">
+<label for="to">到</label><input type="datetime-local" id="to" aria-label="自定义结束时间">
+<label for="modelFilter">模型（可多选）</label><select id="modelFilter" multiple size="1"><option value="">加载中…</option></select>
+<button id="refresh" class="primary">刷新</button>
+<span id="health" class="muted" role="status" aria-live="polite"></span>
+<span id="updated" class="muted" role="status" aria-live="polite"></span>
+</div>
+</header>
+<main id="main">
+<div id="degradedBanner" class="degraded-banner" role="alert">采集器降级：最近一次轮询失败或数据陈旧</div>
+<section class="grid kpis" aria-label="关键指标">
+<div class="panel kpi"><div class="label">请求/任务数</div><div class="value" id="kReq">0</div><div class="sub" id="kFail">失败 0</div></div>
+<div class="panel kpi"><div class="label">总 Tokens</div><div class="value" id="kTok">0</div><div class="sub">输入+输出+推理</div></div>
+<div class="panel kpi"><div class="label">输入 Tokens</div><div class="value" id="kIn">0</div><div class="sub">含缓存命中另计</div></div>
+<div class="panel kpi"><div class="label">输出 Tokens</div><div class="value" id="kOut">0</div><div class="sub">模型回复</div></div>
+<div class="panel kpi"><div class="label">推理 Tokens</div><div class="value" id="kReason">0</div><div class="sub">reasoning</div></div>
+<div class="panel kpi"><div class="label">估算费用</div><div class="value" id="kCost">—</div><div class="sub" id="kCoverage">价格覆盖：未知</div></div>
+</section>
+<section class="grid two">
+<div class="panel"><h2>按小时消耗</h2><canvas id="hourChart" role="img" aria-label="按小时消耗柱状图" width="900" height="260"></canvas><table class="sr-only" id="hourTable" aria-label="按小时消耗数据"><caption>按小时消耗数据</caption><thead><tr><th>小时</th><th>请求</th><th>总 Token</th><th>失败</th></tr></thead><tbody></tbody></table></div>
+<div class="panel"><h2>模型消耗</h2><canvas id="modelChart" role="img" aria-label="模型消耗水平条形图" width="520" height="260"></canvas><table class="sr-only" id="modelTable" aria-label="模型消耗数据"><caption>模型消耗数据</caption><thead><tr><th>模型</th><th>总 Token</th></tr></thead><tbody></tbody></table></div>
+</section>
+<section class="grid two">
+<div class="panel"><h2>账号消耗</h2><div class="scroll" tabindex="0" role="region" aria-label="账号消耗表格"><table><thead><tr><th>账号</th><th class="num">请求</th><th class="num">总 Token</th><th class="num">输入</th><th class="num">输出</th><th class="num">推理</th><th class="num">失败</th></tr></thead><tbody id="accounts"></tbody></table></div></div>
+<div class="panel"><h2>模型明细</h2><div class="scroll" tabindex="0" role="region" aria-label="模型明细表格"><table><thead><tr><th>模型</th><th class="num">请求</th><th class="num">总 Token</th><th class="num">估算费用</th><th>计价</th></tr></thead><tbody id="models"></tbody></table></div></div>
+</section>
+<section class="panel" style="margin-top:14px"><h2>最近请求/任务</h2><div class="scroll" tabindex="0" role="region" aria-label="最近请求表格"><table><thead><tr><th>时间</th><th>账号</th><th>模型</th><th class="num">总 Token</th><th class="num">输入</th><th class="num">输出</th><th class="num">推理</th><th class="num">缓存读</th><th class="num">TTFT</th><th class="num">耗时</th><th>状态</th></tr></thead><tbody id="requests"></tbody></table></div><button id="loadMore" class="primary" style="margin-top:8px;display:none">加载更多</button></section>
+</main>
+<script>
+const nf=new Intl.NumberFormat('zh-CN');
+const $=id=>document.getElementById(id);
+function fmt(n){return nf.format(n||0);}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+let token=localStorage.getItem('usage_dash_token')||'';
+let tokenResolve=null;
+let prevFocus=null;
+let cursor=null;
+function showLoginOverlay(){
+let ov=$('loginOverlay');
+if(!ov){
+prevFocus=document.activeElement;
+ov=document.createElement('div');ov.id='loginOverlay';
+ov.setAttribute('role','dialog');ov.setAttribute('aria-modal','true');ov.setAttribute('aria-labelledby','loginTitle');
+ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:9999';
+ov.innerHTML='<div style="background:#fff;padding:32px;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,.15);max-width:400px;width:90%">'
++'<h2 id="loginTitle" style="margin:0 0 8px;font-size:18px">Dashboard 访问令牌</h2>'
++'<p style="margin:0 0 16px;color:#667085;font-size:14px">请输入访问令牌以查看用量数据。</p>'
++'<label for="tokenInput" style="display:block;margin-bottom:4px">令牌</label>'
++'<input type="password" id="tokenInput" placeholder="令牌" style="width:100%;padding:10px;border:1px solid #a0aec0;border-radius:6px;font-size:14px;margin-bottom:8px" autofocus />'
++'<div id="tokenError" role="alert" style="color:#d92d20;font-size:13px;margin-bottom:8px;display:none">令牌无效，请重试。</div>'
++'<button id="tokenSubmit" style="width:100%;padding:10px;background:#2563eb;color:#fff;border:none;border-radius:6px;font-size:14px;cursor:pointer">确认</button>'
++'</div>';
+document.body.appendChild(ov);
+const submit=async()=>{
+const val=$('tokenInput').value.trim();
+if(!val)return;
+const chk=await fetch('/api/v1/auth/check',{headers:{'Authorization':'Bearer '+val}});
+const chkInfo=chk.ok?await chk.json():{valid:false};
+if(chkInfo.valid){token=val;localStorage.setItem('usage_dash_token',val);ov.remove();if(tokenResolve){const r=tokenResolve;tokenResolve=null;r(true);}if(prevFocus)prevFocus.focus();}
+else{$('tokenError').style.display='block';}
+};
+$('tokenSubmit').onclick=submit;
+$('tokenInput').addEventListener('keydown',e=>{if(e.key==='Enter')submit();if(e.key==='Escape'){ov.remove();if(tokenResolve){const r=tokenResolve;tokenResolve=null;r(false);}}});
+const focusable=ov.querySelectorAll('button,input,select,textarea');const first=focusable[0];const last=focusable[focusable.length-1];
+ov.addEventListener('keydown',e=>{if(e.key!=='Tab')return;if(e.shiftKey){if(document.activeElement===first){e.preventDefault();last.focus();}}else{if(document.activeElement===last){e.preventDefault();first.focus();}}});
+first.focus();
+}else{ov.style.display='flex';$('tokenInput').value='';$('tokenError').style.display='none';$('tokenInput').focus();}
+}
+async function ensureToken(){
+const probe=await fetch('/api/v1/auth/check',{headers:token?{'Authorization':'Bearer '+token}:{}});
+const info=probe.ok?await probe.json():{auth_required:true,valid:false};
+if(!info.auth_required){token='';return true;}
+if(info.valid)return true;
+return new Promise(resolve=>{tokenResolve=resolve;showLoginOverlay();});
+}
+async function getJSON(url){
+const r=await fetch(url,token?{headers:{'Authorization':'Bearer '+token}}:{});
+if(!r.ok){
+if(r.status===401){localStorage.removeItem('usage_dash_token');token='';if(await ensureToken())return getJSON(url);}
+throw new Error(await r.text());
+}
+return r.json();
+}
+function drawBars(canvas,rows,labelKey,valueKey,color){
+const ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height;
+ctx.clearRect(0,0,w,h);ctx.font='12px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
+const pad={l:52,r:18,t:12,b:44};const max=Math.max(1,...rows.map(r=>Number(r[valueKey]||0)));
+const bw=Math.max(12,(w-pad.l-pad.r)/Math.max(1,rows.length)*.62);
+rows.forEach((r,i)=>{
+const x=pad.l+i*((w-pad.l-pad.r)/Math.max(1,rows.length))+bw*.3;
+const bh=(h-pad.t-pad.b)*Number(r[valueKey]||0)/max;
+const y=h-pad.b-bh;
+ctx.fillStyle=color;ctx.fillRect(x,y,bw,bh);
+ctx.fillStyle='#667085';ctx.textAlign='center';
+const label=String(r[labelKey]||'').slice(-5);
+ctx.fillText(label,x+bw/2,h-18);
+if(bh>18){ctx.fillStyle='#17202a';ctx.fillText(fmt(r[valueKey]),x+bw/2,y-5);}
+});
+ctx.strokeStyle='#a0aec0';ctx.beginPath();ctx.moveTo(pad.l,h-pad.b);ctx.lineTo(w-pad.r,h-pad.b);ctx.stroke();
+}
+function drawHorizontal(canvas,rows){
+const ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height;
+ctx.clearRect(0,0,w,h);ctx.font='12px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
+const top=12,rowH=30,max=Math.max(1,...rows.map(r=>Number(r.total_tokens||0)));
+rows.slice(0,8).forEach((r,i)=>{
+const y=top+i*rowH;const labelW=150;const barW=(w-labelW-90)*Number(r.total_tokens||0)/max;
+ctx.fillStyle='#344054';ctx.textAlign='left';ctx.fillText(String(r.model||'unknown').slice(0,22),8,y+18);
+ctx.fillStyle='#0f9f6e';ctx.fillRect(labelW,y+6,barW,14);
+ctx.fillStyle='#667085';ctx.fillText(fmt(r.total_tokens),labelW+barW+8,y+18);
+});
+}
+function updateSrTables(summary){
+const ht=$('hourTable').tBodies[0];ht.innerHTML=summary.hours.map(h=>`<tr><td>${esc(h.hour)}</td><td>${fmt(h.requests)}</td><td>${fmt(h.total_tokens)}</td><td>${fmt(h.failed)}</td></tr>`).join('')||'<tr><td colspan="4">暂无数据</td></tr>';
+const mt=$('modelTable').tBodies[0];mt.innerHTML=summary.models.map(m=>`<tr><td>${esc(m.model)}</td><td>${fmt(m.total_tokens)}</td></tr>`).join('')||'<tr><td colspan="2">暂无数据</td></tr>';
+}
+function queryStr(){
+const params=new URLSearchParams();
+const from=$('from').value,to=$('to').value;
+if(from&&to){params.set('from',new Date(from).toISOString());params.set('to',new Date(to).toISOString());}
+else{params.set('range',$('range').value);}
+const models=Array.from($('modelFilter').selectedOptions).map(o=>o.value).filter(Boolean);
+models.forEach(m=>params.append('model',m));
+return params.toString();
+}
+async function loadModels(){
+try{
+const params=new URLSearchParams();params.set('range',$('range').value);
+const data=await getJSON('/api/v1/models?'+params.toString());
+const sel=$('modelFilter');const kept=new Set(Array.from(sel.selectedOptions).map(o=>o.value));
+sel.innerHTML='<option value="">（全部模型）</option>'+data.models.map(m=>`<option value="${esc(m.model)}">${esc(m.model)}${m.priced?'':' ⚠'}</option>`).join('');
+sel.size=Math.min(6,Math.max(1,data.models.length||1));
+Array.from(sel.options).forEach(o=>{if(kept.has(o.value))o.selected=true;});
+}catch(e){$('modelFilter').innerHTML='<option value="">模型加载失败</option>';}
+}
+async function load(){
+try{
+const qs=queryStr();
+const [summary,reqs,health]=await Promise.all([
+getJSON('/api/v1/summary?'+qs),
+getJSON('/api/v1/requests?'+qs+'&limit=120'),
+getJSON('/api/v1/health')
+]);
+$('main').classList.remove('stale');
+$('degradedBanner').style.display='none';
+const s=summary.summary;
+$('kReq').textContent=fmt(s.requests);$('kFail').textContent='失败 '+fmt(s.failed);
+$('kTok').textContent=fmt(s.total_tokens);$('kIn').textContent=fmt(s.input_tokens);
+$('kOut').textContent=fmt(s.output_tokens);$('kReason').textContent=fmt(s.reasoning_tokens);
+$('kCost').textContent=(s.estimated_cost||0).toFixed(4)+' '+(s.estimated_cost_currency||'USD');
+const cov=summary.price_coverage||'unknown';
+const covMap={complete:'完整',partial:'部分（有未定价模型）',empty:'空',unknown:'未知'};
+$('kCoverage').textContent='价格覆盖：'+(covMap[cov]||cov);
+$('kCoverage').className='sub '+(cov==='complete'?'':(cov==='partial'?'warn':'muted'));
+$('accounts').innerHTML=summary.accounts.length?summary.accounts.map(a=>`<tr><td title="${esc(a.account)}">${esc(String(a.account||'').slice(0,16))}</td><td class="num">${fmt(a.requests)}</td><td class="num">${fmt(a.total_tokens)}</td><td class="num">${fmt(a.input_tokens)}</td><td class="num">${fmt(a.output_tokens)}</td><td class="num">${fmt(a.reasoning_tokens)}</td><td class="num">${fmt(a.failed)}</td></tr>`).join(''):'<tr><td colspan="7" class="empty">暂无数据</td></tr>';
+$('models').innerHTML=summary.models.length?summary.models.map(m=>`<tr><td>${esc(m.model)}</td><td class="num">${fmt(m.requests)}</td><td class="num">${fmt(m.total_tokens)}</td><td class="num">${(m.estimated_cost||0).toFixed(4)}</td><td>${m.priced?'✓':'<span class="warn">未定价</span>'}</td></tr>`).join(''):'<tr><td colspan="5" class="empty">暂无数据</td></tr>';
+cursor=reqs.next_cursor;
+$('requests').innerHTML=reqs.requests.length?reqs.requests.map(r=>`<tr><td>${esc(r.local_time)}</td><td title="${esc(r.account)}">${esc(String(r.account||'').slice(0,16))}</td><td>${esc(r.model)}</td><td class="num">${fmt(r.total_tokens)}</td><td class="num">${fmt(r.input_tokens)}</td><td class="num">${fmt(r.output_tokens)}</td><td class="num">${fmt(r.reasoning_tokens)}</td><td class="num">${fmt(r.cache_read_tokens)}</td><td class="num">${fmt(r.ttft_ms)}</td><td class="num">${fmt(r.latency_ms)}</td><td>${r.failed?'<span class="warn">失败</span>':'成功'}</td></tr>`).join(''):'<tr><td colspan="11" class="empty">暂无数据</td></tr>';
+$('loadMore').style.display=cursor?'inline-block':'none';
+drawBars($('hourChart'),summary.hours,'hour','total_tokens','#2563eb');
+drawHorizontal($('modelChart'),summary.models);
+updateSrTables(summary);
+const h=health;const dotCls=h.ok?'':(h.degraded?'warn':'bad');
+$('health').innerHTML='<span class="dot '+dotCls+'"></span>'+(h.ok?'正常':(h.degraded?'降级':'异常'))+(h.last_usage_timestamp?' · 最新 '+new Date(h.last_usage_timestamp).toLocaleString('zh-CN'):'');
+if(h.degraded)$('degradedBanner').style.display='block';
+$('updated').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN');
+}catch(e){$('main').classList.add('stale');$('updated').textContent='加载失败，以下为上次数据 '+new Date().toLocaleTimeString('zh-CN');}
+}
+async function loadMore(){
+if(!cursor)return;
+try{
+const qs=queryStr();
+const data=await getJSON('/api/v1/requests?'+qs+'&limit=120&cursor='+encodeURIComponent(cursor));
+cursor=data.next_cursor;
+$('requests').insertAdjacentHTML('beforeend',data.requests.map(r=>`<tr><td>${esc(r.local_time)}</td><td title="${esc(r.account)}">${esc(String(r.account||'').slice(0,16))}</td><td>${esc(r.model)}</td><td class="num">${fmt(r.total_tokens)}</td><td class="num">${fmt(r.input_tokens)}</td><td class="num">${fmt(r.output_tokens)}</td><td class="num">${fmt(r.reasoning_tokens)}</td><td class="num">${fmt(r.cache_read_tokens)}</td><td class="num">${fmt(r.ttft_ms)}</td><td class="num">${fmt(r.latency_ms)}</td><td>${r.failed?'<span class="warn">失败</span>':'成功'}</td></tr>`).join(''));
+$('loadMore').style.display=cursor?'inline-block':'none';
+}catch(e){$('updated').textContent='加载更多失败：'+esc(e.message);}
+}
+$('refresh').onclick=()=>{loadModels();load();};
+$('range').onchange=()=>{$('from').value='';$('to').value='';loadModels();load();};
+$('from').onchange=$('to').onchange=load;
+$('modelFilter').onchange=load;
+$('loadMore').onclick=loadMore;
+ensureToken().then(ok=>{if(ok){loadModels();load();setInterval(()=>{load();},30000);}else{document.body.insertAdjacentHTML('afterbegin','<div style="padding:24px;text-align:center;color:#d92d20">未提供有效令牌，刷新页面重试。</div>');}});
+</script>
+</body>
+</html>
