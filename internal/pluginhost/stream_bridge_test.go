@@ -71,6 +71,25 @@ func TestStreamBridgeCloseUnblocksPendingEmit(t *testing.T) {
 	}
 }
 
+func TestStreamBridgeEmitUsesAcceptedPumpResultAfterContextCancellation(t *testing.T) {
+	for range 1000 {
+		ctx, cancel := context.WithCancel(context.Background())
+		stream := &streamBridgeStream{
+			emits:  make(chan streamBridgeEmit),
+			closed: make(chan struct{}),
+		}
+		go func() {
+			request := <-stream.emits
+			cancel()
+			request.done <- nil
+		}()
+
+		if err := stream.emit(ctx, pluginapi.ExecutorStreamChunk{Payload: []byte("accepted")}); err != nil {
+			t.Fatalf("accepted emit returned error: %v", err)
+		}
+	}
+}
+
 func TestStreamBridgeAbortClosesSaturatedStreamWithoutConsumer(t *testing.T) {
 	bridge := newStreamBridge()
 	streamID, chunks, cleanup := bridge.open(context.Background())

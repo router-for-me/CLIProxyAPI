@@ -158,12 +158,7 @@ func (s *streamBridgeStream) emit(ctx context.Context, chunk pluginapi.ExecutorS
 		return errStreamBridgeClosed
 	case s.emits <- request:
 	}
-	select {
-	case err := <-request.done:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return <-request.done
 }
 
 func (s *streamBridgeStream) close(errorMessage string) {
@@ -205,6 +200,7 @@ func (b *streamBridge) open(ctx context.Context) (string, <-chan pluginapi.Execu
 		stream.abortStream()
 	}
 	if ctx != nil && ctx.Done() != nil {
+		// Abort streams canceled before ExecuteStream can install cleanupWhenStreamDone.
 		go func() {
 			<-ctx.Done()
 			cleanup()
