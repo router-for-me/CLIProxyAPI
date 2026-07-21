@@ -123,6 +123,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
 	if opts.Alt != "responses/compact" {
+		translated = helps.FlattenAssistantContentArrays(translated)
 		translated = helps.DropEmptyAssistantMessages(translated)
 	}
 	if opts.Alt == "responses/compact" {
@@ -326,6 +327,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated = helps.FlattenAssistantContentArrays(translated)
 	translated = helps.DropEmptyAssistantMessages(translated)
 
 	// Request usage data in the final streaming chunk so that token statistics
