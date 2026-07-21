@@ -173,10 +173,95 @@ func TestMonthlyWindow(t *testing.T) {
 }
 
 func TestWindowForDefault(t *testing.T) {
-	// Unknown window type should default to hourly.
-	start, _ := windowFor("unknown", time.Now())
+	// Unknown window type should default to hourly. Anchor is the zero value
+	// here, so windowFor falls back to the calendar-aligned hourlyWindow.
+	start, _ := windowFor("unknown", time.Time{}, time.Now())
 	if start.IsZero() {
 		t.Fatal("windowFor default should return non-zero start")
+	}
+}
+
+func TestAnchoredWindowHourly(t *testing.T) {
+	// Anchor is the API key's created_at; windows roll in 1h increments from
+	// that instant rather than snapping to the top of the hour.
+	anchor := time.Date(2026, 7, 19, 12, 34, 56, 0, time.UTC)
+	// now falls in the first window (less than 1h after anchor).
+	now := time.Date(2026, 7, 19, 13, 0, 0, 0, time.UTC)
+	start, end := windowFor("hourly", anchor, now)
+	wantStart := anchor
+	wantEnd := anchor.Add(time.Hour)
+	if !start.Equal(wantStart) {
+		t.Errorf("anchored hourly start = %v; want %v", start, wantStart)
+	}
+	if !end.Equal(wantEnd) {
+		t.Errorf("anchored hourly end = %v; want %v", end, wantEnd)
+	}
+
+	// now = anchor + 1h2m lands in the SECOND window [anchor+1h, anchor+2h).
+	now2 := anchor.Add(time.Hour + 2*time.Minute)
+	start2, end2 := windowFor("hourly", anchor, now2)
+	wantStart2 := anchor.Add(time.Hour)
+	if !start2.Equal(wantStart2) {
+		t.Errorf("anchored hourly[1] start = %v; want %v", start2, wantStart2)
+	}
+	if !end2.Equal(anchor.Add(2 * time.Hour)) {
+		t.Errorf("anchored hourly[1] end = %v; want %v", end2, anchor.Add(2*time.Hour))
+	}
+}
+
+func TestAnchoredWindowWeekly(t *testing.T) {
+	anchor := time.Date(2026, 7, 19, 12, 34, 56, 0, time.UTC)
+	// now = anchor + 8d → lands in window #1 [anchor+7d, anchor+14d).
+	now := anchor.Add(8 * 24 * time.Hour)
+	start, end := windowFor("weekly", anchor, now)
+	wantStart := anchor.Add(7 * 24 * time.Hour)
+	wantEnd := anchor.Add(14 * 24 * time.Hour)
+	if !start.Equal(wantStart) {
+		t.Errorf("anchored weekly start = %v; want %v", start, wantStart)
+	}
+	if !end.Equal(wantEnd) {
+		t.Errorf("anchored weekly end = %v; want %v", end, wantEnd)
+	}
+}
+
+func TestAnchoredWindowMonthly(t *testing.T) {
+	anchor := time.Date(2026, 7, 19, 12, 34, 56, 0, time.UTC)
+	// Monthly is fixed 30 days from anchor (not a calendar month).
+	// now = anchor + 31d → window #1 [anchor+30d, anchor+60d).
+	now := anchor.Add(31 * 24 * time.Hour)
+	start, end := windowFor("monthly", anchor, now)
+	wantStart := anchor.Add(30 * 24 * time.Hour)
+	wantEnd := anchor.Add(60 * 24 * time.Hour)
+	if !start.Equal(wantStart) {
+		t.Errorf("anchored monthly start = %v; want %v", start, wantStart)
+	}
+	if !end.Equal(wantEnd) {
+		t.Errorf("anchored monthly end = %v; want %v", end, wantEnd)
+	}
+}
+
+func TestAnchoredWindowZeroAnchorFallsBack(t *testing.T) {
+	// Zero anchor must fall back to calendar alignment rather than panic.
+	now := time.Date(2026, 7, 19, 12, 34, 56, 0, time.UTC)
+	start, end := windowFor("hourly", time.Time{}, now)
+	if !start.Equal(now.UTC().Truncate(time.Hour)) {
+		t.Errorf("zero-anchor hourly start = %v; want %v", start, now.UTC().Truncate(time.Hour))
+	}
+	if !end.Equal(start.Add(time.Hour)) {
+		t.Errorf("zero-anchor hourly end = %v; want start+1h", end)
+	}
+}
+
+func TestAnchoredWindowClockSkewClampsToFirstWindow(t *testing.T) {
+	// now earlier than anchor (clock skew) should clamp to the first window.
+	anchor := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	now := anchor.Add(-5 * time.Minute)
+	start, end := windowFor("hourly", anchor, now)
+	if !start.Equal(anchor) {
+		t.Errorf("skew hourly start = %v; want anchor %v", start, anchor)
+	}
+	if !end.Equal(anchor.Add(time.Hour)) {
+		t.Errorf("skew hourly end = %v; want anchor+1h", end)
 	}
 }
 

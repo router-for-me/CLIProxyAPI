@@ -224,7 +224,7 @@ func (s *service) Check(ctx context.Context, principal, model string) (Decision,
 			}
 		}
 		// Budget caps are checked against the persisted usage_windows row.
-		if decision, denied := s.checkBudget(ctx, snap.APIKey.ID, snap.Policy); denied {
+		if decision, denied := s.checkBudget(ctx, snap.APIKey.ID, snap.Policy, snap.APIKey.CreatedAt); denied {
 			return decision, nil
 		}
 	}
@@ -296,14 +296,15 @@ func (s *service) Check(ctx context.Context, principal, model string) (Decision,
 
 // checkBudget returns (decision, denied=true) when any budget cap has been
 // exceeded. The decision carries the most restrictive cap that was hit so the
-// caller can surface a meaningful error.
-func (s *service) checkBudget(ctx context.Context, apiKeyID string, p *store.Policy) (Decision, bool) {
+// caller can surface a meaningful error. Window start/end are anchored to the
+// API key's created_at so windows roll from the moment the key was issued.
+func (s *service) checkBudget(ctx context.Context, apiKeyID string, p *store.Policy, createdAt time.Time) (Decision, bool) {
 	if p == nil {
 		return Decision{}, false
 	}
 	now := time.Now()
 	if p.BudgetHourlyUSD != nil && *p.BudgetHourlyUSD > 0 {
-		if spent, _ := s.windowSpent(ctx, apiKeyID, store.WindowTypeHourly, now); spent >= *p.BudgetHourlyUSD {
+		if spent, _ := s.windowSpent(ctx, apiKeyID, store.WindowTypeHourly, createdAt, now); spent >= *p.BudgetHourlyUSD {
 			return Decision{
 				Allow:      false,
 				Reason:     fmt.Sprintf("hourly budget exceeded: %.2f USD spent of %.2f USD limit", spent, *p.BudgetHourlyUSD),
@@ -312,7 +313,7 @@ func (s *service) checkBudget(ctx context.Context, apiKeyID string, p *store.Pol
 		}
 	}
 	if p.BudgetWeeklyUSD != nil && *p.BudgetWeeklyUSD > 0 {
-		if spent, _ := s.windowSpent(ctx, apiKeyID, store.WindowTypeWeekly, now); spent >= *p.BudgetWeeklyUSD {
+		if spent, _ := s.windowSpent(ctx, apiKeyID, store.WindowTypeWeekly, createdAt, now); spent >= *p.BudgetWeeklyUSD {
 			return Decision{
 				Allow:      false,
 				Reason:     fmt.Sprintf("weekly budget exceeded: %.2f USD spent of %.2f USD limit", spent, *p.BudgetWeeklyUSD),
@@ -321,7 +322,7 @@ func (s *service) checkBudget(ctx context.Context, apiKeyID string, p *store.Pol
 		}
 	}
 	if p.BudgetMonthlyUSD != nil && *p.BudgetMonthlyUSD > 0 {
-		if spent, _ := s.windowSpent(ctx, apiKeyID, store.WindowTypeMonthly, now); spent >= *p.BudgetMonthlyUSD {
+		if spent, _ := s.windowSpent(ctx, apiKeyID, store.WindowTypeMonthly, createdAt, now); spent >= *p.BudgetMonthlyUSD {
 			return Decision{
 				Allow:      false,
 				Reason:     fmt.Sprintf("monthly budget exceeded: %.2f USD spent of %.2f USD limit", spent, *p.BudgetMonthlyUSD),
@@ -332,11 +333,13 @@ func (s *service) checkBudget(ctx context.Context, apiKeyID string, p *store.Pol
 	return Decision{}, false
 }
 
-// windowSpent reads the persisted cost_usd for the given budget window. Errors
-// are logged and treated as zero (fail-open) to avoid blocking traffic during
-// transient PG outages.
-func (s *service) windowSpent(ctx context.Context, apiKeyID, windowType string, now time.Time) (float64, error) {
-	start, _ := windowFor(windowType, now)
+// windowSpent reads the persisted cost_usd for the given budget window. The
+// window start is anchored to the supplied createdAt (api key or internal
+// user) so Check and Consume resolve the same window_start. Errors are logged
+// and treated as zero (fail-open) to avoid blocking traffic during transient
+// PG outages.
+func (s *service) windowSpent(ctx context.Context, apiKeyID, windowType string, anchor, now time.Time) (float64, error) {
+	start, _ := windowFor(windowType, anchor, now)
 	w, err := s.usage.GetWindow(ctx, apiKeyID, windowType, start)
 	if err != nil {
 		log.WithError(err).WithField("window", windowType).Debug("policy: read budget window failed")
@@ -376,7 +379,7 @@ func (s *service) Consume(ctx context.Context, principal, model string, tokens T
 	}
 	now := time.Now()
 	for _, wt := range []string{store.WindowTypeHourly, store.WindowTypeWeekly, store.WindowTypeMonthly} {
-		start, end := windowFor(wt, now)
+		start, end := windowFor(wt, snap.APIKey.CreatedAt, now)
 		if err := s.usage.UpsertWindow(ctx, snap.APIKey.ID, wt, start, end, 1, total, cost); err != nil {
 			log.WithError(err).WithField("window", wt).Debug("policy: upsert window failed")
 			// Continue: a single failed upsert should not break the others.
@@ -387,8 +390,12 @@ func (s *service) Consume(ctx context.Context, principal, model string, tokens T
 	// next successful Consume.
 	if snap.InternalUser != nil {
 		uid := snap.InternalUser.ID
+		// Anchor per-user windows to the internal user's created_at so the
+		// dashboard's "Budget vs usage" card reflects the same rolling
+		// window the per-key path enforces.
+		userAnchor := snap.InternalUser.CreatedAt
 		for _, wt := range []string{store.WindowTypeHourly, store.WindowTypeWeekly, store.WindowTypeMonthly} {
-			start, end := windowFor(wt, now)
+			start, end := windowFor(wt, userAnchor, now)
 			if err := s.users.UpsertUserWindow(ctx, uid, wt, start, end, 1, total, cost); err != nil {
 				log.WithError(err).WithField("window", wt).Debug("policy: upsert user window failed")
 			}
