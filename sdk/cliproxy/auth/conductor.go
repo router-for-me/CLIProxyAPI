@@ -665,6 +665,44 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 	if auth == nil {
 		return false
 	}
+	// Preserve the refresh-sourced permanent failure marker
+	// (Unavailable + hasPermanentAuthFailure + NextRetryAfter.IsZero()).
+	// clearCooldownStateForAuth is invoked from SetConfig/register/update
+	// paths when disable-cooling is enabled, and historically clears
+	// auth.Unavailable — without this guard, a config reload erases the
+	// permanent marker and the shouldRefresh / nextRefreshCheckAt /
+	// isAuthBlockedForModel guards stop firing, re-queueing revoked
+	// 400 invalid_grant credentials (codex review).
+	//
+	// Transient cooldowns (NextRetryAfter non-zero) are still cleared
+	// below — only the permanent marker is preserved.
+	if auth.Unavailable && hasPermanentAuthFailure(auth) && auth.NextRetryAfter.IsZero() {
+		// Clear per-model cooldown state (a permanent refresh failure
+		// already resets these in refreshAuthForRequest, but a stale
+		// model cooldown may have been restored from disk or set by a
+		// racing request before the permanent marker was set).
+		modelChanged := false
+		for _, state := range auth.ModelStates {
+			if state == nil || state.Status == StatusDisabled {
+				continue
+			}
+			if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() {
+				state.Unavailable = false
+				state.NextRetryAfter = time.Time{}
+				state.Quota = QuotaState{}
+				state.UpdatedAt = now
+				modelChanged = true
+			}
+		}
+		if modelChanged && len(auth.ModelStates) > 0 {
+			// Recompute quota aggregation but NOT auth.Unavailable /
+			// NextRetryAfter — updateAggregatedAvailability would
+			// overwrite the permanent marker. Manually clear quota
+			// since permanent failures carry no quota state.
+			auth.Quota = QuotaState{}
+		}
+		return modelChanged
+	}
 	changed := false
 	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
 		auth.Unavailable = false
@@ -1394,7 +1432,7 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 	}
 
 	availableByPriority := make(map[int][]*Auth)
-	cooldownCount := 0
+	unavailableCount := 0
 	var earliest time.Time
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
@@ -1404,8 +1442,8 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 			availableByPriority[priority] = append(availableByPriority[priority], candidate)
 			continue
 		}
+		unavailableCount++
 		if reason == blockReasonCooldown {
-			cooldownCount++
 			if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
 				earliest = next
 			}
@@ -1413,7 +1451,7 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 	}
 
 	if len(availableByPriority) == 0 {
-		if cooldownCount == len(auths) && !earliest.IsZero() {
+		if unavailableCount == len(auths) && !earliest.IsZero() {
 			providerForError := provider
 			if providerForError == "mixed" {
 				providerForError = ""
@@ -3739,7 +3777,22 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 
 		if result.Success {
-			if result.Model != "" {
+			// If the auth is already marked as a refresh-sourced permanent
+			// failure (Unavailable + permanent LastError + zero NextRetryAfter),
+			// skip the success-state update — both branches below would erase
+			// the permanent marker:
+			//   - result.Model != "": updateAggregatedAvailability recomputes
+			//     Unavailable=false (all model states clean) + clears LastError.
+			//   - result.Model == "": clearAuthStateOnSuccess unconditionally
+			//     clears Unavailable, LastError, NextRetryAfter.
+			// A dead auth should not receive a success result (guards block
+			// routing), but defending against an erroneous MarkResult call
+			// prevents the marker from being silently erased (codex review
+			// on clearCooldownStateForAuth revealed the same class of leak
+			// across all Unavailable=false write paths).
+			if auth.Unavailable && hasPermanentAuthFailure(auth) && auth.NextRetryAfter.IsZero() {
+				auth.UpdatedAt = now
+			} else if result.Model != "" {
 				state := ensureModelState(auth, result.Model)
 				resetModelState(state, now)
 				updateAggregatedAvailability(auth, now)
@@ -3755,7 +3808,23 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
-			if result.Model != "" {
+			// If the auth is already marked as a refresh-sourced permanent
+			// failure (Unavailable + permanent LastError + zero NextRetryAfter),
+			// skip the failure-state update — MarkResult would overwrite the
+			// permanent marker with a transient request cooldown, masking the
+			// dead auth from scheduler/routing guards (codex review on 358d49b2).
+			//
+			// This happens when tryRefreshAfterUnauthorized calls
+			// refreshAuthForRequest and gets a 400 invalid_grant (permanent),
+			// then the caller records the original 401 via MarkResult — without
+			// this skip, the 401 cooldown overwrites the zero-NextRetryAfter
+			// permanent marker and the dead auth is requeued/routable after the
+			// cooldown expires.
+			if auth.Unavailable && hasPermanentAuthFailure(auth) && auth.NextRetryAfter.IsZero() {
+				// Only record the attempt count (already done above); skip
+				// failure-state write so the permanent marker stays intact.
+				auth.UpdatedAt = now
+			} else if result.Model != "" {
 				if !isRequestScopedResultError(result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
@@ -4072,6 +4141,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 		return
 	}
 	auth.Unavailable = false
+	auth.PermanentRefreshFailure = false
 	auth.Status = StatusActive
 	auth.StatusMessage = ""
 	auth.Quota.Exceeded = false
@@ -4144,6 +4214,21 @@ func resultErrorFromError(err error) *Error {
 	return resultErr
 }
 
+// permanentCredentialStatusMessage returns the StatusMessage to record when
+// isPermanentCredentialFailure returns true. It distinguishes invalid_grant
+// from generic unauthorized so operators can see the real reason in the
+// management API.
+func permanentCredentialStatusMessage(err error) string {
+	if err == nil {
+		return "unauthorized"
+	}
+	raw := strings.ToLower(err.Error())
+	if strings.Contains(raw, "invalid_grant") || strings.Contains(raw, "refresh token") {
+		return "invalid_grant"
+	}
+	return "unauthorized"
+}
+
 func isUnauthorizedError(err error) bool {
 	if err == nil {
 		return false
@@ -4155,11 +4240,87 @@ func isUnauthorizedError(err error) bool {
 	return strings.Contains(raw, "status 401") || strings.Contains(raw, "401 unauthorized")
 }
 
-func hasUnauthorizedAuthFailure(auth *Auth) bool {
-	if auth == nil || auth.LastError == nil {
+// isPermanentCredentialFailure reports whether err indicates the refresh
+// token (or underlying credential) is permanently invalid and cannot be
+// recovered by retrying. This covers RFC 6749 §5.2 permanent error codes
+// returned by OAuth token endpoints:
+//
+//   - HTTP 400 with `invalid_grant`: the refresh token is invalid, expired,
+//     revoked, or was issued to another client. x.ai returns this exact
+//     combination (HTTP 400, error=invalid_grant) for revoked refresh tokens.
+//   - HTTP 401 with `invalid_grant`: some providers use 401 instead of 400.
+//   - Descriptive messages without the standard error code (e.g. "refresh
+//     token has been revoked", "refresh token expired").
+//
+// Returning true marks the auth Unavailable + StatusError so it becomes
+// visible to management API consumers (e.g. the welfare collector script's
+// isDeadCpaAuth cleanup) and stops the auto-refresh loop from retrying
+// indefinitely.
+//
+// Note: plain HTTP 401 is still treated as permanent here (preserving legacy
+// behavior) to avoid regressing providers that rely on 401 semantics, even
+// though 401 may sometimes indicate a transient config issue like invalid_client.
+func isPermanentCredentialFailure(err error) bool {
+	if err == nil {
 		return false
 	}
-	return auth.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(auth.LastError.Code, "unauthorized")
+	if isUnauthorizedError(err) {
+		return true
+	}
+	raw := strings.ToLower(err.Error())
+	for _, sub := range permanentCredentialSubstrings {
+		if strings.Contains(raw, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// permanentCredentialSubstrings are the lowercase substrings that indicate a
+// permanent refresh-token failure when the error does not carry an HTTP 401
+// status (e.g. x.ai's plain fmt.Errorf from the token endpoint).
+var permanentCredentialSubstrings = []string{
+	"invalid_grant",
+	"refresh token has been revoked",
+	"refresh token is invalid",
+	"refresh token expired",
+}
+
+// hasPermanentAuthFailure reports whether auth carries a permanent credential
+// failure sourced from the refresh path (HTTP 401, 400 invalid_grant, or a
+// descriptive revoked/expired message). It replaces the legacy
+// hasUnauthorizedAuthFailure check so the scheduler stops retrying
+// RFC 6749 §5.2 permanent errors that providers return as HTTP 400 instead
+// of 401 (e.g. x.ai revoked refresh tokens).
+//
+// Discriminator: the ONLY signal is auth.PermanentRefreshFailure, which
+// is set exclusively by refreshAuthForRequest's permanent branch. This
+// cleanly distinguishes refresh-sourced permanent failures from
+// disable-cooling transient failures (applyAuthFailureState with
+// disableCooling=true also produces Unavailable=true + zero
+// NextRetryAfter + LastError(401/invalid_grant), but is transient —
+// relying on LastError shape alone would misclassify those as permanent
+// and permanently block routing, codex review).
+//
+// Legacy compat: auths persisted before the PermanentRefreshFailure field
+// existed will have PermanentRefreshFailure=false after restart. They will
+// not be blocked by the guards immediately, but the first refresh attempt
+// will re-detect the permanent failure (refresh returns 400 invalid_grant
+// again) and re-set the marker. This is safer than a LastError-based
+// fallback, which would misclassify disable-cooling request failures as
+// permanent.
+func hasPermanentAuthFailure(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	return auth.PermanentRefreshFailure
+}
+
+// HasPermanentAuthFailure is the exported form of hasPermanentAuthFailure,
+// for cross-package consumers that need to detect the refresh-sourced
+// permanent failure marker (e.g. websocket pin path).
+func HasPermanentAuthFailure(auth *Auth) bool {
+	return hasPermanentAuthFailure(auth)
 }
 
 func refreshErrorFromError(err error) *Error {
@@ -5896,7 +6057,20 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if a == nil {
 		return false
 	}
-	if hasUnauthorizedAuthFailure(a) {
+	// Stop proactive refresh only for refresh-sourced permanent failures
+	// (Unavailable=true + NextRetryAfter zero — refreshAuthForRequest's
+	// permanent branch sets exactly this combination). Request-side
+	// invalid_grant cooldowns must NOT be blocked here:
+	//   - Single-model all-cooldown: updateAggregatedAvailability sets
+	//     Unavailable=true + NextRetryAfter=now+30min (non-zero) → falls
+	//     through to the refresh lead/expiry logic below.
+	//   - Multi-model partial cooldown: updateAggregatedAvailability sets
+	//     Unavailable=false + NextRetryAfter=zero (a clean model keeps the
+	//     auth available). Without the Unavailable check, this guard would
+	//     fire on the cooled model's LastError and unschedule the auth,
+	//     preventing proactive refresh from recovering the cooled model
+	//     early (codex review).
+	if a.Unavailable && hasPermanentAuthFailure(a) && a.NextRetryAfter.IsZero() {
 		return false
 	}
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
@@ -6231,16 +6405,51 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
 	if err != nil {
-		unauthorized := isUnauthorizedError(err)
+		permanent := isPermanentCredentialFailure(err)
 		shouldReschedule := false
+		shouldPersist := false
+		var persistClone *Auth
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
 			current.LastError = refreshErrorFromError(err)
-			if unauthorized {
+			if permanent {
 				current.NextRefreshAfter = time.Time{}
+				// Clear any stale request cooldown so the NextRetryAfter.IsZero()
+				// discriminators in shouldRefresh, nextRefreshCheckAt, and
+				// isAuthBlockedForModel correctly identify this as a refresh-
+				// sourced permanent failure. Without this, a pre-existing request
+				// cooldown (NextRetryAfter non-zero) would mask the permanent
+				// failure, leaving the dead auth scheduled and routable after the
+				// stale cooldown expires (codex review).
+				current.NextRetryAfter = time.Time{}
 				current.Unavailable = true
+				current.PermanentRefreshFailure = true
 				current.Status = StatusError
-				current.StatusMessage = "unauthorized"
+				current.StatusMessage = permanentCredentialStatusMessage(err)
+				// Clear per-model cooldown state so persistCooldownStates drops
+				// the model .cds records from the snapshot. Otherwise a restart
+				// replays them via RestoreCooldownStates → updateAggregatedAvailability,
+				// which restores a non-zero auth NextRetryAfter from the stale
+				// model cooldowns and masks the permanent marker from the
+				// IsZero() guards (codex review). StatusDisabled states are
+				// preserved — they reflect user/admin intent, not cooldown.
+				// updateAggregatedAvailability is NOT called here because it
+				// would recompute auth.Unavailable=false (all model states are
+				// now clean) and overwrite the permanent marker.
+				for _, state := range current.ModelStates {
+					if state == nil || state.Status == StatusDisabled {
+						continue
+					}
+					resetModelState(state, now)
+				}
+				// Clone under the lock so the persist path below has a stable
+				// snapshot. Persist the permanent marker so it survives process
+				// restart — without this, a restart reloads the auth from
+				// storage without the Unavailable/permanent-LastError marker,
+				// and any stale .cds cooldown record can also be restored,
+				// requeueing the revoked credential (codex review).
+				persistClone = current.Clone()
+				shouldPersist = true
 			} else {
 				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 			}
@@ -6251,6 +6460,17 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 			}
 		}
 		m.mu.Unlock()
+		if shouldPersist && persistClone != nil {
+			if errPersist := m.persist(ctx, persistClone); errPersist != nil {
+				log.Debugf("persist permanent refresh failure for %s (%s) failed: %v", auth.Provider, auth.ID, errPersist)
+			}
+			// persistCooldownStates writes a full snapshot and removes stale
+			// .cds files not in the snapshot. The permanent marker has
+			// NextRetryAfter=zero, so authCooldownStateRecord returns false
+			// and the dead auth's auth-level cooldown record is dropped.
+			m.persistCooldownStates(ctx)
+			m.hook.OnAuthUpdated(ctx, persistClone)
+		}
 		if shouldReschedule {
 			m.queueRefreshReschedule(id)
 		}
