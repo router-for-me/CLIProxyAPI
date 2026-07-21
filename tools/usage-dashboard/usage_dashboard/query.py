@@ -64,6 +64,11 @@ def resolve_models(qs):
     return [v for v in (qs.get("model") or []) if v]
 
 
+def resolve_accounts(qs):
+    """Accept repeated account= params (account_hash values)."""
+    return [v for v in (qs.get("account") or []) if v]
+
+
 def resolve_group_by(qs):
     val = _first(qs, "group_by") or "model"
     if val not in ALLOWED_GROUPINGS:
@@ -78,18 +83,39 @@ def model_clause(models):
     return f" AND model IN ({placeholders})", list(models)
 
 
+def account_clause(accounts):
+    if not accounts:
+        return "", []
+    placeholders = ",".join("?" for _ in accounts)
+    return f" AND COALESCE(account_hash,'unknown') IN ({placeholders})", list(accounts)
+
+
+def _filters(qs):
+    """Shared range + model + account filters for analytics queries.
+
+    Returns (start, end, models, accounts, where, params, err).
+    On error, where/params are None and err is a message.
+    """
+    start, end, err = resolve_range(qs)
+    if err:
+        return None, None, [], [], None, None, err
+    models = resolve_models(qs)
+    accounts = resolve_accounts(qs)
+    mclause, mparams = model_clause(models)
+    aclause, aparams = account_clause(accounts)
+    where = f"WHERE ts_epoch BETWEEN ? AND ?{mclause}{aclause}"
+    params = [start, end] + mparams + aparams
+    return start, end, models, accounts, where, params, None
+
+
 def _raise(err):
     raise ValueError(err)
 
 
 def query_summary(cfg, qs):
-    start, end, err = resolve_range(qs)
+    start, end, models, accounts, where, params, err = _filters(qs)
     if err:
         _raise(err)
-    models = resolve_models(qs)
-    mclause, mparams = model_clause(models)
-    where = f"WHERE ts_epoch BETWEEN ? AND ?{mclause}"
-    params = [start, end] + mparams
     with st.db_connect(cfg) as conn:
         total = conn.execute(
             f"""SELECT COUNT(*) requests,
@@ -107,7 +133,7 @@ def query_summary(cfg, qs):
                 FROM usage_events {where}""",
             params,
         ).fetchone()
-        accounts = conn.execute(
+        account_rows = conn.execute(
             f"""SELECT COALESCE(account_hash,'unknown') account, COUNT(*) requests,
                        COALESCE(SUM(total_tokens),0) total_tokens,
                        COALESCE(SUM(input_tokens),0) input_tokens,
@@ -139,8 +165,9 @@ def query_summary(cfg, qs):
     return {
         "range": _first(qs, "range") or ("explicit" if (_first(qs, "from") or _first(qs, "to")) else "today"),
         "models_filter": models,
+        "accounts_filter": accounts,
         "summary": summary,
-        "accounts": [dict(x) for x in accounts],
+        "accounts": [dict(x) for x in account_rows],
         "models": cost["by_model_rows"],
         "hours": [dict(x) for x in hours],
         "price_coverage": cost["coverage"],
@@ -148,16 +175,12 @@ def query_summary(cfg, qs):
 
 
 def query_timeseries(cfg, qs):
-    start, end, err = resolve_range(qs)
+    start, end, models, accounts, where, params, err = _filters(qs)
     if err:
         _raise(err)
     group_by, gerr = resolve_group_by(qs)
     if gerr:
         _raise(gerr)
-    models = resolve_models(qs)
-    mclause, mparams = model_clause(models)
-    where = f"WHERE ts_epoch BETWEEN ? AND ?{mclause}"
-    params = [start, end] + mparams
     select_key = {
         "model": "COALESCE(model, 'unknown')",
         "provider": "COALESCE(provider, 'unknown')",
@@ -178,21 +201,26 @@ def query_timeseries(cfg, qs):
               GROUP BY bucket ORDER BY bucket"""
     with st.db_connect(cfg) as conn:
         rows = conn.execute(sql, params).fetchall()
-    return {"group_by": group_by, "models_filter": models, "series": [dict(r) for r in rows]}
+    return {
+        "group_by": group_by,
+        "models_filter": models,
+        "accounts_filter": accounts,
+        "series": [dict(r) for r in rows],
+    }
 
 
 def query_models(cfg, qs):
-    start, end, err = resolve_range(qs)
+    start, end, models, accounts, where, params, err = _filters(qs)
     if err:
         _raise(err)
     with st.db_connect(cfg) as conn:
         rows = conn.execute(
-            """SELECT COALESCE(model,'unknown') model, MAX(alias) alias,
+            f"""SELECT COALESCE(model,'unknown') model, MAX(alias) alias,
                        MAX(provider) provider, COUNT(*) requests,
                        COALESCE(SUM(total_tokens),0) total_tokens
-                FROM usage_events WHERE ts_epoch BETWEEN ? AND ?
+                FROM usage_events {where}
                 GROUP BY model ORDER BY total_tokens DESC""",
-            (start, end),
+            params,
         ).fetchall()
     pricing = pr.load_pricing(cfg)
     known = set((pricing.get("models") or {}).keys())
@@ -201,7 +229,63 @@ def query_models(cfg, qs):
         d = dict(row)
         d["priced"] = d["model"] in known
         out.append(d)
-    return {"models": out}
+    return {"models": out, "accounts_filter": accounts}
+
+
+def query_accounts(cfg, qs):
+    """Distinct account hashes in range (for filter UI), ordered by volume."""
+    start, end, models, accounts, where, params, err = _filters(qs)
+    if err:
+        _raise(err)
+    # Account picker should list all accounts in the time/model scope, not only
+    # currently selected accounts — so drop account filter for discovery.
+    mclause, mparams = model_clause(models)
+    discover_where = f"WHERE ts_epoch BETWEEN ? AND ?{mclause}"
+    discover_params = [start, end] + mparams
+    with st.db_connect(cfg) as conn:
+        rows = conn.execute(
+            f"""SELECT COALESCE(account_hash,'unknown') account, COUNT(*) requests,
+                       COALESCE(SUM(total_tokens),0) total_tokens
+                FROM usage_events {discover_where}
+                GROUP BY account ORDER BY total_tokens DESC""",
+            discover_params,
+        ).fetchall()
+    return {"accounts": [dict(r) for r in rows], "accounts_filter": accounts}
+
+
+def query_errors(cfg, qs):
+    """Aggregate failed requests by fail_status x model.
+
+    Drives the Errors tab. Honors range + model + account filters so the
+    aggregation stays consistent with every other panel under the same toolbar.
+    """
+    start, end, models, accounts, where, params, err = _filters(qs)
+    if err:
+        _raise(err)
+    sql = f"""SELECT fail_status, COALESCE(model, 'unknown') model,
+                     COUNT(*) count, MAX(timestamp) last_seen
+              FROM usage_events {where} AND failed = 1
+              GROUP BY fail_status, model
+              ORDER BY count DESC, fail_status ASC"""
+    total_failed_sql = f"SELECT COUNT(*) FROM usage_events {where} AND failed = 1"
+    total_sql = f"SELECT COUNT(*) FROM usage_events {where}"
+    with st.db_connect(cfg) as conn:
+        rows = conn.execute(sql, params).fetchall()
+        total_failed = conn.execute(total_failed_sql, params).fetchone()[0]
+        total_requests = conn.execute(total_sql, params).fetchone()[0]
+    denom = total_requests or 1
+    errors = []
+    for r in rows:
+        d = dict(r)
+        d["percent"] = round(d["count"] / denom * 100, 1)
+        errors.append(d)
+    return {
+        "errors": errors,
+        "total_failed": total_failed,
+        "total_requests": total_requests,
+        "models_filter": models,
+        "accounts_filter": accounts,
+    }
 
 
 def max_limit(cfg, requested):
@@ -215,25 +299,21 @@ def max_limit(cfg, requested):
 
 
 def query_requests(cfg, qs):
-    start, end, err = resolve_range(qs)
+    start, end, models, accounts, where, params, err = _filters(qs)
     if err:
         _raise(err)
-    models = resolve_models(qs)
-    mclause, mparams = model_clause(models)
     limit = max_limit(cfg, _first(qs, "limit"))
     cursor = _first(qs, "cursor")
-    where = f"WHERE ts_epoch BETWEEN ? AND ?{mclause}"
-    params = [start, end] + mparams
     if cursor:
         try:
             decoded = base64.urlsafe_b64decode(cursor.encode()).decode()
             cur_ts, cur_id = decoded.rsplit(",", 1)
             where += " AND (ts_epoch, id) < (?, ?)"
-            params += [float(cur_ts), int(cur_id)]
+            params = list(params) + [float(cur_ts), int(cur_id)]
         except Exception:
             _raise("invalid cursor")
     where += " ORDER BY ts_epoch DESC, id DESC LIMIT ?"
-    params.append(limit + 1)
+    params = list(params) + [limit + 1]
     with st.db_connect(cfg) as conn:
         rows = conn.execute(
             f"""SELECT id, timestamp, account_hash, model, alias, provider, endpoint,
@@ -256,4 +336,10 @@ def query_requests(cfg, qs):
         next_cursor = base64.urlsafe_b64encode(raw.encode()).decode()
     for item in items:
         item.pop("id", None)
-    return {"requests": items, "next_cursor": next_cursor, "limit": limit}
+    return {
+        "requests": items,
+        "next_cursor": next_cursor,
+        "limit": limit,
+        "models_filter": models,
+        "accounts_filter": accounts,
+    }
