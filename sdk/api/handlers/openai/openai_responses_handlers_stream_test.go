@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -174,6 +175,107 @@ func TestForwardResponsesStreamRepairsImageStatusInCompletedResponse(t *testing.
 		t.Fatalf("expected response completion payload: %q", parts[2])
 	}
 	if got := gjson.GetBytes(completed, "response.output.0.status").String(); got != "completed" {
+		t.Fatalf("completed response image status = %q, want completed", got)
+	}
+}
+
+func TestForwardResponsesStreamCompletesPartialImageOnIncompleteUpstreamStream(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage)
+	go func() {
+		for _, chunk := range [][]byte{
+			[]byte(`event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_123","object":"response","status":"in_progress","model":"gpt-5.6","output":[]}}
+
+`),
+			[]byte(`event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":1,"output_index":0,"item":{"id":"rs_123","type":"reasoning","summary":[]}}
+
+`),
+			[]byte(`event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":2,"output_index":1,"item":{"id":"ig_123","type":"image_generation_call","status":"in_progress"}}
+
+`),
+			[]byte(`event: response.image_generation_call.in_progress
+data: {"type":"response.image_generation_call.in_progress","sequence_number":3,"output_index":1,"item_id":"ig_123"}
+
+`),
+			[]byte(`event: response.image_generation_call.generating
+data: {"type":"response.image_generation_call.generating","sequence_number":4,"output_index":1,"item_id":"ig_123"}
+
+`),
+			[]byte(`event: response.image_generation_call.partial_image
+data: {"type":"response.image_generation_call.partial_image","sequence_number":7,"output_index":1,"item_id":"ig_123","output_format":"png","partial_image_index":0,"partial_image_b64":"aGVsbG8="}
+
+`),
+		} {
+			data <- chunk
+		}
+		close(data)
+		errs <- &interfaces.ErrorMessage{
+			StatusCode: http.StatusRequestTimeout,
+			Error:      errors.New("stream error: stream disconnected before completion: stream closed before response.completed"),
+		}
+		close(errs)
+	}()
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+
+	body := recorder.Body.String()
+	if strings.Contains(body, "event: error") {
+		t.Fatalf("expected partial image recovery instead of an error event: %q", body)
+	}
+
+	parts := strings.Split(strings.TrimSpace(body), "\n\n")
+	if len(parts) != 9 {
+		t.Fatalf("expected six upstream events and three recovery events, got %d: %q", len(parts), body)
+	}
+
+	completion, ok := responsesSSEDataPayload([]byte(parts[6]))
+	if !ok || !strings.HasPrefix(parts[6], "event: response.image_generation_call.completed\n") {
+		t.Fatalf("expected completed image event, got %q", parts[6])
+	}
+	if got := gjson.GetBytes(completion, "item_id").String(); got != "ig_123" {
+		t.Fatalf("completed image item_id = %q, want ig_123", got)
+	}
+	if got := gjson.GetBytes(completion, "result").String(); got != "aGVsbG8=" {
+		t.Fatalf("completed image result = %q, want partial image Base64", got)
+	}
+	if got := gjson.GetBytes(completion, "sequence_number").Int(); got <= 7 {
+		t.Fatalf("completed image sequence_number = %d, want greater than 7", got)
+	}
+
+	done, ok := responsesSSEDataPayload([]byte(parts[7]))
+	if !ok || !strings.HasPrefix(parts[7], "event: response.output_item.done\n") {
+		t.Fatalf("expected completed image output item, got %q", parts[7])
+	}
+	if got := gjson.GetBytes(done, "item.status").String(); got != "completed" {
+		t.Fatalf("image item status = %q, want completed", got)
+	}
+	if got := gjson.GetBytes(done, "item.result").String(); got != "aGVsbG8=" {
+		t.Fatalf("image item result = %q, want partial image Base64", got)
+	}
+	if got := gjson.GetBytes(done, "sequence_number").Int(); got <= 7 {
+		t.Fatalf("image output item sequence_number = %d, want greater than 7", got)
+	}
+
+	completed, ok := responsesSSEDataPayload([]byte(parts[8]))
+	if !ok || !strings.HasPrefix(parts[8], "event: response.completed\n") {
+		t.Fatalf("expected completed response event, got %q", parts[8])
+	}
+	if got := gjson.GetBytes(completed, "response.status").String(); got != "completed" {
+		t.Fatalf("response status = %q, want completed", got)
+	}
+	output := gjson.GetBytes(completed, "response.output")
+	if !output.IsArray() || len(output.Array()) != 2 {
+		t.Fatalf("expected reasoning and image output items, got %s", output.Raw)
+	}
+	if got := output.Get("1.id").String(); got != "ig_123" {
+		t.Fatalf("completed response image id = %q, want ig_123", got)
+	}
+	if got := output.Get("1.status").String(); got != "completed" {
 		t.Fatalf("completed response image status = %q, want completed", got)
 	}
 }
