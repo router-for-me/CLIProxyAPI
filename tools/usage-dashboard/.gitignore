@@ -1,0 +1,36 @@
+# Local runtime data — never commit credentials or usage databases.
+usage.sqlite
+usage.sqlite-*
+config.json
+pricing.json
+*.log
+*.log.*
+*.bak
+collector.lock
+
+# Secrets / local env (verify runs, systemd env files, etc.)
+.secrets.env
+*.env
+!*.example.env
+LAN_ACCESS.txt
+
+# Local verify / temporary data dirs
+.verify-data/
+.verify-*/
+.runtime/
+
+# Python
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.py[cod]
+.Python
+.venv/
+venv/
+env/
+
+# OS / editor noise
+.DS_Store
+*.swp
+*~

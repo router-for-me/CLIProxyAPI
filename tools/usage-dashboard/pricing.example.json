@@ -1,0 +1,22 @@
+{
+  "currency": "USD",
+  "models": {
+    "ts-gpt-56": [
+      {
+        "effective_from": "2026-07-01T00:00:00Z",
+        "input_per_million": 1.25,
+        "output_per_million": 10.0,
+        "cached_input_per_million": 0.15,
+        "reasoning_per_million": 10.0
+      }
+    ],
+    "ts-opus-48": [
+      {
+        "effective_from": "2026-07-01T00:00:00Z",
+        "input_per_million": 5.0,
+        "output_per_million": 25.0,
+        "cached_input_per_million": 0.6
+      }
+    ]
+  }
+}

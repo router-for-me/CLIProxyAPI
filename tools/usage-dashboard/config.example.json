@@ -1,0 +1,13 @@
+{
+  "cliproxy_base_url": "http://127.0.0.1:8317",
+  "management_key": "replace-with-your-management-key",
+  "poll_interval_seconds": 2,
+  "batch_size": 100,
+  "dashboard_host": "127.0.0.1",
+  "dashboard_port": 8320,
+  "dashboard_token": "",
+  "quota_enabled": false,
+  "quota_refresh_seconds": 300,
+  "default_limit": 100,
+  "max_limit": 500
+}
