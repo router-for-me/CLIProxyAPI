@@ -11,6 +11,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -26,13 +27,13 @@ func TestCodexWebsocketShouldNotifyUpstreamDisconnectOnlySuppressesDownstreamPre
 		msg:  `{"status":500,"error":{"type":"server_error","code":"upstream_failed","message":"upstream failed"}}`,
 	}
 
-	if !codexWebsocketShouldNotifyUpstreamDisconnect(context.Background(), previousResponseErr) {
+	if !helps.CodexWebsocketShouldNotifyUpstreamDisconnect(context.Background(), previousResponseErr) {
 		t.Fatal("non-downstream previous_response_not_found should still notify disconnect subscribers")
 	}
-	if codexWebsocketShouldNotifyUpstreamDisconnect(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), previousResponseErr) {
+	if helps.CodexWebsocketShouldNotifyUpstreamDisconnect(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), previousResponseErr) {
 		t.Fatal("downstream previous_response_not_found should not notify before transcript replay can run")
 	}
-	if !codexWebsocketShouldNotifyUpstreamDisconnect(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), genericErr) {
+	if !helps.CodexWebsocketShouldNotifyUpstreamDisconnect(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), genericErr) {
 		t.Fatal("downstream generic upstream errors should still notify disconnect subscribers")
 	}
 }

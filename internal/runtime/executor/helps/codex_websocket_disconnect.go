@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"context"
@@ -9,7 +9,8 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func codexWebsocketShouldNotifyUpstreamDisconnect(ctx context.Context, err error) bool {
+// CodexWebsocketShouldNotifyUpstreamDisconnect reports whether disconnect subscribers should receive the error.
+func CodexWebsocketShouldNotifyUpstreamDisconnect(ctx context.Context, err error) bool {
 	return !cliproxyexecutor.DownstreamWebsocket(ctx) || !isCodexWebsocketPreviousResponseNotFoundError(err)
 }
 

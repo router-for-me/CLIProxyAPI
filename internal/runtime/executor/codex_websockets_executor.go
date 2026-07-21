@@ -799,7 +799,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 		if wsErr, ok := parseCodexWebsocketError(payload); ok {
 			if sess != nil {
-				e.clearUpstreamConn(sess, conn, "upstream_error", wsErr, codexWebsocketShouldNotifyUpstreamDisconnect(ctx, wsErr))
+				e.clearUpstreamConn(sess, conn, "upstream_error", wsErr, helps.CodexWebsocketShouldNotifyUpstreamDisconnect(ctx, wsErr))
 			}
 			if errClearReplay := clearCodexReasoningReplayOnWebsocketError(ctx, replayScope, payload); errClearReplay != nil {
 				return resp, errClearReplay
@@ -809,7 +809,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 		if wsErr, ok := codexWebsocketStatuslessErrorEvent(payload); ok {
 			if sess != nil {
-				e.clearUpstreamConn(sess, conn, "upstream_error", wsErr, codexWebsocketShouldNotifyUpstreamDisconnect(ctx, wsErr))
+				e.clearUpstreamConn(sess, conn, "upstream_error", wsErr, helps.CodexWebsocketShouldNotifyUpstreamDisconnect(ctx, wsErr))
 			}
 			if streamErr, terminalBody, terminal := codexTerminalFailureErr(payload); terminal {
 				if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
@@ -1418,7 +1418,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
 				if sess != nil {
-					e.clearUpstreamConn(sess, conn, "upstream_error", wsErr, codexWebsocketShouldNotifyUpstreamDisconnect(ctx, wsErr))
+					e.clearUpstreamConn(sess, conn, "upstream_error", wsErr, helps.CodexWebsocketShouldNotifyUpstreamDisconnect(ctx, wsErr))
 				}
 				if errClearReplay := clearCodexReasoningReplayOnWebsocketError(ctx, replayScope, payload); errClearReplay != nil {
 					terminateErr = errClearReplay
@@ -1513,7 +1513,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", statuslessErr)
 				reporter.PublishFailure(ctx, statuslessErr)
 				if sess != nil {
-					e.clearUpstreamConn(sess, conn, "upstream_error", statuslessErr, codexWebsocketShouldNotifyUpstreamDisconnect(ctx, statuslessErr))
+					e.clearUpstreamConn(sess, conn, "upstream_error", statuslessErr, helps.CodexWebsocketShouldNotifyUpstreamDisconnect(ctx, statuslessErr))
 				}
 				_ = send(cliproxyexecutor.StreamChunk{Err: statuslessErr})
 				return
