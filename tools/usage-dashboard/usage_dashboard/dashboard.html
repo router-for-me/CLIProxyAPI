@@ -312,10 +312,35 @@ $('healthText').textContent=t+(h.last_usage_timestamp?(' · '+new Date(h.last_us
 	window.__main=new Chart(ctx,{type:'bar',data:{labels:buckets,datasets},options:{plugins:{legend:{position:'bottom',labels:{color:'#8b95a7',boxWidth:10,font:{size:11}}},tooltip:{callbacks:{label:c=>c.dataset.label+': $'+Number(c.raw).toFixed(4)}}},scales:{x:{stacked:true,ticks:{color:'#8b95a7',maxRotation:0,autoSkip:true,font:{size:10}},grid:{color:'#1c2333'}},y:{stacked:true,ticks:{color:'#8b95a7',callback:v=>'$'+Number(v).toFixed(2),font:{size:10}},grid:{color:'#1c2333'}}},responsive:true,maintainAspectRatio:false}});
 	}
 	/* ---- placeholders filled by later tasks ---- */
-function renderRequests(rows){
-const b=$('requestsBody');
-b.innerHTML=rows.length?rows.map(r=>'<tr class="row-link"><td>'+esc(r.local_time)+'</td><td title="'+esc(r.account)+'">'+esc(String(r.account||'').slice(0,12))+'</td><td>'+esc(r.model)+'</td><td class="num">'+fmt(r.total_tokens)+'</td><td class="num">'+fmtMs(r.ttft_ms)+'</td><td class="num">'+fmtMs(r.latency_ms)+'</td><td>'+(r.failed?'<span class="bad">'+r.fail_status+'</span>':'<span class="good">'+r.fail_status+'</span>')+'</td></tr>').join(''):'<tr><td colspan="7" class="empty">暂无数据</td></tr>';
-}
+let lastRequests=[];
+	function renderRequests(rows){
+	lastRequests=rows||[];
+	const b=$('requestsBody');
+	b.innerHTML=lastRequests.length?lastRequests.map((r,i)=>'<tr class="row-link" data-i="'+i+'"><td>'+esc(r.local_time)+'</td><td title="'+esc(r.account)+'">'+esc(String(r.account||'').slice(0,12))+'</td><td>'+esc(r.model)+'</td><td class="num">'+fmt(r.total_tokens)+'</td><td class="num">'+fmtMs(r.ttft_ms)+'</td><td class="num">'+fmtMs(r.latency_ms)+'</td><td>'+(r.failed?'<span class="bad">'+r.fail_status+'</span>':'<span class="good">'+r.fail_status+'</span>')+'</td></tr>').join(''):'<tr><td colspan="7" class="empty">暂无数据</td></tr>';
+	b.querySelectorAll('tr.row-link').forEach(tr=>tr.onclick=()=>openDrawer(lastRequests[Number(tr.dataset.i)]));
+	}
+	function openDrawer(r){
+	if(!r)return;
+	const kv=(k,v)=>'<div class="k">'+k+'</div><div>'+esc(String(v??'—'))+'</div>';
+	$('drawerBody').innerHTML='<div class="kv">'+
+	kv('时间',r.local_time)+
+	kv('账号',r.account)+
+	kv('模型',r.model)+
+	kv('别名',r.alias)+
+	kv('Provider',r.provider)+
+	kv('请求ID',r.request_id)+
+	kv('状态',r.failed?('失败 '+r.fail_status):('成功 '+r.fail_status))+
+	kv('总Token',fmt(r.total_tokens))+
+	kv('输入',fmt(r.input_tokens))+
+	kv('输出',fmt(r.output_tokens))+
+	kv('推理',fmt(r.reasoning_tokens))+
+	kv('缓存读',fmt(r.cache_read_tokens))+
+	kv('缓存写',fmt(r.cache_creation_tokens))+
+	kv('TTFT',fmtMs(r.ttft_ms))+
+	kv('耗时',fmtMs(r.latency_ms))+
+	'</div>';
+	$('drawer').classList.add('open');
+	}
 function renderTopModels(models){
 const t=(models||[]).slice(0,8);
 $('topModels').innerHTML=t.length?'<table><thead><tr><th>模型</th><th class="num">费用</th><th class="num">Token</th></tr></thead><tbody>'+t.map(m=>'<tr class="row-link" data-model="'+esc(m.model)+'"><td>'+esc(m.model)+(m.priced?'':' <span class="warn">⚠</span>')+'</td><td class="num">'+(m.estimated_cost||0).toFixed(4)+'</td><td class="num">'+fmt(m.total_tokens)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无数据</div>';
@@ -356,7 +381,7 @@ $('tab'+name.charAt(0).toUpperCase()+name.slice(1)).removeAttribute('hidden');
 $('refresh').onclick=()=>{loadFilters().then(()=>load());};
 $('range').onchange=()=>{$('from').value='';$('to').value='';loadFilters().then(()=>load());};
 $('from').onchange=$('to').onchange=()=>load();
-$('loadMore').onclick=async()=>{if(!cursor)return;try{const d=await getJSON('/api/v1/requests?'+queryStr()+'&limit=50&cursor='+encodeURIComponent(cursor));cursor=d.next_cursor;$('requestsBody').insertAdjacentHTML('beforeend',d.requests.map(r=>'<tr class="row-link"><td>'+esc(r.local_time)+'</td><td>'+esc(String(r.account||'').slice(0,12))+'</td><td>'+esc(r.model)+'</td><td class="num">'+fmt(r.total_tokens)+'</td><td class="num">'+fmtMs(r.ttft_ms)+'</td><td class="num">'+fmtMs(r.latency_ms)+'</td><td>'+(r.failed?'<span class="bad">'+r.fail_status+'</span>':'<span class="good">'+r.fail_status+'</span>')+'</td></tr>').join(''));$('loadMore').style.display=cursor?'inline-block':'none';}catch(e){}};
+$('loadMore').onclick=async()=>{if(!cursor)return;try{const d=await getJSON('/api/v1/requests?'+queryStr()+'&limit=50&cursor='+encodeURIComponent(cursor));const start=lastRequests.length;cursor=d.next_cursor;d.requests.forEach((r,i)=>{lastRequests.push(r);const idx=start+i;const tr=document.createElement('tr');tr.className='row-link';tr.dataset.i=idx;tr.innerHTML='<td>'+esc(r.local_time)+'</td><td>'+esc(String(r.account||'').slice(0,12))+'</td><td>'+esc(r.model)+'</td><td class="num">'+fmt(r.total_tokens)+'</td><td class="num">'+fmtMs(r.ttft_ms)+'</td><td class="num">'+fmtMs(r.latency_ms)+'</td><td>'+(r.failed?'<span class="bad">'+r.fail_status+'</span>':'<span class="good">'+r.fail_status+'</span>')+'</td>';tr.onclick=()=>openDrawer(lastRequests[idx]);$('requestsBody').appendChild(tr);});$('loadMore').style.display=cursor?'inline-block':'none';}catch(e){}};
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{switchTab(t.dataset.tab);if(t.dataset.tab==='errors')loadErrors();if(t.dataset.tab==='pricing')loadPricing();});
 $('drawerClose').onclick=()=>$('drawer').classList.remove('open');
 wireMf('modelWrap','modelBtn','modelPanel','modelOptions','modelFilter','modelSummary','模型',()=>load());
