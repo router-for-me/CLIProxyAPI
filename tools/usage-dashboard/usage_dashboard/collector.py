@@ -60,10 +60,20 @@ def _event_key(payload):
 
 
 def _account_hash(payload):
-    src = payload.get("source") or payload.get("auth_index")
-    if not src:
-        return None
-    return hashlib.sha256(str(src).encode()).hexdigest()[:12]
+    """Stable non-reversible account id for dashboard grouping.
+
+    Prefer the client-facing CPA proxy API key (`api_key` in the usage queue).
+    Fall back to upstream credential source / auth_index only when api_key is
+    missing (older records or non-key auth paths).
+    """
+    for key in ("api_key", "source", "auth_index"):
+        val = payload.get(key)
+        if val is None:
+            continue
+        text = str(val).strip()
+        if text:
+            return hashlib.sha256(text.encode()).hexdigest()[:12]
+    return None
 
 
 def _safe_int(value):
