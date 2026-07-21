@@ -86,8 +86,8 @@ func ProviderLimitsForAccount(accountID string) ProviderLimitsPayload {
 	}
 }
 
-func OpenAIProviderLimitsFromUsage(accountID string, payload map[string]any) ProviderLimitsPayload {
-	snapshots := []ProviderLimitSnapshot{openAIRateLimitSnapshot("codex", nil, payload)}
+func OpenAIProviderLimitsFromUsage(accountID string, payload map[string]any, capturedAt int64) ProviderLimitsPayload {
+	snapshots := []ProviderLimitSnapshot{openAIRateLimitSnapshot("codex", nil, payload, capturedAt)}
 	if additional, ok := payload["additional_rate_limits"].([]any); ok {
 		for index, raw := range additional {
 			entry := asMap(raw)
@@ -99,7 +99,7 @@ func OpenAIProviderLimitsFromUsage(accountID string, payload map[string]any) Pro
 				limitID = fmt.Sprintf("additional_%d", index+1)
 			}
 			limitName := firstString(entry, "limit_name", "name")
-			snapshots = append(snapshots, openAIRateLimitSnapshot(limitID, stringPointer(limitName), entry))
+			snapshots = append(snapshots, openAIRateLimitSnapshot(limitID, stringPointer(limitName), entry, capturedAt))
 		}
 	}
 	return ProviderLimitsPayload{
@@ -111,7 +111,7 @@ func OpenAIProviderLimitsFromUsage(accountID string, payload map[string]any) Pro
 	}
 }
 
-func openAIRateLimitSnapshot(limitID string, limitName *string, payload map[string]any) ProviderLimitSnapshot {
+func openAIRateLimitSnapshot(limitID string, limitName *string, payload map[string]any, capturedAt int64) ProviderLimitSnapshot {
 	rateLimit := asMap(payload["rate_limit"])
 	if rateLimit == nil {
 		rateLimit = payload
@@ -123,8 +123,8 @@ func openAIRateLimitSnapshot(limitID string, limitName *string, payload map[stri
 	return ProviderLimitSnapshot{
 		LimitID:              limitID,
 		LimitName:            limitName,
-		Primary:              openAIRateLimitWindow(asMap(rateLimit["primary_window"])),
-		Secondary:            openAIRateLimitWindow(asMap(rateLimit["secondary_window"])),
+		Primary:              openAIRateLimitWindow(asMap(rateLimit["primary_window"]), capturedAt),
+		Secondary:            openAIRateLimitWindow(asMap(rateLimit["secondary_window"]), capturedAt),
 		Credits:              openAICreditsSnapshot(asMap(payload["credits"])),
 		PlanType:             stringOrNil(payload["plan_type"]),
 		RateLimitReachedType: reachedType,
@@ -220,7 +220,7 @@ func zaiSnapshot(limitID, limitName string, windowMinutes int, entry map[string]
 	}
 }
 
-func openAIRateLimitWindow(window map[string]any) *RateLimitWindow {
+func openAIRateLimitWindow(window map[string]any, capturedAt int64) *RateLimitWindow {
 	if window == nil {
 		return nil
 	}
@@ -236,6 +236,9 @@ func openAIRateLimitWindow(window map[string]any) *RateLimitWindow {
 	var resetsAt *int64
 	if reset, ok := numericFloat(window["reset_at"]); ok {
 		resetValue := int64(reset)
+		resetsAt = &resetValue
+	} else if resetAfter, ok := numericFloat(window["reset_after_seconds"]); ok && capturedAt > 0 {
+		resetValue := capturedAt + int64(resetAfter)
 		resetsAt = &resetValue
 	}
 	return &RateLimitWindow{

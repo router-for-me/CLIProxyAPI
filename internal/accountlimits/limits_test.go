@@ -125,9 +125,11 @@ func TestCaptureAnthropicRateLimitsMergesPartialWindows(t *testing.T) {
 }
 
 func TestOpenAIProviderLimitsIncludesAdditionalBuckets(t *testing.T) {
+	capturedAt := int64(1_800_000_000)
 	payload := OpenAIProviderLimitsFromUsage("codex-local", map[string]any{
 		"rate_limit": map[string]any{
-			"primary_window": map[string]any{"used_percent": 10.0},
+			"primary_window":   map[string]any{"used_percent": 10.0, "reset_after_seconds": 120.0},
+			"secondary_window": map[string]any{"used_percent": 20.0, "reset_at": 1_900_000_000.0, "reset_after_seconds": 999.0},
 		},
 		"rate_limit_reached_type": map[string]any{"type": "primary"},
 		"additional_rate_limits": []any{
@@ -145,13 +147,19 @@ func TestOpenAIProviderLimitsIncludesAdditionalBuckets(t *testing.T) {
 				"primary_window":  map[string]any{"used_percent": 75.0},
 			},
 		},
-	})
+	}, capturedAt)
 
 	if len(payload.Snapshots) != 3 {
 		t.Fatalf("snapshots length = %d, want 3", len(payload.Snapshots))
 	}
 	if reached := payload.Snapshots[0].RateLimitReachedType; reached == nil || *reached != "primary" {
 		t.Fatalf("reached type = %v, want primary", reached)
+	}
+	if primary := payload.Snapshots[0].Primary; primary == nil || primary.ResetsAt == nil || *primary.ResetsAt != capturedAt+120 {
+		t.Fatalf("primary resets_at = %+v, want %d", primary, capturedAt+120)
+	}
+	if secondary := payload.Snapshots[0].Secondary; secondary == nil || secondary.ResetsAt == nil || *secondary.ResetsAt != 1_900_000_000 {
+		t.Fatalf("secondary resets_at = %+v, want 1900000000", secondary)
 	}
 	if snapshot := payload.Snapshots[1]; snapshot.LimitID != "spark" || snapshot.LimitName == nil || *snapshot.LimitName != "Spark" || snapshot.Primary == nil || snapshot.Primary.UsedPercent != 25 || snapshot.Secondary == nil || snapshot.Secondary.UsedPercent != 50 {
 		t.Fatalf("spark snapshot = %+v", snapshot)

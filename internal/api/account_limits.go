@@ -194,8 +194,8 @@ func (s *Server) fetchOpenAIAccountLimits(ctx context.Context, credential accoun
 	if errDecode := decoder.Decode(&upstreamPayload); errDecode != nil {
 		return accountlimits.ProviderLimitsPayload{}, http.StatusBadGateway, "Codex usage response has unexpected shape"
 	}
-	payload := accountlimits.OpenAIProviderLimitsFromUsage(credential.accountID, upstreamPayload)
 	capturedAt := unixNow()
+	payload := accountlimits.OpenAIProviderLimitsFromUsage(credential.accountID, upstreamPayload, capturedAt)
 	payload.CapturedAt = &capturedAt
 	return payload, http.StatusOK, ""
 }
