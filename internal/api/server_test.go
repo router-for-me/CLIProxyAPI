@@ -377,7 +377,7 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 
 	cfg := &proxyconfig.Config{
 		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"test-key"},
+			APIKeys: proxyconfig.FromStringKeys([]string{"test-key"}),
 		},
 		Port:                   0,
 		AuthDir:                authDir,
@@ -1206,7 +1206,7 @@ func TestExampleAPIKeySafeModeShowsWarningAndKeepsManagement(t *testing.T) {
 
 	server := newTestServerWithOptions(t, WithExampleAPIKeySafeMode())
 	cfg := *server.cfg
-	cfg.APIKeys = []string{"your-api-key-1"}
+	cfg.APIKeys = proxyconfig.FromStringKeys([]string{"your-api-key-1"})
 	server.UpdateClients(&cfg)
 
 	t.Run("root warning page includes management link", func(t *testing.T) {
@@ -1302,7 +1302,7 @@ func TestExampleAPIKeySafeModeShowsWarningAndKeepsManagement(t *testing.T) {
 
 	t.Run("safe mode clears after key update", func(t *testing.T) {
 		nextCfg := cfg
-		nextCfg.APIKeys = []string{"real-key"}
+		nextCfg.APIKeys = proxyconfig.FromStringKeys([]string{"real-key"})
 		server.UpdateClients(&nextCfg)
 
 		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)

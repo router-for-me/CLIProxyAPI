@@ -48,8 +48,9 @@ type SDKConfig struct {
 	// ClaudeCode configures Claude Code compatibility behavior.
 	ClaudeCode ClaudeCodeConfig `yaml:"claude-code" json:"claude-code"`
 
-	// APIKeys is a list of keys for authenticating clients to this proxy server.
-	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+	// APIKeys authenticates clients to this proxy server.
+	// Entries may be plain strings (unrestricted) or objects with optional allowed-models.
+	APIKeys APIKeyList `yaml:"api-keys" json:"api-keys"`
 
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).

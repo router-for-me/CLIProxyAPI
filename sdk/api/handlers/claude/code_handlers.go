@@ -154,8 +154,48 @@ func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
-	disableCloaking := h.Cfg != nil && h.Cfg.ClaudeCode.DisableCloakingModelList
-	c.JSON(http.StatusOK, claudemodels.BuildResponse(h.Models(), disableCloaking))
+	models := h.Models()
+	// Restrict to models allowed for this client API key before prefixing so
+	// the filter sees the raw registry IDs. Unrestricted keys are no-ops.
+	models = h.FilterModelsByClientAPIKey(c, models, "id")
+	for i := range models {
+		if id, ok := models[i]["id"].(string); ok {
+			models[i]["id"] = util.EnsureClaudeModelIDPrefix(id)
+		}
+	}
+	sortClaudeModelsByDisplayName(models)
+	firstID := ""
+	lastID := ""
+	if len(models) > 0 {
+		if id, ok := models[0]["id"].(string); ok {
+			firstID = id
+		}
+		if id, ok := models[len(models)-1]["id"].(string); ok {
+			lastID = id
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":     models,
+		"has_more": false,
+		"first_id": firstID,
+		"last_id":  lastID,
+	})
+}
+
+// sortClaudeModelsByDisplayName sorts models by display_name ascending.
+// When display_name is equal or missing, id is used as a stable tie-breaker.
+func sortClaudeModelsByDisplayName(models []map[string]any) {
+	sort.SliceStable(models, func(i, j int) bool {
+		di, _ := models[i]["display_name"].(string)
+		dj, _ := models[j]["display_name"].(string)
+		if di != dj {
+			return di < dj
+		}
+		idi, _ := models[i]["id"].(string)
+		idj, _ := models[j]["id"].(string)
+		return idi < idj
+	})
 }
 
 // handleNonStreamingResponse handles non-streaming content generation requests for Claude models.

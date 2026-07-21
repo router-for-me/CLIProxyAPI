@@ -66,6 +66,9 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 
 	// Get all available models
 	allModels := h.Models()
+	// Restrict to models allowed for this client API key (if a per-key
+	// allowlist is configured). Unrestricted keys / open proxy are no-ops.
+	allModels = h.FilterModelsByClientAPIKey(c, allModels, "id")
 
 	// Filter to only include the 4 required fields: id, object, created, owned_by
 	filteredModels := make([]map[string]any, len(allModels))

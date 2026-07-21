@@ -35,7 +35,33 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
-# API keys for authentication
+# API keys for authentication.
+# Each entry may be either a plain string (unrestricted: all models allowed)
+# or an object with an optional `allowed-models` list that restricts which
+# models the key can call. Listing endpoints (/v1/models, /v1beta/models) are
+# filtered the same way as calls.
+#
+# allowed-models rules:
+#   - Omit the field        -> key is unrestricted (default, full access)
+#   - allowed-models: []    -> key may call NO model (deny-all; login only)
+#   - allowed-models: [...] -> only listed models are allowed
+# Matching is case-insensitive. A pattern ending with "*" is a prefix wildcard
+# (e.g. "claude-3-5-haiku*" matches "claude-3-5-haiku-20241022"). Only the
+# client-requested model name is checked (before any alias/thinking suffix
+# normalization). Unknown client keys and open-proxy mode (no api-keys at all)
+# remain unrestricted. Duplicate keys: last entry wins.
+#
+# Example:
+# api-keys:
+#   - "your-api-key-1"                                  # unrestricted
+#   - api-key: "your-api-key-2"                         # unrestricted (object form, no allowlist)
+#     # allowed-models omitted on purpose
+#   - api-key: "your-api-key-3"                         # restricted to two models
+#     allowed-models:
+#       - "gpt-4o-mini"
+#       - "claude-3-5-haiku*"
+#   - api-key: "your-api-key-4"                         # login only, cannot call any model
+#     allowed-models: []
 api-keys:
   - "your-api-key-1"
   - "your-api-key-2"

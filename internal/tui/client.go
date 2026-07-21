@@ -235,7 +235,8 @@ func (c *Client) GetLogs(after int64, limit int) ([]string, int64, error) {
 }
 
 // GetAPIKeys fetches the list of API keys.
-// API returns {"api-keys": [...]}.
+// API returns {"api-keys": [...]} where items may be strings or objects with api-key.
+// The TUI only displays key strings; allowlist fields are preserved server-side.
 func (c *Client) GetAPIKeys() ([]string, error) {
 	wrapper, err := c.getJSON("/v0/management/api-keys")
 	if err != nil {
@@ -249,9 +250,35 @@ func (c *Client) GetAPIKeys() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var result []string
-	if err := json.Unmarshal(raw, &result); err != nil {
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
 		return nil, err
+	}
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		trimmed := strings.TrimSpace(string(item))
+		if trimmed == "" || trimmed == "null" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "\"") {
+			var key string
+			if err := json.Unmarshal(item, &key); err != nil {
+				return nil, err
+			}
+			if key = strings.TrimSpace(key); key != "" {
+				result = append(result, key)
+			}
+			continue
+		}
+		var obj struct {
+			APIKey string `json:"api-key"`
+		}
+		if err := json.Unmarshal(item, &obj); err != nil {
+			return nil, err
+		}
+		if key := strings.TrimSpace(obj.APIKey); key != "" {
+			result = append(result, key)
+		}
 	}
 	return result, nil
 }

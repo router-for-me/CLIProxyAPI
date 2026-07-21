@@ -10,6 +10,11 @@ type SDKConfig = internalconfig.SDKConfig
 
 type Config = internalconfig.Config
 
+type APIKeyEntry = internalconfig.APIKeyEntry
+type APIKeyList = internalconfig.APIKeyList
+
+func FromStringKeys(keys []string) APIKeyList { return internalconfig.FromStringKeys(keys) }
+
 type StreamingConfig = internalconfig.StreamingConfig
 type ClaudeCodeConfig = internalconfig.ClaudeCodeConfig
 type TLSConfig = internalconfig.TLSConfig
