@@ -298,6 +298,35 @@ def max_limit(cfg, requested):
     return max(1, min(n, maximum))
 
 
+def query_prices(cfg, qs=None):
+    """List pricing intervals, marking the one effective at current UTC time.
+
+    Read-only view for the Pricing tab. qs is accepted for signature symmetry
+    but ignored — prices are not time-range scoped.
+    """
+    pricing = pr.load_pricing(cfg)
+    currency = pricing.get("currency") or "USD"
+    now_epoch = dt.datetime.now(_UTC).timestamp()
+    models_out = []
+    for model, intervals in (pricing.get("models") or {}).items():
+        for iv in intervals:
+            active = pr.price_for(pricing, model, now_epoch) is iv
+            entry = {
+                "model": model,
+                "effective_from": iv.get("effective_from"),
+                "effective_now": active,
+            }
+            for rate in ("input_per_million", "output_per_million",
+                         "cached_input_per_million", "reasoning_per_million"):
+                if rate in iv:
+                    entry[rate] = iv[rate]
+            if iv.get("effective_to"):
+                entry["effective_to"] = iv["effective_to"]
+            models_out.append(entry)
+    models_out.sort(key=lambda x: (x["model"], x.get("effective_from") or ""))
+    return {"currency": currency, "models": models_out}
+
+
 def query_requests(cfg, qs):
     start, end, models, accounts, where, params, err = _filters(qs)
     if err:

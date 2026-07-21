@@ -119,6 +119,8 @@ def make_handler(cfg):
                     json_response(self, qy.query_accounts(cfg, qs))
                 elif parsed.path == "/api/v1/errors":
                     json_response(self, qy.query_errors(cfg, qs))
+                elif parsed.path == "/api/v1/prices":
+                    json_response(self, qy.query_prices(cfg))
                 elif parsed.path == "/api/v1/requests":
                     json_response(self, qy.query_requests(cfg, qs))
                 elif parsed.path == "/api/health":
