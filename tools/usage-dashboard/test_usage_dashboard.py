@@ -421,6 +421,49 @@ class TestErrors(BaseTempData):
             qy.query_errors(self.cfg, {"range": ["bogus"]})
 
 
+# ── Prices tests ──────────────────────────────────────────────────────
+
+
+class TestPrices(BaseTempData):
+    def test_prices_lists_currently_effective_intervals(self):
+        pricing_path = cfg_mod.pricing_path_for(self.cfg)
+        with open(pricing_path, "w") as f:
+            json.dump({
+                "currency": "USD",
+                "models": {
+                    "m1": [
+                        {"effective_from": "2020-01-01T00:00:00Z",
+                         "input_per_million": 1.0, "output_per_million": 2.0},
+                    ],
+                },
+            }, f)
+        out = qy.query_prices(self.cfg)
+        self.assertEqual(out["currency"], "USD")
+        self.assertEqual(len(out["models"]), 1)
+        m = out["models"][0]
+        self.assertEqual(m["model"], "m1")
+        self.assertTrue(m["effective_now"])
+        self.assertEqual(m["input_per_million"], 1.0)
+
+    def test_prices_marks_future_interval_not_effective(self):
+        pricing_path = cfg_mod.pricing_path_for(self.cfg)
+        with open(pricing_path, "w") as f:
+            json.dump({
+                "currency": "USD",
+                "models": {
+                    "m2": [{"effective_from": "2999-01-01T00:00:00Z",
+                            "input_per_million": 9.0}],
+                },
+            }, f)
+        out = qy.query_prices(self.cfg)
+        self.assertFalse(out["models"][0]["effective_now"])
+
+    def test_prices_empty_when_no_file(self):
+        out = qy.query_prices(self.cfg)
+        self.assertEqual(out["models"], [])
+        self.assertEqual(out["currency"], "USD")
+
+
 # ── Server tests ───────────────────────────────────────────────────────
 
 
