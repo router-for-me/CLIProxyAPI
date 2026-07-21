@@ -903,7 +903,16 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 			if !strings.HasSuffix(strings.ToLower(name), ".json") {
 				continue
 			}
-			if _, status, errDelete := h.deleteAuthFileByName(ctx, name); errDelete != nil {
+			// Bulk delete must remove the enumerated AuthDir entry itself. Resolving
+			// only by basename can match another runtime auth with the same filename
+			// (subpath/external) and leave the enumerated file behind.
+			full := filepath.Join(h.cfg.AuthDir, name)
+			if !filepath.IsAbs(full) {
+				if abs, errAbs := filepath.Abs(full); errAbs == nil {
+					full = abs
+				}
+			}
+			if _, status, errDelete := h.deleteAuthFileAtPath(ctx, full); errDelete != nil {
 				c.JSON(status, gin.H{"error": errDelete.Error()})
 				return
 			}
@@ -1084,22 +1093,47 @@ func uniqueAuthFileNames(names []string) []string {
 }
 
 func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string, int, error) {
+	return h.deleteAuthFile(ctx, name, "")
+}
+
+// deleteAuthFileAtPath removes one credential file at an already-resolved path.
+// Bulk delete uses this so basename collisions cannot redirect the deletion target.
+func (h *Handler) deleteAuthFileAtPath(ctx context.Context, fullPath string) (string, int, error) {
+	fullPath = strings.TrimSpace(fullPath)
+	if fullPath == "" {
+		return "", http.StatusBadRequest, fmt.Errorf("invalid path")
+	}
+	if !filepath.IsAbs(fullPath) {
+		if abs, errAbs := filepath.Abs(fullPath); errAbs == nil {
+			fullPath = abs
+		}
+	}
+	return h.deleteAuthFile(ctx, filepath.Base(fullPath), fullPath)
+}
+
+// deleteAuthFile removes a credential and its runtime auths.
+// When fixedPath is empty, the target path may be resolved from a runtime auth matched by name.
+// When fixedPath is set, that absolute path is deleted even if another auth shares the basename.
+func (h *Handler) deleteAuthFile(ctx context.Context, name, fixedPath string) (string, int, error) {
 	name = strings.TrimSpace(name)
 	if isUnsafeAuthFileName(name) {
 		return "", http.StatusBadRequest, fmt.Errorf("invalid name")
 	}
 
-	targetPath := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+	targetPath := strings.TrimSpace(fixedPath)
 	targetID := ""
-	if targetAuth := h.findAuthForDelete(name); targetAuth != nil {
-		if !isPluginVirtualSourceDelete(name, targetAuth) {
-			return filepath.Base(name), http.StatusConflict, errPluginVirtualAuth
-		}
-		targetID = strings.TrimSpace(targetAuth.ID)
-		if path := strings.TrimSpace(authAttribute(targetAuth, "path")); path != "" {
-			targetPath = path
-		} else if path := strings.TrimSpace(authAttribute(targetAuth, coreauth.AttributeVirtualSource)); path != "" {
-			targetPath = path
+	if targetPath == "" {
+		targetPath = filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+		if targetAuth := h.findAuthForDelete(name); targetAuth != nil {
+			if !isPluginVirtualSourceDelete(name, targetAuth) {
+				return filepath.Base(name), http.StatusConflict, errPluginVirtualAuth
+			}
+			targetID = strings.TrimSpace(targetAuth.ID)
+			if path := strings.TrimSpace(authAttribute(targetAuth, "path")); path != "" {
+				targetPath = path
+			} else if path := strings.TrimSpace(authAttribute(targetAuth, coreauth.AttributeVirtualSource)); path != "" {
+				targetPath = path
+			}
 		}
 	}
 	if !filepath.IsAbs(targetPath) {

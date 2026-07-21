@@ -6249,7 +6249,7 @@ func authHasStorageRefreshMaterial(auth *Auth) bool {
 	if !ok {
 		return false
 	}
-	return len(bytes.TrimSpace(rawProvider.RawJSON())) > 0
+	return storagePayloadHasRefreshMaterial(rawProvider.RawJSON())
 }
 
 // authIsExplicitlyRefreshable reports whether an auth has local refresh material.
@@ -6257,6 +6257,46 @@ func authHasStorageRefreshMaterial(auth *Auth) bool {
 // refresh_token field.
 func authIsExplicitlyRefreshable(auth *Auth) bool {
 	return authHasRefreshCredential(auth) || authHasStorageRefreshMaterial(auth)
+}
+
+func storagePayloadHasRefreshMaterial(raw []byte) bool {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return false
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		// Opaque non-JSON blobs can still be plugin-owned refresh material.
+		return true
+	}
+	return mapHasRefreshMaterial(payload)
+}
+
+func mapHasRefreshMaterial(payload map[string]any) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	for _, key := range []string{
+		"refresh_token",
+		"refreshToken",
+		"token",
+		"refresh_material",
+		"refreshMaterial",
+		"session_token",
+		"sessionToken",
+	} {
+		switch value := payload[key].(type) {
+		case string:
+			if strings.TrimSpace(value) != "" {
+				return true
+			}
+		case []byte:
+			if len(bytes.TrimSpace(value)) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {

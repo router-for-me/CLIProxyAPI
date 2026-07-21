@@ -390,6 +390,44 @@ func TestManager_RefreshAuthAllowsPluginStorageWithoutRefreshToken(t *testing.T)
 	}
 }
 
+func TestManager_RefreshAuthRejectsTypeOnlyStoragePayload(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(planRefreshExecutor{})
+	auth := &Auth{
+		ID:       "plugin-type-only-storage",
+		Provider: "codex",
+		Storage:  &rawJSONRefreshStorage{raw: []byte(`{"type":"plugin","access_token":"access-only"}`)},
+		Metadata: map[string]any{"access_token": "access-only"},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	refreshed, errRefresh := manager.RefreshAuth(ctx, auth.ID)
+	if !errors.Is(errRefresh, ErrAuthNotRefreshable) {
+		t.Fatalf("RefreshAuth() error = %v, want ErrAuthNotRefreshable", errRefresh)
+	}
+	if refreshed != nil {
+		t.Fatalf("RefreshAuth() auth = %#v, want nil", refreshed)
+	}
+}
+
+func TestStoragePayloadHasRefreshMaterial(t *testing.T) {
+	if !storagePayloadHasRefreshMaterial([]byte(`{"type":"plugin","token":"x"}`)) {
+		t.Fatal("expected token field to count as refresh material")
+	}
+	if storagePayloadHasRefreshMaterial([]byte(`{"type":"plugin","access_token":"x"}`)) {
+		t.Fatal("access_token alone must not count as refresh material")
+	}
+	if storagePayloadHasRefreshMaterial([]byte(`{"type":"plugin"}`)) {
+		t.Fatal("type-only payload must not count as refresh material")
+	}
+	if !storagePayloadHasRefreshMaterial([]byte("opaque-refresh-blob")) {
+		t.Fatal("opaque non-JSON payload should count as refresh material")
+	}
+}
+
 func TestManager_RemovePathWithCleanupLocksSiblingAuthsBeforeDelete(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "plugin-shared.json")

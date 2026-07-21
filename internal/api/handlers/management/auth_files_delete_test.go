@@ -170,3 +170,65 @@ func TestDeleteAuthFile_RemovesRuntimeAuth(t *testing.T) {
 		t.Fatalf("expected runtime auth %q to be removed", record.ID)
 	}
 }
+
+func TestDeleteAuthFile_AllDeletesEnumeratedAuthDirFiles(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	tempDir := t.TempDir()
+	authDir := filepath.Join(tempDir, "auth")
+	subDir := filepath.Join(authDir, "sub")
+	if errMkdir := os.MkdirAll(subDir, 0o700); errMkdir != nil {
+		t.Fatalf("mkdir: %v", errMkdir)
+	}
+
+	fileName := "same-name.json"
+	rootPath := filepath.Join(authDir, fileName)
+	subPath := filepath.Join(subDir, fileName)
+	if errWrite := os.WriteFile(rootPath, []byte(`{"type":"codex","email":"root@example.com"}`), 0o600); errWrite != nil {
+		t.Fatalf("write root auth: %v", errWrite)
+	}
+	if errWrite := os.WriteFile(subPath, []byte(`{"type":"codex","email":"sub@example.com"}`), 0o600); errWrite != nil {
+		t.Fatalf("write sub auth: %v", errWrite)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	// Runtime auth points at the nested file with the same basename.
+	record := &coreauth.Auth{
+		ID:       "nested/" + fileName,
+		FileName: fileName,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": subPath,
+		},
+		Metadata: map[string]any{
+			"type":  "codex",
+			"email": "sub@example.com",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = &memoryAuthStore{}
+
+	deleteRec := httptest.NewRecorder()
+	deleteCtx, _ := gin.CreateTestContext(deleteRec)
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?all=true", nil)
+	deleteCtx.Request = deleteReq
+	h.DeleteAuthFile(deleteCtx)
+
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, errStat := os.Stat(rootPath); !os.IsNotExist(errStat) {
+		t.Fatalf("expected enumerated AuthDir file to be deleted, stat err: %v", errStat)
+	}
+	if _, errStat := os.Stat(subPath); errStat != nil {
+		t.Fatalf("expected nested same-basename file to remain, stat err: %v", errStat)
+	}
+	if _, ok := manager.GetByID(record.ID); !ok {
+		t.Fatal("nested runtime auth was unexpectedly removed by bulk delete of root basename")
+	}
+}
