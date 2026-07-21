@@ -175,7 +175,7 @@ let ov=$('drawer'); // placeholder to avoid unused; real overlay below
 ov=document.createElement('div');ov.id='loginOv';ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:99';
 ov.innerHTML='<div style="background:var(--panel);padding:28px;border-radius:10px;max-width:380px;width:90%"><h2 style="margin:0 0 8px;font-size:16px">访问令牌</h2><p style="color:var(--muted);font-size:13px;margin:0 0 14px">请输入 dashboard token</p><input type="password" id="tokIn" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--text);margin-bottom:8px"/><div id="tokErr" style="color:var(--red);font-size:12px;display:none">令牌无效</div><button class="primary" id="tokGo" style="width:100%;padding:8px">确认</button></div>';
 document.body.appendChild(ov);
-const go=async()=>{const v=$('tokIn').value.trim();if(!v)return;const r=await fetch('/api/v1/auth/check',{headers:{Authorization:'Bearer '+v}});const j=r.ok?await r.json():{valid:false};if(j.valid){token=v;localStorage.setItem('usage_dash_token',v);ov.remove();if(tokenResolve){tokenResolve(tokenResolve=null);}}else{$('tokErr').style.display='block';}};
+const go=async()=>{const v=$('tokIn').value.trim();if(!v)return;const r=await fetch('/api/v1/auth/check',{headers:{Authorization:'Bearer '+v}});const j=r.ok?await r.json():{valid:false};if(j.valid){token=v;localStorage.setItem('usage_dash_token',v);ov.remove();if(tokenResolve){const r=tokenResolve;tokenResolve=null;r(true);}}else{$('tokErr').style.display='block';}};
 $('tokGo').onclick=go;
 $('tokIn').addEventListener('keydown',e=>{if(e.key==='Enter')go();});
 $('tokIn').focus();
