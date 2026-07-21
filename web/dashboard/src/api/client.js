@@ -472,6 +472,8 @@ export async function listModelsCatalog({
   provider = '',
   officialProvider = '',
   availableOnly = true,
+  q = '',
+  sort = '',
 } = {}) {
   const qs = new URLSearchParams();
   qs.set('page', String(page));
@@ -482,11 +484,27 @@ export async function listModelsCatalog({
   // available — the dashboard should show live models only. Pass
   // availableOnly:false to browse the full persisted catalog.
   qs.set('available_only', availableOnly ? 'true' : 'false');
+  if (q) qs.set('q', q);
+  if (sort) qs.set('sort', sort);
   return fetchJSON(`/models-catalog?${qs}`);
 }
 
 export async function getModelsCatalogCount() {
   return fetchJSON('/models-catalog/count');
+}
+
+// getModelsCatalogSummary returns the catalog header stats
+// { total, live, stale, priced, unpriced }. Polled on page mount + after
+// every sync / pricing-source change.
+export async function getModelsCatalogSummary() {
+  return fetchJSON('/models-catalog/summary');
+}
+
+// getModelsCatalogDistinct returns the unique non-empty values for the
+// requested column (provider | official_provider). Used to populate the
+// dashboard filter dropdowns.
+export async function getModelsCatalogDistinct(field = 'provider') {
+  return fetchJSON(`/models-catalog/distinct?field=${encodeURIComponent(field)}`);
 }
 
 export async function getModelPricing(id) {
@@ -510,12 +528,26 @@ export async function putModelPricing(id, pricing) {
 // pick up the new rows. The dashboard's "available only" toggle now means
 // "I want the catalog that came from the latest /v1/models sync" — no extra
 // client-side join is needed.
+//
+// When no callerKey argument is supplied, the dashboard falls back to the
+// operator-stored caller key (getStoredCallerKey) so PG-only deployments
+// without any `api-keys:` entry can still sync by pasting a key once.
 export async function syncModelsFromV1(callerKey = '') {
-  const body = callerKey ? { caller_key: callerKey } : {};
+  const key = callerKey || getStoredCallerKey();
+  const body = key ? { caller_key: key } : {};
   return fetchJSON('/models-catalog/sync-from-v1', {
     method: 'POST',
     body: JSON.stringify(body),
   });
+}
+
+// getModelsCatalogSyncStatus returns metadata about the most recent
+// /v1/models → models_catalog sync: last_synced_at (RFC3339 UTC, null when
+// never synced), last_synced_count, last_error + last_error_type (so the
+// UI can render actionable hints for no_caller_key / v1_models_probe_failed),
+// caller_key_prefix used, and live_available_count (live registry entries).
+export async function getModelsCatalogSyncStatus() {
+  return fetchJSON('/models-catalog/sync-status');
 }
 
 // previewPricingSync fetches, for every model currently in models_catalog,
@@ -537,6 +569,69 @@ export async function applyPricingSync(selections) {
     method: 'POST',
     body: JSON.stringify({ selections }),
   });
+}
+
+// --- Pricing sources (operator-managed external catalogs) -------------------
+//
+// Pricing sources are operator-managed external pricing catalogs (LiteLLM-
+// format JSON URLs or uploaded files). When enabled + refreshed they
+// contribute suggestions to SyncPricingPreview, filling gaps the bundled
+// catalog does not cover (e.g. vendor-namespaced model IDs that appear in
+// a private LiteLLM fork).
+
+export async function listPricingSources() {
+  return fetchJSON('/pricing-sources');
+}
+
+export async function createPricingSource(body) {
+  return fetchJSON('/pricing-sources', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updatePricingSource(id, body) {
+  return fetchJSON(`/pricing-sources/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deletePricingSource(id) {
+  await fetchJSON(`/pricing-sources/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function refreshPricingSource(id) {
+  return fetchJSON(`/pricing-sources/${encodeURIComponent(id)}/refresh`, {
+    method: 'POST',
+  });
+}
+
+export async function refreshAllPricingSources() {
+  return fetchJSON('/pricing-sources/refresh-all', {
+    method: 'POST',
+  });
+}
+
+// uploadPricingSourceFile POSTs a multipart file upload to attach a local
+// LiteLLM-format catalog to a source. Returns { source, entry_count, error }.
+export async function uploadPricingSourceFile(id, file) {
+  const form = new FormData();
+  form.append('file', file);
+  const token = getStoredToken();
+  const res = await fetch(`${API_BASE}/pricing-sources/${encodeURIComponent(id)}/upload`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: form,
+  });
+  const payload = await res.json().catch(() => null);
+  if (!res.ok) {
+    const message = extractErrorMessage(payload, res.statusText);
+    throw new ApiError(message, res.status);
+  }
+  return payload;
 }
 
 // --- Error message customization -------------------------------------------

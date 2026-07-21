@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -29,8 +30,13 @@ import (
 //     persisted catalog down to the IDs the active in-memory registry reports
 //     as currently available (across openai/claude/gemini handler types).
 //     This is what the dashboard should call to show "live" models only.
+//   - q                   (optional): free-text ILIKE filter against id,
+//     name, display_name, and provider. Case-insensitive substring match.
+//   - sort                (optional): ORDER BY column — one of id, provider,
+//     official_provider, context_length, max_completion_tokens,
+//     display_name. Prefix with "-" for descending (e.g. "-context_length").
 func (h *Handler) ListModelsCatalog(c *gin.Context) {
-	_, _, models, _, ok := h.requirePG(c)
+	_, usage, models, _, ok := h.requirePG(c)
 	if !ok {
 		return
 	}
@@ -48,6 +54,7 @@ func (h *Handler) ListModelsCatalog(c *gin.Context) {
 	provider := c.Query("provider")
 	officialProvider := c.Query("official_provider")
 	availableOnly := boolFromQuery(c.Query("available_only"))
+	query := c.Query("q")
 
 	var idFilter []string
 	if availableOnly {
@@ -67,14 +74,44 @@ func (h *Handler) ListModelsCatalog(c *gin.Context) {
 		}
 	}
 
-	stored, total, err := models.SelectAllPaged(c.Request.Context(), page, pageSize, provider, officialProvider, idFilter)
+	// Always expose live_ids (the in-memory registry's currently available
+	// model IDs) so the dashboard can render a "live" badge per row without
+	// a second round-trip. The call below is cheap (registry is in-memory).
+	liveIDs := liveAvailableIDsSet()
+
+	filter := store.ModelsListFilter{
+		Provider:         provider,
+		OfficialProvider: officialProvider,
+		IDFilter:         idFilter,
+		Query:            query,
+	}
+	sort := parseModelsListSort(c.Query("sort"))
+	stored, total, err := models.SelectAllPagedFilter(c.Request.Context(), page, pageSize, filter, sort)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
 	}
+	// Pull pricing rows for the current page's model ids so the dashboard
+	// can render an inline "$I / $O" summary per row without a per-row
+	// GET /pricing call.
+	pageIDs := make([]string, 0, len(stored))
+	for i := range stored {
+		if strings.TrimSpace(stored[i].ID) != "" {
+			pageIDs = append(pageIDs, stored[i].ID)
+		}
+	}
+	pricingForRows := loadPricingForRows(c.Request.Context(), usage, pageIDs)
 	out := make([]any, 0, len(stored))
 	for i := range stored {
-		out = append(out, stored[i])
+		// Enrich each row with the current pricing summary so the
+		// dashboard can render "$I / $O" inline without an extra
+		// GET /pricing call per row. Skipped when usage store is nil.
+		row := stored[i]
+		if p, ok := pricingForRows[strings.ToLower(row.ID)]; ok {
+			cp := p
+			row.Pricing = &cp
+		}
+		out = append(out, row)
 	}
 	c.JSON(http.StatusOK, pgModelsCatalogResponse{
 		Models:     out,
@@ -82,7 +119,57 @@ func (h *Handler) ListModelsCatalog(c *gin.Context) {
 		PageSize:   pageSize,
 		Total:      total,
 		TotalPages: totalPages(total, pageSize),
+		LiveIDs:    liveIDs,
 	})
+}
+
+// parseModelsListSort parses the sort query-string param into a
+// ModelsListSort. The format is "<column>" for ascending or
+// "-<column>" for descending. Unknown columns fall back to id asc.
+func parseModelsListSort(raw string) store.ModelsListSort {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return store.ModelsListSort{Column: "id", Ascending: true}
+	}
+	asc := true
+	if strings.HasPrefix(raw, "-") {
+		asc = false
+		raw = strings.TrimPrefix(raw, "-")
+	} else if strings.HasPrefix(raw, "+") {
+		raw = strings.TrimPrefix(raw, "+")
+	}
+	return store.ModelsListSort{Column: raw, Ascending: asc}
+}
+
+// loadPricingForRows returns a lowercase-id-keyed map of pricing for the
+// supplied ids. Intended for the per-row inline pricing summary. When ids
+// is nil the function returns an empty map (used as a placeholder so the
+// caller can later populate it from the catalog page results).
+//
+// Implementation note: kept simple — fetches each pricing row by id via
+// GetPricing. Catalog pages are <= 200 rows so the cost is bounded; a
+// future batch-by-ids API on UsageStore would make this a single round-trip.
+func loadPricingForRows(ctx context.Context, usage *store.UsageStore, ids []string) map[string]store.Pricing {
+	out := make(map[string]store.Pricing)
+	if usage == nil || len(ids) == 0 {
+		return out
+	}
+	for _, id := range ids {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		p, err := usage.GetPricing(ctx, id)
+		if err != nil || p.ID == "" {
+			continue
+		}
+		// Treat all-zero rows as missing (matches loadCurrentPricing).
+		if p.InputPer1M == 0 && p.OutputPer1M == 0 && p.CachedInputPer1M == 0 &&
+			p.CachedReadPer1M == 0 && p.ReasoningPer1M == 0 {
+			continue
+		}
+		out[strings.ToLower(id)] = p
+	}
+	return out
 }
 
 // pgModelsCatalogResponse is the paginated list response for the catalog.
@@ -92,6 +179,25 @@ type pgModelsCatalogResponse struct {
 	PageSize   int   `json:"page_size"`
 	Total      int64 `json:"total"`
 	TotalPages int   `json:"total_pages"`
+	// LiveIDs is the set of model IDs the in-memory registry currently
+	// reports as available, keyed by lowercase model id. The dashboard uses
+	// it to draw a per-row "live" badge. Built once per list call.
+	LiveIDs map[string]bool `json:"live_ids"`
+}
+
+// liveAvailableIDsSet returns the registry's currently-available model IDs
+// as a lowercase-keyed lookup set. Returns an empty (non-nil) map when the
+// registry has no live entries yet (e.g. cold start).
+func liveAvailableIDsSet() map[string]bool {
+	ids := registry.GetGlobalRegistry().AvailableModelIDList()
+	out := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		out[strings.ToLower(id)] = true
+	}
+	return out
 }
 
 // GetModelsCatalogCount handles GET /v0/management/models-catalog/count.
@@ -106,6 +212,54 @@ func (h *Handler) GetModelsCatalogCount(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"count": count})
+}
+
+// GetModelsCatalogSummary handles GET /v0/management/models-catalog/summary.
+//
+// Returns the catalog summary used by the dashboard header stat cards:
+//
+//	{ total, live, stale, priced, unpriced }
+//
+// `live` is computed by intersecting the persisted catalog ids with the
+// in-memory registry's currently-available ids; `priced` is via a LEFT JOIN
+// against model_pricing (rows with at least one non-zero cost component).
+func (h *Handler) GetModelsCatalogSummary(c *gin.Context) {
+	_, usage, models, _, ok := h.requirePG(c)
+	if !ok {
+		return
+	}
+	pricingTable := ""
+	if usage != nil {
+		pricingTable = usage.PricingTable()
+	}
+	liveIDs := registry.GetGlobalRegistry().AvailableModelIDList()
+	summ, err := models.Summary(c.Request.Context(), pricingTable, liveIDs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+		return
+	}
+	c.JSON(http.StatusOK, summ)
+}
+
+// GetModelsCatalogDistinct handles GET /v0/management/models-catalog/distinct.
+//
+// Query param: field=provider|official_provider
+// Returns the unique non-empty values for the requested column, used to
+// populate the dashboard's filter dropdowns. Empty list when PG is not
+// configured (503 actually, surfaced by requirePG).
+func (h *Handler) GetModelsCatalogDistinct(c *gin.Context) {
+	_, _, models, _, ok := h.requirePG(c)
+	if !ok {
+		return
+	}
+	field := c.DefaultQuery("field", "provider")
+	values, err := models.Distinct(c.Request.Context(), field)
+	if err != nil {
+		// Validation errors (disallowed field) → 400.
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": err.Error()}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"field": field, "values": values})
 }
 
 func boolFromQuery(v string) bool {
@@ -152,6 +306,7 @@ func (h *Handler) SyncModelsFromV1(c *gin.Context) {
 	if callerKey == "" {
 		picked, err := h.pickAutoCallerKey(c, apiKeys)
 		if err != nil {
+			h.recordSyncMeta(0, err.Error(), "no_caller_key", "")
 			c.JSON(http.StatusPreconditionFailed, gin.H{"error": gin.H{
 				"type":    "no_caller_key",
 				"message": err.Error(),
@@ -166,6 +321,7 @@ func (h *Handler) SyncModelsFromV1(c *gin.Context) {
 	// (AuthMiddleware + PolicyMiddleware) exactly as a real caller would.
 	resp, err := h.callV1Models(c, callerKey)
 	if err != nil {
+		h.recordSyncMeta(0, err.Error(), "v1_models_probe_failed", prefixOnly(callerKey))
 		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
 			"type":    "v1_models_probe_failed",
 			"message": err.Error(),
@@ -184,6 +340,7 @@ func (h *Handler) SyncModelsFromV1(c *gin.Context) {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		h.recordSyncMeta(0, "failed to decode /v1/models response: "+err.Error(), "v1_models_decode_failed", prefixOnly(callerKey))
 		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
 			"type":    "v1_models_decode_failed",
 			"message": "failed to decode /v1/models response: " + err.Error(),
@@ -191,6 +348,7 @@ func (h *Handler) SyncModelsFromV1(c *gin.Context) {
 		return
 	}
 	if len(parsed.Data) == 0 {
+		h.recordSyncMeta(0, "", "", prefixOnly(callerKey))
 		c.JSON(http.StatusOK, gin.H{
 			"synced":            0,
 			"caller_key_source": "auto",
@@ -222,17 +380,65 @@ func (h *Handler) SyncModelsFromV1(c *gin.Context) {
 		})
 	}
 	if err := models.UpsertModels(c.Request.Context(), stored); err != nil {
+		h.recordSyncMeta(0, "upsert failed: "+err.Error(), "internal_error", prefixOnly(callerKey))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
 			"type":    "internal_error",
 			"message": "upsert failed: " + err.Error(),
 		}})
 		return
 	}
+	h.recordSyncMeta(len(stored), "", "", prefixOnly(callerKey))
 	c.JSON(http.StatusOK, gin.H{
 		"synced":            len(stored),
 		"caller_key_source": "auto",
 		"caller_key_prefix": prefixOnly(callerKey),
 	})
+}
+
+// recordSyncMeta stores the outcome of the most recent /v1/models →
+// models_catalog sync so the dashboard can render sync status without
+// re-issuing a probe. errType is the JSON error "type" identifier when the
+// sync failed (e.g. "no_caller_key") so the UI can render actionable hints.
+func (h *Handler) recordSyncMeta(count int, errMsg, errType, keyPref string) {
+	h.modelsSyncMu.Lock()
+	defer h.modelsSyncMu.Unlock()
+	h.modelsSyncAt = time.Now()
+	h.modelsSyncCount = count
+	h.modelsSyncErr = errMsg
+	h.modelsSyncErrType = errType
+	h.modelsSyncCallerKeyPref = keyPref
+}
+
+// SyncStatus handles GET /v0/management/models-catalog/sync-status.
+//
+// Returns the outcome of the last POST /sync-from-v1 call plus the count
+// of live models the in-memory registry currently reports as available.
+// The dashboard uses this to render a "last synced N ago · key sk-abcd…"
+// pill and a per-row "live" correction when out of sync.
+func (h *Handler) SyncStatus(c *gin.Context) {
+	if _, _, _, _, ok := h.requirePG(c); !ok {
+		return
+	}
+	h.modelsSyncMu.RLock()
+	at := h.modelsSyncAt
+	count := h.modelsSyncCount
+	errMsg := h.modelsSyncErr
+	errType := h.modelsSyncErrType
+	keyPref := h.modelsSyncCallerKeyPref
+	h.modelsSyncMu.RUnlock()
+
+	resp := gin.H{
+		"last_synced_at":       nil,
+		"last_synced_count":    count,
+		"last_error":           errMsg,
+		"last_error_type":      errType,
+		"caller_key_prefix":    keyPref,
+		"live_available_count": len(registry.GetGlobalRegistry().AvailableModelIDList()),
+	}
+	if !at.IsZero() {
+		resp["last_synced_at"] = at.UTC().Format(time.RFC3339)
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // pickAutoCallerKey returns the first plaintext caller API key the server

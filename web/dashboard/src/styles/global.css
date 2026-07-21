@@ -275,6 +275,53 @@ code, pre {
 .badge--expired  { background: var(--danger-dim); color: var(--danger); }
 .badge--muted    { background: var(--bg-elevated); color: var(--text-muted); }
 
+/* Live-registry dot — rendered before each model ID in the catalog table.
+   Green when the in-memory registry currently reports the model as
+   available; grey when only a stale persisted row exists. */
+.live-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+.live-dot--on  { background: var(--success); box-shadow: 0 0 0 2px var(--success-dim); }
+.live-dot--off { background: var(--text-dim); opacity: 0.55; }
+
+/* Sync status pill — single-row summary shown under the page header. */
+.sync-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 8px 14px;
+  margin-bottom: 16px;
+  font-size: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+}
+.sync-pill--loading { color: var(--text-muted); }
+.sync-pill--error   { background: var(--danger-dim); border-color: rgba(248, 113, 113, 0.4); color: var(--danger); }
+.sync-pill__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  flex-shrink: 0;
+}
+.sync-pill__dot--err { background: var(--danger); }
+
+/* Smaller inline spinner variant used inside the sync pill. */
+.spinner--sm {
+  width: 12px;
+  height: 12px;
+  border-width: 2px;
+}
+
 /* Forms ------------------------------------------------------------------- */
 
 .form__row {
@@ -923,3 +970,247 @@ select.has-error:focus {
 }
 
 
+
+/* Stats grid — header summary cards on the Available Models page. */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+@media (max-width: 900px) {
+  .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.stat-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.stat-card:hover {
+  border-color: var(--accent);
+  background: var(--bg-elevated);
+}
+.stat-card--active {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+.stat-card__value {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.1;
+}
+.stat-card__label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.stat-card__hint {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* Segmented control — used for density toggle, stale filter, etc. */
+.seg-group {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg);
+}
+.seg-btn {
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--border);
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  border-radius: 0;
+  cursor: pointer;
+}
+.seg-btn:last-child { border-right: none; }
+.seg-btn:hover:not(:disabled) {
+  background: var(--bg-elevated);
+  color: var(--text);
+  border-color: var(--border);
+}
+.seg-btn--active {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.seg-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Search input — compact toolbar field with icon space. */
+.search-input {
+  width: 280px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.search-input::placeholder { color: var(--text-dim); }
+
+/* Table density variants. */
+.table--dense td,
+.table--dense th {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+.table--comfortable td,
+.table--comfortable th {
+  padding: 12px;
+  font-size: 13px;
+}
+
+/* Sortable column header. */
+.th-sortable {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.th-sortable:hover { color: var(--text); }
+.th-sort__icon {
+  margin-left: 4px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.th-sortable.th-sort--active .th-sort__icon { color: var(--accent); }
+
+/* Skeleton row shimmer — shown while the catalog list is loading. */
+.skeleton-row td {
+  padding: 10px 12px;
+}
+.skeleton-line {
+  display: inline-block;
+  height: 10px;
+  background: linear-gradient(
+    90deg,
+    var(--bg-elevated) 0%,
+    var(--bg-card) 50%,
+    var(--bg-elevated) 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  border-radius: 3px;
+  width: 100%;
+}
+@keyframes skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Inline pricing summary cell on each catalog row. */
+.pricing-inline {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+}
+.pricing-inline:hover { color: var(--accent); }
+.pricing-inline--unset {
+  color: var(--text-dim);
+  font-style: italic;
+  cursor: pointer;
+}
+
+/* Hover action buttons — revealed when the row is hovered/focused. */
+.row-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+tr:hover .row-actions,
+tr:focus-within .row-actions {
+  opacity: 1;
+}
+.row-actions button {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+.row-actions button.row-actions__btn--primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Expanded row — extra metadata revealed when an operator clicks a row. */
+.row-expanded {
+  background: var(--bg-elevated);
+}
+.row-expanded td {
+  border-bottom: 1px solid var(--border);
+  padding: 12px;
+}
+.row-expanded__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+  font-size: 12px;
+}
+.row-expanded__field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.row-expanded__label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.row-expanded__value {
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+/* Toolbar card — spans above table, holds search + filters. */
+.catalog-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+.catalog-toolbar__spacer { flex: 1; }
+.catalog-toolbar__count {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* Auto-refresh indicator chip. */
+.autorefresh-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 4px 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.autorefresh-chip__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  animation: pulse 2s ease-in-out infinite;
+}
+.autorefresh-chip--off .autorefresh-chip__dot {
+  background: var(--text-dim);
+  animation: none;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}

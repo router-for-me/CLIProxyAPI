@@ -102,13 +102,18 @@ type serverOptionConfig struct {
 // management handlers and middleware consume. All fields may be nil when the
 // PGSTORE_DSN backend is inactive; callers should nil-check before use.
 type PgStoreHandles struct {
-	APIKeys       *store.APIKeyStore
-	Usage         *store.UsageStore
-	Models        *store.ModelsStore
-	Users         *store.UserStore
-	PGSync        *registry.PGSync
-	Policy        policy.PolicyService
-	ErrorMessages errormessages.Store
+	APIKeys        *store.APIKeyStore
+	Usage          *store.UsageStore
+	Models         *store.ModelsStore
+	Users          *store.UserStore
+	PGSync         *registry.PGSync
+	Policy         policy.PolicyService
+	ErrorMessages  errormessages.Store
+	PricingSources store.PricingSourceStore
+	// PricingSourcesDir is the local directory backing uploaded pricing
+	// catalog files for source_type=file pricing sources. Empty when PG
+	// is not configured.
+	PricingSourcesDir string
 }
 
 // ServerOption customises HTTP server construction.
@@ -417,6 +422,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	if handles := optionState.pgStores; handles != nil {
 		s.mgmt.SetPostgresStores(handles.APIKeys, handles.Usage, handles.Models, handles.PGSync, handles.Policy)
 		s.mgmt.SetErrorMessagesStore(handles.ErrorMessages)
+		s.mgmt.SetPricingSourcesStore(handles.PricingSources, handles.PricingSourcesDir)
 		s.mgmt.SetUserStore(handles.Users)
 	}
 	// Wire the /v1/models invoker so the management endpoint
@@ -1018,6 +1024,9 @@ func (s *Server) registerManagementRoutes() {
 		// PG-backed model catalog and pricing management.
 		mgmt.GET("/models-catalog", s.mgmt.ListModelsCatalog)
 		mgmt.GET("/models-catalog/count", s.mgmt.GetModelsCatalogCount)
+		mgmt.GET("/models-catalog/summary", s.mgmt.GetModelsCatalogSummary)
+		mgmt.GET("/models-catalog/distinct", s.mgmt.GetModelsCatalogDistinct)
+		mgmt.GET("/models-catalog/sync-status", s.mgmt.SyncStatus)
 		mgmt.GET("/models-catalog/:id/pricing", s.mgmt.GetModelPricing)
 		mgmt.PUT("/models-catalog/:id/pricing", s.mgmt.PutModelPricing)
 		mgmt.POST("/models-catalog/sync-from-v1", s.mgmt.SyncModelsFromV1)
@@ -1026,6 +1035,17 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/models-catalog/entry/:id/:provider", s.mgmt.GetModelEntry)
 		mgmt.PUT("/models-catalog/entry/:id/:provider", s.mgmt.PutModelEntry)
 		mgmt.DELETE("/models-catalog/entry/:id/:provider", s.mgmt.DeleteModelEntry)
+
+		// Operator-managed external pricing catalogs (LiteLLM-format JSON
+		// URLs / uploaded files). Surface as suggestions in the dashboard's
+		// Sync Pricing modal alongside the bundled catalog.
+		mgmt.GET("/pricing-sources", s.mgmt.ListPricingSources)
+		mgmt.POST("/pricing-sources", s.mgmt.CreatePricingSource)
+		mgmt.PUT("/pricing-sources/:id", s.mgmt.UpdatePricingSource)
+		mgmt.DELETE("/pricing-sources/:id", s.mgmt.DeletePricingSource)
+		mgmt.POST("/pricing-sources/refresh-all", s.mgmt.RefreshAllPricingSources)
+		mgmt.POST("/pricing-sources/:id/refresh", s.mgmt.RefreshPricingSource)
+		mgmt.POST("/pricing-sources/:id/upload", s.mgmt.UploadPricingSourceFile)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)

@@ -20,19 +20,20 @@ import (
 )
 
 const (
-	defaultConfigTable        = "config_store"
-	defaultAuthTable          = "auth_store"
-	defaultConfigKey          = "config"
-	defaultAPIKeysTable       = "api_keys"
-	defaultPoliciesTable      = "api_key_policies"
-	defaultUsageEventsTable   = "usage_events"
-	defaultUsageErrorsTable   = "usage_errors"
-	defaultUsageWindowsTable  = "usage_windows"
-	defaultModelsTable        = "models_catalog"
-	defaultModelPricingTable  = "model_pricing"
-	defaultErrorMessagesTable = "error_messages"
-	defaultInternalUsersTable = "internal_users"
-	defaultUserWindowsTable   = "user_windows"
+	defaultConfigTable         = "config_store"
+	defaultAuthTable           = "auth_store"
+	defaultConfigKey           = "config"
+	defaultAPIKeysTable        = "api_keys"
+	defaultPoliciesTable       = "api_key_policies"
+	defaultUsageEventsTable    = "usage_events"
+	defaultUsageErrorsTable    = "usage_errors"
+	defaultUsageWindowsTable   = "usage_windows"
+	defaultModelsTable         = "models_catalog"
+	defaultModelPricingTable   = "model_pricing"
+	defaultErrorMessagesTable  = "error_messages"
+	defaultInternalUsersTable  = "internal_users"
+	defaultUserWindowsTable    = "user_windows"
+	defaultPricingSourcesTable = "pricing_sources"
 )
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
@@ -66,6 +67,15 @@ type PostgresStoreConfig struct {
 	// HTTP status code. Served by the errormessages package.
 	ErrorMessagesTable string
 
+	// PricingSourcesTable stores operator-managed external pricing catalogs
+	// (LiteLLM JSON URLs / uploaded files). Served by the pricingsource
+	// package's external source registry.
+	PricingSourcesTable string
+
+	// PricingSourcesDir is the local directory used to persist uploaded
+	// pricing catalog files. Defaults to <spool>/pricing_sources.
+	PricingSourcesDir string
+
 	// InternalUsersTable stores the internal-user entity (a key owner with
 	// per-user budget, role, and model access). Referenced by api_keys.user_id
 	// and usage_events.user_id.
@@ -85,12 +95,13 @@ type PostgresStoreConfig struct {
 // PostgresStore persists configuration and authentication metadata using PostgreSQL as backend
 // while mirroring data to a local workspace so existing file-based workflows continue to operate.
 type PostgresStore struct {
-	db         *sql.DB
-	cfg        PostgresStoreConfig
-	spoolRoot  string
-	configPath string
-	authDir    string
-	mu         sync.Mutex
+	db                *sql.DB
+	cfg               PostgresStoreConfig
+	spoolRoot         string
+	configPath        string
+	authDir           string
+	pricingSourcesDir string
+	mu                sync.Mutex
 }
 
 // NewPostgresStore establishes a connection to PostgreSQL and prepares the local workspace.
@@ -130,6 +141,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	if cfg.ErrorMessagesTable == "" {
 		cfg.ErrorMessagesTable = defaultErrorMessagesTable
 	}
+	if cfg.PricingSourcesTable == "" {
+		cfg.PricingSourcesTable = defaultPricingSourcesTable
+	}
 	if cfg.InternalUsersTable == "" {
 		cfg.InternalUsersTable = defaultInternalUsersTable
 	}
@@ -157,6 +171,17 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	if err = os.MkdirAll(authDir, 0o700); err != nil {
 		return nil, fmt.Errorf("postgres store: create auth directory: %w", err)
 	}
+	// pricingSourcesDir persists uploaded LiteLLM-format catalogs. Lax perms
+	// (0o755) match the rest of the spool: files contain only public prices.
+	pricingSourcesDir := filepath.Join(absSpool, "pricing_sources")
+	if cfg.PricingSourcesDir != "" {
+		if abs, err := filepath.Abs(cfg.PricingSourcesDir); err == nil {
+			pricingSourcesDir = abs
+		}
+	}
+	if err = os.MkdirAll(pricingSourcesDir, 0o755); err != nil {
+		return nil, fmt.Errorf("postgres store: create pricing_sources directory: %w", err)
+	}
 
 	db, err := sql.Open("pgx", cfg.DSN)
 	if err != nil {
@@ -168,11 +193,12 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 
 	store := &PostgresStore{
-		db:         db,
-		cfg:        cfg,
-		spoolRoot:  absSpool,
-		configPath: filepath.Join(configDir, "config.yaml"),
-		authDir:    authDir,
+		db:                db,
+		cfg:               cfg,
+		spoolRoot:         absSpool,
+		configPath:        filepath.Join(configDir, "config.yaml"),
+		authDir:           authDir,
+		pricingSourcesDir: pricingSourcesDir,
 	}
 	return store, nil
 }
@@ -608,6 +634,32 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	`, errorMessagesTable)); err != nil {
 		return fmt.Errorf("postgres store: create error_messages table: %w", err)
 	}
+
+	// pricing_sources stores operator-managed external pricing catalogs:
+	// remote LiteLLM-format JSON URLs and locally uploaded catalog files.
+	// The pricingsource package loads each enabled row on refresh and merges
+	// its entries into the in-memory match index so SyncPricingPreview can
+	// surface suggestions from operator-chosen sources alongside the
+	// bundled defaults.
+	pricingSourcesTable := s.fullTableName(s.cfg.PricingSourcesTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id              SERIAL PRIMARY KEY,
+			name            TEXT NOT NULL UNIQUE,
+			source_type     TEXT NOT NULL,
+			url             TEXT,
+			file_path       TEXT,
+			format          TEXT NOT NULL DEFAULT 'litellm',
+			enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+			last_fetched_at TIMESTAMPTZ,
+			last_error      TEXT,
+			entry_count     INTEGER NOT NULL DEFAULT 0,
+			created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, pricingSourcesTable)); err != nil {
+		return fmt.Errorf("postgres store: create pricing_sources table: %w", err)
+	}
 	return nil
 }
 
@@ -735,6 +787,24 @@ func (s *PostgresStore) ErrorMessagesTable() string {
 		return quoteIdentifier(defaultErrorMessagesTable)
 	}
 	return s.fullTableName(s.cfg.ErrorMessagesTable)
+}
+
+// PricingSourcesTable returns the fully-qualified name of the operator-
+// managed external pricing catalog sources table.
+func (s *PostgresStore) PricingSourcesTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultPricingSourcesTable)
+	}
+	return s.fullTableName(s.cfg.PricingSourcesTable)
+}
+
+// PricingSourcesDir returns the local directory backing uploaded pricing
+// catalog files. Guaranteed to exist when the store is non-nil.
+func (s *PostgresStore) PricingSourcesDir() string {
+	if s == nil {
+		return ""
+	}
+	return s.pricingSourcesDir
 }
 
 // InternalUsersTable returns the fully-qualified name of the internal users
