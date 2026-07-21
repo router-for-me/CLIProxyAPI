@@ -217,6 +217,37 @@ data: {"type":"response.completed","response":{"id":"resp_123","status":"complet
 	}
 }
 
+func TestForwardResponsesStreamSuppressesNativeImageCompletionAfterSyntheticCompletion(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 3)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte(`event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"ig_123","type":"image_generation_call","status":"generating","result":"aGVsbG8="}}
+
+`)
+	data <- []byte(`event: response.image_generation_call.completed
+data: {"type":"response.image_generation_call.completed","item_id":"ig_123","call_id":"ig_123","result":"aGVsbG8="}
+
+`)
+	data <- []byte(`event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_123","status":"completed","output":[]}}
+
+`)
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+
+	parts := strings.Split(strings.TrimSpace(recorder.Body.String()), "\n\n")
+	if len(parts) != 3 {
+		t.Fatalf("expected synthetic completion, output item, and response completion events; got %d: %q", len(parts), recorder.Body.String())
+	}
+	if got := strings.Count(recorder.Body.String(), "response.image_generation_call.completed"); got != 2 {
+		t.Fatalf("image completion event count = %d, want event and payload once", got)
+	}
+}
+
 func TestForwardResponsesStreamRepairsMixedIndexedAndUnindexedDoneItems(t *testing.T) {
 	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
 
