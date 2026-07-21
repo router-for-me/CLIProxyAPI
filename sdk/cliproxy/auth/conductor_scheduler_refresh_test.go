@@ -1330,3 +1330,90 @@ func TestClearCooldownStateForAuth_StillClearsTransientCooldown(t *testing.T) {
 		t.Fatalf("expected NextRetryAfter=zero after clearing, got %v", auth.NextRetryAfter)
 	}
 }
+
+// TestPermanentFailureMetadata_RoundTrip verifies that the permanent-failure
+// marker survives a persist → reload cycle via Metadata. Store readers
+// (FileTokenStore/PostgresStore/ObjectStore/GitStore) only persist
+// Auth.Metadata, so the marker (which lives on Auth struct fields) must be
+// mirrored into Metadata by persist() and restored by
+// ApplyPermanentFailureFromMetadata. Without this, a restart reloads the
+// revoked auth as active/routable (codex review).
+func TestPermanentFailureMetadata_RoundTrip(t *testing.T) {
+	auth := &Auth{
+		ID:       "xai-metadata-roundtrip",
+		Provider: "xai",
+		Metadata: map[string]any{
+			"type":                          "xai",
+			"email":                         "roundtrip@example.com",
+			"cpa_permanent_refresh_failure": true,
+			"cpa_permanent_unavailable":     true,
+			"cpa_permanent_status":          string(StatusError),
+			"cpa_permanent_status_message":  "refresh token revoked",
+			"access_token":                  "stale",
+			"refresh_token":                 "revoked",
+		},
+		PermanentRefreshFailure: false,
+		Unavailable:             false,
+		Status:                  StatusActive,
+		StatusMessage:           "",
+	}
+
+	ApplyPermanentFailureFromMetadata(auth)
+
+	if !auth.PermanentRefreshFailure {
+		t.Fatal("expected PermanentRefreshFailure=true after ApplyPermanentFailureFromMetadata")
+	}
+	if !auth.Unavailable {
+		t.Fatal("expected Unavailable=true after restore")
+	}
+	if auth.Status != StatusError {
+		t.Fatalf("expected Status=StatusError, got %s", auth.Status)
+	}
+	if auth.StatusMessage != "refresh token revoked" {
+		t.Fatalf("expected StatusMessage restored, got %q", auth.StatusMessage)
+	}
+	if !hasPermanentAuthFailure(auth) {
+		t.Fatal("expected hasPermanentAuthFailure=true after restore")
+	}
+
+	now := time.Now()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	if manager.shouldRefresh(auth, now) {
+		t.Fatal("expected shouldRefresh=false on restored permanent failure")
+	}
+	blocked, reason, _ := isAuthBlockedForModel(auth, "grok-4", now)
+	if !blocked || reason != blockReasonOther {
+		t.Fatalf("expected isAuthBlockedForModel to block restored permanent failure, got blocked=%v reason=%d", blocked, reason)
+	}
+}
+
+// TestPermanentFailureMetadata_NoMarkerIsNoOp verifies that
+// ApplyPermanentFailureFromMetadata is a no-op when the marker is absent.
+func TestPermanentFailureMetadata_NoMarkerIsNoOp(t *testing.T) {
+	auth := &Auth{
+		ID:       "xai-no-marker",
+		Provider: "xai",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"type":          "xai",
+			"email":         "no-marker@example.com",
+			"access_token":  "valid",
+			"refresh_token": "valid",
+		},
+	}
+
+	ApplyPermanentFailureFromMetadata(auth)
+
+	if auth.PermanentRefreshFailure {
+		t.Fatal("expected PermanentRefreshFailure=false when marker absent")
+	}
+	if auth.Unavailable {
+		t.Fatal("expected Unavailable=false when marker absent")
+	}
+	if auth.Status != StatusActive {
+		t.Fatalf("expected Status=StatusActive, got %s", auth.Status)
+	}
+	if hasPermanentAuthFailure(auth) {
+		t.Fatal("expected hasPermanentAuthFailure=false when marker absent")
+	}
+}

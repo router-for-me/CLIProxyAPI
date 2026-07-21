@@ -5973,6 +5973,30 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if auth.Metadata == nil {
 		return nil
 	}
+	// Persist the permanent-refresh-failure marker into Metadata so the
+	// file/Postgres/object/git stores — which only durably persist
+	// Metadata — can restore it on restart. Without this, store readers
+	// rebuild the Auth with PermanentRefreshFailure=false /
+	// Unavailable=false / Status=StatusActive, and the revoked credential
+	// becomes routable again (codex review).
+	//
+	// Keys are namespaced with the cpa_permanent_ prefix to avoid
+	// colliding with provider/plugin credential metadata that may
+	// legitimately use generic names like "status" or "unavailable"
+	// (codex review).
+	if auth.PermanentRefreshFailure {
+		auth.Metadata[metadataKeyPermanentRefreshFailure] = true
+		auth.Metadata[metadataKeyUnavailable] = auth.Unavailable
+		auth.Metadata[metadataKeyStatus] = string(auth.Status)
+		auth.Metadata[metadataKeyStatusMessage] = auth.StatusMessage
+	} else {
+		// Clear stale marker keys so a recovered auth (e.g. after manual
+		// token replacement) doesn't restore the dead state.
+		delete(auth.Metadata, metadataKeyPermanentRefreshFailure)
+		delete(auth.Metadata, metadataKeyUnavailable)
+		delete(auth.Metadata, metadataKeyStatus)
+		delete(auth.Metadata, metadataKeyStatusMessage)
+	}
 	_, err := m.store.Save(ctx, auth)
 	return err
 }
