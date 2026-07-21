@@ -378,6 +378,49 @@ class TestQuery(BaseTempData):
         self.assertLessEqual(r["limit"], 500)
 
 
+# ── Errors tests ───────────────────────────────────────────────────────
+
+
+class TestErrors(BaseTempData):
+    def _seed(self):
+        col.insert_usage(self.cfg, [
+            nrec(request_id="e1", model="m1", failed=True, fail={"status_code": 429, "body": ""},
+                 tokens={"input_tokens": 1, "output_tokens": 0, "total_tokens": 1}),
+            nrec(request_id="e2", model="m1", failed=True, fail={"status_code": 429, "body": ""},
+                 tokens={"input_tokens": 1, "output_tokens": 0, "total_tokens": 1}),
+            nrec(request_id="e3", model="m2", failed=True, fail={"status_code": 500, "body": ""},
+                 tokens={"input_tokens": 1, "output_tokens": 0, "total_tokens": 1}),
+            nrec(request_id="ok1", model="m1", failed=False, fail={"status_code": 200, "body": ""},
+                 tokens={"input_tokens": 1, "output_tokens": 0, "total_tokens": 1}),
+        ])
+
+    def test_errors_aggregated_by_status_and_model(self):
+        self._seed()
+        out = qy.query_errors(self.cfg, {"range": ["30d"]})
+        by_key = {(e["fail_status"], e["model"]): e for e in out["errors"]}
+        self.assertIn((429, "m1"), by_key)
+        self.assertEqual(by_key[(429, "m1")]["count"], 2)
+        self.assertEqual(by_key[(429, "m1")]["percent"], 50.0)  # 2 of 4 total requests
+        self.assertEqual(out["total_failed"], 3)
+        self.assertEqual(out["total_requests"], 4)
+
+    def test_errors_respect_model_filter(self):
+        self._seed()
+        out = qy.query_errors(self.cfg, {"range": ["30d"], "model": ["m2"]})
+        self.assertEqual(len(out["errors"]), 1)
+        self.assertEqual(out["errors"][0]["fail_status"], 500)
+
+    def test_errors_empty_range_returns_zero_totals(self):
+        out = qy.query_errors(self.cfg, {"range": ["30d"]})
+        self.assertEqual(out["errors"], [])
+        self.assertEqual(out["total_failed"], 0)
+        self.assertEqual(out["total_requests"], 0)
+
+    def test_errors_invalid_range_raises(self):
+        with self.assertRaises(ValueError):
+            qy.query_errors(self.cfg, {"range": ["bogus"]})
+
+
 # ── Server tests ───────────────────────────────────────────────────────
 
 
