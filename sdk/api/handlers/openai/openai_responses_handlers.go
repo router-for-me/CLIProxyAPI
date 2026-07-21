@@ -53,7 +53,20 @@ type responsesSSEFramer struct {
 	outputOrder          []int
 	unindexedOutputItems [][]byte
 	completedImageCalls  map[string]struct{}
+	partialImageCalls    map[string]responsesSSEPartialImage
+	response             []byte
+	lastSequenceNumber   int64
 }
+
+type responsesSSEPartialImage struct {
+	itemID       string
+	callID       string
+	outputIndex  []byte
+	outputFormat string
+	result       []byte
+}
+
+const responsesSSEIncompleteCodexStreamMessage = "stream error: stream disconnected before completion: stream closed before response.completed"
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
 	if len(chunk) == 0 {
@@ -108,6 +121,7 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 	if !ok || len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || !json.Valid(payload) {
 		return frame
 	}
+	f.recordFrameState(payload)
 
 	switch util.GetGJSONBytesNoCopy(payload, "type").String() {
 	case "response.image_generation_call.completed":
@@ -123,6 +137,9 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 			imageCompletedFrame := responsesSSEEventFrame("response.image_generation_call.completed", imageCompleted)
 			return append(imageCompletedFrame, responsesSSEFrameWithData(frame, repaired)...)
 		}
+		if len(imageCompleted) == 0 {
+			f.recordNativeCompletedImageOutput(repaired)
+		}
 		if !bytes.Equal(repaired, payload) {
 			return responsesSSEFrameWithData(frame, repaired)
 		}
@@ -133,6 +150,41 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 		}
 	}
 	return frame
+}
+
+func (f *responsesSSEFramer) recordFrameState(payload []byte) {
+	if sequenceNumber := util.GetGJSONBytesNoCopy(payload, "sequence_number"); sequenceNumber.Exists() && sequenceNumber.Int() > f.lastSequenceNumber {
+		f.lastSequenceNumber = sequenceNumber.Int()
+	}
+	if response := util.GetGJSONBytesNoCopy(payload, "response"); response.IsObject() {
+		f.response = append(f.response[:0], response.Raw...)
+	}
+	if util.GetGJSONBytesNoCopy(payload, "type").String() != "response.image_generation_call.partial_image" {
+		return
+	}
+
+	itemID := strings.TrimSpace(util.GetGJSONBytesNoCopy(payload, "item_id").String())
+	result := util.GetGJSONBytesNoCopy(payload, "partial_image_b64")
+	if itemID == "" || result.Type != gjson.String || len(result.Raw) <= 2 {
+		return
+	}
+	callID := strings.TrimSpace(util.GetGJSONBytesNoCopy(payload, "call_id").String())
+	if callID == "" {
+		callID = itemID
+	}
+	partialImage := responsesSSEPartialImage{
+		itemID:       itemID,
+		callID:       callID,
+		outputFormat: strings.TrimSpace(util.GetGJSONBytesNoCopy(payload, "output_format").String()),
+		result:       append([]byte(nil), result.Raw...),
+	}
+	if outputIndex := util.GetGJSONBytesNoCopy(payload, "output_index"); outputIndex.Exists() {
+		partialImage.outputIndex = append([]byte(nil), outputIndex.Raw...)
+	}
+	if f.partialImageCalls == nil {
+		f.partialImageCalls = make(map[string]responsesSSEPartialImage)
+	}
+	f.partialImageCalls[itemID] = partialImage
 }
 
 func responsesSSECompleteImageGenerationCall(payload []byte) ([]byte, []byte) {
@@ -200,6 +252,138 @@ func (f *responsesSSEFramer) imageCallCompleted(payload []byte) bool {
 	return false
 }
 
+func (f *responsesSSEFramer) recordNativeCompletedImageOutput(payload []byte) {
+	item := util.GetGJSONBytesNoCopy(payload, "item")
+	if item.Get("type").String() != "image_generation_call" ||
+		!strings.EqualFold(strings.TrimSpace(item.Get("status").String()), "completed") {
+		return
+	}
+	itemID := strings.TrimSpace(item.Get("id").String())
+	if itemID == "" {
+		return
+	}
+	if f.completedImageCalls == nil {
+		f.completedImageCalls = make(map[string]struct{})
+	}
+	f.completedImageCalls[itemID] = struct{}{}
+}
+
+func responsesSSEIsIncompleteCodexStream(errMsg *interfaces.ErrorMessage) bool {
+	return errMsg != nil && errMsg.StatusCode == http.StatusRequestTimeout && errMsg.Error != nil &&
+		errMsg.Error.Error() == responsesSSEIncompleteCodexStreamMessage
+}
+
+func (f *responsesSSEFramer) writePartialImageRecovery(w io.Writer) bool {
+	if w == nil || len(f.response) == 0 {
+		return false
+	}
+
+	images := make([]responsesSSEPartialImage, 0, len(f.partialImageCalls))
+	for _, image := range f.partialImageCalls {
+		if _, completed := f.completedImageCalls[image.itemID]; !completed {
+			images = append(images, image)
+		}
+	}
+	if len(images) == 0 {
+		return false
+	}
+	sort.Slice(images, func(i, j int) bool {
+		leftIndex := gjson.ParseBytes(images[i].outputIndex)
+		rightIndex := gjson.ParseBytes(images[j].outputIndex)
+		switch {
+		case leftIndex.Exists() && rightIndex.Exists() && leftIndex.Int() != rightIndex.Int():
+			return leftIndex.Int() < rightIndex.Int()
+		case leftIndex.Exists() != rightIndex.Exists():
+			return leftIndex.Exists()
+		default:
+			return images[i].itemID < images[j].itemID
+		}
+	})
+
+	completedPayloads := make([][]byte, 0, len(images))
+	donePayloads := make([][]byte, 0, len(images))
+	for _, image := range images {
+		completed, done, ok := f.partialImageRecoveryPayloads(image)
+		if !ok {
+			return false
+		}
+		completedPayloads = append(completedPayloads, completed)
+		donePayloads = append(donePayloads, done)
+		f.recordOutputItem(done)
+	}
+	responseCompleted := f.partialImageRecoveryCompletedPayload()
+	if len(responseCompleted) == 0 {
+		return false
+	}
+
+	for index := range completedPayloads {
+		f.recordCompletedImageCall(completedPayloads[index])
+		writeResponsesSSEChunk(w, responsesSSEEventFrame("response.image_generation_call.completed", completedPayloads[index]))
+		writeResponsesSSEChunk(w, responsesSSEEventFrame("response.output_item.done", donePayloads[index]))
+	}
+	writeResponsesSSEChunk(w, responsesSSEEventFrame("response.completed", responseCompleted))
+	return true
+}
+
+func (f *responsesSSEFramer) partialImageRecoveryPayloads(image responsesSSEPartialImage) ([]byte, []byte, bool) {
+	if image.itemID == "" || image.callID == "" || len(image.result) == 0 || !json.Valid(image.result) {
+		return nil, nil, false
+	}
+
+	completed := []byte(`{"type":"response.image_generation_call.completed","item_id":"","call_id":"","result":""}`)
+	completed, _ = sjson.SetBytes(completed, "item_id", image.itemID)
+	completed, _ = sjson.SetBytes(completed, "call_id", image.callID)
+	completed, _ = sjson.SetRawBytes(completed, "result", image.result)
+	completed, _ = sjson.SetBytes(completed, "sequence_number", f.nextSequenceNumber())
+	if len(image.outputIndex) > 0 {
+		completed, _ = sjson.SetRawBytes(completed, "output_index", image.outputIndex)
+	}
+	if image.outputFormat != "" {
+		completed, _ = sjson.SetBytes(completed, "output_format", image.outputFormat)
+	}
+
+	item := []byte(`{"id":"","type":"image_generation_call","status":"completed","result":""}`)
+	item, _ = sjson.SetBytes(item, "id", image.itemID)
+	item, _ = sjson.SetRawBytes(item, "result", image.result)
+	if image.outputFormat != "" {
+		item, _ = sjson.SetBytes(item, "output_format", image.outputFormat)
+	}
+	done := []byte(`{"type":"response.output_item.done","item":{}}`)
+	done, _ = sjson.SetRawBytes(done, "item", item)
+	done, _ = sjson.SetBytes(done, "sequence_number", f.nextSequenceNumber())
+	if len(image.outputIndex) > 0 {
+		done, _ = sjson.SetRawBytes(done, "output_index", image.outputIndex)
+	}
+	return completed, done, true
+}
+
+func (f *responsesSSEFramer) partialImageRecoveryCompletedPayload() []byte {
+	output, ok := f.recordedOutputItems()
+	if !ok {
+		return nil
+	}
+	response, err := sjson.SetBytes(f.response, "status", "completed")
+	if err != nil {
+		return nil
+	}
+	response, err = sjson.SetRawBytes(response, "output", output)
+	if err != nil {
+		return nil
+	}
+	payload := []byte(`{"type":"response.completed","response":{}}`)
+	payload, err = sjson.SetRawBytes(payload, "response", response)
+	if err != nil {
+		return nil
+	}
+	payload, _ = sjson.SetBytes(payload, "sequence_number", f.nextSequenceNumber())
+	return payload
+}
+
+func (f *responsesSSEFramer) nextSequenceNumber() int64 {
+	f.lastSequenceNumber++
+	return f.lastSequenceNumber
+}
+
 func responsesSSEDataPayload(frame []byte) ([]byte, bool) {
 	var payload []byte
 	found := false
@@ -262,7 +446,8 @@ func (f *responsesSSEFramer) recordOutputItem(payload []byte) {
 
 func (f *responsesSSEFramer) repairCompletedPayload(payload []byte) []byte {
 	payload = responsesSSECompleteImageGenerationCallsInOutput(payload)
-	if len(f.outputOrder) == 0 && len(f.unindexedOutputItems) == 0 {
+	outputJSON, ok := f.recordedOutputItems()
+	if !ok {
 		return payload
 	}
 	output := gjson.GetBytes(payload, "response.output")
@@ -270,6 +455,17 @@ func (f *responsesSSEFramer) repairCompletedPayload(payload []byte) []byte {
 		return payload
 	}
 
+	repaired, err := sjson.SetRawBytes(payload, "response.output", outputJSON)
+	if err != nil {
+		return payload
+	}
+	return repaired
+}
+
+func (f *responsesSSEFramer) recordedOutputItems() ([]byte, bool) {
+	if len(f.outputOrder) == 0 && len(f.unindexedOutputItems) == 0 {
+		return nil, false
+	}
 	var outputJSON bytes.Buffer
 	outputJSON.WriteByte('[')
 	indexes := append([]int(nil), f.outputOrder...)
@@ -294,12 +490,7 @@ func (f *responsesSSEFramer) repairCompletedPayload(payload []byte) []byte {
 		written++
 	}
 	outputJSON.WriteByte(']')
-
-	repaired, err := sjson.SetRawBytes(payload, "response.output", outputJSON.Bytes())
-	if err != nil {
-		return payload
-	}
-	return repaired
+	return outputJSON.Bytes(), true
 }
 
 func responsesSSECompleteImageGenerationCallsInOutput(payload []byte) []byte {
@@ -657,6 +848,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			framer.Flush(c.Writer)
 			if errMsg == nil {
+				return
+			}
+			if responsesSSEIsIncompleteCodexStream(errMsg) && framer.writePartialImageRecovery(c.Writer) {
 				return
 			}
 			status := http.StatusInternalServerError
