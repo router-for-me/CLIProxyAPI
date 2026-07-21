@@ -130,6 +130,58 @@ class TestInsertion(BaseTempData):
         self.assertNotIn("sk-LiveKey", json.dumps(row))
         self.assertTrue(row["account_hash"])
 
+    def test_account_hash_prefers_client_api_key(self):
+        """Account grouping must key off the client CPA API key when present."""
+        import hashlib
+        want = hashlib.sha256(b"client-proxy-key").hexdigest()[:12]
+        col.insert_usage(
+            self.cfg,
+            [
+                nrec(
+                    request_id="acc-1",
+                    api_key="client-proxy-key",
+                    source="upstream-provider-key",
+                    auth_index="auth-xyz",
+                )
+            ],
+        )
+        with st.db_connect(self.cfg) as c:
+            row = dict(c.execute("SELECT account_hash FROM usage_events").fetchone())
+        self.assertEqual(row["account_hash"], want)
+        self.assertNotEqual(
+            row["account_hash"],
+            hashlib.sha256(b"upstream-provider-key").hexdigest()[:12],
+        )
+
+    def test_account_filter_limits_summary(self):
+        import hashlib
+        a = hashlib.sha256(b"key-a").hexdigest()[:12]
+        b = hashlib.sha256(b"key-b").hexdigest()[:12]
+        col.insert_usage(
+            self.cfg,
+            [
+                nrec(
+                    request_id="fa",
+                    api_key="key-a",
+                    tokens={"input_tokens": 10, "output_tokens": 0, "total_tokens": 10},
+                ),
+                nrec(
+                    request_id="fb",
+                    api_key="key-b",
+                    tokens={"input_tokens": 90, "output_tokens": 0, "total_tokens": 90},
+                ),
+            ],
+        )
+        all_sum = qy.query_summary(self.cfg, {"range": ["30d"]})
+        self.assertEqual(all_sum["summary"]["requests"], 2)
+        filtered = qy.query_summary(self.cfg, {"range": ["30d"], "account": [a]})
+        self.assertEqual(filtered["summary"]["requests"], 1)
+        self.assertEqual(filtered["accounts_filter"], [a])
+        self.assertEqual(filtered["accounts"][0]["account"], a)
+        accounts = qy.query_accounts(self.cfg, {"range": ["30d"]})
+        ids = {x["account"] for x in accounts["accounts"]}
+        self.assertEqual(ids, {a, b})
+
     def test_malformed_record_does_not_lose_batch(self):
         inserted, dup, err = col.insert_usage(self.cfg, [nrec(request_id="g1"), "{not-json", nrec(request_id="g2")])
         self.assertEqual(inserted, 2)
@@ -429,6 +481,44 @@ class TestServerHTTP(BaseTempData):
         self.assertTrue(srv.is_authorized(FakeHandler({"Authorization": "Bearer tok"}), cfg))
         self.assertTrue(srv.is_authorized(FakeHandler({"X-Dashboard-Token": "tok"}), cfg))
         self.assertFalse(srv.is_authorized(FakeHandler({"Authorization": "Bearer wrong"}), cfg))
+
+
+# ── Static asset tests ────────────────────────────────────────────────
+
+
+class TestStaticAssets(BaseTempData):
+    def test_chart_js_served_with_js_mime(self):
+        import http.client
+        import socket
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        self.cfg["dashboard_port"] = port
+        ready = threading.Event()
+        t = threading.Thread(target=srv.serve, args=(self.cfg, ready), daemon=True)
+        t.start()
+        ready.wait(timeout=3)
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        conn.request("GET", "/static/chart.js")
+        resp = conn.getresponse()
+        body = resp.read()
+        self.assertEqual(resp.status, 200)
+        self.assertIn("javascript", resp.getheader("Content-Type", ""))
+        self.assertIn(b"Chart.js", body[:500])
+        # immutable cache for vendored asset
+        self.assertIn("max-age=", resp.getheader("Cache-Control", ""))
+
+    def test_unknown_static_path_returns_404(self):
+        import http.client, socket
+        sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]; sock.close()
+        self.cfg["dashboard_port"] = port
+        ready = threading.Event()
+        t = threading.Thread(target=srv.serve, args=(self.cfg, ready), daemon=True); t.start(); ready.wait(timeout=3)
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        conn.request("GET", "/static/does-not-exist.js")
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 404)
 
 
 # ── Bootstrap ──────────────────────────────────────────────────────────
