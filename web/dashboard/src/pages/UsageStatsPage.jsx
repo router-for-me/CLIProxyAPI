@@ -1,13 +1,16 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
-  getUsageTotals, getUsageTimeSeries, getUsageTop, getUsageStats,
+  getUsageTotals, getUsageTimeSeries, getUsageTop,
   getUsageEvents, getUsageEvent, getUsageErrors, getUsageError, getUsageFilterOptions,
 } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
+import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import {
-  Spinner, ErrorBanner, EmptyState, Stat, Modal, StatusBadge,
+  Spinner, ErrorBanner, EmptyState, Modal,
 } from '../components/Primitives.jsx';
 import { Sparkline, BarChart, MultiBarChart } from '../components/Charts.jsx';
+import Pager from '../components/Pager.jsx';
+import { useToast } from '../components/Toast.jsx';
 
 // Preset time windows the dashboard offers at the top of the page. Each
 // preset computes from/to in UTC using relative offsets from now.
@@ -30,6 +33,13 @@ function presetToRange(preset) {
 }
 
 const EVENTS_PAGE_SIZE = 10;
+const AUTO_REFRESH_INTERVAL_MS = 60 * 1000;
+const AUTOREFRESH_STORAGE = 'nixllm.dashboard.usageAutorefresh';
+
+function readAutoRefresh() {
+  try { return localStorage.getItem(AUTOREFRESH_STORAGE) !== '0'; }
+  catch { return true; }
+}
 
 // Token breakdown segments rendered left-to-right in the stacked bar. Order
 // is deliberate: input-side tokens (input / cached / cache creation) first,
@@ -82,6 +92,42 @@ function fmtUSDCompact(v) {
   return v.toFixed(4);
 }
 
+// LegendDot renders the colored square that precedes each segment label in
+// the compact and modal token-breakdown legends. The color comes from the
+// segment data (not a fixed class) so the palette stays centralized in
+// TOKEN_SEGMENTS.
+function LegendDot({ color, className = '' }) {
+  return (
+    <span
+      className={`tokbar__legend-dot ${className}`}
+      style={{ background: color }}
+    />
+  );
+}
+
+// TokBar renders a stacked horizontal bar of the given segments. Each
+// segment width is its share of `sum`; segments with a non-zero value get a
+// minimum width so they remain visible. The `size` variant controls the bar
+// height only.
+function TokBar({ segs, sum, size = 'sm', dim = false }) {
+  const pct = (v, base) => (base === 0 ? 0 : (v / base) * 100);
+  return (
+    <div className={`tokbar tokbar--${size}`}>
+      {segs.map((s) => s.value > 0 && (
+        <div
+          key={s.key}
+          className="tokbar__seg tokbar__seg--min"
+          style={{
+            width: `${pct(s.value, sum)}%`,
+            background: s.color,
+            opacity: dim ? 0.7 : 1,
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
 // CompactTokenBreakdown renders the stacked token bar plus a single-line
 // numeric summary. Designed for the dense Recent Events table cell — hover
 // the bar or the row for a title tooltip with every segment's value. When
@@ -90,7 +136,6 @@ function fmtUSDCompact(v) {
 function CompactTokenBreakdown({ e }) {
   const segs = tokenSegments(e);
   const sum = segs.reduce((a, s) => a + s.value, 0);
-  const pct = (v, base) => (base === 0 ? 0 : (v / base) * 100);
   const title = segs.map((s) => `${s.label}: ${s.value.toLocaleString()}`).join(' · ');
 
   const cSegs = costSegments(e);
@@ -99,58 +144,31 @@ function CompactTokenBreakdown({ e }) {
 
   return (
     <div title={`${title} · Total: ${Number(e.total_tokens || 0).toLocaleString()}${hasCost ? ` · Cost: ${fmtUSD(e.cost_usd || 0)}` : ''}`}>
-      <div style={{
-        display: 'flex', height: 7, width: '100%', borderRadius: 4,
-        overflow: 'hidden', background: 'var(--bg)',
-      }}>
-        {segs.map((s) => s.value > 0 && (
-          <div
-            key={s.key}
-            style={{
-              width: `${pct(s.value, sum)}%`,
-              background: s.color,
-              minWidth: s.value > 0 ? 2 : 0,
-            }}
-          />
-        ))}
-      </div>
-      <div className="mono" style={{ fontSize: 11, marginTop: 3, whiteSpace: 'nowrap' }}>
-        {segs.map((s, i) => (
-          <span key={s.key} style={{ marginLeft: i ? 6 : 0 }}>
-            <span style={{ color: s.color }}>●</span>{' '}
+      <TokBar segs={segs} sum={sum} size="sm" />
+      <div className="mono tokbar__legend tokbar__legend--sm">
+        {segs.map((s) => (
+          <span key={s.key} className="tokbar__legend-item tokbar__legend-item--sm">
+            <LegendDot color={s.color} />
             <span className="dim">{s.short}</span>{' '}{s.value.toLocaleString()}
           </span>
         ))}
-        <span className="dim" style={{ marginLeft: 6 }}>
+        <span className="dim tokbar__legend-sum">
           · Σ {(e.total_tokens || 0).toLocaleString()}
         </span>
       </div>
       {hasCost && (
         <>
-          <div style={{
-            display: 'flex', height: 5, width: '100%', borderRadius: 3,
-            overflow: 'hidden', background: 'var(--bg)', marginTop: 4,
-          }}>
-            {cSegs.map((s) => s.value > 0 && (
-              <div
-                key={s.key}
-                style={{
-                  width: `${pct(s.value, cSum)}%`,
-                  background: s.color,
-                  opacity: 0.7,
-                  minWidth: s.value > 0 ? 2 : 0,
-                }}
-              />
-            ))}
+          <div style={{ marginTop: 4 }}>
+            <TokBar segs={cSegs} sum={cSum} size="md" dim />
           </div>
-          <div className="mono" style={{ fontSize: 11, marginTop: 2, whiteSpace: 'nowrap' }}>
-            {cSegs.map((s, i) => (
-              <span key={s.key} style={{ marginLeft: i ? 6 : 0 }}>
-                <span style={{ color: s.color }}>●</span>{' '}
+          <div className="mono tokbar__legend tokbar__legend--sm">
+            {cSegs.map((s) => (
+              <span key={s.key} className="tokbar__legend-item tokbar__legend-item--sm">
+                <LegendDot color={s.color} />
                 <span className="dim">{s.short}</span>{' '}{fmtUSDCompact(s.value)}
               </span>
             ))}
-            <span className="dim" style={{ marginLeft: 6 }}>
+            <span className="dim tokbar__legend-sum">
               · Σ {fmtUSDCompact(e.cost_usd || 0)}
             </span>
           </div>
@@ -176,77 +194,40 @@ function TokenBreakdownCard({ e }) {
   const hasCost = Boolean(e.cost_breakdown);
 
   return (
-    <div style={{ gridColumn: '1 / -1' }}>
-      <div className="dim" style={{ fontSize: 11, marginBottom: 6 }}>Token breakdown</div>
-      <div style={{
-        display: 'flex', height: 12, width: '100%', borderRadius: 6,
-        overflow: 'hidden', background: 'var(--bg)',
-      }}>
-        {segs.map((s) => s.value > 0 && (
-          <div
-            key={s.key}
-            title={`${s.label}: ${s.value.toLocaleString()} (${pct(s.value, sum).toFixed(1)}%)`}
-            style={{
-              width: `${pct(s.value, sum)}%`,
-              background: s.color,
-              minWidth: s.value > 0 ? 2 : 0,
-            }}
-          />
-        ))}
-      </div>
-      <div className="row" style={{ flexWrap: 'wrap', gap: '4px 14px', marginTop: 10, fontSize: 12 }}>
+    <div className="detail-row__block">
+      <div className="detail-row__block-label">Token breakdown</div>
+      <TokBar segs={segs} sum={sum} size="lg" />
+      <div className="tokbar__legend" style={{ marginTop: 10 }}>
         {segs.map((s) => (
-          <span key={s.key} className="row gap-sm" style={{ alignItems: 'center' }}>
-            <span style={{
-              width: 10, height: 10, background: s.color,
-              display: 'inline-block', borderRadius: 2,
-            }} />
+          <span key={s.key} className="tokbar__legend-item">
+            <LegendDot color={s.color} />
             <span className="dim">{s.label}</span>
             <span className="mono">{s.value.toLocaleString()}</span>
             <span className="dim" style={{ fontSize: 11 }}>{pct(s.value, sum).toFixed(1)}%</span>
           </span>
         ))}
-        <span className="dim mono" style={{ marginLeft: 'auto' }}>
-          sum {sum.toLocaleString()} · total {(e.total_tokens || 0).toLocaleString()}
+        <span className="dim mono tokbar__legend-sum">
+          sum {sum.toLocaleString()} · total {total.toLocaleString()}
           {sum !== total ? ` (different by ${(sum - total).toLocaleString()})` : ''}
         </span>
       </div>
 
       {hasCost && (
         <>
-          <div className="dim" style={{ fontSize: 11, marginTop: 14, marginBottom: 6 }}>
-            Cost breakdown <span className="dim" style={{ fontSize: 10 }}>(at-rest pricing)</span>
+          <div className="detail-row__block-label" style={{ marginTop: 14 }}>
+            Cost breakdown <span style={{ fontSize: 10 }}>(at-rest pricing)</span>
           </div>
-          <div style={{
-            display: 'flex', height: 12, width: '100%', borderRadius: 6,
-            overflow: 'hidden', background: 'var(--bg)',
-          }}>
-            {cSegs.map((s) => s.value > 0 && (
-              <div
-                key={s.key}
-                title={`${s.label}: ${fmtUSD(s.value)} (${pct(s.value, cSum).toFixed(1)}%)`}
-                style={{
-                  width: `${pct(s.value, cSum)}%`,
-                  background: s.color,
-                  opacity: 0.85,
-                  minWidth: s.value > 0 ? 2 : 0,
-                }}
-              />
-            ))}
-          </div>
-          <div className="row" style={{ flexWrap: 'wrap', gap: '4px 14px', marginTop: 10, fontSize: 12 }}>
+          <TokBar segs={cSegs} sum={cSum} size="lg" dim />
+          <div className="tokbar__legend" style={{ marginTop: 10 }}>
             {cSegs.map((s) => (
-              <span key={s.key} className="row gap-sm" style={{ alignItems: 'center' }}>
-                <span style={{
-                  width: 10, height: 10, background: s.color,
-                  display: 'inline-block', borderRadius: 2, opacity: 0.85,
-                }} />
+              <span key={s.key} className="tokbar__legend-item">
+                <LegendDot color={s.color} />
                 <span className="dim">{s.label}</span>
                 <span className="mono">{fmtUSD(s.value)}</span>
                 <span className="dim" style={{ fontSize: 11 }}>{pct(s.value, cSum).toFixed(1)}%</span>
               </span>
             ))}
-            <span className="dim mono" style={{ marginLeft: 'auto' }}>
+            <span className="dim mono tokbar__legend-sum">
               sum {fmtUSD(cSum)} · total {fmtUSD(e.cost_usd || 0)}
               {Math.abs(cSum - (e.cost_usd || 0)) > 1e-9 ? ` (different by ${fmtUSD(cSum - (e.cost_usd || 0))})` : ''}
             </span>
@@ -258,6 +239,7 @@ function TokenBreakdownCard({ e }) {
 }
 
 export default function UsageStatsPage() {
+  const toast = useToast();
   const [presetIdx, setPresetIdx] = useState(3); // "Last 24h" default
   const [filter, setFilter] = useState({
     api_key_id: '',
@@ -270,6 +252,7 @@ export default function UsageStatsPage() {
     useCustomRange: false,
     interval: 'hour',
   });
+  const [autoRefresh, setAutoRefresh] = useState(() => readAutoRefresh());
 
   const rangeParams = useMemo(() => {
     if (filter.useCustomRange && (filter.customFrom || filter.customTo)) {
@@ -337,6 +320,23 @@ export default function UsageStatsPage() {
     errors.reload();
   }, [totals, ts, topModels, topKeys, topProviders, filterOptions, events, errors]);
 
+  // Auto-refresh: re-fetch every metric every 60s while the page is visible
+  // and the toggle is on. Mirrors the Models Catalog auto-refresh pattern.
+  useAutoRefresh(reloadAll, AUTO_REFRESH_INTERVAL_MS, autoRefresh);
+
+  function handleRefresh() {
+    reloadAll();
+    toast.info('Stats refreshed');
+  }
+
+  function toggleAutoRefresh() {
+    setAutoRefresh((v) => {
+      const next = !v;
+      try { localStorage.setItem(AUTOREFRESH_STORAGE, next ? '1' : '0'); } catch { /* ignore */ }
+      return next;
+    });
+  }
+
   function updateFilter(partial) {
     setFilter((f) => ({ ...f, ...partial }));
   }
@@ -352,6 +352,7 @@ export default function UsageStatsPage() {
 
   const totalTokens = totals.data?.totals?.total_tokens || 0;
   const failureRate = totals.data?.failure_rate ?? 0;
+  const reqCount = totals.data?.totals?.request_count || 0;
 
   return (
     <>
@@ -364,23 +365,36 @@ export default function UsageStatsPage() {
             from the PG usage_events table.
           </div>
         </div>
-        <button onClick={reloadAll}>Refresh</button>
+        <div className="row gap-sm">
+          <button
+            className={`autorefresh-chip ${autoRefresh ? '' : 'autorefresh-chip--off'}`}
+            onClick={toggleAutoRefresh}
+            title={autoRefresh ? 'Auto-refresh every 60s — click to pause' : 'Auto-refresh paused — click to resume'}
+          >
+            <span className="autorefresh-chip__dot" />
+            {autoRefresh ? 'Live' : 'Paused'}
+          </button>
+          <button onClick={handleRefresh}>Refresh</button>
+        </div>
       </div>
 
       {/* Preset + filter bar */}
       <div className="card">
-        <div className="row gap-sm" style={{ flexWrap: 'wrap', marginBottom: 12 }}>
-          {PRESETS.map((p, i) => (
-            <button
-              key={p.label}
-              onClick={() => { setPresetIdx(i); updateFilter({ useCustomRange: false }); }}
-              className={i === presetIdx && !filter.useCustomRange ? 'primary' : ''}
-              style={{ padding: '4px 10px', fontSize: 12 }}
-            >
-              {p.label}
-            </button>
-          ))}
-          <label className="row gap-sm" style={{ cursor: 'pointer', marginLeft: 'auto' }}>
+        <div className="usage-toolbar">
+          <div className="seg-group" role="tablist" aria-label="Time window">
+            {PRESETS.map((p, i) => (
+              <button
+                key={p.label}
+                type="button"
+                className={`seg-btn ${i === presetIdx && !filter.useCustomRange ? 'seg-btn--active' : ''}`}
+                onClick={() => { setPresetIdx(i); updateFilter({ useCustomRange: false }); }}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <div className="catalog-toolbar__spacer" />
+          <label className="row gap-sm" style={{ cursor: 'pointer' }}>
             <input
               type="checkbox"
               checked={filter.useCustomRange}
@@ -391,7 +405,7 @@ export default function UsageStatsPage() {
           </label>
         </div>
         <div className="grid grid--4">
-          <div className="form__row">
+          <div className="form__row" style={{ marginBottom: 0 }}>
             <label className="form__label">API Key</label>
             <FilterSelect
               loading={filterOptions.loading}
@@ -401,7 +415,7 @@ export default function UsageStatsPage() {
               anyLabel="any key"
             />
           </div>
-          <div className="form__row">
+          <div className="form__row" style={{ marginBottom: 0 }}>
             <label className="form__label">Provider</label>
             <FilterSelect
               loading={filterOptions.loading}
@@ -411,7 +425,7 @@ export default function UsageStatsPage() {
               anyLabel="any provider"
             />
           </div>
-          <div className="form__row">
+          <div className="form__row" style={{ marginBottom: 0 }}>
             <label className="form__label">Model</label>
             <FilterSelect
               loading={filterOptions.loading}
@@ -421,7 +435,7 @@ export default function UsageStatsPage() {
               anyLabel="any model"
             />
           </div>
-          <div className="form__row">
+          <div className="form__row" style={{ marginBottom: 0 }}>
             <label className="form__label">Interval</label>
             <select
               value={rangeParams.interval}
@@ -435,13 +449,13 @@ export default function UsageStatsPage() {
           </div>
         </div>
         {filter.useCustomRange && (
-          <div className="grid grid--2" style={{ marginTop: 8 }}>
-            <div className="form__row">
-              <label className="form__label">From (UTC)</label>
+          <div className="usage-toolbar__range">
+            <div className="row gap-sm">
+              <span className="usage-toolbar__range-label">From (UTC)</span>
               <input type="datetime-local" value={filter.customFrom} onChange={(e) => updateFilter({ customFrom: e.target.value })} />
             </div>
-            <div className="form__row">
-              <label className="form__label">To (UTC)</label>
+            <div className="row gap-sm">
+              <span className="usage-toolbar__range-label">To (UTC)</span>
               <input type="datetime-local" value={filter.customTo} onChange={(e) => updateFilter({ customTo: e.target.value })} />
             </div>
           </div>
@@ -449,27 +463,33 @@ export default function UsageStatsPage() {
       </div>
 
       {/* KPI cards */}
-      <div className="grid grid--4">
-        <Stat
-          label="Total Requests"
-          value={(totals.data?.totals?.request_count || 0).toLocaleString()}
-          delta={`${(totals.data?.totals?.failed_count || 0).toLocaleString()} failed (${failureRate.toFixed(1)}%)`}
-        />
-        <Stat
-          label="Total Tokens"
-          value={totalTokens.toLocaleString()}
-          delta={`in ${(totals.data?.totals?.input_tokens || 0).toLocaleString()} · out ${(totals.data?.totals?.output_tokens || 0).toLocaleString()}`}
-        />
-        <Stat
-          label="Total Cost"
-          value={`$${(totals.data?.totals?.cost_usd || 0).toFixed(4)}`}
-          delta={`avg $${(totals.data?.totals?.request_count || 0) > 0 ? ((totals.data?.totals?.cost_usd || 0) / (totals.data?.totals?.request_count || 1)).toFixed(4) : '0.0000'}/req`}
-        />
-        <Stat
-          label="Active Models"
-          value={String(topModels.data?.entries?.length || 0)}
-          delta={`${topProviders.data?.entries?.length || 0} providers`}
-        />
+      <div className="stats-grid">
+        <div className="stat-card">
+          <div className="stat-card__label">Total Requests</div>
+          <div className="stat-card__value">{reqCount.toLocaleString()}</div>
+          <div className="stat-card__hint">
+            {(totals.data?.totals?.failed_count || 0).toLocaleString()} failed ({failureRate.toFixed(1)}%)
+          </div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-card__label">Total Tokens</div>
+          <div className="stat-card__value">{totalTokens.toLocaleString()}</div>
+          <div className="stat-card__hint">
+            in {(totals.data?.totals?.input_tokens || 0).toLocaleString()} · out {(totals.data?.totals?.output_tokens || 0).toLocaleString()}
+          </div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-card__label">Total Cost</div>
+          <div className="stat-card__value">${(totals.data?.totals?.cost_usd || 0).toFixed(4)}</div>
+          <div className="stat-card__hint">
+            avg ${reqCount > 0 ? ((totals.data?.totals?.cost_usd || 0) / reqCount).toFixed(4) : '0.0000'}/req
+          </div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-card__label">Active Models</div>
+          <div className="stat-card__value">{String(topModels.data?.entries?.length || 0)}</div>
+          <div className="stat-card__hint">{topProviders.data?.entries?.length || 0} providers</div>
+        </div>
       </div>
 
       {totals.error && <ErrorBanner error={totals.error} onRetry={totals.reload} />}
@@ -481,7 +501,7 @@ export default function UsageStatsPage() {
             <h3 className="card__title" style={{ margin: 0 }}>Request volume</h3>
             <span className="dim" style={{ fontSize: 12 }}>{rangeParams.interval}</span>
           </div>
-          {ts.loading && <Spinner label="Loading…" />}
+          {ts.loading && <ChartSkeleton />}
           {!ts.loading && tsData.length > 0 && (
             <BarChart data={tsData} />
           )}
@@ -492,12 +512,12 @@ export default function UsageStatsPage() {
         <div className="card">
           <div className="row row--between" style={{ marginBottom: 12 }}>
             <h3 className="card__title" style={{ margin: 0 }}>Token usage</h3>
-            <span className="dim row gap-sm" style={{ fontSize: 11 }}>
-              <span style={{ width: 10, height: 10, background: 'var(--accent)', display: 'inline-block', borderRadius: 2 }} /> input
-              <span style={{ width: 10, height: 10, background: 'var(--warning)', display: 'inline-block', borderRadius: 2, marginLeft: 6 }} /> output
+            <span className="row gap-sm" style={{ fontSize: 11 }}>
+              <span className="tokbar__legend-dot" style={{ background: 'var(--accent)' }} /> input
+              <span className="tokbar__legend-dot" style={{ background: 'var(--warning)', marginLeft: 6 }} /> output
             </span>
           </div>
-          {ts.loading && <Spinner label="Loading…" />}
+          {ts.loading && <ChartSkeleton />}
           {!ts.loading && tsData.length > 0 && (
             <MultiBarChart data={tsData} />
           )}
@@ -512,7 +532,7 @@ export default function UsageStatsPage() {
           <h3 className="card__title" style={{ margin: 0 }}>Cost trend</h3>
           <span className="dim" style={{ fontSize: 12 }}>{rangeParams.interval}</span>
         </div>
-        {ts.loading && <Spinner label="Loading…" />}
+        {ts.loading && <ChartSkeleton />}
         {!ts.loading && tsData.length > 0 && (
           <Sparkline values={tsData.map((d) => d.cost)} />
         )}
@@ -554,28 +574,22 @@ export default function UsageStatsPage() {
           mixed into the success-side events listing. */}
       <div className="card" style={{ marginTop: 16 }}>
         <div className="row row--between" style={{ marginBottom: 12 }}>
-          <div className="row gap-sm">
+          <div className="seg-group" role="tablist" aria-label="Events / Errors">
             <button
+              type="button"
+              className={`seg-btn ${eventsTab === 'events' ? 'seg-btn--active' : ''}`}
               onClick={() => setEventsTab('events')}
-              className={eventsTab === 'events' ? 'primary' : ''}
-              style={{ padding: '4px 10px', fontSize: 12 }}
             >
               Events
             </button>
             <button
+              type="button"
+              className={`seg-btn ${eventsTab === 'errors' ? 'seg-btn--active' : ''}`}
               onClick={() => setEventsTab('errors')}
-              className={eventsTab === 'errors' ? 'primary' : ''}
-              style={{ padding: '4px 10px', fontSize: 12 }}
             >
               Errors
             </button>
           </div>
-          <button
-            onClick={() => (eventsTab === 'events' ? events.reload() : errors.reload())}
-            style={{ padding: '2px 8px', fontSize: 12 }}
-          >
-            ↻
-          </button>
         </div>
         {eventsTab === 'events' ? (
           <EventsTableBody
@@ -606,6 +620,17 @@ export default function UsageStatsPage() {
   );
 }
 
+// ChartSkeleton fills the chart area with shimmer bars instead of a centered
+// spinner, matching the loading pattern used across the overhauled pages and
+// avoiding layout shift when the data arrives.
+function ChartSkeleton() {
+  return (
+    <div className="chart-skeleton">
+      <div className="skeleton-line chart-skeleton__bar" />
+    </div>
+  );
+}
+
 // FilterSelect renders a dropdown populated with distinct values from the
 // usage_events table. Includes a leading "any" option that clears the filter.
 // Shows a small "loading…" placeholder while the options request is in flight.
@@ -620,20 +645,6 @@ function FilterSelect({ options, value, onChange, anyLabel, loading }) {
   );
 }
 
-function EventsTable({ events, page, pageSize, onPage, onRowClick }) {
-  return (
-    <div className="card" style={{ marginTop: 16 }}>
-      <EventsTableBody
-        events={events}
-        page={page}
-        pageSize={pageSize}
-        onPage={onPage}
-        onRowClick={onRowClick}
-      />
-    </div>
-  );
-}
-
 // EventsTableBody renders the table + pager only (no card). Used by the
 // tabbed Events/Errors switcher, which wraps both in a single card.
 function EventsTableBody({ events, page, pageSize, onPage, onRowClick }) {
@@ -642,7 +653,38 @@ function EventsTableBody({ events, page, pageSize, onPage, onRowClick }) {
   const totalPages = total === 0 ? 1 : Math.ceil(total / pageSize);
   return (
     <>
-      {events.loading && <Spinner label="Loading…" />}
+      {events.loading && (
+        <div style={{ overflowX: 'auto' }}>
+          <table className="table" style={{ tableLayout: 'fixed' }}>
+            <thead>
+              <tr>
+                <th>Time (UTC)</th>
+                <th>Key / Alias</th>
+                <th>Provider</th>
+                <th>Model</th>
+                <th style={{ minWidth: 260 }}>Token breakdown</th>
+                <th style={{ textAlign: 'right' }}>Cost</th>
+                <th style={{ textAlign: 'right' }}>Latency</th>
+                <th style={{ textAlign: 'right' }}>TTFT</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Array.from({ length: 4 }).map((_, i) => (
+                <tr key={i} className="skeleton-row">
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       {events.error && <ErrorBanner error={events.error} />}
       {!events.loading && !events.error && rows.length === 0 && (
         <EmptyState title="No events for this window" />
@@ -660,15 +702,15 @@ function EventsTableBody({ events, page, pageSize, onPage, onRowClick }) {
                   <th style={{ minWidth: 260 }}>Token breakdown</th>
                   <th style={{ textAlign: 'right' }}>Cost</th>
                   <th style={{ textAlign: 'right' }}>Latency</th>
-                  <th>Status</th>
+                  <th style={{ textAlign: 'right' }}>TTFT</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((e) => (
                   <tr
                     key={String(e.id)}
+                    className="row-link"
                     onClick={() => onRowClick(e.id)}
-                    style={{ cursor: 'pointer' }}
                   >
                     <td className="mono" style={{ whiteSpace: 'nowrap' }}>
                       {e.requested_at ? new Date(e.requested_at).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z') : '—'}
@@ -681,33 +723,19 @@ function EventsTableBody({ events, page, pageSize, onPage, onRowClick }) {
                     </td>
                     <td className="mono" style={{ textAlign: 'right' }}>${(e.cost_usd || 0).toFixed(4)}</td>
                     <td className="mono" style={{ textAlign: 'right' }}>{e.latency_ms ? `${e.latency_ms} ms` : '—'}</td>
-                    <td><StatusBadge status="active" /></td>
+                    <td className="mono" style={{ textAlign: 'right' }}>{e.ttft_ms ? `${e.ttft_ms} ms` : '—'}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          <div className="row row--between" style={{ marginTop: 12, fontSize: 12 }}>
-            <span className="dim">
-              {total.toLocaleString()} event{total === 1 ? '' : 's'} · page {page} of {totalPages}
-            </span>
-            <div className="row gap-sm">
-              <button
-                disabled={page <= 1}
-                onClick={() => onPage(Math.max(1, page - 1))}
-                style={{ padding: '4px 10px' }}
-              >
-                ← Prev
-              </button>
-              <button
-                disabled={page >= totalPages}
-                onClick={() => onPage(Math.min(totalPages, page + 1))}
-                style={{ padding: '4px 10px' }}
-              >
-                Next →
-              </button>
-            </div>
-          </div>
+          <Pager
+            page={page}
+            totalPages={totalPages}
+            total={total}
+            pageSize={pageSize}
+            onPageChange={onPage}
+          />
         </>
       )}
     </>
@@ -723,7 +751,36 @@ function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick }) {
   const totalPages = total === 0 ? 1 : Math.ceil(total / pageSize);
   return (
     <>
-      {errors.loading && <Spinner label="Loading…" />}
+      {errors.loading && (
+        <div style={{ overflowX: 'auto' }}>
+          <table className="table" style={{ tableLayout: 'fixed' }}>
+            <thead>
+              <tr>
+                <th>Time (UTC)</th>
+                <th>Key / Alias</th>
+                <th>Provider</th>
+                <th>Model</th>
+                <th style={{ textAlign: 'right' }}>Status</th>
+                <th>Error message</th>
+                <th style={{ textAlign: 'right' }}>Latency</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Array.from({ length: 4 }).map((_, i) => (
+                <tr key={i} className="skeleton-row">
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       {errors.error && <ErrorBanner error={errors.error} />}
       {!errors.loading && !errors.error && rows.length === 0 && (
         <EmptyState title="No failed attempts for this window" />
@@ -747,8 +804,8 @@ function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick }) {
                 {rows.map((e) => (
                   <tr
                     key={String(e.id)}
+                    className="row-link"
                     onClick={() => onRowClick(e.id)}
-                    style={{ cursor: 'pointer' }}
                   >
                     <td className="mono" style={{ whiteSpace: 'nowrap' }}>
                       {e.requested_at ? new Date(e.requested_at).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z') : '—'}
@@ -768,27 +825,13 @@ function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick }) {
               </tbody>
             </table>
           </div>
-          <div className="row row--between" style={{ marginTop: 12, fontSize: 12 }}>
-            <span className="dim">
-              {total.toLocaleString()} error{total === 1 ? '' : 's'} · page {page} of {totalPages}
-            </span>
-            <div className="row gap-sm">
-              <button
-                disabled={page <= 1}
-                onClick={() => onPage(Math.max(1, page - 1))}
-                style={{ padding: '4px 10px' }}
-              >
-                ← Prev
-              </button>
-              <button
-                disabled={page >= totalPages}
-                onClick={() => onPage(Math.min(totalPages, page + 1))}
-                style={{ padding: '4px 10px' }}
-              >
-                Next →
-              </button>
-            </div>
-          </div>
+          <Pager
+            page={page}
+            totalPages={totalPages}
+            total={total}
+            pageSize={pageSize}
+            onPageChange={onPage}
+          />
         </>
       )}
     </>
@@ -802,7 +845,7 @@ function EventDetailModal({ id, onClose }) {
   const detail = useAsync(() => getUsageEvent(id), [id]);
   const e = detail.data?.event;
   return (
-    <Modal title={`Event #${id}`} onClose={onClose}>
+    <Modal title={`Event #${id}`} onClose={onClose} size="lg">
       {detail.loading && <Spinner label="Loading…" />}
       {detail.error && <ErrorBanner error={detail.error} />}
       {!detail.loading && !detail.error && e && (
@@ -844,7 +887,7 @@ function ErrorDetailModal({ id, onClose }) {
   const detail = useAsync(() => getUsageError(id), [id]);
   const e = detail.data?.error_event;
   return (
-    <Modal title={`Error #${id}`} onClose={onClose}>
+    <Modal title={`Error #${id}`} onClose={onClose} size="lg">
       {detail.loading && <Spinner label="Loading…" />}
       {detail.error && <ErrorBanner error={detail.error} />}
       {!detail.loading && !detail.error && e && (
@@ -869,8 +912,8 @@ function ErrorDetailModal({ id, onClose }) {
           <DetailRow label="Status Code" value={e.fail_status_code ? String(e.fail_status_code) : '—'} mono />
           <DetailRow label="Generate" value={e.generate ? 'true' : 'false'} mono />
           <DetailRow label="Endpoint" value={e.endpoint || '—'} mono />
-          <div style={{ gridColumn: '1 / -1' }}>
-            <div className="dim" style={{ fontSize: 11 }}>Error message</div>
+          <div className="detail-row__block">
+            <div className="detail-row__block-label">Error message</div>
             <div className="mono" style={{ fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-all', marginTop: 4 }}>
               {e.error_message || '—'}
             </div>
@@ -884,9 +927,9 @@ function ErrorDetailModal({ id, onClose }) {
 
 function DetailRow({ label, value, mono }) {
   return (
-    <div>
-      <div className="dim" style={{ fontSize: 11 }}>{label}</div>
-      <div className={mono ? 'mono' : ''} style={{ fontSize: 13, wordBreak: 'break-all' }}>{value}</div>
+    <div className="detail-row">
+      <div className="detail-row__label">{label}</div>
+      <div className={`detail-row__value ${mono ? 'mono' : ''}`}>{value}</div>
     </div>
   );
 }
@@ -900,11 +943,12 @@ function LeaderboardCard({ title, entries, loading, error, onReload, metric }) {
     if (!entries || entries.length === 0) return 1;
     return Math.max(...entries.map((e) => e[metric === 'cost_usd' ? 'cost_usd' : metric]), 1);
   }, [entries, metric]);
+  const valueKey = metric === 'cost_usd' ? 'cost_usd' : metric;
   return (
     <div className="card" style={{ padding: 0 }}>
       <div className="row row--between" style={{ padding: '14px 16px 8px' }}>
         <h3 className="card__title" style={{ margin: 0 }}>{title}</h3>
-        <button onClick={onReload} style={{ padding: '2px 8px', fontSize: 12 }}>↻</button>
+        <button onClick={onReload} style={{ padding: '3px 8px', fontSize: 12 }} title="Reload">↻</button>
       </div>
       {loading && <Spinner label="Loading…" />}
       {error && <ErrorBanner error={error} />}
@@ -924,20 +968,13 @@ function LeaderboardCard({ title, entries, loading, error, onReload, metric }) {
             {entries.map((e, i) => (
               <tr key={`${e.key}-${i}`}>
                 <td className="mono">{e.key || '—'}</td>
-                <td className="mono" style={{ textAlign: 'right' }}>{fmt(e[metric === 'cost_usd' ? 'cost_usd' : metric])}</td>
+                <td className="mono" style={{ textAlign: 'right' }}>{fmt(e[valueKey])}</td>
                 <td>
-                  <div style={{
-                    height: 8,
-                    background: 'var(--bg)',
-                    borderRadius: 4,
-                    overflow: 'hidden',
-                  }}>
-                    <div style={{
-                      width: `${(e[metric === 'cost_usd' ? 'cost_usd' : metric] / max * 100)}%`,
-                      height: '100%',
-                      background: 'var(--accent)',
-                      opacity: 0.7,
-                    }} />
+                  <div className="lb-bar">
+                    <div
+                      className="lb-bar__fill"
+                      style={{ width: `${(e[valueKey] / max * 100)}%` }}
+                    />
                   </div>
                 </td>
               </tr>

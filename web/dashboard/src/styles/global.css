@@ -1364,3 +1364,133 @@ tr:focus-within .row-actions {
   font-size: 12px;
 }
 .status-control--saving select { opacity: 0.7; }
+
+/* Usage Stats — filter toolbar layout (preset segment + custom range). */
+.usage-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.usage-toolbar__range {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.usage-toolbar__range label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+.usage-toolbar__range input[type='datetime-local'] {
+  width: auto;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.usage-toolbar__range-label {
+  color: var(--text-dim);
+}
+
+/* Token breakdown stacked bar — used in the dense events table cell and the
+   taller event-detail modal. All segments use the TOKEN_SEGMENTS colors set
+   via inline style on each segment (the color comes from data, not a class),
+   but the bar track, legend, and cell layout live here. */
+.tokbar {
+  display: flex;
+  width: 100%;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg);
+}
+.tokbar--sm { height: 7px; }
+.tokbar--md { height: 5px; }
+.tokbar--lg { height: 12px; border-radius: 6px; }
+.tokbar__seg {
+  min-width: 0;
+}
+.tokbar__seg--min { min-width: 2px; }
+
+.tokbar__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 4px;
+  font-size: 12px;
+}
+.tokbar__legend--sm { font-size: 11px; margin-top: 3px; }
+.tokbar__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.tokbar__legend-item--sm { margin-right: 0; }
+.tokbar__legend-dot {
+  width: 10px;
+  height: 10px;
+  display: inline-block;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.tokbar__legend-sum {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* Chart loading skeleton — fills the chart area instead of a centered spinner. */
+.chart-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0;
+  height: 116px;
+  justify-content: flex-end;
+}
+.chart-skeleton__bar {
+  height: 100%;
+}
+.chart-skeleton__line {
+  height: 10px;
+  width: 100%;
+}
+
+/* Leaderboard progress bar — class-driven variant of the inline-style bar. */
+.lb-bar {
+  height: 8px;
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.lb-bar__fill {
+  height: 100%;
+  background: var(--accent);
+  opacity: 0.7;
+  transition: width 0.2s ease;
+}
+
+/* Detail modal label/value pair — replaces inline-styled DetailRow. */
+.detail-row { display: flex; flex-direction: column; gap: 2px; }
+.detail-row__label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.detail-row__value {
+  font-size: 13px;
+  word-break: break-all;
+}
+.detail-row__block { grid-column: 1 / -1; }
+.detail-row__block-label {
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
