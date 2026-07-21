@@ -273,6 +273,19 @@ export async function getUsageEvent(id) {
   return fetchJSON(`/usage-stats/events/${encodeURIComponent(id)}`);
 }
 
+// Paginated list of raw failed-attempt records (usage_errors table). Mirrors
+// getUsageEvents in shape but surfaces fail_status_code and error_message so
+// operators can triage request errors separately from successful responses.
+export async function getUsageErrors(params = {}) {
+  const qs = toUsageQS(params);
+  return fetchJSON(`/usage-stats/errors${qs}`);
+}
+
+// Single failed-attempt detail. Used by the dashboard's error detail modal.
+export async function getUsageError(id) {
+  return fetchJSON(`/usage-stats/errors/${encodeURIComponent(id)}`);
+}
+
 // Distinct { api_keys: [{id, alias}], providers, models } observed in the
 // filter window. Used by the dashboard to populate dropdown filter menus so
 // the operator never types a free-text value (which is impossible against

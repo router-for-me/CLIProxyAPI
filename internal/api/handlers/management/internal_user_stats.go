@@ -37,6 +37,14 @@ func (h *Handler) GetInternalUserTotals(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
 	}
+	// failed_count is sourced from usage_errors (failed attempts no longer
+	// live in usage_events).
+	failedCount, err := usage.SelectErrorCount(c.Request.Context(), filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+		return
+	}
+	totals.FailedCount = failedCount
 	var failureRate float64
 	if totals.RequestCount > 0 {
 		failureRate = float64(totals.FailedCount) / float64(totals.RequestCount) * 100

@@ -238,6 +238,15 @@ func (h *Handler) GetUsageTotals(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
 	}
+	// failed_count is sourced from usage_errors (failed attempts are no longer
+	// stored in usage_events), keeping the dashboard's failure_rate tile
+	// meaningful as "errors / successful requests".
+	failedCount, err := usage.SelectErrorCount(c.Request.Context(), filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+		return
+	}
+	totals.FailedCount = failedCount
 	// Compute derived metrics for the dashboard.
 	var failureRate float64
 	if totals.RequestCount > 0 {

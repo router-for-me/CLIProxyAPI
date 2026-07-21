@@ -116,6 +116,7 @@ type UsageStore struct {
 	db                 *sql.DB
 	apiKeysTable       string
 	eventsTable        string
+	errorsTable        string
 	windowsTable       string
 	pricingTable       string
 	internalUsersTable string
@@ -141,6 +142,7 @@ func NewUsageStore(parent *PostgresStore) *UsageStore {
 		db:                 parent.DB(),
 		apiKeysTable:       parent.APIKeysTable(),
 		eventsTable:        parent.UsageEventsTable(),
+		errorsTable:        parent.UsageErrorsTable(),
 		windowsTable:       parent.UsageWindowsTable(),
 		pricingTable:       parent.ModelPricingTable(),
 		internalUsersTable: parent.InternalUsersTable(),
@@ -401,8 +403,8 @@ func (s *UsageStore) SelectAggregate(ctx context.Context, filter UsageFilter) ([
 		b.WriteString(" AS bucket, MAX(COALESCE(NULLIF(k.key_alias, ''), k.name)) AS principal")
 	}
 	b.WriteString(`
-		, COALESCE(SUM(CASE WHEN NOT failed THEN 1 ELSE 0 END), 0) AS request_count,
-		COALESCE(SUM(CASE WHEN failed THEN 1 ELSE 0 END), 0) AS failed_count,
+		, COUNT(*) AS request_count,
+		0 AS failed_count,
 		COALESCE(SUM(input_tokens), 0) AS input_tokens,
 		COALESCE(SUM(output_tokens), 0) AS output_tokens,
 		COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
@@ -743,8 +745,8 @@ func (s *UsageStore) SelectTimeSeries(ctx context.Context, filter UsageFilter, i
 	b.WriteString(" AS bucket, EXTRACT(EPOCH FROM ")
 	b.WriteString(intervalExpr)
 	b.WriteString(`)::bigint AS bucket_ts,
-		COALESCE(SUM(CASE WHEN NOT failed THEN 1 ELSE 0 END), 0) AS request_count,
-		COALESCE(SUM(CASE WHEN failed THEN 1 ELSE 0 END), 0) AS failed_count,
+		COUNT(*) AS request_count,
+		0 AS failed_count,
 		COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
 		COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(cached_tokens), 0),
 		COALESCE(SUM(total_tokens), 0), COALESCE(SUM(cost_usd), 0)
@@ -805,8 +807,8 @@ func (s *UsageStore) SelectTop(ctx context.Context, filter UsageFilter, dimensio
 	b.WriteString("SELECT ")
 	b.WriteString(dimCol)
 	b.WriteString(` AS key,
-		COALESCE(SUM(CASE WHEN NOT failed THEN 1 ELSE 0 END), 0) AS request_count,
-		COALESCE(SUM(CASE WHEN failed THEN 1 ELSE 0 END), 0) AS failed_count,
+		COUNT(*) AS request_count,
+		0 AS failed_count,
 		COALESCE(SUM(input_tokens), 0) AS input_tokens,
 		COALESCE(SUM(output_tokens), 0) AS output_tokens,
 		COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
@@ -851,8 +853,8 @@ func (s *UsageStore) SelectTotals(ctx context.Context, filter UsageFilter) (Usag
 	}
 	var b strings.Builder
 	b.WriteString(`SELECT 'total', NULL::text,
-		COALESCE(SUM(CASE WHEN NOT failed THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN failed THEN 1 ELSE 0 END), 0),
+		COUNT(*),
+		0,
 		COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
 		COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(cached_tokens), 0),
 		COALESCE(SUM(total_tokens), 0), COALESCE(SUM(cost_usd), 0)
@@ -1294,7 +1296,7 @@ func dimensionColumn(dimension, apiKeysTable, internalUsersTable string) (column
 func metricExpr(metric string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(metric)) {
 	case "", "request_count", "requests":
-		return "COALESCE(SUM(CASE WHEN NOT failed THEN 1 ELSE 0 END), 0)", nil
+		return "COUNT(*)", nil
 	case "total_tokens", "tokens":
 		return "COALESCE(SUM(total_tokens), 0)", nil
 	case "cost_usd", "cost":

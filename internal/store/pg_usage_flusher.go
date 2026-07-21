@@ -208,9 +208,23 @@ func (f *UsageFlusher) drain(ctx context.Context) {
 }
 
 // flushOne converts the in-memory record to its persisted form and writes it
-// via the UsageStore. Errors are logged but not surfaced; the flusher is
-// best-effort by design (the upstream usage pub/sub does not retry).
+// via the UsageStore. Failed attempts are routed to usage_errors so the
+// success-table aggregates stay clean of failures; successful responses are
+// written to usage_events as before. Errors are logged but not surfaced; the
+// flusher is best-effort by design (the upstream usage pub/sub does not retry).
 func (f *UsageFlusher) flushOne(ctx context.Context, record coreusage.Record) int {
+	if record.Failed {
+		err, ok := f.flushError(ctx, record)
+		if !ok {
+			return 0
+		}
+		if err != nil {
+			log.WithError(err).Debug("postgres usage flusher: single error insert failed; will retry next tick")
+			return 0
+		}
+		f.flushCounter.Add(1)
+		return 1
+	}
 	event, apiKeyID, userID, ok := f.toEvent(ctx, record)
 	if !ok {
 		return 0
@@ -226,9 +240,27 @@ func (f *UsageFlusher) flushOne(ctx context.Context, record coreusage.Record) in
 	return 1
 }
 
+// flushError converts a failed-attempt record into a UsageError and persists
+// it via InsertError. Returns (err, ok): ok=false means the record was
+// malformed enough to skip; err non-nil means the insert failed and the
+// caller may retry on the next tick.
+func (f *UsageFlusher) flushError(ctx context.Context, record coreusage.Record) (error, bool) {
+	event, apiKeyID, userID, ok := f.toError(ctx, record)
+	if !ok {
+		return nil, false
+	}
+	event.APIKeyID = apiKeyID
+	event.UserID = userID
+	if err := f.store.InsertError(ctx, event); err != nil {
+		return err, true
+	}
+	return nil, true
+}
+
 // toEvent converts a coreusage.Record into the persisted UsageEvent shape and
 // resolves the (api_key_id, user_id, cost_usd) tuple that the hot path does not
-// know. Returns ok=false when the record is malformed enough to skip.
+// know. Returns ok=false when the record is malformed enough to skip. Only
+// called for successful responses — failed attempts are routed to toError.
 func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (UsageEvent, string, string, bool) {
 	model := record.Model
 	if model == "" {
@@ -274,12 +306,8 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 				record.Detail.ReasoningTokens, record.Detail.CacheCreationTokens, cacheRead)
 		}
 	}
-	failStatus := record.Fail.StatusCode
-	if !record.Failed {
-		failStatus = 0
-	}
 	return UsageEvent{
-		RequestID:           "", // request ID propagation is handled by the logging plugin already
+		RequestID:           record.RequestID,
 		APIKeyPrincipal:     principal,
 		Provider:            record.Provider,
 		ExecutorType:        record.ExecutorType,
@@ -300,8 +328,86 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 		CostUSD:             cost,
 		LatencyMs:           record.Latency.Milliseconds(),
 		TTFTMs:              record.TTFT.Milliseconds(),
-		Failed:              record.Failed,
+		Failed:              false, // success path; failed attempts go to usage_errors
+		FailStatusCode:      0,
+		Generate:            generateEnabled(record.Generate),
+		RequestedAt:         now,
+	}, apiKeyID, userID, true
+}
+
+// toError converts a failed-attempt coreusage.Record into the persisted
+// UsageError shape. Mirrors toEvent but carries record.Fail.Body into
+// ErrorMessage and record.Fail.StatusCode into FailStatusCode rather than
+// dropping them (which toEvent does for the success path).
+func (f *UsageFlusher) toError(ctx context.Context, record coreusage.Record) (UsageError, string, string, bool) {
+	model := record.Model
+	if model == "" {
+		model = record.Alias
+	}
+	if model == "" {
+		model = "unknown"
+	}
+	now := record.RequestedAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	total := record.Detail.TotalTokens
+	if total == 0 {
+		total = record.Detail.InputTokens + record.Detail.OutputTokens + record.Detail.ReasoningTokens
+	}
+	principal := record.APIKey
+	apiKeyID := ""
+	userID := ""
+	if f.apiKeyStore != nil && principal != "" {
+		hash := HashSecret(principal)
+		if key, _, err := f.apiKeyStore.LookupByHash(ctx, hash); err == nil {
+			apiKeyID = key.ID
+			userID = key.UserID
+		}
+	}
+	// Resolve cost via pricing row; missing pricing → 0. Failed attempts may
+	// have partial token counts (e.g. only input tokens billed before the
+	// upstream errored mid-stream), but we still attribute whatever the
+	// executor observed so the dashboard can surface the partial cost.
+	var cost float64
+	if us := f.store; us != nil {
+		if pricing, err := us.GetPricing(ctx, model); err == nil {
+			cacheRead := record.Detail.CacheReadTokens
+			if cacheRead == 0 {
+				cacheRead = record.Detail.CachedTokens
+			}
+			cost = ComputeCost(pricing, record.Detail.InputTokens, record.Detail.OutputTokens,
+				record.Detail.ReasoningTokens, record.Detail.CacheCreationTokens, cacheRead)
+		}
+	}
+	failStatus := record.Fail.StatusCode
+	if !record.Failed {
+		failStatus = 0
+	}
+	return UsageError{
+		RequestID:           record.RequestID,
+		APIKeyPrincipal:     principal,
+		Provider:            record.Provider,
+		ExecutorType:        record.ExecutorType,
+		Model:               model,
+		Alias:               record.Alias,
+		Endpoint:            "",
+		AuthType:            record.AuthType,
+		Source:              record.Source,
+		ReasoningEffort:     record.ReasoningEffort,
+		ServiceTier:         record.ServiceTier,
+		ResponseServiceTier: record.ResponseServiceTier,
+		InputTokens:         record.Detail.InputTokens,
+		OutputTokens:        record.Detail.OutputTokens,
+		ReasoningTokens:     record.Detail.ReasoningTokens,
+		CachedTokens:        record.Detail.CachedTokens,
+		CacheCreationTokens: record.Detail.CacheCreationTokens,
+		TotalTokens:         total,
+		CostUSD:             cost,
+		LatencyMs:           record.Latency.Milliseconds(),
+		TTFTMs:              record.TTFT.Milliseconds(),
 		FailStatusCode:      failStatus,
+		ErrorMessage:        record.Fail.Body,
 		Generate:            generateEnabled(record.Generate),
 		RequestedAt:         now,
 	}, apiKeyID, userID, true

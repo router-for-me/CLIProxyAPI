@@ -26,6 +26,7 @@ const (
 	defaultAPIKeysTable       = "api_keys"
 	defaultPoliciesTable      = "api_key_policies"
 	defaultUsageEventsTable   = "usage_events"
+	defaultUsageErrorsTable   = "usage_errors"
 	defaultUsageWindowsTable  = "usage_windows"
 	defaultModelsTable        = "models_catalog"
 	defaultModelPricingTable  = "model_pricing"
@@ -46,8 +47,15 @@ type PostgresStoreConfig struct {
 	APIKeysTable string
 	// PoliciesTable stores per-key policy attached to APIKeysTable rows.
 	PoliciesTable string
-	// UsageEventsTable stores per-request usage records (async-flushed).
+	// UsageEventsTable stores per-request usage records (async-flushed);
+	// only successful responses are written here. Failed attempts are
+	// routed to UsageErrorsTable instead.
 	UsageEventsTable string
+	// UsageErrorsTable stores per-request failure records (async-flushed):
+	// upstream errors, stream errors, and other request-level failures with
+	// their error_message and fail_status_code. Kept separate from
+	// UsageEventsTable so the success-table aggregates stay clean.
+	UsageErrorsTable string
 	// UsageWindowsTable stores time-windowed aggregate counters for budget enforcement.
 	UsageWindowsTable string
 	// ModelsTable stores the model catalog mirrored from the registry updater.
@@ -106,6 +114,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.UsageEventsTable == "" {
 		cfg.UsageEventsTable = defaultUsageEventsTable
+	}
+	if cfg.UsageErrorsTable == "" {
+		cfg.UsageErrorsTable = defaultUsageErrorsTable
 	}
 	if cfg.UsageWindowsTable == "" {
 		cfg.UsageWindowsTable = defaultUsageWindowsTable
@@ -356,6 +367,67 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_usage_events_user_id ON %s(user_id, requested_at) WHERE user_id IS NOT NULL`, usageEventsTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: create usage_events user_id index: %w", err)
+	}
+
+	// usage_errors mirrors usage_events but holds only failed attempts. It is
+	// populated by the usage flusher whenever record.Failed is true. Kept
+	// separate so success-table aggregates (request_count, token totals) stay
+	// clean of failures while still allowing failure_rate and error drill-down.
+	usageErrorsTable := s.fullTableName(s.cfg.UsageErrorsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id                      BIGSERIAL PRIMARY KEY,
+			request_id              TEXT,
+			api_key_id              TEXT,
+			api_key_principal       TEXT,
+			user_id                 TEXT,
+			provider                TEXT NOT NULL,
+			executor_type           TEXT,
+			model                   TEXT NOT NULL,
+			alias                   TEXT,
+			endpoint                TEXT,
+			auth_type               TEXT,
+			source                  TEXT,
+			reasoning_effort        TEXT,
+			service_tier            TEXT,
+			response_service_tier   TEXT,
+			input_tokens            BIGINT NOT NULL DEFAULT 0,
+			output_tokens           BIGINT NOT NULL DEFAULT 0,
+			reasoning_tokens        BIGINT NOT NULL DEFAULT 0,
+			cached_tokens           BIGINT NOT NULL DEFAULT 0,
+			cache_creation_tokens   BIGINT NOT NULL DEFAULT 0,
+			total_tokens            BIGINT NOT NULL DEFAULT 0,
+			cost_usd                NUMERIC(12,6) NOT NULL DEFAULT 0,
+			latency_ms              BIGINT,
+			ttft_ms                 BIGINT,
+			fail_status_code        INTEGER,
+			error_message           TEXT NOT NULL DEFAULT '',
+			generate                BOOLEAN NOT NULL DEFAULT FALSE,
+			requested_at            TIMESTAMPTZ NOT NULL,
+			flushed_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, usageErrorsTable)); err != nil {
+		return fmt.Errorf("postgres store: create usage_errors table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_usage_errors_api_key ON %s(api_key_id, requested_at)`, usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create usage_errors api_key index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_usage_errors_model ON %s(model, requested_at)`, usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create usage_errors model index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_usage_errors_requested_at ON %s(requested_at DESC)`, usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create usage_errors requested_at index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_usage_errors_user_id ON %s(user_id, requested_at) WHERE user_id IS NOT NULL`, usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create usage_errors user_id index: %w", err)
 	}
 
 	usageWindowsTable := s.fullTableName(s.cfg.UsageWindowsTable)
@@ -620,6 +692,16 @@ func (s *PostgresStore) UsageEventsTable() string {
 		return quoteIdentifier(defaultUsageEventsTable)
 	}
 	return s.fullTableName(s.cfg.UsageEventsTable)
+}
+
+// UsageErrorsTable returns the fully-qualified name of the per-request usage
+// errors table. Failed attempts (upstream errors, stream errors, etc.) are
+// routed here instead of UsageEventsTable so success aggregates stay clean.
+func (s *PostgresStore) UsageErrorsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultUsageErrorsTable)
+	}
+	return s.fullTableName(s.cfg.UsageErrorsTable)
 }
 
 // UsageWindowsTable returns the fully-qualified name of the time-windowed usage counter table.

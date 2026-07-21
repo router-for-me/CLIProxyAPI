@@ -25,11 +25,16 @@ type Record struct {
 	ExecutorType string
 	Model        string
 	Alias        string
-	APIKey       string
-	AuthID       string
-	AuthIndex    string
-	AuthType     string
-	Source       string
+	// RequestID is the per-request correlation identifier (sourced from the
+	// logging request-id context). Persisted on both usage_events and
+	// usage_errors so failures can be correlated back to the originating log
+	// entries. Empty when no request id was assigned upstream.
+	RequestID string
+	APIKey    string
+	AuthID    string
+	AuthIndex string
+	AuthType  string
+	Source    string
 	// ReasoningEffort stores the translated upstream thinking level for request event logs.
 	ReasoningEffort string
 	// ServiceTier stores the client-requested service tier.

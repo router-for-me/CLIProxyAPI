@@ -990,6 +990,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/internal-users/:id/timeseries", s.mgmt.GetInternalUserTimeSeries)
 		mgmt.GET("/internal-users/:id/top", s.mgmt.GetInternalUserTop)
 		mgmt.GET("/internal-users/:id/events", s.mgmt.GetInternalUserEvents)
+		mgmt.GET("/internal-users/:id/errors", s.mgmt.GetInternalUserErrors)
 		mgmt.GET("/internal-users/:id/windows", s.mgmt.GetInternalUserWindows)
 		mgmt.GET("/internal-users/:id/model-spend", s.mgmt.GetInternalUserModelSpend)
 		mgmt.GET("/internal-users/:id/models", s.mgmt.GetInternalUserModels)
@@ -1002,6 +1003,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage-stats/top", s.mgmt.GetUsageTop)
 		mgmt.GET("/usage-stats/events", s.mgmt.GetUsageEvents)
 		mgmt.GET("/usage-stats/events/:id", s.mgmt.GetUsageEvent)
+		mgmt.GET("/usage-stats/errors", s.mgmt.GetUsageErrors)
+		mgmt.GET("/usage-stats/errors/:id", s.mgmt.GetUsageError)
 		mgmt.GET("/usage-stats/filters", s.mgmt.GetUsageFilters)
 		mgmt.GET("/usage-windows/:api_key_id", s.mgmt.GetUsageWindows)
 

@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   getUsageTotals, getUsageTimeSeries, getUsageTop, getUsageStats,
-  getUsageEvents, getUsageEvent, getUsageFilterOptions,
+  getUsageEvents, getUsageEvent, getUsageErrors, getUsageError, getUsageFilterOptions,
 } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import {
@@ -312,7 +312,19 @@ export default function UsageStatsPage() {
   // operator doesn't end up staring at an out-of-range page on a new window.
   useEffect(() => { setEventsPage(1); }, [JSON.stringify(baseFilter)]);
 
+  // Failed-attempt records are persisted in a separate usage_errors table.
+  // The operator can flip between the "Events" (successful responses) and
+  // "Errors" tabs at the bottom of the page; both share the same filter.
+  const [eventsTab, setEventsTab] = useState('events'); // 'events' | 'errors'
+  const [errorsPage, setErrorsPage] = useState(1);
+  const errors = useAsync(
+    () => getUsageErrors({ ...baseFilter, page: errorsPage, page_size: EVENTS_PAGE_SIZE, include: 'cost_breakdown' }),
+    [JSON.stringify(baseFilter), errorsPage],
+  );
+  useEffect(() => { setErrorsPage(1); }, [JSON.stringify(baseFilter)]);
+
   const [selectedEventId, setSelectedEventId] = useState(null);
+  const [selectedErrorId, setSelectedErrorId] = useState(null);
 
   const reloadAll = useCallback(() => {
     totals.reload();
@@ -322,7 +334,8 @@ export default function UsageStatsPage() {
     topProviders.reload();
     filterOptions.reload();
     events.reload();
-  }, [totals, ts, topModels, topKeys, topProviders, filterOptions, events]);
+    errors.reload();
+  }, [totals, ts, topModels, topKeys, topProviders, filterOptions, events, errors]);
 
   function updateFilter(partial) {
     setFilter((f) => ({ ...f, ...partial }));
@@ -536,17 +549,58 @@ export default function UsageStatsPage() {
         />
       </div>
 
-      {/* Recent events table */}
-      <EventsTable
-        events={events}
-        page={eventsPage}
-        pageSize={EVENTS_PAGE_SIZE}
-        onPage={setEventsPage}
-        onRowClick={setSelectedEventId}
-      />
+      {/* Recent events / errors table — operator can flip between the two.
+          Failed attempts live in a separate usage_errors table and are never
+          mixed into the success-side events listing. */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="row row--between" style={{ marginBottom: 12 }}>
+          <div className="row gap-sm">
+            <button
+              onClick={() => setEventsTab('events')}
+              className={eventsTab === 'events' ? 'primary' : ''}
+              style={{ padding: '4px 10px', fontSize: 12 }}
+            >
+              Events
+            </button>
+            <button
+              onClick={() => setEventsTab('errors')}
+              className={eventsTab === 'errors' ? 'primary' : ''}
+              style={{ padding: '4px 10px', fontSize: 12 }}
+            >
+              Errors
+            </button>
+          </div>
+          <button
+            onClick={() => (eventsTab === 'events' ? events.reload() : errors.reload())}
+            style={{ padding: '2px 8px', fontSize: 12 }}
+          >
+            ↻
+          </button>
+        </div>
+        {eventsTab === 'events' ? (
+          <EventsTableBody
+            events={events}
+            page={eventsPage}
+            pageSize={EVENTS_PAGE_SIZE}
+            onPage={setEventsPage}
+            onRowClick={setSelectedEventId}
+          />
+        ) : (
+          <ErrorsTableBody
+            errors={errors}
+            page={errorsPage}
+            pageSize={EVENTS_PAGE_SIZE}
+            onPage={setErrorsPage}
+            onRowClick={setSelectedErrorId}
+          />
+        )}
+      </div>
 
       {selectedEventId != null && (
         <EventDetailModal id={selectedEventId} onClose={() => setSelectedEventId(null)} />
+      )}
+      {selectedErrorId != null && (
+        <ErrorDetailModal id={selectedErrorId} onClose={() => setSelectedErrorId(null)} />
       )}
     </>
   );
@@ -567,15 +621,27 @@ function FilterSelect({ options, value, onChange, anyLabel, loading }) {
 }
 
 function EventsTable({ events, page, pageSize, onPage, onRowClick }) {
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <EventsTableBody
+        events={events}
+        page={page}
+        pageSize={pageSize}
+        onPage={onPage}
+        onRowClick={onRowClick}
+      />
+    </div>
+  );
+}
+
+// EventsTableBody renders the table + pager only (no card). Used by the
+// tabbed Events/Errors switcher, which wraps both in a single card.
+function EventsTableBody({ events, page, pageSize, onPage, onRowClick }) {
   const total = events.data?.total || 0;
   const rows = events.data?.events || [];
   const totalPages = total === 0 ? 1 : Math.ceil(total / pageSize);
   return (
-    <div className="card" style={{ marginTop: 16 }}>
-      <div className="row row--between" style={{ marginBottom: 12 }}>
-        <h3 className="card__title" style={{ margin: 0 }}>Recent events</h3>
-        <button onClick={events.reload} style={{ padding: '2px 8px', fontSize: 12 }}>↻</button>
-      </div>
+    <>
       {events.loading && <Spinner label="Loading…" />}
       {events.error && <ErrorBanner error={events.error} />}
       {!events.loading && !events.error && rows.length === 0 && (
@@ -615,7 +681,7 @@ function EventsTable({ events, page, pageSize, onPage, onRowClick }) {
                     </td>
                     <td className="mono" style={{ textAlign: 'right' }}>${(e.cost_usd || 0).toFixed(4)}</td>
                     <td className="mono" style={{ textAlign: 'right' }}>{e.latency_ms ? `${e.latency_ms} ms` : '—'}</td>
-                    <td>{e.failed ? <StatusBadge status="failed" /> : <StatusBadge status="active" />}</td>
+                    <td><StatusBadge status="active" /></td>
                   </tr>
                 ))}
               </tbody>
@@ -644,7 +710,88 @@ function EventsTable({ events, page, pageSize, onPage, onRowClick }) {
           </div>
         </>
       )}
-    </div>
+    </>
+  );
+}
+
+// ErrorsTableBody mirrors EventsTableBody but renders failed-attempt rows
+// (usage_errors). Surfaces fail_status_code as a status badge and the
+// error_message truncated, with the full text in the detail modal.
+function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick }) {
+  const total = errors.data?.total || 0;
+  const rows = errors.data?.errors || [];
+  const totalPages = total === 0 ? 1 : Math.ceil(total / pageSize);
+  return (
+    <>
+      {errors.loading && <Spinner label="Loading…" />}
+      {errors.error && <ErrorBanner error={errors.error} />}
+      {!errors.loading && !errors.error && rows.length === 0 && (
+        <EmptyState title="No failed attempts for this window" />
+      )}
+      {!errors.loading && !errors.error && rows.length > 0 && (
+        <>
+          <div style={{ overflowX: 'auto' }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Time (UTC)</th>
+                  <th>Key / Alias</th>
+                  <th>Provider</th>
+                  <th>Model</th>
+                  <th style={{ textAlign: 'right' }}>Status</th>
+                  <th>Error message</th>
+                  <th style={{ textAlign: 'right' }}>Latency</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((e) => (
+                  <tr
+                    key={String(e.id)}
+                    onClick={() => onRowClick(e.id)}
+                    style={{ cursor: 'pointer' }}
+                  >
+                    <td className="mono" style={{ whiteSpace: 'nowrap' }}>
+                      {e.requested_at ? new Date(e.requested_at).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z') : '—'}
+                    </td>
+                    <td className="mono">{e.key_alias || e.api_key_id || '—'}</td>
+                    <td>{e.provider || '—'}</td>
+                    <td className="mono">{e.model || '—'}</td>
+                    <td style={{ textAlign: 'right' }} className="mono">
+                      {e.fail_status_code ? String(e.fail_status_code) : '—'}
+                    </td>
+                    <td style={{ maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {e.error_message || '—'}
+                    </td>
+                    <td className="mono" style={{ textAlign: 'right' }}>{e.latency_ms ? `${e.latency_ms} ms` : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="row row--between" style={{ marginTop: 12, fontSize: 12 }}>
+            <span className="dim">
+              {total.toLocaleString()} error{total === 1 ? '' : 's'} · page {page} of {totalPages}
+            </span>
+            <div className="row gap-sm">
+              <button
+                disabled={page <= 1}
+                onClick={() => onPage(Math.max(1, page - 1))}
+                style={{ padding: '4px 10px' }}
+              >
+                ← Prev
+              </button>
+              <button
+                disabled={page >= totalPages}
+                onClick={() => onPage(Math.min(totalPages, page + 1))}
+                style={{ padding: '4px 10px' }}
+              >
+                Next →
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </>
   );
 }
 
@@ -684,6 +831,53 @@ function EventDetailModal({ id, onClose }) {
         </div>
       )}
       {!detail.loading && !detail.error && !e && <EmptyState title="Event not found" />}
+    </Modal>
+  );
+}
+
+// ErrorDetailModal fetches and renders a single failed-attempt row from the
+// usage_errors table. The sealed api_key_principal is intentionally never
+// shown. Unlike EventDetailModal, every row here is a failure by construction
+// so we surface the status code and full error_message prominently instead of
+// a Failed yes/no row.
+function ErrorDetailModal({ id, onClose }) {
+  const detail = useAsync(() => getUsageError(id), [id]);
+  const e = detail.data?.error_event;
+  return (
+    <Modal title={`Error #${id}`} onClose={onClose}>
+      {detail.loading && <Spinner label="Loading…" />}
+      {detail.error && <ErrorBanner error={detail.error} />}
+      {!detail.loading && !detail.error && e && (
+        <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+          <DetailRow label="Time (UTC)" value={e.requested_at ? new Date(e.requested_at).toISOString() : '—'} mono />
+          <DetailRow label="Request ID" value={e.request_id || '—'} mono />
+          <DetailRow label="API Key ID" value={e.api_key_id || '—'} mono />
+          <DetailRow label="Key Alias" value={e.key_alias || '—'} mono />
+          <DetailRow label="Provider" value={e.provider || '—'} />
+          <DetailRow label="Model" value={e.model || '—'} mono />
+          <DetailRow label="Alias" value={e.alias || '—'} mono />
+          <DetailRow label="Executor" value={e.executor_type || '—'} />
+          <DetailRow label="Auth Type" value={e.auth_type || '—'} />
+          <DetailRow label="Source" value={e.source || '—'} />
+          <DetailRow label="Reasoning Effort" value={e.reasoning_effort || '—'} />
+          <DetailRow label="Service Tier" value={e.service_tier || '—'} />
+          <DetailRow label="Response Service Tier" value={e.response_service_tier || '—'} />
+          <TokenBreakdownCard e={e} />
+          <DetailRow label="Cost (USD)" value={`$${(e.cost_usd || 0).toFixed(4)}`} mono />
+          <DetailRow label="Latency" value={e.latency_ms ? `${e.latency_ms} ms` : '—'} mono />
+          <DetailRow label="TTFT" value={e.ttft_ms ? `${e.ttft_ms} ms` : '—'} mono />
+          <DetailRow label="Status Code" value={e.fail_status_code ? String(e.fail_status_code) : '—'} mono />
+          <DetailRow label="Generate" value={e.generate ? 'true' : 'false'} mono />
+          <DetailRow label="Endpoint" value={e.endpoint || '—'} mono />
+          <div style={{ gridColumn: '1 / -1' }}>
+            <div className="dim" style={{ fontSize: 11 }}>Error message</div>
+            <div className="mono" style={{ fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-all', marginTop: 4 }}>
+              {e.error_message || '—'}
+            </div>
+          </div>
+        </div>
+      )}
+      {!detail.loading && !detail.error && !e && <EmptyState title="Error not found" />}
     </Modal>
   );
 }
