@@ -42,7 +42,39 @@ def _load_dashboard_html():
 
 
 DASHBOARD_HTML = _load_dashboard_html()
-_PUBLIC_PATHS = {"/", "/index.html", "/api/v1/auth/check"}
+_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+
+def _load_static_bytes(filename):
+    """Load a vendored static asset as bytes. Raises FileNotFoundError if missing."""
+    path = os.path.join(_STATIC_DIR, filename)
+    with open(path, "rb") as f:
+        return f.read()
+
+
+_STATIC_MIME = {
+    "chart.4.4.1.min.js": ("application/javascript; charset=utf-8", "public, max-age=31536000, immutable"),
+}
+
+
+def _serve_static(handler, filename):
+    try:
+        body = _STATIC_MIME_CACHE[filename]
+    except KeyError:
+        json_response(handler, {"error": "not found"}, 404)
+        return
+    mime, cache = _STATIC_MIME[filename]
+    handler.send_response(200)
+    handler.send_header("Content-Type", mime)
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", cache)
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+_STATIC_MIME_CACHE = {"chart.4.4.1.min.js": _load_static_bytes("chart.4.4.1.min.js")}
+_PUBLIC_PATHS = {"/", "/index.html", "/api/v1/auth/check", "/static/chart.js"}
 
 
 def make_handler(cfg):
@@ -83,6 +115,8 @@ def make_handler(cfg):
                     json_response(self, qy.query_timeseries(cfg, qs))
                 elif parsed.path == "/api/v1/models":
                     json_response(self, qy.query_models(cfg, qs))
+                elif parsed.path == "/api/v1/accounts":
+                    json_response(self, qy.query_accounts(cfg, qs))
                 elif parsed.path == "/api/v1/requests":
                     json_response(self, qy.query_requests(cfg, qs))
                 elif parsed.path == "/api/health":
@@ -93,6 +127,10 @@ def make_handler(cfg):
                     legacy = {"limit": [str(qy.max_limit(cfg, qy._first(qs, "limit")))]}
                     legacy.update({k: v for k, v in qs.items() if k in ("range", "from", "to", "model")})
                     json_response(self, qy.query_requests(cfg, legacy))
+                elif parsed.path == "/static/chart.js":
+                    _serve_static(self, "chart.4.4.1.min.js")
+                elif parsed.path.startswith("/static/"):
+                    json_response(self, {"error": "not found"}, 404)
                 else:
                     json_response(self, {"error": "not found"}, 404)
             except ValueError as exc:
