@@ -56,3 +56,17 @@ func TestSanitizeCodexHTTPFallbackPayloadKeepsServerToolSearchOutput(t *testing.
 		t.Fatalf("server tool_search_output should be preserved: %s", sanitized)
 	}
 }
+
+func TestSanitizeCodexHTTPFallbackPayloadPreservesLocalShellAction(t *testing.T) {
+	payload := []byte(`{"type":"response.create","model":"gpt-5-codex","input":[{"type":"local_shell_call","id":"shell-1","call_id":"call-1","status":"completed","action":{"type":"exec","command":"pwd"}},{"type":"function_call_output","id":"shell-out-1","call_id":"call-1","output":"ok"}]}`)
+
+	sanitized := SanitizeCodexHTTPFallbackPayload(payload)
+
+	input := gjson.GetBytes(sanitized, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("input len = %d, want matched local shell pair: %s", len(input), sanitized)
+	}
+	if got := input[0].Get("action.command").String(); got != "pwd" {
+		t.Fatalf("local shell action command = %q, want pwd: %s", got, sanitized)
+	}
+}

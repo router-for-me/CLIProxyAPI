@@ -104,7 +104,7 @@ func stripCodexHTTPFallbackInputActions(raw []byte) []byte {
 	}
 	out := bytes.Clone(raw)
 	for i, item := range items.Array() {
-		if !item.Get("action").Exists() {
+		if strings.TrimSpace(item.Get("type").String()) == "local_shell_call" || !item.Get("action").Exists() {
 			continue
 		}
 		updated, err := sjson.DeleteBytes(out, strconv.Itoa(i)+".action")
@@ -116,7 +116,9 @@ func stripCodexHTTPFallbackInputActions(raw []byte) []byte {
 }
 
 func stripCodexHTTPFallbackItemAction(item json.RawMessage) json.RawMessage {
-	if len(item) == 0 || !gjson.GetBytes(item, "action").Exists() {
+	if len(item) == 0 ||
+		strings.TrimSpace(gjson.GetBytes(item, "type").String()) == "local_shell_call" ||
+		!gjson.GetBytes(item, "action").Exists() {
 		return item
 	}
 	updated, err := sjson.DeleteBytes(item, "action")

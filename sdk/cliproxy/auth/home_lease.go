@@ -11,9 +11,8 @@ import (
 )
 
 const (
-	homeLeaseReleaseQueueSize      = 1024
-	homeLeaseReleaseWorkers        = 4
-	homeLeaseReleaseAttemptTimeout = 5 * time.Second
+	homeLeaseReleaseQueueSize = 1024
+	homeLeaseReleaseWorkers   = 4
 )
 
 var homeLeaseReleaseRetryDelays = [...]time.Duration{250 * time.Millisecond, time.Second, 2 * time.Second}
@@ -125,9 +124,7 @@ func (q *homeLeaseReleaseQueue) releaseWithRetry(request homeLeaseReleaseRequest
 			case <-timer.C:
 			}
 		}
-		attemptCtx, cancel := context.WithTimeout(q.ctx, homeLeaseReleaseAttemptTimeout)
-		_, errRelease := request.client.ReleaseInFlightLease(attemptCtx, request.leaseID, request.reason)
-		cancel()
+		_, errRelease := request.client.ReleaseInFlightLease(q.ctx, request.leaseID, request.reason)
 		if errRelease == nil {
 			return
 		}
