@@ -5,234 +5,313 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CLIProxyAPI 用量统计</title>
 <style>
-:root{color-scheme:light;--bg:#f6f7f9;--panel:#fff;--text:#17202a;--muted:#667085;--line:#a0aec0;--blue:#2563eb;--green:#0f9f6e;--red:#d92d20;--amber:#92400e}
+:root{
+  color-scheme:dark;
+  --bg:#0b0f17; --bg-elev:#121826; --panel:#161c28; --panel-2:#1c2333;
+  --text:#e5e7eb; --muted:#8b95a7; --line:#262f42;
+  --accent:#3b82f6; --accent-soft:rgba(59,130,246,.15);
+  --green:#10b981; --red:#ef4444; --amber:#f59e0b;
+  --radius:6px;
+}
 *{box-sizing:border-box}
-body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text)}
-header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 24px;border-bottom:1px solid var(--line);background:#fff;position:sticky;top:0;z-index:2;flex-wrap:wrap}
-h1{font-size:20px;margin:0}
-main{padding:20px 24px 32px;max-width:1440px;margin:0 auto}
-button,select,input{border:1px solid var(--line);background:#fff;color:var(--text);border-radius:6px;padding:8px 10px;font-size:14px}
-button.primary{background:var(--blue);color:#fff;border-color:var(--blue);cursor:pointer}
-button.primary:hover{background:#1e4bbf}
-.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.grid{display:grid;gap:14px}
-.kpis{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
-.two{grid-template-columns:1.2fr .8fr;margin-top:14px}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;min-width:0}
-.panel h2{margin:0 0 12px;font-size:15px}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text);font-size:14px}
+header{display:flex;align-items:center;gap:14px;padding:12px 20px;background:var(--bg-elev);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:30;flex-wrap:wrap}
+h1{font-size:15px;font-weight:600;margin:0;color:var(--text)}
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:1;min-width:0}
+button,select,input{border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:var(--radius);padding:6px 9px;font-size:13px}
+button:hover{border-color:#3a4663}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;cursor:pointer}
+button.primary:hover{background:#2f6fda}
+button.ghost{background:transparent}
+.health{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--green)}
+.dot.warn{background:var(--amber)} .dot.bad{background:var(--red)}
+main{padding:18px 20px 40px;max-width:1480px;margin:0 auto}
+.hero{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px 22px;margin-bottom:14px;display:flex;align-items:center;gap:24px;flex-wrap:wrap}
+.hero-cost{font-size:30px;font-weight:700;letter-spacing:-.5px}
+.hero-label{color:var(--muted);font-size:12px;margin-bottom:4px}
+.hero-spark{flex:1;min-width:200px;height:48px}
+.hero-cov{font-size:12px;color:var(--muted)}
+.hero-cov.warn{color:var(--amber)}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px}
 .kpi .label{color:var(--muted);font-size:12px}
-.kpi .value{font-size:22px;font-weight:700;margin-top:6px}
-.kpi .sub{color:var(--muted);font-size:12px;margin-top:4px}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{text-align:left;border-bottom:1px solid var(--line);padding:8px;white-space:nowrap}
-th{color:var(--muted);font-weight:600}
+.kpi .value{font-size:22px;font-weight:700;margin-top:4px}
+.kpi .sub{color:var(--muted);font-size:11px;margin-top:2px}
+.two{display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:14px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}
+.panel h2{margin:0 0 10px;font-size:13px;color:var(--text);font-weight:600}
+canvas{width:100%;height:300px;display:block}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;border-bottom:1px solid var(--line);padding:7px 8px;white-space:nowrap}
+th{color:var(--muted);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.03em}
 td.num,th.num{text-align:right}
-.scroll{overflow:auto;max-height:420px;position:relative}
-.status{display:inline-flex;align-items:center;gap:6px}
-.dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--green)}
-.dot.bad{background:var(--red)}
-.dot.warn{background:var(--amber)}
+.scroll{overflow:auto;max-height:420px}
 .muted{color:var(--muted)}
 .warn{color:var(--amber)}
-canvas{width:100%;height:260px;display:block}
-#modelFilter{min-width:220px}
-.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-.degraded-banner{background:#fef3cd;border:1px solid var(--amber);color:var(--text);padding:10px 16px;border-radius:6px;margin-bottom:14px;display:none}
-.empty{color:var(--muted);text-align:center;padding:32px 8px;font-style:italic}
+.bad{color:var(--red)}
+.good{color:var(--green)}
+.row-link{cursor:pointer}
+.row-link:hover{background:var(--panel-2)}
+.empty{color:var(--muted);text-align:center;padding:24px 8px;font-style:italic}
 .stale{opacity:.7}
-:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
-label{margin-right:4px;font-size:14px;color:var(--text)}
-@media(max-width:960px){.kpis,.two{grid-template-columns:1fr}header{align-items:flex-start;flex-direction:column}}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.tabbar{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:14px}
+.tab{padding:8px 14px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;font-size:13px;border-radius:0}
+.tab.active{color:var(--text);border-bottom-color:var(--accent)}
+.tab[hidden]{display:none}
+.tabpanel[hidden]{display:none}
+/* model/account multi-select dropdown (reused from v1) */
+.mf{position:relative;min-width:200px;max-width:min(360px,100%)}
+.mf-btn{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-height:32px;padding:4px 9px;text-align:left;cursor:pointer}
+.mf-label{flex:1;min-width:0;display:flex;flex-wrap:wrap;gap:3px;align-items:center}
+.mf-ph{color:var(--muted)}
+.chip{display:inline-flex;align-items:center;max-width:140px;padding:1px 7px;border-radius:999px;background:var(--accent-soft);color:#bfdbfe;font-size:11px}
+.chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip-more{color:var(--muted);font-size:11px}
+.caret{flex-shrink:0;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid var(--muted)}
+.mf-btn[aria-expanded="true"] .caret{transform:rotate(180deg)}
+.mf-panel{display:none;position:absolute;z-index:40;top:calc(100% + 4px);left:0;right:0;max-height:280px;overflow:auto;background:var(--panel-2);border:1px solid var(--line);border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.4);padding:4px}
+.mf-panel.open{display:block}
+.mf-opt{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:12.5px}
+.mf-opt:hover{background:var(--panel)}
+.mf-opt input{width:14px;height:14px;margin:0;accent-color:var(--accent)}
+.mf-opt .meta{margin-left:auto;color:var(--muted);font-size:11px}
+.mf-empty{padding:10px;color:var(--muted);font-size:12.5px;text-align:center}
+.mf-actions{display:flex;gap:6px;padding:6px 6px 4px;border-top:1px solid var(--line);margin-top:4px}
+.mf-actions button{flex:1;padding:4px 6px;font-size:11px;background:var(--panel)}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+.drawer{position:fixed;top:0;right:0;height:100vh;width:min(440px,100vw);background:var(--bg-elev);border-left:1px solid var(--line);box-shadow:-8px 0 30px rgba(0,0,0,.4);transform:translateX(100%);transition:transform .2s ease;z-index:50;overflow:auto}
+.drawer.open{transform:none}
+.drawer-head{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border-bottom:1px solid var(--line)}
+.drawer-body{padding:16px}
+.kv{display:grid;grid-template-columns:120px 1fr;gap:6px 12px;font-size:13px}
+.kv .k{color:var(--muted)}
+@media(max-width:960px){.kpis{grid-template-columns:repeat(2,1fr)}.two{grid-template-columns:1fr}header{align-items:flex-start}}
 </style>
 </head>
 <body>
 <header>
 <h1>CLIProxyAPI 用量统计</h1>
-<div class="toolbar">
-<label for="range">时间范围</label><select id="range"><option value="today">今天</option><option value="1h">最近 1 小时</option><option value="5h">最近 5 小时</option><option value="24h" selected>最近 24 小时</option><option value="7d">最近 7 天</option><option value="30d">最近 30 天</option></select>
-<label for="from">从</label><input type="datetime-local" id="from" aria-label="自定义起始时间">
-<label for="to">到</label><input type="datetime-local" id="to" aria-label="自定义结束时间">
-<label for="modelFilter">模型（可多选）</label><select id="modelFilter" multiple size="1"><option value="">加载中…</option></select>
+<div class="toolbar" id="toolbar">
+<label class="health" id="health"><span class="dot"></span><span id="healthText">—</span></label>
+<label for="range">时间</label>
+<select id="range">
+<option value="today">今天</option>
+<option value="1h">1h</option>
+<option value="5h">5h</option>
+<option value="24h" selected>24h</option>
+<option value="7d">7d</option>
+<option value="30d">30d</option>
+</select>
+<input type="datetime-local" id="from" aria-label="起始时间">
+<input type="datetime-local" id="to" aria-label="结束时间">
+<span class="mf" id="modelWrap">
+<button type="button" id="modelBtn" class="mf-btn" aria-haspopup="listbox" aria-expanded="false"><span class="mf-label" id="modelSummary"><span class="mf-ph">模型</span></span><span class="caret"></span></button>
+<div id="modelPanel" class="mf-panel" hidden><div class="mf-empty" id="modelEmpty">加载中…</div><div id="modelOptions"></div><div class="mf-actions"><button type="button" id="modelClear">清除</button><button type="button" id="modelClose">完成</button></div></div>
+<select id="modelFilter" multiple class="sr-only" tabindex="-1" aria-hidden="true"><option value=""></option></select>
+</span>
+<span class="mf" id="accountWrap">
+<button type="button" id="accountBtn" class="mf-btn" aria-haspopup="listbox" aria-expanded="false"><span class="mf-label" id="accountSummary"><span class="mf-ph">账号</span></span><span class="caret"></span></button>
+<div id="accountPanel" class="mf-panel" hidden><div class="mf-empty" id="accountEmpty">加载中…</div><div id="accountOptions"></div><div class="mf-actions"><button type="button" id="accountClear">清除</button><button type="button" id="accountClose">完成</button></div></div>
+<select id="accountFilter" multiple class="sr-only" tabindex="-1" aria-hidden="true"><option value=""></option></select>
+</span>
 <button id="refresh" class="primary">刷新</button>
-<span id="health" class="muted" role="status" aria-live="polite"></span>
-<span id="updated" class="muted" role="status" aria-live="polite"></span>
 </div>
 </header>
 <main id="main">
-<div id="degradedBanner" class="degraded-banner" role="alert">采集器降级：最近一次轮询失败或数据陈旧</div>
-<section class="grid kpis" aria-label="关键指标">
-<div class="panel kpi"><div class="label">请求/任务数</div><div class="value" id="kReq">0</div><div class="sub" id="kFail">失败 0</div></div>
-<div class="panel kpi"><div class="label">总 Tokens</div><div class="value" id="kTok">0</div><div class="sub">输入+输出+推理</div></div>
-<div class="panel kpi"><div class="label">输入 Tokens</div><div class="value" id="kIn">0</div><div class="sub">含缓存命中另计</div></div>
-<div class="panel kpi"><div class="label">输出 Tokens</div><div class="value" id="kOut">0</div><div class="sub">模型回复</div></div>
-<div class="panel kpi"><div class="label">推理 Tokens</div><div class="value" id="kReason">0</div><div class="sub">reasoning</div></div>
-<div class="panel kpi"><div class="label">估算费用</div><div class="value" id="kCost">—</div><div class="sub" id="kCoverage">价格覆盖：未知</div></div>
+<section class="hero">
+<div>
+<div class="hero-label" id="heroLabel">估算费用（今日）</div>
+<div class="hero-cost" id="heroCost">—</div>
+<div class="hero-cov" id="heroCoverage">价格覆盖：未知</div>
+</div>
+<canvas class="hero-spark" id="heroSpark" width="400" height="48"></canvas>
 </section>
-<section class="grid two">
-<div class="panel"><h2>按小时消耗</h2><canvas id="hourChart" role="img" aria-label="按小时消耗柱状图" width="900" height="260"></canvas><table class="sr-only" id="hourTable" aria-label="按小时消耗数据"><caption>按小时消耗数据</caption><thead><tr><th>小时</th><th>请求</th><th>总 Token</th><th>失败</th></tr></thead><tbody></tbody></table></div>
-<div class="panel"><h2>模型消耗</h2><canvas id="modelChart" role="img" aria-label="模型消耗水平条形图" width="520" height="260"></canvas><table class="sr-only" id="modelTable" aria-label="模型消耗数据"><caption>模型消耗数据</caption><thead><tr><th>模型</th><th>总 Token</th></tr></thead><tbody></tbody></table></div>
+<section class="kpis">
+<div class="kpi"><div class="label">请求数</div><div class="value" id="kpiRequests">0</div><div class="sub" id="kpiRequestsSub">—</div></div>
+<div class="kpi"><div class="label">总 Token</div><div class="value" id="kpiTokens">0</div><div class="sub">输入+输出+推理</div></div>
+<div class="kpi"><div class="label">失败率</div><div class="value" id="kpiFailRate">0%</div><div class="sub" id="kpiFailSub">—</div></div>
+<div class="kpi"><div class="label">平均延迟</div><div class="value" id="kpiLatency">0ms</div><div class="sub" id="kpiLatencySub">TTFT —</div></div>
 </section>
-<section class="grid two">
-<div class="panel"><h2>账号消耗</h2><div class="scroll" tabindex="0" role="region" aria-label="账号消耗表格"><table><thead><tr><th>账号</th><th class="num">请求</th><th class="num">总 Token</th><th class="num">输入</th><th class="num">输出</th><th class="num">推理</th><th class="num">失败</th></tr></thead><tbody id="accounts"></tbody></table></div></div>
-<div class="panel"><h2>模型明细</h2><div class="scroll" tabindex="0" role="region" aria-label="模型明细表格"><table><thead><tr><th>模型</th><th class="num">请求</th><th class="num">总 Token</th><th class="num">估算费用</th><th>计价</th></tr></thead><tbody id="models"></tbody></table></div></div>
-</section>
-<section class="panel" style="margin-top:14px"><h2>最近请求/任务</h2><div class="scroll" tabindex="0" role="region" aria-label="最近请求表格"><table><thead><tr><th>时间</th><th>账号</th><th>模型</th><th class="num">总 Token</th><th class="num">输入</th><th class="num">输出</th><th class="num">推理</th><th class="num">缓存读</th><th class="num">TTFT</th><th class="num">耗时</th><th>状态</th></tr></thead><tbody id="requests"></tbody></table></div><button id="loadMore" class="primary" style="margin-top:8px;display:none">加载更多</button></section>
+<div class="two">
+<div class="panel"><h2>成本趋势（按模型堆叠）</h2><canvas id="mainChart" width="900" height="300"></canvas></div>
+<div class="panel"><h2>Top 模型</h2><div class="scroll" id="topModels"><div class="empty">加载中…</div></div></div>
+</div>
+<div class="two">
+<div class="panel"><h2>Top 账号（API Key）</h2><div class="scroll" id="topAccounts"><div class="empty">加载中…</div></div></div>
+<div class="panel"><h2>价格覆盖</h2><div class="scroll" id="priceCoverageMini"><div class="empty">加载中…</div></div></div>
+</div>
+<div class="tabbar" id="tabBar">
+<button class="tab active" data-tab="requests">明细请求</button>
+<button class="tab" data-tab="errors">错误</button>
+<button class="tab" data-tab="pricing">价格表</button>
+</div>
+<section class="tabpanel" id="tabRequests"><div class="panel"><div class="scroll"><table><thead><tr><th>时间</th><th>账号</th><th>模型</th><th class="num">Token</th><th class="num">TTFT</th><th class="num">耗时</th><th>状态</th></tr></thead><tbody id="requestsBody"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody></table></div><button id="loadMore" class="primary" style="margin-top:8px;display:none">加载更多</button></div></section>
+<section class="tabpanel" id="tabErrors" hidden><div class="panel"><div class="scroll"><table><thead><tr><th>状态码</th><th>模型</th><th class="num">次数</th><th class="num">占比</th><th class="num">最近</th></tr></thead><tbody id="errorsBody"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody></table></div></div></section>
+<section class="tabpanel" id="tabPricing" hidden><div class="panel"><div class="scroll"><table><thead><tr><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存</th><th class="num">推理</th><th>生效</th></tr></thead><tbody id="pricingBody"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody></table></div></div></section>
 </main>
+<div class="drawer" id="drawer" aria-hidden="true">
+<div class="drawer-head"><h2 style="margin:0;font-size:14px">请求详情</h2><button class="ghost" id="drawerClose">关闭</button></div>
+<div class="drawer-body" id="drawerBody"></div>
+</div>
+<script src="/static/chart.js"></script>
 <script>
-const nf=new Intl.NumberFormat('zh-CN');
 const $=id=>document.getElementById(id);
-function fmt(n){return nf.format(n||0);}
-function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+const nf=new Intl.NumberFormat('zh-CN');
+const fmt=n=>nf.format(n||0);
+const fmtMs=n=>{n=n||0;if(n<1000)return n+'ms';return (n/1000).toFixed(1)+'s';};
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let token=localStorage.getItem('usage_dash_token')||'';
 let tokenResolve=null;
 let prevFocus=null;
+let mainChart=null;
 let cursor=null;
-function showLoginOverlay(){
-let ov=$('loginOverlay');
-if(!ov){
-prevFocus=document.activeElement;
-ov=document.createElement('div');ov.id='loginOverlay';
-ov.setAttribute('role','dialog');ov.setAttribute('aria-modal','true');ov.setAttribute('aria-labelledby','loginTitle');
-ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:9999';
-ov.innerHTML='<div style="background:#fff;padding:32px;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,.15);max-width:400px;width:90%">'
-+'<h2 id="loginTitle" style="margin:0 0 8px;font-size:18px">Dashboard 访问令牌</h2>'
-+'<p style="margin:0 0 16px;color:#667085;font-size:14px">请输入访问令牌以查看用量数据。</p>'
-+'<label for="tokenInput" style="display:block;margin-bottom:4px">令牌</label>'
-+'<input type="password" id="tokenInput" placeholder="令牌" style="width:100%;padding:10px;border:1px solid #a0aec0;border-radius:6px;font-size:14px;margin-bottom:8px" autofocus />'
-+'<div id="tokenError" role="alert" style="color:#d92d20;font-size:13px;margin-bottom:8px;display:none">令牌无效，请重试。</div>'
-+'<button id="tokenSubmit" style="width:100%;padding:10px;background:#2563eb;color:#fff;border:none;border-radius:6px;font-size:14px;cursor:pointer">确认</button>'
-+'</div>';
+let activeTab='requests';
+let lastSummary=null;
+/* ---- token / fetch ---- */
+function showLogin(){
+let ov=$('drawer'); // placeholder to avoid unused; real overlay below
+ov=document.createElement('div');ov.id='loginOv';ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:99';
+ov.innerHTML='<div style="background:var(--panel);padding:28px;border-radius:10px;max-width:380px;width:90%"><h2 style="margin:0 0 8px;font-size:16px">访问令牌</h2><p style="color:var(--muted);font-size:13px;margin:0 0 14px">请输入 dashboard token</p><input type="password" id="tokIn" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--text);margin-bottom:8px"/><div id="tokErr" style="color:var(--red);font-size:12px;display:none">令牌无效</div><button class="primary" id="tokGo" style="width:100%;padding:8px">确认</button></div>';
 document.body.appendChild(ov);
-const submit=async()=>{
-const val=$('tokenInput').value.trim();
-if(!val)return;
-const chk=await fetch('/api/v1/auth/check',{headers:{'Authorization':'Bearer '+val}});
-const chkInfo=chk.ok?await chk.json():{valid:false};
-if(chkInfo.valid){token=val;localStorage.setItem('usage_dash_token',val);ov.remove();if(tokenResolve){const r=tokenResolve;tokenResolve=null;r(true);}if(prevFocus)prevFocus.focus();}
-else{$('tokenError').style.display='block';}
-};
-$('tokenSubmit').onclick=submit;
-$('tokenInput').addEventListener('keydown',e=>{if(e.key==='Enter')submit();if(e.key==='Escape'){ov.remove();if(tokenResolve){const r=tokenResolve;tokenResolve=null;r(false);}}});
-const focusable=ov.querySelectorAll('button,input,select,textarea');const first=focusable[0];const last=focusable[focusable.length-1];
-ov.addEventListener('keydown',e=>{if(e.key!=='Tab')return;if(e.shiftKey){if(document.activeElement===first){e.preventDefault();last.focus();}}else{if(document.activeElement===last){e.preventDefault();first.focus();}}});
-first.focus();
-}else{ov.style.display='flex';$('tokenInput').value='';$('tokenError').style.display='none';$('tokenInput').focus();}
+const go=async()=>{const v=$('tokIn').value.trim();if(!v)return;const r=await fetch('/api/v1/auth/check',{headers:{Authorization:'Bearer '+v}});const j=r.ok?await r.json():{valid:false};if(j.valid){token=v;localStorage.setItem('usage_dash_token',v);ov.remove();if(tokenResolve){tokenResolve(tokenResolve=null);}}else{$('tokErr').style.display='block';}};
+$('tokGo').onclick=go;
+$('tokIn').addEventListener('keydown',e=>{if(e.key==='Enter')go();});
+$('tokIn').focus();
 }
 async function ensureToken(){
-const probe=await fetch('/api/v1/auth/check',{headers:token?{'Authorization':'Bearer '+token}:{}});
-const info=probe.ok?await probe.json():{auth_required:true,valid:false};
-if(!info.auth_required){token='';return true;}
-if(info.valid)return true;
-return new Promise(resolve=>{tokenResolve=resolve;showLoginOverlay();});
+const p=await fetch('/api/v1/auth/check',{headers:token?{Authorization:'Bearer '+token}:{}});
+const j=p.ok?await p.json():{auth_required:true,valid:false};
+if(!j.auth_required)return true;
+if(j.valid)return true;
+return new Promise(r=>{tokenResolve=r;showLogin();});
 }
 async function getJSON(url){
-const r=await fetch(url,token?{headers:{'Authorization':'Bearer '+token}}:{});
-if(!r.ok){
-if(r.status===401){localStorage.removeItem('usage_dash_token');token='';if(await ensureToken())return getJSON(url);}
-throw new Error(await r.text());
-}
+const r=await fetch(url,{headers:token?{Authorization:'Bearer '+token}:{},cache:'no-store'});
+if(!r.ok){if(r.status===401){localStorage.removeItem('usage_dash_token');token='';if(await ensureToken())return getJSON(url);}throw new Error(await r.text());}
 return r.json();
 }
-function drawBars(canvas,rows,labelKey,valueKey,color){
-const ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height;
-ctx.clearRect(0,0,w,h);ctx.font='12px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
-const pad={l:52,r:18,t:12,b:44};const max=Math.max(1,...rows.map(r=>Number(r[valueKey]||0)));
-const bw=Math.max(12,(w-pad.l-pad.r)/Math.max(1,rows.length)*.62);
-rows.forEach((r,i)=>{
-const x=pad.l+i*((w-pad.l-pad.r)/Math.max(1,rows.length))+bw*.3;
-const bh=(h-pad.t-pad.b)*Number(r[valueKey]||0)/max;
-const y=h-pad.b-bh;
-ctx.fillStyle=color;ctx.fillRect(x,y,bw,bh);
-ctx.fillStyle='#667085';ctx.textAlign='center';
-const label=String(r[labelKey]||'').slice(-5);
-ctx.fillText(label,x+bw/2,h-18);
-if(bh>18){ctx.fillStyle='#17202a';ctx.fillText(fmt(r[valueKey]),x+bw/2,y-5);}
-});
-ctx.strokeStyle='#a0aec0';ctx.beginPath();ctx.moveTo(pad.l,h-pad.b);ctx.lineTo(w-pad.r,h-pad.b);ctx.stroke();
-}
-function drawHorizontal(canvas,rows){
-const ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height;
-ctx.clearRect(0,0,w,h);ctx.font='12px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
-const top=12,rowH=30,max=Math.max(1,...rows.map(r=>Number(r.total_tokens||0)));
-rows.slice(0,8).forEach((r,i)=>{
-const y=top+i*rowH;const labelW=150;const barW=(w-labelW-90)*Number(r.total_tokens||0)/max;
-ctx.fillStyle='#344054';ctx.textAlign='left';ctx.fillText(String(r.model||'unknown').slice(0,22),8,y+18);
-ctx.fillStyle='#0f9f6e';ctx.fillRect(labelW,y+6,barW,14);
-ctx.fillStyle='#667085';ctx.fillText(fmt(r.total_tokens),labelW+barW+8,y+18);
-});
-}
-function updateSrTables(summary){
-const ht=$('hourTable').tBodies[0];ht.innerHTML=summary.hours.map(h=>`<tr><td>${esc(h.hour)}</td><td>${fmt(h.requests)}</td><td>${fmt(h.total_tokens)}</td><td>${fmt(h.failed)}</td></tr>`).join('')||'<tr><td colspan="4">暂无数据</td></tr>';
-const mt=$('modelTable').tBodies[0];mt.innerHTML=summary.models.map(m=>`<tr><td>${esc(m.model)}</td><td>${fmt(m.total_tokens)}</td></tr>`).join('')||'<tr><td colspan="2">暂无数据</td></tr>';
-}
+/* ---- filters ---- */
+function selectedOf(selId){const s=$(selId);return s?Array.from(s.selectedOptions).map(o=>o.value).filter(Boolean):[];}
 function queryStr(){
-const params=new URLSearchParams();
-const from=$('from').value,to=$('to').value;
-if(from&&to){params.set('from',new Date(from).toISOString());params.set('to',new Date(to).toISOString());}
-else{params.set('range',$('range').value);}
-const models=Array.from($('modelFilter').selectedOptions).map(o=>o.value).filter(Boolean);
-models.forEach(m=>params.append('model',m));
-return params.toString();
+const p=new URLSearchParams();
+const f=$('from').value,t=$('to').value;
+if(f&&t){p.set('from',new Date(f).toISOString());p.set('to',new Date(t).toISOString());}else{p.set('range',$('range').value);}
+selectedOf('modelFilter').forEach(m=>p.append('model',m));
+selectedOf('accountFilter').forEach(a=>p.append('account',a));
+return p.toString();
 }
+function syncSummary(id,ph,selId){
+const vals=selectedOf(selId);
+const el=$(id);
+if(!vals.length){el.innerHTML='<span class="mf-ph">'+ph+'</span>';return;}
+el.innerHTML=vals.slice(0,2).map(v=>'<span class="chip"><span>'+esc(v)+'</span></span>').join('')+(vals.length>2?'<span class="chip-more">+'+(vals.length-2)+'</span>':'');
+}
+function openMf(btnId,panelId){
+const b=$(btnId),p=$(panelId);
+document.querySelectorAll('.mf-panel.open').forEach(x=>{if(x!==p){x.classList.remove('open');x.setAttribute('hidden','');}});
+document.querySelectorAll('.mf-btn[aria-expanded="true"]').forEach(x=>{if(x!==b)x.setAttribute('aria-expanded','false');});
+const open=b.getAttribute('aria-expanded')==='true';
+b.setAttribute('aria-expanded',open?'false':'true');
+p.classList.toggle('open',!open);
+if(!open)p.removeAttribute('hidden');else p.setAttribute('hidden','');
+}
+function wireMf(wrapId,btnId,panelId,optId,selId,summId,ph,onChange){
+const w=$(wrapId);if(!w)return;
+$(btnId).addEventListener('click',e=>{e.stopPropagation();openMf(btnId,panelId);});
+$(btnId.replace('Btn','Clear')).addEventListener('click',e=>{e.preventDefault();$(panelId).querySelectorAll('input[type=checkbox]').forEach(c=>c.checked=false);syncSummary(summId,ph,selId);onChange();});
+$(btnId.replace('Btn','Close')).addEventListener('click',e=>{e.preventDefault();openMf(btnId,panelId);$(btnId).focus();});
+}
+function renderOptions(panelOptId,selId,summId,ph,items,keyFn,labelFn,metaFn,onChange){
+const opts=$(panelOptId);const sel=$(selId);const kept=new Set(selectedOf(selId));
+sel.innerHTML='<option value=""></option>'+items.map(i=>'<option value="'+esc(keyFn(i))+'"'+(kept.has(keyFn(i))?' selected':'')+'></option>').join('');
+if(!items.length){opts.innerHTML='';$(panelOptId.replace('Options','Empty')).style.display='block';$(panelOptId.replace('Options','Empty')).textContent='暂无数据';syncSummary(summId,ph,selId);return;}
+$(panelOptId.replace('Options','Empty')).style.display='none';
+opts.innerHTML=items.map((i,idx)=>{const id=selId+'-'+idx;const k=keyFn(i);const ck=kept.has(k)?' checked':'';
+return '<label class="mf-opt"><input type="checkbox" id="'+id+'" value="'+esc(k)+'"'+ck+'><span>'+esc(labelFn(i))+'</span>'+(metaFn?'<span class="meta">'+esc(metaFn(i))+'</span>':'')+'</label>';
+}).join('');
+opts.querySelectorAll('input[type=checkbox]').forEach(c=>c.addEventListener('change',()=>{syncSummary(summId,ph,selId);onChange();}));
+syncSummary(summId,ph,selId);
+}
+/* ---- data loaders ---- */
 async function loadModels(){
-try{
-const params=new URLSearchParams();params.set('range',$('range').value);
-const data=await getJSON('/api/v1/models?'+params.toString());
-const sel=$('modelFilter');const kept=new Set(Array.from(sel.selectedOptions).map(o=>o.value));
-sel.innerHTML='<option value="">（全部模型）</option>'+data.models.map(m=>`<option value="${esc(m.model)}">${esc(m.model)}${m.priced?'':' ⚠'}</option>`).join('');
-sel.size=Math.min(6,Math.max(1,data.models.length||1));
-Array.from(sel.options).forEach(o=>{if(kept.has(o.value))o.selected=true;});
-}catch(e){$('modelFilter').innerHTML='<option value="">模型加载失败</option>';}
+try{const p=new URLSearchParams();p.set('range',$('range').value);selectedOf('accountFilter').forEach(a=>p.append('account',a));const d=await getJSON('/api/v1/models?'+p);renderOptions('modelOptions','modelFilter','modelSummary','模型',d.models||[],m=>m.model,m=>m.model+(m.priced?'':' ⚠'),m=>fmt(m.requests)+' 次',()=>load());}catch(e){$('modelOptions').innerHTML='';$('modelEmpty').textContent='加载失败';}
 }
+async function loadAccounts(){
+try{const p=new URLSearchParams();p.set('range',$('range').value);selectedOf('modelFilter').forEach(m=>p.append('model',m));const d=await getJSON('/api/v1/accounts?'+p);renderOptions('accountOptions','accountFilter','accountSummary','账号',d.accounts||[],a=>a.account,a=>a.account,a=>fmt(a.requests)+' 次',()=>load());}catch(e){$('accountOptions').innerHTML='';$('accountEmpty').textContent='加载失败';}
+}
+async function loadFilters(){return Promise.all([loadModels(),loadAccounts()]);}
+/* ---- main load ---- */
 async function load(){
 try{
 const qs=queryStr();
-const [summary,reqs,health]=await Promise.all([
-getJSON('/api/v1/summary?'+qs),
-getJSON('/api/v1/requests?'+qs+'&limit=120'),
-getJSON('/api/v1/health')
-]);
+const [sum,reqs,hea]=await Promise.all([getJSON('/api/v1/summary?'+qs),getJSON('/api/v1/requests?'+qs+'&limit=50'),getJSON('/api/v1/health')]);
+lastSummary=sum;
 $('main').classList.remove('stale');
-$('degradedBanner').style.display='none';
-const s=summary.summary;
-$('kReq').textContent=fmt(s.requests);$('kFail').textContent='失败 '+fmt(s.failed);
-$('kTok').textContent=fmt(s.total_tokens);$('kIn').textContent=fmt(s.input_tokens);
-$('kOut').textContent=fmt(s.output_tokens);$('kReason').textContent=fmt(s.reasoning_tokens);
-$('kCost').textContent=(s.estimated_cost||0).toFixed(4)+' '+(s.estimated_cost_currency||'USD');
-const cov=summary.price_coverage||'unknown';
-const covMap={complete:'完整',partial:'部分（有未定价模型）',empty:'空',unknown:'未知'};
-$('kCoverage').textContent='价格覆盖：'+(covMap[cov]||cov);
-$('kCoverage').className='sub '+(cov==='complete'?'':(cov==='partial'?'warn':'muted'));
-$('accounts').innerHTML=summary.accounts.length?summary.accounts.map(a=>`<tr><td title="${esc(a.account)}">${esc(String(a.account||'').slice(0,16))}</td><td class="num">${fmt(a.requests)}</td><td class="num">${fmt(a.total_tokens)}</td><td class="num">${fmt(a.input_tokens)}</td><td class="num">${fmt(a.output_tokens)}</td><td class="num">${fmt(a.reasoning_tokens)}</td><td class="num">${fmt(a.failed)}</td></tr>`).join(''):'<tr><td colspan="7" class="empty">暂无数据</td></tr>';
-$('models').innerHTML=summary.models.length?summary.models.map(m=>`<tr><td>${esc(m.model)}</td><td class="num">${fmt(m.requests)}</td><td class="num">${fmt(m.total_tokens)}</td><td class="num">${(m.estimated_cost||0).toFixed(4)}</td><td>${m.priced?'✓':'<span class="warn">未定价</span>'}</td></tr>`).join(''):'<tr><td colspan="5" class="empty">暂无数据</td></tr>';
+const s=sum.summary;
+$('heroCost').textContent=(s.estimated_cost||0).toFixed(4)+' '+(s.estimated_cost_currency||'USD');
+const cov=sum.price_coverage||'unknown';
+const covMap={complete:'价格覆盖：完整',partial:'部分（有未定价模型）',empty:'无数据',unknown:'未知'};
+$('heroCoverage').textContent=covMap[cov]||cov;
+$('heroCoverage').className='hero-cov'+(cov==='partial'?' warn':'');
+$('kpiRequests').textContent=fmt(s.requests);
+$('kpiRequestsSub').textContent='成功 '+fmt(s.success_requests)+' · 失败 '+fmt(s.failed);
+$('kpiTokens').textContent=fmt(s.total_tokens);
+const fr=s.requests?(s.failed/s.requests*100):0;
+$('kpiFailRate').textContent=fr.toFixed(1)+'%';
+$('kpiFailSub').textContent=fmt(s.failed)+' 次';
+const avgLat=s.success_requests?Math.round(s.success_latency_ms/s.success_requests):0;
+const avgTtft=s.success_requests?Math.round(s.success_ttft_ms/s.success_requests):0;
+$('kpiLatency').textContent=fmtMs(avgLat);
+$('kpiLatencySub').textContent='TTFT '+fmtMs(avgTtft);
+renderHealth(hea);
 cursor=reqs.next_cursor;
-$('requests').innerHTML=reqs.requests.length?reqs.requests.map(r=>`<tr><td>${esc(r.local_time)}</td><td title="${esc(r.account)}">${esc(String(r.account||'').slice(0,16))}</td><td>${esc(r.model)}</td><td class="num">${fmt(r.total_tokens)}</td><td class="num">${fmt(r.input_tokens)}</td><td class="num">${fmt(r.output_tokens)}</td><td class="num">${fmt(r.reasoning_tokens)}</td><td class="num">${fmt(r.cache_read_tokens)}</td><td class="num">${fmt(r.ttft_ms)}</td><td class="num">${fmt(r.latency_ms)}</td><td>${r.failed?'<span class="warn">失败</span>':'成功'}</td></tr>`).join(''):'<tr><td colspan="11" class="empty">暂无数据</td></tr>';
+renderRequests(reqs.requests);
+renderTopModels(sum.models||[]);
+renderTopAccounts(sum.accounts||[]);
 $('loadMore').style.display=cursor?'inline-block':'none';
-drawBars($('hourChart'),summary.hours,'hour','total_tokens','#2563eb');
-drawHorizontal($('modelChart'),summary.models);
-updateSrTables(summary);
-const h=health;const dotCls=h.ok?'':(h.degraded?'warn':'bad');
-$('health').innerHTML='<span class="dot '+dotCls+'"></span>'+(h.ok?'正常':(h.degraded?'降级':'异常'))+(h.last_usage_timestamp?' · 最新 '+new Date(h.last_usage_timestamp).toLocaleString('zh-CN'):'');
-if(h.degraded)$('degradedBanner').style.display='block';
-$('updated').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN');
-}catch(e){$('main').classList.add('stale');$('updated').textContent='加载失败，以下为上次数据 '+new Date().toLocaleTimeString('zh-CN');}
+$('updated')&&($('updated').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN'));
+}catch(e){$('main').classList.add('stale');}
 }
-async function loadMore(){
-if(!cursor)return;
-try{
-const qs=queryStr();
-const data=await getJSON('/api/v1/requests?'+qs+'&limit=120&cursor='+encodeURIComponent(cursor));
-cursor=data.next_cursor;
-$('requests').insertAdjacentHTML('beforeend',data.requests.map(r=>`<tr><td>${esc(r.local_time)}</td><td title="${esc(r.account)}">${esc(String(r.account||'').slice(0,16))}</td><td>${esc(r.model)}</td><td class="num">${fmt(r.total_tokens)}</td><td class="num">${fmt(r.input_tokens)}</td><td class="num">${fmt(r.output_tokens)}</td><td class="num">${fmt(r.reasoning_tokens)}</td><td class="num">${fmt(r.cache_read_tokens)}</td><td class="num">${fmt(r.ttft_ms)}</td><td class="num">${fmt(r.latency_ms)}</td><td>${r.failed?'<span class="warn">失败</span>':'成功'}</td></tr>`).join(''));
-$('loadMore').style.display=cursor?'inline-block':'none';
-}catch(e){$('updated').textContent='加载更多失败：'+esc(e.message);}
+function renderHealth(h){
+const t=h.ok?'正常':(h.degraded?'降级':'异常');
+$('health').querySelector('.dot').className='dot '+(h.ok?'':(h.degraded?'warn':'bad'));
+$('healthText').textContent=t+(h.last_usage_timestamp?(' · '+new Date(h.last_usage_timestamp).toLocaleTimeString('zh-CN')):'');
 }
-$('refresh').onclick=()=>{loadModels();load();};
-$('range').onchange=()=>{$('from').value='';$('to').value='';loadModels();load();};
-$('from').onchange=$('to').onchange=load;
-$('modelFilter').onchange=load;
-$('loadMore').onclick=loadMore;
-ensureToken().then(ok=>{if(ok){loadModels();load();setInterval(()=>{load();},30000);}else{document.body.insertAdjacentHTML('afterbegin','<div style="padding:24px;text-align:center;color:#d92d20">未提供有效令牌，刷新页面重试。</div>');}});
+/* ---- placeholders filled by later tasks ---- */
+function renderRequests(rows){
+const b=$('requestsBody');
+b.innerHTML=rows.length?rows.map(r=>'<tr class="row-link"><td>'+esc(r.local_time)+'</td><td title="'+esc(r.account)+'">'+esc(String(r.account||'').slice(0,12))+'</td><td>'+esc(r.model)+'</td><td class="num">'+fmt(r.total_tokens)+'</td><td class="num">'+fmtMs(r.ttft_ms)+'</td><td class="num">'+fmtMs(r.latency_ms)+'</td><td>'+(r.failed?'<span class="bad">'+r.fail_status+'</span>':'<span class="good">'+r.fail_status+'</span>')+'</td></tr>').join(''):'<tr><td colspan="7" class="empty">暂无数据</td></tr>';
+}
+function renderTopModels(models){
+const t=(models||[]).slice(0,8);
+$('topModels').innerHTML=t.length?'<table><thead><tr><th>模型</th><th class="num">费用</th><th class="num">Token</th></tr></thead><tbody>'+t.map(m=>'<tr class="row-link" data-model="'+esc(m.model)+'"><td>'+esc(m.model)+(m.priced?'':' <span class="warn">⚠</span>')+'</td><td class="num">'+(m.estimated_cost||0).toFixed(4)+'</td><td class="num">'+fmt(m.total_tokens)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无数据</div>';
+}
+function renderTopAccounts(accs){
+const t=(accs||[]).slice(0,8);
+$('topAccounts').innerHTML=t.length?'<table><thead><tr><th>账号</th><th class="num">请求</th><th class="num">Token</th></tr></thead><tbody>'+t.map(a=>'<tr class="row-link" data-account="'+esc(a.account)+'"><td title="API Key 哈希">'+esc(a.account)+'</td><td class="num">'+fmt(a.requests)+'</td><td class="num">'+fmt(a.total_tokens)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无数据</div>';
+}
+function renderPriceMini(models){$('priceCoverageMini').innerHTML='<div class="empty">见「价格表」Tab</div>';}
+/* ---- tabs ---- */
+function switchTab(name){
+activeTab=name;
+document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===name));
+document.querySelectorAll('.tabpanel').forEach(p=>p.setAttribute('hidden',''));
+$('tab'+name.charAt(0).toUpperCase()+name.slice(1)).removeAttribute('hidden');
+}
+/* ---- init ---- */
+$('refresh').onclick=()=>{loadFilters().then(()=>load());};
+$('range').onchange=()=>{$('from').value='';$('to').value='';loadFilters().then(()=>load());};
+$('from').onchange=$('to').onchange=()=>load();
+$('loadMore').onclick=async()=>{if(!cursor)return;try{const d=await getJSON('/api/v1/requests?'+queryStr()+'&limit=50&cursor='+encodeURIComponent(cursor));cursor=d.next_cursor;$('requestsBody').insertAdjacentHTML('beforeend',d.requests.map(r=>'<tr class="row-link"><td>'+esc(r.local_time)+'</td><td>'+esc(String(r.account||'').slice(0,12))+'</td><td>'+esc(r.model)+'</td><td class="num">'+fmt(r.total_tokens)+'</td><td class="num">'+fmtMs(r.ttft_ms)+'</td><td class="num">'+fmtMs(r.latency_ms)+'</td><td>'+(r.failed?'<span class="bad">'+r.fail_status+'</span>':'<span class="good">'+r.fail_status+'</span>')+'</td></tr>').join(''));$('loadMore').style.display=cursor?'inline-block':'none';}catch(e){}};
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>switchTab(t.dataset.tab));
+$('drawerClose').onclick=()=>$('drawer').classList.remove('open');
+wireMf('modelWrap','modelBtn','modelPanel','modelOptions','modelFilter','modelSummary','模型',()=>load());
+wireMf('accountWrap','accountBtn','accountPanel','accountOptions','accountFilter','accountSummary','账号',()=>load());
+document.addEventListener('click',e=>{if(!e.target.closest('.mf'))document.querySelectorAll('.mf-panel.open').forEach(p=>{p.classList.remove('open');p.setAttribute('hidden','');const b=document.querySelector('.mf-btn[aria-expanded="true"]');if(b)b.setAttribute('aria-expanded','false');});});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){$('drawer').classList.remove('open');document.querySelectorAll('.mf-panel.open').forEach(p=>p.classList.remove('open'));}});
+ensureToken().then(ok=>{if(ok){loadFilters().then(()=>load());setInterval(load,30000);}else{document.body.insertAdjacentHTML('afterbegin','<div style="padding:24px;text-align:center;color:var(--red)">未提供有效令牌，刷新页面重试。</div>');}});
 </script>
 </body>
 </html>
