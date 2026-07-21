@@ -1,0 +1,7 @@
+Chart.js v4.4.1
+https://www.chartjs.org
+Copyright (c) 2023 Chart.js Contributors
+Licensed under the MIT License.
+
+Source: https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js
+Vendored on 2026-07-21 to keep the usage dashboard offline-capable.

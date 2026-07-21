@@ -21,3 +21,9 @@ The schema (columns, indexes, `schema_meta` version table) is intentionally
 compatible with databases created by prior revisions of this tool, so existing
 deployments upgrade in place. The schema is documented in
 `docs/cleanroom-design.md`; it is not derived from any upstream schema.
+
+## Vendored frontend assets
+
+- `usage_dashboard/static/chart.4.4.1.min.js` — Chart.js v4.4.1 (MIT).
+  Vendored so the dashboard works on air-gapped LANs without a CDN.
+  See `LICENSE.chartjs.txt` in the same directory.
