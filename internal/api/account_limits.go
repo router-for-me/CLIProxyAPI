@@ -20,11 +20,12 @@ import (
 )
 
 type accountLimitsCredential struct {
-	provider  string
-	accountID string
-	token     string
-	baseURL   string
-	proxyURL  string
+	provider          string
+	accountID         string
+	upstreamAccountID string
+	token             string
+	baseURL           string
+	proxyURL          string
 }
 
 func (s *Server) accountLimitsHandler(c *gin.Context) {
@@ -100,11 +101,12 @@ func (s *Server) accountLimitsCredentials() []accountLimitsCredential {
 					continue
 				}
 				candidates = append(candidates, accountLimitsCredential{
-					provider:  accountlimits.ProviderOpenAI,
-					accountID: accountID,
-					token:     token,
-					baseURL:   attributeString(entry.Attributes, "base_url"),
-					proxyURL:  strings.TrimSpace(entry.ProxyURL),
+					provider:          accountlimits.ProviderOpenAI,
+					accountID:         accountID,
+					upstreamAccountID: metadataString(entry.Metadata, "account_id"),
+					token:             token,
+					baseURL:           attributeString(entry.Attributes, "base_url"),
+					proxyURL:          strings.TrimSpace(entry.ProxyURL),
 				})
 			}
 		}
@@ -149,9 +151,13 @@ func normalizeLimitsProvider(provider string) string {
 }
 
 func (s *Server) fetchOpenAIAccountLimits(ctx context.Context, credential accountLimitsCredential) (accountlimits.ProviderLimitsPayload, int, string) {
-	upstreamAccountID, err := chatGPTAccountIDFromAccessToken(credential.token)
-	if err != nil {
-		return accountlimits.ProviderLimitsPayload{}, http.StatusUnauthorized, "local Codex credential has no ChatGPT account id"
+	upstreamAccountID := credential.upstreamAccountID
+	if upstreamAccountID == "" {
+		var err error
+		upstreamAccountID, err = chatGPTAccountIDFromAccessToken(credential.token)
+		if err != nil {
+			return accountlimits.ProviderLimitsPayload{}, http.StatusUnauthorized, "local Codex credential has no ChatGPT account id"
+		}
 	}
 	request, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, codexUsageURL(credential.baseURL), nil)
 	if errRequest != nil {
@@ -162,7 +168,7 @@ func (s *Server) fetchOpenAIAccountLimits(ctx context.Context, credential accoun
 	request.Header.Set("User-Agent", "codex-cli")
 	request.Header.Set("Accept", "application/json")
 
-	response, status, errMessage := s.doLimitsRequest(ctx, request, credential.proxyURL)
+	response, status, errMessage := s.doLimitsRequest(ctx, request, credential.proxyURL, true)
 	if errMessage != "" {
 		return accountlimits.ProviderLimitsPayload{}, status, errMessage
 	}
@@ -186,7 +192,7 @@ func (s *Server) fetchZaiAccountLimits(ctx context.Context, credential accountLi
 	request.Header.Set("Authorization", "Bearer "+credential.token)
 	request.Header.Set("Accept", "application/json")
 
-	response, status, errMessage := s.doLimitsRequest(ctx, request, credential.proxyURL)
+	response, status, errMessage := s.doLimitsRequest(ctx, request, credential.proxyURL, false)
 	if errMessage != "" {
 		return accountlimits.ProviderLimitsPayload{}, status, errMessage
 	}
@@ -204,8 +210,13 @@ func (s *Server) fetchZaiAccountLimits(ctx context.Context, credential accountLi
 	return payload, http.StatusOK, ""
 }
 
-func (s *Server) doLimitsRequest(ctx context.Context, request *http.Request, proxyURL string) ([]byte, int, string) {
-	client := helps.NewProxyAwareHTTPClient(ctx, s.accountLimitsConfig(), &cliproxyauth.Auth{ProxyURL: proxyURL}, 0)
+func (s *Server) doLimitsRequest(ctx context.Context, request *http.Request, proxyURL string, useUTLS bool) ([]byte, int, string) {
+	auth := &cliproxyauth.Auth{ProxyURL: proxyURL}
+	cfg := s.accountLimitsConfig()
+	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	if useUTLS {
+		client = helps.NewUtlsHTTPClient(ctx, cfg, auth, 0)
+	}
 	response, errDo := client.Do(request)
 	if errDo != nil {
 		return nil, http.StatusBadGateway, errDo.Error()

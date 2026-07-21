@@ -87,7 +87,7 @@ func TestAccountLimitsFetchesCodexUsageFromLocalCredential(t *testing.T) {
 	registerLimitsAuth(t, server, &cliproxyauth.Auth{
 		ID:       "codex-local",
 		Provider: "codex",
-		Metadata: map[string]any{"access_token": testCodexJWT("chatgpt-account")},
+		Metadata: map[string]any{"access_token": "opaque-access-token", "account_id": "chatgpt-account"},
 		Attributes: map[string]string{
 			"base_url": upstream.URL,
 		},
@@ -101,7 +101,7 @@ func TestAccountLimitsFetchesCodexUsageFromLocalCredential(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	if receivedAuthorization != "Bearer "+testCodexJWT("chatgpt-account") {
+	if receivedAuthorization != "Bearer opaque-access-token" {
 		t.Fatalf("Authorization = %q", receivedAuthorization)
 	}
 	var payload accountlimits.ProviderLimitsPayload
