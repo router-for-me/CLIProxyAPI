@@ -418,6 +418,70 @@ func disallowFreeAuthFromContext(ctx context.Context) bool {
 	return ok && raw
 }
 
+// clientAPIKeyFromContext returns the authenticated client API key (Principal)
+// stored on the Gin context by AuthMiddleware. Returns "" when there is no
+// client key (open proxy / no api-keys configured).
+func clientAPIKeyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return ""
+	}
+	if v, exists := ginCtx.Get("userApiKey"); exists {
+		switch value := v.(type) {
+		case string:
+			return value
+		case fmt.Stringer:
+			return value.String()
+		default:
+			return fmt.Sprintf("%v", value)
+		}
+	}
+	return ""
+}
+
+// FilterModelsByClientAPIKey filters a models listing for the authenticated
+// client API key. Returns the input unchanged when no restriction applies
+// (open proxy, unknown key, or key without an allowlist). idField is the map
+// key carrying the model identifier ("id" for OpenAI/Claude, "name" for Gemini).
+func (h *BaseAPIHandler) FilterModelsByClientAPIKey(c *gin.Context, models []map[string]any, idField string) []map[string]any {
+	if h == nil || h.Cfg == nil || len(models) == 0 {
+		return models
+	}
+	if !h.Cfg.APIKeys.HasRestrictions() {
+		return models
+	}
+	return h.Cfg.APIKeys.FilterModelMaps(c.GetString("userApiKey"), models, idField)
+}
+
+// enforceClientKeyModelACL checks the per-client api-key model allowlist.
+// Returns a 404 "model not found" ErrorMessage when the client key is not
+// permitted to use modelName. Returns nil when the request is allowed
+// (including when no restriction applies, e.g. unknown key / open proxy /
+// the key has no allowlist). modelName is the raw client-requested model
+// name, before any alias / thinking-suffix normalization.
+func (h *BaseAPIHandler) enforceClientKeyModelACL(ctx context.Context, modelName string) *interfaces.ErrorMessage {
+	if h == nil || h.Cfg == nil {
+		return nil
+	}
+	if strings.TrimSpace(modelName) == "" {
+		return nil
+	}
+	clientKey := clientAPIKeyFromContext(ctx)
+	if clientKey == "" {
+		return nil
+	}
+	if h.Cfg.APIKeys.AllowsModel(clientKey, modelName) {
+		return nil
+	}
+	return &interfaces.ErrorMessage{
+		StatusCode: http.StatusNotFound,
+		Error:      fmt.Errorf("model not found: %s", modelName),
+	}
+}
+
 // BaseAPIHandler contains the handlers for API endpoints.
 // It holds a pool of clients to interact with the backend service and manages
 // load balancing, client selection, and configuration.
@@ -732,6 +796,9 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 }
 
 func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	if errMsg := h.enforceClientKeyModelACL(ctx, modelName); errMsg != nil {
+		return nil, nil, errMsg
+	}
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
@@ -805,6 +872,9 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 }
 
 func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	if errMsg := h.enforceClientKeyModelACL(ctx, modelName); errMsg != nil {
+		return nil, nil, errMsg
+	}
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, false, execOptions)
 	if routeDecision.ExecutorPluginID != "" {
@@ -1130,6 +1200,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 }
 
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	if errMsg := h.enforceClientKeyModelACL(ctx, modelName); errMsg != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- errMsg
+		close(errChan)
+		return nil, nil, errChan
+	}
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)

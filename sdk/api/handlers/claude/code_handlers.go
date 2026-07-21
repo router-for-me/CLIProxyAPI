@@ -156,6 +156,9 @@ func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
 	models := h.Models()
+	// Restrict to models allowed for this client API key before prefixing so
+	// the filter sees the raw registry IDs. Unrestricted keys are no-ops.
+	models = h.FilterModelsByClientAPIKey(c, models, "id")
 	for i := range models {
 		if id, ok := models[i]["id"].(string); ok {
 			models[i]["id"] = util.EnsureClaudeModelIDPrefix(id)

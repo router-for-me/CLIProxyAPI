@@ -107,15 +107,118 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 // api-keys
 func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
 func (h *Handler) PutAPIKeys(c *gin.Context) {
-	h.putStringList(c, func(v []string) {
-		h.cfg.APIKeys = append([]string(nil), v...)
-	}, nil)
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var list config.APIKeyList
+	if err = json.Unmarshal(data, &list); err != nil {
+		var obj struct {
+			Items config.APIKeyList `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		list = obj.Items
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cfg.APIKeys = append(config.APIKeyList(nil), list...)
+	h.persistLocked(c)
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	var body struct {
+		Old   *string         `json:"old"`
+		New   *string         `json:"new"`
+		Index *int            `json:"index"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if body.Index != nil && len(body.Value) > 0 && *body.Index >= 0 && *body.Index < len(h.cfg.APIKeys) {
+		entry, err := parseAPIKeyPatchValue(body.Value, h.cfg.APIKeys[*body.Index])
+		if err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+		h.cfg.APIKeys[*body.Index] = entry
+		h.persistLocked(c)
+		return
+	}
+	if body.Old != nil && body.New != nil {
+		oldKey := strings.TrimSpace(*body.Old)
+		newKey := strings.TrimSpace(*body.New)
+		for i := range h.cfg.APIKeys {
+			if strings.TrimSpace(h.cfg.APIKeys[i].APIKey) == oldKey {
+				h.cfg.APIKeys[i].APIKey = newKey
+				h.persistLocked(c)
+				return
+			}
+		}
+		h.cfg.APIKeys = append(h.cfg.APIKeys, config.APIKeyEntry{APIKey: newKey})
+		h.persistLocked(c)
+		return
+	}
+	c.JSON(400, gin.H{"error": "missing fields"})
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(h.cfg.APIKeys) {
+			h.cfg.APIKeys = append(h.cfg.APIKeys[:idx], h.cfg.APIKeys[idx+1:]...)
+			h.persistLocked(c)
+			return
+		}
+	}
+	if val := strings.TrimSpace(c.Query("value")); val != "" {
+		out := make(config.APIKeyList, 0, len(h.cfg.APIKeys))
+		for _, entry := range h.cfg.APIKeys {
+			if strings.TrimSpace(entry.APIKey) != val {
+				out = append(out, entry)
+			}
+		}
+		h.cfg.APIKeys = out
+		h.persistLocked(c)
+		return
+	}
+	c.JSON(400, gin.H{"error": "missing index or value"})
+}
+
+// parseAPIKeyPatchValue accepts a string (key only; preserves allowlist) or full object entry.
+func parseAPIKeyPatchValue(raw json.RawMessage, existing config.APIKeyEntry) (config.APIKeyEntry, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return config.APIKeyEntry{}, fmt.Errorf("invalid value")
+	}
+	if strings.HasPrefix(trimmed, "\"") {
+		var key string
+		if err := json.Unmarshal(raw, &key); err != nil {
+			return config.APIKeyEntry{}, fmt.Errorf("invalid value")
+		}
+		existing.APIKey = strings.TrimSpace(key)
+		return existing, nil
+	}
+	var entry config.APIKeyEntry
+	// Reuse list unmarshaller for a single object by wrapping.
+	listRaw := append(append([]byte{'['}, raw...), ']')
+	var list config.APIKeyList
+	if err := json.Unmarshal(listRaw, &list); err != nil || len(list) != 1 {
+		return config.APIKeyEntry{}, fmt.Errorf("invalid value")
+	}
+	entry = list[0]
+	if strings.TrimSpace(entry.APIKey) == "" {
+		return config.APIKeyEntry{}, fmt.Errorf("invalid value")
+	}
+	return entry, nil
 }
 
 // gemini-api-key: []GeminiKey

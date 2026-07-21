@@ -3,6 +3,8 @@ package safemode
 import (
 	"html"
 	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 var exampleAPIKeys = map[string]struct{}{
@@ -12,14 +14,15 @@ var exampleAPIKeys = map[string]struct{}{
 }
 
 // ExampleAPIKeys returns configured top-level API keys that still use template values.
-func ExampleAPIKeys(keys []string) []string {
-	if len(keys) == 0 {
+func ExampleAPIKeys(keys config.APIKeyList) []string {
+	values := keys.KeyValues()
+	if len(values) == 0 {
 		return nil
 	}
 
-	matches := make([]string, 0, len(keys))
+	matches := make([]string, 0, len(values))
 	seen := make(map[string]struct{}, len(exampleAPIKeys))
-	for _, key := range keys {
+	for _, key := range values {
 		trimmed := strings.TrimSpace(key)
 		if _, ok := exampleAPIKeys[trimmed]; !ok {
 			continue
@@ -37,7 +40,7 @@ func ExampleAPIKeys(keys []string) []string {
 }
 
 // HasExampleAPIKeys reports whether any configured top-level API key is a template value.
-func HasExampleAPIKeys(keys []string) bool {
+func HasExampleAPIKeys(keys config.APIKeyList) bool {
 	return len(ExampleAPIKeys(keys)) > 0
 }
 

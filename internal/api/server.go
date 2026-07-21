@@ -672,6 +672,21 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 	_ = json.Unmarshal(body, &routing)
 	upstreamRequestBody := sanitizeCodexAlphaSearchBody(body)
 
+	// Enforce the per-client API key model allowlist before selecting an auth.
+	// Denied requests are reported as "model not found" to match the style
+	// used by the standard execution chokepoints.
+	if model := strings.TrimSpace(routing.Model); model != "" && s.cfg != nil {
+		if clientKey := c.GetString("userApiKey"); clientKey != "" && !s.cfg.APIKeys.AllowsModel(clientKey, model) {
+			c.JSON(http.StatusNotFound, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("model not found: %s", model),
+					Type:    "invalid_request_error",
+				},
+			})
+			return
+		}
+	}
+
 	selectionHeaders := c.Request.Header.Clone()
 	if sessionID := strings.TrimSpace(routing.ID); sessionID != "" {
 		selectionHeaders.Set("X-Session-ID", sessionID)
@@ -1272,11 +1287,41 @@ type homeModelEntry struct {
 	maxCompletionTokens int
 }
 
+// filterHomeModelsByClientAPIKey restricts the home model listing to entries
+// allowed by the authenticated client API key's allowlist. Returns the input
+// unchanged when no restriction applies (open proxy, unknown key, or key
+// without an allowlist).
+func (s *Server) filterHomeModelsByClientAPIKey(c *gin.Context, entries []homeModelEntry) []homeModelEntry {
+	if s == nil || s.cfg == nil || len(entries) == 0 {
+		return entries
+	}
+	if !s.cfg.APIKeys.HasRestrictions() {
+		return entries
+	}
+	clientKey := c.GetString("userApiKey")
+	if clientKey == "" {
+		return entries
+	}
+	entry, ok := s.cfg.APIKeys.Lookup(clientKey)
+	if !ok || entry.AllowedModels == nil {
+		return entries
+	}
+	out := make([]homeModelEntry, 0, len(entries))
+	for _, e := range entries {
+		if s.cfg.APIKeys.AllowsModel(clientKey, e.id) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 func (s *Server) handleHomeModels(c *gin.Context) {
 	entries, ok := s.loadHomeModelEntries(c)
 	if !ok {
 		return
 	}
+
+	entries = s.filterHomeModelsByClientAPIKey(c, entries)
 
 	isClaude := isAnthropicModelsRequest(c)
 
@@ -1373,6 +1418,8 @@ func (s *Server) handleHomeGeminiModels(c *gin.Context) {
 		return
 	}
 
+	entries = s.filterHomeModelsByClientAPIKey(c, entries)
+
 	c.JSON(http.StatusOK, gin.H{
 		"models": formatHomeGeminiModels(entries),
 	})
@@ -1383,6 +1430,8 @@ func (s *Server) handleHomeGeminiModel(c *gin.Context) {
 	if !ok {
 		return
 	}
+
+	entries = s.filterHomeModelsByClientAPIKey(c, entries)
 
 	action := strings.TrimPrefix(c.Param("action"), "/")
 	action = strings.TrimSpace(action)
