@@ -384,27 +384,18 @@ func recordResponsesWebsocketToolCallsFromPayloadWithCache(cache *websocketToolO
 			return
 		}
 		for _, item := range output.Array() {
-			if !isResponsesToolCallType(item.Get("type").String()) {
+			if !isCompleteResponsesWebsocketToolCall(item) {
 				continue
 			}
 			callID := strings.TrimSpace(item.Get("call_id").String())
-			if callID == "" {
-				continue
-			}
 			cache.record(sessionKey, callID, json.RawMessage(item.Raw))
 		}
 	case "response.output_item.added", "response.output_item.done":
 		item := gjson.GetBytes(payload, "item")
-		if !item.Exists() || !item.IsObject() {
-			return
-		}
-		if !isResponsesToolCallType(item.Get("type").String()) {
+		if !isCompleteResponsesWebsocketToolCall(item) {
 			return
 		}
 		callID := strings.TrimSpace(item.Get("call_id").String())
-		if callID == "" {
-			return
-		}
 		cache.record(sessionKey, callID, json.RawMessage(item.Raw))
 	}
 }
