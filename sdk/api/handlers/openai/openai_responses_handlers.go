@@ -20,6 +20,7 @@ import (
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -108,8 +109,11 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 		return frame
 	}
 
-	switch gjson.GetBytes(payload, "type").String() {
+	switch util.GetGJSONBytesNoCopy(payload, "type").String() {
 	case "response.image_generation_call.completed":
+		if f.imageCallCompleted(payload) {
+			return nil
+		}
 		f.recordCompletedImageCall(payload)
 	case "response.output_item.done":
 		repaired, imageCompleted := responsesSSECompleteImageGenerationCall(payload)
@@ -132,15 +136,15 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 }
 
 func responsesSSECompleteImageGenerationCall(payload []byte) ([]byte, []byte) {
-	item := gjson.GetBytes(payload, "item")
+	item := util.GetGJSONBytesNoCopy(payload, "item")
 	if item.Get("type").String() != "image_generation_call" ||
 		!strings.EqualFold(strings.TrimSpace(item.Get("status").String()), "generating") {
 		return payload, nil
 	}
 
 	itemID := strings.TrimSpace(item.Get("id").String())
-	result := strings.TrimSpace(item.Get("result").String())
-	if itemID == "" || result == "" {
+	result := item.Get("result")
+	if itemID == "" || result.Type != gjson.String || len(result.Raw) <= 2 {
 		return payload, nil
 	}
 
@@ -152,9 +156,9 @@ func responsesSSECompleteImageGenerationCall(payload []byte) ([]byte, []byte) {
 	completed := []byte(`{"type":"response.image_generation_call.completed","item_id":"","call_id":"","result":""}`)
 	completed, _ = sjson.SetBytes(completed, "item_id", itemID)
 	completed, _ = sjson.SetBytes(completed, "call_id", itemID)
-	completed, _ = sjson.SetBytes(completed, "result", result)
+	completed, _ = sjson.SetRawBytes(completed, "result", []byte(result.Raw))
 	for _, field := range []string{"output_index", "sequence_number"} {
-		if value := gjson.GetBytes(payload, field); value.Exists() {
+		if value := util.GetGJSONBytesNoCopy(payload, field); value.Exists() {
 			completed, _ = sjson.SetRawBytes(completed, field, []byte(value.Raw))
 		}
 	}
@@ -162,12 +166,17 @@ func responsesSSECompleteImageGenerationCall(payload []byte) ([]byte, []byte) {
 }
 
 func responsesSSEEventFrame(event string, payload []byte) []byte {
-	return []byte("event: " + event + "\ndata: " + string(payload) + "\n\n")
+	frame := make([]byte, 0, len("event: ")+len(event)+len("\ndata: ")+len(payload)+len("\n\n"))
+	frame = append(frame, "event: "...)
+	frame = append(frame, event...)
+	frame = append(frame, "\ndata: "...)
+	frame = append(frame, payload...)
+	return append(frame, "\n\n"...)
 }
 
 func (f *responsesSSEFramer) recordCompletedImageCall(payload []byte) {
 	for _, field := range []string{"item_id", "call_id"} {
-		id := strings.TrimSpace(gjson.GetBytes(payload, field).String())
+		id := strings.TrimSpace(util.GetGJSONBytesNoCopy(payload, field).String())
 		if id == "" {
 			continue
 		}
@@ -183,7 +192,7 @@ func (f *responsesSSEFramer) imageCallCompleted(payload []byte) bool {
 		return false
 	}
 	for _, field := range []string{"item_id", "call_id"} {
-		id := strings.TrimSpace(gjson.GetBytes(payload, field).String())
+		id := strings.TrimSpace(util.GetGJSONBytesNoCopy(payload, field).String())
 		if _, ok := f.completedImageCalls[id]; ok && id != "" {
 			return true
 		}
