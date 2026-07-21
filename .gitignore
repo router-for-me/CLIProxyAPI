@@ -65,3 +65,15 @@ _bmad-output/*
 # Dashboard build output + dependencies
 web/dashboard/node_modules/
 web/dashboard/dist/
+
+# Operator-supplied LiteLLM reference catalogs dropped into the repo root
+# (e.g. model_prices_and_context_window.json) are intentionally NOT tracked;
+# if an operator wants to import one they must do it through the dashboard's
+# Pricing Sources upload flow, which stores it outside the working tree.
+/model_prices_and_context_window.json
+
+# Windows NTFS Alternate Data Stream leak — index-dependent artifacts
+# produced when files cross the WSL/Windows boundary (Zone.Identifier
+# marks the file's origin URL/security zone). Tracked as separate files
+# by git, so we blank the pattern to ignore *:Zone.Identifier everywhere.
+*:Zone.Identifier
