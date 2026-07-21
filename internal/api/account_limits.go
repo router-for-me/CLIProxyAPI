@@ -23,6 +23,7 @@ type accountLimitsCredential struct {
 	provider          string
 	accountID         string
 	upstreamAccountID string
+	hasRefreshToken   bool
 	token             string
 	baseURL           string
 	proxyURL          string
@@ -104,6 +105,7 @@ func (s *Server) accountLimitsCredentials() []accountLimitsCredential {
 					provider:          accountlimits.ProviderOpenAI,
 					accountID:         accountID,
 					upstreamAccountID: metadataString(entry.Metadata, "account_id"),
+					hasRefreshToken:   metadataString(entry.Metadata, "refresh_token") != "",
 					token:             token,
 					baseURL:           attributeString(entry.Attributes, "base_url"),
 					proxyURL:          strings.TrimSpace(entry.ProxyURL),
@@ -169,6 +171,20 @@ func (s *Server) fetchOpenAIAccountLimits(ctx context.Context, credential accoun
 	request.Header.Set("Accept", "application/json")
 
 	response, status, errMessage := s.doLimitsRequest(ctx, request, credential.proxyURL, true)
+	if status == http.StatusUnauthorized && credential.hasRefreshToken && s.handlers != nil && s.handlers.AuthManager != nil {
+		refreshed, errRefresh := s.handlers.AuthManager.RefreshAuth(ctx, credential.accountID, credential.token)
+		if errRefresh == nil && refreshed != nil {
+			credential.token = metadataString(refreshed.Metadata, "access_token")
+			credential.upstreamAccountID = metadataString(refreshed.Metadata, "account_id")
+			if credential.token != "" {
+				request.Header.Set("Authorization", "Bearer "+credential.token)
+				if credential.upstreamAccountID != "" {
+					request.Header.Set("ChatGPT-Account-Id", credential.upstreamAccountID)
+				}
+				response, status, errMessage = s.doLimitsRequest(ctx, request, credential.proxyURL, true)
+			}
+		}
+	}
 	if errMessage != "" {
 		return accountlimits.ProviderLimitsPayload{}, status, errMessage
 	}

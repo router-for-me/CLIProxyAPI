@@ -14,6 +14,17 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
+type accountLimitsRefreshExecutor struct {
+	codexSearchCaptureExecutor
+	refreshCalls int
+}
+
+func (e *accountLimitsRefreshExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	e.refreshCalls++
+	auth.Metadata["access_token"] = "fresh-access-token"
+	return auth, nil
+}
+
 func TestAccountLimitsRequiresProxyAuthentication(t *testing.T) {
 	server := newTestServer(t)
 	recorder := httptest.NewRecorder()
@@ -110,6 +121,48 @@ func TestAccountLimitsFetchesCodexUsageFromLocalCredential(t *testing.T) {
 	}
 	if payload.AccountID != "codex-local" || payload.Provider != accountlimits.ProviderOpenAI || payload.CapturedAt == nil {
 		t.Fatalf("unexpected payload metadata: %+v", payload)
+	}
+}
+
+func TestAccountLimitsRefreshesCodexCredentialAfterUnauthorized(t *testing.T) {
+	requests := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests++
+		if request.Header.Get("Authorization") == "Bearer stale-access-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if request.Header.Get("Authorization") != "Bearer fresh-access-token" {
+			t.Fatalf("Authorization = %q", request.Header.Get("Authorization"))
+		}
+		_, _ = w.Write([]byte(`{"rate_limit":{"primary_window":{"used_percent":12}}}`))
+	}))
+	defer upstream.Close()
+
+	server := newTestServer(t)
+	executor := &accountLimitsRefreshExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	registerLimitsAuth(t, server, &cliproxyauth.Auth{
+		ID:       "codex-refresh",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"access_token":  "stale-access-token",
+			"refresh_token": "refresh-token",
+			"account_id":    "chatgpt-account",
+		},
+		Attributes: map[string]string{"base_url": upstream.URL},
+	})
+
+	recorder := performLimitsRequest(server, "/v1/account/limits")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if requests != 2 || executor.refreshCalls != 1 {
+		t.Fatalf("requests = %d, refresh calls = %d; want 2 and 1", requests, executor.refreshCalls)
+	}
+	updated, ok := server.handlers.AuthManager.GetByID("codex-refresh")
+	if !ok || metadataString(updated.Metadata, "access_token") != "fresh-access-token" {
+		t.Fatalf("refreshed credential not persisted: %+v", updated)
 	}
 }
 

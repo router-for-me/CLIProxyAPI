@@ -2,6 +2,7 @@ package accountlimits
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -86,21 +87,42 @@ func ProviderLimitsForAccount(accountID string) ProviderLimitsPayload {
 }
 
 func OpenAIProviderLimitsFromUsage(accountID string, payload map[string]any) ProviderLimitsPayload {
+	snapshots := []ProviderLimitSnapshot{openAIRateLimitSnapshot("codex", nil, payload)}
+	if additional, ok := payload["additional_rate_limits"].([]any); ok {
+		for index, raw := range additional {
+			entry := asMap(raw)
+			if entry == nil {
+				continue
+			}
+			limitID := firstString(entry, "limit_id", "id", "metered_feature", "limit_name", "name")
+			if limitID == "" {
+				limitID = fmt.Sprintf("additional_%d", index+1)
+			}
+			limitName := firstString(entry, "limit_name", "name")
+			snapshots = append(snapshots, openAIRateLimitSnapshot(limitID, stringPointer(limitName), entry))
+		}
+	}
 	return ProviderLimitsPayload{
 		Object:    ProviderLimitsObject,
 		AccountID: normalizeAccountID(accountID),
 		Provider:  ProviderOpenAI,
 		Source:    "usage_endpoint",
-		Snapshots: []ProviderLimitSnapshot{openAIRateLimitSnapshot(payload)},
+		Snapshots: snapshots,
 	}
 }
 
-func openAIRateLimitSnapshot(payload map[string]any) ProviderLimitSnapshot {
-	rateLimit, _ := payload["rate_limit"].(map[string]any)
+func openAIRateLimitSnapshot(limitID string, limitName *string, payload map[string]any) ProviderLimitSnapshot {
+	rateLimit := asMap(payload["rate_limit"])
+	if rateLimit == nil {
+		rateLimit = payload
+	}
 	reachedType := openAIRateLimitReachedType(payload["rate_limit_reached_type"])
+	if reachedType == nil {
+		reachedType = openAIRateLimitReachedType(rateLimit["rate_limit_reached_type"])
+	}
 	return ProviderLimitSnapshot{
-		LimitID:              "codex",
-		LimitName:            nil,
+		LimitID:              limitID,
+		LimitName:            limitName,
 		Primary:              openAIRateLimitWindow(asMap(rateLimit["primary_window"])),
 		Secondary:            openAIRateLimitWindow(asMap(rateLimit["secondary_window"])),
 		Credits:              openAICreditsSnapshot(asMap(payload["credits"])),
@@ -240,11 +262,29 @@ func openAICreditsSnapshot(credits map[string]any) *CreditsSnapshot {
 }
 
 func openAIRateLimitReachedType(value any) *string {
-	kind := stringOrNil(asMap(value)["kind"])
-	if kind == nil || *kind == "" {
+	reached := asMap(value)
+	if reached == nil {
+		return stringOrNil(value)
+	}
+	return stringPointer(firstString(reached, "type", "kind"))
+}
+
+func firstString(values map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := values[key].(string); ok {
+			if value = strings.TrimSpace(value); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func stringPointer(value string) *string {
+	if value == "" {
 		return nil
 	}
-	return kind
+	return &value
 }
 
 func CaptureAnthropicRateLimits(accountID string, headers http.Header, capturedAt time.Time) bool {

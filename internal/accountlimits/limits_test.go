@@ -124,6 +124,43 @@ func TestCaptureAnthropicRateLimitsMergesPartialWindows(t *testing.T) {
 	}
 }
 
+func TestOpenAIProviderLimitsIncludesAdditionalBuckets(t *testing.T) {
+	payload := OpenAIProviderLimitsFromUsage("codex-local", map[string]any{
+		"rate_limit": map[string]any{
+			"primary_window": map[string]any{"used_percent": 10.0},
+		},
+		"rate_limit_reached_type": map[string]any{"type": "primary"},
+		"additional_rate_limits": []any{
+			map[string]any{
+				"limit_id":   "spark",
+				"limit_name": "Spark",
+				"rate_limit": map[string]any{
+					"primary_window":   map[string]any{"used_percent": 25.0},
+					"secondary_window": map[string]any{"used_percent": 50.0},
+				},
+			},
+			map[string]any{
+				"metered_feature": "code_review",
+				"name":            "Code review",
+				"primary_window":  map[string]any{"used_percent": 75.0},
+			},
+		},
+	})
+
+	if len(payload.Snapshots) != 3 {
+		t.Fatalf("snapshots length = %d, want 3", len(payload.Snapshots))
+	}
+	if reached := payload.Snapshots[0].RateLimitReachedType; reached == nil || *reached != "primary" {
+		t.Fatalf("reached type = %v, want primary", reached)
+	}
+	if snapshot := payload.Snapshots[1]; snapshot.LimitID != "spark" || snapshot.LimitName == nil || *snapshot.LimitName != "Spark" || snapshot.Primary == nil || snapshot.Primary.UsedPercent != 25 || snapshot.Secondary == nil || snapshot.Secondary.UsedPercent != 50 {
+		t.Fatalf("spark snapshot = %+v", snapshot)
+	}
+	if snapshot := payload.Snapshots[2]; snapshot.LimitID != "code_review" || snapshot.LimitName == nil || *snapshot.LimitName != "Code review" || snapshot.Primary == nil || snapshot.Primary.UsedPercent != 75 {
+		t.Fatalf("code review snapshot = %+v", snapshot)
+	}
+}
+
 func TestCloneSnapshotsDoesNotSharePointers(t *testing.T) {
 	name := "limit"
 	windowMinutes := 60

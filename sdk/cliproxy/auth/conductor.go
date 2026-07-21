@@ -6180,6 +6180,13 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	_, _ = m.refreshAuthForRequest(ctx, id, "")
 }
 
+// RefreshAuth synchronously refreshes one credential and persists the result.
+// failedAccessToken lets concurrent callers reuse a refresh that already replaced
+// the token which produced an unauthorized response.
+func (m *Manager) RefreshAuth(ctx context.Context, id, failedAccessToken string) (*Auth, error) {
+	return m.refreshAuthForRequest(ctx, id, failedAccessToken)
+}
+
 // refreshAuthForRequest performs a synchronous credential refresh for the given auth.
 // failedAccessToken lets concurrent callers reuse a refresh that already replaced the
 // access token that produced the unauthorized response.
