@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 
 export function Spinner({ label = 'Loading…' }) {
   return (
@@ -67,9 +67,38 @@ export function Modal({ title, onClose, size = 'md', children, footer }) {
   // Wide modals are used by the Manage-CPA provider-key editor which has
   // many fields; narrow ones stay focused for OAuth-connect / confirm dialogs.
   const sizeClass = ` modal--${size}`;
+  const ref = useRef(null);
+
+  // Esc-to-close + focus the first focusable element on open. The backdrop
+  // click handler (below) already closes the modal; this adds keyboard parity
+  // so operators don't have to reach for the mouse.
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const previouslyFocused = document.activeElement;
+    const focusable = node.querySelector(
+      'input, select, textarea, button:not([aria-label="Close"])',
+    );
+    if (focusable) focusable.focus();
+
+    function onKey(e) {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        onClose?.();
+      }
+    }
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
+        previouslyFocused.focus();
+      }
+    };
+  }, [onClose]);
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className={`modal${sizeClass}`} onClick={(e) => e.stopPropagation()}>
+      <div className={`modal${sizeClass}`} onClick={(e) => e.stopPropagation()} ref={ref}>
         <div className="row row--between modal__header">
           <h3 className="modal__title">{title}</h3>
           <button onClick={onClose} style={{ padding: '4px 10px' }} aria-label="Close">Close</button>
@@ -79,6 +108,17 @@ export function Modal({ title, onClose, size = 'md', children, footer }) {
       </div>
     </div>
   );
+}
+
+// RoleBadge — semantic badge for internal-user roles. The previous code reused
+// `badge--revoked` (red/danger) for proxy_admin, which visually conflated an
+// admins role with a revoked key status. proxy_admin / proxy_viewer render as a
+// neutral accent badge; internal_user stays muted; unknown roles fall back to
+// the muted style.
+export function RoleBadge({ role }) {
+  const isAdmin = role === 'proxy_admin' || role === 'proxy_viewer';
+  const cls = isAdmin ? 'badge--role' : 'badge--muted';
+  return <span className={`badge ${cls}`}>{role || 'unknown'}</span>;
 }
 
 export function Stat({ label, value, delta }) {

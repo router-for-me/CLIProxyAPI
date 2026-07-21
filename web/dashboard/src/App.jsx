@@ -16,6 +16,7 @@ import ManageCpaLayout from './pages/manage-cpa/ManageCpaLayout.jsx';
 import OverviewTab from './pages/manage-cpa/OverviewTab.jsx';
 import ProvidersTab from './pages/manage-cpa/ProvidersTab.jsx';
 import RawConfigTab from './pages/manage-cpa/RawConfigTab.jsx';
+import { ToastProvider } from './components/Toast.jsx';
 
 // App is the root component and owns the auth session.
 //
@@ -89,36 +90,40 @@ export default function App() {
 
   if (!authed) {
     return (
-      <Routes>
-        <Route path="/login" element={<LoginPage onLogin={handleLogin} />} />
-        <Route path="*" element={<Navigate to="/login" replace state={{ from: location.pathname }} />} />
-      </Routes>
+      <ToastProvider>
+        <Routes>
+          <Route path="/login" element={<LoginPage onLogin={handleLogin} />} />
+          <Route path="*" element={<Navigate to="/login" replace state={{ from: location.pathname }} />} />
+        </Routes>
+      </ToastProvider>
     );
   }
 
   return (
-    <div className="app-shell">
-      <Sidebar onLogout={handleLogout} currentPath={location.pathname} />
-      <main className="main">
-        <Routes>
-          <Route path="/login" element={<Navigate to="/" replace />} />
-          <Route path="/" element={<ApiKeysPage />} />
-          <Route path="/api-keys/:id" element={<ApiKeyDetailPage />} />
-          <Route path="/usage" element={<UsageStatsPage />} />
-          <Route path="/internal-users" element={<InternalUsersPage />} />
-          <Route path="/internal-users/:id" element={<InternalUserDetailPage />} />
-          <Route path="/models" element={<ModelsCatalogPage />} />
-          <Route path="/error-messages" element={<ErrorMessagesPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/manage-cpa" element={<ManageCpaLayout />}>
-            <Route index element={<OverviewTab />} />
-            <Route path="providers" element={<ProvidersTab />} />
-            <Route path="raw-config" element={<RawConfigTab />} />
-          </Route>
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </main>
-    </div>
+    <ToastProvider>
+      <div className="app-shell">
+        <Sidebar onLogout={handleLogout} currentPath={location.pathname} />
+        <main className="main">
+          <Routes>
+            <Route path="/login" element={<Navigate to="/" replace />} />
+            <Route path="/" element={<ApiKeysPage />} />
+            <Route path="/api-keys/:id" element={<ApiKeyDetailPage />} />
+            <Route path="/usage" element={<UsageStatsPage />} />
+            <Route path="/internal-users" element={<InternalUsersPage />} />
+            <Route path="/internal-users/:id" element={<InternalUserDetailPage />} />
+            <Route path="/models" element={<ModelsCatalogPage />} />
+            <Route path="/error-messages" element={<ErrorMessagesPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/manage-cpa" element={<ManageCpaLayout />}>
+              <Route index element={<OverviewTab />} />
+              <Route path="providers" element={<ProvidersTab />} />
+              <Route path="raw-config" element={<RawConfigTab />} />
+            </Route>
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </main>
+      </div>
+    </ToastProvider>
   );
 }
 
