@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
@@ -50,6 +51,7 @@ type responsesSSEFramer struct {
 	outputItems          map[int][]byte
 	outputOrder          []int
 	unindexedOutputItems [][]byte
+	completedImageCalls  map[string]struct{}
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
@@ -107,8 +109,19 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 	}
 
 	switch gjson.GetBytes(payload, "type").String() {
+	case "response.image_generation_call.completed":
+		f.recordCompletedImageCall(payload)
 	case "response.output_item.done":
-		f.recordOutputItem(payload)
+		repaired, imageCompleted := responsesSSECompleteImageGenerationCall(payload)
+		f.recordOutputItem(repaired)
+		if len(imageCompleted) > 0 && !f.imageCallCompleted(imageCompleted) {
+			f.recordCompletedImageCall(imageCompleted)
+			imageCompletedFrame := responsesSSEEventFrame("response.image_generation_call.completed", imageCompleted)
+			return append(imageCompletedFrame, responsesSSEFrameWithData(frame, repaired)...)
+		}
+		if !bytes.Equal(repaired, payload) {
+			return responsesSSEFrameWithData(frame, repaired)
+		}
 	case "response.completed":
 		repaired := f.repairCompletedPayload(payload)
 		if !bytes.Equal(repaired, payload) {
@@ -116,6 +129,66 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 		}
 	}
 	return frame
+}
+
+func responsesSSECompleteImageGenerationCall(payload []byte) ([]byte, []byte) {
+	item := gjson.GetBytes(payload, "item")
+	if item.Get("type").String() != "image_generation_call" ||
+		!strings.EqualFold(strings.TrimSpace(item.Get("status").String()), "generating") {
+		return payload, nil
+	}
+
+	itemID := strings.TrimSpace(item.Get("id").String())
+	result := strings.TrimSpace(item.Get("result").String())
+	if itemID == "" || result == "" {
+		return payload, nil
+	}
+
+	repaired, err := sjson.SetBytes(payload, "item.status", "completed")
+	if err != nil {
+		return payload, nil
+	}
+
+	completed := []byte(`{"type":"response.image_generation_call.completed","item_id":"","call_id":"","result":""}`)
+	completed, _ = sjson.SetBytes(completed, "item_id", itemID)
+	completed, _ = sjson.SetBytes(completed, "call_id", itemID)
+	completed, _ = sjson.SetBytes(completed, "result", result)
+	for _, field := range []string{"output_index", "sequence_number"} {
+		if value := gjson.GetBytes(payload, field); value.Exists() {
+			completed, _ = sjson.SetRawBytes(completed, field, []byte(value.Raw))
+		}
+	}
+	return repaired, completed
+}
+
+func responsesSSEEventFrame(event string, payload []byte) []byte {
+	return []byte("event: " + event + "\ndata: " + string(payload) + "\n\n")
+}
+
+func (f *responsesSSEFramer) recordCompletedImageCall(payload []byte) {
+	for _, field := range []string{"item_id", "call_id"} {
+		id := strings.TrimSpace(gjson.GetBytes(payload, field).String())
+		if id == "" {
+			continue
+		}
+		if f.completedImageCalls == nil {
+			f.completedImageCalls = make(map[string]struct{})
+		}
+		f.completedImageCalls[id] = struct{}{}
+	}
+}
+
+func (f *responsesSSEFramer) imageCallCompleted(payload []byte) bool {
+	if len(f.completedImageCalls) == 0 {
+		return false
+	}
+	for _, field := range []string{"item_id", "call_id"} {
+		id := strings.TrimSpace(gjson.GetBytes(payload, field).String())
+		if _, ok := f.completedImageCalls[id]; ok && id != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func responsesSSEDataPayload(frame []byte) ([]byte, bool) {
@@ -179,6 +252,7 @@ func (f *responsesSSEFramer) recordOutputItem(payload []byte) {
 }
 
 func (f *responsesSSEFramer) repairCompletedPayload(payload []byte) []byte {
+	payload = responsesSSECompleteImageGenerationCallsInOutput(payload)
 	if len(f.outputOrder) == 0 && len(f.unindexedOutputItems) == 0 {
 		return payload
 	}
@@ -215,6 +289,28 @@ func (f *responsesSSEFramer) repairCompletedPayload(payload []byte) []byte {
 	repaired, err := sjson.SetRawBytes(payload, "response.output", outputJSON.Bytes())
 	if err != nil {
 		return payload
+	}
+	return repaired
+}
+
+func responsesSSECompleteImageGenerationCallsInOutput(payload []byte) []byte {
+	output := gjson.GetBytes(payload, "response.output")
+	if !output.IsArray() {
+		return payload
+	}
+
+	repaired := payload
+	for index, item := range output.Array() {
+		if item.Get("type").String() != "image_generation_call" ||
+			!strings.EqualFold(strings.TrimSpace(item.Get("status").String()), "generating") ||
+			strings.TrimSpace(item.Get("result").String()) == "" {
+			continue
+		}
+		next, err := sjson.SetBytes(repaired, fmt.Sprintf("response.output.%d.status", index), "completed")
+		if err != nil {
+			continue
+		}
+		repaired = next
 	}
 	return repaired
 }
