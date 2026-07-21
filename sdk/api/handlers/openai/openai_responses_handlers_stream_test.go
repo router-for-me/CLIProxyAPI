@@ -91,6 +91,132 @@ func TestForwardResponsesStreamRepairsEmptyCompletedOutputFromDoneItems(t *testi
 	}
 }
 
+func TestForwardResponsesStreamCompletesGeneratedImageCalls(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 2)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte(`event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":4,"output_index":0,"item":{"id":"ig_123","type":"image_generation_call","status":"generating","result":"aGVsbG8=","output_format":"png"}}
+
+`)
+	data <- []byte(`event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_123","status":"completed","output":[]}}
+
+`)
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+
+	parts := strings.Split(strings.TrimSpace(recorder.Body.String()), "\n\n")
+	if len(parts) != 3 {
+		t.Fatalf("expected image completion, output item, and response completion events; got %d: %q", len(parts), recorder.Body.String())
+	}
+
+	if !strings.HasPrefix(parts[0], "event: response.image_generation_call.completed\n") {
+		t.Fatalf("expected first event to complete the image call, got %q", parts[0])
+	}
+	completion, ok := responsesSSEDataPayload([]byte(parts[0]))
+	if !ok {
+		t.Fatalf("expected image completion payload: %q", parts[0])
+	}
+	if got := gjson.GetBytes(completion, "item_id").String(); got != "ig_123" {
+		t.Fatalf("completion item_id = %q, want ig_123", got)
+	}
+	if got := gjson.GetBytes(completion, "call_id").String(); got != "ig_123" {
+		t.Fatalf("completion call_id = %q, want ig_123", got)
+	}
+	if got := gjson.GetBytes(completion, "result").String(); got != "aGVsbG8=" {
+		t.Fatalf("completion result = %q, want image result", got)
+	}
+
+	done, ok := responsesSSEDataPayload([]byte(parts[1]))
+	if !ok {
+		t.Fatalf("expected output item payload: %q", parts[1])
+	}
+	if got := gjson.GetBytes(done, "item.status").String(); got != "completed" {
+		t.Fatalf("output item status = %q, want completed", got)
+	}
+
+	completed, ok := responsesSSEDataPayload([]byte(parts[2]))
+	if !ok {
+		t.Fatalf("expected response completion payload: %q", parts[2])
+	}
+	if got := gjson.GetBytes(completed, "response.output.0.status").String(); got != "completed" {
+		t.Fatalf("completed response image status = %q, want completed", got)
+	}
+}
+
+func TestForwardResponsesStreamRepairsImageStatusInCompletedResponse(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 2)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"ig_123","type":"image_generation_call","status":"generating","result":"aGVsbG8="}}
+
+`)
+	data <- []byte(`data: {"type":"response.completed","response":{"id":"resp_123","status":"completed","output":[{"id":"ig_123","type":"image_generation_call","status":"generating","result":"aGVsbG8="}]}}
+
+`)
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+
+	parts := strings.Split(strings.TrimSpace(recorder.Body.String()), "\n\n")
+	if len(parts) != 3 {
+		t.Fatalf("expected image completion, output item, and response completion events; got %d: %q", len(parts), recorder.Body.String())
+	}
+
+	completed, ok := responsesSSEDataPayload([]byte(parts[2]))
+	if !ok {
+		t.Fatalf("expected response completion payload: %q", parts[2])
+	}
+	if got := gjson.GetBytes(completed, "response.output.0.status").String(); got != "completed" {
+		t.Fatalf("completed response image status = %q, want completed", got)
+	}
+}
+
+func TestForwardResponsesStreamDoesNotDuplicateNativeImageCompletion(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 3)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte(`event: response.image_generation_call.completed
+data: {"type":"response.image_generation_call.completed","item_id":"ig_123","call_id":"ig_123","result":"aGVsbG8="}
+
+`)
+	data <- []byte(`event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"ig_123","type":"image_generation_call","status":"generating","result":"aGVsbG8="}}
+
+`)
+	data <- []byte(`event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_123","status":"completed","output":[]}}
+
+`)
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+
+	parts := strings.Split(strings.TrimSpace(recorder.Body.String()), "\n\n")
+	if len(parts) != 3 {
+		t.Fatalf("expected native completion, output item, and response completion events; got %d: %q", len(parts), recorder.Body.String())
+	}
+	if got := strings.Count(recorder.Body.String(), "response.image_generation_call.completed"); got != 2 {
+		t.Fatalf("image completion event count = %d, want event and payload once", got)
+	}
+
+	done, ok := responsesSSEDataPayload([]byte(parts[1]))
+	if !ok {
+		t.Fatalf("expected output item payload: %q", parts[1])
+	}
+	if got := gjson.GetBytes(done, "item.status").String(); got != "completed" {
+		t.Fatalf("output item status = %q, want completed", got)
+	}
+}
+
 func TestForwardResponsesStreamRepairsMixedIndexedAndUnindexedDoneItems(t *testing.T) {
 	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
 
