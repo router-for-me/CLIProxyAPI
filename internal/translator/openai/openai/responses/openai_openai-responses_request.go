@@ -339,9 +339,16 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		}
 	}
 
-	// Convert tool_choice if present
-	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
+	// Convert tool_choice if present. When the request carries no tools,
+	// omit tool_choice and parallel_tool_calls entirely: strict
+	// OpenAI-compatible upstreams (e.g. xAI) reject requests that set these
+	// fields without tools, and Codex sends "tools":[] together with
+	// "tool_choice":"auto" on compaction requests.
+	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() && len(chatCompletionsTools) > 0 {
 		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
+	}
+	if len(chatCompletionsTools) == 0 {
+		out, _ = sjson.DeleteBytes(out, "parallel_tool_calls")
 	}
 
 	return out

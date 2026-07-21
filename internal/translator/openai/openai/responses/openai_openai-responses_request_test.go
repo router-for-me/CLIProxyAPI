@@ -363,6 +363,14 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesStructure
 		"input": [
 			{"role":"user","content":"Run command."}
 		],
+		"tools": [
+			{
+				"type": "function",
+				"name": "run_command",
+				"description": "Run a command",
+				"parameters": {"type": "object", "properties": {}}
+			}
+		],
 		"tool_choice": {
 			"type": "function",
 			"function": {
@@ -380,6 +388,34 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesStructure
 	}
 	if got := gjson.GetBytes(out, "tool_choice.function.name").String(); got != "run_command" {
 		t.Fatalf("tool_choice.function.name = %q, want run_command; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DropsToolChoiceWithoutTools(t *testing.T) {
+	// Codex sends "tools":[] with "tool_choice":"auto" on compaction
+	// requests; strict OpenAI-compatible upstreams (e.g. xAI) return 400
+	// when tool_choice or parallel_tool_calls is set without tools.
+	raw := []byte(`{
+		"input": [
+			{"role":"user","content":"Summarize the conversation."}
+		],
+		"tools": [],
+		"tool_choice": "auto",
+		"parallel_tool_calls": false
+	}`)
+	t.Logf("input json:\n%s", prettyJSONForTest(raw))
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("grok-4.5", raw, false)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	if gjson.GetBytes(out, "tools").Exists() {
+		t.Fatalf("tools should be omitted when empty; output=%s", out)
+	}
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("tool_choice should be omitted when no tools are present; output=%s", out)
+	}
+	if gjson.GetBytes(out, "parallel_tool_calls").Exists() {
+		t.Fatalf("parallel_tool_calls should be omitted when no tools are present; output=%s", out)
 	}
 }
 
