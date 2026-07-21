@@ -291,6 +291,11 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	go func(first wsrelay.StreamEvent) {
 		defer close(out)
 		responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
+		originalRequest := opts.OriginalRequest
+		if len(originalRequest) == 0 {
+			originalRequest = req.Payload
+		}
+		claudeInputTokens := helps.NewClaudeInputTokenState(opts.SourceFormat, body.toFormat, responseFormat, originalRequest)
 		var param any
 		metadataLogged := false
 		processEvent := func(event wsrelay.StreamEvent) bool {
@@ -318,7 +323,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 					if detail, ok := helps.ParseGeminiStreamUsage(filtered); ok {
 						reporter.Publish(ctx, detail)
 					}
-					lines := sdktranslator.TranslateStream(ctx, body.toFormat, responseFormat, req.Model, opts.OriginalRequest, translatedReq, filtered, &param)
+					lines := helps.TranslateStreamWithClaudeInputTokens(ctx, body.toFormat, responseFormat, req.Model, opts.OriginalRequest, translatedReq, filtered, &param, claudeInputTokens)
 					for i := range lines {
 						select {
 						case out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(lines[i])}:
@@ -340,7 +345,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 					reporter.MarkFirstResponseByte()
 					helps.AppendAPIResponseChunk(ctx, e.cfg, event.Payload)
 				}
-				lines := sdktranslator.TranslateStream(ctx, body.toFormat, responseFormat, req.Model, opts.OriginalRequest, translatedReq, event.Payload, &param)
+				lines := helps.TranslateStreamWithClaudeInputTokens(ctx, body.toFormat, responseFormat, req.Model, opts.OriginalRequest, translatedReq, event.Payload, &param, claudeInputTokens)
 				for i := range lines {
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(lines[i])}:
