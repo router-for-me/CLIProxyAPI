@@ -5447,6 +5447,10 @@ type homeAuthIdentityDispatcher interface {
 	RPopAuthWithIdentity(ctx context.Context, requestedModel string, requestID string, dispatchID string, sessionID string, headers http.Header, count int) ([]byte, error)
 }
 
+type homeAuthLegacyFallbackDispatcher interface {
+	SupportsLegacyAuthDispatchFallback() bool
+}
+
 var currentHomeDispatcher = func() homeAuthDispatcher {
 	return home.Current()
 }
@@ -5652,6 +5656,7 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	dispatchID := uuid.NewString()
 
 	identityClient, supportsIdentity := client.(homeAuthIdentityDispatcher)
+	legacyFallbackClient, supportsLegacyFallback := client.(homeAuthLegacyFallbackDispatcher)
 	dispatchAuth := func() ([]byte, error) {
 		if supportsIdentity {
 			return identityClient.RPopAuthWithIdentity(ctx, requestedModel, requestID, dispatchID, sessionID, dispatchHeaders, count)
@@ -5664,6 +5669,10 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 		// lost. Retry once with the same dispatch ID so Home can return that
 		// idempotent reservation instead of leaving a ghost slot until TTL.
 		raw, err = dispatchAuth()
+	}
+	if supportsIdentity && supportsLegacyFallback && legacyFallbackClient.SupportsLegacyAuthDispatchFallback() && errors.Is(err, home.ErrAuthNotFound) && ctx.Err() == nil {
+		// Older Home versions publish auths under the key without request or dispatch identity.
+		raw, err = client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, count)
 	}
 	if err != nil {
 		if errors.Is(err, home.ErrAuthNotFound) {

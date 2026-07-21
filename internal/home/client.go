@@ -883,6 +883,10 @@ func (c *Client) RPopAuth(ctx context.Context, requestedModel string, sessionID 
 	return c.RPopAuthWithIdentity(ctx, requestedModel, "", "", sessionID, headers, count)
 }
 
+func (c *Client) SupportsLegacyAuthDispatchFallback() bool {
+	return c != nil
+}
+
 func (c *Client) RPopAuthWithIdentity(ctx context.Context, requestedModel string, requestID string, dispatchID string, sessionID string, headers http.Header, count int) ([]byte, error) {
 	cmd, errClient := c.commandClient()
 	if errClient != nil {
