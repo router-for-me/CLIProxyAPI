@@ -1790,9 +1790,13 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			rewriter = NewStreamRewriter(StreamRewriteOptions{RewriteModel: aliasResult.OriginalAlias})
 		}
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
-			if chunk.Err != nil && !failed {
+			resultErr := chunk.Err
+			if resultErr == nil {
+				resultErr = chunk.ResultErr
+			}
+			if resultErr != nil && !failed {
 				failed = true
-				rerr := resultErrorFromError(chunk.Err)
+				rerr := resultErrorFromError(resultErr)
 				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr})
 			}
 			if !forward {

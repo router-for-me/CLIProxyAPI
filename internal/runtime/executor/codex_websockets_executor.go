@@ -1486,16 +1486,18 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
 			if cliproxyexecutor.DownstreamWebsocket(ctx) {
+				clientChunk := cliproxyexecutor.StreamChunk{Payload: clientPayload}
 				if hasStatuslessErr {
 					terminateReason = "upstream_error"
 					terminateErr = statuslessErr
+					clientChunk.ResultErr = statuslessErr
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", statuslessErr)
 					reporter.PublishFailure(ctx, statuslessErr)
 					if sess != nil {
 						e.clearUpstreamConn(sess, conn, "upstream_error", statuslessErr, false)
 					}
 				}
-				if !send(cliproxyexecutor.StreamChunk{Payload: clientPayload}) {
+				if !send(clientChunk) {
 					terminateReason = "context_done"
 					terminateErr = ctx.Err()
 					return

@@ -138,6 +138,8 @@ type StreamChunk struct {
 	Payload []byte
 	// Err reports any terminal error encountered while producing chunks.
 	Err error
+	// ResultErr records an upstream failure for auth tracking while Payload remains forwardable.
+	ResultErr error
 }
 
 // StreamResult wraps the streaming response, providing both the chunk channel

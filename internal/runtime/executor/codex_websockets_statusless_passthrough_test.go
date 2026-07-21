@@ -72,6 +72,12 @@ func TestCodexWebsocketsExecuteStreamClearsStatuslessPassthroughErrorConn(t *tes
 		if chunk.Err != nil {
 			t.Fatalf("passthrough error chunk Err = %v, want raw payload", chunk.Err)
 		}
+		if chunk.ResultErr == nil {
+			t.Fatal("passthrough error chunk ResultErr = nil, want auth-tracking failure")
+		}
+		if statusErr, ok := chunk.ResultErr.(interface{ StatusCode() int }); !ok || statusErr.StatusCode() != http.StatusTooManyRequests {
+			t.Fatalf("passthrough ResultErr = %#v, want status 429", chunk.ResultErr)
+		}
 		if !bytes.Equal(bytes.TrimSpace(chunk.Payload), errorPayload) {
 			t.Fatalf("passthrough payload = %s, want %s", chunk.Payload, errorPayload)
 		}
