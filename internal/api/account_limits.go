@@ -51,6 +51,8 @@ func (s *Server) accountLimitsHandler(c *gin.Context) {
 			return
 		}
 		c.JSON(http.StatusOK, payload)
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "unsupported account limits provider", "type": "internal_error"}})
 	}
 }
 
@@ -107,10 +109,7 @@ func (s *Server) accountLimitsCredentials() []accountLimitsCredential {
 			}
 		}
 	}
-	var cfgSnapshot *config.Config
-	if s != nil {
-		cfgSnapshot = s.accountLimitsConfigSnapshot()
-	}
+	cfgSnapshot := s.accountLimitsConfig()
 	if cfgSnapshot != nil {
 		for _, compatibility := range cfgSnapshot.OpenAICompatibility {
 			if compatibility.Disabled || !strings.EqualFold(strings.TrimSpace(compatibility.Name), accountlimits.ProviderZai) {
@@ -290,24 +289,11 @@ func (s *Server) accountLimitsConfig() *config.Config {
 	if s == nil {
 		return nil
 	}
-	s.cfgMu.RLock()
-	defer s.cfgMu.RUnlock()
-	if s.cfg == nil {
+	cfg := s.accountLimitsCfg.Load()
+	if cfg == nil {
 		return nil
 	}
-	return s.cfg.CloneForRuntime()
-}
-
-func (s *Server) accountLimitsConfigSnapshot() *config.Config {
-	if s == nil {
-		return nil
-	}
-	s.cfgMu.RLock()
-	defer s.cfgMu.RUnlock()
-	if s.cfg == nil {
-		return nil
-	}
-	return s.cfg.CloneForRuntime()
+	return cfg
 }
 
 var unixNow = func() int64 { return time.Now().Unix() }

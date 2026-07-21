@@ -393,9 +393,45 @@ func cloneSnapshots(snapshots []ProviderLimitSnapshot) []ProviderLimitSnapshot {
 	cloned := make([]ProviderLimitSnapshot, len(snapshots))
 	copy(cloned, snapshots)
 	for i := range cloned {
+		if cloned[i].LimitName != nil {
+			name := *cloned[i].LimitName
+			cloned[i].LimitName = &name
+		}
 		if cloned[i].Primary != nil {
 			primary := *cloned[i].Primary
+			if primary.WindowMinutes != nil {
+				windowMinutes := *primary.WindowMinutes
+				primary.WindowMinutes = &windowMinutes
+			}
+			if primary.ResetsAt != nil {
+				resetsAt := *primary.ResetsAt
+				primary.ResetsAt = &resetsAt
+			}
 			cloned[i].Primary = &primary
+		}
+		if cloned[i].Secondary != nil {
+			secondary := *cloned[i].Secondary
+			if secondary.WindowMinutes != nil {
+				windowMinutes := *secondary.WindowMinutes
+				secondary.WindowMinutes = &windowMinutes
+			}
+			if secondary.ResetsAt != nil {
+				resetsAt := *secondary.ResetsAt
+				secondary.ResetsAt = &resetsAt
+			}
+			cloned[i].Secondary = &secondary
+		}
+		if cloned[i].Credits != nil {
+			credits := *cloned[i].Credits
+			if credits.Balance != nil {
+				balance := *credits.Balance
+				credits.Balance = &balance
+			}
+			cloned[i].Credits = &credits
+		}
+		if cloned[i].PlanType != nil {
+			planType := *cloned[i].PlanType
+			cloned[i].PlanType = &planType
 		}
 		if cloned[i].RateLimitReachedType != nil {
 			status := *cloned[i].RateLimitReachedType

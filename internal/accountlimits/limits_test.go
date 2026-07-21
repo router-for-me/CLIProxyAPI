@@ -124,6 +124,45 @@ func TestCaptureAnthropicRateLimitsMergesPartialWindows(t *testing.T) {
 	}
 }
 
+func TestCloneSnapshotsDoesNotSharePointers(t *testing.T) {
+	name := "limit"
+	windowMinutes := 60
+	resetsAt := int64(100)
+	balance := "10"
+	planType := "plus"
+	status := "limited"
+	original := []ProviderLimitSnapshot{{
+		LimitName: &name,
+		Primary: &RateLimitWindow{
+			WindowMinutes: &windowMinutes,
+			ResetsAt:      &resetsAt,
+		},
+		Secondary: &RateLimitWindow{
+			WindowMinutes: &windowMinutes,
+			ResetsAt:      &resetsAt,
+		},
+		Credits:              &CreditsSnapshot{Balance: &balance},
+		PlanType:             &planType,
+		RateLimitReachedType: &status,
+	}}
+
+	cloned := cloneSnapshots(original)
+	*cloned[0].LimitName = "changed"
+	*cloned[0].Primary.WindowMinutes = 120
+	*cloned[0].Primary.ResetsAt = 200
+	*cloned[0].Secondary.WindowMinutes = 180
+	*cloned[0].Secondary.ResetsAt = 300
+	*cloned[0].Credits.Balance = "0"
+	*cloned[0].PlanType = "free"
+	*cloned[0].RateLimitReachedType = "allowed"
+
+	if *original[0].LimitName != "limit" || *original[0].Primary.WindowMinutes != 60 || *original[0].Primary.ResetsAt != 100 ||
+		*original[0].Secondary.WindowMinutes != 60 || *original[0].Secondary.ResetsAt != 100 || *original[0].Credits.Balance != "10" ||
+		*original[0].PlanType != "plus" || *original[0].RateLimitReachedType != "limited" {
+		t.Fatalf("clone mutated original snapshot: %+v", original[0])
+	}
+}
+
 func TestZaiProviderLimitsFromQuota(t *testing.T) {
 	// Real response shape from GET https://api.z.ai/api/monitor/usage/quota/limit.
 	// First TOKENS_LIMIT (unit 3) = 5h, second (unit 6) = weekly; the TIME_LIMIT

@@ -126,11 +126,13 @@ func TestAccountLimitsFetchesZaiQuotaFromLocalConfig(t *testing.T) {
 	defer upstream.Close()
 
 	server := newTestServer(t)
-	server.cfg.OpenAICompatibility = []proxyconfig.OpenAICompatibility{{
+	cfg := server.accountLimitsConfig().CloneForRuntime()
+	cfg.OpenAICompatibility = []proxyconfig.OpenAICompatibility{{
 		Name:          "zai",
 		BaseURL:       upstream.URL + "/v1",
 		APIKeyEntries: []proxyconfig.OpenAICompatibilityAPIKey{{APIKey: "zai-key"}},
 	}}
+	server.UpdateClients(cfg)
 
 	recorder := performLimitsRequest(server, "/v1/account/limits")
 	if recorder.Code != http.StatusOK {

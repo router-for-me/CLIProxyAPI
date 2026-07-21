@@ -211,8 +211,9 @@ type Server struct {
 	handlers *handlers.BaseAPIHandler
 
 	// cfg holds the current server configuration.
-	cfg   *config.Config
-	cfgMu sync.RWMutex
+	cfg *config.Config
+	// accountLimitsCfg holds an immutable runtime snapshot for account limits requests.
+	accountLimitsCfg atomic.Pointer[config.Config]
 
 	// oldConfigYaml stores a YAML snapshot of the previous configuration for change detection.
 	// This prevents issues when the config object is modified in place by Management API.
@@ -341,6 +342,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
 	}
+	s.accountLimitsCfg.Store(cfg.CloneForRuntime())
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	s.exampleAPIKeySafeModeActive.Store(s.exampleAPIKeySafeModeRequired(cfg))
 	s.handlers.SetPluginHost(optionState.pluginHost)
@@ -1922,9 +1924,8 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if accessConfigApplied || exampleAPIKeySafeModeRequired {
 		s.exampleAPIKeySafeModeActive.Store(exampleAPIKeySafeModeRequired)
 	}
-	s.cfgMu.Lock()
 	s.cfg = cfg
-	s.cfgMu.Unlock()
+	s.accountLimitsCfg.Store(cfg.CloneForRuntime())
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
