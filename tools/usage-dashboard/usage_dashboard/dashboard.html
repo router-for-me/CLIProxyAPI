@@ -324,7 +324,27 @@ function renderTopAccounts(accs){
 const t=(accs||[]).slice(0,8);
 $('topAccounts').innerHTML=t.length?'<table><thead><tr><th>账号</th><th class="num">请求</th><th class="num">Token</th></tr></thead><tbody>'+t.map(a=>'<tr class="row-link" data-account="'+esc(a.account)+'"><td title="API Key 哈希">'+esc(a.account)+'</td><td class="num">'+fmt(a.requests)+'</td><td class="num">'+fmt(a.total_tokens)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无数据</div>';
 }
-function renderPriceMini(models){$('priceCoverageMini').innerHTML='<div class="empty">见「价格表」Tab</div>';}
+async function loadErrors(){
+	try{
+	const d=await getJSON('/api/v1/errors?'+queryStr());
+	const rows=d.errors||[];
+	$('errorsBody').innerHTML=rows.length?rows.map(e=>'<tr class="row-link" data-status="'+esc(e.fail_status)+'" data-model="'+esc(e.model)+'"><td><span class="bad">'+esc(e.fail_status)+'</span></td><td>'+esc(e.model)+'</td><td class="num">'+fmt(e.count)+'</td><td class="num">'+(e.percent||0).toFixed(1)+'%</td><td class="num">'+esc(String(e.last_seen||'').slice(11,19))+'</td></tr>').join(''):'<tr><td colspan="5" class="empty">暂无错误</td></tr>';
+	$('errorsBody').querySelectorAll('tr.row-link').forEach(tr=>tr.onclick=()=>drillError(tr.dataset.status,tr.dataset.model));
+	}catch(e){$('errorsBody').innerHTML='<tr><td colspan="5" class="empty">加载失败</td></tr>';}
+	}
+	function drillError(status,model){
+	// switch to requests tab, filter by model + show only failed (we can't filter failed via API, so we rely on model filter and visually mark)
+	const sel=$('modelFilter');
+	// set model filter to the clicked model
+	Array.from(sel.options).forEach(o=>o.selected=(o.value===model));
+	syncSummary('modelSummary','模型','modelFilter');
+	switchTab('requests');
+	load();
+	}
+	async function loadPricing(){
+	try{const d=await getJSON('/api/v1/prices');const rows=d.models||[];$('pricingBody').innerHTML=rows.length?rows.map(m=>'<tr'+(m.effective_now?'':' class="stale"')+'><td>'+esc(m.model)+'</td><td class="num">'+(m.input_per_million||0).toFixed(2)+'</td><td class="num">'+(m.output_per_million||0).toFixed(2)+'</td><td class="num">'+(m.cached_input_per_million||0).toFixed(2)+'</td><td class="num">'+(m.reasoning_per_million||0).toFixed(2)+'</td><td>'+(m.effective_now?'有效':'<span class="muted">失效</span>')+'</td></tr>').join(''):'<tr><td colspan="6" class="empty">暂无价格数据</td></tr>';}catch(e){$('pricingBody').innerHTML='<tr><td colspan="6" class="empty">加载失败</td></tr>';}
+	}
+	function renderPriceMini(models){$('priceCoverageMini').innerHTML='<div class="empty">见「价格表」Tab</div>';}
 /* ---- tabs ---- */
 function switchTab(name){
 activeTab=name;
@@ -337,7 +357,7 @@ $('refresh').onclick=()=>{loadFilters().then(()=>load());};
 $('range').onchange=()=>{$('from').value='';$('to').value='';loadFilters().then(()=>load());};
 $('from').onchange=$('to').onchange=()=>load();
 $('loadMore').onclick=async()=>{if(!cursor)return;try{const d=await getJSON('/api/v1/requests?'+queryStr()+'&limit=50&cursor='+encodeURIComponent(cursor));cursor=d.next_cursor;$('requestsBody').insertAdjacentHTML('beforeend',d.requests.map(r=>'<tr class="row-link"><td>'+esc(r.local_time)+'</td><td>'+esc(String(r.account||'').slice(0,12))+'</td><td>'+esc(r.model)+'</td><td class="num">'+fmt(r.total_tokens)+'</td><td class="num">'+fmtMs(r.ttft_ms)+'</td><td class="num">'+fmtMs(r.latency_ms)+'</td><td>'+(r.failed?'<span class="bad">'+r.fail_status+'</span>':'<span class="good">'+r.fail_status+'</span>')+'</td></tr>').join(''));$('loadMore').style.display=cursor?'inline-block':'none';}catch(e){}};
-document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>switchTab(t.dataset.tab));
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{switchTab(t.dataset.tab);if(t.dataset.tab==='errors')loadErrors();if(t.dataset.tab==='pricing')loadPricing();});
 $('drawerClose').onclick=()=>$('drawer').classList.remove('open');
 wireMf('modelWrap','modelBtn','modelPanel','modelOptions','modelFilter','modelSummary','模型',()=>load());
 wireMf('accountWrap','accountBtn','accountPanel','accountOptions','accountFilter','accountSummary','账号',()=>load());
