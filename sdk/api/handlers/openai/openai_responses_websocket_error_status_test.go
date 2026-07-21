@@ -5,6 +5,28 @@ import (
 	"testing"
 )
 
+func TestResponsesWebsocketErrorMessageFromPayloadUsesNestedStatus(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{name: "status", payload: `{"type":"error","error":{"status":429,"message":"rate limited"}}`},
+		{name: "status code", payload: `{"type":"error","error":{"status_code":429,"message":"rate limited"}}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			errMsg := responsesWebsocketErrorMessageFromPayload([]byte(test.payload))
+			if errMsg == nil {
+				t.Fatal("error message is nil")
+			}
+			if errMsg.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusTooManyRequests)
+			}
+		})
+	}
+}
+
 func TestResponsesWebsocketErrorMessageFromPayloadMapsConnectionLimitStatus(t *testing.T) {
 	errMsg := responsesWebsocketErrorMessageFromPayload([]byte(`{"type":"error","code":"websocket_connection_limit_reached","message":"too many websocket connections"}`))
 	if errMsg == nil {

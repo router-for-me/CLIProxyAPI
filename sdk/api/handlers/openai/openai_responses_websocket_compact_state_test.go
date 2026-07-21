@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -25,6 +26,21 @@ type websocketCompactStateExecutor struct {
 	mu             sync.Mutex
 	streamPayloads [][]byte
 	compactPayload []byte
+}
+
+func TestWebsocketUpstreamSupportsCompactionReplayForHomeCodexModel(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	registry.GetGlobalRegistry().RegisterClient("home-codex-catalog", "codex", []*registry.ModelInfo{{ID: "home-codex-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient("home-codex-catalog")
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	if !h.websocketUpstreamSupportsCompactionReplayForModel("home-codex-model") {
+		t.Fatal("expected Home-backed Codex model to support compaction replay")
+	}
 }
 
 func (e *websocketCompactStateExecutor) Identifier() string { return "codex" }

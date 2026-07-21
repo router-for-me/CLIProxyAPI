@@ -1315,7 +1315,15 @@ func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsIncrementalInputFor
 func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsCompactionReplayForModel(modelName string) bool {
 	auths, _ := h.responsesWebsocketAvailableAuthsForModel(modelName)
 	if len(auths) == 0 {
-		return false
+		if h == nil || h.AuthManager == nil || !h.AuthManager.HomeEnabled() {
+			return false
+		}
+		providerSet, _ := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(modelName))
+		if len(providerSet) != 1 {
+			return false
+		}
+		_, codexOnly := providerSet["codex"]
+		return codexOnly
 	}
 	for _, auth := range auths {
 		if !responsesWebsocketAuthSupportsCompactionReplay(auth) {
@@ -2325,9 +2333,12 @@ func isResponsesWebsocketCompletionEvent(eventType string) bool {
 }
 
 func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.ErrorMessage {
-	status := int(gjson.GetBytes(payload, "status").Int())
-	if status <= 0 {
-		status = int(gjson.GetBytes(payload, "status_code").Int())
+	status := 0
+	for _, path := range []string{"status", "status_code", "error.status", "error.status_code", "body.error.status", "body.error.status_code"} {
+		status = int(gjson.GetBytes(payload, path).Int())
+		if status > 0 {
+			break
+		}
 	}
 	errCode := strings.TrimSpace(gjson.GetBytes(payload, "error.code").String())
 	if errCode == "" {
