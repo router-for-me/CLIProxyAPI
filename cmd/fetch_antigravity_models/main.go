@@ -196,7 +196,7 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth) []modelEntry {
 		return nil
 	}
 
-	baseURLs := []string{antigravityBaseURLProd, antigravityBaseURLDaily, antigravitySandboxBaseURLDaily}
+	baseURLs := []string{antigravityBaseURLDaily, antigravityBaseURLProd, antigravitySandboxBaseURLDaily}
 
 	for _, baseURL := range baseURLs {
 		modelsURL := baseURL + antigravityModelsPath
@@ -211,78 +211,80 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth) []modelEntry {
 			payload = []byte(`{}`)
 		}
 
-		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, modelsURL, strings.NewReader(string(payload)))
-		if errReq != nil {
-			continue
-		}
-		httpReq.Close = true
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+accessToken)
-		httpReq.Header.Set("User-Agent", misc.AntigravityUserAgent())
-
-		httpClient := &http.Client{Timeout: 30 * time.Second}
-		if transport, _, errProxy := proxyutil.BuildHTTPTransport(auth.ProxyURL); errProxy == nil && transport != nil {
-			httpClient.Transport = transport
-		}
-		httpResp, errDo := httpClient.Do(httpReq)
-		if errDo != nil {
-			continue
-		}
-
-		bodyBytes, errRead := io.ReadAll(httpResp.Body)
-		httpResp.Body.Close()
-		if errRead != nil {
-			continue
-		}
-
-		if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-			continue
-		}
-
-		result := gjson.GetBytes(bodyBytes, "models")
-		if !result.Exists() {
-			continue
-		}
-
-		var models []modelEntry
-
-		for originalName, modelData := range result.Map() {
-			modelID := strings.TrimSpace(originalName)
-			if modelID == "" {
+		for attempt := 0; attempt < 2; attempt++ {
+			httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, modelsURL, strings.NewReader(string(payload)))
+			if errReq != nil {
 				continue
 			}
-			// Skip internal/experimental models
-			switch modelID {
-			case "chat_20706", "chat_23310", "tab_flash_lite_preview", "tab_jump_flash_lite_preview", "gemini-2.5-flash-thinking", "gemini-2.5-pro":
+			httpReq.Close = true
+			httpReq.Header.Set("Content-Type", "application/json")
+			httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+			httpReq.Header.Set("User-Agent", misc.AntigravityUserAgent())
+
+			httpClient := &http.Client{Timeout: 30 * time.Second}
+			if transport, _, errProxy := proxyutil.BuildHTTPTransport(auth.ProxyURL); errProxy == nil && transport != nil {
+				httpClient.Transport = transport
+			}
+			httpResp, errDo := httpClient.Do(httpReq)
+			if errDo != nil {
 				continue
 			}
 
-			displayName := modelData.Get("displayName").String()
-			if displayName == "" {
-				displayName = modelID
+			bodyBytes, errRead := io.ReadAll(httpResp.Body)
+			httpResp.Body.Close()
+			if errRead != nil {
+				continue
 			}
 
-			entry := modelEntry{
-				ID:          modelID,
-				Object:      "model",
-				OwnedBy:     "antigravity",
-				Type:        "antigravity",
-				DisplayName: displayName,
-				Name:        modelID,
-				Description: displayName,
+			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+				continue
 			}
 
-			if maxTok := modelData.Get("maxTokens").Int(); maxTok > 0 {
-				entry.ContextLength = int(maxTok)
-			}
-			if maxOut := modelData.Get("maxOutputTokens").Int(); maxOut > 0 {
-				entry.MaxCompletionTokens = int(maxOut)
+			result := gjson.GetBytes(bodyBytes, "models")
+			if !result.Exists() {
+				continue
 			}
 
-			models = append(models, entry)
+			var models []modelEntry
+
+			for originalName, modelData := range result.Map() {
+				modelID := strings.TrimSpace(originalName)
+				if modelID == "" {
+					continue
+				}
+				// Skip internal/experimental models
+				switch modelID {
+				case "chat_20706", "chat_23310", "tab_flash_lite_preview", "tab_jump_flash_lite_preview", "gemini-2.5-flash-thinking", "gemini-2.5-pro":
+					continue
+				}
+
+				displayName := modelData.Get("displayName").String()
+				if displayName == "" {
+					displayName = modelID
+				}
+
+				entry := modelEntry{
+					ID:          modelID,
+					Object:      "model",
+					OwnedBy:     "antigravity",
+					Type:        "antigravity",
+					DisplayName: displayName,
+					Name:        modelID,
+					Description: displayName,
+				}
+
+				if maxTok := modelData.Get("maxTokens").Int(); maxTok > 0 {
+					entry.ContextLength = int(maxTok)
+				}
+				if maxOut := modelData.Get("maxOutputTokens").Int(); maxOut > 0 {
+					entry.MaxCompletionTokens = int(maxOut)
+				}
+
+				models = append(models, entry)
+			}
+
+			return models
 		}
-
-		return models
 	}
 
 	return nil
