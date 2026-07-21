@@ -347,7 +347,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() && len(chatCompletionsTools) > 0 {
 		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
 	}
-	if len(chatCompletionsTools) == 0 {
+	if len(chatCompletionsTools) == 0 && root.Get("parallel_tool_calls").Exists() {
 		out, _ = sjson.DeleteBytes(out, "parallel_tool_calls")
 	}
 
