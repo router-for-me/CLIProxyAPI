@@ -1214,3 +1214,153 @@ tr:focus-within .row-actions {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
+
+/* Toast stack — fixed top-right notification layer. ----------------------- */
+.toast-stack {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 360px;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  animation: toast-slide-in 0.18s ease-out;
+  border-left: 3px solid var(--text-muted);
+}
+.toast__msg { flex: 1 1 auto; }
+.toast__close {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.toast__close:hover { color: var(--text); }
+.toast--success { border-left-color: var(--success); }
+.toast--error { border-left-color: var(--danger); }
+.toast--info { border-left-color: var(--accent); }
+@keyframes toast-slide-in {
+  from { transform: translateX(16px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+/* CopyButton — inline copy-to-clipboard affordance. ----------------------- */
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.12s ease;
+  font-family: var(--mono);
+}
+.copy-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.copy-btn--sm {
+  font-size: 11px;
+  padding: 3px 8px;
+}
+.copy-btn--copied {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+/* Role badge — neutral accent style for admin/viewer roles (replaces the
+   previous reuse of badge--revoked which conflated admins with revoked
+   keys). */
+.badge--role {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+/* Table row that is fully clickable (navigates to detail). The cursor +
+   hover affordance signal that the whole row is a link; inner links/buttons
+   stop propagation so they don't double-navigate. */
+.table tbody tr.row-link { cursor: pointer; }
+
+/* API Key detail header strip — top summary band above the detail cards. */
+.key-header-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.key-header-strip__main {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+.key-header-strip__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.key-header-strip__meta {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.key-header-strip__meta-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Key detail stat tiles — compact metric cards used for created / expires /
+   last-used values on the detail page. */
+.key-stat {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+.key-stat__label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.key-stat__value {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+}
+
+/* Status control inline editor — small select + spinner row used on the key
+   detail page instead of a bare select + alert(). */
+.status-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.status-control select {
+  width: auto;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.status-control--saving select { opacity: 0.7; }
