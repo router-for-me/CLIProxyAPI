@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -223,5 +224,96 @@ func TestFileRequestLoggerSetFormat(t *testing.T) {
 	logger.SetFormat("invalid")
 	if logger.format != "text" {
 		t.Fatalf("format = %q, want text", logger.format)
+	}
+}
+
+func TestJSONRequestLoggingPreservesAPIWebsocketTimeline(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := NewFileRequestLoggerWithFormat(true, tempDir, "", 10, "json")
+
+	err := logger.LogRequest(
+		"/v1/chat/completions",
+		"POST",
+		nil,
+		[]byte(`{"model":"gpt-4"}`),
+		200,
+		nil,
+		[]byte(`{"ok":true}`),
+		nil,
+		nil,
+		nil,
+		[]byte("connected\nframe: response.completed"),
+		nil,
+		"req-ws-123",
+		time.Now(),
+		time.Time{},
+	)
+	if err != nil {
+		t.Fatalf("LogRequest failed: %v", err)
+	}
+
+	files, err := os.ReadDir(tempDir)
+	if err != nil || len(files) == 0 {
+		t.Fatalf("expected log file in tempDir")
+	}
+	data, err := os.ReadFile(filepath.Join(tempDir, files[0].Name()))
+	if err != nil {
+		t.Fatalf("failed to read log file: %v", err)
+	}
+
+	var entry struct {
+		APIWebsocketTimelineRaw string `json:"api_websocket_timeline_raw"`
+	}
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("failed to unmarshal NDJSON entry: %v", err)
+	}
+	if entry.APIWebsocketTimelineRaw != "connected\nframe: response.completed" {
+		t.Fatalf("timeline = %q", entry.APIWebsocketTimelineRaw)
+	}
+}
+
+func TestJSONStreamingRequestLoggingCapsResponseBody(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := NewFileRequestLoggerWithFormat(true, tempDir, "", 10, "json")
+
+	writer, err := logger.LogStreamingRequest(
+		"/v1/chat/completions",
+		"POST",
+		nil,
+		[]byte(`{"model":"gpt-4","stream":true}`),
+		"req-large-stream-123",
+	)
+	if err != nil {
+		t.Fatalf("LogStreamingRequest failed: %v", err)
+	}
+	_ = writer.WriteStatus(200, map[string][]string{"Content-Type": {"text/event-stream"}})
+	writer.WriteChunkAsync(bytes.Repeat([]byte("x"), maxJSONStreamingResponseBytes+1024))
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	files, err := os.ReadDir(tempDir)
+	if err != nil || len(files) == 0 {
+		t.Fatalf("expected log file in tempDir")
+	}
+	data, err := os.ReadFile(filepath.Join(tempDir, files[0].Name()))
+	if err != nil {
+		t.Fatalf("failed to read log file: %v", err)
+	}
+
+	var entry struct {
+		Response struct {
+			BodyRaw       string `json:"body_raw"`
+			BodyTruncated bool   `json:"body_truncated"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("failed to unmarshal NDJSON entry: %v", err)
+	}
+	if !entry.Response.BodyTruncated {
+		t.Fatalf("expected response body to be marked truncated")
+	}
+	if len(entry.Response.BodyRaw) > maxJSONStreamingResponseBytes {
+		t.Fatalf("response body length = %d, limit = %d", len(entry.Response.BodyRaw), maxJSONStreamingResponseBytes)
 	}
 }
