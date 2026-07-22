@@ -23,12 +23,29 @@ func SanitizeCodexHTTPFallbackPayload(payload []byte) []byte {
 	return out
 }
 
+// SanitizeCodexWebsocketPayload removes incomplete tool call pairs from full
+// transcript requests. Incremental requests may legitimately provide only a
+// tool output because previous_response_id supplies the matching call.
+func SanitizeCodexWebsocketPayload(payload []byte) []byte {
+	if len(payload) == 0 || strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != "" {
+		return payload
+	}
+	if generate := gjson.GetBytes(payload, "generate"); generate.Exists() && !generate.Bool() {
+		return payload
+	}
+	return sanitizeCodexInputToolPairs(payload, false)
+}
+
 func sanitizeCodexHTTPFallbackInput(payload []byte) []byte {
+	return sanitizeCodexInputToolPairs(payload, true)
+}
+
+func sanitizeCodexInputToolPairs(payload []byte, stripUnsupportedActions bool) []byte {
 	input := gjson.GetBytes(payload, "input")
 	if !input.IsArray() {
 		return payload
 	}
-	sanitizedInput := sanitizeCodexHTTPFallbackInputArray([]byte(input.Raw))
+	sanitizedInput := sanitizeCodexToolCallPairsArray([]byte(input.Raw), stripUnsupportedActions)
 	if string(sanitizedInput) == input.Raw {
 		return payload
 	}
@@ -39,21 +56,26 @@ func sanitizeCodexHTTPFallbackInput(payload []byte) []byte {
 	return out
 }
 
-func sanitizeCodexHTTPFallbackInputArray(raw []byte) []byte {
+func sanitizeCodexToolCallPairsArray(raw []byte, stripUnsupportedActions bool) []byte {
 	if len(raw) == 0 {
 		return raw
 	}
 
 	var items []json.RawMessage
 	if err := json.Unmarshal(raw, &items); err != nil {
-		return stripCodexHTTPFallbackInputActions(raw)
+		if stripUnsupportedActions {
+			return stripCodexHTTPFallbackInputActions(raw)
+		}
+		return raw
 	}
 
 	sanitized := make([]json.RawMessage, 0, len(items))
 	callPresent := make(map[string]map[string]struct{}, len(items))
 	outputPresent := make(map[string]map[string]struct{}, len(items))
 	for _, item := range items {
-		item = stripCodexHTTPFallbackItemAction(item)
+		if stripUnsupportedActions {
+			item = stripCodexHTTPFallbackItemAction(item)
+		}
 		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
 		callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
 		if callID == "" {
