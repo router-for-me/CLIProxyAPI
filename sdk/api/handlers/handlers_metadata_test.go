@@ -137,3 +137,32 @@ func TestSetGenerateMetadataHonorsExplicitFalse(t *testing.T) {
 		t.Fatalf("GenerateMetadataKey = %v, want false", got)
 	}
 }
+
+func TestRequestExecutionMetadataIncludesRequestID(t *testing.T) {
+	ctx := logging.WithRequestID(context.Background(), "abcd1234")
+
+	meta := requestExecutionMetadata(ctx)
+	if got := meta[coreexecutor.RequestIDMetadataKey]; got != "abcd1234" {
+		t.Fatalf("RequestIDMetadataKey = %v, want %q", got, "abcd1234")
+	}
+}
+
+func TestRequestExecutionMetadataIncludesRequestIDFromGin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	logging.SetGinRequestID(ginCtx, "gin-req-1")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	meta := requestExecutionMetadata(ctx)
+	if got := meta[coreexecutor.RequestIDMetadataKey]; got != "gin-req-1" {
+		t.Fatalf("RequestIDMetadataKey = %v, want %q", got, "gin-req-1")
+	}
+}
+
+func TestRequestExecutionMetadataOmitsEmptyRequestID(t *testing.T) {
+	meta := requestExecutionMetadata(context.Background())
+	if _, ok := meta[coreexecutor.RequestIDMetadataKey]; ok {
+		t.Fatalf("unexpected request_id in metadata: %v", meta[coreexecutor.RequestIDMetadataKey])
+	}
+}
