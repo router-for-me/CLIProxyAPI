@@ -49,3 +49,12 @@ func TestShouldNotRetryResponsesWebsocketAfterUnrelatedBadRequest(t *testing.T) 
 		t.Fatal("unrelated bad request must not trigger transcript replay")
 	}
 }
+
+func TestResponsesWebsocketAttemptUsesSSEAfterStateLossReplay(t *testing.T) {
+	if !responsesWebsocketAttemptUsesDownstreamWebsocket(false) {
+		t.Fatal("initial attempt must retain downstream websocket preference")
+	}
+	if responsesWebsocketAttemptUsesDownstreamWebsocket(true) {
+		t.Fatal("state-loss replay must prefer HTTP/SSE upstream")
+	}
+}

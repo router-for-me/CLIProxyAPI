@@ -2371,7 +2371,7 @@ func TestForwardResponsesWebsocketDoesNotInterceptErrorAfterPayload(t *testing.T
 
 		data := make(chan []byte, 2)
 		errCh := make(chan *interfaces.ErrorMessage)
-		data <- []byte(`{"type":"response.created","response":{"id":"resp-1"}}`)
+		data <- []byte(`{"type":"response.output_text.delta","delta":"partial"}`)
 		data <- []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response with id 'resp-1' not found.","param":"previous_response_id"}}`)
 		close(data)
 		close(errCh)
@@ -2425,10 +2425,10 @@ func TestForwardResponsesWebsocketDoesNotInterceptErrorAfterPayload(t *testing.T
 
 	_, createdPayload, errReadMessage := conn.ReadMessage()
 	if errReadMessage != nil {
-		t.Fatalf("read created websocket message: %v", errReadMessage)
+		t.Fatalf("read partial websocket message: %v", errReadMessage)
 	}
-	if got := gjson.GetBytes(createdPayload, "type").String(); got != "response.created" {
-		t.Fatalf("created payload type = %s, want response.created; payload=%s", got, createdPayload)
+	if got := gjson.GetBytes(createdPayload, "type").String(); got != "response.output_text.delta" {
+		t.Fatalf("partial payload type = %s, want response.output_text.delta; payload=%s", got, createdPayload)
 	}
 
 	_, errorPayload, errReadMessage := conn.ReadMessage()

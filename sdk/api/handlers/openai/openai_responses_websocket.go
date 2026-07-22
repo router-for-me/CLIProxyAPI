@@ -696,7 +696,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		modelName := gjson.GetBytes(requestJSON, "model").String()
 		lastAttemptedAuthID = pinnedAuthID
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
+		if responsesWebsocketAttemptUsesDownstreamWebsocket(stateLossReplayAttempted) {
+			cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
+		}
 		cliCtx = handlers.WithExecutionSessionID(cliCtx, passthroughSessionID)
 		if pinnedAuthID != "" {
 			cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
@@ -728,7 +730,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			return
 		}
 		if shouldRetryResponsesWebsocketAfterUpstreamStateLoss(forwardErrMsg, payload, previousLastRequest, stateLossReplayAttempted) {
-			log.Infof("responses websocket: retrying id=%s with transcript replay after upstream websocket state loss", passthroughSessionID)
+			log.Infof("responses websocket: retrying id=%s with transcript replay over HTTP/SSE after upstream websocket state loss", passthroughSessionID)
 			stateLossReplayAttempted = true
 			lastRequest = previousLastRequest
 			lastResponseOutput = previousLastResponseOutput
@@ -1720,7 +1722,19 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	var outputItemsFallback [][]byte
 	pendingToolCallIDs := make(map[string]struct{})
 	sentPayload := false
+	provisionalPayloads := make([][]byte, 0, 2)
 	toolSessionKey = strings.TrimSpace(toolSessionKey)
+	flushProvisionalPayloads := func() error {
+		for i := range provisionalPayloads {
+			markAPIResponseTimestamp(c)
+			if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, provisionalPayloads[i], time.Now()); errWrite != nil {
+				return errWrite
+			}
+			sentPayload = true
+		}
+		provisionalPayloads = provisionalPayloads[:0]
+		return nil
+	}
 
 	for {
 		select {
@@ -1736,6 +1750,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				if !sentPayload && interceptError != nil && interceptError(errMsg) {
 					cancel(errMsg.Error)
 					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, nil
+				}
+				if errFlush := flushProvisionalPayloads(); errFlush != nil {
+					cancel(errFlush)
+					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errFlush
 				}
 				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 				markAPIResponseTimestamp(c)
@@ -1778,6 +1796,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						StatusCode: http.StatusRequestTimeout,
 						Error:      fmt.Errorf("stream closed before response.completed"),
 					}
+					if errFlush := flushProvisionalPayloads(); errFlush != nil {
+						cancel(errFlush)
+						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errFlush
+					}
 					h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 					markAPIResponseTimestamp(c)
 					errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
@@ -1809,6 +1831,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			for i := range payloads {
 				collectResponsesWebsocketOutputItem(payloads[i], outputItemsByIndex, &outputItemsFallback)
 				eventType := gjson.GetBytes(payloads[i], "type").String()
+				if !sentPayload && isResponsesWebsocketProvisionalEvent(eventType) {
+					provisionalPayloads = append(provisionalPayloads, bytes.Clone(payloads[i]))
+					continue
+				}
 				if isResponsesWebsocketCompletionEvent(eventType) {
 					payloads[i] = restoreResponsesWebsocketCompletionOutput(payloads[i], outputItemsByIndex, outputItemsFallback)
 				}
@@ -1828,6 +1854,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					completed = true
 					completedOutput = responseCompletedOutputFromPayload(payloads[i], outputItemsByIndex, outputItemsFallback)
 					completedResponseID = responseCompletedIDFromPayload(payloads[i])
+				}
+				if errFlush := flushProvisionalPayloads(); errFlush != nil {
+					cancel(errFlush)
+					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errFlush
 				}
 				markAPIResponseTimestamp(c)
 				// log.Infof(
