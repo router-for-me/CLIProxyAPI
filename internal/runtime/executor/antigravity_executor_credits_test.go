@@ -27,6 +27,19 @@ func resetAntigravityCreditsRetryState() {
 	antigravityCreditsHintRefreshByID = sync.Map{}
 }
 
+func waitForAntigravityCreditsRefresh(authID string) {
+	value, ok := antigravityCreditsHintRefreshByID.Load(authID)
+	if !ok {
+		return
+	}
+	state, ok := value.(*antigravityCreditsHintRefreshState)
+	if !ok || state == nil {
+		return
+	}
+	state.mu.Lock()
+	state.mu.Unlock()
+}
+
 type fakeAntigravityKVClient struct {
 	values       map[string][]byte
 	getErr       error
@@ -642,6 +655,9 @@ func TestEnsureAccessToken_WarmTokenLoadsCreditsHint(t *testing.T) {
 	}))
 
 	token, updatedAuth, err := exec.ensureAccessToken(ctx, auth)
+	t.Cleanup(func() {
+		waitForAntigravityCreditsRefresh(auth.ID)
+	})
 	if err != nil {
 		t.Fatalf("ensureAccessToken() error = %v", err)
 	}
