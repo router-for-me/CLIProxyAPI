@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/codexintegration"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
@@ -133,5 +134,49 @@ func TestModelCatalogUpdaterPlan(t *testing.T) {
 					tt.localModel, tt.homeEnabled, gotModels, gotCodex, tt.wantModels, tt.wantCodexClient)
 			}
 		})
+	}
+}
+
+func TestSelectCodexCommand(t *testing.T) {
+	action, selected, err := selectCodexCommand(false, false, true, false)
+	if err != nil || !selected || action != codexintegration.CommandDoctor {
+		t.Fatalf("selectCodexCommand() = %q, %t, %v", action, selected, err)
+	}
+	if _, _, err = selectCodexCommand(true, true, false, false); err == nil {
+		t.Fatal("selectCodexCommand() accepted multiple commands")
+	}
+	action, selected, err = selectCodexCommand(false, false, false, false)
+	if err != nil || selected || action != "" {
+		t.Fatalf("empty selectCodexCommand() = %q, %t, %v", action, selected, err)
+	}
+}
+
+func TestValidateCodexCommandFlags(t *testing.T) {
+	if err := validateCodexCommandFlags(true, true, codexintegration.CommandOptions{Action: codexintegration.CommandSetup}); err == nil {
+		t.Fatal("validateCodexCommandFlags() accepted another one-shot command")
+	}
+	if err := validateCodexCommandFlags(false, false, codexintegration.CommandOptions{JSON: true}); err == nil {
+		t.Fatal("validateCodexCommandFlags() accepted -json without a command")
+	}
+	if err := validateCodexCommandFlags(true, false, codexintegration.CommandOptions{Action: codexintegration.CommandSetup}); err != nil {
+		t.Fatalf("validateCodexCommandFlags() error = %v", err)
+	}
+}
+
+func TestIsCodexJSONInvocation(t *testing.T) {
+	tests := []struct {
+		args []string
+		want bool
+	}{
+		{args: []string{"-codex-doctor", "-json"}, want: true},
+		{args: []string{"--json=true", "--codex-setup=true"}, want: true},
+		{args: []string{"-codex-doctor", "-json=false"}, want: false},
+		{args: []string{"-json"}, want: false},
+		{args: []string{"-codex-doctor"}, want: false},
+	}
+	for _, test := range tests {
+		if got := isCodexJSONInvocation(test.args); got != test.want {
+			t.Fatalf("isCodexJSONInvocation(%v) = %t, want %t", test.args, got, test.want)
+		}
 	}
 }
