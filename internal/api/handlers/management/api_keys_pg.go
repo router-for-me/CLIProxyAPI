@@ -49,6 +49,24 @@ func (h *Handler) requirePG(c *gin.Context) (*store.APIKeyStore, *store.UsageSto
 	return apiKeys, usage, models, svcPtr, true
 }
 
+// requireMgmtTokens returns false (after writing a 503 response) when the
+// management-token PG store is not wired. Callers should early-return when
+// this returns false. Mirrors requireUsers/requirePG.
+func (h *Handler) requireMgmtTokens(c *gin.Context) (*store.ManagementTokenStore, bool) {
+	if h == nil {
+		h.pgNotConfigured(c)
+		return nil, false
+	}
+	h.mu.Lock()
+	tokens := h.pgMgmtTokens
+	h.mu.Unlock()
+	if tokens == nil {
+		h.pgNotConfigured(c)
+		return nil, false
+	}
+	return tokens, true
+}
+
 // pgCreateKeyRequest is the JSON payload for POST /api-keys-pg.
 //
 // UserID is now REQUIRED (LiteLLM workflow): every API key is owned by an
@@ -94,9 +112,13 @@ type pgPagedKeysResponse struct {
 // ListPGAPIKeys handles GET /v0/management/api-keys-pg.
 //
 // Query parameters:
-//   - page      (default 1)
-//   - page_size (default 25, max 200)
-//   - status    (optional, e.g. "active")
+//   - page       (default 1)
+//   - page_size  (default 25, max 200)
+//   - status     (optional, e.g. "active")
+//   - user_id    (optional, filter to keys owned by this internal user)
+//   - search     (optional, case-insensitive substring on name/alias/prefix)
+//   - sort_by    "created_at" (default) | "name" | "last_used_at" | "user_alias"
+//   - sort_order "desc" (default) | "asc"
 //
 // When no page is supplied, defaults are applied. Unbounded listing is
 // intentionally not supported to bound memory on busy deployments.
@@ -116,8 +138,14 @@ func (h *Handler) ListPGAPIKeys(c *gin.Context) {
 	if pageSize > 200 {
 		pageSize = 200
 	}
-	status := strings.TrimSpace(c.Query("status"))
-	keys, total, err := apiKeys.ListPaged(c.Request.Context(), page, pageSize, status)
+	f := store.APIKeyListFilter{
+		Status:    strings.TrimSpace(c.Query("status")),
+		UserID:    strings.TrimSpace(c.Query("user_id")),
+		Search:    strings.TrimSpace(c.Query("search")),
+		SortBy:    c.DefaultQuery("sort_by", "created_at"),
+		SortOrder: c.DefaultQuery("sort_order", "desc"),
+	}
+	keys, total, err := apiKeys.ListPagedFiltered(c.Request.Context(), page, pageSize, f)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return

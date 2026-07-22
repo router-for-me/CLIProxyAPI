@@ -114,6 +114,11 @@ type PgStoreHandles struct {
 	// catalog files for source_type=file pricing sources. Empty when PG
 	// is not configured.
 	PricingSourcesDir string
+	// ManagementTokens is the PG-backed store for management API tokens
+	// that gate access to the /v0/management REST surface (per-token policy
+	// + audit log). nil when PG is not configured — the /api-tokens routes
+	// return 503 in that case.
+	ManagementTokens *store.ManagementTokenStore
 }
 
 // ServerOption customises HTTP server construction.
@@ -424,6 +429,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.mgmt.SetErrorMessagesStore(handles.ErrorMessages)
 		s.mgmt.SetPricingSourcesStore(handles.PricingSources, handles.PricingSourcesDir)
 		s.mgmt.SetUserStore(handles.Users)
+		s.mgmt.SetManagementTokenStore(handles.ManagementTokens)
 	}
 	// Wire the /v1/models invoker so the management endpoint
 	// POST /v0/management/models-catalog/sync-from-v1 can probe the live
@@ -900,7 +906,7 @@ func (s *Server) registerManagementRoutes() {
 	s.engine.GET("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.GetOAuthCallback)
 
 	mgmt := s.engine.Group("/v0/management")
-	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
+	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), s.mgmt.EnforceTokenPolicy(), s.mgmt.AuditTokenCall())
 	{
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
@@ -1128,6 +1134,21 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
+
+		// PG-backed management API tokens: gate access to the /v0/management
+		// REST surface with per-token policy (read/write scope, per-endpoint
+		// allowlist, RPM + max-parallel limits, expiry) and a full audit log
+		// of every call made with a token (request/response bodies, status,
+		// latency, errors). Return 503 when the PG store is not configured.
+		mgmt.GET("/api-tokens", s.mgmt.ListAPITokens)
+		mgmt.POST("/api-tokens", s.mgmt.CreateAPIToken)
+		mgmt.GET("/api-tokens/audit-log", s.mgmt.ListAPITokenAuditLog)
+		mgmt.GET("/api-tokens/audit-log/:id", s.mgmt.GetAPITokenAuditEntry)
+		mgmt.GET("/api-tokens/:id", s.mgmt.GetAPIToken)
+		mgmt.PATCH("/api-tokens/:id", s.mgmt.PatchAPIToken)
+		mgmt.PUT("/api-tokens/:id/policy", s.mgmt.PutAPITokenPolicy)
+		mgmt.POST("/api-tokens/:id/regenerate", s.mgmt.RegenerateAPIToken)
+		mgmt.DELETE("/api-tokens/:id", s.mgmt.DeleteAPIToken)
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)

@@ -76,6 +76,11 @@ type Handler struct {
 	pgSync    *registry.PGSync
 	policySvc policy.PolicyService
 
+	// pgMgmtTokens stores management API tokens that gate access to the
+	// /v0/management REST surface (per-token policy + audit log). nil when PG
+	// is not configured — the /api-tokens routes return 503 in that case.
+	pgMgmtTokens *store.ManagementTokenStore
+
 	// v1ModelsHandler is the http.Handler that serves GET /v1/models. It is
 	// wired by api.Server after route setup so the management handler can
 	// trigger an in-process sync into models_catalog without a network
@@ -140,6 +145,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		envSecret:           envSecret,
 	}
 	h.startAttemptCleanup()
+	StartMgmtAuditSweep()
 	return h
 }
 
@@ -225,6 +231,19 @@ func (h *Handler) SetV1ModelsHandler(handler http.Handler) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.v1ModelsHandler = handler
+}
+
+// SetManagementTokenStore wires the optional PG-backed management API token
+// store (tokens + policy + audit log). When nil, the /v0/management/api-tokens
+// routes return 503 and token-based authentication is disabled (callers fall
+// back to the static management secret / local password).
+func (h *Handler) SetManagementTokenStore(tokens *store.ManagementTokenStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pgMgmtTokens = tokens
 }
 
 // SetErrorMessagesStore wires the PG-backed store for operator-customized
@@ -436,6 +455,25 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 
 		allowed, statusCode, errMsg := h.AuthenticateManagementKey(clientIP, localClient, provided)
 		if !allowed {
+			// Static-secret auth failed. Before rejecting, attempt to
+			// authenticate the credential as a management API token
+			// (per-token policy + audit log). A resolved token is stashed
+			// in the context so the EnforceTokenPolicy + AuditTokenCall
+			// middlewares can act on it. The IP-ban logic above already ran
+			// for the static-secret miss; token failures are not added to
+			// the ban counter to avoid locking out legit token users.
+			if provided != "" {
+				if tok, pol := h.authenticateManagementToken(c.Request.Context(), provided); tok != nil {
+					// Token auth succeeded. Stash the token + policy and
+					// proceed; the per-token enforcement middleware will
+					// gate scope/endpoints/rate downstream.
+					c.Set(ctxMgmtToken, tok)
+					c.Set(ctxMgmtPolicy, pol)
+					c.Set(ctxMgmtProvided, provided)
+					c.Next()
+					return
+				}
+			}
 			c.AbortWithStatusJSON(statusCode, gin.H{"error": errMsg})
 			return
 		}

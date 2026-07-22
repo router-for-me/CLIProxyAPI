@@ -628,6 +628,7 @@ func main() {
 		pgUsageStore  *store.UsageStore
 		pgModelsStore *store.ModelsStore
 		pgUserStore   *store.UserStore
+		pgMgmtTokens  *store.ManagementTokenStore
 		pgSyncAdapter *registry.PGSync
 		policySvc     policy.PolicyService
 		usageFlusher  *store.UsageFlusher
@@ -637,6 +638,7 @@ func main() {
 		pgUsageStore = store.NewUsageStore(pgStoreInst)
 		pgModelsStore = store.NewModelsStore(pgStoreInst)
 		pgUserStore = store.NewUserStore(pgStoreInst)
+		pgMgmtTokens = store.NewManagementTokenStore(pgStoreInst)
 		pgSyncAdapter = registry.NewPGSync(store.NewPGModelsAdapter(pgModelsStore))
 		policySvc = policy.NewService(pgAPIKeyStore, pgUsageStore, policy.ServiceConfig{})
 		// Attach the user store so per-user budget/RPM enforcement is
@@ -707,6 +709,7 @@ func main() {
 			ErrorMessages:     pgErrorMessages,
 			PricingSources:    pgPricingSources,
 			PricingSourcesDir: pgPricingSourcesDir,
+			ManagementTokens:  pgMgmtTokens,
 		}))
 	}
 
