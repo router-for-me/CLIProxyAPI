@@ -419,6 +419,9 @@ type FileRequestLogger struct {
 	errorLogsMaxFiles int
 
 	homeEnabled bool
+
+	// format specifies log entry structure ("text" or "json").
+	format string
 }
 
 type homeRequestLogPayload struct {
@@ -485,6 +488,11 @@ func (l *FileRequestLogger) forwardRequestLogToHome(ctx context.Context, headers
 // Returns:
 //   - *FileRequestLogger: A new file-based request logger instance
 func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorLogsMaxFiles int) *FileRequestLogger {
+	return NewFileRequestLoggerWithFormat(enabled, logsDir, configDir, errorLogsMaxFiles, "text")
+}
+
+// NewFileRequestLoggerWithFormat creates a new file-based request logger with specified format ("text" or "json").
+func NewFileRequestLoggerWithFormat(enabled bool, logsDir string, configDir string, errorLogsMaxFiles int, format string) *FileRequestLogger {
 	// Resolve logsDir relative to the configuration file directory when it's not absolute.
 	if !filepath.IsAbs(logsDir) {
 		// If configDir is provided, resolve logsDir relative to it.
@@ -492,11 +500,16 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 			logsDir = filepath.Join(configDir, logsDir)
 		}
 	}
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format != "json" {
+		format = "text"
+	}
 	return &FileRequestLogger{
 		enabled:           enabled,
 		logsDir:           logsDir,
 		errorLogsMaxFiles: errorLogsMaxFiles,
 		homeEnabled:       false,
+		format:            format,
 	}
 }
 
@@ -935,6 +948,111 @@ func (l *FileRequestLogger) writeRequestBodyTempFile(body []byte) (string, error
 	return tmpPath, nil
 }
 
+type jsonLogPayload struct {
+	Version             string              `json:"version"`
+	URL                 string              `json:"url"`
+	Method              string              `json:"method"`
+	DownstreamTransport string              `json:"downstream_transport,omitempty"`
+	UpstreamTransport   string              `json:"upstream_transport,omitempty"`
+	Timestamp           string              `json:"timestamp"`
+	Headers             map[string][]string `json:"headers,omitempty"`
+	RequestBody         json.RawMessage     `json:"request_body,omitempty"`
+	RequestBodyRaw      string              `json:"request_body_raw,omitempty"`
+	Response            *jsonLogResponse    `json:"response,omitempty"`
+}
+
+type jsonLogResponse struct {
+	Status  int                 `json:"status"`
+	Headers map[string][]string `json:"headers,omitempty"`
+	Body    json.RawMessage     `json:"body,omitempty"`
+	BodyRaw string              `json:"body_raw,omitempty"`
+}
+
+func (l *FileRequestLogger) writeJSONLog(
+	w io.Writer,
+	url, method string,
+	requestHeaders map[string][]string,
+	requestBody []byte,
+	requestBodyPath string,
+	statusCode int,
+	responseHeaders map[string][]string,
+	response []byte,
+	requestTimestamp time.Time,
+	downstreamTransport string,
+	upstreamTransport string,
+) error {
+	if requestTimestamp.IsZero() {
+		requestTimestamp = time.Now()
+	}
+
+	maskedHeaders := make(map[string][]string, len(requestHeaders))
+	for k, vals := range requestHeaders {
+		mVals := make([]string, len(vals))
+		for i, v := range vals {
+			mVals[i] = util.MaskSensitiveHeaderValue(k, v)
+		}
+		maskedHeaders[k] = mVals
+	}
+
+	var reqBodyBytes []byte
+	if requestBodyPath != "" {
+		if b, err := os.ReadFile(requestBodyPath); err == nil {
+			reqBodyBytes = b
+		}
+	} else {
+		reqBodyBytes = requestBody
+	}
+
+	entry := jsonLogPayload{
+		Version:             buildinfo.Version,
+		URL:                 url,
+		Method:              method,
+		DownstreamTransport: downstreamTransport,
+		UpstreamTransport:   upstreamTransport,
+		Timestamp:           requestTimestamp.Format(time.RFC3339Nano),
+		Headers:             maskedHeaders,
+	}
+
+	if len(reqBodyBytes) > 0 {
+		if json.Valid(reqBodyBytes) {
+			entry.RequestBody = json.RawMessage(reqBodyBytes)
+		} else {
+			entry.RequestBodyRaw = string(reqBodyBytes)
+		}
+	}
+
+	respObj := &jsonLogResponse{
+		Status: statusCode,
+	}
+	if len(responseHeaders) > 0 {
+		mRespHeaders := make(map[string][]string, len(responseHeaders))
+		for k, vals := range responseHeaders {
+			mVals := make([]string, len(vals))
+			for i, v := range vals {
+				mVals[i] = util.MaskSensitiveHeaderValue(k, v)
+			}
+			mRespHeaders[k] = mVals
+		}
+		respObj.Headers = mRespHeaders
+	}
+	if len(response) > 0 {
+		if json.Valid(response) {
+			respObj.Body = json.RawMessage(response)
+		} else {
+			respObj.BodyRaw = string(response)
+		}
+	}
+	entry.Response = respObj
+
+	data, err := json.Marshal(&entry)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	_, errWrite := w.Write(data)
+	return errWrite
+}
+
 func (l *FileRequestLogger) writeNonStreamingLog(
 	w io.Writer,
 	url, method string,
@@ -963,6 +1081,10 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	isWebsocketTranscript := hasSectionPayload(websocketTimeline) || hasFileBodySourcePayload(websocketTimelineSource)
 	downstreamTransport := inferDownstreamTransport(requestHeaders, websocketTimeline, websocketTimelineSource)
 	upstreamTransport := inferUpstreamTransport(apiRequest, apiRequestSource, apiResponse, apiResponseSource, apiWebsocketTimeline, apiWebsocketTimelineSource, apiResponseErrors)
+
+	if l.format == "json" && !isWebsocketTranscript {
+		return l.writeJSONLog(w, url, method, requestHeaders, requestBody, requestBodyPath, statusCode, responseHeaders, response, requestTimestamp, downstreamTransport, upstreamTransport)
+	}
 	if errWrite := writeRequestInfoWithBody(w, url, method, requestHeaders, requestBody, requestBodyPath, requestTimestamp, downstreamTransport, upstreamTransport, !isWebsocketTranscript); errWrite != nil {
 		return errWrite
 	}
