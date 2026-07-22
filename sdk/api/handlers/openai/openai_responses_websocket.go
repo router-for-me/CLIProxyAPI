@@ -689,8 +689,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				forceTranscriptReplayNextRequest = false
 			}
 		} else {
-			if !requestReplacesToolTranscript {
-				requestJSON = repairResponsesWebsocketToolCalls(toolSessionKey, requestJSON, lastResponsePendingToolCallIDs...)
+			pendingToolCallIDs := lastResponsePendingToolCallIDs
+			if stateLossReplayAttempted {
+				// A state-loss replay is a fresh HTTP transcript. Pending call IDs from
+				// the lost websocket must not preserve calls that have no output in the
+				// replay, and full transcript replacements still need pair validation.
+				pendingToolCallIDs = nil
+			}
+			if !requestReplacesToolTranscript || stateLossReplayAttempted {
+				requestJSON = repairResponsesWebsocketToolCalls(toolSessionKey, requestJSON, pendingToolCallIDs...)
 			}
 			requestJSON = dedupeResponsesWebsocketInputItemsByID(requestJSON)
 			updatedLastRequest = bytes.Clone(requestJSON)
