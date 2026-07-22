@@ -18,6 +18,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 
 	var cfg Config
 	// Keep defaults aligned with LoadConfigOptional.
+	cfg.CodexIntegration = DefaultCodexIntegrationConfig()
 	cfg.Host = "" // Default empty: binds to all interfaces (IPv4 + IPv6)
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
@@ -93,6 +94,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 	cfg.SanitizeOAuthModelAlias()
 	cfg.SanitizePayloadRules()
+	if err := cfg.NormalizeCodexIntegration(); err != nil {
+		return nil, err
+	}
 
 	return &cfg, nil
 }
