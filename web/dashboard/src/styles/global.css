@@ -1494,3 +1494,215 @@ tr:focus-within .row-actions {
   color: var(--text-dim);
   margin-bottom: 6px;
 }
+
+/* =========================================================================
+   Developer / API Docs page
+   ========================================================================= */
+.devdocs__header { flex-wrap: wrap; gap: 12px; }
+.devdocs__search { min-width: 260px; max-width: 320px; }
+
+.devdocs__layout {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 24px;
+  align-items: start;
+}
+.devdocs__nav {
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 0;
+  border-right: 1px solid var(--border);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
+.devdocs__nav-link {
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--text-dim);
+  text-decoration: none;
+  border-radius: var(--radius-sm);
+  border-left: 2px solid transparent;
+  transition: background 0.12s, color 0.12s;
+}
+.devdocs__nav-link:hover { color: var(--text); background: var(--bg-card); }
+.devdocs__nav-link.active {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: var(--bg-card);
+}
+
+.devdocs__content { min-width: 0; }
+.devdocs__section { margin-bottom: 32px; scroll-margin-top: 16px; }
+.devdocs__section-title { margin: 0 0 8px; font-size: 18px; }
+.devdocs__section-desc { color: var(--text-dim); margin: 0 0 16px; font-size: 13px; line-height: 1.5; }
+
+.devdocs__endpoint { margin-bottom: 16px; }
+.devdocs__endpoint-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.devdocs__method {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+  color: #fff;
+}
+.devdocs__method--get { background: #2563eb; }
+.devdocs__method--post { background: #16a34a; }
+.devdocs__method--patch { background: #d97706; }
+.devdocs__method--put { background: #7c3aed; }
+.devdocs__method--delete { background: var(--danger); }
+.devdocs__path { font-size: 14px; word-break: break-all; }
+
+.devdocs__summary { margin: 0 0 12px; font-size: 13px; color: var(--text); line-height: 1.5; }
+
+.devdocs__params { margin-bottom: 12px; }
+.devdocs__params .table { width: 100%; }
+
+.devdocs__responses { margin-top: 12px; }
+.devdocs__response { margin-bottom: 10px; padding: 10px; background: var(--bg); border-radius: var(--radius-sm); border: 1px solid var(--border); }
+.devdocs__response-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.devdocs__status {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.devdocs__status--ok { background: rgba(34, 197, 94, 0.15); color: var(--success); }
+.devdocs__status--error { background: rgba(220, 38, 38, 0.15); color: var(--danger); }
+
+.devdocs__codeblock { margin: 10px 0; }
+.devdocs__codeblock-title { font-size: 12px; color: var(--text-dim); margin-bottom: 4px; text-transform: none; }
+.devdocs__code { white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow: auto; font-size: 12px; }
+
+@media (max-width: 820px) {
+  .devdocs__layout { grid-template-columns: 1fr; }
+  .devdocs__nav {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 8px 0 12px;
+    max-height: none;
+  }
+  .devdocs__nav-link { border-left: none; border-bottom: 2px solid transparent; }
+  .devdocs__nav-link.active { border-left: none; border-bottom-color: var(--accent); }
+}
+
+/* =========================================================================
+   EndpointMultiSelect (token policy editor)
+   Mirrors .model-multiselect tokens, plus grouped dropdown + method badges.
+   ========================================================================= */
+.endpoint-multiselect {
+  position: relative;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  transition: border-color 0.12s ease;
+}
+.endpoint-multiselect.is-open,
+.endpoint-multiselect:focus-within {
+  border-color: var(--accent);
+}
+.endpoint-multiselect__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 8px;
+  min-height: 38px;
+  align-items: center;
+}
+.endpoint-multiselect__input {
+  flex: 1 1 160px;
+  min-width: 160px;
+  border: none;
+  background: transparent;
+  padding: 4px 6px;
+  outline: none;
+  width: auto;
+}
+.endpoint-multiselect__dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 50;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  max-height: 320px;
+  overflow-y: auto;
+}
+.endpoint-multiselect__group { padding: 4px 0; }
+.endpoint-multiselect__group-label {
+  padding: 6px 12px 2px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  position: sticky;
+  top: 0;
+  background: var(--bg-elevated);
+}
+.endpoint-multiselect__list {
+  list-style: none;
+  margin: 0;
+  padding: 0 4px;
+}
+.endpoint-multiselect__option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+}
+.endpoint-multiselect__option.is-highlight {
+  background: var(--bg-card);
+}
+.endpoint-multiselect__option.is-selected {
+  color: var(--text-muted);
+}
+.endpoint-multiselect__method {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+  color: #fff;
+}
+.endpoint-multiselect__method--get { background: #2563eb; }
+.endpoint-multiselect__method--post { background: #16a34a; }
+.endpoint-multiselect__method--patch { background: #d97706; }
+.endpoint-multiselect__method--put { background: #7c3aed; }
+.endpoint-multiselect__method--delete { background: var(--danger); }
+.endpoint-multiselect__option-path {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.endpoint-multiselect__option-glob {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--accent);
+  opacity: 0.8;
+}
+.endpoint-multiselect__option-check {
+  flex: 0 0 auto;
+  color: var(--success);
+}
+.endpoint-multiselect__status {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
