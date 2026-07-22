@@ -150,11 +150,15 @@ export async function verifyToken() {
 
 // --- PG-backed API Keys + Policies ------------------------------------------
 
-export async function listAPIKeys({ page = 1, pageSize = 25, status = '' } = {}) {
+export async function listAPIKeys({ page = 1, pageSize = 25, status = '', search = '', userId = '', sortBy = '', sortOrder = '' } = {}) {
   const qs = new URLSearchParams();
   qs.set('page', String(page));
   qs.set('page_size', String(pageSize));
   if (status) qs.set('status', status);
+  if (search) qs.set('search', search);
+  if (userId) qs.set('user_id', userId);
+  if (sortBy) qs.set('sort_by', sortBy);
+  if (sortOrder) qs.set('sort_order', sortOrder);
   return fetchJSON(`/api-keys-pg?${qs}`);
 }
 
@@ -1080,4 +1084,83 @@ function cleanOpenAIModels(models) {
       ...(m.display_name ? { 'display-name': m.display_name } : {}),
       ...(m.force_mapping ? { 'force-mapping': true } : {}),
     }));
+}
+
+// --- Management API Tokens (gate access to /v0/management REST) -----------
+
+export async function listAPITokens({ page = 1, pageSize = 25, status = '', scope = '', search = '', sortBy = '', sortOrder = '' } = {}) {
+  const qs = new URLSearchParams();
+  qs.set('page', String(page));
+  qs.set('page_size', String(pageSize));
+  if (status) qs.set('status', status);
+  if (scope) qs.set('scope', scope);
+  if (search) qs.set('search', search);
+  if (sortBy) qs.set('sort_by', sortBy);
+  if (sortOrder) qs.set('sort_order', sortOrder);
+  return fetchJSON(`/api-tokens?${qs}`);
+}
+
+export async function getAPIToken(id) {
+  return fetchJSON(`/api-tokens/${encodeURIComponent(id)}`);
+}
+
+// createAPIToken creates a new management API token. The plaintext secret is
+// returned ONCE in the response (secret field); the dashboard surfaces it
+// immediately and the value is never recoverable afterwards. Scope defaults
+// to "read" on the server when omitted; pass "write" to allow mutations.
+export async function createAPIToken({ name, scope = 'read', expires_at, metadata, policy }) {
+  return fetchJSON('/api-tokens', {
+    method: 'POST',
+    body: JSON.stringify({ name, scope, expires_at, metadata, policy }),
+  });
+}
+
+export async function patchAPIToken(id, patch) {
+  return fetchJSON(`/api-tokens/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function putAPITokenPolicy(id, policy) {
+  return fetchJSON(`/api-tokens/${encodeURIComponent(id)}/policy`, {
+    method: 'PUT',
+    body: JSON.stringify(policy),
+  });
+}
+
+export async function regenerateAPIToken(id) {
+  return fetchJSON(`/api-tokens/${encodeURIComponent(id)}/regenerate`, {
+    method: 'POST',
+  });
+}
+
+export async function deleteAPIToken(id) {
+  await fetchJSON(`/api-tokens/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export async function getAPITokenAuditLog({
+  page = 1,
+  pageSize = 25,
+  tokenId = '',
+  method = '',
+  path = '',
+  errorsOnly = false,
+  from = '',
+  to = '',
+} = {}) {
+  const qs = new URLSearchParams();
+  qs.set('page', String(page));
+  qs.set('page_size', String(pageSize));
+  if (tokenId) qs.set('token_id', tokenId);
+  if (method) qs.set('method', method);
+  if (path) qs.set('path', path);
+  if (errorsOnly) qs.set('errors_only', '1');
+  if (from) qs.set('from', from);
+  if (to) qs.set('to', to);
+  return fetchJSON(`/api-tokens/audit-log?${qs}`);
+}
+
+export async function getAPITokenAuditEntry(id) {
+  return fetchJSON(`/api-tokens/audit-log/${encodeURIComponent(id)}`);
 }
