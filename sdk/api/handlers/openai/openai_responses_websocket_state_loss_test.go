@@ -18,11 +18,15 @@ func TestShouldRetryResponsesWebsocketAfterMissingToolOutput(t *testing.T) {
 		Error:      fmt.Errorf(`{"status":400,"error":{"type":"invalid_request_error","message":"No tool output found for custom tool call call-2.","param":"input"}}`),
 	}
 	payload := []byte(`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"message","role":"user","content":"continue"}]}`)
+	fullTranscriptPayload := []byte(`{"type":"response.create","input":[{"type":"message","role":"assistant","content":"delegating"},{"type":"function_call","call_id":"call-1","name":"spawn_agent","arguments":"{}"},{"type":"message","role":"user","content":"continue"}]}`)
 	lastRequest := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"start"}]}`)
 
 	for _, errMsg := range []*interfaces.ErrorMessage{functionCallErr, customToolCallErr} {
 		if !shouldRetryResponsesWebsocketAfterUpstreamStateLoss(errMsg, payload, lastRequest, false) {
 			t.Fatalf("missing tool output error was not retryable: %v", errMsg.Error)
+		}
+		if !shouldRetryResponsesWebsocketAfterUpstreamStateLoss(errMsg, fullTranscriptPayload, lastRequest, false) {
+			t.Fatalf("missing tool output error from a full transcript was not retryable: %v", errMsg.Error)
 		}
 		if shouldRetryResponsesWebsocketAfterUpstreamStateLoss(errMsg, payload, lastRequest, true) {
 			t.Fatalf("missing tool output error retried more than once: %v", errMsg.Error)

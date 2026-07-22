@@ -13,8 +13,8 @@ func shouldRetryResponsesWebsocketAfterUpstreamStateLoss(errMsg *interfaces.Erro
 		shouldRetryResponsesWebsocketAfterMissingUpstreamSession(errMsg, rawPayload, lastRequest, attempted)
 }
 
-func shouldRetryResponsesWebsocketAfterMissingToolOutput(errMsg *interfaces.ErrorMessage, rawPayload []byte, lastRequest []byte, attempted bool) bool {
-	if attempted || len(lastRequest) == 0 || !responsesWebsocketRequestRequiresUpstreamContext(rawPayload) {
+func shouldRetryResponsesWebsocketAfterMissingToolOutput(errMsg *interfaces.ErrorMessage, _ []byte, lastRequest []byte, attempted bool) bool {
+	if attempted || len(lastRequest) == 0 {
 		return false
 	}
 	if errMsg == nil || errMsg.Error == nil {

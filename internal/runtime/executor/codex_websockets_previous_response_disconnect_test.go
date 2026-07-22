@@ -17,10 +17,14 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
-func TestCodexWebsocketShouldNotifyUpstreamDisconnectOnlySuppressesDownstreamPreviousResponseMiss(t *testing.T) {
+func TestCodexWebsocketShouldNotifyUpstreamDisconnectSuppressesDownstreamReplayableErrors(t *testing.T) {
 	previousResponseErr := statusErr{
 		code: http.StatusBadRequest,
 		msg:  `{"status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response with id 'resp-1' not found.","param":"previous_response_id"}}`,
+	}
+	missingToolOutputErr := statusErr{
+		code: http.StatusBadRequest,
+		msg:  `{"status":400,"error":{"type":"invalid_request_error","message":"No tool output found for function call call-1.","param":"input"}}`,
 	}
 	genericErr := statusErr{
 		code: http.StatusInternalServerError,
@@ -33,15 +37,43 @@ func TestCodexWebsocketShouldNotifyUpstreamDisconnectOnlySuppressesDownstreamPre
 	if helps.CodexWebsocketShouldNotifyUpstreamDisconnect(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), previousResponseErr) {
 		t.Fatal("downstream previous_response_not_found should not notify before transcript replay can run")
 	}
+	if !helps.CodexWebsocketShouldNotifyUpstreamDisconnect(context.Background(), missingToolOutputErr) {
+		t.Fatal("non-downstream missing tool output should still notify disconnect subscribers")
+	}
+	if helps.CodexWebsocketShouldNotifyUpstreamDisconnect(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), missingToolOutputErr) {
+		t.Fatal("downstream missing tool output should not notify before transcript replay can run")
+	}
 	if !helps.CodexWebsocketShouldNotifyUpstreamDisconnect(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), genericErr) {
 		t.Fatal("downstream generic upstream errors should still notify disconnect subscribers")
 	}
 }
 
-func TestCodexWebsocketsExecuteStreamDoesNotNotifyDisconnectForReplayablePreviousResponseMiss(t *testing.T) {
+func TestCodexWebsocketsExecuteStreamDoesNotNotifyDisconnectForReplayableRequestErrors(t *testing.T) {
+	cases := []struct {
+		name         string
+		errorPayload []byte
+	}{
+		{
+			name:         "previous response missing",
+			errorPayload: []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response with id 'resp-1' not found.","param":"previous_response_id"}}`),
+		},
+		{
+			name:         "tool output missing",
+			errorPayload: []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"No tool output found for function call call-1.","param":"input"}}`),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertCodexWebsocketReplayableRequestErrorDoesNotNotifyDisconnect(t, tc.errorPayload)
+		})
+	}
+}
+
+func assertCodexWebsocketReplayableRequestErrorDoesNotNotifyDisconnect(t *testing.T, errorPayload []byte) {
+	t.Helper()
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	errCh := make(chan error, 2)
-	errorPayload := []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response with id 'resp-1' not found.","param":"previous_response_id"}}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/responses" {
 			errCh <- fmt.Errorf("request path = %s, want /responses", r.URL.Path)
@@ -60,13 +92,13 @@ func TestCodexWebsocketsExecuteStreamDoesNotNotifyDisconnectForReplayablePreviou
 			return
 		}
 		if errWrite := conn.WriteMessage(websocket.TextMessage, errorPayload); errWrite != nil {
-			errCh <- fmt.Errorf("write previous response error: %w", errWrite)
+			errCh <- fmt.Errorf("write replayable request error: %w", errWrite)
 		}
 	}))
 	defer server.Close()
 
 	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
-	sessionID := "sess-previous-response-miss"
+	sessionID := t.Name()
 	disconnectCh := exec.UpstreamDisconnectChan(sessionID)
 	if disconnectCh == nil {
 		t.Fatal("expected disconnect channel")
@@ -93,13 +125,13 @@ func TestCodexWebsocketsExecuteStreamDoesNotNotifyDisconnectForReplayablePreviou
 	select {
 	case chunk, ok := <-result.Chunks:
 		if !ok {
-			t.Fatal("stream closed before previous-response error chunk")
+			t.Fatal("stream closed before replayable request error chunk")
 		}
 		if len(bytes.TrimSpace(chunk.Payload)) != 0 {
 			t.Fatalf("error chunk payload = %s, want empty", chunk.Payload)
 		}
 		if chunk.Err == nil {
-			t.Fatal("error chunk Err = nil, want previous_response_not_found")
+			t.Fatal("error chunk Err = nil, want replayable request error")
 		}
 		statusErr, ok := chunk.Err.(interface{ StatusCode() int })
 		if !ok || statusErr.StatusCode() != http.StatusBadRequest {
@@ -109,7 +141,7 @@ func TestCodexWebsocketsExecuteStreamDoesNotNotifyDisconnectForReplayablePreviou
 		t.Fatal("timed out waiting for previous-response error chunk")
 	}
 
-	assertNoCodexWebsocketDisconnectSignal(t, disconnectCh, "for replayable previous_response_not_found")
+	assertNoCodexWebsocketDisconnectSignal(t, disconnectCh, "for replayable request error")
 	select {
 	case errServer := <-errCh:
 		t.Fatal(errServer)
