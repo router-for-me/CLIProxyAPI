@@ -284,7 +284,12 @@ type CodexHeaderDefaults struct {
 
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
-	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
+	IdentityConfuse              bool `yaml:"identity-confuse" json:"identity-confuse"`
+	ConnectTimeoutSeconds        int  `yaml:"connect-timeout-seconds" json:"connect-timeout-seconds"`
+	ResponseHeaderTimeoutSeconds int  `yaml:"response-header-timeout-seconds" json:"response-header-timeout-seconds"`
+	FirstEventTimeoutSeconds     int  `yaml:"first-event-timeout-seconds" json:"first-event-timeout-seconds"`
+	StreamIdleTimeoutSeconds     int  `yaml:"stream-idle-timeout-seconds" json:"stream-idle-timeout-seconds"`
+	WebsocketPingIntervalSeconds int  `yaml:"websocket-ping-interval-seconds" json:"websocket-ping-interval-seconds"`
 }
 
 // TLSConfig holds HTTPS server settings.

@@ -24,6 +24,7 @@ type utlsRoundTripper struct {
 	connections map[string]*http2.ClientConn
 	pending     map[string]*sync.Cond
 	dialer      proxy.Dialer
+	connectTO   time.Duration
 }
 
 func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
@@ -43,7 +44,7 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	}
 }
 
-func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.ClientConn, error) {
+func (t *utlsRoundTripper) getOrCreateConnection(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
 	t.mu.Lock()
 
 	if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
@@ -63,7 +64,7 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.Clie
 	t.pending[host] = cond
 	t.mu.Unlock()
 
-	h2Conn, err := t.createConnection(host, addr)
+	h2Conn, err := t.createConnection(ctx, host, addr)
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -79,10 +80,21 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.Clie
 	return h2Conn, nil
 }
 
-func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientConn, error) {
-	conn, err := t.dialer.Dial("tcp", addr)
+func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if t.connectTO > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, t.connectTO)
+		defer cancel()
+	}
+	conn, err := dialProxyContext(ctx, t.dialer, "tcp", addr)
 	if err != nil {
 		return nil, err
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
 	}
 
 	tlsConfig := &tls.Config{ServerName: host}
@@ -92,6 +104,7 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		conn.Close()
 		return nil, err
 	}
+	_ = conn.SetDeadline(time.Time{})
 
 	tr := &http2.Transport{}
 	h2Conn, err := tr.NewClientConn(tlsConn)
@@ -111,7 +124,7 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	addr := net.JoinHostPort(hostname, port)
 
-	h2Conn, err := t.getOrCreateConnection(hostname, addr)
+	h2Conn, err := t.getOrCreateConnection(req.Context(), hostname, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -127,6 +140,39 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 
 	return resp, nil
+}
+
+type proxyContextDialer interface {
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
+}
+
+func dialProxyContext(ctx context.Context, dialer proxy.Dialer, network, address string) (net.Conn, error) {
+	if contextDialer, ok := dialer.(proxyContextDialer); ok {
+		return contextDialer.DialContext(ctx, network, address)
+	}
+	type dialResult struct {
+		conn net.Conn
+		err  error
+	}
+	resultCh := make(chan dialResult)
+	abandoned := make(chan struct{})
+	go func() {
+		conn, err := dialer.Dial(network, address)
+		select {
+		case resultCh <- dialResult{conn: conn, err: err}:
+		case <-abandoned:
+			if conn != nil {
+				_ = conn.Close()
+			}
+		}
+	}()
+	select {
+	case result := <-resultCh:
+		return result.conn, result.err
+	case <-ctx.Done():
+		close(abandoned)
+		return nil, ctx.Err()
+	}
 }
 
 // utlsProtectedHosts contains the hosts that should use utls Chrome TLS fingerprint
@@ -190,4 +236,48 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		client.Timeout = timeout
 	}
 	return client
+}
+
+// ConfigureHTTPClientTransportTimeouts applies connection and response-header
+// limits without setting http.Client.Timeout, which would also cap long streams.
+func ConfigureHTTPClientTransportTimeouts(client *http.Client, connectTimeout, responseHeaderTimeout time.Duration) {
+	if client == nil {
+		return
+	}
+	transport := client.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	client.Transport = configureRoundTripperTimeouts(transport, connectTimeout, responseHeaderTimeout)
+}
+
+func configureRoundTripperTimeouts(transport http.RoundTripper, connectTimeout, responseHeaderTimeout time.Duration) http.RoundTripper {
+	switch current := transport.(type) {
+	case *fallbackRoundTripper:
+		clone := *current
+		clone.utls = configureRoundTripperTimeouts(clone.utls, connectTimeout, responseHeaderTimeout)
+		clone.fallback = configureRoundTripperTimeouts(clone.fallback, connectTimeout, responseHeaderTimeout)
+		return &clone
+	case *utlsRoundTripper:
+		current.connectTO = connectTimeout
+		return current
+	case *http.Transport:
+		clone := current.Clone()
+		clone.ResponseHeaderTimeout = responseHeaderTimeout
+		baseDial := clone.DialContext
+		if baseDial == nil {
+			baseDial = (&net.Dialer{}).DialContext
+		}
+		clone.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			if connectTimeout <= 0 {
+				return baseDial(ctx, network, address)
+			}
+			dialCtx, cancel := context.WithTimeout(ctx, connectTimeout)
+			defer cancel()
+			return baseDial(dialCtx, network, address)
+		}
+		return clone
+	default:
+		return transport
+	}
 }
