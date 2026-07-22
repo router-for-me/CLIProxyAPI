@@ -3,8 +3,9 @@ package auth
 import "strings"
 
 const (
-	AuthKindAPIKey = "apikey"
-	AuthKindOAuth  = "oauth"
+	AuthKindAPIKey         = "apikey"
+	AuthKindOAuth          = "oauth"
+	AuthKindAgentIdentity  = "agent_identity"
 
 	AuthSourceConfig      = "config"
 	AuthSourceFile        = "file"
@@ -32,6 +33,11 @@ func (a *Auth) AuthKind() string {
 	}
 	if kind := normalizeAuthKind(authMetadataString(a, AttributeAuthKind)); kind != "" {
 		return kind
+	}
+	// Agent Identity must be classified before OAuth fallbacks: files often retain
+	// email / stale refresh_token fields that would otherwise look like OAuth.
+	if IsAgentIdentityAuth(a) {
+		return AuthKindAgentIdentity
 	}
 	if authAttribute(a, AttributeAPIKey) != "" {
 		return AuthKindAPIKey
@@ -79,6 +85,8 @@ func normalizeAuthKind(kind string) string {
 		return AuthKindAPIKey
 	case AuthKindOAuth, "oauth2":
 		return AuthKindOAuth
+	case AuthKindAgentIdentity, "agent-identity":
+		return AuthKindAgentIdentity
 	default:
 		return ""
 	}
@@ -101,6 +109,34 @@ func normalizeAuthSourceKind(source string) string {
 	default:
 		return ""
 	}
+}
+
+
+// IsAgentIdentityAuth reports whether the auth carries Codex Agent Identity material.
+// Detection prefers explicit auth_kind/type, then required signing fields.
+func IsAgentIdentityAuth(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if kind := normalizeAuthKind(authAttribute(auth, AttributeAuthKind)); kind == AuthKindAgentIdentity {
+		return true
+	}
+	if kind := normalizeAuthKind(authMetadataString(auth, AttributeAuthKind)); kind == AuthKindAgentIdentity {
+		return true
+	}
+	if strings.EqualFold(authMetadataString(auth, "type"), AuthKindAgentIdentity) {
+		return true
+	}
+	runtimeID := authMetadataString(auth, "agent_runtime_id")
+	taskID := authMetadataString(auth, "task_id")
+	privateKey := authMetadataString(auth, "agent_private_key")
+	if privateKey == "" {
+		privateKey = authMetadataString(auth, "private_key_pkcs8_base64")
+	}
+	if privateKey == "" {
+		privateKey = authMetadataString(auth, "private_key")
+	}
+	return runtimeID != "" && taskID != "" && privateKey != ""
 }
 
 func authHasOAuthMetadata(auth *Auth) bool {

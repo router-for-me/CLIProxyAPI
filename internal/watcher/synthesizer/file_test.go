@@ -698,3 +698,35 @@ func TestFileSynthesizer_Synthesize_NoteParsing(t *testing.T) {
 		})
 	}
 }
+
+func TestSynthesizeAuthFileAgentIdentityAuthKind(t *testing.T) {
+	tempDir := t.TempDir()
+	fullPath := filepath.Join(tempDir, "codex-agent.json")
+	raw := []byte(`{
+		"type": "codex",
+		"auth_kind": "agent_identity",
+		"email": "agent@example.com",
+		"refresh_token": "stale-refresh",
+		"agent_runtime_id": "agent-1",
+		"task_id": "task-1",
+		"agent_private_key": "cHJpdmF0ZQ=="
+	}`)
+
+	ctx := &SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: tempDir,
+		Now:     time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC),
+	}
+	auths := SynthesizeAuthFile(ctx, fullPath, raw)
+	if len(auths) != 1 {
+		t.Fatalf("SynthesizeAuthFile() len = %d, want 1", len(auths))
+	}
+	auth := auths[0]
+	if got := auth.Attributes["auth_kind"]; got != coreauth.AuthKindAgentIdentity {
+		t.Fatalf("auth_kind attribute = %q, want %q", got, coreauth.AuthKindAgentIdentity)
+	}
+	if got := auth.AuthKind(); got != coreauth.AuthKindAgentIdentity {
+		t.Fatalf("AuthKind() = %q, want %q", got, coreauth.AuthKindAgentIdentity)
+	}
+}
+

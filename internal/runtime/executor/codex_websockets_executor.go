@@ -358,7 +358,11 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	var identityState codexIdentityConfuseState
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
-	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	var errHeaders error
+	wsHeaders, errHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	if errHeaders != nil {
+		return resp, errHeaders
+	}
 	applyModelHeaderOverrides(wsHeaders, baseModel)
 	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
 
@@ -610,7 +614,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	var identityState codexIdentityConfuseState
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
-	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	var errHeaders error
+	wsHeaders, errHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	if errHeaders != nil {
+		return nil, errHeaders
+	}
 	applyModelHeaderOverrides(wsHeaders, baseModel)
 	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
 
@@ -905,7 +913,22 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
+	// AgentAssertion timestamps are short-lived. Always mint a fresh assertion
+	// immediately before DialContext so queued requests and reconnect dials never
+	// reuse a pre-lock / pre-retry Authorization header.
+	dialHeaders := headers
+	if isAgentIdentityAuth(auth) {
+		dialHeaders = http.Header{}
+		if headers != nil {
+			dialHeaders = headers.Clone()
+		}
+		assertion, errAssertion := generateAgentAssertion(auth)
+		if errAssertion != nil {
+			return nil, nil, fmt.Errorf("codex websocket executor: generate agent assertion: %w", errAssertion)
+		}
+		dialHeaders.Set("Authorization", assertion)
+	}
+	conn, resp, err := dialer.DialContext(ctx, wsURL, dialHeaders)
 	if conn != nil {
 		// Avoid gorilla/websocket flate tail validation issues on some upstreams/Go versions.
 		// Negotiating permessage-deflate is fine; we just don't compress outbound messages.
@@ -1151,11 +1174,18 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 	return rawJSON, headers, nil
 }
 
-func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, token string, cfg *config.Config) http.Header {
+func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, token string, cfg *config.Config) (http.Header, error) {
 	if headers == nil {
 		headers = http.Header{}
 	}
-	if strings.TrimSpace(token) != "" {
+	if isAgentIdentityAuth(auth) {
+		// Validate material early, but do not publish Authorization here.
+		// dialCodexWebsocket mints a fresh AgentAssertion immediately before each DialContext.
+		if _, err := generateAgentAssertion(auth); err != nil {
+			return nil, fmt.Errorf("codex websocket executor: generate agent assertion: %w", err)
+		}
+		headers.Del("Authorization")
+	} else if strings.TrimSpace(token) != "" {
 		headers.Set("Authorization", "Bearer "+token)
 	}
 
@@ -1197,12 +1227,17 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		headers.Set("Originator", codexOriginator)
 	}
 	if !isAPIKey {
+		accountID := ""
 		if auth != nil && auth.Metadata != nil {
-			if accountID, ok := auth.Metadata["account_id"].(string); ok {
-				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
-					setHeaderCasePreserved(headers, "ChatGPT-Account-ID", trimmed)
-				}
+			if v, ok := auth.Metadata["account_id"].(string); ok {
+				accountID = strings.TrimSpace(v)
 			}
+		}
+		if accountID == "" {
+			accountID = agentIdentityAccountID(auth)
+		}
+		if accountID != "" {
+			setHeaderCasePreserved(headers, "ChatGPT-Account-ID", accountID)
 		}
 	}
 
@@ -1212,7 +1247,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
 
-	return headers
+	return headers, nil
 }
 
 func ensureCodexWebsocketSessionHeader(target http.Header, source http.Header, fallbackValue string) {

@@ -70,6 +70,26 @@ func TestNextRefreshCheckAt_APIKeyUnschedule(t *testing.T) {
 	}
 }
 
+func TestNextRefreshCheckAt_AgentIdentityUnschedule(t *testing.T) {
+	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
+	auth := &Auth{
+		ID:       "agent-1",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"auth_kind":         AuthKindAgentIdentity,
+			"email":             "agent@example.com",
+			"refresh_token":     "stale-refresh",
+			"agent_runtime_id":  "agent-1",
+			"task_id":           "task-1",
+			"agent_private_key": "cHJpdmF0ZQ==",
+		},
+	}
+	if _, ok := nextRefreshCheckAt(now, auth, 15*time.Minute); ok {
+		t.Fatalf("nextRefreshCheckAt() ok = true, want false for agent identity")
+	}
+}
+
+
 func TestNextRefreshCheckAt_NextRefreshAfterGate(t *testing.T) {
 	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
 	nextAfter := now.Add(30 * time.Minute)

@@ -343,7 +343,9 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 		return time.Time{}, false
 	}
 
-	if auth.AuthKind() == AuthKindAPIKey {
+	switch auth.AuthKind() {
+	case AuthKindAPIKey, AuthKindAgentIdentity:
+		// API keys never refresh; Agent Identity signs each request and has no OAuth token lifecycle.
 		return time.Time{}, false
 	}
 

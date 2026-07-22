@@ -791,7 +791,10 @@ func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) 
 }
 
 func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) {
-	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, "", nil)
+	headers, err := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, "", nil)
+	if err != nil {
+		t.Fatalf("applyCodexWebsocketHeaders() error = %v", err)
+	}
 
 	if got := headers.Get("OpenAI-Beta"); got != codexResponsesWebsocketBetaHeaderValue {
 		t.Fatalf("OpenAI-Beta = %s, want %s", got, codexResponsesWebsocketBetaHeaderValue)
@@ -839,7 +842,10 @@ func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing
 		"session-id":            "legacy-session",
 	})
 
-	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", nil)
+	headers, err := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", nil)
+	if err != nil {
+		t.Fatalf("applyCodexWebsocketHeaders() error = %v", err)
+	}
 
 	if got := headers.Get("Originator"); got != "Codex Desktop" {
 		t.Fatalf("Originator = %s, want %s", got, "Codex Desktop")
@@ -875,7 +881,10 @@ func TestApplyCodexWebsocketHeadersCanonicalizesLegacyUnderscoreSessionHeader(t 
 		"Session_id": "legacy-underscore-session",
 	})
 
-	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", nil)
+	headers, err := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", nil)
+	if err != nil {
+		t.Fatalf("applyCodexWebsocketHeaders() error = %v", err)
+	}
 
 	if got := headers["session_id"]; len(got) != 1 || got[0] != "legacy-underscore-session" {
 		t.Fatalf("session_id = %#v, want [legacy-underscore-session]", got)
@@ -897,7 +906,10 @@ func TestApplyCodexWebsocketHeadersUsesConfigDefaultsForOAuth(t *testing.T) {
 		Metadata: map[string]any{"email": "user@example.com"},
 	}
 
-	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", cfg)
+	headers, err := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", cfg)
+	if err != nil {
+		t.Fatalf("applyCodexWebsocketHeaders() error = %v", err)
+	}
 
 	if got := headers.Get("User-Agent"); got != "my-codex-client/1.0" {
 		t.Fatalf("User-Agent = %s, want %s", got, "my-codex-client/1.0")
@@ -929,7 +941,10 @@ func TestApplyCodexWebsocketHeadersPrefersExistingHeadersOverClientAndConfig(t *
 	headers.Set("User-Agent", "existing-ua")
 	headers.Set("X-Codex-Beta-Features", "existing-beta")
 
-	got := applyCodexWebsocketHeaders(ctx, headers, auth, "", cfg)
+	got, err := applyCodexWebsocketHeaders(ctx, headers, auth, "", cfg)
+	if err != nil {
+		t.Fatalf("applyCodexWebsocketHeaders() error = %v", err)
+	}
 
 	if gotVal := got.Get("User-Agent"); gotVal != "existing-ua" {
 		t.Fatalf("User-Agent = %s, want %s", gotVal, "existing-ua")
@@ -955,7 +970,10 @@ func TestApplyCodexWebsocketHeadersConfigUserAgentOverridesClientHeader(t *testi
 		"X-Codex-Beta-Features": "client-beta",
 	})
 
-	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", cfg)
+	headers, err := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", cfg)
+	if err != nil {
+		t.Fatalf("applyCodexWebsocketHeaders() error = %v", err)
+	}
 
 	if got := headers.Get("User-Agent"); got != "config-ua" {
 		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
@@ -977,7 +995,10 @@ func TestApplyCodexWebsocketHeadersIgnoresConfigForAPIKeyAuth(t *testing.T) {
 		Attributes: map[string]string{"api_key": "sk-test"},
 	}
 
-	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "sk-test", cfg)
+	headers, err := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "sk-test", cfg)
+	if err != nil {
+		t.Fatalf("applyCodexWebsocketHeaders() error = %v", err)
+	}
 
 	if got := headers.Get("User-Agent"); got != "" {
 		t.Fatalf("User-Agent = %s, want empty", got)
@@ -994,7 +1015,10 @@ func TestApplyCodexWebsocketHeadersPreservesExplicitAPIKeyUserAgent(t *testing.T
 	auth := &cliproxyauth.Auth{Provider: "codex", Attributes: map[string]string{"api_key": "sk-test"}}
 	ctx := contextWithGinHeaders(map[string]string{"User-Agent": "api-key-client/1.0", "Originator": "explicit-origin"})
 
-	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "sk-test", nil)
+	headers, err := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "sk-test", nil)
+	if err != nil {
+		t.Fatalf("applyCodexWebsocketHeaders() error = %v", err)
+	}
 
 	if got := headers.Get("User-Agent"); got != "api-key-client/1.0" {
 		t.Fatalf("User-Agent = %s, want api-key-client/1.0", got)
@@ -1007,7 +1031,10 @@ func TestApplyCodexWebsocketHeadersPreservesExplicitAPIKeyUserAgent(t *testing.T
 func TestApplyCodexWebsocketHeadersUsesCanonicalAccountHeader(t *testing.T) {
 	auth := &cliproxyauth.Auth{Provider: "codex", Metadata: map[string]any{"account_id": "acct-1"}}
 
-	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", nil)
+	headers, err := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", nil)
+	if err != nil {
+		t.Fatalf("applyCodexWebsocketHeaders() error = %v", err)
+	}
 
 	if got := headerValueCaseInsensitive(headers, "ChatGPT-Account-ID"); got != "acct-1" {
 		t.Fatalf("ChatGPT-Account-ID = %s, want acct-1", got)
@@ -1111,7 +1138,11 @@ func TestApplyCodexWebsocketHeadersIdentityConfuseRemapsPromptCacheKey(t *testin
 		"X-Codex-Turn-Metadata": `{"prompt_cache_key":"cache-ws-1","turn_id":"turn-ws-1","window_id":"cache-ws-1:0"}`,
 		"X-Client-Request-Id":   "client-request-1",
 	})
-	headers = applyCodexWebsocketHeaders(ctx, headers, auth, "oauth-token", cfg)
+	var err error
+	headers, err = applyCodexWebsocketHeaders(ctx, headers, auth, "oauth-token", cfg)
+	if err != nil {
+		t.Fatalf("applyCodexWebsocketHeaders() error = %v", err)
+	}
 	applyCodexIdentityConfuseHeaders(headers, &identityState)
 
 	expectedPromptCacheKey := codexIdentityConfuseUUID("auth-ws-1", "prompt-cache", "cache-ws-1")

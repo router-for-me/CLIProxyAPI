@@ -65,6 +65,30 @@ func SynthesizeAuthFile(ctx *SynthesisContext, fullPath string, data []byte) []*
 	return synthesizeFileAuths(ctx, fullPath, data)
 }
 
+
+// resolveFileAuthKind decides the shared auth_kind for a synthesized file credential.
+// Codex Agent Identity files must not be labeled oauth: they must be excluded from
+// OAuth-only selection (/alpha/search) and OAuth refresh paths.
+func resolveFileAuthKind(metadata map[string]any) string {
+	auth := &coreauth.Auth{Metadata: metadata}
+	if coreauth.IsAgentIdentityAuth(auth) {
+		return coreauth.AuthKindAgentIdentity
+	}
+	if kind, ok := metadata["auth_kind"].(string); ok {
+		if normalized := strings.ToLower(strings.TrimSpace(kind)); normalized != "" {
+			switch normalized {
+			case coreauth.AuthKindAPIKey, "api_key", "api-key":
+				return coreauth.AuthKindAPIKey
+			case coreauth.AuthKindOAuth, "oauth2":
+				return coreauth.AuthKindOAuth
+			case coreauth.AuthKindAgentIdentity, "agent-identity":
+				return coreauth.AuthKindAgentIdentity
+			}
+		}
+	}
+	return coreauth.AuthKindOAuth
+}
+
 func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []*coreauth.Auth {
 	if ctx == nil || len(data) == 0 {
 		return nil
@@ -206,7 +230,8 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	coreauth.SetOAuthModelAliasesAttribute(a, perAccountModelAliases)
-	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
+	authKind := resolveFileAuthKind(metadata)
+	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, authKind)
 	// For codex auth files, extract plan_type from the JWT id_token.
 	if provider == "codex" {
 		if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {

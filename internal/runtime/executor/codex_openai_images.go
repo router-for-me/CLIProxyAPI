@@ -112,7 +112,9 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	if errCache != nil {
 		return resp, errCache
 	}
-	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+	if err := applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg); err != nil {
+		return resp, err
+	}
 	applyModelHeaderOverrides(httpReq.Header, mainModel)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
@@ -209,7 +211,9 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 	if errCache != nil {
 		return nil, errCache
 	}
-	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+	if err := applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg); err != nil {
+		return nil, err
+	}
 	applyModelHeaderOverrides(httpReq.Header, mainModel)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
@@ -336,7 +340,9 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 	if errCache != nil {
 		return resp, errCache
 	}
-	applyCodexDirectImageHeaders(httpReq, auth, apiKey, false, e.cfg)
+	if err := applyCodexDirectImageHeaders(httpReq, auth, apiKey, false, e.cfg); err != nil {
+		return resp, err
+	}
 	applyModelHeaderOverrides(httpReq.Header, model)
 	if contentType != "" {
 		httpReq.Header.Set("Content-Type", contentType)
@@ -397,7 +403,9 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 	if errCache != nil {
 		return nil, errCache
 	}
-	applyCodexDirectImageHeaders(httpReq, auth, apiKey, true, e.cfg)
+	if err := applyCodexDirectImageHeaders(httpReq, auth, apiKey, true, e.cfg); err != nil {
+		return nil, err
+	}
 	applyModelHeaderOverrides(httpReq.Header, model)
 	if contentType != "" {
 		httpReq.Header.Set("Content-Type", contentType)
