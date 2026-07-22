@@ -275,6 +275,33 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_FlattensNamespaceT
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_QualifiesNamespaceFunctionCallHistory(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"function_call","call_id":"call_get_me","name":"get_me","namespace":"mcp__github","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_get_me","output":"ok"}
+		],
+		"tools": [
+			{
+				"type":"namespace",
+				"name":"mcp__github",
+				"tools":[{"type":"function","name":"get_me","parameters":{"type":"object"}}]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", raw, false)
+
+	gotHistoryName := gjson.GetBytes(out, "messages.0.tool_calls.0.function.name").String()
+	gotDeclaredName := gjson.GetBytes(out, "tools.0.function.name").String()
+	if gotHistoryName != "mcp__github__get_me" {
+		t.Fatalf("history function name = %q, want mcp__github__get_me; output=%s", gotHistoryName, out)
+	}
+	if gotHistoryName != gotDeclaredName {
+		t.Fatalf("history function name = %q, declared function name = %q; output=%s", gotHistoryName, gotDeclaredName, out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_FlattensNamespaceCustomTools(t *testing.T) {
 	tests := []struct {
 		name string
@@ -336,6 +363,13 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesStructure
 		"input": [
 			{"role":"user","content":"Run command."}
 		],
+		"tools": [
+			{
+				"type": "function",
+				"name": "run_command",
+				"parameters": {"type": "object"}
+			}
+		],
 		"tool_choice": {
 			"type": "function",
 			"function": {
@@ -353,6 +387,62 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesStructure
 	}
 	if got := gjson.GetBytes(out, "tool_choice.function.name").String(); got != "run_command" {
 		t.Fatalf("tool_choice.function.name = %q, want run_command; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_OmitsToolSettingsWithoutTools(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{
+			name: "empty tools",
+			raw: []byte(`{
+				"input": [{"role":"user","content":"say ok"}],
+				"tools": [],
+				"tool_choice": "auto",
+				"parallel_tool_calls": false
+			}`),
+		},
+		{
+			name: "unconvertible tools",
+			raw: []byte(`{
+				"tools": [{"type":"unsupported"}],
+				"tool_choice": "auto",
+				"parallel_tool_calls": false
+			}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("grok-4.5", tt.raw, false)
+
+			for _, field := range []string{"tools", "tool_choice", "parallel_tool_calls"} {
+				if got := gjson.GetBytes(out, field); got.Exists() {
+					t.Fatalf("%s should be omitted without tools; output=%s", field, out)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesParallelToolCallsWithTools(t *testing.T) {
+	raw := []byte(`{
+		"tools": [
+			{
+				"type": "function",
+				"name": "run_command",
+				"parameters": {"type": "object"}
+			}
+		],
+		"parallel_tool_calls": false
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("grok-4.5", raw, false)
+
+	if got := gjson.GetBytes(out, "parallel_tool_calls"); !got.Exists() || got.Bool() {
+		t.Fatalf("parallel_tool_calls = %v, want false; output=%s", got.Value(), out)
 	}
 }
 

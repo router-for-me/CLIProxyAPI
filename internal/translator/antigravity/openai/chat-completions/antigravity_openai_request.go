@@ -5,7 +5,6 @@ package chat_completions
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -189,14 +188,10 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						case "file":
 							filename := item.Get("file.filename").String()
 							fileData := item.Get("file.file_data").String()
-							ext := ""
-							if pieces := strings.Split(filename, "."); len(pieces) > 1 {
-								ext = pieces[len(pieces)-1]
-							}
-							if mimeType, ok := misc.MimeTypes[ext]; ok {
-								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, fileData, false))
+							if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData(filename, "", fileData); ok {
+								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data, false))
 							} else {
-								log.Warnf("Unknown file name extension '%s' in user message, skip", ext)
+								log.Warn("Invalid file data or unknown file name extension in user message, skip")
 							}
 						case "input_audio":
 							audioData := item.Get("input_audio.data").String()
@@ -354,9 +349,16 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						fnRaw = string(fnRawBytes)
 					}
 					fnRawBytes := []byte(fnRaw)
-					fnRawBytes, _ = sjson.SetBytes(fnRawBytes, "name", util.MapSanitizedFunctionName(functionNameMap, fn.Get("name").String()))
-					fnRaw, _ = sjson.Delete(string(fnRawBytes), "strict")
-					functionDeclarations = append(functionDeclarations, []byte(fnRaw))
+					nameResult := fn.Get("name")
+					originalName := nameResult.String()
+					mappedName := util.MapSanitizedFunctionName(functionNameMap, originalName)
+					if nameResult.Type != gjson.String || mappedName != originalName {
+						fnRawBytes, _ = sjson.SetBytes(fnRawBytes, "name", mappedName)
+					}
+					if gjson.GetBytes(fnRawBytes, "strict").Exists() {
+						fnRawBytes, _ = sjson.DeleteBytes(fnRawBytes, "strict")
+					}
+					functionDeclarations = append(functionDeclarations, fnRawBytes)
 				}
 			}
 			if gs := t.Get("google_search"); gs.Exists() {
@@ -501,16 +503,16 @@ func applyOpenAIThinkingCompatibilityToAntigravity(out []byte, rawJSON []byte, m
 		"reasoning.include_thoughts",
 	} {
 		if value := gjson.GetBytes(rawJSON, path); value.Exists() {
-			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", value.Bool())
+			out = setAntigravityOpenAIBoolIfDifferent(out, "request.generationConfig.thinkingConfig.includeThoughts", value.Bool())
 		}
 	}
 
 	if exclude := gjson.GetBytes(rawJSON, "reasoning.exclude"); exclude.Exists() {
-		out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", !exclude.Bool())
+		out = setAntigravityOpenAIBoolIfDifferent(out, "request.generationConfig.thinkingConfig.includeThoughts", !exclude.Bool())
 	}
 
 	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Exists() && antigravityOpenAIDefaultIncludeThoughts(modelName) {
-		out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
+		out = setAntigravityOpenAIBoolIfDifferent(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
 	}
 
 	return normalizeAntigravityOpenAIThinkingConfig(out)
@@ -522,22 +524,22 @@ func normalizeAntigravityOpenAIThinkingConfig(out []byte) []byte {
 		"request.generationConfig.thinkingConfig",
 	} {
 		if includeThoughts := gjson.GetBytes(out, prefix+".includeThoughts"); includeThoughts.Exists() {
-			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts.Bool())
+			out = setAntigravityOpenAIBoolIfDifferent(out, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts.Bool())
 		}
 		if includeThoughts := gjson.GetBytes(out, prefix+".include_thoughts"); includeThoughts.Exists() {
-			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts.Bool())
+			out = setAntigravityOpenAIBoolIfDifferent(out, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts.Bool())
 		}
 		if thinkingLevel := gjson.GetBytes(out, prefix+".thinkingLevel"); thinkingLevel.Exists() {
-			out, _ = sjson.SetRawBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel", []byte(thinkingLevel.Raw))
+			out = setAntigravityOpenAIRawIfDifferent(out, "request.generationConfig.thinkingConfig.thinkingLevel", thinkingLevel)
 		}
 		if thinkingLevel := gjson.GetBytes(out, prefix+".thinking_level"); thinkingLevel.Exists() {
-			out, _ = sjson.SetRawBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel", []byte(thinkingLevel.Raw))
+			out = setAntigravityOpenAIRawIfDifferent(out, "request.generationConfig.thinkingConfig.thinkingLevel", thinkingLevel)
 		}
 		if thinkingBudget := gjson.GetBytes(out, prefix+".thinkingBudget"); thinkingBudget.Exists() {
-			out, _ = sjson.SetRawBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", []byte(thinkingBudget.Raw))
+			out = setAntigravityOpenAIRawIfDifferent(out, "request.generationConfig.thinkingConfig.thinkingBudget", thinkingBudget)
 		}
 		if thinkingBudget := gjson.GetBytes(out, prefix+".thinking_budget"); thinkingBudget.Exists() {
-			out, _ = sjson.SetRawBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", []byte(thinkingBudget.Raw))
+			out = setAntigravityOpenAIRawIfDifferent(out, "request.generationConfig.thinkingConfig.thinkingBudget", thinkingBudget)
 		}
 	}
 
@@ -546,7 +548,7 @@ func normalizeAntigravityOpenAIThinkingConfig(out []byte) []byte {
 		"request.generationConfig.include_thoughts",
 	} {
 		if includeThoughts := gjson.GetBytes(out, path); includeThoughts.Exists() {
-			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts.Bool())
+			out = setAntigravityOpenAIBoolIfDifferent(out, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts.Bool())
 		}
 	}
 
@@ -558,10 +560,36 @@ func normalizeAntigravityOpenAIThinkingConfig(out []byte) []byte {
 		"request.generationConfig.includeThoughts",
 		"request.generationConfig.include_thoughts",
 	} {
-		out, _ = sjson.DeleteBytes(out, path)
+		if gjson.GetBytes(out, path).Exists() {
+			out, _ = sjson.DeleteBytes(out, path)
+		}
 	}
 
 	return out
+}
+
+func setAntigravityOpenAIBoolIfDifferent(out []byte, path string, value bool) []byte {
+	current := gjson.GetBytes(out, path)
+	if value && current.Type == gjson.True || !value && current.Type == gjson.False {
+		return out
+	}
+	updated, errSet := sjson.SetBytes(out, path, value)
+	if errSet != nil {
+		return out
+	}
+	return updated
+}
+
+func setAntigravityOpenAIRawIfDifferent(out []byte, path string, value gjson.Result) []byte {
+	current := gjson.GetBytes(out, path)
+	if current.Exists() && current.Raw == value.Raw {
+		return out
+	}
+	updated, errSet := sjson.SetRawBytes(out, path, []byte(value.Raw))
+	if errSet != nil {
+		return out
+	}
+	return updated
 }
 
 func antigravityOpenAIDefaultIncludeThoughts(modelName string) bool {

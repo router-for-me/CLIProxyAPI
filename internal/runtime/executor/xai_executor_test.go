@@ -27,6 +27,7 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"github.com/tiktoken-go/tokenizer"
 )
 
 func testContextWithAPIKey(apiKey string) context.Context {
@@ -35,6 +36,119 @@ func testContextWithAPIKey(apiKey string) context.Context {
 	ginCtx, _ := gin.CreateTestContext(rec)
 	ginCtx.Set("userApiKey", apiKey)
 	return context.WithValue(context.Background(), "gin", ginCtx)
+}
+
+func TestCountXAIInputTokensExcludesRequestStructure(t *testing.T) {
+	enc, err := tokenizer.Get(tokenizer.O200kBase)
+	if err != nil {
+		t.Fatalf("tokenizer.Get() error = %v", err)
+	}
+
+	semanticBody := []byte(`{
+		"instructions":"Follow the repository instructions.",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Review this implementation."}]},
+			{"type":"function_call","name":"read_file","arguments":"{\"path\":\"main.go\"}"},
+			{"type":"function_call_output","output":"package main"},
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"I will inspect the file."}]}
+		],
+		"tools":[{"type":"function","name":"read_file","description":"Reads a file.","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}],
+		"text":{"format":{"name":"result","schema":{"type":"object"}}}
+	}`)
+	structuralBody := []byte(`{
+		"model":"grok-4.5", "stream":false, "reasoning":{"effort":"high"},
+		"metadata":{"large_wrapper":"this metadata must not affect estimated input tokens"},
+		"prompt_cache_key":"session-123", "max_output_tokens":4096,
+		"instructions":"Follow the repository instructions.",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Review this implementation."}]},
+			{"type":"function_call","name":"read_file","arguments":"{\"path\":\"main.go\"}"},
+			{"type":"function_call_output","output":"package main"},
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"I will inspect the file."}]}
+		],
+		"tools":[{"type":"function","name":"read_file","description":"Reads a file.","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}],
+		"text":{"format":{"name":"result","schema":{"type":"object"}}}
+	}`)
+
+	semanticCount, err := countXAIInputTokens(enc, semanticBody)
+	if err != nil {
+		t.Fatalf("countXAIInputTokens() error = %v", err)
+	}
+	structuralCount, err := countXAIInputTokens(enc, structuralBody)
+	if err != nil {
+		t.Fatalf("countXAIInputTokens() error = %v", err)
+	}
+	if structuralCount != semanticCount {
+		t.Fatalf("structural count = %d, want %d", structuralCount, semanticCount)
+	}
+
+	for name, tc := range map[string]struct {
+		body     []byte
+		expected string
+	}{
+		"instructions": {
+			body:     []byte(`{"instructions":"unique instruction text"}`),
+			expected: "unique instruction text",
+		},
+		"string input": {
+			body:     []byte(`{"input":"unique input text"}`),
+			expected: "unique input text",
+		},
+		"message content": {
+			body:     []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"unique message text"}]}]}`),
+			expected: "unique message text",
+		},
+		"refusal": {
+			body:     []byte(`{"input":[{"type":"message","content":[{"type":"refusal","refusal":"unique refusal text"}]}]}`),
+			expected: "unique refusal text",
+		},
+		"input image": {
+			body:     []byte(`{"input":[{"type":"message","content":[{"type":"input_image","image_url":"https://example.com/unique.png"}]}]}`),
+			expected: "https://example.com/unique.png",
+		},
+		"input file": {
+			body:     []byte(`{"input":[{"type":"message","content":[{"type":"input_file","file_data":"unique file data","filename":"unique.txt"}]}]}`),
+			expected: "unique file data\nunique.txt",
+		},
+		"input audio": {
+			body:     []byte(`{"input":[{"type":"message","content":[{"type":"input_audio","data":"unique audio data"}]}]}`),
+			expected: "unique audio data",
+		},
+		"function call": {
+			body:     []byte(`{"input":[{"type":"function_call","call_id":"call-1","name":"unique_function","arguments":"{\"value\":\"unique argument\"}"}]}`),
+			expected: "unique_function\n{\"value\":\"unique argument\"}",
+		},
+		"function call output": {
+			body:     []byte(`{"input":[{"type":"function_call_output","call_id":"call-1","output":"unique tool output"}]}`),
+			expected: "unique tool output",
+		},
+		"reasoning summary": {
+			body:     []byte(`{"input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"unique summary text"}]}]}`),
+			expected: "unique summary text",
+		},
+		"function tool": {
+			body:     []byte(`{"tools":[{"type":"function","name":"unique_tool","description":"unique tool description","parameters":{"type":"object","properties":{"value":{"type":"string"}}}}]}`),
+			expected: "unique_tool\nunique tool description\n{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
+		},
+		"structured text format": {
+			body:     []byte(`{"text":{"format":{"name":"unique_format","schema":{"type":"object","properties":{"value":{"type":"string"}}}}}}`),
+			expected: "unique_format\n{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}}}",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			count, errCount := countXAIInputTokens(enc, tc.body)
+			if errCount != nil {
+				t.Fatalf("countXAIInputTokens() error = %v", errCount)
+			}
+			expected, errExpected := enc.Count(tc.expected)
+			if errExpected != nil {
+				t.Fatalf("encoder.Count() error = %v", errExpected)
+			}
+			if count != int64(expected) {
+				t.Fatalf("countXAIInputTokens() = %d, want %d", count, expected)
+			}
+		})
+	}
 }
 
 func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
@@ -244,15 +358,23 @@ func TestXAIExecutorExecuteRestoresAdditionalToolsNamespaceCalls(t *testing.T) {
 	}
 
 	// additional_tools are promoted to top-level tools, then namespace-flattened.
+	for _, item := range gjson.GetBytes(gotBody, "input").Array() {
+		if got := item.Get("type").String(); got == "additional_tools" {
+			t.Fatalf("upstream input contains unsupported additional_tools item: %s", gotBody)
+		}
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.role").String(); got != "user" {
+		t.Fatalf("input.0.role = %q, want user; body=%s", got, gotBody)
+	}
 	tool := gjson.GetBytes(gotBody, "tools.0")
 	if got := tool.Get("name").String(); got != "mcp__exa__web_search_exa" {
-		t.Fatalf("upstream additional tool name = %q, want qualified name; body=%s", got, gotBody)
+		t.Fatalf("upstream tool name = %q, want qualified name; body=%s", got, gotBody)
 	}
 	if got := tool.Get("type").String(); got != "function" {
-		t.Fatalf("upstream additional tool type = %q, want function; body=%s", got, gotBody)
+		t.Fatalf("upstream tool type = %q, want function; body=%s", got, gotBody)
 	}
 	if tool.Get("tools").Exists() {
-		t.Fatalf("upstream additional tool should not contain namespace children: %s", gotBody)
+		t.Fatalf("upstream tool should not contain namespace children: %s", gotBody)
 	}
 	for _, item := range gjson.GetBytes(gotBody, "input").Array() {
 		if item.Get("type").String() == "additional_tools" {
@@ -2892,24 +3014,39 @@ func TestNormalizeXAITools_QualifiesSameNamedNamespaceTools(t *testing.T) {
 	}
 }
 
-func TestNormalizeXAITools_AdditionalToolsNamespace(t *testing.T) {
+func TestPromoteXAIAdditionalTools(t *testing.T) {
 	body := []byte(`{
+		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],
 		"input":[
 			{"type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"mcp__exa","tools":[{"type":"function","name":"search","parameters":{"type":"object"}}]}]},
-			{"role":"user","content":"hello"}
+			{"role":"user","content":"hello"},
+			{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"custom_lookup"}]}
 		]
 	}`)
-	out := normalizeXAITools(body)
+	out := promoteXAIAdditionalTools(normalizeXAITools(body))
 
-	tools := gjson.GetBytes(out, "input.0.tools").Array()
-	if len(tools) != 1 {
-		t.Fatalf("additional tools length = %d, want 1; body=%s", len(tools), string(out))
+	input := gjson.GetBytes(out, "input").Array()
+	if len(input) != 1 || input[0].Get("role").String() != "user" {
+		t.Fatalf("input should contain only the user message: %s", string(out))
 	}
-	if got := tools[0].Get("name").String(); got != "mcp__exa__search" {
-		t.Fatalf("additional tool name = %q, want mcp__exa__search; body=%s", got, string(out))
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 3 {
+		t.Fatalf("tools length = %d, want 3; body=%s", len(tools), string(out))
 	}
-	if got := tools[0].Get("type").String(); got != "function" {
-		t.Fatalf("additional tool type = %q, want function; body=%s", got, string(out))
+	if got := tools[0].Get("name").String(); got != "lookup" {
+		t.Fatalf("tools.0.name = %q, want lookup; body=%s", got, string(out))
+	}
+	if got := tools[1].Get("name").String(); got != "mcp__exa__search" {
+		t.Fatalf("tools.1.name = %q, want mcp__exa__search; body=%s", got, string(out))
+	}
+	if got := tools[2].Get("name").String(); got != "custom_lookup" {
+		t.Fatalf("tools.2.name = %q, want custom_lookup; body=%s", got, string(out))
+	}
+	if got := tools[2].Get("type").String(); got != "function" {
+		t.Fatalf("tools.2.type = %q, want function; body=%s", got, string(out))
+	}
+	if !tools[2].Get("parameters").Exists() {
+		t.Fatalf("tools.2.parameters missing: %s", string(out))
 	}
 }
 

@@ -21,7 +21,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -499,9 +498,15 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	}
 
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
+		errSend = mapXAIWebsocketWriteError(sess, conn, errSend)
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
 		if sess != nil {
 			e.invalidateUpstreamConn(sess, conn, "send_error", errSend)
+			if !shouldRetryXAIWebsocketSend(errSend) {
+				sess.clearActive(conn, readCh)
+				sess.reqMu.Unlock()
+				return nil, errSend
+			}
 			connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry != nil || connRetry == nil {
 				bodyErrRetry := websocketHandshakeBody(respHSRetry)
@@ -532,8 +537,9 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
 			reporter.StartResponseTTFT()
 			if errSendRetry := writeCodexWebsocketMessage(sess, conn, wsReqBodyRetry); errSendRetry != nil {
+				errSendRetry = mapXAIWebsocketWriteError(sess, connRetry, errSendRetry)
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
-				e.invalidateUpstreamConn(sess, conn, "send_error", errSendRetry)
+				e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
 				sess.clearActive(conn, readCh)
 				sess.reqMu.Unlock()
 				return nil, errSendRetry
@@ -579,6 +585,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			}
 		}
 
+		claudeInputTokens := helps.NewClaudeInputTokenState(prepared.from, prepared.to, prepared.responseFormat, prepared.originalPayload)
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
@@ -601,11 +608,12 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 					_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
 					return
 				}
+				mappedErr := mapXAIWebsocketReadError(errRead)
 				terminateReason = "read_error"
-				terminateErr = errRead
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", errRead)
-				reporter.PublishFailure(ctx, errRead)
-				_ = send(cliproxyexecutor.StreamChunk{Err: errRead})
+				terminateErr = mappedErr
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)
+				reporter.PublishFailure(ctx, mappedErr)
+				_ = send(cliproxyexecutor.StreamChunk{Err: mappedErr})
 				return
 			}
 			if msgType != websocket.TextMessage {
@@ -753,7 +761,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 
 				payload = normalizeCodexWebsocketCompletion(payload)
 				line := encodeCodexWebsocketAsSSE(payload)
-				chunks := sdktranslator.TranslateStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, line, &param)
+				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, line, &param, claudeInputTokens)
 				for i := range chunks {
 					if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 						terminateReason = "context_done"
@@ -763,7 +771,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				}
 				if len(warmupCompletedPayload) > 0 {
 					line = encodeCodexWebsocketAsSSE(warmupCompletedPayload)
-					chunks = sdktranslator.TranslateStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, line, &param)
+					chunks = helps.TranslateStreamWithClaudeInputTokens(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, line, &param, claudeInputTokens)
 					for i := range chunks {
 						if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 							terminateReason = "context_done"
@@ -1036,11 +1044,29 @@ func configureXAIWebsocketConn(sess *codexWebsocketSession, conn *websocket.Conn
 	if sess == nil || conn == nil {
 		return
 	}
+	sess.resetUpstreamDisconnectError(conn)
 	conn.SetPingHandler(func(appData string) error {
 		sess.writeMu.Lock()
 		defer sess.writeMu.Unlock()
 		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Time{})
 	})
+	defaultCloseHandler := conn.CloseHandler()
+	conn.SetCloseHandler(func(code int, text string) error {
+		sess.setUpstreamDisconnectError(conn, &websocket.CloseError{Code: code, Text: text})
+		return defaultCloseHandler(code, text)
+	})
+}
+
+func mapXAIWebsocketReadError(err error) error {
+	return mapCodexWebsocketReadError(err)
+}
+
+func mapXAIWebsocketWriteError(sess *codexWebsocketSession, conn *websocket.Conn, err error) error {
+	return mapCodexWebsocketWriteError(sess, conn, err)
+}
+
+func shouldRetryXAIWebsocketSend(err error) bool {
+	return shouldRetryCodexWebsocketSend(err)
 }
 
 func readXAIWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
@@ -1086,36 +1112,40 @@ func (e *XAIWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, co
 	for {
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
+			invalidate := func() {
+				e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
+			}
+			invalidated := false
 			ch, done := sess.activeForConn(conn)
 			if ch != nil {
-				select {
-				case ch <- codexWebsocketRead{conn: conn, err: errRead}:
-				case <-done:
-				default:
-				}
+				invalidated = sendTerminalWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errRead}, invalidate)
 				if sess.clearActive(conn, ch) {
 					close(ch)
 				}
 			}
-			e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
+			if !invalidated {
+				invalidate()
+			}
 			return
 		}
 
 		if msgType != websocket.TextMessage {
 			if msgType == websocket.BinaryMessage {
 				errBinary := fmt.Errorf("xai websockets executor: unexpected binary message")
+				invalidate := func() {
+					e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
+				}
+				invalidated := false
 				ch, done := sess.activeForConn(conn)
 				if ch != nil {
-					select {
-					case ch <- codexWebsocketRead{conn: conn, err: errBinary}:
-					case <-done:
-					default:
-					}
+					invalidated = sendTerminalWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errBinary}, invalidate)
 					if sess.clearActive(conn, ch) {
 						close(ch)
 					}
 				}
-				e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
+				if !invalidated {
+					invalidate()
+				}
 				return
 			}
 			continue

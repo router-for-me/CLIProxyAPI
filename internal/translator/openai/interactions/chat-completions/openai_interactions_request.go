@@ -147,17 +147,25 @@ func openAIChatContentPartToInteractions(part gjson.Result) ([]byte, bool) {
 		return out, true
 	case "file", "input_file", "document":
 		file := part.Get("file")
+		filename := firstNonEmpty(file.Get("filename").String(), part.Get("filename").String())
+		fallbackMIMEType := firstNonEmpty(file.Get("mime_type").String(), file.Get("mimeType").String(), part.Get("mime_type").String(), part.Get("mimeType").String())
+		fileData := firstNonEmpty(file.Get("file_data").String(), part.Get("file_data").String(), part.Get("data").String())
+		fileURL := firstNonEmpty(file.Get("file_url").String(), part.Get("file_url").String(), part.Get("url").String())
 		out := []byte(`{"type":"document"}`)
-		if filename := firstNonEmpty(file.Get("filename").String(), part.Get("filename").String()); filename != "" {
+		if filename != "" {
 			out, _ = sjson.SetBytes(out, "filename", filename)
 		}
-		if data := firstNonEmpty(file.Get("file_data").String(), part.Get("file_data").String(), part.Get("data").String()); data != "" {
+		hasContent := false
+		if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData(filename, fallbackMIMEType, fileData); ok {
+			out, _ = sjson.SetBytes(out, "mime_type", mimeType)
 			out, _ = sjson.SetBytes(out, "data", data)
+			hasContent = true
 		}
-		if url := firstNonEmpty(file.Get("file_url").String(), part.Get("file_url").String(), part.Get("url").String()); url != "" {
-			out, _ = sjson.SetBytes(out, "file_url", url)
+		if fileURL != "" {
+			out, _ = sjson.SetBytes(out, "file_url", fileURL)
+			hasContent = true
 		}
-		return out, true
+		return out, hasContent
 	}
 	return nil, false
 }
