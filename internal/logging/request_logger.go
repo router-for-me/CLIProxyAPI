@@ -968,24 +968,27 @@ func (l *FileRequestLogger) writeRequestBodyTempFile(body []byte) (string, error
 }
 
 type jsonLogPayload struct {
-	Version                 string              `json:"version"`
-	URL                     string              `json:"url"`
-	Method                  string              `json:"method"`
-	DownstreamTransport     string              `json:"downstream_transport,omitempty"`
-	UpstreamTransport       string              `json:"upstream_transport,omitempty"`
-	Timestamp               string              `json:"timestamp"`
-	Headers                 map[string][]string `json:"headers,omitempty"`
-	RequestBody             json.RawMessage     `json:"request_body,omitempty"`
-	RequestBodyRaw          string              `json:"request_body_raw,omitempty"`
-	Response                *jsonLogResponse    `json:"response,omitempty"`
-	APIRequest              json.RawMessage     `json:"api_request,omitempty"`
-	APIRequestRaw           string              `json:"api_request_raw,omitempty"`
-	APIResponse             json.RawMessage     `json:"api_response,omitempty"`
-	APIResponseRaw          string              `json:"api_response_raw,omitempty"`
-	APIResponseTruncated    bool                `json:"api_response_truncated,omitempty"`
-	APIResponseErrors       []jsonLogError      `json:"api_response_errors,omitempty"`
-	APIWebsocketTimelineRaw string              `json:"api_websocket_timeline_raw,omitempty"`
-	WebsocketTimelineRaw    string              `json:"websocket_timeline_raw,omitempty"`
+	Version                       string              `json:"version"`
+	URL                           string              `json:"url"`
+	Method                        string              `json:"method"`
+	DownstreamTransport           string              `json:"downstream_transport,omitempty"`
+	UpstreamTransport             string              `json:"upstream_transport,omitempty"`
+	Timestamp                     string              `json:"timestamp"`
+	Headers                       map[string][]string `json:"headers,omitempty"`
+	RequestBody                   json.RawMessage     `json:"request_body,omitempty"`
+	RequestBodyRaw                string              `json:"request_body_raw,omitempty"`
+	Response                      *jsonLogResponse    `json:"response,omitempty"`
+	APIRequest                    json.RawMessage     `json:"api_request,omitempty"`
+	APIRequestRaw                 string              `json:"api_request_raw,omitempty"`
+	APIRequestTruncated           bool                `json:"api_request_truncated,omitempty"`
+	APIResponse                   json.RawMessage     `json:"api_response,omitempty"`
+	APIResponseRaw                string              `json:"api_response_raw,omitempty"`
+	APIResponseTruncated          bool                `json:"api_response_truncated,omitempty"`
+	APIResponseErrors             []jsonLogError      `json:"api_response_errors,omitempty"`
+	APIWebsocketTimelineRaw       string              `json:"api_websocket_timeline_raw,omitempty"`
+	APIWebsocketTimelineTruncated bool                `json:"api_websocket_timeline_truncated,omitempty"`
+	WebsocketTimelineRaw          string              `json:"websocket_timeline_raw,omitempty"`
+	WebsocketTimelineTruncated    bool                `json:"websocket_timeline_truncated,omitempty"`
 }
 
 type jsonLogError struct {
@@ -1076,7 +1079,7 @@ func (l *FileRequestLogger) writeJSONLog(
 	// Upstream API Request
 	var apiReqBytes []byte
 	if apiRequestSource != nil && apiRequestSource.HasPayload() {
-		apiReqBytes, _ = apiRequestSource.Bytes()
+		apiReqBytes, entry.APIRequestTruncated = readFileBodySourceLimited(apiRequestSource, maxJSONFileBackedSectionBytes)
 	} else {
 		apiReqBytes = apiRequest
 	}
@@ -1121,14 +1124,16 @@ func (l *FileRequestLogger) writeJSONLog(
 	}
 
 	if hasFileBodySourcePayload(apiWebsocketTimelineSource) {
-		timeline, _ := readFileBodySourceLimited(apiWebsocketTimelineSource, maxJSONFileBackedSectionBytes)
+		timeline, truncated := readFileBodySourceLimited(apiWebsocketTimelineSource, maxJSONFileBackedSectionBytes)
 		entry.APIWebsocketTimelineRaw = string(timeline)
+		entry.APIWebsocketTimelineTruncated = truncated
 	} else if len(apiWebsocketTimeline) > 0 {
 		entry.APIWebsocketTimelineRaw = string(apiWebsocketTimeline)
 	}
 	if hasFileBodySourcePayload(websocketTimelineSource) {
-		timeline, _ := readFileBodySourceLimited(websocketTimelineSource, maxJSONFileBackedSectionBytes)
+		timeline, truncated := readFileBodySourceLimited(websocketTimelineSource, maxJSONFileBackedSectionBytes)
 		entry.WebsocketTimelineRaw = string(timeline)
+		entry.WebsocketTimelineTruncated = truncated
 	} else if len(websocketTimeline) > 0 {
 		entry.WebsocketTimelineRaw = string(websocketTimeline)
 	}
