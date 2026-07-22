@@ -158,27 +158,49 @@ func TestSetupRejectsUserOwnedRootKeys(t *testing.T) {
 }
 
 func TestSetupMigratesOnlyKnownOpenCodexMarker(t *testing.T) {
+	fixtures := map[string]string{
+		"marker before each key":            "# Auto-injected by opencodex\nopenai_base_url = \"http://127.0.0.1:10100/v1\"\n# Auto-injected by opencodex\nmodel_catalog_json = \"/tmp/opencodex-catalog.json\"\n\n[features]\nweb_search = true\n",
+		"catalog immediately before marker": "model_catalog_json = \"/tmp/opencodex-catalog.json\"\n# Auto-injected by opencodex\nopenai_base_url = \"http://127.0.0.1:10100/v1\"\n\n[features]\nweb_search = true\n",
+	}
+	for name, original := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			lifecycle := testLifecycle(t)
+			if err := os.MkdirAll(lifecycle.Paths.Home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(lifecycle.Paths.ConfigFile, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			models, providers := catalogTestModels()
+			if _, err := lifecycle.Setup(models, providers, false, false); err == nil {
+				t.Fatal("normal Setup() accepted OpenCodex-owned root keys")
+			}
+			if _, err := lifecycle.Setup(models, providers, true, true); err != nil {
+				t.Fatalf("migration Setup() error = %v", err)
+			}
+			configured, err := os.ReadFile(lifecycle.Paths.ConfigFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(configured, []byte("Auto-injected by opencodex")) || !bytes.Contains(configured, []byte(ManagedConfigBegin)) {
+				t.Fatalf("migration result = %s", configured)
+			}
+		})
+	}
+}
+
+func TestSetupMigrationPreservesUnknownCatalogAssignment(t *testing.T) {
 	lifecycle := testLifecycle(t)
 	if err := os.MkdirAll(lifecycle.Paths.Home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	original := "# Auto-injected by opencodex\nopenai_base_url = \"http://127.0.0.1:10100/v1\"\n# Auto-injected by opencodex\nmodel_catalog_json = \"/tmp/opencodex-catalog.json\"\n\n[features]\nweb_search = true\n"
+	original := "model_catalog_json = \"/tmp/user-catalog.json\"\n# Auto-injected by opencodex\nopenai_base_url = \"http://127.0.0.1:10100/v1\"\n"
 	if err := os.WriteFile(lifecycle.Paths.ConfigFile, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	models, providers := catalogTestModels()
-	if _, err := lifecycle.Setup(models, providers, false, false); err == nil {
-		t.Fatal("normal Setup() accepted OpenCodex-owned root keys")
-	}
-	if _, err := lifecycle.Setup(models, providers, true, true); err != nil {
-		t.Fatalf("migration Setup() error = %v", err)
-	}
-	configured, err := os.ReadFile(lifecycle.Paths.ConfigFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(configured, []byte("Auto-injected by opencodex")) || !bytes.Contains(configured, []byte(ManagedConfigBegin)) {
-		t.Fatalf("migration result = %s", configured)
+	if _, err := lifecycle.Setup(models, providers, true, true); err == nil || !strings.Contains(err.Error(), "model_catalog_json") {
+		t.Fatalf("migration Setup() error = %v, want user-owned catalog conflict", err)
 	}
 }
 

@@ -299,6 +299,9 @@ func removeOpenCodexEntries(input string) string {
 		if index+1 < len(lines) {
 			key := rootAssignmentKey(lines[index+1])
 			if key == "openai_base_url" || key == "model_catalog_json" {
+				if key == "openai_base_url" && len(out) > 0 && isKnownOpenCodexCatalogAssignment(out[len(out)-1]) {
+					out = out[:len(out)-1]
+				}
 				index++
 				continue
 			}
@@ -306,6 +309,21 @@ func removeOpenCodexEntries(input string) string {
 		out = append(out, lines[index])
 	}
 	return strings.Join(out, "")
+}
+
+func isKnownOpenCodexCatalogAssignment(line string) bool {
+	if rootAssignmentKey(line) != "model_catalog_json" {
+		return false
+	}
+	_, rawValue, found := strings.Cut(strings.TrimSpace(line), "=")
+	if !found {
+		return false
+	}
+	value, err := strconv.Unquote(strings.TrimSpace(rawValue))
+	if err != nil {
+		return false
+	}
+	return filepath.Base(value) == "opencodex-catalog.json"
 }
 
 func validateConfigOwnership(input string) error {
