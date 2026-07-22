@@ -427,6 +427,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if err != nil {
 		return nil, err
 	}
+	logicalSessionID := primaryID
+	if fallbackID != "" {
+		logicalSessionID = fallbackID
+	}
 
 	cacheKey := provider + "::" + primaryID + "::" + model
 
@@ -442,7 +446,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		if err != nil {
 			return nil, err
 		}
-		s.cache.Set(cacheKey, auth.ID)
+		s.cache.setBinding(cacheKey, logicalSessionID, auth.ID)
 		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 		return auth, nil
 	}
@@ -452,7 +456,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
-					s.cache.Set(cacheKey, auth.ID)
+					s.cache.setBinding(cacheKey, logicalSessionID, auth.ID)
 					entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 					return auth, nil
 				}
@@ -464,7 +468,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if err != nil {
 		return nil, err
 	}
-	s.cache.Set(cacheKey, auth.ID)
+	s.cache.setBinding(cacheKey, logicalSessionID, auth.ID)
 	entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	return auth, nil
 }
@@ -485,6 +489,14 @@ func truncateSessionID(id string) string {
 		return id
 	}
 	return id[:8] + "..."
+}
+
+// SessionAffinityStats returns aggregate statistics for active affinity bindings.
+func (s *SessionAffinitySelector) SessionAffinityStats() SessionAffinityStats {
+	if s == nil || s.cache == nil {
+		return SessionAffinityStats{}
+	}
+	return s.cache.Stats()
 }
 
 // Stop releases resources held by the selector.

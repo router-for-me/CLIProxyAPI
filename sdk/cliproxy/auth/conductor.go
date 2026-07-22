@@ -478,6 +478,26 @@ func (m *Manager) SetSelector(selector Selector) {
 	}
 }
 
+// SessionAffinityStats returns aggregate affinity statistics when the active
+// selector supports session affinity. The boolean result reports whether the
+// session-affinity selector is currently active.
+func (m *Manager) SessionAffinityStats() (SessionAffinityStats, bool) {
+	if m == nil {
+		return SessionAffinityStats{}, false
+	}
+
+	m.mu.RLock()
+	selector := m.selector
+	m.mu.RUnlock()
+	provider, ok := selector.(interface {
+		SessionAffinityStats() SessionAffinityStats
+	})
+	if !ok || provider == nil {
+		return SessionAffinityStats{}, false
+	}
+	return provider.SessionAffinityStats(), true
+}
+
 // SetStore swaps the underlying persistence store.
 func (m *Manager) SetStore(store Store) {
 	m.mu.Lock()
