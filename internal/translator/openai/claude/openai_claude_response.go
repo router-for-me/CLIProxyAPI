@@ -21,6 +21,25 @@ var (
 	dataTag = []byte("data:")
 )
 
+// unwrapOpenAIDataEnvelope returns the inner payload when the upstream wraps the
+// Chat Completions object in an envelope like {"success":true,"data":{...}} (some
+// OpenAI-compatible gateways, e.g. the Cline API, do this for both streaming chunks
+// and non-streaming bodies). Standard responses (top-level "choices"/"id"/"object")
+// are returned unchanged.
+func unwrapOpenAIDataEnvelope(raw []byte) []byte {
+	root := gjson.ParseBytes(raw)
+	if !root.IsObject() {
+		return raw
+	}
+	if root.Get("choices").Exists() || root.Get("id").Exists() || root.Get("object").Exists() {
+		return raw
+	}
+	if inner := root.Get("data"); inner.Exists() && inner.IsObject() {
+		return []byte(inner.Raw)
+	}
+	return raw
+}
+
 // ConvertOpenAIResponseToAnthropicParams holds parameters for response conversion
 type ConvertOpenAIResponseToAnthropicParams struct {
 	MessageID   string
@@ -107,6 +126,7 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 		return [][]byte{}
 	}
 	rawJSON = bytes.TrimSpace(rawJSON[5:])
+	rawJSON = unwrapOpenAIDataEnvelope(rawJSON)
 
 	if (*param).(*ConvertOpenAIResponseToAnthropicParams).ToolNameMap == nil {
 		(*param).(*ConvertOpenAIResponseToAnthropicParams).ToolNameMap = util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
@@ -166,7 +186,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 		}
 
 		// Handle reasoning content delta
-		if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
+		if reasoning := openAIReasoningNode(delta); reasoning.Exists() {
 			for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
 				if reasoningText == "" {
 					continue
@@ -417,6 +437,7 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 
 // convertOpenAINonStreamingToAnthropic converts OpenAI non-streaming response to Anthropic format
 func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
+	rawJSON = unwrapOpenAIDataEnvelope(rawJSON)
 	root := gjson.ParseBytes(rawJSON)
 
 	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
@@ -427,7 +448,7 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() && len(choices.Array()) > 0 {
 		choice := choices.Array()[0] // Take first choice
 
-		reasoningNode := choice.Get("message.reasoning_content")
+		reasoningNode := openAIReasoningNode(choice.Get("message"))
 		for _, reasoningText := range collectOpenAIReasoningTexts(reasoningNode) {
 			if reasoningText == "" {
 				continue
@@ -513,6 +534,21 @@ func (p *ConvertOpenAIResponseToAnthropicParams) toolContentBlockIndex(openAIToo
 	p.NextContentBlockIndex++
 	p.ToolCallBlockIndexes[openAIToolIndex] = idx
 	return idx
+}
+
+// openAIReasoningNode returns the reasoning payload from a message/delta node,
+// accepting both "reasoning_content" (DeepSeek/OpenRouter convention) and
+// "reasoning" (used by some OpenAI-compatible gateways such as the Cline API).
+//
+// "reasoning_content" is preferred, but only when it actually yields collectable
+// text: some gateways emit a placeholder ("reasoning_content": null or "") next to
+// a populated "reasoning" field. In that case Exists() is still true for the
+// placeholder, so we must not select it and lose the real reasoning text.
+func openAIReasoningNode(node gjson.Result) gjson.Result {
+	if r := node.Get("reasoning_content"); r.Exists() && len(collectOpenAIReasoningTexts(r)) > 0 {
+		return r
+	}
+	return node.Get("reasoning")
 }
 
 func collectOpenAIReasoningTexts(node gjson.Result) []string {
@@ -613,6 +649,7 @@ func toolCallAccumulatorIndexes(accumulators map[int]*ToolCallAccumulator) []int
 func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	_ = requestRawJSON
 
+	rawJSON = unwrapOpenAIDataEnvelope(rawJSON)
 	root := gjson.ParseBytes(rawJSON)
 	toolNameMap := util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
 	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
@@ -711,7 +748,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 				}
 			}
 
-			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
+			if reasoning := openAIReasoningNode(message); reasoning.Exists() {
 				for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
 					if reasoningText == "" {
 						continue

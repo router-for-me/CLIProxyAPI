@@ -364,3 +364,79 @@ func TestStreamingTool_StopReasonMixedSuppressedAndValid(t *testing.T) {
 		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
 	}
 }
+
+// Regression test for OpenAI-compatible gateways that wrap the Chat Completions
+// payload in an envelope like {"success":true,"data":{...}} (e.g. the Cline API)
+// and return reasoning under "reasoning" instead of "reasoning_content".
+func TestNonStreaming_DataEnvelopeAndReasoningField(t *testing.T) {
+	raw := []byte(`{"success":true,"data":{"id":"gen_x","model":"moonshotai/kimi-k3","choices":[{"finish_reason":"stop","index":0,"message":{"role":"assistant","content":"4","reasoning":"simple arithmetic"}}],"usage":{"prompt_tokens":90,"completion_tokens":20}}}`)
+	out := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "", []byte(`{"stream":false}`), nil, raw, nil)
+
+	if got := gjson.GetBytes(out, "id").String(); got != "gen_x" {
+		t.Fatalf("id = %q, want %q (envelope not unwrapped)", got, "gen_x")
+	}
+	var sawText, sawThinking bool
+	for _, b := range gjson.GetBytes(out, "content").Array() {
+		switch b.Get("type").String() {
+		case "text":
+			sawText = true
+			if b.Get("text").String() != "4" {
+				t.Fatalf("text = %q, want %q", b.Get("text").String(), "4")
+			}
+		case "thinking":
+			sawThinking = true
+		}
+	}
+	if !sawText {
+		t.Fatal("no text content block produced from wrapped response")
+	}
+	if !sawThinking {
+		t.Fatal("no thinking block produced from \"reasoning\" field")
+	}
+}
+
+func TestStreaming_DataEnvelopeChunk(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"success":true,"data":{"id":"gen_x","model":"m","choices":[{"index":0,"delta":{"content":"4"}}]}}`,
+		`{"success":true,"data":{"id":"gen_x","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}}`,
+	)
+	var sawTextDelta bool
+	for _, e := range events {
+		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "text_delta" {
+			sawTextDelta = true
+		}
+	}
+	if !sawTextDelta {
+		t.Fatalf("no text_delta emitted from wrapped streaming chunk (events=%+v)", events)
+	}
+}
+
+// Regression test: when reasoning_content is an empty placeholder (null/"") but
+// the real reasoning text is present under "reasoning", openAIReasoningNode must
+// fall back to "reasoning" rather than selecting the empty placeholder.
+func TestNonStreaming_EmptyReasoningContentPlaceholderFallsBack(t *testing.T) {
+	raw := []byte(`{"id":"gen_x","model":"m","choices":[{"finish_reason":"stop","index":0,"message":{"role":"assistant","content":"4","reasoning_content":null,"reasoning":"simple arithmetic"}}]}`)
+	out := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "", []byte(`{"stream":false}`), nil, raw, nil)
+	var sawThinking bool
+	for _, b := range gjson.GetBytes(out, "content").Array() {
+		if b.Get("type").String() == "thinking" && b.Get("thinking").String() != "" {
+			sawThinking = true
+		}
+	}
+	if !sawThinking {
+		t.Fatal("no thinking block produced when reasoning_content is a null placeholder but reasoning is populated")
+	}
+
+	// Empty-string placeholder variant.
+	raw = []byte(`{"id":"gen_x","model":"m","choices":[{"finish_reason":"stop","index":0,"message":{"role":"assistant","content":"4","reasoning_content":"","reasoning":"more reasoning"}}]}`)
+	out = ConvertOpenAIResponseToClaudeNonStream(context.Background(), "", []byte(`{"stream":false}`), nil, raw, nil)
+	sawThinking = false
+	for _, b := range gjson.GetBytes(out, "content").Array() {
+		if b.Get("type").String() == "thinking" && b.Get("thinking").String() != "" {
+			sawThinking = true
+		}
+	}
+	if !sawThinking {
+		t.Fatal("no thinking block produced when reasoning_content is an empty-string placeholder but reasoning is populated")
+	}
+}
