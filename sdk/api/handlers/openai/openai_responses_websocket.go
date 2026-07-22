@@ -619,6 +619,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				allowIncrementalInputWithPreviousResponseID,
 				allowCompactionReplayBypass,
 			)
+			// `generate` is a websocket-only control field. The HTTP/SSE Codex
+			// endpoint rejects it, including during transcript replay after a
+			// websocket state-loss error.
+			if errMsg == nil && stateLossReplayAttempted {
+				requestJSON = sanitizeResponsesWebsocketHTTPPayload(requestJSON)
+				updatedLastRequest = sanitizeResponsesWebsocketHTTPPayload(updatedLastRequest)
+			}
 		}
 		if errMsg != nil {
 			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
@@ -794,6 +801,17 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		})
 		restoredTranscriptState = false
 	}
+}
+
+func sanitizeResponsesWebsocketHTTPPayload(payload []byte) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	updated, errDelete := sjson.DeleteBytes(payload, "generate")
+	if errDelete != nil {
+		return payload
+	}
+	return updated
 }
 
 func websocketClientAddress(c *gin.Context) string {
@@ -1722,17 +1740,18 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	var outputItemsFallback [][]byte
 	pendingToolCallIDs := make(map[string]struct{})
 	sentPayload := false
-	provisionalPayloads := make([][]byte, 0, 2)
+	meaningfulPayloadSent := false
+	bufferedPayloads := make([][]byte, 0, 4)
 	toolSessionKey = strings.TrimSpace(toolSessionKey)
-	flushProvisionalPayloads := func() error {
-		for i := range provisionalPayloads {
+	flushBufferedPayloads := func() error {
+		for i := range bufferedPayloads {
 			markAPIResponseTimestamp(c)
-			if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, provisionalPayloads[i], time.Now()); errWrite != nil {
+			if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, bufferedPayloads[i], time.Now()); errWrite != nil {
 				return errWrite
 			}
 			sentPayload = true
 		}
-		provisionalPayloads = provisionalPayloads[:0]
+		bufferedPayloads = bufferedPayloads[:0]
 		return nil
 	}
 
@@ -1747,11 +1766,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				continue
 			}
 			if errMsg != nil {
-				if !sentPayload && interceptError != nil && interceptError(errMsg) {
+				if !meaningfulPayloadSent && interceptError != nil && interceptError(errMsg) {
 					cancel(errMsg.Error)
 					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, nil
 				}
-				if errFlush := flushProvisionalPayloads(); errFlush != nil {
+				if errFlush := flushBufferedPayloads(); errFlush != nil {
 					cancel(errFlush)
 					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errFlush
 				}
@@ -1796,7 +1815,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						StatusCode: http.StatusRequestTimeout,
 						Error:      fmt.Errorf("stream closed before response.completed"),
 					}
-					if errFlush := flushProvisionalPayloads(); errFlush != nil {
+					if errFlush := flushBufferedPayloads(); errFlush != nil {
 						cancel(errFlush)
 						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errFlush
 					}
@@ -1831,8 +1850,8 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			for i := range payloads {
 				collectResponsesWebsocketOutputItem(payloads[i], outputItemsByIndex, &outputItemsFallback)
 				eventType := gjson.GetBytes(payloads[i], "type").String()
-				if !sentPayload && isResponsesWebsocketProvisionalEvent(eventType) {
-					provisionalPayloads = append(provisionalPayloads, bytes.Clone(payloads[i]))
+				if !sentPayload && !isResponsesWebsocketMeaningfulEvent(eventType) && eventType != wsEventTypeError {
+					bufferedPayloads = append(bufferedPayloads, bytes.Clone(payloads[i]))
 					continue
 				}
 				if isResponsesWebsocketCompletionEvent(eventType) {
@@ -1843,7 +1862,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				var payloadErrMsg *interfaces.ErrorMessage
 				if eventType == wsEventTypeError {
 					payloadErrMsg = responsesWebsocketErrorMessageFromPayload(payloads[i])
-					if !sentPayload && interceptError != nil && interceptError(payloadErrMsg) {
+					if !meaningfulPayloadSent && interceptError != nil && interceptError(payloadErrMsg) {
 						cancel(payloadErrMsg.Error)
 						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, nil
 					}
@@ -1855,7 +1874,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					completedOutput = responseCompletedOutputFromPayload(payloads[i], outputItemsByIndex, outputItemsFallback)
 					completedResponseID = responseCompletedIDFromPayload(payloads[i])
 				}
-				if errFlush := flushProvisionalPayloads(); errFlush != nil {
+				if errFlush := flushBufferedPayloads(); errFlush != nil {
 					cancel(errFlush)
 					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errFlush
 				}
@@ -1878,6 +1897,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errWrite
 				}
 				sentPayload = true
+				if isResponsesWebsocketMeaningfulEvent(eventType) {
+					meaningfulPayloadSent = true
+				}
 				if payloadErrMsg != nil {
 					cancel(payloadErrMsg.Error)
 					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, nil
