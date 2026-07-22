@@ -317,3 +317,130 @@ func TestJSONStreamingRequestLoggingCapsResponseBody(t *testing.T) {
 		t.Fatalf("response body length = %d, limit = %d", len(entry.Response.BodyRaw), maxJSONStreamingResponseBytes)
 	}
 }
+
+func TestJSONRequestLoggingCapsFileBackedAPIResponse(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := NewFileRequestLoggerWithFormat(true, tempDir, "", 10, "json")
+	source, err := NewFileBodySourceInDir(tempDir, "api-response")
+	if err != nil {
+		t.Fatalf("NewFileBodySourceInDir failed: %v", err)
+	}
+	part, err := source.CreatePart("response")
+	if err != nil {
+		t.Fatalf("CreatePart failed: %v", err)
+	}
+	if _, err := part.Write(bytes.Repeat([]byte("y"), maxJSONFileBackedSectionBytes+1024)); err != nil {
+		t.Fatalf("failed to write source: %v", err)
+	}
+	if err := part.Close(); err != nil {
+		t.Fatalf("failed to close source: %v", err)
+	}
+
+	err = logger.LogRequestWithOptionsAndAllSources(
+		"/v1/chat/completions",
+		"POST",
+		nil,
+		[]byte(`{"model":"gpt-4"}`),
+		502,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		source,
+		nil,
+		nil,
+		nil,
+		false,
+		"req-api-response-123",
+		time.Now(),
+		time.Time{},
+	)
+	if err != nil {
+		t.Fatalf("LogRequestWithOptionsAndAllSources failed: %v", err)
+	}
+
+	files, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatalf("failed to read tempDir: %v", err)
+	}
+	var data []byte
+	for _, file := range files {
+		if filepath.Ext(file.Name()) != ".log" {
+			continue
+		}
+		data, err = os.ReadFile(filepath.Join(tempDir, file.Name()))
+		if err != nil {
+			t.Fatalf("failed to read log: %v", err)
+		}
+		break
+	}
+	if len(data) == 0 {
+		t.Fatalf("expected request log file")
+	}
+
+	var entry struct {
+		APIResponseRaw       string `json:"api_response_raw"`
+		APIResponseTruncated bool   `json:"api_response_truncated"`
+	}
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("failed to unmarshal NDJSON entry: %v", err)
+	}
+	if !entry.APIResponseTruncated {
+		t.Fatalf("expected API response to be marked truncated")
+	}
+	if len(entry.APIResponseRaw) > maxJSONFileBackedSectionBytes {
+		t.Fatalf("API response length = %d, limit = %d", len(entry.APIResponseRaw), maxJSONFileBackedSectionBytes)
+	}
+}
+
+func TestJSONRequestLoggingKeepsDownstreamWebsocketTimelineInJSON(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := NewFileRequestLoggerWithFormat(true, tempDir, "", 10, "json")
+
+	err := logger.LogRequest(
+		"/v1/responses",
+		"GET",
+		map[string][]string{"Upgrade": {"websocket"}},
+		nil,
+		101,
+		nil,
+		nil,
+		[]byte("client: open\nserver: ready"),
+		nil,
+		nil,
+		nil,
+		nil,
+		"req-downstream-ws-123",
+		time.Now(),
+		time.Time{},
+	)
+	if err != nil {
+		t.Fatalf("LogRequest failed: %v", err)
+	}
+
+	files, err := os.ReadDir(tempDir)
+	if err != nil || len(files) == 0 {
+		t.Fatalf("expected log file in tempDir")
+	}
+	data, err := os.ReadFile(filepath.Join(tempDir, files[0].Name()))
+	if err != nil {
+		t.Fatalf("failed to read log file: %v", err)
+	}
+
+	var entry struct {
+		DownstreamTransport  string `json:"downstream_transport"`
+		WebsocketTimelineRaw string `json:"websocket_timeline_raw"`
+	}
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("expected NDJSON websocket log, got %v: %s", err, string(data))
+	}
+	if entry.DownstreamTransport != "websocket" {
+		t.Fatalf("downstream transport = %q, want websocket", entry.DownstreamTransport)
+	}
+	if entry.WebsocketTimelineRaw != "client: open\nserver: ready" {
+		t.Fatalf("timeline = %q", entry.WebsocketTimelineRaw)
+	}
+}
