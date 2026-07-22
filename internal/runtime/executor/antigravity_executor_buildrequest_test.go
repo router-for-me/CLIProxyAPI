@@ -84,6 +84,29 @@ func TestAntigravityBuildRequest_NormalizesBooleanToolSchemas(t *testing.T) {
 	}
 }
 
+func TestAntigravityBuildRequest_NormalizesTopLevelTrueToolSchema(t *testing.T) {
+	body := buildRequestBodyFromRawPayload(t, "claude-opus-4-6-thinking", []byte(`{
+		"request": {
+			"contents": [{"role":"user","parts":[{"text":"use the tool"}]}],
+			"tools": [{"function_declarations": [{
+				"name": "boolean_schema_tool",
+				"parametersJsonSchema": true
+			}]}]
+		}
+	}`))
+	parameters, ok := extractFirstFunctionDeclaration(t, body)["parameters"].(map[string]any)
+	if !ok {
+		t.Fatalf("parameters missing: %#v", body)
+	}
+	if parameters["type"] != "object" {
+		t.Fatalf("parameters type = %#v, want object", parameters["type"])
+	}
+	required, ok := parameters["required"].([]any)
+	if !ok || len(required) != 1 || required[0] != "reason" {
+		t.Fatalf("parameters required = %#v, want reason placeholder", parameters["required"])
+	}
+}
+
 func TestAntigravityBuildRequest_SkipsSchemaSanitizationWithoutToolsField(t *testing.T) {
 	body := buildRequestBodyFromRawPayload(t, "gemini-3.1-flash-image", []byte(`{
 		"request": {

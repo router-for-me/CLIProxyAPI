@@ -1108,6 +1108,27 @@ func TestCleanJSONSchemaBooleanSchemas(t *testing.T) {
 			},
 		},
 		{
+			name:  "Antigravity top-level true becomes validated object schema",
+			clean: CleanJSONSchemaForAntigravity,
+			input: `true`,
+			assertFn: func(t *testing.T, result gjson.Result) {
+				if result.Get("type").String() != "object" || result.Get("required.0").String() != "reason" {
+					t.Fatalf("Antigravity true schema = %s, want validated object placeholder", result.Raw)
+				}
+			},
+		},
+		{
+			name:  "Antigravity nested empty tool schema becomes validated object schema",
+			clean: CleanJSONSchemaForAntigravity,
+			input: `{"tools":[{"functionDeclarations":[{"name":"run","parametersJsonSchema":{}}]}]}`,
+			assertFn: func(t *testing.T, result gjson.Result) {
+				schema := result.Get("tools.0.functionDeclarations.0.parametersJsonSchema")
+				if schema.Get("type").String() != "object" || schema.Get("required.0").String() != "reason" {
+					t.Fatalf("nested empty schema = %s, want validated object placeholder", schema.Raw)
+				}
+			},
+		},
+		{
 			name:  "top-level false stays unsatisfiable",
 			clean: CleanJSONSchemaForAntigravity,
 			input: `false`,

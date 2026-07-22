@@ -34,7 +34,7 @@ func cleanJSONSchema(jsonStr string, addPlaceholder bool) string {
 	// Phase 0: JSON Schema permits boolean schemas, while Gemini requires each
 	// schema position to contain an object. Normalize only schema positions so
 	// boolean values in tool results or request content remain untouched.
-	jsonStr = normalizeBooleanSchemas(jsonStr)
+	jsonStr = normalizeBooleanSchemas(jsonStr, addPlaceholder)
 
 	// Phase 1: Convert and add hints
 	jsonStr = convertRefsToHints(jsonStr)
@@ -219,7 +219,7 @@ func convertEnumValuesToStrings(jsonStr string) string {
 
 const impossibleSchemaProperty = "__cliproxyapi_never__"
 
-func normalizeBooleanSchemas(jsonStr string) string {
+func normalizeBooleanSchemas(jsonStr string, requireRootObjectType bool) string {
 	var root any
 	decoder := json.NewDecoder(strings.NewReader(jsonStr))
 	decoder.UseNumber()
@@ -227,9 +227,9 @@ func normalizeBooleanSchemas(jsonStr string) string {
 		return jsonStr
 	}
 	if isSchemaRoot(root) {
-		root = normalizeSchemaNode(root)
+		root = normalizeSchemaNode(root, requireRootObjectType)
 	} else {
-		normalizeSchemaRootsInPayload(root, nil)
+		normalizeSchemaRootsInPayload(root, nil, requireRootObjectType)
 	}
 	data, err := json.Marshal(root)
 	if err != nil {
@@ -257,20 +257,20 @@ func isSchemaRoot(value any) bool {
 	return false
 }
 
-func normalizeSchemaRootsInPayload(value any, path []string) {
+func normalizeSchemaRootsInPayload(value any, path []string, requireRootObjectType bool) {
 	switch current := value.(type) {
 	case map[string]any:
 		for key, child := range current {
 			childPath := append(path, key)
 			if isPayloadSchemaKey(key, current, path) {
-				current[key] = normalizeSchemaNode(child)
+				current[key] = normalizeSchemaNode(child, requireRootObjectType)
 				continue
 			}
-			normalizeSchemaRootsInPayload(child, childPath)
+			normalizeSchemaRootsInPayload(child, childPath, requireRootObjectType)
 		}
 	case []any:
 		for index := range current {
-			normalizeSchemaRootsInPayload(current[index], path)
+			normalizeSchemaRootsInPayload(current[index], path, requireRootObjectType)
 		}
 	}
 }
@@ -295,37 +295,46 @@ func isPayloadSchemaKey(key string, parent map[string]any, path []string) bool {
 	return false
 }
 
-func normalizeSchemaNode(value any) any {
+func normalizeSchemaNode(value any, requireRootObjectType bool) any {
 	switch schema := value.(type) {
 	case bool:
 		if schema {
+			if requireRootObjectType {
+				return map[string]any{"type": "object"}
+			}
 			return map[string]any{}
 		}
 		return impossibleBooleanSchema()
 	case map[string]any:
+		if requireRootObjectType && len(schema) == 0 {
+			return map[string]any{"type": "object"}
+		}
 		if replacement, replace := simplifyBooleanCombinators(schema); replace {
 			return replacement
+		}
+		if requireRootObjectType && len(schema) == 0 {
+			return map[string]any{"type": "object"}
 		}
 		for key, child := range schema {
 			switch key {
 			case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas":
 				if children, ok := child.(map[string]any); ok {
 					for name, nested := range children {
-						children[name] = normalizeSchemaNode(nested)
+						children[name] = normalizeSchemaNode(nested, false)
 					}
 				}
 			case "items", "contains", "propertyNames", "if", "then", "else", "not":
-				schema[key] = normalizeSchemaNode(child)
+				schema[key] = normalizeSchemaNode(child, false)
 			case "prefixItems", "allOf", "anyOf", "oneOf":
 				if children, ok := child.([]any); ok {
 					for index := range children {
-						children[index] = normalizeSchemaNode(children[index])
+						children[index] = normalizeSchemaNode(children[index], false)
 					}
 				}
 			case "additionalProperties":
 				// A boolean here is a keyword value, not a boolean Schema root.
 				if _, isBoolean := child.(bool); !isBoolean {
-					schema[key] = normalizeSchemaNode(child)
+					schema[key] = normalizeSchemaNode(child, false)
 				}
 			}
 		}
