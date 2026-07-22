@@ -1186,7 +1186,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 	opts.Metadata = reqMeta
 	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
-	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+	streamResult, bootstrapRetries, err := h.executeInitialStreamWithBootstrapTimeout(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -1296,7 +1296,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			return
 		}
 		sentPayload := false
-		bootstrapRetries := 0
+		bootstrapRetriesUsed := bootstrapRetries
 		chunkIndex := 0
 		var historyChunks [][]byte
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
@@ -1357,9 +1357,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 					// Safe bootstrap recovery: if the upstream fails before any payload bytes are sent,
 					// retry a few times (to allow auth rotation / transient recovery) and then attempt model fallback.
 					if !sentPayload {
-						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
-							bootstrapRetries++
-							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+						if bootstrapRetriesUsed < maxBootstrapRetries && bootstrapEligible(streamErr) {
+							bootstrapRetriesUsed++
+							retryResult, retryErr := h.executeStreamBootstrapAttempt(ctx, providers, req, opts)
 							if retryErr == nil {
 								rawStreamHeaders = cloneHeader(retryResult.Headers)
 								baseStreamHeaders = cloneHeader(retryResult.Headers)
