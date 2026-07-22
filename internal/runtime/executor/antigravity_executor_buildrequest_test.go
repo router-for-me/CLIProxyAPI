@@ -39,6 +39,51 @@ func TestAntigravityBuildRequest_SanitizesAntigravityToolSchema(t *testing.T) {
 	assertSchemaSanitizedAndPropertyPreserved(t, params)
 }
 
+func TestAntigravityBuildRequest_NormalizesBooleanToolSchemas(t *testing.T) {
+	body := buildRequestBodyFromRawPayload(t, "gemini-3.1-pro", []byte(`{
+		"request": {
+			"contents": [{"role":"user","parts":[{"text":"use the tool"}]}],
+			"tools": [{"function_declarations": [{
+				"name": "boolean_schema_tool",
+				"parametersJsonSchema": {
+					"type": "object",
+					"properties": {
+						"anything": true,
+						"never": false,
+						"list": {"type":"array","items":false}
+					},
+					"additionalProperties": false
+				}
+			}]}]
+		}
+	}`))
+	parameters, ok := extractFirstFunctionDeclaration(t, body)["parameters"].(map[string]any)
+	if !ok {
+		t.Fatalf("parameters missing: %#v", body)
+	}
+	properties, ok := parameters["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties missing: %#v", parameters)
+	}
+	anything, ok := properties["anything"].(map[string]any)
+	if !ok || len(anything) != 0 {
+		t.Fatalf("true schema = %#v, want empty object", properties["anything"])
+	}
+	never, ok := properties["never"].(map[string]any)
+	if !ok {
+		t.Fatalf("false schema missing: %#v", properties["never"])
+	}
+	neverProperties, _ := never["properties"].(map[string]any)
+	sentinel, _ := neverProperties["__cliproxyapi_never__"].(map[string]any)
+	enum, ok := sentinel["enum"].([]any)
+	if !ok || len(enum) != 0 {
+		t.Fatalf("false schema sentinel = %#v", never)
+	}
+	if _, exists := parameters["additionalProperties"]; exists {
+		t.Fatalf("unsupported additionalProperties reached Antigravity: %#v", parameters)
+	}
+}
+
 func TestAntigravityBuildRequest_SkipsSchemaSanitizationWithoutToolsField(t *testing.T) {
 	body := buildRequestBodyFromRawPayload(t, "gemini-3.1-flash-image", []byte(`{
 		"request": {

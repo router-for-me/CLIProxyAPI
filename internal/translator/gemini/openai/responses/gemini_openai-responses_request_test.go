@@ -475,6 +475,32 @@ func TestConvertOpenAIResponsesRequestToGeminiCleansToolSchemaRequiredFields(t *
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToGeminiNormalizesBooleanToolSchemas(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.1-pro",
+		"input": [
+			{"type":"function_call_output","call_id":"call-1","output":"{\"ok\":false}"},
+			{"role":"user","content":[{"type":"input_text","text":"continue"}]}
+		],
+		"tools": [
+			{"type":"function","name":"anything","parameters":true},
+			{"type":"function","name":"never","parameters":false}
+		]
+	}`
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.1-pro", []byte(inputJSON), false)
+	anything := gjson.GetBytes(output, "tools.0.functionDeclarations.0.parametersJsonSchema")
+	if !anything.IsObject() || len(anything.Map()) != 0 {
+		t.Fatalf("true parameters schema = %s, want {}. Output: %s", anything.Raw, output)
+	}
+	never := gjson.GetBytes(output, "tools.0.functionDeclarations.1.parametersJsonSchema")
+	if enum := never.Get("properties.__cliproxyapi_never__.enum"); !enum.IsArray() || len(enum.Array()) != 0 {
+		t.Fatalf("false parameters schema = %s. Output: %s", never.Raw, output)
+	}
+	if !gjson.GetBytes(output, "contents").IsArray() {
+		t.Fatalf("tool result second turn was dropped. Output: %s", output)
+	}
+}
+
 func validResponsesGPTReasoningSignature() string {
 	raw := make([]byte, 1+8+16+16+32)
 	raw[0] = 0x80
