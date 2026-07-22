@@ -1217,19 +1217,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		errChan <- executionErrorMessage(err)
 		close(errChan)
 		return nil, nil, errChan
 	}
@@ -1295,22 +1283,6 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			return status >= http.StatusInternalServerError
 		}
 	}
-	streamErrorMessage := func(streamErr error) *interfaces.ErrorMessage {
-		status := http.StatusInternalServerError
-		if se, ok := streamErr.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := streamErr.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		return &interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon}
-	}
-
 	// Resolve bootstrap retries and the first payload synchronously. The returned
 	// header map is therefore final before it becomes visible to the caller and
 	// is never mutated concurrently with HTTP response handling.
@@ -1322,6 +1294,42 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	chunkIndex := 0
 	var historyChunks [][]byte
 	maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
+	processPayload := func(rawPayload []byte) ([]byte, bool, error) {
+		applyStreamHeaderInit()
+		payload := cloneBytes(rawPayload)
+		if streamInterceptorsActive {
+			executedReq, executedOpts := executedRequest()
+			intercepted := interceptStreamChunk(ctx, interceptorHost, pluginapi.StreamChunkInterceptRequest{
+				SourceFormat:    responseProtocol,
+				Model:           normalizedModel,
+				RequestedModel:  originalRequestedModel,
+				RequestHeaders:  cloneHeader(executedOpts.Headers),
+				ResponseHeaders: cloneHeader(rawStreamHeaders),
+				OriginalRequest: cloneBytes(executedOpts.OriginalRequest),
+				RequestBody:     cloneBytes(executedReq.Payload),
+				Body:            payload,
+				HistoryChunks:   cloneByteSlices(historyChunks),
+				ChunkIndex:      chunkIndex,
+				Metadata:        executedOpts.Metadata,
+			}, execOptions.SkipInterceptorPluginID)
+			applyStreamHeaders(intercepted.Headers)
+			if len(intercepted.Body) > 0 {
+				payload = cloneBytes(intercepted.Body)
+			}
+			chunkIndex++
+			if intercepted.DropChunk {
+				return nil, true, nil
+			}
+		} else {
+			chunkIndex++
+		}
+		if responseProtocol == "openai-response" {
+			if errValidate := validateSSEDataJSON(payload); errValidate != nil {
+				return nil, false, errValidate
+			}
+		}
+		return payload, false, nil
+	}
 	for firstPayload == nil && initialErr == nil && !streamFinished && !streamCanceled {
 		chunk, ok, canceled := nextStreamChunk(ctx, nil, nil, chunks)
 		if canceled {
@@ -1348,46 +1356,20 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				}
 				streamErr = enrichAuthSelectionError(retryErr, providers, normalizedModel)
 			}
-			initialErr = streamErrorMessage(streamErr)
+			initialErr = executionErrorMessage(streamErr)
 			break
 		}
 		if len(chunk.Payload) == 0 {
 			continue
 		}
 
-		applyStreamHeaderInit()
-		payload := cloneBytes(chunk.Payload)
-		if streamInterceptorsActive {
-			executedReq, executedOpts := executedRequest()
-			intercepted := interceptStreamChunk(ctx, interceptorHost, pluginapi.StreamChunkInterceptRequest{
-				SourceFormat:    responseProtocol,
-				Model:           normalizedModel,
-				RequestedModel:  originalRequestedModel,
-				RequestHeaders:  cloneHeader(executedOpts.Headers),
-				ResponseHeaders: cloneHeader(rawStreamHeaders),
-				OriginalRequest: cloneBytes(executedOpts.OriginalRequest),
-				RequestBody:     cloneBytes(executedReq.Payload),
-				Body:            payload,
-				HistoryChunks:   cloneByteSlices(historyChunks),
-				ChunkIndex:      chunkIndex,
-				Metadata:        executedOpts.Metadata,
-			}, execOptions.SkipInterceptorPluginID)
-			applyStreamHeaders(intercepted.Headers)
-			if len(intercepted.Body) > 0 {
-				payload = cloneBytes(intercepted.Body)
-			}
-			chunkIndex++
-			if intercepted.DropChunk {
-				continue
-			}
-		} else {
-			chunkIndex++
+		payload, dropped, errProcess := processPayload(chunk.Payload)
+		if errProcess != nil {
+			initialErr = &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errProcess}
+			break
 		}
-		if responseProtocol == "openai-response" {
-			if errValidate := validateSSEDataJSON(payload); errValidate != nil {
-				initialErr = &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate}
-				break
-			}
+		if dropped {
+			continue
 		}
 		firstPayload = payload
 		streamHeadersCommitted = true
@@ -1448,44 +1430,19 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				return
 			}
 			if chunk.Err != nil {
-				_ = sendErr(streamErrorMessage(chunk.Err))
+				_ = sendErr(executionErrorMessage(chunk.Err))
 				return
 			}
 			if len(chunk.Payload) == 0 {
 				continue
 			}
-			payload := cloneBytes(chunk.Payload)
-			if streamInterceptorsActive {
-				executedReq, executedOpts := executedRequest()
-				intercepted := interceptStreamChunk(ctx, interceptorHost, pluginapi.StreamChunkInterceptRequest{
-					SourceFormat:    responseProtocol,
-					Model:           normalizedModel,
-					RequestedModel:  originalRequestedModel,
-					RequestHeaders:  cloneHeader(executedOpts.Headers),
-					ResponseHeaders: cloneHeader(rawStreamHeaders),
-					OriginalRequest: cloneBytes(executedOpts.OriginalRequest),
-					RequestBody:     cloneBytes(executedReq.Payload),
-					Body:            payload,
-					HistoryChunks:   cloneByteSlices(historyChunks),
-					ChunkIndex:      chunkIndex,
-					Metadata:        executedOpts.Metadata,
-				}, execOptions.SkipInterceptorPluginID)
-				applyStreamHeaders(intercepted.Headers)
-				if len(intercepted.Body) > 0 {
-					payload = cloneBytes(intercepted.Body)
-				}
-				chunkIndex++
-				if intercepted.DropChunk {
-					continue
-				}
-			} else {
-				chunkIndex++
+			payload, dropped, errProcess := processPayload(chunk.Payload)
+			if errProcess != nil {
+				_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errProcess})
+				return
 			}
-			if responseProtocol == "openai-response" {
-				if errValidate := validateSSEDataJSON(payload); errValidate != nil {
-					_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate})
-					return
-				}
+			if dropped {
+				continue
 			}
 			if okSendData := sendData(payload); !okSendData {
 				return
