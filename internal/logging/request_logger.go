@@ -783,6 +783,7 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 		chunkChan:        make(chan []byte, 100), // Buffered channel for async writes
 		closeChan:        make(chan struct{}),
 		errorChan:        make(chan error, 1),
+		format:           l.format,
 	}
 
 	// Start async writer goroutine
@@ -949,16 +950,21 @@ func (l *FileRequestLogger) writeRequestBodyTempFile(body []byte) (string, error
 }
 
 type jsonLogPayload struct {
-	Version             string              `json:"version"`
-	URL                 string              `json:"url"`
-	Method              string              `json:"method"`
-	DownstreamTransport string              `json:"downstream_transport,omitempty"`
-	UpstreamTransport   string              `json:"upstream_transport,omitempty"`
-	Timestamp           string              `json:"timestamp"`
-	Headers             map[string][]string `json:"headers,omitempty"`
-	RequestBody         json.RawMessage     `json:"request_body,omitempty"`
-	RequestBodyRaw      string              `json:"request_body_raw,omitempty"`
-	Response            *jsonLogResponse    `json:"response,omitempty"`
+	Version             string                     `json:"version"`
+	URL                 string                     `json:"url"`
+	Method              string                     `json:"method"`
+	DownstreamTransport string                     `json:"downstream_transport,omitempty"`
+	UpstreamTransport   string                     `json:"upstream_transport,omitempty"`
+	Timestamp           string                     `json:"timestamp"`
+	Headers             map[string][]string        `json:"headers,omitempty"`
+	RequestBody         json.RawMessage            `json:"request_body,omitempty"`
+	RequestBodyRaw      string                     `json:"request_body_raw,omitempty"`
+	Response            *jsonLogResponse           `json:"response,omitempty"`
+	APIRequest          json.RawMessage            `json:"api_request,omitempty"`
+	APIRequestRaw       string                     `json:"api_request_raw,omitempty"`
+	APIResponse         json.RawMessage            `json:"api_response,omitempty"`
+	APIResponseRaw      string                     `json:"api_response_raw,omitempty"`
+	APIResponseErrors   []*interfaces.ErrorMessage `json:"api_response_errors,omitempty"`
 }
 
 type jsonLogResponse struct {
@@ -977,6 +983,11 @@ func (l *FileRequestLogger) writeJSONLog(
 	statusCode int,
 	responseHeaders map[string][]string,
 	response []byte,
+	apiRequest []byte,
+	apiRequestSource *FileBodySource,
+	apiResponse []byte,
+	apiResponseSource *FileBodySource,
+	apiResponseErrors []*interfaces.ErrorMessage,
 	requestTimestamp time.Time,
 	downstreamTransport string,
 	upstreamTransport string,
@@ -1019,6 +1030,40 @@ func (l *FileRequestLogger) writeJSONLog(
 		} else {
 			entry.RequestBodyRaw = string(reqBodyBytes)
 		}
+	}
+
+	// Upstream API Request
+	var apiReqBytes []byte
+	if apiRequestSource != nil && apiRequestSource.HasPayload() {
+		apiReqBytes, _ = apiRequestSource.Bytes()
+	} else {
+		apiReqBytes = apiRequest
+	}
+	if len(apiReqBytes) > 0 {
+		if json.Valid(apiReqBytes) {
+			entry.APIRequest = json.RawMessage(apiReqBytes)
+		} else {
+			entry.APIRequestRaw = string(apiReqBytes)
+		}
+	}
+
+	// Upstream API Response
+	var apiRespBytes []byte
+	if apiResponseSource != nil && apiResponseSource.HasPayload() {
+		apiRespBytes, _ = apiResponseSource.Bytes()
+	} else {
+		apiRespBytes = apiResponse
+	}
+	if len(apiRespBytes) > 0 {
+		if json.Valid(apiRespBytes) {
+			entry.APIResponse = json.RawMessage(apiRespBytes)
+		} else {
+			entry.APIResponseRaw = string(apiRespBytes)
+		}
+	}
+
+	if len(apiResponseErrors) > 0 {
+		entry.APIResponseErrors = apiResponseErrors
 	}
 
 	respObj := &jsonLogResponse{
@@ -1083,7 +1128,7 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	upstreamTransport := inferUpstreamTransport(apiRequest, apiRequestSource, apiResponse, apiResponseSource, apiWebsocketTimeline, apiWebsocketTimelineSource, apiResponseErrors)
 
 	if l.format == "json" && !isWebsocketTranscript {
-		return l.writeJSONLog(w, url, method, requestHeaders, requestBody, requestBodyPath, statusCode, responseHeaders, response, requestTimestamp, downstreamTransport, upstreamTransport)
+		return l.writeJSONLog(w, url, method, requestHeaders, requestBody, requestBodyPath, statusCode, responseHeaders, response, apiRequest, apiRequestSource, apiResponse, apiResponseSource, apiResponseErrors, requestTimestamp, downstreamTransport, upstreamTransport)
 	}
 	if errWrite := writeRequestInfoWithBody(w, url, method, requestHeaders, requestBody, requestBodyPath, requestTimestamp, downstreamTransport, upstreamTransport, !isWebsocketTranscript); errWrite != nil {
 		return errWrite
@@ -1820,6 +1865,9 @@ type FileStreamingLogWriter struct {
 
 	// apiResponseTimestamp captures when the API response was received.
 	apiResponseTimestamp time.Time
+
+	// format specifies log entry structure ("text" or "json").
+	format string
 }
 
 // WriteChunkAsync writes a response chunk asynchronously (non-blocking).
@@ -2022,7 +2070,35 @@ func (w *FileStreamingLogWriter) asyncWriter() {
 }
 
 func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
-	if errWrite := writeRequestInfoWithBody(logFile, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.timestamp, "http", inferUpstreamTransport(w.apiRequest, w.apiRequestSource, w.apiResponse, w.apiResponseSource, w.apiWebsocketTimeline, nil, nil), true); errWrite != nil {
+	upstreamTransport := inferUpstreamTransport(w.apiRequest, w.apiRequestSource, w.apiResponse, w.apiResponseSource, w.apiWebsocketTimeline, nil, nil)
+	if w.format == "json" {
+		var responseBytes []byte
+		if w.responseBodyPath != "" {
+			responseBytes, _ = os.ReadFile(w.responseBodyPath)
+		}
+		dummyLogger := &FileRequestLogger{format: "json"}
+		return dummyLogger.writeJSONLog(
+			logFile,
+			w.url,
+			w.method,
+			w.requestHeaders,
+			nil,
+			w.requestBodyPath,
+			w.responseStatus,
+			w.responseHeaders,
+			responseBytes,
+			w.apiRequest,
+			w.apiRequestSource,
+			w.apiResponse,
+			w.apiResponseSource,
+			nil,
+			w.timestamp,
+			"http",
+			upstreamTransport,
+		)
+	}
+
+	if errWrite := writeRequestInfoWithBody(logFile, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.timestamp, "http", upstreamTransport, true); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeAPISection(logFile, "=== API WEBSOCKET TIMELINE ===\n", "=== API WEBSOCKET TIMELINE", w.apiWebsocketTimeline, time.Time{}); errWrite != nil {

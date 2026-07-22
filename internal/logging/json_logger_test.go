@@ -95,3 +95,56 @@ func TestJSONRequestLogging(t *testing.T) {
 		t.Errorf("expected status 200, got %d", entry.Response.Status)
 	}
 }
+
+func TestJSONStreamingRequestLogging(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := NewFileRequestLoggerWithFormat(true, tempDir, "", 10, "json")
+
+	writer, err := logger.LogStreamingRequest(
+		"/v1/chat/completions",
+		"POST",
+		map[string][]string{"User-Agent": {"test-agent"}},
+		[]byte(`{"model":"gpt-4","stream":true}`),
+		"req-stream-123",
+	)
+	if err != nil {
+		t.Fatalf("LogStreamingRequest failed: %v", err)
+	}
+
+	_ = writer.WriteStatus(200, map[string][]string{"Content-Type": {"text/event-stream"}})
+	writer.WriteChunkAsync([]byte("data: {\"choices\":[]}\n\n"))
+	_ = writer.WriteAPIRequest([]byte(`{"upstream":"req"}`))
+	_ = writer.WriteAPIResponse([]byte(`{"upstream":"resp"}`))
+
+	time.Sleep(50 * time.Millisecond)
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	files, err := os.ReadDir(tempDir)
+	if err != nil || len(files) == 0 {
+		t.Fatalf("expected log file in tempDir")
+	}
+
+	logPath := filepath.Join(tempDir, files[0].Name())
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("failed to read log file: %v", err)
+	}
+
+	var entry jsonLogPayload
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("failed to unmarshal NDJSON streaming entry: %v, raw data: %s", err, string(data))
+	}
+
+	if entry.URL != "/v1/chat/completions" {
+		t.Errorf("expected URL /v1/chat/completions, got %s", entry.URL)
+	}
+	if entry.APIRequest == nil && entry.APIRequestRaw == "" {
+		t.Errorf("expected non-empty APIRequest")
+	}
+	if entry.APIResponse == nil && entry.APIResponseRaw == "" {
+		t.Errorf("expected non-empty APIResponse")
+	}
+}
