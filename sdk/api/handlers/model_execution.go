@@ -21,6 +21,7 @@ type modelExecutionOptions struct {
 	SkipInterceptorPluginID string
 	SkipRouterPluginID      string
 	ForcedProvider          string
+	StrictForcedProvider    bool
 	AuthSelectionModel      string
 }
 

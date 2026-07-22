@@ -741,7 +741,15 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 
 func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
-	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
+	var errMsg *interfaces.ErrorMessage
+	modelName, execOptions, errMsg = h.prepareCodexIntegrationExecution(modelName, execOptions)
+	if errMsg != nil {
+		return nil, nil, errMsg
+	}
+	routeDecision := modelRouteDecision{}
+	if !execOptions.StrictForcedProvider {
+		routeDecision = h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
+	}
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
 	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
 		return nil, nil, errMsg
@@ -814,7 +822,15 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 
 func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
-	routeDecision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, false, execOptions)
+	var errMsg *interfaces.ErrorMessage
+	modelName, execOptions, errMsg = h.prepareCodexIntegrationExecution(modelName, execOptions)
+	if errMsg != nil {
+		return nil, nil, errMsg
+	}
+	routeDecision := modelRouteDecision{}
+	if !execOptions.StrictForcedProvider {
+		routeDecision = h.applyModelRouter(ctx, handlerType, modelName, rawJSON, false, execOptions)
+	}
 	if routeDecision.ExecutorPluginID != "" {
 		return h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
@@ -1139,7 +1155,18 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
-	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
+	var errMsg *interfaces.ErrorMessage
+	modelName, execOptions, errMsg = h.prepareCodexIntegrationExecution(modelName, execOptions)
+	if errMsg != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- errMsg
+		close(errChan)
+		return nil, nil, errChan
+	}
+	routeDecision := modelRouteDecision{}
+	if !execOptions.StrictForcedProvider {
+		routeDecision = h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
+	}
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
 	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -1547,6 +1574,29 @@ func statusFromError(err error) int {
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
 	return h.getRequestDetailsWithOptions(modelName, false)
+}
+
+func (h *BaseAPIHandler) prepareCodexIntegrationExecution(modelName string, execOptions modelExecutionOptions) (string, modelExecutionOptions, *interfaces.ErrorMessage) {
+	if h == nil || h.Cfg == nil {
+		return modelName, execOptions, nil
+	}
+	resolved, matched, errResolve := util.ResolveCodexIntegrationModel(modelName, &h.Cfg.CodexIntegration)
+	if !matched {
+		return modelName, execOptions, nil
+	}
+	if errResolve != nil {
+		return modelName, execOptions, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errResolve}
+	}
+	forcedProvider := strings.ToLower(strings.TrimSpace(execOptions.ForcedProvider))
+	if forcedProvider != "" && forcedProvider != resolved.Provider {
+		return modelName, execOptions, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("model %q requires provider %q, not %q", modelName, resolved.Provider, forcedProvider),
+		}
+	}
+	execOptions.ForcedProvider = resolved.Provider
+	execOptions.StrictForcedProvider = true
+	return modelName, execOptions, nil
 }
 
 func validateNativeInteractionsExecution(entryProtocol string, execOptions modelExecutionOptions, routeDecision modelRouteDecision) *interfaces.ErrorMessage {

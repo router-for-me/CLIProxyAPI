@@ -79,6 +79,35 @@ func (cfg *Config) NormalizeCodexIntegration() error {
 	return nil
 }
 
+// EffectiveOAuthModelAlias returns user aliases plus the stable Codex Integration
+// mappings. Integration aliases are appended so their provider lock and response
+// identity cannot be shadowed by a user alias with the same client slug.
+func (cfg *Config) EffectiveOAuthModelAlias() map[string][]OAuthModelAlias {
+	if cfg == nil {
+		return nil
+	}
+	out := make(map[string][]OAuthModelAlias, len(cfg.OAuthModelAlias)+2)
+	for channel, aliases := range cfg.OAuthModelAlias {
+		out[channel] = append([]OAuthModelAlias(nil), aliases...)
+	}
+	if !cfg.CodexIntegration.Enabled {
+		return out
+	}
+	for _, model := range cfg.CodexIntegration.Models {
+		if !model.Visible {
+			continue
+		}
+		out[model.Provider] = append(out[model.Provider], OAuthModelAlias{
+			Name:         model.UpstreamModel,
+			Alias:        model.Slug,
+			Fork:         true,
+			DisplayName:  model.DisplayName,
+			ForceMapping: true,
+		})
+	}
+	return out
+}
+
 func validateCodexCatalogFile(name string) error {
 	if filepath.IsAbs(name) {
 		return fmt.Errorf("codex-integration.catalog-file: absolute paths are not allowed")

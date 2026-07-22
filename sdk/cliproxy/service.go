@@ -1333,7 +1333,7 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 	s.cfgMu.Unlock()
 	if s.coreManager != nil {
 		s.coreManager.SetConfig(newCfg)
-		s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
+		s.coreManager.SetOAuthModelAlias(newCfg.EffectiveOAuthModelAlias())
 	}
 	ctx := coreauth.WithSkipPersist(context.Background())
 	s.syncPluginRuntimeConfig(ctx)
