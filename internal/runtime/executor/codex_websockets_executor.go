@@ -1630,6 +1630,13 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 	// Match codex-rs websocket v2 semantics: every request is `response.create`.
 	// Incremental follow-up turns continue on the same websocket using
 	// `previous_response_id` + incremental `input`, not `response.append`.
+	// A generated full transcript already carries its own context, so replay it
+	// fresh instead of combining it with stale upstream response state.
+	if strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) != "" &&
+		(!gjson.GetBytes(body, "generate").Exists() || gjson.GetBytes(body, "generate").Bool()) &&
+		codexWebsocketInputLooksFullTranscript(gjson.GetBytes(body, "input")) {
+		body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	}
 	body = helps.SanitizeCodexWebsocketPayload(body)
 	body = helps.SanitizeCodexInputItemIDs(body)
 	wsReqBody, errSet := sjson.SetBytes(bytes.Clone(body), "type", "response.create")

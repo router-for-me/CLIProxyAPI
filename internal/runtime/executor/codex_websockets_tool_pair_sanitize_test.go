@@ -45,6 +45,34 @@ func TestBuildCodexWebsocketRequestBodyKeepsIncrementalCustomToolOutput(t *testi
 	}
 }
 
+func TestBuildCodexWebsocketRequestBodyDropsOrphanFunctionCallFromFullIncrementalTranscript(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1","role":"assistant","content":"delegate"},{"type":"function_call","id":"fc-1","call_id":"call-agent-1","name":"spawn_agent","arguments":"{}"},{"type":"message","id":"msg-2","role":"user","content":"start"}]}`)
+
+	wsReqBody := buildCodexWebsocketRequestBody(body)
+
+	if gjson.GetBytes(wsReqBody, "previous_response_id").Exists() {
+		t.Fatalf("full transcript should not retain previous_response_id: %s", wsReqBody)
+	}
+	input := gjson.GetBytes(wsReqBody, "input").Array()
+	if len(input) != 2 || input[0].Get("id").String() != "msg-1" || input[1].Get("id").String() != "msg-2" {
+		t.Fatalf("orphan function call was not removed from full transcript: %s", wsReqBody)
+	}
+}
+
+func TestBuildCodexWebsocketRequestBodyKeepsMatchedFunctionPairInFullIncrementalTranscript(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"function_call","id":"fc-1","call_id":"call-agent-1","name":"spawn_agent","arguments":"{}"},{"type":"function_call_output","id":"fco-1","call_id":"call-agent-1","output":"started"},{"type":"message","id":"msg-1","role":"user","content":"continue"}]}`)
+
+	wsReqBody := buildCodexWebsocketRequestBody(body)
+
+	if gjson.GetBytes(wsReqBody, "previous_response_id").Exists() {
+		t.Fatalf("full transcript should not retain previous_response_id: %s", wsReqBody)
+	}
+	input := gjson.GetBytes(wsReqBody, "input").Array()
+	if len(input) != 3 || input[0].Get("type").String() != "function_call" || input[1].Get("type").String() != "function_call_output" {
+		t.Fatalf("matched function pair was not preserved: %s", wsReqBody)
+	}
+}
+
 func TestBuildCodexWebsocketRequestBodyKeepsPrewarmPendingCustomToolCall(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","generate":false,"input":[{"type":"custom_tool_call","id":"ctc-1","call_id":"call-agent-1","name":"spawn_agent","input":"{}"}]}`)
 
