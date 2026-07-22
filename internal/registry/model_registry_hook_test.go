@@ -202,3 +202,80 @@ func TestModelRegistryHook_PanicDoesNotAffectRegistry(t *testing.T) {
 		t.Fatal("timeout waiting for OnModelsUnregistered hook call")
 	}
 }
+
+func TestModelRegistrySubscribersPreserveLegacyHookAndCanCancel(t *testing.T) {
+	r := newTestModelRegistry()
+	legacy := &capturingHook{
+		registeredCh:   make(chan registeredCall, 2),
+		unregisteredCh: make(chan unregisteredCall, 2),
+	}
+	subscriber := &capturingHook{
+		registeredCh:   make(chan registeredCall, 2),
+		unregisteredCh: make(chan unregisteredCall, 2),
+	}
+	r.SetHook(legacy)
+	cancel := r.SubscribeHook(subscriber)
+	r.RegisterClient("client-1", "xai", []*ModelInfo{{ID: "grok-4.5"}})
+
+	for name, channel := range map[string]<-chan registeredCall{
+		"legacy": legacy.registeredCh, "subscriber": subscriber.registeredCh,
+	} {
+		select {
+		case call := <-channel:
+			if call.provider != "xai" || call.clientID != "client-1" || len(call.models) != 1 {
+				t.Fatalf("%s call = %#v", name, call)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timeout waiting for %s hook", name)
+		}
+	}
+
+	cancel()
+	cancel()
+	r.RegisterClient("client-2", "xai", []*ModelInfo{{ID: "grok-build-0.1"}})
+	select {
+	case call := <-subscriber.registeredCh:
+		t.Fatalf("cancelled subscriber received %#v", call)
+	case <-time.After(100 * time.Millisecond):
+	}
+	select {
+	case <-legacy.registeredCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("legacy hook stopped after subscriber cancellation")
+	}
+}
+
+type mutatingHook struct {
+	done chan struct{}
+}
+
+func (h *mutatingHook) OnModelsRegistered(_ context.Context, _, _ string, models []*ModelInfo) {
+	if len(models) > 0 {
+		models[0].ID = "mutated"
+	}
+	close(h.done)
+}
+
+func (h *mutatingHook) OnModelsUnregistered(context.Context, string, string) {}
+
+func TestModelRegistrySubscribersReceiveIndependentSnapshots(t *testing.T) {
+	r := newTestModelRegistry()
+	mutator := &mutatingHook{done: make(chan struct{})}
+	observer := &capturingHook{registeredCh: make(chan registeredCall, 1), unregisteredCh: make(chan unregisteredCall, 1)}
+	r.SubscribeHook(mutator)
+	r.SubscribeHook(observer)
+	r.RegisterClient("client-1", "xai", []*ModelInfo{{ID: "grok-4.5"}})
+	select {
+	case <-mutator.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for mutating subscriber")
+	}
+	select {
+	case call := <-observer.registeredCh:
+		if len(call.models) != 1 || call.models[0].ID != "grok-4.5" {
+			t.Fatalf("observer snapshot was mutated: %#v", call.models)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for observer")
+	}
+}

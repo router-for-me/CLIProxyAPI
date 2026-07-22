@@ -146,6 +146,9 @@ type ModelRegistry struct {
 	availableModelsCache map[string]availableModelsCacheEntry
 	// hook is an optional callback sink for model registration changes
 	hook ModelRegistryHook
+	// subscribers are independent observers that do not replace the legacy hook.
+	subscribers      map[uint64]ModelRegistryHook
+	nextSubscriberID uint64
 }
 
 // Global model registry instance
@@ -228,42 +231,100 @@ func (r *ModelRegistry) SetHook(hook ModelRegistryHook) {
 	r.hook = hook
 }
 
+// SubscribeHook adds an independent model registry observer and returns an
+// idempotent cancellation function. It preserves the legacy SetHook observer.
+func (r *ModelRegistry) SubscribeHook(hook ModelRegistryHook) func() {
+	if r == nil || hook == nil {
+		return func() {}
+	}
+	r.mutex.Lock()
+	if r.subscribers == nil {
+		r.subscribers = make(map[uint64]ModelRegistryHook)
+	}
+	r.nextSubscriberID++
+	id := r.nextSubscriberID
+	r.subscribers[id] = hook
+	r.mutex.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.mutex.Lock()
+			delete(r.subscribers, id)
+			r.mutex.Unlock()
+		})
+	}
+}
+
 const defaultModelRegistryHookTimeout = 5 * time.Second
 const modelQuotaExceededWindow = 5 * time.Minute
 
 func (r *ModelRegistry) triggerModelsRegistered(provider, clientID string, models []*ModelInfo) {
-	hook := r.hook
-	if hook == nil {
-		return
+	hooks := make([]ModelRegistryHook, 0, len(r.subscribers)+1)
+	if r.hook != nil {
+		hooks = append(hooks, r.hook)
 	}
-	modelsCopy := cloneModelInfosUnique(models)
-	go func() {
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				log.Errorf("model registry hook OnModelsRegistered panic: %v", recovered)
-			}
+	for _, subscriber := range r.subscribers {
+		hooks = append(hooks, subscriber)
+	}
+	for _, hook := range hooks {
+		hook := hook
+		modelsCopy := cloneModelInfosUnique(models)
+		go func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					log.Errorf("model registry hook OnModelsRegistered panic: %v", recovered)
+				}
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), defaultModelRegistryHookTimeout)
+			defer cancel()
+			hook.OnModelsRegistered(ctx, provider, clientID, modelsCopy)
 		}()
-		ctx, cancel := context.WithTimeout(context.Background(), defaultModelRegistryHookTimeout)
-		defer cancel()
-		hook.OnModelsRegistered(ctx, provider, clientID, modelsCopy)
-	}()
+	}
 }
 
 func (r *ModelRegistry) triggerModelsUnregistered(provider, clientID string) {
-	hook := r.hook
-	if hook == nil {
-		return
+	hooks := make([]ModelRegistryHook, 0, len(r.subscribers)+1)
+	if r.hook != nil {
+		hooks = append(hooks, r.hook)
 	}
-	go func() {
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				log.Errorf("model registry hook OnModelsUnregistered panic: %v", recovered)
-			}
+	for _, subscriber := range r.subscribers {
+		hooks = append(hooks, subscriber)
+	}
+	for _, hook := range hooks {
+		hook := hook
+		go func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					log.Errorf("model registry hook OnModelsUnregistered panic: %v", recovered)
+				}
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), defaultModelRegistryHookTimeout)
+			defer cancel()
+			hook.OnModelsUnregistered(ctx, provider, clientID)
 		}()
-		ctx, cancel := context.WithTimeout(context.Background(), defaultModelRegistryHookTimeout)
-		defer cancel()
-		hook.OnModelsUnregistered(ctx, provider, clientID)
-	}()
+	}
+}
+
+// GetProvidersForModel returns the currently registered provider identifiers for a model.
+func (r *ModelRegistry) GetProvidersForModel(modelID string) []string {
+	if r == nil {
+		return nil
+	}
+	modelID = strings.TrimSpace(modelID)
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	registration := r.models[modelID]
+	if registration == nil {
+		return nil
+	}
+	providers := make([]string, 0, len(registration.Providers))
+	for provider, count := range registration.Providers {
+		if count > 0 {
+			providers = append(providers, provider)
+		}
+	}
+	sort.Strings(providers)
+	return providers
 }
 
 // RegisterClient registers a client and its supported models

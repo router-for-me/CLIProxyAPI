@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestEmbeddedCodexClientModelsCatalogIsValid(t *testing.T) {
@@ -179,6 +180,42 @@ func TestRefreshCodexClientModelsKeepsLastValidSnapshot(t *testing.T) {
 				t.Fatalf("revision after failed refresh = %d, want %d", afterRevision, revision)
 			}
 		})
+	}
+}
+
+func TestCodexClientModelSubscribersReceiveChangesAndCanCancel(t *testing.T) {
+	original, _ := GetCodexClientModelsSnapshot()
+	t.Cleanup(func() {
+		if _, err := loadCodexClientModelsFromBytes(original, "test cleanup"); err != nil {
+			t.Fatalf("restore original catalog: %v", err)
+		}
+	})
+	revisions := make(chan uint64, 2)
+	cancel := SubscribeCodexClientModelsChanges(func(revision uint64) { revisions <- revision })
+	t.Cleanup(cancel)
+
+	changedCatalog := testCodexClientCatalog(t, testCodexClientModel("gpt-5.5", 77))
+	changed, err := loadCodexClientModelsFromBytes(changedCatalog, "subscriber test")
+	if err != nil || !changed {
+		t.Fatalf("loadCodexClientModelsFromBytes() = %t, %v", changed, err)
+	}
+	select {
+	case revision := <-revisions:
+		if revision == 0 {
+			t.Fatal("subscriber revision = 0")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for template subscriber")
+	}
+
+	cancel()
+	if _, err = loadCodexClientModelsFromBytes(original, "subscriber cancellation test"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case revision := <-revisions:
+		t.Fatalf("cancelled subscriber received revision %d", revision)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
