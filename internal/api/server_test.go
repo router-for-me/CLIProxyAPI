@@ -13,6 +13,7 @@ import (
 	"time"
 
 	gin "github.com/gin-gonic/gin"
+	codexloopback "github.com/router-for-me/CLIProxyAPI/v7/internal/access/codex_loopback"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -177,6 +178,30 @@ func TestHealthz(t *testing.T) {
 			t.Fatalf("expected empty body for HEAD request, got %q", rr.Body.String())
 		}
 	})
+}
+
+func TestCodexLoopbackProviderAppliesOnlyToDataPlane(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "management-secret")
+	server := newTestServer(t)
+	server.accessManager.SetProviders([]sdkaccess.Provider{codexloopback.NewProvider()})
+
+	dataReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	dataReq.RemoteAddr = "127.0.0.1:50000"
+	dataReq.Header.Set("Authorization", "Bearer chatgpt-token")
+	dataRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(dataRR, dataReq)
+	if dataRR.Code != http.StatusOK {
+		t.Fatalf("data plane status = %d, want 200; body=%s", dataRR.Code, dataRR.Body.String())
+	}
+
+	managementReq := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+	managementReq.RemoteAddr = "127.0.0.1:50000"
+	managementReq.Header.Set("Authorization", "Bearer chatgpt-token")
+	managementRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(managementRR, managementReq)
+	if managementRR.Code == http.StatusOK {
+		t.Fatalf("Codex loopback bearer authenticated management endpoint: %s", managementRR.Body.String())
+	}
 }
 
 func TestCodexAlphaSearchForwardsRequest(t *testing.T) {

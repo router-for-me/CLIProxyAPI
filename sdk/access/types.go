@@ -28,6 +28,9 @@ const (
 	// AccessProviderTypeConfigAPIKey is the built-in provider validating inline API keys.
 	AccessProviderTypeConfigAPIKey = "config-api-key"
 
+	// AccessProviderTypeCodexLoopback accepts Codex bearer credentials only from a loopback socket.
+	AccessProviderTypeCodexLoopback = "codex-loopback"
+
 	// DefaultAccessProviderName is applied when no provider name is supplied.
 	DefaultAccessProviderName = "config-inline"
 )
