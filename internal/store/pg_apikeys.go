@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -696,6 +697,7 @@ func (s *APIKeyStore) CountActive(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
+// assertRowsAffected returns ErrAPIKeyNotFound when 0 rows were touched.
 func assertRowsAffected(res sql.Result, id, label string) error {
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -705,4 +707,131 @@ func assertRowsAffected(res sql.Result, id, label string) error {
 		return fmt.Errorf("%w: id=%s", ErrAPIKeyNotFound, id)
 	}
 	return nil
+}
+
+// APIKeyListFilter captures the optional filter dimensions for ListPagedFiltered.
+// Empty values are ignored (unfiltered). SortBy is one of "created_at"
+// (default), "name", "last_used_at", "user_alias". SortOrder is "desc"
+// (default) or "asc". Search is a case-insensitive substring match on name,
+// key_alias, or key_prefix.
+type APIKeyListFilter struct {
+	Status    string
+	UserID    string
+	Search    string
+	SortBy    string
+	SortOrder string
+}
+
+// ListPagedFiltered is the filtered/sorted variant of ListPaged. It accepts a
+// full filter struct so the management API can expose search, user_id, and
+// sort dimensions without overloading the ListPaged signature.
+func (s *APIKeyStore) ListPagedFiltered(ctx context.Context, page, pageSize int, f APIKeyListFilter) ([]*APIKey, int64, error) {
+	if s == nil || s.db == nil {
+		return nil, 0, fmt.Errorf("postgres store: api key store not initialized")
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 25
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+
+	var (
+		where []string
+		args  []any
+	)
+	addFilter := func(clause string, val any) {
+		args = append(args, val)
+		where = append(where, fmt.Sprintf(clause, len(args)))
+	}
+	if f.Status != "" {
+		addFilter("k.status = $%d", f.Status)
+	}
+	if f.UserID != "" {
+		addFilter("k.user_id = $%d", f.UserID)
+	}
+	if f.Search != "" {
+		like := "%" + f.Search + "%"
+		// Bind three separate positional placeholders (one per column) so the
+		// LIKE pattern is matched against name, key_alias, and key_prefix.
+		args = append(args, like, like, like)
+		n := len(args)
+		where = append(where, fmt.Sprintf(
+			"(LOWER(k.name) LIKE LOWER($%d) OR LOWER(k.key_alias) LIKE LOWER($%d) OR LOWER(k.key_prefix) LIKE LOWER($%d))",
+			n-2, n-1, n,
+		))
+	}
+	whereClause := ""
+	if len(where) > 0 {
+		whereClause = " WHERE " + strings.Join(where, " AND ")
+	}
+
+	var total int64
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s k%s`, s.apiKeysTable, whereClause)
+	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("postgres store: count api keys (filtered): %w", err)
+	}
+
+	sortCol := "k.created_at"
+	sortDir := "DESC"
+	switch strings.ToLower(f.SortBy) {
+	case "name":
+		sortCol = "k.name"
+	case "last_used_at":
+		sortCol = "k.last_used_at"
+	case "user_alias":
+		sortCol = "u.user_alias"
+	case "created_at", "":
+		sortCol = "k.created_at"
+	}
+	if strings.EqualFold(f.SortOrder, "asc") {
+		sortDir = "ASC"
+	}
+
+	listArgs := append([]any{}, args...)
+	listArgs = append(listArgs, pageSize, (page-1)*pageSize)
+	listQuery := fmt.Sprintf(`
+		SELECT k.id, k.name, COALESCE(k.key_alias, ''), k.key_hash, k.key_prefix, k.status,
+		       COALESCE(k.user_id, ''),
+		       COALESCE(u.user_alias, ''), COALESCE(u.user_email, ''),
+		       k.created_at, k.updated_at, k.expires_at, k.last_used_at, k.metadata
+		FROM %s k
+		LEFT JOIN %s u ON u.id = k.user_id%s
+		ORDER BY %s %s NULLS LAST
+		LIMIT $%d OFFSET $%d
+	`, s.apiKeysTable, s.internalUsersTable, whereClause, sortCol, sortDir, len(listArgs)-1, len(listArgs))
+
+	rows, err := s.db.QueryContext(ctx, listQuery, listArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("postgres store: list api keys (filtered): %w", err)
+	}
+	defer rows.Close()
+
+	keys := make([]*APIKey, 0, pageSize)
+	for rows.Next() {
+		var (
+			key      APIKey
+			metadata []byte
+		)
+		if err = rows.Scan(&key.ID, &key.Name, &key.KeyAlias, &key.KeyHash, &key.KeyPrefix, &key.Status,
+			&key.UserID,
+			&key.UserAlias, &key.UserEmail,
+			&key.CreatedAt, &key.UpdatedAt, &key.ExpiresAt, &key.LastUsedAt, &metadata); err != nil {
+			return nil, 0, fmt.Errorf("postgres store: scan api key row (filtered): %w", err)
+		}
+		if len(metadata) > 0 {
+			_ = json.Unmarshal(metadata, &key.Metadata)
+		}
+		if key.Metadata == nil {
+			key.Metadata = map[string]any{}
+		}
+		keys = append(keys, &key)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("postgres store: iterate api keys (filtered): %w", err)
+	}
+	return keys, total, nil
 }
