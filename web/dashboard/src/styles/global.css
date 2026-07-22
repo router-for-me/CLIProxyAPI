@@ -25,6 +25,8 @@
   --success-dim: rgba(74, 222, 128, 0.13);
   --radius: 8px;
   --radius-sm: 4px;
+  --sidebar-w: 240px;
+  --sidebar-w-collapsed: 56px;
   --mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
 }
@@ -113,45 +115,130 @@ code, pre {
 
 /* Layout ------------------------------------------------------------------ */
 
+/* Layout ------------------------------------------------------------------ */
+
 .app-shell {
   display: grid;
-  grid-template-columns: 220px 1fr;
+  grid-template-columns: var(--sidebar-w) 1fr;
   min-height: 100vh;
+}
+.app-shell--collapsed {
+  grid-template-columns: var(--sidebar-w-collapsed) 1fr;
+}
+
+/* Top bar — mobile only. Hidden on desktop where the real sidebar lives. */
+.topbar {
+  display: none;
 }
 
 .sidebar {
   background: var(--bg-elevated);
   border-right: 1px solid var(--border);
-  padding: 20px 0;
   display: flex;
   flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow: hidden;
 }
 
+.sidebar__header {
+  display: flex;
+  align-items: center;
+  padding: 20px 18px 16px;
+  gap: 8px;
+}
 .sidebar__brand {
-  padding: 0 20px 24px;
   display: flex;
   align-items: center;
   gap: 10px;
   font-weight: 600;
   font-size: 16px;
   letter-spacing: -0.01em;
+  min-width: 0;
 }
 .sidebar__brand-mark {
   width: 28px;
   height: 28px;
   display: grid;
   place-items: center;
+  flex-shrink: 0;
 }
 .sidebar__brand-mark svg { width: 100%; height: 100%; }
+.sidebar__brand-text {
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* Collapse toggle — a floating circular handle pinned to the sidebar's right
+ * edge, vertically centered. Reads as an affordance ("grab here to fold") far
+ * more clearly than an in-header icon button. */
+.sidebar__collapse-btn {
+  position: absolute;
+  top: 64px;
+  right: -12px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  cursor: pointer;
+  z-index: 20;
+  transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease,
+              transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.sidebar__collapse-btn:hover {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.sidebar__collapse-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.sidebar__collapse-btn svg {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+/* Chevron points left when expanded (toward the sidebar = "fold in"), and
+ * rotates 180° when collapsed (points right = "expand out"). */
+.sidebar__collapse-btn.is-collapsed svg { transform: rotate(180deg); }
 
 .sidebar__nav {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   padding: 0 10px;
+  overflow-y: auto;
+  /* Hide scrollbar unless hovering, to keep the rail minimal. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
 }
+.sidebar__nav::-webkit-scrollbar { width: 6px; }
+.sidebar__nav::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+
+.sidebar__section + .sidebar__section { margin-top: 16px; }
+.sidebar__section-label {
+  padding: 4px 12px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
 .sidebar__link {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -160,6 +247,20 @@ code, pre {
   border-radius: var(--radius-sm);
   font-size: 13px;
   transition: all 0.12s ease;
+  text-decoration: none;
+}
+/* Left accent bar — the strong active indicator. Hidden by default. */
+.sidebar__link::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 0;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: height 0.14s ease;
 }
 .sidebar__link:hover {
   background: var(--bg-card);
@@ -169,12 +270,83 @@ code, pre {
   background: var(--accent-dim);
   color: var(--accent);
 }
+.sidebar__link.active::before { height: 18px; }
+
+.sidebar__link-icon {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.sidebar__link-icon svg { width: 100%; height: 100%; }
+.sidebar__link-label {
+  white-space: nowrap;
+  overflow: hidden;
+}
+
 .sidebar__footer {
-  padding: 16px 20px 0;
+  padding: 14px 14px 20px;
   border-top: 1px solid var(--border);
-  margin-top: 16px;
-  font-size: 12px;
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sidebar__version {
+  display: inline-block;
+  align-self: flex-start;
+  font-family: var(--mono);
+  font-size: 10px;
   color: var(--text-dim);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.sidebar__signout {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.sidebar__signout:hover {
+  background: var(--danger-dim);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.sidebar__signout .sidebar__link-icon svg { width: 16px; height: 16px; }
+
+/* Collapsed rail: hide text, center icons. ------------------------------- */
+.app-shell--collapsed .sidebar__header {
+  justify-content: center;
+  padding: 20px 8px 16px;
+}
+.app-shell--collapsed .sidebar__brand-text,
+.app-shell--collapsed .sidebar__section-label,
+.app-shell--collapsed .sidebar__link-label,
+.app-shell--collapsed .sidebar__version {
+  display: none;
+}
+.app-shell--collapsed .sidebar__nav { padding: 0 8px; }
+.app-shell--collapsed .sidebar__link {
+  justify-content: center;
+  padding: 9px 0;
+}
+.app-shell--collapsed .sidebar__section + .sidebar__section { margin-top: 10px; }
+/* Floating handle stays pinned to the right edge in collapsed mode too. */
+.app-shell--collapsed .sidebar__footer { padding: 14px 8px 20px; }
+.app-shell--collapsed .sidebar__signout {
+  justify-content: center;
+  padding: 9px 0;
 }
 
 .main {
@@ -225,9 +397,66 @@ code, pre {
 
 @media (max-width: 900px) {
   .grid--2, .grid--3, .grid--4 { grid-template-columns: 1fr; }
-  .app-shell { grid-template-columns: 1fr; }
-  .sidebar { display: none; }
+  .app-shell,
+  .app-shell--collapsed { grid-template-columns: 1fr; }
   .main { padding: 20px; }
+
+  /* Mobile top bar replaces the desktop sidebar column header. */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-elevated);
+    position: sticky;
+    top: 0;
+    z-index: 40;
+  }
+  .topbar__menu {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .topbar__menu svg { width: 16px; height: 16px; }
+  .topbar__title { font-weight: 600; font-size: 15px; }
+
+  /* Sidebar becomes an off-canvas drawer. */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: var(--sidebar-w);
+    height: 100vh;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    z-index: 50;
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.4);
+  }
+  .sidebar--open { transform: translateX(0); }
+  /* The floating collapse handle has no place in a mobile drawer — hide it. */
+  .sidebar__collapse-btn { display: none !important; }
+  /* Mobile drawer is always expanded (labels visible) regardless of rail pref. */
+  .sidebar--open .sidebar__brand-text,
+  .sidebar--open .sidebar__section-label,
+  .sidebar--open .sidebar__link-label,
+  .sidebar--open .sidebar__version { display: initial; }
+  .sidebar--open .sidebar__link { justify-content: flex-start; padding: 9px 12px; }
+  .sidebar--open .sidebar__header { padding: 20px 18px 16px; }
+  .sidebar--open .sidebar__signout { justify-content: flex-start; padding: 9px 12px; }
+
+  .sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 45;
+  }
 }
 
 /* Tables ------------------------------------------------------------------ */
