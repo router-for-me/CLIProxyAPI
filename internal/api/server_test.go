@@ -392,6 +392,30 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 	return NewServer(cfg, authManager, accessManager, configPath, opts...)
 }
 
+type reloadableRequestLogger struct {
+	internallogging.RequestLogger
+	format string
+}
+
+func (l *reloadableRequestLogger) SetFormat(format string) {
+	l.format = format
+}
+
+func TestUpdateClientsAppliesRequestLogFormat(t *testing.T) {
+	logger := &reloadableRequestLogger{}
+	server := newTestServerWithOptions(t, WithRequestLoggerFactory(func(*proxyconfig.Config, string) internallogging.RequestLogger {
+		return logger
+	}))
+
+	nextCfg := *server.cfg
+	nextCfg.RequestLogFormat = "json"
+	server.UpdateClients(&nextCfg)
+
+	if logger.format != "json" {
+		t.Fatalf("format = %q, want json", logger.format)
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	server := newTestServer(t)
 

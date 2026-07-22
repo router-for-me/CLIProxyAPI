@@ -2004,6 +2004,12 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		}
 	}
 
+	if s.requestLogger != nil && (oldCfg == nil || oldCfg.RequestLogFormat != cfg.RequestLogFormat) {
+		if setter, ok := s.requestLogger.(interface{ SetFormat(string) }); ok {
+			setter.SetFormat(cfg.RequestLogFormat)
+		}
+	}
+
 	if oldCfg == nil || oldCfg.DisableCooling != cfg.DisableCooling {
 		auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	}

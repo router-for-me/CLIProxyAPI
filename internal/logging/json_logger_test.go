@@ -2,10 +2,14 @@ package logging
 
 import (
 	"encoding/json"
+	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 )
 
 func TestJSONRequestLogging(t *testing.T) {
@@ -146,5 +150,78 @@ func TestJSONStreamingRequestLogging(t *testing.T) {
 	}
 	if entry.APIResponse == nil && entry.APIResponseRaw == "" {
 		t.Errorf("expected non-empty APIResponse")
+	}
+}
+
+func TestJSONRequestLoggingSerializesErrorsAndMasksAddonHeaders(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := NewFileRequestLoggerWithFormat(true, tempDir, "", 10, "json")
+
+	err := logger.LogRequest(
+		"/v1/chat/completions",
+		"POST",
+		nil,
+		[]byte(`{"model":"gpt-4"}`),
+		502,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		[]*interfaces.ErrorMessage{{
+			StatusCode: http.StatusBadGateway,
+			Error:      errors.New("upstream connection failed"),
+			Addon: http.Header{
+				"Authorization": {"Bearer secret-token"},
+			},
+		}},
+		"req-error-123",
+		time.Now(),
+		time.Time{},
+	)
+	if err != nil {
+		t.Fatalf("LogRequest failed: %v", err)
+	}
+
+	files, err := os.ReadDir(tempDir)
+	if err != nil || len(files) == 0 {
+		t.Fatalf("expected log file in tempDir")
+	}
+	data, err := os.ReadFile(filepath.Join(tempDir, files[0].Name()))
+	if err != nil {
+		t.Fatalf("failed to read log file: %v", err)
+	}
+
+	var entry struct {
+		APIResponseErrors []struct {
+			StatusCode int                 `json:"status_code"`
+			Error      string              `json:"error"`
+			Addon      map[string][]string `json:"addon,omitempty"`
+		} `json:"api_response_errors"`
+	}
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("failed to unmarshal NDJSON entry: %v", err)
+	}
+	if len(entry.APIResponseErrors) != 1 {
+		t.Fatalf("expected one API error, got %d", len(entry.APIResponseErrors))
+	}
+	if entry.APIResponseErrors[0].Error != "upstream connection failed" {
+		t.Fatalf("error = %q, want upstream connection failed", entry.APIResponseErrors[0].Error)
+	}
+	if got := entry.APIResponseErrors[0].Addon["Authorization"][0]; got == "Bearer secret-token" {
+		t.Fatalf("Authorization addon header was not masked")
+	}
+}
+
+func TestFileRequestLoggerSetFormat(t *testing.T) {
+	logger := NewFileRequestLoggerWithFormat(true, t.TempDir(), "", 10, "text")
+	logger.SetFormat("json")
+	if logger.format != "json" {
+		t.Fatalf("format = %q, want json", logger.format)
+	}
+	logger.SetFormat("invalid")
+	if logger.format != "text" {
+		t.Fatalf("format = %q, want text", logger.format)
 	}
 }

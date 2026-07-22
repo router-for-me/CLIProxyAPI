@@ -500,10 +500,7 @@ func NewFileRequestLoggerWithFormat(enabled bool, logsDir string, configDir stri
 			logsDir = filepath.Join(configDir, logsDir)
 		}
 	}
-	format = strings.ToLower(strings.TrimSpace(format))
-	if format != "json" {
-		format = "text"
-	}
+	format = normalizeRequestLogFormat(format)
 	return &FileRequestLogger{
 		enabled:           enabled,
 		logsDir:           logsDir,
@@ -511,6 +508,21 @@ func NewFileRequestLoggerWithFormat(enabled bool, logsDir string, configDir stri
 		homeEnabled:       false,
 		format:            format,
 	}
+}
+
+func normalizeRequestLogFormat(format string) string {
+	if strings.EqualFold(strings.TrimSpace(format), "json") {
+		return "json"
+	}
+	return "text"
+}
+
+// SetFormat updates the request log format used by future log entries.
+func (l *FileRequestLogger) SetFormat(format string) {
+	if l == nil {
+		return
+	}
+	l.format = normalizeRequestLogFormat(format)
 }
 
 // SetHomeEnabled toggles home request-log forwarding.
@@ -950,21 +962,27 @@ func (l *FileRequestLogger) writeRequestBodyTempFile(body []byte) (string, error
 }
 
 type jsonLogPayload struct {
-	Version             string                     `json:"version"`
-	URL                 string                     `json:"url"`
-	Method              string                     `json:"method"`
-	DownstreamTransport string                     `json:"downstream_transport,omitempty"`
-	UpstreamTransport   string                     `json:"upstream_transport,omitempty"`
-	Timestamp           string                     `json:"timestamp"`
-	Headers             map[string][]string        `json:"headers,omitempty"`
-	RequestBody         json.RawMessage            `json:"request_body,omitempty"`
-	RequestBodyRaw      string                     `json:"request_body_raw,omitempty"`
-	Response            *jsonLogResponse           `json:"response,omitempty"`
-	APIRequest          json.RawMessage            `json:"api_request,omitempty"`
-	APIRequestRaw       string                     `json:"api_request_raw,omitempty"`
-	APIResponse         json.RawMessage            `json:"api_response,omitempty"`
-	APIResponseRaw      string                     `json:"api_response_raw,omitempty"`
-	APIResponseErrors   []*interfaces.ErrorMessage `json:"api_response_errors,omitempty"`
+	Version             string              `json:"version"`
+	URL                 string              `json:"url"`
+	Method              string              `json:"method"`
+	DownstreamTransport string              `json:"downstream_transport,omitempty"`
+	UpstreamTransport   string              `json:"upstream_transport,omitempty"`
+	Timestamp           string              `json:"timestamp"`
+	Headers             map[string][]string `json:"headers,omitempty"`
+	RequestBody         json.RawMessage     `json:"request_body,omitempty"`
+	RequestBodyRaw      string              `json:"request_body_raw,omitempty"`
+	Response            *jsonLogResponse    `json:"response,omitempty"`
+	APIRequest          json.RawMessage     `json:"api_request,omitempty"`
+	APIRequestRaw       string              `json:"api_request_raw,omitempty"`
+	APIResponse         json.RawMessage     `json:"api_response,omitempty"`
+	APIResponseRaw      string              `json:"api_response_raw,omitempty"`
+	APIResponseErrors   []jsonLogError      `json:"api_response_errors,omitempty"`
+}
+
+type jsonLogError struct {
+	StatusCode int                 `json:"status_code"`
+	Error      string              `json:"error,omitempty"`
+	Addon      map[string][]string `json:"addon,omitempty"`
 }
 
 type jsonLogResponse struct {
@@ -972,6 +990,21 @@ type jsonLogResponse struct {
 	Headers map[string][]string `json:"headers,omitempty"`
 	Body    json.RawMessage     `json:"body,omitempty"`
 	BodyRaw string              `json:"body_raw,omitempty"`
+}
+
+func maskHeaders(headers map[string][]string) map[string][]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	masked := make(map[string][]string, len(headers))
+	for key, values := range headers {
+		maskedValues := make([]string, len(values))
+		for i, value := range values {
+			maskedValues[i] = util.MaskSensitiveHeaderValue(key, value)
+		}
+		masked[key] = maskedValues
+	}
+	return masked
 }
 
 func (l *FileRequestLogger) writeJSONLog(
@@ -996,14 +1029,7 @@ func (l *FileRequestLogger) writeJSONLog(
 		requestTimestamp = time.Now()
 	}
 
-	maskedHeaders := make(map[string][]string, len(requestHeaders))
-	for k, vals := range requestHeaders {
-		mVals := make([]string, len(vals))
-		for i, v := range vals {
-			mVals[i] = util.MaskSensitiveHeaderValue(k, v)
-		}
-		maskedHeaders[k] = mVals
-	}
+	maskedHeaders := maskHeaders(requestHeaders)
 
 	var reqBodyBytes []byte
 	if requestBodyPath != "" {
@@ -1063,22 +1089,27 @@ func (l *FileRequestLogger) writeJSONLog(
 	}
 
 	if len(apiResponseErrors) > 0 {
-		entry.APIResponseErrors = apiResponseErrors
+		entry.APIResponseErrors = make([]jsonLogError, 0, len(apiResponseErrors))
+		for _, apiErr := range apiResponseErrors {
+			if apiErr == nil {
+				continue
+			}
+			logErr := jsonLogError{
+				StatusCode: apiErr.StatusCode,
+				Addon:      maskHeaders(apiErr.Addon),
+			}
+			if apiErr.Error != nil {
+				logErr.Error = apiErr.Error.Error()
+			}
+			entry.APIResponseErrors = append(entry.APIResponseErrors, logErr)
+		}
 	}
 
 	respObj := &jsonLogResponse{
 		Status: statusCode,
 	}
 	if len(responseHeaders) > 0 {
-		mRespHeaders := make(map[string][]string, len(responseHeaders))
-		for k, vals := range responseHeaders {
-			mVals := make([]string, len(vals))
-			for i, v := range vals {
-				mVals[i] = util.MaskSensitiveHeaderValue(k, v)
-			}
-			mRespHeaders[k] = mVals
-		}
-		respObj.Headers = mRespHeaders
+		respObj.Headers = maskHeaders(responseHeaders)
 	}
 	if len(response) > 0 {
 		if json.Valid(response) {
