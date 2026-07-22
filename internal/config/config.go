@@ -59,6 +59,9 @@ type Config struct {
 	// CommercialMode disables high-overhead request logging and HTTP middleware features to minimize per-request memory usage.
 	CommercialMode bool `yaml:"commercial-mode" json:"commercial-mode"`
 
+	// RequestLogFormat specifies the format for request log files: "text" (default) or "json" (NDJSON).
+	RequestLogFormat string `yaml:"request-log-format" json:"request-log-format"`
+
 	// LoggingToFile controls whether application logs are written to rotating files or stdout.
 	LoggingToFile bool `yaml:"logging-to-file" json:"logging-to-file"`
 
@@ -731,6 +734,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
 				// Missing and optional: return empty config (cloud deploy standby).
 				cfg := &Config{}
+				cfg.RequestLogFormat = strings.ToLower(strings.TrimSpace(cfg.RequestLogFormat))
+				if cfg.RequestLogFormat != "json" {
+					cfg.RequestLogFormat = "text"
+				}
+
 				cfg.NormalizePluginsConfig()
 				return cfg, nil
 			}
@@ -749,6 +757,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	var cfg Config
 	// Set defaults before unmarshal so that absent keys keep defaults.
 	cfg.Host = "" // Default empty: binds to all interfaces (IPv4 + IPv6)
+	cfg.RequestLogFormat = "text"
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
