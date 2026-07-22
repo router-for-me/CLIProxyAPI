@@ -31,7 +31,7 @@ func TestParseConfigBytesCodexIntegrationStableDefaults(t *testing.T) {
 	want := map[string]string{
 		"xai/grok-4.5":                         "grok-4.5",
 		"xai/grok-build-0.1":                   "grok-build-0.1",
-		"antigravity/gemini-3.6-flash":         "gemini-3.6-flash",
+		"antigravity/gemini-3.6-flash":         "gemini-3.6-flash-high",
 		"antigravity/gemini-3.1-pro":           "gemini-pro-agent",
 		"antigravity/claude-opus-4-6-thinking": "claude-opus-4-6-thinking",
 	}

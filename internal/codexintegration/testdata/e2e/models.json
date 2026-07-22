@@ -4,7 +4,7 @@
     {"id": "gpt-5.6-sol", "object": "model", "owned_by": "openai", "display_name": "GPT-5.6 Sol"},
     {"id": "grok-4.5", "object": "model", "owned_by": "xai", "display_name": "Grok 4.5", "context_length": 262144},
     {"id": "grok-build-0.1", "object": "model", "owned_by": "xai", "display_name": "Grok Build", "context_length": 262144},
-    {"id": "gemini-3.6-flash", "object": "model", "owned_by": "antigravity", "display_name": "Gemini 3.6 Flash", "context_length": 1048576},
+    {"id": "gemini-3.6-flash-high", "object": "model", "owned_by": "antigravity", "display_name": "Gemini 3.6 Flash", "context_length": 1048576},
     {"id": "gemini-pro-agent", "object": "model", "owned_by": "antigravity", "display_name": "Gemini Pro Agent", "context_length": 1048576},
     {"id": "claude-opus-4-6-thinking", "object": "model", "owned_by": "antigravity", "display_name": "Claude Opus 4.6 Thinking", "context_length": 200000}
   ]

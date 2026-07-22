@@ -119,7 +119,7 @@ func catalogTestModels() ([]map[string]any, ModelProvidersFunc) {
 		{"id": "gpt-5.4", "display_name": "GPT-5.4"},
 		{"id": "grok-4.5", "display_name": "Grok 4.5", "context_length": 262144},
 		{"id": "grok-build-0.1", "display_name": "Grok Build", "context_length": 262144},
-		{"id": "gemini-3.6-flash", "display_name": "Gemini 3.6 Flash", "context_length": 1048576},
+		{"id": "gemini-3.6-flash-high", "display_name": "Gemini 3.6 Flash", "context_length": 1048576},
 		{"id": "gemini-pro-agent", "display_name": "Gemini Pro Agent", "context_length": 1048576},
 		{"id": "claude-opus-4-6-thinking", "display_name": "Claude Opus", "context_length": 200000},
 	}
@@ -129,7 +129,7 @@ func catalogTestModels() ([]map[string]any, ModelProvidersFunc) {
 		"gpt-5.4":                  {"codex"},
 		"grok-4.5":                 {"xai"},
 		"grok-build-0.1":           {"xai"},
-		"gemini-3.6-flash":         {"antigravity"},
+		"gemini-3.6-flash-high":    {"antigravity"},
 		"gemini-pro-agent":         {"antigravity"},
 		"claude-opus-4-6-thinking": {"antigravity"},
 	}

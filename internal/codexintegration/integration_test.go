@@ -118,7 +118,7 @@ func TestCodexIntegrationReleaseGateSetupCatalogRouteDoctorRestore(t *testing.T)
 	}{
 		"xai/grok-4.5":                         {provider: "xai", upstream: "grok-4.5"},
 		"xai/grok-build-0.1":                   {provider: "xai", upstream: "grok-build-0.1"},
-		"antigravity/gemini-3.6-flash":         {provider: "antigravity", upstream: "gemini-3.6-flash"},
+		"antigravity/gemini-3.6-flash":         {provider: "antigravity", upstream: "gemini-3.6-flash-high"},
 		"antigravity/gemini-3.1-pro":           {provider: "antigravity", upstream: "gemini-pro-agent"},
 		"antigravity/claude-opus-4-6-thinking": {provider: "antigravity", upstream: "claude-opus-4-6-thinking"},
 	}

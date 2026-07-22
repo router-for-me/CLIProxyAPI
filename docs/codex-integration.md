@@ -23,7 +23,7 @@ The first five entries are the featured multi-agent models, in this order:
 | --- | --- | --- | --- | --- | --- |
 | `gpt-5.6-sol` | built-in `openai` provider | yes | yes | provider-defined | yes |
 | `xai/grok-4.5` | `xai` / `grok-4.5` | yes | yes | yes | yes |
-| `antigravity/gemini-3.6-flash` | `antigravity` / `gemini-3.6-flash` | yes | yes | yes | no |
+| `antigravity/gemini-3.6-flash` | `antigravity` / `gemini-3.6-flash-high` | yes | yes | yes | no |
 | `antigravity/gemini-3.1-pro` | `antigravity` / `gemini-pro-agent` | yes | yes | yes | no |
 | `antigravity/claude-opus-4-6-thinking` | `antigravity` / `claude-opus-4-6-thinking` | yes | yes | yes | no |
 | `xai/grok-build-0.1` | `xai` / `grok-build-0.1` | no | yes | yes | yes |
@@ -161,4 +161,3 @@ Restore removes the CLIProxyAPI-owned marker block, restores a pre-existing cata
 - Official GPT image generation and image edit stay on the official Codex path. Third-party catalog entries advertise image input only where configured.
 - Remote Codex clients and OpenCodex sidecar search behavior are outside this integration.
 - Provider subscriptions and OAuth-backed CLI access are governed by each provider's terms and usage limits. Confirm that proxying a subscription into Codex is permitted for your account and organization.
-

@@ -40,7 +40,7 @@ codex-integration:
       supports-web-search: true
     - slug: "antigravity/gemini-3.6-flash"
       provider: "antigravity"
-      upstream-model: "gemini-3.6-flash"
+      upstream-model: "gemini-3.6-flash-high"
       display-name: "Gemini 3.6 Flash"
       visible: true
       featured: true
