@@ -530,6 +530,7 @@ func main() {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
+	cfg.DisableCodexModelDiscovery = localModel
 
 	// In cloud deploy mode, check if we have a valid configuration
 	var configFileExists bool

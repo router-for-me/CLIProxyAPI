@@ -41,6 +41,10 @@ type Config struct {
 	// Home config is runtime-only and is populated from -home-jwt.
 	Home HomeConfig `yaml:"-" json:"-"`
 
+	// DisableCodexModelDiscovery disables authenticated per-account Codex model discovery.
+	// It is runtime-only and is enabled by the --local-model command-line flag.
+	DisableCodexModelDiscovery bool `yaml:"-" json:"-"`
+
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
 

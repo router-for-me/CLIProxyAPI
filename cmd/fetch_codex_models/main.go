@@ -21,9 +21,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,11 +38,7 @@ import (
 )
 
 const (
-	codexModelsBaseURL       = "https://chatgpt.com/backend-api/codex"
-	codexModelsPath          = "/models"
-	defaultClientVersion     = "0.144.1"
-	defaultCodexUserAgent    = "codex_cli_rs/0.144.1 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
-	defaultCodexOriginator   = "codex_cli_rs"
+	defaultClientVersion     = codexauth.DefaultModelsClientVersion
 	accessTokenRefreshLeeway = 30 * time.Second
 )
 
@@ -229,85 +223,29 @@ func ensureAccessToken(ctx context.Context, store *sdkauth.FileTokenStore, auth 
 }
 
 func fetchModels(ctx context.Context, auth *coreauth.Auth, accessToken, clientVersion string) ([]byte, int, error) {
-	modelsURL, errURL := codexModelsURL(clientVersion)
-	if errURL != nil {
-		return nil, 0, errURL
-	}
-
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
-	if errReq != nil {
-		return nil, 0, errReq
-	}
-	httpReq.Close = true
-	httpReq.Header.Set("Accept", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+accessToken)
-	httpReq.Header.Set("Originator", defaultCodexOriginator)
-	httpReq.Header.Set("User-Agent", defaultCodexUserAgent)
-	if accountID := metaStringValue(auth.Metadata, "account_id"); accountID != "" {
-		httpReq.Header.Set("Chatgpt-Account-Id", accountID)
-	}
-	if auth != nil {
-		util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes)
-	}
-
 	httpClient := &http.Client{}
 	if auth != nil {
 		if transport, _, errProxy := proxyutil.BuildHTTPTransport(auth.ProxyURL); errProxy == nil && transport != nil {
 			httpClient.Transport = transport
 		}
 	}
-
-	httpResp, errDo := httpClient.Do(httpReq)
-	if errDo != nil {
-		return nil, 0, errDo
+	customRequest := &http.Request{Header: make(http.Header)}
+	accountID := ""
+	if auth != nil {
+		util.ApplyCustomHeadersFromAttrs(customRequest, auth.Attributes)
+		accountID = metaStringValue(auth.Metadata, "account_id")
 	}
-
-	bodyBytes, errRead := io.ReadAll(httpResp.Body)
-	if errClose := httpResp.Body.Close(); errClose != nil && errRead == nil {
-		errRead = errClose
+	catalog, errFetch := codexauth.FetchModelsCatalog(ctx, httpClient, codexauth.ModelsRequest{
+		AccessToken:   accessToken,
+		AccountID:     accountID,
+		ClientVersion: clientVersion,
+		Headers:       customRequest.Header,
+		Host:          customRequest.Host,
+	})
+	if errFetch != nil {
+		return nil, 0, errFetch
 	}
-	if errRead != nil {
-		return nil, 0, errRead
-	}
-
-	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		return nil, 0, fmt.Errorf("models request failed with status %d: %s", httpResp.StatusCode, strings.TrimSpace(string(bodyBytes)))
-	}
-
-	count, errCount := countModels(bodyBytes)
-	if errCount != nil {
-		return nil, 0, errCount
-	}
-	return bodyBytes, count, nil
-}
-
-func codexModelsURL(clientVersion string) (string, error) {
-	u, err := url.Parse(codexModelsBaseURL + codexModelsPath)
-	if err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(clientVersion) != "" {
-		q := u.Query()
-		q.Set("client_version", strings.TrimSpace(clientVersion))
-		u.RawQuery = q.Encode()
-	}
-	return u.String(), nil
-}
-
-func countModels(raw []byte) (int, error) {
-	var payload struct {
-		Models []json.RawMessage `json:"models"`
-	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return 0, fmt.Errorf("failed to parse response JSON: %w", err)
-	}
-	// Keep this check intentionally loose: fetch_codex_models dumps the upstream
-	// Codex API payload. Strict CPA catalog validation belongs in
-	// cmd/validate_codex_models and registry.ValidateCodexClientModelsJSON.
-	if payload.Models == nil {
-		return 0, fmt.Errorf("response JSON does not contain models array")
-	}
-	return len(payload.Models), nil
+	return catalog.Raw, len(catalog.Models), nil
 }
 
 func prettyJSON(raw []byte) ([]byte, error) {

@@ -97,6 +97,14 @@ type Service struct {
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
 
+	// codexModels caches authenticated per-account Codex model catalogs.
+	codexModelsMu         sync.Mutex
+	codexModels           map[string]*codexModelDiscoveryEntry
+	codexModelsGeneration uint64
+	codexModelsFetch      codexModelCatalogFetcher
+	codexModelsCtx        context.Context
+	codexModelsCancel     context.CancelFunc
+
 	// pluginHost owns dynamic plugin lifecycle and runtime capability adapters.
 	pluginHost *pluginhost.Host
 
@@ -524,6 +532,7 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 			if update.Auth == nil || update.Auth.ID == "" {
 				continue
 			}
+			s.invalidateCodexModelDiscovery(update.Auth)
 			auth := s.prepareCoreAuthForModelRegistration(registrationCtx, update.Auth)
 			if auth == nil {
 				continue
@@ -749,8 +758,11 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil {
 		provider = strings.TrimSpace(existing.Provider)
 	}
-	GlobalModelRegistry().UnregisterClient(id)
+	s.removeCodexModelDiscovery(id)
 	s.coreManager.Remove(ctx, id)
+	// Unregister after removing the manager entry so an in-flight model refresh
+	// cannot restore a client after the removal cleanup has completed.
+	GlobalModelRegistry().UnregisterClient(id)
 	if strings.EqualFold(provider, "codex") {
 		executor.CloseCodexWebsocketSessionsForAuthID(id, "auth_removed")
 	}
@@ -1261,11 +1273,13 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 	previousStrategy := ""
 	var previousSessionAffinity bool
 	var previousSessionAffinityTTL string
+	var disableCodexModelDiscovery bool
 	s.cfgMu.RLock()
 	if s.cfg != nil {
 		previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
 		previousSessionAffinity = s.cfg.Routing.SessionAffinity
 		previousSessionAffinityTTL = s.cfg.Routing.SessionAffinityTTL
+		disableCodexModelDiscovery = s.cfg.DisableCodexModelDiscovery
 	}
 	s.cfgMu.RUnlock()
 
@@ -1276,6 +1290,9 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 	}
 	if newCfg == nil {
 		return
+	}
+	if disableCodexModelDiscovery {
+		newCfg.DisableCodexModelDiscovery = true
 	}
 
 	nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
@@ -1620,6 +1637,7 @@ func (s *Service) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	s.startCodexModelDiscovery(ctx)
 
 	usage.StartDefault(ctx)
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
@@ -1805,6 +1823,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if ctx == nil {
 			ctx = context.Background()
 		}
+		s.stopCodexModelDiscovery()
 
 		if s.homeCancel != nil {
 			s.homeCancel()
@@ -1950,6 +1969,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		return
 	}
 	var models []*ModelInfo
+	var codexDiscoveryRevision uint64
 	switch provider {
 	case constant.Gemini:
 		models = registry.GetGeminiModels()
@@ -2004,21 +2024,27 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		}
 		models = applyExcludedModels(models, excluded)
 	case "codex":
-		codexPlanType := ""
-		if a.Attributes != nil {
-			codexPlanType = strings.TrimSpace(a.Attributes["plan_type"])
-		}
-		switch strings.ToLower(codexPlanType) {
-		case "pro":
-			models = registry.GetCodexProModels()
-		case "plus":
-			models = registry.GetCodexPlusModels()
-		case "team", "business", "go":
-			models = registry.GetCodexTeamModels()
-		case "free":
-			models = registry.GetCodexFreeModels()
-		default:
-			models = registry.GetCodexProModels()
+		discovered, ok, revision := s.discoveredCodexModelsForAuth(ctx, a)
+		codexDiscoveryRevision = revision
+		if ok {
+			models = discovered
+		} else {
+			codexPlanType := ""
+			if a.Attributes != nil {
+				codexPlanType = strings.TrimSpace(a.Attributes["plan_type"])
+			}
+			switch strings.ToLower(codexPlanType) {
+			case "pro":
+				models = registry.GetCodexProModels()
+			case "plus":
+				models = registry.GetCodexPlusModels()
+			case "team", "business", "go":
+				models = registry.GetCodexTeamModels()
+			case "free":
+				models = registry.GetCodexFreeModels()
+			default:
+				models = registry.GetCodexProModels()
+			}
 		}
 		if entry := s.resolveConfigCodexKey(a); entry != nil {
 			if len(entry.Models) > 0 {
@@ -2151,10 +2177,16 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	models = s.appendPluginModels(key, models)
 	if len(models) > 0 {
 		s.registerResolvedModelsForAuth(a, key, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
-		return
+	} else {
+		GlobalModelRegistry().UnregisterClient(a.ID)
 	}
 
-	GlobalModelRegistry().UnregisterClient(a.ID)
+	// A fast asynchronous discovery can complete before this call finishes
+	// registering its current catalog. Reconcile from the now-cached revision
+	// so older or fallback models cannot overwrite a successful discovery.
+	if provider == "codex" && s.codexModelDiscoveryRevisionChanged(a, codexDiscoveryRevision) {
+		s.registerModelsForAuthWithCache(ctx, a, compatCache)
+	}
 }
 
 // refreshModelRegistrationForAuth re-applies the latest model registration for
