@@ -88,6 +88,9 @@ type Service struct {
 	// authQueueStop cancels the auth update queue processing.
 	authQueueStop context.CancelFunc
 
+	// codexQuotaRefreshCancel stops active Codex quota synchronization.
+	codexQuotaRefreshCancel context.CancelFunc
+
 	// authManager handles legacy authentication operations.
 	authManager *sdkAuth.Manager
 
@@ -1331,6 +1334,7 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 	s.cfgMu.Lock()
 	s.cfg = newCfg
 	s.cfgMu.Unlock()
+	s.restartCodexQuotaRefresher(context.Background(), newCfg)
 	if s.coreManager != nil {
 		s.coreManager.SetConfig(newCfg)
 		s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
@@ -1679,6 +1683,7 @@ func (s *Service) Run(ctx context.Context) error {
 	// legacy clients removed; no caches to refresh
 
 	s.ensureWebsocketGateway()
+	s.restartCodexQuotaRefresher(ctx, s.cfg)
 	if homeEnabled {
 		s.registerAvailableExecutors(ctx, executorRegistrationOptions{
 			includeBaseline: true,
@@ -1824,6 +1829,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 
 		if s.watcherCancel != nil {
 			s.watcherCancel()
+		}
+		if s.codexQuotaRefreshCancel != nil {
+			s.codexQuotaRefreshCancel()
+			s.codexQuotaRefreshCancel = nil
 		}
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()

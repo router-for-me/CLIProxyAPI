@@ -26,6 +26,19 @@ const (
 	DefaultAuthDir               = "~/.cli-proxy-api"
 )
 
+// CodexQuotaRefreshConfig controls active verification for quota-exhausted Codex credentials.
+type CodexQuotaRefreshConfig struct {
+	Enabled            *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	ScanInterval       string `yaml:"scan-interval,omitempty" json:"scan-interval,omitempty"`
+	MinAccountInterval string `yaml:"min-account-interval,omitempty" json:"min-account-interval,omitempty"`
+	AccountStagger     string `yaml:"account-stagger,omitempty" json:"account-stagger,omitempty"`
+}
+
+// IsEnabled reports whether active Codex quota synchronization is enabled.
+func (c CodexQuotaRefreshConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
 	SDKConfig `yaml:",inline"`
@@ -83,6 +96,9 @@ type Config struct {
 
 	// SaveCooldownStatus persists runtime cooldown status next to auth files when true.
 	SaveCooldownStatus bool `yaml:"save-cooldown-status" json:"save-cooldown-status"`
+
+	// CodexQuotaRefresh configures passive and active Codex quota synchronization.
+	CodexQuotaRefresh CodexQuotaRefreshConfig `yaml:"codex-quota-refresh" json:"codex-quota-refresh"`
 
 	// TransientErrorCooldownSeconds controls cooldowns for transient upstream errors.
 	// 0 keeps the legacy default cooldown. Negative values disable these cooldowns.
