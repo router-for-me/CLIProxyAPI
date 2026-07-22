@@ -20,20 +20,23 @@ import (
 )
 
 const (
-	defaultConfigTable         = "config_store"
-	defaultAuthTable           = "auth_store"
-	defaultConfigKey           = "config"
-	defaultAPIKeysTable        = "api_keys"
-	defaultPoliciesTable       = "api_key_policies"
-	defaultUsageEventsTable    = "usage_events"
-	defaultUsageErrorsTable    = "usage_errors"
-	defaultUsageWindowsTable   = "usage_windows"
-	defaultModelsTable         = "models_catalog"
-	defaultModelPricingTable   = "model_pricing"
-	defaultErrorMessagesTable  = "error_messages"
-	defaultInternalUsersTable  = "internal_users"
-	defaultUserWindowsTable    = "user_windows"
-	defaultPricingSourcesTable = "pricing_sources"
+	defaultConfigTable                  = "config_store"
+	defaultAuthTable                    = "auth_store"
+	defaultConfigKey                    = "config"
+	defaultAPIKeysTable                 = "api_keys"
+	defaultPoliciesTable                = "api_key_policies"
+	defaultUsageEventsTable             = "usage_events"
+	defaultUsageErrorsTable             = "usage_errors"
+	defaultUsageWindowsTable            = "usage_windows"
+	defaultModelsTable                  = "models_catalog"
+	defaultModelPricingTable            = "model_pricing"
+	defaultErrorMessagesTable           = "error_messages"
+	defaultInternalUsersTable           = "internal_users"
+	defaultUserWindowsTable             = "user_windows"
+	defaultPricingSourcesTable          = "pricing_sources"
+	defaultManagementTokensTable        = "management_tokens"
+	defaultManagementTokenPoliciesTable = "management_token_policies"
+	defaultManagementAuditLogTable      = "management_audit_log"
 )
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
@@ -83,6 +86,19 @@ type PostgresStoreConfig struct {
 	// UserWindowsTable stores time-windowed aggregate counters for per-user
 	// budget enforcement, parallel to UsageWindowsTable but keyed by user_id.
 	UserWindowsTable string
+
+	// ManagementTokensTable stores management API tokens that gate access to
+	// the /v0/management REST surface. Each token has a scope (read|write),
+	// optional policy (RPM, max-parallel, endpoint allow/block lists), and an
+	// expiry. The plaintext secret is never stored; only the SHA-256 hash.
+	ManagementTokensTable string
+	// ManagementTokenPoliciesTable stores per-token policy attached to
+	// ManagementTokensTable rows (FK ON DELETE CASCADE).
+	ManagementTokenPoliciesTable string
+	// ManagementAuditLogTable stores the audit trail of every management API
+	// call made with a management token (request/response bodies, status,
+	// latency, error). Bodies are AES-GCM-sealed when UsageEncryptionKey is set.
+	ManagementAuditLogTable string
 
 	// UsageEncryptionKey is the passphrase used to derive an AES-256-GCM
 	// key for sealing sensitive columns (api_key_principal in usage_events)
@@ -149,6 +165,15 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.UserWindowsTable == "" {
 		cfg.UserWindowsTable = defaultUserWindowsTable
+	}
+	if cfg.ManagementTokensTable == "" {
+		cfg.ManagementTokensTable = defaultManagementTokensTable
+	}
+	if cfg.ManagementTokenPoliciesTable == "" {
+		cfg.ManagementTokenPoliciesTable = defaultManagementTokenPoliciesTable
+	}
+	if cfg.ManagementAuditLogTable == "" {
+		cfg.ManagementAuditLogTable = defaultManagementAuditLogTable
 	}
 
 	spoolRoot := strings.TrimSpace(cfg.SpoolDir)
@@ -660,6 +685,112 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	`, pricingSourcesTable)); err != nil {
 		return fmt.Errorf("postgres store: create pricing_sources table: %w", err)
 	}
+
+	// management_tokens stores management API tokens that gate access to the
+	// /v0/management REST surface. Mirrors the api_keys schema shape: only the
+	// SHA-256 hash is persisted; the plaintext secret is returned exactly once
+	// at create/regenerate time. scope (read|write) gates which HTTP verbs the
+	// token may use. 503 when the PG backend is absent (feature-detected via
+	// the ManagementTokenStore nil check).
+	mgmtTokensTable := s.fullTableName(s.cfg.ManagementTokensTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id           TEXT PRIMARY KEY,
+			name         TEXT NOT NULL,
+			key_hash     TEXT NOT NULL UNIQUE,
+			key_prefix   TEXT NOT NULL,
+			status       TEXT NOT NULL DEFAULT 'active',
+			scope        TEXT NOT NULL DEFAULT 'read',
+			created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			expires_at   TIMESTAMPTZ,
+			last_used_at TIMESTAMPTZ,
+			metadata     JSONB NOT NULL DEFAULT '{}'::jsonb
+		)
+	`, mgmtTokensTable)); err != nil {
+		return fmt.Errorf("postgres store: create management_tokens table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_management_tokens_key_hash ON %s(key_hash)`, mgmtTokensTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create management_tokens key_hash index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_management_tokens_status ON %s(status) WHERE status = 'active'`, mgmtTokensTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create management_tokens status index: %w", err)
+	}
+
+	// management_token_policies stores per-token policy (RPM, max-parallel,
+	// endpoint allow/block lists) attached to management_tokens rows. FK
+	// ON DELETE CASCADE mirrors api_key_policies.
+	mgmtPoliciesTable := s.fullTableName(s.cfg.ManagementTokenPoliciesTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			token_id              TEXT PRIMARY KEY REFERENCES %s(id) ON DELETE CASCADE,
+			rpm_limit             INTEGER,
+			max_parallel_requests INTEGER,
+			hourly_rate_limit     INTEGER,
+			allowed_endpoints     JSONB NOT NULL DEFAULT '[]'::jsonb,
+			blocked_endpoints     JSONB NOT NULL DEFAULT '[]'::jsonb,
+			allowed_ips           JSONB NOT NULL DEFAULT '[]'::jsonb,
+			blocked_ips           JSONB NOT NULL DEFAULT '[]'::jsonb,
+			updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, mgmtPoliciesTable, mgmtTokensTable)); err != nil {
+		return fmt.Errorf("postgres store: create management_token_policies table: %w", err)
+	}
+	// Backfill allowed_ips / blocked_ips columns (IP allowlist/blocklist) for
+	// deployments that already have management_token_policies without them.
+	// Idempotent so existing deployments upgrade transparently.
+	for _, col := range []string{"allowed_ips", "blocked_ips"} {
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+			`ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s JSONB NOT NULL DEFAULT '[]'::jsonb`,
+			mgmtPoliciesTable, quoteIdentifier(col),
+		)); err != nil {
+			return fmt.Errorf("postgres store: alter management_token_policies add %s: %w", col, err)
+		}
+	}
+
+	// management_audit_log stores the audit trail of every management API call
+	// made with a management token: request audit (who/what/when/latency),
+	// request/response bodies for mutations, and error message for 4xx/5xx.
+	// Bodies are AES-GCM-sealed at rest when UsageEncryptionKey is configured;
+	// otherwise plaintext (legacy rows remain readable, forward-encrypting).
+	mgmtAuditTable := s.fullTableName(s.cfg.ManagementAuditLogTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id            BIGSERIAL PRIMARY KEY,
+			token_id      TEXT,
+			actor_ip      TEXT,
+			method        TEXT NOT NULL,
+			path          TEXT NOT NULL,
+			status_code   INTEGER NOT NULL DEFAULT 0,
+			latency_ms    BIGINT NOT NULL DEFAULT 0,
+			request_body  TEXT,
+			response_body TEXT,
+			error_message TEXT,
+			is_error      BOOLEAN NOT NULL DEFAULT FALSE,
+			occurred_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, mgmtAuditTable)); err != nil {
+		return fmt.Errorf("postgres store: create management_audit_log table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_management_audit_token ON %s(token_id, occurred_at DESC) WHERE token_id IS NOT NULL`, mgmtAuditTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create management_audit_log token index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_management_audit_occurred_at ON %s(occurred_at DESC)`, mgmtAuditTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create management_audit_log occurred_at index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_management_audit_is_error ON %s(occurred_at DESC) WHERE is_error = TRUE`, mgmtAuditTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create management_audit_log is_error index: %w", err)
+	}
 	return nil
 }
 
@@ -823,6 +954,33 @@ func (s *PostgresStore) UserWindowsTable() string {
 		return quoteIdentifier(defaultUserWindowsTable)
 	}
 	return s.fullTableName(s.cfg.UserWindowsTable)
+}
+
+// ManagementTokensTable returns the fully-qualified name of the management API
+// tokens table (gate access to /v0/management REST surface).
+func (s *PostgresStore) ManagementTokensTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultManagementTokensTable)
+	}
+	return s.fullTableName(s.cfg.ManagementTokensTable)
+}
+
+// ManagementTokenPoliciesTable returns the fully-qualified name of the
+// per-management-token policy table.
+func (s *PostgresStore) ManagementTokenPoliciesTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultManagementTokenPoliciesTable)
+	}
+	return s.fullTableName(s.cfg.ManagementTokenPoliciesTable)
+}
+
+// ManagementAuditLogTable returns the fully-qualified name of the management
+// API audit log table (request audit + bodies + error log).
+func (s *PostgresStore) ManagementAuditLogTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultManagementAuditLogTable)
+	}
+	return s.fullTableName(s.cfg.ManagementAuditLogTable)
 }
 
 // Save persists authentication metadata to disk and PostgreSQL.
