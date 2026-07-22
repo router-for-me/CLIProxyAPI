@@ -7,8 +7,9 @@ import (
 
 // sessionEntry stores auth binding with expiration.
 type sessionEntry struct {
-	authID    string
-	expiresAt time.Time
+	authID           string
+	logicalSessionID string
+	expiresAt        time.Time
 }
 
 // SessionCache provides TTL-based session to auth mapping with automatic cleanup.
@@ -17,6 +18,14 @@ type SessionCache struct {
 	entries map[string]sessionEntry
 	ttl     time.Duration
 	stopCh  chan struct{}
+}
+
+// SessionAffinityStats summarizes active logical sessions and affinity bindings.
+// A binding represents one provider, extracted session ID, and model tuple;
+// one logical session may therefore own multiple bindings.
+type SessionAffinityStats struct {
+	ActiveSessions int `json:"active_sessions"`
+	ActiveBindings int `json:"active_bindings"`
 }
 
 // NewSessionCache creates a cache with the specified TTL.
@@ -82,13 +91,23 @@ func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 
 // Set binds a session to an auth ID with TTL refresh.
 func (c *SessionCache) Set(sessionID, authID string) {
-	if sessionID == "" || authID == "" {
+	c.setBinding(sessionID, sessionID, authID)
+}
+
+// setBinding binds a cache key to an auth while retaining its logical session ID.
+// Existing logical session metadata is preserved when an auth is reselected.
+func (c *SessionCache) setBinding(cacheKey, logicalSessionID, authID string) {
+	if cacheKey == "" || logicalSessionID == "" || authID == "" {
 		return
 	}
 	c.mu.Lock()
-	c.entries[sessionID] = sessionEntry{
-		authID:    authID,
-		expiresAt: time.Now().Add(c.ttl),
+	if existing, ok := c.entries[cacheKey]; ok && existing.logicalSessionID != "" {
+		logicalSessionID = existing.logicalSessionID
+	}
+	c.entries[cacheKey] = sessionEntry{
+		authID:           authID,
+		logicalSessionID: logicalSessionID,
+		expiresAt:        time.Now().Add(c.ttl),
 	}
 	c.mu.Unlock()
 }
@@ -116,6 +135,32 @@ func (c *SessionCache) InvalidateAuth(authID string) {
 		}
 	}
 	c.mu.Unlock()
+}
+
+// Stats returns a point-in-time count of unexpired bindings.
+// Expired entries are ignored even if the background cleanup has not removed them yet.
+func (c *SessionCache) Stats() SessionAffinityStats {
+	if c == nil {
+		return SessionAffinityStats{}
+	}
+
+	now := time.Now()
+	stats := SessionAffinityStats{}
+	sessions := make(map[string]struct{})
+	c.mu.RLock()
+	for cacheKey, entry := range c.entries {
+		if !now.After(entry.expiresAt) {
+			stats.ActiveBindings++
+			logicalSessionID := entry.logicalSessionID
+			if logicalSessionID == "" {
+				logicalSessionID = cacheKey
+			}
+			sessions[logicalSessionID] = struct{}{}
+		}
+	}
+	c.mu.RUnlock()
+	stats.ActiveSessions = len(sessions)
+	return stats
 }
 
 // Stop terminates the background cleanup goroutine.

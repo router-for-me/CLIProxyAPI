@@ -606,6 +606,37 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 	}
 }
 
+func TestManagementSessionAffinityStatsRouteRegistered(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/routing/session-affinity/stats", nil)
+	req.Header.Set("Authorization", "Bearer test-management-key")
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var response struct {
+		Enabled        bool `json:"enabled"`
+		ActiveSessions int  `json:"active_sessions"`
+		ActiveBindings int  `json:"active_bindings"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v body=%s", err, recorder.Body.String())
+	}
+	if response.Enabled {
+		t.Fatal("enabled = true, want false")
+	}
+	if response.ActiveBindings != 0 {
+		t.Fatalf("active_bindings = %d, want 0", response.ActiveBindings)
+	}
+	if response.ActiveSessions != 0 {
+		t.Fatalf("active_sessions = %d, want 0", response.ActiveSessions)
+	}
+}
+
 func TestManagementPluginsRouteRegistered(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 
