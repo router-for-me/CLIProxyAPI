@@ -96,6 +96,50 @@ func TestSetupPreservesConfigShapeAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestSyncRefreshesStaleJournalMetadata(t *testing.T) {
+	lifecycle := testLifecycle(t)
+	models, providers := catalogTestModels()
+	if _, err := lifecycle.Setup(models, providers, true, false); err != nil {
+		t.Fatalf("Setup() error = %v", err)
+	}
+	journal, exists, err := readJournal(lifecycle.Paths.JournalFile)
+	if err != nil || !exists {
+		t.Fatalf("readJournal() = %#v, %v", journal, err)
+	}
+	journal.CatalogRevision = "stale-catalog"
+	journal.CatalogSourceVersion = 0
+	journal.MappingRevision = "stale-mapping"
+	journalData, err := marshalJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(lifecycle.Paths.JournalFile, journalData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	preview, err := lifecycle.Sync(models, providers, false)
+	if err != nil || !preview.Changed || preview.Applied {
+		t.Fatalf("Sync(preview) = %#v, %v", preview, err)
+	}
+	applied, err := lifecycle.Sync(models, providers, true)
+	if err != nil || !applied.Changed || !applied.Applied {
+		t.Fatalf("Sync(apply) = %#v, %v", applied, err)
+	}
+	refreshed, exists, err := readJournal(lifecycle.Paths.JournalFile)
+	if err != nil || !exists {
+		t.Fatalf("readJournal(refreshed) = %#v, %v", refreshed, err)
+	}
+	if refreshed.CatalogRevision != applied.CatalogRevision ||
+		refreshed.CatalogSourceVersion != applied.SourceRevision ||
+		refreshed.MappingRevision != applied.MappingRevision {
+		t.Fatalf("refreshed journal = %#v, want operation revisions %#v", refreshed, applied)
+	}
+	second, err := lifecycle.Sync(models, providers, true)
+	if err != nil || second.Changed || second.Applied {
+		t.Fatalf("second Sync() = %#v, %v", second, err)
+	}
+}
+
 func TestSetupRejectsUserOwnedRootKeys(t *testing.T) {
 	lifecycle := testLifecycle(t)
 	if err := os.MkdirAll(lifecycle.Paths.Home, 0o700); err != nil {

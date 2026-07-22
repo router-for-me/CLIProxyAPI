@@ -140,7 +140,10 @@ func (l *Lifecycle) prepareSetup(models []map[string]any, providers ModelProvide
 	if err != nil {
 		return setupPlan{}, err
 	}
-	changed := !bytes.Equal(oldConfig, newConfig) || !bytes.Equal(oldCatalog, catalogData) || !journalExists
+	journalStale := journalExists && (journal.CatalogRevision != catalog.Revision ||
+		journal.CatalogSourceVersion != catalog.SourceRevision ||
+		journal.MappingRevision != catalog.MappingRevision)
+	changed := !bytes.Equal(oldConfig, newConfig) || !bytes.Equal(oldCatalog, catalogData) || !journalExists || journalStale
 	return setupPlan{
 		catalog: catalog, catalogData: catalogData, configData: newConfig, configMode: configMode,
 		configOld: oldConfig, configExists: configExists, catalogOld: oldCatalog,
