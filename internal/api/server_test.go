@@ -496,6 +496,51 @@ func TestManagementResponseExposesPluginSupportHeaderForCORS(t *testing.T) {
 	}
 }
 
+func TestAgentIdentityManagementRoutesAreRegisteredAndProtected(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+	server := newTestServer(t)
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{
+			name:   "provision",
+			method: http.MethodPost,
+			path:   "/v0/management/auth-files/agent-identity/provision",
+			body:   `{}`,
+		},
+		{
+			name:   "export",
+			method: http.MethodGet,
+			path:   "/v0/management/auth-files/agent-identity/export",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			unauthorizedRequest := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			unauthorizedRequest.Header.Set("Content-Type", "application/json")
+			unauthorizedRecorder := httptest.NewRecorder()
+			server.engine.ServeHTTP(unauthorizedRecorder, unauthorizedRequest)
+			if unauthorizedRecorder.Code != http.StatusUnauthorized {
+				t.Fatalf("unauthorized status = %d, want %d body=%s", unauthorizedRecorder.Code, http.StatusUnauthorized, unauthorizedRecorder.Body.String())
+			}
+
+			authorizedRequest := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			authorizedRequest.Header.Set("Authorization", "Bearer test-management-key")
+			authorizedRequest.Header.Set("Content-Type", "application/json")
+			authorizedRecorder := httptest.NewRecorder()
+			server.engine.ServeHTTP(authorizedRecorder, authorizedRequest)
+			if authorizedRecorder.Code != http.StatusBadRequest {
+				t.Fatalf("authorized status = %d, want %d body=%s", authorizedRecorder.Code, http.StatusBadRequest, authorizedRecorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestOAuthCallbackRouteSkipsManagementKeyMiddleware(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 

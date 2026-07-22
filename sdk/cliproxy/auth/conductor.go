@@ -260,6 +260,9 @@ type Manager struct {
 	refreshLoop   *authAutoRefreshLoop
 
 	requestPrepareLocks sync.Map
+	// mutationLocks serializes durable state transitions per auth ID. Callers that
+	// also need refresh exclusion must acquire refreshLocks before mutationLocks.
+	mutationLocks sync.Map
 	// refreshLocks serializes credential refresh per auth ID so concurrent
 	// 401 recoveries and auto-refresh workers do not race the same refresh_token.
 	refreshLocks sync.Map
@@ -2163,6 +2166,8 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
+	mutationLock := m.mutationLockForAuth(auth.ID)
+	mutationLock.mu.Lock()
 	now := time.Now()
 	clearedCooldown := false
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
@@ -2181,11 +2186,13 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
+	result := auth.Clone()
+	mutationLock.mu.Unlock()
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
 	if clearedCooldown {
 		m.persistCooldownStates(ctx)
 	}
-	return auth.Clone(), nil
+	return result, nil
 }
 
 // Update replaces an existing auth entry and notifies hooks.
@@ -2193,10 +2200,13 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
+	mutationLock := m.mutationLockForAuth(auth.ID)
+	mutationLock.mu.Lock()
 	m.mu.Lock()
 	existing, ok := m.auths[auth.ID]
 	if !ok || existing == nil {
 		m.mu.Unlock()
+		mutationLock.mu.Unlock()
 		return nil, nil
 	}
 	if !auth.indexAssigned && auth.Index == "" {
@@ -2228,11 +2238,13 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
+	result := auth.Clone()
+	mutationLock.mu.Unlock()
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	if clearedCooldown {
 		m.persistCooldownStates(ctx)
 	}
-	return auth.Clone(), nil
+	return result, nil
 }
 
 // Remove deletes an auth from runtime state without persisting.
@@ -2246,11 +2258,14 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 		return
 	}
 	_ = ctx
+	mutationLock := m.mutationLockForAuth(id)
+	mutationLock.mu.Lock()
 
 	m.mu.Lock()
 	existing := m.auths[id]
 	if existing == nil {
 		m.mu.Unlock()
+		mutationLock.mu.Unlock()
 		return
 	}
 	provider := strings.TrimSpace(existing.Provider)
@@ -2277,6 +2292,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 	}
 	m.queueRefreshUnschedule(id)
 	m.invalidateSessionAffinity(id)
+	mutationLock.mu.Unlock()
 
 	if provider != "" {
 		if exec, ok := m.Executor(provider); ok && exec != nil {
@@ -6123,6 +6139,32 @@ type authRefreshLock struct {
 	mu sync.Mutex
 }
 
+type authMutationLock struct {
+	mu sync.Mutex
+}
+
+func (m *Manager) mutationLockForAuth(id string) *authMutationLock {
+	lockValue, _ := m.mutationLocks.LoadOrStore(id, &authMutationLock{})
+	lock, _ := lockValue.(*authMutationLock)
+	if lock != nil {
+		return lock
+	}
+	lock = &authMutationLock{}
+	m.mutationLocks.Store(id, lock)
+	return lock
+}
+
+func (m *Manager) refreshLockForAuth(id string) *authRefreshLock {
+	lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{})
+	lock, _ := lockValue.(*authRefreshLock)
+	if lock != nil {
+		return lock
+	}
+	lock = &authRefreshLock{}
+	m.refreshLocks.Store(id, lock)
+	return lock
+}
+
 func authAccessToken(auth *Auth) string {
 	if token := authMetadataString(auth, "access_token"); token != "" {
 		return token
@@ -6195,12 +6237,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		return nil, errors.New("auth id is empty")
 	}
 
-	lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{})
-	lock, _ := lockValue.(*authRefreshLock)
-	if lock == nil {
-		lock = &authRefreshLock{}
-		m.refreshLocks.Store(id, lock)
-	}
+	lock := m.refreshLockForAuth(id)
 	lock.mu.Lock()
 	defer lock.mu.Unlock()
 
