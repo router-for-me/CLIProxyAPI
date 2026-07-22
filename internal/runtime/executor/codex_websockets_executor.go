@@ -466,25 +466,20 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		return resp, errSend
 	}
 	if sess == nil {
-		stopPings := startStandaloneCodexWebsocketPings(conn, codexTimeoutsFromConfig(e.cfg).websocketPing)
+		timeouts := codexTimeoutsFromConfig(e.cfg)
+		configureStandaloneCodexWebsocket(conn, timeouts.websocketIdle)
+		stopPings := startStandaloneCodexWebsocketPings(conn, timeouts.websocketPing)
 		defer stopPings()
 	}
 
 	timeouts := codexTimeoutsFromConfig(e.cfg)
-	firstEvent := true
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
 	for {
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
 		}
-		readTimeout := timeouts.streamIdle
-		readPhase := "stream idle"
-		if firstEvent {
-			readTimeout = timeouts.firstEvent
-			readPhase = "first event"
-		}
-		msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh, readTimeout, readPhase)
+		msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh, timeouts.websocketIdle)
 		if errRead != nil {
 			if sess != nil {
 				e.invalidateUpstreamConn(sess, conn, "read_error", errRead)
@@ -493,7 +488,6 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)
 			return resp, mappedErr
 		}
-		firstEvent = false
 		if msgType != websocket.TextMessage {
 			if msgType == websocket.BinaryMessage {
 				err = fmt.Errorf("codex websockets executor: unexpected binary message")
@@ -705,7 +699,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 		defer close(out)
 		if sess == nil {
-			stopPings := startStandaloneCodexWebsocketPings(conn, codexTimeoutsFromConfig(e.cfg).websocketPing)
+			timeouts := codexTimeoutsFromConfig(e.cfg)
+			configureStandaloneCodexWebsocket(conn, timeouts.websocketIdle)
+			stopPings := startStandaloneCodexWebsocketPings(conn, timeouts.websocketPing)
 			defer stopPings()
 		}
 		defer func() {
@@ -735,7 +731,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		timeouts := codexTimeoutsFromConfig(e.cfg)
-		firstEvent := true
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
@@ -746,13 +741,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
 				return
 			}
-			readTimeout := timeouts.streamIdle
-			readPhase := "stream idle"
-			if firstEvent {
-				readTimeout = timeouts.firstEvent
-				readPhase = "first event"
-			}
-			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh, readTimeout, readPhase)
+			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh, timeouts.websocketIdle)
 			if errRead != nil {
 				if sess != nil && ctx != nil && ctx.Err() != nil {
 					terminateReason = "context_done"
@@ -771,7 +760,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				_ = send(cliproxyexecutor.StreamChunk{Err: mappedErr})
 				return
 			}
-			firstEvent = false
 			if msgType != websocket.TextMessage {
 				if msgType == websocket.BinaryMessage {
 					err = fmt.Errorf("codex websockets executor: unexpected binary message")
@@ -883,8 +871,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 }
 
 func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *cliproxyauth.Auth, wsURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {
-	timeouts := codexTimeoutsFromConfig(e.cfg)
-	dialer := newProxyAwareWebsocketDialer(e.cfg, auth, timeouts.connect, timeouts.responseHeader)
+	dialer := newProxyAwareWebsocketDialer(e.cfg, auth)
 	dialer.EnableCompression = true
 	if ctx == nil {
 		ctx = context.Background()
@@ -979,7 +966,7 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 	return fallback
 }
 
-func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead, timeout time.Duration, phase string) (int, []byte, error) {
+func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead, timeout time.Duration) (int, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -993,7 +980,7 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return 0, nil, ctxErr
 			}
-			return 0, nil, codexRequestTimeoutError{phase: phase, timeout: timeout}
+			return 0, nil, codexRequestTimeoutError{phase: "websocket idle", timeout: timeout}
 		}
 		return msgType, payload, errRead
 	}
@@ -1003,17 +990,10 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 	if readCh == nil {
 		return 0, nil, fmt.Errorf("codex websockets executor: session read channel is nil")
 	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return 0, nil, ctx.Err()
-		case <-timer.C:
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return 0, nil, ctxErr
-			}
-			return 0, nil, codexRequestTimeoutError{phase: phase, timeout: timeout}
 		case ev, ok := <-readCh:
 			if !ok {
 				return 0, nil, fmt.Errorf("codex websockets executor: session read channel closed")
@@ -1029,21 +1009,13 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 	}
 }
 
-func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth, timeoutValues ...time.Duration) *websocket.Dialer {
-	connectTimeout := codexDefaultConnectTimeout
-	handshakeTimeout := codexResponsesWebsocketHandshakeTO
-	if len(timeoutValues) > 0 && timeoutValues[0] > 0 {
-		connectTimeout = timeoutValues[0]
-	}
-	if len(timeoutValues) > 1 && timeoutValues[1] > 0 {
-		handshakeTimeout = timeoutValues[1]
-	}
+func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *websocket.Dialer {
 	dialer := &websocket.Dialer{
 		Proxy:             http.ProxyFromEnvironment,
-		HandshakeTimeout:  handshakeTimeout,
+		HandshakeTimeout:  codexResponsesWebsocketHandshakeTO,
 		EnableCompression: true,
 		NetDialContext: (&net.Dialer{
-			Timeout:   connectTimeout,
+			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 	}
@@ -1679,7 +1651,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 			sess.connMu.Lock()
 			sess.readerConn = conn
 			sess.connMu.Unlock()
-			sess.configureConn(conn, codexTimeoutsFromConfig(e.cfg).streamIdle)
+			sess.configureConn(conn, codexTimeoutsFromConfig(e.cfg).websocketIdle)
 			go e.readUpstreamLoop(sess, conn)
 		}
 		// Validate a reused socket before writing the business payload. A failed
@@ -1711,7 +1683,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	sess.readerConn = conn
 	sess.connMu.Unlock()
 
-	sess.configureConn(conn, codexTimeoutsFromConfig(e.cfg).streamIdle)
+	sess.configureConn(conn, codexTimeoutsFromConfig(e.cfg).websocketIdle)
 	go e.readUpstreamLoop(sess, conn)
 	logCodexWebsocketConnected(sess.sessionID, authID, wsURL)
 	return conn, resp, nil
@@ -1740,9 +1712,12 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		}
 	}()
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(timeouts.streamIdle))
+		_ = conn.SetReadDeadline(time.Now().Add(timeouts.websocketIdle))
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
+			if networkErr, ok := errRead.(net.Error); ok && networkErr.Timeout() {
+				errRead = codexRequestTimeoutError{phase: "websocket idle", timeout: timeouts.websocketIdle}
+			}
 			invalidate := func() {
 				e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
 			}
@@ -1759,7 +1734,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			}
 			return
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(timeouts.streamIdle))
+		_ = conn.SetReadDeadline(time.Now().Add(timeouts.websocketIdle))
 
 		if msgType != websocket.TextMessage {
 			if msgType == websocket.BinaryMessage {
@@ -1792,6 +1767,24 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		case <-done:
 		}
 	}
+}
+
+func configureStandaloneCodexWebsocket(conn *websocket.Conn, idleTimeout time.Duration) {
+	if conn == nil || idleTimeout <= 0 {
+		return
+	}
+	refreshReadDeadline := func() error {
+		return conn.SetReadDeadline(time.Now().Add(idleTimeout))
+	}
+	conn.SetPingHandler(func(appData string) error {
+		if err := refreshReadDeadline(); err != nil {
+			return err
+		}
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
+	})
+	conn.SetPongHandler(func(string) error {
+		return refreshReadDeadline()
+	})
 }
 
 func startStandaloneCodexWebsocketPings(conn *websocket.Conn, interval time.Duration) func() {

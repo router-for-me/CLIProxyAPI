@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 type restorePlan struct {
@@ -42,32 +43,76 @@ func (l *Lifecycle) Restore(apply bool) (OperationResult, error) {
 	if !plan.changed {
 		return OperationResult{}, nil
 	}
-	if plan.writeConfig {
-		if err = atomicWriteFile(l.Paths.ConfigFile, plan.configData, plan.configMode); err != nil {
-			return OperationResult{}, err
-		}
-	}
-	if plan.restoreCatalog {
-		if plan.journalExists && plan.journal.CatalogExisted && plan.journal.CatalogBackupFile != "" {
-			backup, _, _, readErr := readRegularFile(plan.journal.CatalogBackupFile, 0o600)
-			if readErr != nil {
-				return OperationResult{}, fmt.Errorf("read original catalog backup: %w", readErr)
-			}
-			if err = atomicWriteFile(l.Paths.CatalogFile, backup, 0o600); err != nil {
-				return OperationResult{}, err
-			}
-		} else if _, err = moveAside(l.Paths.CatalogFile, l.Paths.BackupDir, "catalog.restored"); err != nil {
-			return OperationResult{}, err
-		}
-	}
-	if plan.journalExists {
-		if _, err = moveAside(l.Paths.JournalFile, l.Paths.BackupDir, "journal.restored.json"); err != nil {
-			return OperationResult{}, err
-		}
+	if err = l.applyRestore(plan); err != nil {
+		return OperationResult{}, err
 	}
 	result.Applied = true
 	result.RestartRequired = true
 	return result, nil
+}
+
+func (l *Lifecycle) applyRestore(plan restorePlan) (err error) {
+	configSnapshot, err := snapshotRegularFile(l.Paths.ConfigFile, 0o600)
+	if err != nil {
+		return err
+	}
+	catalogSnapshot, err := snapshotRegularFile(l.Paths.CatalogFile, 0o600)
+	if err != nil {
+		return err
+	}
+	journalSnapshot, err := snapshotRegularFile(l.Paths.JournalFile, 0o600)
+	if err != nil {
+		return err
+	}
+	var configMutated, catalogMutated bool
+	var catalogBackup, journalBackup string
+	defer func() {
+		if err == nil {
+			return
+		}
+		rollbackErrors := make([]error, 0, 3)
+		if journalBackup != "" {
+			rollbackErrors = append(rollbackErrors, restoreMovedAside(l.Paths.JournalFile, journalBackup))
+		} else if !journalSnapshot.exists {
+			rollbackErrors = append(rollbackErrors, restoreFileSnapshot(l.Paths.JournalFile, journalSnapshot))
+		}
+		if catalogBackup != "" {
+			rollbackErrors = append(rollbackErrors, restoreMovedAside(l.Paths.CatalogFile, catalogBackup))
+		} else if catalogMutated {
+			rollbackErrors = append(rollbackErrors, restoreFileSnapshot(l.Paths.CatalogFile, catalogSnapshot))
+		}
+		if configMutated {
+			rollbackErrors = append(rollbackErrors, restoreFileSnapshot(l.Paths.ConfigFile, configSnapshot))
+		}
+		err = withRollbackError(err, rollbackErrors...)
+	}()
+
+	if plan.writeConfig {
+		configMutated = true
+		if err = atomicWriteFile(l.Paths.ConfigFile, plan.configData, plan.configMode); err != nil {
+			return err
+		}
+	}
+	if plan.restoreCatalog {
+		if plan.journalExists && plan.journal.CatalogExisted && plan.journal.CatalogBackupFile != "" {
+			backup, readErr := l.readBackup(plan.journal.CatalogBackupFile)
+			if readErr != nil {
+				return fmt.Errorf("read original catalog backup: %w", readErr)
+			}
+			catalogMutated = true
+			if err = atomicWriteFile(l.Paths.CatalogFile, backup, 0o600); err != nil {
+				return err
+			}
+		} else if catalogBackup, err = moveAside(l.Paths.CatalogFile, l.Paths.BackupDir, "catalog.restored"); err != nil {
+			return err
+		}
+	}
+	if plan.journalExists {
+		if journalBackup, err = moveAside(l.Paths.JournalFile, l.Paths.BackupDir, "journal.restored.json"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (l *Lifecycle) prepareRestore() (restorePlan, error) {
@@ -96,7 +141,7 @@ func (l *Lifecycle) prepareRestore() (restorePlan, error) {
 			managedConfigFound = true
 			writeConfig = true
 			if journalExists && contentHash(configData) == journal.ManagedConfigHash && journal.ConfigExisted && journal.ConfigBackupFile != "" {
-				newConfig, _, _, err = readRegularFile(journal.ConfigBackupFile, 0o600)
+				newConfig, err = l.readBackup(journal.ConfigBackupFile)
 				if err != nil {
 					return restorePlan{}, fmt.Errorf("read original config backup: %w", err)
 				}
@@ -120,4 +165,21 @@ func (l *Lifecycle) prepareRestore() (restorePlan, error) {
 		changed: changed, configData: newConfig, configMode: configMode, writeConfig: writeConfig,
 		catalogExists: catalogExists, restoreCatalog: restoreCatalog, journal: journal, journalExists: journalExists,
 	}, nil
+}
+
+func (l *Lifecycle) readBackup(path string) ([]byte, error) {
+	cleanBackupDir := filepath.Clean(l.Paths.BackupDir)
+	cleanPath := filepath.Clean(path)
+	relative, err := filepath.Rel(cleanBackupDir, cleanPath)
+	if err != nil || relative == "." || relative == ".." || filepath.IsAbs(relative) || len(relative) >= 3 && relative[:3] == ".."+string(filepath.Separator) {
+		return nil, fmt.Errorf("backup path %q is outside the Codex integration backup directory", path)
+	}
+	data, _, exists, err := readRegularFile(cleanPath, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, fmt.Errorf("backup file %q is missing", cleanPath)
+	}
+	return data, nil
 }

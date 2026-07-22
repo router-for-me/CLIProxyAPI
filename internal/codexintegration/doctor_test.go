@@ -115,6 +115,29 @@ func TestRunDoctorReportsMissingProviderAndStaleCatalog(t *testing.T) {
 	}
 }
 
+func TestExpectedFeaturedModelsFollowConfiguredSlugs(t *testing.T) {
+	lifecycle := testLifecycle(t)
+	models, providers := catalogTestModels()
+	catalog, err := CompileCatalog(models, providers, lifecycle.Config.CodexIntegration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const customSlug = "xai/grok-primary"
+	for index := range lifecycle.Config.CodexIntegration.Models {
+		if lifecycle.Config.CodexIntegration.Models[index].Slug == "xai/grok-4.5" {
+			lifecycle.Config.CodexIntegration.Models[index].Slug = customSlug
+		}
+	}
+	catalog.Models[1]["slug"] = customSlug
+	data, err := catalog.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasExpectedFeaturedModels(data, lifecycle.Config.CodexIntegration) {
+		t.Fatal("configured featured slug was rejected")
+	}
+}
+
 func TestValidateCommandOptions(t *testing.T) {
 	tests := []struct {
 		name    string

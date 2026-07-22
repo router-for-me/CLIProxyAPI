@@ -9,6 +9,68 @@ import (
 	"time"
 )
 
+type fileSnapshot struct {
+	data   []byte
+	mode   os.FileMode
+	exists bool
+}
+
+func snapshotRegularFile(path string, defaultMode os.FileMode) (fileSnapshot, error) {
+	data, mode, exists, err := readRegularFile(path, defaultMode)
+	if err != nil {
+		return fileSnapshot{}, err
+	}
+	return fileSnapshot{data: data, mode: mode, exists: exists}, nil
+}
+
+func restoreFileSnapshot(path string, snapshot fileSnapshot) error {
+	if snapshot.exists {
+		return atomicWriteFile(path, snapshot.data, snapshot.mode)
+	}
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect rollback target %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("refusing non-regular rollback target %s", path)
+	}
+	if err = os.Remove(path); err != nil {
+		return fmt.Errorf("remove rollback target %s: %w", path, err)
+	}
+	return syncDirectory(filepath.Dir(path))
+}
+
+func restoreMovedAside(original, backup string) error {
+	if backup == "" {
+		return nil
+	}
+	if _, err := os.Lstat(original); err == nil {
+		return fmt.Errorf("refusing to replace rollback target %s", original)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect rollback target %s: %w", original, err)
+	}
+	if err := os.Rename(backup, original); err != nil {
+		return fmt.Errorf("restore %s from %s: %w", original, backup, err)
+	}
+	if err := syncDirectory(filepath.Dir(original)); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(backup))
+}
+
+func withRollbackError(cause error, rollbackErrors ...error) error {
+	errorsToJoin := []error{cause}
+	for _, rollbackErr := range rollbackErrors {
+		if rollbackErr != nil {
+			errorsToJoin = append(errorsToJoin, fmt.Errorf("rollback failed: %w", rollbackErr))
+		}
+	}
+	return errors.Join(errorsToJoin...)
+}
+
 func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	temp, err := os.CreateTemp(dir, ".cliproxyapi-write-*")
@@ -85,7 +147,7 @@ func moveAside(source, backupDir, label string) (string, error) {
 		return "", fmt.Errorf("move %s aside: %w", source, err)
 	}
 	if err := syncDirectory(filepath.Dir(source)); err != nil {
-		return "", err
+		return destination, err
 	}
 	return destination, syncDirectory(backupDir)
 }

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
@@ -164,7 +165,7 @@ func addCatalogChecks(lifecycle *Lifecycle, models []map[string]any, providers M
 		add("catalog", "catalog.invalid", DoctorBlocking, "The managed model catalog is invalid.", "Run -codex-sync; if it fails, keep the last-good catalog and inspect logs.")
 		return
 	}
-	if !hasExpectedFeaturedModels(data) {
+	if !hasExpectedFeaturedModels(data, lifecycle.Config.CodexIntegration) {
 		add("catalog", "catalog.featured_mismatch", DoctorBlocking, "The catalog does not contain the required five featured models in order.", "Run -codex-sync after all mapped upstream models are available.")
 		return
 	}
@@ -185,19 +186,26 @@ func addCatalogChecks(lifecycle *Lifecycle, models []map[string]any, providers M
 	}
 }
 
-func hasExpectedFeaturedModels(data []byte) bool {
+func hasExpectedFeaturedModels(data []byte, integration config.CodexIntegrationConfig) bool {
 	var payload struct {
 		Models []map[string]any `json:"models"`
 	}
 	if json.Unmarshal(data, &payload) != nil || len(payload.Models) < 5 {
 		return false
 	}
-	want := []string{
-		"gpt-5.6-sol",
-		"xai/grok-4.5",
-		"antigravity/gemini-3.6-flash",
-		"antigravity/gemini-3.1-pro",
-		"antigravity/claude-opus-4-6-thinking",
+	want := []string{"gpt-5.6-sol"}
+	featured := make([]config.CodexIntegrationModel, 0, 4)
+	for _, model := range integration.Models {
+		if model.Visible && model.Featured {
+			featured = append(featured, model)
+		}
+	}
+	sortCodexIntegrationModels(featured)
+	for _, model := range featured {
+		want = append(want, model.Slug)
+	}
+	if len(want) != 5 {
+		return false
 	}
 	for index, slug := range want {
 		if current, _ := payload.Models[index]["slug"].(string); current != slug {

@@ -1566,3 +1566,37 @@ func TestCodexWebsocketPingActivityRenewsIdleDeadline(t *testing.T) {
 		t.Fatalf("message type = %q, want response.completed", got)
 	}
 }
+
+func TestStandaloneCodexWebsocketPongActivityRenewsIdleDeadline(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		go func() {
+			time.Sleep(180 * time.Millisecond)
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed"}`))
+		}()
+		_, _, _ = conn.ReadMessage()
+	}))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	configureStandaloneCodexWebsocket(conn, 70*time.Millisecond)
+	stop := startStandaloneCodexWebsocketPings(conn, 20*time.Millisecond)
+	defer stop()
+
+	_, payload, err := readCodexWebsocketMessage(context.Background(), nil, conn, nil, 70*time.Millisecond)
+	if err != nil {
+		t.Fatalf("ReadMessage() error = %v; pong activity should renew idle deadline", err)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != "response.completed" {
+		t.Fatalf("message type = %q, want response.completed", got)
+	}
+}

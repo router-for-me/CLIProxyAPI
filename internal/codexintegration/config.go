@@ -158,7 +158,35 @@ func operationResultForPlan(plan setupPlan) OperationResult {
 	}
 }
 
-func (l *Lifecycle) applySetup(plan setupPlan, result *OperationResult) error {
+func (l *Lifecycle) applySetup(plan setupPlan, result *OperationResult) (err error) {
+	journalSnapshot, err := snapshotRegularFile(l.Paths.JournalFile, 0o600)
+	if err != nil {
+		return err
+	}
+	configSnapshot := fileSnapshot{data: plan.configOld, mode: plan.configMode, exists: plan.configExists}
+	catalogSnapshot := fileSnapshot{data: plan.catalogOld, mode: 0o600, exists: plan.catalogExists}
+	var configMutated, catalogMutated, journalMutated bool
+	var cacheBackup string
+	defer func() {
+		if err == nil {
+			return
+		}
+		rollbackErrors := make([]error, 0, 4)
+		if journalMutated {
+			rollbackErrors = append(rollbackErrors, restoreFileSnapshot(l.Paths.JournalFile, journalSnapshot))
+		}
+		if configMutated {
+			rollbackErrors = append(rollbackErrors, restoreFileSnapshot(l.Paths.ConfigFile, configSnapshot))
+		}
+		if catalogMutated {
+			rollbackErrors = append(rollbackErrors, restoreFileSnapshot(l.Paths.CatalogFile, catalogSnapshot))
+		}
+		if cacheBackup != "" {
+			rollbackErrors = append(rollbackErrors, restoreMovedAside(l.Paths.CacheFile, cacheBackup))
+		}
+		err = withRollbackError(err, rollbackErrors...)
+	}()
+
 	journal := plan.journal
 	if !plan.journalExists {
 		journal = Journal{
@@ -181,16 +209,18 @@ func (l *Lifecycle) applySetup(plan setupPlan, result *OperationResult) error {
 		}
 	}
 	if !bytes.Equal(plan.catalogOld, plan.catalogData) {
-		if err := atomicWriteFile(l.Paths.CatalogFile, plan.catalogData, 0o600); err != nil {
+		catalogMutated = true
+		if err = atomicWriteFile(l.Paths.CatalogFile, plan.catalogData, 0o600); err != nil {
 			return err
 		}
 	}
 	if !bytes.Equal(plan.configOld, plan.configData) {
-		if err := atomicWriteFile(l.Paths.ConfigFile, plan.configData, plan.configMode); err != nil {
+		configMutated = true
+		if err = atomicWriteFile(l.Paths.ConfigFile, plan.configData, plan.configMode); err != nil {
 			return err
 		}
 	}
-	if _, err := moveAside(l.Paths.CacheFile, l.Paths.BackupDir, "models_cache.json.stale"); err != nil {
+	if cacheBackup, err = moveAside(l.Paths.CacheFile, l.Paths.BackupDir, "models_cache.json.stale"); err != nil {
 		return err
 	}
 	journal.UpdatedAt = time.Now().UTC()
@@ -203,6 +233,7 @@ func (l *Lifecycle) applySetup(plan setupPlan, result *OperationResult) error {
 	if err != nil {
 		return err
 	}
+	journalMutated = true
 	return atomicWriteFile(l.Paths.JournalFile, journalData, 0o600)
 }
 

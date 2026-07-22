@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
 	"time"
 )
 
@@ -30,12 +29,12 @@ type Journal struct {
 }
 
 func readJournal(path string) (Journal, bool, error) {
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return Journal{}, false, nil
-	}
+	data, _, exists, err := readRegularFile(path, 0o600)
 	if err != nil {
 		return Journal{}, false, fmt.Errorf("read Codex integration journal: %w", err)
+	}
+	if !exists {
+		return Journal{}, false, nil
 	}
 	var journal Journal
 	if err = json.Unmarshal(data, &journal); err != nil {

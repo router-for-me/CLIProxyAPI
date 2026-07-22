@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	codexloopback "github.com/router-for-me/CLIProxyAPI/v7/internal/access/codex_loopback"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
@@ -218,6 +219,7 @@ func (b *Builder) Build() (*Service, error) {
 	}
 
 	configaccess.Register(&b.cfg.SDKConfig)
+	codexloopback.Register(&b.cfg.SDKConfig)
 	pluginHost := b.pluginHost
 	if pluginHost == nil {
 		pluginHost = pluginhost.New()

@@ -251,15 +251,9 @@ codex:
   # Some superstitious users believe request tracking identifiers can be used
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
-  # TCP/TLS connection timeout. Default: 30 seconds.
-  connect-timeout-seconds: 30
-  # Maximum wait for upstream HTTP or WebSocket response headers. Default: 60 seconds.
-  response-header-timeout-seconds: 60
-  # Maximum wait for the first response body bytes or WebSocket event. Default: 120 seconds.
-  first-event-timeout-seconds: 120
-  # Maximum silence between response body reads or WebSocket events. Default: 900 seconds.
-  stream-idle-timeout-seconds: 900
-  # WebSocket ping cadence. Must be lower than stream-idle-timeout-seconds. Default: 30 seconds.
+  # WebSocket liveness deadline. Ping/pong traffic refreshes it. Default: 900 seconds.
+  websocket-idle-timeout-seconds: 900
+  # WebSocket ping cadence. Must be lower than websocket-idle-timeout-seconds. Default: 30 seconds.
   websocket-ping-interval-seconds: 30
 
 # When true, enable authentication for the WebSocket API (/v1/ws).

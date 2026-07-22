@@ -1097,14 +1097,8 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
-	timeouts := codexTimeoutsFromConfig(e.cfg)
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
-	helps.ConfigureHTTPClientTransportTimeouts(httpClient, timeouts.connect, timeouts.responseHeader)
-	response, err := doCodexHTTPRequest(ctx, httpClient, httpReq, timeouts.responseHeader)
-	if response != nil && response.Body != nil {
-		response.Body = newCodexActivityTimeoutBody(ctx, response.Body, timeouts.firstEvent, timeouts.streamIdle)
-	}
-	return response, err
+	return httpClient.Do(httpReq)
 }
 
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -1186,16 +1180,13 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		AuthType:  authType,
 		AuthValue: authValue,
 	})
-	timeouts := codexTimeoutsFromConfig(e.cfg)
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
-	helps.ConfigureHTTPClientTransportTimeouts(httpClient, timeouts.connect, timeouts.responseHeader)
 	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := doCodexHTTPRequest(ctx, httpClient, httpReq, timeouts.responseHeader)
+	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	httpResp.Body = newCodexActivityTimeoutBody(ctx, httpResp.Body, timeouts.firstEvent, timeouts.streamIdle)
 	defer func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex executor: close response body error: %v", errClose)
@@ -1344,16 +1335,13 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		AuthType:  authType,
 		AuthValue: authValue,
 	})
-	timeouts := codexTimeoutsFromConfig(e.cfg)
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
-	helps.ConfigureHTTPClientTransportTimeouts(httpClient, timeouts.connect, timeouts.responseHeader)
 	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := doCodexHTTPRequest(ctx, httpClient, httpReq, timeouts.responseHeader)
+	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	httpResp.Body = newCodexActivityTimeoutBody(ctx, httpResp.Body, timeouts.firstEvent, timeouts.streamIdle)
 	defer func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex executor: close response body error: %v", errClose)
@@ -1463,16 +1451,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		AuthValue: authValue,
 	})
 
-	timeouts := codexTimeoutsFromConfig(e.cfg)
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
-	helps.ConfigureHTTPClientTransportTimeouts(httpClient, timeouts.connect, timeouts.responseHeader)
 	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := doCodexHTTPRequest(ctx, httpClient, httpReq, timeouts.responseHeader)
+	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
-	httpResp.Body = newCodexActivityTimeoutBody(ctx, httpResp.Body, timeouts.firstEvent, timeouts.streamIdle)
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, readErr := io.ReadAll(httpResp.Body)

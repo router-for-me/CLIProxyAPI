@@ -127,7 +127,8 @@ Doctor exits with `0` for clean, `1` for warnings, and `2` for a blocking proble
 | `endpoint.models_rejected` | Loopback data-plane authentication or binding is wrong | Confirm `host` is strict loopback, enable `loopback-access`, and restart CLIProxyAPI |
 | HTTP `401` | Provider credential expired or was rejected | Refresh that provider login; do not route the slug to another provider |
 | HTTP `429` | Subscription quota or concurrent connection limit | Wait for reset or reduce concurrency; preserve the provider-qualified route |
-| HTTP `5xx`, first-event timeout, or idle timeout | Upstream or network failure | Retry a read-only request after connectivity recovers; inspect request ID and provider health |
+| HTTP `5xx` or request-context cancellation | Upstream, network, or caller cancellation | Retry a read-only request after connectivity recovers; inspect request ID and provider health |
+| WebSocket liveness timeout | No model event and no successful ping/pong traffic within the configured deadline | Check provider connectivity and retry a read-only request |
 | WebSocket upgrade unavailable | No request payload was accepted over WebSocket | CLIProxyAPI safely uses the HTTP Responses transport |
 | WebSocket disconnect after request write | Acceptance is ambiguous | CLIProxyAPI returns the error and does not automatically resend, preventing duplicate tool execution |
 | `opencodex.listener_detected` | The old proxy is still running | Finish the cutover checks, then stop its daemon and config watcher |
@@ -158,6 +159,7 @@ Restore removes the CLIProxyAPI-owned marker block, restores a pre-existing cata
 - Setup rejects symlinks, uses an exclusive lifecycle lock, writes atomically, and creates new sensitive files with mode `0600`.
 - The first release exposes the explicit stable mappings above. It does not automatically publish every provider model.
 - AntiGravity models do not advertise Codex hosted `web_search`; local browser or MCP tools remain available to the Codex agent.
+- HTTP response streams have no proxy-owned first-event or idle deadline; the caller's request context controls cancellation. WebSocket liveness uses ping/pong-refreshed deadlines, which are an intentional exception for reusable connections.
 - Official GPT image generation and image edit stay on the official Codex path. Third-party catalog entries advertise image input only where configured.
 - Remote Codex clients and OpenCodex sidecar search behavior are outside this integration.
 - Provider subscriptions and OAuth-backed CLI access are governed by each provider's terms and usage limits. Confirm that proxying a subscription into Codex is permitted for your account and organization.

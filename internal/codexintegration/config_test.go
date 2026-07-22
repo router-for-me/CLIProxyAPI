@@ -332,6 +332,24 @@ func TestSetupRejectsSymlinkAndHeldLock(t *testing.T) {
 		}
 	})
 
+	t.Run("journal symlink", func(t *testing.T) {
+		lifecycle := testLifecycle(t)
+		if err := os.MkdirAll(lifecycle.Paths.StateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(t.TempDir(), "journal.json")
+		if err := os.WriteFile(target, []byte(`{"version":1}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, lifecycle.Paths.JournalFile); err != nil {
+			t.Fatal(err)
+		}
+		models, providers := catalogTestModels()
+		if _, err := lifecycle.Setup(models, providers, true, false); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+			t.Fatalf("Setup() error = %v, want journal symlink rejection", err)
+		}
+	})
+
 	t.Run("held lock", func(t *testing.T) {
 		lifecycle := testLifecycle(t)
 		if err := os.MkdirAll(lifecycle.Paths.Home, 0o700); err != nil {
@@ -345,6 +363,110 @@ func TestSetupRejectsSymlinkAndHeldLock(t *testing.T) {
 			t.Fatalf("Setup() error = %v, want lock rejection", err)
 		}
 	})
+}
+
+func TestFileSnapshotRollbackRestoresExistingAndRemovesNewFiles(t *testing.T) {
+	dir := t.TempDir()
+	existingPath := filepath.Join(dir, "existing")
+	newPath := filepath.Join(dir, "new")
+	if err := os.WriteFile(existingPath, []byte("before"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	existing, err := snapshotRegularFile(existingPath, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing, err := snapshotRegularFile(newPath, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(existingPath, []byte("after"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(newPath, []byte("created"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = restoreFileSnapshot(existingPath, existing); err != nil {
+		t.Fatal(err)
+	}
+	if err = restoreFileSnapshot(newPath, missing); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(existingPath)
+	if err != nil || string(data) != "before" {
+		t.Fatalf("restored existing = %q, %v", data, err)
+	}
+	info, err := os.Stat(existingPath)
+	if err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("restored mode = %v, %v", info, err)
+	}
+	if _, err = os.Stat(newPath); !os.IsNotExist(err) {
+		t.Fatalf("new file survived rollback: %v", err)
+	}
+}
+
+func TestApplySetupRollsBackWhenFinalJournalWriteFails(t *testing.T) {
+	lifecycle := testLifecycle(t)
+	models, providers := catalogTestModels()
+	plan, err := lifecycle.prepareSetup(models, providers, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = lifecycle.ensureWritePaths(); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle.Paths.JournalFile = filepath.Join(lifecycle.Paths.Home, "missing", "journal.json")
+	var result OperationResult
+	if err = lifecycle.applySetup(plan, &result); err == nil {
+		t.Fatal("applySetup() error = nil, want journal write failure")
+	}
+	for _, path := range []string{lifecycle.Paths.ConfigFile, lifecycle.Paths.CatalogFile} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("transaction left %s behind: %v", path, statErr)
+		}
+	}
+}
+
+func TestApplyRestoreRollsBackWhenCatalogMoveFails(t *testing.T) {
+	lifecycle := testLifecycle(t)
+	models, providers := catalogTestModels()
+	if _, err := lifecycle.Setup(models, providers, true, false); err != nil {
+		t.Fatal(err)
+	}
+	configBefore, err := os.ReadFile(lifecycle.Paths.ConfigFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogBefore, err := os.ReadFile(lifecycle.Paths.CatalogFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journalBefore, err := os.ReadFile(lifecycle.Paths.JournalFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := lifecycle.prepareRestore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedBackupPath := filepath.Join(lifecycle.Paths.Home, "blocked-backups")
+	if err = os.WriteFile(blockedBackupPath, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle.Paths.BackupDir = blockedBackupPath
+	if err = lifecycle.applyRestore(plan); err == nil {
+		t.Fatal("applyRestore() error = nil, want catalog move failure")
+	}
+	for path, want := range map[string][]byte{
+		lifecycle.Paths.ConfigFile:  configBefore,
+		lifecycle.Paths.CatalogFile: catalogBefore,
+		lifecycle.Paths.JournalFile: journalBefore,
+	} {
+		got, readErr := os.ReadFile(path)
+		if readErr != nil || !bytes.Equal(got, want) {
+			t.Fatalf("rollback mismatch for %s: %q, %v", path, got, readErr)
+		}
+	}
 }
 
 func TestSetupCompileFailureLeavesHomeUntouched(t *testing.T) {
