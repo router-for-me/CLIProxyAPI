@@ -334,6 +334,51 @@ func TestClaudeMessagesResponsesBridgeRehydratesCompactCapsule(t *testing.T) {
 	}
 }
 
+func TestPrepareClaudeCompactionReplayUsesNewestCanonicalWindow(t *testing.T) {
+	firstMarker := mustClaudeCompactionMarkerForTest(t)
+	secondCompactRequest := map[string]any{
+		"model": responsesBridgeUpstreamModel,
+		"messages": []any{
+			map[string]any{"role": "assistant", "content": firstMarker},
+			map[string]any{"role": "user", "content": "after first compaction"},
+		},
+	}
+	preparedSecond, firstReplay, errPrepareSecond := prepareClaudeCompactionReplay(mustJSONMarshalForTest(t, secondCompactRequest), responsesBridgeUpstreamModel)
+	if errPrepareSecond != nil {
+		t.Fatalf("prepare second compaction: %v", errPrepareSecond)
+	}
+	if firstReplay == nil || !strings.Contains(string(mustJSONMarshalForTest(t, firstReplay.Output)), "encrypted") {
+		t.Fatalf("first replay was not recovered: %#v", firstReplay)
+	}
+	if got := gjson.GetBytes(preparedSecond, "messages.0.content").String(); got != "after first compaction" {
+		t.Fatalf("second compact input retained capsule message: %s", preparedSecond)
+	}
+
+	secondCompact := []byte(`{"id":"resp_compact_2","object":"response.compaction","output":[{"type":"message","role":"user","content":[{"type":"input_text","text":"new canonical window"}]},{"type":"compaction","encrypted_content":"encrypted-second"}],"usage":{"input_tokens":100,"output_tokens":20}}`)
+	_, secondMarker, errBuild := buildClaudeCompactResponse(secondCompact, responsesBridgeClientModel, responsesBridgeUpstreamModel, "responses-bridge-auth")
+	if errBuild != nil {
+		t.Fatalf("build second compact response: %v", errBuild)
+	}
+	followup := map[string]any{
+		"model": responsesBridgeUpstreamModel,
+		"messages": []any{
+			map[string]any{"role": "assistant", "content": secondMarker},
+			map[string]any{"role": "user", "content": "continue"},
+		},
+	}
+	_, secondReplay, errPrepareFollowup := prepareClaudeCompactionReplay(mustJSONMarshalForTest(t, followup), responsesBridgeUpstreamModel)
+	if errPrepareFollowup != nil {
+		t.Fatalf("prepare follow-up after second compaction: %v", errPrepareFollowup)
+	}
+	encodedReplay := string(mustJSONMarshalForTest(t, secondReplay.Output))
+	if !strings.Contains(encodedReplay, "encrypted-second") {
+		t.Fatalf("new canonical window missing: %s", encodedReplay)
+	}
+	if strings.Contains(encodedReplay, "encrypted-state") {
+		t.Fatalf("prior compacted window accumulated into replacement: %s", encodedReplay)
+	}
+}
+
 func TestPrepareClaudeCompactionReplayIgnoresQuotedMarkerConstants(t *testing.T) {
 	marker := mustClaudeCompactionMarkerForTest(t)
 	sourceExcerpt := `const (
