@@ -464,6 +464,38 @@ func TestHandlerModelRouterRoutesStreamBeforeRequestDetails(t *testing.T) {
 	}
 }
 
+func TestPrepareStreamModelRouteReusesDecisionDuringExecution(t *testing.T) {
+	const model = "prepared-router-model"
+	const targetPluginID = "prepared-stream-plugin"
+	routeCalls := 0
+	host := &handlerDirectExecutorRouteHost{}
+	host.hasRouters = true
+	host.route = func(context.Context, pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		routeCalls++
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: targetPluginID}, true
+	}
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetModelRouterHost(host)
+	body := []byte(`{"model":"prepared-router-model","stream":true}`)
+	ctx, routedToPlugin := handler.PrepareStreamModelRoute(context.Background(), "openai", model, body)
+	if !routedToPlugin {
+		t.Fatal("PrepareStreamModelRoute() did not detect plugin executor route")
+	}
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", model, body, "")
+	for range dataChan {
+	}
+	if errMsg := <-errChan; errMsg != nil {
+		t.Fatalf("ExecuteStreamWithAuthManager() error = %+v", errMsg)
+	}
+	if routeCalls != 1 {
+		t.Fatalf("model router calls = %d, want 1", routeCalls)
+	}
+	if host.lastPluginID != targetPluginID {
+		t.Fatalf("plugin id = %q, want %q", host.lastPluginID, targetPluginID)
+	}
+}
+
 func TestExecuteModelPropagatesRouterSkipPluginID(t *testing.T) {
 	model := "model-execution-router-skip-model"
 	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))
