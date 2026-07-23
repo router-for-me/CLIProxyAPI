@@ -114,6 +114,46 @@ func NewSubsetTokenBreakdown(inputTotal, cacheRead, cacheWrite, outputTotal, rea
 	}
 }
 
+// NewPartialSubsetTokenBreakdown preserves known subset buckets while assigning
+// an authoritative remainder to the unclassified bucket.
+func NewPartialSubsetTokenBreakdown(inputTotal, cacheRead, cacheWrite, outputTotal, reasoning, total int64) TokenBreakdown {
+	cacheTotal, okCache := nonNegativeSum(cacheRead, cacheWrite)
+	expectedTotal, okExpected := nonNegativeSum(inputTotal, outputTotal)
+	if !okCache || !okExpected || inputTotal < 0 || outputTotal < 0 || reasoning < 0 ||
+		cacheTotal > inputTotal || reasoning > outputTotal || total < 0 {
+		return inconsistentTokenBreakdown(total, expectedTotal)
+	}
+	resolvedTotal := total
+	if resolvedTotal == 0 {
+		resolvedTotal = expectedTotal
+	}
+	if resolvedTotal < expectedTotal {
+		return inconsistentTokenBreakdown(total, expectedTotal)
+	}
+	unclassified := resolvedTotal - expectedTotal
+	quality := TokenAccountingQualityComplete
+	if unclassified > 0 {
+		quality = TokenAccountingQualityUnclassified
+	}
+	return TokenBreakdown{
+		SchemaVersion: TokenAccountingSchemaVersion,
+		Quality:       quality,
+		TotalTokens:   resolvedTotal,
+		Input: TokenInputBreakdown{
+			TotalTokens:      inputTotal,
+			UncachedTokens:   inputTotal - cacheTotal,
+			CacheReadTokens:  cacheRead,
+			CacheWriteTokens: cacheWrite,
+		},
+		Output: TokenOutputBreakdown{
+			TotalTokens:        outputTotal,
+			NonReasoningTokens: outputTotal - reasoning,
+			ReasoningTokens:    reasoning,
+		},
+		UnclassifiedTokens: unclassified,
+	}
+}
+
 // NewIndependentTokenBreakdown normalizes protocols where uncached input,
 // cache reads, cache writes, non-reasoning output, and reasoning are separate.
 func NewIndependentTokenBreakdown(uncachedInput, cacheRead, cacheWrite, nonReasoningOutput, reasoning, total int64) TokenBreakdown {
@@ -207,7 +247,13 @@ func EnsureTokenBreakdown(detail Detail) Detail {
 // providers remain unclassified instead of guessing how their buckets overlap.
 func EnsureTokenBreakdownForProvider(detail Detail, provider, executorType string) Detail {
 	if !detail.TokenBreakdown.Valid() {
-		detail.TokenBreakdown = tokenBreakdownForProvider(detail, provider, executorType)
+		semantics := tokenAccountingSemanticsFor(provider, executorType)
+		if detail.CacheReadTokens == 0 && detail.CachedTokens > 0 && detail.InputTokens == 0 &&
+			detail.OutputTokens == 0 && detail.ReasoningTokens == 0 && detail.CacheCreationTokens == 0 && detail.TotalTokens == 0 &&
+			(semantics == tokenAccountingSemanticsSubset || semantics == tokenAccountingSemanticsSeparateReasoning) {
+			detail.CacheReadTokens = detail.CachedTokens
+		}
+		detail.TokenBreakdown = tokenBreakdownForSemantics(detail, semantics)
 	}
 	if detail.TotalTokens == 0 {
 		detail.TotalTokens = detail.TokenBreakdown.TotalTokens
@@ -215,8 +261,18 @@ func EnsureTokenBreakdownForProvider(detail Detail, provider, executorType strin
 	return detail
 }
 
-func tokenBreakdownForProvider(detail Detail, provider, executorType string) TokenBreakdown {
-	switch tokenAccountingSemanticsFor(provider, executorType) {
+func tokenBreakdownForSemantics(detail Detail, semantics tokenAccountingSemantics) TokenBreakdown {
+	if detail.TotalTokens == 0 && detail.InputTokens == 0 && detail.OutputTokens == 0 {
+		if total, okTotal := unclassifiedTokenLowerBound(detail); !okTotal {
+			return inconsistentTokenBreakdown(detail.TotalTokens, 0)
+		} else if total > 0 && (semantics == tokenAccountingSemanticsUnknown ||
+			semantics == tokenAccountingSemanticsSubset ||
+			(semantics == tokenAccountingSemanticsSeparateReasoning &&
+				(detail.CacheReadTokens > 0 || detail.CacheCreationTokens > 0 || detail.CachedTokens > 0))) {
+			return NewUnclassifiedTokenBreakdown(total)
+		}
+	}
+	switch semantics {
 	case tokenAccountingSemanticsSubset:
 		return NewSubsetTokenBreakdown(
 			detail.InputTokens,
@@ -248,13 +304,32 @@ func tokenBreakdownForProvider(detail Detail, provider, executorType string) Tok
 		total := detail.TotalTokens
 		if total == 0 {
 			var okTotal bool
-			total, okTotal = nonNegativeSum(detail.InputTokens, detail.OutputTokens)
+			total, okTotal = unclassifiedTokenLowerBound(detail)
 			if !okTotal {
 				return inconsistentTokenBreakdown(detail.TotalTokens, 0)
 			}
 		}
 		return NewUnclassifiedTokenBreakdown(total)
 	}
+}
+
+func unclassifiedTokenLowerBound(detail Detail) (int64, bool) {
+	cacheTokens, okCache := nonNegativeSum(detail.CacheReadTokens, detail.CacheCreationTokens)
+	if !okCache || detail.InputTokens < 0 || detail.OutputTokens < 0 || detail.ReasoningTokens < 0 || detail.CachedTokens < 0 {
+		return 0, false
+	}
+	inputTotal := detail.InputTokens
+	if cacheTokens > inputTotal {
+		inputTotal = cacheTokens
+	}
+	if detail.CachedTokens > inputTotal {
+		inputTotal = detail.CachedTokens
+	}
+	outputTotal := detail.OutputTokens
+	if detail.ReasoningTokens > outputTotal {
+		outputTotal = detail.ReasoningTokens
+	}
+	return nonNegativeSum(inputTotal, outputTotal)
 }
 
 func tokenAccountingSemanticsFor(provider, executorType string) tokenAccountingSemantics {

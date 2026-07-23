@@ -15,6 +15,17 @@ func TestNewSubsetTokenBreakdownAvoidsCacheAndReasoningDoubleCount(t *testing.T)
 	}
 }
 
+func TestNewPartialSubsetTokenBreakdownPreservesKnownBuckets(t *testing.T) {
+	breakdown := NewPartialSubsetTokenBreakdown(10, 4, 0, 0, 0, 15)
+	if !breakdown.Valid() {
+		t.Fatalf("breakdown is invalid: %+v", breakdown)
+	}
+	if breakdown.Quality != TokenAccountingQualityUnclassified || breakdown.Input.TotalTokens != 10 ||
+		breakdown.UnclassifiedTokens != 5 {
+		t.Fatalf("breakdown = %+v", breakdown)
+	}
+}
+
 func TestNewIndependentTokenBreakdownKeepsClaudeCacheBucketsIndependent(t *testing.T) {
 	breakdown := NewIndependentTokenBreakdown(30, 7, 13, 5, 0, 55)
 	if !breakdown.Valid() {
@@ -116,6 +127,36 @@ func TestEnsureTokenBreakdownForProviderUsesKnownSemantics(t *testing.T) {
 func TestEnsureTokenBreakdownForUnknownProviderDoesNotGuessReasoning(t *testing.T) {
 	detail := EnsureTokenBreakdownForProvider(Detail{InputTokens: 100, OutputTokens: 30, ReasoningTokens: 12}, "plugin-provider", "")
 	if detail.TotalTokens != 130 || detail.TokenBreakdown.Quality != TokenAccountingQualityUnclassified || detail.TokenBreakdown.UnclassifiedTokens != 130 {
+		t.Fatalf("detail = %+v", detail)
+	}
+}
+
+func TestEnsureTokenBreakdownForUnknownProviderPreservesAuxiliaryOnlyUsage(t *testing.T) {
+	detail := EnsureTokenBreakdownForProvider(Detail{ReasoningTokens: 12, CacheReadTokens: 7}, "plugin-provider", "")
+	if detail.TotalTokens != 19 || detail.TokenBreakdown.Quality != TokenAccountingQualityUnclassified || detail.TokenBreakdown.UnclassifiedTokens != 19 {
+		t.Fatalf("detail = %+v", detail)
+	}
+}
+
+func TestEnsureTokenBreakdownForGeminiClassifiesReasoningOnlyUsage(t *testing.T) {
+	detail := EnsureTokenBreakdownForProvider(Detail{ReasoningTokens: 12}, "gemini", "")
+	if detail.TotalTokens != 12 || detail.TokenBreakdown.Quality != TokenAccountingQualityComplete ||
+		detail.TokenBreakdown.Output.ReasoningTokens != 12 {
+		t.Fatalf("detail = %+v", detail)
+	}
+}
+
+func TestEnsureTokenBreakdownPreservesLegacyCachedOnlyUsage(t *testing.T) {
+	detail := EnsureTokenBreakdownForProvider(Detail{CachedTokens: 13}, "openai", "")
+	if detail.TotalTokens != 13 || detail.CacheReadTokens != 13 || detail.TokenBreakdown.Quality != TokenAccountingQualityUnclassified ||
+		detail.TokenBreakdown.UnclassifiedTokens != 13 {
+		t.Fatalf("detail = %+v", detail)
+	}
+}
+
+func TestEnsureTokenBreakdownDoesNotOverrideCanonicalZeroCacheRead(t *testing.T) {
+	detail := EnsureTokenBreakdownForProvider(Detail{CachedTokens: 13, CacheCreationTokens: 13}, "openai", "")
+	if detail.CacheReadTokens != 0 {
 		t.Fatalf("detail = %+v", detail)
 	}
 }

@@ -77,6 +77,14 @@ func TestParseOpenAIUsageTotalOnlyIsUnclassified(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsagePartialBucketsPreserveKnownTokens(t *testing.T) {
+	detail := ParseOpenAIUsage([]byte(`{"usage":{"input_tokens":10,"total_tokens":15}}`))
+	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityUnclassified ||
+		detail.TokenBreakdown.Input.TotalTokens != 10 || detail.TokenBreakdown.UnclassifiedTokens != 5 {
+		t.Fatalf("detail = %+v", detail)
+	}
+}
+
 func TestParseOpenAIUsageExplicitZeroBucketsRemainInconsistent(t *testing.T) {
 	detail := ParseOpenAIUsage([]byte(`{"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":42}}`))
 	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityInconsistent {
@@ -339,6 +347,33 @@ func TestParseGeminiUsageNormalizesCachedContent(t *testing.T) {
 	}
 }
 
+func TestParseGeminiUsageIncludesToolUsePromptTokens(t *testing.T) {
+	detail := ParseGeminiUsage([]byte(`{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"toolUsePromptTokenCount":5,"totalTokenCount":20}}`))
+	if detail.InputTokens != 15 || detail.TotalTokens != 20 {
+		t.Fatalf("detail = %+v", detail)
+	}
+	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete ||
+		detail.TokenBreakdown.Input.UncachedTokens != 15 || detail.TokenBreakdown.Output.ReasoningTokens != 3 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
+}
+
+func TestParseGeminiUsageRejectsInvalidToolUseSums(t *testing.T) {
+	tests := map[string]string{
+		"negative": `{"usageMetadata":{"promptTokenCount":10,"toolUsePromptTokenCount":-1,"totalTokenCount":10}}`,
+		"overflow": `{"usageMetadata":{"promptTokenCount":9223372036854775807,"toolUsePromptTokenCount":1,"totalTokenCount":9223372036854775807}}`,
+	}
+	for name, payload := range tests {
+		t.Run(name, func(t *testing.T) {
+			detail := ParseGeminiUsage([]byte(payload))
+			if detail.InputTokens < 0 || !detail.TokenBreakdown.Valid() ||
+				detail.TokenBreakdown.Quality != usage.TokenAccountingQualityInconsistent {
+				t.Fatalf("detail = %+v", detail)
+			}
+		})
+	}
+}
+
 func TestParseInteractionsUsage(t *testing.T) {
 	detail := ParseInteractionsUsage([]byte(`{"usage":{"input_tokens":3,"output_tokens":4,"reasoning_tokens":5,"cached_tokens":2}}`))
 	if detail.InputTokens != 3 {
@@ -382,6 +417,17 @@ func TestParseInteractionsUsageNormalizesCacheWriteAlias(t *testing.T) {
 	detail := ParseInteractionsUsage([]byte(`{"usage":{"input_tokens":3,"cache_write_tokens":2}}`))
 	if detail.CacheCreationTokens != 2 {
 		t.Fatalf("cache creation tokens = %d, want 2", detail.CacheCreationTokens)
+	}
+}
+
+func TestParseInteractionsUsageIncludesToolUseTokens(t *testing.T) {
+	detail := ParseInteractionsUsage([]byte(`{"usage":{"total_input_tokens":2,"total_output_tokens":6,"total_thought_tokens":3,"total_tool_use_tokens":4,"total_tokens":15}}`))
+	if detail.InputTokens != 6 || detail.OutputTokens != 6 || detail.ReasoningTokens != 3 || detail.TotalTokens != 15 {
+		t.Fatalf("detail = %+v", detail)
+	}
+	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete ||
+		detail.TokenBreakdown.Input.UncachedTokens != 6 || detail.TokenBreakdown.Output.TotalTokens != 9 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
 	}
 }
 

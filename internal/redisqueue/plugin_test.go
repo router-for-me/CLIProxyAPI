@@ -144,7 +144,7 @@ func TestUsageQueuePluginPayloadDefaultsGenerateTrueWhenOmitted(t *testing.T) {
 	})
 }
 
-func TestUsageQueuePluginMarksCanonicalZeroCacheRead(t *testing.T) {
+func TestUsageQueuePluginPreservesLegacyCachedOnlyUsage(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := internallogging.WithResponseStatusHolder(context.Background())
 		internallogging.SetResponseStatus(ctx, http.StatusOK)
@@ -153,21 +153,16 @@ func TestUsageQueuePluginMarksCanonicalZeroCacheRead(t *testing.T) {
 			Provider: "openai",
 			Model:    "gpt-5.4",
 			Detail: coreusage.Detail{
-				CachedTokens:    13,
-				CacheReadTokens: 0,
+				CachedTokens: 13,
 			},
 		})
 
 		payload := popSinglePayload(t)
 		requireTokensBoolField(t, payload, "cache_read_tokens_present", true)
 		tokens := requireTokensPayload(t, payload)
-		var cacheReadTokens int64
-		if errUnmarshal := json.Unmarshal(tokens["cache_read_tokens"], &cacheReadTokens); errUnmarshal != nil {
-			t.Fatalf("unmarshal cache_read_tokens: %v", errUnmarshal)
-		}
-		if cacheReadTokens != 0 {
-			t.Fatalf("cache_read_tokens = %d, want 0", cacheReadTokens)
-		}
+		requireIntField(t, tokens, "cache_read_tokens", 13)
+		requireIntField(t, tokens, "total_tokens", 13)
+		requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityUnclassified, 13)
 	})
 }
 
