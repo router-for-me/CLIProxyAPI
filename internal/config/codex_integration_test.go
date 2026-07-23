@@ -17,8 +17,8 @@ func TestParseConfigBytesCodexIntegrationDefaultsRemainDisabled(t *testing.T) {
 	if cfg.CodexIntegration.CatalogFile != DefaultCodexCatalogFile {
 		t.Fatalf("CatalogFile = %q, want %q", cfg.CodexIntegration.CatalogFile, DefaultCodexCatalogFile)
 	}
-	if len(cfg.CodexIntegration.Models) != 5 {
-		t.Fatalf("len(Models) = %d, want 5", len(cfg.CodexIntegration.Models))
+	if len(cfg.CodexIntegration.Models) != 4 {
+		t.Fatalf("len(Models) = %d, want 4", len(cfg.CodexIntegration.Models))
 	}
 }
 
@@ -30,7 +30,6 @@ func TestParseConfigBytesCodexIntegrationStableDefaults(t *testing.T) {
 
 	want := map[string]string{
 		"xai/grok-4.5":                         "grok-4.5",
-		"xai/grok-build-0.1":                   "grok-build-0.1",
 		"antigravity/gemini-3.6-flash":         "gemini-3.6-flash-high",
 		"antigravity/gemini-3.1-pro":           "gemini-pro-agent",
 		"antigravity/claude-opus-4-6-thinking": "claude-opus-4-6-thinking",
@@ -47,6 +46,16 @@ func TestParseConfigBytesCodexIntegrationStableDefaults(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Fatalf("missing stable models: %#v", want)
+	}
+}
+
+func TestParseConfigBytesCodexIntegrationAcceptsKimiProvider(t *testing.T) {
+	cfg, err := ParseConfigBytes([]byte("host: 127.0.0.1\ncodex-integration:\n  enabled: true\n  models:\n    - slug: kimi/kimi-for-coding\n      provider: kimi\n      upstream-model: kimi-for-coding\n      visible: true\n"))
+	if err != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", err)
+	}
+	if got := cfg.CodexIntegration.Models[0].Provider; got != "kimi" {
+		t.Fatalf("Provider = %q, want kimi", got)
 	}
 }
 
@@ -110,7 +119,7 @@ func TestConfigExampleCodexIntegrationParses(t *testing.T) {
 	if cfg.CodexIntegration.Enabled {
 		t.Fatal("example config enables Codex integration")
 	}
-	if len(cfg.CodexIntegration.Models) != 5 {
-		t.Fatalf("len(example Models) = %d, want 5", len(cfg.CodexIntegration.Models))
+	if len(cfg.CodexIntegration.Models) != 4 {
+		t.Fatalf("len(example Models) = %d, want 4", len(cfg.CodexIntegration.Models))
 	}
 }

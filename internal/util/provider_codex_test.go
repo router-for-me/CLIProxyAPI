@@ -9,6 +9,9 @@ import (
 func TestResolveCodexIntegrationModel(t *testing.T) {
 	integration := config.DefaultCodexIntegrationConfig()
 	integration.Enabled = true
+	integration.Models = append(integration.Models, config.CodexIntegrationModel{
+		Slug: "kimi/kimi-for-coding", Provider: "kimi", UpstreamModel: "kimi-for-coding", Visible: true,
+	})
 
 	tests := []struct {
 		name         string
@@ -20,6 +23,7 @@ func TestResolveCodexIntegrationModel(t *testing.T) {
 	}{
 		{name: "grok", model: "xai/grok-4.5", wantProvider: "xai", wantUpstream: "grok-4.5", wantMatched: true},
 		{name: "gemini suffix", model: "antigravity/gemini-3.1-pro(high)", wantProvider: "antigravity", wantUpstream: "gemini-pro-agent(high)", wantMatched: true},
+		{name: "kimi", model: "kimi/kimi-for-coding", wantProvider: "kimi", wantUpstream: "kimi-for-coding", wantMatched: true},
 		{name: "custom credential prefix", model: "teamA/gemini-3.1-pro", wantUpstream: "teamA/gemini-3.1-pro"},
 		{name: "unknown reserved slug", model: "xai/missing", wantMatched: true, wantErr: true},
 	}

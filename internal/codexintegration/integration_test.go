@@ -101,8 +101,8 @@ func TestCodexIntegrationReleaseGateSetupCatalogRouteDoctorRestore(t *testing.T)
 			t.Fatalf("featured model %d = %q, want %q", index, got, slug)
 		}
 	}
-	if build := bySlug["xai/grok-build-0.1"]; build == nil || catalogInt(build, "priority") <= len(wantFeatured) {
-		t.Fatalf("Grok Build must be visible after featured five: %#v", build)
+	if build := bySlug["xai/grok-build-0.1"]; build != nil {
+		t.Fatalf("unconfigured Grok Build model is visible: %#v", build)
 	}
 	if got := catalogInt(bySlug["antigravity/gemini-3.1-pro"], "context_window"); got != 1048576 {
 		t.Fatalf("Gemini 3.1 Pro context_window = %d, want 1048576", got)
@@ -117,7 +117,6 @@ func TestCodexIntegrationReleaseGateSetupCatalogRouteDoctorRestore(t *testing.T)
 		upstream string
 	}{
 		"xai/grok-4.5":                         {provider: "xai", upstream: "grok-4.5"},
-		"xai/grok-build-0.1":                   {provider: "xai", upstream: "grok-build-0.1"},
 		"antigravity/gemini-3.6-flash":         {provider: "antigravity", upstream: "gemini-3.6-flash-high"},
 		"antigravity/gemini-3.1-pro":           {provider: "antigravity", upstream: "gemini-pro-agent"},
 		"antigravity/claude-opus-4-6-thinking": {provider: "antigravity", upstream: "claude-opus-4-6-thinking"},

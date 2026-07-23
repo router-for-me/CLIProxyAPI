@@ -63,10 +63,5 @@ func (p *ModelPolicy) Models() []config.CodexIntegrationModel {
 
 // IsReservedProvider reports whether a slash prefix is owned by Codex Integration.
 func IsReservedProvider(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "xai", "antigravity":
-		return true
-	default:
-		return false
-	}
+	return config.IsCodexIntegrationProvider(provider)
 }

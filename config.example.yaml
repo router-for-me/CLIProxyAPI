@@ -27,17 +27,6 @@ codex-integration:
       supports-tools: true
       supports-parallel-tools: true
       supports-web-search: true
-    - slug: "xai/grok-build-0.1"
-      provider: "xai"
-      upstream-model: "grok-build-0.1"
-      display-name: "Grok Build 0.1"
-      visible: true
-      featured: false
-      priority: 50
-      input-modalities: ["text", "image"]
-      supports-tools: true
-      supports-parallel-tools: true
-      supports-web-search: true
     - slug: "antigravity/gemini-3.6-flash"
       provider: "antigravity"
       upstream-model: "gemini-3.6-flash-high"

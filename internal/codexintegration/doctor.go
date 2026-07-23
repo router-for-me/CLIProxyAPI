@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pelletier/go-toml/v2"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
@@ -91,7 +92,7 @@ func RunDoctor(ctx context.Context, lifecycle *Lifecycle, models []map[string]an
 		}
 	}
 	if options.ProbeModels {
-		addModelProbes(ctx, lifecycle, options.HTTPClient, add)
+		addModelProbes(ctx, lifecycle, models, providers, options.HTTPClient, add)
 	}
 
 	report := DoctorReport{SchemaVersion: 1, Checks: checks}
@@ -131,7 +132,19 @@ func addConfigChecks(lifecycle *Lifecycle, checks *[]DoctorCheck, add func(strin
 	if strings.Contains(normalized, openCodexMarker) {
 		add("config", "config.opencodex_marker", DoctorWarning, "Codex config still contains an OpenCodex injection marker.", "Use -codex-setup -codex-migrate-opencodex -apply during the migration window.")
 	}
+	if provider := codexModelProvider(data); provider != "" && provider != "openai" {
+		add("config", "config.model_provider_preserved", DoctorInfo, "Codex uses the existing model provider identity "+provider+".", "Keep this provider identity when it anchors existing task history; CLIProxyAPI does not rewrite model_provider.")
+	}
 	_ = checks
+}
+
+func codexModelProvider(data []byte) string {
+	var document map[string]any
+	if toml.Unmarshal(data, &document) != nil {
+		return ""
+	}
+	provider, _ := document["model_provider"].(string)
+	return strings.ToLower(strings.TrimSpace(provider))
 }
 
 func addListenerChecks(ctx context.Context, lifecycle *Lifecycle, options DoctorOptions, add func(string, string, DoctorSeverity, string, string)) {
@@ -166,7 +179,7 @@ func addCatalogChecks(lifecycle *Lifecycle, models []map[string]any, providers M
 		return
 	}
 	if !hasExpectedFeaturedModels(data, lifecycle.Config.CodexIntegration) {
-		add("catalog", "catalog.featured_mismatch", DoctorBlocking, "The catalog does not contain the required five featured models in order.", "Run -codex-sync after all mapped upstream models are available.")
+		add("catalog", "catalog.featured_mismatch", DoctorBlocking, "The catalog does not contain the configured featured models in order.", "Run -codex-sync after all mapped upstream models are available.")
 		return
 	}
 	expected, compileErr := CompileCatalog(models, providers, lifecycle.Config.CodexIntegration)
@@ -190,25 +203,23 @@ func hasExpectedFeaturedModels(data []byte, integration config.CodexIntegrationC
 	var payload struct {
 		Models []map[string]any `json:"models"`
 	}
-	if json.Unmarshal(data, &payload) != nil || len(payload.Models) < 5 {
+	featured := featuredCodexIntegrationModels(integration)
+	if json.Unmarshal(data, &payload) != nil || len(payload.Models) < 1+len(featured) {
 		return false
 	}
-	want := []string{"gpt-5.6-sol"}
-	featured := make([]config.CodexIntegrationModel, 0, 4)
+	configuredSlugs := make(map[string]struct{}, len(integration.Models))
 	for _, model := range integration.Models {
-		if model.Visible && model.Featured {
-			featured = append(featured, model)
-		}
+		configuredSlugs[model.Slug] = struct{}{}
 	}
-	sortCodexIntegrationModels(featured)
-	for _, model := range featured {
-		want = append(want, model.Slug)
-	}
-	if len(want) != 5 {
+	first, _ := payload.Models[0]["slug"].(string)
+	if first == "" {
 		return false
 	}
-	for index, slug := range want {
-		if current, _ := payload.Models[index]["slug"].(string); current != slug {
+	if _, configured := configuredSlugs[first]; configured {
+		return false
+	}
+	for index, model := range featured {
+		if current, _ := payload.Models[index+1]["slug"].(string); current != model.Slug {
 			return false
 		}
 	}
@@ -247,12 +258,7 @@ func addAuthChecks(lifecycle *Lifecycle, add func(string, string, DoctorSeverity
 			required[mapping.Provider] = true
 		}
 	}
-	if len(lifecycle.Config.CodexKey) > 0 {
-		providers["codex"]++
-	}
-	if len(lifecycle.Config.XAIKey) > 0 {
-		providers["xai"]++
-	}
+	addConfiguredCredentialProviders(lifecycle.Config, providers)
 	names := make([]string, 0, len(required))
 	for provider := range required {
 		names = append(names, provider)
@@ -263,6 +269,37 @@ func addAuthChecks(lifecycle *Lifecycle, add func(string, string, DoctorSeverity
 			add("oauth", "oauth."+provider+"_missing", DoctorBlocking, "No credential metadata was found for provider "+provider+".", "Log in to "+provider+" through CLIProxyAPI, then rerun doctor.")
 		} else {
 			add("oauth", "oauth."+provider+"_present", DoctorInfo, "Credential metadata is present for provider "+provider+".", "")
+		}
+	}
+}
+
+func addConfiguredCredentialProviders(cfg *config.Config, providers map[string]int) {
+	if cfg == nil {
+		return
+	}
+	for _, entry := range cfg.CodexKey {
+		if strings.TrimSpace(entry.APIKey) != "" {
+			providers["codex"]++
+		}
+	}
+	for _, entry := range cfg.XAIKey {
+		if strings.TrimSpace(entry.APIKey) != "" {
+			providers["xai"]++
+		}
+	}
+	for _, entry := range cfg.GeminiKey {
+		if strings.TrimSpace(entry.APIKey) != "" {
+			providers["gemini"]++
+		}
+	}
+	for _, entry := range cfg.ClaudeKey {
+		if strings.TrimSpace(entry.APIKey) != "" {
+			providers["claude"]++
+		}
+	}
+	for _, entry := range cfg.VertexCompatAPIKey {
+		if strings.TrimSpace(entry.APIKey) != "" {
+			providers["vertex"]++
 		}
 	}
 }
@@ -352,13 +389,8 @@ func addEndpointCheck(ctx context.Context, lifecycle *Lifecycle, client *http.Cl
 	add("endpoint", "endpoint.models_ready", DoctorInfo, "The local /v1/models endpoint accepts loopback bearer access.", "")
 }
 
-func addModelProbes(ctx context.Context, lifecycle *Lifecycle, client *http.Client, add func(string, string, DoctorSeverity, string, string)) {
-	targets := []string{"gpt-5.6-sol"}
-	for _, mapping := range lifecycle.Config.CodexIntegration.Models {
-		if mapping.Featured && mapping.Visible {
-			targets = append(targets, mapping.Slug)
-		}
-	}
+func addModelProbes(ctx context.Context, lifecycle *Lifecycle, models []map[string]any, providers ModelProvidersFunc, client *http.Client, add func(string, string, DoctorSeverity, string, string)) {
+	targets := modelProbeTargets(lifecycle, models, providers)
 	for _, model := range targets {
 		payload, _ := json.Marshal(map[string]any{
 			"model": model, "input": "Reply with OK.", "max_output_tokens": 16, "stream": false,
@@ -373,6 +405,23 @@ func addModelProbes(ctx context.Context, lifecycle *Lifecycle, client *http.Clie
 			add("probe", "probe."+codeModel+".ready", DoctorInfo, "The explicit model probe succeeded for "+model+".", "")
 		}
 	}
+}
+
+func modelProbeTargets(lifecycle *Lifecycle, models []map[string]any, providers ModelProvidersFunc) []string {
+	targets := make([]string, 0, 5)
+	officialOnly := lifecycle.Config.CodexIntegration
+	officialOnly.Enabled = false
+	if catalog, err := CompileCatalog(models, providers, officialOnly); err == nil {
+		if official := selectOfficialFeaturedModel(catalog.Models); official != "" {
+			targets = append(targets, official)
+		}
+	}
+	for _, mapping := range lifecycle.Config.CodexIntegration.Models {
+		if mapping.Featured && mapping.Visible {
+			targets = append(targets, mapping.Slug)
+		}
+	}
+	return targets
 }
 
 func endpointRequest(ctx context.Context, client *http.Client, method, url string, body []byte) (int, error) {

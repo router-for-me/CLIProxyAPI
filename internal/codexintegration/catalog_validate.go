@@ -19,6 +19,8 @@ func ValidateCatalog(catalog Catalog, integration config.CodexIntegrationConfig)
 		return fmt.Errorf("validate compiled Codex catalog: %w", err)
 	}
 
+	featuredModels := featuredCodexIntegrationModels(integration)
+	featuredCount := 1 + len(featuredModels)
 	seenPriorities := make(map[int]string, len(catalog.Models))
 	for i, model := range catalog.Models {
 		slug := catalogString(model, "slug")
@@ -38,33 +40,42 @@ func ValidateCatalog(catalog Catalog, integration config.CodexIntegrationConfig)
 				return fmt.Errorf("compiled Codex catalog model %q advertises unverified hosted search", slug)
 			}
 		}
-		if i < 5 && priority != i+1 {
+		if i < featuredCount && priority != i+1 {
 			return fmt.Errorf("compiled Codex catalog featured priority %d is not contiguous", priority)
 		}
 	}
 
 	if integration.Enabled {
-		wantFeatured := []string{"gpt-5.6-sol"}
-		featured := make([]config.CodexIntegrationModel, 0, 4)
-		for _, model := range integration.Models {
-			if model.Visible && model.Featured {
-				featured = append(featured, model)
-			}
-		}
-		sortCodexIntegrationModels(featured)
-		for _, model := range featured {
-			wantFeatured = append(wantFeatured, model.Slug)
-		}
-		if len(wantFeatured) != 5 || len(catalog.Models) < 5 {
+		if len(catalog.Models) < featuredCount {
 			return fmt.Errorf("compiled Codex catalog featured surface is incomplete")
 		}
-		for i, want := range wantFeatured {
-			if got := catalogString(catalog.Models[i], "slug"); got != want {
-				return fmt.Errorf("compiled Codex catalog featured model %d is %q, want %q", i+1, got, want)
+		configuredSlugs := make(map[string]struct{}, len(integration.Models))
+		for _, model := range integration.Models {
+			configuredSlugs[model.Slug] = struct{}{}
+		}
+		if first := catalogString(catalog.Models[0], "slug"); first == "" {
+			return fmt.Errorf("compiled Codex catalog has no official featured model")
+		} else if _, configured := configuredSlugs[first]; configured {
+			return fmt.Errorf("compiled Codex catalog first featured model %q is not official", first)
+		}
+		for i, want := range featuredModels {
+			if got := catalogString(catalog.Models[i+1], "slug"); got != want.Slug {
+				return fmt.Errorf("compiled Codex catalog featured model %d is %q, want %q", i+2, got, want.Slug)
 			}
 		}
 	}
 	return nil
+}
+
+func featuredCodexIntegrationModels(integration config.CodexIntegrationConfig) []config.CodexIntegrationModel {
+	featured := make([]config.CodexIntegrationModel, 0, 4)
+	for _, model := range integration.Models {
+		if model.Visible && model.Featured {
+			featured = append(featured, model)
+		}
+	}
+	sortCodexIntegrationModels(featured)
+	return featured
 }
 
 func sortCodexIntegrationModels(models []config.CodexIntegrationModel) {

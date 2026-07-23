@@ -170,8 +170,9 @@ func commandCatalogSource(ctx context.Context, lifecycle *Lifecycle, client *htt
 		}
 	}
 	add("codex", registry.GetCodexProModels())
-	add("xai", registry.GetXAIModels())
-	add("antigravity", registry.GetAntigravityModels())
+	for _, provider := range config.CodexIntegrationProviders() {
+		add(provider, registry.GetStaticModelDefinitionsByChannel(provider))
+	}
 
 	liveModels := fetchLiveModelList(ctx, lifecycle.baseURL(), client)
 	for _, model := range liveModels {

@@ -15,9 +15,11 @@ CLIProxyAPI
 
 The lifecycle commands manage one marked root block in Codex's `config.toml`, one complete model catalog, a restore journal, and catalog-cache invalidation. Setup, sync, and restore are previews unless `-apply` is present.
 
+Setup never rewrites Codex's `model_provider` key or provider tables. Existing provider identities can scope which tasks Codex displays, so preserving them is required for task-history continuity. The doctor reports a preserved non-`openai` provider as an informational check; operators must keep that provider pointed at the intended loopback endpoint.
+
 ## Model surface
 
-The first five entries are the featured multi-agent models, in this order:
+The example configuration places one official model and four third-party models at the front of the multi-agent model surface:
 
 | Codex-visible slug | Upstream route | Featured | Tools | Image input | Hosted web search |
 | --- | --- | --- | --- | --- | --- |
@@ -26,9 +28,10 @@ The first five entries are the featured multi-agent models, in this order:
 | `antigravity/gemini-3.6-flash` | `antigravity` / `gemini-3.6-flash-high` | yes | yes | yes | no |
 | `antigravity/gemini-3.1-pro` | `antigravity` / `gemini-pro-agent` | yes | yes | yes | no |
 | `antigravity/claude-opus-4-6-thinking` | `antigravity` / `claude-opus-4-6-thinking` | yes | yes | yes | no |
-| `xai/grok-build-0.1` | `xai` / `grok-build-0.1` | no | yes | yes | yes |
 
 Provider-qualified slugs are strict routes. For example, `antigravity/gemini-3.1-pro` fails closed when AntiGravity is unavailable; it is never sent to a same-named model on another provider. The stable slug remains visible in responses even though its upstream target is `gemini-pro-agent`.
+
+Configured model mappings may use any native non-Codex provider supported by CLIProxyAPI: `aistudio`, `antigravity`, `claude`, `gemini`, `kimi`, `vertex`, or `xai`. The example keeps four verified third-party models featured; additional models such as Kimi can be added without changing the integration code.
 
 The catalog also retains the complete official GPT model surface. Official tasks and models continue to use Codex's built-in `openai` provider rather than a replacement provider name.
 
@@ -150,7 +153,7 @@ Restore removes the CLIProxyAPI-owned marker block, restores a pre-existing cata
 2. Complete setup and doctor in a temporary Codex home.
 3. Apply the explicit OpenCodex migration to the real Codex home.
 4. Stop OpenCodex's daemon and credential/config watcher; keep its installation and backups during the observation period.
-5. Restart Codex and verify the five featured models, Grok Build, official GPT history, tools, image input, compact, and a long-running task.
+5. Restart Codex and verify the configured featured models, official GPT history, tools, image input, compact, and a long-running task.
 6. After the observation gate passes, unload the old service permanently. Retain the CLIProxyAPI restore journal and backups for one release cycle.
 
 ## Security and capability boundaries

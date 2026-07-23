@@ -30,7 +30,7 @@ func TestModelPolicyRejectsDuplicateSlug(t *testing.T) {
 }
 
 func TestReservedProviderNamespace(t *testing.T) {
-	for _, provider := range []string{"xai", "antigravity"} {
+	for _, provider := range []string{"aistudio", "antigravity", "claude", "gemini", "kimi", "vertex", "xai"} {
 		if !IsReservedProvider(provider) {
 			t.Fatalf("IsReservedProvider(%q) = false, want true", provider)
 		}

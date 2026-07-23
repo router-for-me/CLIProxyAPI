@@ -7,9 +7,32 @@ import (
 	"strings"
 )
 
-var codexIntegrationProviders = map[string]struct{}{
-	"antigravity": {},
-	"xai":         {},
+var codexIntegrationProviders = []string{
+	"aistudio",
+	"antigravity",
+	"claude",
+	"gemini",
+	"kimi",
+	"vertex",
+	"xai",
+}
+
+// CodexIntegrationProviders returns the native non-Codex providers that can be
+// exposed through a provider-qualified Codex model slug.
+func CodexIntegrationProviders() []string {
+	return append([]string(nil), codexIntegrationProviders...)
+}
+
+// IsCodexIntegrationProvider reports whether provider is a native data-plane
+// provider supported by the Codex Integration router.
+func IsCodexIntegrationProvider(provider string) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	for _, candidate := range codexIntegrationProviders {
+		if provider == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 // NormalizeCodexIntegration normalizes and validates the optional Codex integration config.
@@ -51,7 +74,7 @@ func (cfg *Config) NormalizeCodexIntegration() error {
 		model.UpstreamModel = strings.TrimSpace(model.UpstreamModel)
 		model.DisplayName = strings.TrimSpace(model.DisplayName)
 
-		if _, ok := codexIntegrationProviders[model.Provider]; !ok {
+		if !IsCodexIntegrationProvider(model.Provider) {
 			return fmt.Errorf("codex-integration.models[%d].provider: unsupported provider %q", i, model.Provider)
 		}
 		if model.Slug == "" || !strings.HasPrefix(model.Slug, model.Provider+"/") || strings.Count(model.Slug, "/") != 1 {

@@ -38,6 +38,7 @@ func TestSetupPreservesConfigShapeAndIsIdempotent(t *testing.T) {
 		{name: "comments and table", body: "# user comment\n\n[features]\nmulti_agent = true\n"},
 		{name: "CRLF", body: "# user comment\r\n\r\n[features]\r\nmulti_agent = true\r\n"},
 		{name: "multiple profiles", body: "[profiles.work]\nmodel = \"gpt-5.6-sol\"\n\n[features]\nweb_search = true\n"},
+		{name: "history scoped provider", body: "model_provider = \"custom\"\n\n[model_providers.custom]\nname = \"Existing provider\"\nbase_url = \"http://127.0.0.1:8317/v1\"\nwire_api = \"responses\"\n"},
 	}
 
 	for _, fixture := range fixtures {
@@ -69,6 +70,13 @@ func TestSetupPreservesConfigShapeAndIsIdempotent(t *testing.T) {
 			}
 			if strings.Contains(fixture.body, "\r\n") && bytes.Contains(configured, []byte("\n")) && !bytes.Contains(configured, []byte("\r\n")) {
 				t.Fatal("CRLF style was not preserved")
+			}
+			if fixture.name == "history scoped provider" {
+				for _, preserved := range []string{`model_provider = "custom"`, `[model_providers.custom]`, `name = "Existing provider"`} {
+					if !bytes.Contains(configured, []byte(preserved)) {
+						t.Fatalf("history-scoped provider configuration lost %q: %s", preserved, configured)
+					}
+				}
 			}
 			info, err := os.Stat(lifecycle.Paths.ConfigFile)
 			if err != nil {

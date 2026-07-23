@@ -37,10 +37,13 @@ func TestCompileCatalogBuildsFeaturedStableSurface(t *testing.T) {
 	}
 
 	bySlug := catalogBySlug(catalog.Models)
-	for _, slug := range []string{"gpt-5.5", "gpt-5.4", "xai/grok-build-0.1"} {
+	for _, slug := range []string{"gpt-5.5", "gpt-5.4"} {
 		if bySlug[slug] == nil {
 			t.Fatalf("catalog missing %q", slug)
 		}
+	}
+	if bySlug["xai/grok-build-0.1"] != nil {
+		t.Fatal("catalog exposed an unconfigured Grok Build model")
 	}
 	if got, _ := bySlug["antigravity/gemini-3.1-pro"]["supports_search_tool"].(bool); got {
 		t.Fatal("AntiGravity Gemini advertises hosted search")
@@ -80,6 +83,37 @@ func TestCompileCatalogRejectsMissingMappedUpstream(t *testing.T) {
 	}
 	if _, err := CompileCatalog(filtered, missingProviders, integration); err == nil {
 		t.Fatal("CompileCatalog() error = nil, want missing upstream error")
+	}
+}
+
+func TestCompileCatalogSupportsAdditionalNativeProvider(t *testing.T) {
+	integration := config.DefaultCodexIntegrationConfig()
+	integration.Enabled = true
+	integration.Models = []config.CodexIntegrationModel{{
+		Slug: "kimi/kimi-for-coding", Provider: "kimi", UpstreamModel: "kimi-for-coding",
+		DisplayName: "Kimi for Coding", Visible: true, Featured: true, Priority: 2,
+		InputModalities: []string{"text"}, SupportsTools: true,
+	}}
+	models, baseProviders := catalogTestModels()
+	models = append(models, map[string]any{
+		"id": "kimi-for-coding", "display_name": "Kimi for Coding", "context_length": 262144,
+	})
+	providers := func(model string) []string {
+		if model == "kimi-for-coding" {
+			return []string{"kimi"}
+		}
+		return baseProviders(model)
+	}
+
+	catalog, err := CompileCatalog(models, providers, integration)
+	if err != nil {
+		t.Fatalf("CompileCatalog() error = %v", err)
+	}
+	if got := catalogString(catalog.Models[1], "slug"); got != "kimi/kimi-for-coding" {
+		t.Fatalf("Models[1].slug = %q, want kimi/kimi-for-coding", got)
+	}
+	if err = ValidateCatalog(catalog, integration); err != nil {
+		t.Fatalf("ValidateCatalog() error = %v", err)
 	}
 }
 

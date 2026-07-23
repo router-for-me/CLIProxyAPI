@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 func TestRunDoctorCleanWithoutUpstreamProbes(t *testing.T) {
@@ -42,6 +44,25 @@ func TestRunDoctorCleanWithoutUpstreamProbes(t *testing.T) {
 		if check.Layer == "probe" {
 			t.Fatalf("default doctor sent a model probe: %#v", check)
 		}
+	}
+}
+
+func TestRunDoctorReportsPreservedHistoryScopedProvider(t *testing.T) {
+	lifecycle := testLifecycle(t)
+	models, providers := catalogTestModels()
+	if err := os.MkdirAll(lifecycle.Paths.Home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configData := []byte("model_provider = \"custom\"\n\n[model_providers.custom]\nbase_url = \"http://127.0.0.1:8317/v1\"\nwire_api = \"responses\"\n")
+	if err := os.WriteFile(lifecycle.Paths.ConfigFile, configData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.Setup(models, providers, true, false); err != nil {
+		t.Fatal(err)
+	}
+	report := RunDoctor(context.Background(), lifecycle, models, providers, DoctorOptions{SkipOpenCodexCheck: true})
+	if !doctorHasCode(report, "config.model_provider_preserved") {
+		t.Fatalf("doctor did not report the preserved history-scoped provider: %#v", report.Checks)
 	}
 }
 
@@ -224,4 +245,47 @@ func doctorHasCode(report DoctorReport, code string) bool {
 		}
 	}
 	return false
+}
+
+func TestAddAuthChecksAcceptsConfiguredAPIKeys(t *testing.T) {
+	authDir := t.TempDir()
+	lifecycle := testLifecycle(t)
+	lifecycle.Config.AuthDir = authDir
+	lifecycle.Config.CodexIntegration.Models = []config.CodexIntegrationModel{
+		{Slug: "gemini/gemini-3.1-pro", Provider: "gemini", Visible: true},
+		{Slug: "claude/claude-opus-4-6", Provider: "claude", Visible: true},
+		{Slug: "vertex/gemini-3.1-pro", Provider: "vertex", Visible: true},
+	}
+	lifecycle.Config.GeminiKey = []config.GeminiKey{{APIKey: "gemini-key"}}
+	lifecycle.Config.ClaudeKey = []config.ClaudeKey{{APIKey: "claude-key"}}
+	lifecycle.Config.VertexCompatAPIKey = []config.VertexCompatKey{{APIKey: "vertex-key"}}
+
+	checks := make([]DoctorCheck, 0)
+	addAuthChecks(lifecycle, func(layer, code string, severity DoctorSeverity, message, remediation string) {
+		checks = append(checks, DoctorCheck{Layer: layer, Code: code, Severity: severity, Message: message, Remediation: remediation})
+	})
+	report := DoctorReport{Checks: checks}
+	for _, provider := range []string{"gemini", "claude", "vertex"} {
+		if !doctorHasCode(report, "oauth."+provider+"_present") {
+			t.Fatalf("configured %s API key was not recognized: %#v", provider, report.Checks)
+		}
+		if doctorHasCode(report, "oauth."+provider+"_missing") {
+			t.Fatalf("configured %s API key was reported missing: %#v", provider, report.Checks)
+		}
+	}
+}
+
+func TestModelProbeTargetsFollowAvailableOfficialCatalog(t *testing.T) {
+	lifecycle := testLifecycle(t)
+	models, providers := catalogTestModels()
+	filtered := make([]map[string]any, 0, len(models)-1)
+	for _, model := range models {
+		if model["id"] != "gpt-5.6-sol" {
+			filtered = append(filtered, model)
+		}
+	}
+	targets := modelProbeTargets(lifecycle, filtered, providers)
+	if len(targets) == 0 || targets[0] != "gpt-5.5" {
+		t.Fatalf("modelProbeTargets() = %v, want available official model first", targets)
+	}
 }

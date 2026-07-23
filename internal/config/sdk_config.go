@@ -107,11 +107,6 @@ func DefaultCodexIntegrationConfig() CodexIntegrationConfig {
 				InputModalities: []string{"text", "image"}, SupportsTools: true, SupportsParallelTools: true, SupportsWebSearch: true,
 			},
 			{
-				Slug: "xai/grok-build-0.1", Provider: "xai", UpstreamModel: "grok-build-0.1",
-				DisplayName: "Grok Build 0.1", Visible: true, Priority: 50,
-				InputModalities: []string{"text", "image"}, SupportsTools: true, SupportsParallelTools: true, SupportsWebSearch: true,
-			},
-			{
 				Slug: "antigravity/gemini-3.6-flash", Provider: "antigravity", UpstreamModel: "gemini-3.6-flash-high",
 				DisplayName: "Gemini 3.6 Flash", Visible: true, Featured: true, Priority: 3,
 				InputModalities: []string{"text", "image"}, SupportsTools: true, SupportsParallelTools: true,

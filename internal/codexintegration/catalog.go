@@ -81,8 +81,9 @@ func CompileCatalog(models []map[string]any, providersForModel ModelProvidersFun
 		return finalizeCatalog(ordered, sourceRevision, integration)
 	}
 
-	if !catalogContainsSlug(official, "gpt-5.6-sol") {
-		return Catalog{}, fmt.Errorf("official Codex model %q is unavailable", "gpt-5.6-sol")
+	officialFeatured := selectOfficialFeaturedModel(official)
+	if officialFeatured == "" {
+		return Catalog{}, fmt.Errorf("official Codex catalog has no visible model")
 	}
 
 	overlays := make([]map[string]any, 0, len(integration.Models))
@@ -97,24 +98,9 @@ func CompileCatalog(models []map[string]any, providersForModel ModelProvidersFun
 		overlays = append(overlays, compileOverlayCatalogEntry(mapping, model, defaultTemplate))
 	}
 
-	featured := []string{"gpt-5.6-sol"}
-	featuredModels := make([]config.CodexIntegrationModel, 0, len(integration.Models))
-	for _, mapping := range integration.Models {
-		if mapping.Visible && mapping.Featured {
-			featuredModels = append(featuredModels, mapping)
-		}
-	}
-	sort.SliceStable(featuredModels, func(i, j int) bool {
-		if featuredModels[i].Priority == featuredModels[j].Priority {
-			return featuredModels[i].Slug < featuredModels[j].Slug
-		}
-		return featuredModels[i].Priority < featuredModels[j].Priority
-	})
-	for _, mapping := range featuredModels {
+	featured := []string{officialFeatured}
+	for _, mapping := range featuredCodexIntegrationModels(integration) {
 		featured = append(featured, mapping.Slug)
-	}
-	if len(featured) != 5 {
-		return Catalog{}, fmt.Errorf("Codex Integration featured surface has %d models, want 5", len(featured))
 	}
 
 	entries := append(official, overlays...)
@@ -127,6 +113,35 @@ func CompileCatalog(models []map[string]any, providersForModel ModelProvidersFun
 		return Catalog{}, err
 	}
 	return catalog, nil
+}
+
+func selectOfficialFeaturedModel(models []map[string]any) string {
+	candidates := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		if catalogString(model, "visibility") == "hide" {
+			continue
+		}
+		if catalogString(model, "slug") != "" {
+			candidates = append(candidates, model)
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		leftPriority, rightPriority := catalogInt(candidates[i], "priority"), catalogInt(candidates[j], "priority")
+		if leftPriority == rightPriority {
+			return catalogString(candidates[i], "slug") < catalogString(candidates[j], "slug")
+		}
+		if leftPriority <= 0 {
+			return false
+		}
+		if rightPriority <= 0 {
+			return true
+		}
+		return leftPriority < rightPriority
+	})
+	if len(candidates) == 0 {
+		return ""
+	}
+	return catalogString(candidates[0], "slug")
 }
 
 func parseCatalogTemplates(raw []byte) (map[string]map[string]any, map[string]any, error) {
@@ -372,15 +387,6 @@ func containsProvider(providers []string, target string) bool {
 
 func onlyProvider(providers []string, target string) bool {
 	return len(providers) > 0 && containsProvider(providers, target) && len(providers) == 1
-}
-
-func catalogContainsSlug(models []map[string]any, slug string) bool {
-	for _, model := range models {
-		if catalogString(model, "slug") == slug {
-			return true
-		}
-	}
-	return false
 }
 
 func applyCatalogVisibility(entry map[string]any, id string) {
