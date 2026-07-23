@@ -261,10 +261,6 @@ VS Code 扩展，可将你的 Claude、ChatGPT/Codex、Antigravity、Grok 和 Ki
 
 基于 Next.js 的实现，灵感来自 CLIProxyAPI，易于安装使用；自研格式转换（OpenAI/Claude/Gemini/Ollama）、组合系统与自动回退、多账户管理（指数退避）、Next.js Web 控制台，并支持 Cursor、Claude Code、Cline、RooCode 等 CLI 工具，无需 API 密钥。
 
-### [Alex](https://github.com/madhavajay/alex)
-
-匥 CLIProxyAPI 吥匡、匦匥选 UI 的朠地 Rust LLM 䌣理。匣匥匆版码晰耐䍓茷由到夐䈢挐䊑商。攡持朠地鐴路追踪、匥脚朠化中间件、夐订阅聚合、故障转移、以及通过即时通讯完成重新认证。
-
 ### [OmniRoute](https://github.com/diegosouzapw/OmniRoute)
 
 代码不止，创新不停。智能路由至免费及低成本 AI 模型，并支持自动故障转移。
@@ -278,6 +274,10 @@ OmniRoute 是一个面向多供应商大语言模型的 AI 网关：它提供兼
 ### [Codex Switch](https://github.com/9ycrooked/CodexSwitch)
 
 这是一个使用 Tauri 2 + Vue 3 构建的工具，用于管理多个 OpenAI Codex 桌面账户。它可以在已保存的 ChatGPT/Codex 认证配置之间切换，实时查看 5 小时和每周配额使用情况，验证 token 健康状态，查看当前账户详情，并在无需手动复制的情况下导入或保存 auth.json 文件。
+
+### [Alex](https://github.com/madhavajay/alex)
+
+受 CLIProxyAPI 启发、带可选 UI 的本地 Rust LLM 代理。它可将编码 Agent 路由到多个提供商，支持本地链路追踪、可脚本化中间件、多订阅聚合、故障转移，以及通过即时通讯完成重新认证。
 
 > [!NOTE]  
 > 如果你开发了 CLIProxyAPI 的移植或衍生项目，请提交 PR 将其添加到此列表中。
