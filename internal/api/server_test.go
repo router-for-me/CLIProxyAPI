@@ -3,12 +3,15 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,15 +24,19 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 type codexSearchCaptureExecutor struct {
-	request *http.Request
-	body    []byte
-	authIDs []string
+	request      *http.Request
+	body         []byte
+	authIDs      []string
+	prepareErr   error
+	httpErr      error
+	responseBody io.ReadCloser
 }
 
 func (e *codexSearchCaptureExecutor) Identifier() string { return "codex" }
@@ -51,6 +58,9 @@ func (e *codexSearchCaptureExecutor) CountTokens(context.Context, *auth.Auth, co
 }
 
 func (e *codexSearchCaptureExecutor) PrepareRequest(req *http.Request, a *auth.Auth) error {
+	if e.prepareErr != nil {
+		return e.prepareErr
+	}
 	token, _ := a.Metadata["access_token"].(string)
 	req.Header.Set("Authorization", "Bearer "+token)
 	return nil
@@ -94,6 +104,9 @@ func (s *codexSearchAPIKeyFirstSelector) Pick(_ context.Context, _ string, _ str
 }
 
 func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *auth.Auth, req *http.Request) (*http.Response, error) {
+	if e.httpErr != nil {
+		return nil, e.httpErr
+	}
 	e.request = req.Clone(req.Context())
 	e.authIDs = append(e.authIDs, selected.ID)
 	body, err := io.ReadAll(req.Body)
@@ -101,11 +114,248 @@ func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *au
 		return nil, err
 	}
 	e.body = body
+	responseBody := e.responseBody
+	if responseBody == nil {
+		responseBody = io.NopCloser(strings.NewReader(`{"results":[{"url":"https://example.com"}]}`))
+	}
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       io.NopCloser(strings.NewReader(`{"results":[{"url":"https://example.com"}]}`)),
+		Body:       responseBody,
 	}, nil
+}
+
+type codexSearchHomeDispatcher struct {
+	calls atomic.Int32
+}
+
+func (*codexSearchHomeDispatcher) HeartbeatOK() bool { return true }
+
+func (d *codexSearchHomeDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, _ int) ([]byte, error) {
+	d.calls.Add(1)
+	return json.Marshal(map[string]any{
+		"model":      model,
+		"auth_index": "home-codex-search",
+		"auth": map[string]any{
+			"id":       "home-codex-search",
+			"provider": "codex",
+			"status":   "active",
+			"metadata": map[string]any{"access_token": "home-search-token"},
+		},
+		"concurrency": map[string]any{
+			"accounted":     true,
+			"credential_id": "home-codex-search",
+			"model":         model,
+		},
+	})
+}
+
+func (*codexSearchHomeDispatcher) AbortAmbiguousDispatch() {}
+
+type codexSearchBusyHomeDispatcher struct{}
+
+func (*codexSearchBusyHomeDispatcher) HeartbeatOK() bool { return true }
+func (*codexSearchBusyHomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+	return []byte(`{"error":{"type":"credential_concurrency_exceeded","message":"busy","retry_after_ms":750}}`), nil
+}
+func (*codexSearchBusyHomeDispatcher) AbortAmbiguousDispatch() {}
+
+type trackedSearchResponseBody struct {
+	io.Reader
+	closed atomic.Bool
+}
+
+func (b *trackedSearchResponseBody) Close() error {
+	b.closed.Store(true)
+	return nil
+}
+
+type drainAwareSearchResponseBody struct {
+	started   chan struct{}
+	closed    chan struct{}
+	startOnce sync.Once
+	closeOnce sync.Once
+}
+
+func newDrainAwareSearchResponseBody() *drainAwareSearchResponseBody {
+	return &drainAwareSearchResponseBody{started: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (b *drainAwareSearchResponseBody) Read([]byte) (int, error) {
+	b.startOnce.Do(func() { close(b.started) })
+	<-b.closed
+	return 0, io.EOF
+}
+
+func (b *drainAwareSearchResponseBody) Close() error {
+	b.closeOnce.Do(func() { close(b.closed) })
+	return nil
+}
+
+func TestAuditHomeBusyNormalAndStream429Headers(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "normal", true: "stream"}[stream], func(t *testing.T) {
+			server := newTestServer(t)
+			server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
+			server.handlers.AuthManager.PublishHomeDispatch(&codexSearchBusyHomeDispatcher{}, executionregistry.New(), 1)
+
+			body := `{"model":"gpt-5-codex","input":[]}`
+			if stream {
+				body = `{"model":"gpt-5-codex","input":[],"stream":true}`
+			}
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer test-key")
+			server.engine.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusTooManyRequests, rr.Body.String())
+			}
+			if got := rr.Header().Get("Retry-After"); got != "1" {
+				t.Fatalf("Retry-After = %q, want 1", got)
+			}
+		})
+	}
+}
+
+func TestAuditHomeCodexSearchBusyReturnsTrustedRetryAfter(t *testing.T) {
+	server := newTestServer(t)
+	server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
+	server.handlers.AuthManager.PublishHomeDispatch(&codexSearchBusyHomeDispatcher{}, executionregistry.New(), 1)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"model":"gpt-5-codex","query":"test"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusTooManyRequests, rr.Body.String())
+	}
+	if got := rr.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want 1", got)
+	}
+	if !strings.Contains(rr.Body.String(), "busy") {
+		t.Fatalf("body = %q, want busy error", rr.Body.String())
+	}
+}
+
+func TestAuditHomeCodexSearchBodyCloseBeforeRelease(t *testing.T) {
+	server := newTestServer(t)
+	dispatcher := &codexSearchHomeDispatcher{}
+	registry := executionregistry.New()
+	body := newDrainAwareSearchResponseBody()
+	var releaseAfterBodyClose atomic.Bool
+	var releaseCount atomic.Int32
+	registry.SetReleaseSink(func(group executionregistry.ReleaseGroup, _ int64) {
+		if group != (executionregistry.ReleaseGroup{CredentialID: "home-codex-search", Model: "gpt-5-codex"}) {
+			t.Errorf("release group = %#v", group)
+		}
+		select {
+		case <-body.closed:
+			releaseAfterBodyClose.Store(true)
+		default:
+		}
+		releaseCount.Add(1)
+	})
+	server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
+	server.handlers.AuthManager.PublishHomeDispatch(dispatcher, registry, 1)
+	executor := &codexSearchCaptureExecutor{responseBody: body}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"id":"home-search-drain","model":"gpt-5-codex","query":"test"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	handlerDone := make(chan struct{})
+	go func() {
+		server.engine.ServeHTTP(rr, req)
+		close(handlerDone)
+	}()
+
+	select {
+	case <-body.started:
+	case <-time.After(time.Second):
+		t.Fatal("search handler did not start reading the response body")
+	}
+	if errDrain := registry.Drain(context.Background()); errDrain != nil {
+		t.Fatalf("Drain() error = %v", errDrain)
+	}
+	if got := releaseCount.Load(); got != 1 {
+		t.Fatalf("accounted releases = %d, want 1", got)
+	}
+	if !releaseAfterBodyClose.Load() {
+		t.Fatal("accounted Home selection released before the search response body closed")
+	}
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("search handler remained blocked after Home drain")
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+}
+
+func TestHomeCodexAlphaSearchEndsSelectionAcrossDirectHTTPPaths(t *testing.T) {
+	tests := []struct {
+		name       string
+		configure  func(*codexSearchCaptureExecutor, *trackedSearchResponseBody)
+		wantStatus int
+		wantClosed bool
+	}{
+		{
+			name: "request build failure",
+			configure: func(executor *codexSearchCaptureExecutor, _ *trackedSearchResponseBody) {
+				executor.prepareErr = errors.New("request preparation failed")
+			},
+			wantStatus: http.StatusBadGateway,
+		},
+		{
+			name: "HTTP error",
+			configure: func(executor *codexSearchCaptureExecutor, _ *trackedSearchResponseBody) {
+				executor.httpErr = errors.New("upstream unavailable")
+			},
+			wantStatus: http.StatusBadGateway,
+		},
+		{
+			name: "response body close",
+			configure: func(executor *codexSearchCaptureExecutor, body *trackedSearchResponseBody) {
+				executor.responseBody = body
+			},
+			wantStatus: http.StatusOK,
+			wantClosed: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := newTestServer(t)
+			dispatcher := &codexSearchHomeDispatcher{}
+			registry := executionregistry.New()
+			server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
+			server.handlers.AuthManager.PublishHomeDispatch(dispatcher, registry, 1)
+			body := &trackedSearchResponseBody{Reader: strings.NewReader(`{"results":[]}`)}
+			executor := &codexSearchCaptureExecutor{}
+			test.configure(executor, body)
+			server.handlers.AuthManager.RegisterExecutor(executor)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"id":"home-search-session","model":"gpt-5-codex","query":"test"}`))
+			req.Header.Set("Authorization", "Bearer test-key")
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+			if rr.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", rr.Code, test.wantStatus, rr.Body.String())
+			}
+			if got := dispatcher.calls.Load(); got != 1 {
+				t.Fatalf("Home RPOP calls = %d, want 1", got)
+			}
+			if got := body.closed.Load(); got != test.wantClosed {
+				t.Fatalf("response body closed = %t, want %t", got, test.wantClosed)
+			}
+			if errDrain := registry.Drain(context.Background()); errDrain != nil {
+				t.Fatalf("Drain() error = %v", errDrain)
+			}
+		})
+	}
 }
 
 func newTestServer(t *testing.T) *Server {

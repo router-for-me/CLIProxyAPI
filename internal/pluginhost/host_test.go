@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -1091,6 +1092,233 @@ func TestHostPluginBusyReportsLoadingPlugin(t *testing.T) {
 	}
 }
 
+func TestHostCanceledInitializationDiscardsBlockedClient(t *testing.T) {
+	client := &blockingInitializationClient{
+		started:      make(chan struct{}),
+		release:      make(chan struct{}),
+		registration: validTestPlugin("alpha"),
+	}
+	h := NewForTest(&blockingHostCallLoader{client: client})
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "alpha"),
+		Configs: enabledPluginConfigs("alpha"),
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(ctx, cfg)
+		close(applyDone)
+	}()
+	waitForHostTestSignal(t, client.started, "plugin initialization")
+	cancel()
+	waitForHostTestSignal(t, applyDone, "canceled plugin initialization")
+	if !h.PluginBusy("alpha") || h.PluginLoaded("alpha") {
+		t.Fatal("canceled initialization did not retain only its in-flight load token")
+	}
+
+	close(client.release)
+	deadline := time.Now().Add(time.Second)
+	for client.shutdown.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := client.shutdown.Load(); got != 1 {
+		t.Fatalf("blocked initialization client shutdown calls = %d, want 1", got)
+	}
+	if h.PluginBusy("alpha") || h.PluginLoaded("alpha") {
+		t.Fatal("canceled initialization remained in the host after late cleanup")
+	}
+}
+
+func TestHostCancellationUnderMutationLockDoesNotInsertLoadedPlugin(t *testing.T) {
+	client := &blockingInitializationClient{
+		started:      make(chan struct{}),
+		release:      make(chan struct{}),
+		completed:    make(chan struct{}),
+		registration: validTestPlugin("alpha"),
+	}
+	h := NewForTest(&blockingHostCallLoader{client: client})
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "alpha"),
+		Configs: enabledPluginConfigs("alpha"),
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(ctx, cfg)
+		close(applyDone)
+	}()
+	waitForHostTestSignal(t, client.started, "plugin initialization")
+
+	h.mu.Lock()
+	close(client.release)
+	waitForHostTestSignal(t, client.completed, "plugin initialization completion")
+	cancel()
+	h.mu.Unlock()
+	waitForHostTestSignal(t, applyDone, "canceled plugin apply")
+
+	deadline := time.Now().Add(time.Second)
+	for client.shutdown.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := client.shutdown.Load(); got != 1 {
+		t.Fatalf("late client shutdown calls = %d, want 1", got)
+	}
+	if h.PluginLoaded("alpha") || h.PluginBusy("alpha") {
+		t.Fatal("canceled load inserted or retained a completed plugin")
+	}
+}
+
+func TestHostCanceledLoadDiscardsLateClientWithoutReplacingCurrentPlugin(t *testing.T) {
+	first := &lateLoadClient{registration: validTestPlugin("alpha")}
+	second := &lateLoadClient{registration: validTestPlugin("alpha")}
+	loader := &lateLoadPluginLoader{
+		first:         first,
+		second:        second,
+		firstStarted:  make(chan struct{}),
+		firstRelease:  make(chan struct{}),
+		secondStarted: make(chan struct{}),
+	}
+	h := NewForTest(loader)
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "alpha"),
+		Configs: enabledPluginConfigs("alpha"),
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	firstDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(ctx, cfg)
+		close(firstDone)
+	}()
+	waitForHostTestSignal(t, loader.firstStarted, "first plugin load")
+	cancel()
+	waitForHostTestSignal(t, firstDone, "canceled plugin load")
+	if !h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = false after canceled load, want retained load token")
+	}
+
+	secondDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), cfg)
+		close(secondDone)
+	}()
+	waitForHostTestSignal(t, secondDone, "replacement apply completion")
+	if got := loader.calls.Load(); got != 1 {
+		t.Fatalf("Open calls = %d, want 1 while canceled load is still blocked", got)
+	}
+	select {
+	case <-loader.secondStarted:
+		t.Fatal("replacement started a second load before the canceled load completed")
+	default:
+	}
+
+	close(loader.firstRelease)
+	deadline := time.Now().Add(time.Second)
+	for first.shutdown.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := first.shutdown.Load(); got != 1 {
+		t.Fatalf("late client shutdown calls = %d, want 1", got)
+	}
+	if h.PluginBusy("alpha") || h.PluginLoaded("alpha") {
+		t.Fatal("late canceled client remained in the host")
+	}
+	h.ShutdownAll()
+}
+
+func TestHostCanceledBlockedLoadKeepsOneLoaderAndCleanupPerPlugin(t *testing.T) {
+	first := &lateLoadClient{registration: validTestPlugin("alpha")}
+	loader := &lateLoadPluginLoader{
+		first:         first,
+		second:        &lateLoadClient{registration: validTestPlugin("alpha")},
+		firstStarted:  make(chan struct{}),
+		firstRelease:  make(chan struct{}),
+		secondStarted: make(chan struct{}),
+	}
+	h := NewForTest(loader)
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "alpha"),
+		Configs: enabledPluginConfigs("alpha"),
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	firstDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(ctx, cfg)
+		close(firstDone)
+	}()
+	waitForHostTestSignal(t, loader.firstStarted, "first plugin load")
+	cancel()
+	waitForHostTestSignal(t, firstDone, "canceled plugin load")
+
+	for range 8 {
+		h.ApplyConfig(context.Background(), cfg)
+	}
+	if got := loader.calls.Load(); got != 1 {
+		t.Fatalf("Open calls = %d, want one blocked loader", got)
+	}
+
+	close(loader.firstRelease)
+	deadline := time.Now().Add(time.Second)
+	for first.shutdown.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := first.shutdown.Load(); got != 1 {
+		t.Fatalf("late client shutdown calls = %d, want one cleanup", got)
+	}
+	if h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = true after blocked load cleanup")
+	}
+}
+
+func TestHostUnloadPluginContextDetachesBlockedCall(t *testing.T) {
+	plugin := validTestPlugin("alpha")
+	client := &blockingHostCallClient{started: make(chan struct{}), release: make(chan struct{}), registration: plugin}
+	loader := &blockingHostCallLoader{client: client}
+	h := NewForTest(loader)
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "alpha"),
+		Configs: enabledPluginConfigs("alpha"),
+	}}
+	h.ApplyConfig(context.Background(), cfg)
+
+	h.mu.Lock()
+	loaded := h.loaded["alpha"]
+	h.mu.Unlock()
+	if loaded == nil {
+		t.Fatal("plugin did not load")
+	}
+	go func() { _, _ = loaded.client.Call(context.Background(), pluginabi.MethodUsageHandle, nil) }()
+	waitForHostTestSignal(t, client.started, "blocked plugin call")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	unloadDone := make(chan bool, 1)
+	go func() { unloadDone <- h.UnloadPluginContext(ctx, "alpha") }()
+	if ok := waitForHostTestBool(t, unloadDone, "contextual unload"); !ok {
+		t.Fatal("UnloadPluginContext() = false, want true after detaching runtime")
+	}
+	if h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = true after contextual unload detached runtime")
+	}
+	if got := client.shutdown.Load(); got != 0 {
+		t.Fatalf("shutdown calls before blocked plugin call exits = %d, want 0", got)
+	}
+
+	close(client.release)
+	deadline := time.Now().Add(time.Second)
+	for client.shutdown.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := client.shutdown.Load(); got != 1 {
+		t.Fatalf("shutdown calls after blocked plugin call exits = %d, want 1", got)
+	}
+}
+
 func TestHostUnloadWaitsForBlockingLoad(t *testing.T) {
 	h, cfg, openStarted, releaseOpen := newBlockingOpenHost(t)
 	applyDone := make(chan struct{})
@@ -1214,6 +1442,117 @@ func (c *capturePluginClient) Call(ctx context.Context, method string, request [
 
 func (c *capturePluginClient) Shutdown() {}
 
+type blockingInitializationClient struct {
+	started         chan struct{}
+	release         chan struct{}
+	completed       chan struct{}
+	registration    pluginapi.Plugin
+	shutdown        atomic.Int32
+	shutdownStarted chan struct{}
+	shutdownRelease chan struct{}
+}
+
+func (c *blockingInitializationClient) Call(_ context.Context, method string, _ []byte) ([]byte, error) {
+	if method != pluginabi.MethodPluginRegister {
+		return nil, fmt.Errorf("unexpected plugin method %s", method)
+	}
+	close(c.started)
+	<-c.release
+	if c.completed != nil {
+		close(c.completed)
+	}
+	return marshalRPCResult(rpcRegistration{
+		SchemaVersion: pluginabi.SchemaVersion,
+		Metadata:      c.registration.Metadata,
+		Capabilities:  rpcCapabilitiesFromPlugin(c.registration),
+	})
+}
+
+func (c *blockingInitializationClient) Shutdown() {
+	c.shutdown.Add(1)
+	if c.shutdownStarted != nil {
+		close(c.shutdownStarted)
+	}
+	if c.shutdownRelease != nil {
+		<-c.shutdownRelease
+	}
+}
+
+type lateLoadPluginLoader struct {
+	first         pluginClient
+	second        pluginClient
+	firstStarted  chan struct{}
+	firstRelease  chan struct{}
+	secondStarted chan struct{}
+	calls         atomic.Int32
+}
+
+func (l *lateLoadPluginLoader) Open(pluginFile, *Host) (pluginClient, error) {
+	if l.calls.Add(1) == 1 {
+		close(l.firstStarted)
+		<-l.firstRelease
+		return l.first, nil
+	}
+	close(l.secondStarted)
+	return l.second, nil
+}
+
+type lateLoadClient struct {
+	registration pluginapi.Plugin
+	shutdown     atomic.Int32
+}
+
+func (c *lateLoadClient) Call(_ context.Context, method string, _ []byte) ([]byte, error) {
+	if method != pluginabi.MethodPluginRegister {
+		return nil, fmt.Errorf("unexpected plugin method %s", method)
+	}
+	return marshalRPCResult(rpcRegistration{
+		SchemaVersion: pluginabi.SchemaVersion,
+		Metadata:      c.registration.Metadata,
+		Capabilities:  rpcCapabilitiesFromPlugin(c.registration),
+	})
+}
+
+func (c *lateLoadClient) Shutdown() {
+	c.shutdown.Add(1)
+}
+
+type blockingHostCallLoader struct {
+	client pluginClient
+}
+
+func (l *blockingHostCallLoader) Open(pluginFile, *Host) (pluginClient, error) {
+	return l.client, nil
+}
+
+type blockingHostCallClient struct {
+	started      chan struct{}
+	release      chan struct{}
+	registration pluginapi.Plugin
+	shutdown     atomic.Int32
+}
+
+func (c *blockingHostCallClient) Call(_ context.Context, method string, _ []byte) ([]byte, error) {
+	switch method {
+	case pluginabi.MethodPluginRegister:
+		return marshalRPCResult(rpcRegistration{
+			SchemaVersion: pluginabi.SchemaVersion,
+			Metadata:      c.registration.Metadata,
+			Capabilities:  rpcCapabilitiesFromPlugin(c.registration),
+		})
+	case pluginabi.MethodUsageHandle:
+		close(c.started)
+		<-c.release
+		return marshalRPCResult(rpcEmptyResponse{})
+	default:
+		return nil, fmt.Errorf("unexpected plugin method %s", method)
+	}
+}
+
+func (c *blockingHostCallClient) Shutdown() {
+	c.shutdown.Add(1)
+}
+
 type blockingOpenLoader struct {
 	inner     *testSymbolLoader
 	started   chan struct{}
@@ -1308,5 +1647,120 @@ func waitForHostTestBool(t *testing.T, ch <-chan bool, name string) bool {
 	case <-time.After(time.Second):
 		t.Fatalf("timed out waiting for %s", name)
 		return false
+	}
+}
+
+type countingPluginLoader struct {
+	client      pluginClient
+	replacement pluginClient
+	calls       atomic.Int32
+}
+
+func (l *countingPluginLoader) Open(pluginFile, *Host) (pluginClient, error) {
+	if l.calls.Add(1) == 1 {
+		return l.client, nil
+	}
+	return l.replacement, nil
+}
+
+func TestHostShutdownAllRetainsBlockedLoadTokenUntilCleanup(t *testing.T) {
+	client := &blockingInitializationClient{
+		started:         make(chan struct{}),
+		release:         make(chan struct{}),
+		registration:    validTestPlugin("alpha"),
+		shutdownStarted: make(chan struct{}),
+		shutdownRelease: make(chan struct{}),
+	}
+	loader := &countingPluginLoader{client: client, replacement: &lateLoadClient{registration: validTestPlugin("alpha")}}
+	h := NewForTest(loader)
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "alpha"),
+		Configs: enabledPluginConfigs("alpha"),
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	firstDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(ctx, cfg)
+		close(firstDone)
+	}()
+	waitForHostTestSignal(t, client.started, "plugin registration")
+	cancel()
+	waitForHostTestSignal(t, firstDone, "canceled plugin apply")
+	close(client.release)
+	waitForHostTestSignal(t, client.shutdownStarted, "plugin shutdown")
+
+	h.ShutdownAllContext(context.Background())
+	var applies sync.WaitGroup
+	for range 8 {
+		applies.Add(1)
+		go func() {
+			defer applies.Done()
+			h.ApplyConfig(context.Background(), cfg)
+		}()
+	}
+	applies.Wait()
+	if got := loader.calls.Load(); got != 1 {
+		t.Fatalf("Open calls while ShutdownAll cleanup is blocked = %d, want 1", got)
+	}
+	if !h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = false before physical shutdown returns")
+	}
+
+	close(client.shutdownRelease)
+	deadline := time.Now().Add(time.Second)
+	for h.PluginBusy("alpha") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = true after physical shutdown returned")
+	}
+}
+
+func TestHostCanceledRegisterRetainsLoadTokenUntilShutdownReturns(t *testing.T) {
+	client := &blockingInitializationClient{
+		started:         make(chan struct{}),
+		release:         make(chan struct{}),
+		registration:    validTestPlugin("alpha"),
+		shutdownStarted: make(chan struct{}),
+		shutdownRelease: make(chan struct{}),
+	}
+	loader := &countingPluginLoader{client: client, replacement: &lateLoadClient{registration: validTestPlugin("alpha")}}
+	h := NewForTest(loader)
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "alpha"),
+		Configs: enabledPluginConfigs("alpha"),
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(ctx, cfg)
+		close(applyDone)
+	}()
+	waitForHostTestSignal(t, client.started, "plugin registration")
+	cancel()
+	waitForHostTestSignal(t, applyDone, "canceled plugin apply")
+	close(client.release)
+	waitForHostTestSignal(t, client.shutdownStarted, "plugin shutdown")
+
+	for range 8 {
+		h.ApplyConfig(context.Background(), cfg)
+	}
+	if got := loader.calls.Load(); got != 1 {
+		t.Fatalf("Open calls while shutdown is blocked = %d, want 1", got)
+	}
+	if !h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = false before physical shutdown returns")
+	}
+
+	close(client.shutdownRelease)
+	deadline := time.Now().Add(time.Second)
+	for h.PluginBusy("alpha") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = true after physical shutdown returned")
 	}
 }

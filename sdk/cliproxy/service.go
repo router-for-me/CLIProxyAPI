@@ -10,9 +10,11 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
@@ -29,6 +31,7 @@ import (
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
@@ -48,6 +51,11 @@ type Service struct {
 
 	// configUpdateMu serializes config updates across watcher + home.
 	configUpdateMu sync.Mutex
+
+	// configRuntimeMu orders side-effecting runtime application after config commits.
+	configRuntimeMu     sync.Mutex
+	configSequence      uint64
+	appliedRoutingState *routingRuntimeState
 
 	// configPath is the path to the configuration file.
 	configPath string
@@ -106,17 +114,124 @@ type Service struct {
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
 
-	homeClient          *home.Client
-	homeCancel          context.CancelFunc
-	homeLogForwarder    *logging.HomeAppLogForwarder
-	homePluginSyncMu    sync.Mutex
-	homePluginSyncKey   string
-	homePluginSyncFetch func(context.Context, sdkpluginstore.PluginSyncRequest) (sdkpluginstore.PluginSyncResponse, error)
+	homeLifecycleMu              sync.Mutex
+	homeOwnershipMu              sync.Mutex
+	homeConfigCommitMu           sync.Mutex
+	homeConfigStageHook          func()
+	homeConfigCommitHook         func()
+	homeConfigRuntimeHook        func()
+	applyPprofConfigContextFn    func(context.Context, *config.Config) bool
+	updateServerClientsContextFn func(context.Context, *config.Config) bool
+	homeSupervisor               *homeSubscriberSupervisor
+	homeMu                       sync.Mutex
+	homeGeneration               uint64
+	homeClient                   *home.Client
+	homeRegistry                 *executionregistry.Registry
+	homeDispatchBundle           *coreauth.HomeDispatchBundle
+	homeDrainBound               time.Duration
+	homeCancel                   context.CancelFunc
+	runCancel                    context.CancelFunc
+	homeLogForwarder             homeLogForwarder
+	homeLogForwarderClient       *home.Client
+	homePluginSyncMu             sync.Mutex
+	homePluginSyncKey            string
+	homePluginSyncFetch          func(context.Context, sdkpluginstore.PluginSyncRequest) (sdkpluginstore.PluginSyncResponse, error)
+	homePluginDeleteTask         func(context.Context, *config.Config, home.PluginTask) homeplugins.SyncReport
+}
+
+type homeSubscriberSupervisor struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+
+	publisherMu   sync.Mutex
+	publisherDone <-chan struct{}
+}
+
+func (s *homeSubscriberSupervisor) setPublisherCompletion(done <-chan struct{}) {
+	if s == nil {
+		return
+	}
+	s.publisherMu.Lock()
+	s.publisherDone = done
+	s.publisherMu.Unlock()
+}
+
+func (s *homeSubscriberSupervisor) publisherCompletion() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	s.publisherMu.Lock()
+	defer s.publisherMu.Unlock()
+	return s.publisherDone
+}
+
+type homeConfigWorkQueue struct {
+	mu    sync.Mutex
+	items [][]byte
+	wake  chan struct{}
+}
+
+func newHomeConfigWorkQueue() *homeConfigWorkQueue {
+	return &homeConfigWorkQueue{wake: make(chan struct{}, 1)}
+}
+
+func (q *homeConfigWorkQueue) enqueue(raw []byte) {
+	if q == nil {
+		return
+	}
+	item := append([]byte(nil), raw...)
+	q.mu.Lock()
+	q.items = append(q.items, item)
+	q.mu.Unlock()
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (q *homeConfigWorkQueue) dequeue(ctx context.Context) ([]byte, bool) {
+	if q == nil || ctx == nil {
+		return nil, false
+	}
+	for {
+		if ctx.Err() != nil {
+			return nil, false
+		}
+		q.mu.Lock()
+		if ctx.Err() != nil {
+			q.mu.Unlock()
+			return nil, false
+		}
+		if len(q.items) > 0 {
+			item := q.items[0]
+			q.items[0] = nil
+			q.items = q.items[1:]
+			q.mu.Unlock()
+			return item, true
+		}
+		q.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case <-q.wake:
+		}
+	}
+}
+
+type homeLogForwarder interface {
+	Bind(*home.Client)
+	Deactivate(*home.Client)
+	Stop()
+}
+
+var startHomeLogForwarder = func(queueSize int) homeLogForwarder {
+	return logging.StartHomeAppLogForwarder(queueSize)
 }
 
 const (
 	modelRegistrationMaxWorkersPerCategory         = 5
 	modelRegistrationMaxWorkersOpenAICompatibility = 20
+	homeSubscriberPreAckRetryBackoff               = 100 * time.Millisecond
 )
 
 const (
@@ -176,16 +291,29 @@ func (s *Service) syncPluginRuntimeConfig(ctx context.Context) bool {
 		sdkAuth.RegisterPluginAuthParser(nil)
 		return false
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	s.cfgMu.RLock()
 	cfg := s.cfg
 	s.cfgMu.RUnlock()
+	return s.syncPluginRuntimeConfigForConfig(ctx, cfg)
+}
+
+func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *config.Config) bool {
+	if s == nil {
+		sdkAuth.RegisterPluginAuthParser(nil)
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
 
 	if s.pluginHost != nil {
 		s.pluginHost.ApplyConfig(ctx, cfg)
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false
 	}
 	if s.coreManager != nil {
 		s.coreManager.SetPluginScheduler(s.pluginHost)
@@ -195,6 +323,9 @@ func (s *Service) syncPluginRuntimeConfig(ctx context.Context) bool {
 		return false
 	}
 	s.pluginHost.RegisterFrontendAuthProviders()
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
 	if s.accessManager != nil {
 		s.accessManager.SetProviders(sdkaccess.RegisteredProviders())
 	}
@@ -203,7 +334,7 @@ func (s *Service) syncPluginRuntimeConfig(ctx context.Context) bool {
 	if s.server != nil {
 		s.server.RefreshPluginManagementRoutes()
 	}
-	return true
+	return ctx.Err() == nil
 }
 
 func (s *Service) syncPluginModelRuntime(ctx context.Context) {
@@ -214,6 +345,9 @@ func (s *Service) syncPluginModelRuntime(ctx context.Context) {
 		ctx = context.Background()
 	}
 	s.pluginHost.RegisterModels(ctx, registry.GetGlobalRegistry())
+	if ctx.Err() != nil {
+		return
+	}
 	s.registerAvailableExecutors(ctx, executorRegistrationOptions{
 		includeBaseline:   s.cfg != nil && s.cfg.Home.Enabled,
 		includePlugins:    true,
@@ -221,6 +355,9 @@ func (s *Service) syncPluginModelRuntime(ctx context.Context) {
 		auths:             s.coreManager.List(),
 	})
 	s.refreshPluginModelRegistrations(ctx)
+	if ctx.Err() != nil {
+		return
+	}
 	s.coreManager.RefreshSchedulerAll()
 }
 
@@ -686,7 +823,7 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 		return nil
 	}
 	auth = auth.Clone()
-	s.ensureExecutorsForAuth(auth)
+	s.ensureExecutorsForAuthWithContext(ctx, auth, false)
 
 	// IMPORTANT: Update coreManager FIRST, before model registration.
 	// This ensures that configuration changes (proxy_url, prefix, etc.) take effect
@@ -727,7 +864,13 @@ func (s *Service) completeModelRegistrationForAuthWithCache(ctx context.Context,
 	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" {
 		return
 	}
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
 	s.registerModelsForAuthWithCache(ctx, auth, compatCache)
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
 	s.coreManager.ReconcileRegistryModelStates(ctx, auth.ID)
 
 	// Refresh the scheduler entry so that the auth's supportedModelSet is rebuilt
@@ -770,24 +913,35 @@ func (s *Service) applyRetryConfig(cfg *config.Config) {
 }
 
 func (s *Service) configureCooldownStateStore(cfg *config.Config) {
+	_ = s.configureCooldownStateStoreContext(context.Background(), cfg, false)
+}
+
+func (s *Service) configureCooldownStateStoreContext(ctx context.Context, cfg *config.Config, persistOld bool) bool {
 	if s == nil || s.coreManager == nil {
-		return
+		return true
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
+	return s.coreManager.SwapCooldownStateStore(ctx, s.resolveCooldownStateStore(cfg), persistOld)
+}
+
+func (s *Service) resolveCooldownStateStore(cfg *config.Config) coreauth.CooldownStateStore {
 	if cfg == nil || !cfg.SaveCooldownStatus || cfg.Home.Enabled {
-		s.coreManager.SetCooldownStateStore(nil)
-		return
+		return nil
 	}
 	authDir, errResolve := resolveCooldownStateAuthDir(cfg)
 	if errResolve != nil {
 		log.Warnf("failed to resolve cooldown state directory: %v", errResolve)
-		s.coreManager.SetCooldownStateStore(nil)
-		return
+		return nil
 	}
 	if authDir == "" {
-		s.coreManager.SetCooldownStateStore(nil)
-		return
+		return nil
 	}
-	s.coreManager.SetCooldownStateStore(coreauth.NewFileCooldownStateStoreWithAuthDir(authDir, authDir))
+	return coreauth.NewFileCooldownStateStoreWithAuthDir(authDir, authDir)
 }
 
 func resolveCooldownStateAuthDir(cfg *config.Config) (string, error) {
@@ -952,14 +1106,18 @@ func (s *Service) unregisterOpenAICompatExecutor(providerKey string) {
 }
 
 func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
-	s.ensureExecutorsForAuthWithMode(a, false)
+	s.ensureExecutorsForAuthWithContext(context.Background(), a, false)
 }
 
 func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace bool) {
-	if a == nil {
+	s.ensureExecutorsForAuthWithContext(context.Background(), a, forceReplace)
+}
+
+func (s *Service) ensureExecutorsForAuthWithContext(ctx context.Context, a *coreauth.Auth, forceReplace bool) {
+	if a == nil || (ctx != nil && ctx.Err() != nil) {
 		return
 	}
-	s.registerAvailableExecutors(context.Background(), executorRegistrationOptions{
+	s.registerAvailableExecutors(ctx, executorRegistrationOptions{
 		auths:             []*coreauth.Auth{a},
 		forceReplaceAuths: forceReplace,
 	})
@@ -1181,7 +1339,13 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 	if s == nil || s.pluginHost == nil || a == nil {
 		return false
 	}
+	if ctx != nil && ctx.Err() != nil {
+		return true
+	}
 	result := s.pluginHost.ModelsForAuth(ctx, a)
+	if ctx != nil && ctx.Err() != nil {
+		return true
+	}
 	if !result.Handled {
 		return false
 	}
@@ -1209,7 +1373,7 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 				result.Auth.Attributes[key] = value
 			}
 		}
-		if updated, errUpdate := s.coreManager.Update(context.Background(), result.Auth); errUpdate == nil && updated != nil {
+		if updated, errUpdate := s.coreManager.Update(ctx, result.Auth); errUpdate == nil && updated != nil {
 			activeAuth = updated.Clone()
 		}
 	}
@@ -1232,6 +1396,9 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 			activeExcluded = strings.Split(val, ",")
 		}
 	}
+	if ctx != nil && ctx.Err() != nil {
+		return true
+	}
 	models := applyExcludedModels(result.Models, activeExcluded)
 	models = applyOAuthModelAliasForAuth(s.cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
 	if len(models) > 0 {
@@ -1243,31 +1410,79 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 }
 
 func (s *Service) applyConfigUpdate(newCfg *config.Config) {
-	s.applyConfigUpdateWithAuthSynthesis(newCfg, true)
+	s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, true)
 }
 
 func (s *Service) applyWatcherConfigUpdate(newCfg *config.Config) {
-	s.applyConfigUpdateWithAuthSynthesis(newCfg, false)
+	s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, false)
 }
 
-func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synthesizeConfigAuths bool) {
+type configCommit struct {
+	cfg      *config.Config
+	sequence uint64
+}
+
+type routingRuntimeState struct {
+	strategy           string
+	sessionAffinity    bool
+	sessionAffinityTTL time.Duration
+}
+
+func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
+	state := routingRuntimeState{
+		strategy:           "round-robin",
+		sessionAffinityTTL: time.Hour,
+	}
+	if cfg == nil {
+		return state
+	}
+
+	switch strings.ToLower(strings.TrimSpace(cfg.Routing.Strategy)) {
+	case "fill-first", "fillfirst", "ff":
+		state.strategy = "fill-first"
+	}
+	state.sessionAffinity = cfg.Routing.SessionAffinity
+	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
+		if parsed, errParse := time.ParseDuration(ttl); errParse == nil && parsed > 0 {
+			state.sessionAffinityTTL = parsed
+		}
+	}
+	return state
+}
+
+func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
+	var selector coreauth.Selector
+	if state.strategy == "fill-first" {
+		selector = &coreauth.FillFirstSelector{}
+	} else {
+		selector = &coreauth.RoundRobinSelector{}
+	}
+	if state.sessionAffinity {
+		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
+			Fallback: selector,
+			TTL:      state.sessionAffinityTTL,
+		})
+	}
+	return selector
+}
+
+func (s *Service) applyConfigUpdateWithAuthSynthesis(ctx context.Context, newCfg *config.Config, synthesizeConfigAuths bool) bool {
+	commit := s.commitConfigUpdate(newCfg)
+	if commit.cfg == nil {
+		return false
+	}
+	return s.applyConfigRuntime(ctx, commit, synthesizeConfigAuths)
+}
+
+// commitConfigUpdate applies only in-memory configuration state. Runtime work that
+// may block on plugins, models, storage, or networking is deliberately deferred.
+func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 	if s == nil {
-		return
+		return configCommit{}
 	}
 
 	s.configUpdateMu.Lock()
 	defer s.configUpdateMu.Unlock()
-
-	previousStrategy := ""
-	var previousSessionAffinity bool
-	var previousSessionAffinityTTL string
-	s.cfgMu.RLock()
-	if s.cfg != nil {
-		previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
-		previousSessionAffinity = s.cfg.Routing.SessionAffinity
-		previousSessionAffinityTTL = s.cfg.Routing.SessionAffinityTTL
-	}
-	s.cfgMu.RUnlock()
 
 	if newCfg == nil {
 		s.cfgMu.RLock()
@@ -1275,86 +1490,132 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 		s.cfgMu.RUnlock()
 	}
 	if newCfg == nil {
-		return
+		return configCommit{}
 	}
 
-	nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
-	normalizeStrategy := func(strategy string) string {
-		switch strategy {
-		case "fill-first", "fillfirst", "ff":
-			return "fill-first"
-		default:
-			return "round-robin"
-		}
-	}
-	previousStrategy = normalizeStrategy(previousStrategy)
-	nextStrategy = normalizeStrategy(nextStrategy)
-
-	nextSessionAffinity := newCfg.Routing.SessionAffinity
-	nextSessionAffinityTTL := newCfg.Routing.SessionAffinityTTL
-
-	selectorChanged := previousStrategy != nextStrategy ||
-		previousSessionAffinity != nextSessionAffinity ||
-		previousSessionAffinityTTL != nextSessionAffinityTTL
-
-	if s.coreManager != nil && selectorChanged {
-		var selector coreauth.Selector
-		switch nextStrategy {
-		case "fill-first":
-			selector = &coreauth.FillFirstSelector{}
-		default:
-			selector = &coreauth.RoundRobinSelector{}
-		}
-
-		if nextSessionAffinity {
-			ttl := time.Hour
-			if ttlStr := strings.TrimSpace(nextSessionAffinityTTL); ttlStr != "" {
-				if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
-					ttl = parsed
-				}
-			}
-			selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
-				Fallback: selector,
-				TTL:      ttl,
-			})
-		}
-
-		s.coreManager.SetSelector(selector)
-	}
-
-	s.applyRetryConfig(newCfg)
-	s.configureCooldownStateStore(newCfg)
-	s.applyPprofConfig(newCfg)
-	if s.server != nil {
-		s.server.UpdateClients(newCfg)
-	}
 	s.cfgMu.Lock()
 	s.cfg = newCfg
 	s.cfgMu.Unlock()
-	if s.coreManager != nil {
-		s.coreManager.SetConfig(newCfg)
-		s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
+	s.configSequence++
+	return configCommit{cfg: newCfg, sequence: s.configSequence}
+}
+
+func (s *Service) configCommitCurrent(commit configCommit) bool {
+	if s == nil || commit.sequence == 0 {
+		return false
 	}
-	ctx := coreauth.WithSkipPersist(context.Background())
-	s.syncPluginRuntimeConfig(ctx)
+	s.configUpdateMu.Lock()
+	current := s.configSequence == commit.sequence
+	s.configUpdateMu.Unlock()
+	return current
+}
+
+func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, synthesizeConfigAuths bool) bool {
+	cfg := commit.cfg
+	if s == nil || cfg == nil {
+		return false
+	}
+	s.configRuntimeMu.Lock()
+	defer s.configRuntimeMu.Unlock()
+	if !s.configCommitCurrent(commit) {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
+
+	if !s.applyManagerConfig(ctx, commit) {
+		return false
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
+	if !s.applyPprofConfigContext(ctx, cfg) {
+		return false
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
+	if !s.updateServerClientsContext(ctx, cfg) {
+		return false
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
+
+	registrationCtx := coreauth.WithSkipPersist(ctx)
+	s.syncPluginRuntimeConfigForConfig(registrationCtx, cfg)
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
 	var auths []*coreauth.Auth
 	if s.coreManager != nil {
 		auths = s.coreManager.List()
 	}
-	s.registerAvailableExecutors(context.Background(), executorRegistrationOptions{
-		includeBaseline:   newCfg.Home.Enabled,
+	s.registerAvailableExecutors(registrationCtx, executorRegistrationOptions{
+		includeBaseline:   cfg.Home.Enabled,
 		forceReplaceAuths: true,
 		auths:             auths,
 	})
-	if synthesizeConfigAuths {
-		s.registerConfigAPIKeyAuths(ctx, newCfg)
+	if errContext := ctx.Err(); errContext != nil {
+		return false
 	}
-	if s.coreManager != nil && !newCfg.Home.Enabled && newCfg.SaveCooldownStatus {
-		if errRestoreCooldown := s.coreManager.RestoreCooldownStates(context.Background()); errRestoreCooldown != nil {
+	if synthesizeConfigAuths {
+		s.registerConfigAPIKeyAuths(registrationCtx, cfg)
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
+	if s.coreManager != nil && !cfg.Home.Enabled && cfg.SaveCooldownStatus {
+		if errRestoreCooldown := s.coreManager.RestoreCooldownStates(registrationCtx); errRestoreCooldown != nil && ctx.Err() == nil {
 			log.Warnf("failed to restore cooldown state after config update: %v", errRestoreCooldown)
 		}
 	}
-	s.syncPluginModelRuntime(ctx)
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
+	s.syncPluginModelRuntime(registrationCtx)
+	return ctx.Err() == nil
+}
+
+func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) bool {
+	if s == nil || s.coreManager == nil || commit.cfg == nil {
+		return s != nil && commit.cfg != nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
+	routingState := normalizedRoutingRuntimeState(commit.cfg)
+	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
+		s.coreManager.SetSelector(newRoutingSelector(routingState))
+		s.appliedRoutingState = &routingState
+	}
+	s.applyRetryConfig(commit.cfg)
+	store := s.resolveCooldownStateStore(commit.cfg)
+	if !s.coreManager.ApplyConfigWithCooldownStateStore(ctx, commit.cfg, store) {
+		return false
+	}
+	s.coreManager.SetOAuthModelAlias(commit.cfg.OAuthModelAlias)
+	return true
+}
+
+func (s *Service) updateServerClientsContext(ctx context.Context, cfg *config.Config) bool {
+	if s == nil || cfg == nil || (ctx != nil && ctx.Err() != nil) {
+		return false
+	}
+	if s.updateServerClientsContextFn != nil {
+		return s.updateServerClientsContextFn(ctx, cfg)
+	}
+	if s.server == nil {
+		return true
+	}
+	return s.server.UpdateClientsContext(ctx, cfg)
 }
 
 func (s *Service) reloadConfigFromWatcher() bool {
@@ -1430,18 +1691,48 @@ func (s *Service) applyHomeOverlay(remoteCfg *config.Config) {
 }
 
 func (s *Service) applyHomeOverlayContext(ctx context.Context, remoteCfg *config.Config) error {
+	return s.applyHomeOverlayWithClient(ctx, remoteCfg, nil)
+}
+
+func (s *Service) applyHomeOverlayWithClient(ctx context.Context, remoteCfg *config.Config, client *home.Client) error {
+	work, errStage := s.stageHomeOverlayWithClient(ctx, remoteCfg, client)
+	if errStage != nil {
+		return errStage
+	}
+	if ctx != nil {
+		if errContext := ctx.Err(); errContext != nil {
+			return errContext
+		}
+	}
+	if work.config != nil {
+		if !s.applyConfigUpdateWithAuthSynthesis(ctx, work.config, true) {
+			return context.Canceled
+		}
+		work.committed = true
+	}
+	if errFinalize := s.finalizeHomePluginWork(ctx, client, work); errFinalize != nil {
+		return errFinalize
+	}
+	return nil
+}
+
+func (s *Service) stageHomeOverlayWithClient(ctx context.Context, remoteCfg *config.Config, client *home.Client) (*homePluginFinalization, error) {
+	work := &homePluginFinalization{}
 	if s == nil || remoteCfg == nil {
-		return nil
+		return work, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, errContext
 	}
 
 	s.cfgMu.RLock()
 	baseCfg := s.cfg
 	s.cfgMu.RUnlock()
 	if baseCfg == nil {
-		return nil
+		return work, nil
 	}
 
 	merged := *remoteCfg
@@ -1455,26 +1746,120 @@ func (s *Service) applyHomeOverlayContext(ctx context.Context, remoteCfg *config
 	syncCfg.Plugins.StoreAuth = storeAuth
 
 	logHomeConfigChanges(baseCfg, &merged)
-	report, syncKey, didSync, errSync := s.syncHomePlugins(ctx, &syncCfg)
+	report, syncKey, didSync, errSync := s.syncHomePluginsWithClient(ctx, &syncCfg, client)
 	if errSync != nil {
-		log.Warnf("failed to sync home plugins: %v", errSync)
+		return nil, fmt.Errorf("sync home plugins: %w", errSync)
 	}
-	s.applyConfigUpdate(&merged)
-	var errLoad error
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, errContext
+	}
 	if didSync {
-		errLoad = homeplugins.MarkLoadResults(&report, s.pluginHost)
-		if errLoad != nil {
-			log.Warnf("failed to load home plugins after config update: %v", errLoad)
+		if errLoad := homeplugins.MarkLoadResults(&report, s.pluginHost); errLoad != nil {
+			return nil, fmt.Errorf("load home plugins: %w", errLoad)
 		}
 	}
 	if strings.TrimSpace(report.Task) != "" {
-		s.reportHomePluginStatus(ctx, &merged, report)
-		if errSync == nil && errLoad == nil {
-			s.markHomePluginsSynced(syncKey)
+		work.syncKey = syncKey
+		work.markSynced = true
+		if strings.TrimSpace(merged.Home.NodeID) != "" {
+			work.statusWork = append(work.statusWork, homePluginStatusWork{cfg: &merged, report: report})
 		}
 	}
-	s.processHomePluginTasks(ctx, &merged)
-	return nil
+	taskWork, errTasks := s.stageHomePluginTasksWithClient(ctx, &merged, client)
+	if errTasks != nil {
+		return nil, fmt.Errorf("stage home plugin tasks: %w", errTasks)
+	}
+	work.taskWork = append(work.taskWork, taskWork...)
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, errContext
+	}
+	work.config = &merged
+	return work, nil
+}
+
+func (s *Service) commitHomeConfig(lifetimeCtx, homeCtx context.Context, generation uint64, work *homePluginFinalization) bool {
+	if s == nil || work == nil || work.config == nil {
+		return false
+	}
+
+	s.homeConfigCommitMu.Lock()
+	defer s.homeConfigCommitMu.Unlock()
+	if !s.homeLifetimeActive(homeCtx, lifetimeCtx, generation) {
+		return false
+	}
+	if s.homeConfigCommitHook != nil {
+		s.homeConfigCommitHook()
+	}
+	if !s.homeLifetimeActive(homeCtx, lifetimeCtx, generation) {
+		return false
+	}
+	commit := s.commitConfigUpdate(work.config)
+	if commit.cfg == nil {
+		return false
+	}
+	work.config = commit.cfg
+	work.configCommit = commit
+	work.committed = true
+	return true
+}
+
+func (s *Service) homeLifetimeActive(homeCtx, lifetimeCtx context.Context, generation uint64) bool {
+	if s == nil || homeCtx.Err() != nil || lifetimeCtx.Err() != nil {
+		return false
+	}
+	s.homeMu.Lock()
+	active := s.homeGeneration == generation
+	s.homeMu.Unlock()
+	return active
+}
+
+func (s *Service) finalizeHomePluginWorkUntilDone(ctx, homeCtx context.Context, generation uint64, client *home.Client, work *homePluginFinalization, publish func() bool) error {
+	stopClose := closeHomeClientOnCancellation(ctx, client)
+	defer stopClose()
+	for {
+		if errContext := ctx.Err(); errContext != nil {
+			return errContext
+		}
+
+		s.homeOwnershipMu.Lock()
+		if !s.homeLifetimeActive(homeCtx, ctx, generation) {
+			s.homeOwnershipMu.Unlock()
+			return context.Canceled
+		}
+		errFinalize := s.finalizeHomePluginWork(ctx, client, work)
+		if errFinalize == nil && (publish == nil || publish()) {
+			s.homeOwnershipMu.Unlock()
+			return nil
+		}
+		s.homeOwnershipMu.Unlock()
+		if errFinalize == nil {
+			return context.Canceled
+		}
+
+		log.WithError(errFinalize).Warn("failed to finalize home plugins; retrying")
+		timer := time.NewTimer(homeSubscriberPreAckRetryBackoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func closeHomeClientOnCancellation(ctx context.Context, client *home.Client) func() {
+	if ctx == nil || client == nil {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			client.Close()
+		case <-stop:
+		}
+	}()
+	return func() { close(stop) }
 }
 
 func logHomeConfigChanges(oldCfg, newCfg *config.Config) {
@@ -1557,6 +1942,23 @@ func (s *Service) startHomeUsageForwarder(ctx context.Context, client *home.Clie
 	}()
 }
 
+func applyHomeObservationBarrier(registry *executionregistry.Registry, revision int64) {
+	if registry != nil {
+		registry.ObserveBarrier(revision)
+	}
+}
+
+func applyHomeInFlightPublisherConfig(manager *coreauth.Manager, cfg internalconfig.CredentialInFlightConfig) error {
+	publisherCfg, errConfig := coreauth.HomeInFlightPublisherConfigFromConfig(cfg)
+	if errConfig != nil {
+		return errConfig
+	}
+	if manager != nil {
+		manager.ApplyHomeInFlightPublisherConfig(publisherCfg)
+	}
+	return nil
+}
+
 func (s *Service) startHomeSubscriber(ctx context.Context) {
 	if s == nil {
 		return
@@ -1568,40 +1970,349 @@ func (s *Service) startHomeSubscriber(ctx context.Context) {
 		return
 	}
 
-	if s.homeCancel != nil {
-		s.homeCancel()
-		s.homeCancel = nil
-	}
-	if s.homeClient != nil {
-		s.homeClient.Close()
-		s.homeClient = nil
-	}
-	if s.homeLogForwarder != nil {
-		s.homeLogForwarder.Stop()
-		s.homeLogForwarder = nil
+	parentCtx := ctx
+	if parentCtx == nil {
+		parentCtx = context.Background()
 	}
 
-	homeCtx := ctx
-	if homeCtx == nil {
-		homeCtx = context.Background()
+	s.homeLifecycleMu.Lock()
+	defer s.homeLifecycleMu.Unlock()
+
+	if previousSupervisor := s.homeSupervisor; previousSupervisor != nil {
+		s.homeConfigCommitMu.Lock()
+		previousSupervisor.cancel()
+		s.homeConfigCommitMu.Unlock()
+		<-previousSupervisor.done
 	}
-	homeCtx, cancel := context.WithCancel(homeCtx)
+	if !s.drainDetachedHomeLifetime(parentCtx) {
+		return
+	}
+	if parentCtx.Err() != nil {
+		return
+	}
+
+	homeCtx, cancel := context.WithCancel(parentCtx)
+	done := make(chan struct{})
+	s.homeMu.Lock()
+	s.homeGeneration++
+	generation := s.homeGeneration
 	s.homeCancel = cancel
+	s.homeMu.Unlock()
+	supervisor := &homeSubscriberSupervisor{cancel: cancel, done: done}
+	s.homeSupervisor = supervisor
+	go s.runHomeSubscriber(homeCtx, parentCtx, cfg.Home, generation, supervisor)
+}
 
-	client := home.New(cfg.Home)
-	s.homeClient = client
-	home.SetCurrent(client)
+func (s *Service) drainDetachedHomeLifetime(parentCtx context.Context) bool {
+	s.homeMu.Lock()
+	previousCancel := s.homeCancel
+	previousClient := s.homeClient
+	previousRegistry := s.homeRegistry
+	previousBundle := s.homeDispatchBundle
+	previousDrainBound := s.homeDrainBound
+	previousForwarder := s.homeLogForwarder
+	previousForwarderClient := s.homeLogForwarderClient
+	s.homeCancel = nil
+	s.homeClient = nil
+	s.homeRegistry = nil
+	s.homeDispatchBundle = nil
+	s.homeDrainBound = 0
+	s.homeLogForwarderClient = nil
+	s.homeMu.Unlock()
 
-	go client.StartConfigSubscriber(homeCtx, func(raw []byte) error {
-		parsed, err := config.ParseConfigBytes(raw)
-		if err != nil {
-			log.Warnf("failed to parse home config payload: %v", err)
-			return err
+	if s.coreManager != nil {
+		s.coreManager.ClearHomeDispatchBundle(previousBundle)
+	}
+	home.ClearCurrentIf(previousClient)
+	if previousCancel != nil {
+		previousCancel()
+	}
+	if previousForwarder != nil && previousForwarderClient == previousClient {
+		previousForwarder.Deactivate(previousClient)
+	}
+	if previousRegistry != nil {
+		if previousDrainBound <= 0 {
+			previousDrainBound = internalconfig.CredentialConcurrencyConfig{}.WithDefaults().CPACancelBound
 		}
-		return s.applyHomeOverlayContext(homeCtx, parsed)
-	})
-	s.startHomeUsageForwarder(homeCtx, client)
-	s.homeLogForwarder = logging.StartHomeAppLogForwarder(0)
+		drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(parentCtx), previousDrainBound)
+		errDrain := previousRegistry.Drain(drainCtx)
+		cancelDrain()
+		if errDrain != nil {
+			if previousClient != nil {
+				previousClient.Close()
+			}
+			if parentCtx.Err() == nil {
+				log.WithError(errDrain).Error("failed to drain replaced Home execution registry")
+				s.cancelServiceRun()
+			}
+			return false
+		}
+	}
+	if previousClient != nil {
+		previousClient.Close()
+	}
+	return true
+}
+
+func (s *Service) runHomeSubscriber(homeCtx context.Context, parentCtx context.Context, homeCfg internalconfig.HomeConfig, generation uint64, supervisor *homeSubscriberSupervisor) {
+	defer func() {
+		s.homeMu.Lock()
+		if s.homeGeneration == generation {
+			s.homeCancel = nil
+		}
+		s.homeMu.Unlock()
+		close(supervisor.done)
+	}()
+
+	for homeCtx.Err() == nil {
+		supervisor.setPublisherCompletion(nil)
+		client := home.New(homeCfg)
+		client.SetManagedLifetime(true)
+		registry := executionregistry.New()
+		releaseCtx, releaseCancel := context.WithCancel(context.WithoutCancel(homeCtx))
+		releaseFlusher := home.NewReleaseFlusher(client.LimiterConfig, client.PushConcurrencyRelease)
+		registry.SetReleaseSink(releaseFlusher.MarkDirty)
+		releaseDone := make(chan struct{})
+		go func() {
+			defer close(releaseDone)
+			releaseFlusher.Run(releaseCtx)
+		}()
+		lifetimeCtx, lifetimeCancel := context.WithCancel(homeCtx)
+		cancelBound := atomic.Int64{}
+		cancelBound.Store(int64(internalconfig.CredentialConcurrencyConfig{}.WithDefaults().CPACancelBound))
+		queue := newHomeConfigWorkQueue()
+		ready := make(chan struct{})
+		var readyOnce sync.Once
+		var published atomic.Bool
+		workerDone := make(chan struct{})
+
+		go func() {
+			defer close(workerDone)
+			s.runHomeConfigWorkerWithSupervisor(lifetimeCtx, homeCtx, generation, client, registry, queue, ready, &published, &cancelBound, supervisor)
+		}()
+
+		errRun := client.RunConfigSubscriberLifetime(lifetimeCtx, func(raw []byte) error {
+			parsed, errParse := config.ParseConfigBytes(raw)
+			if errParse != nil {
+				log.Warnf("failed to parse home config payload: %v", errParse)
+				return errParse
+			}
+			if errSetLifecycle := client.SetLifecycleConfig(parsed.CredentialConcurrency); errSetLifecycle != nil {
+				log.Warnf("failed to apply Home lifecycle config: %v", errSetLifecycle)
+				return errSetLifecycle
+			}
+			if errPublisherConfig := applyHomeInFlightPublisherConfig(s.coreManager, parsed.CredentialInFlight); errPublisherConfig != nil {
+				log.Warnf("failed to apply Home in-flight publisher config: %v", errPublisherConfig)
+				return errPublisherConfig
+			}
+			applyHomeObservationBarrier(registry, parsed.CredentialConcurrency.ObservationBarrierRevision)
+			cancelBound.Store(int64(parsed.CredentialConcurrency.WithDefaults().CPACancelBound))
+			queue.enqueue(raw)
+			return nil
+		}, func() {
+			readyOnce.Do(func() { close(ready) })
+		})
+		lifetimeCancel()
+		<-workerDone
+		if publisherDone := supervisor.publisherCompletion(); publisherDone != nil {
+			<-publisherDone
+		}
+
+		s.detachHomeSubscriberLifetime(client, registry)
+		drainBound := time.Duration(cancelBound.Load())
+		drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(parentCtx), drainBound)
+		errDrain := registry.Drain(drainCtx)
+		var errFlush error
+		if errDrain == nil {
+			errFlush = releaseFlusher.Flush(drainCtx)
+		}
+		cancelDrain()
+		releaseCancel()
+		<-releaseDone
+		client.Close()
+		if errDrain != nil {
+			if parentCtx.Err() == nil {
+				log.WithError(errDrain).Error("failed to drain Home execution registry")
+				s.cancelServiceRun()
+			}
+			return
+		}
+		if errFlush != nil {
+			if parentCtx.Err() == nil {
+				log.WithError(errFlush).Error("failed to flush Home concurrency releases")
+				s.cancelServiceRun()
+			}
+			return
+		}
+		if errRun != nil && homeCtx.Err() == nil {
+			log.WithError(errRun).Warn("home config subscription lifetime ended")
+		}
+		if !published.Load() && errRun != nil && !waitForHomeSubscriberRetry(homeCtx, homeSubscriberPreAckRetryBackoff) {
+			return
+		}
+	}
+}
+
+func (s *Service) runHomeConfigWorker(lifetimeCtx, homeCtx context.Context, generation uint64, client *home.Client, registry *executionregistry.Registry, queue *homeConfigWorkQueue, ready <-chan struct{}, published *atomic.Bool, cancelBound *atomic.Int64) {
+	s.runHomeConfigWorkerWithSupervisor(lifetimeCtx, homeCtx, generation, client, registry, queue, ready, published, cancelBound, nil)
+}
+
+func (s *Service) runHomeConfigWorkerWithSupervisor(lifetimeCtx, homeCtx context.Context, generation uint64, client *home.Client, registry *executionregistry.Registry, queue *homeConfigWorkQueue, ready <-chan struct{}, published *atomic.Bool, cancelBound *atomic.Int64, supervisor *homeSubscriberSupervisor) {
+	select {
+	case <-lifetimeCtx.Done():
+		return
+	case <-ready:
+	}
+
+	for {
+		if lifetimeCtx.Err() != nil {
+			return
+		}
+		raw, ok := queue.dequeue(lifetimeCtx)
+		if !ok {
+			return
+		}
+		if lifetimeCtx.Err() != nil {
+			return
+		}
+
+		var work *homePluginFinalization
+		for {
+			if lifetimeCtx.Err() != nil {
+				return
+			}
+			parsed, errParse := config.ParseConfigBytes(raw)
+			if errParse == nil {
+				work, errParse = s.stageHomeOverlayWithClient(lifetimeCtx, parsed, client)
+			}
+			if errParse == nil {
+				break
+			}
+			if lifetimeCtx.Err() != nil {
+				return
+			}
+			log.WithError(errParse).Warn("failed to stage home config; retrying")
+			if !waitForHomeSubscriberRetry(lifetimeCtx, homeSubscriberPreAckRetryBackoff) {
+				return
+			}
+		}
+
+		var publish func() bool
+		if !published.Load() {
+			publish = func() bool {
+				s.homeMu.Lock()
+				defer s.homeMu.Unlock()
+				if homeCtx.Err() != nil || lifetimeCtx.Err() != nil || s.homeGeneration != generation {
+					return false
+				}
+				s.homeClient = client
+				s.homeRegistry = registry
+				s.homeDrainBound = time.Duration(cancelBound.Load())
+				if s.coreManager != nil {
+					s.homeDispatchBundle = s.coreManager.PublishHomeDispatch(client, registry, generation)
+				}
+				home.SetCurrent(client)
+				if s.homeLogForwarder == nil {
+					s.homeLogForwarder = startHomeLogForwarder(0)
+				}
+				s.homeLogForwarder.Bind(client)
+				s.homeLogForwarderClient = client
+				published.Store(true)
+				return true
+			}
+		}
+		if s.homeConfigStageHook != nil {
+			s.homeConfigStageHook()
+		}
+		if !s.commitHomeConfig(lifetimeCtx, homeCtx, generation, work) {
+			return
+		}
+		if s.homeConfigRuntimeHook != nil {
+			s.homeConfigRuntimeHook()
+		}
+		if !s.homeLifetimeActive(homeCtx, lifetimeCtx, generation) || !s.applyConfigRuntime(lifetimeCtx, work.configCommit, true) {
+			return
+		}
+		if errFinalize := s.finalizeHomePluginWorkUntilDone(lifetimeCtx, homeCtx, generation, client, work, publish); errFinalize != nil {
+			if !errors.Is(errFinalize, context.Canceled) {
+				log.WithError(errFinalize).Warn("home plugin finalization ended")
+			}
+			return
+		}
+		if publish != nil {
+			s.startHomeInFlightPublisher(lifetimeCtx, client, registry, supervisor)
+			s.startHomeUsageForwarder(lifetimeCtx, client)
+		}
+	}
+}
+
+func (s *Service) startHomeInFlightPublisher(ctx context.Context, client *home.Client, registry *executionregistry.Registry, supervisor *homeSubscriberSupervisor) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	done := make(chan struct{})
+	if supervisor != nil {
+		supervisor.setPublisherCompletion(done)
+	}
+	go func() {
+		defer close(done)
+		s.coreManager.StartHomeInFlightPublisher(ctx, client, registry)
+	}()
+}
+
+func waitForHomeSubscriberRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (s *Service) detachHomeSubscriberLifetime(client *home.Client, registry *executionregistry.Registry) {
+	if s == nil {
+		return
+	}
+	s.homeMu.Lock()
+	var bundle *coreauth.HomeDispatchBundle
+	if s.homeClient == client && s.homeRegistry == registry {
+		bundle = s.homeDispatchBundle
+		s.homeClient = nil
+		s.homeRegistry = nil
+		s.homeDispatchBundle = nil
+		s.homeDrainBound = 0
+	}
+	forwarder := s.homeLogForwarder
+	if s.homeLogForwarderClient == client {
+		s.homeLogForwarderClient = nil
+	} else {
+		forwarder = nil
+	}
+	s.homeMu.Unlock()
+	if s.coreManager != nil {
+		s.coreManager.ClearHomeDispatchBundle(bundle)
+	}
+	home.ClearCurrentIf(client)
+	if forwarder != nil {
+		forwarder.Deactivate(client)
+	}
+}
+
+func (s *Service) cancelServiceRun() {
+	if s == nil {
+		return
+	}
+	s.homeMu.Lock()
+	cancel := s.runCancel
+	if cancel == nil {
+		cancel = s.homeCancel
+	}
+	s.homeMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // Run starts the service and blocks until the context is cancelled or the server stops.
@@ -1620,6 +2331,18 @@ func (s *Service) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx, runCancel := context.WithCancel(ctx)
+	s.homeMu.Lock()
+	s.runCancel = runCancel
+	s.homeMu.Unlock()
+	defer func() {
+		runCancel()
+		s.homeMu.Lock()
+		if s.runCancel != nil {
+			s.runCancel = nil
+		}
+		s.homeMu.Unlock()
+	}()
 
 	usage.StartDefault(ctx)
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
@@ -1806,19 +2529,51 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			ctx = context.Background()
 		}
 
-		if s.homeCancel != nil {
-			s.homeCancel()
-			s.homeCancel = nil
+		s.homeLifecycleMu.Lock()
+		if supervisor := s.homeSupervisor; supervisor != nil {
+			s.homeConfigCommitMu.Lock()
+			supervisor.cancel()
+			s.homeConfigCommitMu.Unlock()
+			<-supervisor.done
 		}
-		if s.homeClient != nil {
-			s.homeClient.Close()
-			s.homeClient = nil
+		s.homeMu.Lock()
+		homeCancel := s.homeCancel
+		homeClient := s.homeClient
+		homeRegistry := s.homeRegistry
+		homeDispatchBundle := s.homeDispatchBundle
+		homeForwarder := s.homeLogForwarder
+		homeForwarderClient := s.homeLogForwarderClient
+		s.homeGeneration++
+		s.homeCancel = nil
+		s.homeClient = nil
+		s.homeRegistry = nil
+		s.homeDispatchBundle = nil
+		s.homeDrainBound = 0
+		s.homeLogForwarder = nil
+		s.homeLogForwarderClient = nil
+		s.homeMu.Unlock()
+		if s.coreManager != nil {
+			s.coreManager.ClearHomeDispatchBundle(homeDispatchBundle)
 		}
-		if s.homeLogForwarder != nil {
-			s.homeLogForwarder.Stop()
-			s.homeLogForwarder = nil
+		home.ClearCurrentIf(homeClient)
+		if homeCancel != nil {
+			homeCancel()
 		}
-		home.ClearCurrent()
+		if homeRegistry != nil {
+			if errClose := homeRegistry.Close(); errClose != nil {
+				log.WithError(errClose).Warn("failed to close Home execution registry during shutdown")
+			}
+		}
+		if homeClient != nil {
+			homeClient.Close()
+		}
+		if homeForwarder != nil {
+			if homeForwarderClient == homeClient {
+				homeForwarder.Deactivate(homeClient)
+			}
+			homeForwarder.Stop()
+		}
+		s.homeLifecycleMu.Unlock()
 
 		// legacy refresh loop removed; only stopping core auth manager below
 
@@ -1879,7 +2634,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				includePlugins: true,
 			})
 			s.pluginHost.RegisterFrontendAuthProviders()
-			s.pluginHost.ShutdownAll()
+			s.pluginHost.ShutdownAllContext(ctx)
 			if s.accessManager != nil {
 				s.accessManager.SetProviders(sdkaccess.RegisteredProviders())
 			}
@@ -1920,6 +2675,9 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if ctx.Err() != nil {
+		return
+	}
 	if a.Disabled {
 		GlobalModelRegistry().UnregisterClient(a.ID)
 		return
@@ -1947,6 +2705,9 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		}
 	}
 	if s.tryRegisterPluginModelsForAuth(ctx, a, provider, authKind, excluded) {
+		return
+	}
+	if ctx.Err() != nil {
 		return
 	}
 	var models []*ModelInfo
@@ -2143,7 +2904,13 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 		}
 	}
+	if ctx.Err() != nil {
+		return
+	}
 	models = applyOAuthModelAliasForAuth(s.cfg, provider, authKind, a.Attributes, models)
+	if ctx.Err() != nil {
+		return
+	}
 	key := provider
 	if key == "" {
 		key = strings.ToLower(strings.TrimSpace(a.Provider))
@@ -2165,20 +2932,31 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 // as part of the previous registration snapshot and is cleared when the auth is
 // rebound to the refreshed model catalog.
 func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
-	return s.refreshModelRegistrationForAuthWithCache(current, nil)
+	return s.refreshModelRegistrationForAuthWithContext(context.Background(), current, nil)
 }
 
 func (s *Service) refreshModelRegistrationForAuthWithCache(current *coreauth.Auth, compatCache *openAICompatibilityRegistrationCache) bool {
+	return s.refreshModelRegistrationForAuthWithContext(context.Background(), current, compatCache)
+}
+
+func (s *Service) refreshModelRegistrationForAuthWithContext(ctx context.Context, current *coreauth.Auth, compatCache *openAICompatibilityRegistrationCache) bool {
 	if s == nil || s.coreManager == nil || current == nil || current.ID == "" {
 		return false
 	}
-
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return false
+	}
 	if !current.Disabled {
-		s.ensureExecutorsForAuth(current)
+		s.ensureExecutorsForAuthWithContext(ctx, current, false)
 	}
 	s.registerModelsForAuthWithCache(ctx, current, compatCache)
 	s.coreManager.ReconcileRegistryModelStates(ctx, current.ID)
+	if ctx.Err() != nil {
+		return false
+	}
 
 	latest, ok := s.latestAuthForModelRegistration(current.ID)
 	if !ok || latest.Disabled {
@@ -2190,8 +2968,11 @@ func (s *Service) refreshModelRegistrationForAuthWithCache(current *coreauth.Aut
 	// Re-apply the latest auth snapshot so concurrent auth updates cannot leave
 	// stale model registrations behind. This may duplicate registration work when
 	// no auth fields changed, but keeps the refresh path simple and correct.
-	s.ensureExecutorsForAuth(latest)
+	s.ensureExecutorsForAuthWithContext(ctx, latest, false)
 	s.registerModelsForAuthWithCache(ctx, latest, compatCache)
+	if ctx.Err() != nil {
+		return false
+	}
 	s.coreManager.ReconcileRegistryModelStates(ctx, latest.ID)
 	s.coreManager.RefreshSchedulerEntry(current.ID)
 	return true

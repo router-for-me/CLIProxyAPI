@@ -41,6 +41,12 @@ type Config struct {
 	// Home config is runtime-only and is populated from -home-jwt.
 	Home HomeConfig `yaml:"-" json:"-"`
 
+	// CredentialConcurrency contains Home-authoritative credential lifecycle settings.
+	CredentialConcurrency CredentialConcurrencyConfig `yaml:"credential-concurrency" json:"credential-concurrency"`
+
+	// CredentialInFlight configures credential observation snapshots.
+	CredentialInFlight CredentialInFlightConfig `yaml:"credential-in-flight" json:"credential-in-flight"`
+
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
 
@@ -730,7 +736,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		if optional {
 			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
 				// Missing and optional: return empty config (cloud deploy standby).
-				cfg := &Config{}
+				cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
 				cfg.NormalizePluginsConfig()
 				return cfg, nil
 			}
@@ -739,8 +745,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
-	if optional && len(data) == 0 {
-		cfg := &Config{}
+	if optional && len(bytes.TrimSpace(data)) == 0 {
+		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
 		cfg.NormalizePluginsConfig()
 		return cfg, nil
 	}
@@ -762,14 +768,20 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
-			cfgOptional := &Config{}
+			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
 			cfgOptional.NormalizePluginsConfig()
 			return cfgOptional, nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()
+	if errValidate := cfg.CredentialInFlight.Validate(); errValidate != nil {
+		return nil, errValidate
 	}
 
 	// Hash remote management key if plaintext is detected (nested)

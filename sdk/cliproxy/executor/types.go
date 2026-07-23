@@ -112,6 +112,8 @@ type Options struct {
 	Metadata map[string]any
 	// RequestAfterAuthInterceptor runs after credential selection and before executor translation.
 	RequestAfterAuthInterceptor RequestAfterAuthInterceptor
+	// ExecutionLifecycle owns Home-dispatched execution resources. Executors must not add it to request metadata.
+	ExecutionLifecycle ExecutionLifecycle
 }
 
 // ResponseFormatOrSource returns the response target format for an execution.
