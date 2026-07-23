@@ -274,6 +274,17 @@ func TestValidateClaudeBridgeContextWindowRejectsOversizedInput(t *testing.T) {
 	}
 }
 
+func TestValidateClaudeBridgeContextWindowAllowsCompactedReplayAboveSyntheticLimit(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.6-luna","input":[{"type":"compaction","encrypted_content":"opaque-state"},{"type":"message","role":"user","content":[{"type":"input_text","text":` + string(mustJSONMarshalExecutorTest(t, strings.Repeat("x ", 200_500))) + `}]}]}`)
+	count, errContext := validateClaudeBridgeContextWindow("gpt-5.6-luna", body, cliproxyexecutor.Options{Alt: constant.ClaudeResponsesBridgeAlt})
+	if errContext != nil {
+		t.Fatalf("compacted replay rejected at synthetic limit: %v", errContext)
+	}
+	if count <= claudeBridgeContextWindow {
+		t.Fatalf("context count = %d, want > %d to exercise compacted replay exception", count, claudeBridgeContextWindow)
+	}
+}
+
 func TestClaudeThinkingTokenCountRequested(t *testing.T) {
 	if !claudeThinkingTokenCountRequested(http.Header{"Anthropic-Beta": []string{"thinking-token-count-2026-05-13"}}) {
 		t.Fatal("explicit thinking-token-count beta was not detected")
