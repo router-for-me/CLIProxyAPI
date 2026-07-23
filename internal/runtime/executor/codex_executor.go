@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -1837,11 +1838,11 @@ func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, 
 	state := codexIdentityConfuseState{enabled: true, authID: strings.TrimSpace(auth.ID)}
 	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(userPayload, "prompt_cache_key").String()); promptCacheKey != "" {
 		state.originalPromptCacheKey = promptCacheKey
-		state.promptCacheKey = codexIdentityConfuseUUID(auth.ID, "prompt-cache", promptCacheKey)
+		state.promptCacheKey = codexIdentityConfuseUUIDLike(auth.ID, "prompt-cache", promptCacheKey)
 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", state.promptCacheKey)
 	}
 	if installationID := strings.TrimSpace(gjson.GetBytes(userPayload, "client_metadata.x-codex-installation-id").String()); installationID != "" {
-		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-installation-id", codexIdentityConfuseUUID(auth.ID, "installation", installationID))
+		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-installation-id", codexIdentityConfuseUUIDLike(auth.ID, "installation", installationID))
 	}
 	if turnMetadata := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-turn-metadata").String()); turnMetadata != "" {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-turn-metadata", applyCodexTurnMetadataIdentityConfuse(turnMetadata, &state))
@@ -1895,6 +1896,37 @@ func applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata string, state *codexI
 	if state.promptCacheKey != "" && gjson.Get(rawTurnMetadata, "window_id").Exists() {
 		updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "window_id", state.promptCacheKey+":0")
 	}
+	// installation_id is stable for the life of a Codex install, so an unconfused one
+	// is the strongest cross-account correlation anchor there is: every account in the
+	// pool would carry the same value for a given downstream client. The
+	// client_metadata.x-codex-installation-id path never covers it — a real client
+	// (Codex Desktop 0.144.x, live-captured 2026-07-17) sends installation_id ONLY here,
+	// in x-codex-turn-metadata, and sends no client_metadata at all. The ReplaceAll above
+	// cannot reach it either, since installation_id never equals prompt_cache_key.
+	// Same "installation" kind as the body path so both agree when both are present,
+	// but stamped version 4 to match what a real client's randomly-generated install id
+	// looks like. Guard on authID: a blank one would hash identically for every account,
+	// i.e. confused-looking but still a perfect correlation anchor.
+	if strings.TrimSpace(state.authID) != "" {
+		if installationID := strings.TrimSpace(gjson.Get(rawTurnMetadata, "installation_id").String()); installationID != "" {
+			if confused := codexIdentityConfuseUUIDLike(state.authID, "installation", installationID); confused != "" {
+				updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "installation_id", confused)
+			}
+		}
+		// turn_started_at_unix_ms comes off the same clock as turn_id — in the capture the
+		// two sit 17 ms apart. Shifting the version-7 ids while leaving this one raw would
+		// put a request's own two timestamps ~40 s apart, which no real client can produce:
+		// they are minted together. Move it by the same account offset so the whole request
+		// reads as one client whose clock runs slightly behind — internally consistent, and
+		// a skewed client clock is unremarkable, unlike a self-contradicting one.
+		if startedAt := gjson.Get(rawTurnMetadata, "turn_started_at_unix_ms"); startedAt.Exists() && startedAt.Type == gjson.Number {
+			shifted := startedAt.Int() - codexIdentityConfuseMillisOffset(state.authID)
+			if shifted < 0 {
+				shifted = 0
+			}
+			updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "turn_started_at_unix_ms", shifted)
+		}
+	}
 	return updatedTurnMetadata
 }
 
@@ -1924,7 +1956,7 @@ func (state *codexIdentityConfuseState) confuseTurnID(turnID string) string {
 			return replacement.confused
 		}
 	}
-	confusedTurnID := codexIdentityConfuseUUID(state.authID, "turn", turnID)
+	confusedTurnID := codexIdentityConfuseUUIDLike(state.authID, "turn", turnID)
 	state.turnIDs = append(state.turnIDs, codexIdentityReplacement{original: turnID, confused: confusedTurnID})
 	return confusedTurnID
 }
@@ -1949,6 +1981,77 @@ func codexIdentityConfuseEnabled(cfg *config.Config) bool {
 func codexIdentityConfuseUUID(authID string, kind string, value string) string {
 	name := strings.Join([]string{"cli-proxy-api", "codex", "identity-confuse", kind, strings.TrimSpace(authID), strings.TrimSpace(value)}, ":")
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(name)).String()
+}
+
+// codexIdentityConfuseMaxSkewMillis bounds the per-account clock shift below. It is
+// wide enough that two accounts practically never land on the same millisecond, and
+// narrow enough that the shifted timestamp stays consistent with when the request
+// actually arrives.
+const codexIdentityConfuseMaxSkewMillis = 60_000
+
+// codexIdentityConfuseMillisOffset returns a stable backward clock shift for one
+// account. A real client's version-7 ids carry a genuine millisecond timestamp, so
+// reusing the original's verbatim would leave every account in the pool reporting the
+// identical millisecond — an anchor as good as the id it replaces. The offset is keyed
+// on the account ALONE, never the id: one shift per account moves every id in the
+// request together, preserving the ordering the real client encodes (a turn is minted
+// later than the session that contains it, and that gap has to survive).
+func codexIdentityConfuseMillisOffset(authID string) int64 {
+	seed := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:identity-confuse:clock:"+strings.TrimSpace(authID)))
+	return int64(binary.BigEndian.Uint32(seed[0:4]) % codexIdentityConfuseMaxSkewMillis)
+}
+
+func codexUUIDMillis(u uuid.UUID) int64 {
+	return int64(u[0])<<40 | int64(u[1])<<32 | int64(u[2])<<24 | int64(u[3])<<16 | int64(u[4])<<8 | int64(u[5])
+}
+
+func codexSetUUIDMillis(u *uuid.UUID, ms int64) {
+	u[0], u[1], u[2] = byte(ms>>40), byte(ms>>32), byte(ms>>24)
+	u[3], u[4], u[5] = byte(ms>>16), byte(ms>>8), byte(ms)
+}
+
+// codexIdentityConfuseUUIDLike is codexIdentityConfuseUUID re-shaped to look like the id
+// it replaces. uuid.NewSHA1 always yields version 5, but a real client emits none: a live
+// capture (codex 0.142.5 / Codex Desktop 0.144.x, 2026-07-17) shows session, thread and
+// turn ids as version 7 and installation_id as version 4. A confused id that stops the
+// original from leaking while stamping "5" in the version nibble of every request just
+// trades one tell for another — and a version-5 id read as version 7 decodes to a
+// timestamp in the year 6335.
+//
+// So mirror the original: keep its version, and for version 7 carry its timestamp forward
+// shifted by this account's offset. Everything else stays hash-derived, so the result is
+// deterministic per (account, kind, original) — a session id that drifted between requests
+// would be its own tell — while a v4/v7 payload is defined to be opaque, leaving it
+// indistinguishable from a randomly generated one.
+func codexIdentityConfuseUUIDLike(authID string, kind string, value string) string {
+	confused, err := uuid.Parse(codexIdentityConfuseUUID(authID, kind, value))
+	if err != nil {
+		return ""
+	}
+	original, errOriginal := uuid.Parse(strings.TrimSpace(value))
+	if errOriginal != nil {
+		// Not a UUID, so there is no shape to mirror: leave the hash as-is rather than
+		// invent a version the caller never had.
+		return confused.String()
+	}
+	switch original.Version() {
+	case 4:
+		confused[6] = (confused[6] & 0x0f) | 0x40
+	case 7:
+		millis := codexUUIDMillis(original) - codexIdentityConfuseMillisOffset(authID)
+		if millis < 0 {
+			millis = 0
+		}
+		codexSetUUIDMillis(&confused, millis)
+		confused[6] = (confused[6] & 0x0f) | 0x70
+	default:
+		return confused.String()
+	}
+	// NewSHA1 already sets the RFC 4122 variant, but the timestamp write above can land
+	// on byte 8 for neither version — set it explicitly so the result is well-formed
+	// regardless of which branch ran.
+	confused[8] = (confused[8] & 0x3f) | 0x80
+	return confused.String()
 }
 
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) {
