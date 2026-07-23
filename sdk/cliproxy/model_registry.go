@@ -28,3 +28,8 @@ func GlobalModelRegistry() ModelRegistry {
 func SetGlobalModelRegistryHook(hook ModelRegistryHook) {
 	registry.GetGlobalRegistry().SetHook(hook)
 }
+
+// SubscribeGlobalModelRegistryHook adds an observer without replacing the legacy hook.
+func SubscribeGlobalModelRegistryHook(hook ModelRegistryHook) func() {
+	return registry.GetGlobalRegistry().SubscribeHook(hook)
+}

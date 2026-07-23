@@ -561,6 +561,45 @@ func TestExecuteProtocolWithAuthManagerUsesForcedProvider(t *testing.T) {
 	}
 }
 
+func TestPrepareCodexIntegrationExecutionForcesStableProvider(t *testing.T) {
+	integration := sdkconfig.DefaultCodexIntegrationConfig()
+	integration.Enabled = true
+	handler := &BaseAPIHandler{Cfg: &sdkconfig.SDKConfig{CodexIntegration: integration}}
+
+	model, opts, errMsg := handler.prepareCodexIntegrationExecution("antigravity/gemini-3.1-pro(high)", modelExecutionOptions{})
+	if errMsg != nil {
+		t.Fatalf("prepareCodexIntegrationExecution() error = %+v", errMsg)
+	}
+	if model != "antigravity/gemini-3.1-pro(high)" {
+		t.Fatalf("model = %q, want stable client slug", model)
+	}
+	if opts.ForcedProvider != "antigravity" {
+		t.Fatalf("ForcedProvider = %q, want antigravity", opts.ForcedProvider)
+	}
+}
+
+func TestPrepareCodexIntegrationExecutionRejectsProviderConflict(t *testing.T) {
+	integration := sdkconfig.DefaultCodexIntegrationConfig()
+	integration.Enabled = true
+	handler := &BaseAPIHandler{Cfg: &sdkconfig.SDKConfig{CodexIntegration: integration}}
+
+	_, _, errMsg := handler.prepareCodexIntegrationExecution("xai/grok-4.5", modelExecutionOptions{ForcedProvider: "codex"})
+	if errMsg == nil || errMsg.StatusCode != http.StatusBadRequest {
+		t.Fatalf("prepareCodexIntegrationExecution() error = %+v, want 400", errMsg)
+	}
+}
+
+func TestPrepareCodexIntegrationExecutionLeavesCustomPrefixUntouched(t *testing.T) {
+	integration := sdkconfig.DefaultCodexIntegrationConfig()
+	integration.Enabled = true
+	handler := &BaseAPIHandler{Cfg: &sdkconfig.SDKConfig{CodexIntegration: integration}}
+
+	model, opts, errMsg := handler.prepareCodexIntegrationExecution("teamA/gemini-3.1-pro", modelExecutionOptions{})
+	if errMsg != nil || model != "teamA/gemini-3.1-pro" || opts.ForcedProvider != "" {
+		t.Fatalf("prepareCodexIntegrationExecution() = %q, %#v, %+v", model, opts, errMsg)
+	}
+}
+
 func TestPreferExecutionProviderMovesPreferredFirst(t *testing.T) {
 	providers := preferExecutionProvider([]string{"gemini", "gemini-interactions", "claude"}, "gemini-interactions")
 	want := []string{"gemini-interactions", "gemini", "claude"}

@@ -37,6 +37,8 @@ func TestLoadConfigOptional_CodexIdentityConfuse(t *testing.T) {
 	configYAML := []byte(`
 codex:
   identity-confuse: true
+  websocket-idle-timeout-seconds: 44
+  websocket-ping-interval-seconds: 5
 `)
 	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -49,5 +51,11 @@ codex:
 
 	if !cfg.Codex.IdentityConfuse {
 		t.Fatalf("IdentityConfuse = false, want true")
+	}
+	if got := cfg.Codex.WebsocketIdleTimeoutSeconds; got != 44 {
+		t.Fatalf("WebsocketIdleTimeoutSeconds = %d, want 44", got)
+	}
+	if got := cfg.Codex.WebsocketPingIntervalSeconds; got != 5 {
+		t.Fatalf("WebsocketPingIntervalSeconds = %d, want 5", got)
 	}
 }

@@ -2,6 +2,7 @@
 package util
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -30,6 +31,11 @@ func CleanJSONSchemaForGemini(jsonStr string) string {
 
 // cleanJSONSchema performs the core cleaning operations on the JSON schema.
 func cleanJSONSchema(jsonStr string, addPlaceholder bool) string {
+	// Phase 0: JSON Schema permits boolean schemas, while Gemini requires each
+	// schema position to contain an object. Normalize only schema positions so
+	// boolean values in tool results or request content remain untouched.
+	jsonStr = normalizeBooleanSchemas(jsonStr, addPlaceholder)
+
 	// Phase 1: Convert and add hints
 	jsonStr = convertRefsToHints(jsonStr)
 	jsonStr = convertConstToEnum(jsonStr)
@@ -195,7 +201,7 @@ func convertEnumValuesToStrings(jsonStr string) string {
 			continue
 		}
 
-		var stringVals []string
+		stringVals := make([]string, 0, len(arr.Array()))
 		for _, item := range arr.Array() {
 			stringVals = append(stringVals, item.String())
 		}
@@ -209,6 +215,224 @@ func convertEnumValuesToStrings(jsonStr string) string {
 		jsonStr = string(updated)
 	}
 	return jsonStr
+}
+
+const impossibleSchemaProperty = "__cliproxyapi_never__"
+
+func normalizeBooleanSchemas(jsonStr string, requireRootObjectType bool) string {
+	var root any
+	decoder := json.NewDecoder(strings.NewReader(jsonStr))
+	decoder.UseNumber()
+	if err := decoder.Decode(&root); err != nil {
+		return jsonStr
+	}
+	if isSchemaRoot(root) {
+		root = normalizeSchemaNode(root, requireRootObjectType)
+	} else {
+		normalizeSchemaRootsInPayload(root, nil, requireRootObjectType)
+	}
+	data, err := json.Marshal(root)
+	if err != nil {
+		return jsonStr
+	}
+	return string(data)
+}
+
+func isSchemaRoot(value any) bool {
+	if _, ok := value.(bool); ok {
+		return true
+	}
+	object, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	for _, key := range []string{
+		"type", "properties", "items", "required", "anyOf", "oneOf", "allOf",
+		"$ref", "$defs", "definitions", "enum", "const", "additionalProperties",
+	} {
+		if _, exists := object[key]; exists {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeSchemaRootsInPayload(value any, path []string, requireRootObjectType bool) {
+	switch current := value.(type) {
+	case map[string]any:
+		for key, child := range current {
+			childPath := append(path, key)
+			if isPayloadSchemaKey(key, current, path) {
+				current[key] = normalizeSchemaNode(child, requireRootObjectType)
+				continue
+			}
+			normalizeSchemaRootsInPayload(child, childPath, requireRootObjectType)
+		}
+	case []any:
+		for index := range current {
+			normalizeSchemaRootsInPayload(current[index], path, requireRootObjectType)
+		}
+	}
+}
+
+func isPayloadSchemaKey(key string, parent map[string]any, path []string) bool {
+	switch key {
+	case "parametersJsonSchema", "responseJsonSchema", "responseSchema", "input_schema":
+		return true
+	case "schema":
+		typeName, _ := parent["type"].(string)
+		return typeName == "json_schema"
+	case "parameters":
+		if _, hasName := parent["name"]; hasName {
+			return true
+		}
+		for _, segment := range path {
+			if segment == "functionDeclarations" || segment == "function_declarations" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizeSchemaNode(value any, requireRootObjectType bool) any {
+	switch schema := value.(type) {
+	case bool:
+		if schema {
+			if requireRootObjectType {
+				return map[string]any{"type": "object"}
+			}
+			return map[string]any{}
+		}
+		return impossibleBooleanSchema()
+	case map[string]any:
+		if requireRootObjectType && len(schema) == 0 {
+			return map[string]any{"type": "object"}
+		}
+		if replacement, replace := simplifyBooleanCombinators(schema); replace {
+			return replacement
+		}
+		if requireRootObjectType && len(schema) == 0 {
+			return map[string]any{"type": "object"}
+		}
+		for key, child := range schema {
+			switch key {
+			case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas":
+				if children, ok := child.(map[string]any); ok {
+					for name, nested := range children {
+						children[name] = normalizeSchemaNode(nested, false)
+					}
+				}
+			case "items", "contains", "propertyNames", "if", "then", "else", "not":
+				schema[key] = normalizeSchemaNode(child, false)
+			case "prefixItems", "allOf", "anyOf", "oneOf":
+				if children, ok := child.([]any); ok {
+					for index := range children {
+						children[index] = normalizeSchemaNode(children[index], false)
+					}
+				}
+			case "additionalProperties":
+				// A boolean here is a keyword value, not a boolean Schema root.
+				if _, isBoolean := child.(bool); !isBoolean {
+					schema[key] = normalizeSchemaNode(child, false)
+				}
+			}
+		}
+		return schema
+	default:
+		return value
+	}
+}
+
+func simplifyBooleanCombinators(schema map[string]any) (any, bool) {
+	if raw, exists := schema["not"]; exists {
+		if boolean, ok := raw.(bool); ok {
+			if boolean {
+				return impossibleBooleanSchema(), true
+			}
+			delete(schema, "not")
+		}
+	}
+	if raw, exists := schema["allOf"]; exists {
+		if items, ok := raw.([]any); ok {
+			filtered := make([]any, 0, len(items))
+			for _, item := range items {
+				if boolean, isBoolean := item.(bool); isBoolean {
+					if !boolean {
+						return impossibleBooleanSchema(), true
+					}
+					continue
+				}
+				filtered = append(filtered, item)
+			}
+			if len(filtered) == 0 {
+				delete(schema, "allOf")
+			} else {
+				schema["allOf"] = filtered
+			}
+		}
+	}
+	if raw, exists := schema["anyOf"]; exists {
+		if items, ok := raw.([]any); ok {
+			filtered := make([]any, 0, len(items))
+			for _, item := range items {
+				if boolean, isBoolean := item.(bool); isBoolean {
+					if boolean {
+						delete(schema, "anyOf")
+						return schema, false
+					}
+					continue
+				}
+				filtered = append(filtered, item)
+			}
+			if len(filtered) == 0 {
+				return impossibleBooleanSchema(), true
+			}
+			schema["anyOf"] = filtered
+		}
+	}
+	if raw, exists := schema["oneOf"]; exists {
+		if items, ok := raw.([]any); ok {
+			filtered := make([]any, 0, len(items))
+			trueCount := 0
+			for _, item := range items {
+				if boolean, isBoolean := item.(bool); isBoolean {
+					if boolean {
+						trueCount++
+					}
+					continue
+				}
+				filtered = append(filtered, item)
+			}
+			switch {
+			case trueCount == 0 && len(filtered) == 0:
+				return impossibleBooleanSchema(), true
+			case trueCount == 1 && len(filtered) == 0:
+				delete(schema, "oneOf")
+			case trueCount > 0:
+				// "exactly one" with a true branch needs negation to preserve.
+				// Gemini removes negation, so rejecting all inputs is the safe subset.
+				return impossibleBooleanSchema(), true
+			default:
+				schema["oneOf"] = filtered
+			}
+		}
+	}
+	return schema, false
+}
+
+func impossibleBooleanSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			impossibleSchemaProperty: map[string]any{
+				"type":        "string",
+				"enum":        []any{},
+				"description": "No value is accepted by the original boolean false schema.",
+			},
+		},
+		"required": []any{impossibleSchemaProperty},
+	}
 }
 
 func addEnumHints(jsonStr string) string {

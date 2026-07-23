@@ -117,12 +117,15 @@ PackyCode provides special discounts for our software users: register using <a h
 - Claude Code multi-account load balancing
 - OpenAI Codex multi-account load balancing
 - Grok Build multi-account load balancing
+- Codex desktop/CLI model integration through one local CLIProxyAPI process ([setup and operations guide](docs/codex-integration.md))
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
 ## Getting Started
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
+
+To keep official GPT models while adding provider-qualified Grok, Gemini, and Claude models to Codex desktop or the Codex CLI, follow the [Codex integration guide](docs/codex-integration.md).
 
 ## Management API
 

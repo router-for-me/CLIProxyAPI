@@ -6,7 +6,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/codexintegration"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	log "github.com/sirupsen/logrus"
 )
 
 type codexClientModelsPayload struct {
@@ -35,6 +37,13 @@ var codexClientAllowedReasoningLevels = map[string]struct{}{
 }
 
 func (h *OpenAIAPIHandler) codexClientModelsResponse() map[string]any {
+	if h != nil && h.Cfg != nil && h.Cfg.CodexIntegration.Enabled {
+		catalog, err := codexintegration.CompileCatalog(h.Models(), registry.GetGlobalRegistry().GetModelProviders, h.Cfg.CodexIntegration)
+		if err == nil {
+			return map[string]any{"models": catalog.Models}
+		}
+		log.WithError(err).Warn("Codex Integration catalog compile failed; serving official last-good model surface")
+	}
 	return codexClientModelsResponse(h.Models(), registry.GetGlobalRegistry().GetModelProviders)
 }
 

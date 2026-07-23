@@ -25,6 +25,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/access"
+	codexloopback "github.com/router-for-me/CLIProxyAPI/v7/internal/access/codex_loopback"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
@@ -1712,6 +1713,14 @@ func (s *Server) Start() error {
 	listener, errListen := net.Listen("tcp", addr)
 	if errListen != nil {
 		return fmt.Errorf("failed to start HTTP server: %v", errListen)
+	}
+	if s.cfg != nil && s.cfg.CodexIntegration.Enabled && s.cfg.CodexIntegration.LoopbackAccess {
+		if errLoopback := codexloopback.ValidateListenerAddr(listener.Addr()); errLoopback != nil {
+			if errClose := listener.Close(); errClose != nil {
+				log.Errorf("failed to close listener after Codex loopback validation failure: %v", errClose)
+			}
+			return errLoopback
+		}
 	}
 
 	useTLS := s.cfg != nil && s.cfg.TLS.Enable

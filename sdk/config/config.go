@@ -11,6 +11,8 @@ type SDKConfig = internalconfig.SDKConfig
 type Config = internalconfig.Config
 
 type StreamingConfig = internalconfig.StreamingConfig
+type CodexIntegrationConfig = internalconfig.CodexIntegrationConfig
+type CodexIntegrationModel = internalconfig.CodexIntegrationModel
 type TLSConfig = internalconfig.TLSConfig
 type RemoteManagement = internalconfig.RemoteManagement
 type OAuthModelAlias = internalconfig.OAuthModelAlias
@@ -34,7 +36,12 @@ type TLS = internalconfig.TLSConfig
 
 const (
 	DefaultPanelGitHubRepository = internalconfig.DefaultPanelGitHubRepository
+	DefaultCodexCatalogFile      = internalconfig.DefaultCodexCatalogFile
 )
+
+func DefaultCodexIntegrationConfig() CodexIntegrationConfig {
+	return internalconfig.DefaultCodexIntegrationConfig()
+}
 
 func LoadConfig(configFile string) (*Config, error) { return internalconfig.LoadConfig(configFile) }
 

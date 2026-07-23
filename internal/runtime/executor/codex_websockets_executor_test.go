@@ -1452,3 +1452,151 @@ func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 		t.Fatal("expected websocket proxy function to be nil for direct mode")
 	}
 }
+
+func TestStandaloneCodexWebsocketPingsAreProactive(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	pingReceived := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		conn.SetPingHandler(func(string) error {
+			select {
+			case pingReceived <- struct{}{}:
+			default:
+			}
+			return nil
+		})
+		_, _, _ = conn.ReadMessage()
+	}))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	stop := startStandaloneCodexWebsocketPings(conn, 20*time.Millisecond)
+	defer stop()
+	defer conn.Close()
+
+	select {
+	case <-pingReceived:
+	case <-time.After(time.Second):
+		t.Fatal("server did not receive proactive websocket ping")
+	}
+}
+
+func TestCodexWebsocketHandshakeTransportFailureFallsBackToHTTP(t *testing.T) {
+	websocketAttempts := make(chan struct{}, 2)
+	httpAttempts := make(chan struct{}, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			websocketAttempts <- struct{}{}
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("response writer does not support hijacking")
+			}
+			conn, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Errorf("Hijack() error = %v", err)
+				return
+			}
+			_ = conn.Close()
+			return
+		}
+		httpAttempts <- struct{}{}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-http\",\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: []byte(`{"model":"gpt-5-codex","input":"hello"}`)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")}
+
+	if _, err := exec.Execute(context.Background(), auth, req, opts); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := len(websocketAttempts); got != 1 {
+		t.Fatalf("websocket attempts = %d, want 1", got)
+	}
+	if got := len(httpAttempts); got != 1 {
+		t.Fatalf("HTTP fallback attempts = %d, want 1", got)
+	}
+}
+
+func TestCodexWebsocketPingActivityRenewsIdleDeadline(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for range 3 {
+			time.Sleep(40 * time.Millisecond)
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)); err != nil {
+				return
+			}
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed"}`)); err != nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	sess := &codexWebsocketSession{}
+	sess.configureConn(conn, 70*time.Millisecond)
+	_ = conn.SetReadDeadline(time.Now().Add(70 * time.Millisecond))
+
+	_, payload, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("ReadMessage() error = %v; ping activity should renew idle deadline", err)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != "response.completed" {
+		t.Fatalf("message type = %q, want response.completed", got)
+	}
+}
+
+func TestStandaloneCodexWebsocketPongActivityRenewsIdleDeadline(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		go func() {
+			time.Sleep(180 * time.Millisecond)
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed"}`))
+		}()
+		_, _, _ = conn.ReadMessage()
+	}))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	configureStandaloneCodexWebsocket(conn, 70*time.Millisecond)
+	stop := startStandaloneCodexWebsocketPings(conn, 20*time.Millisecond)
+	defer stop()
+
+	_, payload, err := readCodexWebsocketMessage(context.Background(), nil, conn, nil, 70*time.Millisecond)
+	if err != nil {
+		t.Fatalf("ReadMessage() error = %v; pong activity should renew idle deadline", err)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != "response.completed" {
+		t.Fatalf("message type = %q, want response.completed", got)
+	}
+}

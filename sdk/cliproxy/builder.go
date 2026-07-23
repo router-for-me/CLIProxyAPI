@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	codexloopback "github.com/router-for-me/CLIProxyAPI/v7/internal/access/codex_loopback"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
@@ -218,6 +219,7 @@ func (b *Builder) Build() (*Service, error) {
 	}
 
 	configaccess.Register(&b.cfg.SDKConfig)
+	codexloopback.Register(&b.cfg.SDKConfig)
 	pluginHost := b.pluginHost
 	if pluginHost == nil {
 		pluginHost = pluginhost.New()
@@ -269,7 +271,7 @@ func (b *Builder) Build() (*Service, error) {
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
 	coreManager.SetConfig(b.cfg)
-	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
+	coreManager.SetOAuthModelAlias(b.cfg.EffectiveOAuthModelAlias())
 	if pluginHost != nil {
 		coreManager.SetPluginScheduler(pluginHost)
 	}

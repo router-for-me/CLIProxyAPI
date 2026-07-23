@@ -1089,3 +1089,154 @@ func TestCleanJSONSchemaForAntigravity_UniqueItemsStripped(t *testing.T) {
 		t.Errorf("uniqueItems hint missing in description")
 	}
 }
+
+func TestCleanJSONSchemaBooleanSchemas(t *testing.T) {
+	tests := []struct {
+		name     string
+		clean    func(string) string
+		input    string
+		assertFn func(*testing.T, gjson.Result)
+	}{
+		{
+			name:  "top-level true becomes unconstrained schema object",
+			clean: CleanJSONSchemaForGemini,
+			input: `true`,
+			assertFn: func(t *testing.T, result gjson.Result) {
+				if !result.IsObject() || len(result.Map()) != 0 {
+					t.Fatalf("true schema = %s, want {}", result.Raw)
+				}
+			},
+		},
+		{
+			name:  "Antigravity top-level true becomes validated object schema",
+			clean: CleanJSONSchemaForAntigravity,
+			input: `true`,
+			assertFn: func(t *testing.T, result gjson.Result) {
+				if result.Get("type").String() != "object" || result.Get("required.0").String() != "reason" {
+					t.Fatalf("Antigravity true schema = %s, want validated object placeholder", result.Raw)
+				}
+			},
+		},
+		{
+			name:  "Antigravity nested empty tool schema becomes validated object schema",
+			clean: CleanJSONSchemaForAntigravity,
+			input: `{"tools":[{"functionDeclarations":[{"name":"run","parametersJsonSchema":{}}]}]}`,
+			assertFn: func(t *testing.T, result gjson.Result) {
+				schema := result.Get("tools.0.functionDeclarations.0.parametersJsonSchema")
+				if schema.Get("type").String() != "object" || schema.Get("required.0").String() != "reason" {
+					t.Fatalf("nested empty schema = %s, want validated object placeholder", schema.Raw)
+				}
+			},
+		},
+		{
+			name:  "top-level false stays unsatisfiable",
+			clean: CleanJSONSchemaForAntigravity,
+			input: `false`,
+			assertFn: func(t *testing.T, result gjson.Result) {
+				property := result.Get("properties." + impossibleSchemaProperty)
+				if !property.Exists() || !property.Get("enum").IsArray() || len(property.Get("enum").Array()) != 0 {
+					t.Fatalf("false schema = %s, want required empty enum sentinel", result.Raw)
+				}
+				if result.Get("required.0").String() != impossibleSchemaProperty {
+					t.Fatalf("false schema required = %s", result.Get("required").Raw)
+				}
+			},
+		},
+		{
+			name:  "nested properties and items",
+			clean: CleanJSONSchemaForGemini,
+			input: `{"type":"object","properties":{"anything":true,"never":false,"list":{"type":"array","items":false}},"required":["anything","never","list"]}`,
+			assertFn: func(t *testing.T, result gjson.Result) {
+				if anything := result.Get("properties.anything"); !anything.IsObject() || len(anything.Map()) != 0 {
+					t.Fatalf("true property = %s", anything.Raw)
+				}
+				for _, path := range []string{"properties.never", "properties.list.items"} {
+					if enum := result.Get(path + ".properties." + impossibleSchemaProperty + ".enum"); !enum.IsArray() || len(enum.Array()) != 0 {
+						t.Fatalf("%s false sentinel = %s", path, result.Get(path).Raw)
+					}
+				}
+			},
+		},
+		{
+			name:  "false anyOf branch is removed",
+			clean: CleanJSONSchemaForGemini,
+			input: `{"anyOf":[false,{"type":"string"}]}`,
+			assertFn: func(t *testing.T, result gjson.Result) {
+				if result.Get("type").String() != "string" {
+					t.Fatalf("anyOf result = %s, want string schema", result.Raw)
+				}
+			},
+		},
+		{
+			name:  "true anyOf branch removes union constraint",
+			clean: CleanJSONSchemaForGemini,
+			input: `{"anyOf":[true,{"type":"string"}]}`,
+			assertFn: func(t *testing.T, result gjson.Result) {
+				if !result.IsObject() || len(result.Map()) != 0 {
+					t.Fatalf("anyOf true result = %s, want {}", result.Raw)
+				}
+			},
+		},
+		{
+			name:  "additionalProperties booleans remain keyword values",
+			clean: CleanJSONSchemaForAntigravity,
+			input: `{"type":"object","properties":{"value":{"type":"string"}},"additionalProperties":false}`,
+			assertFn: func(t *testing.T, result gjson.Result) {
+				if result.Get("properties." + impossibleSchemaProperty).Exists() {
+					t.Fatalf("additionalProperties false became a false schema: %s", result.Raw)
+				}
+				if !strings.Contains(result.Get("description").String(), "No extra properties allowed") {
+					t.Fatalf("additionalProperties false hint missing: %s", result.Raw)
+				}
+			},
+		},
+		{
+			name:  "additionalProperties true is not a true schema root",
+			clean: CleanJSONSchemaForGemini,
+			input: `{"type":"object","properties":{"value":{"type":"string"}},"additionalProperties":true}`,
+			assertFn: func(t *testing.T, result gjson.Result) {
+				if result.Get("properties."+impossibleSchemaProperty).Exists() || result.Get("description").Exists() {
+					t.Fatalf("additionalProperties true changed schema meaning: %s", result.Raw)
+				}
+			},
+		},
+		{
+			name:  "false allOf makes the full schema unsatisfiable",
+			clean: CleanJSONSchemaForGemini,
+			input: `{"type":"object","allOf":[{"properties":{"value":{"type":"string"}}},false]}`,
+			assertFn: func(t *testing.T, result gjson.Result) {
+				if enum := result.Get("properties." + impossibleSchemaProperty + ".enum"); !enum.IsArray() || len(enum.Array()) != 0 {
+					t.Fatalf("allOf false result = %s", result.Raw)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output := test.clean(test.input)
+			if !json.Valid([]byte(output)) {
+				t.Fatalf("cleaned schema is invalid JSON: %s", output)
+			}
+			test.assertFn(t, gjson.Parse(output))
+		})
+	}
+}
+
+func TestCleanJSONSchemaBooleanNormalizationDoesNotTouchToolResults(t *testing.T) {
+	input := `{
+		"request": {
+			"contents": [{"parts": [{"functionResponse": {"response": {"ok": false, "enabled": true}}}]}],
+			"tools": [{"functionDeclarations": [{"name": "lookup", "parameters": true}]}]
+		}
+	}`
+	result := gjson.Parse(CleanJSONSchemaForGemini(input))
+	if result.Get("request.contents.0.parts.0.functionResponse.response.ok").Type != gjson.False ||
+		result.Get("request.contents.0.parts.0.functionResponse.response.enabled").Type != gjson.True {
+		t.Fatalf("tool result booleans changed: %s", result.Raw)
+	}
+	parameters := result.Get("request.tools.0.functionDeclarations.0.parameters")
+	if !parameters.IsObject() || len(parameters.Map()) != 0 {
+		t.Fatalf("tool true schema = %s, want {}", parameters.Raw)
+	}
+}

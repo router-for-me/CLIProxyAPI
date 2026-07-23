@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/codexintegration"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
@@ -87,6 +88,11 @@ type Service struct {
 
 	// authQueueStop cancels the auth update queue processing.
 	authQueueStop context.CancelFunc
+
+	// codexSyncCancel controls the optional Codex catalog auto-sync worker.
+	codexSyncMu      sync.Mutex
+	codexSyncCancel  context.CancelFunc
+	codexSyncRootCtx context.Context
 
 	// authManager handles legacy authentication operations.
 	authManager *sdkAuth.Manager
@@ -1333,7 +1339,7 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 	s.cfgMu.Unlock()
 	if s.coreManager != nil {
 		s.coreManager.SetConfig(newCfg)
-		s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
+		s.coreManager.SetOAuthModelAlias(newCfg.EffectiveOAuthModelAlias())
 	}
 	ctx := coreauth.WithSkipPersist(context.Background())
 	s.syncPluginRuntimeConfig(ctx)
@@ -1355,6 +1361,7 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 		}
 	}
 	s.syncPluginModelRuntime(ctx)
+	s.configureCodexSyncWorker(nil, newCfg)
 }
 
 func (s *Service) reloadConfigFromWatcher() bool {
@@ -1770,6 +1777,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.registerModelRefreshCallback()
+	s.configureCodexSyncWorker(ctx, s.cfg)
 
 	// Prefer core auth manager auto refresh if available.
 	if s.coreManager != nil && !homeEnabled {
@@ -1846,6 +1854,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			s.authQueueStop()
 			s.authQueueStop = nil
 		}
+		s.configureCodexSyncWorker(context.Background(), nil)
 
 		if errShutdownPprof := s.shutdownPprof(ctx); errShutdownPprof != nil {
 			log.Errorf("failed to stop pprof server: %v", errShutdownPprof)
@@ -1888,6 +1897,36 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		usage.StopDefault()
 	})
 	return shutdownErr
+}
+
+func (s *Service) configureCodexSyncWorker(ctx context.Context, cfg *config.Config) {
+	if s == nil {
+		return
+	}
+	s.codexSyncMu.Lock()
+	defer s.codexSyncMu.Unlock()
+	if ctx != nil {
+		s.codexSyncRootCtx = ctx
+	}
+	if s.codexSyncCancel != nil {
+		s.codexSyncCancel()
+		s.codexSyncCancel = nil
+	}
+	if cfg == nil || !cfg.CodexIntegration.Enabled || !cfg.CodexIntegration.AutoSync {
+		return
+	}
+	rootCtx := s.codexSyncRootCtx
+	if rootCtx == nil {
+		rootCtx = context.Background()
+	}
+	worker, err := codexintegration.NewSyncWorker(cfg, registry.GetGlobalRegistry())
+	if err != nil {
+		log.Warnf("failed to configure Codex Integration auto-sync: %v", err)
+		return
+	}
+	workerCtx, cancel := context.WithCancel(rootCtx)
+	s.codexSyncCancel = cancel
+	go worker.Run(workerCtx)
 }
 
 func (s *Service) ensureAuthDir() error {

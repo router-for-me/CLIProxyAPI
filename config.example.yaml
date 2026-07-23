@@ -5,6 +5,62 @@ host: ""
 # Server port
 port: 8317
 
+# Optional Codex desktop/CLI integration. It remains disabled unless explicitly enabled.
+# Loopback access preserves Codex's built-in openai provider identity and is accepted only
+# when this server is bound to 127.0.0.1, ::1, or localhost.
+codex-integration:
+  enabled: false
+  codex-home: ""
+  loopback-access: true
+  auto-sync: true
+  catalog-file: "cliproxyapi-catalog.json"
+  multi-agent-mode: "v1"
+  models:
+    - slug: "xai/grok-4.5"
+      provider: "xai"
+      upstream-model: "grok-4.5"
+      display-name: "Grok 4.5"
+      visible: true
+      featured: true
+      priority: 2
+      input-modalities: ["text", "image"]
+      supports-tools: true
+      supports-parallel-tools: true
+      supports-web-search: true
+    - slug: "antigravity/gemini-3.6-flash"
+      provider: "antigravity"
+      upstream-model: "gemini-3.6-flash-high"
+      display-name: "Gemini 3.6 Flash"
+      visible: true
+      featured: true
+      priority: 3
+      input-modalities: ["text", "image"]
+      supports-tools: true
+      supports-parallel-tools: true
+      supports-web-search: false
+    - slug: "antigravity/gemini-3.1-pro"
+      provider: "antigravity"
+      upstream-model: "gemini-pro-agent"
+      display-name: "Gemini 3.1 Pro"
+      visible: true
+      featured: true
+      priority: 4
+      input-modalities: ["text", "image"]
+      supports-tools: true
+      supports-parallel-tools: true
+      supports-web-search: false
+    - slug: "antigravity/claude-opus-4-6-thinking"
+      provider: "antigravity"
+      upstream-model: "claude-opus-4-6-thinking"
+      display-name: "Claude Opus 4.6 Thinking"
+      visible: true
+      featured: true
+      priority: 5
+      input-modalities: ["text", "image"]
+      supports-tools: true
+      supports-parallel-tools: true
+      supports-web-search: false
+
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false
@@ -184,6 +240,10 @@ codex:
   # Some superstitious users believe request tracking identifiers can be used
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
+  # WebSocket liveness deadline. Ping/pong traffic refreshes it. Default: 900 seconds.
+  websocket-idle-timeout-seconds: 900
+  # WebSocket ping cadence. Must be lower than websocket-idle-timeout-seconds. Default: 30 seconds.
+  websocket-ping-interval-seconds: 30
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true

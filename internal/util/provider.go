@@ -4,15 +4,52 @@
 package util
 
 import (
+	"fmt"
 	"net/url"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/codexintegration"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	log "github.com/sirupsen/logrus"
 )
 
 const openAICompatibleProviderPrefix = "openai-compatible-"
+
+// ResolveCodexIntegrationModel resolves a stable Codex model slug without changing
+// non-reserved credential prefixes. matched is true for every reserved namespace,
+// including unknown slugs that must fail closed.
+func ResolveCodexIntegrationModel(modelName string, integration *config.CodexIntegrationConfig) (resolved config.CodexIntegrationModel, matched bool, err error) {
+	resolved.UpstreamModel = modelName
+	if integration == nil || !integration.Enabled {
+		return resolved, false, nil
+	}
+
+	parsed := thinking.ParseSuffix(strings.TrimSpace(modelName))
+	baseModel := strings.TrimSpace(parsed.ModelName)
+	provider, _, hasPrefix := strings.Cut(baseModel, "/")
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if !hasPrefix || !codexintegration.IsReservedProvider(provider) {
+		return resolved, false, nil
+	}
+
+	policy, errPolicy := codexintegration.NewModelPolicy(integration.Models)
+	if errPolicy != nil {
+		return resolved, true, fmt.Errorf("invalid Codex Integration model policy: %w", errPolicy)
+	}
+	mapping, ok := policy.Resolve(baseModel)
+	if !ok || !mapping.Visible {
+		return resolved, true, fmt.Errorf("Codex Integration model %q is not configured", baseModel)
+	}
+	if mapping.Provider != provider {
+		return resolved, true, fmt.Errorf("Codex Integration model %q requires provider %q", baseModel, mapping.Provider)
+	}
+	if parsed.HasSuffix {
+		mapping.UpstreamModel += "(" + parsed.RawSuffix + ")"
+	}
+	return mapping, true, nil
+}
 
 // OpenAICompatibleProviderKey returns the internal provider key for an OpenAI-compatible provider.
 func OpenAICompatibleProviderKey(name string) string {

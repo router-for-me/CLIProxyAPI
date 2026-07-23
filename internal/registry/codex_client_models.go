@@ -27,6 +27,12 @@ type codexClientModelsStore struct {
 
 var codexClientCatalogStore = &codexClientModelsStore{}
 
+var codexClientModelsSubscribers = struct {
+	sync.Mutex
+	nextID      uint64
+	subscribers map[uint64]func(uint64)
+}{subscribers: make(map[uint64]func(uint64))}
+
 func init() {
 	if _, err := loadCodexClientModelsFromBytes(embeddedCodexClientModelsJSON, "embed"); err != nil {
 		log.Warnf("registry: failed to parse embedded codex_client_models.json (Codex client catalog will remain unavailable until a valid remote refresh): %v", err)
@@ -47,6 +53,26 @@ func GetCodexClientModelsSnapshot() ([]byte, uint64) {
 	return append([]byte(nil), codexClientCatalogStore.data...), codexClientCatalogStore.revision
 }
 
+// SubscribeCodexClientModelsChanges observes validated template revisions.
+func SubscribeCodexClientModelsChanges(callback func(uint64)) func() {
+	if callback == nil {
+		return func() {}
+	}
+	codexClientModelsSubscribers.Lock()
+	codexClientModelsSubscribers.nextID++
+	id := codexClientModelsSubscribers.nextID
+	codexClientModelsSubscribers.subscribers[id] = callback
+	codexClientModelsSubscribers.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			codexClientModelsSubscribers.Lock()
+			delete(codexClientModelsSubscribers.subscribers, id)
+			codexClientModelsSubscribers.Unlock()
+		})
+	}
+}
+
 func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {
 	if err := ValidateCodexClientModelsJSON(data); err != nil {
 		return false, fmt.Errorf("%s: %w", source, err)
@@ -54,13 +80,36 @@ func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {
 
 	cloned := append([]byte(nil), data...)
 	codexClientCatalogStore.mu.Lock()
-	defer codexClientCatalogStore.mu.Unlock()
 	if bytes.Equal(codexClientCatalogStore.data, cloned) {
+		codexClientCatalogStore.mu.Unlock()
 		return false, nil
 	}
 	codexClientCatalogStore.data = cloned
 	codexClientCatalogStore.revision++
+	revision := codexClientCatalogStore.revision
+	codexClientCatalogStore.mu.Unlock()
+	notifyCodexClientModelsSubscribers(revision)
 	return true, nil
+}
+
+func notifyCodexClientModelsSubscribers(revision uint64) {
+	codexClientModelsSubscribers.Lock()
+	callbacks := make([]func(uint64), 0, len(codexClientModelsSubscribers.subscribers))
+	for _, callback := range codexClientModelsSubscribers.subscribers {
+		callbacks = append(callbacks, callback)
+	}
+	codexClientModelsSubscribers.Unlock()
+	for _, callback := range callbacks {
+		callback := callback
+		go func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					log.Errorf("Codex client model subscriber panic: %v", recovered)
+				}
+			}()
+			callback(revision)
+		}()
+	}
 }
 
 // ValidateCodexClientModelsJSON validates the fields required to serve a

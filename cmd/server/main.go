@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/codexintegration"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
@@ -70,7 +71,12 @@ func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode,
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
 func main() {
-	fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+	codexJSONMode := isCodexJSONInvocation(os.Args[1:])
+	if codexJSONMode {
+		log.SetOutput(os.Stderr)
+	} else {
+		fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+	}
 
 	// Command-line flags to control the application's behavior.
 	var codexLogin bool
@@ -90,6 +96,15 @@ func main() {
 	var tuiMode bool
 	var standalone bool
 	var localModel bool
+	var codexSetup bool
+	var codexSync bool
+	var codexDoctor bool
+	var codexRestore bool
+	var codexApply bool
+	var codexJSON bool
+	var codexProbeModels bool
+	var codexMigrateOpenCodex bool
+	var codexHome string
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
@@ -109,6 +124,15 @@ func main() {
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded models.json and codex_client_models.json only, skip remote model catalog fetching")
+	flag.BoolVar(&codexSetup, "codex-setup", false, "Preview Codex Integration setup; use -apply to write")
+	flag.BoolVar(&codexSync, "codex-sync", false, "Preview Codex Integration catalog sync; use -apply to write")
+	flag.BoolVar(&codexDoctor, "codex-doctor", false, "Run read-only Codex Integration diagnostics")
+	flag.BoolVar(&codexRestore, "codex-restore", false, "Preview Codex Integration restore; use -apply to write")
+	flag.BoolVar(&codexApply, "apply", false, "Apply a Codex Integration setup, sync, or restore command")
+	flag.BoolVar(&codexJSON, "json", false, "Emit machine-readable JSON for Codex Integration commands")
+	flag.BoolVar(&codexProbeModels, "probe-models", false, "Send explicit low-cost model probes with -codex-doctor")
+	flag.BoolVar(&codexMigrateOpenCodex, "codex-migrate-opencodex", false, "Migrate recognized OpenCodex-managed root keys during setup")
+	flag.StringVar(&codexHome, "codex-home", "", "Override CODEX_HOME for Codex Integration commands")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -145,6 +169,38 @@ func main() {
 
 	// Parse the command-line flags.
 	flag.Parse()
+	codexAction, hasCodexCommand, errSelectCodexCommand := selectCodexCommand(codexSetup, codexSync, codexDoctor, codexRestore)
+	if errSelectCodexCommand != nil {
+		if codexJSON {
+			_ = codexintegration.WriteCommandFailure(os.Stdout, "", errSelectCodexCommand)
+		} else {
+			fmt.Fprintf(os.Stderr, "Codex Integration error: %v\n", errSelectCodexCommand)
+		}
+		os.Exit(2)
+	}
+	codexCommandOptions := codexintegration.CommandOptions{
+		Action: codexAction, Apply: codexApply, JSON: codexJSON, ProbeModels: codexProbeModels,
+		MigrateOpenCodex: codexMigrateOpenCodex, CodexHome: codexHome,
+	}
+	otherOneShotCommand := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin
+	if errCommandFlags := validateCodexCommandFlags(hasCodexCommand, otherOneShotCommand, codexCommandOptions); errCommandFlags != nil {
+		if codexJSON {
+			_ = codexintegration.WriteCommandFailure(os.Stdout, codexAction, errCommandFlags)
+		} else {
+			fmt.Fprintf(os.Stderr, "Codex Integration error: %v\n", errCommandFlags)
+		}
+		os.Exit(2)
+	}
+	if hasCodexCommand {
+		if errValidateCodexCommand := codexintegration.ValidateCommandOptions(codexCommandOptions); errValidateCodexCommand != nil {
+			if codexJSON {
+				_ = codexintegration.WriteCommandFailure(os.Stdout, codexAction, errValidateCodexCommand)
+			} else {
+				fmt.Fprintf(os.Stderr, "Codex Integration error: %v\n", errValidateCodexCommand)
+			}
+			os.Exit(2)
+		}
+	}
 
 	// Core application variables.
 	var err error
@@ -584,7 +640,7 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
-	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin
+	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin || hasCodexCommand
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
@@ -629,6 +685,23 @@ func main() {
 			}
 			return
 		}
+	}
+	if hasCodexCommand {
+		exitCode, errCommand := codexintegration.RunCommand(context.Background(), cfg, codexCommandOptions, os.Stdout)
+		if errCommand != nil {
+			if codexJSON {
+				_ = codexintegration.WriteCommandFailure(os.Stdout, codexAction, errCommand)
+			} else {
+				fmt.Fprintf(os.Stderr, "Codex Integration error: %v\n", errCommand)
+			}
+			if exitCode == 0 {
+				exitCode = 2
+			}
+		}
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+		return
 	}
 
 	// Handle different command modes based on the provided flags.
@@ -767,6 +840,57 @@ func startModelCatalogUpdaters(localModel, homeEnabled bool) {
 	} else if homeEnabled {
 		log.Info("Home mode: remote models.json updates disabled; Codex client model list follows Home model IDs")
 	}
+}
+
+func selectCodexCommand(setup, syncCatalog, doctor, restore bool) (codexintegration.CommandAction, bool, error) {
+	selected := make([]codexintegration.CommandAction, 0, 1)
+	if setup {
+		selected = append(selected, codexintegration.CommandSetup)
+	}
+	if syncCatalog {
+		selected = append(selected, codexintegration.CommandSync)
+	}
+	if doctor {
+		selected = append(selected, codexintegration.CommandDoctor)
+	}
+	if restore {
+		selected = append(selected, codexintegration.CommandRestore)
+	}
+	if len(selected) > 1 {
+		return "", false, errors.New("-codex-setup, -codex-sync, -codex-doctor, and -codex-restore are mutually exclusive")
+	}
+	if len(selected) == 0 {
+		return "", false, nil
+	}
+	return selected[0], true, nil
+}
+
+func validateCodexCommandFlags(hasCodexCommand, hasOtherOneShotCommand bool, options codexintegration.CommandOptions) error {
+	if hasCodexCommand && hasOtherOneShotCommand {
+		return errors.New("Codex Integration commands cannot be combined with login or import commands")
+	}
+	if hasCodexCommand {
+		return nil
+	}
+	if options.Apply || options.JSON || options.ProbeModels || options.MigrateOpenCodex || strings.TrimSpace(options.CodexHome) != "" {
+		return errors.New("-apply, -json, -probe-models, -codex-migrate-opencodex, and -codex-home require a Codex Integration command")
+	}
+	return nil
+}
+
+func isCodexJSONInvocation(args []string) bool {
+	hasCommand := false
+	jsonEnabled := false
+	for _, arg := range args {
+		name, value, hasValue := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+		switch name {
+		case "codex-setup", "codex-sync", "codex-doctor", "codex-restore":
+			hasCommand = !hasValue || !strings.EqualFold(value, "false")
+		case "json":
+			jsonEnabled = !hasValue || !strings.EqualFold(value, "false")
+		}
+	}
+	return hasCommand && jsonEnabled
 }
 
 func pluginBootstrapConfigPath(args []string, defaultPath string) string {
