@@ -2,13 +2,106 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
+
+func TestFileTokenStoreSaveMetadataReplacesExistingCredentialPrivately(t *testing.T) {
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "codex.json")
+	if err := os.WriteFile(path, []byte(`{"type":"codex","access_token":"old"}`), 0o600); err != nil {
+		t.Fatalf("seed auth file: %v", err)
+	}
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatalf("make auth file read-only: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auth := &cliproxyauth.Auth{
+		ID:       "codex.json",
+		Provider: "codex",
+		FileName: "codex.json",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "new",
+		},
+	}
+	if _, err := store.Save(context.Background(), auth); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read auth file: %v", err)
+	}
+	var metadata map[string]any
+	if err = json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatalf("decode auth file: %v", err)
+	}
+	if metadata["access_token"] != "new" {
+		t.Fatalf("access_token = %#v, want new", metadata["access_token"])
+	}
+	assertPrivateCredentialMode(t, path)
+	assertNoCredentialTempFiles(t, baseDir, "codex.json")
+}
+
+func TestFileTokenStoreSaveMetadataTightensUnchangedCredential(t *testing.T) {
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "codex.json")
+	if err := os.WriteFile(path, []byte(`{"type":"codex","disabled":false}`), 0o600); err != nil {
+		t.Fatalf("seed auth file: %v", err)
+	}
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatalf("loosen auth file permissions: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auth := &cliproxyauth.Auth{
+		ID:       "codex.json",
+		Provider: "codex",
+		FileName: "codex.json",
+		Metadata: map[string]any{"type": "codex"},
+	}
+	if _, err := store.Save(context.Background(), auth); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	assertPrivateCredentialMode(t, path)
+	assertNoCredentialTempFiles(t, baseDir, "codex.json")
+}
+
+func assertPrivateCredentialMode(t *testing.T, path string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat credential file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("credential mode = %o, want 600", got)
+	}
+}
+
+func assertNoCredentialTempFiles(t *testing.T, dir, name string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, "."+name+".tmp-*"))
+	if err != nil {
+		t.Fatalf("glob credential temp files: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("credential temp files were not removed: %v", matches)
+	}
+}
 
 func TestExtractAccessToken(t *testing.T) {
 	t.Parallel()

@@ -60,6 +60,7 @@ type Handler struct {
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginReleaseCacheMu    sync.Mutex
 	pluginReleaseCache      map[string]pluginReleaseCacheEntry
+	agentIdentityRegistrar  agentIdentityRegistrarFactory
 }
 
 type configReloadSnapshot struct {
