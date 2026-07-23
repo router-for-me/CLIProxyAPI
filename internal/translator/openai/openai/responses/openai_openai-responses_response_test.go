@@ -503,6 +503,149 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_OmitsTop
 	}
 }
 
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_FlattensNestedChatTools(t *testing.T) {
+	// When only the translated Chat Completions request is available, tools echo
+	// must still be Responses-flat (top-level name + parameters).
+	translatedRequest := []byte(`{
+		"model":"gpt-5-6-sol-max",
+		"tools":[{
+			"type":"function",
+			"function":{
+				"name":"mcp_jbcontext_code_search",
+				"description":"Search code via jbcontext MCP",
+				"parameters":{"type":"object","properties":{"query":{"type":"string"}},"additionalProperties":false}
+			}
+		}]
+	}`)
+	raw := []byte(`{"id":"chatcmpl_tools_flat","object":"chat.completion","created":1773896263,"model":"model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`)
+
+	resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "model", nil, translatedRequest, raw, nil)
+	tool0 := gjson.GetBytes(resp, "tools.0")
+	if !tool0.Exists() {
+		t.Fatalf("tools[0] missing: %s", resp)
+	}
+	if tool0.Get("function").Exists() {
+		t.Fatalf("tools[0] still nested under function: %s", tool0.Raw)
+	}
+	if got := tool0.Get("name").String(); got != "mcp_jbcontext_code_search" {
+		t.Fatalf("tools[0].name = %q, want mcp_jbcontext_code_search; tool=%s", got, tool0.Raw)
+	}
+	if !tool0.Get("parameters").Exists() {
+		t.Fatalf("tools[0].parameters missing: %s", tool0.Raw)
+	}
+	if got := tool0.Get("description").String(); got != "Search code via jbcontext MCP" {
+		t.Fatalf("tools[0].description = %q; tool=%s", got, tool0.Raw)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_PrefersOriginalFlatTools(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"gpt-5-6-sol-max",
+		"tools":[{"type":"function","name":"flat_tool","description":"flat","parameters":{"type":"object","properties":{}}}]
+	}`)
+	translatedRequest := []byte(`{
+		"model":"gpt-5-6-sol-max",
+		"tools":[{"type":"function","function":{"name":"flat_tool","description":"nested","parameters":{"type":"object","properties":{}}}}]
+	}`)
+	raw := []byte(`{"id":"chatcmpl_tools_orig","object":"chat.completion","created":1773896263,"model":"model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+
+	resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "model", originalRequest, translatedRequest, raw, nil)
+	tool0 := gjson.GetBytes(resp, "tools.0")
+	if tool0.Get("function").Exists() {
+		t.Fatalf("tools[0] nested: %s", tool0.Raw)
+	}
+	if got := tool0.Get("description").String(); got != "flat" {
+		t.Fatalf("expected original flat tools echo, got description=%q tool=%s", got, tool0.Raw)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_StreamCompletedFlattensNestedChatTools(t *testing.T) {
+	t.Parallel()
+
+	// Stream path only sees the translated Chat Completions request when original is absent.
+	translatedRequest := []byte(`{
+		"model":"gpt-5-6-sol-max",
+		"tools":[{
+			"type":"function",
+			"function":{
+				"name":"mcp_jbcontext_code_search",
+				"description":"Search code via jbcontext MCP",
+				"parameters":{"type":"object","properties":{"query":{"type":"string"}}}
+			}
+		}]
+	}`)
+	chunks := []string{
+		`data: {"id":"chatcmpl_tools_stream","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl_tools_stream","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var completed gjson.Result
+	for _, line := range chunks {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", nil, translatedRequest, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			if event == "response.completed" {
+				completed = data
+			}
+		}
+	}
+	if !completed.Exists() {
+		t.Fatal("expected response.completed event")
+	}
+	tool0 := completed.Get("response.tools.0")
+	if !tool0.Exists() {
+		t.Fatalf("response.tools[0] missing: %s", completed.Raw)
+	}
+	if tool0.Get("function").Exists() {
+		t.Fatalf("response.tools[0] still nested: %s", tool0.Raw)
+	}
+	if got := tool0.Get("name").String(); got != "mcp_jbcontext_code_search" {
+		t.Fatalf("response.tools[0].name=%q; tool=%s", got, tool0.Raw)
+	}
+	if !tool0.Get("parameters").Exists() {
+		t.Fatalf("response.tools[0].parameters missing: %s", tool0.Raw)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_StreamCompletedPrefersOriginalFlatTools(t *testing.T) {
+	t.Parallel()
+
+	originalRequest := []byte(`{
+		"model":"gpt-5-6-sol-max",
+		"tools":[{"type":"function","name":"flat_tool","description":"flat","parameters":{"type":"object","properties":{}}}]
+	}`)
+	translatedRequest := []byte(`{
+		"model":"gpt-5-6-sol-max",
+		"tools":[{"type":"function","function":{"name":"flat_tool","description":"nested","parameters":{"type":"object","properties":{}}}}]
+	}`)
+	chunks := []string{
+		`data: {"id":"chatcmpl_tools_stream_orig","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var completed gjson.Result
+	for _, line := range chunks {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", originalRequest, translatedRequest, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			if event == "response.completed" {
+				completed = data
+			}
+		}
+	}
+	if !completed.Exists() {
+		t.Fatal("expected response.completed event")
+	}
+	tool0 := completed.Get("response.tools.0")
+	if tool0.Get("function").Exists() {
+		t.Fatalf("response.tools[0] nested: %s", tool0.Raw)
+	}
+	if got := tool0.Get("description").String(); got != "flat" {
+		t.Fatalf("expected original flat tools on stream completed, got description=%q tool=%s", got, tool0.Raw)
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresNamespaceFunctionCall(t *testing.T) {
 	originalRequest := []byte(`{
 		"model":"deepseek-v4-flash",

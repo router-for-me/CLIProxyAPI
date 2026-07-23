@@ -313,6 +313,64 @@ func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
 	return nil
 }
 
+// toolsForOpenAIResponsesEcho returns tools in OpenAI Responses flat shape.
+// Chat Completions nested {"type":"function","function":{"name","parameters",...}}
+// is flattened to {"type":"function","name","parameters",...} so clients like
+// Junie (kotlinx.serialization) see required top-level name/parameters.
+// Already-flat Responses tools and non-function tools pass through.
+func toolsForOpenAIResponsesEcho(tools gjson.Result) interface{} {
+	if !tools.Exists() || !tools.IsArray() {
+		return tools.Value()
+	}
+	out := make([]interface{}, 0, len(tools.Array()))
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		out = append(out, flattenChatCompletionsToolToResponses(tool))
+		return true
+	})
+	return out
+}
+
+func flattenChatCompletionsToolToResponses(tool gjson.Result) interface{} {
+	if !tool.IsObject() {
+		return tool.Value()
+	}
+	toolType := strings.TrimSpace(tool.Get("type").String())
+	nested := tool.Get("function")
+	if (toolType == "function" || toolType == "") && nested.Exists() && nested.IsObject() {
+		topName := strings.TrimSpace(tool.Get("name").String())
+		hasTopParams := tool.Get("parameters").Exists()
+		if topName == "" || !hasTopParams {
+			flat := []byte(`{"type":"function"}`)
+			name := topName
+			if name == "" {
+				name = strings.TrimSpace(nested.Get("name").String())
+			}
+			if name != "" {
+				flat, _ = sjson.SetBytes(flat, "name", name)
+			}
+			description := tool.Get("description")
+			if !description.Exists() || description.String() == "" {
+				description = nested.Get("description")
+			}
+			if description.Exists() && description.String() != "" {
+				flat, _ = sjson.SetBytes(flat, "description", description.String())
+			}
+			parameters := tool.Get("parameters")
+			if !parameters.Exists() {
+				parameters = nested.Get("parameters")
+			}
+			if !parameters.Exists() {
+				parameters = nested.Get("parametersJsonSchema")
+			}
+			if parameters.Exists() {
+				flat, _ = sjson.SetRawBytes(flat, "parameters", []byte(parameters.Raw))
+			}
+			return gjson.ParseBytes(flat).Value()
+		}
+	}
+	return tool.Value()
+}
+
 func applyResponsesFunctionCallNamespaceFields(item []byte, requestRawJSON []byte, qualifiedName string, itemPath string) []byte {
 	name, namespace := splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON, qualifiedName)
 	namePath := "name"
