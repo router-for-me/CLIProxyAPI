@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1089,4 +1090,55 @@ func TestCodexExecutorReasoningReplayCacheMatchesShortenedClaudeToolResultCallID
 	if got := gjson.GetBytes(secondBody, "input.3.call_id").String(); got != shortCallID {
 		t.Fatalf("input.3.call_id = %q, want shortened call_id %q; body=%s", got, shortCallID, string(secondBody))
 	}
+}
+
+func BenchmarkInsertCodexReasoningReplayTurnsLargeHistory(b *testing.B) {
+	body, replayItems := codexReasoningReplayLargeHistoryFixture(384, 4096, 32)
+	b.ReportMetric(float64(len(body)), "body_bytes")
+	b.ReportMetric(float64(len(replayItems)/2), "replay_turns")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		updated, inserted := insertCodexReasoningReplayTurns(body, replayItems)
+		if inserted || len(updated) != len(body) {
+			b.Fatalf("unexpected replay insertion: inserted=%t body_bytes=%d updated_bytes=%d", inserted, len(body), len(updated))
+		}
+	}
+}
+
+func TestCodexReplayInputPrefixFingerprintsMatchSingleCalculation(t *testing.T) {
+	body := []byte(`{"input":[{"type":"message","role":"user","content":"one"},{"type":"message","role":"assistant","content":"two"},{"type":"message","role":"user","content":"three"}]}`)
+	inputItems := gjson.GetBytes(body, "input").Array()
+	fingerprints := codexReplayInputPrefixFingerprints(body, inputItems)
+	if len(fingerprints) != len(inputItems)+1 {
+		t.Fatalf("fingerprint count = %d, want %d", len(fingerprints), len(inputItems)+1)
+	}
+	for end := 0; end <= len(inputItems); end++ {
+		if got, want := fingerprints[end], codexReplayInputPrefixFingerprint(inputItems, end); got != want {
+			t.Fatalf("fingerprint[%d] = %q, want %q", end, got, want)
+		}
+	}
+}
+
+func codexReasoningReplayLargeHistoryFixture(inputItemCount, textBytes, replayTurnCount int) ([]byte, [][]byte) {
+	text := strings.Repeat("x", textBytes)
+	var body strings.Builder
+	body.Grow(inputItemCount * (textBytes + 96))
+	body.WriteString(`{"model":"gpt-5.4","input":[`)
+	for index := 0; index < inputItemCount; index++ {
+		if index > 0 {
+			body.WriteByte(',')
+		}
+		_, _ = fmt.Fprintf(&body, `{"type":"message","role":"user","content":[{"type":"input_text","text":"%s-%d"}]}`, text, index)
+	}
+	body.WriteString(`]}`)
+
+	replayItems := make([][]byte, 0, replayTurnCount*2)
+	for index := 0; index < replayTurnCount; index++ {
+		replayItems = append(replayItems,
+			[]byte(fmt.Sprintf(`{"type":"%s","id":"turn-%d","request_fingerprint":"missing-prefix-%d","call_ids":["missing-call-%d"]}`, internalcache.CodexReasoningReplayTurnType, index, index, index)),
+			[]byte(fmt.Sprintf(`{"type":"reasoning","encrypted_content":"missing-reasoning-%d"}`, index)),
+		)
+	}
+	return []byte(body.String()), replayItems
 }
