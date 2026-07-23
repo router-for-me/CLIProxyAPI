@@ -65,7 +65,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
 
-	usageDetail := coreusage.EnsureTokenBreakdown(record.Detail)
+	usageDetail := coreusage.EnsureTokenBreakdownForProvider(record.Detail, record.Provider, record.ExecutorType)
 	tokens := tokenStats{
 		InputTokens:            usageDetail.InputTokens,
 		OutputTokens:           usageDetail.OutputTokens,

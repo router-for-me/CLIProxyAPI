@@ -54,3 +54,68 @@ func TestNewUnclassifiedTokenBreakdownDoesNotGuessBuckets(t *testing.T) {
 		t.Fatalf("breakdown = %+v", breakdown)
 	}
 }
+
+func TestEnsureTokenBreakdownForProviderUsesKnownSemantics(t *testing.T) {
+	tests := []struct {
+		name         string
+		provider     string
+		executorType string
+		detail       Detail
+		wantTotal    int64
+		wantInput    int64
+		wantOutput   int64
+	}{
+		{
+			name:       "OpenAI subsets cache and reasoning",
+			provider:   "openai",
+			detail:     Detail{InputTokens: 100, OutputTokens: 30, ReasoningTokens: 12, CacheReadTokens: 40, CacheCreationTokens: 10},
+			wantTotal:  130,
+			wantInput:  100,
+			wantOutput: 30,
+		},
+		{
+			name:         "OpenAI compatible executor takes precedence",
+			provider:     "anthropic",
+			executorType: "OpenAICompatExecutor",
+			detail:       Detail{InputTokens: 100, OutputTokens: 30, ReasoningTokens: 12, CacheReadTokens: 40, CacheCreationTokens: 10},
+			wantTotal:    130,
+			wantInput:    100,
+			wantOutput:   30,
+		},
+		{
+			name:       "Gemini keeps reasoning separate",
+			provider:   "gemini",
+			detail:     Detail{InputTokens: 100, OutputTokens: 30, ReasoningTokens: 12, CacheReadTokens: 40, CacheCreationTokens: 10},
+			wantTotal:  142,
+			wantInput:  100,
+			wantOutput: 42,
+		},
+		{
+			name:       "Claude keeps cache and reasoning independent",
+			provider:   "anthropic",
+			detail:     Detail{InputTokens: 100, OutputTokens: 30, ReasoningTokens: 12, CacheReadTokens: 40, CacheCreationTokens: 10},
+			wantTotal:  192,
+			wantInput:  150,
+			wantOutput: 42,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			detail := EnsureTokenBreakdownForProvider(tt.detail, tt.provider, tt.executorType)
+			if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != TokenAccountingQualityComplete {
+				t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+			}
+			if detail.TotalTokens != tt.wantTotal || detail.TokenBreakdown.TotalTokens != tt.wantTotal ||
+				detail.TokenBreakdown.Input.TotalTokens != tt.wantInput || detail.TokenBreakdown.Output.TotalTokens != tt.wantOutput {
+				t.Fatalf("detail = %+v, want total=%d input=%d output=%d", detail, tt.wantTotal, tt.wantInput, tt.wantOutput)
+			}
+		})
+	}
+}
+
+func TestEnsureTokenBreakdownForUnknownProviderDoesNotGuessReasoning(t *testing.T) {
+	detail := EnsureTokenBreakdownForProvider(Detail{InputTokens: 100, OutputTokens: 30, ReasoningTokens: 12}, "plugin-provider", "")
+	if detail.TotalTokens != 130 || detail.TokenBreakdown.Quality != TokenAccountingQualityUnclassified || detail.TokenBreakdown.UnclassifiedTokens != 130 {
+		t.Fatalf("detail = %+v", detail)
+	}
+}

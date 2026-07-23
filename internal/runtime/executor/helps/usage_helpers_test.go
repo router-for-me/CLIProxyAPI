@@ -69,6 +69,21 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsageTotalOnlyIsUnclassified(t *testing.T) {
+	detail := ParseOpenAIUsage([]byte(`{"usage":{"total_tokens":42}}`))
+	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityUnclassified ||
+		detail.TotalTokens != 42 || detail.TokenBreakdown.UnclassifiedTokens != 42 {
+		t.Fatalf("detail = %+v", detail)
+	}
+}
+
+func TestParseOpenAIUsageExplicitZeroBucketsRemainInconsistent(t *testing.T) {
+	detail := ParseOpenAIUsage([]byte(`{"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":42}}`))
+	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityInconsistent {
+		t.Fatalf("detail = %+v", detail)
+	}
+}
+
 func TestParseCodexUsageIncludesCacheWriteTokens(t *testing.T) {
 	data := []byte(`{"response":{"service_tier":"priority","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":40}}}}`)
 	detail, ok := ParseCodexUsage(data)
@@ -354,11 +369,11 @@ func TestNormalizeUsageDetailTotalDoesNotDoubleCountReasoning(t *testing.T) {
 		InputTokens:     100,
 		OutputTokens:    30,
 		ReasoningTokens: 12,
-	})
+	}, "openai", "")
 	if detail.TotalTokens != 130 {
 		t.Fatalf("total tokens = %d, want 130", detail.TotalTokens)
 	}
-	if detail.TokenBreakdown.Quality != usage.TokenAccountingQualityUnclassified || detail.TokenBreakdown.UnclassifiedTokens != 130 {
+	if detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete || detail.TokenBreakdown.Output.ReasoningTokens != 12 {
 		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
 	}
 }

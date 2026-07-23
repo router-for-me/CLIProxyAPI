@@ -62,7 +62,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireMissingField(t, payload, "request_service_tier")
 		requireStringField(t, payload, "response_service_tier", "default")
 		requireIntField(t, payload, "accounting_version", coreusage.TokenAccountingSchemaVersion)
-		requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityUnclassified, 30)
+		requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityComplete, 30)
 		requireTokensBoolField(t, payload, "cache_read_tokens_present", true)
 		requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
 		requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
@@ -70,6 +70,38 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireBoolField(t, payload, "generate", true)
 		requireFailField(t, payload, http.StatusOK, "")
 	})
+}
+
+func TestUsageQueuePluginNormalizesDirectSDKUsageByProvider(t *testing.T) {
+	tests := []struct {
+		provider  string
+		wantTotal int
+	}{
+		{provider: "openai", wantTotal: 130},
+		{provider: "gemini", wantTotal: 142},
+	}
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			withEnabledQueue(t, func() {
+				ctx := internallogging.WithResponseStatusHolder(context.Background())
+				internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+				(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+					Provider: tt.provider,
+					Model:    "direct-sdk-model",
+					Detail: coreusage.Detail{
+						InputTokens:     100,
+						OutputTokens:    30,
+						ReasoningTokens: 12,
+					},
+				})
+
+				payload := popSinglePayload(t)
+				requireIntField(t, requireTokensPayload(t, payload), "total_tokens", tt.wantTotal)
+				requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityComplete, int64(tt.wantTotal))
+			})
+		})
+	}
 }
 
 func TestUsageQueuePluginPayloadIncludesGenerateFalse(t *testing.T) {

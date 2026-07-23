@@ -1,5 +1,7 @@
 package usage
 
+import "strings"
+
 // TokenAccountingSchemaVersion identifies the canonical token accounting contract.
 const TokenAccountingSchemaVersion = 2
 
@@ -10,6 +12,15 @@ const (
 	TokenAccountingQualityComplete     TokenAccountingQuality = "complete"
 	TokenAccountingQualityInconsistent TokenAccountingQuality = "inconsistent"
 	TokenAccountingQualityUnclassified TokenAccountingQuality = "unclassified"
+)
+
+type tokenAccountingSemantics uint8
+
+const (
+	tokenAccountingSemanticsUnknown tokenAccountingSemantics = iota
+	tokenAccountingSemanticsSubset
+	tokenAccountingSemanticsIndependent
+	tokenAccountingSemanticsSeparateReasoning
 )
 
 // TokenInputBreakdown contains mutually exclusive input token buckets.
@@ -188,17 +199,88 @@ func NewUnclassifiedTokenBreakdown(total int64) TokenBreakdown {
 // EnsureTokenBreakdown attaches a valid v2 breakdown to legacy or direct SDK
 // usage details without guessing whether reasoning is already inside output.
 func EnsureTokenBreakdown(detail Detail) Detail {
+	return EnsureTokenBreakdownForProvider(detail, "", "")
+}
+
+// EnsureTokenBreakdownForProvider attaches a valid v2 breakdown to legacy or
+// direct SDK usage details using the known provider's token semantics. Unknown
+// providers remain unclassified instead of guessing how their buckets overlap.
+func EnsureTokenBreakdownForProvider(detail Detail, provider, executorType string) Detail {
 	if !detail.TokenBreakdown.Valid() {
-		total := detail.TotalTokens
-		if total == 0 {
-			total = detail.InputTokens + detail.OutputTokens
-		}
-		detail.TokenBreakdown = NewUnclassifiedTokenBreakdown(total)
+		detail.TokenBreakdown = tokenBreakdownForProvider(detail, provider, executorType)
 	}
 	if detail.TotalTokens == 0 {
 		detail.TotalTokens = detail.TokenBreakdown.TotalTokens
 	}
 	return detail
+}
+
+func tokenBreakdownForProvider(detail Detail, provider, executorType string) TokenBreakdown {
+	switch tokenAccountingSemanticsFor(provider, executorType) {
+	case tokenAccountingSemanticsSubset:
+		return NewSubsetTokenBreakdown(
+			detail.InputTokens,
+			detail.CacheReadTokens,
+			detail.CacheCreationTokens,
+			detail.OutputTokens,
+			detail.ReasoningTokens,
+			detail.TotalTokens,
+		)
+	case tokenAccountingSemanticsIndependent:
+		return NewIndependentTokenBreakdown(
+			detail.InputTokens,
+			detail.CacheReadTokens,
+			detail.CacheCreationTokens,
+			detail.OutputTokens,
+			detail.ReasoningTokens,
+			detail.TotalTokens,
+		)
+	case tokenAccountingSemanticsSeparateReasoning:
+		return NewSeparateReasoningTokenBreakdown(
+			detail.InputTokens,
+			detail.CacheReadTokens,
+			detail.CacheCreationTokens,
+			detail.OutputTokens,
+			detail.ReasoningTokens,
+			detail.TotalTokens,
+		)
+	default:
+		total := detail.TotalTokens
+		if total == 0 {
+			var okTotal bool
+			total, okTotal = nonNegativeSum(detail.InputTokens, detail.OutputTokens)
+			if !okTotal {
+				return inconsistentTokenBreakdown(detail.TotalTokens, 0)
+			}
+		}
+		return NewUnclassifiedTokenBreakdown(total)
+	}
+}
+
+func tokenAccountingSemanticsFor(provider, executorType string) tokenAccountingSemantics {
+	normalizedProvider := strings.ToLower(strings.TrimSpace(provider))
+	normalizedExecutor := strings.ToLower(strings.TrimSpace(executorType))
+	value := strings.TrimSpace(normalizedProvider + " " + normalizedExecutor)
+	if value == "" || value == "unknown" || value == "unknown unknown" {
+		return tokenAccountingSemanticsUnknown
+	}
+	if normalizedExecutor == "openaicompatexecutor" || normalizedProvider == "openai-compatibility" || strings.HasPrefix(normalizedProvider, "openai-compatible-") {
+		return tokenAccountingSemanticsSubset
+	}
+	if strings.Contains(value, "claude") || strings.Contains(value, "anthropic") {
+		return tokenAccountingSemanticsIndependent
+	}
+	for _, marker := range []string{"gemini", "aistudio", "antigravity", "vertex", "interaction"} {
+		if strings.Contains(value, marker) {
+			return tokenAccountingSemanticsSeparateReasoning
+		}
+	}
+	for _, marker := range []string{"openai", "codex", "xai", "grok", "kimi", "qwen", "deepseek", "openrouter"} {
+		if strings.Contains(value, marker) {
+			return tokenAccountingSemanticsSubset
+		}
+	}
+	return tokenAccountingSemanticsUnknown
 }
 
 func inconsistentTokenBreakdown(total, fallback int64) TokenBreakdown {
