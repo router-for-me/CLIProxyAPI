@@ -61,6 +61,8 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireStringField(t, payload, "service_tier", "auto")
 		requireMissingField(t, payload, "request_service_tier")
 		requireStringField(t, payload, "response_service_tier", "default")
+		requireIntField(t, payload, "accounting_version", coreusage.TokenAccountingSchemaVersion)
+		requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityUnclassified, 30)
 		requireTokensBoolField(t, payload, "cache_read_tokens_present", true)
 		requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
 		requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
@@ -394,6 +396,38 @@ func requireStringField(t *testing.T, payload map[string]json.RawMessage, key, w
 	}
 	if got != want {
 		t.Fatalf("%s = %q, want %q", key, got, want)
+	}
+}
+
+func requireIntField(t *testing.T, payload map[string]json.RawMessage, key string, want int) {
+	t.Helper()
+
+	raw, ok := payload[key]
+	if !ok {
+		t.Fatalf("payload missing %q", key)
+	}
+	var got int
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal %q: %v", key, err)
+	}
+	if got != want {
+		t.Fatalf("%s = %d, want %d", key, got, want)
+	}
+}
+
+func requireTokenBreakdown(t *testing.T, payload map[string]json.RawMessage, quality coreusage.TokenAccountingQuality, total int64) {
+	t.Helper()
+
+	raw, ok := payload["token_breakdown"]
+	if !ok {
+		t.Fatal("payload missing token_breakdown")
+	}
+	var breakdown coreusage.TokenBreakdown
+	if err := json.Unmarshal(raw, &breakdown); err != nil {
+		t.Fatalf("unmarshal token_breakdown: %v", err)
+	}
+	if !breakdown.Valid() || breakdown.Quality != quality || breakdown.TotalTokens != total {
+		t.Fatalf("token_breakdown = %+v, want quality=%s total=%d", breakdown, quality, total)
 	}
 }
 

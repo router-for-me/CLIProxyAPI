@@ -208,13 +208,7 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 }
 
 func normalizeUsageDetailTotal(detail usage.Detail) usage.Detail {
-	if detail.TotalTokens == 0 {
-		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
-		if total > 0 {
-			detail.TotalTokens = total
-		}
-	}
-	return detail
+	return usage.EnsureTokenBreakdown(detail)
 }
 
 func hasNonZeroTokenUsage(detail usage.Detail) bool {
@@ -224,7 +218,8 @@ func hasNonZeroTokenUsage(detail usage.Detail) bool {
 		detail.CachedTokens != 0 ||
 		detail.CacheReadTokens != 0 ||
 		detail.CacheCreationTokens != 0 ||
-		detail.TotalTokens != 0
+		detail.TotalTokens != 0 ||
+		detail.TokenBreakdown.TotalTokens != 0
 }
 
 // ensurePublished guarantees that a usage record is emitted exactly once.
@@ -610,6 +605,17 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if reasoning.Exists() {
 		detail.ReasoningTokens = reasoning.Int()
 	}
+	detail.TokenBreakdown = usage.NewSubsetTokenBreakdown(
+		detail.InputTokens,
+		detail.CacheReadTokens,
+		detail.CacheCreationTokens,
+		detail.OutputTokens,
+		detail.ReasoningTokens,
+		detail.TotalTokens,
+	)
+	if detail.TotalTokens == 0 {
+		detail.TotalTokens = detail.TokenBreakdown.TotalTokens
+	}
 	return detail
 }
 
@@ -665,6 +671,14 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		detail.CachedTokens = detail.CacheCreationTokens
 	}
 	detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.CacheReadTokens + detail.CacheCreationTokens
+	detail.TokenBreakdown = usage.NewIndependentTokenBreakdown(
+		detail.InputTokens,
+		detail.CacheReadTokens,
+		detail.CacheCreationTokens,
+		detail.OutputTokens,
+		detail.ReasoningTokens,
+		detail.TotalTokens,
+	)
 	return detail
 }
 
@@ -681,6 +695,14 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 	if detail.TotalTokens == 0 {
 		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
 	}
+	detail.TokenBreakdown = usage.NewSeparateReasoningTokenBreakdown(
+		detail.InputTokens,
+		detail.CacheReadTokens,
+		detail.CacheCreationTokens,
+		detail.OutputTokens,
+		detail.ReasoningTokens,
+		detail.TotalTokens,
+	)
 	return detail
 }
 
@@ -699,11 +721,16 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 		detail.CacheReadTokens = detail.CachedTokens
 	}
 	if detail.TotalTokens == 0 {
-		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CacheCreationTokens
-		if cacheRead.Exists() {
-			detail.TotalTokens += detail.CacheReadTokens
-		}
+		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
 	}
+	detail.TokenBreakdown = usage.NewSeparateReasoningTokenBreakdown(
+		detail.InputTokens,
+		detail.CacheReadTokens,
+		detail.CacheCreationTokens,
+		detail.OutputTokens,
+		detail.ReasoningTokens,
+		detail.TotalTokens,
+	)
 	return detail
 }
 

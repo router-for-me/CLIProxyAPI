@@ -12,16 +12,16 @@ import (
 )
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
-	data := []byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
+	data := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":6,"total_tokens":16,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
 	detail := ParseOpenAIUsage(data)
-	if detail.InputTokens != 1 {
-		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 1)
+	if detail.InputTokens != 10 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 10)
 	}
-	if detail.OutputTokens != 2 {
-		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 2)
+	if detail.OutputTokens != 6 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 6)
 	}
-	if detail.TotalTokens != 3 {
-		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 3)
+	if detail.TotalTokens != 16 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 16)
 	}
 	if detail.CachedTokens != 4 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 4)
@@ -31,6 +31,12 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	}
 	if detail.ReasoningTokens != 5 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 5)
+	}
+	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
+	if detail.TokenBreakdown.Input.UncachedTokens != 6 || detail.TokenBreakdown.Output.NonReasoningTokens != 1 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
 	}
 }
 
@@ -57,6 +63,9 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 	if detail.ResponseServiceTier != "default" {
 		t.Fatalf("response service tier = %q, want default", detail.ResponseServiceTier)
+	}
+	if detail.TokenBreakdown.Input.UncachedTokens != 3 || detail.TokenBreakdown.Output.NonReasoningTokens != 11 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
 	}
 }
 
@@ -86,6 +95,9 @@ func TestParseCodexUsageIncludesCacheWriteTokens(t *testing.T) {
 	}
 	if detail.ResponseServiceTier != "priority" {
 		t.Fatalf("response service tier = %q, want priority", detail.ResponseServiceTier)
+	}
+	if detail.TokenBreakdown.Input.UncachedTokens != 30 || detail.TokenBreakdown.Input.CacheWriteTokens != 40 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
 	}
 }
 
@@ -283,6 +295,9 @@ func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
 	if detail.TotalTokens != 22859 {
 		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 22859)
 	}
+	if detail.TokenBreakdown.Input.TotalTokens != 22606 || detail.TokenBreakdown.Input.UncachedTokens != 3085 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
 }
 
 func TestParseClaudeUsageFallsBackCachedTokensToCacheCreation(t *testing.T) {
@@ -303,6 +318,9 @@ func TestParseGeminiUsageNormalizesCachedContent(t *testing.T) {
 	}
 	if detail.CacheReadTokens != 4 {
 		t.Fatalf("cache read tokens = %d, want 4", detail.CacheReadTokens)
+	}
+	if detail.TokenBreakdown.Input.UncachedTokens != 6 || detail.TokenBreakdown.TotalTokens != 12 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
 	}
 }
 
@@ -325,6 +343,23 @@ func TestParseInteractionsUsage(t *testing.T) {
 	}
 	if detail.CacheReadTokens != 2 {
 		t.Fatalf("cache read tokens = %d, want 2", detail.CacheReadTokens)
+	}
+	if detail.TokenBreakdown.Input.UncachedTokens != 1 || detail.TokenBreakdown.Output.TotalTokens != 9 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
+}
+
+func TestNormalizeUsageDetailTotalDoesNotDoubleCountReasoning(t *testing.T) {
+	detail := normalizeUsageDetailTotal(usage.Detail{
+		InputTokens:     100,
+		OutputTokens:    30,
+		ReasoningTokens: 12,
+	})
+	if detail.TotalTokens != 130 {
+		t.Fatalf("total tokens = %d, want 130", detail.TotalTokens)
+	}
+	if detail.TokenBreakdown.Quality != usage.TokenAccountingQualityUnclassified || detail.TokenBreakdown.UnclassifiedTokens != 130 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
 	}
 }
 
