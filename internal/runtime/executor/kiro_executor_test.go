@@ -476,6 +476,41 @@ func TestMapModelToKiro_MapsClaudeOpus47Variants(t *testing.T) {
 			expected: "minimax-m2.5",
 		},
 		{
+			name:     "gpt version with trailing codename (terra)",
+			model:    "kiro-gpt-5-6-terra",
+			expected: "gpt-5.6-terra",
+		},
+		{
+			name:     "gpt version with trailing codename (sol)",
+			model:    "kiro-gpt-5-6-sol",
+			expected: "gpt-5.6-sol",
+		},
+		{
+			name:     "gpt version with trailing codename (luna)",
+			model:    "kiro-gpt-5-6-luna",
+			expected: "gpt-5.6-luna",
+		},
+		{
+			name:     "kimi version with trailing codename",
+			model:    "kiro-kimi-k2-7-code",
+			expected: "kimi-k2.7-code",
+		},
+		{
+			name:     "deepseek versioned",
+			model:    "kiro-deepseek-3-2",
+			expected: "deepseek-3.2",
+		},
+		{
+			name:     "grok version keeps trailing build segment",
+			model:    "kiro-grok-4-20-0309-reasoning",
+			expected: "grok-4.20-0309-reasoning",
+		},
+		{
+			name:     "single digit segment left alone",
+			model:    "kiro-claude-sonnet-5",
+			expected: "claude-sonnet-5",
+		},
+		{
 			name:     "identifier without trailing version unchanged",
 			model:    "kiro-qwen3-coder-next",
 			expected: "qwen3-coder-next",

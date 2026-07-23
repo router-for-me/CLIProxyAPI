@@ -1585,34 +1585,33 @@ func trimKiroDateSuffix(s string) string {
 	return s[:len(s)-9]
 }
 
-// normalizeKiroVersion converts a trailing "-<digit>" pair to a dot-separated
-// version. For example:
+// normalizeKiroVersion converts the version separator from a dash to a dot.
+// The version separator is the FIRST dash that sits directly between two
+// digits (i.e. "<digit>-<digit>"), since that is how Kiro encodes the
+// "major.minor" version in its backend IDs. For example:
 //   - "claude-sonnet-4-5"   → "claude-sonnet-4.5"
 //   - "claude-opus-4-7"     → "claude-opus-4.7"
+//   - "gpt-5-6-terra"       → "gpt-5.6-terra" (version sits mid-identifier)
 //   - "minimax-m2-1"        → "minimax-m2.1" (the "m2" retains its digit)
-//   - "qwen3-coder-next"    → "qwen3-coder-next" (no trailing digit pair)
-//   - "glm-5"               → "glm-5" (only one digit segment; left alone)
+//   - "kimi-k2-7-code"      → "kimi-k2.7-code"
+//   - "qwen3-coder-next"    → "qwen3-coder-next" (no digit-dash-digit pair)
+//   - "glm-5"               → "glm-5" (single digit segment; left alone)
+//   - "claude-sonnet-5"     → "claude-sonnet-5" (dash is letter-digit)
 //
-// The rule: if the last dash-separated segment is all digits AND the
-// second-to-last segment ends with a digit, replace that last dash with a dot.
+// Only the first such dash is rewritten so that trailing build/date segments
+// like "grok-4-20-0309" collapse to "grok-4.20-0309" rather than eating the
+// "-0309" separator too.
 func normalizeKiroVersion(s string) string {
-	lastDash := strings.LastIndex(s, "-")
-	if lastDash <= 0 || lastDash == len(s)-1 {
-		return s
-	}
-	tail := s[lastDash+1:]
-	for _, r := range tail {
-		if r < '0' || r > '9' {
-			return s
+	for i := 1; i < len(s)-1; i++ {
+		if s[i] != '-' {
+			continue
+		}
+		prev, next := s[i-1], s[i+1]
+		if prev >= '0' && prev <= '9' && next >= '0' && next <= '9' {
+			return s[:i] + "." + s[i+1:]
 		}
 	}
-	// Require the preceding character to be a digit — otherwise we'd rewrite
-	// "glm-5" into "glm.5" which isn't a backend ID Kiro recognizes.
-	prev := s[lastDash-1]
-	if prev < '0' || prev > '9' {
-		return s
-	}
-	return s[:lastDash] + "." + tail
+	return s
 }
 
 // EventStreamError represents an Event Stream processing error
