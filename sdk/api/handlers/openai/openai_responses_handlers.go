@@ -485,7 +485,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	// New core execution path
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -495,50 +494,50 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	}
 	framer := &responsesSSEFramer{}
 
-	// Peek at the first chunk
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			cliCancel(c.Request.Context().Err())
-			return
-		case errMsg, ok := <-errChan:
-			if !ok {
-				// Err channel closed cleanly; wait for data channel.
-				errChan = nil
-				continue
+	h.BootstrapStream(c, flusher, handlers.StreamBootstrapOptions{
+		Execute: func() (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+			return h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+		},
+		SetSSEHeaders: setSSEHeaders,
+		WriteCommittedError: func(errMsg *interfaces.ErrorMessage) []byte {
+			framer.Flush(c.Writer)
+			if errMsg == nil {
+				return nil
 			}
-			// Upstream failed immediately. Return proper error status and JSON.
-			h.WriteErrorResponse(c, errMsg)
-			if errMsg != nil {
-				cliCancel(errMsg.Error)
-			} else {
-				cliCancel(nil)
+			status := http.StatusInternalServerError
+			if errMsg.StatusCode > 0 {
+				status = errMsg.StatusCode
 			}
-			return
-		case chunk, ok := <-dataChan:
-			if !ok {
-				// Stream closed without data? Send headers and done.
+			errText := http.StatusText(status)
+			if errMsg.Error != nil && errMsg.Error.Error() != "" {
+				errText = errMsg.Error.Error()
+			}
+			chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
+			_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
+			return chunk
+		},
+		WriteUncommittedError: func(errMsg *interfaces.ErrorMessage) { h.WriteErrorResponse(c, errMsg) },
+		OnFirstChunk: func(headersCommitted bool, upstreamHeaders http.Header, chunk []byte) {
+			if !headersCommitted {
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				_, _ = c.Writer.Write([]byte("\n"))
-				flusher.Flush()
-				cliCancel(nil)
-				return
 			}
-
-			// Success! Set headers.
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-
 			// Write first chunk logic (matching forwardResponsesStream)
 			framer.WriteChunk(c.Writer, chunk)
 			flusher.Flush()
-
-			// Continue
-			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
-			return
-		}
-	}
+		},
+		OnStreamClosedWithoutData: func(headersCommitted bool, upstreamHeaders http.Header) {
+			if !headersCommitted {
+				setSSEHeaders()
+				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			}
+			_, _ = c.Writer.Write([]byte("\n"))
+		},
+		Forward: func(data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, data, errs, framer)
+		},
+		Cancel: func(err error) { cliCancel(err) },
+	})
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
