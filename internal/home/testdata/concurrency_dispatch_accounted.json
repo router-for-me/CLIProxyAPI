@@ -1,0 +1,27 @@
+{
+  "model": "gpt",
+  "provider": "codex",
+  "auth_index": "cred-1",
+  "user_api_key": "user-key",
+  "auth": {
+    "id": "cred-1",
+    "provider": "codex",
+    "status": "active",
+    "disabled": false,
+    "unavailable": false,
+    "quota": {
+      "exceeded": false,
+      "next_recover_at": "0001-01-01T00:00:00Z"
+    },
+    "created_at": "0001-01-01T00:00:00Z",
+    "updated_at": "0001-01-01T00:00:00Z",
+    "last_refreshed_at": "0001-01-01T00:00:00Z",
+    "next_refresh_after": "0001-01-01T00:00:00Z",
+    "next_retry_after": "0001-01-01T00:00:00Z"
+  },
+  "concurrency": {
+    "accounted": true,
+    "credential_id": "cred-1",
+    "model": "gpt"
+  }
+}

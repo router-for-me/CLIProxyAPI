@@ -6,8 +6,6 @@ package cliproxy
 import (
 	"context"
 	"fmt"
-	"strings"
-	"time"
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
@@ -229,42 +227,16 @@ func (b *Builder) Build() (*Service, error) {
 	accessManager.SetProviders(sdkaccess.RegisteredProviders())
 
 	coreManager := b.coreManager
+	var appliedRoutingState *routingRuntimeState
 	if coreManager == nil {
 		tokenStore := sdkAuth.GetTokenStore()
 		if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok && b.cfg != nil {
 			dirSetter.SetBaseDir(b.cfg.AuthDir)
 		}
 
-		strategy := ""
-		sessionAffinity := false
-		sessionAffinityTTL := time.Hour
-		if b.cfg != nil {
-			strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
-			// Support both legacy ClaudeCodeSessionAffinity and new universal SessionAffinity
-			sessionAffinity = b.cfg.Routing.SessionAffinity
-			if ttlStr := strings.TrimSpace(b.cfg.Routing.SessionAffinityTTL); ttlStr != "" {
-				if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
-					sessionAffinityTTL = parsed
-				}
-			}
-		}
-		var selector coreauth.Selector
-		switch strategy {
-		case "fill-first", "fillfirst", "ff":
-			selector = &coreauth.FillFirstSelector{}
-		default:
-			selector = &coreauth.RoundRobinSelector{}
-		}
-
-		// Wrap with session affinity if enabled (failover is always on)
-		if sessionAffinity {
-			selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
-				Fallback: selector,
-				TTL:      sessionAffinityTTL,
-			})
-		}
-
-		coreManager = coreauth.NewManager(tokenStore, selector, nil)
+		routingState := normalizedRoutingRuntimeState(b.cfg)
+		coreManager = coreauth.NewManager(tokenStore, newRoutingSelector(routingState), nil)
+		appliedRoutingState = &routingState
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
@@ -275,17 +247,18 @@ func (b *Builder) Build() (*Service, error) {
 	}
 
 	service := &Service{
-		cfg:            b.cfg,
-		configPath:     b.configPath,
-		tokenProvider:  tokenProvider,
-		apiKeyProvider: apiKeyProvider,
-		watcherFactory: watcherFactory,
-		hooks:          b.hooks,
-		authManager:    authManager,
-		accessManager:  accessManager,
-		coreManager:    coreManager,
-		pluginHost:     pluginHost,
-		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
+		cfg:                 b.cfg,
+		configPath:          b.configPath,
+		tokenProvider:       tokenProvider,
+		apiKeyProvider:      apiKeyProvider,
+		watcherFactory:      watcherFactory,
+		hooks:               b.hooks,
+		authManager:         authManager,
+		accessManager:       accessManager,
+		coreManager:         coreManager,
+		pluginHost:          pluginHost,
+		appliedRoutingState: appliedRoutingState,
+		serverOptions:       append([]api.ServerOption(nil), b.serverOptions...),
 	}
 	if b.postAuthHook != nil {
 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))

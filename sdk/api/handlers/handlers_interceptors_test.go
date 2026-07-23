@@ -840,7 +840,7 @@ func TestHandlerStreamInterceptorKeepsReturnedHeadersStableAfterFirstPayload(t *
 		t.Fatalf("first chunk = %q, want first", firstChunk)
 	}
 	if upstreamHeaders.Get("X-Chunk") != "first" || upstreamHeaders.Get("X-Stage") != "init" {
-		t.Fatalf("upstream headers after first chunk = %#v, want first chunk headers", upstreamHeaders)
+		t.Fatalf("upstream headers after first chunk = %#v, want first transformed chunk headers", upstreamHeaders)
 	}
 
 	close(releaseSecond)
@@ -857,7 +857,80 @@ func TestHandlerStreamInterceptorKeepsReturnedHeadersStableAfterFirstPayload(t *
 		t.Fatalf("stream payload = %q, want firstsecond", got)
 	}
 	if upstreamHeaders.Get("X-Chunk") != "first" {
-		t.Fatalf("upstream headers changed after first payload: %#v", upstreamHeaders)
+		t.Fatalf("upstream headers changed after return: %#v", upstreamHeaders)
+	}
+}
+
+func TestHandlerStreamInterceptorReturnedHeadersImmutableAfterReturn(t *testing.T) {
+	model := "handler-interceptor-stream-immutable-headers-model"
+	releaseSecond := make(chan struct{})
+	bodyStarted := make(chan struct{})
+	releaseBody := make(chan struct{})
+	executor := &interceptorCaptureExecutor{
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk)
+			go func() {
+				defer close(chunks)
+				chunks <- coreexecutor.StreamChunk{Payload: []byte("first")}
+				<-releaseSecond
+				chunks <- coreexecutor.StreamChunk{Payload: []byte("second")}
+			}()
+			return &coreexecutor.StreamResult{
+				Headers: http.Header{"X-Upstream": []string{"stream"}},
+				Chunks:  chunks,
+			}, nil
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{PassthroughHeaders: true})
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			headers := cloneHeader(req.ResponseHeaders)
+			switch req.ChunkIndex {
+			case pluginapi.StreamChunkHeaderInitIndex:
+				headers.Set("X-Init", "plugin")
+			case 1:
+				close(bodyStarted)
+				<-releaseBody
+				headers.Set("X-Body", "plugin")
+			}
+			return pluginapi.StreamChunkInterceptResponse{Headers: headers, Body: cloneBytes(req.Body)}
+		},
+	})
+
+	dataChan, upstreamHeaders, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+	dataDone := make(chan struct{})
+	go func() {
+		defer close(dataDone)
+		for range dataChan {
+		}
+	}()
+	stopReading := make(chan struct{})
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			select {
+			case <-stopReading:
+				return
+			default:
+				_ = upstreamHeaders.Get("X-Init")
+			}
+		}
+	}()
+
+	close(releaseSecond)
+	<-bodyStarted
+	close(releaseBody)
+	<-dataDone
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	close(stopReading)
+	<-readerDone
+	if upstreamHeaders.Get("X-Init") != "plugin" || upstreamHeaders.Get("X-Body") != "" {
+		t.Fatalf("returned headers mutated after return: %#v", upstreamHeaders)
 	}
 }
 

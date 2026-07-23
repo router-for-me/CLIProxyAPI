@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +38,9 @@ func TestAuthDispatchRequestIncludesCount(t *testing.T) {
 	}
 	if got := int(payload["count"].(float64)); got != 2 {
 		t.Fatalf("count = %d, want 2", got)
+	}
+	if got := int(payload["concurrency_protocol"].(float64)); got != 1 {
+		t.Fatalf("concurrency_protocol = %d, want 1", got)
 	}
 }
 
@@ -194,6 +198,66 @@ func TestBuildKVSetArgs(t *testing.T) {
 	}
 	if _, errConflict := buildKVSetArgs("key", []byte("value"), KVSetOptions{NX: true, XX: true}); errConflict == nil {
 		t.Fatalf("buildKVSetArgs(NX XX) error = nil, want error")
+	}
+}
+
+func TestClientLPushInFlightSnapshotUsesDedicatedKeyWithoutChangingHeartbeat(t *testing.T) {
+	client, commands := newRedisCommandTestClient(t, func(args []string) string {
+		if len(args) > 0 && strings.EqualFold(args[0], "LPUSH") {
+			return ":1\r\n"
+		}
+		return "-ERR unexpected command\r\n"
+	})
+	client.heartbeatOK.Store(true)
+
+	if errPush := client.LPushInFlightSnapshot(context.Background(), []byte(`{"revision":1}`)); errPush != nil {
+		t.Fatalf("LPushInFlightSnapshot() error = %v", errPush)
+	}
+	if !client.HeartbeatOK() {
+		t.Fatal("LPushInFlightSnapshot() changed heartbeat state")
+	}
+	last := commands.Last()
+	if len(last) != 3 || !strings.EqualFold(last[0], "LPUSH") || last[1] != redisKeyInFlightSnapshot || last[2] != `{"revision":1}` {
+		t.Fatalf("LPushInFlightSnapshot() command = %#v", last)
+	}
+}
+
+func TestClientPushConcurrencyReleaseUsesIndependentClient(t *testing.T) {
+	client, commands := newRedisCommandTestClient(t, func(args []string) string {
+		if len(args) > 0 && strings.EqualFold(args[0], "LPUSH") {
+			return ":1\r\n"
+		}
+		return "-ERR unexpected command\r\n"
+	})
+	commandClient := client.cmd
+
+	frame := concurrencyReleaseFrameFromFixture(t)
+	if errPush := client.PushConcurrencyRelease(context.Background(), frame); errPush != nil {
+		t.Fatalf("PushConcurrencyRelease() error = %v", errPush)
+	}
+	if client.release == nil || client.release == commandClient {
+		t.Fatal("PushConcurrencyRelease() did not create an independent client")
+	}
+	last := commands.Last()
+	if want := []string{"LPUSH", redisKeyConcurrencyRelease, `{"credential_id":"cred-1","model":"gpt","release_seq":1}`}; !reflect.DeepEqual(last, want) {
+		t.Fatalf("PushConcurrencyRelease() command = %#v, want %#v", last, want)
+	}
+}
+
+func TestClientLPushInFlightSnapshotErrorKeepsHeartbeat(t *testing.T) {
+	client, _ := newRedisCommandTestClient(t, func(args []string) string {
+		if len(args) > 0 && strings.EqualFold(args[0], "LPUSH") {
+			return "-ERR unavailable\r\n"
+		}
+		return "-ERR unexpected command\r\n"
+	})
+	client.heartbeatOK.Store(true)
+
+	if errPush := client.LPushInFlightSnapshot(context.Background(), []byte(`{"revision":1}`)); errPush == nil {
+		t.Fatal("LPushInFlightSnapshot() error = nil")
+	}
+	if !client.HeartbeatOK() {
+		t.Fatal("LPushInFlightSnapshot() changed heartbeat state after an error")
 	}
 }
 
@@ -666,12 +730,34 @@ func (l *redisCommandLog) Last() []string {
 	return append([]string(nil), l.commands[len(l.commands)-1]...)
 }
 
+func (l *redisCommandLog) All() [][]string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([][]string, len(l.commands))
+	for index := range l.commands {
+		out[index] = append([]string(nil), l.commands[index]...)
+	}
+	return out
+}
+
 func (l *redisCommandLog) CountKey(key string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	count := 0
 	for _, command := range l.commands {
 		if len(command) >= 2 && command[1] == key {
+			count++
+		}
+	}
+	return count
+}
+
+func (l *redisCommandLog) CountCommandKey(commandName string, key string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	count := 0
+	for _, command := range l.commands {
+		if len(command) >= 2 && strings.EqualFold(command[0], commandName) && command[1] == key {
 			count++
 		}
 	}
@@ -734,6 +820,85 @@ func newRedisCommandTestClient(t *testing.T, handler func([]string) string) (*Cl
 		client.Close()
 	})
 	return client, log
+}
+
+func newBlockingRPopTestClient(t *testing.T) (*Client, <-chan struct{}, chan struct{}) {
+	t.Helper()
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen: %v", errListen)
+	}
+	requestRead := make(chan struct{})
+	release := make(chan struct{})
+	serverDone := make(chan struct{})
+	var handlers sync.WaitGroup
+	go func() {
+		defer close(serverDone)
+		for {
+			conn, errAccept := listener.Accept()
+			if errAccept != nil {
+				return
+			}
+			handlers.Add(1)
+			go func(conn net.Conn) {
+				defer handlers.Done()
+				defer func() { _ = conn.Close() }()
+				reader := bufio.NewReader(conn)
+				for {
+					args, errRead := readRedisCommand(reader)
+					if errRead != nil {
+						return
+					}
+					if len(args) > 0 && strings.EqualFold(args[0], "HELLO") {
+						if _, errWrite := io.WriteString(conn, "%6\r\n$6\r\nserver\r\n$5\r\nredis\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n:1\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n"); errWrite != nil {
+							return
+						}
+						continue
+					}
+					if len(args) > 0 && strings.EqualFold(args[0], "RPOP") {
+						select {
+						case <-requestRead:
+						default:
+							close(requestRead)
+						}
+						<-release
+						return
+					}
+					if _, errWrite := io.WriteString(conn, "+OK\r\n"); errWrite != nil {
+						return
+					}
+				}
+			}(conn)
+		}
+	}()
+
+	options := &redis.Options{
+		Addr:                  listener.Addr().String(),
+		Protocol:              2,
+		DisableIdentity:       true,
+		DialTimeout:           time.Second,
+		ReadTimeout:           time.Second,
+		WriteTimeout:          time.Second,
+		MaxRetries:            -1,
+		ContextTimeoutEnabled: true,
+	}
+	client := New(config.HomeConfig{Enabled: true, Host: "127.0.0.1", Port: 1, DisableClusterDiscovery: true})
+	options.Dialer = client.trackedRedisDialer(redis.NewDialer(options))
+	client.cmdOptions = cloneRedisOptions(options)
+	client.cmd = redis.NewClient(options)
+	client.sub = redis.NewClient(cloneRedisOptions(options))
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		client.Close()
+		_ = listener.Close()
+		<-serverDone
+		handlers.Wait()
+	})
+	return client, requestRead, release
 }
 
 func serveRedisCommandTestConn(conn net.Conn, log *redisCommandLog, handler func([]string) string) {
@@ -863,4 +1028,757 @@ func TestQueryToLowerMap(t *testing.T) {
 	if nilMap := queryToLowerMap(nil); nilMap != nil {
 		t.Fatalf("queryToLowerMap(nil) = %v, want nil", nilMap)
 	}
+}
+
+func TestClientSetLifecycleConfigAcceptsHomeAuthoritativeHeartbeat(t *testing.T) {
+	client := New(config.HomeConfig{Enabled: true, Host: "127.0.0.1", Port: 6379})
+	cfg := (config.CredentialConcurrencyConfig{}).WithDefaults()
+	cfg.CPAHeartbeatTimeout = 20 * time.Second
+
+	if errSet := client.SetLifecycleConfig(cfg); errSet != nil {
+		t.Fatalf("SetLifecycleConfig() error = %v", errSet)
+	}
+	if got := client.LimiterConfig().CPAHeartbeatTimeout; got != cfg.CPAHeartbeatTimeout {
+		t.Fatalf("LimiterConfig().CPAHeartbeatTimeout = %s, want %s", got, cfg.CPAHeartbeatTimeout)
+	}
+}
+
+func TestConfigSubscriberUsesAppliedLifecycleRevisionAndRebuildsCommands(t *testing.T) {
+	client := New(config.HomeConfig{Enabled: true, Host: "127.0.0.1", Port: 6379})
+	client.mu.Lock()
+	client.cmd = redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
+	client.mu.Unlock()
+	if errSet := client.SetLifecycleConfig(config.CredentialConcurrencyConfig{
+		LifecycleConfigRevision: 9,
+		CPAHeartbeatTimeout:     4 * time.Second,
+		CPACancelBound:          5 * time.Second,
+	}); errSet != nil {
+		t.Fatalf("SetLifecycleConfig() error = %v", errSet)
+	}
+	args, timeout := client.subscriptionParameters()
+	if !reflect.DeepEqual(args, []string{"config", "9"}) {
+		t.Fatalf("subscribe args = %#v", args)
+	}
+	if timeout != 4*time.Second {
+		t.Fatalf("receive timeout = %s", timeout)
+	}
+	client.promoteSubscription()
+	client.mu.Lock()
+	commandClient := client.cmd
+	client.mu.Unlock()
+	if commandClient != nil {
+		t.Fatal("bootstrap command client was retained after subscription")
+	}
+}
+
+func TestRunConfigSubscriberLifetimeReturnsAfterHeartbeatLoss(t *testing.T) {
+	configPayload := "credential-concurrency:\n  lifecycle-config-revision: 1\n  cpa-heartbeat-timeout: 20ms\n"
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen: %v", errListen)
+	}
+	commands := &redisCommandLog{}
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		for {
+			conn, errAccept := listener.Accept()
+			if errAccept != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				reader := bufio.NewReader(conn)
+				for {
+					args, errRead := readRedisCommand(reader)
+					if errRead != nil {
+						return
+					}
+					commands.Append(args)
+					switch {
+					case len(args) >= 1 && strings.EqualFold(args[0], "HELLO"):
+						if _, errWrite := io.WriteString(conn, "%6\r\n$6\r\nserver\r\n$5\r\nredis\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n:1\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n"); errWrite != nil {
+							return
+						}
+					case len(args) >= 2 && strings.EqualFold(args[0], "GET") && args[1] == redisKeyConfig:
+						if _, errWrite := io.WriteString(conn, fmt.Sprintf("$%d\r\n%s\r\n", len(configPayload), configPayload)); errWrite != nil {
+							return
+						}
+					case len(args) >= 2 && strings.EqualFold(args[0], "SUBSCRIBE") && args[1] == redisChannelConfig:
+						if _, errWrite := io.WriteString(conn, "*3\r\n$9\r\nsubscribe\r\n$6\r\nconfig\r\n:1\r\n"); errWrite != nil {
+							return
+						}
+					default:
+						if _, errWrite := io.WriteString(conn, "+OK\r\n"); errWrite != nil {
+							return
+						}
+					}
+				}
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		<-serverDone
+	})
+
+	host, portText, errSplit := net.SplitHostPort(listener.Addr().String())
+	if errSplit != nil {
+		t.Fatalf("split listener address: %v", errSplit)
+	}
+	port, errPort := strconv.Atoi(portText)
+	if errPort != nil {
+		t.Fatalf("parse listener port: %v", errPort)
+	}
+	client := New(config.HomeConfig{Enabled: true, Host: host, Port: port, DisableClusterDiscovery: true})
+
+	ready := make(chan struct{}, 1)
+	errRun := client.RunConfigSubscriberLifetime(context.Background(), func(raw []byte) error {
+		parsed, errParse := config.ParseConfigBytes(raw)
+		if errParse != nil {
+			return errParse
+		}
+		if errSet := client.SetLifecycleConfig(parsed.CredentialConcurrency); errSet != nil {
+			return errSet
+		}
+		return nil
+	}, func() { ready <- struct{}{} })
+	if errRun == nil {
+		t.Fatal("RunConfigSubscriberLifetime() error = nil after heartbeat loss")
+	}
+	select {
+	case <-ready:
+	default:
+		t.Fatalf("RunConfigSubscriberLifetime() did not invoke onReady after subscription ACK: %v; commands=%#v", errRun, commands.All())
+	}
+	if client.HeartbeatOK() {
+		t.Fatal("HeartbeatOK() = true after heartbeat loss")
+	}
+	client.mu.Lock()
+	commandClient, subscriptionClient := client.cmd, client.sub
+	client.mu.Unlock()
+	if commandClient != nil || subscriptionClient != nil {
+		t.Fatalf("clients retained after heartbeat loss: command=%v subscription=%v", commandClient != nil, subscriptionClient != nil)
+	}
+	if count := commands.CountCommandKey("GET", redisKeyConfig); count != 1 {
+		t.Fatalf("GET config count = %d, want 1", count)
+	}
+	if count := commands.CountCommandKey("SUBSCRIBE", redisChannelConfig); count != 1 {
+		t.Fatalf("SUBSCRIBE config count = %d, want 1", count)
+	}
+	if got := findRedisCommand(commands.All(), "SUBSCRIBE"); !reflect.DeepEqual(got, []string{"subscribe", "config", "1"}) {
+		t.Fatalf("SUBSCRIBE wire command = %#v, want []string{\"subscribe\", \"config\", \"1\"}", got)
+	}
+}
+
+func TestRunConfigSubscriberLifetimeRejectsInvalidSubscriptionACK(t *testing.T) {
+	for name, ack := range map[string]string{
+		"message":       "*3\r\n$7\r\nmessage\r\n$6\r\nconfig\r\n$2\r\n{}\r\n",
+		"wrong-channel": "*3\r\n$9\r\nsubscribe\r\n$5\r\nother\r\n:1\r\n",
+		"wrong-count":   "*3\r\n$9\r\nsubscribe\r\n$6\r\nconfig\r\n:2\r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			client, commands := newRedisCommandTestClient(t, func(args []string) string {
+				switch {
+				case len(args) >= 1 && strings.EqualFold(args[0], "HELLO"):
+					return "%6\r\n$6\r\nserver\r\n$5\r\nredis\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n:1\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n"
+				case len(args) >= 2 && strings.EqualFold(args[0], "GET") && args[1] == redisKeyConfig:
+					return "$16\r\nhost: 127.0.0.1\r\n"
+				case len(args) >= 2 && strings.EqualFold(args[0], "SUBSCRIBE") && args[1] == redisChannelConfig:
+					return ack
+				default:
+					return "+OK\r\n"
+				}
+			})
+			errRun := client.RunConfigSubscriberLifetime(context.Background(), func([]byte) error { return nil }, nil)
+			if errRun == nil {
+				t.Fatal("RunConfigSubscriberLifetime() error = nil, want invalid ACK rejection")
+			}
+			if command := findRedisCommand(commands.All(), "PING"); command != nil {
+				t.Fatalf("PING command = %#v, want no command pool exposure before valid ACK", command)
+			}
+		})
+	}
+}
+
+func TestReceiveSubscriptionACKsForMultipleChannels(t *testing.T) {
+	firstACK := "*3\r\n$9\r\nsubscribe\r\n$5\r\nfirst\r\n:1\r\n"
+	secondACK := "*3\r\n$9\r\nsubscribe\r\n$6\r\nsecond\r\n:2\r\n"
+	tests := []struct {
+		name     string
+		response string
+		wantErr  bool
+	}{
+		{name: "ordered final count", response: firstACK + secondACK},
+		{name: "missing final ACK", response: firstACK, wantErr: true},
+		{name: "wrong second channel", response: firstACK + "*3\r\n$9\r\nsubscribe\r\n$5\r\nother\r\n:2\r\n", wantErr: true},
+		{name: "wrong second kind", response: firstACK + "*3\r\n$11\r\nunsubscribe\r\n$6\r\nsecond\r\n:2\r\n", wantErr: true},
+		{name: "wrong second count", response: firstACK + "*3\r\n$9\r\nsubscribe\r\n$6\r\nsecond\r\n:1\r\n", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, _ := newRedisCommandTestClient(t, func(args []string) string {
+				switch {
+				case len(args) >= 1 && strings.EqualFold(args[0], "HELLO"):
+					return "%6\r\n$6\r\nserver\r\n$5\r\nredis\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n:1\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n"
+				case len(args) == 3 && strings.EqualFold(args[0], "SUBSCRIBE") && args[1] == "first" && args[2] == "second":
+					return tt.response
+				default:
+					return "-ERR unexpected command\r\n"
+				}
+			})
+			pubsub := client.cmd.Subscribe(context.Background(), "first", "second")
+			t.Cleanup(func() {
+				if errClose := pubsub.Close(); errClose != nil {
+					t.Errorf("close PubSub: %v", errClose)
+				}
+			})
+
+			errACK := receiveSubscriptionACKs(context.Background(), pubsub, homeRedisTestOperationTimeout, []string{"first", "second"})
+			if (errACK != nil) != tt.wantErr {
+				t.Fatalf("receiveSubscriptionACKs() error = %v, wantErr %t", errACK, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestRunConfigSubscriberLifetimeRejectsNonPositiveLifecycleDuration(t *testing.T) {
+	configPayload := "credential-concurrency:\n" +
+		"  lifecycle-config-revision: 1\n" +
+		"  cpa-heartbeat-timeout: 0s\n" +
+		"  cpa-cancel-bound: 5s\n" +
+		"  reclaim-grace: 5s\n" +
+		"  cleanup-interval: 5s\n"
+	client, commands := newRedisCommandTestClient(t, func(args []string) string {
+		switch {
+		case len(args) >= 1 && strings.EqualFold(args[0], "HELLO"):
+			return "%6\r\n$6\r\nserver\r\n$5\r\nredis\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n:1\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n"
+		case len(args) >= 2 && strings.EqualFold(args[0], "GET") && args[1] == redisKeyConfig:
+			return fmt.Sprintf("$%d\r\n%s\r\n", len(configPayload), configPayload)
+		case len(args) >= 2 && strings.EqualFold(args[0], "SUBSCRIBE") && args[1] == redisChannelConfig:
+			return "*3\r\n$9\r\nsubscribe\r\n$6\r\nconfig\r\n:1\r\n"
+		default:
+			return "+OK\r\n"
+		}
+	})
+
+	errRun := client.RunConfigSubscriberLifetime(context.Background(), func(raw []byte) error {
+		parsed, errParse := config.ParseConfigBytes(raw)
+		if errParse != nil {
+			return errParse
+		}
+		return client.SetLifecycleConfig(parsed.CredentialConcurrency)
+	}, nil)
+	if errRun == nil {
+		t.Fatal("RunConfigSubscriberLifetime() error = nil, want invalid lifecycle duration rejection")
+	}
+	if got := findRedisCommand(commands.All(), "SUBSCRIBE"); got != nil {
+		t.Fatalf("SUBSCRIBE wire command = %#v, want no subscription after invalid GET config", got)
+	}
+}
+
+func TestRunConfigSubscriberLifetimeRejectsExplicitInvalidLifecycleConfig(t *testing.T) {
+	configPayload := "credential-concurrency:\n" +
+		"  lifecycle-config-revision: 0\n" +
+		"  cpa-heartbeat-timeout: 20ms\n" +
+		"  cpa-cancel-bound: 5s\n" +
+		"  reclaim-grace: 5s\n" +
+		"  cleanup-interval: 5s\n"
+	client, commands := newRedisCommandTestClient(t, func(args []string) string {
+		switch {
+		case len(args) >= 1 && strings.EqualFold(args[0], "HELLO"):
+			return "%6\r\n$6\r\nserver\r\n$5\r\nredis\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n:1\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n"
+		case len(args) >= 2 && strings.EqualFold(args[0], "GET") && args[1] == redisKeyConfig:
+			return fmt.Sprintf("$%d\r\n%s\r\n", len(configPayload), configPayload)
+		case len(args) >= 2 && strings.EqualFold(args[0], "SUBSCRIBE") && args[1] == redisChannelConfig:
+			return "*3\r\n$9\r\nsubscribe\r\n$6\r\nconfig\r\n:1\r\n"
+		default:
+			return "+OK\r\n"
+		}
+	})
+
+	errRun := client.RunConfigSubscriberLifetime(context.Background(), func(raw []byte) error {
+		parsed, errParse := config.ParseConfigBytes(raw)
+		if errParse != nil {
+			return errParse
+		}
+		return client.SetLifecycleConfig(parsed.CredentialConcurrency)
+	}, nil)
+	if errRun == nil {
+		t.Fatal("RunConfigSubscriberLifetime() error = nil, want invalid lifecycle config rejection")
+	}
+	if got := findRedisCommand(commands.All(), "SUBSCRIBE"); got != nil {
+		t.Fatalf("SUBSCRIBE wire command = %#v, want no subscription after invalid GET config", got)
+	}
+}
+
+type blockingSubscriptionCloser struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (c *blockingSubscriptionCloser) Close() error {
+	close(c.started)
+	<-c.release
+	return nil
+}
+
+func TestEndConfigSubscriberLifetimeClearsHeartbeatBeforeCloseBlocks(t *testing.T) {
+	client := New(config.HomeConfig{Enabled: true})
+	client.heartbeatOK.Store(true)
+	closer := &blockingSubscriptionCloser{started: make(chan struct{}), release: make(chan struct{})}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.endConfigSubscriberLifetimeWithSubscription(errors.New("heartbeat lost"), closer, "heartbeat loss")
+	}()
+
+	select {
+	case <-closer.started:
+	case <-time.After(time.Second):
+		t.Fatal("subscription close did not start")
+	}
+	if client.heartbeatOK.Load() {
+		close(closer.release)
+		t.Fatal("HeartbeatOK() remained true while subscription close was blocked")
+	}
+	select {
+	case errEnd := <-done:
+		close(closer.release)
+		t.Fatalf("endConfigSubscriberLifetimeWithSubscription() returned before subscription close unblocked: %v", errEnd)
+	default:
+	}
+	close(closer.release)
+	if errEnd := <-done; errEnd == nil {
+		t.Fatal("endConfigSubscriberLifetimeWithSubscription() error = nil, want heartbeat loss")
+	}
+}
+
+func TestRunConfigSubscriberLifetimeUsesLegacySubscribeWithoutLifecycleConfig(t *testing.T) {
+	configPayload := "host: 127.0.0.1\n"
+	client, commands := newRedisCommandTestClient(t, func(args []string) string {
+		switch {
+		case len(args) >= 1 && strings.EqualFold(args[0], "HELLO"):
+			return "%6\r\n$6\r\nserver\r\n$5\r\nredis\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n:1\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n"
+		case len(args) >= 2 && strings.EqualFold(args[0], "GET") && args[1] == redisKeyConfig:
+			return fmt.Sprintf("$%d\r\n%s\r\n", len(configPayload), configPayload)
+		case len(args) >= 2 && strings.EqualFold(args[0], "SUBSCRIBE") && args[1] == redisChannelConfig:
+			return "*3\r\n$9\r\nsubscribe\r\n$6\r\nconfig\r\n:1\r\n"
+		default:
+			return "+OK\r\n"
+		}
+	})
+
+	errRun := client.RunConfigSubscriberLifetime(context.Background(), func(raw []byte) error {
+		parsed, errParse := config.ParseConfigBytes(raw)
+		if errParse != nil {
+			return errParse
+		}
+		if errSet := client.SetLifecycleConfig(parsed.CredentialConcurrency); errSet != nil {
+			return errSet
+		}
+		return nil
+	}, nil)
+	if errRun == nil {
+		t.Fatal("RunConfigSubscriberLifetime() error = nil after heartbeat loss")
+	}
+	if got := findRedisCommand(commands.All(), "SUBSCRIBE"); !reflect.DeepEqual(got, []string{"subscribe", "config"}) {
+		t.Fatalf("SUBSCRIBE wire command = %#v, want []string{\"subscribe\", \"config\"}", got)
+	}
+}
+
+func TestRPopAuthLeavesCompleteServerErrorDeterministic(t *testing.T) {
+	client, _ := newRedisCommandTestClient(t, func(args []string) string {
+		switch {
+		case len(args) >= 1 && strings.EqualFold(args[0], "HELLO"):
+			return "%6\r\n$6\r\nserver\r\n$5\r\nredis\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n:1\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n"
+		case len(args) >= 1 && strings.EqualFold(args[0], "RPOP"):
+			return "-ERR dispatch denied\r\n"
+		default:
+			return "+OK\r\n"
+		}
+	})
+	client.heartbeatOK.Store(true)
+
+	_, errRPop := client.RPopAuth(context.Background(), "gpt-5.4", "", nil, 1)
+	if errRPop == nil {
+		t.Fatal("RPopAuth() error = nil, want server failure")
+	}
+	if IsAmbiguousDispatchError(errRPop) {
+		t.Fatalf("RPopAuth() error = %v, want deterministic server error", errRPop)
+	}
+	if client.dispatchFenced.Load() || !client.heartbeatOK.Load() {
+		t.Fatalf("client fence/heartbeat = %v/%v, want false/true", client.dispatchFenced.Load(), client.heartbeatOK.Load())
+	}
+}
+
+type testRedisServerError string
+
+func (e testRedisServerError) Error() string { return string(e) }
+func (testRedisServerError) RedisError()     {}
+
+func TestIssuedRPopAuthErrorClassification(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		ambiguous bool
+	}{
+		{name: "redis server error", err: testRedisServerError("ERR denied"), ambiguous: false},
+		{name: "redis nil", err: redis.Nil, ambiguous: false},
+		{name: "closed connection", err: redis.ErrClosed, ambiguous: true},
+		{name: "pool timeout", err: redis.ErrPoolTimeout, ambiguous: true},
+		{name: "dial interruption", err: &net.OpError{Op: "dial", Err: errors.New("connection refused")}, ambiguous: true},
+		{name: "tls interruption", err: x509.UnknownAuthorityError{}, ambiguous: true},
+		{name: "write interruption", err: &net.OpError{Op: "write", Err: io.ErrClosedPipe}, ambiguous: true},
+		{name: "partial response", err: io.ErrUnexpectedEOF, ambiguous: true},
+		{name: "unknown transport", err: errors.New("unknown transport state"), ambiguous: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAmbiguousIssuedRPopAuthError(tt.err); got != tt.ambiguous {
+				t.Fatalf("isAmbiguousIssuedRPopAuthError(%v) = %v, want %v", tt.err, got, tt.ambiguous)
+			}
+		})
+	}
+}
+
+func TestRPopAuthRejectsPreCanceledContextBeforeRequest(t *testing.T) {
+	client, commands := newRedisCommandTestClient(t, func([]string) string { return "+OK\r\n" })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, errRPop := client.RPopAuth(ctx, "gpt-5.4", "", nil, 1)
+	if !errors.Is(errRPop, context.Canceled) {
+		t.Fatalf("RPopAuth() error = %v, want context.Canceled", errRPop)
+	}
+	if IsAmbiguousDispatchError(errRPop) {
+		t.Fatalf("RPopAuth() error = %v, want deterministic pre-send cancellation", errRPop)
+	}
+	if commands.CountCommandKey("RPOP", "") != 0 {
+		t.Fatalf("commands = %#v, want no RPOP", commands.All())
+	}
+}
+
+func TestRPopAuthMarksRequestReadThenCloseAmbiguous(t *testing.T) {
+	client, requestRead, release := newBlockingRPopTestClient(t)
+	result := make(chan error, 1)
+	go func() {
+		_, errRPop := client.RPopAuth(context.Background(), "gpt-5.4", "", nil, 1)
+		result <- errRPop
+	}()
+	select {
+	case <-requestRead:
+	case <-time.After(time.Second):
+		t.Fatal("server did not read RPOP request")
+	}
+	close(release)
+	if errRPop := <-result; !IsAmbiguousDispatchError(errRPop) {
+		t.Fatalf("RPopAuth() error = %v, want ambiguous response interruption", errRPop)
+	}
+}
+
+func TestRPopAuthLeavesHELLOSetupInterruptionDeterministic(t *testing.T) {
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen: %v", errListen)
+	}
+	commands := &redisCommandLog{}
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		for {
+			conn, errAccept := listener.Accept()
+			if errAccept != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				args, errRead := readRedisCommand(bufio.NewReader(conn))
+				if errRead == nil {
+					commands.Append(args)
+				}
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		<-serverDone
+	})
+
+	host, portText, errSplit := net.SplitHostPort(listener.Addr().String())
+	if errSplit != nil {
+		t.Fatalf("split listener address: %v", errSplit)
+	}
+	port, errPort := strconv.Atoi(portText)
+	if errPort != nil {
+		t.Fatalf("parse listener port: %v", errPort)
+	}
+	client := New(config.HomeConfig{Enabled: true, Host: host, Port: port, DisableClusterDiscovery: true})
+	t.Cleanup(client.Close)
+
+	_, errRPop := client.RPopAuth(context.Background(), "gpt-5.4", "", nil, 1)
+	if errRPop == nil {
+		t.Fatal("RPopAuth() error = nil, want setup interruption")
+	}
+	if IsAmbiguousDispatchError(errRPop) {
+		t.Fatalf("RPopAuth() error = %v, want deterministic setup interruption", errRPop)
+	}
+	if client.dispatchFenced.Load() {
+		t.Fatal("RPopAuth() fenced the client after setup interruption")
+	}
+	allCommands := commands.All()
+	if len(allCommands) == 0 || len(allCommands[0]) == 0 || !strings.EqualFold(allCommands[0][0], "HELLO") {
+		t.Fatalf("commands = %#v, want HELLO setup before interruption", allCommands)
+	}
+	for _, command := range allCommands {
+		if len(command) > 0 && strings.EqualFold(command[0], "RPOP") {
+			t.Fatalf("commands = %#v, want no RPOP after setup interruption", allCommands)
+		}
+	}
+}
+
+func TestTrackedRedisConnectionCloseRemovesContendedEntries(t *testing.T) {
+	client := New(config.HomeConfig{Enabled: true})
+	const connectionCount = 32
+	connections := make([]*homeDispatchConn, 0, connectionCount)
+	peers := make([]net.Conn, 0, connectionCount)
+	for range connectionCount {
+		local, peer := net.Pipe()
+		connections = append(connections, &homeDispatchConn{Conn: local, client: client})
+		peers = append(peers, peer)
+	}
+	t.Cleanup(func() {
+		for _, peer := range peers {
+			_ = peer.Close()
+		}
+	})
+
+	client.mu.Lock()
+	client.connections = make(map[*homeDispatchConn]struct{}, len(connections))
+	for _, conn := range connections {
+		client.connections[conn] = struct{}{}
+	}
+	started := make(chan struct{}, len(connections))
+	closed := make(chan error, len(connections))
+	for _, conn := range connections {
+		go func(conn *homeDispatchConn) {
+			started <- struct{}{}
+			closed <- conn.Close()
+		}(conn)
+	}
+	for range connections {
+		<-started
+	}
+	time.Sleep(20 * time.Millisecond)
+	client.mu.Unlock()
+	for range connections {
+		if errClose := <-closed; errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+			t.Fatalf("tracked connection close: %v", errClose)
+		}
+	}
+	client.mu.Lock()
+	remaining := len(client.connections)
+	client.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("tracked connection count = %d, want 0 after contended close churn", remaining)
+	}
+}
+
+func TestAbortAmbiguousDispatchClosesBlockedRPopWithoutWaitingForResponse(t *testing.T) {
+	client, requestRead, release := newBlockingRPopTestClient(t)
+	client.heartbeatOK.Store(true)
+	result := make(chan error, 1)
+	go func() {
+		_, errRPop := client.RPopAuth(context.Background(), "gpt-5.4", "", nil, 1)
+		result <- errRPop
+	}()
+	select {
+	case <-requestRead:
+	case <-time.After(time.Second):
+		t.Fatal("server did not read RPOP request")
+	}
+
+	aborted := make(chan struct{})
+	go func() {
+		client.AbortAmbiguousDispatch()
+		close(aborted)
+	}()
+	select {
+	case <-aborted:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("AbortAmbiguousDispatch() waited for blocked RPOP response")
+	}
+	if client.heartbeatOK.Load() {
+		close(release)
+		t.Fatal("HeartbeatOK() remained true after abort")
+	}
+	client.mu.Lock()
+	commandClient, subscriptionClient := client.cmd, client.sub
+	client.mu.Unlock()
+	if commandClient != nil || subscriptionClient != nil {
+		close(release)
+		t.Fatalf("clients retained after abort: command=%v subscription=%v", commandClient != nil, subscriptionClient != nil)
+	}
+	select {
+	case errRPop := <-result:
+		if errRPop == nil {
+			close(release)
+			t.Fatal("RPopAuth() error = nil after client abort")
+		}
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("RPopAuth() remained blocked after abort closed its client")
+	}
+	close(release)
+}
+
+func TestRPopAuthLeavesPreSendFailureDeterministic(t *testing.T) {
+	client := New(config.HomeConfig{Enabled: true, Host: "127.0.0.1", Port: 6379})
+
+	_, errRPop := client.RPopAuth(context.Background(), "", "", nil, 1)
+	if errRPop == nil {
+		t.Fatal("RPopAuth() error = nil, want requested model validation failure")
+	}
+	if IsAmbiguousDispatchError(errRPop) {
+		t.Fatalf("RPopAuth() error = %v, want deterministic pre-send failure", errRPop)
+	}
+}
+
+func TestClientClosePermanentlyFencesDispatch(t *testing.T) {
+	client := New(config.HomeConfig{Enabled: true, Host: "127.0.0.1", Port: 6379})
+	client.mu.Lock()
+	client.cmd = redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
+	client.mu.Unlock()
+
+	client.Close()
+	if _, errClient := client.commandClient(); !errors.Is(errClient, ErrDispatchFenced) {
+		t.Fatalf("commandClient() error = %v, want ErrDispatchFenced", errClient)
+	}
+	client.mu.Lock()
+	commandClient := client.cmd
+	client.mu.Unlock()
+	if commandClient != nil {
+		t.Fatal("commandClient() recreated a command pool after Close")
+	}
+}
+
+func TestAbortAmbiguousDispatchFencesConcurrentRPop(t *testing.T) {
+	client := New(config.HomeConfig{Enabled: true, Host: "127.0.0.1", Port: 6379})
+	client.AbortAmbiguousDispatch()
+
+	const attempts = 32
+	errs := make(chan error, attempts)
+	var workers sync.WaitGroup
+	for range attempts {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			_, errRPop := client.RPopAuth(context.Background(), "gpt-5.4", "", nil, 1)
+			errs <- errRPop
+		}()
+	}
+	workers.Wait()
+	close(errs)
+
+	for errRPop := range errs {
+		if !errors.Is(errRPop, ErrDispatchFenced) {
+			t.Fatalf("RPopAuth() error = %v, want ErrDispatchFenced", errRPop)
+		}
+	}
+	client.mu.Lock()
+	commandClient := client.cmd
+	client.mu.Unlock()
+	if commandClient != nil {
+		t.Fatal("RPopAuth() recreated a command pool after AbortAmbiguousDispatch")
+	}
+}
+
+func TestRunConfigSubscriberLifetimeRebuildsFreshCommandPoolBeforeReady(t *testing.T) {
+	configPayload := "host: 127.0.0.1\n"
+	client, commands := newRedisCommandTestClient(t, func(args []string) string {
+		switch {
+		case len(args) >= 1 && strings.EqualFold(args[0], "HELLO"):
+			return "%6\r\n$6\r\nserver\r\n$5\r\nredis\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n:1\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n"
+		case len(args) >= 2 && strings.EqualFold(args[0], "GET") && args[1] == redisKeyConfig:
+			return fmt.Sprintf("$%d\r\n%s\r\n", len(configPayload), configPayload)
+		case len(args) >= 2 && strings.EqualFold(args[0], "SUBSCRIBE") && args[1] == redisChannelConfig:
+			return "*3\r\n$9\r\nsubscribe\r\n$6\r\nconfig\r\n:1\r\n"
+		case len(args) >= 1 && strings.EqualFold(args[0], "PING"):
+			return "+PONG\r\n"
+		default:
+			return "+OK\r\n"
+		}
+	})
+	var bootstrap *redis.Client
+	var freshCommandClient *redis.Client
+	ready := make(chan struct{}, 1)
+	errRun := client.RunConfigSubscriberLifetime(context.Background(), func([]byte) error {
+		client.mu.Lock()
+		bootstrap = client.cmd
+		client.mu.Unlock()
+		return nil
+	}, func() {
+		client.mu.Lock()
+		freshCommandClient = client.cmd
+		client.mu.Unlock()
+		ready <- struct{}{}
+	})
+	if errRun == nil {
+		t.Fatal("RunConfigSubscriberLifetime() error = nil after heartbeat loss")
+	}
+	select {
+	case <-ready:
+	default:
+		t.Fatalf("RunConfigSubscriberLifetime() did not invoke onReady: %v", errRun)
+	}
+	if bootstrap == nil || freshCommandClient == nil || freshCommandClient == bootstrap {
+		t.Fatalf("command pools bootstrap=%p fresh=%p, want distinct non-nil pools", bootstrap, freshCommandClient)
+	}
+	if got := findRedisCommand(commands.All(), "PING"); got == nil {
+		t.Fatalf("commands = %#v, want fresh command PING before onReady", commands.All())
+	}
+}
+
+func TestRunConfigSubscriberLifetimeDoesNotReadyWhenFreshCommandProbeFails(t *testing.T) {
+	configPayload := "host: 127.0.0.1\n"
+	client, _ := newRedisCommandTestClient(t, func(args []string) string {
+		switch {
+		case len(args) >= 1 && strings.EqualFold(args[0], "HELLO"):
+			return "%6\r\n$6\r\nserver\r\n$5\r\nredis\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n:1\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n"
+		case len(args) >= 2 && strings.EqualFold(args[0], "GET") && args[1] == redisKeyConfig:
+			return fmt.Sprintf("$%d\r\n%s\r\n", len(configPayload), configPayload)
+		case len(args) >= 2 && strings.EqualFold(args[0], "SUBSCRIBE") && args[1] == redisChannelConfig:
+			return "*3\r\n$9\r\nsubscribe\r\n$6\r\nconfig\r\n:1\r\n"
+		case len(args) >= 1 && strings.EqualFold(args[0], "PING"):
+			return "-ERR fresh command probe failed\r\n"
+		default:
+			return "+OK\r\n"
+		}
+	})
+	ready := make(chan struct{}, 1)
+	errRun := client.RunConfigSubscriberLifetime(context.Background(), func([]byte) error { return nil }, func() { ready <- struct{}{} })
+	if errRun == nil {
+		t.Fatal("RunConfigSubscriberLifetime() error = nil, want fresh command probe failure")
+	}
+	select {
+	case <-ready:
+		t.Fatalf("RunConfigSubscriberLifetime() invoked onReady after fresh command probe failure: %v", errRun)
+	default:
+	}
+	client.mu.Lock()
+	commandClient, subscriptionClient := client.cmd, client.sub
+	client.mu.Unlock()
+	if commandClient != nil || subscriptionClient != nil {
+		t.Fatalf("clients retained after fresh command probe failure: command=%v subscription=%v", commandClient != nil, subscriptionClient != nil)
+	}
+}
+
+func findRedisCommand(commands [][]string, commandName string) []string {
+	for _, command := range commands {
+		if len(command) > 0 && strings.EqualFold(command[0], commandName) {
+			return command
+		}
+	}
+	return nil
 }
