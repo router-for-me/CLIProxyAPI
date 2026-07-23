@@ -1290,6 +1290,127 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 	}
 }
 
+func TestXAIWebsocketPostCompactionAppendWithoutPreviousReplaysCompactedTranscript(t *testing.T) {
+	store := &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+	state := getXAIWebsocketIDState(store, "post-compaction-append-session")
+	state.replaceTranscriptWithItems([]byte(`{"type":"compaction","encrypted_content":"compact-state"}`))
+	state.mapDownstreamToUpstream("resp-compact", "")
+
+	fullReset := []byte(`{"type":"response.create","model":"grok-4.3","input":[{"type":"message","id":"msg-full"}]}`)
+	fullMapper := newXAIWebsocketRequestIDMapper(store, "post-compaction-append-session", fullReset)
+	if full := fullMapper.upstreamRequestPayload(fullReset); len(gjson.GetBytes(full, "input").Array()) != 1 {
+		t.Fatalf("self-contained response.create unexpectedly replayed compacted transcript: %s", full)
+	}
+
+	payload := []byte(`{"type":"response.append","model":"grok-4.3","input":[{"type":"message","id":"msg-2","role":"user","content":"second"}]}`)
+	mapper := newXAIWebsocketRequestIDMapper(store, "post-compaction-append-session", payload)
+	got := mapper.upstreamRequestPayload(payload)
+	input := gjson.GetBytes(got, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("post-compaction append input len = %d, want 2: %s", len(input), got)
+	}
+	if gotType := input[0].Get("type").String(); gotType != "compaction" {
+		t.Fatalf("post-compaction append input[0].type = %q, want compaction: %s", gotType, got)
+	}
+	if gotID := input[1].Get("id").String(); gotID != "msg-2" {
+		t.Fatalf("post-compaction append input[1].id = %q, want msg-2: %s", gotID, got)
+	}
+
+	state.recordTranscriptTurn(got, []byte(`{"type":"response.completed","response":{"id":"resp-after-compact","output":[{"type":"message","id":"out-2"}]}}`), true)
+	nextPayload := []byte(`{"type":"response.create","model":"grok-4.3","input":[{"type":"message","id":"msg-3"}]}`)
+	nextMapper := newXAIWebsocketRequestIDMapper(store, "post-compaction-append-session", nextPayload)
+	next := nextMapper.upstreamRequestPayload(nextPayload)
+	if nextInput := gjson.GetBytes(next, "input").Array(); len(nextInput) != 1 || nextInput[0].Get("id").String() != "msg-3" {
+		t.Fatalf("compacted transcript replay was not cleared after success: %s", next)
+	}
+}
+
+func TestXAIWebsocketPostCompactionWarmupPreservesTranscriptForLaterCompaction(t *testing.T) {
+	store := &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+	state := getXAIWebsocketIDState(store, "warmup-reset-session")
+	state.replaceTranscriptWithItems([]byte(`{"type":"compaction","encrypted_content":"compact-state"}`))
+
+	warmupPayload := []byte(`{"type":"response.append","model":"grok-4.3","generate":false,"input":[{"type":"message","id":"warmup-context"}]}`)
+	warmupMapper := newXAIWebsocketRequestIDMapper(store, "warmup-reset-session", warmupPayload)
+	warmupUpstream := warmupMapper.upstreamRequestPayload(warmupPayload)
+	if !warmupMapper.replayedCompactedTranscript {
+		t.Fatal("post-compaction warmup did not mark full transcript replay")
+	}
+	state.recordTranscriptTurn(
+		warmupUpstream,
+		[]byte(`{"type":"response.completed","response":{"id":"resp-warmup","output":[]}}`),
+		true,
+	)
+
+	appendPayload := []byte(`{"type":"response.append","model":"grok-4.3","input":[{"type":"message","id":"msg-after-warmup"}]}`)
+	appendMapper := newXAIWebsocketRequestIDMapper(store, "warmup-reset-session", appendPayload)
+	appendUpstream := appendMapper.upstreamRequestPayload(appendPayload)
+	input := gjson.GetBytes(appendUpstream, "input").Array()
+	if len(input) != 1 || input[0].Get("id").String() != "msg-after-warmup" {
+		t.Fatalf("warmup retained pending replay instead of native append: %s", appendUpstream)
+	}
+	state.recordTranscriptTurn(
+		appendUpstream,
+		[]byte(`{"type":"response.completed","response":{"id":"resp-after-warmup","output":[{"type":"message","id":"out-after-warmup"}]}}`),
+		false,
+	)
+
+	transcript := gjson.ParseBytes(state.snapshotTranscriptInput()).Array()
+	wantTypes := []string{"compaction", "message", "message", "message"}
+	if len(transcript) != len(wantTypes) {
+		t.Fatalf("post-warmup transcript len = %d, want %d: %s", len(transcript), len(wantTypes), state.snapshotTranscriptInput())
+	}
+	for i, wantType := range wantTypes {
+		if gotType := transcript[i].Get("type").String(); gotType != wantType {
+			t.Fatalf("post-warmup transcript[%d].type = %q, want %q: %s", i, gotType, wantType, state.snapshotTranscriptInput())
+		}
+	}
+}
+
+func TestXAIWebsocketEmptyFullResetClearsPendingCompactionReplay(t *testing.T) {
+	store := &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+	state := getXAIWebsocketIDState(store, "empty-reset-session")
+	state.replaceTranscriptWithItems([]byte(`{"type":"compaction","encrypted_content":"stale-compact-state"}`))
+	state.recordTranscriptTurn(
+		[]byte(`{"type":"response.create","model":"grok-4.3","input":[]}`),
+		[]byte(`{"type":"response.completed","response":{"id":"resp-empty","output":[]}}`),
+		true,
+	)
+
+	appendPayload := []byte(`{"type":"response.append","model":"grok-4.3","input":[{"type":"message","id":"msg-new"}]}`)
+	mapper := newXAIWebsocketRequestIDMapper(store, "empty-reset-session", appendPayload)
+	got := mapper.upstreamRequestPayload(appendPayload)
+	input := gjson.GetBytes(got, "input").Array()
+	if len(input) != 1 || input[0].Get("id").String() != "msg-new" {
+		t.Fatalf("empty full reset retained stale compaction replay: %s", got)
+	}
+}
+
+func TestValidateXAIWebsocketCompactionResponse(t *testing.T) {
+	valid := []byte(`{"id":"resp_compact","output":[{"type":"compaction","encrypted_content":"opaque-state"}]}`)
+	responseID, item, err := validateXAIWebsocketCompactionResponse(valid)
+	if err != nil {
+		t.Fatalf("valid compaction response error: %v", err)
+	}
+	if responseID != "resp_compact" || gjson.GetBytes(item, "encrypted_content").String() != "opaque-state" {
+		t.Fatalf("validated compaction response = id:%q item:%s", responseID, item)
+	}
+
+	for _, payload := range [][]byte{
+		nil,
+		[]byte(`{}`),
+		[]byte(`{"id":"resp_empty","output":[]}`),
+		[]byte(`{"id":123,"output":[{"type":"compaction","encrypted_content":"opaque"}]}`),
+		[]byte(`{"id":"resp_object","output":{"0":{"type":"compaction","encrypted_content":"opaque"}}}`),
+		[]byte(`{"id":"resp_numeric_state","output":[{"type":"compaction","encrypted_content":123}]}`),
+		[]byte(`{"id":"resp_missing_state","output":[{"type":"compaction"}]}`),
+	} {
+		if _, _, errInvalid := validateXAIWebsocketCompactionResponse(payload); errInvalid == nil {
+			t.Fatalf("invalid compaction response accepted: %s", payload)
+		}
+	}
+}
+
 func TestBuildXAIWebsocketRequestBodySetsStoreAndKeepsPromptCacheKey(t *testing.T) {
 	body := []byte(`{"model":"grok-4.3","stream":true,"stream_options":{"include_usage":true},"background":true,"prompt_cache_key":"cache-1","previous_response_id":"resp-prev","instructions":"system prompt","input":[{"type":"message","role":"user","content":"hello"}]}`)
 
