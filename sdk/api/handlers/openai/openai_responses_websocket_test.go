@@ -1608,6 +1608,44 @@ func TestRepairResponsesWebsocketToolCallsInsertsCachedOutput(t *testing.T) {
 	}
 }
 
+func TestResponsesWebsocketToolCacheTurnCommitsOnlyOnSuccess(t *testing.T) {
+	const sessionKey = "tool-cache-turn-commit-session"
+	defer defaultWebsocketToolOutputCache.deleteSession(sessionKey)
+	defer defaultWebsocketToolCallCache.deleteSession(sessionKey)
+
+	turn := newResponsesWebsocketToolCacheTurn(sessionKey)
+	turn.recordRequest([]byte(`{"input":[{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"cached result"}]}`))
+	beforeCommit := repairResponsesWebsocketToolCallsWithoutRecording(sessionKey, []byte(`{"input":[{"type":"function_call","id":"fc-next","call_id":"call-1","name":"lookup","arguments":"{}"}]}`))
+	if gjson.GetBytes(beforeCommit, "input.#").Int() != 0 {
+		t.Fatalf("uncommitted turn populated global cache: %s", beforeCommit)
+	}
+
+	turn.commit()
+	afterCommit := repairResponsesWebsocketToolCallsWithoutRecording(sessionKey, []byte(`{"input":[{"type":"function_call","id":"fc-next","call_id":"call-1","name":"lookup","arguments":"{}"}]}`))
+	input := gjson.GetBytes(afterCommit, "input").Array()
+	if len(input) != 2 || input[1].Get("output").String() != "cached result" {
+		t.Fatalf("committed turn was not available to tool repair: %s", afterCommit)
+	}
+}
+
+func TestResponsesWebsocketToolCacheRetainPreventsOverlappingReleaseDeletion(t *testing.T) {
+	const sessionKey = "tool-cache-overlapping-retain-session"
+	retainResponsesWebsocketToolCaches(sessionKey)
+	retainResponsesWebsocketToolCaches(sessionKey)
+	turn := newResponsesWebsocketToolCacheTurn(sessionKey)
+	turn.recordRequest([]byte(`{"input":[{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"kept"}]}`))
+	turn.commit()
+
+	releaseResponsesWebsocketToolCaches(sessionKey)
+	if _, ok := defaultWebsocketToolOutputCache.get(sessionKey, "call-1"); !ok {
+		t.Fatal("first overlapping release deleted active session cache")
+	}
+	releaseResponsesWebsocketToolCaches(sessionKey)
+	if _, ok := defaultWebsocketToolOutputCache.get(sessionKey, "call-1"); ok {
+		t.Fatal("final release did not delete session cache")
+	}
+}
+
 func TestRepairResponsesWebsocketToolCallsDropsOrphanFunctionCall(t *testing.T) {
 	cache := newWebsocketToolOutputCache(time.Minute, 10)
 	sessionKey := "session-1"
@@ -2930,6 +2968,86 @@ func TestResponsesWebsocketRejectsUnknownPreviousResponseOnNewSocket(t *testing.
 	}
 	if got := len(gjson.GetBytes(payloads[0], "input").Array()); got != 3 {
 		t.Fatalf("full recovery input len = %d, want 3: %s", got, payloads[0])
+	}
+}
+
+func TestResponsesWebsocketRollsBackCanonicalTranscriptAfterNonRetryableError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	modelName := "xai-websocket-rollback-model"
+	executor := &websocketCanonicalRollbackExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:       "auth-xai-rollback",
+		Provider: "xai",
+		Status:   coreauth.StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: modelName}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Session-Id": []string{"rollback-tool-cache-session"}})
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	requests := []string{
+		fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","id":"msg-1"}]}`, modelName),
+		`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"function_call","id":"fc-failed","call_id":"failed-call","name":"failed_tool","arguments":"{}"},{"type":"function_call_output","id":"fco-failed","call_id":"failed-call","output":"must-not-survive"}]}`,
+		`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-3"},{"type":"function_call","id":"fc-retry","call_id":"failed-call","name":"failed_tool","arguments":"{}"}]}`,
+	}
+	wantTypes := []string{wsEventTypeCompleted, wsEventTypeError, wsEventTypeCompleted}
+	for i := range requests {
+		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(requests[i])); errWrite != nil {
+			t.Fatalf("write websocket message %d: %v", i+1, errWrite)
+		}
+		_, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			t.Fatalf("read websocket response %d: %v", i+1, errRead)
+		}
+		if got := gjson.GetBytes(payload, "type").String(); got != wantTypes[i] {
+			t.Fatalf("response %d type = %q, want %q: %s", i+1, got, wantTypes[i], payload)
+		}
+	}
+
+	payloads := executor.Payloads()
+	if len(payloads) != 3 {
+		t.Fatalf("executor payload count = %d, want 3", len(payloads))
+	}
+	third := payloads[2]
+	if gjson.GetBytes(third, "previous_response_id").Exists() {
+		t.Fatalf("retry payload must not depend on previous_response_id: %s", third)
+	}
+	input := gjson.GetBytes(third, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("retry canonical input len = %d, want 3: %s", len(input), third)
+	}
+	wantIDs := []string{"msg-1", "out-1", "msg-3"}
+	for i, wantID := range wantIDs {
+		if got := input[i].Get("id").String(); got != wantID {
+			t.Fatalf("retry canonical input[%d].id = %q, want %q: %s", i, got, wantID, third)
+		}
+	}
+	if bytes.Contains(third, []byte(`"id":"fc-failed"`)) || bytes.Contains(third, []byte(`"id":"fco-failed"`)) {
+		t.Fatalf("failed turn leaked into retry transcript: %s", third)
+	}
+	if bytes.Contains(third, []byte(`"call_id":"failed-call"`)) || bytes.Contains(third, []byte("must-not-survive")) {
+		t.Fatalf("failed turn contaminated tool repair cache: %s", third)
 	}
 }
 
