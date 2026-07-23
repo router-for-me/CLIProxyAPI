@@ -66,12 +66,26 @@ func validateClaudeBridgeContextWindow(model string, body []byte, opts cliproxye
 	if errCount != nil {
 		return 0, errCount
 	}
-	if count <= claudeBridgeContextWindow {
+	if count <= claudeBridgeContextWindow || hasClaudeCompactionReplay(body) {
 		return count, nil
 	}
 	errorBody := []byte(`{"error":{"message":"","type":"invalid_request_error","code":"context_too_large"}}`)
 	errorBody, _ = sjson.SetBytes(errorBody, "error.message", fmt.Sprintf("prompt is too long: %d tokens > %d maximum", count, claudeBridgeContextWindow))
 	return count, newCodexStatusErr(http.StatusBadRequest, errorBody)
+}
+
+func hasClaudeCompactionReplay(body []byte) bool {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return false
+	}
+	for _, item := range input.Array() {
+		switch item.Get("type").String() {
+		case "compaction", "compaction_summary":
+			return strings.TrimSpace(item.Get("encrypted_content").String()) != ""
+		}
+	}
+	return false
 }
 
 var dataTag = []byte("data:")
