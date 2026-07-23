@@ -342,10 +342,13 @@ nonstream-keepalive-interval: 0
 #                                    # "never": never apply cloaking
 #       # This "cloak" block applies to this claude-api-key entry only. For Claude OAuth
 #       # credentials, set the same options in the auth/token JSON file via "cloak_mode" /
-#       # "cloak_strict_mode" / "cloak_sensitive_words" / "cloak_cache_user_id". The top-level
+#       # "cloak_strict_mode" / "cloak_relaxed_system_prompt" / "cloak_sensitive_words" /
+#       # "cloak_cache_user_id". The top-level
 #       # "disable-claude-cloak-mode: true" disables cloaking for all Claude credentials at once.
-#       strict-mode: false           # false (default): prepend Claude Code prompt to user system messages
-#                                    # true: strip all user system messages, keep only Claude Code prompt
+#       strict-mode: false           # false (default): handle client system messages according to relaxed-system-prompt
+#                                    # true: strip all user system messages, keep only Claude Code prompt; overrides relaxed-system-prompt
+#       relaxed-system-prompt: true  # true (default): keep the billing and agent system blocks, then append client system messages as top-level system blocks
+#                                    # false: use the standard Claude Code prompt and forward client system messages
 #       sensitive-words:             # optional: words to obfuscate with zero-width characters
 #         - "API"
 #         - "proxy"
