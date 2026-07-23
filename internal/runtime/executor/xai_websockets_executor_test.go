@@ -34,6 +34,50 @@ func TestXAIWebsocketsEnabledForConfigAPIKey(t *testing.T) {
 	}
 }
 
+func TestXAIAutoExecutorRequiredUpstreamWebsocketRejectsHTTPFallback(t *testing.T) {
+	exec := NewXAIAutoExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-http-only",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"api_key": "xai-key",
+		},
+	}
+	ctx := cliproxyexecutor.WithRequiredUpstreamWebsocket(
+		cliproxyexecutor.WithDownstreamWebsocket(context.Background()),
+	)
+	_, errExecute := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "grok-4",
+		Payload: []byte(`{"model":"grok-4","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
+	if errExecute == nil {
+		t.Fatal("ExecuteStream() error = nil, want replay-required error")
+	}
+	statusErr, ok := errExecute.(interface{ StatusCode() int })
+	if !ok || statusErr.StatusCode() != http.StatusUpgradeRequired {
+		t.Fatalf("ExecuteStream() error = %T %v, want status 426", errExecute, errExecute)
+	}
+	if got := gjson.Get(errExecute.Error(), "error.code").String(); got != "upstream_http_replay_required" {
+		t.Fatalf("ExecuteStream() error code = %q, want upstream_http_replay_required", got)
+	}
+	requestScoped, ok := errExecute.(cliproxyexecutor.RequestScopedError)
+	if !ok || !requestScoped.IsRequestScoped() {
+		t.Fatalf("ExecuteStream() error = %T, want request-scoped replay signal", errExecute)
+	}
+}
+
+func TestXAIWebsocketsRequiredUpstreamRejectsCompactionHTTPFallback(t *testing.T) {
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	ctx := cliproxyexecutor.WithRequiredUpstreamWebsocket(context.Background())
+	_, errExecute := exec.ExecuteStream(ctx, &cliproxyauth.Auth{}, cliproxyexecutor.Request{
+		Model:   "grok-4",
+		Payload: []byte(`{"model":"grok-4","input":[{"type":"compaction_trigger"}]}`),
+	}, cliproxyexecutor.Options{})
+	if !cliproxyexecutor.IsUpstreamWebsocketReplayRequired(errExecute) {
+		t.Fatalf("ExecuteStream() error = %T %v, want replay-required", errExecute, errExecute)
+	}
+}
+
 func TestMapXAIWebsocketWriteErrorStopsRetryForMessageTooBig(t *testing.T) {
 	networkWriteErr := errors.New("write: broken pipe")
 	tests := []struct {
