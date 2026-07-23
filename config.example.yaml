@@ -49,6 +49,34 @@ pprof:
   enable: false
   addr: "127.0.0.1:8316"
 
+# Credential concurrency is configured by Home in Home mode. The synthesized Home config is
+# authoritative and local values, including the values below, are ignored. Do not use local
+# configuration to override a Home concurrency policy.
+# credential-concurrency:
+#   lifecycle-config-revision: 1
+#   observation-barrier-revision: 0
+#   cpa-heartbeat-timeout: "3s"
+#   cpa-cancel-bound: "5s"
+#   reclaim-grace: "5s"
+#   cleanup-interval: "5s"
+#   release-flush-interval: 250ms
+#   release-max-backoff: 2s
+#   busy-retry-min: 250ms
+#   busy-retry-max: 1s
+#   max-limit: 1000000
+
+# Credential in-flight observation snapshot contract.
+# credential-in-flight:
+#   snapshot-interval: 2s
+#   stale-after: 10s
+#   max-part-bytes: 262144
+#   max-part-count: 64
+#   max-revision-bytes: 16777216
+#   max-aggregate-groups: 100000
+#   max-details: 10000
+#   max-string-bytes: 256
+#   staging-retention: 1m
+
 # Standard dynamic library plugins are trusted in-process code. They are disabled by default.
 # Build Go examples with go build -buildmode=c-shared for the target GOOS/GOARCH.
 # Other languages can implement the same C ABI and JSON method protocol.

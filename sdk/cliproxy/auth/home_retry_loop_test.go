@@ -9,6 +9,7 @@ import (
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
@@ -32,6 +33,8 @@ func (d *repeatedHomeAuthDispatcher) RPopAuth(context.Context, string, string, h
 	})
 	return raw, nil
 }
+
+func (*repeatedHomeAuthDispatcher) AbortAmbiguousDispatch() {}
 
 type unauthorizedHomeExecutor struct {
 	calls atomic.Int32
@@ -75,6 +78,7 @@ func TestManagerExecuteHomeStopsWhenDispatchRepeatsTriedAuth(t *testing.T) {
 	executor := &unauthorizedHomeExecutor{}
 	manager := NewManager(nil, nil, nil)
 	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.SetHomeExecutionRegistry(executionregistry.New())
 	manager.RegisterExecutor(executor)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
