@@ -106,6 +106,54 @@ func TestBuildKiroPayload_NoToolsNoHistoryToolUse(t *testing.T) {
 	}
 }
 
+// TestBuildKiroPayload_TrailingSystemMessageKeepsTools reproduces the case
+// observed in production: Claude Code's mid-conversation-system beta appends a
+// role:"system" message as the FINAL entry of the messages array. Without
+// normalization the system message is skipped, no current user message is
+// produced, and the converted tools are silently dropped from the payload —
+// the model then hallucinates text-format tool calls.
+//
+// Expected behavior: the trailing system message is carried as user content
+// and the client-declared tools land on
+// currentMessage.userInputMessageContext.tools.
+func TestBuildKiroPayload_TrailingSystemMessageKeepsTools(t *testing.T) {
+	claudeReq := `{
+		"model": "claude-opus-4-8",
+		"max_tokens": 1024,
+		"tools": [
+			{"name": "Grep", "description": "search", "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}}}
+		],
+		"messages": [
+			{"role": "user", "content": "investigate the revision conflict"},
+			{"role": "system", "content": "Available agent types for the Agent tool: ..."}
+		]
+	}`
+
+	out, _ := BuildKiroPayload([]byte(claudeReq), "claude-opus-4-8", "arn:test", "test", true, false, http.Header{}, nil)
+	if len(out) == 0 {
+		t.Fatal("expected non-empty payload")
+	}
+
+	tools := gjson.GetBytes(out, "conversationState.currentMessage.userInputMessage.userInputMessageContext.tools")
+	if !tools.IsArray() || len(tools.Array()) != 1 {
+		t.Fatalf("expected exactly 1 tool on currentMessage, got: %s", tools.Raw)
+	}
+	if got := tools.Array()[0].Get("toolSpecification.name").String(); got != "Grep" {
+		t.Fatalf("expected tool named 'Grep', got %q", got)
+	}
+
+	content := gjson.GetBytes(out, "conversationState.currentMessage.userInputMessage.content").String()
+	if !strings.Contains(content, "investigate the revision conflict") {
+		t.Fatalf("expected user text in current message content, got: %q", content)
+	}
+	if !strings.Contains(content, "Available agent types for the Agent tool") {
+		t.Fatalf("expected system message text carried into current message content, got: %q", content)
+	}
+	if !strings.Contains(content, "<system-reminder>") {
+		t.Fatalf("expected system text wrapped in <system-reminder> tags, got: %q", content)
+	}
+}
+
 // TestSynthesizeToolSpecsFromHistory_Dedup ensures repeated tool names yield a
 // single stub.
 func TestSynthesizeToolSpecsFromHistory_Dedup(t *testing.T) {

@@ -4,6 +4,7 @@ package claude
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -531,4 +532,359 @@ func DeduplicateToolUses(toolUses []KiroToolUse) []KiroToolUse {
 	}
 
 	return unique
+}
+
+// Kiro IDE native tool-call format
+// ---------------------------------
+// When the request uses the AI_EDITOR origin, the Kiro-backed model frequently
+// emits tool calls as inline text in Claude's XML function-calling format
+// instead of structured toolUseEvent events:
+//
+//	<invoke name="grepSearch">
+//	<parameter name="query">foo|bar</parameter>
+//	<parameter name="includePattern">apps/**</parameter>
+//	</invoke>
+//
+// It also uses Kiro IDE's own tool names (grepSearch, readFile, fileSearch,
+// readMultipleFiles, listDirectory, fsRead, ...) rather than the tool names the
+// client actually declared (Read, Grep, Glob, Bash, ...). If left as plain text
+// the client never sees a tool_use block, so no tool ever runs and the model
+// starts hallucinating fake tool results. The helpers below recover these calls
+// by parsing the invoke XML and mapping the native names onto the client's
+// canonical tools.
+
+var (
+	// invokeOpenPattern matches the invoke opening tag and captures the tool name.
+	// The antml: namespace prefix is tolerated for compatibility.
+	invokeOpenPattern = regexp.MustCompile(`<(?:antml:)?invoke\s+name="([^"]+)"\s*>`)
+	// invokeCloseTag is the literal closing tag (with and without namespace).
+	invokeCloseTag      = "</invoke>"
+	invokeCloseTagAntml = "</antml:invoke>"
+	// invokeStartTag / invokeStartTagAntml are the prefixes used for cross-chunk
+	// boundary detection while streaming.
+	invokeStartTag      = "<invoke"
+	invokeStartTagAntml = "<antml:invoke"
+	// parameterPattern matches a single <parameter name="k">value</parameter>.
+	parameterPattern = regexp.MustCompile(`(?s)<(?:antml:)?parameter\s+name="([^"]+)"\s*>(.*?)</(?:antml:)?parameter>`)
+)
+
+// parseInvokeBlock parses a single complete <invoke ...>...</invoke> block and
+// returns the native tool name plus its parameters. Parameter values are
+// JSON-decoded when possible so arrays (paths) and numbers (depth) keep their
+// types; otherwise they remain strings. Returns ok=false when the block is
+// malformed (missing name or unparseable opening tag).
+func parseInvokeBlock(block string) (name string, params map[string]interface{}, ok bool) {
+	m := invokeOpenPattern.FindStringSubmatch(block)
+	if m == nil {
+		return "", nil, false
+	}
+	name = m[1]
+
+	params = make(map[string]interface{})
+	for _, pm := range parameterPattern.FindAllStringSubmatch(block, -1) {
+		key := pm[1]
+		raw := strings.TrimSpace(pm[2])
+		// Preserve arrays/objects/numbers/bools by attempting a JSON decode first.
+		var decoded interface{}
+		if raw != "" && json.Unmarshal([]byte(raw), &decoded) == nil {
+			params[key] = decoded
+		} else {
+			params[key] = raw
+		}
+	}
+	return name, params, true
+}
+
+// firstStringParam returns the first usable string value for the given keys.
+// It accepts either a plain string or a single-element array (for paths).
+func firstStringParam(params map[string]interface{}, keys ...string) string {
+	for _, k := range keys {
+		v, exists := params[k]
+		if !exists {
+			continue
+		}
+		switch t := v.(type) {
+		case string:
+			if t != "" {
+				return t
+			}
+		case []interface{}:
+			for _, item := range t {
+				if s, ok := item.(string); ok && s != "" {
+					return s
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// intParam returns the integer value of a parameter, tolerating JSON numbers
+// and numeric strings. Returns 0 when absent or unparseable.
+func intParam(params map[string]interface{}, keys ...string) int {
+	for _, k := range keys {
+		v, exists := params[k]
+		if !exists {
+			continue
+		}
+		switch t := v.(type) {
+		case float64:
+			return int(t)
+		case string:
+			var n int
+			if _, err := fmt.Sscanf(t, "%d", &n); err == nil {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+// mapKiroNativeTool maps a Kiro IDE native tool call onto the client's
+// canonical Claude tool name and input. Unknown native tools are passed through
+// unchanged so the client can surface a meaningful "unknown tool" error.
+func mapKiroNativeTool(name string, params map[string]interface{}) (string, map[string]interface{}) {
+	switch name {
+	case "readFile", "fsRead":
+		return "Read", map[string]interface{}{
+			"file_path": firstStringParam(params, "path", "file_path", "filePath"),
+		}
+	case "readMultipleFiles":
+		return "Read", map[string]interface{}{
+			"file_path": firstStringParam(params, "paths", "path", "file_path"),
+		}
+	case "grepSearch":
+		input := map[string]interface{}{
+			"pattern": firstStringParam(params, "query", "pattern"),
+		}
+		if glob := firstStringParam(params, "includePattern", "include", "glob"); glob != "" {
+			input["glob"] = glob
+		}
+		return "Grep", input
+	case "fileSearch":
+		return "Glob", map[string]interface{}{
+			"pattern": firstStringParam(params, "query", "pattern"),
+		}
+	case "listDirectory":
+		path := firstStringParam(params, "path", "dir", "directory")
+		if path == "" {
+			path = "."
+		}
+		command := "ls " + path
+		if intParam(params, "depth") > 1 {
+			command = "ls -R " + path
+		}
+		return "Bash", map[string]interface{}{"command": command}
+	case "writeFile", "fsWrite", "createFile":
+		return "Write", map[string]interface{}{
+			"file_path": firstStringParam(params, "path", "file_path", "filePath"),
+			"content":   firstStringParam(params, "content", "fileText", "text", "file_text"),
+		}
+	case "strReplace", "strReplaceEditor", "editFile", "replaceInFile":
+		return "Edit", map[string]interface{}{
+			"file_path":  firstStringParam(params, "path", "file_path", "filePath"),
+			"old_string": firstStringParam(params, "oldStr", "old_string", "old_str"),
+			"new_string": firstStringParam(params, "newStr", "new_string", "new_str"),
+		}
+	case "executeBash", "runCommand", "executeCommand", "bash", "shell":
+		return "Bash", map[string]interface{}{
+			"command": firstStringParam(params, "command", "cmd"),
+		}
+	default:
+		// Unrecognized native tool: pass through with original name/params.
+		return name, params
+	}
+}
+
+// buildInvokeToolUse converts a parsed native invoke block into a KiroToolUse,
+// applying the native->client tool name mapping and deduplication.
+func buildInvokeToolUse(block string, processedIDs map[string]bool) *KiroToolUse {
+	nativeName, params, ok := parseInvokeBlock(block)
+	if !ok {
+		return nil
+	}
+	clientName, input := mapKiroNativeTool(nativeName, params)
+
+	inputJSON, _ := json.Marshal(input)
+	dedupeKey := clientName + ":" + string(inputJSON)
+	if processedIDs != nil {
+		if processedIDs[dedupeKey] {
+			log.Debugf("kiro: skipping duplicate invoke tool call: %s", clientName)
+			return nil
+		}
+		processedIDs[dedupeKey] = true
+	}
+
+	toolUseID := "toolu_" + uuid.New().String()[:12]
+	log.Infof("kiro: extracted invoke tool call: %s -> %s (ID: %s)", nativeName, clientName, toolUseID)
+	return &KiroToolUse{
+		ToolUseID: toolUseID,
+		Name:      clientName,
+		Input:     input,
+	}
+}
+
+// findInvokeClose returns the index just past the end of the first invoke
+// closing tag at or after from. The boolean reports whether one was found.
+func findInvokeClose(s string, from int) (int, bool) {
+	idx := -1
+	if i := strings.Index(s[from:], invokeCloseTag); i >= 0 {
+		idx = from + i + len(invokeCloseTag)
+	}
+	if i := strings.Index(s[from:], invokeCloseTagAntml); i >= 0 {
+		if end := from + i + len(invokeCloseTagAntml); idx == -1 || end < idx {
+			idx = end
+		}
+	}
+	if idx < 0 {
+		return 0, false
+	}
+	return idx, true
+}
+
+// findInvokeOpen returns the index of the first invoke opening tag ("<invoke"
+// or "<antml:invoke") at or after from. The boolean reports whether one was found.
+func findInvokeOpen(s string, from int) (int, bool) {
+	idx := -1
+	if i := strings.Index(s[from:], invokeStartTag); i >= 0 {
+		idx = from + i
+	}
+	if i := strings.Index(s[from:], invokeStartTagAntml); i >= 0 {
+		if idx == -1 || from+i < idx {
+			idx = from + i
+		}
+	}
+	if idx < 0 {
+		return 0, false
+	}
+	return idx, true
+}
+
+// pendingInvokeSuffix returns the length of the trailing partial invoke-start
+// tag (e.g. "<inv", "<antml:in") that should be held back for the next chunk.
+func pendingInvokeSuffix(s string) int {
+	a := PendingTagSuffix(s, invokeStartTag)
+	b := PendingTagSuffix(s, invokeStartTagAntml)
+	if b > a {
+		return b
+	}
+	return a
+}
+
+// ParseInvokeToolCalls extracts complete <invoke name="...">...</invoke> blocks
+// from a full (non-streaming) response body. It returns the text with the
+// invoke blocks removed and the recovered tool calls (mapped to client tools).
+// Incomplete/trailing invoke markup is left in the text unchanged.
+func ParseInvokeToolCalls(text string, processedIDs map[string]bool) (string, []KiroToolUse) {
+	if !strings.Contains(text, invokeStartTag) && !strings.Contains(text, invokeStartTagAntml) {
+		return text, nil
+	}
+
+	var toolUses []KiroToolUse
+	var clean strings.Builder
+
+	remaining := text
+	for {
+		open, hasOpen := findInvokeOpen(remaining, 0)
+		if !hasOpen {
+			clean.WriteString(remaining)
+			break
+		}
+		// Emit text before the invoke block.
+		clean.WriteString(remaining[:open])
+
+		closeIdx, hasClose := findInvokeClose(remaining, open)
+		if !hasClose {
+			// No closing tag yet (truncated response) - keep the rest as text.
+			clean.WriteString(remaining[open:])
+			break
+		}
+
+		block := remaining[open:closeIdx]
+		if tu := buildInvokeToolUse(block, processedIDs); tu != nil {
+			toolUses = append(toolUses, *tu)
+		}
+		remaining = remaining[closeIdx:]
+	}
+
+	return clean.String(), toolUses
+}
+
+// InvokeStreamParser incrementally recovers <invoke> tool calls from a stream
+// of content deltas. Text outside invoke blocks is passed through as ordinary
+// text; complete invoke blocks are converted into tool calls. Partial tags at
+// chunk boundaries are buffered until the closing tag arrives.
+type InvokeStreamParser struct {
+	buf          strings.Builder
+	processedIDs map[string]bool
+}
+
+// NewInvokeStreamParser creates a streaming invoke parser. processedIDs is
+// shared with the structured tool-use dedup map so the same call is not emitted
+// twice across the text and structured channels.
+func NewInvokeStreamParser(processedIDs map[string]bool) *InvokeStreamParser {
+	return &InvokeStreamParser{processedIDs: processedIDs}
+}
+
+// Feed consumes one content delta and returns any plain text that is safe to
+// emit now plus any tool calls completed by this delta.
+func (p *InvokeStreamParser) Feed(delta string) (string, []KiroToolUse) {
+	p.buf.WriteString(delta)
+
+	var textOut strings.Builder
+	var toolUses []KiroToolUse
+
+	for {
+		s := p.buf.String()
+		open, hasOpen := findInvokeOpen(s, 0)
+		if !hasOpen {
+			// No invoke tag. Hold back a trailing partial tag, emit the rest.
+			hold := pendingInvokeSuffix(s)
+			if hold > 0 {
+				textOut.WriteString(s[:len(s)-hold])
+				p.buf.Reset()
+				p.buf.WriteString(s[len(s)-hold:])
+			} else {
+				textOut.WriteString(s)
+				p.buf.Reset()
+			}
+			break
+		}
+
+		// Emit text before the invoke block.
+		if open > 0 {
+			textOut.WriteString(s[:open])
+		}
+
+		closeIdx, hasClose := findInvokeClose(s, open)
+		if !hasClose {
+			// Invoke not complete yet - keep buffering from the open tag.
+			p.buf.Reset()
+			p.buf.WriteString(s[open:])
+			break
+		}
+
+		block := s[open:closeIdx]
+		if tu := buildInvokeToolUse(block, p.processedIDs); tu != nil {
+			toolUses = append(toolUses, *tu)
+		}
+		p.buf.Reset()
+		p.buf.WriteString(s[closeIdx:])
+	}
+
+	return textOut.String(), toolUses
+}
+
+// Flush emits any buffered content at end of stream. An incomplete invoke is
+// surfaced as plain text so no content is silently dropped.
+func (p *InvokeStreamParser) Flush() (string, []KiroToolUse) {
+	s := p.buf.String()
+	p.buf.Reset()
+	if s == "" {
+		return "", nil
+	}
+	// A complete invoke could in theory sit in the buffer if the closing tag was
+	// the very last thing buffered; Feed already handles those, so whatever
+	// remains here is incomplete markup -> emit as text.
+	return s, nil
 }

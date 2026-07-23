@@ -2195,6 +2195,12 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 	cleanedContent, embeddedToolUses := kiroclaude.ParseEmbeddedToolCalls(contentStr, processedIDs)
 	toolUses = append(toolUses, embeddedToolUses...)
 
+	// Parse Kiro IDE native <invoke name="..."> tool calls from content.
+	// The model frequently emits these as inline text instead of structured
+	// toolUseEvent when using the AI_EDITOR origin.
+	cleanedContent, invokeToolUses := kiroclaude.ParseInvokeToolCalls(cleanedContent, processedIDs)
+	toolUses = append(toolUses, invokeToolUses...)
+
 	// Deduplicate all tool uses
 	toolUses = kiroclaude.DeduplicateToolUses(toolUses)
 
@@ -2208,6 +2214,11 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 			stopReason = "end_turn"
 			log.Debugf("kiro: parseEventStream using fallback stop_reason: end_turn")
 		}
+	} else if len(toolUses) > 0 && stopReason == "end_turn" {
+		// Upstream reported end_turn but we recovered tool calls from the text
+		// (native invoke format). The client must run the tools, so report tool_use.
+		stopReason = "tool_use"
+		log.Debugf("kiro: parseEventStream overriding end_turn -> tool_use (recovered %d tool uses from text)", len(toolUses))
 	}
 
 	// Log warning if response was truncated due to max_tokens
@@ -2434,6 +2445,12 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	processedIDs := make(map[string]bool)
 	var currentToolUse *kiroclaude.ToolUseState
 
+	// Invoke parser recovers Kiro IDE native <invoke name="..."> tool calls that
+	// the model emits as inline text (common with the AI_EDITOR origin). Shares
+	// the dedup map so the same call is not emitted via both text and structured
+	// channels.
+	invokeParser := kiroclaude.NewInvokeStreamParser(processedIDs)
+
 	// NOTE: Duplicate content filtering removed - it was causing legitimate repeated
 	// content (like consecutive newlines) to be incorrectly filtered out.
 	// The previous implementation compared lastContentEvent == contentDelta which
@@ -2505,6 +2522,46 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	messageStartSent := false
 	isTextBlockOpen := false
 	var outputLen int
+
+	// emitInvokeToolUse emits a recovered native <invoke> tool call as a Claude
+	// tool_use content block, closing any open text block first. It mirrors the
+	// structured toolUseEvent emission path so the two look identical downstream.
+	emitInvokeToolUse := func(tu kiroclaude.KiroToolUse) {
+		if isTextBlockOpen && contentBlockIndex >= 0 {
+			blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
+			sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
+			for _, chunk := range sseData {
+				enqueueTranslatedSSE(out, chunk)
+			}
+			isTextBlockOpen = false
+		}
+
+		hasToolUses = true
+		contentBlockIndex++
+		blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", tu.ToolUseID, tu.Name)
+		sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+		for _, chunk := range sseData {
+			enqueueTranslatedSSE(out, chunk)
+		}
+
+		if tu.Input != nil {
+			if inputJSON, err := json.Marshal(tu.Input); err == nil {
+				inputDelta := kiroclaude.BuildClaudeInputJsonDeltaEvent(string(inputJSON), contentBlockIndex)
+				sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, inputDelta, &translatorParam)
+				for _, chunk := range sseData {
+					enqueueTranslatedSSE(out, chunk)
+				}
+			} else {
+				log.Debugf("kiro: failed to marshal invoke tool input: %v", err)
+			}
+		}
+
+		blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
+		sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
+		for _, chunk := range sseData {
+			enqueueTranslatedSSE(out, chunk)
+		}
+	}
 
 	// Ensure usage is published even on early return
 	defer func() {
@@ -3048,29 +3105,39 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 					isThinkingBlockOpen = false
 				}
 				if contentDelta != "" {
+					// Recover native <invoke> tool calls from the text stream. feedText
+					// is the content with invoke markup removed; feedTools holds any
+					// calls completed by this delta.
+					feedText, feedTools := invokeParser.Feed(contentDelta)
+
 					// When official reasoning events have been seen, strip any
 					// stray thinking tag strings so they don't leak into output.
-					emitText := contentDelta
+					emitText := feedText
 					if hasOfficialReasoningEvent {
 						emitText = strings.ReplaceAll(emitText, kirocommon.ThinkingStartTag, "")
 						emitText = strings.ReplaceAll(emitText, kirocommon.ThinkingEndTag, "")
 					}
-					if emitText == "" {
-						continue
-					}
-					if !isTextBlockOpen {
-						contentBlockIndex++
-						isTextBlockOpen = true
-						blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
-						sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+					if emitText != "" {
+						if !isTextBlockOpen {
+							contentBlockIndex++
+							isTextBlockOpen = true
+							blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+							sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+							for _, chunk := range sseData {
+								enqueueTranslatedSSE(out, chunk)
+							}
+						}
+						claudeEvent := kiroclaude.BuildClaudeStreamEvent(emitText, contentBlockIndex)
+						sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
 						for _, chunk := range sseData {
 							enqueueTranslatedSSE(out, chunk)
 						}
 					}
-					claudeEvent := kiroclaude.BuildClaudeStreamEvent(emitText, contentBlockIndex)
-					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
-					for _, chunk := range sseData {
-						enqueueTranslatedSSE(out, chunk)
+
+					// Emit recovered tool calls as tool_use blocks (after the text that
+					// preceded them).
+					for _, tu := range feedTools {
+						emitInvokeToolUse(tu)
 					}
 				}
 			}
@@ -3440,6 +3507,31 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		}
 	}
 
+	// Flush any invoke-buffered content. A complete invoke would already have
+	// been emitted by Feed; whatever remains is incomplete markup, surfaced as
+	// plain text so no content is silently dropped.
+	if leftover, flushTools := invokeParser.Flush(); leftover != "" || len(flushTools) > 0 {
+		if leftover != "" {
+			if !isTextBlockOpen {
+				contentBlockIndex++
+				isTextBlockOpen = true
+				blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+				sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+				for _, chunk := range sseData {
+					enqueueTranslatedSSE(out, chunk)
+				}
+			}
+			claudeEvent := kiroclaude.BuildClaudeStreamEvent(leftover, contentBlockIndex)
+			sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+			for _, chunk := range sseData {
+				enqueueTranslatedSSE(out, chunk)
+			}
+		}
+		for _, tu := range flushTools {
+			emitInvokeToolUse(tu)
+		}
+	}
+
 	// Close thinking block if still open at stream end
 	if isThinkingBlockOpen && thinkingBlockIndex >= 0 {
 		blockStop := kiroclaude.BuildClaudeThinkingBlockStopEvent(thinkingBlockIndex)
@@ -3521,6 +3613,11 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			stopReason = "end_turn"
 			log.Debugf("kiro: streamToChannel using fallback stop_reason: end_turn")
 		}
+	} else if hasToolUses && stopReason == "end_turn" {
+		// Upstream reported end_turn but tool calls were recovered from the text
+		// (native invoke format). The client must run the tools, so report tool_use.
+		stopReason = "tool_use"
+		log.Debugf("kiro: streamToChannel overriding end_turn -> tool_use (recovered tool uses from text)")
 	}
 
 	// Log warning if response was truncated due to max_tokens

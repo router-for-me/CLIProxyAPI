@@ -753,6 +753,11 @@ func GetKiroModels() []*ModelInfo {
 		description string
 	}{
 		{
+			id:          "kiro-claude-sonnet-5",
+			displayName: "Claude Sonnet 5",
+			description: "Claude Sonnet 5 via Kiro",
+		},
+		{
 			id:          "kiro-claude-sonnet-4-6",
 			displayName: "Claude Sonnet 4.6",
 			description: "Claude Sonnet 4.6 via Kiro",
@@ -766,6 +771,11 @@ func GetKiroModels() []*ModelInfo {
 			id:          "kiro-claude-sonnet-4",
 			displayName: "Claude Sonnet 4",
 			description: "Claude Sonnet 4 via Kiro",
+		},
+		{
+			id:          "kiro-claude-opus-4-8",
+			displayName: "Claude Opus 4.8",
+			description: "Claude Opus 4.8 via Kiro",
 		},
 		{
 			id:          "kiro-claude-opus-4-7",
@@ -786,6 +796,11 @@ func GetKiroModels() []*ModelInfo {
 			id:          "kiro-claude-haiku-4-5",
 			displayName: "Claude Haiku 4.5",
 			description: "Claude Haiku 4.5 via Kiro",
+		},
+		{
+			id:          "kiro-claude-fable-5",
+			displayName: "Claude Fable 5",
+			description: "Claude Fable 5 via Kiro",
 		},
 	}
 
