@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -811,8 +813,8 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	if got := headers.Get("Originator"); got != codexOriginator {
 		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
 	}
-	if got := headers.Get("Version"); got != "" {
-		t.Fatalf("Version = %q, want empty", got)
+	if got := headers.Get("Version"); got != codexDefaultVersion {
+		t.Fatalf("Version = %q, want %q", got, codexDefaultVersion)
 	}
 	if got := headers.Get("x-codex-beta-features"); got != "" {
 		t.Fatalf("x-codex-beta-features = %q, want empty", got)
@@ -833,7 +835,7 @@ func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing
 	ctx := contextWithGinHeaders(map[string]string{
 		"Originator":            "Codex Desktop",
 		"User-Agent":            "codex_cli_rs/0.1.0",
-		"Version":               "0.115.0-alpha.27",
+		"Version":               codexDefaultVersion,
 		"X-Codex-Turn-Metadata": `{"turn_id":"turn-1"}`,
 		"X-Client-Request-Id":   "019d2233-e240-7162-992d-38df0a2a0e0d",
 		"session-id":            "legacy-session",
@@ -847,8 +849,8 @@ func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing
 	if got := headers.Get("User-Agent"); got != "codex_cli_rs/0.1.0" {
 		t.Fatalf("User-Agent = %s, want %s", got, "codex_cli_rs/0.1.0")
 	}
-	if got := headers.Get("Version"); got != "0.115.0-alpha.27" {
-		t.Fatalf("Version = %s, want %s", got, "0.115.0-alpha.27")
+	if got := headers.Get("Version"); got != codexDefaultVersion {
+		t.Fatalf("Version = %s, want %s", got, codexDefaultVersion)
 	}
 	if got := headers.Get("X-Codex-Turn-Metadata"); got != `{"turn_id":"turn-1"}` {
 		t.Fatalf("X-Codex-Turn-Metadata = %s, want %s", got, `{"turn_id":"turn-1"}`)
@@ -861,6 +863,126 @@ func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing
 	}
 	if got := headers.Get("Session-Id"); got != "" {
 		t.Fatalf("Session-Id = %s, want empty", got)
+	}
+}
+
+func TestApplyCodexWebsocketHeadersPinsClientProfilePerAuth(t *testing.T) {
+	auth := &cliproxyauth.Auth{Provider: "codex", Metadata: map[string]any{"email": "user@example.com"}}
+
+	firstCtx := contextWithGinHeaders(map[string]string{
+		"Originator":                            "Codex Desktop",
+		"User-Agent":                            "codex_cli_rs/0.1.0",
+		"Version":                               codexDefaultVersion,
+		"X-Codex-Beta-Features":                 "first-beta",
+		"x-responsesapi-include-timing-metrics": "true",
+		"X-Codex-Turn-Metadata":                 `{"turn_id":"turn-1"}`,
+	})
+	first := applyCodexWebsocketHeaders(firstCtx, http.Header{}, auth, "", nil)
+	if got := first.Get("User-Agent"); got != "codex_cli_rs/0.1.0" {
+		t.Fatalf("first User-Agent = %q, want %q", got, "codex_cli_rs/0.1.0")
+	}
+
+	secondCtx := contextWithGinHeaders(map[string]string{
+		"Originator":            "Other Client",
+		"User-Agent":            "other-client/9.9",
+		"Version":               "9.9.9",
+		"X-Codex-Beta-Features": "second-beta",
+		"X-Codex-Turn-Metadata": `{"turn_id":"turn-2"}`,
+	})
+	second := applyCodexWebsocketHeaders(secondCtx, http.Header{}, auth, "", nil)
+
+	if got := second.Get("User-Agent"); got != "codex_cli_rs/0.1.0" {
+		t.Fatalf("second User-Agent = %q, want pinned first value", got)
+	}
+	if got := second.Get("Originator"); got != "Codex Desktop" {
+		t.Fatalf("second Originator = %q, want pinned first value", got)
+	}
+	if got := second.Get("Version"); got != codexDefaultVersion {
+		t.Fatalf("second Version = %q, want pinned default value", got)
+	}
+	if got := second.Get("X-Codex-Beta-Features"); got != "first-beta" {
+		t.Fatalf("second X-Codex-Beta-Features = %q, want pinned first value", got)
+	}
+	if got := second.Get("X-Codex-Turn-Metadata"); got != `{"turn_id":"turn-2"}` {
+		t.Fatalf("second X-Codex-Turn-Metadata = %q, want per-request value", got)
+	}
+}
+
+func TestCodexClientProfilePinDoesNotMutateAuthMaps(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		ID:       "test-codex-profile-no-mutate",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"existing": "value",
+		},
+		Metadata: map[string]any{
+			"email": "user@example.com",
+		},
+	}
+	ctx := contextWithGinHeaders(map[string]string{
+		"Originator":            "Codex Desktop",
+		"User-Agent":            "codex_cli_rs/0.1.0",
+		"Version":               codexDefaultVersion,
+		"X-Codex-Beta-Features": "first-beta",
+	})
+
+	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", nil)
+
+	if got := headers.Get("User-Agent"); got != "codex_cli_rs/0.1.0" {
+		t.Fatalf("User-Agent = %q, want pinned value", got)
+	}
+	if _, ok := auth.Attributes["header:User-Agent"]; ok {
+		t.Fatalf("auth.Attributes was mutated: %#v", auth.Attributes)
+	}
+	if _, ok := auth.Metadata["headers"]; ok {
+		t.Fatalf("auth.Metadata was mutated: %#v", auth.Metadata)
+	}
+	if _, ok := auth.Metadata["codex_client_profile_pinned"]; ok {
+		t.Fatalf("auth.Metadata contains stale pin marker: %#v", auth.Metadata)
+	}
+}
+
+func TestCodexClientProfilePinConcurrentRequests(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		ID:       "test-codex-profile-concurrent",
+		Provider: "codex",
+		Metadata: map[string]any{"email": "user@example.com"},
+	}
+
+	const workers = 32
+	contexts := make([]context.Context, workers)
+	for i := 0; i < workers; i++ {
+		contexts[i] = contextWithGinHeaders(map[string]string{
+			"Originator":            "Codex Desktop",
+			"User-Agent":            fmt.Sprintf("codex_cli_rs/0.144.%d", i),
+			"Version":               codexDefaultVersion,
+			"X-Codex-Beta-Features": fmt.Sprintf("beta-%d", i),
+		})
+	}
+
+	start := make(chan struct{})
+	errCh := make(chan string, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			headers := applyCodexWebsocketHeaders(contexts[i], http.Header{}, auth, "", nil)
+			if headers.Get("User-Agent") == "" {
+				errCh <- "missing User-Agent"
+			}
+			if got := headers.Get("Version"); got != codexDefaultVersion {
+				errCh <- fmt.Sprintf("Version = %q, want %q", got, codexDefaultVersion)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for msg := range errCh {
+		t.Fatal(msg)
 	}
 }
 
@@ -1388,7 +1510,7 @@ func TestApplyCodexHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
 	}
 	req = req.WithContext(contextWithGinHeaders(map[string]string{
 		"Originator":            "Codex Desktop",
-		"Version":               "0.115.0-alpha.27",
+		"Version":               codexDefaultVersion,
 		"X-Codex-Turn-Metadata": `{"turn_id":"turn-1"}`,
 		"X-Client-Request-Id":   "019d2233-e240-7162-992d-38df0a2a0e0d",
 	}))
@@ -1398,14 +1520,60 @@ func TestApplyCodexHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
 	if got := req.Header.Get("Originator"); got != "Codex Desktop" {
 		t.Fatalf("Originator = %s, want %s", got, "Codex Desktop")
 	}
-	if got := req.Header.Get("Version"); got != "0.115.0-alpha.27" {
-		t.Fatalf("Version = %s, want %s", got, "0.115.0-alpha.27")
+	if got := req.Header.Get("Version"); got != codexDefaultVersion {
+		t.Fatalf("Version = %s, want %s", got, codexDefaultVersion)
 	}
 	if got := req.Header.Get("X-Codex-Turn-Metadata"); got != `{"turn_id":"turn-1"}` {
 		t.Fatalf("X-Codex-Turn-Metadata = %s, want %s", got, `{"turn_id":"turn-1"}`)
 	}
 	if got := req.Header.Get("X-Client-Request-Id"); got != "019d2233-e240-7162-992d-38df0a2a0e0d" {
 		t.Fatalf("X-Client-Request-Id = %s, want %s", got, "019d2233-e240-7162-992d-38df0a2a0e0d")
+	}
+}
+
+func TestApplyCodexHeadersPinsClientProfilePerAuth(t *testing.T) {
+	auth := &cliproxyauth.Auth{Provider: "codex", Metadata: map[string]any{"email": "user@example.com"}}
+
+	firstReq, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	firstReq = firstReq.WithContext(contextWithGinHeaders(map[string]string{
+		"Originator":            "Codex Desktop",
+		"User-Agent":            "codex_cli_rs/0.1.0",
+		"Version":               codexDefaultVersion,
+		"X-Codex-Beta-Features": "first-beta",
+		"X-Codex-Turn-Metadata": `{"turn_id":"turn-1"}`,
+	}))
+	applyCodexHeaders(firstReq, auth, "oauth-token", true, nil)
+
+	secondReq, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	secondReq = secondReq.WithContext(contextWithGinHeaders(map[string]string{
+		"Originator":            "Other Client",
+		"User-Agent":            "other-client/9.9",
+		"Version":               "9.9.9",
+		"X-Codex-Beta-Features": "second-beta",
+		"X-Codex-Turn-Metadata": `{"turn_id":"turn-2"}`,
+	}))
+	applyCodexHeaders(secondReq, auth, "oauth-token", true, nil)
+
+	if got := secondReq.Header.Get("User-Agent"); got != "codex_cli_rs/0.1.0" {
+		t.Fatalf("second User-Agent = %q, want pinned first value", got)
+	}
+	if got := secondReq.Header.Get("Originator"); got != "Codex Desktop" {
+		t.Fatalf("second Originator = %q, want pinned first value", got)
+	}
+	if got := secondReq.Header.Get("Version"); got != codexDefaultVersion {
+		t.Fatalf("second Version = %q, want pinned default value", got)
+	}
+	if got := secondReq.Header.Get("X-Codex-Beta-Features"); got != "first-beta" {
+		t.Fatalf("second X-Codex-Beta-Features = %q, want pinned first value", got)
+	}
+	if got := secondReq.Header.Get("X-Codex-Turn-Metadata"); got != `{"turn_id":"turn-2"}` {
+		t.Fatalf("second X-Codex-Turn-Metadata = %q, want per-request value", got)
 	}
 }
 
@@ -1417,8 +1585,8 @@ func TestApplyCodexHeadersDoesNotInjectClientOnlyHeadersByDefault(t *testing.T) 
 
 	applyCodexHeaders(req, nil, "oauth-token", true, nil)
 
-	if got := req.Header.Get("Version"); got != "" {
-		t.Fatalf("Version = %q, want empty", got)
+	if got := req.Header.Get("Version"); got != codexDefaultVersion {
+		t.Fatalf("Version = %q, want %q", got, codexDefaultVersion)
 	}
 	if got := req.Header.Get("X-Codex-Turn-Metadata"); got != "" {
 		t.Fatalf("X-Codex-Turn-Metadata = %q, want empty", got)

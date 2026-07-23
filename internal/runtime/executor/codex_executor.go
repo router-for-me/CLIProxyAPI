@@ -35,7 +35,8 @@ import (
 )
 
 const (
-	codexUserAgent             = "codex-tui/0.135.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.135.0)"
+	codexDefaultVersion        = "0.144.6"
+	codexUserAgent             = "codex-tui/0.144.6 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.144.6)"
 	codexOriginator            = "codex-tui"
 	codexDefaultImageToolModel = "gpt-image-2"
 	codexResponsesLiteHeader   = "X-OpenAI-Internal-Codex-Responses-Lite"
@@ -1988,14 +1989,18 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+token)
 
-	if ginHeaders != nil && ginHeaders.Get("X-Codex-Beta-Features") != "" {
-		r.Header.Set("X-Codex-Beta-Features", ginHeaders.Get("X-Codex-Beta-Features"))
+	codexPinClientProfileFromFirstRequest(r.Context(), auth, r.Header, ginHeaders, cfg)
+	codexPreparePinnedClientProfileHeaders(r.Header, auth)
+	profileHeaders := codexClientProfileSourceHeaders(auth, ginHeaders)
+
+	if profileHeaders != nil && profileHeaders.Get("X-Codex-Beta-Features") != "" {
+		r.Header.Set("X-Codex-Beta-Features", profileHeaders.Get("X-Codex-Beta-Features"))
 	}
-	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
+	codexEnsureVersionHeader(r.Header, profileHeaders, !codexAuthUsesAPIKey(auth))
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	ensureHeaderWithConfigPrecedence(r.Header, profileHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 
 	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
 		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
@@ -2014,7 +2019,7 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 			isAPIKey = true
 		}
 	}
-	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
+	if originator := firstNonEmptyHeaderValue(r.Header, profileHeaders, "Originator"); originator != "" {
 		r.Header.Set("Originator", originator)
 	} else if !isAPIKey {
 		r.Header.Set("Originator", codexOriginator)
