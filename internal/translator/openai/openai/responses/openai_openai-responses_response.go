@@ -119,7 +119,7 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 			completed, _ = sjson.SetBytes(completed, "response.tool_choice", v.Value())
 		}
 		if v := req.Get("tools"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.tools", v.Value())
+			completed, _ = sjson.SetBytes(completed, "response.tools", toolsForOpenAIResponsesEcho(v))
 		}
 		if v := req.Get("top_logprobs"); v.Exists() {
 			completed, _ = sjson.SetBytes(completed, "response.top_logprobs", v.Int())
@@ -774,8 +774,14 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 		if v := req.Get("tool_choice"); v.Exists() {
 			resp, _ = sjson.SetBytes(resp, "tool_choice", v.Value())
 		}
-		if v := req.Get("tools"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "tools", v.Value())
+		// Prefer original Responses request for tools echo when available;
+		// always normalize nested Chat Completions shape → Responses flat.
+		toolsRaw := requestRawJSON
+		if len(requestForNamespace) > 0 && gjson.GetBytes(requestForNamespace, "tools").Exists() {
+			toolsRaw = requestForNamespace
+		}
+		if v := gjson.GetBytes(toolsRaw, "tools"); v.Exists() {
+			resp, _ = sjson.SetBytes(resp, "tools", toolsForOpenAIResponsesEcho(v))
 		}
 		if v := req.Get("top_logprobs"); v.Exists() {
 			resp, _ = sjson.SetBytes(resp, "top_logprobs", v.Int())
