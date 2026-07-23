@@ -174,6 +174,8 @@ type QuotaState struct {
 	NextRecoverAt time.Time `json:"next_recover_at"`
 	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
 	BackoffLevel int `json:"backoff_level,omitempty"`
+	// NextProbeAt schedules the next non-consuming provider quota-status check.
+	NextProbeAt time.Time `json:"next_probe_at,omitempty"`
 }
 
 // ModelState captures the execution state for a specific model under an auth entry.

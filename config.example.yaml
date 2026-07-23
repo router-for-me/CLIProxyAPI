@@ -184,6 +184,14 @@ codex:
   # Some superstitious users believe request tracking identifiers can be used
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
+  # Adaptive Codex cooldowns are opt-in. When enabled, ordinary 429 responses use
+  # 15s, 30s, 1m, 2m, and 5m backoff with jitter. usage_limit_reached follows the
+  # provider reset time and is checked through the non-consuming WHAM usage endpoint.
+  quota-cooldown:
+    enabled: false
+    unauthorized-cooldown-seconds: 1800
+    transient-backoff-seconds: [15, 30, 60, 120, 300]
+    jitter-percent: 20
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
