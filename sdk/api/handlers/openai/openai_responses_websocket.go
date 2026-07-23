@@ -1504,6 +1504,17 @@ func responsesWebsocketAuthAvailableForModel(auth *coreauth.Auth, modelName stri
 	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
 		return false
 	}
+	// Permanent credential failure from the refresh path (e.g. refresh
+	// returned 400 invalid_grant) marks the auth Unavailable with a
+	// permanent LastError and zero NextRetryAfter. This must block the
+	// pinned websocket path too — otherwise a dead Codex/xAI pin keeps
+	// being matched by responsesWebsocketPinnedAuthMatchesModel and the
+	// handler keeps sending frames with WithPinnedAuthID, getting
+	// auth_unavailable instead of releasing the pin and falling back to
+	// a healthy auth (codex review).
+	if auth.Unavailable && coreauth.HasPermanentAuthFailure(auth) && auth.NextRetryAfter.IsZero() {
+		return false
+	}
 	if modelName != "" && len(auth.ModelStates) > 0 {
 		state, ok := auth.ModelStates[modelName]
 		if (!ok || state == nil) && modelName != "" {

@@ -3356,6 +3356,23 @@ func TestResponsesWebsocketPinnedAuthMatchesModel(t *testing.T) {
 	if responsesWebsocketPinnedAuthMatchesModel(unregisteredAuth, modelB, modelA, true) {
 		t.Fatal("Home runtime auth matched a different model")
 	}
+
+	// Permanent credential failure from the refresh path (400 invalid_grant
+	// or 401) marks the auth Unavailable with zero NextRetryAfter. The
+	// websocket pin path must reject it so the dead pin is released and the
+	// handler falls back to a healthy auth, instead of keeping the dead pin
+	// and sending frames that get auth_unavailable (codex review).
+	permanentFailedAuth := auth.Clone()
+	permanentFailedAuth.Unavailable = true
+	permanentFailedAuth.NextRetryAfter = time.Time{}
+	permanentFailedAuth.PermanentRefreshFailure = true
+	permanentFailedAuth.LastError = &coreauth.Error{HTTPStatus: http.StatusBadRequest, Message: "invalid_grant: refresh token revoked"}
+	if responsesWebsocketPinnedAuthMatchesModel(permanentFailedAuth, modelA, modelA, false) {
+		t.Fatal("permanent failed auth matched a model — dead pin must be rejected so it can be released")
+	}
+	if responsesWebsocketAuthAvailableForModel(permanentFailedAuth, modelA, time.Now()) {
+		t.Fatal("permanent failed auth reported available — websocket path must block it")
+	}
 }
 
 func TestWebsocketUpstreamSupportsIncrementalInputForModel(t *testing.T) {
