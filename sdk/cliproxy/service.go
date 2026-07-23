@@ -115,12 +115,36 @@ type Service struct {
 	homePluginSyncMu    sync.Mutex
 	homePluginSyncKey   string
 	homePluginSyncFetch func(context.Context, sdkpluginstore.PluginSyncRequest) (sdkpluginstore.PluginSyncResponse, error)
+
+	// kiroModelsCache caches the provider-scoped Kiro model catalog so that a fleet
+	// of Kiro accounts does not each trigger a ListAvailableModels call on every
+	// registration cycle (startup, config reload, catalog refresh).
+	kiroModelsCache kiroModelsCache
+}
+
+// kiroModelsCache is a TTL cache for the Kiro model catalog. The catalog is
+// provider-scoped (identical for every account; profileArn only routes billing), so
+// all Kiro auths share a single cached fetch. The mutex is held across the fetch so a
+// burst of accounts registering at once collapses into a single upstream call: the
+// first caller fetches while the rest wait, then they return the now-fresh cache. The
+// base (pre-agentic) model list is cached; agentic variants are derived per read
+// because they depend on a runtime flag, not the auth.
+type kiroModelsCache struct {
+	mu     sync.Mutex
+	models []*ModelInfo
+	expiry time.Time
 }
 
 const (
 	modelRegistrationMaxWorkersPerCategory         = 5
 	modelRegistrationMaxWorkersOpenAICompatibility = 20
 )
+
+// kiroModelsCacheTTL bounds how long a fetched Kiro model catalog is reused across
+// registration cycles before the next fetch is allowed. The catalog changes rarely,
+// so a modest TTL removes the per-account request amplification while keeping the
+// list reasonably fresh.
+const kiroModelsCacheTTL = 30 * time.Minute
 
 const (
 	modelRegistrationPhaseConfigAPIKey = iota
@@ -2964,8 +2988,11 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 	return out
 }
 
-// fetchKiroModels attempts to dynamically fetch Kiro models from the API.
-// If dynamic fetch fails, it falls back to static registry.GetKiroModels().
+// fetchKiroModels returns the Kiro model list for an auth. The provider-scoped base
+// catalog is fetched through a TTL cache that coalesces concurrent callers, so a fleet
+// of Kiro accounts triggers at most one ListAvailableModels call per TTL instead of one
+// per account per registration cycle. If the fetch fails, it falls back to the static
+// registry.GetKiroModels().
 func (s *Service) fetchKiroModels(a *coreauth.Auth) []*ModelInfo {
 	if a == nil {
 		log.Debug("kiro: auth is nil, using static models")
@@ -2979,43 +3006,78 @@ func (s *Service) fetchKiroModels(a *coreauth.Auth) []*ModelInfo {
 		return registry.GetKiroModels()
 	}
 
-	// Create KiroAuth instance
-	kAuth := kiroauth.NewKiroAuth(s.cfg)
-	if kAuth == nil {
-		log.Warn("kiro: failed to create KiroAuth instance, using static models")
+	base, ok := s.kiroModelsCache.get(func() ([]*ModelInfo, error) {
+		return s.fetchKiroBaseModelsFromAPI(tokenData)
+	})
+	if !ok {
 		return registry.GetKiroModels()
 	}
 
-	// Use timeout context for API call
+	// Generate agentic variants (only when kiro-system-prompt-inject-enable is on).
+	// This depends on a runtime flag rather than the account, so it is derived on
+	// every read instead of being cached.
+	return generateKiroAgenticVariants(base)
+}
+
+// get returns the provider-scoped Kiro base (pre-agentic) model list, invoking fetch
+// at most once per TTL. Concurrent callers coalesce onto a single fetch by waiting on
+// the mutex; when they acquire it the cache is already fresh. It returns ok=false when
+// nothing is cached and fetch fails or returns no models, so the caller can fall back
+// to the static catalog. Failed or empty fetches are not cached, allowing a retry.
+func (c *kiroModelsCache) get(fetch func() ([]*ModelInfo, error)) ([]*ModelInfo, bool) {
+	if c == nil || fetch == nil {
+		return nil, false
+	}
+
+	// The lock is intentionally held across fetch() so a burst of concurrent callers
+	// collapses into a single upstream call: latecomers block here and then read the
+	// now-fresh cache below. Do not narrow this to only guard the cache fields.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.models != nil && time.Now().Before(c.expiry) {
+		return c.models, true
+	}
+
+	models, err := fetch()
+	if err != nil {
+		log.Warnf("kiro: failed to fetch dynamic models: %v, using static models", err)
+		return nil, false
+	}
+	if len(models) == 0 {
+		// Do not cache a failed/empty catalog so a later caller can retry.
+		return nil, false
+	}
+
+	c.models = models
+	c.expiry = time.Now().Add(kiroModelsCacheTTL)
+	return models, true
+}
+
+// fetchKiroBaseModelsFromAPI performs the single upstream ListAvailableModels call and
+// converts the response to base ModelInfo entries (without agentic variants).
+func (s *Service) fetchKiroBaseModelsFromAPI(tokenData *kiroauth.KiroTokenData) ([]*ModelInfo, error) {
+	kAuth := kiroauth.NewKiroAuth(s.cfg)
+	if kAuth == nil {
+		return nil, errors.New("failed to create KiroAuth instance")
+	}
+
+	// Use timeout context for the credential-bound API call.
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// Attempt to fetch dynamic models
 	apiModels, err := kAuth.ListAvailableModels(ctx, tokenData)
 	if err != nil {
-		log.Warnf("kiro: failed to fetch dynamic models: %v, using static models", err)
-		return registry.GetKiroModels()
+		return nil, err
 	}
-
 	if len(apiModels) == 0 {
 		log.Debug("kiro: API returned no models, using static models")
-		return registry.GetKiroModels()
+		return nil, nil
 	}
 
-	// Convert API models to ModelInfo
 	models := convertKiroAPIModels(apiModels)
-
-	baseCount := len(models)
-
-	// Generate agentic variants (only when kiro-system-prompt-inject-enable is on).
-	models = generateKiroAgenticVariants(models)
-
-	if len(models) > baseCount {
-		log.Infof("kiro: fetched %d models from API (+%d agentic variants)", baseCount, len(models)-baseCount)
-	} else {
-		log.Infof("kiro: fetched %d models from API", baseCount)
-	}
-	return models
+	log.Infof("kiro: fetched %d models from API", len(models))
+	return models, nil
 }
 
 // extractKiroTokenData extracts KiroTokenData from auth attributes and metadata.
