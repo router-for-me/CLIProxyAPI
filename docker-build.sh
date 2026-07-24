@@ -60,7 +60,9 @@ EOF
   echo "[prep] created empty .env (fill TOS keys before enabling uploader upload)"
 fi
 
-mkdir -p logs auths
+# plugins/ is bind-mounted into the API container so store-installed
+# plugin binaries survive container recreate.
+mkdir -p logs auths plugins
 
 echo
 echo "Please select an option:"
@@ -97,7 +99,11 @@ print_status() {
   echo "Log QA panel:   open Management, then click the right-side LOG QA button"
   echo
   echo "QA reports dir (host): ./logs/log-qa/reports/"
+  echo "Plugins dir (host):    ./plugins  (mounted at /CLIProxyAPI/plugins)"
   echo "One-shot QA now:       docker compose exec log-qa ./log-qa -config /CLIProxyAPI/log-qa.yaml -once"
+  echo
+  echo "Plugins: set plugins.enabled=true and plugins.configs.<id>.enabled=true in config.yaml,"
+  echo "         then install/update the plugin from Management after deploy."
   echo
   docker compose ps
 }
