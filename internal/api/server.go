@@ -119,6 +119,11 @@ type PgStoreHandles struct {
 	// + audit log). nil when PG is not configured — the /api-tokens routes
 	// return 503 in that case.
 	ManagementTokens *store.ManagementTokenStore
+	// UpstreamProviders is the PG-backed store for the upstream_providers
+	// table (the normalized source of truth for both API-key providers and
+	// OAuth/file-backed auths). nil when PG is not configured — the
+	// /upstream-providers routes return 503 in that case.
+	UpstreamProviders store.UpstreamProviderStore
 }
 
 // ServerOption customises HTTP server construction.
@@ -430,6 +435,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.mgmt.SetPricingSourcesStore(handles.PricingSources, handles.PricingSourcesDir)
 		s.mgmt.SetUserStore(handles.Users)
 		s.mgmt.SetManagementTokenStore(handles.ManagementTokens)
+		s.mgmt.SetUpstreamProvidersStore(handles.UpstreamProviders)
+		// Surface persisted official_provider values in auth-selection errors.
+		s.handlers.SetModelsCatalogStore(store.NewModelsCatalogResolver(handles.Models))
 	}
 	// Wire the /v1/models invoker so the management endpoint
 	// POST /v0/management/models-catalog/sync-from-v1 can probe the live
@@ -1032,6 +1040,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/models-catalog/count", s.mgmt.GetModelsCatalogCount)
 		mgmt.GET("/models-catalog/summary", s.mgmt.GetModelsCatalogSummary)
 		mgmt.GET("/models-catalog/distinct", s.mgmt.GetModelsCatalogDistinct)
+		mgmt.GET("/models-catalog/providers-for-model", s.mgmt.GetModelProviders)
 		mgmt.GET("/models-catalog/sync-status", s.mgmt.SyncStatus)
 		mgmt.GET("/models-catalog/:id/pricing", s.mgmt.GetModelPricing)
 		mgmt.PUT("/models-catalog/:id/pricing", s.mgmt.PutModelPricing)

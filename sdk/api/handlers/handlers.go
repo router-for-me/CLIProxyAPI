@@ -17,9 +17,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -442,6 +444,19 @@ type BaseAPIHandler struct {
 	// ModelRouterHost optionally routes matching requests to a plugin executor, the router's own
 	// executor, or a built-in provider before model-to-provider resolution and auth selection.
 	ModelRouterHost PluginModelRouterHost
+
+	// ModelsCatalogStore optionally resolves the official provider name for a
+	// provider key from the persisted models catalog (Postgres). When nil
+	// (file-based deployments), resolution falls back to the in-memory model
+	// registry and OpenAI-compatible auth attributes.
+	ModelsCatalogStore ModelsCatalogResolver
+}
+
+// ModelsCatalogResolver resolves an internal provider key to the official
+// provider name persisted in the models catalog. model is the requested model
+// id (may be empty). Returns "" when no row matches.
+type ModelsCatalogResolver interface {
+	OfficialProvider(ctx context.Context, providerKey, model string) string
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -458,6 +473,16 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 		Cfg:         cfg,
 		AuthManager: authManager,
 	}
+}
+
+// SetModelsCatalogStore wires a models-catalog resolver (backed by the
+// Postgres ModelsStore) used to render official provider names in auth
+// selection errors. Safe to call with nil to clear the resolver.
+func (h *BaseAPIHandler) SetModelsCatalogStore(r ModelsCatalogResolver) {
+	if h == nil {
+		return
+	}
+	h.ModelsCatalogStore = r
 }
 
 // UpdateClients updates the handlers' client list and configuration.
@@ -749,7 +774,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	if routeDecision.ExecutorPluginID != "" {
 		return h.executeWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
+	providers, normalizedModel, errMsg := h.providersForExecution(ctx, modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
@@ -784,7 +809,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
+		err = enrichAuthSelectionError(h, ctx, err, providers, normalizedModel)
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
 			if code := se.StatusCode(); code > 0 {
@@ -818,7 +843,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	if routeDecision.ExecutorPluginID != "" {
 		return h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
+	providers, normalizedModel, errMsg := h.providersForExecution(ctx, modelName, originalRequestedModel, false, routeDecision, execOptions)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
@@ -851,7 +876,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
+		err = enrichAuthSelectionError(h, ctx, err, providers, normalizedModel)
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
 			if code := se.StatusCode(); code > 0 {
@@ -1150,7 +1175,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	if routeDecision.ExecutorPluginID != "" {
 		return h.streamWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
+	providers, normalizedModel, errMsg := h.providersForExecution(ctx, modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
@@ -1188,7 +1213,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
+		err = enrichAuthSelectionError(h, ctx, err, providers, normalizedModel)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
@@ -1371,7 +1396,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 								chunks = retryResult.Chunks
 								continue outer
 							}
-							streamErr = enrichAuthSelectionError(retryErr, providers, normalizedModel)
+							streamErr = enrichAuthSelectionError(h, ctx, retryErr, providers, normalizedModel)
 						}
 					}
 
@@ -1546,7 +1571,7 @@ func statusFromError(err error) int {
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
-	return h.getRequestDetailsWithOptions(modelName, false)
+	return h.getRequestDetailsWithOptions(context.Background(), modelName, false)
 }
 
 func validateNativeInteractionsExecution(entryProtocol string, execOptions modelExecutionOptions, routeDecision modelRouteDecision) *interfaces.ErrorMessage {
@@ -1573,7 +1598,7 @@ func nativeInteractionsExecutionError() *interfaces.ErrorMessage {
 // providersForExecution resolves the providers and normalized model for a request. When a model
 // router selected a built-in provider, it skips model->provider resolution and uses the router's
 // provider (with an optional target model); otherwise it falls back to the registry-based path.
-func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel string, allowImageModel bool, routeDecision modelRouteDecision, execOptions modelExecutionOptions) ([]string, string, *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) providersForExecution(ctx context.Context, modelName, originalRequestedModel string, allowImageModel bool, routeDecision modelRouteDecision, execOptions modelExecutionOptions) ([]string, string, *interfaces.ErrorMessage) {
 	forcedProvider := strings.ToLower(strings.TrimSpace(execOptions.ForcedProvider))
 	if forcedProvider != "" {
 		if routeDecision.ExecutorPluginID != "" {
@@ -1601,10 +1626,59 @@ func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel
 		}
 		return []string{routeDecision.Provider}, normalizedModel, nil
 	}
-	return h.getRequestDetailsWithOptions(modelName, allowImageModel)
+	return h.getRequestDetailsWithOptions(ctx, modelName, allowImageModel)
 }
 
-func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowImageModel bool) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+// policyRoutesForModel reads the per-API-key model routes stashed by the policy
+// middleware into the gin context (embedded in ctx) and returns the pinned
+// upstream providers for modelID, or nil when no route is configured. The
+// registry-derived provider list is intersected with this set so requests are
+// confined to the pinned providers (no failover outside the set).
+func policyRoutesForModel(ctx context.Context, modelID string) []string {
+	if ctx == nil {
+		return nil
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return nil
+	}
+	return middleware.RoutesForModel(ginCtx, modelID)
+}
+
+// intersectProviders returns the subset of providers that appear (case-
+// insensitively) in pinned, preserving the order/precedence of providers.
+// Returns nil when the intersection is empty.
+func intersectProviders(providers, pinned []string) []string {
+	if len(pinned) == 0 {
+		return providers
+	}
+	pinnedSet := make(map[string]struct{}, len(pinned))
+	for _, p := range pinned {
+		pinnedSet[strings.ToLower(strings.TrimSpace(p))] = struct{}{}
+	}
+	out := make([]string, 0, len(providers))
+	seen := make(map[string]struct{}, len(providers))
+	for _, p := range providers {
+		key := strings.ToLower(strings.TrimSpace(p))
+		if key == "" {
+			continue
+		}
+		if _, ok := pinnedSet[key]; !ok {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (h *BaseAPIHandler) getRequestDetailsWithOptions(ctx context.Context, modelName string, allowImageModel bool) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
@@ -1649,6 +1723,21 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 
 	if len(providers) == 0 {
 		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
+	}
+
+	// Apply per-API-key model routing: when the policy pins this model to a
+	// subset of upstream providers, confine the candidate list to that subset.
+	// There is no failover to registry providers outside the pinned set; an
+	// empty intersection (no pinned provider serves the model) is a hard 503.
+	if pinned := policyRoutesForModel(ctx, baseModel); len(pinned) > 0 {
+		filtered := intersectProviders(providers, pinned)
+		if len(filtered) == 0 {
+			return nil, "", &interfaces.ErrorMessage{
+				StatusCode: http.StatusServiceUnavailable,
+				Error:      fmt.Errorf("no available upstream for model %s on allowed providers %v", modelName, pinned),
+			}
+		}
+		providers = filtered
 	}
 
 	// The thinking suffix is preserved in the model name itself, so no
@@ -2152,7 +2241,7 @@ func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, handlerT
 	return body, responseHeaders
 }
 
-func enrichAuthSelectionError(err error, providers []string, model string) error {
+func enrichAuthSelectionError(h *BaseAPIHandler, ctx context.Context, err error, providers []string, model string) error {
 	if err == nil {
 		return nil
 	}
@@ -2167,7 +2256,7 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 		return err
 	}
 
-	providerText := strings.Join(providers, ",")
+	providerText := strings.Join(officialProviderNames(h, ctx, providers, model), ",")
 	if providerText == "" {
 		providerText = "unknown"
 	}
@@ -2183,7 +2272,7 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 	detail := fmt.Sprintf("%s (providers=%s, model=%s)", baseMessage, providerText, modelText)
 
 	// Clarify the most common alias confusion between Anthropic route names and internal provider keys.
-	if strings.Contains(","+providerText+",", ",claude,") {
+	if containsProviderKey(providers, "claude") {
 		detail += "; check Claude auth/key session and cooldown state via /v0/management/auth-files"
 	}
 
@@ -2198,6 +2287,144 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 		Retryable:  authErr.Retryable,
 		HTTPStatus: status,
 	}
+}
+
+// officialProviderNames maps internal provider keys (e.g. "claude",
+// "openai-compatible-opencode", "gemini", "codex") to their Official Provider
+// display names for use in user-facing error messages. Resolution prefers the
+// persisted models catalog (official_provider column) when a catalog store is
+// wired, then falls back to the in-memory registry OwnedBy and OpenAI-compatible
+// auth attributes. When no authoritative source is available it falls back to
+// the openai-compatible- suffix, then the raw key, so the message stays
+// actionable.
+func officialProviderNames(h *BaseAPIHandler, ctx context.Context, providers []string, model string) []string {
+	if len(providers) == 0 {
+		return providers
+	}
+	out := make([]string, 0, len(providers))
+	for _, key := range providers {
+		out = append(out, officialProviderName(h, ctx, key, model))
+	}
+	return out
+}
+
+// containsProviderKey reports whether providers contains the supplied
+// case-insensitive internal key. Used to preserve hint messages keyed on the
+// internal provider key (e.g. "claude") rather than the resolved display name.
+func containsProviderKey(providers []string, target string) bool {
+	target = strings.ToLower(strings.TrimSpace(target))
+	if target == "" {
+		return false
+	}
+	for _, p := range providers {
+		if strings.ToLower(strings.TrimSpace(p)) == target {
+			return true
+		}
+	}
+	return false
+}
+
+const (
+	openAICompatibleProviderPrefix = "openai-compatible-"
+	openAICompatProviderAttrKey    = "provider_key"
+	openAICompatNameAttrKey        = "compat_name"
+	openAICompatibilityProvider    = "openai-compatibility"
+)
+
+// officialProviderName resolves a single provider key to its Official Provider
+// display name. Resolution order:
+//  1. Persisted models catalog (official_provider column) via
+//     h.ModelsCatalogStore, when wired — this is the authoritative source for
+//     operator-edited values and reflects what /v0/management/models surfaces.
+//  2. OpenAI-compatible: the auth record's compat_name attribute matched via
+//     the AuthManager. Works even when the requested model is unregistered.
+//  3. Registry OwnedBy for any model registered under the provider key — gives
+//     "anthropic"/"google"/"openai" for the built-in claude/gemini/codex keys.
+//  4. Fallback: the openai-compatible- suffix, then the raw key.
+func officialProviderName(h *BaseAPIHandler, ctx context.Context, key, model string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	lowerKey := strings.ToLower(key)
+
+	// 1. Persisted models catalog (official_provider column). This is the
+	// source of truth surfaced by the dashboard, so it takes precedence.
+	if h != nil && h.ModelsCatalogStore != nil {
+		resolverCtx := ctx
+		if resolverCtx == nil {
+			resolverCtx = context.Background()
+		}
+		if name := strings.TrimSpace(h.ModelsCatalogStore.OfficialProvider(resolverCtx, lowerKey, model)); name != "" {
+			return name
+		}
+	}
+
+	// 2. OpenAI-compatible providers: read the compat_name (official name)
+	// directly from the auth record carrying this provider key.
+	if h != nil && h.AuthManager != nil {
+		if name := officialNameFromAuthManager(h.AuthManager, lowerKey); name != "" {
+			return name
+		}
+	}
+
+	// 3. Registry OwnedBy — prefer the requested model, then any model
+	// registered for this provider key.
+	reg := registry.GetGlobalRegistry()
+	if model != "" {
+		if info := reg.GetModelInfo(model, lowerKey); info != nil {
+			if name := registry.OwnedByAsProvider(info); name != "" {
+				return name
+			}
+		}
+	}
+	for _, info := range reg.GetAvailableModelsByProvider(lowerKey) {
+		if name := registry.OwnedByAsProvider(info); name != "" {
+			return name
+		}
+	}
+
+	// 4. Fallback: openai-compatible- suffix (the configured compat name),
+	// then the raw key.
+	if stripped := strings.TrimPrefix(lowerKey, openAICompatibleProviderPrefix); stripped != "" && stripped != lowerKey {
+		return stripped
+	}
+	return lowerKey
+}
+
+// officialNameFromAuthManager returns the official provider name (compat_name)
+// carried by an OpenAI-compatible auth record whose provider key matches the
+// supplied internal key. Returns "" when no matching auth is found or when the
+// key does not refer to an OpenAI-compatible provider.
+func officialNameFromAuthManager(am *coreauth.Manager, key string) string {
+	if am == nil || key == "" {
+		return ""
+	}
+	if !strings.HasPrefix(key, openAICompatibleProviderPrefix) && key != openAICompatibilityProvider {
+		return ""
+	}
+	wantKey := strings.ToLower(key)
+	for _, a := range am.List() {
+		if a == nil {
+			continue
+		}
+		// Match by the provider_key attribute (already normalized to the
+		// "openai-compatible-<name>" form by the watcher synthesizer).
+		if attrKey := strings.ToLower(strings.TrimSpace(a.Attributes[openAICompatProviderAttrKey])); attrKey == wantKey {
+			if name := strings.TrimSpace(a.Attributes[openAICompatNameAttrKey]); name != "" {
+				return name
+			}
+		}
+		// Fall back to the openai-compatibility provider path, where the
+		// official name is the auth Label when no compat_name is set.
+		if wantKey == openAICompatibilityProvider &&
+			strings.EqualFold(strings.TrimSpace(a.Provider), openAICompatibilityProvider) {
+			if name := strings.TrimSpace(a.Label); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.

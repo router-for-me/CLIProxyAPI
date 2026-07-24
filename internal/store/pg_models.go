@@ -501,6 +501,125 @@ func (s *ModelsStore) SelectAllPagedFilter(ctx context.Context, page, pageSize i
 	return out, total, rows.Err()
 }
 
+// SelectAllDistinctPagedFilter is the deduplicated variant of
+// SelectAllPagedFilter: it returns at most one row per model id (the first
+// matching row per id, ordered by id then provider). Used by the dashboard's
+// allowed-models dropdown so each model id appears once regardless of how many
+// upstream providers serve it. The same ModelsListFilter/ModelsListSort apply;
+// the COUNT is COUNT(DISTINCT LOWER(id)).
+func (s *ModelsStore) SelectAllDistinctPagedFilter(ctx context.Context, page, pageSize int, f ModelsListFilter, sort ModelsListSort) ([]StoredModel, int64, error) {
+	if s == nil || s.db == nil {
+		return nil, 0, fmt.Errorf("postgres store: models store not initialized")
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 25
+	}
+
+	var (
+		whereParts []string
+		args       []any
+	)
+	if f.Provider != "" {
+		args = append(args, f.Provider)
+		whereParts = append(whereParts, fmt.Sprintf("provider = $%d", len(args)))
+	}
+	if f.OfficialProvider != "" {
+		args = append(args, f.OfficialProvider)
+		whereParts = append(whereParts, fmt.Sprintf("official_provider = $%d", len(args)))
+	}
+	if len(f.IDFilter) > 0 {
+		args = append(args, pqStringArray(f.IDFilter))
+		whereParts = append(whereParts, fmt.Sprintf("id = ANY($%d::text[])", len(args)))
+	}
+	if q := strings.TrimSpace(f.Query); q != "" {
+		args = append(args, "%"+strings.ToLower(q)+"%")
+		whereParts = append(whereParts, fmt.Sprintf(
+			"(LOWER(id) LIKE $%d OR LOWER(COALESCE(name,'')) LIKE $%d OR LOWER(COALESCE(display_name,'')) LIKE $%d OR LOWER(provider) LIKE $%d)",
+			len(args), len(args), len(args), len(args),
+		))
+	}
+	whereClause := ""
+	if len(whereParts) > 0 {
+		whereClause = " WHERE " + strings.Join(whereParts, " AND ")
+	}
+
+	// DISTINCT ON requires its ORDER BY to start with the DISTINCT column. We
+	// pick the first row per id ordered by id, provider so the result is
+	// deterministic; a secondary sort by the user-requested column is applied
+	// via an outer query wrapper so pagination math stays on distinct ids.
+	var total int64
+	countQuery := fmt.Sprintf(`SELECT COUNT(DISTINCT LOWER(id)) FROM %s%s`, s.modelsTable, whereClause)
+	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("postgres store: count models (distinct): %w", err)
+	}
+
+	orderClause := sortClause(sort)
+	listArgs := append([]any{}, args...)
+	listArgs = append(listArgs, pageSize, (page-1)*pageSize)
+	// The inner SELECT picks one representative row per id; the outer SELECT
+	// re-applies the requested sort column for display ordering and paginates.
+	listQuery := fmt.Sprintf(`
+		SELECT id, provider, official_provider, object, created, owned_by, type, display_name,
+		       name, version, description, input_token_limit, output_token_limit,
+		       supported_generation_methods, context_length, max_completion_tokens,
+		       supported_parameters, input_modalities, output_modalities,
+		       supports_web_search, thinking_config, override_header, user_defined,
+		       updated_at
+		FROM (
+			SELECT DISTINCT ON (LOWER(id))
+			       id, provider, official_provider, object, created, owned_by, type, display_name,
+			       name, version, description, input_token_limit, output_token_limit,
+			       supported_generation_methods, context_length, max_completion_tokens,
+			       supported_parameters, input_modalities, output_modalities,
+			       supports_web_search, thinking_config, override_header, user_defined,
+			       updated_at
+			FROM %s%s
+			ORDER BY LOWER(id), provider
+		) distinct_models
+		ORDER BY %s LIMIT $%d OFFSET $%d
+	`, s.modelsTable, whereClause, orderClause, len(listArgs)-1, len(listArgs))
+
+	rows, err := s.db.QueryContext(ctx, listQuery, listArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("postgres store: select models (distinct-paged): %w", err)
+	}
+	defer rows.Close()
+	out := make([]StoredModel, 0, pageSize)
+	for rows.Next() {
+		var (
+			m          StoredModel
+			genMethods []byte
+			params     []byte
+			inputMod   []byte
+			outputMod  []byte
+			thinking   []byte
+			override   []byte
+		)
+		if err = rows.Scan(&m.ID, &m.Provider, &m.OfficialProvider, &m.Object, &m.Created, &m.OwnedBy,
+			&m.Type, &m.DisplayName, &m.Name, &m.Version, &m.Description,
+			&m.InputTokenLimit, &m.OutputTokenLimit, &genMethods, &m.ContextLength,
+			&m.MaxCompletionTokens, &params, &inputMod, &outputMod,
+			&m.SupportsWebSearch, &thinking, &override, &m.UserDefined, &m.UpdatedAt); err != nil {
+			return nil, 0, fmt.Errorf("postgres store: scan model row (distinct-paged): %w", err)
+		}
+		m.SupportedGenerationMethods = decodeStringArray(genMethods)
+		m.SupportedParameters = decodeStringArray(params)
+		m.InputModalities = decodeStringArray(inputMod)
+		m.OutputModalities = decodeStringArray(outputMod)
+		if len(thinking) > 0 && string(thinking) != "null" {
+			_ = json.Unmarshal(thinking, &m.Thinking)
+		}
+		if len(override) > 0 && string(override) != "null" {
+			_ = json.Unmarshal(override, &m.OverrideHeader)
+		}
+		out = append(out, m)
+	}
+	return out, total, rows.Err()
+}
+
 // sortClause maps a ModelsListSort to a safe ORDER BY clause. Column names
 // are whitelisted to avoid SQL injection from query-string params.
 func sortClause(sort ModelsListSort) string {
@@ -777,6 +896,29 @@ func (s *ModelsStore) SelectOne(ctx context.Context, id, provider string) (*Stor
 		_ = json.Unmarshal(override, &m.OverrideHeader)
 	}
 	return &m, nil
+}
+
+// OfficialProviderByModelAndProvider returns the official_provider column for
+// the (id, provider) row in the models catalog. The provider argument is the
+// catalog's provider column value (the model owner, e.g. "anthropic" or
+// "opencode"), not the internal provider key. Returns ("", nil) when no row
+// matches so callers can fall back to other sources.
+func (s *ModelsStore) OfficialProviderByModelAndProvider(ctx context.Context, id, provider string) (string, error) {
+	if s == nil || s.db == nil {
+		return "", fmt.Errorf("postgres store: models store not initialized")
+	}
+	var official string
+	err := s.db.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT official_provider FROM %s WHERE id = $1 AND provider = $2`,
+		s.modelsTable,
+	), id, provider).Scan(&official)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("postgres store: select official_provider: %w", err)
+	}
+	return official, nil
 }
 
 // DeleteOne removes a single model row by (id, provider) primary key.

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
@@ -81,7 +83,7 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 
 func TestEnrichAuthSelectionError_DefaultsTo503WithContext(t *testing.T) {
 	in := &coreauth.Error{Code: "auth_not_found", Message: "no auth available"}
-	out := enrichAuthSelectionError(in, []string{"claude"}, "claude-sonnet-4-6")
+	out := enrichAuthSelectionError(nil, context.Background(), in, []string{"claude"}, "claude-sonnet-4-6")
 
 	var got *coreauth.Error
 	if !errors.As(out, &got) || got == nil {
@@ -103,7 +105,7 @@ func TestEnrichAuthSelectionError_DefaultsTo503WithContext(t *testing.T) {
 
 func TestEnrichAuthSelectionError_PreservesExplicitStatus(t *testing.T) {
 	in := &coreauth.Error{Code: "auth_unavailable", Message: "no auth available", HTTPStatus: http.StatusTooManyRequests}
-	out := enrichAuthSelectionError(in, []string{"gemini"}, "gemini-2.5-pro")
+	out := enrichAuthSelectionError(nil, context.Background(), in, []string{"gemini"}, "gemini-2.5-pro")
 
 	var got *coreauth.Error
 	if !errors.As(out, &got) || got == nil {
@@ -116,8 +118,135 @@ func TestEnrichAuthSelectionError_PreservesExplicitStatus(t *testing.T) {
 
 func TestEnrichAuthSelectionError_IgnoresOtherErrors(t *testing.T) {
 	in := errors.New("boom")
-	out := enrichAuthSelectionError(in, []string{"claude"}, "claude-sonnet-4-6")
+	out := enrichAuthSelectionError(nil, context.Background(), in, []string{"claude"}, "claude-sonnet-4-6")
 	if out != in {
 		t.Fatalf("expected original error to be returned unchanged")
+	}
+}
+
+// TestEnrichAuthSelectionError_ShowsOfficialProviderName verifies that the
+// providers list surfaced in the error message is rendered using the Official
+// Provider name rather than the internal "openai-compatible-..." key.
+func TestEnrichAuthSelectionError_ShowsOfficialProviderName(t *testing.T) {
+	in := &coreauth.Error{Code: "auth_unavailable", Message: "no auth available"}
+	out := enrichAuthSelectionError(nil, context.Background(), in, []string{"openai-compatible-opencode"}, "some-custom-model")
+
+	var got *coreauth.Error
+	if !errors.As(out, &got) || got == nil {
+		t.Fatalf("expected coreauth.Error, got %T", out)
+	}
+	if strings.Contains(got.Message, "openai-compatible-opencode") {
+		t.Fatalf("message should not expose the internal key, got %q", got.Message)
+	}
+	if !strings.Contains(got.Message, "providers=opencode") {
+		t.Fatalf("message should show Official Provider name, got %q", got.Message)
+	}
+}
+
+// TestEnrichAuthSelectionError_ResolvesOfficialNameFromRegistry verifies that
+// a built-in provider key resolves to its Official Provider name (OwnedBy)
+// taken from the model registry, rather than being emitted as the raw key.
+func TestEnrichAuthSelectionError_ResolvesOfficialNameFromRegistry(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "auth-claude",
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider,
+		[]*registry.ModelInfo{{ID: "claude-test-model", OwnedBy: "anthropic", Type: "claude"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	handler := NewBaseAPIHandlers(nil, manager)
+	in := &coreauth.Error{Code: "auth_unavailable", Message: "no auth available"}
+	out := enrichAuthSelectionError(handler, context.Background(), in, []string{"claude"}, "claude-test-model")
+
+	var got *coreauth.Error
+	if !errors.As(out, &got) || got == nil {
+		t.Fatalf("expected coreauth.Error, got %T", out)
+	}
+	if strings.Contains(got.Message, "providers=claude") {
+		t.Fatalf("message should not expose the raw key, got %q", got.Message)
+	}
+	if !strings.Contains(got.Message, "providers=anthropic") {
+		t.Fatalf("message should show Official Provider name, got %q", got.Message)
+	}
+}
+
+// TestEnrichAuthSelectionError_ResolvesCompatNameFromAuthManager verifies that
+// an OpenAI-compatible provider key resolves to the official compat name
+// carried on the auth record, independent of model registration.
+func TestEnrichAuthSelectionError_ResolvesCompatNameFromAuthManager(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "auth-opencode",
+		Provider: "openai-compatibility",
+		Label:    "opencode",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"provider_key": "openai-compatible-opencode",
+			"compat_name":  "opencode",
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register: %v", err)
+	}
+
+	handler := NewBaseAPIHandlers(nil, manager)
+	in := &coreauth.Error{Code: "auth_unavailable", Message: "no auth available"}
+	out := enrichAuthSelectionError(handler, context.Background(), in, []string{"openai-compatible-opencode"}, "some-unregistered-model")
+
+	var got *coreauth.Error
+	if !errors.As(out, &got) || got == nil {
+		t.Fatalf("expected coreauth.Error, got %T", out)
+	}
+	if strings.Contains(got.Message, "openai-compatible-opencode") {
+		t.Fatalf("message should not expose the internal key, got %q", got.Message)
+	}
+	if !strings.Contains(got.Message, "providers=opencode") {
+		t.Fatalf("message should show Official Provider name, got %q", got.Message)
+	}
+}
+
+// fakeCatalogResolver is a test double for ModelsCatalogResolver returning a
+// canned official_provider value regardless of input.
+type fakeCatalogResolver struct {
+	official  string
+	calls     int
+	lastKey   string
+	lastModel string
+}
+
+func (f *fakeCatalogResolver) OfficialProvider(_ context.Context, providerKey, model string) string {
+	f.calls++
+	f.lastKey = providerKey
+	f.lastModel = model
+	return f.official
+}
+
+// TestEnrichAuthSelectionError_PrefersModelsCatalog verifies that the persisted
+// models catalog (official_provider column) takes precedence over the registry
+// and auth-manager fallbacks when a resolver is wired.
+func TestEnrichAuthSelectionError_PrefersModelsCatalog(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	handler := NewBaseAPIHandlers(nil, manager)
+	handler.SetModelsCatalogStore(&fakeCatalogResolver{official: "Anthropic PBC"})
+
+	in := &coreauth.Error{Code: "auth_unavailable", Message: "no auth available"}
+	out := enrichAuthSelectionError(handler, context.Background(), in, []string{"claude"}, "claude-sonnet-4-6")
+
+	var got *coreauth.Error
+	if !errors.As(out, &got) || got == nil {
+		t.Fatalf("expected coreauth.Error, got %T", out)
+	}
+	if !strings.Contains(got.Message, "providers=Anthropic PBC") {
+		t.Fatalf("message should show catalog official_provider, got %q", got.Message)
+	}
+	// Claude hint should still fire (keyed on the internal "claude" key).
+	if !strings.Contains(got.Message, "/v0/management/auth-files") {
+		t.Fatalf("message missing management hint: %q", got.Message)
 	}
 }
