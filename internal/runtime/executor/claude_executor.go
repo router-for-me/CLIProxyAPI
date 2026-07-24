@@ -351,9 +351,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
+	wireBody, contentEncoding := helps.MaybeCompressRequestBodyContext(ctx, e.cfg, e.Identifier(), bodyForUpstream)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wireBody))
 	if err != nil {
 		return resp, err
+	}
+	if contentEncoding != "" {
+		httpReq.Header.Set("Content-Encoding", contentEncoding)
 	}
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, opts.Headers); errHeaders != nil {
 		return resp, errHeaders
@@ -542,9 +546,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
+	wireBody, contentEncoding := helps.MaybeCompressRequestBodyContext(ctx, e.cfg, e.Identifier(), bodyForUpstream)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wireBody))
 	if err != nil {
 		return nil, err
+	}
+	if contentEncoding != "" {
+		httpReq.Header.Set("Content-Encoding", contentEncoding)
 	}
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg, opts.Headers); errHeaders != nil {
 		return nil, errHeaders
@@ -801,9 +809,13 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel)
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	wireBody, contentEncoding := helps.MaybeCompressRequestBodyContext(ctx, e.cfg, e.Identifier(), body)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wireBody))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
+	}
+	if contentEncoding != "" {
+		httpReq.Header.Set("Content-Encoding", contentEncoding)
 	}
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, opts.Headers); errHeaders != nil {
 		return cliproxyexecutor.Response{}, errHeaders

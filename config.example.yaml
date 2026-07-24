@@ -44,6 +44,16 @@ api-keys:
 # Enable debug logging
 debug: false
 
+# Upstream request body compression (experimental).
+# Supported values: "off" (default) and "auto". Auto uses only the encoding
+# verified for each provider (Claude: gzip; Codex: zstd). Providers without
+# verified support always stay uncompressed.
+# Bodies smaller than request-compression-min-size are sent uncompressed.
+# The optional minimum size accepts positive integer KiB values and defaults to 16 KiB.
+# Enable debug logging to observe compression ratios.
+# request-compression: "off"
+# request-compression-min-size: "16k"
+
 # Enable pprof HTTP debug server (host:port). Keep it bound to localhost for safety.
 pprof:
   enable: false

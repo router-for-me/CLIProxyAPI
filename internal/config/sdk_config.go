@@ -42,6 +42,16 @@ type SDKConfig struct {
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
+	// RequestCompression controls upstream request body compression. Supported
+	// values are "off" (default) and "auto". Auto uses only the encoding verified
+	// for each provider.
+	RequestCompression string `yaml:"request-compression,omitempty" json:"request-compression,omitempty"`
+
+	// RequestCompressionMinSize is the minimum uncompressed body size required
+	// before request compression is applied. It accepts positive integer KiB
+	// values such as "16k" and defaults to 16 KiB when empty.
+	RequestCompressionMinSize string `yaml:"request-compression-min-size,omitempty" json:"request-compression-min-size,omitempty"`
+
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
