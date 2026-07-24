@@ -280,6 +280,13 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterPluginExecutorRoute(ctx co
 		Body:           cloneBytes(req.Payload),
 		Metadata:       opts.Metadata,
 	}, requestID, skipPluginID)
+	if resp.Reject {
+		return req, opts, &interfaces.ErrorMessage{
+			StatusCode:     http.StatusForbidden,
+			Error:          fmt.Errorf("request rejected by plugin: %s", resp.RejectReason),
+			DirectResponse: true,
+		}
+	}
 	opts.Headers = mergeRequestInterceptorHeaders(opts.Headers, resp.Headers, resp.ClearHeaders)
 	if len(resp.Body) > 0 {
 		req.Payload = cloneBytes(resp.Body)

@@ -180,6 +180,14 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 		Body:           bytes.Clone(req.Payload),
 		Metadata:       opts.Metadata,
 	})
+	if resp.Reject {
+		return req, opts, &Error{
+			Code:       "request_rejected_by_plugin",
+			Message:    resp.RejectReason,
+			HTTPStatus: http.StatusForbidden,
+			Retryable:  false,
+		}
+	}
 	opts.Headers = mergeRequestHeaders(opts.Headers, resp.Headers, resp.ClearHeaders)
 	if len(resp.Body) > 0 {
 		req.Payload = bytes.Clone(resp.Body)

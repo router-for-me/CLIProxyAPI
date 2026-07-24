@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -420,6 +421,13 @@ func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context,
 		Body:           cloneBytes(req.Payload),
 		Metadata:       opts.Metadata,
 	}, skipPluginID)
+	if resp.Reject {
+		return req, opts, &interfaces.ErrorMessage{
+			StatusCode:     http.StatusForbidden,
+			Error:          fmt.Errorf("request rejected by plugin: %s", resp.RejectReason),
+			DirectResponse: true,
+		}
+	}
 	opts.Headers = finalInterceptorHeaders(opts.Headers, resp.Headers)
 	if len(resp.Body) > 0 {
 		req.Payload = cloneBytes(resp.Body)
@@ -469,6 +477,8 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, 
 		StatusCode:      normalizedTerminationStatus(resp.StatusCode),
 		ResponseHeaders: resp.ResponseHeaders,
 		ResponseBody:    resp.ResponseBody,
+		Reject:          resp.Reject,
+		RejectReason:    resp.RejectReason,
 	}
 }
 

@@ -746,11 +746,13 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if maxWait <= 0 {
 		return 0, false
 	}
-	status := statusCodeFromError(err)
-	if status == http.StatusOK {
+	// Plugin policy rejections are terminal even when some auth is cooling down.
+	// Check before closestCooldownWait so a 403 reject never sleeps/retries.
+	if isRequestInvalidError(err) {
 		return 0, false
 	}
-	if isRequestInvalidError(err) {
+	status := statusCodeFromError(err)
+	if status == http.StatusOK {
 		return 0, false
 	}
 	wait, found := m.closestCooldownWait(providers, model, attempt)

@@ -101,6 +101,10 @@ type RequestAfterAuthInterceptResponse struct {
 	ResponseHeaders http.Header
 	// ResponseBody contains the downstream response body used when Terminate is true.
 	ResponseBody []byte
+	// Reject, when true, aborts the request after auth selection (fail-closed).
+	Reject bool
+	// RejectReason is an optional human-readable explanation surfaced to the caller.
+	RejectReason string
 }
 
 // RequestTerminatedError carries a plugin-defined downstream response without executing upstream.

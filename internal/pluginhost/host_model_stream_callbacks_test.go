@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -72,5 +73,34 @@ func TestHostModelExecuteStreamDetachesFromCallbackParentCancel(t *testing.T) {
 	case <-streamCtx.Done():
 	case <-time.After(time.Second):
 		t.Fatal("stream context was not canceled after callback scope closed")
+	}
+}
+
+func TestHostModelExecuteStreamKeepsLegacyEnvelopeErrorForSchema1(t *testing.T) {
+	host := New()
+	host.SetModelExecutor(&fakeHostModelExecutor{
+		executeModelStream: func(context.Context, handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+			return handlers.ModelExecutionStream{}, &interfaces.ErrorMessage{
+				StatusCode: http.StatusUnauthorized,
+				Error:      errors.New("unauthorized"),
+			}
+		},
+	})
+	callbackID, cleanup := host.openCallbackContextForPluginVersion(context.Background(), "legacy", 1)
+	defer cleanup()
+
+	rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{Model: "model-1", Stream: true},
+		HostCallbackID:            callbackID,
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecuteStream, rawReq)
+	if errCall == nil {
+		t.Fatalf("callFromPlugin() error = nil, want schema 1 callback error")
+	}
+	if rawResp != nil {
+		t.Fatalf("raw response = %s, want no successful result", rawResp)
 	}
 }

@@ -5,6 +5,12 @@ import (
 	"testing"
 )
 
+func TestSchemaVersionPreservesV1Compatibility(t *testing.T) {
+	if SchemaVersion != SchemaVersionV1 {
+		t.Fatalf("SchemaVersion = %d, want compatibility default %d", SchemaVersion, SchemaVersionV1)
+	}
+}
+
 func TestEnvelopeRoundTrip(t *testing.T) {
 	payload := json.RawMessage(`{"name":"example"}`)
 	env := Envelope{
@@ -27,8 +33,8 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 }
 
 func TestMethodNamesAreStable(t *testing.T) {
-	if SchemaVersion != 2 {
-		t.Fatalf("SchemaVersion = %d, want 2", SchemaVersion)
+	if CurrentSchemaVersion != SchemaVersionV2 {
+		t.Fatalf("CurrentSchemaVersion = %d, want %d", CurrentSchemaVersion, SchemaVersionV2)
 	}
 	if MethodPluginRegister != "plugin.register" {
 		t.Fatalf("MethodPluginRegister = %q", MethodPluginRegister)

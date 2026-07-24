@@ -1535,14 +1535,18 @@ func isMissingModelPhrase(value string) bool {
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. Specifically, it treats 400 responses with
 // "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
-// and all 422 responses as request-shape failures, where switching auths or
-// pooled upstream models will not help. Model-support errors are excluded so
-// routing can fall through to another auth or upstream.
+// all 422 responses, and plugin policy rejections (request_rejected_by_plugin)
+// as request-shape / policy failures, where switching auths or pooled upstream
+// models will not help. Model-support errors are excluded so routing can fall
+// through to another auth or upstream.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
 	}
 	if isRequestScopedError(err) {
+		return true
+	}
+	if isRequestRejectedByPluginError(err) {
 		return true
 	}
 	if isCloudflareChallengeError(err) {
@@ -1573,6 +1577,19 @@ func isRequestInvalidError(err error) bool {
 	default:
 		return false
 	}
+}
+
+// isRequestRejectedByPluginError reports plugin policy rejections that must
+// terminate auth selection and outer cooldown retries immediately.
+func isRequestRejectedByPluginError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		return authErr.Code == "request_rejected_by_plugin"
+	}
+	return false
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {

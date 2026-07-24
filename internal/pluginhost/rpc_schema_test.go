@@ -103,7 +103,7 @@ func TestRPCCapabilitiesIncludeModelRouter(t *testing.T) {
 	}
 }
 
-func TestRegisterRPCPluginSendsHostSchemaVersion(t *testing.T) {
+func TestRegisterRPCPluginSendsCurrentHostSchemaVersion(t *testing.T) {
 	lookup := newTestSymbolLookup(&testPlugin{
 		registerResult: validTestPlugin("schema"),
 	})
@@ -111,8 +111,8 @@ func TestRegisterRPCPluginSendsHostSchemaVersion(t *testing.T) {
 	if _, errRegister := registerRPCPlugin(context.Background(), nil, "schema", lookup, pluginabi.MethodPluginRegister, []byte("mode: test")); errRegister != nil {
 		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
 	}
-	if lookup.lastLifecycle.SchemaVersion != pluginabi.SchemaVersion {
-		t.Fatalf("lifecycle schema_version = %d, want %d", lookup.lastLifecycle.SchemaVersion, pluginabi.SchemaVersion)
+	if lookup.lastLifecycle.SchemaVersion != pluginabi.SchemaVersionV2 {
+		t.Fatalf("lifecycle schema_version = %d, want %d", lookup.lastLifecycle.SchemaVersion, pluginabi.SchemaVersionV2)
 	}
 	if string(lookup.lastLifecycle.ConfigYAML) != "mode: test" {
 		t.Fatalf("lifecycle config = %q, want input config", lookup.lastLifecycle.ConfigYAML)
@@ -123,7 +123,7 @@ func TestRegisterRPCPluginRejectsFutureSchemaVersion(t *testing.T) {
 	lookup := newTestSymbolLookup(&testPlugin{
 		registerResult: validTestPlugin("future-schema"),
 	})
-	lookup.schemaVersion = pluginabi.SchemaVersion + 1
+	lookup.schemaVersion = pluginabi.SchemaVersionV2 + 1
 
 	_, errRegister := registerRPCPlugin(context.Background(), nil, "future-schema", lookup, pluginabi.MethodPluginRegister, nil)
 	if errRegister == nil || !strings.Contains(errRegister.Error(), "schema version") {
