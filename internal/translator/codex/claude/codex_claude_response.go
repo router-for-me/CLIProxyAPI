@@ -104,6 +104,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		if params.ThinkingBlockOpen && params.ThinkingStopPending {
 			output = append(output, finalizeCodexThinkingBlock(params)...)
 		}
+		output = append(output, stopCodexTextBlock(params)...)
 		params.ThinkingSummarySeen = true
 		output = append(output, startCodexThinkingBlock(params)...)
 	case "response.reasoning_summary_text.delta":
