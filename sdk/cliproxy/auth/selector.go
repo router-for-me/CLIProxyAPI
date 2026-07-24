@@ -196,7 +196,17 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	return available
 }
 
-func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
+// collectAvailableByPriority partitions auths by priority for routing.
+// Returns the available priority buckets, the count of unavailable auths
+// (cooldown + permanently blocked), and the earliest cooldown retry time
+// among cooldown auths (permanently blocked auths contribute zero time).
+//
+// The unavailable count includes permanently blocked auths (e.g. refresh
+// returned 400 invalid_grant) so that a mix of dead + cooldown auths still
+// reports a cooldown error with the cooldown auths' earliest retry time,
+// instead of falling through to a generic auth_unavailable error that
+// hides the cooldown recovery window from callers.
+func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, unavailableCount int, earliest time.Time) {
 	available = make(map[int][]*Auth)
 	for i := 0; i < len(auths); i++ {
 		candidate := auths[i]
@@ -206,14 +216,14 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 			available[priority] = append(available[priority], candidate)
 			continue
 		}
+		unavailableCount++
 		if reason == blockReasonCooldown {
-			cooldownCount++
 			if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
 				earliest = next
 			}
 		}
 	}
-	return available, cooldownCount, earliest
+	return available, unavailableCount, earliest
 }
 
 func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
@@ -221,9 +231,9 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
 
-	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now)
+	availableByPriority, unavailableCount, earliest := collectAvailableByPriority(auths, model, now)
 	if len(availableByPriority) == 0 {
-		if cooldownCount == len(auths) && !earliest.IsZero() {
+		if unavailableCount == len(auths) && !earliest.IsZero() {
 			providerForError := provider
 			if providerForError == "mixed" {
 				providerForError = ""
@@ -308,6 +318,35 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	}
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true, blockReasonDisabled, time.Time{}
+	}
+	// Permanent credential failure from the refresh path (e.g. refresh
+	// returned 400 invalid_grant) marks the auth Unavailable with a permanent
+	// LastError and does NOT set auth.NextRetryAfter (it stays zero). This
+	// must block all routing — the credential is dead and retrying will only
+	// waste a request.
+	//
+	// The NextRetryAfter.IsZero() guard is critical for distinguishing refresh
+	// permanent failures from request-side cooldowns:
+	//
+	//   - Refresh permanent failure: refreshAuthForRequest sets Unavailable=true
+	//     + permanent LastError but never sets NextRetryAfter (it only clears
+	//     NextRefreshAfter, a different field). ModelStates may or may not be
+	//     empty depending on prior traffic — relying on len(ModelStates)==0
+	//     is unsafe (codex review: a revoked auth with prior ModelStates would
+	//     skip the block).
+	//
+	//   - Request-side cooldown: MarkResult/applyAuthFailureState always sets
+	//     auth.NextRetryAfter = now+30min for invalid_grant/unauthorized/etc.
+	//     Those auths must fall through to the model-state branch below, which
+	//     honors NextRetryAfter expiry and allows the normal retry/resume path
+	//     after the cooldown. Blocking them here would keep the auth blocked
+	//     forever, preventing cooldown recovery (codex review).
+	//
+	// restoreCooldownRecordLocked only restores records with NextRetryAfter
+	// in the future, so persisted auths always have non-zero NextRetryAfter
+	// and are not affected by this short-circuit.
+	if auth.Unavailable && hasPermanentAuthFailure(auth) && auth.NextRetryAfter.IsZero() {
+		return true, blockReasonOther, time.Time{}
 	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {

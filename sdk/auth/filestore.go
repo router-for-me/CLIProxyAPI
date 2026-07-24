@@ -279,6 +279,7 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 					auth.Metadata["disabled"] = true
 				}
 				cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
+				cliproxyauth.ApplyPermanentFailureFromMetadata(auth)
 			}
 			return auths, nil
 		}
@@ -339,6 +340,7 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 		auth.Attributes["email"] = email
 	}
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
+	cliproxyauth.ApplyPermanentFailureFromMetadata(auth)
 	return []*cliproxyauth.Auth{auth}, nil
 }
 

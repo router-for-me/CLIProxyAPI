@@ -323,6 +323,7 @@ func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 			NextRefreshAfter: time.Time{},
 		}
 		cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
+		cliproxyauth.ApplyPermanentFailureFromMetadata(auth)
 		if disabled, ok := metadata["disabled"].(bool); ok && disabled {
 			auth.Disabled = true
 			auth.Status = cliproxyauth.StatusDisabled
