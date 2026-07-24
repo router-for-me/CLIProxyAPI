@@ -141,11 +141,17 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		output = appendPendingCodexFunctionCallsFromTerminal(output, params, originalRequestRawJSON, responseData)
 		template, _ = sjson.SetBytes(template, "delta.stop_reason", mapCodexStopReasonToClaude(codexStopReason(responseData), params.HasEmittedToolUse))
 		template = setClaudeStopSequence(template, "delta.stop_sequence", responseData)
-		inputTokens, outputTokens, cachedTokens := extractResponsesUsage(responseData.Get("usage"))
+		inputTokens, outputTokens, cachedTokens, cacheCreationTokens := extractResponsesUsage(responseData.Get("usage"))
 		template, _ = sjson.SetBytes(template, "usage.input_tokens", inputTokens)
 		template, _ = sjson.SetBytes(template, "usage.output_tokens", outputTokens)
 		if cachedTokens > 0 {
 			template, _ = sjson.SetBytes(template, "usage.cache_read_input_tokens", cachedTokens)
+		}
+		if cacheCreationTokens > 0 {
+			// OpenAI/Codex cache writes are billed at 1.25x, matching Anthropic's 5m write tier.
+			// Upstream does not expose 5m/1h TTL metadata, so attribute all writes to the 5m bucket.
+			template, _ = sjson.SetBytes(template, "usage.cache_creation_input_tokens", cacheCreationTokens)
+			template, _ = sjson.SetBytes(template, "usage.cache_creation.ephemeral_5m_input_tokens", cacheCreationTokens)
 		}
 
 		output = translatorcommon.AppendSSEEventBytes(output, "message_delta", template, 2)
@@ -352,11 +358,17 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
 	out, _ = sjson.SetBytes(out, "id", responseData.Get("id").String())
 	out, _ = sjson.SetBytes(out, "model", responseData.Get("model").String())
-	inputTokens, outputTokens, cachedTokens := extractResponsesUsage(responseData.Get("usage"))
+	inputTokens, outputTokens, cachedTokens, cacheCreationTokens := extractResponsesUsage(responseData.Get("usage"))
 	out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
 	out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
 	if cachedTokens > 0 {
 		out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", cachedTokens)
+	}
+	if cacheCreationTokens > 0 {
+		// OpenAI/Codex cache writes are billed at 1.25x, matching Anthropic's 5m write tier.
+		// Upstream does not expose 5m/1h TTL metadata, so attribute all writes to the 5m bucket.
+		out, _ = sjson.SetBytes(out, "usage.cache_creation_input_tokens", cacheCreationTokens)
+		out, _ = sjson.SetBytes(out, "usage.cache_creation.ephemeral_5m_input_tokens", cacheCreationTokens)
 	}
 
 	hasToolCall := false
@@ -778,14 +790,18 @@ func resolveCodexClaudeToolUseName(originalRequestRawJSON []byte, name string) s
 	return name
 }
 
-func extractResponsesUsage(usage gjson.Result) (int64, int64, int64) {
+func extractResponsesUsage(usage gjson.Result) (int64, int64, int64, int64) {
 	if !usage.Exists() || usage.Type == gjson.Null {
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
 
 	inputTokens := usage.Get("input_tokens").Int()
 	outputTokens := usage.Get("output_tokens").Int()
 	cachedTokens := usage.Get("input_tokens_details.cached_tokens").Int()
+	cacheCreationTokens := usage.Get("input_tokens_details.cache_write_tokens").Int()
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = usage.Get("input_tokens_details.cache_creation_tokens").Int()
+	}
 
 	if cachedTokens > 0 {
 		if inputTokens >= cachedTokens {
@@ -794,8 +810,15 @@ func extractResponsesUsage(usage gjson.Result) (int64, int64, int64) {
 			inputTokens = 0
 		}
 	}
+	if cacheCreationTokens > 0 {
+		if inputTokens >= cacheCreationTokens {
+			inputTokens -= cacheCreationTokens
+		} else {
+			inputTokens = 0
+		}
+	}
 
-	return inputTokens, outputTokens, cachedTokens
+	return inputTokens, outputTokens, cachedTokens, cacheCreationTokens
 }
 
 // buildReverseMapFromClaudeOriginalShortToOriginal builds a map[short]original from original Claude request tools.

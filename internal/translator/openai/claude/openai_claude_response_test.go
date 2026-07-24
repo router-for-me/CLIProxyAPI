@@ -364,3 +364,138 @@ func TestStreamingTool_StopReasonMixedSuppressedAndValid(t *testing.T) {
 		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
 	}
 }
+
+func TestExtractOpenAIUsage_CacheReadAndWrite(t *testing.T) {
+	tests := []struct {
+		name              string
+		usageJSON         string
+		wantInput         int64
+		wantOutput        int64
+		wantCached        int64
+		wantCacheCreation int64
+	}{
+		{
+			name:              "cache read only",
+			usageJSON:         `{"prompt_tokens":2006,"completion_tokens":300,"prompt_tokens_details":{"cached_tokens":1920}}`,
+			wantInput:         86,
+			wantOutput:        300,
+			wantCached:        1920,
+			wantCacheCreation: 0,
+		},
+		{
+			name:              "cache write tokens",
+			usageJSON:         `{"prompt_tokens":2006,"completion_tokens":300,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":1800}}`,
+			wantInput:         206,
+			wantOutput:        300,
+			wantCached:        0,
+			wantCacheCreation: 1800,
+		},
+		{
+			name:              "cache creation alias",
+			usageJSON:         `{"prompt_tokens":2006,"completion_tokens":300,"prompt_tokens_details":{"cache_creation_tokens":400}}`,
+			wantInput:         1606,
+			wantOutput:        300,
+			wantCached:        0,
+			wantCacheCreation: 400,
+		},
+		{
+			name:              "read and write together",
+			usageJSON:         `{"prompt_tokens":2006,"completion_tokens":300,"prompt_tokens_details":{"cached_tokens":1920,"cache_write_tokens":50}}`,
+			wantInput:         36,
+			wantOutput:        300,
+			wantCached:        1920,
+			wantCacheCreation: 50,
+		},
+		{
+			name:              "malformed cached tokens cannot go negative",
+			usageJSON:         `{"prompt_tokens":10,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":50,"cache_write_tokens":3}}`,
+			wantInput:         0,
+			wantOutput:        1,
+			wantCached:        50,
+			wantCacheCreation: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input, output, cached, creation := extractOpenAIUsage(gjson.Parse(tt.usageJSON))
+			if input != tt.wantInput || output != tt.wantOutput || cached != tt.wantCached || creation != tt.wantCacheCreation {
+				t.Fatalf("got input=%d output=%d cached=%d creation=%d, want %d %d %d %d",
+					input, output, cached, creation, tt.wantInput, tt.wantOutput, tt.wantCached, tt.wantCacheCreation)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponseToClaude_StreamEmitsCacheUsage(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2006,"completion_tokens":300,"prompt_tokens_details":{"cached_tokens":1920,"cache_write_tokens":50}}}`,
+	)
+
+	var usagePayload string
+	for _, e := range events {
+		if e.Type == "message_delta" {
+			usagePayload = e.Payload
+		}
+	}
+	if usagePayload == "" {
+		t.Fatalf("message_delta not found in events: %+v", events)
+	}
+	parsed := gjson.Parse(usagePayload)
+	if got := parsed.Get("usage.input_tokens").Int(); got != 36 {
+		t.Fatalf("input_tokens = %d, want 36", got)
+	}
+	if got := parsed.Get("usage.output_tokens").Int(); got != 300 {
+		t.Fatalf("output_tokens = %d, want 300", got)
+	}
+	if got := parsed.Get("usage.cache_read_input_tokens").Int(); got != 1920 {
+		t.Fatalf("cache_read_input_tokens = %d, want 1920", got)
+	}
+	if got := parsed.Get("usage.cache_creation_input_tokens").Int(); got != 50 {
+		t.Fatalf("cache_creation_input_tokens = %d, want 50", got)
+	}
+}
+
+func TestConvertOpenAIResponseToClaudeNonStream_EmitsCacheUsage(t *testing.T) {
+	out := ConvertOpenAIResponseToClaudeNonStream(
+		context.Background(),
+		"",
+		[]byte(`{"messages":[]}`),
+		nil,
+		[]byte(`{"id":"c1","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2006,"completion_tokens":300,"prompt_tokens_details":{"cached_tokens":1920,"cache_write_tokens":50}}}`),
+		nil,
+	)
+	parsed := gjson.ParseBytes(out)
+	if got := parsed.Get("usage.input_tokens").Int(); got != 36 {
+		t.Fatalf("input_tokens = %d, want 36. Output: %s", got, string(out))
+	}
+	if got := parsed.Get("usage.output_tokens").Int(); got != 300 {
+		t.Fatalf("output_tokens = %d, want 300. Output: %s", got, string(out))
+	}
+	if got := parsed.Get("usage.cache_read_input_tokens").Int(); got != 1920 {
+		t.Fatalf("cache_read_input_tokens = %d, want 1920. Output: %s", got, string(out))
+	}
+	if got := parsed.Get("usage.cache_creation_input_tokens").Int(); got != 50 {
+		t.Fatalf("cache_creation_input_tokens = %d, want 50. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAINonStreamingToAnthropic_EmitsCacheUsage(t *testing.T) {
+	outs := convertOpenAINonStreamingToAnthropic([]byte(
+		`{"id":"c1","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2006,"completion_tokens":300,"prompt_tokens_details":{"cached_tokens":1920,"cache_write_tokens":50}}}`,
+	))
+	if len(outs) != 1 {
+		t.Fatalf("expected 1 output, got %d", len(outs))
+	}
+	parsed := gjson.ParseBytes(outs[0])
+	if got := parsed.Get("usage.input_tokens").Int(); got != 36 {
+		t.Fatalf("input_tokens = %d, want 36. Output: %s", got, string(outs[0]))
+	}
+	if got := parsed.Get("usage.cache_read_input_tokens").Int(); got != 1920 {
+		t.Fatalf("cache_read_input_tokens = %d, want 1920. Output: %s", got, string(outs[0]))
+	}
+	if got := parsed.Get("usage.cache_creation_input_tokens").Int(); got != 50 {
+		t.Fatalf("cache_creation_input_tokens = %d, want 50. Output: %s", got, string(outs[0]))
+	}
+}
