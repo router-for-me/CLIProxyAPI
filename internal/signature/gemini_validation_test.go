@@ -191,7 +191,7 @@ func TestInspectGeminiThoughtSignature_RejectsInvalidBase64(t *testing.T) {
 	}
 }
 
-func TestValidateGeminiThoughtSignatures_FunctionCallRequiresSignature(t *testing.T) {
+func TestValidateGeminiThoughtSignatures_FirstFunctionCallRequiresSignature(t *testing.T) {
 	input := []byte(`{
 		"contents": [{
 			"role": "model",
@@ -203,9 +203,66 @@ func TestValidateGeminiThoughtSignatures_FunctionCallRequiresSignature(t *testin
 
 	err := ValidateGeminiThoughtSignatures(input)
 	if err == nil {
-		t.Fatal("missing functionCall thoughtSignature should fail")
+		t.Fatal("missing first functionCall thoughtSignature should fail")
 	}
-	if !strings.Contains(err.Error(), "missing thoughtSignature on functionCall") {
+	if !strings.Contains(err.Error(), "missing thoughtSignature on first functionCall") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateGeminiThoughtSignatures_AllowsUnsignedParallelSibling(t *testing.T) {
+	input := []byte(`{
+		"contents": [{
+			"role": "model",
+			"parts": [
+				{
+					"functionCall": {"id": "call-1", "name": "read_file", "args": {}},
+					"thoughtSignature": "skip_thought_signature_validator"
+				},
+				{"functionCall": {"id": "call-2", "name": "read_file", "args": {}}}
+			]
+		}]
+	}`)
+
+	if err := ValidateGeminiThoughtSignatures(input, GeminiThoughtSignatureValidationOptions{AllowBypassSentinel: true}); err != nil {
+		t.Fatalf("unsigned parallel sibling should be valid: %v", err)
+	}
+}
+
+func TestValidateGeminiThoughtSignatures_RejectsSentinelOutsideFirstFunctionCall(t *testing.T) {
+	tests := []struct {
+		name  string
+		parts string
+	}{
+		{
+			name: "parallel sibling",
+			parts: `[
+				{"functionCall":{"name":"first","args":{}},"thoughtSignature":"skip_thought_signature_validator"},
+				{"functionCall":{"name":"second","args":{}},"thoughtSignature":"skip_thought_signature_validator"}
+			]`,
+		},
+		{
+			name:  "thought part",
+			parts: `[{"text":"hidden","thought":true,"thoughtSignature":"skip_thought_signature_validator"}]`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{"contents":[{"role":"model","parts":` + tt.parts + `}]}`)
+			err := ValidateGeminiThoughtSignatures(input, GeminiThoughtSignatureValidationOptions{AllowBypassSentinel: true})
+			if err == nil || !strings.Contains(err.Error(), "allowed only on the first model functionCall") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateGeminiThoughtSignatures_RejectsNonCanonicalNestedSignature(t *testing.T) {
+	signature := testGemini3ThoughtSignature([]byte{0x01, 0x0c, 0x39})
+	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"first","args":{},"thoughtSignature":"` + signature + `"}}]}]}`)
+
+	err := ValidateGeminiThoughtSignatures(input)
+	if err == nil || !strings.Contains(err.Error(), "canonical top-level field") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -272,6 +329,26 @@ func TestValidateGeminiFunctionCallPairing_ValidParallelGroup(t *testing.T) {
 
 	if err := ValidateGeminiFunctionCallPairing(input); err != nil {
 		t.Fatalf("valid pairing failed: %v", err)
+	}
+}
+
+func TestValidateGeminiFunctionCallPairing_RejectsUserBoundaryBeforeResponse(t *testing.T) {
+	payload := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run","args":{}}}]},{"role":"user","parts":[{"text":"boundary"}]},{"role":"model","parts":[{"functionResponse":{"id":"call-1","name":"run","response":{"result":"ok"}}}]}]}`)
+	if err := ValidateGeminiFunctionCallPairing(payload); err == nil {
+		t.Fatal("user boundary before function response was accepted")
+	}
+}
+
+func TestValidateGeminiFunctionCallPairing_RejectsEmptyContentBoundaryBeforeResponse(t *testing.T) {
+	for _, boundary := range []string{
+		`{"role":"user","parts":[]}`,
+		`{"role":"user"}`,
+		`{"role":"user","parts":null}`,
+	} {
+		payload := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run","args":{}}}]},` + boundary + `,{"role":"model","parts":[{"functionResponse":{"id":"call-1","name":"run","response":{"result":"ok"}}}]}]}`)
+		if err := ValidateGeminiFunctionCallPairing(payload); err == nil {
+			t.Fatalf("content boundary %s before function response was accepted", boundary)
+		}
 	}
 }
 

@@ -19,10 +19,10 @@
 //   - "skip_thought_signature_validator"
 //   - "context_engineering_is_the_way_to_go"
 //
-// This repo currently emits "skip_thought_signature_validator" for non-Claude
-// Antigravity Gemini model parts that contain functionCall, thought, or an
-// existing thoughtSignature. That is a request-shape compatibility policy, not a
-// proof that the replaced signature was malformed.
+// This repo emits "skip_thought_signature_validator" only when the first
+// functionCall in a synthetic model turn lacks a compatible provider signature.
+// Later parallel calls and ordinary text/thought parts preserve their native
+// unsigned shape.
 //
 // This validator is intentionally more conservative than a decrypting verifier.
 // Claude has a known E/R base64 envelope and a protobuf tree in this package.
@@ -32,9 +32,9 @@
 //
 // Validation tiers:
 //
-//   - Sentinel tier: accept the documented bypass sentinels only when the
-//     model functionCall is synthetic, migrated, or otherwise not traceable to a
-//     prior Gemini model response in the same conversation.
+//   - Sentinel tier: accept the documented bypass sentinels only on the first
+//     model functionCall when it is synthetic, migrated, or otherwise not
+//     traceable to a prior Gemini model response in the same conversation.
 //   - Opaque-shape tier: for real Gemini signatures, require a non-empty string,
 //     bounded length, successful standard base64 decoding, and a known protobuf
 //     envelope when the caller needs provider compatibility. Observed samples
@@ -205,8 +205,9 @@ func InspectGeminiThoughtSignature(rawSignature string, opts ...GeminiThoughtSig
 }
 
 // ValidateGeminiThoughtSignatures validates thoughtSignature fields in a Gemini
-// native payload. Function-call parts must have a valid signature. Other parts
-// are optional, but if a thoughtSignature field is present it must be valid.
+// native payload. The first functionCall in each model Content must have a valid
+// provider signature or allowed synthetic sentinel. Later parallel sibling calls
+// may be unsigned, but any signature they do carry must still be valid.
 func ValidateGeminiThoughtSignatures(inputRawJSON []byte, opts ...GeminiThoughtSignatureValidationOptions) error {
 	contents, contentsPath := geminiContents(inputRawJSON)
 	if !contents.IsArray() {
@@ -215,29 +216,47 @@ func ValidateGeminiThoughtSignatures(inputRawJSON []byte, opts ...GeminiThoughtS
 
 	contentResults := contents.Array()
 	for i := 0; i < len(contentResults); i++ {
-		parts := contentResults[i].Get("parts")
+		content := contentResults[i]
+		parts := content.Get("parts")
 		if !parts.IsArray() {
 			continue
 		}
 
+		isModelTurn := strings.EqualFold(strings.TrimSpace(content.Get("role").String()), "model")
+		firstFunctionCallSeen := false
 		partResults := parts.Array()
 		for j := 0; j < len(partResults); j++ {
 			part := partResults[j]
 			hasFunctionCall := part.Get("functionCall").Exists()
-			hasSignature := part.Get("thoughtSignature").Exists()
+			isFirstFunctionCall := isModelTurn && hasFunctionCall && !firstFunctionCallSeen
+			if isModelTurn && hasFunctionCall {
+				firstFunctionCallSeen = true
+			}
+			rawSignature, hasSignature := geminiPartThoughtSignature(part)
 			if !hasFunctionCall && !hasSignature {
 				continue
 			}
 
 			partPath := fmt.Sprintf("%s[%d].parts[%d]", contentsPath, i, j)
-			rawSignature := strings.TrimSpace(part.Get("thoughtSignature").String())
-			if rawSignature == "" {
-				if hasFunctionCall {
-					return fmt.Errorf("%s: missing thoughtSignature on functionCall", partPath)
-				}
-				return fmt.Errorf("%s: empty thoughtSignature", partPath)
+			rawSignature = strings.TrimSpace(rawSignature)
+			if part.Get("functionResponse").Exists() && hasSignature {
+				return fmt.Errorf("%s: functionResponse must not carry thoughtSignature", partPath)
 			}
-
+			if rawSignature == "" {
+				if isFirstFunctionCall {
+					return fmt.Errorf("%s: missing thoughtSignature on first functionCall", partPath)
+				}
+				if hasSignature {
+					return fmt.Errorf("%s: empty thoughtSignature", partPath)
+				}
+				continue
+			}
+			if IsGeminiThoughtSignatureBypass(rawSignature) && !isFirstFunctionCall {
+				return fmt.Errorf("%s: Gemini bypass sentinel is allowed only on the first model functionCall", partPath)
+			}
+			if !hasNormalizedGeminiPartThoughtSignature(part, rawSignature) {
+				return fmt.Errorf("%s: thoughtSignature must use one canonical top-level field", partPath)
+			}
 			if _, err := InspectGeminiThoughtSignature(rawSignature, opts...); err != nil {
 				return fmt.Errorf("%s: %w", partPath, err)
 			}
@@ -263,6 +282,9 @@ func ValidateGeminiFunctionCallPairing(inputRawJSON []byte) error {
 	for i := 0; i < len(contentResults); i++ {
 		parts := contentResults[i].Get("parts")
 		if !parts.IsArray() {
+			if len(pending) > 0 {
+				return fmt.Errorf("%s[%d]: content appears before %d pending functionResponse part(s)", contentsPath, i, len(pending))
+			}
 			continue
 		}
 
@@ -303,6 +325,9 @@ func ValidateGeminiFunctionCallPairing(inputRawJSON []byte) error {
 		}
 
 		if len(responses) == 0 {
+			if len(pending) > 0 {
+				return fmt.Errorf("%s[%d]: content appears before %d pending functionResponse part(s)", contentsPath, i, len(pending))
+			}
 			continue
 		}
 		if len(pending) == 0 {
