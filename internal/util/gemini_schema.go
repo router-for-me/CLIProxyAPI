@@ -197,7 +197,18 @@ func convertEnumValuesToStrings(jsonStr string) string {
 
 		var stringVals []string
 		for _, item := range arr.Array() {
+			// JSON Schema permits null in enum arrays for optional values, but
+			// Gemini's enum field only accepts non-empty strings. gjson renders
+			// null as an empty string, which Gemini rejects during request validation.
+			if item.Type == gjson.Null || item.String() == "" {
+				continue
+			}
 			stringVals = append(stringVals, item.String())
+		}
+
+		if len(stringVals) == 0 {
+			jsonStr, _ = sjson.Delete(jsonStr, p)
+			continue
 		}
 
 		// Always update enum values to strings and set type to "string"
