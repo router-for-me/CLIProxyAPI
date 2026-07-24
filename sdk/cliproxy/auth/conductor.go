@@ -907,7 +907,7 @@ func dedupeStrings(values []string) []string {
 	return out
 }
 
-// ResetQuota clears quota/cooldown state for an auth and resumes registry routing.
+// ResetQuota clears quota/cooldown and refresh quarantine state for an auth and resumes registry routing.
 func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []string, error) {
 	if m == nil {
 		return nil, nil, nil
@@ -929,6 +929,7 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 		m.mu.Unlock()
 		return nil, nil, nil
 	}
+	auth.RefreshBlocked = false
 
 	var cooldownRecordsBefore []CooldownStateRecord
 	trackCooldownState := m.cooldownStore != nil
@@ -985,6 +986,7 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 	if snapshot != nil && cooldownStateChanged {
 		m.persistCooldownStates(ctx)
 	}
+	m.queueRefreshReschedule(authID)
 	return snapshot, models, nil
 }
 
@@ -4726,6 +4728,13 @@ func isUnauthorizedError(err error) bool {
 	if err == nil {
 		return false
 	}
+	type authUnavailableError interface {
+		AuthUnavailable() bool
+	}
+	var terminal authUnavailableError
+	if errors.As(err, &terminal) && terminal != nil && terminal.AuthUnavailable() {
+		return true
+	}
 	if statusCodeFromError(err) == http.StatusUnauthorized {
 		return true
 	}
@@ -4745,7 +4754,7 @@ func refreshErrorFromError(err error) *Error {
 		return nil
 	}
 	statusCode := statusCodeFromError(err)
-	if statusCode == 0 && isUnauthorizedError(err) {
+	if isUnauthorizedError(err) {
 		statusCode = http.StatusUnauthorized
 	}
 	authErr := &Error{Message: err.Error(), HTTPStatus: statusCode}
@@ -6949,6 +6958,9 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if a == nil {
 		return false
 	}
+	if a.RefreshBlocked {
+		return false
+	}
 	if hasUnauthorizedAuthFailure(a) {
 		return false
 	}
@@ -7292,6 +7304,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 			if unauthorized {
 				current.NextRefreshAfter = time.Time{}
 				current.Unavailable = true
+				current.RefreshBlocked = true
 				current.Status = StatusError
 				current.StatusMessage = "unauthorized"
 			} else {
@@ -7322,6 +7335,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	updated.LastError = nil
 	updated.StatusMessage = ""
 	updated.Unavailable = false
+	updated.RefreshBlocked = false
 	if updated.Status == StatusError {
 		updated.Status = StatusActive
 	}

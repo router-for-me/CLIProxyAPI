@@ -45,6 +45,20 @@ func (e unauthorizedRefreshTestExecutor) Refresh(ctx context.Context, auth *Auth
 	return nil, errors.New("token refresh failed with status 401: invalid_grant")
 }
 
+type terminalCredentialRefreshError struct{}
+
+func (terminalCredentialRefreshError) Error() string         { return "invalid_client" }
+func (terminalCredentialRefreshError) StatusCode() int       { return http.StatusBadRequest }
+func (terminalCredentialRefreshError) AuthUnavailable() bool { return true }
+
+type terminalCredentialRefreshTestExecutor struct {
+	schedulerProviderTestExecutor
+}
+
+func (e terminalCredentialRefreshTestExecutor) Refresh(context.Context, *Auth) (*Auth, error) {
+	return nil, terminalCredentialRefreshError{}
+}
+
 func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
@@ -87,6 +101,71 @@ func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.
 	}
 	if _, shouldSchedule := nextRefreshCheckAt(now, updated, time.Second); shouldSchedule {
 		t.Fatal("expected unauthorized auth to be removed from the auto-refresh schedule")
+	}
+}
+
+func TestManager_RefreshAuthTerminalCredentialFailureQuarantinesAuth(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(terminalCredentialRefreshTestExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "codex"},
+	})
+
+	primary := &Auth{
+		ID:       "terminal-refresh-primary",
+		Provider: "codex",
+		Metadata: map[string]any{"refresh_token": "rotated-refresh-token"},
+	}
+	backup := &Auth{ID: "terminal-refresh-backup", Provider: "codex"}
+	if _, errRegister := manager.Register(ctx, primary); errRegister != nil {
+		t.Fatalf("register primary: %v", errRegister)
+	}
+	if _, errRegister := manager.Register(ctx, backup); errRegister != nil {
+		t.Fatalf("register backup: %v", errRegister)
+	}
+
+	manager.refreshAuth(ctx, primary.ID)
+
+	updated, ok := manager.GetByID(primary.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected primary auth after refresh failure")
+	}
+	if updated.LastError == nil || updated.LastError.Code != "unauthorized" {
+		t.Fatalf("expected terminal refresh failure to be recorded as unauthorized, got %+v", updated.LastError)
+	}
+	if !updated.NextRefreshAfter.IsZero() {
+		t.Fatalf("NextRefreshAfter = %s, want terminal failure unscheduled", updated.NextRefreshAfter)
+	}
+
+	available, errAvailable := getAvailableAuths(manager.List(), "codex", "gpt-5.5", time.Now())
+	if errAvailable != nil {
+		t.Fatalf("getAvailableAuths error: %v", errAvailable)
+	}
+	if len(available) != 1 || available[0].ID != backup.ID {
+		availableIDs := make([]string, 0, len(available))
+		for _, auth := range available {
+			if auth != nil {
+				availableIDs = append(availableIDs, auth.ID)
+			}
+		}
+		t.Fatalf("available auths = %v, want only %q", availableIDs, backup.ID)
+	}
+
+	reloaded := &Auth{
+		ID:       primary.ID,
+		Provider: primary.Provider,
+		Status:   StatusActive,
+		Metadata: map[string]any{"refresh_token": "new-refresh-token"},
+	}
+	if _, errUpdate := manager.Update(ctx, reloaded); errUpdate != nil {
+		t.Fatalf("reload primary: %v", errUpdate)
+	}
+	available, errAvailable = getAvailableAuths(manager.List(), "codex", "gpt-5.5", time.Now())
+	if errAvailable != nil {
+		t.Fatalf("getAvailableAuths after reload error: %v", errAvailable)
+	}
+	if len(available) != 2 {
+		t.Fatalf("available auth count after reload = %d, want 2", len(available))
 	}
 }
 
