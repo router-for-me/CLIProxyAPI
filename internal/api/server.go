@@ -1347,6 +1347,10 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
 		return
 	}
 
+	c.JSON(http.StatusOK, formatHomeCodexClientModels(entries))
+}
+
+func formatHomeCodexClientModels(entries []homeModelEntry) map[string]any {
 	models := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
 		model := map[string]any{
@@ -1363,10 +1367,13 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
 			model["display_name"] = entry.displayName
 			model["description"] = entry.displayName
 		}
+		if entry.contextLength > 0 {
+			model["context_length"] = entry.contextLength
+		}
 		models = append(models, model)
 	}
 
-	c.JSON(http.StatusOK, openai.CodexClientModelsResponse(models))
+	return openai.CodexClientModelsResponse(models)
 }
 
 func (s *Server) geminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {
