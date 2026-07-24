@@ -16,6 +16,7 @@ import (
 	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/diagnosticcapture"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
@@ -757,6 +758,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
+	diagnosticCapture := diagnosticcapture.Enabled() && sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse)
 	to := sdktranslator.FromString("codex")
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
@@ -797,6 +799,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if err != nil {
 		return resp, err
 	}
+	if diagnosticCapture {
+		diagnosticcapture.CaptureForwarded(ctx, upstreamBody)
+	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	var authID, authLabel, authType, authValue string
@@ -832,6 +837,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		b = applyCodexIdentityConfuseResponsePayload(b, identityState)
+		if diagnosticCapture {
+			diagnosticcapture.CaptureUpstreamResponse(ctx, httpResp.StatusCode, b)
+		}
 		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, b); errClearReplay != nil {
 			return resp, errClearReplay
 		}
@@ -846,6 +854,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, err
 	}
 	upstreamData := applyCodexIdentityConfuseResponsePayload(data, identityState)
+	if diagnosticCapture {
+		diagnosticcapture.CaptureUpstreamResponse(ctx, httpResp.StatusCode, upstreamData)
+	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, upstreamData)
 
 	lines := bytes.Split(upstreamData, []byte("\n"))
@@ -1044,6 +1055,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
+	diagnosticCapture := diagnosticcapture.Enabled() && sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse)
 	to := sdktranslator.FromString("codex")
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
@@ -1083,6 +1095,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if err != nil {
 		return nil, err
 	}
+	if diagnosticCapture {
+		diagnosticcapture.CaptureForwarded(ctx, upstreamBody)
+	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	var authID, authLabel, authType, authValue string
@@ -1121,6 +1136,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			return nil, readErr
 		}
 		data = applyCodexIdentityConfuseResponsePayload(data, identityState)
+		if diagnosticCapture {
+			diagnosticcapture.CaptureUpstreamResponse(ctx, httpResp.StatusCode, data)
+		}
 		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, data); errClearReplay != nil {
 			return nil, errClearReplay
 		}
@@ -1142,8 +1160,18 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
+		var diagnosticUpstreamResponse bytes.Buffer
+		defer func() {
+			if diagnosticCapture {
+				diagnosticcapture.CaptureUpstreamResponse(ctx, httpResp.StatusCode, diagnosticUpstreamResponse.Bytes())
+			}
+		}()
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
+			if diagnosticCapture {
+				diagnosticUpstreamResponse.Write(line)
+				diagnosticUpstreamResponse.WriteByte('\n')
+			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			translatedLine := bytes.Clone(line)
 
