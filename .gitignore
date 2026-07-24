@@ -9,11 +9,23 @@ config.yaml
 # Generated content
 bin/*
 logs/*
+logs-archive/*
+logs-cache-fail/*
 conv/*
 temp/*
 refs/*
 plugins/*
 examples/plugin/bin/*
+
+# Local runtime / backup artifacts
+keeper/
+backups/
+usage-backups/
+auths-backup-*/
+tmp-*/
+retest-all-*.txt
+v1-messages-*.log
+config.yaml.bak.*
 
 # Storage backends
 pgstore/*
