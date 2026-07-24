@@ -515,6 +515,10 @@ type SchedulerAuthCandidate struct {
 type SchedulerPickResponse struct {
 	// AuthID identifies the selected auth record.
 	AuthID string
+	// ExcludedAuthIDs asks the host to omit these otherwise-valid candidates,
+	// then apply its current native scheduling strategy to the remainder.
+	// The host must ignore IDs that are not in the original candidate set.
+	ExcludedAuthIDs []string
 	// DelegateBuiltin asks the host to use a named built-in scheduler.
 	DelegateBuiltin string
 	// Handled reports whether the plugin made a scheduling decision.

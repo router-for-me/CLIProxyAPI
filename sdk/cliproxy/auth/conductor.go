@@ -1864,6 +1864,43 @@ func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedule
 	}
 }
 
+func schedulerExcludedAuthIDs(candidates []*Auth, requested []string) map[string]struct{} {
+	if len(requested) == 0 || len(candidates) == 0 {
+		return nil
+	}
+	candidateIDs := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if candidate != nil && strings.TrimSpace(candidate.ID) != "" {
+			candidateIDs[candidate.ID] = struct{}{}
+		}
+	}
+	excluded := make(map[string]struct{}, len(requested))
+	for _, authID := range requested {
+		authID = strings.TrimSpace(authID)
+		if _, ok := candidateIDs[authID]; ok {
+			excluded[authID] = struct{}{}
+		}
+	}
+	if len(excluded) == 0 {
+		return nil
+	}
+	return excluded
+}
+
+func schedulerTriedWithExcluded(tried map[string]struct{}, excluded map[string]struct{}) map[string]struct{} {
+	if len(excluded) == 0 {
+		return tried
+	}
+	merged := make(map[string]struct{}, len(tried)+len(excluded))
+	for authID := range tried {
+		merged[authID] = struct{}{}
+	}
+	for authID := range excluded {
+		merged[authID] = struct{}{}
+	}
+	return merged
+}
+
 func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginScheduler, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, candidates []*Auth) (*Auth, bool, error) {
 	if scheduler == nil || len(candidates) == 0 {
 		return nil, false, nil
@@ -1885,18 +1922,30 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 	if errPick != nil {
 		return nil, true, errPick
 	}
+	excluded := schedulerExcludedAuthIDs(candidates, resp.ExcludedAuthIDs)
 	if !handled || !resp.Handled {
-		return nil, false, nil
+		if len(excluded) == 0 {
+			return nil, false, nil
+		}
+		return m.pickViaBuiltinScheduler(ctx, schedulerStrategyCurrent, providerKey, providers, model, opts, schedulerTriedWithExcluded(tried, excluded))
 	}
 	if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
-		return selected, true, nil
+		if _, isExcluded := excluded[selected.ID]; !isExcluded {
+			return selected, true, nil
+		}
 	}
 
 	strategy, okStrategy := builtinSchedulerStrategy(resp.DelegateBuiltin)
-	if !okStrategy {
-		return nil, false, nil
+	if okStrategy {
+		return m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, schedulerTriedWithExcluded(tried, excluded))
 	}
-	return m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried)
+	if len(excluded) != 0 {
+		// The plugin filtered candidates without selecting one. Re-run CPA's
+		// currently configured native scheduler with the exclusions treated as
+		// request-local tried auths, preserving fill-first/round-robin semantics.
+		return m.pickViaBuiltinScheduler(ctx, schedulerStrategyCurrent, providerKey, providers, model, opts, schedulerTriedWithExcluded(tried, excluded))
+	}
+	return nil, false, nil
 }
 
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
