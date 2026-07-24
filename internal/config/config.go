@@ -440,6 +440,17 @@ type CloakConfig struct {
 	// - true: strip all user system messages, keep only Claude Code prompt
 	StrictMode bool `yaml:"strict-mode,omitempty" json:"strict-mode,omitempty"`
 
+	// PreserveSystemPrompt controls how the caller's original system prompt is
+	// forwarded when cloaking OAuth (Claude Code login) requests. It only has an
+	// effect when StrictMode is false.
+	// - false (default): the forwarded system prompt is reduced to a neutral
+	//   reminder so the request looks like native Claude Code traffic.
+	// - true: the caller's original system prompt is kept and moved into the first
+	//   user message instead of being replaced.
+	// Keeping the original prompt makes requests more recognizable as third-party
+	// traffic, which may affect Anthropic plan-vs-extra-usage metering.
+	PreserveSystemPrompt *bool `yaml:"preserve-system-prompt,omitempty" json:"preserve-system-prompt,omitempty"`
+
 	// SensitiveWords is a list of words to obfuscate with zero-width characters.
 	// This can help bypass certain content filters.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
