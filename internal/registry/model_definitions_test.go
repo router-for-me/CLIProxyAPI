@@ -35,6 +35,19 @@ func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
 	t.Fatalf("Vertex models do not contain %q", releaseID)
 }
 
+func TestClaudeBuiltinsIncludeOpus5(t *testing.T) {
+	for _, model := range GetClaudeModels() {
+		if model == nil || model.ID != "claude-opus-5" {
+			continue
+		}
+		if model.Type != "claude" || model.DisplayName != "Claude Opus 5" || model.ContextLength != 1_000_000 {
+			t.Fatalf("unexpected Opus 5 metadata: %#v", model)
+		}
+		return
+	}
+	t.Fatal("Claude models do not contain claude-opus-5")
+}
+
 func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 

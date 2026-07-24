@@ -7,6 +7,7 @@ import (
 )
 
 const (
+	claudeBuiltinOpus5ModelID       = "claude-opus-5"
 	codexBuiltinImage15ModelID      = "gpt-image-1.5"
 	codexBuiltinImageModelID        = "gpt-image-2"
 	xaiBuiltinImageModelID          = "grok-imagine-image"
@@ -32,7 +33,7 @@ type staticModelsJSON struct {
 
 // GetClaudeModels returns the standard Claude model definitions.
 func GetClaudeModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Claude)
+	return WithClaudeBuiltins(cloneModelInfos(getModels().Claude))
 }
 
 // GetGeminiModels returns the standard Gemini model definitions.
@@ -110,6 +111,11 @@ func GetXAIModels() []*ModelInfo {
 	return WithXAIBuiltins(cloneModelInfos(getModels().XAI))
 }
 
+// WithClaudeBuiltins keeps newly released Claude models available while the remote catalog catches up.
+func WithClaudeBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, claudeBuiltinOpus5ModelInfo())
+}
+
 // WithCodexBuiltins injects hard-coded Codex-only model definitions that should
 // not depend on remote models.json updates. Built-ins replace any matching IDs
 // already present in the provided slice.
@@ -129,6 +135,24 @@ func normalizeAntigravityCapabilityModelID(modelID string) string {
 		modelID = strings.TrimSpace(modelID[:open])
 	}
 	return modelID
+}
+
+func claudeBuiltinOpus5ModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                  claudeBuiltinOpus5ModelID,
+		Object:              "model",
+		OwnedBy:             "anthropic",
+		Type:                "claude",
+		DisplayName:         "Claude Opus 5",
+		Description:         "Anthropic's most capable model for reasoning, planning, coding, and agentic work",
+		ContextLength:       1_000_000,
+		MaxCompletionTokens: 128_000,
+		Thinking: &ThinkingSupport{
+			ZeroAllowed:    true,
+			DynamicAllowed: true,
+			Levels:         []string{"low", "medium", "high", "xhigh", "max"},
+		},
+	}
 }
 
 func codexBuiltinImage15ModelInfo() *ModelInfo {
