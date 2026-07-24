@@ -557,6 +557,10 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	entry["success"] = auth.Success
 	entry["failed"] = auth.Failed
 	entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())
+	entry["quota"] = auth.Quota
+	if len(auth.ModelStates) > 0 {
+		entry["model_states"] = auth.ModelStates
+	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
 	}
