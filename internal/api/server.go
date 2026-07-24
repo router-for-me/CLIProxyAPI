@@ -97,7 +97,11 @@ type ServerOption func(*serverOptionConfig)
 func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
-	logger := logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
+	format := "text"
+	if cfg != nil {
+		format = cfg.RequestLogFormat
+	}
+	logger := logging.NewFileRequestLoggerWithFormat(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles, format)
 	logger.SetHomeEnabled(cfg != nil && cfg.Home.Enabled)
 	return logger
 }
@@ -1997,6 +2001,12 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 	if s.requestLogger != nil && (oldCfg == nil || oldCfg.ErrorLogsMaxFiles != cfg.ErrorLogsMaxFiles) {
 		if setter, ok := s.requestLogger.(interface{ SetErrorLogsMaxFiles(int) }); ok {
 			setter.SetErrorLogsMaxFiles(cfg.ErrorLogsMaxFiles)
+		}
+	}
+
+	if s.requestLogger != nil && (oldCfg == nil || oldCfg.RequestLogFormat != cfg.RequestLogFormat) {
+		if setter, ok := s.requestLogger.(interface{ SetFormat(string) }); ok {
+			setter.SetFormat(cfg.RequestLogFormat)
 		}
 	}
 

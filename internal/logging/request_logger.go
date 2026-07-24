@@ -10,6 +10,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -32,6 +33,11 @@ import (
 )
 
 var requestLogID atomic.Uint64
+
+const (
+	maxJSONStreamingResponseBytes = 8 << 20 // 8 MiB
+	maxJSONFileBackedSectionBytes = 8 << 20 // 8 MiB
+)
 
 const (
 	WebsocketTimelineSourceContextKey    = "WEBSOCKET_TIMELINE_SOURCE"
@@ -419,6 +425,9 @@ type FileRequestLogger struct {
 	errorLogsMaxFiles int
 
 	homeEnabled bool
+
+	// format specifies log entry structure ("text" or "json").
+	format string
 }
 
 type homeRequestLogPayload struct {
@@ -485,6 +494,11 @@ func (l *FileRequestLogger) forwardRequestLogToHome(ctx context.Context, headers
 // Returns:
 //   - *FileRequestLogger: A new file-based request logger instance
 func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorLogsMaxFiles int) *FileRequestLogger {
+	return NewFileRequestLoggerWithFormat(enabled, logsDir, configDir, errorLogsMaxFiles, "text")
+}
+
+// NewFileRequestLoggerWithFormat creates a new file-based request logger with specified format ("text" or "json").
+func NewFileRequestLoggerWithFormat(enabled bool, logsDir string, configDir string, errorLogsMaxFiles int, format string) *FileRequestLogger {
 	// Resolve logsDir relative to the configuration file directory when it's not absolute.
 	if !filepath.IsAbs(logsDir) {
 		// If configDir is provided, resolve logsDir relative to it.
@@ -492,12 +506,29 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 			logsDir = filepath.Join(configDir, logsDir)
 		}
 	}
+	format = normalizeRequestLogFormat(format)
 	return &FileRequestLogger{
 		enabled:           enabled,
 		logsDir:           logsDir,
 		errorLogsMaxFiles: errorLogsMaxFiles,
 		homeEnabled:       false,
+		format:            format,
 	}
+}
+
+func normalizeRequestLogFormat(format string) string {
+	if strings.EqualFold(strings.TrimSpace(format), "json") {
+		return "json"
+	}
+	return "text"
+}
+
+// SetFormat updates the request log format used by future log entries.
+func (l *FileRequestLogger) SetFormat(format string) {
+	if l == nil {
+		return
+	}
+	l.format = normalizeRequestLogFormat(format)
 }
 
 // SetHomeEnabled toggles home request-log forwarding.
@@ -770,6 +801,7 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 		chunkChan:        make(chan []byte, 100), // Buffered channel for async writes
 		closeChan:        make(chan struct{}),
 		errorChan:        make(chan error, 1),
+		format:           l.format,
 	}
 
 	// Start async writer goroutine
@@ -935,6 +967,253 @@ func (l *FileRequestLogger) writeRequestBodyTempFile(body []byte) (string, error
 	return tmpPath, nil
 }
 
+type jsonLogPayload struct {
+	Version                       string              `json:"version"`
+	URL                           string              `json:"url"`
+	Method                        string              `json:"method"`
+	DownstreamTransport           string              `json:"downstream_transport,omitempty"`
+	UpstreamTransport             string              `json:"upstream_transport,omitempty"`
+	Timestamp                     string              `json:"timestamp"`
+	Headers                       map[string][]string `json:"headers,omitempty"`
+	RequestBody                   json.RawMessage     `json:"request_body,omitempty"`
+	RequestBodyRaw                string              `json:"request_body_raw,omitempty"`
+	Response                      *jsonLogResponse    `json:"response,omitempty"`
+	APIRequest                    json.RawMessage     `json:"api_request,omitempty"`
+	APIRequestRaw                 string              `json:"api_request_raw,omitempty"`
+	APIRequestTruncated           bool                `json:"api_request_truncated,omitempty"`
+	APIResponse                   json.RawMessage     `json:"api_response,omitempty"`
+	APIResponseRaw                string              `json:"api_response_raw,omitempty"`
+	APIResponseTruncated          bool                `json:"api_response_truncated,omitempty"`
+	APIResponseErrors             []jsonLogError      `json:"api_response_errors,omitempty"`
+	APIWebsocketTimelineRaw       string              `json:"api_websocket_timeline_raw,omitempty"`
+	APIWebsocketTimelineTruncated bool                `json:"api_websocket_timeline_truncated,omitempty"`
+	WebsocketTimelineRaw          string              `json:"websocket_timeline_raw,omitempty"`
+	WebsocketTimelineTruncated    bool                `json:"websocket_timeline_truncated,omitempty"`
+}
+
+type jsonLogError struct {
+	StatusCode int                 `json:"status_code"`
+	Error      string              `json:"error,omitempty"`
+	Addon      map[string][]string `json:"addon,omitempty"`
+}
+
+type jsonLogResponse struct {
+	Status        int                 `json:"status"`
+	Headers       map[string][]string `json:"headers,omitempty"`
+	Body          json.RawMessage     `json:"body,omitempty"`
+	BodyRaw       string              `json:"body_raw,omitempty"`
+	BodyTruncated bool                `json:"body_truncated,omitempty"`
+}
+
+func maskHeaders(headers map[string][]string) map[string][]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	masked := make(map[string][]string, len(headers))
+	for key, values := range headers {
+		maskedValues := make([]string, len(values))
+		for i, value := range values {
+			maskedValues[i] = util.MaskSensitiveHeaderValue(key, value)
+		}
+		masked[key] = maskedValues
+	}
+	return masked
+}
+
+func (l *FileRequestLogger) writeJSONLog(
+	w io.Writer,
+	url, method string,
+	requestHeaders map[string][]string,
+	requestBody []byte,
+	requestBodyPath string,
+	statusCode int,
+	responseHeaders map[string][]string,
+	response []byte,
+	responsePath string,
+	apiRequest []byte,
+	apiRequestSource *FileBodySource,
+	apiResponse []byte,
+	apiResponseSource *FileBodySource,
+	apiResponseErrors []*interfaces.ErrorMessage,
+	websocketTimeline []byte,
+	websocketTimelineSource *FileBodySource,
+	apiWebsocketTimeline []byte,
+	apiWebsocketTimelineSource *FileBodySource,
+	requestTimestamp time.Time,
+	downstreamTransport string,
+	upstreamTransport string,
+) error {
+	if requestTimestamp.IsZero() {
+		requestTimestamp = time.Now()
+	}
+
+	maskedHeaders := maskHeaders(requestHeaders)
+
+	var reqBodyBytes []byte
+	if requestBodyPath != "" {
+		if b, err := os.ReadFile(requestBodyPath); err == nil {
+			reqBodyBytes = b
+		}
+	} else {
+		reqBodyBytes = requestBody
+	}
+
+	entry := jsonLogPayload{
+		Version:             buildinfo.Version,
+		URL:                 url,
+		Method:              method,
+		DownstreamTransport: downstreamTransport,
+		UpstreamTransport:   upstreamTransport,
+		Timestamp:           requestTimestamp.Format(time.RFC3339Nano),
+		Headers:             maskedHeaders,
+	}
+
+	if len(reqBodyBytes) > 0 {
+		if json.Valid(reqBodyBytes) {
+			entry.RequestBody = json.RawMessage(reqBodyBytes)
+		} else {
+			entry.RequestBodyRaw = string(reqBodyBytes)
+		}
+	}
+
+	// Upstream API Request
+	var apiReqBytes []byte
+	if apiRequestSource != nil && apiRequestSource.HasPayload() {
+		apiReqBytes, entry.APIRequestTruncated = readFileBodySourceLimited(apiRequestSource, maxJSONFileBackedSectionBytes)
+	} else {
+		apiReqBytes = apiRequest
+	}
+	if len(apiReqBytes) > 0 {
+		if json.Valid(apiReqBytes) {
+			entry.APIRequest = json.RawMessage(apiReqBytes)
+		} else {
+			entry.APIRequestRaw = string(apiReqBytes)
+		}
+	}
+
+	// Upstream API Response
+	var apiRespBytes []byte
+	if apiResponseSource != nil && apiResponseSource.HasPayload() {
+		apiRespBytes, entry.APIResponseTruncated = readFileBodySourceLimited(apiResponseSource, maxJSONFileBackedSectionBytes)
+	} else {
+		apiRespBytes = apiResponse
+	}
+	if len(apiRespBytes) > 0 {
+		if json.Valid(apiRespBytes) {
+			entry.APIResponse = json.RawMessage(apiRespBytes)
+		} else {
+			entry.APIResponseRaw = string(apiRespBytes)
+		}
+	}
+
+	if len(apiResponseErrors) > 0 {
+		entry.APIResponseErrors = make([]jsonLogError, 0, len(apiResponseErrors))
+		for _, apiErr := range apiResponseErrors {
+			if apiErr == nil {
+				continue
+			}
+			logErr := jsonLogError{
+				StatusCode: apiErr.StatusCode,
+				Addon:      maskHeaders(apiErr.Addon),
+			}
+			if apiErr.Error != nil {
+				logErr.Error = apiErr.Error.Error()
+			}
+			entry.APIResponseErrors = append(entry.APIResponseErrors, logErr)
+		}
+	}
+
+	if hasFileBodySourcePayload(apiWebsocketTimelineSource) {
+		timeline, truncated := readFileBodySourceLimited(apiWebsocketTimelineSource, maxJSONFileBackedSectionBytes)
+		entry.APIWebsocketTimelineRaw = string(timeline)
+		entry.APIWebsocketTimelineTruncated = truncated
+	} else if len(apiWebsocketTimeline) > 0 {
+		entry.APIWebsocketTimelineRaw = string(apiWebsocketTimeline)
+	}
+	if hasFileBodySourcePayload(websocketTimelineSource) {
+		timeline, truncated := readFileBodySourceLimited(websocketTimelineSource, maxJSONFileBackedSectionBytes)
+		entry.WebsocketTimelineRaw = string(timeline)
+		entry.WebsocketTimelineTruncated = truncated
+	} else if len(websocketTimeline) > 0 {
+		entry.WebsocketTimelineRaw = string(websocketTimeline)
+	}
+
+	respObj := &jsonLogResponse{
+		Status: statusCode,
+	}
+	if len(responseHeaders) > 0 {
+		respObj.Headers = maskHeaders(responseHeaders)
+	}
+	if responsePath != "" {
+		response, respObj.BodyTruncated = readFileLimited(responsePath, maxJSONStreamingResponseBytes)
+	}
+	if len(response) > 0 {
+		if json.Valid(response) {
+			respObj.Body = json.RawMessage(response)
+		} else {
+			respObj.BodyRaw = string(response)
+		}
+	}
+	entry.Response = respObj
+
+	data, err := json.Marshal(&entry)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	_, errWrite := w.Write(data)
+	return errWrite
+}
+
+func readFileLimited(path string, limit int) ([]byte, bool) {
+	file, errOpen := os.Open(path)
+	if errOpen != nil {
+		return nil, false
+	}
+	defer func() {
+		if errClose := file.Close(); errClose != nil {
+			log.WithError(errClose).Warn("failed to close JSON log source file")
+		}
+	}()
+
+	payload, errRead := io.ReadAll(io.LimitReader(file, int64(limit)+1))
+	if errRead != nil {
+		return nil, false
+	}
+	if len(payload) > limit {
+		return payload[:limit], true
+	}
+	return payload, false
+}
+
+var errJSONLogSectionLimit = errors.New("JSON log section size limit reached")
+
+type limitedJSONLogWriter struct {
+	buffer bytes.Buffer
+	limit  int
+}
+
+func (w *limitedJSONLogWriter) Write(payload []byte) (int, error) {
+	remaining := w.limit - w.buffer.Len()
+	if remaining <= 0 {
+		return 0, errJSONLogSectionLimit
+	}
+	if len(payload) > remaining {
+		_, _ = w.buffer.Write(payload[:remaining])
+		return remaining, errJSONLogSectionLimit
+	}
+	return w.buffer.Write(payload)
+}
+
+func readFileBodySourceLimited(source *FileBodySource, limit int) ([]byte, bool) {
+	if source == nil || !source.HasPayload() {
+		return nil, false
+	}
+	writer := &limitedJSONLogWriter{limit: limit}
+	errWrite := source.WriteTo(writer)
+	return writer.buffer.Bytes(), errors.Is(errWrite, errJSONLogSectionLimit)
+}
+
 func (l *FileRequestLogger) writeNonStreamingLog(
 	w io.Writer,
 	url, method string,
@@ -963,6 +1242,10 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	isWebsocketTranscript := hasSectionPayload(websocketTimeline) || hasFileBodySourcePayload(websocketTimelineSource)
 	downstreamTransport := inferDownstreamTransport(requestHeaders, websocketTimeline, websocketTimelineSource)
 	upstreamTransport := inferUpstreamTransport(apiRequest, apiRequestSource, apiResponse, apiResponseSource, apiWebsocketTimeline, apiWebsocketTimelineSource, apiResponseErrors)
+
+	if l.format == "json" {
+		return l.writeJSONLog(w, url, method, requestHeaders, requestBody, requestBodyPath, statusCode, responseHeaders, response, "", apiRequest, apiRequestSource, apiResponse, apiResponseSource, apiResponseErrors, websocketTimeline, websocketTimelineSource, apiWebsocketTimeline, apiWebsocketTimelineSource, requestTimestamp, downstreamTransport, upstreamTransport)
+	}
 	if errWrite := writeRequestInfoWithBody(w, url, method, requestHeaders, requestBody, requestBodyPath, requestTimestamp, downstreamTransport, upstreamTransport, !isWebsocketTranscript); errWrite != nil {
 		return errWrite
 	}
@@ -1698,6 +1981,9 @@ type FileStreamingLogWriter struct {
 
 	// apiResponseTimestamp captures when the API response was received.
 	apiResponseTimestamp time.Time
+
+	// format specifies log entry structure ("text" or "json").
+	format string
 }
 
 // WriteChunkAsync writes a response chunk asynchronously (non-blocking).
@@ -1900,7 +2186,36 @@ func (w *FileStreamingLogWriter) asyncWriter() {
 }
 
 func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
-	if errWrite := writeRequestInfoWithBody(logFile, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.timestamp, "http", inferUpstreamTransport(w.apiRequest, w.apiRequestSource, w.apiResponse, w.apiResponseSource, w.apiWebsocketTimeline, nil, nil), true); errWrite != nil {
+	upstreamTransport := inferUpstreamTransport(w.apiRequest, w.apiRequestSource, w.apiResponse, w.apiResponseSource, w.apiWebsocketTimeline, nil, nil)
+	if w.format == "json" {
+		dummyLogger := &FileRequestLogger{format: "json"}
+		return dummyLogger.writeJSONLog(
+			logFile,
+			w.url,
+			w.method,
+			w.requestHeaders,
+			nil,
+			w.requestBodyPath,
+			w.responseStatus,
+			w.responseHeaders,
+			nil,
+			w.responseBodyPath,
+			w.apiRequest,
+			w.apiRequestSource,
+			w.apiResponse,
+			w.apiResponseSource,
+			nil,
+			nil,
+			nil,
+			w.apiWebsocketTimeline,
+			nil,
+			w.timestamp,
+			"http",
+			upstreamTransport,
+		)
+	}
+
+	if errWrite := writeRequestInfoWithBody(logFile, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.timestamp, "http", upstreamTransport, true); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeAPISection(logFile, "=== API WEBSOCKET TIMELINE ===\n", "=== API WEBSOCKET TIMELINE", w.apiWebsocketTimeline, time.Time{}); errWrite != nil {
