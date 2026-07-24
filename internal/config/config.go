@@ -291,6 +291,8 @@ type CodexHeaderDefaults struct {
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
+	// OptimizeMultiAgentV2 rewrites official Codex spawn_agent definitions.
+	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
 }
 
 // TLSConfig holds HTTPS server settings.
