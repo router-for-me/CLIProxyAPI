@@ -40,6 +40,9 @@ type ResponseWriterWrapper struct {
 	chunkChannel        chan []byte                // chunkChannel is a channel for asynchronously passing response chunks to the logger.
 	streamDone          chan struct{}              // streamDone signals when the streaming goroutine completes.
 	logger              logging.RequestLogger      // logger is the instance of the request logger service.
+	rootLogger          logging.RequestLogger      // rootLogger is the unscoped logger used to rebind after auth.
+	ginContext          *gin.Context               // ginContext allows post-auth log directory rebinding.
+	authScopeApplied    bool                       // authScopeApplied avoids rebinding more than once.
 	requestInfo         *RequestInfo               // requestInfo holds the details of the original request.
 	statusCode          int                        // statusCode stores the HTTP status code of the response.
 	headers             map[string][]string        // headers stores the response headers.
@@ -65,6 +68,38 @@ func NewResponseWriterWrapper(w gin.ResponseWriter, logger logging.RequestLogger
 		requestInfo:    requestInfo,
 		headers:        make(map[string][]string),
 	}
+}
+
+// SetAuthLogScopeSources stores the root logger and request context so the wrapper
+// can rebind the per-key log directory after authentication (e.g. plugin Key ID).
+func (w *ResponseWriterWrapper) SetAuthLogScopeSources(root logging.RequestLogger, c *gin.Context) {
+	if w == nil {
+		return
+	}
+	w.rootLogger = root
+	w.ginContext = c
+}
+
+// applyAuthLogScope rebinds w.logger to the post-auth directory once auth has run.
+// Prefer plugin metadata key_id / Principal when they differ from the raw secret
+// so request logs land under logs/keys/<Key-ID>/ instead of a secret hash.
+func (w *ResponseWriterWrapper) applyAuthLogScope() {
+	if w == nil || w.authScopeApplied || w.rootLogger == nil || w.ginContext == nil {
+		return
+	}
+	value, asLabel := resolveRequestLogScope(w.ginContext)
+	if !asLabel {
+		// No stable label (native api-key Principal == raw secret, or auth not done).
+		// Keep the provisional raw-key scope; mark applied only after auth finished.
+		if _, ok := w.ginContext.Get("userApiKey"); ok {
+			w.authScopeApplied = true
+		}
+		return
+	}
+	if scoped := scopeRequestLogger(w.rootLogger, value, true); scoped != nil {
+		w.logger = scoped
+	}
+	w.authScopeApplied = true
 }
 
 // Write wraps the underlying ResponseWriter's Write method to capture response data.
@@ -160,8 +195,11 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 	contentType := w.ResponseWriter.Header().Get("Content-Type")
 	w.isStreaming = w.detectStreaming(contentType)
 
+	// Rebind log directory to auth Principal / key_id before opening stream files.
+	w.applyAuthLogScope()
+
 	// If streaming, initialize streaming log writer
-	if w.isStreaming && w.logger.IsEnabled() {
+	if w.isStreaming && w.logger != nil && w.logger.IsEnabled() {
 		streamWriter, err := w.logger.LogStreamingRequest(
 			w.requestInfo.URL,
 			w.requestInfo.Method,
@@ -261,6 +299,14 @@ func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}) {
 func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	if w.requestInfo != nil && w.requestInfo.deferredBodyCapture != nil {
 		defer w.requestInfo.deferredBodyCapture.Cleanup()
+	}
+	if c != nil && w.ginContext == nil {
+		w.ginContext = c
+	}
+	// Prefer Key ID / Principal after auth for the final log file directory.
+	// Skip rebinding when a streaming log file is already open under the provisional path.
+	if w.streamWriter == nil {
+		w.applyAuthLogScope()
 	}
 	if w.logger == nil {
 		return nil

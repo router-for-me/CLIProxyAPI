@@ -109,6 +109,98 @@ func TestRequestAPIKey(t *testing.T) {
 	}
 }
 
+func TestResolveRequestLogScope(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("plugin key_id metadata", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Request.Header.Set("Authorization", "Bearer cpa_randomsecretvalue1234567890")
+		c.Set("userApiKey", "team-a")
+		c.Set("accessMetadata", map[string]string{"key_id": "team-a", "provider": "cpa-key-policy"})
+		value, asLabel := resolveRequestLogScope(c)
+		if value != "team-a" || !asLabel {
+			t.Fatalf("resolveRequestLogScope() = (%q, %v), want (team-a, true)", value, asLabel)
+		}
+	})
+
+	t.Run("principal differs from raw secret", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Request.Header.Set("Authorization", "Bearer cpa_randomsecretvalue1234567890")
+		c.Set("userApiKey", "billing-bot")
+		value, asLabel := resolveRequestLogScope(c)
+		if value != "billing-bot" || !asLabel {
+			t.Fatalf("resolveRequestLogScope() = (%q, %v), want (billing-bot, true)", value, asLabel)
+		}
+	})
+
+	t.Run("native api key principal equals secret", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Request.Header.Set("Authorization", "Bearer native-secret")
+		c.Set("userApiKey", "native-secret")
+		c.Set("accessMetadata", map[string]string{"source": "authorization"})
+		value, asLabel := resolveRequestLogScope(c)
+		if value != "native-secret" || asLabel {
+			t.Fatalf("resolveRequestLogScope() = (%q, %v), want (native-secret, false)", value, asLabel)
+		}
+	})
+}
+
+func TestRequestLoggingMiddlewareUsesPluginKeyIDDirectory(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	logsDir := t.TempDir()
+	logger := logging.NewFileRequestLogger(true, logsDir, "", 10)
+	plainKey := "cpa_randomsecretvalue1234567890abcdef"
+
+	router := gin.New()
+	router.Use(RequestLoggingMiddleware(logger))
+	router.POST("/v1/chat/completions", func(c *gin.Context) {
+		// Simulate AuthMiddleware after a successful cpa-key-policy authenticate.
+		c.Set("userApiKey", "team-a")
+		c.Set("accessProvider", "plugin:cpa-key-policy:cpa-key-policy")
+		c.Set("accessMetadata", map[string]string{
+			"key_id":   "team-a",
+			"provider": "cpa-key-policy",
+		})
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"gpt-5.4"}`)))
+	request.Header.Set("Authorization", "Bearer "+plainKey)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("response status = %d, want %d", response.Code, http.StatusOK)
+	}
+
+	keyDir := filepath.Join(logsDir, "keys", "team-a")
+	entries, errReadDir := os.ReadDir(keyDir)
+	if errReadDir != nil {
+		t.Fatalf("expected log dir %s: %v", keyDir, errReadDir)
+	}
+	found := false
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".log") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("no request log under %s; entries=%v", keyDir, entries)
+	}
+
+	// Must not only land under the secret fingerprint directory.
+	hashed := filepath.Join(logsDir, "keys", logging.APIKeyLogDirectory(plainKey))
+	if hashed == keyDir {
+		t.Fatal("hashed directory unexpectedly equals key-id directory")
+	}
+}
+
 func TestShouldCaptureRequestBody(t *testing.T) {
 	tests := []struct {
 		name          string

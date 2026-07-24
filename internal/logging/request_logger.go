@@ -586,6 +586,22 @@ func (l *FileRequestLogger) ForAPIKey(apiKey string) RequestLogger {
 	return &clone
 }
 
+// ForKeyLabel returns a request logger scoped under keys/<sanitized-label>/.
+// Use this for non-secret stable labels such as plugin Key IDs (auth Principal /
+// metadata key_id). The raw secret is never used as the directory name.
+func (l *FileRequestLogger) ForKeyLabel(label string) RequestLogger {
+	if l == nil {
+		return l
+	}
+	clone := *l
+	directory := SanitizeAPIKeyName(label)
+	if directory == "" {
+		directory = "unauthenticated"
+	}
+	clone.logsDir = filepath.Join(l.logsDir, "keys", directory)
+	return &clone
+}
+
 // SanitizeAPIKeyName returns the safe directory label used for a configured API key name.
 func SanitizeAPIKeyName(name string) string {
 	name = strings.TrimSpace(name)

@@ -46,12 +46,9 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			return
 		}
 
-		requestLogger := logger
-		if scopedLogger, ok := logger.(interface {
-			ForAPIKey(string) logging.RequestLogger
-		}); ok {
-			requestLogger = scopedLogger.ForAPIKey(requestAPIKey(c.Request))
-		}
+		// Provisional scope from the raw credential (pre-auth). After AuthMiddleware
+		// runs, the wrapper rebinds to plugin Key ID / Principal when available.
+		requestLogger := scopeRequestLogger(logger, requestAPIKey(c.Request), false)
 
 		loggerEnabled := requestLogger.IsEnabled()
 		captureBody := shouldCaptureRequestBody(loggerEnabled, c.Request)
@@ -67,6 +64,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 
 		// Create response writer wrapper
 		wrapper := NewResponseWriterWrapper(c.Writer, requestLogger, requestInfo)
+		wrapper.SetAuthLogScopeSources(logger, c)
 		if !loggerEnabled {
 			wrapper.logOnErrorOnly = true
 		}
@@ -104,6 +102,70 @@ func requestAPIKey(req *http.Request) string {
 		return strings.TrimSpace(req.URL.Query().Get("auth_token"))
 	}
 	return ""
+}
+
+// resolveRequestLogScope picks the directory key for request logs after auth.
+// When a frontend-auth plugin stamps metadata key_id (or Principal differs from
+// the raw secret), return that label so logs land under logs/keys/<Key-ID>/.
+// Native config-api-key keeps Principal == raw secret and uses fingerprinting /
+// api-key-names via ForAPIKey.
+func resolveRequestLogScope(c *gin.Context) (value string, asLabel bool) {
+	if c == nil {
+		return "", false
+	}
+	if id := accessMetadataKeyID(c); id != "" {
+		return id, true
+	}
+	rawKey := requestAPIKey(c.Request)
+	if principal, ok := c.Get("userApiKey"); ok {
+		if p, ok := principal.(string); ok {
+			p = strings.TrimSpace(p)
+			if p != "" && p != rawKey {
+				return p, true
+			}
+		}
+	}
+	return rawKey, false
+}
+
+func accessMetadataKeyID(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	raw, ok := c.Get("accessMetadata")
+	if !ok || raw == nil {
+		return ""
+	}
+	switch meta := raw.(type) {
+	case map[string]string:
+		return strings.TrimSpace(meta["key_id"])
+	case map[string]any:
+		if v, ok := meta["key_id"]; ok {
+			if s, ok := v.(string); ok {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
+}
+
+func scopeRequestLogger(logger logging.RequestLogger, value string, asLabel bool) logging.RequestLogger {
+	if logger == nil {
+		return nil
+	}
+	if asLabel {
+		if labeled, ok := logger.(interface {
+			ForKeyLabel(string) logging.RequestLogger
+		}); ok {
+			return labeled.ForKeyLabel(value)
+		}
+	}
+	if scoped, ok := logger.(interface {
+		ForAPIKey(string) logging.RequestLogger
+	}); ok {
+		return scoped.ForAPIKey(value)
+	}
+	return logger
 }
 
 type fileBodySourceFactory interface {

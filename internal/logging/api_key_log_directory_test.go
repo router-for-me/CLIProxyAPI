@@ -60,3 +60,27 @@ func TestFileRequestLoggerUsesConfiguredAPIKeyName(t *testing.T) {
 		t.Fatalf("scoped logsDir = %q, want %q", scoped.logsDir, want)
 	}
 }
+
+func TestFileRequestLoggerForKeyLabel(t *testing.T) {
+	root := t.TempDir()
+	logger := NewFileRequestLogger(true, root, "", 10)
+	scoped, ok := logger.ForKeyLabel("team-a").(*FileRequestLogger)
+	if !ok {
+		t.Fatal("ForKeyLabel() did not return a FileRequestLogger")
+	}
+	want := filepath.Join(root, "keys", "team-a")
+	if scoped.logsDir != want {
+		t.Fatalf("scoped logsDir = %q, want %q", scoped.logsDir, want)
+	}
+	// Sanitizes unsafe characters; never embeds the raw secret.
+	scoped = logger.ForKeyLabel("Team A / prod").(*FileRequestLogger)
+	want = filepath.Join(root, "keys", "Team-A-prod")
+	if scoped.logsDir != want {
+		t.Fatalf("scoped logsDir = %q, want %q", scoped.logsDir, want)
+	}
+	scoped = logger.ForKeyLabel("").(*FileRequestLogger)
+	want = filepath.Join(root, "keys", "unauthenticated")
+	if scoped.logsDir != want {
+		t.Fatalf("empty label logsDir = %q, want %q", scoped.logsDir, want)
+	}
+}
