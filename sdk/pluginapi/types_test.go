@@ -210,17 +210,24 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 		t.Fatalf("HostModelExecutionRequest headers = %#v", decodedRequest.Headers)
 	}
 
+	upstreamErrorBody := `{"error":{"message":"quota","code":"rate_limit"}}`
 	response := HostModelExecutionResponse{
-		StatusCode: http.StatusAccepted,
-		Headers:    http.Header{"Content-Type": []string{"application/json"}},
-		Body:       []byte(`{"ok":true}`),
+		StatusCode: http.StatusTooManyRequests,
+		Headers:    http.Header{"Retry-After": []string{"5"}},
+		Body:       []byte(upstreamErrorBody),
+		Error: &HostModelError{
+			StatusCode: http.StatusTooManyRequests,
+			Headers:    http.Header{"Retry-After": []string{"5"}},
+			Body:       []byte(upstreamErrorBody),
+			Message:    upstreamErrorBody,
+		},
 	}
 	rawResponse, errMarshalResponse := json.Marshal(response)
 	if errMarshalResponse != nil {
 		t.Fatalf("marshal HostModelExecutionResponse: %v", errMarshalResponse)
 	}
 	responseJSON := string(rawResponse)
-	for _, field := range []string{"status_code", "headers", "body"} {
+	for _, field := range []string{"status_code", "headers", "body", "error"} {
 		if !strings.Contains(responseJSON, `"`+field+`"`) {
 			t.Fatalf("HostModelExecutionResponse JSON missing field %q: %s", field, responseJSON)
 		}
@@ -230,22 +237,32 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 		t.Fatalf("unmarshal HostModelExecutionResponse: %v", errUnmarshalResponse)
 	}
 	if decodedResponse.StatusCode != response.StatusCode ||
-		decodedResponse.Headers.Get("Content-Type") != "application/json" ||
-		string(decodedResponse.Body) != string(response.Body) {
+		decodedResponse.Headers.Get("Retry-After") != "5" ||
+		string(decodedResponse.Body) != string(response.Body) ||
+		decodedResponse.Error == nil ||
+		decodedResponse.Error.StatusCode != http.StatusTooManyRequests ||
+		decodedResponse.Error.Headers.Get("Retry-After") != "5" ||
+		string(decodedResponse.Error.Body) != upstreamErrorBody ||
+		decodedResponse.Error.Message != upstreamErrorBody {
 		t.Fatalf("HostModelExecutionResponse round trip = %#v", decodedResponse)
 	}
 
 	streamResponse := HostModelStreamResponse{
-		StatusCode: http.StatusOK,
-		Headers:    http.Header{"Content-Type": []string{"text/event-stream"}},
-		StreamID:   "stream-1",
+		StatusCode: http.StatusTooManyRequests,
+		Headers:    http.Header{"Retry-After": []string{"5"}},
+		Error: &HostModelError{
+			StatusCode: http.StatusTooManyRequests,
+			Headers:    http.Header{"Retry-After": []string{"5"}},
+			Body:       []byte(upstreamErrorBody),
+			Message:    upstreamErrorBody,
+		},
 	}
 	rawStreamResponse, errMarshalStreamResponse := json.Marshal(streamResponse)
 	if errMarshalStreamResponse != nil {
 		t.Fatalf("marshal HostModelStreamResponse: %v", errMarshalStreamResponse)
 	}
 	streamResponseJSON := string(rawStreamResponse)
-	for _, field := range []string{"status_code", "headers", "stream_id"} {
+	for _, field := range []string{"status_code", "headers", "error"} {
 		if !strings.Contains(streamResponseJSON, `"`+field+`"`) {
 			t.Fatalf("HostModelStreamResponse JSON missing field %q: %s", field, streamResponseJSON)
 		}
@@ -255,8 +272,13 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 		t.Fatalf("unmarshal HostModelStreamResponse: %v", errUnmarshalStreamResponse)
 	}
 	if decodedStreamResponse.StatusCode != streamResponse.StatusCode ||
-		decodedStreamResponse.Headers.Get("Content-Type") != "text/event-stream" ||
-		decodedStreamResponse.StreamID != streamResponse.StreamID {
+		decodedStreamResponse.Headers.Get("Retry-After") != "5" ||
+		decodedStreamResponse.StreamID != "" ||
+		decodedStreamResponse.Error == nil ||
+		decodedStreamResponse.Error.StatusCode != http.StatusTooManyRequests ||
+		decodedStreamResponse.Error.Headers.Get("Retry-After") != "5" ||
+		string(decodedStreamResponse.Error.Body) != upstreamErrorBody ||
+		decodedStreamResponse.Error.Message != upstreamErrorBody {
 		t.Fatalf("HostModelStreamResponse round trip = %#v", decodedStreamResponse)
 	}
 
@@ -280,13 +302,19 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 		Payload: []byte("data: test\n\n"),
 		Error:   "temporary stream error",
 		Done:    true,
+		ErrorDetails: &HostModelError{
+			StatusCode: http.StatusBadGateway,
+			Headers:    http.Header{"Retry-After": []string{"5"}},
+			Body:       []byte("temporary stream error"),
+			Message:    "temporary stream error",
+		},
 	}
 	rawReadResponse, errMarshalReadResponse := json.Marshal(readResponse)
 	if errMarshalReadResponse != nil {
 		t.Fatalf("marshal HostModelStreamReadResponse: %v", errMarshalReadResponse)
 	}
 	readResponseJSON := string(rawReadResponse)
-	for _, field := range []string{"payload", "error", "done"} {
+	for _, field := range []string{"payload", "error", "done", "error_details"} {
 		if !strings.Contains(readResponseJSON, `"`+field+`"`) {
 			t.Fatalf("HostModelStreamReadResponse JSON missing field %q: %s", field, readResponseJSON)
 		}
@@ -297,7 +325,12 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 	}
 	if string(decodedReadResponse.Payload) != string(readResponse.Payload) ||
 		decodedReadResponse.Error != readResponse.Error ||
-		decodedReadResponse.Done != readResponse.Done {
+		decodedReadResponse.Done != readResponse.Done ||
+		decodedReadResponse.ErrorDetails == nil ||
+		decodedReadResponse.ErrorDetails.StatusCode != http.StatusBadGateway ||
+		decodedReadResponse.ErrorDetails.Headers.Get("Retry-After") != "5" ||
+		string(decodedReadResponse.ErrorDetails.Body) != "temporary stream error" ||
+		decodedReadResponse.ErrorDetails.Message != "temporary stream error" {
 		t.Fatalf("HostModelStreamReadResponse round trip = %#v", decodedReadResponse)
 	}
 

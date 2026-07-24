@@ -57,11 +57,12 @@ const (
 type dynamicLibraryLoader struct{}
 
 type dynamicLibraryClient struct {
-	dll      *syscall.DLL
-	tempPath string
-	hostAPI  *windowsHostAPI
-	hostCtx  *uintptr
-	api      windowsPluginAPI
+	dll       *syscall.DLL
+	tempPath  string
+	hostAPI   *windowsHostAPI
+	hostCtx   *uintptr
+	hostEntry *dynamicHostCallbackEntry
+	api       windowsPluginAPI
 }
 
 func defaultPluginLoader() pluginLoader {
@@ -87,11 +88,13 @@ func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, err
 	id := windowsHostCallbackID.Add(1)
 	hostCtx := new(uintptr)
 	*hostCtx = id
-	windowsHostCallbackEntries.Store(id, dynamicHostCallbackEntry{host: host, pluginID: file.ID})
+	hostEntry := newDynamicHostCallbackEntry(host, file.ID)
+	windowsHostCallbackEntries.Store(id, hostEntry)
 	client := &dynamicLibraryClient{
-		dll:      dll,
-		tempPath: loadPath,
-		hostCtx:  hostCtx,
+		dll:       dll,
+		tempPath:  loadPath,
+		hostCtx:   hostCtx,
+		hostEntry: hostEntry,
 		hostAPI: &windowsHostAPI{
 			abiVersion: pluginHostABIVersion,
 			hostCtx:    uintptr(unsafe.Pointer(hostCtx)),
@@ -294,6 +297,12 @@ func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request 
 	return out, nil
 }
 
+func (c *dynamicLibraryClient) setSchemaVersion(schemaVersion uint32) {
+	if c != nil && c.hostEntry != nil {
+		c.hostEntry.setSchemaVersion(schemaVersion)
+	}
+}
+
 func (c *dynamicLibraryClient) Shutdown() {
 	// Windows Go DLLs are not safe to hot-unload from the host process.
 	// The plugin was loaded from a shadow copy, so keeping the module mapped
@@ -341,7 +350,7 @@ func windowsHostCall(hostCtx uintptr, methodPtr uintptr, requestPtr uintptr, req
 	if !okHost {
 		return 1
 	}
-	entry, okHost := rawHost.(dynamicHostCallbackEntry)
+	entry, okHost := rawHost.(*dynamicHostCallbackEntry)
 	if !okHost || entry.host == nil {
 		return 1
 	}
@@ -350,7 +359,7 @@ func windowsHostCall(hostCtx uintptr, methodPtr uintptr, requestPtr uintptr, req
 		request = unsafe.Slice((*byte)(unsafe.Pointer(requestPtr)), requestLen)
 		request = append([]byte(nil), request...)
 	}
-	ctx := withHostCallbackPluginID(context.Background(), entry.pluginID)
+	ctx := entry.context()
 	resp, errCall := entry.host.callFromPlugin(ctx, windowsString(methodPtr), request)
 	if errCall != nil {
 		resp = marshalRPCError("host_call_failed", errCall.Error())

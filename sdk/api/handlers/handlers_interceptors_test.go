@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 
@@ -365,6 +366,80 @@ func TestHandlerRequestInterceptorAfterAuthRewritesExecutorRequest(t *testing.T)
 	}
 	if !responseChecked {
 		t.Fatal("response interceptor was not called")
+	}
+}
+
+func TestApplyRequestInterceptorsBeforeAuthRejectReturns403(t *testing.T) {
+	handler := &BaseAPIHandler{}
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptRequestBeforeAuth: func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			return pluginapi.RequestInterceptResponse{Reject: true, RejectReason: "policy denied"}
+		},
+	})
+
+	req := coreexecutor.Request{Model: "gpt", Payload: []byte("body")}
+	opts := coreexecutor.Options{}
+	outReq, _, rejectErr := handler.applyRequestInterceptorsBeforeAuth(context.Background(), "openai", "gpt", req, opts, "")
+
+	if rejectErr == nil {
+		t.Fatal("expected a rejection ErrorMessage from the before-auth interceptors")
+	}
+	if rejectErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("StatusCode = %d, want %d", rejectErr.StatusCode, http.StatusForbidden)
+	}
+	if rejectErr.Error == nil || !strings.Contains(rejectErr.Error.Error(), "policy denied") {
+		t.Fatalf("Error = %v, want reason substring %q", rejectErr.Error, "policy denied")
+	}
+	if !strings.Contains(rejectErr.Error.Error(), "request rejected by plugin") {
+		t.Fatalf("Error = %v, want prefix %q", rejectErr.Error, "request rejected by plugin")
+	}
+	if string(outReq.Payload) != "body" {
+		t.Fatalf("Payload = %q, want original body on reject", outReq.Payload)
+	}
+}
+
+func TestApplyRequestInterceptorsAfterPluginExecutorRouteRejectReturns403(t *testing.T) {
+	handler := &BaseAPIHandler{}
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptRequestAfterAuth: func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			return pluginapi.RequestInterceptResponse{
+				Reject:       true,
+				RejectReason: "policy denied",
+				Body:         []byte("should-not-be-applied"),
+			}
+		},
+	})
+
+	req := coreexecutor.Request{Model: "gpt", Payload: []byte("body")}
+	opts := coreexecutor.Options{}
+	outReq, outOpts, rejectErr := handler.applyRequestInterceptorsAfterPluginExecutorRoute(
+		context.Background(),
+		nil,
+		"executor-plugin",
+		"openai",
+		"gpt",
+		req,
+		opts,
+		"",
+	)
+
+	if rejectErr == nil {
+		t.Fatal("expected a rejection ErrorMessage from the plugin-executor after-auth path")
+	}
+	if rejectErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("StatusCode = %d, want %d", rejectErr.StatusCode, http.StatusForbidden)
+	}
+	if rejectErr.Error == nil || !strings.Contains(rejectErr.Error.Error(), "policy denied") {
+		t.Fatalf("Error = %v, want reason substring %q", rejectErr.Error, "policy denied")
+	}
+	if !strings.Contains(rejectErr.Error.Error(), "request rejected by plugin") {
+		t.Fatalf("Error = %v, want prefix %q", rejectErr.Error, "request rejected by plugin")
+	}
+	if string(outReq.Payload) != "body" {
+		t.Fatalf("Payload = %q, want original body (mutations discarded on reject)", outReq.Payload)
+	}
+	if string(outOpts.OriginalRequest) == "should-not-be-applied" {
+		t.Fatalf("OriginalRequest was mutated on reject: %q", outOpts.OriginalRequest)
 	}
 }
 

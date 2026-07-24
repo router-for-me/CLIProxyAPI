@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 )
 
 type callbackContextRegistry struct {
@@ -15,9 +17,10 @@ type callbackContextRegistry struct {
 }
 
 type callbackContextEntry struct {
-	ctx      context.Context
-	pluginID string
-	cleanup  []func()
+	ctx           context.Context
+	pluginID      string
+	schemaVersion uint32
+	cleanup       []func()
 }
 
 func newCallbackContextRegistry() *callbackContextRegistry {
@@ -25,6 +28,10 @@ func newCallbackContextRegistry() *callbackContextRegistry {
 }
 
 func (r *callbackContextRegistry) open(ctx context.Context, pluginID string) (string, func()) {
+	return r.openWithSchemaVersion(ctx, pluginID, pluginabi.CurrentSchemaVersion)
+}
+
+func (r *callbackContextRegistry) openWithSchemaVersion(ctx context.Context, pluginID string, schemaVersion uint32) (string, func()) {
 	if r == nil {
 		return "", func() {}
 	}
@@ -32,10 +39,10 @@ func (r *callbackContextRegistry) open(ctx context.Context, pluginID string) (st
 		ctx = context.Background()
 	}
 	pluginID = strings.TrimSpace(pluginID)
-	ctx = withHostCallbackPluginID(ctx, pluginID)
+	ctx = withHostCallbackCaller(ctx, pluginID, schemaVersion)
 	id := strconv.FormatUint(r.next.Add(1), 10)
 	r.mu.Lock()
-	r.contexts[id] = callbackContextEntry{ctx: ctx, pluginID: pluginID}
+	r.contexts[id] = callbackContextEntry{ctx: ctx, pluginID: pluginID, schemaVersion: schemaVersion}
 	r.mu.Unlock()
 
 	var once sync.Once
@@ -54,6 +61,16 @@ func (r *callbackContextRegistry) open(ctx context.Context, pluginID string) (st
 			}
 		})
 	}
+}
+
+func (r *callbackContextRegistry) schemaVersion(id string) uint32 {
+	if r == nil || id == "" {
+		return 0
+	}
+	r.mu.RLock()
+	schemaVersion := r.contexts[id].schemaVersion
+	r.mu.RUnlock()
+	return schemaVersion
 }
 
 func (r *callbackContextRegistry) pluginID(id string) string {
@@ -105,10 +122,14 @@ func (h *Host) openCallbackContext(ctx context.Context) (string, func()) {
 }
 
 func (h *Host) openCallbackContextForPlugin(ctx context.Context, pluginID string) (string, func()) {
+	return h.openCallbackContextForPluginVersion(ctx, pluginID, pluginabi.CurrentSchemaVersion)
+}
+
+func (h *Host) openCallbackContextForPluginVersion(ctx context.Context, pluginID string, schemaVersion uint32) (string, func()) {
 	if h == nil || h.callbackContexts == nil {
 		return "", func() {}
 	}
-	return h.callbackContexts.open(ctx, pluginID)
+	return h.callbackContexts.openWithSchemaVersion(ctx, pluginID, schemaVersion)
 }
 
 func (h *Host) addCallbackCleanup(id string, cleanup func()) bool {
@@ -136,4 +157,11 @@ func (h *Host) callbackContextPluginID(id string) string {
 		return ""
 	}
 	return h.callbackContexts.pluginID(id)
+}
+
+func (h *Host) callbackContextSchemaVersion(id string) uint32 {
+	if h == nil || h.callbackContexts == nil {
+		return 0
+	}
+	return h.callbackContexts.schemaVersion(id)
 }

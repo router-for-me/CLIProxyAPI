@@ -5,10 +5,16 @@ import "encoding/json"
 const (
 	// ABIVersion tracks the native C ABI shape (native plugin exports).
 	ABIVersion uint32 = 1
-	// SchemaVersion tracks the RPC JSON contract exchanged at plugin.register.
-	// Increment only for breaking RPC changes. New capabilities such as ModelRouter
-	// are gated by capability flags and method names while the version stays at 1.
-	SchemaVersion uint32 = 1
+	// SchemaVersionV1 is the original RPC JSON contract.
+	SchemaVersionV1 uint32 = 1
+	// SchemaVersionV2 adds structured host model execution errors in successful
+	// results while retaining the v1 envelope error contract for v1 plugins.
+	SchemaVersionV2 uint32 = 2
+	// SchemaVersion is the compatibility default for plugins that have not
+	// explicitly opted into a newer RPC JSON contract.
+	SchemaVersion uint32 = SchemaVersionV1
+	// CurrentSchemaVersion is the latest RPC JSON contract supported by the host.
+	CurrentSchemaVersion uint32 = SchemaVersionV2
 )
 
 const (
