@@ -282,6 +282,10 @@ A public CLIProxyAPI-compatible fork and bundled management panel. It keeps upst
 
 This is a tool built with Tauri 2 + Vue 3 for managing multiple OpenAI Codex desktop accounts. Switch between saved ChatGPT/Codex certification profiles, check 5-hour and weekly quota usage in real time, verify token health, view active account details, and import or save auth.json files without manual copying.
 
+### [Alex](https://github.com/madhavajay/alex)
+
+A local Rust LLM proxy with an optional UI, inspired by CLIProxyAPI. It routes coding agents across providers with local trace capture, scriptable middleware, subscription bonding, failover, and messenger-assisted re-authentication.
+
 > [!NOTE]  
 > If you have developed a port of CLIProxyAPI or a project inspired by it, please open a PR to add it to this list.
 
