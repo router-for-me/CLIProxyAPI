@@ -91,6 +91,7 @@ func sampleCloneRuntimeConfig() *Config {
 	bypassStrict := false
 	pluginEnabled := false
 	cacheUserID := true
+	relaxedSystemPrompt := true
 
 	return &Config{
 		SDKConfig: SDKConfig{
@@ -145,8 +146,9 @@ func sampleCloneRuntimeConfig() *Config {
 			Headers:        map[string]string{"X-Claude": "one"},
 			ExcludedModels: []string{"claude-hidden"},
 			Cloak: &CloakConfig{
-				SensitiveWords: []string{"secret"},
-				CacheUserID:    &cacheUserID,
+				RelaxedSystemPrompt: &relaxedSystemPrompt,
+				SensitiveWords:      []string{"secret"},
+				CacheUserID:         &cacheUserID,
 			},
 		}},
 		OpenAICompatibility: []OpenAICompatibility{{

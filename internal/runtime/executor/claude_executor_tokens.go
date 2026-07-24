@@ -118,7 +118,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	}
 
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
-		body = checkSystemInstructions(body)
+		body = checkSystemInstructionsWithMode(body, false)
 	}
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
