@@ -51,6 +51,10 @@ PackyCode provides special discounts for our software users: register using <a h
 <table>
 <tbody>
 <tr>
+<td width="180"><a href="https://apertis.ai/register?utm_source=cliproxyapi&amp;utm_medium=partner&amp;utm_campaign=cliproxyapi_partner"><img src="./assets/apertis.svg" alt="Apertis" width="150"></a></td>
+<td>Thanks to <a href="https://apertis.ai/register?utm_source=cliproxyapi&amp;utm_medium=partner&amp;utm_campaign=cliproxyapi_partner">Apertis</a> for supporting CLIProxyAPI! Apertis is a multi-provider AI API gateway that works as an <code>openai-compatibility</code> upstream for CLIProxyAPI and supports OpenAI and Anthropic SDK requests in streaming and non-streaming modes. CLIProxyAPI users can register through the exclusive link and enter promo code <code>CLIPROXYAPI</code> in the Partner code field before Checkout to get 10% off one personal PAYG purchase or Coding Plan checkout per account. The offer is limited to the first 100 redemptions and expires on October 20, 2026 at 08:18 UTC. See the <a href="https://apertis.ai/integrations/cliproxyapi">setup guide</a>.</td>
+</tr>
+<tr>
 <td width="180"><a href="https://www.aicodemirror.com/register?invitecode=TJNAIF"><img src="./assets/aicodemirror.png" alt="AICodeMirror" width="150"></a></td>
 <td>Thanks to AICodeMirror for sponsoring this project! AICodeMirror provides official high-stability relay services for Claude Code / Codex / Gemini, with enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical support. Claude Code / Codex / Gemini official channels at 38% / 2% / 9% of original price, with extra discounts on top-ups! AICodeMirror offers special benefits for CLIProxyAPI users: register via <a href="https://www.aicodemirror.com/register?invitecode=TJNAIF">this link</a> to enjoy 20% off your first top-up, and enterprise customers can get up to 25% off!</td>
 </tr>

@@ -50,6 +50,10 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <table>
 <tbody>
 <tr>
+<td width="180"><a href="https://apertis.ai/register?utm_source=cliproxyapi&amp;utm_medium=partner&amp;utm_campaign=cliproxyapi_partner"><img src="./assets/apertis.svg" alt="Apertis" width="150"></a></td>
+<td>感谢 <a href="https://apertis.ai/register?utm_source=cliproxyapi&amp;utm_medium=partner&amp;utm_campaign=cliproxyapi_partner">Apertis</a> 支持 CLIProxyAPI！Apertis 是多供应商 AI API 网关，可作为 CLIProxyAPI 的 <code>openai-compatibility</code> 上游，同时支持 OpenAI 与 Anthropic SDK 的流式和非流式请求。CLIProxyAPI 用户通过专属链接注册，并在结账前的“合作伙伴代码”栏输入优惠码 <code>CLIPROXYAPI</code>，个人账户即可在一次 PAYG 充值或 Coding Plan 结账中享受 9 折优惠。优惠限前 100 次兑换，有效期至 2026 年 10 月 20 日 08:18 UTC。请参阅<a href="https://apertis.ai/integrations/cliproxyapi">配置指南</a>。</td>
+</tr>
+<tr>
 <td width="180"><a href="https://www.aicodemirror.com/register?invitecode=TJNAIF"><img src="./assets/aicodemirror.png" alt="AICodeMirror" width="150"></a></td>
 <td>感谢 AICodeMirror 赞助了本项目！AICodeMirror 提供 Claude Code / Codex / Gemini 官方高稳定中转服务，支持企业级高并发、极速开票、7×24 专属技术支持。 Claude Code / Codex / Gemini 官方渠道低至 3.8 / 0.2 / 0.9 折，充值更有折上折！AICodeMirror 为 CLIProxyAPI 的用户提供了特别福利，通过<a href="https://www.aicodemirror.com/register?invitecode=TJNAIF" target="_blank">此链接</a>注册的用户，可享受首充8折，企业客户最高可享 7.5 折！</td>
 </tr>
