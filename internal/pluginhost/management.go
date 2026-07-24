@@ -102,7 +102,7 @@ func (h *Host) callManagementRegistrar(ctx context.Context, record capabilityRec
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "ManagementAPI.RegisterManagement", recovered)
+			h.fusePlugin(record, "ManagementAPI.RegisterManagement", recovered)
 			resp = pluginapi.ManagementRegistrationResponse{}
 			err = fmt.Errorf("management registrar panic: %v", recovered)
 		}
@@ -332,7 +332,7 @@ func (h *Host) callManagementHandler(ctx context.Context, record managementRoute
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.pluginID, "ManagementHandler.HandleManagement", recovered)
+			h.fusePluginIdentity(record.pluginID, record.path, record.version, "ManagementHandler.HandleManagement", recovered)
 			resp = pluginapi.ManagementResponse{}
 			err = fmt.Errorf("management handler panic: %v", recovered)
 		}
@@ -354,7 +354,7 @@ func (h *Host) callResourceHandler(ctx context.Context, record resourceRouteReco
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.pluginID, "ResourceHandler.HandleManagement", recovered)
+			h.fusePluginIdentity(record.pluginID, record.path, record.version, "ResourceHandler.HandleManagement", recovered)
 			resp = pluginapi.ManagementResponse{}
 			err = fmt.Errorf("resource handler panic: %v", recovered)
 		}

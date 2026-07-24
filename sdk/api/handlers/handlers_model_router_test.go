@@ -122,13 +122,25 @@ func (h *handlerDirectExecutorRouteHost) CountPluginExecutor(ctx context.Context
 
 type handlerDirectExecutorInterceptorHost struct {
 	handlerDirectExecutorRouteHost
-	afterAuthCalled bool
-	afterAuthReq    pluginapi.RequestInterceptRequest
+	afterAuthCalled    bool
+	afterAuthReq       pluginapi.RequestInterceptRequest
+	streamStateful     bool
+	streamSession      pluginapi.StreamChunkInterceptorSession
+	streamInterceptReq []pluginapi.StreamChunkInterceptRequest
 }
 
 func (h *handlerDirectExecutorInterceptorHost) HasRequestInterceptors() bool { return true }
 
-func (h *handlerDirectExecutorInterceptorHost) HasStreamInterceptors() bool { return false }
+func (h *handlerDirectExecutorInterceptorHost) HasStreamInterceptors() bool {
+	return h != nil && h.streamStateful
+}
+
+func (h *handlerDirectExecutorInterceptorHost) OpenStreamChunkInterceptorSession(skipPluginID string) pluginapi.StreamChunkInterceptorSession {
+	if h == nil {
+		return nil
+	}
+	return h.streamSession
+}
 
 func (h *handlerDirectExecutorInterceptorHost) InterceptRequestBeforeAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
 	return pluginapi.RequestInterceptResponse{Headers: cloneHeader(req.Headers), Body: cloneBytes(req.Body)}
@@ -150,6 +162,7 @@ func (h *handlerDirectExecutorInterceptorHost) InterceptResponse(ctx context.Con
 }
 
 func (h *handlerDirectExecutorInterceptorHost) InterceptStreamChunk(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+	h.streamInterceptReq = append(h.streamInterceptReq, req)
 	return pluginapi.StreamChunkInterceptResponse{Headers: cloneHeader(req.ResponseHeaders), Body: cloneBytes(req.Body)}
 }
 
@@ -493,6 +506,72 @@ func TestPrepareStreamModelRouteReusesDecisionDuringExecution(t *testing.T) {
 	}
 	if host.lastPluginID != targetPluginID {
 		t.Fatalf("plugin id = %q, want %q", host.lastPluginID, targetPluginID)
+	}
+}
+
+func TestHandlerPluginExecutorStatefulStreamInterceptorOmitsHeavyPayloadFields(t *testing.T) {
+	originalModel := "handler-plugin-executor-stateful-stream-model"
+	host := &handlerDirectExecutorInterceptorHost{streamStateful: true}
+	sessionClosed := make(chan struct{})
+	host.streamSession = &handlerStreamInterceptorSession{
+		canOmit: func() bool { return true },
+		onClose: func() { close(sessionClosed) },
+		intercept: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			host.streamInterceptReq = append(host.streamInterceptReq, req)
+			headers := cloneHeader(req.ResponseHeaders)
+			if headers == nil {
+				headers = make(http.Header)
+			}
+			switch req.ChunkIndex {
+			case pluginapi.StreamChunkHeaderInitIndex:
+				headers.Set("X-Stage", "init")
+			case 0:
+				headers.Set("X-Chunk", "payload")
+			}
+			return pluginapi.StreamChunkInterceptResponse{Headers: headers, Body: cloneBytes(req.Body)}
+		},
+	}
+	host.hasRouters = true
+	host.route = func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: "stream-plugin"}, true
+	}
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetPluginHost(host)
+
+	dataChan, upstreamHeaders, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", originalModel, []byte(fmt.Sprintf(`{"model":%q,"stream":true}`, originalModel)), "")
+	if upstreamHeaders.Get("X-Stage") != "init" || upstreamHeaders.Get("X-Chunk") != "" {
+		t.Fatalf("upstream headers on return = %#v, want only initialized headers", upstreamHeaders)
+	}
+	for range dataChan {
+	}
+	for errMsg := range errChan {
+		if errMsg != nil {
+			t.Fatalf("ExecuteStreamWithAuthManager() error = %+v", errMsg)
+		}
+	}
+	<-sessionClosed
+	if upstreamHeaders.Get("X-Stage") != "init" || upstreamHeaders.Get("X-Chunk") != "" {
+		t.Fatalf("upstream headers changed after return: %#v", upstreamHeaders)
+	}
+
+	if len(host.streamInterceptReq) != 3 {
+		t.Fatalf("stream interceptor calls = %d, want init, payload, and end", len(host.streamInterceptReq))
+	}
+	initReq, payloadReq, endReq := host.streamInterceptReq[0], host.streamInterceptReq[1], host.streamInterceptReq[2]
+	if initReq.ChunkIndex != pluginapi.StreamChunkHeaderInitIndex || initReq.StreamID == "" {
+		t.Fatalf("init request = %#v, want header init with stream ID", initReq)
+	}
+	if len(initReq.RequestBody) == 0 || len(initReq.OriginalRequest) == 0 {
+		t.Fatalf("init request heavy fields = %#v/%#v, want request body and original request", initReq.RequestBody, initReq.OriginalRequest)
+	}
+	if payloadReq.ChunkIndex != 0 || payloadReq.StreamID != initReq.StreamID {
+		t.Fatalf("payload request = %#v, want chunk 0 with init stream ID", payloadReq)
+	}
+	if len(payloadReq.RequestBody) != 0 || len(payloadReq.OriginalRequest) != 0 || len(payloadReq.HistoryChunks) != 0 {
+		t.Fatalf("payload heavy fields = %#v/%#v/%#v, want omitted", payloadReq.RequestBody, payloadReq.OriginalRequest, payloadReq.HistoryChunks)
+	}
+	if endReq.ChunkIndex != pluginapi.StreamChunkEndIndex || endReq.StreamID != initReq.StreamID {
+		t.Fatalf("end request = %#v, want end marker with init stream ID", endReq)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -331,7 +332,7 @@ func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModel
 		}
 		authProvider := record.plugin.Capabilities.AuthProvider
 		if authProvider != nil {
-			identifier, okIdentifier := h.callAuthProviderIdentifier(record.id, authProvider)
+			identifier, okIdentifier := h.callAuthProviderIdentifier(record, authProvider)
 			if !okIdentifier || normalizeProviderID(identifier) != providerKey {
 				continue
 			}
@@ -464,7 +465,7 @@ func (h *Host) callModelRegistrar(ctx context.Context, record capabilityRecord, 
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "ModelRegistrar.RegisterModels", recovered)
+			h.fusePlugin(record, "ModelRegistrar.RegisterModels", recovered)
 			resp = pluginapi.ModelRegistrationResponse{}
 			err = fmt.Errorf("model registrar panic: %v", recovered)
 		}
@@ -478,7 +479,7 @@ func (h *Host) callModelProviderStaticModels(ctx context.Context, record capabil
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "ModelProvider.StaticModels", recovered)
+			h.fusePlugin(record, "ModelProvider.StaticModels", recovered)
 			resp = pluginapi.ModelResponse{}
 			err = fmt.Errorf("model provider panic: %v", recovered)
 		}
@@ -495,7 +496,7 @@ func (h *Host) callModelsForAuth(ctx context.Context, record capabilityRecord, p
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "ModelProvider.ModelsForAuth", recovered)
+			h.fusePlugin(record, "ModelProvider.ModelsForAuth", recovered)
 			resp = pluginapi.ModelResponse{}
 			err = fmt.Errorf("model provider per-auth models panic: %v", recovered)
 		}
@@ -518,7 +519,7 @@ func (h *Host) callRequestInterceptor(ctx context.Context, record capabilityReco
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, method, recovered)
+			h.fusePlugin(record, method, recovered)
 			out = pluginapi.RequestInterceptResponse{}
 			ok = false
 		}
@@ -537,7 +538,7 @@ func (h *Host) callResponseInterceptor(ctx context.Context, record capabilityRec
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "ResponseInterceptor.InterceptResponse", recovered)
+			h.fusePlugin(record, "ResponseInterceptor.InterceptResponse", recovered)
 			out = pluginapi.ResponseInterceptResponse{}
 			ok = false
 		}
@@ -556,7 +557,7 @@ func (h *Host) callStreamChunkInterceptor(ctx context.Context, record capability
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "StreamChunkInterceptor.InterceptStreamChunk", recovered)
+			h.fusePlugin(record, "StreamChunkInterceptor.InterceptStreamChunk", recovered)
 			out = pluginapi.StreamChunkInterceptResponse{}
 			ok = false
 		}
@@ -682,6 +683,275 @@ func (h *Host) InterceptStreamChunkExcept(ctx context.Context, req pluginapi.Str
 		}
 	}
 	return current
+}
+
+type streamChunkInterceptorSessionRecord struct {
+	record          capabilityRecord
+	interceptor     pluginapi.StreamChunkInterceptor
+	stateful        bool
+	rpcMetadataSafe bool
+	fuseEpoch       uint64
+	initAttempted   bool
+	initialized     bool
+	disabled        bool
+	cleanupPending  bool
+	cleanupRequired bool
+}
+
+type streamChunkInterceptorSession struct {
+	host     *Host
+	callMu   sync.Mutex
+	stateMu  sync.Mutex
+	records  []streamChunkInterceptorSessionRecord
+	releases []func()
+	closed   bool
+}
+
+// OpenStreamChunkInterceptorSession pins the currently active stream
+// interceptors for one stream. Hot reloads affect new sessions only.
+func (h *Host) OpenStreamChunkInterceptorSession(skipPluginID string) pluginapi.StreamChunkInterceptorSession {
+	if h == nil {
+		return nil
+	}
+	skipPluginID = strings.TrimSpace(skipPluginID)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	raw := h.snapshot.Load()
+	snap, _ := raw.(*Snapshot)
+	if snap == nil {
+		return nil
+	}
+	records := make([]streamChunkInterceptorSessionRecord, 0, len(snap.records))
+	releases := make([]func(), 0, len(snap.records))
+	for _, record := range snap.records {
+		if record.id == skipPluginID || !h.pluginIdentityCurrentLocked(record.id, record.path, record.version) {
+			continue
+		}
+		if _, fused := h.fused[record.id]; fused {
+			continue
+		}
+		fuseEpoch := h.fusedIdentities[makePluginIdentityKey(record.id, record.path, record.version)]
+		if record.plugin.Capabilities.StreamChunkInterceptor == nil {
+			continue
+		}
+		interceptor := record.plugin.Capabilities.StreamChunkInterceptor
+		rpcMetadataSafe := false
+		if adapter, okAdapter := interceptor.(*rpcPluginAdapter); okAdapter {
+			client, okClient := adapter.client.(*guardedPluginClient)
+			if !okClient {
+				continue
+			}
+			lease, errPin := client.Pin()
+			if errPin != nil {
+				continue
+			}
+			pinnedAdapter := *adapter
+			pinnedAdapter.client = lease
+			interceptor = &pinnedAdapter
+			rpcMetadataSafe = true
+			releases = append(releases, lease.Shutdown)
+		}
+		records = append(records, streamChunkInterceptorSessionRecord{
+			record:          record,
+			interceptor:     interceptor,
+			stateful:        record.plugin.Capabilities.StreamChunkInterceptorStateful,
+			rpcMetadataSafe: rpcMetadataSafe,
+			fuseEpoch:       fuseEpoch,
+		})
+	}
+	if len(records) == 0 {
+		for _, release := range releases {
+			release()
+		}
+		return nil
+	}
+	return &streamChunkInterceptorSession{host: h, records: records, releases: releases}
+}
+
+func (s *streamChunkInterceptorSession) CanOmitHeavyFields() bool {
+	if s == nil {
+		return false
+	}
+	s.callMu.Lock()
+	defer s.callMu.Unlock()
+	if s.isClosed() {
+		return false
+	}
+	for i := range s.records {
+		if s.records[i].disabled || !s.records[i].stateful || !s.records[i].initialized {
+			return false
+		}
+	}
+	return len(s.records) > 0
+}
+
+func (s *streamChunkInterceptorSession) InterceptStreamChunk(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+	passthrough := pluginapi.StreamChunkInterceptResponse{
+		Headers: cloneHeader(req.ResponseHeaders),
+		Body:    bytes.Clone(req.Body),
+	}
+	if s == nil || s.host == nil {
+		return passthrough
+	}
+	if s.isClosed() {
+		return passthrough
+	}
+	s.callMu.Lock()
+	defer s.callMu.Unlock()
+	if s.isClosed() {
+		return passthrough
+	}
+
+	current := pluginapi.StreamChunkInterceptResponse{
+		Headers: cloneHeader(req.ResponseHeaders),
+		Body:    bytes.Clone(req.Body),
+	}
+	for i := range s.records {
+		if s.isClosed() {
+			return passthrough
+		}
+		state := &s.records[i]
+		if !state.disabled && s.host.isPinnedStreamInterceptorFused(state.record, state.fuseEpoch) {
+			state.disabled = true
+			if state.stateful && state.cleanupRequired {
+				state.cleanupPending = true
+			}
+		}
+		if state.disabled {
+			if req.ChunkIndex != pluginapi.StreamChunkEndIndex || !state.cleanupPending {
+				continue
+			}
+			state.cleanupPending = false
+		}
+		if req.ChunkIndex == pluginapi.StreamChunkEndIndex {
+			if !state.stateful || !state.initAttempted {
+				continue
+			}
+		} else if current.DropChunk {
+			continue
+		}
+
+		nextReq := req
+		nextReq.RequestHeaders = cloneHeader(req.RequestHeaders)
+		nextReq.ResponseHeaders = cloneHeader(current.Headers)
+		nextReq.OriginalRequest = bytes.Clone(req.OriginalRequest)
+		nextReq.RequestBody = bytes.Clone(req.RequestBody)
+		nextReq.Body = bytes.Clone(current.Body)
+		nextReq.HistoryChunks = cloneByteSlices(req.HistoryChunks)
+		if state.rpcMetadataSafe {
+			nextReq.Metadata = req.Metadata
+		} else {
+			nextReq.Metadata = cloneInterceptorMetadata(req.Metadata)
+		}
+		if !state.stateful || (req.ChunkIndex >= 0 && !state.initialized) {
+			nextReq.StreamID = ""
+		}
+		if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex && state.stateful {
+			state.initAttempted = true
+		}
+
+		wasInitialized := state.initialized
+		resp, ok, panicked := s.host.callPinnedStreamChunkInterceptor(ctx, state.record, state.interceptor, nextReq)
+		if s.isClosed() {
+			return passthrough
+		}
+		if panicked {
+			if req.ChunkIndex != pluginapi.StreamChunkEndIndex && state.stateful && (wasInitialized || state.cleanupRequired) {
+				state.cleanupPending = true
+			}
+			state.disabled = true
+		}
+		if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex && state.stateful {
+			state.initialized = ok
+			if ok {
+				state.cleanupRequired = true
+			}
+		} else if req.ChunkIndex >= 0 && state.stateful && !ok {
+			state.initialized = false
+		}
+		if !ok {
+			continue
+		}
+		current.Headers = mergeHeaders(current.Headers, resp.Headers, resp.ClearHeaders)
+		if len(resp.Body) > 0 {
+			current.Body = bytes.Clone(resp.Body)
+		}
+		if resp.DropChunk && req.ChunkIndex != pluginapi.StreamChunkEndIndex {
+			current.DropChunk = true
+		}
+	}
+	s.stateMu.Lock()
+	if s.closed {
+		s.stateMu.Unlock()
+		return passthrough
+	}
+	s.stateMu.Unlock()
+	return current
+}
+
+func (s *streamChunkInterceptorSession) Close() {
+	if s == nil {
+		return
+	}
+	s.stateMu.Lock()
+	if s.closed {
+		s.stateMu.Unlock()
+		return
+	}
+	s.closed = true
+	releases := s.releases
+	s.releases = nil
+	s.stateMu.Unlock()
+	if len(releases) == 0 {
+		return
+	}
+	go func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+}
+
+func (s *streamChunkInterceptorSession) isClosed() bool {
+	s.stateMu.Lock()
+	closed := s.closed
+	s.stateMu.Unlock()
+	return closed
+}
+
+func (h *Host) callPinnedStreamChunkInterceptor(ctx context.Context, record capabilityRecord, interceptor pluginapi.StreamChunkInterceptor, req pluginapi.StreamChunkInterceptRequest) (out pluginapi.StreamChunkInterceptResponse, ok bool, panicked bool) {
+	if h == nil || interceptor == nil {
+		return pluginapi.StreamChunkInterceptResponse{}, false, false
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.fusePlugin(record, "StreamChunkInterceptor.InterceptStreamChunk", recovered)
+			out = pluginapi.StreamChunkInterceptResponse{}
+			ok = false
+			panicked = true
+		}
+	}()
+	resp, errIntercept := interceptor.InterceptStreamChunk(ctx, req)
+	if errIntercept != nil {
+		log.Warnf("pluginhost: pinned stream chunk interceptor %s failed: %v", record.id, errIntercept)
+		return pluginapi.StreamChunkInterceptResponse{}, false, false
+	}
+	return resp, true, false
+}
+
+func (h *Host) isPinnedStreamInterceptorFused(record capabilityRecord, openedAtFuseEpoch uint64) bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.pluginIdentityCurrentLocked(record.id, record.path, record.version) {
+		if _, fused := h.fused[record.id]; fused {
+			return true
+		}
+	}
+	return h.fusedIdentities[makePluginIdentityKey(record.id, record.path, record.version)] > openedAtFuseEpoch
 }
 
 func (h *Host) HasStreamInterceptors() bool {
@@ -968,7 +1238,7 @@ func (h *Host) executorProvider(record capabilityRecord, executor pluginapi.Prov
 	}
 	provider := h.modelProvider(record.id)
 	if provider == "" {
-		identifier, okIdentifier := h.callExecutorIdentifier(record.id, executor)
+		identifier, okIdentifier := h.callExecutorIdentifier(record, executor)
 		if !okIdentifier {
 			return "", false
 		}
@@ -978,13 +1248,13 @@ func (h *Host) executorProvider(record capabilityRecord, executor pluginapi.Prov
 	return provider, provider != ""
 }
 
-func (h *Host) callExecutorIdentifier(pluginID string, executor pluginapi.ProviderExecutor) (provider string, ok bool) {
-	if h == nil || executor == nil || h.isPluginFused(pluginID) {
+func (h *Host) callExecutorIdentifier(record capabilityRecord, executor pluginapi.ProviderExecutor) (provider string, ok bool) {
+	if h == nil || executor == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return "", false
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(pluginID, "Executor.Identifier", recovered)
+			h.fusePlugin(record, "Executor.Identifier", recovered)
 			provider = ""
 			ok = false
 		}
@@ -1192,7 +1462,8 @@ func (h *Host) refreshThinkingProviders(records []capabilityRecord) {
 		if !okProvider {
 			continue
 		}
-		thinking.RegisterPluginProvider(record.id, provider, record.priority, &thinkingAdapter{
+		generation := pluginIdentityGeneration(record.path, record.version)
+		registered := thinking.RegisterPluginProviderGeneration(record.id, generation, provider, record.priority, &thinkingAdapter{
 			host:     h,
 			pluginID: record.id,
 			path:     record.path,
@@ -1200,6 +1471,9 @@ func (h *Host) refreshThinkingProviders(records []capabilityRecord) {
 			provider: provider,
 			applier:  applier,
 		})
+		if registered && (h.isPluginFused(record.id) || !h.recordCurrent(record)) {
+			thinking.UnregisterPluginProvidersGeneration(record.id, generation)
+		}
 	}
 }
 
@@ -1209,7 +1483,7 @@ func (h *Host) callThinkingIdentifier(record capabilityRecord, applier pluginapi
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "ThinkingApplier.Identifier", recovered)
+			h.fusePlugin(record, "ThinkingApplier.Identifier", recovered)
 			provider = ""
 			ok = false
 		}
@@ -1221,31 +1495,75 @@ func (h *Host) callThinkingIdentifier(record capabilityRecord, applier pluginapi
 	return provider, true
 }
 
-func (h *Host) currentUsagePlugin(pluginID string) pluginapi.UsagePlugin {
+func (h *Host) currentUsagePlugin(pluginID string) (pluginapi.UsagePlugin, capabilityRecord, bool) {
 	if h == nil || strings.TrimSpace(pluginID) == "" {
-		return nil
+		return nil, capabilityRecord{}, false
 	}
 	for _, record := range h.activeRecords() {
 		if record.id != pluginID {
 			continue
 		}
 		if h.isPluginFused(record.id) {
-			return nil
+			return nil, capabilityRecord{}, false
 		}
-		return record.plugin.Capabilities.UsagePlugin
+		plugin := record.plugin.Capabilities.UsagePlugin
+		return plugin, record, plugin != nil
 	}
-	return nil
+	return nil, capabilityRecord{}, false
 }
 
-func (h *Host) fusePlugin(id, method string, recovered any) {
+func (h *Host) fusePlugin(record capabilityRecord, method string, recovered any) {
+	h.fusePluginIdentity(record.id, record.path, record.version, method, recovered)
+}
+
+func (h *Host) fusePluginIdentity(id, path, version, method string, recovered any) {
 	if h == nil {
 		return
 	}
+	reason := fmt.Sprintf("%s panic: %v", method, recovered)
 	h.mu.Lock()
-	h.fused[id] = fmt.Sprintf("%s panic: %v", method, recovered)
+	fuseID := h.pluginIdentityCurrentLocked(id, path, version)
+	h.recordPluginFuseLocked(id, path, version, reason, fuseID)
 	h.mu.Unlock()
-	thinking.UnregisterPluginProviders(id)
+	thinking.UnregisterPluginProvidersGeneration(id, pluginIdentityGeneration(path, version))
 	log.WithField("plugin_id", id).WithField("method", method).Errorf("pluginhost: plugin panic recovered: %v\n%s", recovered, debug.Stack())
+}
+
+// fuseLoadingPluginIdentity fuses a plugin using an explicit identity. Callers on the
+// initial load or hot-reload path must pass the identity of the plugin being
+// registered, because it is not yet present in h.loaded and deriving the
+// identity there would resolve the outgoing plugin and advance the wrong fuse
+// epoch.
+func (h *Host) fuseLoadingPluginIdentity(id, path, version, method string, recovered any) {
+	if h == nil {
+		return
+	}
+	reason := fmt.Sprintf("%s panic: %v", method, recovered)
+	h.mu.Lock()
+	fuseID := h.activePluginPaths[id] == "" || h.pluginIdentityCurrentLocked(id, path, version)
+	if loaded := h.loaded[id]; loaded != nil {
+		fuseID = makePluginIdentityKey(id, loaded.path, loaded.version) == makePluginIdentityKey(id, path, version)
+	}
+	h.recordPluginFuseLocked(id, path, version, reason, fuseID)
+	h.mu.Unlock()
+	thinking.UnregisterPluginProvidersGeneration(id, pluginIdentityGeneration(path, version))
+	log.WithField("plugin_id", id).WithField("method", method).Errorf("pluginhost: plugin panic recovered: %v\n%s", recovered, debug.Stack())
+}
+
+func (h *Host) recordPluginFuseLocked(id, path, version, reason string, fuseID bool) {
+	if fuseID {
+		h.fused[id] = reason
+	}
+	identityKey := makePluginIdentityKey(id, path, version)
+	if identityKey.path != "" {
+		h.nextFuseEpoch++
+		h.fusedIdentities[identityKey] = h.nextFuseEpoch
+	}
+}
+
+func pluginIdentityGeneration(path, version string) string {
+	identity := makePluginIdentityKey("", path, version)
+	return identity.path + "\x00" + identity.version
 }
 
 func (h *Host) isPluginFused(id string) bool {
@@ -1273,7 +1591,7 @@ func (a *accessAdapter) Identifier() (identifier string) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			if a.host != nil {
-				a.host.fusePlugin(a.pluginID, "FrontendAuthProvider.Identifier", recovered)
+				a.host.fusePluginIdentity(a.pluginID, a.path, a.version, "FrontendAuthProvider.Identifier", recovered)
 			}
 			identifier = ""
 		}
@@ -1292,7 +1610,7 @@ func (a *accessAdapter) Authenticate(ctx context.Context, r *http.Request) (resu
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(a.pluginID, "FrontendAuthProvider.Authenticate", recovered)
+			a.host.fusePluginIdentity(a.pluginID, a.path, a.version, "FrontendAuthProvider.Authenticate", recovered)
 			result = nil
 			authErr = sdkaccess.NewNotHandledError()
 		}
@@ -1595,7 +1913,7 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(a.pluginID, "Executor.Execute", recovered)
+			a.host.fusePluginIdentity(a.pluginID, a.path, a.version, "Executor.Execute", recovered)
 			resp = coreexecutor.Response{}
 			err = fmt.Errorf("plugin executor %s panic: %v", a.Identifier(), recovered)
 		}
@@ -1622,7 +1940,7 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(a.pluginID, "Executor.ExecuteStream", recovered)
+			a.host.fusePluginIdentity(a.pluginID, a.path, a.version, "Executor.ExecuteStream", recovered)
 			result = nil
 			err = fmt.Errorf("plugin executor %s stream panic: %v", a.Identifier(), recovered)
 		}
@@ -1652,7 +1970,7 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(record.id, "AuthProvider.RefreshAuth", recovered)
+			a.host.fusePlugin(*record, "AuthProvider.RefreshAuth", recovered)
 			refreshed = nil
 			err = fmt.Errorf("plugin executor %s refresh panic: %v", a.Identifier(), recovered)
 		}
@@ -1721,7 +2039,7 @@ func (a *executorAdapter) CountTokens(ctx context.Context, auth *coreauth.Auth, 
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(a.pluginID, "Executor.CountTokens", recovered)
+			a.host.fusePluginIdentity(a.pluginID, a.path, a.version, "Executor.CountTokens", recovered)
 			resp = coreexecutor.Response{}
 			err = fmt.Errorf("plugin executor %s count tokens panic: %v", a.Identifier(), recovered)
 		}
@@ -1751,7 +2069,7 @@ func (a *executorAdapter) HttpRequest(ctx context.Context, auth *coreauth.Auth, 
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(a.pluginID, "Executor.HttpRequest", recovered)
+			a.host.fusePluginIdentity(a.pluginID, a.path, a.version, "Executor.HttpRequest", recovered)
 			resp = nil
 			err = fmt.Errorf("plugin executor %s http request panic: %v", a.Identifier(), recovered)
 		}
@@ -1808,13 +2126,13 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	if a == nil {
 		return
 	}
-	plugin := a.host.currentUsagePlugin(a.pluginID)
-	if plugin == nil {
+	plugin, pluginRecord, okPlugin := a.host.currentUsagePlugin(a.pluginID)
+	if !okPlugin {
 		return
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(a.pluginID, "UsagePlugin.HandleUsage", recovered)
+			a.host.fusePlugin(pluginRecord, "UsagePlugin.HandleUsage", recovered)
 		}
 	}()
 	plugin.HandleUsage(ctx, pluginapi.UsageRecord{
@@ -1857,7 +2175,7 @@ func (a *thinkingAdapter) Apply(body []byte, config thinking.ThinkingConfig, mod
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(a.pluginID, "ThinkingApplier.ApplyThinking", recovered)
+			a.host.fusePluginIdentity(a.pluginID, a.path, a.version, "ThinkingApplier.ApplyThinking", recovered)
 			out = bytes.Clone(body)
 			err = nil
 		}
@@ -1950,7 +2268,7 @@ func (h *Host) callRequestNormalizer(ctx context.Context, record capabilityRecor
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "RequestNormalizer.NormalizeRequest", recovered)
+			h.fusePlugin(record, "RequestNormalizer.NormalizeRequest", recovered)
 			out = nil
 			ok = false
 		}
@@ -1974,7 +2292,7 @@ func (h *Host) callRequestTranslator(ctx context.Context, record capabilityRecor
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "RequestTranslator.TranslateRequest", recovered)
+			h.fusePlugin(record, "RequestTranslator.TranslateRequest", recovered)
 			out = nil
 			ok = false
 		}
@@ -1998,7 +2316,7 @@ func (h *Host) callResponseNormalizer(ctx context.Context, record capabilityReco
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, method, recovered)
+			h.fusePlugin(record, method, recovered)
 			out = nil
 			ok = false
 		}
@@ -2024,7 +2342,7 @@ func (h *Host) callResponseTranslator(ctx context.Context, record capabilityReco
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "ResponseTranslator.TranslateResponse", recovered)
+			h.fusePlugin(record, "ResponseTranslator.TranslateResponse", recovered)
 			out = nil
 			ok = false
 		}

@@ -294,6 +294,74 @@ func TestHostUnloadPluginTargetsOnlyRequestedPlugin(t *testing.T) {
 	}
 }
 
+func TestHostUnloadPluginDefersPinnedStreamClientShutdown(t *testing.T) {
+	loader := newTestSymbolLoader()
+	var calls []int
+	plugin := &testPlugin{
+		registerResult: pluginapi.Plugin{
+			Metadata: validTestPlugin("alpha").Metadata,
+			Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						calls = append(calls, req.ChunkIndex)
+						return pluginapi.StreamChunkInterceptResponse{Body: append(req.Body, []byte("|alpha")...)}, nil
+					},
+				},
+				StreamChunkInterceptorStateful: true,
+			},
+		},
+	}
+	lookup := newTestSymbolLookup(plugin)
+	lookup.shutdownDone = make(chan struct{})
+	loader.lookups["alpha"] = lookup
+	h := NewForTest(loader)
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
+		},
+	})
+
+	session := h.OpenStreamChunkInterceptorSession("")
+	if session == nil {
+		t.Fatal("OpenStreamChunkInterceptorSession() = nil, want active session")
+	}
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:    "stream-1",
+		RequestBody: []byte("request"),
+		ChunkIndex:  pluginapi.StreamChunkHeaderInitIndex,
+	})
+
+	if !h.UnloadPlugin("alpha") {
+		t.Fatal("UnloadPlugin(alpha) = false, want true")
+	}
+	if lookup.shutdownCalls != 0 {
+		t.Fatalf("shutdown calls = %d while stream session is pinned, want 0", lookup.shutdownCalls)
+	}
+	resp := session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		Body:       []byte("chunk"),
+		ChunkIndex: 0,
+	})
+	if string(resp.Body) != "chunk|alpha" {
+		t.Fatalf("pinned stream payload = %q, want chunk|alpha after unload", resp.Body)
+	}
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+	session.Close()
+	waitForHostTestSignal(t, lookup.shutdownDone, "deferred pinned plugin shutdown")
+
+	if fmt.Sprint(calls) != "[-1 0 -2]" {
+		t.Fatalf("pinned plugin calls = %v, want [-1 0 -2]", calls)
+	}
+	if lookup.shutdownCalls != 1 {
+		t.Fatalf("shutdown calls = %d after session close, want 1", lookup.shutdownCalls)
+	}
+}
+
 func TestHostApplyConfigRegistersPluginThinkingApplier(t *testing.T) {
 	loader := newTestSymbolLoader()
 	plugin := &testPlugin{

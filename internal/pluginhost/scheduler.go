@@ -55,7 +55,7 @@ func (h *Host) callScheduler(ctx context.Context, record capabilityRecord, req p
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "Scheduler.Pick", recovered)
+			h.fusePlugin(record, "Scheduler.Pick", recovered)
 			resp = pluginapi.SchedulerPickResponse{}
 			handled = false
 			err = nil

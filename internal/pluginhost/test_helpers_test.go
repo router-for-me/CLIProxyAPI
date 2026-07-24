@@ -37,6 +37,7 @@ type testSymbolLookup struct {
 	plugin              *testPlugin
 	active              pluginapi.Plugin
 	shutdownCalls       int
+	shutdownDone        chan struct{}
 	registerOverride    func([]byte) pluginapi.Plugin
 	reconfigureOverride func([]byte) pluginapi.Plugin
 	schemaVersion       uint32
@@ -168,6 +169,9 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 
 func (l *testSymbolLookup) Shutdown() {
 	l.shutdownCalls++
+	if l.shutdownDone != nil {
+		close(l.shutdownDone)
+	}
 }
 
 func (l *testSymbolLookup) callLifecycle(request []byte, reload bool) ([]byte, error) {

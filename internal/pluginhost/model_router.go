@@ -44,7 +44,7 @@ func (h *Host) RouteModelExcept(ctx context.Context, req pluginapi.ModelRouteReq
 		nextReq := cloneModelRouteRequest(req)
 		nextReq.Plugin = clonePluginMetadata(record.meta)
 		nextReq.PluginID = record.id
-		resp, ok := h.callModelRouter(ctx, record.id, router, nextReq)
+		resp, ok := h.callModelRouter(ctx, record, router, nextReq)
 		if !ok || !resp.Handled {
 			continue
 		}
@@ -74,20 +74,20 @@ func (h *Host) RouteModelExcept(ctx context.Context, req pluginapi.ModelRouteReq
 	return pluginapi.ModelRouteResponse{}, false
 }
 
-func (h *Host) callModelRouter(ctx context.Context, pluginID string, router pluginapi.ModelRouter, req pluginapi.ModelRouteRequest) (out pluginapi.ModelRouteResponse, ok bool) {
-	if h == nil || router == nil || h.isPluginFused(pluginID) {
+func (h *Host) callModelRouter(ctx context.Context, record capabilityRecord, router pluginapi.ModelRouter, req pluginapi.ModelRouteRequest) (out pluginapi.ModelRouteResponse, ok bool) {
+	if h == nil || router == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.ModelRouteResponse{}, false
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(pluginID, "ModelRouter.RouteModel", recovered)
+			h.fusePlugin(record, "ModelRouter.RouteModel", recovered)
 			out = pluginapi.ModelRouteResponse{}
 			ok = false
 		}
 	}()
 	resp, errRoute := router.RouteModel(ctx, req)
 	if errRoute != nil {
-		log.WithField("plugin_id", pluginID).WithError(errRoute).Warn("pluginhost: model router failed")
+		log.WithField("plugin_id", record.id).WithError(errRoute).Warn("pluginhost: model router failed")
 		return pluginapi.ModelRouteResponse{}, false
 	}
 	return resp, true
