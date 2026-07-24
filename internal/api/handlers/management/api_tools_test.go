@@ -1,14 +1,130 @@
 package management
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/gin-gonic/gin"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
+
+type fakeManagementCodexRefreshService struct {
+	tokenData     *codexauth.CodexTokenData
+	refreshTokens []string
+}
+
+func (f *fakeManagementCodexRefreshService) RefreshTokensWithRetry(_ context.Context, refreshToken string, retries int) (*codexauth.CodexTokenData, error) {
+	if retries != 3 {
+		return nil, fmt.Errorf("retries = %d, want 3", retries)
+	}
+	f.refreshTokens = append(f.refreshTokens, refreshToken)
+	if refreshToken == "refresh-stale" {
+		return nil, fmt.Errorf("token refresh failed: refresh_token_reused")
+	}
+	if refreshToken != "refresh-old" {
+		return nil, fmt.Errorf("refresh token = %q, want refresh-old", refreshToken)
+	}
+	return f.tokenData, nil
+}
+
+func TestAPICallRefreshesCodexTokenAfterUnauthorized(t *testing.T) {
+	originalFactory := newManagementCodexRefreshService
+	fakeRefresh := &fakeManagementCodexRefreshService{tokenData: &codexauth.CodexTokenData{
+		AccessToken:  "access-new",
+		RefreshToken: "refresh-new",
+		IDToken:      "id-new",
+		AccountID:    "account-new",
+		Email:        "codex@example.test",
+		Expire:       time.Now().Add(time.Hour).Format(time.RFC3339),
+	}}
+	newManagementCodexRefreshService = func(_ *config.Config, _ string) managementCodexRefreshService {
+		return fakeRefresh
+	}
+	defer func() { newManagementCodexRefreshService = originalFactory }()
+
+	requests := 0
+	requestTokens := make([]string, 0, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		requestTokens = append(requestTokens, r.Header.Get("Authorization"))
+		if requestTokens[len(requestTokens)-1] == "Bearer access-old" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"expired"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	authFile := filepath.Join(t.TempDir(), "codex-example.json")
+	if errWrite := os.WriteFile(authFile, []byte(`{"refresh_token":"refresh-old"}`), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "codex-example.json",
+		Provider: "codex",
+		Attributes: map[string]string{
+			coreauth.AttributePath: authFile,
+		},
+		Metadata: map[string]any{
+			"access_token":  "access-old",
+			"refresh_token": "refresh-stale",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{}, manager)
+	router := gin.New()
+	router.POST("/api-call", h.APICall)
+	payload, _ := json.Marshal(map[string]any{
+		"auth_index": auth.EnsureIndex(),
+		"method":     http.MethodGet,
+		"url":        upstream.URL,
+		"header":     map[string]string{"Authorization": "Bearer $TOKEN$"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api-call", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("management status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	responseBody, _ := io.ReadAll(recorder.Body)
+	var response apiCallResponse
+	if errUnmarshal := json.Unmarshal(responseBody, &response); errUnmarshal != nil {
+		t.Fatalf("decode response: %v", errUnmarshal)
+	}
+	if response.StatusCode != http.StatusOK || requests != 2 {
+		t.Fatalf("upstream status=%d requests=%d, want 200/2", response.StatusCode, requests)
+	}
+	if requestTokens[0] != "Bearer access-old" || requestTokens[1] != "Bearer access-new" {
+		t.Fatalf("Authorization sequence = %v, want old/new", requestTokens)
+	}
+	if got := fmt.Sprint(fakeRefresh.refreshTokens); got != "[refresh-stale refresh-old]" {
+		t.Fatalf("refresh token candidates = %s, want stale/persisted", got)
+	}
+	updated := h.authByIndex(auth.Index)
+	if got := tokenValueForAuth(updated); got != "access-new" {
+		t.Fatalf("persisted access token = %q, want access-new", got)
+	}
+}
 
 func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
 	t.Parallel()
