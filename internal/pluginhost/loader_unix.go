@@ -98,10 +98,11 @@ var (
 type dynamicLibraryLoader struct{}
 
 type dynamicLibraryClient struct {
-	handle  unsafe.Pointer
-	hostAPI *C.cliproxy_host_api
-	hostCtx unsafe.Pointer
-	api     C.cliproxy_plugin_api
+	handle    unsafe.Pointer
+	hostAPI   *C.cliproxy_host_api
+	hostCtx   unsafe.Pointer
+	hostEntry *dynamicHostCallbackEntry
+	api       C.cliproxy_plugin_api
 }
 
 func defaultPluginLoader() pluginLoader {
@@ -138,13 +139,15 @@ func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, err
 	}
 	id := hostCallbackID.Add(1)
 	*(*C.uintptr_t)(hostCtx) = C.uintptr_t(id)
-	hostCallbackEntries.Store(id, dynamicHostCallbackEntry{host: host, pluginID: file.ID})
+	hostEntry := newDynamicHostCallbackEntry(host, file.ID)
+	hostCallbackEntries.Store(id, hostEntry)
 	C.cliproxy_set_host_api(hostAPI, C.uint32_t(pluginHostABIVersion), hostCtx)
 
 	client := &dynamicLibraryClient{
-		handle:  handle,
-		hostAPI: hostAPI,
-		hostCtx: hostCtx,
+		handle:    handle,
+		hostAPI:   hostAPI,
+		hostCtx:   hostCtx,
+		hostEntry: hostEntry,
 	}
 	rc := C.cliproxy_call_init(initSymbol, hostAPI, &client.api)
 	if rc != 0 {
@@ -197,6 +200,12 @@ func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request 
 		return nil, fmt.Errorf("plugin call %s returned %d: %s", method, int(rc), string(out))
 	}
 	return out, nil
+}
+
+func (c *dynamicLibraryClient) setSchemaVersion(schemaVersion uint32) {
+	if c != nil && c.hostEntry != nil {
+		c.hostEntry.setSchemaVersion(schemaVersion)
+	}
 }
 
 func (c *dynamicLibraryClient) Shutdown() {

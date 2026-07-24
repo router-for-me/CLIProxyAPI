@@ -516,6 +516,17 @@ func (h *Host) callRequestInterceptor(ctx context.Context, record capabilityReco
 	if h == nil || call == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.RequestInterceptResponse{}, false
 	}
+	panicked := false
+	call = markRequestInterceptorPanic(call, &panicked)
+	defer func() {
+		if panicked {
+			out = pluginapi.RequestInterceptResponse{
+				Reject:       true,
+				RejectReason: "request interceptor panic: " + record.id,
+			}
+			ok = true
+		}
+	}()
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			h.fusePlugin(record.id, method, recovered)
@@ -610,6 +621,11 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 			current.Headers = mergeHeaders(current.Headers, resp.Headers, resp.ClearHeaders)
 			if len(resp.Body) > 0 {
 				current.Body = bytes.Clone(resp.Body)
+			}
+			if resp.Reject {
+				current.Reject = true
+				current.RejectReason = resp.RejectReason
+				break
 			}
 		}
 	}

@@ -40,18 +40,21 @@ type streamBridgeEmit struct {
 
 type streamBridgeClose struct {
 	errorMessage string
+	errorDetails *pluginapi.HostModelError
 	accepted     chan struct{}
 }
 
 type rpcStreamEmitRequest struct {
-	StreamID string `json:"stream_id"`
-	Payload  []byte `json:"payload,omitempty"`
-	Error    string `json:"error,omitempty"`
+	StreamID     string                    `json:"stream_id"`
+	Payload      []byte                    `json:"payload,omitempty"`
+	Error        string                    `json:"error,omitempty"`
+	ErrorDetails *pluginapi.HostModelError `json:"error_details,omitempty"`
 }
 
 type rpcStreamCloseRequest struct {
-	StreamID string `json:"stream_id"`
-	Error    string `json:"error,omitempty"`
+	StreamID     string                    `json:"stream_id"`
+	Error        string                    `json:"error,omitempty"`
+	ErrorDetails *pluginapi.HostModelError `json:"error_details,omitempty"`
 }
 
 func newStreamBridge() *streamBridge {
@@ -97,8 +100,14 @@ func (s *streamBridgeStream) run() {
 		case request := <-s.closes:
 			s.markClosed()
 			close(request.accepted)
-			if request.errorMessage != "" {
-				queue = append(queue, pluginapi.ExecutorStreamChunk{Err: fmt.Errorf("%s", request.errorMessage)})
+			if request.errorDetails != nil || request.errorMessage != "" {
+				var err error
+				if request.errorDetails != nil {
+					err = newPluginStreamError(request.errorDetails, request.errorMessage)
+				} else {
+					err = fmt.Errorf("%s", request.errorMessage)
+				}
+				queue = append(queue, pluginapi.ExecutorStreamChunk{Err: err})
 			}
 			for len(queue) > 0 {
 				select {
@@ -161,12 +170,13 @@ func (s *streamBridgeStream) emit(ctx context.Context, chunk pluginapi.ExecutorS
 	return <-request.done
 }
 
-func (s *streamBridgeStream) close(errorMessage string) {
+func (s *streamBridgeStream) close(errorMessage string, errorDetails *pluginapi.HostModelError) {
 	if s == nil {
 		return
 	}
 	request := streamBridgeClose{
 		errorMessage: errorMessage,
+		errorDetails: errorDetails,
 		accepted:     make(chan struct{}),
 	}
 	select {
@@ -228,7 +238,7 @@ func (b *streamBridge) emit(ctx context.Context, id string, chunk pluginapi.Exec
 	return nil
 }
 
-func (b *streamBridge) close(id string, errorMessage string) {
+func (b *streamBridge) close(id string, errorMessage string, errorDetails *pluginapi.HostModelError) {
 	if b == nil || id == "" {
 		return
 	}
@@ -239,5 +249,5 @@ func (b *streamBridge) close(id string, errorMessage string) {
 	if stream == nil {
 		return
 	}
-	stream.close(errorMessage)
+	stream.close(errorMessage, errorDetails)
 }

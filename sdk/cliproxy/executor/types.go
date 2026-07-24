@@ -89,6 +89,10 @@ type RequestAfterAuthInterceptResponse struct {
 	Body []byte
 	// ClearHeaders explicitly removes current request headers before Headers is applied.
 	ClearHeaders []string
+	// Reject, when true, aborts the request after auth selection (fail-closed).
+	Reject bool
+	// RejectReason is an optional human-readable explanation surfaced to the caller.
+	RejectReason string
 }
 
 // Options controls execution behavior for both streaming and non-streaming calls.

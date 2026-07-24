@@ -5,6 +5,12 @@ import (
 	"testing"
 )
 
+func TestSchemaVersionPreservesV1Compatibility(t *testing.T) {
+	if SchemaVersion != SchemaVersionV1 {
+		t.Fatalf("SchemaVersion = %d, want compatibility default %d", SchemaVersion, SchemaVersionV1)
+	}
+}
+
 func TestEnvelopeRoundTrip(t *testing.T) {
 	payload := json.RawMessage(`{"name":"example"}`)
 	env := Envelope{

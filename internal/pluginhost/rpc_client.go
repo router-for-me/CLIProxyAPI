@@ -14,9 +14,10 @@ import (
 )
 
 type rpcPluginAdapter struct {
-	id     string
-	host   *Host
-	client pluginClient
+	id            string
+	host          *Host
+	client        pluginClient
+	schemaVersion uint32
 }
 
 type rpcAuthProvider struct {
@@ -59,15 +60,20 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	}
 	resp, errCall := callPlugin[rpcRegistration](ctx, client, method, rpcLifecycleRequest{
 		ConfigYAML:    bytes.Clone(configYAML),
-		SchemaVersion: pluginabi.SchemaVersion,
+		SchemaVersion: pluginabi.CurrentSchemaVersion,
 	})
 	if errCall != nil {
 		return pluginapi.Plugin{}, errCall
 	}
-	if resp.SchemaVersion > pluginabi.SchemaVersion {
+	schemaVersion := resp.SchemaVersion
+	if schemaVersion == 0 {
+		schemaVersion = pluginabi.SchemaVersionV1
+	}
+	if schemaVersion > pluginabi.CurrentSchemaVersion {
 		return pluginapi.Plugin{}, fmt.Errorf("plugin schema version %d is not supported", resp.SchemaVersion)
 	}
-	adapter := &rpcPluginAdapter{id: id, host: host, client: client}
+	setPluginClientSchemaVersion(client, schemaVersion)
+	adapter := &rpcPluginAdapter{id: id, host: host, client: client, schemaVersion: schemaVersion}
 	plugin := pluginapi.Plugin{
 		Metadata: resp.Metadata,
 		Capabilities: pluginapi.Capabilities{
@@ -331,7 +337,7 @@ func (a *rpcPluginAdapter) openHostCallbackContext(ctx context.Context) (string,
 	if a == nil || a.host == nil {
 		return "", func() {}
 	}
-	return a.host.openCallbackContextForPlugin(ctx, a.id)
+	return a.host.openCallbackContextForPluginVersion(ctx, a.id, a.schemaVersion)
 }
 
 func (a *rpcPluginAdapter) RegisterModels(ctx context.Context, req pluginapi.ModelRegistrationRequest) (pluginapi.ModelRegistrationResponse, error) {

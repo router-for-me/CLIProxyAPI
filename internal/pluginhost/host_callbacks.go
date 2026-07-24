@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -67,15 +69,44 @@ type rpcHostModelExecutionRequest struct {
 }
 
 type dynamicHostCallbackEntry struct {
-	host     *Host
-	pluginID string
+	host          *Host
+	pluginID      string
+	schemaVersion atomic.Uint32
 }
 
-type hostCallbackPluginIDKey struct{}
+func newDynamicHostCallbackEntry(host *Host, pluginID string) *dynamicHostCallbackEntry {
+	entry := &dynamicHostCallbackEntry{host: host, pluginID: strings.TrimSpace(pluginID)}
+	entry.schemaVersion.Store(pluginabi.SchemaVersionV1)
+	return entry
+}
 
-func withHostCallbackPluginID(ctx context.Context, pluginID string) context.Context {
+func (e *dynamicHostCallbackEntry) setSchemaVersion(schemaVersion uint32) {
+	if e == nil {
+		return
+	}
+	if schemaVersion == 0 {
+		schemaVersion = pluginabi.SchemaVersionV1
+	}
+	e.schemaVersion.Store(schemaVersion)
+}
+
+func (e *dynamicHostCallbackEntry) context() context.Context {
+	if e == nil {
+		return context.Background()
+	}
+	return withHostCallbackCaller(context.Background(), e.pluginID, e.schemaVersion.Load())
+}
+
+type hostCallbackCaller struct {
+	pluginID      string
+	schemaVersion uint32
+}
+
+type hostCallbackCallerKey struct{}
+
+func withHostCallbackCaller(ctx context.Context, pluginID string, schemaVersion uint32) context.Context {
 	pluginID = strings.TrimSpace(pluginID)
-	if pluginID == "" {
+	if pluginID == "" && schemaVersion == 0 {
 		if ctx == nil {
 			return context.Background()
 		}
@@ -84,15 +115,26 @@ func withHostCallbackPluginID(ctx context.Context, pluginID string) context.Cont
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithValue(ctx, hostCallbackPluginIDKey{}, pluginID)
+	return context.WithValue(ctx, hostCallbackCallerKey{}, hostCallbackCaller{
+		pluginID:      pluginID,
+		schemaVersion: schemaVersion,
+	})
 }
 
 func hostCallbackPluginIDFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
-	pluginID, _ := ctx.Value(hostCallbackPluginIDKey{}).(string)
-	return strings.TrimSpace(pluginID)
+	caller, _ := ctx.Value(hostCallbackCallerKey{}).(hostCallbackCaller)
+	return strings.TrimSpace(caller.pluginID)
+}
+
+func hostCallbackSchemaVersionFromContext(ctx context.Context) uint32 {
+	if ctx == nil {
+		return 0
+	}
+	caller, _ := ctx.Value(hostCallbackCallerKey{}).(hostCallbackCaller)
+	return caller.schemaVersion
 }
 
 func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte) ([]byte, error) {
@@ -137,6 +179,22 @@ func (h *Host) callbackCallerPluginID(ctx context.Context, callbackID string) st
 		return pluginID
 	}
 	return h.callbackContextPluginID(callbackID)
+}
+
+func (h *Host) callbackCallerSchemaVersion(ctx context.Context, callbackID string) uint32 {
+	if callbackID != "" {
+		if schemaVersion := h.callbackContextSchemaVersion(callbackID); schemaVersion != 0 {
+			return schemaVersion
+		}
+	}
+	if schemaVersion := hostCallbackSchemaVersionFromContext(ctx); schemaVersion != 0 {
+		return schemaVersion
+	}
+	return pluginabi.CurrentSchemaVersion
+}
+
+func (h *Host) usesStructuredHostModelErrors(ctx context.Context, callbackID string) bool {
+	return h.callbackCallerSchemaVersion(ctx, callbackID) >= pluginabi.SchemaVersionV2
 }
 
 func (h *Host) callHostHTTPDo(ctx context.Context, request []byte) ([]byte, error) {
@@ -248,7 +306,9 @@ func (h *Host) callHostStreamEmit(ctx context.Context, request []byte) ([]byte, 
 		return nil, fmt.Errorf("decode stream emit request: %w", errUnmarshal)
 	}
 	chunk := pluginapi.ExecutorStreamChunk{Payload: append([]byte(nil), req.Payload...)}
-	if req.Error != "" {
+	if req.ErrorDetails != nil {
+		chunk.Err = newPluginStreamError(req.ErrorDetails, req.Error)
+	} else if req.Error != "" {
 		chunk.Err = fmt.Errorf("%s", req.Error)
 	}
 	if errEmit := h.streams.emit(ctx, req.StreamID, chunk); errEmit != nil {
@@ -262,7 +322,7 @@ func (h *Host) callHostStreamClose(request []byte) ([]byte, error) {
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
 		return nil, fmt.Errorf("decode stream close request: %w", errUnmarshal)
 	}
-	h.streams.close(req.StreamID, req.Error)
+	h.streams.close(req.StreamID, req.Error, req.ErrorDetails)
 	return marshalRPCResult(rpcEmptyResponse{})
 }
 
@@ -282,13 +342,29 @@ func (h *Host) callHostModelExecute(ctx context.Context, request []byte) ([]byte
 	ctx = h.resolveCallbackContext(req.HostCallbackID, ctx)
 	resp, errMsg := executor.ExecuteModel(ctx, modelExecutionRequestFromPlugin(req.HostModelExecutionRequest, skipPluginID))
 	if errMsg != nil {
-		return nil, modelExecutionError(errMsg)
+		if !h.usesStructuredHostModelErrors(ctx, req.HostCallbackID) {
+			return nil, legacyHostModelError(errMsg)
+		}
+		return marshalRPCResult(hostModelExecutionErrorResponse(errMsg))
 	}
 	return marshalRPCResult(pluginapi.HostModelExecutionResponse{
 		StatusCode: resp.StatusCode,
 		Headers:    cloneHeader(resp.Headers),
 		Body:       append([]byte(nil), resp.Body...),
 	})
+}
+
+func legacyHostModelError(errMsg *interfaces.ErrorMessage) error {
+	details := hostModelErrorFromMessage(errMsg)
+	if details == nil {
+		return fmt.Errorf("host model execution failed")
+	}
+	return &pluginStreamError{
+		statusCode: details.StatusCode,
+		headers:    httpHeader(cloneHeader(details.Headers)),
+		body:       append([]byte(nil), details.Body...),
+		message:    details.Message,
+	}
 }
 
 func modelExecutionRequestFromPlugin(req pluginapi.HostModelExecutionRequest, skipPluginID string) handlers.ModelExecutionRequest {
@@ -306,17 +382,129 @@ func modelExecutionRequestFromPlugin(req pluginapi.HostModelExecutionRequest, sk
 	}
 }
 
-func modelExecutionError(errMsg *interfaces.ErrorMessage) error {
+type pluginStreamError struct {
+	statusCode int
+	headers    httpHeader
+	body       []byte
+	message    string
+}
+
+func newPluginStreamError(details *pluginapi.HostModelError, fallback string) error {
+	if details == nil {
+		return fmt.Errorf("%s", fallback)
+	}
+	message := details.Message
+	if message == "" && len(details.Body) > 0 {
+		message = string(details.Body)
+	}
+	if message == "" {
+		message = fallback
+	}
+	if message == "" && details.StatusCode > 0 {
+		message = fmt.Sprintf("upstream returned status %d", details.StatusCode)
+	}
+	return &pluginStreamError{
+		statusCode: details.StatusCode,
+		headers:    httpHeader(cloneHeader(details.Headers)),
+		body:       append([]byte(nil), details.Body...),
+		message:    message,
+	}
+}
+
+func (e *pluginStreamError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if len(e.body) > 0 {
+		return string(e.body)
+	}
+	return e.message
+}
+
+func (e *pluginStreamError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.statusCode
+}
+
+func (e *pluginStreamError) Headers() http.Header {
+	if e == nil {
+		return nil
+	}
+	return cloneHeader(http.Header(e.headers))
+}
+
+// hostModelExecutionErrorResponse builds a successful RPC result that carries a
+// structured model failure in Error. Callers must inspect Error/StatusCode.
+func hostModelExecutionErrorResponse(errMsg *interfaces.ErrorMessage) pluginapi.HostModelExecutionResponse {
+	details := hostModelErrorFromMessage(errMsg)
+	if details == nil {
+		return pluginapi.HostModelExecutionResponse{}
+	}
+	return pluginapi.HostModelExecutionResponse{
+		StatusCode: details.StatusCode,
+		Headers:    cloneHeader(details.Headers),
+		Body:       append([]byte(nil), details.Body...),
+		Error:      details,
+	}
+}
+
+// hostModelStreamErrorResponse builds a successful RPC result that carries a
+// structured stream-startup failure in Error. StreamID is left empty.
+func hostModelStreamErrorResponse(errMsg *interfaces.ErrorMessage) pluginapi.HostModelStreamResponse {
+	details := hostModelErrorFromMessage(errMsg)
+	if details == nil {
+		return pluginapi.HostModelStreamResponse{}
+	}
+	return pluginapi.HostModelStreamResponse{
+		StatusCode: details.StatusCode,
+		Headers:    cloneHeader(details.Headers),
+		Error:      details,
+	}
+}
+
+// hostModelErrorFromMessage maps interfaces.ErrorMessage into HostModelError.
+// Body is filled from the error string when no raw upstream body is available.
+func hostModelErrorFromMessage(errMsg *interfaces.ErrorMessage) *pluginapi.HostModelError {
 	if errMsg == nil {
 		return nil
 	}
+	message := ""
 	if errMsg.Error != nil {
-		return errMsg.Error
+		message = errMsg.Error.Error()
 	}
-	if errMsg.StatusCode > 0 {
-		return fmt.Errorf("model execution failed with status %d", errMsg.StatusCode)
+	if message == "" && errMsg.StatusCode > 0 {
+		message = fmt.Sprintf("model execution failed with status %d", errMsg.StatusCode)
 	}
-	return fmt.Errorf("model execution failed")
+	return &pluginapi.HostModelError{
+		StatusCode: errMsg.StatusCode,
+		Headers:    cloneHeader(errMsg.Addon),
+		Body:       []byte(message),
+		Message:    message,
+	}
+}
+
+func hostModelErrorFromError(err error) *pluginapi.HostModelError {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	details := &pluginapi.HostModelError{
+		Body:    []byte(message),
+		Message: message,
+	}
+	if statusErr, ok := err.(interface{ StatusCode() int }); ok {
+		details.StatusCode = statusErr.StatusCode()
+	}
+	if headerErr, ok := err.(interface{ Headers() http.Header }); ok {
+		details.Headers = cloneHeader(headerErr.Headers())
+	}
+	if streamErr, ok := err.(*handlers.ModelExecutionStreamError); ok && streamErr != nil {
+		details.StatusCode = streamErr.StatusCode
+		details.Headers = cloneHeader(streamErr.Headers)
+	}
+	return details
 }
 
 func (h *Host) callHostLog(ctx context.Context, request []byte) ([]byte, error) {

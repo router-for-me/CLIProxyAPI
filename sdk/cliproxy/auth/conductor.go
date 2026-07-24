@@ -2101,7 +2101,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			execReq.Model = executionModel
 		}
 		execOpts := opts
-		execReq, execOpts = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+		execReq, execOpts, errAfterAuth := applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+		if errAfterAuth != nil {
+			return nil, errAfterAuth
+		}
 		if errCtx := ctx.Err(); errCtx != nil {
 			return nil, errCtx
 		}
@@ -2778,7 +2781,12 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			}
 			execOpts := opts
 			execOpts.ExecutionLifecycle = selection
-			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			execReq, execOpts, errAfterAuth := applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			if errAfterAuth != nil {
+				releaseAttempt()
+				selection.End("request_rejected")
+				return cliproxyexecutor.Response{}, errAfterAuth
+			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				releaseAttempt()
 				selection.End("attempt_canceled")
@@ -2825,9 +2833,9 @@ type requestToFormatResolver interface {
 	RequestToFormat(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) sdktranslator.Format
 }
 
-func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExecutor, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, requestedModel string) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
+func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExecutor, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, requestedModel string) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
 	if opts.RequestAfterAuthInterceptor == nil {
-		return req, opts
+		return req, opts, nil
 	}
 	toFormat := requestToFormat(provider, executor, req, opts)
 	resp := opts.RequestAfterAuthInterceptor(ctx, cliproxyexecutor.RequestAfterAuthInterceptRequest{
@@ -2840,12 +2848,21 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 		Body:           bytes.Clone(req.Payload),
 		Metadata:       opts.Metadata,
 	})
+	if resp.Reject {
+		// Terminal policy rejection: do not cool credentials or retry other auths.
+		return req, opts, &Error{
+			Code:       "request_rejected_by_plugin",
+			Message:    resp.RejectReason,
+			HTTPStatus: http.StatusForbidden,
+			Retryable:  false,
+		}
+	}
 	opts.Headers = mergeRequestHeaders(opts.Headers, resp.Headers, resp.ClearHeaders)
 	if len(resp.Body) > 0 {
 		req.Payload = bytes.Clone(resp.Body)
 		opts.OriginalRequest = bytes.Clone(resp.Body)
 	}
-	return req, opts
+	return req, opts, nil
 }
 
 func requestToFormat(provider string, executor ProviderExecutor, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) sdktranslator.Format {
@@ -2978,7 +2995,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				execReq.Model = executionModel
 			}
 			execOpts := opts
-			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			execReq, execOpts, errAfterAuth := applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			if errAfterAuth != nil {
+				return cliproxyexecutor.Response{}, errAfterAuth
+			}
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -3091,7 +3111,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				execReq.Model = executionModel
 			}
 			execOpts := opts
-			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			execReq, execOpts, errAfterAuth := applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			if errAfterAuth != nil {
+				return cliproxyexecutor.Response{}, errAfterAuth
+			}
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -4199,11 +4222,13 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if maxWait <= 0 {
 		return 0, false
 	}
-	status := statusCodeFromError(err)
-	if status == http.StatusOK {
+	// Plugin policy rejections are terminal even when some auth is cooling down.
+	// Check before closestCooldownWait so a 403 reject never sleeps/retries.
+	if isRequestInvalidError(err) {
 		return 0, false
 	}
-	if isRequestInvalidError(err) {
+	status := statusCodeFromError(err)
+	if status == http.StatusOK {
 		return 0, false
 	}
 	wait, found := m.closestCooldownWait(providers, model, attempt)
@@ -5108,14 +5133,18 @@ func isMissingModelPhrase(value string) bool {
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. Specifically, it treats 400 responses with
 // "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
-// and all 422 responses as request-shape failures, where switching auths or
-// pooled upstream models will not help. Model-support errors are excluded so
-// routing can fall through to another auth or upstream.
+// all 422 responses, and plugin policy rejections (request_rejected_by_plugin)
+// as request-shape / policy failures, where switching auths or pooled upstream
+// models will not help. Model-support errors are excluded so routing can fall
+// through to another auth or upstream.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
 	}
 	if isRequestScopedError(err) {
+		return true
+	}
+	if isRequestRejectedByPluginError(err) {
 		return true
 	}
 	if isCloudflareChallengeError(err) {
@@ -5146,6 +5175,19 @@ func isRequestInvalidError(err error) bool {
 	default:
 		return false
 	}
+}
+
+// isRequestRejectedByPluginError reports plugin policy rejections that must
+// terminate auth selection and outer cooldown retries immediately.
+func isRequestRejectedByPluginError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		return authErr.Code == "request_rejected_by_plugin"
+	}
+	return false
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {

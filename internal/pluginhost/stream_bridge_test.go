@@ -2,6 +2,8 @@ package pluginhost
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -51,7 +53,7 @@ func TestStreamBridgeCloseUnblocksPendingEmit(t *testing.T) {
 	default:
 	}
 
-	bridge.close(streamID, "")
+	bridge.close(streamID, "", nil)
 
 	select {
 	case err := <-emitDone:
@@ -127,7 +129,7 @@ func TestStreamBridgeCleanupAbortsPendingGracefulClose(t *testing.T) {
 			t.Fatalf("fill stream buffer: %v", err)
 		}
 	}
-	bridge.close(streamID, "plugin stream failed")
+	bridge.close(streamID, "plugin stream failed", nil)
 
 	cleanup()
 
@@ -145,7 +147,11 @@ func TestStreamBridgeCloseDeliversTerminalError(t *testing.T) {
 	bridge := newStreamBridge()
 	streamID, chunks, _ := bridge.open(context.Background())
 
-	bridge.close(streamID, "plugin stream failed")
+	bridge.close(streamID, "plugin stream failed", &pluginapi.HostModelError{
+		StatusCode: http.StatusBadGateway,
+		Headers:    http.Header{"Retry-After": []string{"5"}},
+		Message:    "plugin stream failed",
+	})
 
 	chunk, ok := <-chunks
 	if !ok {
@@ -153,6 +159,14 @@ func TestStreamBridgeCloseDeliversTerminalError(t *testing.T) {
 	}
 	if chunk.Err == nil || chunk.Err.Error() != "plugin stream failed" {
 		t.Fatalf("terminal error = %v, want plugin stream failed", chunk.Err)
+	}
+	statusErr, ok := chunk.Err.(interface{ StatusCode() int })
+	if !ok || statusErr.StatusCode() != http.StatusBadGateway {
+		t.Fatalf("terminal error status = %#v, want 502", chunk.Err)
+	}
+	headerErr, ok := chunk.Err.(interface{ Headers() http.Header })
+	if !ok || headerErr.Headers().Get("Retry-After") != "5" {
+		t.Fatalf("terminal error headers = %#v, want retry-after", chunk.Err)
 	}
 	if _, ok = <-chunks; ok {
 		t.Fatal("stream remains open after terminal error")
@@ -171,7 +185,10 @@ func TestStreamBridgeClosePreservesTerminalErrorWhenBufferIsFull(t *testing.T) {
 
 	closeDone := make(chan struct{})
 	go func() {
-		bridge.close(streamID, "plugin stream failed")
+		bridge.close(streamID, "plugin stream failed", &pluginapi.HostModelError{
+			StatusCode: http.StatusBadGateway,
+			Message:    "plugin stream failed",
+		})
 		close(closeDone)
 	}()
 	select {
@@ -193,5 +210,52 @@ func TestStreamBridgeClosePreservesTerminalErrorWhenBufferIsFull(t *testing.T) {
 	}
 	if terminalErr == nil || terminalErr.Error() != "plugin stream failed" {
 		t.Fatalf("terminal error = %v, want plugin stream failed", terminalErr)
+	}
+	statusErr, ok := terminalErr.(interface{ StatusCode() int })
+	if !ok || statusErr.StatusCode() != http.StatusBadGateway {
+		t.Fatalf("terminal error status = %#v, want 502", terminalErr)
+	}
+}
+
+func TestStreamBridgeEmitUnblocksOnContextCancellationWhenFull(t *testing.T) {
+	bridge := newStreamBridge()
+	id, _, cleanup := bridge.open(context.Background())
+	defer cleanup()
+
+	for i := 0; i < streamBridgeBufferSize; i++ {
+		if err := bridge.emit(context.Background(), id, pluginapi.ExecutorStreamChunk{Payload: []byte("p")}); err != nil {
+			t.Fatalf("emit %d: %v", i, err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	emitDone := make(chan error, 1)
+	go func() {
+		emitDone <- bridge.emit(ctx, id, pluginapi.ExecutorStreamChunk{Payload: []byte("blocked")})
+	}()
+	cancel()
+
+	select {
+	case err := <-emitDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("emit error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("emit did not stop after context cancellation")
+	}
+}
+
+func TestStreamBridgeUsesPerStreamSignals(t *testing.T) {
+	bridge := newStreamBridge()
+	firstID, _, firstCleanup := bridge.open(context.Background())
+	defer firstCleanup()
+	secondID, _, secondCleanup := bridge.open(context.Background())
+	defer secondCleanup()
+
+	bridge.mu.Lock()
+	firstSignal := bridge.streams[firstID].emits
+	secondSignal := bridge.streams[secondID].emits
+	bridge.mu.Unlock()
+	if firstSignal == secondSignal {
+		t.Fatal("streams share a space signal")
 	}
 }
