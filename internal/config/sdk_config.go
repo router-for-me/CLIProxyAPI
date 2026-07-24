@@ -34,6 +34,17 @@ type SDKConfig struct {
 	// Empty or invalid values use the default 3h.
 	VideoResultAuthCacheTTL string `yaml:"video-result-auth-cache-ttl,omitempty" json:"video-result-auth-cache-ttl,omitempty"`
 
+	// NoProxyCIDRs lists CIDRs or literal IPs whose targets should bypass the
+	// configured ProxyURL. Management api-call requests to hosts falling
+	// inside these ranges are sent directly instead of being routed through
+	// the proxy. Applies to literal IPs and hostnames that resolve to IPs
+	// inside the list.
+	//
+	// Defaults (used when this field is empty): 127.0.0.0/8, 10.0.0.0/8,
+	// 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, ::1/128, fc00::/7,
+	// fe80::/10. Specifying any value here REPLACES the defaults.
+	NoProxyCIDRs []string `yaml:"no-proxy-cidrs,omitempty" json:"no-proxy-cidrs,omitempty"`
+
 	// ForceModelPrefix requires explicit model prefixes (e.g., "teamA/gemini-3-pro-preview")
 	// to target prefixed credentials. When false, unprefixed model requests may use prefixed
 	// credentials as well.
