@@ -95,11 +95,17 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	case "error":
 		output = append(output, codexStreamErrorToClaudeError(rootResult)...)
 	case "response.created":
-		template = []byte(`{"type":"message_start","message":{"id":"","type":"message","role":"assistant","model":"claude-opus-4-1-20250805","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0},"content":[],"stop_reason":null}}`)
+		template = []byte(`{"type":"message_start","message":{"id":"","type":"message","role":"assistant","content":[],"model":"claude-opus-4-1-20250805","stop_reason":null,"stop_sequence":null,"usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":0,"output_tokens":0,"output_tokens_details":{"thinking_tokens":0},"server_tool_use":{"web_fetch_requests":0,"web_search_requests":0}}}}`)
 		template, _ = sjson.SetBytes(template, "message.model", rootResult.Get("response.model").String())
 		template, _ = sjson.SetBytes(template, "message.id", rootResult.Get("response.id").String())
 
 		output = translatorcommon.AppendSSEEventBytes(output, "message_start", template, 2)
+		if claudeRequestStreamsThinking(originalRequestRawJSON) {
+			// Claude opens the thinking block before its otherwise silent reasoning phase.
+			// Opening it here lets estimated_tokens progress events remain valid until
+			// Codex emits its first reasoning summary delta.
+			output = append(output, startCodexThinkingBlock(params)...)
+		}
 	case "response.reasoning_summary_part.added":
 		if params.ThinkingBlockOpen && params.ThinkingStopPending {
 			output = append(output, finalizeCodexThinkingBlock(params)...)
@@ -107,7 +113,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		params.ThinkingSummarySeen = true
 		output = append(output, startCodexThinkingBlock(params)...)
 	case "response.reasoning_summary_text.delta":
-		template = []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`)
+		template = []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":null}}`)
 		template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
 		template, _ = sjson.SetBytes(template, "delta.thinking", rootResult.Get("delta").String())
 
@@ -116,6 +122,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		params.ThinkingStopPending = true
 	case "response.content_part.added":
 		if rootResult.Get("part.type").String() == "output_text" {
+			output = append(output, finalizeCodexThinkingBlock(params)...)
 			output = append(output, startCodexTextBlock(params)...)
 		}
 	case "response.output_text.delta":
@@ -134,19 +141,20 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	case "response.web_search_call.searching", "response.web_search_call.completed", "response.web_search_call.in_progress":
 		// Wait for populated web_search_call items on output_item.done.
 	case "response.completed", "response.incomplete":
-		template = []byte(`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
+		template = []byte(`{"type":"message_delta","context_management":null,"delta":{"container":null,"stop_details":null,"stop_reason":"tool_use","stop_sequence":null},"usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":0,"iterations":null,"output_tokens":0,"output_tokens_details":{"thinking_tokens":0},"server_tool_use":{"web_fetch_requests":0,"web_search_requests":0}}}`)
 		responseData := rootResult.Get("response")
 		output = hydrateOpenCodexFunctionCallFromTerminal(output, params, responseData)
 		output = append(output, finalizeCodexOpenContentBlocks(params)...)
 		output = appendPendingCodexFunctionCallsFromTerminal(output, params, originalRequestRawJSON, responseData)
 		template, _ = sjson.SetBytes(template, "delta.stop_reason", mapCodexStopReasonToClaude(codexStopReason(responseData), params.HasEmittedToolUse))
 		template = setClaudeStopSequence(template, "delta.stop_sequence", responseData)
-		inputTokens, outputTokens, cachedTokens := extractResponsesUsage(responseData.Get("usage"))
-		template, _ = sjson.SetBytes(template, "usage.input_tokens", inputTokens)
-		template, _ = sjson.SetBytes(template, "usage.output_tokens", outputTokens)
-		if cachedTokens > 0 {
-			template, _ = sjson.SetBytes(template, "usage.cache_read_input_tokens", cachedTokens)
-		}
+		usage := extractResponsesUsage(responseData)
+		template, _ = sjson.SetBytes(template, "usage.input_tokens", usage.InputTokens)
+		template, _ = sjson.SetBytes(template, "usage.cache_creation_input_tokens", usage.CacheCreationInputTokens)
+		template, _ = sjson.SetBytes(template, "usage.cache_read_input_tokens", usage.CacheReadInputTokens)
+		template, _ = sjson.SetBytes(template, "usage.output_tokens", usage.OutputTokens)
+		template, _ = sjson.SetBytes(template, "usage.output_tokens_details.thinking_tokens", usage.ThinkingTokens)
+		template, _ = sjson.SetBytes(template, "usage.server_tool_use.web_search_requests", usage.WebSearchRequests)
 
 		output = translatorcommon.AppendSSEEventBytes(output, "message_delta", template, 2)
 		output = translatorcommon.AppendSSEEventBytes(output, "message_stop", []byte(`{"type":"message_stop"}`), 2)
@@ -299,6 +307,15 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	return [][]byte{output}
 }
 
+func claudeRequestStreamsThinking(originalRequestRawJSON []byte) bool {
+	switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(originalRequestRawJSON, "thinking.type").String())) {
+	case "adaptive", "enabled":
+		return true
+	default:
+		return false
+	}
+}
+
 func codexStreamErrorToClaudeError(rootResult gjson.Result) []byte {
 	errorResult := rootResult.Get("error")
 	errType := strings.TrimSpace(errorResult.Get("type").String())
@@ -349,15 +366,16 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 		return []byte{}
 	}
 
-	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
+	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":0,"output_tokens":0,"output_tokens_details":{"thinking_tokens":0},"server_tool_use":{"web_fetch_requests":0,"web_search_requests":0}}}`)
 	out, _ = sjson.SetBytes(out, "id", responseData.Get("id").String())
 	out, _ = sjson.SetBytes(out, "model", responseData.Get("model").String())
-	inputTokens, outputTokens, cachedTokens := extractResponsesUsage(responseData.Get("usage"))
-	out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
-	out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
-	if cachedTokens > 0 {
-		out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", cachedTokens)
-	}
+	usage := extractResponsesUsage(responseData)
+	out, _ = sjson.SetBytes(out, "usage.input_tokens", usage.InputTokens)
+	out, _ = sjson.SetBytes(out, "usage.cache_creation_input_tokens", usage.CacheCreationInputTokens)
+	out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", usage.CacheReadInputTokens)
+	out, _ = sjson.SetBytes(out, "usage.output_tokens", usage.OutputTokens)
+	out, _ = sjson.SetBytes(out, "usage.output_tokens_details.thinking_tokens", usage.ThinkingTokens)
+	out, _ = sjson.SetBytes(out, "usage.server_tool_use.web_search_requests", usage.WebSearchRequests)
 
 	hasToolCall := false
 	webSearchSeen := make(map[string]struct{})
@@ -778,24 +796,31 @@ func resolveCodexClaudeToolUseName(originalRequestRawJSON []byte, name string) s
 	return name
 }
 
-func extractResponsesUsage(usage gjson.Result) (int64, int64, int64) {
+type claudeResponsesUsage struct {
+	InputTokens              int64
+	CacheCreationInputTokens int64
+	CacheReadInputTokens     int64
+	OutputTokens             int64
+	ThinkingTokens           int64
+	WebSearchRequests        int64
+}
+
+func extractResponsesUsage(responseData gjson.Result) claudeResponsesUsage {
+	usage := responseData.Get("usage")
 	if !usage.Exists() || usage.Type == gjson.Null {
-		return 0, 0, 0
+		return claudeResponsesUsage{}
 	}
 
-	inputTokens := usage.Get("input_tokens").Int()
-	outputTokens := usage.Get("output_tokens").Int()
-	cachedTokens := usage.Get("input_tokens_details.cached_tokens").Int()
-
-	if cachedTokens > 0 {
-		if inputTokens >= cachedTokens {
-			inputTokens -= cachedTokens
-		} else {
-			inputTokens = 0
-		}
+	detail := claudeResponsesUsage{
+		InputTokens:       usage.Get("input_tokens").Int(),
+		OutputTokens:      usage.Get("output_tokens").Int(),
+		ThinkingTokens:    usage.Get("output_tokens_details.reasoning_tokens").Int(),
+		WebSearchRequests: responseData.Get("tool_usage.web_search.num_requests").Int(),
 	}
-
-	return inputTokens, outputTokens, cachedTokens
+	// Codex cached_tokens describes ChatGPT's internal prompt cache, not an
+	// Anthropic cache-control entry. Keep the full context count in input_tokens so
+	// Claude clients can make correct context and auto-compaction decisions.
+	return detail
 }
 
 // buildReverseMapFromClaudeOriginalShortToOriginal builds a map[short]original from original Claude request tools.

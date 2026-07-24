@@ -28,6 +28,7 @@ func TestConvertCodexResponseToClaude_StreamThinkingIncludesSignature(t *testing
 	}
 
 	startFound := false
+	thinkingDeltaFound := false
 	signatureDeltaFound := false
 	stopFound := false
 
@@ -46,6 +47,12 @@ func TestConvertCodexResponseToClaude_StreamThinkingIncludesSignature(t *testing
 					}
 				}
 			case "content_block_delta":
+				if data.Get("delta.type").String() == "thinking_delta" {
+					thinkingDeltaFound = true
+					if got := data.Get("delta.estimated_tokens").Raw; got != "null" {
+						t.Fatalf("thinking delta estimated_tokens = %q, want null: %s", got, line)
+					}
+				}
 				if data.Get("delta.type").String() == "signature_delta" {
 					signatureDeltaFound = true
 					if got := data.Get("delta.signature").String(); got != "enc_sig_123" {
@@ -61,11 +68,91 @@ func TestConvertCodexResponseToClaude_StreamThinkingIncludesSignature(t *testing
 	if !startFound {
 		t.Fatal("expected thinking content_block_start event")
 	}
+	if !thinkingDeltaFound {
+		t.Fatal("expected thinking_delta event")
+	}
 	if !signatureDeltaFound {
 		t.Fatal("expected signature_delta event for thinking block")
 	}
 	if !stopFound {
 		t.Fatal("expected content_block_stop event for thinking block")
+	}
+}
+
+func TestConvertCodexResponseToClaude_AdaptiveThinkingStartsWithMessage(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	originalRequest := []byte(`{"messages":[],"thinking":{"type":"adaptive"}}`)
+
+	outputs := ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, []byte(`data: {"type":"response.created","response":{"id":"resp_123","model":"gpt-5.6-luna"}}`), &param)
+	stream := string(bytes.Join(outputs, nil))
+	messageStart := strings.Index(stream, "event: message_start")
+	thinkingStart := strings.Index(stream, `"content_block":{"type":"thinking"`)
+	if messageStart < 0 || thinkingStart < 0 {
+		t.Fatalf("adaptive response start must include message and thinking block starts: %s", stream)
+	}
+	if messageStart >= thinkingStart {
+		t.Fatalf("thinking block must start after message_start: %s", stream)
+	}
+	messageStartData := gjson.Parse(claudeSSEDataForTest(t, outputs[0]))
+	if !messageStartData.Get("message.content").IsArray() {
+		t.Fatalf("message_start content is not nested under message: %s", outputs[0])
+	}
+	if messageStartData.Get("content").Exists() || messageStartData.Get("stop_reason").Exists() {
+		t.Fatalf("message_start leaked message fields to the event root: %s", outputs[0])
+	}
+	params := param.(*ConvertCodexResponseToClaudeParams)
+	if !params.ThinkingBlockOpen || params.BlockIndex != 0 {
+		t.Fatalf("thinking state = open %v index %d, want open index 0", params.ThinkingBlockOpen, params.BlockIndex)
+	}
+}
+
+func claudeSSEDataForTest(t *testing.T, chunk []byte) string {
+	t.Helper()
+	for _, line := range strings.Split(string(chunk), "\n") {
+		if strings.HasPrefix(line, "data: ") {
+			return strings.TrimPrefix(line, "data: ")
+		}
+	}
+	t.Fatalf("SSE chunk has no data line: %s", chunk)
+	return ""
+}
+
+func TestConvertCodexResponseToClaude_NoThinkingDoesNotStartEmptyBlock(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	outputs := ConvertCodexResponseToClaude(ctx, "", []byte(`{"messages":[]}`), nil, []byte(`data: {"type":"response.created","response":{"id":"resp_123","model":"gpt-5.6-luna"}}`), &param)
+	stream := string(bytes.Join(outputs, nil))
+	if strings.Contains(stream, `"content_block":{"type":"thinking"`) {
+		t.Fatalf("request without thinking unexpectedly opened a thinking block: %s", stream)
+	}
+}
+
+func TestConvertCodexResponseToClaude_AdaptiveThinkingClosesBeforeTextPart(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	originalRequest := []byte(`{"messages":[],"thinking":{"type":"adaptive"}}`)
+	inputs := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_123","model":"gpt-5.6-sol"}}`),
+		[]byte(`data: {"type":"response.content_part.added","part":{"type":"output_text","text":""}}`),
+		[]byte(`data: {"type":"response.output_text.delta","delta":"done"}`),
+	}
+
+	var outputs [][]byte
+	for _, input := range inputs {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, input, &param)...)
+	}
+	stream := string(bytes.Join(outputs, nil))
+	thinkingStart := strings.Index(stream, `"index":0,"content_block":{"type":"thinking"`)
+	thinkingStop := strings.Index(stream, `{"type":"content_block_stop","index":0}`)
+	textStart := strings.Index(stream, `"index":1,"content_block":{"type":"text"`)
+	textDelta := strings.Index(stream, `"index":1,"delta":{"type":"text_delta","text":"done"`)
+	if thinkingStart < 0 || thinkingStop < 0 || textStart < 0 || textDelta < 0 {
+		t.Fatalf("missing adaptive thinking/text lifecycle event: %s", stream)
+	}
+	if !(thinkingStart < thinkingStop && thinkingStop < textStart && textStart < textDelta) {
+		t.Fatalf("invalid adaptive thinking/text lifecycle order: %s", stream)
 	}
 }
 
@@ -1210,6 +1297,72 @@ func TestConvertCodexResponseToClaudeNonStream_StopSequenceMapping(t *testing.T)
 	}
 	if got := parsed.Get("stop_sequence").String(); got != "\nEND" {
 		t.Fatalf("stop_sequence = %q, want newline END. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamUsageBreakdown(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	outputs := ConvertCodexResponseToClaude(ctx, "", []byte(`{"messages":[]}`), nil, []byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-terra"}}`), &param)
+	outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", []byte(`{"messages":[]}`), nil, []byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":80000,"input_tokens_details":{"cache_write_tokens":1000,"cached_tokens":60000},"output_tokens":500,"output_tokens_details":{"reasoning_tokens":250}},"tool_usage":{"web_search":{"num_requests":2}},"output":[]}}`), &param)...)
+
+	messageStart, okStart := firstClaudeStreamPayloadForEvent(string(bytes.Join(outputs, nil)), "message_start")
+	if !okStart {
+		t.Fatalf("missing message_start: %q", outputs)
+	}
+	for _, path := range []string{
+		"message.usage.cache_creation_input_tokens",
+		"message.usage.cache_read_input_tokens",
+		"message.usage.output_tokens_details.thinking_tokens",
+		"message.usage.server_tool_use.web_fetch_requests",
+		"message.usage.server_tool_use.web_search_requests",
+	} {
+		if !messageStart.Get(path).Exists() {
+			t.Fatalf("message_start missing %s: %s", path, messageStart.Raw)
+		}
+	}
+
+	messageDelta, okDelta := findClaudeStreamMessageDelta(outputs)
+	if !okDelta {
+		t.Fatalf("missing message_delta: %q", outputs)
+	}
+	for _, path := range []string{
+		"context_management",
+		"delta.container",
+		"delta.stop_details",
+		"delta.stop_sequence",
+		"usage.iterations",
+	} {
+		if got := messageDelta.Get(path).Raw; got != "null" {
+			t.Fatalf("%s = %q, want null: %s", path, got, messageDelta.Raw)
+		}
+	}
+	assertClaudeUsageBreakdown(t, messageDelta.Get("usage"))
+}
+
+func TestConvertCodexResponseToClaudeNonStreamUsageBreakdown(t *testing.T) {
+	response := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.6-terra","usage":{"input_tokens":80000,"input_tokens_details":{"cache_write_tokens":1000,"cached_tokens":60000},"output_tokens":500,"output_tokens_details":{"reasoning_tokens":250}},"tool_usage":{"web_search":{"num_requests":2}},"output":[]}}`)
+	out := ConvertCodexResponseToClaudeNonStream(context.Background(), "", []byte(`{"messages":[]}`), nil, response, nil)
+	assertClaudeUsageBreakdown(t, gjson.GetBytes(out, "usage"))
+}
+
+func assertClaudeUsageBreakdown(t *testing.T, usage gjson.Result) {
+	t.Helper()
+	checks := []struct {
+		path string
+		want int64
+	}{
+		{path: "input_tokens", want: 80000},
+		{path: "cache_creation_input_tokens", want: 0},
+		{path: "cache_read_input_tokens", want: 0},
+		{path: "output_tokens", want: 500},
+		{path: "output_tokens_details.thinking_tokens", want: 250},
+		{path: "server_tool_use.web_search_requests", want: 2},
+	}
+	for _, check := range checks {
+		if got := usage.Get(check.path).Int(); got != check.want {
+			t.Fatalf("%s = %d, want %d: %s", check.path, got, check.want, usage.Raw)
+		}
 	}
 }
 
