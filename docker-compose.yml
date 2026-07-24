@@ -26,6 +26,8 @@ services:
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/CLIProxyAPI/auths
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+      # Persist store-installed plugins across container recreate (default plugins.dir).
+      - ${CLI_PROXY_PLUGINS_PATH:-./plugins}:/CLIProxyAPI/plugins
       - ./log-uploader.yaml:/CLIProxyAPI/log-uploader.yaml
       # Read-only QA reports for Management "LOG QA" panel
       - ./log-qa.yaml:/CLIProxyAPI/log-qa.yaml:ro

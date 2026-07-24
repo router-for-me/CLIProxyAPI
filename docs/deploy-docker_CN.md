@@ -66,8 +66,14 @@ chmod +x docker-build.sh
    - `log-uploader.yaml`  
    - `log-qa.yaml`  
    - `.env`  
-2. 创建 `logs/`、`auths/`  
+2. 创建 `logs/`、`auths/`、`plugins/`（插件商店安装的二进制会落在这里，需持久化）  
 3. 启动三个服务  
+
+插件相关注意：
+
+- `config.yaml` 中必须 `plugins.enabled: true`，且对应插件 `plugins.configs.<id>.enabled: true`  
+- 商店安装**不会**自动打开单插件；若配置里是 `enabled: false`，重启后不会加载  
+- compose 已挂载 `./plugins` → `/CLIProxyAPI/plugins`，避免容器重建后插件文件丢失
 
 ### 首次部署建议选 2
 
