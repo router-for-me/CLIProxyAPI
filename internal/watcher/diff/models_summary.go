@@ -41,7 +41,7 @@ func SummarizeGeminiModels(models []config.GeminiModel) GeminiModelsSummary {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName))
+			out(configuredModelHashKey(name, alias, model.DisplayName, configuredModelHashMetadata{Thinking: model.Thinking}))
 		}
 	})
 	return GeminiModelsSummary{
@@ -62,7 +62,7 @@ func SummarizeClaudeModels(models []config.ClaudeModel) ClaudeModelsSummary {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName))
+			out(configuredModelHashKey(name, alias, model.DisplayName, configuredModelHashMetadata{Thinking: model.Thinking}))
 		}
 	})
 	return ClaudeModelsSummary{
@@ -83,11 +83,10 @@ func SummarizeCodexModels(models []config.CodexModel) CodexModelsSummary {
 			if name == "" && alias == "" {
 				continue
 			}
-			forceMapping := "false"
-			if model.ForceMapping {
-				forceMapping = "true"
-			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|force-mapping=" + forceMapping)
+			out(configuredModelHashKey(name, alias, model.DisplayName, configuredModelHashMetadata{
+				Thinking:     model.Thinking,
+				ForceMapping: model.ForceMapping,
+			}))
 		}
 	})
 	return CodexModelsSummary{
@@ -111,7 +110,7 @@ func SummarizeVertexModels(models []config.VertexCompatModel) VertexModelsSummar
 		if alias != "" {
 			name = alias
 		}
-		names = append(names, name+"|"+strings.TrimSpace(model.DisplayName))
+		names = append(names, configuredModelHashKey(name, "", model.DisplayName, configuredModelHashMetadata{Thinking: model.Thinking}))
 	}
 	if len(names) == 0 {
 		return VertexModelsSummary{}

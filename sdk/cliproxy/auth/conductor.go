@@ -250,9 +250,9 @@ type Manager struct {
 	// oauthModelAlias stores global OAuth model alias mappings (alias -> upstream name) keyed by channel.
 	oauthModelAlias atomic.Value
 
-	// apiKeyModelAlias caches resolved model alias mappings for API-key auths.
-	// Keyed by auth.ID, value is alias(lower) -> upstream model (including suffix).
-	apiKeyModelAlias atomic.Value
+	// apiKeyModelRouting atomically publishes API-key aliases and exact configured
+	// capabilities from the same config snapshot.
+	apiKeyModelRouting atomic.Value
 
 	// modelPoolOffsets tracks per-auth alias pool rotation state.
 	modelPoolOffsets map[string]int
@@ -296,7 +296,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
-	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
+	manager.apiKeyModelRouting.Store(&apiKeyModelRoutingSnapshot{config: &internalconfig.Config{}})
 	defaultInFlightConfig, errInFlightConfig := HomeInFlightPublisherConfigFromConfig(internalconfig.DefaultCredentialInFlightConfig())
 	if errInFlightConfig == nil {
 		manager.ApplyHomeInFlightPublisherConfig(defaultInFlightConfig)
@@ -589,7 +589,7 @@ func (m *Manager) SetRoundTripperProvider(p RoundTripperProvider) {
 }
 
 // SetConfig updates the runtime config snapshot used by request-time helpers.
-// Callers should provide the latest config on reload so per-credential alias mapping stays in sync.
+// Callers should provide the latest config on reload so per-credential model routing stays in sync.
 func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	if m == nil {
 		return
@@ -616,6 +616,7 @@ func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) bool {
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	}
+	cfg = cfg.CloneForRuntime()
 	m.mu.RLock()
 	oldCooldownStore := m.cooldownStore
 	m.mu.RUnlock()
@@ -1206,7 +1207,11 @@ func (m *Manager) localFallbackAuth(authID string) *Auth {
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
-	if m == nil {
+	return lookupAPIKeyUpstreamModel(m.loadAPIKeyModelRouting(), authID, requestedModel)
+}
+
+func lookupAPIKeyUpstreamModel(snapshot *apiKeyModelRoutingSnapshot, authID, requestedModel string) string {
+	if snapshot == nil {
 		return ""
 	}
 	authID = strings.TrimSpace(authID)
@@ -1217,11 +1222,7 @@ func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) strin
 	if requestedModel == "" {
 		return ""
 	}
-	table, _ := m.apiKeyModelAlias.Load().(apiKeyModelAliasTable)
-	if table == nil {
-		return ""
-	}
-	byAlias := table[authID]
+	byAlias := snapshot.aliases[authID]
 	if len(byAlias) == 0 {
 		return ""
 	}
@@ -1240,7 +1241,7 @@ func isAPIKeyAuth(auth *Auth) bool {
 	if auth == nil {
 		return false
 	}
-	return auth.AuthKind() == AuthKindAPIKey
+	return auth.AuthKind() == AuthKindAPIKey || IsConfigAPIKeyAuth(auth)
 }
 
 func isOpenAICompatAPIKeyAuth(auth *Auth) bool {
@@ -1320,14 +1321,17 @@ func rotateStrings(values []string, offset int) []string {
 }
 
 func (m *Manager) resolveOpenAICompatUpstreamModelPool(auth *Auth, requestedModel string) []string {
-	if m == nil || !isOpenAICompatAPIKeyAuth(auth) {
+	return resolveOpenAICompatUpstreamModelPool(m.loadAPIKeyModelRouting().config, auth, requestedModel)
+}
+
+func resolveOpenAICompatUpstreamModelPool(cfg *internalconfig.Config, auth *Auth, requestedModel string) []string {
+	if !isOpenAICompatAPIKeyAuth(auth) {
 		return nil
 	}
 	requestedModel = strings.TrimSpace(requestedModel)
 	if requestedModel == "" {
 		return nil
 	}
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	}
@@ -1349,6 +1353,7 @@ func preserveRequestedModelSuffix(requestedModel, resolved string) string {
 }
 
 func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []string {
+	routing := m.loadAPIKeyModelRouting()
 	if auth != nil && auth.Attributes != nil {
 		if homeModel := strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]); homeModel != "" {
 			return []string{homeModel}
@@ -1356,14 +1361,14 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 	}
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
-	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
+	if pool := resolveOpenAICompatUpstreamModelPool(routing.config, auth, requestedModel); len(pool) > 0 {
 		if len(pool) == 1 {
 			return pool
 		}
 		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool))
 		return rotateStrings(pool, offset)
 	}
-	resolved := m.applyAPIKeyModelAlias(auth, requestedModel)
+	resolved := m.applyAPIKeyModelAliasWithRouting(routing, auth, requestedModel)
 	if strings.TrimSpace(resolved) == "" {
 		resolved = requestedModel
 	}
@@ -1438,14 +1443,22 @@ func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string) ([]stri
 	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled
 }
 
-func (m *Manager) preparedExecutionModelsWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult) {
-	candidates, pooled, aliasResult := m.executionModelCandidatesWithAlias(auth, routeModel)
-	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled, aliasResult
+func (m *Manager) preparedExecutionModelsWithAlias(auth *Auth, routeModel string, imageExecution bool) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
+	candidates, _, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
+	candidates = filterAPIKeyModelCandidates(routing, auth, routeModel, candidates, imageExecution)
+	pooled := len(candidates) > 1
+	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled, aliasResult, routing
 }
 
-func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult) {
+func imageExecutionFromOptions(opts cliproxyexecutor.Options) bool {
+	value, _ := opts.Metadata[cliproxyexecutor.ImageExecutionMetadataKey].(bool)
+	return value
+}
+
+func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
+	routing := m.loadAPIKeyModelRouting()
 	requestedModel := rewriteModelForAuth(routeModel, auth)
-	aliasResult := m.resolveExecutionAliasResultForRequested(auth, requestedModel)
+	aliasResult := m.resolveExecutionAliasResultForRequestedWithRouting(routing, auth, requestedModel)
 	if aliasResult.ForceMapping && auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes[homeForceMappingAttributeKey]), "true") {
 		aliasResult.OriginalAlias = strings.TrimSpace(routeModel)
 	}
@@ -1458,7 +1471,7 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 		}
 	}
 	if len(candidates) == 0 {
-		if pool := m.resolveOpenAICompatUpstreamModelPool(auth, upstreamModel); len(pool) > 0 {
+		if pool := resolveOpenAICompatUpstreamModelPool(routing.config, auth, upstreamModel); len(pool) > 0 {
 			if len(pool) == 1 {
 				candidates = pool
 			} else {
@@ -1466,7 +1479,7 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 				candidates = rotateStrings(pool, offset)
 			}
 		} else {
-			resolved := m.applyAPIKeyModelAlias(auth, upstreamModel)
+			resolved := m.applyAPIKeyModelAliasWithRouting(routing, auth, upstreamModel)
 			if strings.TrimSpace(resolved) == "" {
 				resolved = upstreamModel
 			}
@@ -1474,7 +1487,7 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 		}
 	}
 	pooled := len(candidates) > 1
-	return candidates, pooled, aliasResult
+	return candidates, pooled, aliasResult, routing
 }
 
 func (m *Manager) resolveExecutionAliasResult(auth *Auth, routeModel string) OAuthModelAliasResult {
@@ -1483,11 +1496,15 @@ func (m *Manager) resolveExecutionAliasResult(auth *Auth, routeModel string) OAu
 }
 
 func (m *Manager) resolveExecutionAliasResultForRequested(auth *Auth, requestedModel string) OAuthModelAliasResult {
+	return m.resolveExecutionAliasResultForRequestedWithRouting(m.loadAPIKeyModelRouting(), auth, requestedModel)
+}
+
+func (m *Manager) resolveExecutionAliasResultForRequestedWithRouting(routing *apiKeyModelRoutingSnapshot, auth *Auth, requestedModel string) OAuthModelAliasResult {
 	if result := homeForceMappingAliasResult(auth, requestedModel); result.ForceMapping {
 		return result
 	}
-	if auth != nil && auth.AuthKind() == AuthKindAPIKey {
-		return m.resolveAPIKeyModelAliasWithResult(auth, requestedModel)
+	if isAPIKeyAuth(auth) {
+		return resolveAPIKeyModelAliasWithResult(routing.config, auth, requestedModel)
 	}
 	return m.applyOAuthModelAliasWithResult(auth, requestedModel)
 }
@@ -1514,7 +1531,7 @@ func homeForceMappingAliasResult(auth *Auth, requestedModel string) OAuthModelAl
 }
 
 func executionAliasPoolModel(auth *Auth, requestedModel string, aliasResult OAuthModelAliasResult) string {
-	if auth != nil && auth.AuthKind() == AuthKindAPIKey {
+	if isAPIKeyAuth(auth) {
 		if strings.TrimSpace(requestedModel) != "" {
 			return requestedModel
 		}
@@ -1526,14 +1543,17 @@ func executionAliasPoolModel(auth *Auth, requestedModel string, aliasResult OAut
 }
 
 func (m *Manager) resolveAPIKeyModelAliasWithResult(auth *Auth, requestedModel string) OAuthModelAliasResult {
-	if m == nil || auth == nil {
+	return resolveAPIKeyModelAliasWithResult(m.loadAPIKeyModelRouting().config, auth, requestedModel)
+}
+
+func resolveAPIKeyModelAliasWithResult(cfg *internalconfig.Config, auth *Auth, requestedModel string) OAuthModelAliasResult {
+	if auth == nil {
 		return OAuthModelAliasResult{}
 	}
 	requestedModel = strings.TrimSpace(requestedModel)
 	if requestedModel == "" {
 		return OAuthModelAliasResult{}
 	}
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	}
@@ -1825,26 +1845,44 @@ func builtinSchedulerStrategy(delegate string) (schedulerStrategy, bool) {
 	}
 }
 
-func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedulerStrategy, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, bool, error) {
+func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedulerStrategy, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, candidates []*Auth) (*Auth, bool, error) {
 	if m == nil || m.scheduler == nil {
 		return nil, false, nil
 	}
+	allowed := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if candidate != nil && strings.TrimSpace(candidate.ID) != "" {
+			allowed[candidate.ID] = struct{}{}
+		}
+	}
+	restrictedTried := make(map[string]struct{}, len(tried))
+	for authID := range tried {
+		restrictedTried[authID] = struct{}{}
+	}
+	m.mu.RLock()
+	for authID := range m.auths {
+		if _, ok := allowed[authID]; !ok {
+			restrictedTried[authID] = struct{}{}
+		}
+	}
+	m.mu.RUnlock()
+
 	providerKey := strings.ToLower(strings.TrimSpace(provider))
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 	for {
 		var selected *Auth
 		var errPick error
 		if providerKey == "mixed" {
-			selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
+			selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, restrictedTried, strategy)
 			if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 				m.syncScheduler()
-				selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
+				selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, restrictedTried, strategy)
 			}
 		} else {
-			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
+			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, restrictedTried, strategy)
 			if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 				m.syncScheduler()
-				selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
+				selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, restrictedTried, strategy)
 			}
 		}
 		if errPick != nil {
@@ -1853,11 +1891,12 @@ func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedule
 		if selected == nil {
 			return nil, true, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 		}
+		if _, ok := allowed[selected.ID]; !ok {
+			restrictedTried[selected.ID] = struct{}{}
+			continue
+		}
 		if disallowFreeAuth && isFreeCodexAuth(selected) {
-			if tried == nil {
-				tried = make(map[string]struct{})
-			}
-			tried[selected.ID] = struct{}{}
+			restrictedTried[selected.ID] = struct{}{}
 			continue
 		}
 		return selected, true, nil
@@ -1896,7 +1935,7 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 	if !okStrategy {
 		return nil, false, nil
 	}
-	return m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried)
+	return m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried, candidates)
 }
 
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
@@ -1912,6 +1951,24 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 	}
 	selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
 	return selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey)
+}
+
+func (m *Manager) authSupportsExecutionModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string, opts cliproxyexecutor.Options) bool {
+	if !m.authSupportsRouteModel(registryRef, auth, routeModel) {
+		return false
+	}
+	if !imageExecutionFromOptions(opts) || registryRef == nil || auth == nil {
+		return true
+	}
+	routeKey := canonicalModelKey(routeModel)
+	if routeKey != "" && registryRef.ClientModelSupportsImageAPI(auth.ID, routeKey) {
+		return true
+	}
+	selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
+	if selectionKey != "" && selectionKey != routeKey && registryRef.ClientModelSupportsImageAPI(auth.ID, selectionKey) {
+		return true
+	}
+	return false
 }
 
 func discardStreamChunks(ch <-chan cliproxyexecutor.StreamChunk) {
@@ -2086,7 +2143,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
 }
 
-func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel, executionModel string, execModels []string, pooled bool, aliasResult OAuthModelAliasResult, allowRetry bool, ephemeralResult bool) (*cliproxyexecutor.StreamResult, error) {
+func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel, executionModel string, execModels []string, pooled bool, aliasResult OAuthModelAliasResult, routing *apiKeyModelRoutingSnapshot, allowRetry bool, ephemeralResult bool) (*cliproxyexecutor.StreamResult, error) {
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
@@ -2104,6 +2161,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		execReq, execOpts = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 		if errCtx := ctx.Err(); errCtx != nil {
 			return nil, errCtx
+		}
+		if executionModel == "" {
+			execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, execModel, imageExecutionFromOptions(execOpts))
 		}
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
 		if errStream != nil {
@@ -2206,7 +2266,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, aliasResult, ephemeralResult), nil
+		responseAliasResult := aliasResultForAPIKeyModelCandidate(routing, auth, routeModel, execModel, imageExecutionFromOptions(execOpts), aliasResult)
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, responseAliasResult, ephemeralResult), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
@@ -2227,7 +2288,7 @@ func (m *Manager) rebuildAPIKeyModelAliasFromRuntimeConfig() {
 	m.rebuildAPIKeyModelAliasLocked(cfg)
 }
 
-// RefreshAPIKeyModelAlias rebuilds the API-key model alias table from the current runtime config.
+// RefreshAPIKeyModelAlias rebuilds API-key model aliases and configured capabilities.
 func (m *Manager) RefreshAPIKeyModelAlias() {
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 }
@@ -2241,6 +2302,7 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 	}
 
 	out := make(apiKeyModelAliasTable)
+	capabilities := make(apiKeyModelCapabilityTable)
 	for _, auth := range m.auths {
 		if auth == nil {
 			continue
@@ -2248,36 +2310,43 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 		if strings.TrimSpace(auth.ID) == "" {
 			continue
 		}
-		if auth.AuthKind() != AuthKindAPIKey {
+		if !isAPIKeyAuth(auth) {
 			continue
 		}
 
 		byAlias := make(map[string]string)
+		byCapability := make(map[string][]apiKeyModelCapabilityRoute)
 		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 		switch provider {
 		case "gemini":
 			if entry := resolveGeminiAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+				compileAPIKeyModelCapabilities(byCapability, entry.Models, "gemini")
 			}
 		case "gemini-interactions":
 			if entry := resolveInteractionsAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+				compileAPIKeyModelCapabilities(byCapability, entry.Models, "interactions")
 			}
 		case "claude":
 			if entry := resolveClaudeAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+				compileAPIKeyModelCapabilities(byCapability, entry.Models, "claude")
 			}
 		case "codex":
 			if entry := resolveCodexAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+				compileAPIKeyModelCapabilities(byCapability, entry.Models, "codex")
 			}
 		case "xai":
 			if entry := resolveXAIAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+				compileAPIKeyModelCapabilities(byCapability, entry.Models, "xai")
 			}
 		case "vertex":
 			if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+				compileAPIKeyModelCapabilities(byCapability, entry.Models, "gemini")
 			}
 		default:
 			// OpenAI-compat uses config selection from auth.Attributes.
@@ -2290,16 +2359,24 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			if compatName != "" || strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
 				if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider); entry != nil {
 					compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+					compileOpenAICompatModelCapabilities(byCapability, entry.Models)
 				}
 			}
 		}
 
 		if len(byAlias) > 0 {
-			out[auth.ID] = byAlias
+			out[strings.TrimSpace(auth.ID)] = byAlias
+		}
+		if len(byCapability) > 0 {
+			capabilities[strings.TrimSpace(auth.ID)] = byCapability
 		}
 	}
 
-	m.apiKeyModelAlias.Store(out)
+	m.apiKeyModelRouting.Store(&apiKeyModelRoutingSnapshot{
+		config:       cfg,
+		aliases:      out,
+		capabilities: capabilities,
+	})
 }
 
 func compileAPIKeyModelAliasForModels[T interface {
@@ -2728,6 +2805,18 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			}
 			return cliproxyexecutor.Response{}, repeatedHomeAuthError()
 		}
+		upstreamModel := ""
+		if auth.Attributes != nil {
+			upstreamModel = auth.Attributes[homeUpstreamModelAttributeKey]
+		}
+		if homeAuthKnownIneligibleForImage(auth, routeModel, upstreamModel, opts) {
+			tried[auth.ID] = struct{}{}
+			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "image_ineligible"); errEnd != nil {
+				return cliproxyexecutor.Response{}, errEnd
+			}
+			lastErr = &Error{Code: "auth_not_found", Message: "selected auth does not support image execution"}
+			continue
+		}
 		if errRuntimeAuth := m.bindHomeSelectionRuntimeAuth(ctx, opts, selection); errRuntimeAuth != nil {
 			selection.End("runtime_auth_bind_failed")
 			return cliproxyexecutor.Response{}, errRuntimeAuth
@@ -2743,7 +2832,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel, imageExecutionFromOptions(opts))
 		if aliasResult.ForceMapping && responseAlias != "" {
 			aliasResult.OriginalAlias = responseAlias
 		}
@@ -2784,6 +2873,9 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 				selection.End("attempt_canceled")
 				return cliproxyexecutor.Response{}, errCtx
 			}
+			if !restoreExecutionModel {
+				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, preparedAuth, routeModel, upstreamModel, imageExecutionFromOptions(execOpts))
+			}
 			var response cliproxyexecutor.Response
 			var errExecute error
 			if countTokens {
@@ -2795,7 +2887,8 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			if errExecute == nil {
 				m.reportHomeResult(execCtx, result, preparedAuth)
 				releaseAttempt()
-				rewriteForceMappedResponse(&response, aliasResult)
+				responseAliasResult := aliasResultForAPIKeyModelCandidate(routing, preparedAuth, routeModel, upstreamModel, imageExecutionFromOptions(execOpts), aliasResult)
+				rewriteForceMappedResponse(&response, responseAliasResult)
 				if !m.retainHomeWebsocketSelection(ctx, opts, routeModel, selection) {
 					selection.End("completed")
 				}
@@ -2955,8 +3048,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 
-		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel, imageExecutionFromOptions(opts))
 		if len(models) == 0 {
+			if homeMode {
+				homeAuthCount++
+			}
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
@@ -2979,6 +3075,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			execOpts := opts
 			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			if !restoreExecutionModel {
+				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel, imageExecutionFromOptions(execOpts))
+			}
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -3009,7 +3108,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				continue
 			}
 			m.MarkResult(execCtx, result)
-			rewriteForceMappedResponse(&resp, aliasResult)
+			responseAliasResult := aliasResultForAPIKeyModelCandidate(routing, auth, routeModel, upstreamModel, imageExecutionFromOptions(execOpts), aliasResult)
+			rewriteForceMappedResponse(&resp, responseAliasResult)
 			return resp, nil
 		}
 		if authErr != nil {
@@ -3068,8 +3168,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 
-		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel, imageExecutionFromOptions(opts))
 		if len(models) == 0 {
+			if homeMode {
+				homeAuthCount++
+			}
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
@@ -3092,6 +3195,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			execOpts := opts
 			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			if !restoreExecutionModel {
+				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel, imageExecutionFromOptions(execOpts))
+			}
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -3130,7 +3236,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				continue
 			}
 			m.MarkResult(execCtx, result)
-			rewriteForceMappedResponse(&resp, aliasResult)
+			responseAliasResult := aliasResultForAPIKeyModelCandidate(routing, auth, routeModel, upstreamModel, imageExecutionFromOptions(execOpts), aliasResult)
+			rewriteForceMappedResponse(&resp, responseAliasResult)
 			return resp, nil
 		}
 		if authErr != nil {
@@ -3198,6 +3305,28 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
+		if selection != nil {
+			upstreamModel := ""
+			if auth.Attributes != nil {
+				upstreamModel = auth.Attributes[homeUpstreamModelAttributeKey]
+			}
+			if homeAuthKnownIneligibleForImage(auth, routeModel, upstreamModel, opts) {
+				if _, seen := tried[auth.ID]; seen {
+					selection.End("repeated_auth")
+					if lastErr != nil {
+						return nil, lastErr
+					}
+					return nil, repeatedHomeAuthError()
+				}
+				tried[auth.ID] = struct{}{}
+				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "image_ineligible"); errEnd != nil {
+					return nil, errEnd
+				}
+				lastErr = &Error{Code: "auth_not_found", Message: "selected auth does not support image execution"}
+				homeAuthCount++
+				continue
+			}
+		}
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, routeModel)
@@ -3224,7 +3353,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel, imageExecutionFromOptions(opts))
 		if selection != nil && aliasResult.ForceMapping && responseAlias != "" {
 			aliasResult.OriginalAlias = responseAlias
 		}
@@ -3234,6 +3363,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "no_execution_models"); errEnd != nil {
 					return nil, errEnd
 				}
+				lastErr = &Error{Code: "auth_not_found", Message: "no execution models available"}
+				homeAuthCount++
 			}
 			continue
 		}
@@ -3273,7 +3404,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			models = models[:1]
 			pooled = false
 		}
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, !homeMode, selection != nil)
+		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode, selection != nil)
 		if errStream != nil {
 			if selection != nil {
 				releaseAttempt()
@@ -3752,11 +3883,15 @@ func rewriteModelForAuth(model string, auth *Auth) string {
 }
 
 func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) string {
-	if m == nil || auth == nil {
+	return m.applyAPIKeyModelAliasWithRouting(m.loadAPIKeyModelRouting(), auth, requestedModel)
+}
+
+func (m *Manager) applyAPIKeyModelAliasWithRouting(routing *apiKeyModelRoutingSnapshot, auth *Auth, requestedModel string) string {
+	if auth == nil {
 		return requestedModel
 	}
 
-	if auth.AuthKind() != AuthKindAPIKey {
+	if !isAPIKeyAuth(auth) {
 		return requestedModel
 	}
 
@@ -3766,13 +3901,13 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 	}
 
 	// Fast path: lookup per-auth mapping table (keyed by auth.ID).
-	if resolved := m.lookupAPIKeyUpstreamModel(auth.ID, requestedModel); resolved != "" {
+	if resolved := lookupAPIKeyUpstreamModel(routing, auth.ID, requestedModel); resolved != "" {
 		return resolved
 	}
 
 	// Slow path: scan config for the matching credential entry and resolve alias.
 	// This acts as a safety net if mappings are stale or auth.ID is missing.
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	cfg := routing.config
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	}
@@ -3956,6 +4091,36 @@ func resolveUpstreamModelForOpenAICompatAPIKey(cfg *internalconfig.Config, auth 
 }
 
 type apiKeyModelAliasTable map[string]map[string]string
+
+const resolvedAPIKeyModelInfoMetadataKey = "cliproxy.resolved_api_key_model_info"
+
+// ResolvedAPIKeyModelInfo returns the configured model definition selected for
+// this API-key execution attempt.
+func ResolvedAPIKeyModelInfo(req cliproxyexecutor.Request) (*registry.ModelInfo, bool) {
+	modelInfo, ok := req.Metadata[resolvedAPIKeyModelInfoMetadataKey].(*registry.ModelInfo)
+	if !ok || modelInfo == nil {
+		return nil, false
+	}
+	return modelInfo, true
+}
+
+func (m *Manager) attachResolvedAPIKeyModelInfo(req cliproxyexecutor.Request, auth *Auth, routeModel, upstreamModel string) cliproxyexecutor.Request {
+	return attachResolvedAPIKeyModelInfo(m.loadAPIKeyModelRouting(), req, auth, routeModel, upstreamModel, false)
+}
+
+func attachResolvedAPIKeyModelInfo(routing *apiKeyModelRoutingSnapshot, req cliproxyexecutor.Request, auth *Auth, routeModel, upstreamModel string, imageExecution bool) cliproxyexecutor.Request {
+	route, _, compatible := lookupAPIKeyModelCapability(routing, auth, routeModel, upstreamModel, apiKeyModelExecutionKindForImage(imageExecution))
+	if !compatible || route.modelInfo == nil {
+		return req
+	}
+	metadata := make(map[string]any, len(req.Metadata)+1)
+	for key, value := range req.Metadata {
+		metadata[key] = value
+	}
+	metadata[resolvedAPIKeyModelInfoMetadataKey] = route.modelInfo
+	req.Metadata = metadata
+	return req
+}
 
 func resolveOpenAICompatConfig(cfg *internalconfig.Config, providerKey, compatName, authProvider string) *internalconfig.OpenAICompatibility {
 	if cfg == nil {
@@ -5443,7 +5608,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if _, used := tried[candidate.ID]; used {
 			continue
 		}
-		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+		if modelKey != "" && !m.authSupportsExecutionModel(registryRef, candidate, model, opts) {
 			continue
 		}
 		candidates = append(candidates, candidate)
@@ -5556,6 +5721,29 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
 		if errSelection != nil {
 			return nil, errSelection
 		}
+		selectionAuth := selection.CloneAuthForRoute(model)
+		upstreamModel := ""
+		if selectionAuth != nil && selectionAuth.Attributes != nil {
+			upstreamModel = selectionAuth.Attributes[homeUpstreamModelAttributeKey]
+		}
+		if homeAuthKnownIneligibleForImage(selectionAuth, model, upstreamModel, opts) {
+			authID := ""
+			if selectionAuth != nil {
+				authID = strings.TrimSpace(selectionAuth.ID)
+			}
+			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "image_ineligible"); errEnd != nil {
+				return nil, errEnd
+			}
+			if authID == "" {
+				return nil, &Error{Code: "auth_not_found", Message: "selected auth has no ID"}
+			}
+			if _, alreadyTried := tried[authID]; alreadyTried {
+				return nil, repeatedHomeAuthError()
+			}
+			tried[authID] = struct{}{}
+			homeAuthCount++
+			continue
+		}
 		providerMatches := strings.TrimSpace(provider) == "" || strings.EqualFold(strings.TrimSpace(selection.Provider), strings.TrimSpace(provider))
 		kindMatches := selection.Auth != nil && selection.Auth.AuthKind() == requiredKind
 		if providerMatches && kindMatches {
@@ -5590,7 +5778,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		return auth, exec, err
 	}
 
-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+	if imageExecutionFromOptions(opts) || m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
 	if strings.TrimSpace(model) != "" {
@@ -5702,7 +5890,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if _, ok := m.executors[providerKey]; !ok {
 			continue
 		}
-		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+		if modelKey != "" && !m.authSupportsExecutionModel(registryRef, candidate, model, opts) {
 			continue
 		}
 		candidates = append(candidates, candidate)
@@ -5754,7 +5942,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
 
-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+	if imageExecutionFromOptions(opts) || m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
 
@@ -5890,6 +6078,30 @@ func repeatedHomeAuthError() *Error {
 		Message:    "home returned a previously tried auth",
 		HTTPStatus: http.StatusServiceUnavailable,
 	}
+}
+
+func homeAuthKnownIneligibleForImage(auth *Auth, routeModel, upstreamModel string, opts cliproxyexecutor.Options) bool {
+	if !imageExecutionFromOptions(opts) || auth == nil {
+		return false
+	}
+	registryRef := registry.GetGlobalRegistry()
+	seen := make(map[string]struct{}, 2)
+	for _, model := range []string{routeModel, upstreamModel} {
+		model = canonicalModelKey(model)
+		key := strings.ToLower(strings.TrimSpace(model))
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		if !registryRef.ClientSupportsModel(auth.ID, model) {
+			continue
+		}
+		return !registryRef.ClientModelSupportsImageAPI(auth.ID, model)
+	}
+	return false
 }
 
 type homeAuthDispatchResponse struct {
@@ -6769,7 +6981,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		}
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
-		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(c.auth, routeModel)
+		models, pooled, aliasResult, _ := m.executionModelCandidatesWithAlias(c.auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
@@ -6823,11 +7035,11 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		}
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
-		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(c.auth, routeModel)
+		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(c.auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
-		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult, true, false)
+		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult, routing, true, false)
 		if errStream != nil {
 			continue
 		}

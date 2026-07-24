@@ -9,6 +9,7 @@ import (
 func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 	modelID := "mimo-v2.5-pro-codex-test"
 	textOnlyModelID := "mimo-text-only-codex-test"
+	sharedImageModelID := "compat-shared-image-codex-test"
 	modelRegistry := registry.GetGlobalRegistry()
 	modelRegistry.RegisterClient("codex-input-modalities-test", "openai-compatibility", []*registry.ModelInfo{
 		{
@@ -41,6 +42,13 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 			OwnedBy: "mimo",
 			Type:    registry.OpenAIImageModelType,
 		},
+		{
+			ID:               sharedImageModelID,
+			Object:           "model",
+			OwnedBy:          "mimo",
+			Type:             "openai-compatibility",
+			SupportsImageAPI: true,
+		},
 	})
 	t.Cleanup(func() {
 		modelRegistry.UnregisterClient("codex-input-modalities-test")
@@ -57,6 +65,7 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 	var textOnlyEntry map[string]any
 	var mixedEntry map[string]any
 	var imageEntry map[string]any
+	var sharedImageEntry map[string]any
 	for _, entry := range models {
 		slug := stringModelValue(entry, "slug")
 		switch slug {
@@ -68,6 +77,8 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 			mixedEntry = entry
 		case "compat-image-only-codex-test":
 			imageEntry = entry
+		case sharedImageModelID:
+			sharedImageEntry = entry
 		}
 	}
 	if visionEntry == nil {
@@ -126,6 +137,12 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 	}
 	if _, exists := imageEntry["input_modalities"]; exists {
 		t.Fatalf("image endpoint model should not expose input_modalities from registry: %#v", imageEntry["input_modalities"])
+	}
+	if sharedImageEntry == nil {
+		t.Fatalf("expected codex entry for %q", sharedImageModelID)
+	}
+	if got, _ := sharedImageEntry["visibility"].(string); got == "hide" {
+		t.Fatalf("shared image-capable model visibility = %q, want visible", got)
 	}
 }
 

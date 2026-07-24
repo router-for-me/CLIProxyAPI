@@ -69,16 +69,29 @@ func TestImagesModelValidationAllowsGPTImageAndXAIModels(t *testing.T) {
 func TestImagesModelValidationAllowsOpenAICompatImageModels(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-openai-compat-image-model-validation"
+	shadowClientID := "test-openai-compat-image-model-validation-shadow"
 	modelRegistry.RegisterClient(clientID, "openai-compatibility", []*registry.ModelInfo{
 		{ID: "compat-image-model", Object: "model", OwnedBy: "compat", Type: registry.OpenAIImageModelType},
+		{ID: "tenant/compat-image-model", Object: "model", OwnedBy: "compat", Type: registry.OpenAIImageModelType},
+		{ID: "compat-shared-model", Object: "model", OwnedBy: "compat", Type: "openai-compatibility", SupportsImageAPI: true},
 		{ID: "compat-chat-model", Object: "model", OwnedBy: "compat", Type: "openai-compatibility"},
 	})
+	modelRegistry.RegisterClient(shadowClientID, "openai-compatibility", []*registry.ModelInfo{
+		{ID: "compat-shared-model", Object: "model", OwnedBy: "chat", Type: "openai"},
+	})
 	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(shadowClientID)
 		modelRegistry.UnregisterClient(clientID)
 	})
 
 	if !isSupportedImagesModel("compat-image-model") {
 		t.Fatal("expected configured openai-compatibility image model to be supported")
+	}
+	if !isSupportedImagesModel("tenant/compat-image-model") {
+		t.Fatal("expected prefixed openai-compatibility image model to be supported")
+	}
+	if !isSupportedImagesModel("compat-shared-model") {
+		t.Fatal("expected image-capable provider registration to remain visible after a chat-only registration")
 	}
 	if isSupportedImagesModel("compat-chat-model") {
 		t.Fatal("expected non-image openai-compatibility model to be rejected")

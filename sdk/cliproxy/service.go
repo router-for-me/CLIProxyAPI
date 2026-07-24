@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -3283,6 +3284,7 @@ type modelEntry interface {
 	GetName() string
 	GetAlias() string
 	GetDisplayName() string
+	GetThinking() *registry.ThinkingSupport
 }
 
 func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, created int64, fallbackDisplayName string, userDefined bool) *ModelInfo {
@@ -3301,15 +3303,15 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 	if displayName == "" {
 		displayName = alias
 	}
-	return &ModelInfo{
-		ID:          alias,
-		Object:      "model",
-		Created:     created,
-		OwnedBy:     ownedBy,
-		Type:        modelType,
-		DisplayName: displayName,
-		UserDefined: userDefined,
-	}
+	info := modelconfig.ResolveModelInfo(name, modelType, model.GetThinking())
+	info.ID = alias
+	info.Object = "model"
+	info.Created = created
+	info.OwnedBy = ownedBy
+	info.Type = modelType
+	info.DisplayName = displayName
+	info.UserDefined = userDefined
+	return info
 }
 
 func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []*ModelInfo {
@@ -3317,50 +3319,60 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		return nil
 	}
 	now := time.Now().Unix()
-	models := make([]*ModelInfo, 0, len(compat.Models))
+	type aliasGroup struct {
+		firstIndex int
+		chatIndex  int
+		image      bool
+	}
+	groups := make(map[string]*aliasGroup)
+	order := make([]string, 0, len(compat.Models))
 	for i := range compat.Models {
 		model := compat.Models[i]
-		modelType := "openai-compatibility"
-		if model.Image {
-			modelType = registry.OpenAIImageModelType
+		modelID := strings.TrimSpace(model.Alias)
+		if modelID == "" {
+			modelID = strings.TrimSpace(model.Name)
 		}
-		info := buildConfiguredModelInfo(model, compat.Name, modelType, now, strings.TrimSpace(model.Alias), false)
+		if modelID == "" {
+			continue
+		}
+		key := strings.ToLower(modelID)
+		group := groups[key]
+		if group == nil {
+			group = &aliasGroup{firstIndex: i, chatIndex: -1}
+			groups[key] = group
+			order = append(order, key)
+		}
+		if model.Image {
+			group.image = true
+		} else if group.chatIndex < 0 {
+			group.chatIndex = i
+		}
+	}
+
+	models := make([]*ModelInfo, 0, len(order))
+	for _, key := range order {
+		group := groups[key]
+		modelIndex := group.firstIndex
+		if group.chatIndex >= 0 {
+			modelIndex = group.chatIndex
+		}
+		model := compat.Models[modelIndex]
+		info := buildConfiguredModelInfo(model, compat.Name, "openai-compatibility", now, strings.TrimSpace(model.Alias), false)
 		if info == nil {
 			continue
 		}
-		thinking := model.Thinking
-		if thinking == nil && !model.Image {
-			thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+		info.SupportsImageAPI = group.image
+		if group.image && group.chatIndex < 0 {
+			info.Type = registry.OpenAIImageModelType
 		}
-		info.Thinking = thinking
-		info.SupportedInputModalities = normalizeCompatConfigModalities(model.InputModalities)
-		info.SupportedOutputModalities = normalizeCompatConfigModalities(model.OutputModalities)
+		if info.Thinking == nil && !model.Image {
+			info.Thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+		}
+		info.SupportedInputModalities = modelconfig.NormalizeModalities(model.InputModalities)
+		info.SupportedOutputModalities = modelconfig.NormalizeModalities(model.OutputModalities)
 		models = append(models, info)
 	}
 	return models
-}
-
-func normalizeCompatConfigModalities(raw []string) []string {
-	if len(raw) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(raw))
-	seen := make(map[string]struct{}, len(raw))
-	for _, item := range raw {
-		modality := strings.ToLower(strings.TrimSpace(item))
-		if modality == "" {
-			continue
-		}
-		if _, exists := seen[modality]; exists {
-			continue
-		}
-		seen[modality] = struct{}{}
-		out = append(out, modality)
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {
@@ -3372,8 +3384,7 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 	seen := make(map[string]struct{}, len(models))
 	for i := range models {
 		model := models[i]
-		name := strings.TrimSpace(model.GetName())
-		info := buildConfiguredModelInfo(model, ownedBy, modelType, now, name, true)
+		info := buildConfiguredModelInfo(model, ownedBy, modelType, now, strings.TrimSpace(model.GetName()), true)
 		if info == nil {
 			continue
 		}
@@ -3383,11 +3394,6 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 			continue
 		}
 		seen[key] = struct{}{}
-		if name != "" {
-			if upstream := registry.LookupStaticModelInfo(name); upstream != nil && upstream.Thinking != nil {
-				info.Thinking = upstream.Thinking
-			}
-		}
 		out = append(out, info)
 	}
 	return out
