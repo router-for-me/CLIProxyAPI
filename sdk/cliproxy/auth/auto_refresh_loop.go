@@ -68,11 +68,17 @@ func (l *authAutoRefreshLoop) run(ctx context.Context) {
 	if workers <= 0 {
 		workers = refreshMaxConcurrency
 	}
+	var workerWG sync.WaitGroup
+	workerWG.Add(workers)
 	for i := 0; i < workers; i++ {
-		go l.worker(ctx)
+		go func() {
+			defer workerWG.Done()
+			l.worker(ctx)
+		}()
 	}
 
 	l.loop(ctx)
+	workerWG.Wait()
 }
 
 func (l *authAutoRefreshLoop) worker(ctx context.Context) {

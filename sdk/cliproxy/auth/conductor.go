@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -267,6 +268,7 @@ type Manager struct {
 	// Auto refresh state
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
+	refreshDone   <-chan struct{}
 
 	requestPrepareLocks sync.Map
 	// refreshLocks serializes credential refresh per auth ID so concurrent
@@ -586,6 +588,21 @@ func (m *Manager) SetRoundTripperProvider(p RoundTripperProvider) {
 	m.mu.Lock()
 	m.rtProvider = p
 	m.mu.Unlock()
+}
+
+// SetRoundTripperProviderIfAbsent installs p only when the host has not
+// already configured a RoundTripper provider. It reports whether p was stored.
+func (m *Manager) SetRoundTripperProviderIfAbsent(p RoundTripperProvider) bool {
+	if m == nil || p == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.rtProvider != nil {
+		return false
+	}
+	m.rtProvider = p
+	return true
 }
 
 // SetConfig updates the runtime config snapshot used by request-time helpers.
@@ -2391,6 +2408,57 @@ func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	}
 }
 
+// RegisterExecutorIfAbsent registers executor only when its provider key has
+// no current executor. It reports whether the executor was installed.
+func (m *Manager) RegisterExecutorIfAbsent(executor ProviderExecutor) bool {
+	if m == nil || executor == nil {
+		return false
+	}
+	provider := strings.ToLower(strings.TrimSpace(executor.Identifier()))
+	if provider == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if current := m.executors[provider]; current != nil {
+		return false
+	}
+	m.executors[provider] = executor
+	return true
+}
+
+// UnregisterExecutorIfMatch removes provider only when expected is still the
+// registered executor. This lets embedding hosts avoid deleting replacements
+// installed concurrently by another owner.
+func (m *Manager) UnregisterExecutorIfMatch(provider string, expected ProviderExecutor) bool {
+	if m == nil || expected == nil {
+		return false
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current := m.executors[provider]
+	if !sameProviderExecutor(current, expected) {
+		return false
+	}
+	delete(m.executors, provider)
+	return true
+}
+
+func sameProviderExecutor(first, second ProviderExecutor) bool {
+	if first == nil || second == nil {
+		return first == nil && second == nil
+	}
+	firstType := reflect.TypeOf(first)
+	if firstType != reflect.TypeOf(second) || !firstType.Comparable() {
+		return false
+	}
+	return first == second
+}
+
 // UnregisterExecutor removes the executor associated with the provider key.
 func (m *Manager) UnregisterExecutor(provider string) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
@@ -2480,6 +2548,41 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.persistCooldownStates(ctx)
 	}
 	return auth.Clone(), nil
+}
+
+// SyncRuntimeAuth adds or replaces auth in runtime memory without persistence
+// or host hooks. It is intended for embedded runtimes whose host owns durable
+// storage and mutation notifications.
+func (m *Manager) SyncRuntimeAuth(auth *Auth) *Auth {
+	if m == nil || auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return nil
+	}
+	auth = auth.Clone()
+	m.mu.Lock()
+	if existing := m.auths[auth.ID]; existing != nil {
+		auth.CreatedAt = existing.CreatedAt
+		auth.Success = existing.Success
+		auth.Failed = existing.Failed
+		auth.recentRequests = existing.recentRequests
+		if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
+			auth.LastRefreshedAt = existing.LastRefreshedAt
+			auth.NextRefreshAfter = existing.NextRefreshAfter
+			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+				auth.ModelStates = existing.ModelStates
+			}
+		}
+	}
+	auth.EnsureIndex()
+	stored := auth.Clone()
+	m.auths[auth.ID] = stored
+	m.mu.Unlock()
+
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(stored)
+	}
+	m.queueRefreshReschedule(auth.ID)
+	return stored.Clone()
 }
 
 // Remove deletes an auth from runtime state without persisting.
@@ -6881,6 +6984,7 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	cancelPrev := m.refreshCancel
 	m.refreshCancel = nil
 	m.refreshLoop = nil
+	m.refreshDone = nil
 	m.mu.Unlock()
 	if cancelPrev != nil {
 		cancelPrev()
@@ -6892,14 +6996,123 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 		workers = cfg.AuthAutoRefreshWorkers
 	}
 	loop := newAuthAutoRefreshLoop(m, interval, workers)
+	done := make(chan struct{})
 
 	m.mu.Lock()
 	m.refreshCancel = cancelCtx
 	m.refreshLoop = loop
+	m.refreshDone = done
 	m.mu.Unlock()
 
 	loop.rebuild(time.Now())
-	go loop.run(ctx)
+	go m.runAutoRefreshLoop(ctx, loop, done)
+}
+
+func (m *Manager) runAutoRefreshLoop(ctx context.Context, loop *authAutoRefreshLoop, done chan struct{}) {
+	loop.run(ctx)
+	close(done)
+	m.mu.Lock()
+	if m.refreshLoop == loop {
+		m.refreshCancel = nil
+		m.refreshLoop = nil
+		m.refreshDone = nil
+	}
+	m.mu.Unlock()
+}
+
+// AutoRefreshLease represents an auto-refresh loop acquired for an embedding
+// runtime. A lease only stops the exact loop it created; an existing host-owned
+// loop is reused and remains untouched when the lease closes.
+type AutoRefreshLease struct {
+	manager *Manager
+	loop    *authAutoRefreshLoop
+	cancel  context.CancelFunc
+	done    <-chan struct{}
+	owned   bool
+	once    sync.Once
+}
+
+// EnsureAutoRefresh reuses an existing manager loop or starts one owned by the
+// returned lease. Closing a non-owning lease is a no-op.
+func (m *Manager) EnsureAutoRefresh(parent context.Context, interval time.Duration) *AutoRefreshLease {
+	if m == nil {
+		return &AutoRefreshLease{}
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	if interval <= 0 {
+		interval = refreshCheckInterval
+	}
+
+	m.mu.Lock()
+	if m.refreshLoop != nil {
+		loopDone := m.refreshDone
+		loopRunning := true
+		if loopDone != nil {
+			select {
+			case <-loopDone:
+				loopRunning = false
+			default:
+			}
+		}
+		if loopRunning {
+			lease := &AutoRefreshLease{manager: m, loop: m.refreshLoop, done: loopDone}
+			m.mu.Unlock()
+			return lease
+		}
+		m.refreshCancel = nil
+		m.refreshLoop = nil
+		m.refreshDone = nil
+	}
+	ctx, cancelCtx := context.WithCancel(parent)
+	workers := refreshMaxConcurrency
+	if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil && cfg.AuthAutoRefreshWorkers > 0 {
+		workers = cfg.AuthAutoRefreshWorkers
+	}
+	loop := newAuthAutoRefreshLoop(m, interval, workers)
+	done := make(chan struct{})
+	m.refreshCancel = cancelCtx
+	m.refreshLoop = loop
+	m.refreshDone = done
+	m.mu.Unlock()
+
+	loop.rebuild(time.Now())
+	go m.runAutoRefreshLoop(ctx, loop, done)
+	return &AutoRefreshLease{manager: m, loop: loop, cancel: cancelCtx, done: done, owned: true}
+}
+
+// Close cancels an owned loop and waits for its scheduler and workers to exit.
+func (l *AutoRefreshLease) Close(ctx context.Context) error {
+	if l == nil || !l.owned {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	l.once.Do(func() {
+		if l.manager != nil {
+			l.manager.mu.Lock()
+			if l.manager.refreshLoop == l.loop {
+				l.manager.refreshCancel = nil
+				l.manager.refreshLoop = nil
+				l.manager.refreshDone = nil
+			}
+			l.manager.mu.Unlock()
+		}
+		if l.cancel != nil {
+			l.cancel()
+		}
+	})
+	if l.done == nil {
+		return nil
+	}
+	select {
+	case <-l.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // StopAutoRefresh cancels the background refresh loop, if running.
@@ -6909,6 +7122,7 @@ func (m *Manager) StopAutoRefresh() {
 	cancel := m.refreshCancel
 	m.refreshCancel = nil
 	m.refreshLoop = nil
+	m.refreshDone = nil
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()

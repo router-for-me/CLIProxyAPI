@@ -102,3 +102,32 @@ func TestManagerExecutorReturnsRegisteredExecutor(t *testing.T) {
 		t.Fatal("expected unknown provider lookup to fail")
 	}
 }
+
+func TestManagerRegisterAndUnregisterExecutorOwnershipIsAtomic(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, nil, nil)
+	owned := &replaceAwareExecutor{id: "codex"}
+	host := &replaceAwareExecutor{id: "codex"}
+
+	if !manager.RegisterExecutorIfAbsent(owned) {
+		t.Fatal("expected first executor registration to succeed")
+	}
+	if manager.RegisterExecutorIfAbsent(host) {
+		t.Fatal("expected second executor registration to preserve current owner")
+	}
+	manager.RegisterExecutor(host)
+	if manager.UnregisterExecutorIfMatch("codex", owned) {
+		t.Fatal("stale owner removed host replacement")
+	}
+	resolved, okResolved := manager.Executor("codex")
+	if !okResolved || resolved != host {
+		t.Fatalf("executor after stale unregister = %T, want host executor", resolved)
+	}
+	if !manager.UnregisterExecutorIfMatch("codex", host) {
+		t.Fatal("current owner could not unregister its executor")
+	}
+	if _, okResolved := manager.Executor("codex"); okResolved {
+		t.Fatal("executor remains registered after matching unregister")
+	}
+}
