@@ -29,6 +29,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -296,12 +297,111 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	return client
 }
 
+func sanitizeAntigravityGeminiRequestSignatures(modelName string, rawJSON []byte) []byte {
+	if !antigravityUsesReasoningReplayCache(modelName) {
+		return rawJSON
+	}
+	rawJSON = internalsignature.SanitizeGeminiRequestThoughtSignatures(rawJSON, "request.contents")
+	return normalizeAntigravityGeminiFunctionResponseRoles(rawJSON)
+}
+
+func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
+	contents := gjson.GetBytes(rawJSON, "request.contents")
+	if !contents.IsArray() {
+		return rawJSON
+	}
+	type functionRef struct {
+		id   string
+		name string
+	}
+	out := rawJSON
+	var pending []functionRef
+	for contentIndex, content := range contents.Array() {
+		parts := content.Get("parts")
+		if !parts.IsArray() || len(parts.Array()) == 0 {
+			pending = nil
+			continue
+		}
+		var calls, responses []functionRef
+		var responseParts []json.RawMessage
+		hasOtherPart := false
+		parts.ForEach(func(_, part gjson.Result) bool {
+			switch {
+			case part.Get("functionCall").Exists():
+				calls = append(calls, functionRef{id: part.Get("functionCall.id").String(), name: part.Get("functionCall.name").String()})
+			case part.Get("functionResponse").Exists():
+				responses = append(responses, functionRef{id: part.Get("functionResponse.id").String(), name: part.Get("functionResponse.name").String()})
+				responseParts = append(responseParts, json.RawMessage(part.Raw))
+			default:
+				hasOtherPart = true
+			}
+			return true
+		})
+		if len(calls) > 0 && len(responses) == 0 {
+			pending = calls
+			continue
+		}
+		if len(responses) == 0 {
+			if hasOtherPart {
+				pending = nil
+			}
+			continue
+		}
+		if hasOtherPart || len(calls) > 0 {
+			pending = nil
+			continue
+		}
+
+		if len(pending) == len(responses) {
+			ordered := make([]json.RawMessage, 0, len(responseParts))
+			used := make([]bool, len(responses))
+			for _, call := range pending {
+				matched := -1
+				for responseIndex, response := range responses {
+					if used[responseIndex] {
+						continue
+					}
+					if (call.id != "" && response.id == call.id) || (call.id == "" && call.name != "" && response.name == call.name) {
+						matched = responseIndex
+						break
+					}
+				}
+				if matched < 0 {
+					ordered = nil
+					break
+				}
+				used[matched] = true
+				ordered = append(ordered, responseParts[matched])
+			}
+			if len(ordered) == len(responseParts) {
+				if encoded, errMarshal := json.Marshal(ordered); errMarshal == nil {
+					if updated, errSet := sjson.SetRawBytes(out, fmt.Sprintf("request.contents.%d.parts", contentIndex), encoded); errSet == nil {
+						out = updated
+					}
+				}
+			}
+		}
+		pending = nil
+		if content.Get("role").String() != "model" {
+			if updated, errSet := sjson.SetBytes(out, fmt.Sprintf("request.contents.%d.role", contentIndex), "model"); errSet == nil {
+				out = updated
+			}
+		}
+	}
+	return out
+}
+
 func validateAntigravityRequestSignatures(ctx context.Context, modelName string, from sdktranslator.Format, rawJSON []byte) ([]byte, error) {
 	if from.String() != "claude" {
 		return rawJSON, nil
 	}
-	// Always strip thinking blocks with invalid signatures (empty or non-Claude-format).
 	before := countClaudeThinkingBlocks(rawJSON)
+	if antigravityUsesReasoningReplayCache(modelName) {
+		rawJSON = antigravityclaude.StripInvalidGeminiSignatureThinkingBlocks(rawJSON)
+		logAntigravitySignatureStrip(before, countClaudeThinkingBlocks(rawJSON), "provider_cleanup", "empty_or_non_gemini_signature")
+		return rawJSON, nil
+	}
+	// Claude models accept only Claude-format thinking signatures.
 	rawJSON = antigravityclaude.StripEmptySignatureThinkingBlocks(rawJSON)
 	logAntigravitySignatureStrip(before, countClaudeThinkingBlocks(rawJSON), "prefix_cleanup", "empty_or_non_claude_signature")
 	if cache.SignatureCacheEnabled() {
@@ -664,6 +764,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated = sanitizeAntigravityGeminiRequestSignatures(baseModel, translated)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
@@ -885,6 +986,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated = sanitizeAntigravityGeminiRequestSignatures(baseModel, translated)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
@@ -907,6 +1009,15 @@ attemptLoop:
 				if cp := injectEnabledCreditTypes(translated); len(cp) > 0 {
 					requestPayload = cp
 					helps.MarkCreditsUsed(ctx)
+				}
+			}
+			replayScope := antigravityReasoningReplayScope{}
+			if antigravityUsesReasoningReplayCache(baseModel) {
+				var errReplay error
+				requestPayload, replayScope, errReplay = prepareAntigravityGeminiReasoningReplayPayload(ctx, baseModel, req, opts, requestPayload)
+				if errReplay != nil {
+					err = errReplay
+					return resp, err
 				}
 			}
 			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL)
@@ -1028,6 +1139,10 @@ attemptLoop:
 						continue attemptLoop
 					}
 				}
+				if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, bodyBytes); errClear != nil {
+					err = errClear
+					return resp, err
+				}
 				err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 				return resp, err
 			}
@@ -1036,6 +1151,7 @@ attemptLoop:
 			if useCredits {
 				clearAntigravityCreditsFailureState(auth)
 			}
+			replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, requestPayload)
 			out := make(chan cliproxyexecutor.StreamChunk)
 			go func(resp *http.Response) {
 				defer close(out)
@@ -1049,6 +1165,9 @@ attemptLoop:
 				for scanner.Scan() {
 					line := scanner.Bytes()
 					helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+					if replayAccumulator != nil {
+						replayAccumulator.ObserveSSELine(line)
+					}
 
 					// Filter usage metadata for all models
 					// Only retain usage statistics in the terminal chunk
@@ -1070,6 +1189,9 @@ attemptLoop:
 					reporter.PublishFailure(ctx, errScan)
 					out <- cliproxyexecutor.StreamChunk{Err: errScan}
 				} else {
+					if replayAccumulator != nil {
+						replayAccumulator.Commit(ctx)
+					}
 					reporter.EnsurePublished(ctx)
 				}
 			}(httpResp)
@@ -1355,6 +1477,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated = sanitizeAntigravityGeminiRequestSignatures(baseModel, translated)
 	translated, _ = sjson.DeleteBytes(translated, "request.stream")
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
@@ -1524,9 +1647,6 @@ attemptLoop:
 			go func(resp *http.Response) {
 				defer close(out)
 				defer func() {
-					if replayAccumulator != nil {
-						replayAccumulator.Flush(ctx)
-					}
 					if errClose := resp.Body.Close(); errClose != nil {
 						log.Errorf("antigravity executor: close response line error: %v", errClose)
 					}
@@ -1581,6 +1701,9 @@ attemptLoop:
 					case <-ctx.Done():
 					}
 				} else {
+					if replayAccumulator != nil {
+						replayAccumulator.Commit(ctx)
+					}
 					reporter.EnsurePublished(ctx)
 				}
 			}(httpResp)
@@ -1686,6 +1809,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
+	payload = sanitizeAntigravityGeminiRequestSignatures(baseModel, payload)
 
 	payload = helps.DeleteJSONField(payload, "project")
 	payload = helps.DeleteJSONField(payload, "model")
