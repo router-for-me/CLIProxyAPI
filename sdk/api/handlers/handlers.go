@@ -155,8 +155,11 @@ func (h *BaseAPIHandler) PrepareStreamModelRoute(ctx context.Context, handlerTyp
 	return ctx, hasOverride
 }
 
-func preparedModelRouteFromContext(ctx context.Context) (modelRouteDecision, bool) {
-	if ctx == nil {
+func preparedModelRouteFromContext(ctx context.Context, skipRouterPluginID string) (modelRouteDecision, bool) {
+	// A host.model.execute(_stream) callback is a nested execution. Its caller
+	// is excluded from model routing, so a route prepared for the outer request
+	// can no longer be reused: it may point straight back at that caller.
+	if ctx == nil || strings.TrimSpace(skipRouterPluginID) != "" {
 		return modelRouteDecision{}, false
 	}
 	decision, ok := ctx.Value(preparedModelRouteContextKey{}).(modelRouteDecision)
@@ -1165,7 +1168,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
-	routeDecision, preparedRoute := preparedModelRouteFromContext(ctx)
+	routeDecision, preparedRoute := preparedModelRouteFromContext(ctx, execOptions.SkipRouterPluginID)
 	if !preparedRoute {
 		routeDecision = h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
 	}
