@@ -340,6 +340,10 @@ type QuotaExceeded struct {
 	// When all free-tier auths are exhausted (429/503), the conductor retries with
 	// an auth that has available Google One AI credits.
 	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
+
+	// OnPaymentRequired controls behavior when an API key returns 402 (Payment Required).
+	// Supported values: "cooldown" (default, 30-min cooldown) or "disable" (permanently disable the key).
+	OnPaymentRequired string `yaml:"on-payment-required,omitempty" json:"on-payment-required,omitempty"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.
