@@ -148,12 +148,23 @@ type Config struct {
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
 
+	// ClaudeCloakMode sets the global default Claude cloak mode: "auto" (default),
+	// "always", or "never". Cloaking disguises requests as the official Claude Code
+	// CLI and replaces the system prompt. "auto" cloaks only clients whose
+	// User-Agent is not Claude Code; "always" cloaks every request regardless of
+	// client (useful when the proxy only ever fronts non-Claude-Code apps, so a
+	// stray "claude-cli" User-Agent can't disable cloaking and get premium models
+	// rejected); "never" disables it. A specific credential can still override this
+	// via its own cloak settings (the per claude-api-key "cloak" block, or a
+	// "cloak_mode" value in the auth/OAuth token file). Empty preserves "auto".
+	ClaudeCloakMode string `yaml:"claude-cloak-mode" json:"claude-cloak-mode"`
+
 	// DisableClaudeCloakMode globally disables Claude request cloaking when true.
-	// Cloaking disguises requests as the official Claude Code CLI and replaces the
-	// system prompt. When true, every Claude credential defaults to no cloaking
-	// ("never"); a specific credential can still re-enable or override it via its own
-	// cloak settings (the per claude-api-key "cloak" block, or a "cloak_mode" value in
-	// the auth/OAuth token file). Default false preserves the per-client "auto" behavior.
+	// Equivalent to ClaudeCloakMode "never" and kept for backward compatibility;
+	// when true it takes precedence over ClaudeCloakMode. A specific credential can
+	// still re-enable or override it via its own cloak settings (the per
+	// claude-api-key "cloak" block, or a "cloak_mode" value in the auth/OAuth token
+	// file). Default false preserves the per-client "auto" behavior.
 	DisableClaudeCloakMode bool `yaml:"disable-claude-cloak-mode" json:"disable-claude-cloak-mode"`
 
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
