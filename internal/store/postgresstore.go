@@ -20,23 +20,28 @@ import (
 )
 
 const (
-	defaultConfigTable                  = "config_store"
-	defaultAuthTable                    = "auth_store"
-	defaultConfigKey                    = "config"
-	defaultAPIKeysTable                 = "api_keys"
-	defaultPoliciesTable                = "api_key_policies"
-	defaultUsageEventsTable             = "usage_events"
-	defaultUsageErrorsTable             = "usage_errors"
-	defaultUsageWindowsTable            = "usage_windows"
-	defaultModelsTable                  = "models_catalog"
-	defaultModelPricingTable            = "model_pricing"
-	defaultErrorMessagesTable           = "error_messages"
-	defaultInternalUsersTable           = "internal_users"
-	defaultUserWindowsTable             = "user_windows"
-	defaultPricingSourcesTable          = "pricing_sources"
-	defaultManagementTokensTable        = "management_tokens"
-	defaultManagementTokenPoliciesTable = "management_token_policies"
-	defaultManagementAuditLogTable      = "management_audit_log"
+	defaultConfigTable                   = "config_store"
+	defaultAuthTable                     = "auth_store"
+	defaultConfigKey                     = "config"
+	defaultAPIKeysTable                  = "api_keys"
+	defaultPoliciesTable                 = "api_key_policies"
+	defaultUsageEventsTable              = "usage_events"
+	defaultUsageErrorsTable              = "usage_errors"
+	defaultUsageWindowsTable             = "usage_windows"
+	defaultModelsTable                   = "models_catalog"
+	defaultModelPricingTable             = "model_pricing"
+	defaultErrorMessagesTable            = "error_messages"
+	defaultInternalUsersTable            = "internal_users"
+	defaultUserWindowsTable              = "user_windows"
+	defaultPricingSourcesTable           = "pricing_sources"
+	defaultManagementTokensTable         = "management_tokens"
+	defaultManagementTokenPoliciesTable  = "management_token_policies"
+	defaultManagementAuditLogTable       = "management_audit_log"
+	defaultUpstreamProvidersTable        = "upstream_providers"
+	defaultUpstreamProviderModelsTable   = "upstream_provider_models"
+	defaultUpstreamProviderHeadersTable  = "upstream_provider_headers"
+	defaultUpstreamProviderExcludedTable = "upstream_provider_excluded_models"
+	defaultUpstreamProviderEntriesTable  = "upstream_provider_api_key_entries"
 )
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
@@ -99,6 +104,24 @@ type PostgresStoreConfig struct {
 	// call made with a management token (request/response bodies, status,
 	// latency, error). Bodies are AES-GCM-sealed when UsageEncryptionKey is set.
 	ManagementAuditLogTable string
+
+	// UpstreamProvidersTable stores every upstream provider (API-key providers
+	// and OAuth/file-backed auths) as normalized rows. When PG is configured it
+	// is the source of truth; the config.yaml provider sections and auth-dir
+	// JSON files are rendered from these rows.
+	UpstreamProvidersTable string
+	// UpstreamProviderModelsTable stores the models[] array for each upstream
+	// provider as child rows (one row per model entry). FK cascade.
+	UpstreamProviderModelsTable string
+	// UpstreamProviderHeadersTable stores the headers{} map for each upstream
+	// provider as child rows keyed by (provider_id, header_key). FK cascade.
+	UpstreamProviderHeadersTable string
+	// UpstreamProviderExcludedTable stores the excluded-models[] list for each
+	// upstream provider as child rows. FK cascade.
+	UpstreamProviderExcludedTable string
+	// UpstreamProviderEntriesTable stores the api-key-entries[] list for
+	// openai-compatibility providers as child rows. FK cascade.
+	UpstreamProviderEntriesTable string
 
 	// UsageEncryptionKey is the passphrase used to derive an AES-256-GCM
 	// key for sealing sensitive columns (api_key_principal in usage_events)
@@ -174,6 +197,21 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.ManagementAuditLogTable == "" {
 		cfg.ManagementAuditLogTable = defaultManagementAuditLogTable
+	}
+	if cfg.UpstreamProvidersTable == "" {
+		cfg.UpstreamProvidersTable = defaultUpstreamProvidersTable
+	}
+	if cfg.UpstreamProviderModelsTable == "" {
+		cfg.UpstreamProviderModelsTable = defaultUpstreamProviderModelsTable
+	}
+	if cfg.UpstreamProviderHeadersTable == "" {
+		cfg.UpstreamProviderHeadersTable = defaultUpstreamProviderHeadersTable
+	}
+	if cfg.UpstreamProviderExcludedTable == "" {
+		cfg.UpstreamProviderExcludedTable = defaultUpstreamProviderExcludedTable
+	}
+	if cfg.UpstreamProviderEntriesTable == "" {
+		cfg.UpstreamProviderEntriesTable = defaultUpstreamProviderEntriesTable
 	}
 
 	spoolRoot := strings.TrimSpace(cfg.SpoolDir)
@@ -355,6 +393,13 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS max_parallel_requests INTEGER`, policiesTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: alter api_key_policies add max_parallel_requests: %w", err)
+	}
+	// Backfill model_routes on api_key_policies (per-allowed-model upstream
+	// provider pinning). Idempotent.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS model_routes JSONB NOT NULL DEFAULT '[]'::jsonb`, policiesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter api_key_policies add model_routes: %w", err)
 	}
 
 	usageEventsTable := s.fullTableName(s.cfg.UsageEventsTable)
@@ -791,6 +836,133 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: create management_audit_log is_error index: %w", err)
 	}
+
+	// upstream_providers stores every upstream provider as one normalized row.
+	// It is the source of truth for both the config.yaml-based API-key
+	// providers (gemini/codex/xai/claude/openai-compatibility/vertex/
+	// interactions) and the OAuth/file-backed auths (claude/codex/kimi/xai/
+	// vertex/aistudio/antigravity). provider_type disambiguates the kind; the
+	// "oauth:" prefix marks OAuth/file-backed entries.
+	upstreamProvidersTable := s.fullTableName(s.cfg.UpstreamProvidersTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id                         BIGSERIAL PRIMARY KEY,
+			provider_type              TEXT NOT NULL,
+			name                       TEXT,
+			priority                   INTEGER NOT NULL DEFAULT 0,
+			disabled                   BOOLEAN NOT NULL DEFAULT FALSE,
+			prefix                     TEXT,
+			api_key                    TEXT,
+			base_url                   TEXT,
+			proxy_url                  TEXT,
+			label                      TEXT,
+			email                      TEXT,
+			file_name                  TEXT,
+			source_backend             TEXT,
+			status                     TEXT,
+			unavailable                BOOLEAN NOT NULL DEFAULT FALSE,
+			last_error                 TEXT,
+			last_error_at              TIMESTAMPTZ,
+			websockets                 BOOLEAN NOT NULL DEFAULT FALSE,
+			rebuild_mid_system_message BOOLEAN NOT NULL DEFAULT FALSE,
+			experimental_cch_signing   BOOLEAN NOT NULL DEFAULT FALSE,
+			cloak_mode                 TEXT,
+			cloak_strict_mode          BOOLEAN NOT NULL DEFAULT FALSE,
+			cloak_sensitive_words      JSONB NOT NULL DEFAULT '[]'::jsonb,
+			cloak_cache_user_id        BOOLEAN,
+			token_access_token         TEXT,
+			token_refresh_token        TEXT,
+			token_token_type           TEXT,
+			token_expiry               TIMESTAMPTZ,
+			token_expired              BOOLEAN,
+			token_scope                TEXT,
+			extra_config               JSONB NOT NULL DEFAULT '{}'::jsonb,
+			created_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, upstreamProvidersTable)); err != nil {
+		return fmt.Errorf("postgres store: create upstream_providers table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_upstream_providers_type_file ON %s(provider_type, file_name) WHERE file_name IS NOT NULL`, upstreamProvidersTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create upstream_providers uniqueness index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_upstream_providers_type ON %s(provider_type)`, upstreamProvidersTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create upstream_providers type index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_upstream_providers_disabled ON %s(disabled) WHERE disabled = TRUE`, upstreamProvidersTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create upstream_providers disabled index: %w", err)
+	}
+
+	upstreamModelsTable := s.fullTableName(s.cfg.UpstreamProviderModelsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id                 BIGSERIAL PRIMARY KEY,
+			provider_id        BIGINT NOT NULL REFERENCES %s(id) ON DELETE CASCADE,
+			name               TEXT NOT NULL,
+			alias              TEXT,
+			display_name       TEXT,
+				force_mapping      BOOLEAN NOT NULL DEFAULT FALSE,
+				image              BOOLEAN NOT NULL DEFAULT FALSE,
+				input_modalities   JSONB NOT NULL DEFAULT '[]'::jsonb,
+				output_modalities  JSONB NOT NULL DEFAULT '[]'::jsonb,
+				thinking           JSONB,
+				sort_order         INTEGER NOT NULL DEFAULT 0
+		)
+	`, upstreamModelsTable, upstreamProvidersTable)); err != nil {
+		return fmt.Errorf("postgres store: create upstream_provider_models table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_upstream_provider_models_provider ON %s(provider_id)`, upstreamModelsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create upstream_provider_models index: %w", err)
+	}
+
+	upstreamHeadersTable := s.fullTableName(s.cfg.UpstreamProviderHeadersTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			provider_id  BIGINT NOT NULL REFERENCES %s(id) ON DELETE CASCADE,
+			header_key   TEXT NOT NULL,
+			header_value TEXT NOT NULL,
+			PRIMARY KEY (provider_id, header_key)
+		)
+	`, upstreamHeadersTable, upstreamProvidersTable)); err != nil {
+		return fmt.Errorf("postgres store: create upstream_provider_headers table: %w", err)
+	}
+
+	upstreamExcludedTable := s.fullTableName(s.cfg.UpstreamProviderExcludedTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			provider_id BIGINT NOT NULL REFERENCES %s(id) ON DELETE CASCADE,
+			model       TEXT NOT NULL,
+			PRIMARY KEY (provider_id, model)
+		)
+	`, upstreamExcludedTable, upstreamProvidersTable)); err != nil {
+		return fmt.Errorf("postgres store: create upstream_provider_excluded_models table: %w", err)
+	}
+
+	upstreamEntriesTable := s.fullTableName(s.cfg.UpstreamProviderEntriesTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id          BIGSERIAL PRIMARY KEY,
+			provider_id BIGINT NOT NULL REFERENCES %s(id) ON DELETE CASCADE,
+			api_key     TEXT NOT NULL,
+			proxy_url   TEXT,
+			sort_order  INTEGER NOT NULL DEFAULT 0
+		)
+	`, upstreamEntriesTable, upstreamProvidersTable)); err != nil {
+		return fmt.Errorf("postgres store: create upstream_provider_api_key_entries table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_upstream_provider_entries_provider ON %s(provider_id)`, upstreamEntriesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create upstream_provider_api_key_entries index: %w", err)
+	}
 	return nil
 }
 
@@ -983,6 +1155,52 @@ func (s *PostgresStore) ManagementAuditLogTable() string {
 	return s.fullTableName(s.cfg.ManagementAuditLogTable)
 }
 
+// UpstreamProvidersTable returns the fully-qualified name of the upstream
+// providers table (the source of truth for both API-key providers and OAuth
+// auths when PG is configured).
+func (s *PostgresStore) UpstreamProvidersTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultUpstreamProvidersTable)
+	}
+	return s.fullTableName(s.cfg.UpstreamProvidersTable)
+}
+
+// UpstreamProviderModelsTable returns the fully-qualified name of the child
+// table holding each provider's models[] list.
+func (s *PostgresStore) UpstreamProviderModelsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultUpstreamProviderModelsTable)
+	}
+	return s.fullTableName(s.cfg.UpstreamProviderModelsTable)
+}
+
+// UpstreamProviderHeadersTable returns the fully-qualified name of the child
+// table holding each provider's headers{} map.
+func (s *PostgresStore) UpstreamProviderHeadersTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultUpstreamProviderHeadersTable)
+	}
+	return s.fullTableName(s.cfg.UpstreamProviderHeadersTable)
+}
+
+// UpstreamProviderExcludedTable returns the fully-qualified name of the child
+// table holding each provider's excluded-models[] list.
+func (s *PostgresStore) UpstreamProviderExcludedTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultUpstreamProviderExcludedTable)
+	}
+	return s.fullTableName(s.cfg.UpstreamProviderExcludedTable)
+}
+
+// UpstreamProviderEntriesTable returns the fully-qualified name of the child
+// table holding openai-compatibility providers' api-key-entries[] list.
+func (s *PostgresStore) UpstreamProviderEntriesTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultUpstreamProviderEntriesTable)
+	}
+	return s.fullTableName(s.cfg.UpstreamProviderEntriesTable)
+}
+
 // Save persists authentication metadata to disk and PostgreSQL.
 func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
 	if auth == nil {
@@ -1063,7 +1281,104 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 	if err = s.upsertAuthRecord(ctx, relID, path); err != nil {
 		return "", err
 	}
+	// Best-effort: mirror the refreshed token + metadata into the normalized
+	// upstream_providers row for the oauth:* provider matching this auth file.
+	// Non-fatal when the table is unseeded or the row is absent (logged at
+	// debug to avoid noisy refresh loops). No secrets are logged.
+	s.syncUpstreamProviderToken(ctx, auth)
 	return path, nil
+}
+
+// syncUpstreamProviderToken updates the normalized token columns of the
+// upstream_providers row backing this OAuth auth, if one exists. It is
+// invoked after every Save (which fires on token refresh) so the table stays
+// current without a separate refresh pipeline. Failures are logged at debug
+// level and never propagate — a stale normalized row must not break refresh.
+func (s *PostgresStore) syncUpstreamProviderToken(ctx context.Context, auth *cliproxyauth.Auth) {
+	if s == nil || auth == nil {
+		return
+	}
+	fileName := strings.TrimSpace(auth.FileName)
+	if fileName == "" {
+		return
+	}
+	// Only OAuth/file-backed auths map to an oauth:* row.
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if provider == "" {
+		return
+	}
+	// API-key providers are persisted via config, not auth files.
+	if !authIsOAuthProvider(provider) {
+		return
+	}
+	var (
+		access  any
+		refresh any
+		expiry  any
+		scope   any
+	)
+	if auth.Metadata != nil {
+		access = tokenStringFromMeta(auth.Metadata, "access_token", "access-token")
+		refresh = tokenStringFromMeta(auth.Metadata, "refresh_token", "refresh-token")
+		scope = tokenStringFromMeta(auth.Metadata, "scope")
+		if t, ok := auth.ExpirationTime(); ok && !t.IsZero() {
+			expiry = t.UTC()
+		}
+	}
+	table := s.fullTableName(s.cfg.UpstreamProvidersTable)
+	res, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		UPDATE %s SET
+			token_access_token  = COALESCE($1, token_access_token),
+			token_refresh_token = COALESCE($2, token_refresh_token),
+			token_scope         = COALESCE($3, token_scope),
+			token_expiry        = COALESCE($4, token_expiry),
+			updated_at          = NOW()
+		WHERE file_name = $5 AND provider_type = $6
+	`, table), access, refresh, scope, expiry, fileName, "oauth:"+provider)
+	if err != nil {
+		log.WithError(err).Debugf("postgres store: sync upstream provider token for %s", fileName)
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Row not present yet (table unseeded or this auth has no normalized
+		// row). Not an error — seeding or a later management write will create it.
+		log.Debugf("postgres store: no upstream_providers row for auth %s", fileName)
+	}
+}
+
+// authIsOAuthProvider reports whether the given provider channel is an
+// OAuth/file-backed auth (as opposed to an API-key provider whose creds live
+// in config.yaml). The list mirrors the synthesizer's supported channels.
+func authIsOAuthProvider(provider string) bool {
+	switch provider {
+	case "claude", "codex", "kimi", "xai", "vertex", "aistudio", "antigravity":
+		return true
+	}
+	return false
+}
+
+// tokenStringFromMeta extracts a non-empty trimmed string value from a metadata
+// map, trying each key in order.
+func tokenStringFromMeta(meta map[string]any, keys ...string) any {
+	for _, k := range keys {
+		if v, ok := meta[k]; ok {
+			if s, ok := castString(v); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return nil
+}
+
+// castString coerces common JSON-decoded scalar types to a trimmed string.
+func castString(v any) (string, bool) {
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t), true
+	case json.Number:
+		return t.String(), true
+	}
+	return "", false
 }
 
 // List enumerates all auth records stored in PostgreSQL.

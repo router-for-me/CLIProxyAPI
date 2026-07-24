@@ -1062,6 +1062,17 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/pricing-sources/:id/refresh", s.mgmt.RefreshPricingSource)
 		mgmt.POST("/pricing-sources/:id/upload", s.mgmt.UploadPricingSourceFile)
 
+		// Normalized upstream providers (source of truth for both the
+		// config.yaml-based API-key providers and the OAuth/file-backed auths).
+		// Returns 503 when the PG store is not configured. Every mutation
+		// re-renders config.yaml + auth-dir artifacts from the table and
+		// triggers a client reload.
+		mgmt.GET("/upstream-providers", s.mgmt.ListUpstreamProviders)
+		mgmt.POST("/upstream-providers", s.mgmt.CreateUpstreamProvider)
+		mgmt.GET("/upstream-providers/:id", s.mgmt.GetUpstreamProvider)
+		mgmt.PUT("/upstream-providers/:id", s.mgmt.UpdateUpstreamProvider)
+		mgmt.DELETE("/upstream-providers/:id", s.mgmt.DeleteUpstreamProvider)
+
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
 		mgmt.PATCH("/gemini-api-key", s.mgmt.PatchGeminiKey)

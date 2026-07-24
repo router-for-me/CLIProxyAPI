@@ -476,6 +476,7 @@ export async function listModelsCatalog({
   provider = '',
   officialProvider = '',
   availableOnly = true,
+  distinctIds = false,
   q = '',
   sort = '',
 } = {}) {
@@ -488,6 +489,10 @@ export async function listModelsCatalog({
   // available — the dashboard should show live models only. Pass
   // availableOnly:false to browse the full persisted catalog.
   qs.set('available_only', availableOnly ? 'true' : 'false');
+  // Deduplicate to one row per model id (picking a representative provider)
+  // so dropdowns show each model id once regardless of how many upstreams
+  // serve it.
+  if (distinctIds) qs.set('distinct_ids', 'true');
   if (q) qs.set('q', q);
   if (sort) qs.set('sort', sort);
   return fetchJSON(`/models-catalog?${qs}`);
@@ -513,6 +518,14 @@ export async function getModelsCatalogDistinct(field = 'provider') {
 
 export async function getModelPricing(id) {
   return fetchJSON(`/models-catalog/${encodeURIComponent(id)}/pricing`);
+}
+
+// getModelProviders returns the upstream provider identifiers the active
+// in-memory registry reports as currently serving the supplied model id.
+// Used by the per-model routing editor so it only offers providers that
+// actually back the selected model. Returns { model, providers:[] }.
+export async function getModelProviders(id) {
+  return fetchJSON(`/models-catalog/providers-for-model?id=${encodeURIComponent(id)}`);
 }
 
 export async function putModelPricing(id, pricing) {
@@ -851,6 +864,30 @@ export async function patchAuthFileStatus({ name, disabled }) {
   });
 }
 
+// fetchAuthFileJSON reads the raw auth-dir JSON file for the given name and
+// returns it as a parsed object. Unlike listAuthFiles (which hides token
+// values for security), this returns the full content including access/refresh
+// tokens, expiry, email, cloak settings — everything the upstream_providers
+// table needs to persist a complete normalized row after an OAuth connect.
+// The name must include the .json suffix (server requirement).
+export async function fetchAuthFileJSON(name) {
+  const fileName = name.endsWith('.json') ? name : `${name}.json`;
+  const token = getStoredToken();
+  const res = await fetch(
+    `${API_BASE}/auth-files/download?name=${encodeURIComponent(fileName)}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+  );
+  if (!res.ok) {
+    let message = `Fetch auth file failed (${res.status})`;
+    try {
+      const payload = await res.json();
+      message = extractErrorMessage(payload, message);
+    } catch { /* ignore */ }
+    throw new ApiError(message, res.status);
+  }
+  return res.json();
+}
+
 export async function deleteAuthFile(names) {
   const list = Array.isArray(names) ? names : [names];
   if (list.length === 0) {
@@ -939,6 +976,35 @@ export async function requestOAuthUrl(provider, { isWebUI = true } = {}) {
   }
   const qs = isWebUI ? '?is_webui=1' : '';
   return cpaFetch(`/${provider}-auth-url${qs}`);
+}
+
+// submitOAuthCallback completes an OAuth flow by submitting the redirect URL
+// (or raw code+state) the operator pasted after completing the browser login.
+// The server persists the callback file for the pending session and a
+// background waiter exchanges the code for tokens. Returns { status: 'ok' }.
+export async function submitOAuthCallback({ provider, redirectUrl, code, state }) {
+  const body = { provider };
+  if (redirectUrl) body.redirect_url = redirectUrl;
+  if (code) body.code = code;
+  if (state) body.state = state;
+  return cpaFetch('/oauth-callback', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+// oauthChannelToAuthProvider maps an upstream-providers oauth:* channel to
+// the auth-url endpoint identifier the server expects. Returns '' for
+// channels that do not support a web OAuth flow (vertex, aistudio).
+export function oauthChannelToAuthProvider(channel) {
+  const map = {
+    claude: 'anthropic',
+    codex: 'codex',
+    kimi: 'kimi',
+    xai: 'xai',
+    antigravity: 'antigravity',
+  };
+  return map[channel] || '';
 }
 
 // --- Fetch / Apply Models --------------------------------------------------
@@ -1163,4 +1229,43 @@ export async function getAPITokenAuditLog({
 
 export async function getAPITokenAuditEntry(id) {
   return fetchJSON(`/api-tokens/audit-log/${encodeURIComponent(id)}`);
+}
+
+// --- Upstream Providers (normalized source of truth in PG) -----------------
+//
+// Upstream providers are one row per provider credential — both the
+// config.yaml-based API-key providers (gemini/codex/xai/claude/
+// openai-compatibility/vertex/interactions) and the OAuth/file-backed auths
+// (provider_type prefixed with "oauth:"). Every mutation re-renders
+// config.yaml + auth-dir artifacts from the table and triggers a client
+// reload server-side, so the dashboard only needs to refresh the list after a
+// write.
+
+export async function listUpstreamProviders({ providerType = '' } = {}) {
+  const qs = new URLSearchParams();
+  if (providerType) qs.set('provider_type', providerType);
+  const suffix = qs.toString() ? `?${qs}` : '';
+  return fetchJSON(`/upstream-providers${suffix}`);
+}
+
+export async function getUpstreamProvider(id) {
+  return fetchJSON(`/upstream-providers/${encodeURIComponent(id)}`);
+}
+
+export async function createUpstreamProvider(payload) {
+  return fetchJSON('/upstream-providers', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateUpstreamProvider(id, payload) {
+  return fetchJSON(`/upstream-providers/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteUpstreamProvider(id) {
+  await fetchJSON(`/upstream-providers/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }

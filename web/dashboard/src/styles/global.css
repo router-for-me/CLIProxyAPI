@@ -800,6 +800,50 @@ ul.list-bare li { padding: 4px 0; }
   opacity: 1;
   background: rgba(94, 234, 212, 0.18);
 }
+/* Selected/active variant for toggle chips (e.g. per-model routing picker). */
+.chip.chip--selected {
+  background: var(--accent, #5eead4);
+  color: var(--bg, #0b0f14);
+  border-color: var(--accent, #5eead4);
+  cursor: pointer;
+}
+.chip:not(.chip--selected) {
+  cursor: pointer;
+  opacity: 0.7;
+}
+.chip:not(.chip--selected):hover {
+  opacity: 1;
+}
+/* Per-model upstream routing editor rows. */
+.model-routes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.model-routes__row {
+  display: grid;
+  grid-template-columns: minmax(120px, 240px) 1fr;
+  grid-template-rows: auto auto;
+  gap: 4px 12px;
+  align-items: start;
+  padding: 6px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+.model-routes__model {
+  font-size: 12px;
+  align-self: center;
+  word-break: break-all;
+}
+.model-routes__providers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.model-routes__hint {
+  grid-column: 2;
+  font-size: 11px;
+}
 .model-multiselect__dropdown {
   position: absolute;
   top: calc(100% + 4px);
@@ -1934,4 +1978,92 @@ tr:focus-within .row-actions {
   padding: 10px 12px;
   font-size: 12px;
   color: var(--text-muted);
+}
+
+/* --- Upstream Providers page + editor ----------------------------------- */
+
+/* Table cell with a primary line + a small badge beneath it. */
+.cell-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cell-stack__main {
+  font-weight: 500;
+}
+
+.clickable-row {
+  transition: background 0.12s ease;
+}
+.clickable-row:hover {
+  background: var(--bg-elevated);
+}
+.btn-icon {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 14px;
+}
+.btn-icon:hover {
+  border-color: var(--border);
+  color: var(--danger);
+}
+.truncate-cell {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Models tab — one model entry is a stacked group of rows. */
+.up-model-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+  background: var(--bg);
+}
+.up-model-row__meta {
+  align-items: center;
+}
+.up-inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.up-inline-check input[type='checkbox'] {
+  margin: 0;
+}
+.up-sub-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 0;
+}
+.up-sub-fields input {
+  flex: 1;
+}
+
+/* --- OAuth connect / success banner ------------------------------------- */
+.success-banner {
+  background: var(--success-dim);
+  border: 1px solid var(--success);
+  color: var(--success);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  margin-bottom: 14px;
 }

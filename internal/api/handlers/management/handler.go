@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pricingsource"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/upstreamsync"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -80,6 +81,12 @@ type Handler struct {
 	// /v0/management REST surface (per-token policy + audit log). nil when PG
 	// is not configured — the /api-tokens routes return 503 in that case.
 	pgMgmtTokens *store.ManagementTokenStore
+
+	// pgUpstreamProviders stores the normalized upstream_providers rows that
+	// are the source of truth for both the config.yaml-based API-key providers
+	// and the OAuth/file-backed auths. nil when PG is not configured — the
+	// /upstream-providers routes return 503 in that case.
+	pgUpstreamProviders store.UpstreamProviderStore
 
 	// v1ModelsHandler is the http.Handler that serves GET /v1/models. It is
 	// wired by api.Server after route setup so the management handler can
@@ -244,6 +251,18 @@ func (h *Handler) SetManagementTokenStore(tokens *store.ManagementTokenStore) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pgMgmtTokens = tokens
+}
+
+// SetUpstreamProvidersStore wires the PG-backed store for the normalized
+// upstream_providers table. When nil, the /v0/management/upstream-providers
+// routes return 503.
+func (h *Handler) SetUpstreamProvidersStore(upstream store.UpstreamProviderStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pgUpstreamProviders = upstream
 }
 
 // SetErrorMessagesStore wires the PG-backed store for operator-customized
@@ -605,6 +624,49 @@ func (h *Handler) persistLocked(c *gin.Context) bool {
 	}
 	h.reloadConfigAfterManagementSaveAsync(reqCtx, snapshot)
 	return true
+}
+
+// applyUpstreamProviders re-renders the config.yaml provider sections and
+// auth-dir JSON files from the upstream_providers table, then triggers the
+// same config-reload path used by the file-based management mutations so
+// BuildAPIKeyClients + loadFileClients re-run with the new state. It is the
+// bridge that makes the normalized table the source of truth while reusing
+// the existing routing pipeline. Caller must NOT hold h.mu.
+func (h *Handler) applyUpstreamProviders(ctx context.Context) {
+	if h == nil || h.pgUpstreamProviders == nil {
+		return
+	}
+	h.mu.Lock()
+	cfg := h.cfg
+	configPath := h.configFilePath
+	authDir := ""
+	if cfg != nil {
+		authDir = cfg.AuthDir
+	}
+	h.mu.Unlock()
+	if cfg == nil {
+		return
+	}
+	merged, err := upstreamsync.ApplyArtifacts(ctx, h.pgUpstreamProviders, cfg, configPath, authDir)
+	if err != nil {
+		log.WithError(err).Warn("management: apply upstream providers failed")
+		return
+	}
+	// Swap the rendered provider lists into the live config and snapshot for
+	// the reload hook.
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.GeminiKey = merged.GeminiKey
+		h.cfg.InteractionsKey = merged.InteractionsKey
+		h.cfg.CodexKey = merged.CodexKey
+		h.cfg.XAIKey = merged.XAIKey
+		h.cfg.ClaudeKey = merged.ClaudeKey
+		h.cfg.OpenAICompatibility = merged.OpenAICompatibility
+		h.cfg.VertexCompatAPIKey = merged.VertexCompatAPIKey
+	}
+	snapshot := h.reloadSnapshotConfigLocked()
+	h.mu.Unlock()
+	h.reloadConfigAfterManagementSaveAsync(ctx, snapshot)
 }
 
 // Helper methods for simple types

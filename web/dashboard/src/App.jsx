@@ -16,6 +16,7 @@ import SettingsPage from './pages/SettingsPage.jsx';
 import ApiTokensPage from './pages/ApiTokensPage.jsx';
 import ApiTokenDetailPage from './pages/ApiTokenDetailPage.jsx';
 import DeveloperPage from './pages/DeveloperPage.jsx';
+import UpstreamProvidersPage from './pages/UpstreamProvidersPage.jsx';
 import ManageCpaLayout from './pages/manage-cpa/ManageCpaLayout.jsx';
 import OverviewTab from './pages/manage-cpa/OverviewTab.jsx';
 import ProvidersTab from './pages/manage-cpa/ProvidersTab.jsx';
@@ -162,6 +163,7 @@ export default function App() {
             <Route path="/api-tokens" element={<ApiTokensPage />} />
             <Route path="/api-tokens/:id" element={<ApiTokenDetailPage />} />
             <Route path="/developer" element={<DeveloperPage />} />
+            <Route path="/upstream-providers" element={<UpstreamProvidersPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/manage-cpa" element={<ManageCpaLayout />}>
               <Route index element={<OverviewTab />} />

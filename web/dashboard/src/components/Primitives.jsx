@@ -69,9 +69,16 @@ export function Modal({ title, onClose, size = 'md', children, footer }) {
   const sizeClass = ` modal--${size}`;
   const ref = useRef(null);
 
-  // Esc-to-close + focus the first focusable element on open. The backdrop
-  // click handler (below) already closes the modal; this adds keyboard parity
-  // so operators don't have to reach for the mouse.
+  // Keep the latest onClose in a ref so the mount-only effect below can call
+  // it without re-running on every render. Without this, a parent that passes
+  // a fresh closure (e.g. `attemptClose`) on every keystroke would cause the
+  // effect to re-fire and steal focus back to the first input mid-typing.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  // Esc-to-close + focus the first focusable element on OPEN ONLY. The effect
+  // runs once on mount (empty dep array); subsequent renders never re-focus,
+  // so typing into any field stays put even when the parent re-renders.
   useEffect(() => {
     const node = ref.current;
     if (!node) return;
@@ -84,7 +91,7 @@ export function Modal({ title, onClose, size = 'md', children, footer }) {
     function onKey(e) {
       if (e.key === 'Escape') {
         e.stopPropagation();
-        onClose?.();
+        onCloseRef.current?.();
       }
     }
     document.addEventListener('keydown', onKey);
@@ -94,7 +101,7 @@ export function Modal({ title, onClose, size = 'md', children, footer }) {
         previouslyFocused.focus();
       }
     };
-  }, [onClose]);
+  }, []);
 
   return (
     <div className="modal-backdrop" onClick={onClose}>

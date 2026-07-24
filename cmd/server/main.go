@@ -37,6 +37,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/upstreamsync"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -689,11 +690,24 @@ func main() {
 		// suggestions without waiting for an operator refresh.
 		pgPricingSources := store.NewPricingSourceStore(pgStoreInst)
 		pgPricingSourcesDir := pgStoreInst.PricingSourcesDir()
+		// Wire the PG-backed upstream providers store (normalized source of
+		// truth for both API-key providers and OAuth/file-backed auths).
+		pgUpstreamProviders := store.NewUpstreamProviderStore(pgStoreInst)
 		// Seed model catalog when empty so the registry can load from PG.
 		seedCtx, seedCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		if count, countErr := pgModelsStore.Count(seedCtx); countErr == nil && count == 0 {
 			if loadErr := loadEmbeddedModelsToPG(seedCtx, pgSyncAdapter); loadErr != nil {
 				log.Warnf("failed to seed model catalog to PostgreSQL: %v", loadErr)
+			}
+		}
+		// Seed the upstream_providers table from the existing config.yaml +
+		// auth-dir artifacts on first boot (table empty). Subsequent boots load
+		// from the table; the artifacts are then rendered FROM the table.
+		if cfg != nil {
+			if count, countErr := pgUpstreamProviders.Count(seedCtx); countErr == nil && count == 0 {
+				if seedErr := upstreamsync.SeedFromArtifacts(seedCtx, pgUpstreamProviders, cfg, cfg.AuthDir); seedErr != nil {
+					log.Warnf("failed to seed upstream providers to PostgreSQL: %v", seedErr)
+				}
 			}
 		}
 		seedCancel()
@@ -710,6 +724,7 @@ func main() {
 			PricingSources:    pgPricingSources,
 			PricingSourcesDir: pgPricingSourcesDir,
 			ManagementTokens:  pgMgmtTokens,
+			UpstreamProviders: pgUpstreamProviders,
 		}))
 	}
 
