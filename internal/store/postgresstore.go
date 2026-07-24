@@ -908,6 +908,7 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			alias              TEXT,
 			display_name       TEXT,
 				force_mapping      BOOLEAN NOT NULL DEFAULT FALSE,
+				fork               BOOLEAN NOT NULL DEFAULT FALSE,
 				image              BOOLEAN NOT NULL DEFAULT FALSE,
 				input_modalities   JSONB NOT NULL DEFAULT '[]'::jsonb,
 				output_modalities  JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -916,6 +917,15 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		)
 	`, upstreamModelsTable, upstreamProvidersTable)); err != nil {
 		return fmt.Errorf("postgres store: create upstream_provider_models table: %w", err)
+	}
+	// Idempotently add the fork column for databases running an older schema
+	// (CREATE TABLE IF NOT EXISTS does not backfill new columns to existing
+	// tables). Ignore the error when the column already exists.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS fork BOOLEAN NOT NULL DEFAULT FALSE`,
+		upstreamModelsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter upstream_provider_models add fork column: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
 		`CREATE INDEX IF NOT EXISTS idx_upstream_provider_models_provider ON %s(provider_id)`, upstreamModelsTable,

@@ -64,6 +64,9 @@ type UpstreamProvider struct {
 }
 
 // UpstreamProviderModel is one entry of a provider's models[] list.
+// For API-key providers it maps into the per-provider config.Models slice;
+// for OAuth providers it is rendered into the auth file's "model_aliases"
+// array (config.OAuthModelAlias shape: name/alias/fork/display-name/force-mapping).
 type UpstreamProviderModel struct {
 	ID               int64          `json:"id,omitempty"`
 	ProviderID       int64          `json:"provider_id,omitempty"`
@@ -71,6 +74,7 @@ type UpstreamProviderModel struct {
 	Alias            string         `json:"alias,omitempty"`
 	DisplayName      string         `json:"display_name,omitempty"`
 	ForceMapping     bool           `json:"force_mapping,omitempty"`
+	Fork             bool           `json:"fork,omitempty"`
 	Image            bool           `json:"image,omitempty"`
 	InputModalities  []string       `json:"input_modalities,omitempty"`
 	OutputModalities []string       `json:"output_modalities,omitempty"`
@@ -401,7 +405,7 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 	}
 	// Models.
 	mRows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, provider_id, name, alias, display_name, force_mapping, image,
+		SELECT id, provider_id, name, alias, display_name, force_mapping, fork, image,
 		       input_modalities, output_modalities, thinking, sort_order
 		FROM %s WHERE provider_id = $1 ORDER BY sort_order, id
 	`, s.models), p.ID)
@@ -413,7 +417,7 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 		var alias, displayName sql.NullString
 		var inputMod, outputMod, thinking []byte
 		if err = mRows.Scan(&m.ID, &m.ProviderID, &m.Name, &alias, &displayName, &m.ForceMapping,
-			&m.Image, &inputMod, &outputMod, &thinking, &m.SortOrder); err != nil {
+			&m.Fork, &m.Image, &inputMod, &outputMod, &thinking, &m.SortOrder); err != nil {
 			mRows.Close()
 			return fmt.Errorf("postgres store: scan upstream provider model: %w", err)
 		}
@@ -539,11 +543,11 @@ func (s *pgUpstreamProviderStore) replaceChildrenTx(ctx context.Context, tx *sql
 			sortOrder = i
 		}
 		if _, err = tx.ExecContext(ctx, fmt.Sprintf(`
-			INSERT INTO %s (provider_id, name, alias, display_name, force_mapping, image,
+			INSERT INTO %s (provider_id, name, alias, display_name, force_mapping, fork, image,
 			                input_modalities, output_modalities, thinking, sort_order)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		`, s.models), providerID, m.Name, nullableString(m.Alias), nullableString(m.DisplayName),
-			m.ForceMapping, m.Image, input, output, thinking, sortOrder,
+			m.ForceMapping, m.Fork, m.Image, input, output, thinking, sortOrder,
 		); err != nil {
 			return fmt.Errorf("postgres store: insert upstream provider model: %w", err)
 		}

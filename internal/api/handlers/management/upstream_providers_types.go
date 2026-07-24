@@ -47,6 +47,7 @@ type upstreamProviderModelReq struct {
 	Alias            string         `json:"alias,omitempty"`
 	DisplayName      string         `json:"display_name,omitempty"`
 	ForceMapping     bool           `json:"force_mapping,omitempty"`
+	Fork             bool           `json:"fork,omitempty"`
 	Image            bool           `json:"image,omitempty"`
 	InputModalities  []string       `json:"input_modalities,omitempty"`
 	OutputModalities []string       `json:"output_modalities,omitempty"`

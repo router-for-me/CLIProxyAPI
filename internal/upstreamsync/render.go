@@ -276,7 +276,18 @@ func RenderAuthFile(p store.UpstreamProvider) ([]byte, error) {
 	if v, ok := p.ExtraConfig["tool_prefix_disabled"].(bool); ok && v {
 		meta["tool_prefix_disabled"] = true
 	}
-	if v, ok := p.ExtraConfig["model_aliases"]; ok {
+	// Per-account OAuth model aliases are the normalized store.UpstreamProvider
+	// .Models rows for this OAuth provider. Render them into the auth file's
+	// "model_aliases" JSON key, which the synthesizer
+	// (extractOAuthModelAliasesFromMetadata) reads back into config.OAuthModelAlias.
+	// The JSON shape mirrors config.OAuthModelAlias struct tags
+	// (name/alias/fork/display-name/force-mapping) so the round-trip is lossless.
+	if aliases := oauthModelAliasesFromModels(p.Models); len(aliases) > 0 {
+		meta["model_aliases"] = aliases
+	} else if v, ok := p.ExtraConfig["model_aliases"]; ok {
+		// Backward-compat: rows seeded before this field was modelled still
+		// carry the raw blob in extra_config. Pass it through unchanged until
+		// the row is re-saved through the editor (which populates Models).
 		meta["model_aliases"] = v
 	}
 	// Cloak (Claude OAuth).
@@ -321,4 +332,42 @@ func RenderAuthFile(p store.UpstreamProvider) ([]byte, error) {
 		meta["expired"] = true
 	}
 	return json.MarshalIndent(meta, "", "  ")
+}
+
+// oauthModelAliasesFromModels renders a provider's Models rows into the
+// model_aliases array shape the synthesizer reads. Entries with no name or no
+// alias are dropped (mirrors config.SanitizeOAuthModelAlias semantics), so a
+// provider with only "name" rows (no aliasing) produces an empty array and the
+// model_aliases key is omitted by the caller. The keys match config.OAuthModelAlias
+// JSON tags: name, alias, fork, display-name, force-mapping.
+func oauthModelAliasesFromModels(models []store.UpstreamProviderModel) []map[string]any {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(models))
+	for _, m := range models {
+		name := strings.TrimSpace(m.Name)
+		alias := strings.TrimSpace(m.Alias)
+		if name == "" || alias == "" || strings.EqualFold(name, alias) {
+			continue
+		}
+		entry := map[string]any{
+			"name":  name,
+			"alias": alias,
+		}
+		if m.Fork {
+			entry["fork"] = true
+		}
+		if dn := strings.TrimSpace(m.DisplayName); dn != "" {
+			entry["display-name"] = dn
+		}
+		if m.ForceMapping {
+			entry["force-mapping"] = true
+		}
+		out = append(out, entry)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

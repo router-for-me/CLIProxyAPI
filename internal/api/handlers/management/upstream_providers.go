@@ -94,6 +94,7 @@ func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
 			Alias:            m.Alias,
 			DisplayName:      m.DisplayName,
 			ForceMapping:     m.ForceMapping,
+			Fork:             m.Fork,
 			Image:            m.Image,
 			InputModalities:  m.InputModalities,
 			OutputModalities: m.OutputModalities,

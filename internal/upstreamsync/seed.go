@@ -315,7 +315,20 @@ func providerFromAuthJSON(fileName string, raw []byte) (store.UpstreamProvider, 
 		setExtra(&p, "tool_prefix_disabled", true)
 	}
 	if v, ok := meta["model_aliases"]; ok {
-		setExtra(&p, "model_aliases", v)
+		// Per-account OAuth aliases are normalized into Models rows so they
+		// round-trip through the editor and RenderAuthFile. Anything we cannot
+		// decode falls back to extra_config passthrough to avoid data loss.
+		if rows := modelsFromOAuthAliases(v); len(rows) > 0 {
+			p.Models = append(p.Models, rows...)
+		} else {
+			setExtra(&p, "model_aliases", v)
+		}
+	} else if v, ok := meta["model-aliases"]; ok {
+		if rows := modelsFromOAuthAliases(v); len(rows) > 0 {
+			p.Models = append(p.Models, rows...)
+		} else {
+			setExtra(&p, "model_aliases", v)
+		}
 	}
 	if v := valueString(meta["cloak_mode"]); v != "" {
 		p.CloakMode = v
@@ -371,7 +384,7 @@ func providerFromAuthJSON(fileName string, raw []byte) (store.UpstreamProvider, 
 	modelled := map[string]bool{
 		"type": true, "email": true, "label": true, "disabled": true,
 		"prefix": true, "disable_cooling": true, "request_retry": true,
-		"tool_prefix_disabled": true, "model_aliases": true,
+		"tool_prefix_disabled": true, "model_aliases": true, "model-aliases": true,
 		"cloak_mode": true, "cloak_strict_mode": true,
 		"cloak_sensitive_words": true, "cloak_cache_user_id": true,
 		"access_token": true, "refresh_token": true, "token": true,
@@ -393,6 +406,48 @@ func setExtra(p *store.UpstreamProvider, key string, value any) {
 		p.ExtraConfig = make(map[string]any)
 	}
 	p.ExtraConfig[key] = value
+}
+
+// modelsFromOAuthAliases decodes an auth-file "model_aliases"/"model-aliases"
+// value (raw decoded JSON: []any of map[string]any) into normalized
+// store.UpstreamProviderModel rows using the config.OAuthModelAlias shape
+// (name/alias/fork/display-name/force-mapping). Returns nil when the value
+// cannot be decoded or yields no valid entries, so the caller can fall back to
+// extra_config passthrough and avoid data loss for shapes the editor does not
+// model.
+func modelsFromOAuthAliases(v any) []store.UpstreamProviderModel {
+	if v == nil {
+		return nil
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	var aliases []config.OAuthModelAlias
+	if err := json.Unmarshal(raw, &aliases); err != nil {
+		return nil
+	}
+	// Sanitize via the shared config helper (drops name==""/alias==""/dup
+	// aliases) by routing through a one-channel config and back.
+	cfg := config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{"auth": aliases},
+	}
+	cfg.SanitizeOAuthModelAlias()
+	cleaned := cfg.OAuthModelAlias["auth"]
+	if len(cleaned) == 0 {
+		return nil
+	}
+	out := make([]store.UpstreamProviderModel, 0, len(cleaned))
+	for _, a := range cleaned {
+		out = append(out, store.UpstreamProviderModel{
+			Name:         a.Name,
+			Alias:        a.Alias,
+			Fork:         a.Fork,
+			DisplayName:  a.DisplayName,
+			ForceMapping: a.ForceMapping,
+		})
+	}
+	return out
 }
 
 // encodeThinkingSupport serializes *registry.ThinkingSupport into a JSONB-
