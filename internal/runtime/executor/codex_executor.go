@@ -1760,12 +1760,53 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 		auth.Metadata["account_id"] = td.AccountID
 	}
 	auth.Metadata["email"] = td.Email
+	applyCodexCapacityClaims(auth, td.IDToken)
 	// Use unified key in files
 	auth.Metadata["expired"] = td.Expire
 	auth.Metadata["type"] = "codex"
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
+}
+
+func applyCodexCapacityClaims(auth *cliproxyauth.Auth, idToken string) {
+	if auth == nil || strings.TrimSpace(idToken) == "" {
+		return
+	}
+	claims, errParse := codexauth.ParseJWTToken(idToken)
+	if errParse != nil || claims == nil {
+		if errParse != nil {
+			log.Warnf("codex executor: failed to parse refreshed capacity claims: %v", errParse)
+		}
+		return
+	}
+
+	info := claims.CodexAuthInfo
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	if planType := strings.TrimSpace(info.ChatgptPlanType); planType != "" {
+		auth.Attributes["plan_type"] = planType
+		auth.Metadata["chatgpt_plan_type"] = planType
+	}
+	if accountID := strings.TrimSpace(info.ChatgptAccountID); accountID != "" {
+		auth.Metadata["chatgpt_account_id"] = accountID
+	} else {
+		delete(auth.Metadata, "chatgpt_account_id")
+	}
+	if info.ChatgptSubscriptionActiveStart != nil {
+		auth.Metadata["chatgpt_subscription_active_start"] = info.ChatgptSubscriptionActiveStart
+	} else {
+		delete(auth.Metadata, "chatgpt_subscription_active_start")
+	}
+	if info.ChatgptSubscriptionActiveUntil != nil {
+		auth.Metadata["chatgpt_subscription_active_until"] = info.ChatgptSubscriptionActiveUntil
+	} else {
+		delete(auth.Metadata, "chatgpt_subscription_active_until")
+	}
 }
 
 type codexIdentityConfuseState struct {
