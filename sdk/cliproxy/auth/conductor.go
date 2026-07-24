@@ -458,13 +458,18 @@ func (m *Manager) RefreshSchedulerAll() {
 	}
 }
 
+type registryCooldownCandidate struct {
+	stateKey string
+	model    string
+}
+
 // ReconcileRegistryModelStates aligns per-model runtime state with the current
 // registry snapshot for one auth.
 //
-// Supported models are reset to a clean state because re-registration already
-// cleared the registry-side cooldown/suspension snapshot. ModelStates for
-// models that are no longer present in the registry are pruned entirely so
-// renamed/removed models cannot keep auth-level status stale.
+// Active cooldowns for supported models are preserved across re-registration
+// and restored into the registry. ModelStates for models that are no longer
+// present in the registry are pruned entirely so renamed/removed models cannot
+// keep auth-level status stale.
 func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID string) {
 	if m == nil || authID == "" {
 		return
@@ -484,12 +489,14 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	}
 
 	var snapshot *Auth
+	var cooldowns []registryCooldownCandidate
 	now := time.Now()
 
 	m.mu.Lock()
 	auth, ok := m.auths[authID]
 	if ok && auth != nil && len(auth.ModelStates) > 0 {
 		changed := false
+		preserved := false
 		for modelKey, state := range auth.ModelStates {
 			baseModel := canonicalModelKey(modelKey)
 			if baseModel == "" {
@@ -509,30 +516,148 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 			if modelStateIsClean(state) {
 				continue
 			}
+			if state.Unavailable && state.NextRetryAfter.After(now) {
+				preserved = true
+				if _, _, suspend := registrySuspensionForModelState(state); suspend {
+					cooldowns = append(cooldowns, registryCooldownCandidate{
+						stateKey: modelKey,
+						model:    baseModel,
+					})
+				}
+				continue
+			}
 			resetModelState(state, now)
 			changed = true
 		}
 		if len(auth.ModelStates) == 0 {
 			auth.ModelStates = nil
 		}
-		if changed {
+		if changed || preserved {
+			previousUnavailable := auth.Unavailable
+			previousNextRetryAfter := auth.NextRetryAfter
+			previousQuota := auth.Quota
+			previousStatus := auth.Status
+			previousStatusMessage := auth.StatusMessage
+			previousLastError := cloneError(auth.LastError)
+
 			updateAggregatedAvailability(auth, now)
-			if !hasModelError(auth, now) {
-				auth.LastError = nil
-				auth.StatusMessage = ""
-				auth.Status = StatusActive
+			updateAggregatedModelError(auth, now)
+			aggregateChanged := previousUnavailable != auth.Unavailable ||
+				!previousNextRetryAfter.Equal(auth.NextRetryAfter) ||
+				!cooldownQuotaEqual(previousQuota, auth.Quota) ||
+				previousStatus != auth.Status ||
+				previousStatusMessage != auth.StatusMessage ||
+				!cooldownErrorEqual(previousLastError, auth.LastError)
+			if changed || aggregateChanged {
+				auth.UpdatedAt = now
+				if errPersist := m.persist(ctx, auth); errPersist != nil {
+					logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth changes during model state reconciliation: %v", errPersist)
+				}
+				snapshot = auth.Clone()
 			}
-			auth.UpdatedAt = now
-			if errPersist := m.persist(ctx, auth); errPersist != nil {
-				logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth changes during model state reconciliation: %v", errPersist)
-			}
-			snapshot = auth.Clone()
 		}
+	}
+	if m.scheduler != nil && snapshot != nil {
+		m.scheduler.upsertAuth(snapshot)
 	}
 	m.mu.Unlock()
 
-	if m.scheduler != nil && snapshot != nil {
-		m.scheduler.upsertAuth(snapshot)
+	for _, cooldown := range cooldowns {
+		m.restoreRegistryCooldown(authID, cooldown)
+	}
+}
+
+// restoreRegistryCooldown revalidates a reconciliation candidate before
+// changing the registry. Holding m.mu for the registry writes orders them with
+// concurrent MarkResult, ResetQuota, and Remove state changes so a stale
+// snapshot cannot re-suspend a model that has already recovered.
+func (m *Manager) restoreRegistryCooldown(authID string, cooldown registryCooldownCandidate) {
+	if m == nil || authID == "" || cooldown.stateKey == "" || cooldown.model == "" {
+		return
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	auth := m.auths[authID]
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		return
+	}
+	state := auth.ModelStates[cooldown.stateKey]
+	if state == nil || !state.Unavailable || !state.NextRetryAfter.After(time.Now()) {
+		return
+	}
+	reason, quota, suspend := registrySuspensionForModelState(state)
+	if !suspend {
+		return
+	}
+
+	reg := registry.GetGlobalRegistry()
+	if quota {
+		reg.SetModelQuotaExceeded(authID, cooldown.model)
+	}
+	reg.SuspendClientModel(authID, cooldown.model, reason)
+}
+
+func updateAggregatedModelError(auth *Auth, now time.Time) {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		return
+	}
+	var latest *ModelState
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		activeError := state.LastError != nil
+		if !activeError && state.Status == StatusError {
+			activeError = state.Unavailable && state.NextRetryAfter.After(now)
+		}
+		if !activeError {
+			continue
+		}
+		if latest == nil || state.UpdatedAt.After(latest.UpdatedAt) {
+			latest = state
+		}
+	}
+	if latest == nil {
+		auth.LastError = nil
+		auth.StatusMessage = ""
+		auth.Status = StatusActive
+		return
+	}
+	auth.LastError = cloneError(latest.LastError)
+	auth.StatusMessage = latest.StatusMessage
+	if auth.StatusMessage == "" && auth.LastError != nil {
+		auth.StatusMessage = auth.LastError.Message
+	}
+	auth.Status = StatusError
+}
+
+func registrySuspensionForModelState(state *ModelState) (reason string, quota, suspend bool) {
+	if state == nil {
+		return "", false, false
+	}
+	if state.Quota.Exceeded && strings.EqualFold(strings.TrimSpace(state.Quota.Reason), "quota") {
+		return "quota", true, true
+	}
+	if isModelSupportResultError(state.LastError) {
+		return "model_not_supported", false, true
+	}
+	if isInvalidGrantResultError(state.LastError) {
+		return "invalid_grant", false, true
+	}
+	if isCloudflareChallengeResultError(state.LastError) {
+		return "", false, false
+	}
+	switch statusCodeFromResult(state.LastError) {
+	case http.StatusUnauthorized:
+		return "unauthorized", false, true
+	case http.StatusPaymentRequired, http.StatusForbidden:
+		return "payment_required", false, true
+	case http.StatusNotFound:
+		return "not_found", false, true
+	default:
+		return "", false, false
 	}
 }
 
