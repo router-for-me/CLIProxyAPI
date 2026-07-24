@@ -1406,12 +1406,10 @@ func TestClaudeExecutorExecuteStreamRetainsStartedCacheStateUntilStreamEnds(t *t
 	case <-testContext.Done():
 		t.Fatalf("timed out waiting for captured upstream body: %v", testContext.Err())
 	}
-	// Recompute the plan directly against the runtime (not through
-	// executor.planAdaptiveClaudePromptCache, which now short-circuits once
-	// cache_control is present) using the actual bytes sent upstream. This
-	// reads the ground-truth breakpoint locations the first planning pass
-	// already committed, so the resulting prefix keys exactly match the ones
-	// registered when the in-flight request acquired its flight.
+	// Recompute the plan directly against the runtime using the actual bytes
+	// sent upstream. This reads the ground-truth breakpoint locations the first
+	// planning pass already committed, so the resulting prefix keys exactly
+	// match the ones registered when the in-flight request acquired its flight.
 	scopeKey := claudePromptCacheScopeKey(auth, "key-123", server.URL, "claude-sonnet-4-5")
 	officialAnthropic := isOfficialAnthropicBaseURL(server.URL)
 	_, matchingPlan := runtime.PlanClaudePromptCache(
@@ -1419,7 +1417,7 @@ func TestClaudeExecutorExecuteStreamRetainsStartedCacheStateUntilStreamEnds(t *t
 		upstreamBody,
 		helps.ClaudePromptCacheCapabilities{
 			AutomaticHistory: officialAnthropic,
-			ExplicitHistory:  !officialAnthropic,
+			ExplicitHistory:  true,
 		},
 	)
 	if matchingPlan == nil || len(matchingPlan.Prefixes) == 0 {
@@ -1457,15 +1455,18 @@ func TestClaudeExecutorExecuteStreamRetainsStartedCacheStateUntilStreamEnds(t *t
 	}
 }
 
-func TestClaudeExecutorAdaptiveDoesNotTouchUserCacheControl(t *testing.T) {
+func TestClaudeExecutorAdaptiveStripsAndReplansUserCacheControl(t *testing.T) {
 	executor := NewClaudeExecutor(&config.Config{
 		ClaudePromptCache: config.ClaudePromptCacheConfig{Mode: config.ClaudePromptCacheModeAdaptive},
 	})
 	auth := &cliproxyauth.Auth{ID: "user-marked-auth"}
 
-	// Client already placed 4 in-body cache_control breakpoints (at Anthropic's limit).
+	// Client already placed in-body + top-level cache_control. Adaptive mode
+	// must strip them and re-apply CPA breakpoints for official Anthropic:
+	// tools-tail + system-tail + second-to-last user + top-level automatic.
 	payload := []byte(`{
 		"model":"claude-sonnet-4-5",
+		"cache_control":{"type":"ephemeral"},
 		"tools":[{"name":"Read","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],
 		"system":[{"type":"text","text":"system","cache_control":{"type":"ephemeral"}}],
 		"messages":[
@@ -1484,26 +1485,40 @@ func TestClaudeExecutorAdaptiveDoesNotTouchUserCacheControl(t *testing.T) {
 		bytes.Clone(payload),
 	)
 
-	if plan != nil {
-		t.Fatalf("adaptive planner must not produce a plan when the client already owns cache_control, got %+v", plan.Summary)
+	if plan == nil {
+		t.Fatal("adaptive planner must produce a plan after stripping client cache_control")
 	}
-	if !bytes.Equal(plannedBody, payload) {
-		t.Fatalf("adaptive planner modified a user-marked request:\nbefore=%s\nafter=%s", payload, plannedBody)
+	if !plan.Summary.AutomaticHistory {
+		t.Fatal("official Anthropic adaptive plan must keep automatic history")
 	}
-	if gjson.GetBytes(plannedBody, "cache_control").Exists() {
-		t.Fatal("adaptive planner must not add a top-level automatic-history cache_control when the client already marked breakpoints")
+	if !gjson.GetBytes(plannedBody, "cache_control").Exists() {
+		t.Fatal("official Anthropic adaptive plan must set top-level cache_control")
+	}
+	if !gjson.GetBytes(plannedBody, "tools.0.cache_control").Exists() {
+		t.Fatal("adaptive plan missing tools-tail breakpoint")
+	}
+	if !gjson.GetBytes(plannedBody, "system.0.cache_control").Exists() {
+		t.Fatal("adaptive plan missing system-tail breakpoint")
+	}
+	if !gjson.GetBytes(plannedBody, "messages.0.content.0.cache_control").Exists() {
+		t.Fatal("adaptive plan missing second-to-last user breakpoint")
+	}
+	if gjson.GetBytes(plannedBody, "messages.2.content.0.cache_control").Exists() {
+		t.Fatal("adaptive plan must not leave cache_control on the latest user turn")
+	}
+	if got := countCacheControls(plannedBody); got != 3 {
+		t.Fatalf("in-body cache_control count = %d, want 3", got)
 	}
 }
 
-func TestClaudeExecutorAdaptiveLeavesOverLimitUserCacheControlForUpstreamToReject(t *testing.T) {
+func TestClaudeExecutorAdaptiveReplansOverLimitUserCacheControl(t *testing.T) {
 	executor := NewClaudeExecutor(&config.Config{
 		ClaudePromptCache: config.ClaudePromptCacheConfig{Mode: config.ClaudePromptCacheModeAdaptive},
 	})
 	auth := &cliproxyauth.Auth{ID: "over-limit-auth"}
 
 	// Client marked 5 breakpoints -- one over Anthropic's limit. Adaptive mode
-	// must not "fix" this by deleting or moving any of them; the upstream
-	// alone decides whether to accept or reject the request.
+	// strips them and re-plans within the supported budget.
 	payload := []byte(`{
 		"model":"claude-sonnet-4-5",
 		"tools":[{"name":"Read","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],
@@ -1524,14 +1539,17 @@ func TestClaudeExecutorAdaptiveLeavesOverLimitUserCacheControlForUpstreamToRejec
 		bytes.Clone(payload),
 	)
 
-	if plan != nil {
-		t.Fatalf("adaptive planner must not produce a plan for an over-limit user-marked request, got %+v", plan.Summary)
+	if plan == nil {
+		t.Fatal("adaptive planner must produce a plan after stripping over-limit client cache_control")
 	}
-	if got := countCacheControls(plannedBody); got != 5 {
-		t.Fatalf("cache_control count = %d, want 5 (untouched)", got)
+	if got := countCacheControls(plannedBody); got != 3 {
+		t.Fatalf("in-body cache_control count = %d, want 3 after replan", got)
 	}
-	if !bytes.Equal(plannedBody, payload) {
-		t.Fatal("adaptive planner must leave an over-limit user-marked request byte-for-byte unchanged")
+	if !gjson.GetBytes(plannedBody, "cache_control").Exists() {
+		t.Fatal("official Anthropic adaptive plan must set top-level cache_control")
+	}
+	if gjson.GetBytes(plannedBody, "messages.1.content.0.cache_control").Exists() {
+		t.Fatal("adaptive replan must not keep cache_control on assistant content")
 	}
 }
 

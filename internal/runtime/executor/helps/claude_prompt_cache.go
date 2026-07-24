@@ -986,6 +986,32 @@ func (runtime *ClaudePromptCacheRuntime) trimDiagnosticsLocked() {
 	}
 }
 
+// StripAllClaudeCacheControls removes every client/top-level/in-body cache_control
+// marker so adaptive planning can re-apply CPA's breakpoint strategy from scratch.
+func StripAllClaudeCacheControls(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+	updatedPayload := payload
+	if gjson.GetBytes(updatedPayload, "cache_control").Exists() {
+		if nextPayload, errDelete := sjson.DeleteBytes(updatedPayload, "cache_control"); errDelete == nil {
+			updatedPayload = nextPayload
+		}
+	}
+	locations, invalidPaths := collectClaudeCacheBreakpoints(updatedPayload)
+	for _, invalidPath := range invalidPaths {
+		if nextPayload, errDelete := sjson.DeleteBytes(updatedPayload, invalidPath); errDelete == nil {
+			updatedPayload = nextPayload
+		}
+	}
+	for _, location := range locations {
+		if nextPayload, errDelete := sjson.DeleteBytes(updatedPayload, location.path); errDelete == nil {
+			updatedPayload = nextPayload
+		}
+	}
+	return updatedPayload
+}
+
 func collectClaudeCacheBreakpoints(payload []byte) ([]claudeBreakpointLocation, []string) {
 	locations := make([]claudeBreakpointLocation, 0, ClaudePromptCacheMaxBreakpoints)
 	invalidPaths := make([]string, 0)

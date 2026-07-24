@@ -17,7 +17,7 @@ func TestPlanClaudePromptCacheUsesAutomaticHistoryForOfficialAnthropic(t *testin
 	plannedPayload, plan := runtime.PlanClaudePromptCache(
 		"official-scope",
 		payload,
-		ClaudePromptCacheCapabilities{AutomaticHistory: true},
+		ClaudePromptCacheCapabilities{AutomaticHistory: true, ExplicitHistory: true},
 	)
 
 	if plan == nil {
@@ -29,12 +29,15 @@ func TestPlanClaudePromptCacheUsesAutomaticHistoryForOfficialAnthropic(t *testin
 	if !isValidClaudeCacheControl(gjson.GetBytes(plannedPayload, "cache_control")) {
 		t.Fatalf("top-level cache_control = %s, want valid automatic control", gjson.GetBytes(plannedPayload, "cache_control").Raw)
 	}
+	if !gjson.GetBytes(plannedPayload, "messages.0.content.0.cache_control").Exists() {
+		t.Fatal("official Anthropic plan missing second-to-last user breakpoint")
+	}
 	locations, invalidPaths := collectClaudeCacheBreakpoints(plannedPayload)
 	if len(invalidPaths) != 0 {
 		t.Fatalf("invalid cache-control paths = %v, want none", invalidPaths)
 	}
-	if len(locations) != 2 {
-		t.Fatalf("explicit breakpoint count = %d, want 2", len(locations))
+	if len(locations) != 3 {
+		t.Fatalf("explicit breakpoint count = %d, want 3 (tools-tail + system-tail + history)", len(locations))
 	}
 	if plan.Summary.FinalBreakpoints != len(locations) {
 		t.Fatalf("summary final breakpoints = %d, want %d", plan.Summary.FinalBreakpoints, len(locations))
@@ -580,6 +583,27 @@ func TestClaudePromptCacheDiagnosticsRejectsCompletionFromEvictedGeneration(t *t
 	previousMessageID, _ := runtime.BeginDiagnostic("diagnostic-key")
 	if previousMessageID != "" {
 		t.Fatalf("previous message ID = %q, want empty after evicted generation completion", previousMessageID)
+	}
+}
+
+func TestStripAllClaudeCacheControlsRemovesTopLevelAndInBody(t *testing.T) {
+	payload := []byte(`{
+		"cache_control":{"type":"ephemeral"},
+		"tools":[{"name":"Read","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],
+		"system":[{"type":"text","text":"system","cache_control":{"type":"ephemeral"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}]
+	}`)
+
+	stripped := StripAllClaudeCacheControls(payload)
+	if gjson.GetBytes(stripped, "cache_control").Exists() {
+		t.Fatal("top-level cache_control was not stripped")
+	}
+	locations, invalidPaths := collectClaudeCacheBreakpoints(stripped)
+	if len(invalidPaths) != 0 {
+		t.Fatalf("invalid paths after strip = %v", invalidPaths)
+	}
+	if len(locations) != 0 {
+		t.Fatalf("in-body breakpoints after strip = %d, want 0", len(locations))
 	}
 }
 
