@@ -212,6 +212,11 @@ codex:
   # Some superstitious users believe request tracking identifiers can be used
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
+  # When true, optimize Codex Desktop and codex-tui requests for multi-agent v2.
+  # This refreshes Codex spawn_agent model details, removes message parameter encryption,
+  # normalizes encrypted agent_message content for Codex, and converts agent_message input
+  # into standard user messages for non-Codex upstream protocols.
+  optimize-multi-agent-v2: false
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true

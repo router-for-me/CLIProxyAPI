@@ -3,7 +3,9 @@ package openai
 import (
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 )
 
 func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
@@ -189,7 +191,7 @@ func TestCodexClientModelsResponse_RequiresTemplateAndCodexProvidersForSearchToo
 		{"id": "gpt-5.6-sol"},
 	}, func(id string) []string {
 		return providers[id]
-	})
+	}, false)
 	models, ok := resp["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
@@ -291,5 +293,69 @@ func TestLoadCodexClientModelTemplatesRefreshesOnRevision(t *testing.T) {
 	}
 	if got := stringModelValue(templates["gpt-5.5"], "display_name"); got != "Second" {
 		t.Fatalf("cached display_name = %q, want Second", got)
+	}
+}
+
+func TestApplyCodexClientModelMetadataPreservesMultiAgentVersionWhenDisabled(t *testing.T) {
+	entry := map[string]any{"multi_agent_version": "v1"}
+	model := map[string]any{"id": "custom-model"}
+
+	applyCodexClientModelMetadata(entry, "custom-model", model, false)
+	if got := entry["multi_agent_version"]; got != "v1" {
+		t.Fatalf("disabled multi_agent_version = %#v, want preserved v1", got)
+	}
+
+	applyCodexClientModelMetadata(entry, "custom-model", model, true)
+	if got := entry["multi_agent_version"]; got != "v2" {
+		t.Fatalf("enabled multi_agent_version = %#v, want v2", got)
+	}
+}
+
+func TestCodexClientModelsResponseMultiAgentV2FollowsConfig(t *testing.T) {
+	modelID := "codex-client-multi-agent-v2-test"
+	clientID := "codex-client-multi-agent-v2-test-client"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(clientID, "openai-compatibility", []*registry.ModelInfo{{ID: modelID}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&config.SDKConfig{}, nil)
+	handler := NewOpenAIAPIHandler(base)
+	for _, tt := range []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "disabled", enabled: false},
+		{name: "enabled", enabled: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			base.Cfg.CodexOptimizeMultiAgentV2 = tt.enabled
+			response := handler.codexClientModelsResponse()
+			models, ok := response["models"].([]map[string]any)
+			if !ok {
+				t.Fatalf("models type = %T, want []map[string]any", response["models"])
+			}
+			var entry map[string]any
+			for _, model := range models {
+				if stringModelValue(model, "slug") == modelID {
+					entry = model
+					break
+				}
+			}
+			if entry == nil {
+				t.Fatalf("missing synthesized model %q", modelID)
+			}
+			value, exists := entry["multi_agent_version"]
+			if tt.enabled {
+				if !exists || value != "v2" {
+					t.Fatalf("multi_agent_version = %#v, want v2", value)
+				}
+				return
+			}
+			if !exists || value != nil {
+				t.Fatalf("multi_agent_version = %#v, want preserved null", value)
+			}
+		})
 	}
 }
