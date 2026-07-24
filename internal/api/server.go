@@ -971,6 +971,14 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 		mgmt.PATCH("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 
+		mgmt.GET("/kimi-usage-query-enabled", s.mgmt.GetKimiUsageQueryEnabled)
+		mgmt.PUT("/kimi-usage-query-enabled", s.mgmt.PutKimiUsageQueryEnabled)
+		mgmt.PATCH("/kimi-usage-query-enabled", s.mgmt.PutKimiUsageQueryEnabled)
+
+		mgmt.GET("/kimi-usage-query-interval-seconds", s.mgmt.GetKimiUsageQueryIntervalSeconds)
+		mgmt.PUT("/kimi-usage-query-interval-seconds", s.mgmt.PutKimiUsageQueryIntervalSeconds)
+		mgmt.PATCH("/kimi-usage-query-interval-seconds", s.mgmt.PutKimiUsageQueryIntervalSeconds)
+
 		mgmt.GET("/proxy-url", s.mgmt.GetProxyURL)
 		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)
 		mgmt.PATCH("/proxy-url", s.mgmt.PutProxyURL)
@@ -2015,6 +2023,27 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 
 	if s.handlers != nil && s.handlers.AuthManager != nil {
 		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
+
+		// Dynamically restart the Kimi usage probe when the management center
+		// changes the relevant config fields. Home mode delegates credential
+		// management to the Home control plane; the local probe must not run.
+		prevEnabled := false
+		prevInterval := 0
+		if oldCfg != nil {
+			prevEnabled = oldCfg.KimiUsageQueryEnabled
+			prevInterval = oldCfg.KimiUsageQueryIntervalSeconds
+		}
+		if cfg.Home.Enabled {
+			s.handlers.AuthManager.StopKimiUsageProbe()
+		} else if !prevEnabled && cfg.KimiUsageQueryEnabled {
+			interval := time.Duration(cfg.KimiUsageQueryIntervalSeconds) * time.Second
+			s.handlers.AuthManager.StartKimiUsageProbe(context.Background(), interval)
+		} else if prevEnabled && !cfg.KimiUsageQueryEnabled {
+			s.handlers.AuthManager.StopKimiUsageProbe()
+		} else if prevEnabled && cfg.KimiUsageQueryEnabled && prevInterval != cfg.KimiUsageQueryIntervalSeconds {
+			interval := time.Duration(cfg.KimiUsageQueryIntervalSeconds) * time.Second
+			s.handlers.AuthManager.StartKimiUsageProbe(context.Background(), interval)
+		}
 	}
 
 	// Update log level dynamically when debug flag changes

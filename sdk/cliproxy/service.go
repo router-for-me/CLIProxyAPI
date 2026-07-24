@@ -2501,6 +2501,12 @@ func (s *Service) Run(ctx context.Context) error {
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}
 
+	// Kimi usage probe — opt-in per config, off by default.
+	if s.coreManager != nil && !homeEnabled && s.cfg != nil && s.cfg.KimiUsageQueryEnabled {
+		interval := time.Duration(s.cfg.KimiUsageQueryIntervalSeconds) * time.Second
+		s.coreManager.StartKimiUsageProbe(context.Background(), interval)
+	}
+
 	select {
 	case <-ctx.Done():
 		log.Debug("service context cancelled, shutting down...")
@@ -2582,6 +2588,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
+			s.coreManager.StopKimiUsageProbe()
 		}
 		if s.watcher != nil {
 			if err := s.watcher.Stop(); err != nil {

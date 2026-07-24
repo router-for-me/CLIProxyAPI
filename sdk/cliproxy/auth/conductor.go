@@ -268,6 +268,13 @@ type Manager struct {
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
 
+	// Kimi usage probe state: periodically queries /v1/usages for auths whose
+	// base_url matches api.kimi.com/coding, cooling them down to the real resetTime
+	// when a rolling window is exhausted. Started/stopped by the service layer.
+	usageProbeMu     sync.Mutex
+	usageProbeCancel context.CancelFunc
+	usageProbeWG     sync.WaitGroup
+
 	requestPrepareLocks sync.Map
 	// refreshLocks serializes credential refresh per auth ID so concurrent
 	// 401 recoveries and auto-refresh workers do not race the same refresh_token.
