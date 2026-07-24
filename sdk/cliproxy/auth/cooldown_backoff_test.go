@@ -152,6 +152,87 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 	}
 }
 
+func TestMarkResultInvalidGrantAppliesCooldown(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "auth-invalid-grant",
+		Provider: "antigravity",
+		Metadata: map[string]any{"type": "antigravity"},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: "antigravity",
+		Model:    "claude-sonnet-4-20250514",
+		Success:  false,
+		Error: &Error{
+			Code:       "invalid_request_error",
+			Message:    `{"error":"invalid_grant","error_description":"Bad Request"}`,
+			HTTPStatus: http.StatusBadRequest,
+		},
+	})
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("expected auth to exist")
+	}
+	state := updated.ModelStates["claude-sonnet-4-20250514"]
+	if state == nil {
+		t.Fatal("expected model state after failure")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatal("expected cooldown (non-zero NextRetryAfter) for invalid_grant, got zero")
+	}
+	if !state.NextRetryAfter.After(time.Now()) {
+		t.Fatalf("expected cooldown in the future, got %v", state.NextRetryAfter)
+	}
+}
+
+func TestApplyAuthFailureStateInvalidGrantAppliesCooldown(t *testing.T) {
+	now := time.Now()
+	invalidGrantErr := &Error{
+		Code:       "invalid_request_error",
+		Message:    `{"error":"invalid_grant","error_description":"Bad Request"}`,
+		HTTPStatus: http.StatusBadRequest,
+	}
+	auth := &Auth{ID: "auth-grant-cooldown"}
+
+	applyAuthFailureState(auth, invalidGrantErr, nil, now, false)
+
+	if auth.StatusMessage != "unauthorized" {
+		t.Fatalf("StatusMessage = %q, want %q", auth.StatusMessage, "unauthorized")
+	}
+	if auth.NextRetryAfter.IsZero() {
+		t.Fatal("expected NextRetryAfter to be set for invalid_grant")
+	}
+	if !auth.NextRetryAfter.Equal(now.Add(30 * time.Minute)) {
+		t.Fatalf("NextRetryAfter = %v, want %v", auth.NextRetryAfter, now.Add(30*time.Minute))
+	}
+}
+
+func TestIsRequestInvalidErrorExcludesInvalidGrant(t *testing.T) {
+	grantErr := &Error{
+		Code:       "invalid_request_error",
+		Message:    `{"error":"invalid_grant","error_description":"Bad Request"}`,
+		HTTPStatus: http.StatusBadRequest,
+	}
+	if isRequestInvalidError(grantErr) {
+		t.Fatal("isRequestInvalidError should return false for invalid_grant wrapped in invalid_request_error")
+	}
+
+	normalBadReq := &Error{
+		Code:       "invalid_request_error",
+		Message:    "invalid parameter: temperature must be between 0 and 2",
+		HTTPStatus: http.StatusBadRequest,
+	}
+	if !isRequestInvalidError(normalBadReq) {
+		t.Fatal("isRequestInvalidError should return true for genuine invalid_request_error")
+	}
+}
+
 func TestJitteredCooldownWaitBounds(t *testing.T) {
 	cases := []struct {
 		wait      time.Duration

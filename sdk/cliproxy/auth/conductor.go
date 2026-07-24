@@ -4411,7 +4411,20 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								state.NextRetryAfter = nextTransientErrorRetryAfter(now)
 							}
 						default:
-							state.NextRetryAfter = time.Time{}
+							if isOAuthInvalidGrantResultError(result.Error) {
+								if disableCooling {
+									state.NextRetryAfter = time.Time{}
+									auth.NextRetryAfter = time.Time{}
+								} else {
+									next := now.Add(30 * time.Minute)
+									state.NextRetryAfter = next
+									auth.NextRetryAfter = next
+									suspendReason = "unauthorized"
+									shouldSuspendModel = true
+								}
+							} else {
+								state.NextRetryAfter = time.Time{}
+							}
 						}
 					}
 
@@ -4731,6 +4744,20 @@ func isUnauthorizedError(err error) bool {
 	}
 	raw := strings.ToLower(err.Error())
 	return strings.Contains(raw, "status 401") || strings.Contains(raw, "401 unauthorized")
+}
+
+// isOAuthInvalidGrantMessage checks whether an error message indicates an OAuth
+// invalid_grant failure (revoked or expired refresh token). These are credential-level
+// errors that should be cooled down, not treated as invalid request payloads.
+func isOAuthInvalidGrantMessage(msg string) bool {
+	return strings.Contains(strings.ToLower(msg), "invalid_grant")
+}
+
+func isOAuthInvalidGrantResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	return isOAuthInvalidGrantMessage(err.Error())
 }
 
 func hasUnauthorizedAuthFailure(auth *Auth) bool {
@@ -5131,6 +5158,9 @@ func isRequestInvalidError(err error) bool {
 	switch status {
 	case http.StatusBadRequest:
 		msg := err.Error()
+		if isOAuthInvalidGrantMessage(msg) {
+			return false
+		}
 		return strings.Contains(msg, "invalid_request_error") ||
 			strings.Contains(msg, "bad_request_error") ||
 			strings.Contains(msg, "INVALID_ARGUMENT") ||
@@ -5230,7 +5260,14 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.NextRetryAfter = nextTransientErrorRetryAfter(now)
 		}
 	default:
-		if auth.StatusMessage == "" {
+		if resultErr != nil && isOAuthInvalidGrantMessage(resultErr.Error()) {
+			auth.StatusMessage = "unauthorized"
+			if disableCooling {
+				auth.NextRetryAfter = time.Time{}
+			} else {
+				auth.NextRetryAfter = now.Add(30 * time.Minute)
+			}
+		} else if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"
 		}
 	}
