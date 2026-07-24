@@ -285,6 +285,19 @@ export function ModelListEditor({ rows, onChange, fieldHints = {} }) {
               style={{ flex: 1 }}
             />
             <label className="toggle-row" style={{ flex: '0 0 auto', padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
+              <span className="toggle-row__label" style={{ fontSize: 11 }}>fork</span>
+              <span className="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={!!row['fork']}
+                  onChange={(e) => update(idx, { 'fork': e.target.checked })}
+                  aria-label="Fork alias"
+                  title="Keep the original model id available in addition to the alias"
+                />
+                <span className="toggle-switch__slider" />
+              </span>
+            </label>
+            <label className="toggle-row" style={{ flex: '0 0 auto', padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
               <span className="toggle-row__label" style={{ fontSize: 11 }}>force-mapping</span>
               <span className="toggle-switch">
                 <input

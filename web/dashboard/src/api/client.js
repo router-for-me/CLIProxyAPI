@@ -1269,3 +1269,44 @@ export async function updateUpstreamProvider(id, payload) {
 export async function deleteUpstreamProvider(id) {
   await fetchJSON(`/upstream-providers/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
+
+// --- Global oauth-model-alias (config.yaml) ---------------------------------
+// Per-channel global model aliases for OAuth/file-backed auth channels.
+// Returns { "oauth-model-alias": { <channel>: [{name,alias,fork,display-name,force-mapping}] } }.
+export async function getOAuthModelAlias() {
+  return fetchJSON('/oauth-model-alias');
+}
+
+// Replaces the entire global oauth-model-alias map.
+// channels: { <channel>: [{name,alias,fork?,display-name?,force-mapping?}] }
+export async function putOAuthModelAlias(channels) {
+  return fetchJSON('/oauth-model-alias', {
+    method: 'PUT',
+    body: JSON.stringify(channels),
+  });
+}
+
+// Patches a single channel (create/replace when aliases non-empty,
+// deletes the channel when aliases is empty/missing).
+export async function patchOAuthModelAlias(channel, aliases) {
+  return fetchJSON('/oauth-model-alias', {
+    method: 'PATCH',
+    body: JSON.stringify({ channel, aliases }),
+  });
+}
+
+// Deletes a single channel from the global oauth-model-alias map.
+export async function deleteOAuthModelAlias(channel) {
+  const qs = new URLSearchParams();
+  qs.set('channel', channel);
+  return fetchJSON(`/oauth-model-alias?${qs}`, { method: 'DELETE' });
+}
+
+// --- Static model definitions (default models per OAuth channel) ------------
+// Returns { channel, models: [{ id, display_name, type, owned_by, ... }] }.
+// The list is the canonical static catalog (embedded models.json, refreshed
+// in the background by the registry updater); it works on cold start with no
+// PG / live auth client. Used to populate the "upstream model" dropdown.
+export async function getModelDefinitions(channel) {
+  return fetchJSON(`/model-definitions/${encodeURIComponent(channel)}`);
+}
