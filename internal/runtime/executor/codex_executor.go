@@ -2100,7 +2100,7 @@ func normalizeCodexInstructions(body []byte) []byte {
 	if !instructions.Exists() || instructions.Type == gjson.Null {
 		body, _ = sjson.SetBytes(body, "instructions", "")
 	}
-	return body
+	return stripCodexIntermediaryUpdatesFromPayload(body)
 }
 
 var imageGenToolJSON = []byte(`{"type":"image_generation","output_format":"png"}`)
