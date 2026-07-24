@@ -146,6 +146,27 @@ func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
 	if second == nil || second.Thinking == nil || len(second.Thinking.Levels) == 0 || second.Thinking.Levels[0] == "mutated" {
 		t.Fatalf("expected static lookup clone, got %+v", second)
 	}
+
+	antigravity := LookupModelInfo("gemini-3.5-flash-extra-low", "antigravity")
+	if antigravity == nil {
+		t.Fatal("expected Antigravity gemini-3.5-flash-extra-low static model")
+	}
+	if antigravity.Type != "antigravity" || antigravity.DisplayName != "Gemini 3.5 Flash (Extra Low)" {
+		t.Fatalf("unexpected Antigravity static model metadata: %+v", antigravity)
+	}
+	if antigravity.ContextLength != 1048576 || antigravity.MaxCompletionTokens != 65535 {
+		t.Fatalf("unexpected Antigravity static model limits: %+v", antigravity)
+	}
+	if antigravity.Thinking == nil ||
+		antigravity.Thinking.Min != 1 ||
+		antigravity.Thinking.Max != 65535 ||
+		!antigravity.Thinking.DynamicAllowed ||
+		len(antigravity.Thinking.Levels) != 3 ||
+		antigravity.Thinking.Levels[0] != "low" ||
+		antigravity.Thinking.Levels[1] != "medium" ||
+		antigravity.Thinking.Levels[2] != "high" {
+		t.Fatalf("unexpected Antigravity static model thinking configuration: %+v", antigravity.Thinking)
+	}
 }
 
 func TestLookupModelInfoIncludesClaudeSonnet5(t *testing.T) {
