@@ -38,8 +38,10 @@ const (
 	codexUserAgent             = "codex-tui/0.135.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.135.0)"
 	codexOriginator            = "codex-tui"
 	codexDefaultImageToolModel = "gpt-image-2"
-	codexResponsesLiteHeader   = "X-OpenAI-Internal-Codex-Responses-Lite"
-	codexResponsesLiteMetadata = "client_metadata.ws_request_header_x_openai_internal_codex_responses_lite"
+	// Paid quotas can be reset before resets_at, so periodically recheck them.
+	codexPaidPlanRecheckInterval = 30 * time.Minute
+	codexResponsesLiteHeader     = "X-OpenAI-Internal-Codex-Responses-Lite"
+	codexResponsesLiteMetadata   = "client_metadata.ws_request_header_x_openai_internal_codex_responses_lite"
 )
 
 var dataTag = []byte("data:")
@@ -2273,18 +2275,24 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 	if strings.TrimSpace(gjson.GetBytes(errorBody, "error.type").String()) != "usage_limit_reached" {
 		return nil
 	}
+	var retryAfter time.Duration
 	if resetsAt := gjson.GetBytes(errorBody, "error.resets_at").Int(); resetsAt > 0 {
 		resetAtTime := time.Unix(resetsAt, 0)
 		if resetAtTime.After(now) {
-			retryAfter := resetAtTime.Sub(now)
-			return &retryAfter
+			retryAfter = resetAtTime.Sub(now)
 		}
 	}
-	if resetsInSeconds := gjson.GetBytes(errorBody, "error.resets_in_seconds").Int(); resetsInSeconds > 0 {
-		retryAfter := time.Duration(resetsInSeconds) * time.Second
-		return &retryAfter
+	if retryAfter <= 0 {
+		retryAfter = time.Duration(gjson.GetBytes(errorBody, "error.resets_in_seconds").Int()) * time.Second
 	}
-	return nil
+	if retryAfter <= 0 {
+		return nil
+	}
+	planType := strings.TrimSpace(gjson.GetBytes(errorBody, "error.plan_type").String())
+	if planType != "" && !strings.EqualFold(planType, "free") && retryAfter > codexPaidPlanRecheckInterval {
+		retryAfter = codexPaidPlanRecheckInterval
+	}
+	return &retryAfter
 }
 
 func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {

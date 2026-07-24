@@ -46,6 +46,23 @@ func TestParseCodexRetryAfter(t *testing.T) {
 		}
 	})
 
+	t.Run("caps paid plan reset hint for recheck", func(t *testing.T) {
+		resetAt := now.Add(4 * time.Hour).Unix()
+		body := []byte(`{"error":{"type":"usage_limit_reached","plan_type":"team","resets_at":` + itoa(resetAt) + `}}`)
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil || *retryAfter != codexPaidPlanRecheckInterval {
+			t.Fatalf("retryAfter = %v, want %v", retryAfter, codexPaidPlanRecheckInterval)
+		}
+	})
+
+	t.Run("keeps free plan reset hint", func(t *testing.T) {
+		body := []byte(`{"error":{"type":"usage_limit_reached","plan_type":"free","resets_in_seconds":14400}}`)
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil || *retryAfter != 4*time.Hour {
+			t.Fatalf("retryAfter = %v, want %v", retryAfter, 4*time.Hour)
+		}
+	})
+
 	t.Run("non-429 status code", func(t *testing.T) {
 		body := []byte(`{"error":{"type":"usage_limit_reached","resets_in_seconds":30}}`)
 		if got := parseCodexRetryAfter(http.StatusBadRequest, body, now); got != nil {
