@@ -141,6 +141,9 @@ type Config struct {
 	// These are used only when the client does not send its own headers.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
 
+	// XAI configures provider-wide xAI / Grok request behavior.
+	XAI XAIConfig `yaml:"xai" json:"xai"`
+
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
@@ -293,6 +296,22 @@ type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
 	// OptimizeMultiAgentV2 rewrites official Codex spawn_agent definitions.
 	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
+}
+
+// XAIConfig configures provider-wide xAI / Grok request behavior.
+type XAIConfig struct {
+	// InjectBuildSearchTools prepends native server tools web_search + x_search
+	// when missing. Those tools fingerprint free OAuth requests onto the
+	// cache-capable grok-4.5 tier instead of grok-4.5-build-free.
+	// Default false. Safe to combine with real search usage: responses keep
+	// native search items unless HideInjectedSearchResults is true.
+	InjectBuildSearchTools bool `yaml:"inject-build-search-tools" json:"inject-build-search-tools"`
+
+	// HideInjectedSearchResults strips web_search_call / x_search_call items
+	// from client-visible responses when InjectBuildSearchTools is also on.
+	// Default false so cache injection and real native search can coexist.
+	// Set true only for bait-only pools that must never surface server search.
+	HideInjectedSearchResults bool `yaml:"hide-injected-search-results" json:"hide-injected-search-results"`
 }
 
 // TLSConfig holds HTTPS server settings.
