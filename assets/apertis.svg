@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="mf" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#5eead4"/>
+      <stop offset="25%" stop-color="#2dd4bf"/>
+      <stop offset="65%" stop-color="#0d9488"/>
+      <stop offset="100%" stop-color="#0a7a6f"/>
+    </linearGradient>
+    <linearGradient id="mb" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#14b8a6"/>
+      <stop offset="50%" stop-color="#0d7d72"/>
+      <stop offset="100%" stop-color="#044f47"/>
+    </linearGradient>
+    <mask id="crossbar-mask">
+      <rect width="512" height="512" fill="white"/>
+      <polygon points="190,308 206,266 318,266 300,308" fill="black"/>
+    </mask>
+  </defs>
+  <g mask="url(#crossbar-mask)">
+    <path d="M298 108 L412 412 L350 412 L298 300 L232 300 L152 412 Z" fill="url(#mb)" opacity="0.45"/>
+    <path d="M244 108 L366 412 L300 412 L256 308 L190 308 L108 412 Z" fill="url(#mf)"/>
+  </g>
+</svg>
