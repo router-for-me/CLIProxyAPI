@@ -315,6 +315,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
 	}
+	if requestID := requestIDFromContext(ctx); requestID != "" {
+		meta[coreexecutor.RequestIDMetadataKey] = requestID
+	}
 	if disallowFreeAuthFromContext(ctx) {
 		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
 	}
@@ -437,6 +440,21 @@ func executionSessionIDFromContext(ctx context.Context) string {
 	default:
 		return ""
 	}
+}
+
+// requestIDFromContext returns the host-generated request correlation ID when present.
+// It prefers the Go context value, then falls back to the Gin request ID for plugin metadata.
+func requestIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if requestID := strings.TrimSpace(logging.GetRequestID(ctx)); requestID != "" {
+		return requestID
+	}
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+		return strings.TrimSpace(logging.GetGinRequestID(ginCtx))
+	}
+	return ""
 }
 
 func disallowFreeAuthFromContext(ctx context.Context) bool {

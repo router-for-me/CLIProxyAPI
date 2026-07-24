@@ -44,6 +44,8 @@ const (
 	SelectedAuthIndexCallbackMetadataKey = "selected_auth_index_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
+	// RequestIDMetadataKey stores the host-generated request correlation ID.
+	RequestIDMetadataKey = "request_id"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.
