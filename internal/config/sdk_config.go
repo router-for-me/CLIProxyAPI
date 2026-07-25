@@ -45,6 +45,10 @@ type SDKConfig struct {
 	// CodexOptimizeMultiAgentV2 mirrors the provider-wide runtime setting for API handlers.
 	CodexOptimizeMultiAgentV2 bool `yaml:"-" json:"-"`
 
+	// DisableClaudeModelListCloak mirrors the global Claude cloak disable for API handlers.
+	// It is runtime-only because the user-facing setting lives on Config.
+	DisableClaudeModelListCloak bool `yaml:"-" json:"-"`
+
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 

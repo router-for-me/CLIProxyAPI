@@ -46,6 +46,7 @@ func effectiveSDKConfig(cfg *config.Config) *config.SDKConfig {
 	}
 	sdkCfg := cfg.SDKConfig
 	sdkCfg.CodexOptimizeMultiAgentV2 = cfg.Codex.OptimizeMultiAgentV2
+	sdkCfg.DisableClaudeModelListCloak = cfg.DisableClaudeCloakMode
 	if cfg.CommercialMode {
 		sdkCfg.RequestLog = false
 	}

@@ -14,3 +14,12 @@ func TestEffectiveSDKConfigCopiesCodexOptimizeMultiAgentV2(t *testing.T) {
 		t.Fatalf("CodexOptimizeMultiAgentV2 = false, want true")
 	}
 }
+
+func TestEffectiveSDKConfigCopiesClaudeModelListCloakDisable(t *testing.T) {
+	cfg := &config.Config{DisableClaudeCloakMode: true}
+
+	sdkCfg := effectiveSDKConfig(cfg)
+	if sdkCfg == nil || !sdkCfg.DisableClaudeModelListCloak {
+		t.Fatalf("DisableClaudeModelListCloak = false, want true")
+	}
+}

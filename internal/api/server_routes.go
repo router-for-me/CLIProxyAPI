@@ -571,7 +571,8 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 	isClaude := isAnthropicModelsRequest(c)
 
 	if isClaude {
-		c.JSON(http.StatusOK, claudemodels.BuildResponse(formatHomeClaudeModels(entries)))
+		cloakModelIDs := s.cfg == nil || !s.cfg.DisableClaudeCloakMode
+		c.JSON(http.StatusOK, buildHomeClaudeModelsResponse(entries, cloakModelIDs))
 		return
 	}
 
@@ -593,6 +594,10 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		"object": "list",
 		"data":   filtered,
 	})
+}
+
+func buildHomeClaudeModelsResponse(entries []homeModelEntry, cloakModelIDs bool) map[string]any {
+	return claudemodels.BuildResponse(formatHomeClaudeModels(entries), cloakModelIDs)
 }
 
 func formatHomeClaudeModels(entries []homeModelEntry) []map[string]any {

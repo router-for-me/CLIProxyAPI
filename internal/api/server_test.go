@@ -1820,6 +1820,28 @@ func TestDecodeHomeModelsKeepsTokenMetadata(t *testing.T) {
 	}
 }
 
+func TestBuildHomeClaudeModelsResponseHonorsCloakFlag(t *testing.T) {
+	entries := []homeModelEntry{{id: "gpt-4o", displayName: "GPT 4o"}}
+
+	cloaked := buildHomeClaudeModelsResponse(entries, true)
+	cloakedData, ok := cloaked["data"].([]map[string]any)
+	if !ok || len(cloakedData) != 1 {
+		t.Fatalf("cloaked data = %#v, want one model", cloaked["data"])
+	}
+	if got, _ := cloakedData[0]["id"].(string); got != "claude-fable-5-dd-o4-tpg" {
+		t.Fatalf("cloaked id = %q, want claude-fable-5-dd-o4-tpg", got)
+	}
+
+	uncloaked := buildHomeClaudeModelsResponse(entries, false)
+	uncloakedData, ok := uncloaked["data"].([]map[string]any)
+	if !ok || len(uncloakedData) != 1 {
+		t.Fatalf("uncloaked data = %#v, want one model", uncloaked["data"])
+	}
+	if got, _ := uncloakedData[0]["id"].(string); got != "gpt-4o" {
+		t.Fatalf("uncloaked id = %q, want gpt-4o", got)
+	}
+}
+
 func TestHomeModelsAuthStatus(t *testing.T) {
 	cases := []struct {
 		name        string
