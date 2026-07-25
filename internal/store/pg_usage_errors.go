@@ -27,6 +27,7 @@ type UsageError struct {
 	ExecutorType        string    `json:"executor_type,omitempty"`
 	Model               string    `json:"model"`
 	Alias               string    `json:"alias,omitempty"`
+	RouteModel          string    `json:"route_model,omitempty"`
 	Endpoint            string    `json:"endpoint,omitempty"`
 	AuthType            string    `json:"auth_type,omitempty"`
 	Source              string    `json:"source,omitempty"`
@@ -61,6 +62,7 @@ type UsageErrorRow struct {
 	ExecutorType        string  `json:"executor_type,omitempty"`
 	Model               string  `json:"model"`
 	Alias               string  `json:"alias,omitempty"`
+	RouteModel          string  `json:"route_model,omitempty"`
 	Endpoint            string  `json:"endpoint,omitempty"`
 	AuthType            string  `json:"auth_type,omitempty"`
 	Source              string  `json:"source,omitempty"`
@@ -92,7 +94,7 @@ type UsageErrorRow struct {
 // GetError (which additionally projects the joined key_alias).
 const usageErrorColumnList = `
 	request_id, api_key_id, api_key_principal, user_id, provider, executor_type, model,
-	alias, endpoint, auth_type, source, reasoning_effort, service_tier,
+	alias, route_model, endpoint, auth_type, source, reasoning_effort, service_tier,
 	response_service_tier, input_tokens, output_tokens, reasoning_tokens,
 	cached_tokens, cache_creation_tokens, total_tokens, cost_usd, latency_ms,
 	ttft_ms, fail_status_code, error_message, generate, requested_at
@@ -104,7 +106,7 @@ const usageErrorColumnList = `
 const errorRowSelectColumns = `
 	e.id, e.request_id, e.api_key_id,
 	COALESCE(NULLIF(k.key_alias, ''), k.name, '') AS key_alias,
-	e.provider, e.executor_type, e.model, e.alias, e.endpoint, e.auth_type,
+	e.provider, e.executor_type, e.model, e.alias, e.route_model, e.endpoint, e.auth_type,
 	e.source, e.reasoning_effort, e.service_tier, e.response_service_tier,
 	e.input_tokens, e.output_tokens, e.reasoning_tokens,
 	e.cached_tokens, e.cache_creation_tokens, e.total_tokens, e.cost_usd,
@@ -118,19 +120,27 @@ func (s *UsageStore) errorJoin() string {
 
 // scanErrorRow scans one row from the column order defined above. Shared by
 // SelectErrors and GetError so the two stay in sync, mirroring scanEventRow.
+// route_model is nullable (added via idempotent ALTER; pre-existing rows carry
+// NULL), so it is scanned into a sql.NullString and then resolved to a plain
+// string — mirroring how other nullable TEXT columns are handled elsewhere
+// in the store.
 func scanErrorRow(scanner interface {
 	Scan(dest ...any) error
 }) (UsageErrorRow, error) {
 	var r UsageErrorRow
+	var routeModel sql.NullString
 	if err := scanner.Scan(
 		&r.ID, &r.RequestID, &r.APIKeyID, &r.KeyAlias,
-		&r.Provider, &r.ExecutorType, &r.Model, &r.Alias, &r.Endpoint, &r.AuthType,
+		&r.Provider, &r.ExecutorType, &r.Model, &r.Alias, &routeModel, &r.Endpoint, &r.AuthType,
 		&r.Source, &r.ReasoningEffort, &r.ServiceTier, &r.ResponseServiceTier,
 		&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens,
 		&r.CacheCreationTokens, &r.TotalTokens, &r.CostUSD, &r.LatencyMs, &r.TTFTMs,
 		&r.FailStatusCode, &r.ErrorMessage, &r.Generate, &r.RequestedAt,
 	); err != nil {
 		return UsageErrorRow{}, err
+	}
+	if routeModel.Valid {
+		r.RouteModel = routeModel.String
 	}
 	return r, nil
 }
@@ -153,11 +163,11 @@ func (s *UsageStore) InsertError(ctx context.Context, e UsageError) error {
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (%s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
-			$24, $25, $26, $27)
+			$24, $25, $26, $27, $28)
 	`, s.errorsTable, usageErrorColumnList),
 		e.RequestID, nullableString(e.APIKeyID), nullableString(principal),
 		nullableString(e.UserID),
-		e.Provider, e.ExecutorType, e.Model, e.Alias, e.Endpoint, e.AuthType,
+		e.Provider, e.ExecutorType, e.Model, e.Alias, nullableString(e.RouteModel), e.Endpoint, e.AuthType,
 		e.Source, e.ReasoningEffort, e.ServiceTier, e.ResponseServiceTier,
 		e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens,
 		e.CacheCreationTokens, e.TotalTokens, e.CostUSD, e.LatencyMs, e.TTFTMs,
@@ -185,18 +195,18 @@ func (s *UsageStore) BatchInsertErrors(ctx context.Context, errors []UsageError)
 	b.WriteString(" (")
 	b.WriteString(usageErrorColumnList)
 	b.WriteString(") VALUES ")
-	args := make([]any, 0, len(errors)*27)
+	args := make([]any, 0, len(errors)*28)
 	for i, ev := range errors {
 		if i > 0 {
 			b.WriteByte(',')
 		}
 		b.WriteByte('(')
-		for j := 1; j <= 27; j++ {
+		for j := 1; j <= 28; j++ {
 			if j > 1 {
 				b.WriteByte(',')
 			}
 			b.WriteByte('$')
-			b.WriteString(itoa(i*27 + j))
+			b.WriteString(itoa(i*28 + j))
 		}
 		b.WriteByte(')')
 		if ev.RequestedAt.IsZero() {
@@ -209,7 +219,7 @@ func (s *UsageStore) BatchInsertErrors(ctx context.Context, errors []UsageError)
 		}
 		args = append(args, ev.RequestID, nullableString(ev.APIKeyID), nullableString(principal),
 			nullableString(ev.UserID),
-			ev.Provider, ev.ExecutorType, ev.Model, ev.Alias, ev.Endpoint, ev.AuthType,
+			ev.Provider, ev.ExecutorType, ev.Model, ev.Alias, nullableString(ev.RouteModel), ev.Endpoint, ev.AuthType,
 			ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
 			ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
 			ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.LatencyMs, ev.TTFTMs,

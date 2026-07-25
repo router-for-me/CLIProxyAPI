@@ -413,6 +413,7 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			executor_type           TEXT,
 			model                   TEXT NOT NULL,
 			alias                   TEXT,
+			route_model             TEXT,
 			endpoint                TEXT,
 			auth_type               TEXT,
 			source                  TEXT,
@@ -481,6 +482,7 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			executor_type           TEXT,
 			model                   TEXT NOT NULL,
 			alias                   TEXT,
+			route_model             TEXT,
 			endpoint                TEXT,
 			auth_type               TEXT,
 			source                  TEXT,
@@ -524,6 +526,20 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_usage_errors_user_id ON %s(user_id, requested_at) WHERE user_id IS NOT NULL`, usageErrorsTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: create usage_errors user_id index: %w", err)
+	}
+	// route_model records the client-requested model name (before alias/upstream
+	// resolution) for usage_errors so misrouting can be diagnosed by comparing
+	// it against the resolved model id. Idempotent ALTER keeps pre-existing
+	// stores in sync. Mirrored on usage_events for schema consistency.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS route_model TEXT`, usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: add usage_errors.route_model column: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS route_model TEXT`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: add usage_events.route_model column: %w", err)
 	}
 
 	usageWindowsTable := s.fullTableName(s.cfg.UsageWindowsTable)

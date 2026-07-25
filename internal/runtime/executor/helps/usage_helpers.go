@@ -26,6 +26,8 @@ type UsageReporter struct {
 	executorType string
 	model        string
 	alias        string
+	routeModel   string
+	endpoint     string
 	authID       string
 	authIndex    string
 	authType     string
@@ -109,6 +111,29 @@ func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format stri
 		return
 	}
 	r.reasoning = thinking.ExtractTranslatedReasoningEffort(payload, format)
+}
+
+// SetRouteModel records the model name exactly as the client requested it
+// (before alias/upstream resolution). Persisted on usage_errors as route_model
+// so misrouting can be diagnosed by comparing it against the resolved Model.
+// When unset the flusher falls back to the alias/client-requested model that
+// was captured in context, preserving the previous behavior.
+func (r *UsageReporter) SetRouteModel(routeModel string) {
+	if r == nil {
+		return
+	}
+	r.routeModel = strings.TrimSpace(routeModel)
+}
+
+// SetEndpoint records the upstream URL the executor actually hit. Persisted on
+// usage_errors as endpoint so a failed attempt can be traced to the concrete
+// provider path (e.g. openai-compat "/chat/completions" vs an Anthropic-style
+// endpoint).
+func (r *UsageReporter) SetEndpoint(endpoint string) {
+	if r == nil {
+		return
+	}
+	r.endpoint = strings.TrimSpace(endpoint)
 }
 
 func (r *UsageReporter) TrackHTTPClient(client *http.Client) *http.Client {
@@ -271,6 +296,8 @@ func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, d
 		ExecutorType:        r.executorType,
 		Model:               model,
 		Alias:               r.alias,
+		RouteModel:          r.routeModel,
+		Endpoint:            r.endpoint,
 		Source:              r.source,
 		APIKey:              r.apiKey,
 		AuthID:              r.authID,

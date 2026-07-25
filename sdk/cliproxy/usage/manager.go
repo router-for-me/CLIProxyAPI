@@ -56,6 +56,18 @@ type Record struct {
 	Detail      Detail
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
+	// RouteModel stores the model name exactly as the client requested it
+	// (before any alias/upstream resolution), captured for usage_errors rows
+	// so misrouting (e.g. a model pinned to the wrong provider/endpoint) can
+	// be diagnosed by comparing RouteModel against Model (the resolved
+	// upstream id sent to the provider).
+	RouteModel string
+	// Endpoint stores the upstream URL the executor actually hit. Persisted
+	// on usage_errors so a 4xx/5xx can be traced to the concrete provider
+	// path (e.g. openai-compat "/chat/completions" vs an Anthropic-style
+	// endpoint), which is otherwise impossible to reconstruct for failed
+	// attempts.
+	Endpoint string
 }
 
 // Failure holds HTTP failure metadata for an upstream request attempt.
