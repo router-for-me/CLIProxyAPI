@@ -43,8 +43,9 @@ import (
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 
 const (
-	anthropicCallbackPort = 54545
-	codexCallbackPort     = 1455
+	anthropicCallbackPort          = 54545
+	codexCallbackPort              = 1455
+	manualCredentialRefreshTimeout = 75 * time.Second
 )
 
 type callbackForwarder struct {
@@ -317,6 +318,42 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 	return true
 }
 
+func (h *Handler) authFileRefreshable(auth *coreauth.Auth) bool {
+	if h == nil || auth == nil {
+		return false
+	}
+
+	h.mu.Lock()
+	cfg := h.cfg
+	host := h.pluginHost
+	h.mu.Unlock()
+
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if host != nil && host.HasAuthProvider(provider) {
+		return true
+	}
+	if cfg != nil && cfg.Home.Enabled && auth.AuthKind() != coreauth.AuthKindAPIKey {
+		return true
+	}
+	if auth.Metadata == nil {
+		return false
+	}
+	refreshToken, _ := auth.Metadata["refresh_token"].(string)
+	if strings.TrimSpace(refreshToken) == "" {
+		refreshToken, _ = auth.Metadata["refreshToken"].(string)
+	}
+	if strings.TrimSpace(refreshToken) == "" {
+		return false
+	}
+
+	switch provider {
+	case "antigravity", "claude", "codex", "kimi", "xai":
+		return true
+	default:
+		return false
+	}
+}
+
 func (h *Handler) ListAuthFiles(c *gin.Context) {
 	if h == nil {
 		c.JSON(500, gin.H{"error": "handler not initialized"})
@@ -554,6 +591,7 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 		"source":         "memory",
 		"size":           int64(0),
 	}
+	entry["refreshable"] = h.authFileRefreshable(auth)
 	entry["success"] = auth.Success
 	entry["failed"] = auth.Failed
 	entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())
@@ -638,6 +676,112 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 		entry["websockets"] = websockets
 	}
 	return entry
+}
+
+type refreshStatusCoder interface {
+	StatusCode() int
+}
+
+// RefreshAuthFile forces one refreshable credential to exchange its refresh token.
+func (h *Handler) RefreshAuthFile(c *gin.Context) {
+	if h == nil || h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "auth_manager_unavailable",
+			"message": "core auth manager unavailable",
+		})
+		return
+	}
+
+	var req struct {
+		AuthIndex string `json:"auth_index"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&req); errBindJSON != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "invalid request body",
+		})
+		return
+	}
+
+	authIndex := strings.TrimSpace(req.AuthIndex)
+	if authIndex == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "auth_index_required",
+			"message": "auth_index is required",
+		})
+		return
+	}
+
+	auth := h.authByIndex(authIndex)
+	if auth == nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "credential_not_found",
+			"message": "credential not found",
+		})
+		return
+	}
+	if !h.authFileRefreshable(auth) {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "credential_not_refreshable",
+			"message": "credential does not support manual refresh",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), manualCredentialRefreshTimeout)
+	defer cancel()
+	updated, errRefresh := h.authManager.RefreshNow(ctx, auth.ID)
+	if errRefresh != nil {
+		fields := log.Fields{"auth_id": auth.ID, "provider": auth.Provider}
+		log.WithFields(fields).WithError(errRefresh).Warn("manual credential refresh failed")
+
+		switch {
+		case errors.Is(errRefresh, coreauth.ErrRefreshPersistFailed):
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "credential_persist_failed",
+				"message": "credential refreshed in memory but could not be persisted",
+			})
+		case errors.Is(errRefresh, context.DeadlineExceeded):
+			c.JSON(http.StatusGatewayTimeout, gin.H{
+				"error":   "credential_refresh_timeout",
+				"message": "credential refresh timed out",
+			})
+		default:
+			var statusErr refreshStatusCoder
+			if errors.As(errRefresh, &statusErr) && statusErr.StatusCode() == http.StatusUnauthorized {
+				c.JSON(http.StatusUnprocessableEntity, gin.H{
+					"error":   "credential_reauthentication_required",
+					"message": "credential refresh was rejected; sign in again",
+				})
+				return
+			}
+			c.JSON(http.StatusBadGateway, gin.H{
+				"error":   "credential_refresh_failed",
+				"message": "credential refresh failed",
+			})
+		}
+		return
+	}
+	if updated == nil {
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "credential_refresh_failed",
+			"message": "credential refresh returned no result",
+		})
+		return
+	}
+
+	updated.EnsureIndex()
+	name := strings.TrimSpace(updated.FileName)
+	if name == "" {
+		name = updated.ID
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status":       "ok",
+		"auth_index":   updated.Index,
+		"name":         name,
+		"provider":     strings.TrimSpace(updated.Provider),
+		"last_refresh": updated.LastRefreshedAt,
+	})
 }
 
 func authWebsocketsValue(auth *coreauth.Auth) (bool, bool) {
