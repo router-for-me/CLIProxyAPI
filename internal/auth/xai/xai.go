@@ -345,8 +345,14 @@ func (a *XAIAuth) RefreshTokens(ctx context.Context, refreshToken, tokenEndpoint
 	}
 	tokenEndpoint = strings.TrimSpace(tokenEndpoint)
 
+	refreshCtx := context.WithoutCancel(ctx)
+	if deadline, ok := ctx.Deadline(); ok {
+		var cancel context.CancelFunc
+		refreshCtx, cancel = context.WithDeadline(refreshCtx, deadline)
+		defer cancel()
+	}
 	result, err, _ := xaiRefreshGroup.Do(refreshToken, func() (interface{}, error) {
-		return a.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken, tokenEndpoint)
+		return a.refreshTokensSingleFlight(refreshCtx, refreshToken, tokenEndpoint)
 	})
 	if err != nil {
 		return nil, err

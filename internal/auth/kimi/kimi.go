@@ -353,8 +353,14 @@ func (c *DeviceFlowClient) RefreshToken(ctx context.Context, refreshToken string
 	}
 	refreshToken = strings.TrimSpace(refreshToken)
 
+	refreshCtx := context.WithoutCancel(ctx)
+	if deadline, ok := ctx.Deadline(); ok {
+		var cancel context.CancelFunc
+		refreshCtx, cancel = context.WithDeadline(refreshCtx, deadline)
+		defer cancel()
+	}
 	result, err, _ := kimiRefreshGroup.Do(refreshToken, func() (interface{}, error) {
-		return c.refreshTokenSingleFlight(context.WithoutCancel(ctx), refreshToken)
+		return c.refreshTokenSingleFlight(refreshCtx, refreshToken)
 	})
 	if err != nil {
 		return nil, err

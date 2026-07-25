@@ -3,11 +3,13 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -18,6 +20,7 @@ import (
 type managementRefreshExecutor struct {
 	provider string
 	err      error
+	release  <-chan struct{}
 	calls    atomic.Int32
 }
 
@@ -30,6 +33,9 @@ func (e *managementRefreshExecutor) ExecuteStream(context.Context, *coreauth.Aut
 }
 func (e *managementRefreshExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
 	e.calls.Add(1)
+	if e.release != nil {
+		<-e.release
+	}
 	if e.err != nil {
 		return nil, e.err
 	}
@@ -132,11 +138,7 @@ func TestRefreshAuthFileMapsProviderUnauthorizedWithoutManagementLogout(t *testi
 	manager := coreauth.NewManager(nil, nil, nil)
 	executor := &managementRefreshExecutor{
 		provider: "codex",
-		err: &coreauth.Error{
-			HTTPStatus: http.StatusUnauthorized,
-			Code:       "invalid_grant",
-			Message:    "refresh token rejected",
-		},
+		err:      errors.New("token refresh failed with status 401: invalid_grant"),
 	}
 	manager.RegisterExecutor(executor)
 	auth := registerManagementRefreshAuth(t, manager, "codex")
@@ -188,6 +190,27 @@ func TestAuthFileRefreshableSupportsHomeOAuthButNotAPIKeys(t *testing.T) {
 	}
 	if h.authFileRefreshable(apiKey) {
 		t.Fatal("Home API key credential should not be refreshable")
+	}
+}
+
+func TestWaitForAuthFileRefreshHonorsDeadlineWhenProviderIgnoresContext(t *testing.T) {
+	release := make(chan struct{})
+	manager := coreauth.NewManager(nil, nil, nil)
+	executor := &managementRefreshExecutor{provider: "codex", release: release}
+	manager.RegisterExecutor(executor)
+	auth := registerManagementRefreshAuth(t, manager, "codex")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	_, errRefresh := waitForAuthFileRefresh(ctx, manager, auth.ID)
+	if !errors.Is(errRefresh, context.DeadlineExceeded) {
+		t.Fatalf("waitForAuthFileRefresh() error = %v, want deadline exceeded", errRefresh)
+	}
+
+	close(release)
+	// Wait for the ignored provider call to leave the manager's per-auth critical section.
+	if _, errDrain := manager.RefreshNow(context.Background(), auth.ID); errDrain != nil {
+		t.Fatalf("drain RefreshNow() error = %v", errDrain)
 	}
 }
 

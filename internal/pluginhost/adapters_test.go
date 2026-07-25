@@ -2682,6 +2682,8 @@ func TestExecutorAdapterMethods(t *testing.T) {
 	auth := &coreauth.Auth{
 		ID:       "auth-1",
 		Provider: "plugin-provider",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
 		Metadata: map[string]any{"old": "value"},
 	}
 	req := coreexecutor.Request{
@@ -2742,6 +2744,9 @@ func TestExecutorAdapterMethods(t *testing.T) {
 	}
 	if refreshed.Metadata["token"] != "new" {
 		t.Fatalf("Refresh() metadata = %#v, want token=new", refreshed.Metadata)
+	}
+	if !refreshed.Disabled || refreshed.Status != coreauth.StatusDisabled {
+		t.Fatalf("Refresh() status = %q disabled=%t, want disabled", refreshed.Status, refreshed.Disabled)
 	}
 
 	count, errCountTokens := adapter.CountTokens(context.Background(), auth, req, opts)

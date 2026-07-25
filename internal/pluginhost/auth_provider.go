@@ -361,6 +361,7 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 		return nil, true, errRefresh
 	}
 	data := pluginResp.Auth
+	data.Disabled = auth.Disabled
 	if strings.TrimSpace(data.Provider) == "" {
 		data.Provider = authProvider(auth)
 	}

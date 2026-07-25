@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -49,6 +50,27 @@ func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("expected 1 refresh attempt, got %d", got)
+	}
+}
+
+func TestRefreshTokensHonorsContextDeadline(t *testing.T) {
+	resetCodexRefreshGroupForTest()
+	t.Cleanup(resetCodexRefreshGroupForTest)
+
+	auth := &CodexAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				<-req.Context().Done()
+				return nil, req.Context().Err()
+			}),
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	_, errRefresh := auth.RefreshTokens(ctx, "deadline-refresh-token")
+	if !errors.Is(errRefresh, context.DeadlineExceeded) {
+		t.Fatalf("RefreshTokens() error = %v, want deadline exceeded", errRefresh)
 	}
 }
 

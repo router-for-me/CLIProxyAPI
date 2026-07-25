@@ -2131,8 +2131,14 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	}
 	refreshToken = strings.TrimSpace(refreshToken)
 
+	refreshCtx := context.WithoutCancel(ctx)
+	if deadline, ok := ctx.Deadline(); ok {
+		var cancel context.CancelFunc
+		refreshCtx, cancel = context.WithDeadline(refreshCtx, deadline)
+		defer cancel()
+	}
 	result, errRefresh, _ := antigravityRefreshGroup.Do(refreshToken, func() (interface{}, error) {
-		return e.refreshTokenSingleFlight(context.WithoutCancel(ctx), auth, refreshToken)
+		return e.refreshTokenSingleFlight(refreshCtx, auth, refreshToken)
 	})
 	if errRefresh != nil {
 		return auth, errRefresh

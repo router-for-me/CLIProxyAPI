@@ -75,8 +75,12 @@ type RefreshEvaluator interface {
 	ShouldRefresh(now time.Time, auth *Auth) bool
 }
 
-// ErrRefreshPersistFailed indicates that refreshed credentials could not be persisted.
-var ErrRefreshPersistFailed = errors.New("refreshed auth persistence failed")
+var (
+	// ErrRefreshPersistFailed indicates that refreshed credentials could not be persisted.
+	ErrRefreshPersistFailed = errors.New("refreshed auth persistence failed")
+	// ErrRefreshUnauthorized indicates that the provider rejected credential refresh authentication.
+	ErrRefreshUnauthorized = errors.New("credential refresh unauthorized")
+)
 
 const (
 	refreshCheckInterval  = 5 * time.Second
@@ -7184,8 +7188,53 @@ func (m *Manager) markRefreshPending(id string, now time.Time) bool {
 	return true
 }
 
+type authRefreshResult struct {
+	err        error
+	persistErr error
+}
+
 type authRefreshLock struct {
-	mu sync.Mutex
+	token      chan struct{}
+	generation atomic.Uint64
+	last       authRefreshResult
+}
+
+func newAuthRefreshLock() *authRefreshLock {
+	return &authRefreshLock{token: make(chan struct{}, 1)}
+}
+
+func (l *authRefreshLock) acquire(ctx context.Context) error {
+	if l == nil {
+		return errors.New("auth refresh lock is nil")
+	}
+	select {
+	case l.token <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (l *authRefreshLock) release() {
+	if l != nil {
+		<-l.token
+	}
+}
+
+func (l *authRefreshLock) record(result authRefreshResult) {
+	l.last = result
+	l.generation.Add(1)
+}
+
+func (l *authRefreshLock) resultError(reportPersistError bool) error {
+	result := l.last
+	if result.err != nil {
+		return result.err
+	}
+	if reportPersistError && result.persistErr != nil {
+		return fmt.Errorf("%w: %v", ErrRefreshPersistFailed, result.persistErr)
+	}
+	return nil
 }
 
 func authAccessToken(auth *Auth) string {
@@ -7246,7 +7295,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 }
 
 // RefreshNow forces a synchronous credential refresh and reports persistence failures.
-// Concurrent callers that observed the same access token reuse the first completed refresh.
+// Concurrent callers for the same credential reuse the first completed refresh result.
 func (m *Manager) RefreshNow(ctx context.Context, id string) (*Auth, error) {
 	if m == nil {
 		return nil, errors.New("auth manager is nil")
@@ -7282,14 +7331,26 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		return nil, errors.New("auth id is empty")
 	}
 
-	lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{})
-	lock, _ := lockValue.(*authRefreshLock)
-	if lock == nil {
-		lock = &authRefreshLock{}
-		m.refreshLocks.Store(id, lock)
+	lockValue, _ := m.refreshLocks.LoadOrStore(id, newAuthRefreshLock())
+	lock, ok := lockValue.(*authRefreshLock)
+	if !ok || lock == nil {
+		return nil, errors.New("invalid auth refresh lock")
 	}
-	lock.mu.Lock()
-	defer lock.mu.Unlock()
+	observedGeneration := lock.generation.Load()
+	if errAcquire := lock.acquire(ctx); errAcquire != nil {
+		return nil, errAcquire
+	}
+	defer lock.release()
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, errContext
+	}
+
+	// Reuse the complete result, including persistence failures, when another
+	// refresh finished while this caller was waiting for the same credential.
+	if lock.generation.Load() != observedGeneration {
+		current, _ := m.GetByID(id)
+		return current, lock.resultError(reportPersistError)
+	}
 
 	m.mu.RLock()
 	auth := m.auths[id]
@@ -7299,10 +7360,13 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	}
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {
-		return nil, errors.New("auth or executor not found")
+		errMissing := errors.New("auth or executor not found")
+		lock.record(authRefreshResult{err: errMissing})
+		return nil, errMissing
 	}
 
-	// Another request may already have refreshed this credential.
+	// A refresh that completed before this call began may already have replaced
+	// the access token which received the unauthorized provider response.
 	if failedAccessToken != "" {
 		if currentToken := authAccessToken(auth); currentToken != "" && currentToken != failedAccessToken {
 			return auth.Clone(), nil
@@ -7313,7 +7377,6 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	updated, err := exec.Refresh(ctx, cloned)
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
-		return nil, err
 	}
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
@@ -7341,7 +7404,12 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		if shouldReschedule {
 			m.queueRefreshReschedule(id)
 		}
-		return nil, err
+		resultErr := err
+		if unauthorized {
+			resultErr = fmt.Errorf("%w: %w", ErrRefreshUnauthorized, err)
+		}
+		lock.record(authRefreshResult{err: resultErr})
+		return nil, resultErr
 	}
 	if updated == nil {
 		updated = cloned
@@ -7364,18 +7432,20 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
-	saved, errUpdate := m.update(ctx, updated, reportPersistError)
+	// Always retain the persistence outcome so concurrent manual callers cannot
+	// report success after a coalesced background refresh failed to save.
+	saved, errUpdate := m.update(ctx, updated, true)
 	for _, model := range modelsToResume {
 		registry.GetGlobalRegistry().ResumeClientModel(id, model)
 	}
 	if errUpdate != nil {
 		log.Debugf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
-		return saved, fmt.Errorf("%w: %v", ErrRefreshPersistFailed, errUpdate)
 	}
-	if saved != nil {
-		return saved, nil
+	if saved == nil {
+		saved = updated.Clone()
 	}
-	return updated.Clone(), nil
+	lock.record(authRefreshResult{persistErr: errUpdate})
+	return saved, lock.resultError(reportPersistError)
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {

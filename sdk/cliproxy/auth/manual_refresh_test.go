@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -15,6 +16,7 @@ type manualRefreshExecutor struct {
 	provider string
 	started  chan struct{}
 	release  chan struct{}
+	err      error
 	once     sync.Once
 	calls    atomic.Int32
 }
@@ -41,6 +43,9 @@ func (e *manualRefreshExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth,
 		case <-e.release:
 		}
 	}
+	if e.err != nil {
+		return nil, e.err
+	}
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
@@ -59,11 +64,13 @@ func (e *manualRefreshExecutor) HttpRequest(context.Context, *Auth, *http.Reques
 }
 
 type failingRefreshStore struct {
-	err error
+	err       error
+	saveCount atomic.Int32
 }
 
 func (s *failingRefreshStore) List(context.Context) ([]*Auth, error) { return nil, nil }
 func (s *failingRefreshStore) Save(context.Context, *Auth) (string, error) {
+	s.saveCount.Add(1)
 	return "", s.err
 }
 func (s *failingRefreshStore) Delete(context.Context, string) error { return nil }
@@ -125,6 +132,116 @@ func TestManagerRefreshNowReportsPersistenceFailure(t *testing.T) {
 	current, ok := manager.GetByID(auth.ID)
 	if !ok || authAccessToken(current) != "fresh-token" {
 		t.Fatalf("runtime auth = %#v, want refreshed credential", current)
+	}
+}
+
+func TestManagerRefreshNowCoalescesPersistenceFailureWithoutAccessToken(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	persistErr := errors.New("disk unavailable")
+	store := &failingRefreshStore{err: persistErr}
+	executor := &manualRefreshExecutor{
+		provider: "codex",
+		started:  started,
+		release:  release,
+	}
+	manager := NewManager(store, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := registerManualRefreshAuth(t, manager)
+	current, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("registered auth not found")
+	}
+	delete(current.Metadata, "access_token")
+	if _, errUpdate := manager.Update(WithSkipPersist(context.Background()), current); errUpdate != nil {
+		t.Fatalf("Update() error = %v", errUpdate)
+	}
+
+	type result struct {
+		auth *Auth
+		err  error
+	}
+	results := make(chan result, 2)
+	refresh := func() {
+		updated, errRefresh := manager.RefreshNow(context.Background(), auth.ID)
+		results <- result{auth: updated, err: errRefresh}
+	}
+
+	go refresh()
+	<-started
+	secondStarted := make(chan struct{})
+	go func() {
+		close(secondStarted)
+		refresh()
+	}()
+	<-secondStarted
+	// Keep the first refresh in flight long enough for the second caller to queue.
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+
+	for range 2 {
+		got := <-results
+		if !errors.Is(got.err, ErrRefreshPersistFailed) {
+			t.Fatalf("refresh error = %v, want ErrRefreshPersistFailed", got.err)
+		}
+		if got.auth == nil || authAccessToken(got.auth) != "fresh-token" {
+			t.Fatalf("refreshed auth = %#v", got.auth)
+		}
+	}
+	if got := executor.calls.Load(); got != 1 {
+		t.Fatalf("Refresh() calls = %d, want 1", got)
+	}
+	if got := store.saveCount.Load(); got != 1 {
+		t.Fatalf("Save() calls = %d, want 1", got)
+	}
+}
+
+func TestManagerRefreshNowWaitForConcurrentRefreshHonorsContext(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	executor := &manualRefreshExecutor{
+		provider: "codex",
+		started:  started,
+		release:  release,
+	}
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := registerManualRefreshAuth(t, manager)
+
+	firstResult := make(chan error, 1)
+	go func() {
+		_, errRefresh := manager.RefreshNow(context.Background(), auth.ID)
+		firstResult <- errRefresh
+	}()
+	<-started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, errRefresh := manager.RefreshNow(ctx, auth.ID)
+	if !errors.Is(errRefresh, context.DeadlineExceeded) {
+		t.Fatalf("second RefreshNow() error = %v, want deadline exceeded", errRefresh)
+	}
+	if got := executor.calls.Load(); got != 1 {
+		t.Fatalf("Refresh() calls before release = %d, want 1", got)
+	}
+
+	close(release)
+	if errFirst := <-firstResult; errFirst != nil {
+		t.Fatalf("first RefreshNow() error = %v", errFirst)
+	}
+}
+
+func TestManagerRefreshNowClassifiesPlainUnauthorizedError(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&manualRefreshExecutor{
+		provider: "codex",
+		err:      errors.New("token refresh failed with status 401: invalid_grant"),
+	})
+	auth := registerManualRefreshAuth(t, manager)
+
+	_, errRefresh := manager.RefreshNow(context.Background(), auth.ID)
+	if !errors.Is(errRefresh, ErrRefreshUnauthorized) {
+		t.Fatalf("RefreshNow() error = %v, want ErrRefreshUnauthorized", errRefresh)
 	}
 }
 

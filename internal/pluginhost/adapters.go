@@ -1671,6 +1671,9 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 		return nil, errRefresh
 	}
 	data := pluginResp.Auth
+	if auth != nil {
+		data.Disabled = auth.Disabled
+	}
 	if strings.TrimSpace(data.Provider) == "" {
 		data.Provider = authProvider(auth)
 	}

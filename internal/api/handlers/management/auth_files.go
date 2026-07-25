@@ -682,6 +682,26 @@ type refreshStatusCoder interface {
 	StatusCode() int
 }
 
+type authFileRefreshResult struct {
+	auth *coreauth.Auth
+	err  error
+}
+
+func waitForAuthFileRefresh(ctx context.Context, manager *coreauth.Manager, authID string) (*coreauth.Auth, error) {
+	result := make(chan authFileRefreshResult, 1)
+	go func() {
+		updated, errRefresh := manager.RefreshNow(ctx, authID)
+		result <- authFileRefreshResult{auth: updated, err: errRefresh}
+	}()
+
+	select {
+	case completed := <-result:
+		return completed.auth, completed.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // RefreshAuthFile forces one refreshable credential to exchange its refresh token.
 func (h *Handler) RefreshAuthFile(c *gin.Context) {
 	if h == nil || h.authManager == nil {
@@ -730,7 +750,7 @@ func (h *Handler) RefreshAuthFile(c *gin.Context) {
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), manualCredentialRefreshTimeout)
 	defer cancel()
-	updated, errRefresh := h.authManager.RefreshNow(ctx, auth.ID)
+	updated, errRefresh := waitForAuthFileRefresh(ctx, h.authManager, auth.ID)
 	if errRefresh != nil {
 		fields := log.Fields{"auth_id": auth.ID, "provider": auth.Provider}
 		log.WithFields(fields).WithError(errRefresh).Warn("manual credential refresh failed")
@@ -745,6 +765,11 @@ func (h *Handler) RefreshAuthFile(c *gin.Context) {
 			c.JSON(http.StatusGatewayTimeout, gin.H{
 				"error":   "credential_refresh_timeout",
 				"message": "credential refresh timed out",
+			})
+		case errors.Is(errRefresh, coreauth.ErrRefreshUnauthorized):
+			c.JSON(http.StatusUnprocessableEntity, gin.H{
+				"error":   "credential_reauthentication_required",
+				"message": "credential refresh was rejected; sign in again",
 			})
 		default:
 			var statusErr refreshStatusCoder

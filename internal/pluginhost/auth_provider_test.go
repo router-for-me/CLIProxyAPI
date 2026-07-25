@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
@@ -267,7 +268,7 @@ func TestPollLoginPassesProviderStateHostAndHTTPClient(t *testing.T) {
 	}
 }
 
-func TestRefreshAuthPreservesAuthIndex(t *testing.T) {
+func TestRefreshAuthPreservesAuthIndexAndDisabledState(t *testing.T) {
 	host := newHostWithRecords(capabilityRecord{
 		id: "auth-plugin",
 		plugin: pluginapi.Plugin{
@@ -292,6 +293,7 @@ func TestRefreshAuthPreservesAuthIndex(t *testing.T) {
 	auth := host.AuthDataToCoreAuth(pluginapi.AuthData{
 		Provider: "plugin-provider",
 		ID:       "auth-1",
+		Disabled: true,
 		Metadata: map[string]any{"access_token": "old-token"},
 	}, "", "")
 	if auth == nil {
@@ -311,6 +313,9 @@ func TestRefreshAuthPreservesAuthIndex(t *testing.T) {
 	}
 	if got := refreshed.Metadata["access_token"]; got != "new-token" {
 		t.Fatalf("RefreshAuth() access_token = %q, want new-token", got)
+	}
+	if !refreshed.Disabled || refreshed.Status != coreauth.StatusDisabled {
+		t.Fatalf("RefreshAuth() status = %q disabled=%t, want disabled", refreshed.Status, refreshed.Disabled)
 	}
 }
 
