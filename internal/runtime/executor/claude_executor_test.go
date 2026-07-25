@@ -2497,6 +2497,43 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	}
 }
 
+// Test case 6: OAuth mode without preserve sanitizes the forwarded system prompt
+func TestCheckSystemInstructionsWithSigningMode_OAuthSanitizesByDefault(t *testing.T) {
+	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithSigningMode(payload, false, false, true, false, "2.1.63", "", "")
+
+	got := gjson.GetBytes(out, "messages.0.content").String()
+	if strings.Contains(got, "You are a helpful assistant.") {
+		t.Fatalf("OAuth default should not forward the original system prompt, got %q", got)
+	}
+	if want := expectedForwardedSystemReminder(sanitizeForwardedSystemPrompt("You are a helpful assistant.")) + "hi"; got != want {
+		t.Fatalf("OAuth default should forward sanitized reminder, got %q want %q", got, want)
+	}
+}
+
+// Test case 7: OAuth mode with preserve keeps the caller's original system prompt
+func TestCheckSystemInstructionsWithSigningMode_OAuthPreserveKeepsOriginal(t *testing.T) {
+	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithSigningMode(payload, false, false, true, true, "2.1.63", "", "")
+
+	if want := expectedForwardedSystemReminder("You are a helpful assistant.") + "hi"; gjson.GetBytes(out, "messages.0.content").String() != want {
+		t.Fatalf("OAuth preserve should forward the original system prompt, got %q want %q", gjson.GetBytes(out, "messages.0.content").String(), want)
+	}
+}
+
+// Test case 8: preserve has no effect in strict mode
+func TestCheckSystemInstructionsWithSigningMode_PreserveIgnoredInStrictMode(t *testing.T) {
+	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithSigningMode(payload, true, false, true, true, "2.1.63", "", "")
+
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != "hi" {
+		t.Fatalf("strict mode should never forward system prompt regardless of preserve, got %q", got)
+	}
+}
+
 func TestClaudeExecutor_ExperimentalCCHSigningDisabledByDefaultKeepsLegacyHeader(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

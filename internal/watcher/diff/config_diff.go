@@ -257,6 +257,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 				if len(o.Cloak.SensitiveWords) != len(n.Cloak.SensitiveWords) {
 					changes = append(changes, fmt.Sprintf("claude[%d].cloak.sensitive-words: %d -> %d", i, len(o.Cloak.SensitiveWords), len(n.Cloak.SensitiveWords)))
 				}
+				if !boolPtrEqual(o.Cloak.PreserveSystemPrompt, n.Cloak.PreserveSystemPrompt) {
+					changes = append(changes, fmt.Sprintf("claude[%d].cloak.preserve-system-prompt: %s -> %s", i, boolPtrString(o.Cloak.PreserveSystemPrompt), boolPtrString(n.Cloak.PreserveSystemPrompt)))
+				}
 			}
 		}
 	}
@@ -503,4 +506,18 @@ func formatURL(raw string) string {
 		return host
 	}
 	return scheme + "://" + host
+}
+
+func boolPtrEqual(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+func boolPtrString(v *bool) string {
+	if v == nil {
+		return "<unset>"
+	}
+	return fmt.Sprintf("%t", *v)
 }
