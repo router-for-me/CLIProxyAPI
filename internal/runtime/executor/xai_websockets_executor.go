@@ -1594,6 +1594,11 @@ func NewXAIAutoExecutor(cfg *config.Config) *XAIAutoExecutor {
 
 func (e *XAIAutoExecutor) Identifier() string { return "xai" }
 
+// UsesConfig reports whether the executor was created for cfg.
+func (e *XAIAutoExecutor) UsesConfig(cfg *config.Config) bool {
+	return e != nil && e.httpExec != nil && e.httpExec.cfg == cfg
+}
+
 func (e *XAIAutoExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if e == nil || e.httpExec == nil {
 		return nil

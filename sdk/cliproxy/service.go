@@ -53,9 +53,10 @@ type Service struct {
 	configUpdateMu sync.Mutex
 
 	// configRuntimeMu orders side-effecting runtime application after config commits.
-	configRuntimeMu     sync.Mutex
-	configSequence      uint64
-	appliedRoutingState *routingRuntimeState
+	configRuntimeMu        sync.Mutex
+	executorRegistrationMu sync.Mutex
+	configSequence         uint64
+	appliedRoutingState    *routingRuntimeState
 
 	// configPath is the path to the configuration file.
 	configPath string
@@ -348,10 +349,13 @@ func (s *Service) syncPluginModelRuntime(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	s.cfgMu.RLock()
+	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
+	s.cfgMu.RUnlock()
 	s.registerAvailableExecutors(ctx, executorRegistrationOptions{
-		includeBaseline:   s.cfg != nil && s.cfg.Home.Enabled,
+		includeBaseline:   homeEnabled,
 		includePlugins:    true,
-		forceReplaceAuths: true,
+		forceReplaceAuths: false,
 		auths:             s.coreManager.List(),
 	})
 	s.refreshPluginModelRegistrations(ctx)
@@ -1036,7 +1040,7 @@ func (c *openAICompatibilityRegistrationCache) lookup(compatName string) (*openA
 	return entry, ok
 }
 
-func (s *Service) hasNativeOpenAICompatExecutorConfig(a *coreauth.Auth, providerKey string) bool {
+func (s *Service) hasNativeOpenAICompatExecutorConfig(a *coreauth.Auth, providerKey string, cfg *config.Config) bool {
 	if a == nil {
 		return false
 	}
@@ -1052,7 +1056,7 @@ func (s *Service) hasNativeOpenAICompatExecutorConfig(a *coreauth.Auth, provider
 	if strings.EqualFold(strings.TrimSpace(a.Provider), "openai-compatibility") {
 		return true
 	}
-	if s == nil || s.cfg == nil {
+	if s == nil || cfg == nil {
 		return false
 	}
 
@@ -1069,8 +1073,8 @@ func (s *Service) hasNativeOpenAICompatExecutorConfig(a *coreauth.Auth, provider
 		candidates = append(candidates, strings.ToLower(provider))
 	}
 
-	for i := range s.cfg.OpenAICompatibility {
-		compat := &s.cfg.OpenAICompatibility[i]
+	for i := range cfg.OpenAICompatibility {
+		compat := &cfg.OpenAICompatibility[i]
 		if compat.Disabled {
 			continue
 		}
@@ -1130,10 +1134,15 @@ func (s *Service) registerAvailableExecutors(ctx context.Context, opts executorR
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	s.executorRegistrationMu.Lock()
+	defer s.executorRegistrationMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
 	// Keep all Service-owned executor registration paths here so native, Home,
 	// auth-derived, and plugin executors stay in the same binding order.
 	if opts.includeBaseline {
-		s.registerExecutorsForAuths(baselineExecutorAuths(), true)
+		s.registerExecutorsForAuths(baselineExecutorAuths(), opts.forceReplaceAuths)
 	}
 	if len(opts.auths) > 0 {
 		s.registerExecutorsForAuths(opts.auths, opts.forceReplaceAuths)
@@ -1187,6 +1196,9 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	if s == nil || s.coreManager == nil || a == nil {
 		return
 	}
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
 	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
 		if !forceReplace {
 			existingExecutor, hasExecutor := s.coreManager.Executor("codex")
@@ -1197,7 +1209,7 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 				}
 			}
 		}
-		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(cfg))
 		return
 	}
 	// Skip disabled auth entries when (re)binding executors.
@@ -1220,29 +1232,38 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 				}
 			}
 		}
-		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(compatProviderKey, s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(compatProviderKey, cfg))
 		return
 	}
 	switch strings.ToLower(a.Provider) {
 	case constant.Gemini:
-		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(cfg))
 	case constant.GeminiInteractions:
-		s.coreManager.RegisterExecutor(executor.NewGeminiInteractionsExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewGeminiInteractionsExecutor(cfg))
 	case "vertex":
-		s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(cfg))
 	case "aistudio":
 		if s.wsGateway != nil {
-			s.coreManager.RegisterExecutor(executor.NewAIStudioExecutor(s.cfg, a.ID, s.wsGateway))
+			s.coreManager.RegisterExecutor(executor.NewAIStudioExecutor(cfg, a.ID, s.wsGateway))
 		}
 		return
 	case "antigravity":
-		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(cfg))
 	case "claude":
-		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
 	case "kimi":
-		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(cfg))
 	case "xai":
-		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(s.cfg))
+		if !forceReplace {
+			existingExecutor, hasExecutor := s.coreManager.Executor("xai")
+			if hasExecutor {
+				existingXAIAutoExecutor, isXAIAutoExecutor := existingExecutor.(*executor.XAIAutoExecutor)
+				if isXAIAutoExecutor && existingXAIAutoExecutor.UsesConfig(cfg) {
+					return
+				}
+			}
+		}
+		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -1250,7 +1271,7 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		}
 		if s.pluginHost != nil &&
 			s.pluginHost.HasExecutorCandidateProvider(providerKey) &&
-			!s.hasNativeOpenAICompatExecutorConfig(a, providerKey) {
+			!s.hasNativeOpenAICompatExecutorConfig(a, providerKey, cfg) {
 			s.unregisterOpenAICompatExecutor(providerKey)
 			return
 		}
@@ -1261,7 +1282,7 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 				}
 			}
 		}
-		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(providerKey, s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(providerKey, cfg))
 	}
 }
 
