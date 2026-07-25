@@ -370,6 +370,10 @@ type RoutingConfig struct {
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
+	// AllowAuthIndexHeader lets authenticated clients pin one credential by sending
+	// X-CPA-Auth-Index. When false, requests carrying the header are rejected.
+	AllowAuthIndexHeader bool `yaml:"allow-auth-index-header,omitempty" json:"allow-auth-index-header,omitempty"`
+
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Session IDs are extracted from multiple sources:
 	// metadata.user_id (Claude Code session format), X-Session-ID, Session_id (Codex),

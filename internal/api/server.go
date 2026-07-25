@@ -76,6 +76,8 @@ var corsExposedResponseHeadersJoined = strings.Join(corsExposedResponseHeaders, 
 const (
 	exampleAPIKeyManagementPath = "/management.html"
 	exampleAPIKeyManagementURL  = "/management.html?safe-mode=configure"
+	authIndexSelectionHeader    = "X-CPA-Auth-Index"
+	authIndexSelectionGinKey    = "cpa_auth_selection_id"
 )
 
 type serverOptionConfig struct {
@@ -243,6 +245,8 @@ type Server struct {
 	wsRoutes      map[string]struct{}
 	wsAuthChanged func(bool, bool)
 	wsAuthEnabled atomic.Bool
+	// authIndexHeaderEnabled gates per-request credential selection.
+	authIndexHeaderEnabled atomic.Bool
 
 	// management handler
 	mgmt *managementHandlers.Handler
@@ -349,6 +353,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
+	s.authIndexHeaderEnabled.Store(cfg.Routing.AllowAuthIndexHeader)
 	s.exampleAPIKeySafeModeActive.Store(s.exampleAPIKeySafeModeRequired(cfg))
 	s.handlers.SetPluginHost(optionState.pluginHost)
 	if optionState.pluginHost != nil {
@@ -529,7 +534,7 @@ func (s *Server) setupRoutes() {
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
-	v1.Use(AuthMiddleware(s.accessManager))
+	v1.Use(AuthMiddleware(s.accessManager), s.authIndexSelectionMiddleware())
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -555,7 +560,7 @@ func (s *Server) setupRoutes() {
 	}
 
 	openaiV1 := s.engine.Group("/openai/v1")
-	openaiV1.Use(AuthMiddleware(s.accessManager))
+	openaiV1.Use(AuthMiddleware(s.accessManager), s.authIndexSelectionMiddleware())
 	{
 		openaiV1.POST("/videos", openaiHandlers.VideosCreate)
 		openaiV1.GET("/videos/:video_id/content", openaiHandlers.VideosContent)
@@ -564,7 +569,7 @@ func (s *Server) setupRoutes() {
 
 	// Codex CLI direct route aliases (chatgpt_base_url compatible)
 	codexDirect := s.engine.Group("/backend-api/codex")
-	codexDirect.Use(AuthMiddleware(s.accessManager))
+	codexDirect.Use(AuthMiddleware(s.accessManager), s.authIndexSelectionMiddleware())
 	{
 		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
@@ -574,7 +579,7 @@ func (s *Server) setupRoutes() {
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
-	v1beta.Use(AuthMiddleware(s.accessManager))
+	v1beta.Use(AuthMiddleware(s.accessManager), s.authIndexSelectionMiddleware())
 	{
 		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
 		v1beta.POST("/interactions", geminiHandlers.Interactions)
@@ -762,6 +767,9 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		return
 	}
 	selectionOpts := coreexecutor.Options{Headers: selectionHeaders, OriginalRequest: body}
+	if authID := selectedAuthIDFromGin(c); authID != "" {
+		selectionOpts.Metadata = map[string]any{coreexecutor.PinnedAuthMetadataKey: authID}
+	}
 	var selection *auth.HomeDispatchSelection
 	var selected *auth.Auth
 	if s.handlers.AuthManager.HomeEnabled() {
@@ -1909,6 +1917,60 @@ func corsMiddleware() gin.HandlerFunc {
 	}
 }
 
+func (s *Server) authIndexSelectionMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authIndex := strings.TrimSpace(c.GetHeader(authIndexSelectionHeader))
+		if authIndex == "" {
+			c.Next()
+			return
+		}
+
+		// This is a proxy control header and must never reach an upstream provider.
+		c.Request.Header.Del(authIndexSelectionHeader)
+
+		if !s.authIndexHeaderEnabled.Load() {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "auth index selection is disabled"})
+			return
+		}
+
+		selected := s.authByIndex(authIndex)
+		if selected == nil {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "auth index not found"})
+			return
+		}
+
+		c.Set(authIndexSelectionGinKey, selected.ID)
+		ctx := handlers.WithPinnedAuthID(c.Request.Context(), selected.ID)
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	}
+}
+
+func (s *Server) authByIndex(authIndex string) *auth.Auth {
+	authIndex = strings.TrimSpace(authIndex)
+	if authIndex == "" || s == nil || s.handlers == nil || s.handlers.AuthManager == nil {
+		return nil
+	}
+	for _, candidate := range s.handlers.AuthManager.List() {
+		if candidate != nil && candidate.EnsureIndex() == authIndex {
+			return candidate
+		}
+	}
+	return nil
+}
+
+func selectedAuthIDFromGin(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	value, ok := c.Get(authIndexSelectionGinKey)
+	if !ok {
+		return ""
+	}
+	authID, _ := value.(string)
+	return strings.TrimSpace(authID)
+}
+
 func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) bool {
 	if s == nil || s.accessManager == nil || newCfg == nil {
 		return false
@@ -2059,6 +2121,7 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		}
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
+	s.authIndexHeaderEnabled.Store(cfg.Routing.AllowAuthIndexHeader)
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
 	}

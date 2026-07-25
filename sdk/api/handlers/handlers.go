@@ -586,6 +586,9 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
 		}
 	}
+	if pinnedAuthID := pinnedAuthIDFromContext(requestCtx); pinnedAuthID != "" {
+		parentCtx = WithPinnedAuthID(parentCtx, pinnedAuthID)
+	}
 	newCtx, cancel := context.WithCancel(parentCtx)
 
 	endpoint := ""

@@ -39,6 +39,35 @@ type codexSearchCaptureExecutor struct {
 	responseBody io.ReadCloser
 }
 
+type authSelectionCaptureExecutor struct {
+	authIDs []string
+	headers []http.Header
+}
+
+func (e *authSelectionCaptureExecutor) Identifier() string { return "manual-selection-test" }
+
+func (e *authSelectionCaptureExecutor) Execute(_ context.Context, selected *auth.Auth, _ coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+	e.authIDs = append(e.authIDs, selected.ID)
+	e.headers = append(e.headers, opts.Headers.Clone())
+	return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+}
+
+func (e *authSelectionCaptureExecutor) ExecuteStream(context.Context, *auth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (e *authSelectionCaptureExecutor) Refresh(_ context.Context, selected *auth.Auth) (*auth.Auth, error) {
+	return selected, nil
+}
+
+func (e *authSelectionCaptureExecutor) CountTokens(context.Context, *auth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *authSelectionCaptureExecutor) HttpRequest(context.Context, *auth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
 func (e *codexSearchCaptureExecutor) Identifier() string { return "codex" }
 
 func (e *codexSearchCaptureExecutor) Execute(context.Context, *auth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
@@ -521,6 +550,120 @@ func TestCodexAlphaSearchForwardsRequest(t *testing.T) {
 	}
 	if _, errParse := time.Parse("20060102150405", parts[0]); errParse != nil {
 		t.Fatalf("trace timestamp = %q: %v", parts[0], errParse)
+	}
+}
+
+func TestAuthIndexHeaderRequiresOptIn(t *testing.T) {
+	server := newTestServer(t)
+	credential := &auth.Auth{
+		ID:       "codex-manual",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Metadata: map[string]any{"access_token": "codex-token"},
+	}
+	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+		t.Fatalf("register Codex auth: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"query":"GPT-5.6"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set(authIndexSelectionHeader, credential.EnsureIndex())
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "auth index selection is disabled") {
+		t.Fatalf("body = %q, want disabled error", rr.Body.String())
+	}
+}
+
+func TestAuthIndexHeaderPinsCredential(t *testing.T) {
+	server := newTestServer(t)
+	server.authIndexHeaderEnabled.Store(true)
+	executor := &authSelectionCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+
+	var selected *auth.Auth
+	for _, credential := range []*auth.Auth{
+		{
+			ID:       "codex-auto-first",
+			Provider: executor.Identifier(),
+			Status:   auth.StatusActive,
+		},
+		{
+			ID:       "codex-manual-target",
+			Provider: executor.Identifier(),
+			Status:   auth.StatusActive,
+		},
+	} {
+		if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+			t.Fatalf("register Codex auth %s: %v", credential.ID, err)
+		}
+		registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "manual-selection-model"}})
+		t.Cleanup(func() {
+			registry.GetGlobalRegistry().UnregisterClient(credential.ID)
+		})
+		if credential.ID == "codex-manual-target" {
+			selected = credential
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"manual-selection-model","input":"hello"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(authIndexSelectionHeader, selected.EnsureIndex())
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if got := executor.authIDs; len(got) != 1 || got[0] != selected.ID {
+		t.Fatalf("selected auth IDs = %v, want [%s]", got, selected.ID)
+	}
+	if got := executor.headers[0].Get(authIndexSelectionHeader); got != "" {
+		t.Fatalf("upstream received proxy control header %q", got)
+	}
+}
+
+func TestAuthIndexHeaderDoesNotFallback(t *testing.T) {
+	server := newTestServer(t)
+	server.authIndexHeaderEnabled.Store(true)
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+
+	unavailable := &auth.Auth{
+		ID:       "codex-unavailable",
+		Provider: "codex",
+		Status:   auth.StatusDisabled,
+		Disabled: true,
+		Metadata: map[string]any{"access_token": "token-disabled"},
+	}
+	available := &auth.Auth{
+		ID:       "codex-available",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Metadata: map[string]any{"access_token": "token-active"},
+	}
+	for _, credential := range []*auth.Auth{unavailable, available} {
+		if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+			t.Fatalf("register Codex auth %s: %v", credential.ID, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"query":"GPT-5.6"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set(authIndexSelectionHeader, unavailable.EnsureIndex())
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+	}
+	if len(executor.authIDs) != 0 {
+		t.Fatalf("selected auth IDs = %v, want none", executor.authIDs)
 	}
 }
 
