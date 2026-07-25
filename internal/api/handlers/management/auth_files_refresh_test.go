@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -117,6 +119,43 @@ func TestRefreshAuthFileRefreshesCredentialWithoutReturningTokens(t *testing.T) 
 	}
 	if got := executor.calls.Load(); got != 1 {
 		t.Fatalf("Refresh() calls = %d, want 1", got)
+	}
+}
+
+func TestListAuthFilesOmitsRefreshableCapability(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "refresh-handler-auth.json")
+	if errWrite := os.WriteFile(path, []byte(`{"type":"codex"}`), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := registerManagementRefreshAuth(t, manager, "codex")
+	auth.Attributes = map[string]string{coreauth.AttributePath: path}
+	if _, errUpdate := manager.Update(coreauth.WithSkipPersist(context.Background()), auth); errUpdate != nil {
+		t.Fatalf("Update() error = %v", errUpdate)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+
+	h.ListAuthFiles(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var payload struct {
+		Files []map[string]any `json:"files"`
+	}
+	if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &payload); errUnmarshal != nil {
+		t.Fatalf("decode response: %v", errUnmarshal)
+	}
+	if len(payload.Files) != 1 {
+		t.Fatalf("files = %#v, want one entry", payload.Files)
+	}
+	if _, exposed := payload.Files[0]["refreshable"]; exposed {
+		t.Fatalf("response exposed deprecated refreshable capability: %s", recorder.Body.String())
 	}
 }
 
