@@ -500,6 +500,165 @@ func TestExistingWebsocketSessionConnRequiresMatchingHealthyConnection(t *testin
 	}
 }
 
+func TestExistingWebsocketSessionConnRequiresMatchingConnectionKey(t *testing.T) {
+	conn := &websocket.Conn{}
+	closer := newWebsocketConnectionCloser(conn)
+	sess := &codexWebsocketSession{
+		conn:          conn,
+		connCloser:    closer,
+		authID:        "auth-a",
+		wsURL:         "ws://example.test/responses",
+		connectionKey: "settings-a",
+	}
+	sess.resetUpstreamDisconnectError(conn)
+
+	if gotConn, gotCloser := existingWebsocketSessionConn(sess, "auth-a", "ws://example.test/responses", "settings-a"); gotConn != conn || gotCloser != closer {
+		t.Fatal("matching connection settings were not reusable")
+	}
+	if got, _ := existingWebsocketSessionConn(sess, "auth-a", "ws://example.test/responses", "settings-b"); got != nil {
+		t.Fatal("websocket session matched incompatible connection settings")
+	}
+}
+
+func TestCodexWebsocketConnectionKeyTracksStableSettings(t *testing.T) {
+	baseConfig := &config.Config{
+		SDKConfig: config.SDKConfig{ProxyURL: "http://global-proxy.example:8080"},
+		CodexHeaderDefaults: config.CodexHeaderDefaults{
+			UserAgent:    "codex-test/1",
+			BetaFeatures: "feature-a",
+		},
+		RequestRetry: 1,
+	}
+	baseAuth := &cliproxyauth.Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"header:X-Route": "route-a",
+		},
+		Metadata: map[string]any{
+			"access_token": "token-a",
+			"account_id":   "account-a",
+		},
+	}
+	baseKey := codexWebsocketConnectionKey(baseConfig, baseAuth)
+
+	tests := []struct {
+		name     string
+		mutate   func(*config.Config, *cliproxyauth.Auth)
+		wantSame bool
+	}{
+		{
+			name: "access token rotation keeps socket identity",
+			mutate: func(_ *config.Config, auth *cliproxyauth.Auth) {
+				auth.Metadata["access_token"] = "token-b"
+			},
+			wantSame: true,
+		},
+		{
+			name: "unrelated retry config keeps socket identity",
+			mutate: func(cfg *config.Config, _ *cliproxyauth.Auth) {
+				cfg.RequestRetry = 9
+			},
+			wantSame: true,
+		},
+		{
+			name: "global proxy changes socket identity",
+			mutate: func(cfg *config.Config, _ *cliproxyauth.Auth) {
+				cfg.ProxyURL = "http://other-global-proxy.example:8080"
+			},
+		},
+		{
+			name: "auth proxy changes socket identity",
+			mutate: func(_ *config.Config, auth *cliproxyauth.Auth) {
+				auth.ProxyURL = "http://auth-proxy.example:8080"
+			},
+		},
+		{
+			name: "user agent default changes socket identity",
+			mutate: func(cfg *config.Config, _ *cliproxyauth.Auth) {
+				cfg.CodexHeaderDefaults.UserAgent = "codex-test/2"
+			},
+		},
+		{
+			name: "beta default changes socket identity",
+			mutate: func(cfg *config.Config, _ *cliproxyauth.Auth) {
+				cfg.CodexHeaderDefaults.BetaFeatures = "feature-b"
+			},
+		},
+		{
+			name: "identity confuse activation changes socket identity",
+			mutate: func(cfg *config.Config, _ *cliproxyauth.Auth) {
+				cfg.Codex.IdentityConfuse = true
+				cfg.Routing.SessionAffinity = true
+			},
+		},
+		{
+			name: "custom header changes socket identity",
+			mutate: func(_ *config.Config, auth *cliproxyauth.Auth) {
+				auth.Attributes["header:X-Route"] = "route-b"
+			},
+		},
+		{
+			name: "account changes socket identity",
+			mutate: func(_ *config.Config, auth *cliproxyauth.Auth) {
+				auth.Metadata["account_id"] = "account-b"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := *baseConfig
+			auth := baseAuth.Clone()
+			tt.mutate(&cfg, auth)
+			got := codexWebsocketConnectionKey(&cfg, auth)
+			if tt.wantSame && got != baseKey {
+				t.Fatalf("connection key changed: got %q, want %q", got, baseKey)
+			}
+			if !tt.wantSame && got == baseKey {
+				t.Fatalf("connection key did not change from %q", baseKey)
+			}
+		})
+	}
+
+	t.Run("API key rotation changes socket identity", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{
+			ID:       "codex-api-key-auth",
+			Provider: "codex",
+			Attributes: map[string]string{
+				"api_key": "api-key-a",
+			},
+		}
+		firstKey := codexWebsocketConnectionKey(baseConfig, auth)
+		auth.Attributes["api_key"] = "api-key-b"
+		secondKey := codexWebsocketConnectionKey(baseConfig, auth)
+		if secondKey == firstKey {
+			t.Fatalf("connection key did not change after API-key rotation: %q", firstKey)
+		}
+	})
+
+	t.Run("API key handshake takes precedence over explicit OAuth kind", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{
+			ID:       "codex-mixed-auth",
+			Provider: "codex",
+			Attributes: map[string]string{
+				cliproxyauth.AttributeAuthKind: cliproxyauth.AuthKindOAuth,
+				"api_key":                      "api-key-a",
+			},
+			Metadata: map[string]any{"access_token": "oauth-token"},
+		}
+		if !codexAuthUsesAPIKey(auth) {
+			t.Fatal("test auth does not use API-key handshake")
+		}
+		firstKey := codexWebsocketConnectionKey(baseConfig, auth)
+		auth.Attributes["api_key"] = "api-key-b"
+		secondKey := codexWebsocketConnectionKey(baseConfig, auth)
+		if secondKey == firstKey {
+			t.Fatalf("connection key did not change after mixed-shape API-key rotation: %q", firstKey)
+		}
+	})
+}
+
 func TestCodexAutoExecutorRequiredUpstreamWebsocketRejectsHTTPFallback(t *testing.T) {
 	exec := NewCodexAutoExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
 	auth := &cliproxyauth.Auth{

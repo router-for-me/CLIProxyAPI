@@ -42,6 +42,12 @@ type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
 }
 
+// executionSessionHandoff lets a replaced executor preserve sessions that the
+// replacement can continue through a shared runtime store.
+type executionSessionHandoff interface {
+	CanHandoffExecutionSessionsTo(replacement ProviderExecutor) bool
+}
+
 // Result captures execution outcome used to adjust auth state.
 type Result struct {
 	// AuthID references the auth that produced this result.

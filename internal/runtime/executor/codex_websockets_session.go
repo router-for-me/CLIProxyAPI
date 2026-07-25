@@ -2,13 +2,17 @@ package executor
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -56,6 +60,7 @@ type codexWebsocketSession struct {
 	connCloser      *websocketConnectionCloser
 	wsURL           string
 	authID          string
+	connectionKey   string
 	lifecycleBindMu sync.Mutex
 	lifecycle       cliproxyexecutor.ExecutionLifecycle
 	lifecycleModel  string
@@ -272,6 +277,7 @@ func (s *codexWebsocketSession) detachConnection(conn *websocket.Conn, lifecycle
 		closer = s.connCloser
 		s.conn = nil
 		s.connCloser = nil
+		s.connectionKey = ""
 		if s.readerConn == conn {
 			s.readerConn = nil
 		}
@@ -296,7 +302,93 @@ func closeWebsocketAfterBindFailure(sess *codexWebsocketSession, conn *websocket
 	}
 }
 
-func websocketSessionTargetChanged(sess *codexWebsocketSession, authID string, wsURL string) bool {
+func codexWebsocketConfigConnectionKey(cfg *config.Config) string {
+	var parts strings.Builder
+	proxyURL := ""
+	userAgent := ""
+	betaFeatures := ""
+	if cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+		userAgent = strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
+		betaFeatures = strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+	}
+	appendCodexWebsocketConnectionKeyPart(&parts, "proxy", proxyURL)
+	appendCodexWebsocketConnectionKeyPart(&parts, "user-agent", userAgent)
+	appendCodexWebsocketConnectionKeyPart(&parts, "beta-features", betaFeatures)
+	appendCodexWebsocketConnectionKeyPart(&parts, "identity-confuse", strconv.FormatBool(codexIdentityConfuseEnabled(cfg)))
+	return codexWebsocketConnectionKeyHash(parts.String())
+}
+
+func codexWebsocketConnectionKey(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	var parts strings.Builder
+	appendCodexWebsocketConnectionKeyPart(&parts, "config", codexWebsocketConfigConnectionKey(cfg))
+	appendCodexWebsocketConnectionKeyPart(&parts, "proxy", codexWebsocketProxyURL(cfg, auth))
+	if auth == nil {
+		return codexWebsocketConnectionKeyHash(parts.String())
+	}
+	authKind := strings.TrimSpace(auth.AuthKind())
+	appendCodexWebsocketConnectionKeyPart(&parts, "auth-kind", authKind)
+	if codexAuthUsesAPIKey(auth) {
+		apiKey := strings.TrimSpace(auth.Attributes["api_key"])
+		appendCodexWebsocketConnectionKeyPart(&parts, "api-key-fingerprint", codexWebsocketConnectionKeyHash(apiKey))
+	}
+	accountID := ""
+	if auth.Metadata != nil {
+		accountID, _ = auth.Metadata["account_id"].(string)
+	}
+	appendCodexWebsocketConnectionKeyPart(&parts, "account-id", strings.TrimSpace(accountID))
+
+	headerParts := make([]string, 0)
+	for key, value := range auth.Attributes {
+		if !strings.HasPrefix(key, "header:") {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(key, "header:")))
+		value = strings.TrimSpace(value)
+		if name == "" || value == "" {
+			continue
+		}
+		headerParts = append(headerParts, name+"\x00"+value)
+	}
+	sort.Strings(headerParts)
+	for _, headerPart := range headerParts {
+		appendCodexWebsocketConnectionKeyPart(&parts, "header", headerPart)
+	}
+	return codexWebsocketConnectionKeyHash(parts.String())
+}
+
+func appendCodexWebsocketConnectionKeyPart(parts *strings.Builder, name string, value string) {
+	if parts == nil {
+		return
+	}
+	parts.WriteString(name)
+	parts.WriteByte('=')
+	parts.WriteString(strconv.Itoa(len(value)))
+	parts.WriteByte(':')
+	parts.WriteString(value)
+	parts.WriteByte('\n')
+}
+
+func codexWebsocketConnectionKeyHash(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", sum)
+}
+
+func requestedWebsocketConnectionKey(connectionKeys []string) string {
+	if len(connectionKeys) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(connectionKeys[0])
+}
+
+func websocketSessionTargetMatches(sess *codexWebsocketSession, authID string, wsURL string, connectionKey string) bool {
+	return sess != nil &&
+		strings.TrimSpace(sess.authID) == strings.TrimSpace(authID) &&
+		strings.TrimSpace(sess.wsURL) == strings.TrimSpace(wsURL) &&
+		strings.TrimSpace(sess.connectionKey) == strings.TrimSpace(connectionKey)
+}
+
+func websocketSessionTargetChanged(sess *codexWebsocketSession, authID string, wsURL string, connectionKeys ...string) bool {
 	if sess == nil {
 		return false
 	}
@@ -306,19 +398,19 @@ func websocketSessionTargetChanged(sess *codexWebsocketSession, authID string, w
 	if strings.TrimSpace(sess.authID) == "" && strings.TrimSpace(sess.wsURL) == "" {
 		return false
 	}
-	return strings.TrimSpace(sess.authID) != strings.TrimSpace(authID) || strings.TrimSpace(sess.wsURL) != strings.TrimSpace(wsURL)
+	return !websocketSessionTargetMatches(sess, authID, wsURL, requestedWebsocketConnectionKey(connectionKeys))
 }
 
-func existingWebsocketSessionConn(sess *codexWebsocketSession, authID string, wsURL string) (*websocket.Conn, *websocketConnectionCloser) {
+func existingWebsocketSessionConn(sess *codexWebsocketSession, authID string, wsURL string, connectionKeys ...string) (*websocket.Conn, *websocketConnectionCloser) {
 	if sess == nil {
 		return nil, nil
 	}
 	sess.connMu.Lock()
 	conn := sess.conn
 	closer := sess.connCloser
-	matches := conn != nil && closer != nil &&
-		strings.TrimSpace(sess.authID) == strings.TrimSpace(authID) &&
-		strings.TrimSpace(sess.wsURL) == strings.TrimSpace(wsURL)
+	matches := conn != nil && closer != nil && websocketSessionTargetMatches(
+		sess, authID, wsURL, requestedWebsocketConnectionKey(connectionKeys),
+	)
 	sess.connMu.Unlock()
 	if !matches || sess.upstreamDisconnectError(conn) != nil {
 		return nil, nil
@@ -326,7 +418,7 @@ func existingWebsocketSessionConn(sess *codexWebsocketSession, authID string, ws
 	return conn, closer
 }
 
-func detachMismatchedWebsocketSessionConn(sess *codexWebsocketSession, authID string, wsURL string) (*websocket.Conn, *websocketConnectionCloser, string, string, cliproxyexecutor.ExecutionLifecycle) {
+func detachMismatchedWebsocketSessionConn(sess *codexWebsocketSession, authID string, wsURL string, connectionKeys ...string) (*websocket.Conn, *websocketConnectionCloser, string, string, cliproxyexecutor.ExecutionLifecycle) {
 	if sess == nil {
 		return nil, nil, "", "", nil
 	}
@@ -334,7 +426,7 @@ func detachMismatchedWebsocketSessionConn(sess *codexWebsocketSession, authID st
 	sess.connMu.Lock()
 	defer sess.connMu.Unlock()
 	conn := sess.conn
-	if conn == nil || (strings.TrimSpace(sess.authID) == strings.TrimSpace(authID) && strings.TrimSpace(sess.wsURL) == strings.TrimSpace(wsURL)) {
+	if conn == nil || websocketSessionTargetMatches(sess, authID, wsURL, requestedWebsocketConnectionKey(connectionKeys)) {
 		return nil, nil, "", "", nil
 	}
 
@@ -346,6 +438,7 @@ func detachMismatchedWebsocketSessionConn(sess *codexWebsocketSession, authID st
 	sess.lifecycleModel = ""
 	sess.conn = nil
 	sess.connCloser = nil
+	sess.connectionKey = ""
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}
@@ -456,11 +549,15 @@ func (e *CodexWebsocketsExecutor) UpstreamDisconnectChan(sessionID string) <-cha
 }
 
 func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
+	return e.ensureUpstreamConnWithConnectionKey(ctx, auth, sess, authID, wsURL, headers, codexWebsocketConnectionKey(e.cfg, auth))
+}
+
+func (e *CodexWebsocketsExecutor) ensureUpstreamConnWithConnectionKey(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header, connectionKey string) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
 	if sess == nil {
 		return e.dialCodexWebsocket(ctx, auth, wsURL, headers)
 	}
 
-	if staleConn, staleCloser, staleAuthID, staleWSURL, staleLifecycle := detachMismatchedWebsocketSessionConn(sess, authID, wsURL); staleConn != nil {
+	if staleConn, staleCloser, staleAuthID, staleWSURL, staleLifecycle := detachMismatchedWebsocketSessionConn(sess, authID, wsURL, connectionKey); staleConn != nil {
 		logCodexWebsocketDisconnected(sess.sessionID, staleAuthID, staleWSURL, "target_changed", nil)
 		if staleCloser != nil {
 			if errClose := staleCloser.Close(); errClose != nil {
@@ -507,6 +604,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	sess.connCloser = closer
 	sess.wsURL = wsURL
 	sess.authID = authID
+	sess.connectionKey = connectionKey
 	sess.readerConn = conn
 	sess.connMu.Unlock()
 
@@ -602,6 +700,7 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWe
 	sess.lifecycleModel = ""
 	sess.conn = nil
 	sess.connCloser = nil
+	sess.connectionKey = ""
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}
@@ -693,6 +792,7 @@ func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
 	sess.lifecycleModel = ""
 	sess.conn = nil
 	sess.connCloser = nil
+	sess.connectionKey = ""
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}

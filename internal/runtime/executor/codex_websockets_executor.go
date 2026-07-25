@@ -104,6 +104,30 @@ func (e *CodexAutoExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	return e.httpExec.CountTokens(ctx, auth, req, opts)
 }
 
+func (e *CodexAutoExecutor) CanHandoffExecutionSessionsTo(replacement cliproxyauth.ProviderExecutor) bool {
+	next, ok := replacement.(*CodexAutoExecutor)
+	if !ok || e == nil || next == nil || e.wsExec == nil || next.wsExec == nil {
+		return false
+	}
+	store := e.wsExec.store
+	if store == nil {
+		store = globalCodexWebsocketSessionStore
+	}
+	nextStore := next.wsExec.store
+	if nextStore == nil {
+		nextStore = globalCodexWebsocketSessionStore
+	}
+	var cfg *config.Config
+	if e.wsExec.CodexExecutor != nil {
+		cfg = e.wsExec.cfg
+	}
+	var nextCfg *config.Config
+	if next.wsExec.CodexExecutor != nil {
+		nextCfg = next.wsExec.cfg
+	}
+	return store == nextStore && codexWebsocketConfigConnectionKey(cfg) == codexWebsocketConfigConnectionKey(nextCfg)
+}
+
 func (e *CodexAutoExecutor) CloseExecutionSession(sessionID string) {
 	if e == nil || e.wsExec == nil {
 		return
