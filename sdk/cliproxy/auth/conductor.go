@@ -1024,11 +1024,7 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
 	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
-		if len(pool) == 1 {
-			return pool
-		}
-		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool))
-		return rotateStrings(pool, offset)
+		return pool
 	}
 	resolved := m.applyAPIKeyModelAlias(auth, requestedModel)
 	if strings.TrimSpace(resolved) == "" {
@@ -1123,12 +1119,7 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 	}
 	if len(candidates) == 0 {
 		if pool := m.resolveOpenAICompatUpstreamModelPool(auth, upstreamModel); len(pool) > 0 {
-			if len(pool) == 1 {
-				candidates = pool
-			} else {
-				offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, upstreamModel), len(pool))
-				candidates = rotateStrings(pool, offset)
-			}
+			candidates = pool
 		} else {
 			resolved := m.applyAPIKeyModelAlias(auth, upstreamModel)
 			if strings.TrimSpace(resolved) == "" {

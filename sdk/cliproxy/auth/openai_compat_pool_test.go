@@ -271,7 +271,7 @@ func TestResolveModelAliasPoolPrefersExactSuffixedAlias(t *testing.T) {
 	}
 }
 
-func TestManagerExecute_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
+func TestManagerExecute_OpenAICompatAliasPoolUsesConfigOrderWithinAuth(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{id: openAICompatPoolProviderKey}
 	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
@@ -290,7 +290,7 @@ func TestManagerExecute_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
 	}
 
 	got := executor.ExecuteModels()
-	want := []string{"deepseek-v3.1", "glm-5", "deepseek-v3.1"}
+	want := []string{"deepseek-v3.1", "deepseek-v3.1", "deepseek-v3.1"}
 	if len(got) != len(want) {
 		t.Fatalf("execute calls = %v, want %v", got, want)
 	}
@@ -301,7 +301,7 @@ func TestManagerExecute_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
 	}
 }
 
-func TestManagerExecute_OpenAICompatAliasPoolForceMappingRotatesAndRewritesResponse(t *testing.T) {
+func TestManagerExecute_OpenAICompatAliasPoolForceMappingUsesConfigOrderAndRewritesResponse(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{
 		id: openAICompatPoolProviderKey,
@@ -325,7 +325,7 @@ func TestManagerExecute_OpenAICompatAliasPoolForceMappingRotatesAndRewritesRespo
 	}
 
 	got := executor.ExecuteModels()
-	wantModels := []string{"deepseek-v3.1", "glm-5"}
+	wantModels := []string{"deepseek-v3.1", "deepseek-v3.1"}
 	for i := range wantModels {
 		if got[i] != wantModels[i] {
 			t.Fatalf("execute call %d model = %q, want %q", i, got[i], wantModels[i])
@@ -661,7 +661,7 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolSkipsSuspendedUpstreamOnLater
 	}
 }
 
-func TestManagerExecuteCount_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
+func TestManagerExecuteCount_OpenAICompatAliasPoolUsesConfigOrderWithinAuth(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{id: openAICompatPoolProviderKey}
 	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
@@ -680,7 +680,7 @@ func TestManagerExecuteCount_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T
 	}
 
 	got := executor.CountModels()
-	want := []string{"deepseek-v3.1", "glm-5"}
+	want := []string{"deepseek-v3.1", "deepseek-v3.1"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("count call %d model = %q, want %q", i, got[i], want[i])
