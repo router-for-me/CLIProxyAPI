@@ -2144,12 +2144,18 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 
 	// Determine cloak settings. Precedence (low -> high):
 	//   built-in "auto" default
+	//   -> global claude-cloak-mode default ("auto"/"always"/"never")
 	//   -> global disable-claude-cloak-mode switch (forces "never")
 	//   -> per-credential settings from auth attributes/metadata
 	//   -> per claude-api-key cloak config
 	cloakMode := "auto"
-	if cfg != nil && cfg.DisableClaudeCloakMode {
-		cloakMode = "never"
+	if cfg != nil {
+		if globalMode := strings.ToLower(strings.TrimSpace(cfg.ClaudeCloakMode)); globalMode != "" {
+			cloakMode = globalMode
+		}
+		if cfg.DisableClaudeCloakMode {
+			cloakMode = "never"
+		}
 	}
 	strictMode := attrStrict
 	sensitiveWords := attrWords

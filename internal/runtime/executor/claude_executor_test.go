@@ -2712,6 +2712,38 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	}
 }
 
+func TestApplyCloaking_GlobalAlwaysModeCloaksClaudeCliClient(t *testing.T) {
+	// A "claude-cli" User-Agent is treated as a genuine Claude Code client, so the
+	// default "auto" mode skips cloaking. claude-cloak-mode: "always" must force
+	// cloaking anyway — the fix for non-Claude-Code apps that send a claude-cli UA
+	// and get premium models rejected (429) because their request went un-cloaked.
+	incoming := http.Header{"User-Agent": []string{"claude-cli/2.1.181 (external, cli)"}}
+	ctx := newClaudeHeaderTestRequest(t, incoming).Context()
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
+	payload := []byte(`{"system":"orig","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	// Baseline: default "auto" mode leaves a claude-cli client un-cloaked, so the
+	// original system prompt passes through unchanged.
+	baseOut, errBase := applyCloaking(ctx, &config.Config{}, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+	if errBase != nil {
+		t.Fatalf("applyCloaking() baseline error = %v", errBase)
+	}
+	if got := gjson.GetBytes(baseOut, "system").String(); got != "orig" {
+		t.Fatalf("auto mode should not cloak a claude-cli client; system = %q", got)
+	}
+
+	// With claude-cloak-mode: "always", cloaking is forced even for a claude-cli
+	// client — the system prompt is replaced with the injected Claude Code blocks.
+	cfg := &config.Config{ClaudeCloakMode: "always"}
+	out, errCloaking := applyCloaking(ctx, cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+	if errCloaking != nil {
+		t.Fatalf("applyCloaking() always error = %v", errCloaking)
+	}
+	if !gjson.GetBytes(out, "system").IsArray() {
+		t.Fatalf("claude-cloak-mode always should cloak (inject Claude Code system blocks); system = %q", gjson.GetBytes(out, "system").Raw)
+	}
+}
+
 func TestNormalizeClaudeSamplingForUpstream_RemovesTemperature(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`)
 	out := normalizeClaudeSamplingForUpstream(payload)
