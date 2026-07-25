@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -93,6 +94,46 @@ func TestBuildConfigChangeDetails_NoChanges(t *testing.T) {
 	}
 }
 
+func TestBuildConfigChangeDetails_CodexLiveMediaRelay(t *testing.T) {
+	oldCfg := &config.Config{Codex: config.CodexConfig{LiveMediaRelay: config.CodexLiveMediaRelayConfig{
+		Enabled:     false,
+		MaxSessions: 16,
+		ICEServers: []config.CodexLiveICEServer{{
+			URLs:       []string{"turn:old.example.com"},
+			Username:   "old-user",
+			Credential: "old-secret",
+		}},
+	}}}
+	newCfg := &config.Config{Codex: config.CodexConfig{LiveMediaRelay: config.CodexLiveMediaRelayConfig{
+		Enabled:                 true,
+		MaxSessions:             32,
+		DisablePrivateRemoteIPs: true,
+		PublicIP:                "203.0.113.10",
+		UDPPortMin:              40000,
+		UDPPortMax:              40063,
+		ICEServers: []config.CodexLiveICEServer{{
+			URLs:       []string{"turn:new.example.com"},
+			Username:   "new-user",
+			Credential: "new-secret",
+		}},
+	}}}
+
+	details := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, details, "codex.live-media-relay.enabled: false -> true")
+	expectContains(t, details, "codex.live-media-relay.max-sessions: 16 -> 32")
+	expectContains(t, details, "codex.live-media-relay.disable-private-remote-ips: false -> true")
+	expectContains(t, details, "codex.live-media-relay.public-ip: <none> -> 203.0.113.10")
+	expectContains(t, details, "codex.live-media-relay.udp-port-min: 0 -> 40000")
+	expectContains(t, details, "codex.live-media-relay.udp-port-max: 0 -> 40063")
+	expectContains(t, details, "codex.live-media-relay.ice-servers: updated (1 -> 1 entries, credentials redacted)")
+	joined := strings.Join(details, "\n")
+	for _, secret := range []string{"old-secret", "new-secret", "old-user", "new-user"} {
+		if strings.Contains(joined, secret) {
+			t.Fatalf("config change details leaked %q: %s", secret, joined)
+		}
+	}
+}
+
 func TestBuildConfigChangeDetails_GeminiVertexHeaders(t *testing.T) {
 	oldCfg := &config.Config{
 		GeminiKey: []config.GeminiKey{
@@ -180,7 +221,7 @@ func TestBuildConfigChangeDetails_XAIKeys(t *testing.T) {
 	}}}
 
 	changes := BuildConfigChangeDetails(oldCfg, newCfg)
-	expectContains(t, changes, "xai[0].base-url: https://old.example.com/v1 -> https://new.example.com/v1")
+	expectContains(t, changes, "xai[0].base-url: https://old.example.com -> https://new.example.com")
 	expectContains(t, changes, "xai[0].proxy-url: http://old-proxy -> http://new-proxy")
 	expectContains(t, changes, "xai[0].prefix: old -> new")
 	expectContains(t, changes, "xai[0].priority: 1 -> 2")
@@ -238,6 +279,37 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 	details := BuildConfigChangeDetails(oldCfg, newCfg)
 	expectContains(t, details, "api-keys count: 1 -> 3")
 	expectContains(t, details, "remote-management.secret-key: created")
+}
+
+func TestBuildConfigChangeDetails_RedactsEndpointURLs(t *testing.T) {
+	oldCfg := &config.Config{
+		GeminiKey: []config.GeminiKey{{BaseURL: "https://old-user:old-pass@old.example/v1?token=old-token"}},
+		RemoteManagement: config.RemoteManagement{
+			PanelGitHubRepository: "https://old-user:old-pass@old-panel.example/private?token=old-token",
+		},
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			BaseURL: "https://old-user:old-pass@old-compat.example/v1?token=old-token",
+		}},
+	}
+	newCfg := &config.Config{
+		GeminiKey: []config.GeminiKey{{BaseURL: "https://new-user:new-pass@new.example/v1?token=new-token"}},
+		RemoteManagement: config.RemoteManagement{
+			PanelGitHubRepository: "https://new-user:new-pass@new-panel.example/private?token=new-token",
+		},
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			BaseURL: "https://new-user:new-pass@new-compat.example/v1?token=new-token",
+		}},
+	}
+
+	details := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, details, "gemini[0].base-url: https://old.example -> https://new.example")
+	expectContains(t, details, "remote-management.panel-github-repository: https://old-panel.example -> https://new-panel.example")
+	joined := strings.Join(details, "\n")
+	for _, sensitive := range []string{"old-user", "new-user", "old-pass", "new-pass", "old-token", "new-token", "/private", "/v1"} {
+		if strings.Contains(joined, sensitive) {
+			t.Fatalf("config change details leaked %q: %s", sensitive, joined)
+		}
+	}
 }
 
 func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
@@ -328,7 +400,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "codex-api-key count: 1 -> 2")
 	expectContains(t, details, "remote-management.disable-control-panel: false -> true")
 	expectContains(t, details, "remote-management.disable-auto-update-panel: false -> true")
-	expectContains(t, details, "remote-management.panel-github-repository: old/repo -> new/repo")
+	expectContains(t, details, "remote-management.panel-github-repository: old -> new")
 	expectContains(t, details, "remote-management.secret-key: deleted")
 }
 
@@ -482,7 +554,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 	expectContains(t, changes, "remote-management.allow-remote: false -> true")
 	expectContains(t, changes, "remote-management.disable-control-panel: false -> true")
 	expectContains(t, changes, "remote-management.disable-auto-update-panel: false -> true")
-	expectContains(t, changes, "remote-management.panel-github-repository: old/repo -> new/repo")
+	expectContains(t, changes, "remote-management.panel-github-repository: old -> new")
 	expectContains(t, changes, "remote-management.secret-key: deleted")
 	expectContains(t, changes, "openai-compatibility:")
 }

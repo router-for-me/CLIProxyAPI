@@ -329,6 +329,56 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorPrepareResponsesRequestRewritesCodexAgentMessage(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}})
+	payload := []byte(`{
+		"model":"grok-4.5",
+		"input":[{
+			"type":"agent_message",
+			"id":"amsg_019f92c3-6d77-7880-a6e4-f920867dc6a0",
+			"author":"/root",
+			"recipient":"/root/arithmetic_question",
+			"content":[
+				{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/arithmetic_question\nSender: /root\nPayload:\n"},
+				{"type":"encrypted_content","encrypted_content":"请出一道四则运算题。只回复题目本身，不要解答；使用中文。"}
+			],
+			"internal_chat_message_metadata_passthrough":{"turn_id":"019f92c3-6772-7213-8aac-8bd154d528f1"}
+		}]
+	}`)
+	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model:   "grok-4.5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Headers:      http.Header{"User-Agent": []string{"Codex Desktop/0.146.0-alpha.3.1"}},
+	}, true)
+	if errPrepare != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", errPrepare)
+	}
+
+	message := gjson.GetBytes(prepared.body, "input.0")
+	if message.Get("type").String() != "message" || message.Get("role").String() != "user" {
+		t.Fatalf("agent message was not rewritten: %s", prepared.body)
+	}
+	if message.Get("content.1.type").String() != "input_text" {
+		t.Fatalf("content[1].type = %q, want input_text; body=%s", message.Get("content.1.type").String(), prepared.body)
+	}
+	if text := message.Get("content.1.text").String(); text != "请出一道四则运算题。只回复题目本身，不要解答；使用中文。" {
+		t.Fatalf("content[1].text = %q; body=%s", text, prepared.body)
+	}
+	if message.Get("content.1.encrypted_content").Exists() {
+		t.Fatalf("encrypted_content was preserved: %s", prepared.body)
+	}
+	if message.Get("id").String() != "amsg_019f92c3-6d77-7880-a6e4-f920867dc6a0" || message.Get("author").String() != "/root" || message.Get("recipient").String() != "/root/arithmetic_question" {
+		t.Fatalf("agent message identity fields changed: %s", prepared.body)
+	}
+	if turnID := message.Get("internal_chat_message_metadata_passthrough.turn_id").String(); turnID != "019f92c3-6772-7213-8aac-8bd154d528f1" {
+		t.Fatalf("turn_id = %q; body=%s", turnID, prepared.body)
+	}
+}
+
 func TestXAIExecutorExecuteRestoresAdditionalToolsNamespaceCalls(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
