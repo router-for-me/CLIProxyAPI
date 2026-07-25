@@ -169,15 +169,13 @@ func (s *Service) Run(ctx context.Context, dryRun bool) (runErr error) {
 
 func (s *Service) run(ctx context.Context, dryRun bool) error {
 	if s.cfg.Schedule.RunOnStart {
-		if errRun := s.runOnce(ctx, dryRun); errRun != nil {
-			log.WithError(errRun).Error("log uploader initial run failed")
-		}
+		s.runCatchUp(ctx, dryRun, "initial")
 	}
 	for {
 		delay := s.nextDelay()
 		nextRun := s.now().Add(delay)
 		log.WithFields(log.Fields{
-			"delay":   delay.String(),
+			"delay":    delay.String(),
 			"next_run": nextRun.Format(time.RFC3339),
 		}).Info("scheduler waiting for next run")
 		timer := time.NewTimer(delay)
@@ -191,24 +189,83 @@ func (s *Service) run(ctx context.Context, dryRun bool) error {
 			}
 			return nil
 		case <-timer.C:
-			if errRun := s.runOnce(ctx, dryRun); errRun != nil {
-				log.WithError(errRun).Error("scheduled log upload failed")
-			}
+			s.runCatchUp(ctx, dryRun, "scheduled")
 		}
 	}
 }
 
-// nextDelay returns the wait duration until the next run.
-// When there are pending hours from previous failures, it uses the shorter
-// catch-up delay instead of the full interval to reduce backlog faster.
-func (s *Service) nextDelay() time.Duration {
-	state, errLoad := s.loadState()
-	if errLoad != nil || len(state.PreparedHours) == 0 {
-		now := s.now().In(s.location)
-		return time.Until(nextScheduledRun(now, s.cfg.Schedule.Interval, s.cfg.Schedule.SettleDelay))
+// runCatchUp keeps calling runOnce until there is no settled backlog and no
+// prepared hours, so hour N+1 starts immediately after hour N without waiting
+// for the next clock boundary. On error it stops the burst and lets the outer
+// scheduler retry after catch-up delay (when backlog remains).
+func (s *Service) runCatchUp(ctx context.Context, dryRun bool, reason string) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		errRun := s.runOnce(ctx, dryRun)
+		if errRun != nil {
+			if reason == "initial" {
+				log.WithError(errRun).Error("log uploader initial run failed")
+			} else {
+				log.WithError(errRun).Error("scheduled log upload failed")
+			}
+			return
+		}
+		hasWork, errHas := s.hasCatchUpWork()
+		if errHas != nil {
+			log.WithError(errHas).Warn("catch-up work check failed; waiting for next schedule")
+			return
+		}
+		if !hasWork {
+			return
+		}
+		log.WithField("reason", reason).Info("settled backlog remains; continuing catch-up immediately")
 	}
-	log.WithField("pending_hours", len(state.PreparedHours)).Info("pending hours detected; using catch-up delay")
-	return s.cfg.Schedule.CatchUpDelay
+}
+
+// hasCatchUpWork reports whether another runOnce should start without waiting
+// for the next hourly boundary: prepared uploads still open, or settled source
+// .log files still waiting to be archived.
+func (s *Service) hasCatchUpWork() (bool, error) {
+	state, errLoad := s.loadState()
+	if errLoad != nil {
+		return false, errLoad
+	}
+	if len(state.PreparedHours) > 0 {
+		return true, nil
+	}
+	sources, errScan := s.scanSources(state)
+	if errScan != nil {
+		return false, errScan
+	}
+	return len(sources) > 0, nil
+}
+
+// nextDelay returns the wait duration until the next run.
+// When prepared hours or settled source backlog remain, it uses the shorter
+// catch-up delay instead of waiting for the next hour boundary.
+func (s *Service) nextDelay() time.Duration {
+	now := s.now().In(s.location)
+	hasWork, errHas := s.hasCatchUpWork()
+	if errHas != nil {
+		log.WithError(errHas).Warn("failed to inspect backlog for next delay; using hourly schedule")
+		return durationUntil(now, nextScheduledRun(now, s.cfg.Schedule.Interval, s.cfg.Schedule.SettleDelay))
+	}
+	if hasWork {
+		log.Info("pending backlog detected; using catch-up delay")
+		return s.cfg.Schedule.CatchUpDelay
+	}
+	return durationUntil(now, nextScheduledRun(now, s.cfg.Schedule.Interval, s.cfg.Schedule.SettleDelay))
+}
+
+// durationUntil returns target-now, or 0 if target is not after now.
+func durationUntil(now, target time.Time) time.Duration {
+	d := target.Sub(now)
+	if d < 0 {
+		return 0
+	}
+	return d
 }
 
 func nextScheduledRun(now time.Time, interval, settleDelay time.Duration) time.Time {
@@ -485,8 +542,8 @@ func (s *Service) processBatch(ctx context.Context, hour time.Time, provider str
 		return s.recordBatchFailure(record, errChecksum)
 	}
 	log.WithFields(log.Fields{
-		"hour":           hour.Format(time.RFC3339),
-		"archive_size":   archiveSize,
+		"hour":            hour.Format(time.RFC3339),
+		"archive_size":    archiveSize,
 		"sha256_duration": s.now().Sub(shaStart).String(),
 	}).Info("archive checksum computed")
 	if archiveSize != compressedSize {

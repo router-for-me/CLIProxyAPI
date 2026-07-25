@@ -894,6 +894,98 @@ func TestNextScheduledRun(t *testing.T) {
 	}
 }
 
+func TestNextDelayUsesCatchUpWhenSettledSourceBacklogExists(t *testing.T) {
+	t.Parallel()
+
+	location := mustLocation(t, "Asia/Shanghai")
+	// Mid-hour: normal schedule would wait until next :05; backlog must not wait that long.
+	now := time.Date(2026, time.July, 15, 10, 45, 0, 0, location)
+	root := filepath.Join(t.TempDir(), "keys")
+	workDir := filepath.Join(t.TempDir(), "uploader")
+	// Settled historical log (hour 08 ready well before now).
+	mustWriteLog(t, root, "user-a", "old.log",
+		requestLog(time.Date(2026, time.July, 15, 8, 10, 0, 0, location), "gpt", "backlog"),
+		now.Add(-2*time.Hour))
+
+	cfg := testConfig(root, workDir)
+	cfg.Schedule.SettleDelay = 5 * time.Minute
+	cfg.Schedule.CatchUpDelay = 2 * time.Minute
+	service := mustTestService(t, cfg, &fakeObjectUploader{}, now)
+
+	hasWork, errHas := service.hasCatchUpWork()
+	if errHas != nil {
+		t.Fatalf("hasCatchUpWork: %v", errHas)
+	}
+	if !hasWork {
+		t.Fatal("hasCatchUpWork() = false, want true for settled source backlog")
+	}
+	delay := service.nextDelay()
+	if delay != 2*time.Minute {
+		t.Fatalf("nextDelay() = %s, want catch-up delay 2m (not next hour boundary)", delay)
+	}
+}
+
+func TestNextDelayUsesHourlyScheduleWhenNoBacklog(t *testing.T) {
+	t.Parallel()
+
+	location := mustLocation(t, "Asia/Shanghai")
+	now := time.Date(2026, time.July, 15, 10, 45, 0, 0, location)
+	root := filepath.Join(t.TempDir(), "keys")
+	workDir := filepath.Join(t.TempDir(), "uploader")
+	cfg := testConfig(root, workDir)
+	cfg.Schedule.SettleDelay = 5 * time.Minute
+	cfg.Schedule.CatchUpDelay = 2 * time.Minute
+	service := mustTestService(t, cfg, &fakeObjectUploader{}, now)
+
+	hasWork, errHas := service.hasCatchUpWork()
+	if errHas != nil {
+		t.Fatalf("hasCatchUpWork: %v", errHas)
+	}
+	if hasWork {
+		t.Fatal("hasCatchUpWork() = true, want false with empty logs root")
+	}
+	delay := service.nextDelay()
+	// From 10:45, next scheduled run is 11:05 → 20 minutes.
+	want := 20 * time.Minute
+	if delay < want-time.Second || delay > want+time.Second {
+		t.Fatalf("nextDelay() = %s, want about %s", delay, want)
+	}
+}
+
+func TestRunCatchUpProcessesMultipleHoursWithoutScheduleGap(t *testing.T) {
+	t.Parallel()
+
+	location := mustLocation(t, "Asia/Shanghai")
+	now := time.Date(2026, time.July, 15, 5, 10, 0, 0, location)
+	root := filepath.Join(t.TempDir(), "keys")
+	workDir := filepath.Join(t.TempDir(), "uploader")
+	mustWriteLog(t, root, "u1", "h1.log",
+		requestLog(time.Date(2026, time.July, 15, 1, 10, 0, 0, location), "m", "h1"), now.Add(-4*time.Hour))
+	mustWriteLog(t, root, "u2", "h2.log",
+		requestLog(time.Date(2026, time.July, 15, 2, 10, 0, 0, location), "m", "h2"), now.Add(-3*time.Hour))
+	mustWriteLog(t, root, "u3", "h3.log",
+		requestLog(time.Date(2026, time.July, 15, 3, 10, 0, 0, location), "m", "h3"), now.Add(-2*time.Hour))
+
+	cfg := testConfig(root, workDir)
+	cfg.Upload.Enabled = true
+	cfg.Schedule.SettleDelay = 0
+	uploader := &fakeObjectUploader{}
+	service := mustTestService(t, cfg, uploader, now)
+
+	// One catch-up burst must archive all three settled hours.
+	service.runCatchUp(context.Background(), false, "test")
+	if len(uploader.calls) != 3 {
+		t.Fatalf("upload calls = %d, want 3 consecutive hours in one catch-up", len(uploader.calls))
+	}
+	hasWork, errHas := service.hasCatchUpWork()
+	if errHas != nil {
+		t.Fatalf("hasCatchUpWork after catch-up: %v", errHas)
+	}
+	if hasWork {
+		t.Fatal("hasCatchUpWork() still true after processing all settled hours")
+	}
+}
+
 func testConfig(root, workDir string) Config {
 	return Config{
 		LogsRoot: root,
