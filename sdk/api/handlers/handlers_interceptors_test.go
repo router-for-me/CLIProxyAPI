@@ -29,7 +29,15 @@ type handlerInterceptorNoStreamTestHost struct {
 	*handlerInterceptorTestHost
 }
 
+type handlerInterceptorDisabledRequestTestHost struct {
+	*handlerInterceptorTestHost
+}
+
 func (h *handlerInterceptorNoStreamTestHost) HasStreamInterceptors() bool {
+	return false
+}
+
+func (h *handlerInterceptorDisabledRequestTestHost) HasRequestInterceptors() bool {
 	return false
 }
 
@@ -252,6 +260,77 @@ func TestHandlerRequestInterceptorRewritesExecutorRequest(t *testing.T) {
 	}
 	if gotOpts.Metadata[coreexecutor.RequestedModelMetadataKey] != model {
 		t.Fatalf("metadata = %#v, want requested model", gotOpts.Metadata)
+	}
+}
+
+func TestHandlerSkipsDisabledRequestInterceptorsWithoutCopyingPayload(t *testing.T) {
+	payload := []byte(`{"model":"disabled-interceptor-model"}`)
+	called := false
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetPluginHost(&handlerInterceptorDisabledRequestTestHost{
+		handlerInterceptorTestHost: &handlerInterceptorTestHost{
+			interceptRequestBeforeAuth: func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+				called = true
+				return pluginapi.RequestInterceptResponse{Body: []byte(`{"unexpected":true}`)}
+			},
+		},
+	})
+
+	req := coreexecutor.Request{Model: "disabled-interceptor-model", Payload: payload}
+	opts := coreexecutor.Options{OriginalRequest: payload}
+	gotReq, gotOpts := handler.applyRequestInterceptorsBeforeAuth(context.Background(), "openai", req.Model, req, opts, "")
+
+	if called {
+		t.Fatal("disabled request interceptor was called")
+	}
+	if &gotReq.Payload[0] != &payload[0] {
+		t.Fatal("request payload was copied")
+	}
+	if &gotOpts.OriginalRequest[0] != &payload[0] {
+		t.Fatal("original request was copied")
+	}
+}
+
+func BenchmarkHandlerRequestInterceptors(b *testing.B) {
+	sizes := []struct {
+		name  string
+		bytes int
+	}{
+		{name: "1KiB", bytes: 1 << 10},
+		{name: "1MiB", bytes: 1 << 20},
+		{name: "8MiB", bytes: 8 << 20},
+	}
+	hosts := []struct {
+		name string
+		host PluginInterceptorHost
+	}{
+		{
+			name: "disabled",
+			host: &handlerInterceptorDisabledRequestTestHost{
+				handlerInterceptorTestHost: &handlerInterceptorTestHost{},
+			},
+		},
+		{name: "active", host: &handlerInterceptorTestHost{}},
+	}
+
+	for _, size := range sizes {
+		payload := make([]byte, size.bytes)
+		req := coreexecutor.Request{Model: "benchmark-model", Payload: payload}
+		opts := coreexecutor.Options{OriginalRequest: payload}
+		for _, host := range hosts {
+			b.Run(host.name+"/"+size.name, func(b *testing.B) {
+				handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+				handler.SetPluginHost(host.host)
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					gotReq, gotOpts := handler.applyRequestInterceptorsBeforeAuth(context.Background(), "openai", req.Model, req, opts, "")
+					if len(gotReq.Payload) != size.bytes || len(gotOpts.OriginalRequest) != size.bytes {
+						b.Fatal("request payload length changed")
+					}
+				}
+			})
+		}
 	}
 }
 
