@@ -107,6 +107,10 @@ func TestManager_AvailableProvidersAndHasProviderAuth_ExcludeDisabled(t *testing
 
 func TestManager_ResetQuotaClearsRuntimeAndRegistryState(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
+	refreshLoop := newAuthAutoRefreshLoop(manager, time.Second, 1)
+	manager.mu.Lock()
+	manager.refreshLoop = refreshLoop
+	manager.mu.Unlock()
 	ctx := context.Background()
 	authID := "reset-quota-auth"
 	model := "reset-quota-model"
@@ -124,7 +128,9 @@ func TestManager_ResetQuotaClearsRuntimeAndRegistryState(t *testing.T) {
 		Status:         StatusError,
 		StatusMessage:  "quota exhausted",
 		Unavailable:    true,
+		RefreshBlocked: true,
 		NextRetryAfter: next,
+		Runtime:        testRefreshEvaluator{},
 		Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: next, BackoffLevel: 2},
 		ModelStates: map[string]*ModelState{
 			model: {
@@ -145,6 +151,13 @@ func TestManager_ResetQuotaClearsRuntimeAndRegistryState(t *testing.T) {
 	if count := reg.GetModelCount(model); count != 0 {
 		t.Fatalf("registry model count before reset = %d, want 0", count)
 	}
+	refreshLoop.applyDirty(time.Now())
+	refreshLoop.mu.Lock()
+	_, scheduledBeforeReset := refreshLoop.index[authID]
+	refreshLoop.mu.Unlock()
+	if scheduledBeforeReset {
+		t.Fatalf("refresh-blocked auth %q was scheduled before reset", authID)
+	}
 
 	updated, models, errReset := manager.ResetQuota(ctx, authID)
 	if errReset != nil {
@@ -158,6 +171,9 @@ func TestManager_ResetQuotaClearsRuntimeAndRegistryState(t *testing.T) {
 	}
 	if updated.Status != StatusActive || updated.StatusMessage != "" || updated.Unavailable || !updated.NextRetryAfter.IsZero() {
 		t.Fatalf("updated auth state = status %q message %q unavailable %v next %v", updated.Status, updated.StatusMessage, updated.Unavailable, updated.NextRetryAfter)
+	}
+	if updated.RefreshBlocked {
+		t.Fatal("updated auth remained refresh-blocked after administrative quota reset")
 	}
 	if updated.Quota.Exceeded || updated.Quota.Reason != "" || !updated.Quota.NextRecoverAt.IsZero() || updated.Quota.BackoffLevel != 0 {
 		t.Fatalf("updated auth quota = %+v, want cleared", updated.Quota)
@@ -174,5 +190,12 @@ func TestManager_ResetQuotaClearsRuntimeAndRegistryState(t *testing.T) {
 	}
 	if count := reg.GetModelCount(model); count != 1 {
 		t.Fatalf("registry model count after reset = %d, want 1", count)
+	}
+	refreshLoop.applyDirty(time.Now())
+	refreshLoop.mu.Lock()
+	_, scheduledAfterReset := refreshLoop.index[authID]
+	refreshLoop.mu.Unlock()
+	if !scheduledAfterReset {
+		t.Fatalf("auth %q was not rescheduled for refresh after reset", authID)
 	}
 }
