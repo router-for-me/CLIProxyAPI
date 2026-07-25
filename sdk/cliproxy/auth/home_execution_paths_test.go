@@ -11,8 +11,11 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 type homeExecutionDispatcher struct{}
@@ -99,6 +102,80 @@ func TestHomeSelectionEndsAfterExecute(t *testing.T) {
 		t.Fatal("attempt context was not canceled after execution")
 	}
 }
+
+func TestHomeNonStreamingExecutionLogsSelectedOAuthAuth(t *testing.T) {
+	previousLevel := log.GetLevel()
+	log.SetLevel(log.DebugLevel)
+	hook := logtest.NewLocal(log.StandardLogger())
+	t.Cleanup(func() {
+		hook.Reset()
+		log.SetLevel(previousLevel)
+	})
+
+	tests := []struct {
+		name string
+		run  func(*Manager, context.Context) error
+	}{
+		{
+			name: "execute",
+			run: func(manager *Manager, ctx context.Context) error {
+				_, errExecute := manager.Execute(ctx, []string{"home-execution"}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{})
+				return errExecute
+			},
+		},
+		{
+			name: "count_tokens",
+			run: func(manager *Manager, ctx context.Context) error {
+				_, errCount := manager.ExecuteCount(ctx, []string{"home-execution"}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{})
+				return errCount
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hook.Reset()
+			manager := NewManager(nil, nil, nil)
+			manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+			manager.PublishHomeDispatch(homeOAuthLoggingDispatcher{}, executionregistry.New(), 1)
+			manager.RegisterExecutor(&homeExecutionExecutor{})
+
+			ctx := internallogging.WithRequestID(context.Background(), "req-home-log")
+			if errRun := tt.run(manager, ctx); errRun != nil {
+				t.Fatalf("execution error = %v", errRun)
+			}
+
+			const expected = "Use OAuth provider=home-execution auth_file=home-auth for model model-a via socks5 proxy"
+			for _, entry := range hook.AllEntries() {
+				if entry.Level == log.DebugLevel && entry.Message == expected {
+					if got := entry.Data["request_id"]; got != "req-home-log" {
+						t.Fatalf("request_id = %v, want req-home-log", got)
+					}
+					return
+				}
+			}
+			t.Fatalf("selected auth log %q not found", expected)
+		})
+	}
+}
+
+type homeOAuthLoggingDispatcher struct{}
+
+func (homeOAuthLoggingDispatcher) HeartbeatOK() bool { return true }
+
+func (homeOAuthLoggingDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+	return json.Marshal(homeAuthDispatchResponse{Auth: Auth{
+		ID:       "home-auth",
+		Provider: "home-execution",
+		ProxyURL: "socks5://127.0.0.1:1080",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			AttributeAuthKind: AuthKindOAuth,
+		},
+	}})
+}
+
+func (homeOAuthLoggingDispatcher) AbortAmbiguousDispatch() {}
 
 func TestHomeSelectionEndsOnMissingExecutor(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
