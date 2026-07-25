@@ -541,16 +541,21 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 }
 
 // ensureXAINativeXSearchTool appends {"type":"x_search"} when the final tools
-// list does not already include native X Search. When tool_choice restricts the
-// model to allowed_tools, x_search is also added there (without duplicates) so
-// Grok can select the injected tool. When injection is enabled, HTTP and websocket
-// executors both prepare payloads through prepareResponsesRequestTo, so this runs
-// once before the body is submitted upstream.
+// list does not already include native X Search or a client function named
+// web_search. When tool_choice restricts the model to allowed_tools, x_search
+// is also added there (without duplicates) so Grok can select the injected
+// tool. When injection is enabled, HTTP and websocket executors both prepare
+// payloads through prepareResponsesRequestTo, so this runs once before the body
+// is submitted upstream.
 func ensureXAINativeXSearchTool(body []byte) []byte {
 	if !gjson.ValidBytes(body) {
 		return body
 	}
-	if !xaiRequestHasNativeXSearch(body) {
+	hasNativeXSearch := xaiRequestHasNativeXSearch(body)
+	if xaiRequestHasClientWebSearchTool(body) && !hasNativeXSearch {
+		return body
+	}
+	if !hasNativeXSearch {
 		tools := gjson.GetBytes(body, "tools")
 		if !tools.Exists() || !tools.IsArray() {
 			body, _ = sjson.SetRawBytes(body, "tools", []byte(`[{"type":"x_search"}]`))
@@ -559,6 +564,26 @@ func ensureXAINativeXSearchTool(body []byte) []byte {
 		}
 	}
 	return ensureXAINativeXSearchAllowedTools(body)
+}
+
+// xaiRequestHasClientWebSearchTool reports whether the request already exposes
+// a local function or custom tool named web_search. Injecting native x_search
+// beside it makes both tools collide on xAI's upstream web_search name.
+func xaiRequestHasClientWebSearchTool(body []byte) bool {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		toolType := strings.TrimSpace(tool.Get("type").String())
+		if toolType != xaiFunctionToolType && toolType != xaiCustomToolType {
+			continue
+		}
+		if strings.TrimSpace(tool.Get("name").String()) == xaiWebSearchToolType {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureXAINativeXSearchAllowedTools appends x_search to tool_choice.tools when
