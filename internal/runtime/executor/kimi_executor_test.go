@@ -14,6 +14,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func TestNewKimiExecutorInitializesDelegatedClaudeConfig(t *testing.T) {
@@ -71,6 +72,171 @@ func TestKimiExecutorClaudeRequestPreservesInternalModelSemantics(t *testing.T) 
 	if got := gjson.GetBytes(response.Payload, "model").String(); got != model {
 		t.Fatalf("response model = %q, want %q", got, model)
 	}
+}
+
+func TestKimiExecutorClaudeRequestConvertsNestedToolReference(t *testing.T) {
+	var upstreamBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"msg_test","type":"message","role":"assistant","model":"k3","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+			)),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{DisableClaudeCloakMode: true})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-token"},
+	}
+	payload := kimiClaudeNestedToolReferencePayload(false)
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		OriginalRequest: payload,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	assertKimiNestedToolReferenceNormalized(t, upstreamBody)
+}
+
+func TestKimiExecutorClaudeStreamConvertsNestedToolReference(t *testing.T) {
+	var upstreamBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body: io.NopCloser(strings.NewReader(
+				"event: message_start\n" +
+					`data: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"k3","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}` + "\n\n" +
+					"event: message_stop\n" +
+					`data: {"type":"message_stop"}` + "\n\n",
+			)),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{DisableClaudeCloakMode: true})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-token"},
+	}
+	payload := kimiClaudeNestedToolReferencePayload(true)
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		Stream:          true,
+		SourceFormat:    sdktranslator.FormatClaude,
+		OriginalRequest: payload,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+	assertKimiNestedToolReferenceNormalized(t, upstreamBody)
+}
+
+func kimiClaudeNestedToolReferencePayload(stream bool) []byte {
+	payload := []byte(`{
+		"model":"kimi-k3",
+		"max_tokens":256,
+		"messages":[
+			{"role":"user","content":"find tool"},
+			{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"ToolSearch","input":{"query":"x"}}]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"tu_1","content":[
+					{"type":"text","text":"before"},
+					{"type":"tool_reference","tool_name":"SendMessage"},
+					{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1n"}}
+				]},
+				{"type":"tool_reference","tool_name":"KeepTopLevel"},
+				{"type":"text","text":"ok now say hi"}
+			]}
+		]
+	}`)
+	if !stream {
+		return payload
+	}
+	out, errSet := sjson.SetBytes(payload, "stream", true)
+	if errSet != nil {
+		panic(errSet)
+	}
+	return out
+}
+
+func assertKimiNestedToolReferenceNormalized(t *testing.T, body []byte) {
+	t.Helper()
+	if got := gjson.GetBytes(body, "messages.2.content.0.content.0.text").String(); got != "before" {
+		t.Fatalf("existing nested text = %q, want before: %s", got, body)
+	}
+	if got := gjson.GetBytes(body, "messages.2.content.0.content.1.type").String(); got != "text" {
+		t.Fatalf("nested reference type = %q, want text: %s", got, body)
+	}
+	if got := gjson.GetBytes(body, "messages.2.content.0.content.1.text").String(); got != "SendMessage" {
+		t.Fatalf("nested reference text = %q, want SendMessage: %s", got, body)
+	}
+	if got := gjson.GetBytes(body, "messages.2.content.0.content.2.type").String(); got != "image" {
+		t.Fatalf("unrelated nested block type = %q, want image: %s", got, body)
+	}
+	if got := gjson.GetBytes(body, "messages.2.content.1.type").String(); got != "tool_reference" {
+		t.Fatalf("top-level reference type = %q, want preserved tool_reference: %s", got, body)
+	}
+	if got := gjson.GetBytes(body, "messages.2.content.1.tool_name").String(); got != "KeepTopLevel" {
+		t.Fatalf("top-level reference tool_name = %q, want KeepTopLevel: %s", got, body)
+	}
+}
+
+func TestKimiExecutorCountTokensConvertsNestedToolReference(t *testing.T) {
+	var upstreamBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"input_tokens":42}`)),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{DisableClaudeCloakMode: true})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-token"},
+	}
+	payload := kimiClaudeNestedToolReferencePayload(false)
+	_, err := executor.CountTokens(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		OriginalRequest: payload,
+	})
+	if err != nil {
+		t.Fatalf("CountTokens() error = %v", err)
+	}
+	assertKimiNestedToolReferenceNormalized(t, upstreamBody)
 }
 
 func TestKimiExecutorCountTokensUsesCanonicalUpstreamModel(t *testing.T) {

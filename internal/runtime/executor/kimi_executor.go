@@ -85,6 +85,11 @@ func (e *KimiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	from := opts.SourceFormat
 	if from.String() == "claude" {
+		normalizedPayload, errNormalize := normalizeKimiClaudeToolResultReferences(req.Payload)
+		if errNormalize != nil {
+			return resp, errNormalize
+		}
+		req.Payload = normalizedPayload
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 		return e.ClaudeExecutor.Execute(ctx, auth, req, opts)
 	}
@@ -195,6 +200,11 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	from := opts.SourceFormat
 	if from.String() == "claude" {
+		normalizedPayload, errNormalize := normalizeKimiClaudeToolResultReferences(req.Payload)
+		if errNormalize != nil {
+			return nil, errNormalize
+		}
+		req.Payload = normalizedPayload
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 		return e.ClaudeExecutor.ExecuteStream(ctx, auth, req, opts)
 	}
@@ -336,8 +346,68 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 // CountTokens estimates token count for Kimi requests.
 func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if opts.SourceFormat.String() == "claude" {
+		normalizedPayload, errNormalize := normalizeKimiClaudeToolResultReferences(req.Payload)
+		if errNormalize != nil {
+			return cliproxyexecutor.Response{}, errNormalize
+		}
+		req.Payload = normalizedPayload
+	}
 	auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 	return e.ClaudeExecutor.CountTokens(ctx, auth, req, opts)
+}
+
+func normalizeKimiClaudeToolResultReferences(body []byte) ([]byte, error) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body, nil
+	}
+
+	messages := util.GetGJSONBytesNoCopy(body, "messages")
+	if !messages.IsArray() {
+		return body, nil
+	}
+
+	out := body
+	converted := 0
+	for messageIndex, message := range messages.Array() {
+		content := message.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		for contentIndex, block := range content.Array() {
+			if block.Get("type").String() != "tool_result" {
+				continue
+			}
+			nestedContent := block.Get("content")
+			if !nestedContent.IsArray() {
+				continue
+			}
+			for nestedIndex, nestedBlock := range nestedContent.Array() {
+				if nestedBlock.Get("type").String() != "tool_reference" {
+					continue
+				}
+				toolName := nestedBlock.Get("tool_name").String()
+				if strings.TrimSpace(toolName) == "" {
+					continue
+				}
+				replacement, errText := sjson.SetBytes([]byte(`{"type":"text"}`), "text", toolName)
+				if errText != nil {
+					return body, fmt.Errorf("kimi executor: failed to encode tool reference text: %w", errText)
+				}
+				path := fmt.Sprintf("messages.%d.content.%d.content.%d", messageIndex, contentIndex, nestedIndex)
+				updated, errSet := sjson.SetRawBytes(out, path, replacement)
+				if errSet != nil {
+					return body, fmt.Errorf("kimi executor: failed to normalize nested tool reference: %w", errSet)
+				}
+				out = updated
+				converted++
+			}
+		}
+	}
+	if converted > 0 {
+		log.WithField("converted_tool_references", converted).Debug("kimi executor: normalized unsupported nested tool references")
+	}
+	return out, nil
 }
 
 func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
