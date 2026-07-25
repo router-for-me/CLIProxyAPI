@@ -118,8 +118,8 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if hasUnauthorizedAuthFailure(a) {
 		return false
 	}
-	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
-		return false
+	if !a.NextRefreshAfter.IsZero() {
+		return !now.Before(a.NextRefreshAfter)
 	}
 	if evaluator, ok := a.Runtime.(RefreshEvaluator); ok && evaluator != nil {
 		return evaluator.ShouldRefresh(now, a)
@@ -161,7 +161,7 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 		return false
 	}
 	if hasExpiry && !expiry.IsZero() {
-		return time.Until(expiry) <= *lead
+		return expiry.Sub(now) <= effectiveRefreshLead(*lead, lastRefresh, expiry)
 	}
 	if !lastRefresh.IsZero() {
 		return now.Sub(lastRefresh) >= *lead
@@ -441,6 +441,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		}
 	}
 
+	previousExpiry, hadPreviousExpiry := auth.ExpirationTime()
 	cloned := auth.Clone()
 	updated, err := exec.Refresh(ctx, cloned)
 	if err != nil && errors.Is(err, context.Canceled) {
@@ -493,7 +494,13 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	}
 	updated.UpdatedAt = now
 	modelsToResume := clearUnauthorizedModelStates(updated, now)
-	if m.shouldRefresh(updated, now) {
+	expiryDidNotAdvance := false
+	if hadPreviousExpiry {
+		if refreshedExpiry, okExpiry := updated.ExpirationTime(); okExpiry {
+			expiryDidNotAdvance = !refreshedExpiry.After(previousExpiry)
+		}
+	}
+	if expiryDidNotAdvance || m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
 	saved, errUpdate := m.Update(ctx, updated)

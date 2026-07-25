@@ -139,6 +139,54 @@ func TestNextRefreshCheckAt_ProviderLead_Expiry(t *testing.T) {
 	}
 }
 
+func TestNextRefreshCheckAt_ProviderLeadCapsAtHalfObservedLifetime(t *testing.T) {
+	now := time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)
+	lead := 5 * 24 * time.Hour
+	setRefreshLeadFactory(t, "short-lived-provider", func() *time.Duration {
+		d := lead
+		return &d
+	})
+
+	tests := []struct {
+		name     string
+		lifetime time.Duration
+		wantDue  time.Time
+	}{
+		{
+			name:     "three day token uses half lifetime",
+			lifetime: 72 * time.Hour,
+			wantDue:  now.Add(36 * time.Hour),
+		},
+		{
+			name:     "ten day token keeps provider lead",
+			lifetime: 10 * 24 * time.Hour,
+			wantDue:  now.Add(5 * 24 * time.Hour),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			auth := &Auth{
+				ID:              "short-lived-auth",
+				Provider:        "short-lived-provider",
+				LastRefreshedAt: now,
+				Metadata: map[string]any{
+					"email":      "x@example.com",
+					"expires_at": now.Add(tt.lifetime).Format(time.RFC3339),
+				},
+			}
+
+			got, ok := nextRefreshCheckAt(now, auth, time.Minute)
+			if !ok {
+				t.Fatal("nextRefreshCheckAt() ok = false, want true")
+			}
+			if !got.Equal(tt.wantDue) {
+				t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, tt.wantDue)
+			}
+		})
+	}
+}
+
 func TestNextRefreshCheckAt_RefreshEvaluatorFallback(t *testing.T) {
 	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
 	interval := 15 * time.Minute

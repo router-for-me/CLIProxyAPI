@@ -45,6 +45,117 @@ func (e unauthorizedRefreshTestExecutor) Refresh(ctx context.Context, auth *Auth
 	return nil, errors.New("token refresh failed with status 401: invalid_grant")
 }
 
+type shortLivedRefreshTestExecutor struct {
+	schedulerProviderTestExecutor
+	lifetime time.Duration
+}
+
+func (e shortLivedRefreshTestExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	now := time.Now().UTC()
+	auth.Metadata["last_refresh"] = now.Format(time.RFC3339Nano)
+	auth.Metadata["expired"] = now.Add(e.lifetime).Format(time.RFC3339Nano)
+	return auth, nil
+}
+
+func TestManager_RefreshAuthShortLivedTokenDoesNotEnterIneffectiveBackoff(t *testing.T) {
+	const provider = "short-lived-refresh"
+	lead := 5 * 24 * time.Hour
+	setRefreshLeadFactory(t, provider, func() *time.Duration {
+		d := lead
+		return &d
+	})
+
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(shortLivedRefreshTestExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: provider},
+		lifetime:                      72 * time.Hour,
+	})
+
+	auth := &Auth{
+		ID:       "short-lived-refresh-auth",
+		Provider: provider,
+		Metadata: map[string]any{
+			"email":        "x@example.com",
+			"expired":      time.Now().Add(-time.Minute).Format(time.RFC3339Nano),
+			"last_refresh": time.Now().Add(-72 * time.Hour).Format(time.RFC3339Nano),
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	manager.refreshAuth(ctx, auth.ID)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("expected auth %q after refresh", auth.ID)
+	}
+	if !updated.NextRefreshAfter.IsZero() {
+		t.Fatalf("NextRefreshAfter = %s, want zero after an effective short-lived refresh", updated.NextRefreshAfter)
+	}
+	now := time.Now()
+	if manager.shouldRefresh(updated, now) {
+		t.Fatal("short-lived refreshed token remained immediately refreshable")
+	}
+	next, shouldSchedule := nextRefreshCheckAt(now, updated, time.Minute)
+	if !shouldSchedule {
+		t.Fatal("short-lived refreshed token was removed from the refresh schedule")
+	}
+	if !next.After(now.Add(30*time.Hour)) || !next.Before(now.Add(42*time.Hour)) {
+		t.Fatalf("next refresh = %s, want approximately halfway through the 72h lifetime", next)
+	}
+}
+
+func TestManager_RefreshAuthUnchangedFutureExpiryUsesIneffectiveBackoff(t *testing.T) {
+	const provider = "unchanged-future-expiry"
+	lead := 5 * 24 * time.Hour
+	setRefreshLeadFactory(t, provider, func() *time.Duration {
+		d := lead
+		return &d
+	})
+
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: provider})
+	now := time.Now().UTC()
+	expiry := now.Add(72 * time.Hour)
+	auth := &Auth{
+		ID:       "unchanged-future-expiry-auth",
+		Provider: provider,
+		Metadata: map[string]any{
+			"email":        "x@example.com",
+			"expired":      expiry.Format(time.RFC3339Nano),
+			"last_refresh": now.Add(-time.Hour).Format(time.RFC3339Nano),
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	manager.refreshAuth(ctx, auth.ID)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("expected auth %q after refresh", auth.ID)
+	}
+	remaining := time.Until(updated.NextRefreshAfter)
+	if remaining < 20*time.Second || remaining > 40*time.Second {
+		t.Fatalf("NextRefreshAfter = %s, want ineffective-refresh backoff near 30s", updated.NextRefreshAfter)
+	}
+	afterGate := updated.NextRefreshAfter.Add(time.Second)
+	if !manager.shouldRefresh(updated, afterGate) {
+		t.Fatal("unchanged expiry stopped being refreshable after ineffective-refresh gate elapsed")
+	}
+	next, shouldSchedule := nextRefreshCheckAt(afterGate, updated, time.Minute)
+	if !shouldSchedule || next.After(afterGate) {
+		t.Fatalf("nextRefreshCheckAt() = (%s, %v), want immediate retry after elapsed ineffective gate", next, shouldSchedule)
+	}
+}
+
 func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)

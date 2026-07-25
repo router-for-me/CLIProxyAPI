@@ -347,8 +347,11 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 		return time.Time{}, false
 	}
 
-	if !auth.NextRefreshAfter.IsZero() && now.Before(auth.NextRefreshAfter) {
-		return auth.NextRefreshAfter, true
+	if !auth.NextRefreshAfter.IsZero() {
+		if now.Before(auth.NextRefreshAfter) {
+			return auth.NextRefreshAfter, true
+		}
+		return now, true
 	}
 
 	if evaluator, ok := auth.Runtime.(RefreshEvaluator); ok && evaluator != nil {
@@ -397,7 +400,7 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 		return time.Time{}, false
 	}
 	if hasExpiry && !expiry.IsZero() {
-		dueAt := expiry.Add(-*lead)
+		dueAt := expiry.Add(-effectiveRefreshLead(*lead, lastRefresh, expiry))
 		if !dueAt.After(now) {
 			return now, true
 		}

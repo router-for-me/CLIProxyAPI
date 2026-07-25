@@ -667,6 +667,20 @@ func ProviderRefreshLead(provider string, runtime any) *time.Duration {
 	return nil
 }
 
+// effectiveRefreshLead caps a provider's static lead at half of the observed
+// credential lifetime. This prevents short-lived credentials from remaining
+// permanently inside a refresh window that is longer than the token lifetime.
+func effectiveRefreshLead(providerLead time.Duration, lastRefresh, expiry time.Time) time.Duration {
+	if providerLead <= 0 || lastRefresh.IsZero() || expiry.IsZero() || !expiry.After(lastRefresh) {
+		return providerLead
+	}
+	halfLifetime := expiry.Sub(lastRefresh) / 2
+	if halfLifetime > 0 && halfLifetime < providerLead {
+		return halfLifetime
+	}
+	return providerLead
+}
+
 func parseTimeValue(v any) (time.Time, bool) {
 	switch value := v.(type) {
 	case string:
