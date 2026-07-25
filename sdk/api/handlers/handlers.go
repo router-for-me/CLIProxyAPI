@@ -19,6 +19,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/errormessages"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -2428,6 +2429,21 @@ func officialNameFromAuthManager(am *coreauth.Manager, key string) string {
 }
 
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.
+//
+// The rendered body is routed through the errormessages registry so operator
+// overrides (custom title/message/body_template, per status code) take effect
+// for upstream-provider errors too — not only for policy-middleware denials.
+// When no override is configured the curated default body is used, which
+// keeps the historical OpenAI-style {error:{message,type,code}} shape so
+// existing SDK error handlers keep working.
+//
+// `details` carries the upstream-provided error text. When headers have not
+// been committed yet (non-streaming responses) the full registry body is
+// written and the HTTP status is set on the response. When the writer is
+// already committed (mid-stream errors) the body is emitted inline in the
+// format the caller already chose (e.g. as an SSE data frame) — the caller
+// is responsible for framing; BuildStreamErrorBody exposes the same body
+// bytes for that purpose.
 func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
 	status := http.StatusInternalServerError
 	if msg != nil && msg.StatusCode > 0 {
@@ -2452,7 +2468,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 		}
 	}
 
-	body := BuildErrorResponseBody(status, errText)
+	body := BuildStreamErrorBody(c, status, errText)
 	// Append first to preserve upstream response logs, then drop duplicate payloads if already recorded.
 	var previous []byte
 	if existing, exists := c.Get("API_RESPONSE"); exists {
@@ -2475,6 +2491,39 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	}
 	c.Status(status)
 	_, _ = c.Writer.Write(body)
+}
+
+// BuildStreamErrorBody renders the registry-backed error body for the given
+// status code and detail text, serialized to JSON bytes. It is the streaming
+// counterpart to WriteErrorResponse: streaming handlers use it inside their
+// WriteTerminalError callbacks (which already own the SSE framing) so that
+// mid-stream upstream errors honor operator overrides exactly like their
+// non-streaming siblings.
+func BuildStreamErrorBody(c *gin.Context, status int, details string) []byte {
+	if status <= 0 {
+		status = http.StatusInternalServerError
+	}
+	body := errormessages.BodyFor(c.Request.Context(), status, details)
+	raw, err := json.Marshal(body)
+	if err != nil {
+		// Should not happen for our gin.H shape, but never break the response.
+		return BuildErrorResponseBody(status, details)
+	}
+	return raw
+}
+
+// StreamErrorMessageText returns the operator-configured message text for a
+// status code (with placeholders substituted) for use inside protocol-
+// specific streaming error envelopes whose shape cannot be replaced by the
+// registry's default JSON body — e.g. OpenAI Responses SSE chunks with a
+// fixed {type,code,message} structure. This lets the `message` field still
+// honor operator overrides (custom text, {{details}} expansion) while the
+// caller keeps its protocol envelope intact.
+func StreamErrorMessageText(c *gin.Context, status int, details string) string {
+	if status <= 0 {
+		status = http.StatusInternalServerError
+	}
+	return errormessages.MessageText(c.Request.Context(), status, details)
 }
 
 func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *interfaces.ErrorMessage) {

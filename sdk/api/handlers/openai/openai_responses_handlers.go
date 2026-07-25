@@ -562,7 +562,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 			if errMsg.Error != nil && errMsg.Error.Error() != "" {
 				errText = errMsg.Error.Error()
 			}
-			chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
+			// The Responses streaming protocol requires a fixed
+			// {type,code,message} chunk shape, so we keep that envelope but
+			// route the message text through the errormessages registry so
+			// operator overrides still surface in the `message` field.
+			message := handlers.StreamErrorMessageText(c, status, errText)
+			chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, message, 0)
 			_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
 		},
 		WriteDone: func() {

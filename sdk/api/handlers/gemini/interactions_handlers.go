@@ -195,7 +195,9 @@ func (h *GeminiAPIHandler) forwardInteractionsStream(c *gin.Context, flusher htt
 			if errMsg.Error != nil && errMsg.Error.Error() != "" {
 				errText = errMsg.Error.Error()
 			}
-			body := handlers.BuildErrorResponseBody(status, errText)
+			// Route through the errormessages registry so operator overrides
+			// apply to mid-stream upstream errors too.
+			body := handlers.BuildStreamErrorBody(c, status, errText)
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
 		},
 	})

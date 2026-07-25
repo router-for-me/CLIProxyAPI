@@ -162,6 +162,42 @@ func Respond(c *gin.Context, statusCode int, details string) {
 	c.AbortWithStatusJSON(statusCode, body)
 }
 
+// BodyFor returns the rendered error-response body for a status code, in
+// the same JSON shape the proxy emits at runtime. `details` is merged into
+// the configured message when it contains the "{{details}}" placeholder.
+//
+// Disabled overrides are skipped: when an operator sets Enabled=false the
+// row is not loaded into the registry cache, so Lookup falls back to the
+// curated default (which is always enabled) — exactly mirroring runtime
+// behavior. Callers that need the rendered body without a gin.Context
+// (e.g. the preview endpoint, or handlers that write the body themselves)
+// should use this instead of Respond.
+func BodyFor(ctx context.Context, statusCode int, details string) gin.H {
+	msg, _ := Lookup(ctx, statusCode)
+	return renderBody(msg, details)
+}
+
+// RenderBody is the exported form of renderBody, kept so callers outside
+// the package (the management preview endpoint) can render a candidate
+// Message without consulting the registry — useful for testing edits
+// before they are persisted.
+func RenderBody(m Message, details string) gin.H {
+	return renderBody(m, details)
+}
+
+// MessageText returns the configured message string for a status code with
+// placeholders substituted, WITHOUT the surrounding JSON body. It is meant
+// for protocols whose streaming error format is constrained (e.g. OpenAI
+// Responses SSE chunks with a fixed {type,code,message} shape): callers
+// keep their protocol-specific envelope but surface the operator's custom
+// message text in the `message` field. As with Respond, an operator
+// override (enabled) takes precedence; otherwise the curated default is
+// used, and disabled overrides are skipped.
+func MessageText(ctx context.Context, statusCode int, details string) string {
+	msg, _ := Lookup(ctx, statusCode)
+	return substitute(msg.Message, details, msg)
+}
+
 // renderBody builds the JSON response shape. The default shape is
 //
 //	{

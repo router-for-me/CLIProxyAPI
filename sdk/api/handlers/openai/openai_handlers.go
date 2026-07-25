@@ -679,7 +679,10 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 			if errMsg.Error != nil && errMsg.Error.Error() != "" {
 				errText = errMsg.Error.Error()
 			}
-			body := handlers.BuildErrorResponseBody(status, errText)
+			// Route through the errormessages registry so operator overrides
+			// (custom title/message/body_template) apply to mid-stream upstream
+			// errors too, mirroring the non-streaming WriteErrorResponse path.
+			body := handlers.BuildStreamErrorBody(c, status, errText)
 			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(body))
 		},
 		WriteDone: func() {

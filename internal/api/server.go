@@ -1029,8 +1029,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage-windows/:api_key_id", s.mgmt.GetUsageWindows)
 
 		// Operator-customizable error response text, keyed by HTTP status code.
+		// The preview route is POST because it accepts a candidate body to
+		// render (GET would conflict with the "/:code" pattern and has no
+		// query-string body semantics).
 		mgmt.GET("/error-messages", s.mgmt.ListErrorMessages)
-		mgmt.GET("/error-messages/preview", s.mgmt.PreviewErrorMessage)
+		mgmt.POST("/error-messages/preview", s.mgmt.PreviewErrorMessage)
 		mgmt.GET("/error-messages/:code", s.mgmt.GetErrorMessage)
 		mgmt.PUT("/error-messages/:code", s.mgmt.PutErrorMessage)
 		mgmt.DELETE("/error-messages/:code", s.mgmt.DeleteErrorMessage)

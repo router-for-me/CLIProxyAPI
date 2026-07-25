@@ -99,7 +99,9 @@ func writeImagesStreamErrorEvent(c *gin.Context, errMsg *interfaces.ErrorMessage
 	if errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
 		errText = errMsg.Error.Error()
 	}
-	body := handlers.BuildErrorResponseBody(status, errText)
+	// Route through the errormessages registry so operator overrides apply
+	// to mid-stream image errors too.
+	body := handlers.BuildStreamErrorBody(c, status, errText)
 	_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
 }
 

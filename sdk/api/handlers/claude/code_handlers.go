@@ -371,7 +371,7 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 			}
 			c.Status(status)
 
-			errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
+			errorBytes, _ := json.Marshal(h.toClaudeErrorWith(c, errMsg, status))
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
 		},
 	})
@@ -389,19 +389,36 @@ type claudeErrorResponse struct {
 
 func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claudeErrorResponse {
 	status := http.StatusInternalServerError
-	errText := http.StatusText(status)
-	if msg != nil {
-		if msg.StatusCode > 0 {
-			status = msg.StatusCode
-			errText = http.StatusText(status)
-		}
-		if msg.Error != nil {
-			if v := strings.TrimSpace(msg.Error.Error()); v != "" {
-				errText = v
-			}
+	if msg != nil && msg.StatusCode > 0 {
+		status = msg.StatusCode
+	}
+	// No gin.Context: the upstream error text is used verbatim (kept for
+	// tests and callers without a request context).
+	return h.toClaudeErrorWith(nil, msg, status)
+}
+
+// toClaudeErrorWith builds the Claude-shaped error envelope for a resolved
+// status code and upstream message. When a gin.Context is supplied the
+// message text is routed through the errormessages registry so operator
+// overrides (custom message text, {{details}} substitution) take effect —
+// mirroring the OpenAI/Gemini paths. When ctx is nil the upstream message
+// text is used verbatim (kept for callers without a context, e.g. tests).
+func (h *ClaudeCodeAPIHandler) toClaudeErrorWith(c *gin.Context, msg *interfaces.ErrorMessage, status int) claudeErrorResponse {
+	upstreamErrText := http.StatusText(status)
+	if msg != nil && msg.Error != nil {
+		if v := strings.TrimSpace(msg.Error.Error()); v != "" {
+			upstreamErrText = v
 		}
 	}
-	errType, message := claudeErrorDetailFromText(status, errText)
+	// Extract the upstream error type (if the upstream payload carries one)
+	// from the raw upstream text. The final `message` field honors operator
+	// overrides via the registry, with {{details}} expanded to the upstream
+	// error text.
+	errType, extractedMessage := claudeErrorDetailFromText(status, upstreamErrText)
+	message := extractedMessage
+	if c != nil && c.Request != nil {
+		message = handlers.StreamErrorMessageText(c, status, upstreamErrText)
+	}
 	return claudeErrorResponse{
 		Type: "error",
 		Error: claudeErrorDetail{
@@ -428,7 +445,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		}
 	}
 
-	body, err := json.Marshal(h.toClaudeError(msg))
+	body, err := json.Marshal(h.toClaudeErrorWith(c, msg, status))
 	if err != nil {
 		body = []byte(`{"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}`)
 	}

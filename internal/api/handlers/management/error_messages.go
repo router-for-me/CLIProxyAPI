@@ -249,7 +249,7 @@ func (h *Handler) PreviewErrorMessage(c *gin.Context) {
 		BodyTemplate: req.BodyTemplate,
 		Enabled:      true,
 	}
-	rendered := renderErrorMessagePreview(m, req.Details)
+	rendered := errormessages.RenderBody(m, req.Details)
 	c.JSON(http.StatusOK, gin.H{
 		"status_code": req.Code,
 		"input":       m,
@@ -281,91 +281,4 @@ func parseStatusCodeParam(c *gin.Context) (int, error) {
 		return 0, errors.New("status code must be between 100 and 599")
 	}
 	return code, nil
-}
-
-// renderErrorMessagePreview is a thin wrapper around the registry's internal
-// renderBody, kept as a helper so the preview handler does not need to be
-// wired into the gin context path (it operates on raw input).
-func renderErrorMessagePreview(m errormessages.Message, details string) gin.H {
-	// Inline copy of errormessages.renderBody since the package keeps it
-	// unexported. The two implementations MUST stay in sync — if the
-	// registry's render semantics change, this helper needs the same update.
-	return gin.H{
-		"error": gin.H{
-			"type":    slugForPreview(m.StatusCode),
-			"code":    m.StatusCode,
-			"title":   m.Title,
-			"message": substitutePreview(m.Message, details, m),
-		},
-		// Note: body_template rendering is performed by the registry at
-		// response time; the preview pane cannot evaluate JSON templates
-		// faithfully without reproducing the substitution+parse logic, so
-		// we surface the default body shape only and let the dashboard show
-		// the raw template as a code preview.
-	}
-}
-
-func slugForPreview(code int) string {
-	// Mirror errormessages.slugFor at the package boundary.
-	switch code {
-	case 400:
-		return "invalid_request_error"
-	case 401:
-		return "authentication_error"
-	case 402:
-		return "quota_exceeded"
-	case 403:
-		return "permission_denied"
-	case 404:
-		return "not_found_error"
-	case 405:
-		return "method_not_allowed"
-	case 408:
-		return "timeout_error"
-	case 409:
-		return "conflict_error"
-	case 429:
-		return "rate_limit_exceeded"
-	case 500:
-		return "internal_error"
-	case 502:
-		return "upstream_error"
-	case 503:
-		return "service_unavailable"
-	case 504:
-		return "gateway_timeout"
-	default:
-		return "error"
-	}
-}
-
-func substitutePreview(s, details string, m errormessages.Message) string {
-	if s == "" {
-		return s
-	}
-	out := s
-	out = replaceAll(out, "{{details}}", details)
-	out = replaceAll(out, "{{code}}", strconv.Itoa(m.StatusCode))
-	out = replaceAll(out, "{{title}}", m.Title)
-	out = replaceAll(out, "{{message}}", m.Message)
-	return out
-}
-
-func replaceAll(s, old, new string) string {
-	for {
-		i := indexOf(s, old)
-		if i < 0 {
-			return s
-		}
-		s = s[:i] + new + s[i+len(old):]
-	}
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }
