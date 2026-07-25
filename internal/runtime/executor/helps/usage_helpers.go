@@ -22,26 +22,27 @@ import (
 )
 
 type UsageReporter struct {
-	provider        string
-	executorType    string
-	model           string
-	alias           string
-	authID          string
-	authIndex       string
-	authMu          sync.RWMutex
-	accessTokenHash string
-	authType        string
-	apiKey          string
-	source          string
-	reasoning       string
-	serviceTier     string
-	generate        bool
-	requestedAt     time.Time
-	ttftMu          sync.RWMutex
-	ttft            time.Duration
-	ttftStart       time.Time
-	ttftSet         bool
-	once            sync.Once
+	provider             string
+	executorType         string
+	model                string
+	alias                string
+	authID               string
+	authIndex            string
+	authMu               sync.RWMutex
+	accessTokenHash      string
+	authType             string
+	apiKey               string
+	source               string
+	reasoning            string
+	serviceTier          string
+	effectiveServiceTier string
+	generate             bool
+	requestedAt          time.Time
+	ttftMu               sync.RWMutex
+	ttft                 time.Duration
+	ttftStart            time.Time
+	ttftSet              bool
+	once                 sync.Once
 }
 
 type usageExecutor interface {
@@ -126,11 +127,32 @@ func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string
 	r.publishRecord(ctx, record)
 }
 
-func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format string) {
+// SetTranslatedRequestMetadata captures usage-relevant values from the final
+// outbound payload after translation and payload defaults or overrides.
+func (r *UsageReporter) SetTranslatedRequestMetadata(payload []byte, format string) {
 	if r == nil {
 		return
 	}
 	r.reasoning = thinking.ExtractTranslatedReasoningEffort(payload, format)
+	r.effectiveServiceTier = extractEffectiveServiceTier(payload)
+}
+
+// SetTranslatedReasoningEffort is retained for existing executor call sites.
+// It now captures all post-translation request metadata used by usage records.
+func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format string) {
+	r.SetTranslatedRequestMetadata(payload, format)
+}
+
+func extractEffectiveServiceTier(payload []byte) string {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return ""
+	}
+	for _, path := range []string{"service_tier", "request.service_tier", "interaction.service_tier"} {
+		if tier := strings.TrimSpace(gjson.GetBytes(payload, path).String()); tier != "" {
+			return tier
+		}
+	}
+	return ""
 }
 
 func (r *UsageReporter) TrackHTTPClient(client *http.Client) *http.Client {
@@ -278,26 +300,27 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
 	}
 	return usage.Record{
-		Provider:            r.provider,
-		ExecutorType:        r.executorType,
-		Model:               model,
-		Alias:               r.alias,
-		Source:              r.source,
-		APIKey:              r.apiKey,
-		AuthID:              r.authID,
-		AuthIndex:           r.authIndex,
-		AccessTokenSHA256:   r.accessTokenFingerprint(),
-		AuthType:            r.authType,
-		ReasoningEffort:     r.reasoning,
-		ServiceTier:         r.serviceTier,
-		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
-		Generate:            usage.GenerateFlag(r.generate),
-		RequestedAt:         r.requestedAt,
-		Latency:             r.latency(),
-		TTFT:                r.ttftDuration(),
-		Failed:              failed,
-		Fail:                fail,
-		Detail:              detail,
+		Provider:             r.provider,
+		ExecutorType:         r.executorType,
+		Model:                model,
+		Alias:                r.alias,
+		Source:               r.source,
+		APIKey:               r.apiKey,
+		AuthID:               r.authID,
+		AuthIndex:            r.authIndex,
+		AccessTokenSHA256:    r.accessTokenFingerprint(),
+		AuthType:             r.authType,
+		ReasoningEffort:      r.reasoning,
+		ServiceTier:          r.serviceTier,
+		EffectiveServiceTier: r.effectiveServiceTier,
+		ResponseServiceTier:  strings.TrimSpace(detail.ResponseServiceTier),
+		Generate:             usage.GenerateFlag(r.generate),
+		RequestedAt:          r.requestedAt,
+		Latency:              r.latency(),
+		TTFT:                 r.ttftDuration(),
+		Failed:               failed,
+		Fail:                 fail,
+		Detail:               detail,
 	}
 }
 
