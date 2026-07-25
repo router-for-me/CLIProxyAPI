@@ -145,8 +145,8 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, false)
+	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -258,8 +258,8 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true)
+	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, true)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -387,7 +387,7 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	reporter := helps.NewExecutorUsageReporter(ctx, e, targetName, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	body := translateGeminiInteractionsRequestBody(targetName, req.Payload, opts, false)
+	body := translateGeminiInteractionsRequestBody(ctx, e.cfg, targetName, req.Payload, opts, false)
 	if gjson.GetBytes(body, "model").Exists() && targetName != "" {
 		body = helps.SetStringIfDifferent(body, "model", targetName)
 	}
@@ -398,7 +398,7 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	fromProtocol := opts.SourceFormat.String()
-	originalTranslated := geminiInteractionsPayloadConfigSource(targetName, req.Payload, opts, false)
+	originalTranslated := geminiInteractionsPayloadConfigSource(ctx, e.cfg, targetName, req.Payload, opts, false)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 
 	baseURL := resolveGeminiBaseURL(auth)
@@ -463,7 +463,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	reporter := helps.NewExecutorUsageReporter(ctx, e, targetName, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	body := translateGeminiInteractionsRequestBody(targetName, req.Payload, opts, true)
+	body := translateGeminiInteractionsRequestBody(ctx, e.cfg, targetName, req.Payload, opts, true)
 	if gjson.GetBytes(body, "model").Exists() && targetName != "" {
 		body = helps.SetStringIfDifferent(body, "model", targetName)
 	}
@@ -474,7 +474,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	fromProtocol := opts.SourceFormat.String()
-	originalTranslated := geminiInteractionsPayloadConfigSource(targetName, req.Payload, opts, true)
+	originalTranslated := geminiInteractionsPayloadConfigSource(ctx, e.cfg, targetName, req.Payload, opts, true)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = helps.SetBoolIfDifferent(body, "stream", true)
 	baseURL := resolveGeminiBaseURL(auth)
@@ -619,7 +619,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("gemini")
-	translatedReq := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	translatedReq := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false)
 
 	translatedReq, err := thinking.ApplyThinking(translatedReq, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -779,19 +779,19 @@ func nativeInteractionsSourceFormat(format sdktranslator.Format) bool {
 	}
 }
 
-func translateGeminiInteractionsRequestBody(model string, payload []byte, opts cliproxyexecutor.Options, stream bool) []byte {
+func translateGeminiInteractionsRequestBody(ctx context.Context, cfg *config.Config, model string, payload []byte, opts cliproxyexecutor.Options, stream bool) []byte {
 	if opts.SourceFormat == "" || opts.SourceFormat == sdktranslator.FormatInteractions {
 		return bytes.Clone(payload)
 	}
-	return sdktranslator.TranslateRequest(opts.SourceFormat, sdktranslator.FormatInteractions, model, payload, stream)
+	return helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, cfg, opts.SourceFormat, sdktranslator.FormatInteractions, model, payload, stream)
 }
 
-func geminiInteractionsPayloadConfigSource(model string, payload []byte, opts cliproxyexecutor.Options, stream bool) []byte {
+func geminiInteractionsPayloadConfigSource(ctx context.Context, cfg *config.Config, model string, payload []byte, opts cliproxyexecutor.Options, stream bool) []byte {
 	source := opts.OriginalRequest
 	if len(source) == 0 {
 		source = payload
 	}
-	return translateGeminiInteractionsRequestBody(model, source, opts, stream)
+	return translateGeminiInteractionsRequestBody(ctx, cfg, model, source, opts, stream)
 }
 
 func isNativeInteractionsAuth(auth *cliproxyauth.Auth) bool {

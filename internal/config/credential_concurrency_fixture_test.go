@@ -1,12 +1,7 @@
 package config
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -14,17 +9,17 @@ import (
 )
 
 type credentialConcurrencyFixtureWireConfig struct {
-	LifecycleConfigRevision    int64         `json:"lifecycle-config-revision"`
-	ObservationBarrierRevision int64         `json:"observation-barrier-revision"`
-	CPAHeartbeatTimeout        time.Duration `json:"cpa-heartbeat-timeout"`
-	CPACancelBound             time.Duration `json:"cpa-cancel-bound"`
-	ReclaimGrace               time.Duration `json:"reclaim-grace"`
-	CleanupInterval            time.Duration `json:"cleanup-interval"`
-	ReleaseFlushInterval       string        `json:"release-flush-interval" yaml:"release-flush-interval"`
-	ReleaseMaxBackoff          string        `json:"release-max-backoff" yaml:"release-max-backoff"`
-	BusyRetryMin               string        `json:"busy-retry-min" yaml:"busy-retry-min"`
-	BusyRetryMax               string        `json:"busy-retry-max" yaml:"busy-retry-max"`
-	MaxLimit                   int64         `json:"max-limit"`
+	LifecycleConfigRevision    int64
+	ObservationBarrierRevision int64
+	CPAHeartbeatTimeout        time.Duration
+	CPACancelBound             time.Duration
+	ReclaimGrace               time.Duration
+	CleanupInterval            time.Duration
+	ReleaseFlushInterval       string `yaml:"release-flush-interval"`
+	ReleaseMaxBackoff          string `yaml:"release-max-backoff"`
+	BusyRetryMin               string `yaml:"busy-retry-min"`
+	BusyRetryMax               string `yaml:"busy-retry-max"`
+	MaxLimit                   int64
 }
 
 type credentialConcurrencyFixtureHotDurations struct {
@@ -58,45 +53,44 @@ func (c credentialConcurrencyFixtureWireConfig) config() (CredentialConcurrencyC
 	}, nil
 }
 
-func TestCredentialConcurrencyLifecycleFixture(t *testing.T) {
-	raw, errRead := os.ReadFile(filepath.Join("..", "..", "testdata", "credential-concurrency-lifecycle.json"))
-	if errRead != nil {
-		t.Fatal(errRead)
+func credentialConcurrencyWireFixture(cpaHeartbeatTimeout time.Duration) credentialConcurrencyFixtureWireConfig {
+	return credentialConcurrencyFixtureWireConfig{
+		CPAHeartbeatTimeout:  cpaHeartbeatTimeout,
+		CPACancelBound:       5 * time.Second,
+		ReclaimGrace:         5 * time.Second,
+		CleanupInterval:      5 * time.Second,
+		ReleaseFlushInterval: "250ms",
+		ReleaseMaxBackoff:    "2s",
+		BusyRetryMin:         "250ms",
+		BusyRetryMax:         "1s",
+		MaxLimit:             1_000_000,
 	}
-	var fixture struct {
-		Defaults credentialConcurrencyFixtureWireConfig `json:"defaults"`
-		Invalid  []struct {
-			NodeHeartbeatTimeout time.Duration                          `json:"node_heartbeat_timeout"`
-			Config               credentialConcurrencyFixtureWireConfig `json:"config"`
-		} `json:"invalid"`
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if errDecode := decoder.Decode(&fixture); errDecode != nil {
-		t.Fatal(errDecode)
-	}
-	if errTrailing := decoder.Decode(&struct{}{}); errTrailing != io.EOF {
-		t.Fatalf("fixture contains trailing JSON: %v", errTrailing)
-	}
+}
 
-	defaults, errConfig := fixture.Defaults.config()
+func credentialConcurrencyConfigFixture(cpaHeartbeatTimeout time.Duration) CredentialConcurrencyConfig {
+	return CredentialConcurrencyConfig{
+		CPAHeartbeatTimeout:  cpaHeartbeatTimeout,
+		CPACancelBound:       5 * time.Second,
+		ReclaimGrace:         5 * time.Second,
+		CleanupInterval:      5 * time.Second,
+		ReleaseFlushInterval: 250 * time.Millisecond,
+		ReleaseMaxBackoff:    2 * time.Second,
+		BusyRetryMin:         250 * time.Millisecond,
+		BusyRetryMax:         time.Second,
+		MaxLimit:             1_000_000,
+	}
+}
+
+func TestCredentialConcurrencyLifecycleFixture(t *testing.T) {
+	wireDefaults := credentialConcurrencyWireFixture(3 * time.Second)
+	wireDefaults.LifecycleConfigRevision = 1
+	defaults, errConfig := wireDefaults.config()
 	if errConfig != nil {
 		t.Fatal(errConfig)
 	}
 
-	expectedDefaults := CredentialConcurrencyConfig{
-		LifecycleConfigRevision:    1,
-		ObservationBarrierRevision: 0,
-		CPAHeartbeatTimeout:        3 * time.Second,
-		CPACancelBound:             5 * time.Second,
-		ReclaimGrace:               5 * time.Second,
-		CleanupInterval:            5 * time.Second,
-		ReleaseFlushInterval:       250 * time.Millisecond,
-		ReleaseMaxBackoff:          2 * time.Second,
-		BusyRetryMin:               250 * time.Millisecond,
-		BusyRetryMax:               time.Second,
-		MaxLimit:                   1_000_000,
-	}
+	expectedDefaults := credentialConcurrencyConfigFixture(3 * time.Second)
+	expectedDefaults.LifecycleConfigRevision = 1
 	if defaults != expectedDefaults {
 		t.Fatalf("defaults = %#v, want %#v", defaults, expectedDefaults)
 	}
@@ -104,44 +98,25 @@ func TestCredentialConcurrencyLifecycleFixture(t *testing.T) {
 		t.Fatalf("ValidateCredentialConcurrency(defaults) error = %v", errValidate)
 	}
 
+	invalidFixtures := []struct {
+		NodeHeartbeatTimeout time.Duration
+		Config               credentialConcurrencyFixtureWireConfig
+	}{
+		{NodeHeartbeatTimeout: 3 * time.Second, Config: credentialConcurrencyWireFixture(3 * time.Second)},
+		{NodeHeartbeatTimeout: 20 * time.Second, Config: credentialConcurrencyWireFixture(0)},
+	}
 	expectedInvalid := []struct {
 		nodeHeartbeatTimeout time.Duration
 		config               CredentialConcurrencyConfig
 	}{
-		{
-			nodeHeartbeatTimeout: 3 * time.Second,
-			config: CredentialConcurrencyConfig{
-				CPAHeartbeatTimeout:  3 * time.Second,
-				CPACancelBound:       5 * time.Second,
-				ReclaimGrace:         5 * time.Second,
-				CleanupInterval:      5 * time.Second,
-				ReleaseFlushInterval: 250 * time.Millisecond,
-				ReleaseMaxBackoff:    2 * time.Second,
-				BusyRetryMin:         250 * time.Millisecond,
-				BusyRetryMax:         time.Second,
-				MaxLimit:             1_000_000,
-			},
-		},
-		{
-			nodeHeartbeatTimeout: 20 * time.Second,
-			config: CredentialConcurrencyConfig{
-				CPAHeartbeatTimeout:  0,
-				CPACancelBound:       5 * time.Second,
-				ReclaimGrace:         5 * time.Second,
-				CleanupInterval:      5 * time.Second,
-				ReleaseFlushInterval: 250 * time.Millisecond,
-				ReleaseMaxBackoff:    2 * time.Second,
-				BusyRetryMin:         250 * time.Millisecond,
-				BusyRetryMax:         time.Second,
-				MaxLimit:             1_000_000,
-			},
-		},
+		{nodeHeartbeatTimeout: 3 * time.Second, config: credentialConcurrencyConfigFixture(3 * time.Second)},
+		{nodeHeartbeatTimeout: 20 * time.Second, config: credentialConcurrencyConfigFixture(0)},
 	}
-	if len(fixture.Invalid) != len(expectedInvalid) {
-		t.Fatalf("invalid fixture count = %d, want %d", len(fixture.Invalid), len(expectedInvalid))
+	if len(invalidFixtures) != len(expectedInvalid) {
+		t.Fatalf("invalid fixture count = %d, want %d", len(invalidFixtures), len(expectedInvalid))
 	}
 	for index, expected := range expectedInvalid {
-		item := fixture.Invalid[index]
+		item := invalidFixtures[index]
 		itemConfig, errConfig := item.Config.config()
 		if errConfig != nil {
 			t.Fatalf("invalid fixture %d config() error = %v", index, errConfig)

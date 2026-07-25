@@ -287,8 +287,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
+	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, stream)
+	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, stream)
 	body = helps.SetStringIfDifferent(body, "model", upstreamModel)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -482,8 +482,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true)
+	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, true)
 	body = helps.SetStringIfDifferent(body, "model", upstreamModel)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -778,7 +778,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
+	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, stream)
 	body = helps.SetStringIfDifferent(body, "model", upstreamModel)
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		body = rebuildMidSystemMessagesToTopLevel(body)

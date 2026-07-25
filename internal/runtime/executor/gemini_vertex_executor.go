@@ -328,8 +328,8 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 			originalPayloadSource = opts.OriginalRequest
 		}
 		originalPayload := originalPayloadSource
-		originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-		body = sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+		originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, false)
+		body = helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false)
 
 		body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 		if err != nil {
@@ -453,8 +453,8 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, false)
+	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -568,8 +568,8 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true)
+	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, true)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -714,8 +714,8 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true)
+	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, true)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -852,7 +852,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("gemini")
 
-	translatedReq := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	translatedReq := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false)
 
 	translatedReq, err := thinking.ApplyThinking(translatedReq, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -943,7 +943,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("gemini")
 
-	translatedReq := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	translatedReq := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false)
 
 	translatedReq, err := thinking.ApplyThinking(translatedReq, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {

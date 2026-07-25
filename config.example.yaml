@@ -212,6 +212,37 @@ codex:
   # Some superstitious users believe request tracking identifiers can be used
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
+  # When true, optimize Codex Desktop and codex-tui requests for multi-agent v2.
+  # This refreshes Codex spawn_agent model details, removes message parameter encryption,
+  # normalizes encrypted agent_message content for Codex, and converts agent_message input
+  # into standard user messages for non-Codex upstream protocols.
+  optimize-multi-agent-v2: false
+  # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
+  # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
+  live-media-relay:
+    enabled: false
+    # Maximum concurrent media sessions. Zero uses the default of 32.
+    max-sessions: 32
+    # Reject downstream SDP candidates that target private, loopback, link-local, or unspecified IPs.
+    # Keep false for local or trusted-network Codex Desktop connections.
+    disable-private-remote-ips: false
+    # Public IPv4 or IPv6 address advertised when CPA is behind 1:1 NAT.
+    public-ip: ""
+    # Optional UDP allocation range. Both values must be set together and provide at least two ports per session.
+    udp-port-min: 0
+    udp-port-max: 0
+    # Optional STUN/TURN servers. TURN credentials are never returned by the JSON config API.
+    # Without a concrete global/per-auth proxy-url, WebRTC uses normal direct ICE/STUN/TURN connectivity.
+    # With http, https, socks5, or socks5h proxy-url, the OpenAI-facing leg is forced through
+    # authenticated ICE-TCP over that proxy and never falls back to UDP or a direct connection.
+    # The Codex Desktop-facing leg remains direct, and configured ICE servers still apply to it.
+    # ice-servers:
+    #   - urls:
+    #       - "stun:stun.example.com:3478"
+    #   - urls:
+    #       - "turn:turn.example.com:3478?transport=udp"
+    #     username: "user"
+    #     credential: "secret"
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true

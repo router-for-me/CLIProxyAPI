@@ -111,8 +111,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
+	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, opts.Stream)
+	translated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, opts.Stream)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -312,8 +312,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true)
+	translated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, true)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -583,7 +583,7 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	translated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false)
 
 	modelForCounting := baseModel
 

@@ -14,15 +14,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -138,7 +137,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 // back into the original model name used for routing and upstream requests.
 func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 	modelName := gjson.GetBytes(rawJSON, "model").String()
-	resolved := util.ResolveClaudeModelIDPrefix(modelName)
+	resolved := claudemodels.ResolveClaudeModelIDPrefix(modelName)
 	if resolved == modelName {
 		return rawJSON
 	}
@@ -155,45 +154,7 @@ func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
-	models := h.Models()
-	for i := range models {
-		if id, ok := models[i]["id"].(string); ok {
-			models[i]["id"] = util.EnsureClaudeModelIDPrefix(id)
-		}
-	}
-	sortClaudeModelsByDisplayName(models)
-	firstID := ""
-	lastID := ""
-	if len(models) > 0 {
-		if id, ok := models[0]["id"].(string); ok {
-			firstID = id
-		}
-		if id, ok := models[len(models)-1]["id"].(string); ok {
-			lastID = id
-		}
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"data":     models,
-		"has_more": false,
-		"first_id": firstID,
-		"last_id":  lastID,
-	})
-}
-
-// sortClaudeModelsByDisplayName sorts models by display_name ascending.
-// When display_name is equal or missing, id is used as a stable tie-breaker.
-func sortClaudeModelsByDisplayName(models []map[string]any) {
-	sort.SliceStable(models, func(i, j int) bool {
-		di, _ := models[i]["display_name"].(string)
-		dj, _ := models[j]["display_name"].(string)
-		if di != dj {
-			return di < dj
-		}
-		idi, _ := models[i]["id"].(string)
-		idj, _ := models[j]["id"].(string)
-		return idi < idj
-	})
+	c.JSON(http.StatusOK, claudemodels.BuildResponse(h.Models()))
 }
 
 // handleNonStreamingResponse handles non-streaming content generation requests for Claude models.

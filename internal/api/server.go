@@ -28,6 +28,9 @@ import (
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
+	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
+	codexmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -107,6 +110,7 @@ func effectiveSDKConfig(cfg *config.Config) *config.SDKConfig {
 		return nil
 	}
 	sdkCfg := cfg.SDKConfig
+	sdkCfg.CodexOptimizeMultiAgentV2 = cfg.Codex.OptimizeMultiAgentV2
 	if cfg.CommercialMode {
 		sdkCfg.RequestLog = false
 	}
@@ -211,7 +215,8 @@ type Server struct {
 	muxHTTPListener *muxListener
 
 	// handlers contains the API handlers for processing requests.
-	handlers *handlers.BaseAPIHandler
+	handlers         *handlers.BaseAPIHandler
+	codexLiveHandler *codexlive.Handler
 
 	// cfg holds the current server configuration.
 	cfg *config.Config
@@ -520,6 +525,7 @@ func (s *Server) setupRoutes() {
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)
+	s.codexLiveHandler = codexlive.NewHandler(s.handlers.AuthManager, s.cfg)
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
@@ -541,6 +547,11 @@ func (s *Server) setupRoutes() {
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
 		v1.POST("/alpha/search", s.codexAlphaSearch)
+		v1.POST("/live", s.codexLiveHandler.Handle)
+		v1.GET("/live/:call_id", s.codexLiveHandler.HandleSideband)
+		v1.POST("/realtime/calls", s.codexLiveHandler.Handle)
+		v1.GET("/realtime/calls/:call_id", s.codexLiveHandler.HandleSideband)
+		v1.GET("/realtime", s.codexLiveHandler.HandleSideband)
 	}
 
 	openaiV1 := s.engine.Group("/openai/v1")
@@ -1366,7 +1377,7 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
 		models = append(models, model)
 	}
 
-	c.JSON(http.StatusOK, openai.CodexClientModelsResponse(models))
+	c.JSON(http.StatusOK, codexmodels.BuildResponse(models, nil, s.cfg.Codex.OptimizeMultiAgentV2))
 }
 
 func (s *Server) geminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {
@@ -1409,23 +1420,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 	isClaude := isAnthropicModelsRequest(c)
 
 	if isClaude {
-		out := formatHomeClaudeModels(entries)
-		firstID := ""
-		lastID := ""
-		if len(out) > 0 {
-			if id, okID := out[0]["id"].(string); okID {
-				firstID = id
-			}
-			if id, okID := out[len(out)-1]["id"].(string); okID {
-				lastID = id
-			}
-		}
-		c.JSON(http.StatusOK, gin.H{
-			"data":     out,
-			"has_more": false,
-			"first_id": firstID,
-			"last_id":  lastID,
-		})
+		c.JSON(http.StatusOK, claudemodels.BuildResponse(formatHomeClaudeModels(entries)))
 		return
 	}
 
@@ -1454,16 +1449,6 @@ func formatHomeClaudeModels(entries []homeModelEntry) []map[string]any {
 	for _, entry := range entries {
 		out = append(out, formatHomeClaudeModel(entry))
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		di, _ := out[i]["display_name"].(string)
-		dj, _ := out[j]["display_name"].(string)
-		if di != dj {
-			return di < dj
-		}
-		idi, _ := out[i]["id"].(string)
-		idj, _ := out[j]["id"].(string)
-		return idi < idj
-	})
 	return out
 }
 
@@ -1481,7 +1466,7 @@ func formatHomeClaudeModel(entry homeModelEntry) map[string]any {
 		maxOutput = registry.DefaultClaudeMaxOutputTokens
 	}
 	model := map[string]any{
-		"id":               util.EnsureClaudeModelIDPrefix(entry.id),
+		"id":               entry.id,
 		"object":           "model",
 		"owned_by":         entry.ownedBy,
 		"type":             "model",
@@ -1891,8 +1876,12 @@ func (s *Server) Stop(ctx context.Context) error {
 	}
 
 	// Shutdown the HTTP server.
-	if err := s.server.Shutdown(ctx); err != nil {
-		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
+	errShutdown := s.server.Shutdown(ctx)
+	if s.codexLiveHandler != nil {
+		s.codexLiveHandler.Close()
+	}
+	if errShutdown != nil {
+		return fmt.Errorf("failed to shutdown HTTP server: %v", errShutdown)
 	}
 
 	log.Debug("API server stopped")
@@ -2064,6 +2053,11 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		s.exampleAPIKeySafeModeActive.Store(exampleAPIKeySafeModeRequired)
 	}
 	s.cfg = cfg
+	if s.codexLiveHandler != nil {
+		if errUpdate := s.codexLiveHandler.UpdateConfig(cfg); errUpdate != nil {
+			log.WithError(errUpdate).Error("failed to update Codex Live media relay configuration")
+		}
+	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
