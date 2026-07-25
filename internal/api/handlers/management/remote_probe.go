@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -138,7 +139,15 @@ func (h *Handler) RemoteProbeModels(c *gin.Context) {
 		return
 	}
 
-	probeURL := baseURL + "/v1/models"
+	// Build the probe URL via the shared helper. Previously this handler
+	// ALWAYS appended "/v1/models", which 404'd on upstreams when the
+	// operator's base_url already carried a "/v1" version segment (the
+	// dashboard placeholder example suggests entering one, e.g.
+	// "https://openrouter.ai/api/v1" — which produced
+	// "https://openrouter.ai/api/v1/v1/models"). The helper auto-detects
+	// the version segment so both shapes work: base_url with "/v1" →
+	// "{base}/models"; base_url without "/v1" → "{base}/v1/models".
+	probeURL := util.JoinOpenAICompatUpstreamURL(baseURL, "/models")
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, probeURL, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{

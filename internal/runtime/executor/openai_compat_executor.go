@@ -33,6 +33,17 @@ const (
 	openAICompatMultipartMemory       int64 = 32 << 20
 )
 
+// openAICompatUpstreamURL delegates to util.JoinOpenAICompatUpstreamURL so the
+// executor and the management remote-probe handler share the exact same
+// base-URL joining rules. Kept as a thin wrapper so call sites read naturally
+// inside the executor package. See util.JoinOpenAICompatUpstreamURL for the
+// rationale (the previous behaviour always appended the endpoint suffix
+// verbatim, which 404'd whenever the operator's base URL either carried a
+// "/v1" version segment or lacked one depending on the code path).
+func openAICompatUpstreamURL(baseURL, suffix string) string {
+	return util.JoinOpenAICompatUpstreamURL(baseURL, suffix)
+}
+
 // OpenAICompatExecutor implements a stateless executor for OpenAI-compatible providers.
 // It performs request/response translation and executes against the provider base URL
 // using per-auth credentials (API key) and per-auth HTTP transport (proxy) from context.
@@ -91,6 +102,12 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	// Persist the client-requested model (before alias/upstream resolution)
+	// so failed attempts can be diagnosed for misrouting: comparing
+	// route_model against model reveals when a request was pinned to a
+	// provider whose upstream rejects that id (e.g. a model served only on
+	// an Anthropic-style endpoint routed to an openai-compat provider).
+	reporter.SetRouteModel(helps.PayloadRequestedModel(opts, req.Model))
 
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {
@@ -130,7 +147,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
-	url := strings.TrimSuffix(baseURL, "/") + endpoint
+	url := openAICompatUpstreamURL(baseURL, endpoint)
+	reporter.SetEndpoint(url)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return resp, err
@@ -204,6 +222,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	reporter.SetRouteModel(helps.PayloadRequestedModel(opts, req.Model))
 
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {
@@ -221,7 +240,8 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 	}
 	reporter.SetTranslatedReasoningEffort(payload, "openai")
 
-	url := strings.TrimSuffix(baseURL, "/") + endpointPath
+	url := openAICompatUpstreamURL(baseURL, endpointPath)
+	reporter.SetEndpoint(url)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return resp, err
@@ -297,6 +317,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	// Persist the client-requested model + upstream URL so failed streaming
+	// attempts can be diagnosed for misrouting (see Execute for rationale).
+	reporter.SetRouteModel(helps.PayloadRequestedModel(opts, req.Model))
 
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {
@@ -329,7 +352,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url := openAICompatUpstreamURL(baseURL, "/chat/completions")
+	reporter.SetEndpoint(url)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
@@ -464,6 +488,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	reporter.SetRouteModel(helps.PayloadRequestedModel(opts, req.Model))
 
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {
@@ -481,7 +506,8 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 	}
 	reporter.SetTranslatedReasoningEffort(payload, "openai")
 
-	url := strings.TrimSuffix(baseURL, "/") + endpointPath
+	url := openAICompatUpstreamURL(baseURL, endpointPath)
+	reporter.SetEndpoint(url)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err

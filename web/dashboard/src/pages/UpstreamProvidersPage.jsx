@@ -771,7 +771,7 @@ function buildSchemas() {
           { name: 'name', label: 'Provider name', type: 'text', placeholder: 'openrouter', required: true,
             hint: 'Unique identifier for this OpenAI-compatible provider.' },
           { name: 'base_url', label: 'Base URL', type: 'text', placeholder: 'https://openrouter.ai/api/v1',
-            required: true, hint: 'The external OpenAI-compatible API endpoint.',
+            required: true, hint: 'The external OpenAI-compatible API endpoint. Include /v1 if your upstream requires it; otherwise the server auto-inserts /v1 before /chat/completions and /images/...',
             validate: (v) => (v && !URL_RE.test(v) ? 'Must start with http://, https://, or socks5://.' : '') },
         ]},
         { title: 'Endpoint', fields: [
