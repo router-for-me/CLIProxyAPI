@@ -28,6 +28,27 @@ func Allowed(p Policy, model string) bool {
 	return false
 }
 
+// ModelCoveredByAllowed reports whether model is permitted by the supplied
+// allowed-models list (exact or trailing-wildcard match). An empty list means
+// "all allowed", so it returns true. It is the write-time validation analogue
+// of Allowed (without the blocked-list precedence): a route may target a model
+// only when that model is in the allowlist. Wildcard entries (e.g. "gpt-4*")
+// cover any model matching their prefix.
+func ModelCoveredByAllowed(allowedModels []string, model string) bool {
+	if model == "" {
+		return false
+	}
+	if len(allowedModels) == 0 {
+		return true
+	}
+	for _, allowed := range allowedModels {
+		if modelMatches(allowed, model) {
+			return true
+		}
+	}
+	return false
+}
+
 // modelMatches compares a policy entry against the requested model. Entries
 // support a trailing '*' wildcard that matches any prefix, which is useful
 // for guarding families like "gpt-4*" or "claude-*".

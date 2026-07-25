@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 )
 
 // mockPolicyService is a test double for policy.PolicyService.
@@ -24,6 +25,7 @@ type mockPolicyService struct {
 	lastConsume   *policy.TokenCounts
 	invalidateKey string
 	invalidateAll bool
+	routes        []store.ModelRoute
 }
 
 func (m *mockPolicyService) Active() bool { return m.active }
@@ -58,6 +60,10 @@ func (m *mockPolicyService) AcquireParallel(_ context.Context, _ string) (bool, 
 
 func (m *mockPolicyService) ReleaseParallel(_ context.Context, _ string) error {
 	return nil
+}
+
+func (m *mockPolicyService) ResolvedRoutes(_ context.Context, _ string) []store.ModelRoute {
+	return m.routes
 }
 
 func newTestRouter(svc policy.PolicyService) *gin.Engine {

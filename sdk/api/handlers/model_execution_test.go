@@ -761,7 +761,7 @@ func TestExecuteProtocolStreamWithAuthManagerAgentUsesSelectionModelForAuth(t *t
 func TestProvidersForExecutionForcedGeminiRejectsRouterProvider(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
 	decision := modelRouteDecision{Provider: "claude", Model: "claude-sonnet-4"}
-	_, _, errMsg := handler.providersForExecution("agents/test-agent", "agents/test-agent", false, decision, modelExecutionOptions{ForcedProvider: "gemini"})
+	_, _, errMsg := handler.providersForExecution(context.Background(), "agents/test-agent", "agents/test-agent", false, decision, modelExecutionOptions{ForcedProvider: "gemini"})
 	if errMsg == nil {
 		t.Fatal("providersForExecution() error = nil, want native interactions error")
 	}
@@ -775,7 +775,7 @@ func TestProvidersForExecutionForcedGeminiRejectsRouterProvider(t *testing.T) {
 
 func TestProvidersForExecutionForcedGeminiUsesGeminiProvider(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
-	providers, model, errMsg := handler.providersForExecution("agents/test-agent", "agents/test-agent", false, modelRouteDecision{}, modelExecutionOptions{ForcedProvider: "gemini"})
+	providers, model, errMsg := handler.providersForExecution(context.Background(), "agents/test-agent", "agents/test-agent", false, modelRouteDecision{}, modelExecutionOptions{ForcedProvider: "gemini"})
 	if errMsg != nil {
 		t.Fatalf("providersForExecution() error = %+v", errMsg)
 	}

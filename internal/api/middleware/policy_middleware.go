@@ -10,12 +10,14 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/errormessages"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 )
 
 // Context keys populated by the policy middleware so downstream handlers and
@@ -27,6 +29,11 @@ const (
 	// CtxPolicyKeyID carries the resolved key_id (when available) for log
 	// correlation without exposing the plaintext key.
 	CtxPolicyKeyID = "policy.key_id"
+	// CtxPolicyModelRoutes carries the per-allowed-model upstream provider
+	// routes resolved for the principal (a []store.ModelRoute). The request
+	// handler reads it to confine provider selection to the pinned set. Absent
+	// when no policy/service is active or no routes are configured.
+	CtxPolicyModelRoutes = "policy.model_routes"
 )
 
 // PolicyMiddleware returns a Gin middleware that delegates to the supplied
@@ -77,6 +84,15 @@ func PolicyMiddleware(svc policy.PolicyService) gin.HandlerFunc {
 			return
 		}
 
+		// Re-resolve the per-model upstream routes for the principal so the
+		// request handler can confine provider selection. This reuses the
+		// snapshot cache populated by Check (no extra DB round-trip). The
+		// model-specific matching against the requested model is done later by
+		// the handler; here we stash the full route table.
+		if routes := svc.ResolvedRoutes(c.Request.Context(), principalStr); len(routes) > 0 {
+			c.Set(CtxPolicyModelRoutes, routes)
+		}
+
 		// Acquire an in-flight slot under the configured max_parallel_requests
 		// cap. The slot is released in a defer so the counter does not leak,
 		// including the upstream handler's panic / early-return paths. When
@@ -99,6 +115,36 @@ func PolicyMiddleware(svc policy.PolicyService) gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// RoutesForModel returns the pinned upstream providers for modelID from the gin
+// context, where PolicyMiddleware stashed the principal's model_routes. Returns
+// nil when no policy/service is active, no routes are configured, or no route
+// matches modelID. A nil result means "use the registry default provider set".
+// The match is case-insensitive on the model id (routes are keyed on the bare
+// model id, without thinking suffix).
+func RoutesForModel(c *gin.Context, modelID string) []string {
+	if c == nil || modelID == "" {
+		return nil
+	}
+	raw, ok := c.Get(CtxPolicyModelRoutes)
+	if !ok || raw == nil {
+		return nil
+	}
+	routes, ok := raw.([]store.ModelRoute)
+	if !ok {
+		return nil
+	}
+	target := strings.ToLower(strings.TrimSpace(modelID))
+	for _, r := range routes {
+		if strings.ToLower(strings.TrimSpace(r.Model)) == target {
+			if len(r.Providers) == 0 {
+				return nil
+			}
+			return r.Providers
+		}
+	}
+	return nil
 }
 
 // extractModel reads the request body to find a "model" field. The body is

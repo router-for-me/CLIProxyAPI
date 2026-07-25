@@ -30,6 +30,9 @@ import (
 //     persisted catalog down to the IDs the active in-memory registry reports
 //     as currently available (across openai/claude/gemini handler types).
 //     This is what the dashboard should call to show "live" models only.
+//   - distinct_ids        (default false): when "1" or "true", deduplicates the
+//     page to one row per model id (picking one representative provider per id).
+//     Used by the allowed-models dropdown so each model id appears once.
 //   - q                   (optional): free-text ILIKE filter against id,
 //     name, display_name, and provider. Case-insensitive substring match.
 //   - sort                (optional): ORDER BY column — one of id, provider,
@@ -54,6 +57,7 @@ func (h *Handler) ListModelsCatalog(c *gin.Context) {
 	provider := c.Query("provider")
 	officialProvider := c.Query("official_provider")
 	availableOnly := boolFromQuery(c.Query("available_only"))
+	distinctIDs := boolFromQuery(c.Query("distinct_ids"))
 	query := c.Query("q")
 
 	var idFilter []string
@@ -86,7 +90,16 @@ func (h *Handler) ListModelsCatalog(c *gin.Context) {
 		Query:            query,
 	}
 	sort := parseModelsListSort(c.Query("sort"))
-	stored, total, err := models.SelectAllPagedFilter(c.Request.Context(), page, pageSize, filter, sort)
+	var (
+		stored []store.StoredModel
+		total  int64
+		err    error
+	)
+	if distinctIDs {
+		stored, total, err = models.SelectAllDistinctPagedFilter(c.Request.Context(), page, pageSize, filter, sort)
+	} else {
+		stored, total, err = models.SelectAllPagedFilter(c.Request.Context(), page, pageSize, filter, sort)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
@@ -260,6 +273,32 @@ func (h *Handler) GetModelsCatalogDistinct(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"field": field, "values": values})
+}
+
+// GetModelProviders handles GET /v0/management/models-catalog/providers-for-model.
+//
+// Query param: id=<modelID>
+// Returns the upstream provider identifiers the active in-memory registry
+// reports as currently serving the supplied model id, ordered by availability
+// count descending. Used by the dashboard's per-model routing editor so it
+// only offers providers that actually back the selected model. Returns an empty
+// provider list (not an error) when the model is unknown or has no live
+// providers — operators may still type a custom provider name.
+//
+// This endpoint reads from the in-memory registry (not PG), so it works without
+// the PG backend only insomuch as the registry has live clients; when no model
+// id is supplied it responds 400.
+func (h *Handler) GetModelProviders(c *gin.Context) {
+	modelID := strings.TrimSpace(c.Query("id"))
+	if modelID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": "id query parameter is required"}})
+		return
+	}
+	providers := registry.GetGlobalRegistry().GetModelProviders(modelID)
+	if providers == nil {
+		providers = []string{}
+	}
+	c.JSON(http.StatusOK, gin.H{"model": modelID, "providers": providers})
 }
 
 func boolFromQuery(v string) bool {

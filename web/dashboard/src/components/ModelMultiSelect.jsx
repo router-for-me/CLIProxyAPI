@@ -30,7 +30,7 @@ export default function ModelMultiSelect({
   placeholder = 'search models…',
   hint,
 }) {
-  const [models, setModels] = useState([]);     // [{id, provider, displayName}]
+  const [models, setModels] = useState([]);     // [{id, provider, officialProvider, displayName}]
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [query, setQuery] = useState('');
@@ -50,7 +50,7 @@ export default function ModelMultiSelect({
         const acc = [];
         let page = 1;
         while (acc.length < MAX_MODELS_LOAD) {
-          const res = await listModelsCatalog({ page, pageSize: PAGE_SIZE, availableOnly: true });
+          const res = await listModelsCatalog({ page, pageSize: PAGE_SIZE, availableOnly: true, distinctIds: true });
           const rows = Array.isArray(res?.models) ? res.models : [];
           for (const r of rows) {
             const id = r?.id || r?.name;
@@ -58,6 +58,7 @@ export default function ModelMultiSelect({
             acc.push({
               id,
               provider: r?.provider || '',
+              officialProvider: r?.official_provider || r?.officialProvider || '',
               displayName: r?.display_name || r?.displayName || '',
             });
           }
@@ -100,6 +101,7 @@ export default function ModelMultiSelect({
     return models
       .filter((m) =>
         m.id.toLowerCase().includes(q) ||
+        (m.officialProvider || '').toLowerCase().includes(q) ||
         m.provider.toLowerCase().includes(q) ||
         (m.displayName || '').toLowerCase().includes(q))
       .slice(0, 50);
@@ -207,7 +209,7 @@ export default function ModelMultiSelect({
                       onMouseEnter={() => setHighlight(i)}
                     >
                       <span className="model-multiselect__option-id mono">{m.id}</span>
-                      {m.provider && <span className="model-multiselect__option-provider">{m.provider}</span>}
+                      {m.officialProvider && <span className="model-multiselect__option-provider" title="Official provider">{m.officialProvider}</span>}
                       {isSelected && <span className="model-multiselect__option-check">✓</span>}
                     </li>
                   );

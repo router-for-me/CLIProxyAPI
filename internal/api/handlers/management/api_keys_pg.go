@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -344,6 +345,35 @@ func (h *Handler) PatchPGAPIKey(c *gin.Context) {
 	c.JSON(http.StatusOK, pgKeyResponse{APIKey: key, Policy: pol})
 }
 
+// validateModelRoutes checks that each model route targets a model permitted by
+// the policy's AllowedModels (exact or wildcard match), has no duplicate route
+// models, and has at least one provider. Returns a non-empty human-readable
+// error message when validation fails, or "" when the routes are valid.
+func validateModelRoutes(p store.Policy) string {
+	if len(p.ModelRoutes) == 0 {
+		return ""
+	}
+	seen := make(map[string]struct{}, len(p.ModelRoutes))
+	for _, r := range p.ModelRoutes {
+		model := strings.TrimSpace(r.Model)
+		if model == "" {
+			return "model_routes: entry with empty model is not allowed"
+		}
+		if len(r.Providers) == 0 {
+			return fmt.Sprintf("model_routes: route for %q must list at least one provider", model)
+		}
+		key := strings.ToLower(model)
+		if _, dup := seen[key]; dup {
+			return fmt.Sprintf("model_routes: duplicate route for model %q", model)
+		}
+		seen[key] = struct{}{}
+		if !policy.ModelCoveredByAllowed(p.AllowedModels, model) {
+			return fmt.Sprintf("model_routes: model %q is not in allowed_models", model)
+		}
+	}
+	return ""
+}
+
 // PutPGAPIKeyPolicy handles PUT /v0/management/api-keys-pg/:id/policy.
 func (h *Handler) PutPGAPIKeyPolicy(c *gin.Context) {
 	apiKeys, _, _, policySvc, ok := h.requirePG(c)
@@ -354,6 +384,10 @@ func (h *Handler) PutPGAPIKeyPolicy(c *gin.Context) {
 	var p store.Policy
 	if err := c.ShouldBindJSON(&p); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": err.Error()}})
+		return
+	}
+	if msg := validateModelRoutes(p); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": msg}})
 		return
 	}
 	if err := apiKeys.UpdatePolicy(c.Request.Context(), id, p); err != nil {

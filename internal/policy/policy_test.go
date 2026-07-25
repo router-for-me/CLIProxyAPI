@@ -38,6 +38,31 @@ func TestAllowedEmptyPolicy(t *testing.T) {
 	}
 }
 
+func TestModelCoveredByAllowed(t *testing.T) {
+	cases := []struct {
+		name   string
+		allow  []string
+		model  string
+		expect bool
+	}{
+		{"empty_allow_means_all", nil, "deepseek-v4-pro", true},
+		{"exact_match", []string{"deepseek-v4-pro", "gpt-4o"}, "deepseek-v4-pro", true},
+		{"not_in_list", []string{"deepseek-v4-pro", "gpt-4o"}, "claude-3", false},
+		{"wildcard_covers", []string{"gpt-4*", "deepseek-v4-pro"}, "gpt-4o-mini", true},
+		{"wildcard_no_match", []string{"gpt-4*"}, "claude-3", false},
+		{"empty_model_rejected", []string{"gpt-4o"}, "", false},
+		{"empty_model_rejected_when_all", nil, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ModelCoveredByAllowed(tc.allow, tc.model)
+			if got != tc.expect {
+				t.Fatalf("ModelCoveredByAllowed(%v, %q) = %v, want %v", tc.allow, tc.model, got, tc.expect)
+			}
+		})
+	}
+}
+
 func TestAllowedWhitelist(t *testing.T) {
 	p := Policy{AllowedModels: []string{"gpt-4o", "claude-3"}}
 	if !Allowed(p, "gpt-4o") {
@@ -363,6 +388,9 @@ func (r *recordingService) AcquireParallel(_ context.Context, _ string) (bool, e
 	return true, nil
 }
 func (r *recordingService) ReleaseParallel(_ context.Context, _ string) error { return nil }
+func (r *recordingService) ResolvedRoutes(_ context.Context, _ string) []store.ModelRoute {
+	return nil
+}
 
 func TestUsagePluginForwardsCacheTokens(t *testing.T) {
 	rec := &recordingService{}

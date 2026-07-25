@@ -366,7 +366,19 @@ function PolicyCard({ apiKeyId, policy: initial, onUpdated }) {
         <div className="form__row">
           <div className="form__label">Allowed models</div>
           <ul className="list-bare">
-            {initial.allowed_models.map((m) => <li key={m} className="mono">{m}</li>)}
+            {initial.allowed_models.map((m) => {
+              const route = (initial.model_routes || []).find((r) => r.model === m);
+              return (
+                <li key={m} className="mono">
+                  {m}
+                  {route && route.providers && route.providers.length > 0 && (
+                    <span className="muted" style={{ marginLeft: 8 }}>
+                      → {route.providers.join(', ')}
+                    </span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}

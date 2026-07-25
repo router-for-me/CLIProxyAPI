@@ -65,6 +65,9 @@ type Policy struct {
 	BudgetMonthlyUSD *float64
 	AllowedModels    []string
 	BlockedModels    []string
+	// ModelRoutes optionally pins specific allowed model IDs to a subset of
+	// upstream providers. See store.Policy.ModelRoutes for semantics.
+	ModelRoutes []store.ModelRoute
 }
 
 // APIKeySnapshot pairs a key's identity with its resolved policy for caching.
@@ -91,6 +94,13 @@ type PolicyService interface {
 	// counters are incremented synchronously here; budget windows are read
 	// but their increment happens via Consume (after tokens are known).
 	Check(ctx context.Context, principal, model string) (Decision, error)
+
+	// ResolvedRoutes returns the per-allowed-model upstream provider routes
+	// configured on the principal's policy (snapshot-cached). Returns nil when
+	// the service is inactive, no policy is attached, or no routes are set.
+	// The middleware stashes the result into the request context so the
+	// handler can confine provider selection to the pinned set.
+	ResolvedRoutes(ctx context.Context, principal string) []store.ModelRoute
 
 	// Consume records tokens + cost against the budget windows. Called from
 	// the usage plugin sink after the upstream response has been parsed.

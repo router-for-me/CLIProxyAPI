@@ -294,6 +294,26 @@ func (s *service) Check(ctx context.Context, principal, model string) (Decision,
 	return Decision{Allow: true}, nil
 }
 
+// ResolvedRoutes returns the per-allowed-model upstream provider routes
+// configured on the principal's policy. It reuses the snapshot cache populated
+// by Check so the per-request hot path pays no extra DB round-trip. Returns nil
+// when the service is inactive, the principal is unknown, no policy is
+// attached, or no routes are configured — callers treat nil as "no routing
+// override, use registry defaults".
+func (s *service) ResolvedRoutes(ctx context.Context, principal string) []store.ModelRoute {
+	if !s.Active() || principal == "" {
+		return nil
+	}
+	snap, err := s.snapshot(ctx, principal)
+	if err != nil || snap.Policy == nil {
+		return nil
+	}
+	if len(snap.Policy.ModelRoutes) == 0 {
+		return nil
+	}
+	return snap.Policy.ModelRoutes
+}
+
 // checkBudget returns (decision, denied=true) when any budget cap has been
 // exceeded. The decision carries the most restrictive cap that was hit so the
 // caller can surface a meaningful error. Window start/end are anchored to the
@@ -516,6 +536,7 @@ func fromStorePolicy(p store.Policy) Policy {
 		BudgetMonthlyUSD: p.BudgetMonthlyUSD,
 		AllowedModels:    p.AllowedModels,
 		BlockedModels:    p.BlockedModels,
+		ModelRoutes:      p.ModelRoutes,
 	}
 }
 

@@ -62,16 +62,29 @@ type APIKey struct {
 // Policy captures the limits enforced on an API key. Pointer-typed scalar
 // fields distinguish "unset / unlimited" (nil) from explicit zero values.
 type Policy struct {
-	APIKeyID            string    `json:"api_key_id"`
-	RPMLimit            *int      `json:"rpm_limit,omitempty"`
-	HourlyRateLimit     *int      `json:"hourly_rate_limit,omitempty"`
-	BudgetHourlyUSD     *float64  `json:"budget_hourly_usd,omitempty"`
-	BudgetWeeklyUSD     *float64  `json:"budget_weekly_usd,omitempty"`
-	BudgetMonthlyUSD    *float64  `json:"budget_monthly_usd,omitempty"`
-	MaxParallelRequests *int      `json:"max_parallel_requests,omitempty"`
-	AllowedModels       []string  `json:"allowed_models,omitempty"`
-	BlockedModels       []string  `json:"blocked_models,omitempty"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	APIKeyID            string   `json:"api_key_id"`
+	RPMLimit            *int     `json:"rpm_limit,omitempty"`
+	HourlyRateLimit     *int     `json:"hourly_rate_limit,omitempty"`
+	BudgetHourlyUSD     *float64 `json:"budget_hourly_usd,omitempty"`
+	BudgetWeeklyUSD     *float64 `json:"budget_weekly_usd,omitempty"`
+	BudgetMonthlyUSD    *float64 `json:"budget_monthly_usd,omitempty"`
+	MaxParallelRequests *int     `json:"max_parallel_requests,omitempty"`
+	AllowedModels       []string `json:"allowed_models,omitempty"`
+	BlockedModels       []string `json:"blocked_models,omitempty"`
+	// ModelRoutes optionally pins specific allowed model IDs to a subset of
+	// upstream providers. When a route is present for the requested model, the
+	// request is confined to those providers only (no failover to other
+	// registry providers). A model in ModelRoutes must also be permitted by
+	// AllowedModels (exact or wildcard). Wildcard tokens cannot be routed.
+	ModelRoutes []ModelRoute `json:"model_routes,omitempty"`
+	UpdatedAt   time.Time    `json:"updated_at"`
+}
+
+// ModelRoute pins a single model ID to a set of upstream providers. Requests
+// for Model are confined to the listed Providers (case-insensitive match).
+type ModelRoute struct {
+	Model     string   `json:"model"`
+	Providers []string `json:"providers"`
 }
 
 // APIKeyStore provides CRUD operations for client-facing API keys and their
@@ -223,7 +236,7 @@ func (s *APIKeyStore) LookupByHash(ctx context.Context, hash string) (*APIKey, *
 		       k.created_at, k.updated_at, k.expires_at, k.last_used_at, k.metadata,
 		       p.rpm_limit, p.hourly_rate_limit, p.budget_hourly_usd, p.budget_weekly_usd,
 		       p.budget_monthly_usd, p.max_parallel_requests,
-		       p.allowed_models, p.blocked_models, p.updated_at
+		       p.allowed_models, p.blocked_models, p.model_routes, p.updated_at
 		FROM %s k
 		LEFT JOIN %s u ON u.id = k.user_id
 		LEFT JOIN %s p ON p.api_key_id = k.id
@@ -251,7 +264,7 @@ func (s *APIKeyStore) LookupByID(ctx context.Context, id string) (*APIKey, *Poli
 		       k.created_at, k.updated_at, k.expires_at, k.last_used_at, k.metadata,
 		       p.rpm_limit, p.hourly_rate_limit, p.budget_hourly_usd, p.budget_weekly_usd,
 		       p.budget_monthly_usd, p.max_parallel_requests,
-		       p.allowed_models, p.blocked_models, p.updated_at
+		       p.allowed_models, p.blocked_models, p.model_routes, p.updated_at
 		FROM %s k
 		LEFT JOIN %s u ON u.id = k.user_id
 		LEFT JOIN %s p ON p.api_key_id = k.id
@@ -279,6 +292,7 @@ func scanAPIKeyRow(row *sql.Row) (*APIKey, *Policy, error) {
 		maxParallel     sql.NullInt64
 		allowedModels   []byte
 		blockedModels   []byte
+		modelRoutes     []byte
 		policyUpdatedAt sql.NullTime
 	)
 	if err := row.Scan(
@@ -288,7 +302,7 @@ func scanAPIKeyRow(row *sql.Row) (*APIKey, *Policy, error) {
 		&key.CreatedAt, &key.UpdatedAt, &key.ExpiresAt, &key.LastUsedAt, &metadata,
 		&rpmLimit, &hourlyRateLimit, &budgetHourly, &budgetWeekly, &budgetMonthly,
 		&maxParallel,
-		&allowedModels, &blockedModels, &policyUpdatedAt,
+		&allowedModels, &blockedModels, &modelRoutes, &policyUpdatedAt,
 	); err != nil {
 		return nil, nil, err
 	}
@@ -328,6 +342,7 @@ func scanAPIKeyRow(row *sql.Row) (*APIKey, *Policy, error) {
 		}
 		p.AllowedModels = decodeStringArray(allowedModels)
 		p.BlockedModels = decodeStringArray(blockedModels)
+		p.ModelRoutes = decodeModelRoutes(modelRoutes)
 		policy = &p
 	}
 	return &key, policy, nil
@@ -492,13 +507,14 @@ func (s *APIKeyStore) UpdatePolicy(ctx context.Context, id string, policy Policy
 func upsertPolicyTx(ctx context.Context, tx *sql.Tx, policiesTable string, policy Policy) error {
 	allowed, _ := json.Marshal(normalizeStringSlice(policy.AllowedModels))
 	blocked, _ := json.Marshal(normalizeStringSlice(policy.BlockedModels))
+	routes, _ := json.Marshal(normalizeModelRoutes(policy.ModelRoutes))
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
 			api_key_id, rpm_limit, hourly_rate_limit,
 			budget_hourly_usd, budget_weekly_usd, budget_monthly_usd,
 			max_parallel_requests,
-			allowed_models, blocked_models, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, NOW())
+			allowed_models, blocked_models, model_routes, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, NOW())
 		ON CONFLICT (api_key_id) DO UPDATE SET
 			rpm_limit = EXCLUDED.rpm_limit,
 			hourly_rate_limit = EXCLUDED.hourly_rate_limit,
@@ -508,12 +524,13 @@ func upsertPolicyTx(ctx context.Context, tx *sql.Tx, policiesTable string, polic
 			max_parallel_requests = EXCLUDED.max_parallel_requests,
 			allowed_models = EXCLUDED.allowed_models,
 			blocked_models = EXCLUDED.blocked_models,
+			model_routes = EXCLUDED.model_routes,
 			updated_at = NOW()
 	`, policiesTable),
 		policy.APIKeyID, policy.RPMLimit, policy.HourlyRateLimit,
 		policy.BudgetHourlyUSD, policy.BudgetWeeklyUSD, policy.BudgetMonthlyUSD,
 		policy.MaxParallelRequests,
-		string(allowed), string(blocked),
+		string(allowed), string(blocked), string(routes),
 	); err != nil {
 		return fmt.Errorf("postgres store: upsert policy: %w", err)
 	}
@@ -529,6 +546,49 @@ func normalizeStringSlice(values []string) []string {
 		if v != "" {
 			out = append(out, v)
 		}
+	}
+	return out
+}
+
+// normalizeModelRoutes drops routes with an empty model or no providers and
+// trims whitespace. It returns a non-nil slice (empty when input is empty) so
+// the persisted jsonb column is [] rather than NULL.
+func normalizeModelRoutes(routes []ModelRoute) []ModelRoute {
+	if len(routes) == 0 {
+		return []ModelRoute{}
+	}
+	out := make([]ModelRoute, 0, len(routes))
+	for _, r := range routes {
+		model := strings.TrimSpace(r.Model)
+		if model == "" {
+			continue
+		}
+		providers := make([]string, 0, len(r.Providers))
+		for _, p := range r.Providers {
+			if p = strings.TrimSpace(p); p != "" {
+				providers = append(providers, p)
+			}
+		}
+		if len(providers) == 0 {
+			continue
+		}
+		out = append(out, ModelRoute{Model: model, Providers: providers})
+	}
+	return out
+}
+
+// decodeModelRoutes unmarshals the model_routes jsonb column. Returns nil when
+// the column is empty/null/[] so zero-value semantics ("no routes") apply.
+func decodeModelRoutes(raw []byte) []ModelRoute {
+	if len(raw) == 0 {
+		return nil
+	}
+	var out []ModelRoute
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
