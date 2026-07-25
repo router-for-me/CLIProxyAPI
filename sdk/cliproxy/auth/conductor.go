@@ -2728,6 +2728,8 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			}
 			return cliproxyexecutor.Response{}, repeatedHomeAuthError()
 		}
+		entry := logEntryWithRequestID(ctx)
+		debugLogAuthSelection(entry, auth, selection.Provider, routeModel)
 		if errRuntimeAuth := m.bindHomeSelectionRuntimeAuth(ctx, opts, selection); errRuntimeAuth != nil {
 			selection.End("runtime_auth_bind_failed")
 			return cliproxyexecutor.Response{}, errRuntimeAuth

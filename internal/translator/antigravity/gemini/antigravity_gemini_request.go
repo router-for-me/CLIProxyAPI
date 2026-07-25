@@ -6,6 +6,7 @@
 package gemini
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -149,7 +150,7 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	rawJSON = rewriteGeminiFunctionNames(rawJSON, functionNameMap)
 
 	if strings.Contains(strings.ToLower(modelName), "claude") {
-		rawJSON = sanitizeAntigravityClaudeGeminiRequestSignatures(modelName, rawJSON)
+		rawJSON = SanitizeAntigravityClaudeGeminiRequestSignatures(modelName, rawJSON)
 	} else {
 		rawJSON = signature.SanitizeGeminiRequestThoughtSignatures(rawJSON, "request.contents")
 	}
@@ -292,9 +293,11 @@ func rewriteGeminiFunctionNames(rawJSON []byte, functionNameMap map[string]strin
 	return rawJSON
 }
 
-func sanitizeAntigravityClaudeGeminiRequestSignatures(modelName string, rawJSON []byte) []byte {
+func SanitizeAntigravityClaudeGeminiRequestSignatures(modelName string, rawJSON []byte) []byte {
 	var root map[string]any
-	if err := json.Unmarshal(rawJSON, &root); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(rawJSON))
+	decoder.UseNumber()
+	if err := decoder.Decode(&root); err != nil {
 		log.WithError(err).Debug("antigravity gemini translator: failed to parse request for Claude signature sanitize")
 		return rawJSON
 	}

@@ -2206,7 +2206,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 // ensureCacheControl injects cache_control breakpoints into the payload for optimal prompt caching.
 // According to Anthropic's documentation, cache prefixes are created in order: tools -> system -> messages.
 // This function adds cache_control to:
-// 1. The LAST tool in the tools array (caches all tool definitions)
+// 1. The LAST non-deferred tool in the tools array (caches all preceding tool definitions)
 // 2. The LAST system prompt element
 // 3. The SECOND-TO-LAST user turn (caches conversation history for multi-turn)
 //
@@ -2214,7 +2214,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 // This enables up to 90% cost reduction on cached tokens (cache read = 0.1x base price).
 // See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
 func ensureCacheControl(payload []byte) []byte {
-	// 1. Inject cache_control into the LAST tool (caches all tool definitions)
+	// 1. Inject cache_control into the LAST non-deferred tool
 	// Tools are cached first in the hierarchy, so this is the most important breakpoint.
 	payload = injectToolsCacheControl(payload)
 
@@ -2623,8 +2623,8 @@ func injectMessagesCacheControl(payload []byte) []byte {
 	return payload
 }
 
-// injectToolsCacheControl adds cache_control to the last tool in the tools array.
-// Per Anthropic docs: "The cache_control parameter on the last tool definition caches all tool definitions."
+// injectToolsCacheControl adds cache_control to the last non-deferred tool in the tools array.
+// Deferred tools cannot use prompt caching, so trailing deferred tools are skipped.
 // This only adds cache_control if NO tool in the array already has it.
 func injectToolsCacheControl(payload []byte) []byte {
 	tools := gjson.GetBytes(payload, "tools")
@@ -2632,26 +2632,24 @@ func injectToolsCacheControl(payload []byte) []byte {
 		return payload
 	}
 
-	toolCount := int(tools.Get("#").Int())
-	if toolCount == 0 {
-		return payload
-	}
-
-	// Check if ANY tool already has cache_control - if so, don't modify tools
+	// Check if ANY tool already has cache_control and find the last eligible tool.
 	hasCacheControlInTools := false
-	tools.ForEach(func(_, tool gjson.Result) bool {
+	lastEligibleToolIndex := -1
+	tools.ForEach(func(index, tool gjson.Result) bool {
 		if tool.Get("cache_control").Exists() {
 			hasCacheControlInTools = true
 			return false
 		}
+		if !tool.Get("defer_loading").Bool() {
+			lastEligibleToolIndex = int(index.Int())
+		}
 		return true
 	})
-	if hasCacheControlInTools {
+	if hasCacheControlInTools || lastEligibleToolIndex < 0 {
 		return payload
 	}
 
-	// Add cache_control to the last tool
-	lastToolPath := fmt.Sprintf("tools.%d.cache_control", toolCount-1)
+	lastToolPath := fmt.Sprintf("tools.%d.cache_control", lastEligibleToolIndex)
 	result, err := sjson.SetBytes(payload, lastToolPath, map[string]string{"type": "ephemeral"})
 	if err != nil {
 		log.Warnf("failed to inject cache_control into tools array: %v", err)

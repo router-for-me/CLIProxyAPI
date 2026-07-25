@@ -108,6 +108,29 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.Codex.OptimizeMultiAgentV2 != newCfg.Codex.OptimizeMultiAgentV2 {
 		changes = append(changes, fmt.Sprintf("codex.optimize-multi-agent-v2: %t -> %t", oldCfg.Codex.OptimizeMultiAgentV2, newCfg.Codex.OptimizeMultiAgentV2))
 	}
+	oldLiveRelay := oldCfg.Codex.LiveMediaRelay
+	newLiveRelay := newCfg.Codex.LiveMediaRelay
+	if oldLiveRelay.Enabled != newLiveRelay.Enabled {
+		changes = append(changes, fmt.Sprintf("codex.live-media-relay.enabled: %t -> %t", oldLiveRelay.Enabled, newLiveRelay.Enabled))
+	}
+	if oldLiveRelay.MaxSessions != newLiveRelay.MaxSessions {
+		changes = append(changes, fmt.Sprintf("codex.live-media-relay.max-sessions: %d -> %d", oldLiveRelay.MaxSessions, newLiveRelay.MaxSessions))
+	}
+	if oldLiveRelay.DisablePrivateRemoteIPs != newLiveRelay.DisablePrivateRemoteIPs {
+		changes = append(changes, fmt.Sprintf("codex.live-media-relay.disable-private-remote-ips: %t -> %t", oldLiveRelay.DisablePrivateRemoteIPs, newLiveRelay.DisablePrivateRemoteIPs))
+	}
+	if strings.TrimSpace(oldLiveRelay.PublicIP) != strings.TrimSpace(newLiveRelay.PublicIP) {
+		changes = append(changes, fmt.Sprintf("codex.live-media-relay.public-ip: %s -> %s", displayOptionalValue(oldLiveRelay.PublicIP), displayOptionalValue(newLiveRelay.PublicIP)))
+	}
+	if oldLiveRelay.UDPPortMin != newLiveRelay.UDPPortMin {
+		changes = append(changes, fmt.Sprintf("codex.live-media-relay.udp-port-min: %d -> %d", oldLiveRelay.UDPPortMin, newLiveRelay.UDPPortMin))
+	}
+	if oldLiveRelay.UDPPortMax != newLiveRelay.UDPPortMax {
+		changes = append(changes, fmt.Sprintf("codex.live-media-relay.udp-port-max: %d -> %d", oldLiveRelay.UDPPortMax, newLiveRelay.UDPPortMax))
+	}
+	if !reflect.DeepEqual(oldLiveRelay.ICEServers, newLiveRelay.ICEServers) {
+		changes = append(changes, fmt.Sprintf("codex.live-media-relay.ice-servers: updated (%d -> %d entries, credentials redacted)", len(oldLiveRelay.ICEServers), len(newLiveRelay.ICEServers)))
+	}
 
 	if oldCfg.Routing.Strategy != newCfg.Routing.Strategy {
 		changes = append(changes, fmt.Sprintf("routing.strategy: %s -> %s", oldCfg.Routing.Strategy, newCfg.Routing.Strategy))
@@ -129,7 +152,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			o := oldCfg.GeminiKey[i]
 			n := newCfg.GeminiKey[i]
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
-				changes = append(changes, fmt.Sprintf("gemini[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL)))
+				changes = append(changes, fmt.Sprintf("gemini[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL)))
 			}
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("gemini[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
@@ -162,7 +185,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			o := oldCfg.InteractionsKey[i]
 			n := newCfg.InteractionsKey[i]
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
-				changes = append(changes, fmt.Sprintf("interactions[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL)))
+				changes = append(changes, fmt.Sprintf("interactions[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL)))
 			}
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("interactions[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
@@ -197,7 +220,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			o := oldCfg.ClaudeKey[i]
 			n := newCfg.ClaudeKey[i]
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
-				changes = append(changes, fmt.Sprintf("claude[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL)))
+				changes = append(changes, fmt.Sprintf("claude[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL)))
 			}
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("claude[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
@@ -246,7 +269,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			o := oldCfg.CodexKey[i]
 			n := newCfg.CodexKey[i]
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
-				changes = append(changes, fmt.Sprintf("codex[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL)))
+				changes = append(changes, fmt.Sprintf("codex[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL)))
 			}
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("codex[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
@@ -284,7 +307,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			o := oldCfg.XAIKey[i]
 			n := newCfg.XAIKey[i]
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
-				changes = append(changes, fmt.Sprintf("xai[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL)))
+				changes = append(changes, fmt.Sprintf("xai[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL)))
 			}
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("xai[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
@@ -340,7 +363,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	oldPanelRepo := strings.TrimSpace(oldCfg.RemoteManagement.PanelGitHubRepository)
 	newPanelRepo := strings.TrimSpace(newCfg.RemoteManagement.PanelGitHubRepository)
 	if oldPanelRepo != newPanelRepo {
-		changes = append(changes, fmt.Sprintf("remote-management.panel-github-repository: %s -> %s", oldPanelRepo, newPanelRepo))
+		changes = append(changes, fmt.Sprintf("remote-management.panel-github-repository: %s -> %s", formatURL(oldPanelRepo), formatURL(newPanelRepo)))
 	}
 	if oldCfg.RemoteManagement.SecretKey != newCfg.RemoteManagement.SecretKey {
 		switch {
@@ -369,7 +392,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			o := oldCfg.VertexCompatAPIKey[i]
 			n := newCfg.VertexCompatAPIKey[i]
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
-				changes = append(changes, fmt.Sprintf("vertex[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL)))
+				changes = append(changes, fmt.Sprintf("vertex[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL)))
 			}
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("vertex[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
@@ -442,7 +465,19 @@ func equalStringMap(a, b map[string]string) bool {
 	return true
 }
 
+func displayOptionalValue(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "<none>"
+	}
+	return trimmed
+}
+
 func formatProxyURL(raw string) string {
+	return formatURL(raw)
+}
+
+func formatURL(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return "<none>"
