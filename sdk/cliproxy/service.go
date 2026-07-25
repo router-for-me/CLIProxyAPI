@@ -653,7 +653,6 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 
 	registrationCtx := coreauth.WithDeferredAPIKeyModelAliasRebuild(ctx)
 	tasks := make([]modelRegistrationTask, 0, len(updates))
-	needsPluginSync := false
 	needsAliasRebuild := false
 	for _, update := range updates {
 		switch update.Action {
@@ -674,7 +673,6 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 					s.completeModelRegistrationForAuthWithCache(registrationCtx, authForRegistration, compatCache)
 				},
 			})
-			needsPluginSync = true
 		case watcher.AuthUpdateActionDelete:
 			id := update.ID
 			if id == "" && update.Auth != nil {
@@ -694,9 +692,6 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 		s.coreManager.RefreshAPIKeyModelAlias()
 	}
 	s.runModelRegistrationTasks(registrationCtx, tasks)
-	if needsPluginSync {
-		s.syncPluginRuntime(registrationCtx)
-	}
 }
 
 func coalesceAuthUpdates(updates []watcher.AuthUpdate) []watcher.AuthUpdate {
@@ -900,7 +895,6 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	if strings.EqualFold(provider, "xai") {
 		executor.CloseXAIWebsocketSessionsForAuthID(id, "auth_removed")
 	}
-	s.syncPluginRuntime(ctx)
 }
 
 func (s *Service) applyRetryConfig(cfg *config.Config) {
