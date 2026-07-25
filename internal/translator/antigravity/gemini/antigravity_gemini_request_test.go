@@ -705,3 +705,77 @@ func TestConvertGeminiRequestToAntigravityMapsSnakeCaseFunctionReferences(t *tes
 		}
 	}
 }
+
+func TestSanitizeAntigravityClaudeGeminiRequestSignatures_PreservesNumberPrecision(t *testing.T) {
+	inputJSON := []byte(`{
+		"project": "",
+		"model": "claude-sonnet-4-6",
+		"request": {
+			"contents": [
+				{
+					"role": "model",
+					"parts": [
+						{
+							"text": "thinking",
+							"thought": true,
+							"thoughtSignature": "invalid"
+						},
+						{
+							"functionCall": {
+								"name": "calc",
+								"args": {
+									"n": 12345678901234567890,
+									"big": 9007199254740993
+								}
+							}
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-sonnet-4-6", inputJSON)
+	outputStr := string(output)
+
+	bigVal := gjson.Get(outputStr, "request.contents.0.parts.0.functionCall.args.big").Raw
+	nVal := gjson.Get(outputStr, "request.contents.0.parts.0.functionCall.args.n").Raw
+
+	if bigVal != "9007199254740993" {
+		t.Errorf("Precision lost for big: got %s, want 9007199254740993", bigVal)
+	}
+	if nVal != "12345678901234567890" {
+		t.Errorf("Precision lost for n: got %s, want 12345678901234567890", nVal)
+	}
+}
+
+func TestSanitizeAntigravityClaudeGeminiRequestSignatures_StripsFunctionCallSignatureForClaudeModel(t *testing.T) {
+	inputJSON := []byte(`{
+		"project": "",
+		"model": "claude-sonnet-4-6",
+		"request": {
+			"contents": [
+				{
+					"role": "model",
+					"parts": [
+						{
+							"functionCall": {
+								"name": "calc",
+								"args": {}
+							},
+							"thoughtSignature": "skip_thought_signature_validator"
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-sonnet-4-6", inputJSON)
+	outputStr := string(output)
+
+	sig := gjson.Get(outputStr, "request.contents.0.parts.0.thoughtSignature")
+	if sig.Exists() {
+		t.Fatalf("expected functionCall thoughtSignature to be stripped for Claude target model, got %s", sig.Raw)
+	}
+}
