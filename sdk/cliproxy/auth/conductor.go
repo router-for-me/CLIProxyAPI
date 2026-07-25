@@ -75,6 +75,9 @@ type RefreshEvaluator interface {
 	ShouldRefresh(now time.Time, auth *Auth) bool
 }
 
+// ErrRefreshPersistFailed indicates that refreshed credentials could not be persisted.
+var ErrRefreshPersistFailed = errors.New("refreshed auth persistence failed")
+
 const (
 	refreshCheckInterval  = 5 * time.Second
 	refreshMaxConcurrency = 16
@@ -2437,6 +2440,10 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 
 // Update replaces an existing auth entry and notifies hooks.
 func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
+	return m.update(ctx, auth, false)
+}
+
+func (m *Manager) update(ctx context.Context, auth *Auth, reportPersistError bool) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
@@ -2474,10 +2481,13 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.scheduler.upsertAuth(authClone)
 	}
 	m.queueRefreshReschedule(auth.ID)
-	_ = m.persist(ctx, auth)
+	errPersist := m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	if clearedCooldown {
 		m.persistCooldownStates(ctx)
+	}
+	if reportPersistError && errPersist != nil {
+		return auth.Clone(), errPersist
 	}
 	return auth.Clone(), nil
 }
@@ -7223,7 +7233,7 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 		return auth, false
 	}
 	log.Debugf("unauthorized response for %s (%s), refreshing credentials before fallback", auth.Provider, auth.ID)
-	refreshed, errRefresh := m.refreshAuthForRequest(ctx, auth.ID, authAccessToken(auth))
+	refreshed, errRefresh := m.refreshAuthForRequest(ctx, auth.ID, authAccessToken(auth), false)
 	if errRefresh != nil || refreshed == nil {
 		log.Debugf("credential refresh before fallback failed for %s (%s): %v", auth.Provider, auth.ID, errRefresh)
 		return auth, false
@@ -7232,13 +7242,35 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) {
-	_, _ = m.refreshAuthForRequest(ctx, id, "")
+	_, _ = m.refreshAuthForRequest(ctx, id, "", false)
+}
+
+// RefreshNow forces a synchronous credential refresh and reports persistence failures.
+// Concurrent callers that observed the same access token reuse the first completed refresh.
+func (m *Manager) RefreshNow(ctx context.Context, id string) (*Auth, error) {
+	if m == nil {
+		return nil, errors.New("auth manager is nil")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, errors.New("auth id is empty")
+	}
+
+	m.mu.RLock()
+	auth := m.auths[id]
+	observedAccessToken := authAccessToken(auth)
+	m.mu.RUnlock()
+	if auth == nil {
+		return nil, errors.New("auth not found")
+	}
+
+	return m.refreshAuthForRequest(ctx, id, observedAccessToken, true)
 }
 
 // refreshAuthForRequest performs a synchronous credential refresh for the given auth.
 // failedAccessToken lets concurrent callers reuse a refresh that already replaced the
 // access token that produced the unauthorized response.
-func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessToken string) (*Auth, error) {
+func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessToken string, reportPersistError bool) (*Auth, error) {
 	if m == nil {
 		return nil, errors.New("auth manager is nil")
 	}
@@ -7332,12 +7364,13 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
-	saved, errUpdate := m.Update(ctx, updated)
+	saved, errUpdate := m.update(ctx, updated, reportPersistError)
 	for _, model := range modelsToResume {
 		registry.GetGlobalRegistry().ResumeClientModel(id, model)
 	}
 	if errUpdate != nil {
 		log.Debugf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
+		return saved, fmt.Errorf("%w: %v", ErrRefreshPersistFailed, errUpdate)
 	}
 	if saved != nil {
 		return saved, nil
