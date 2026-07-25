@@ -59,6 +59,15 @@ type Failure struct {
 	Body       string
 }
 
+// CacheInputMode describes whether cache-read and cache-write tokens are already
+// included in InputTokens. The zero value means the producer does not know.
+type CacheInputMode string
+
+const (
+	CacheInputModeIncluded CacheInputMode = "included"
+	CacheInputModeSeparate CacheInputMode = "separate"
+)
+
 // Detail holds the token usage breakdown.
 type Detail struct {
 	InputTokens         int64
@@ -67,6 +76,7 @@ type Detail struct {
 	CachedTokens        int64
 	CacheReadTokens     int64
 	CacheCreationTokens int64
+	CacheInputMode      CacheInputMode
 	TotalTokens         int64
 	TokenBreakdown      TokenBreakdown
 	ResponseServiceTier string
@@ -348,11 +358,13 @@ func (m *Manager) dispatch(item queueItem) {
 	if len(plugins) == 0 {
 		return
 	}
+	record := item.record
+	record.Detail = EnsureTokenBreakdownForProvider(record.Detail, record.Provider, record.ExecutorType)
 	for _, plugin := range plugins {
 		if plugin == nil {
 			continue
 		}
-		safeInvoke(plugin, item.ctx, item.record)
+		safeInvoke(plugin, item.ctx, record)
 	}
 }
 

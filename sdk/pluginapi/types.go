@@ -1303,6 +1303,14 @@ type UsageFailure struct {
 	Body string
 }
 
+// CacheInputMode describes whether cache read/write tokens are included in InputTokens.
+type CacheInputMode string
+
+const (
+	CacheInputModeIncluded CacheInputMode = "included"
+	CacheInputModeSeparate CacheInputMode = "separate"
+)
+
 // UsageDetail contains token accounting counters.
 type UsageDetail struct {
 	// InputTokens is the prompt or input token count.
@@ -1317,6 +1325,8 @@ type UsageDetail struct {
 	CacheReadTokens int64
 	// CacheCreationTokens is the cache creation token count.
 	CacheCreationTokens int64
+	// CacheInputMode reports whether cache tokens are included in InputTokens.
+	CacheInputMode CacheInputMode
 	// TotalTokens is the total token count.
 	TotalTokens int64
 }

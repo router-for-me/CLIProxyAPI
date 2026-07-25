@@ -569,6 +569,18 @@ func hasOpenAIStyleUsageBucketFields(usageNode gjson.Result) bool {
 		usageNode.Get("output_tokens_details.reasoning_tokens").Exists()
 }
 
+func includedCacheInputMode(detail usage.Detail) usage.CacheInputMode {
+	if !hasNonZeroTokenUsage(detail) {
+		return ""
+	}
+	cacheTokens, ok := safeUsageTokenSum(detail.CacheReadTokens, detail.CacheCreationTokens)
+	if !ok || detail.InputTokens < 0 || detail.CachedTokens < 0 ||
+		cacheTokens > detail.InputTokens || detail.CachedTokens > detail.InputTokens {
+		return ""
+	}
+	return usage.CacheInputModeIncluded
+}
+
 func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	inputNode := usageNode.Get("prompt_tokens")
 	if !inputNode.Exists() {
@@ -608,6 +620,7 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if reasoning.Exists() {
 		detail.ReasoningTokens = reasoning.Int()
 	}
+	detail.CacheInputMode = includedCacheInputMode(detail)
 	if hasOpenAIStyleUsageBucketFields(usageNode) {
 		if inputNode.Exists() && outputNode.Exists() {
 			detail.TokenBreakdown = usage.NewSubsetTokenBreakdown(
@@ -707,6 +720,9 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		detail.ReasoningTokens,
 		detail.TotalTokens,
 	)
+	if hasNonZeroTokenUsage(detail) {
+		detail.CacheInputMode = usage.CacheInputModeSeparate
+	}
 	return detail
 }
 
@@ -726,6 +742,7 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 		detail.TokenBreakdown = invalidUsageTokenBreakdown(detail.TotalTokens)
 		return detail
 	}
+	detail.CacheInputMode = includedCacheInputMode(detail)
 	if detail.TotalTokens == 0 {
 		var okTotal bool
 		detail.TotalTokens, okTotal = safeUsageTokenSum(detail.InputTokens, detail.OutputTokens, detail.ReasoningTokens)
@@ -769,6 +786,7 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 	if !cacheRead.Exists() && detail.CachedTokens > 0 {
 		detail.CacheReadTokens = detail.CachedTokens
 	}
+	detail.CacheInputMode = includedCacheInputMode(detail)
 	if detail.TotalTokens == 0 {
 		var okTotal bool
 		detail.TotalTokens, okTotal = safeUsageTokenSum(detail.InputTokens, detail.OutputTokens, detail.ReasoningTokens)

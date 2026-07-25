@@ -64,6 +64,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireIntField(t, payload, "accounting_version", coreusage.TokenAccountingSchemaVersion)
 		requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityComplete, 30)
 		requireTokensBoolField(t, payload, "cache_read_tokens_present", true)
+		requireStringField(t, requireTokensPayload(t, payload), "cache_input_mode", string(coreusage.CacheInputModeIncluded))
 		requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
 		requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
 		requireBoolField(t, payload, "failed", false)
@@ -163,6 +164,26 @@ func TestUsageQueuePluginPreservesLegacyCachedOnlyUsage(t *testing.T) {
 		requireIntField(t, tokens, "cache_read_tokens", 13)
 		requireIntField(t, tokens, "total_tokens", 13)
 		requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityUnclassified, 13)
+		requireMissingField(t, tokens, "cache_input_mode")
+	})
+}
+
+func TestUsageQueuePluginOmitsUnknownCacheInputMode(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider: "plugin-provider",
+			Model:    "custom-model",
+			Detail: coreusage.Detail{
+				InputTokens: 1,
+				TotalTokens: 1,
+			},
+		})
+
+		tokens := requireTokensPayload(t, popSinglePayload(t))
+		requireMissingField(t, tokens, "cache_input_mode")
 	})
 }
 

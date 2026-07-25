@@ -74,6 +74,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		CacheReadTokens:        usageDetail.CacheReadTokens,
 		CacheReadTokensPresent: true,
 		CacheCreationTokens:    usageDetail.CacheCreationTokens,
+		CacheInputMode:         usageDetail.CacheInputMode,
 		TotalTokens:            usageDetail.TotalTokens,
 	}
 
@@ -149,14 +150,15 @@ type requestDetail struct {
 }
 
 type tokenStats struct {
-	InputTokens            int64 `json:"input_tokens"`
-	OutputTokens           int64 `json:"output_tokens"`
-	ReasoningTokens        int64 `json:"reasoning_tokens"`
-	CachedTokens           int64 `json:"cached_tokens"`
-	CacheReadTokens        int64 `json:"cache_read_tokens"`
-	CacheReadTokensPresent bool  `json:"cache_read_tokens_present"`
-	CacheCreationTokens    int64 `json:"cache_creation_tokens"`
-	TotalTokens            int64 `json:"total_tokens"`
+	InputTokens            int64                    `json:"input_tokens"`
+	OutputTokens           int64                    `json:"output_tokens"`
+	ReasoningTokens        int64                    `json:"reasoning_tokens"`
+	CachedTokens           int64                    `json:"cached_tokens"`
+	CacheReadTokens        int64                    `json:"cache_read_tokens"`
+	CacheReadTokensPresent bool                     `json:"cache_read_tokens_present"`
+	CacheCreationTokens    int64                    `json:"cache_creation_tokens"`
+	CacheInputMode         coreusage.CacheInputMode `json:"cache_input_mode,omitempty"`
+	TotalTokens            int64                    `json:"total_tokens"`
 }
 
 type failDetail struct {

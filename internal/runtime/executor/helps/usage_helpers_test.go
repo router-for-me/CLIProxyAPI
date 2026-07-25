@@ -12,7 +12,7 @@ import (
 )
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
-	data := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":6,"total_tokens":16,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
+	data := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":6,"total_tokens":16,"prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":2},"completion_tokens_details":{"reasoning_tokens":5}}}`)
 	detail := ParseOpenAIUsage(data)
 	if detail.InputTokens != 10 {
 		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 10)
@@ -29,13 +29,19 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	if detail.CacheReadTokens != 4 {
 		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 4)
 	}
+	if detail.CacheCreationTokens != 2 {
+		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 2)
+	}
+	if detail.CacheInputMode != usage.CacheInputModeIncluded {
+		t.Fatalf("cache input mode = %q, want included", detail.CacheInputMode)
+	}
 	if detail.ReasoningTokens != 5 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 5)
 	}
 	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete {
 		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
 	}
-	if detail.TokenBreakdown.Input.UncachedTokens != 6 || detail.TokenBreakdown.Output.NonReasoningTokens != 1 {
+	if detail.TokenBreakdown.Input.UncachedTokens != 4 || detail.TokenBreakdown.Output.NonReasoningTokens != 1 {
 		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
 	}
 }
@@ -129,6 +135,56 @@ func TestParseOpenAIUsageNormalizesCacheCreationAlias(t *testing.T) {
 	detail := ParseOpenAIUsage(data)
 	if detail.CacheCreationTokens != 4 {
 		t.Fatalf("cache creation tokens = %d, want 4", detail.CacheCreationTokens)
+	}
+}
+
+func TestParseOpenAIUsageOmitsIncludedModeWhenCacheExceedsInput(t *testing.T) {
+	detail := ParseOpenAIUsage([]byte(`{"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11,"prompt_tokens_details":{"cached_tokens":20}}}`))
+	if detail.CacheInputMode != "" {
+		t.Fatalf("cache input mode = %q, want omitted for inconsistent included counters", detail.CacheInputMode)
+	}
+	if detail.TokenBreakdown.Quality != usage.TokenAccountingQualityInconsistent {
+		t.Fatalf("token breakdown quality = %q, want inconsistent", detail.TokenBreakdown.Quality)
+	}
+}
+
+func TestUsageParsersOmitCacheInputModeForAllZeroCounters(t *testing.T) {
+	tests := []struct {
+		name  string
+		parse func() usage.Detail
+	}{
+		{
+			name: "OpenAI",
+			parse: func() usage.Detail {
+				return ParseOpenAIUsage([]byte(`{"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"cached_tokens":0}}}`))
+			},
+		},
+		{
+			name: "Claude",
+			parse: func() usage.Detail {
+				return ParseClaudeUsage([]byte(`{"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`))
+			},
+		},
+		{
+			name: "Gemini",
+			parse: func() usage.Detail {
+				return ParseGeminiUsage([]byte(`{"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"cachedContentTokenCount":0,"totalTokenCount":0}}`))
+			},
+		},
+		{
+			name: "Interactions",
+			parse: func() usage.Detail {
+				return ParseInteractionsUsage([]byte(`{"usage":{"input_tokens":0,"output_tokens":0,"cached_tokens":0,"total_tokens":0}}`))
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			detail := test.parse()
+			if detail.CacheInputMode != "" {
+				t.Fatalf("cache input mode = %q, want omitted for all-zero usage", detail.CacheInputMode)
+			}
+		})
 	}
 }
 
@@ -318,6 +374,9 @@ func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
 	if detail.TotalTokens != 22859 {
 		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 22859)
 	}
+	if detail.CacheInputMode != usage.CacheInputModeSeparate {
+		t.Fatalf("cache input mode = %q, want separate", detail.CacheInputMode)
+	}
 	if detail.TokenBreakdown.Input.TotalTokens != 22606 || detail.TokenBreakdown.Input.UncachedTokens != 3085 {
 		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
 	}
@@ -341,6 +400,9 @@ func TestParseGeminiUsageNormalizesCachedContent(t *testing.T) {
 	}
 	if detail.CacheReadTokens != 4 {
 		t.Fatalf("cache read tokens = %d, want 4", detail.CacheReadTokens)
+	}
+	if detail.CacheInputMode != usage.CacheInputModeIncluded {
+		t.Fatalf("cache input mode = %q, want included", detail.CacheInputMode)
 	}
 	if detail.TokenBreakdown.Input.UncachedTokens != 6 || detail.TokenBreakdown.TotalTokens != 12 {
 		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
@@ -394,8 +456,18 @@ func TestParseInteractionsUsage(t *testing.T) {
 	if detail.CacheReadTokens != 2 {
 		t.Fatalf("cache read tokens = %d, want 2", detail.CacheReadTokens)
 	}
+	if detail.CacheInputMode != usage.CacheInputModeIncluded {
+		t.Fatalf("cache input mode = %q, want included", detail.CacheInputMode)
+	}
 	if detail.TokenBreakdown.Input.UncachedTokens != 1 || detail.TokenBreakdown.Output.TotalTokens != 9 {
 		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
+}
+
+func TestParseInteractionsUsageOmitsIncludedModeWhenLegacyCacheExceedsInput(t *testing.T) {
+	detail := ParseInteractionsUsage([]byte(`{"usage":{"input_tokens":10,"cached_tokens":20,"cache_read_tokens":2}}`))
+	if detail.CacheInputMode != "" {
+		t.Fatalf("cache input mode = %q, want omitted when legacy cache exceeds input", detail.CacheInputMode)
 	}
 }
 

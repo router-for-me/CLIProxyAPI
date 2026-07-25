@@ -2161,6 +2161,58 @@ func TestUsageAdapterNormalizesOmittedGenerateToTrue(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterPreservesCacheInputMode(t *testing.T) {
+	var got pluginapi.UsageRecord
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		got = record
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-cache-input-mode",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{host: host, pluginID: "usage-cache-input-mode"}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "claude",
+		Detail: coreusage.Detail{
+			InputTokens:         100,
+			CacheReadTokens:     40,
+			CacheCreationTokens: 10,
+			CacheInputMode:      coreusage.CacheInputModeSeparate,
+		},
+	})
+	if got.Detail.CacheInputMode != pluginapi.CacheInputModeSeparate {
+		t.Fatalf("plugin cache input mode = %q, want %q", got.Detail.CacheInputMode, pluginapi.CacheInputModeSeparate)
+	}
+}
+
+func TestUsageAdapterNormalizesLegacyCacheInputMode(t *testing.T) {
+	var got pluginapi.UsageRecord
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		got = record
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-normalize-cache-input-mode",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{host: host, pluginID: "usage-normalize-cache-input-mode"}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "openai",
+		Detail: coreusage.Detail{
+			InputTokens:  10,
+			CachedTokens: 4,
+		},
+	})
+	if got.Detail.CacheInputMode != pluginapi.CacheInputModeIncluded {
+		t.Fatalf("plugin cache input mode = %q, want %q", got.Detail.CacheInputMode, pluginapi.CacheInputModeIncluded)
+	}
+}
+
 func TestUsageAdapterPreservesExplicitGenerateFalse(t *testing.T) {
 	var gotGenerate bool
 	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
