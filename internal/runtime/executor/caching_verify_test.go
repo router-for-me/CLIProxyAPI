@@ -67,6 +67,49 @@ func TestEnsureCacheControl(t *testing.T) {
 		}
 	})
 
+	t.Run("Tools Caching Skips Deferred Tail", func(t *testing.T) {
+		input := []byte(`{
+			"model": "claude-opus-5",
+			"tools": [
+				{"name": "resident", "description": "Resident tool", "input_schema": {"type": "object"}},
+				{"name": "deferred", "description": "Deferred tool", "input_schema": {"type": "object"}, "defer_loading": true}
+			],
+			"messages": [{"role": "user", "content": "Hi"}]
+		}`)
+
+		output := ensureCacheControl(input)
+
+		if got := gjson.GetBytes(output, "tools.0.cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("resident tool cache_control = %q, want ephemeral; output: %s", got, output)
+		}
+		if gjson.GetBytes(output, "tools.1.cache_control").Exists() {
+			t.Fatalf("deferred tool must not receive cache_control; output: %s", output)
+		}
+	})
+
+	t.Run("Tools Caching Skips When All Tools Deferred", func(t *testing.T) {
+		input := []byte(`{
+			"model": "claude-opus-5",
+			"tools": [
+				{"name": "deferred0", "description": "Deferred tool", "input_schema": {"type": "object"}, "defer_loading": true},
+				{"name": "deferred1", "description": "Deferred tool", "input_schema": {"type": "object"}, "defer_loading": true}
+			],
+			"system": "System prompt",
+			"messages": [{"role": "user", "content": "Hi"}]
+		}`)
+
+		output := ensureCacheControl(input)
+
+		for i := 0; i < 2; i++ {
+			if gjson.GetBytes(output, fmt.Sprintf("tools.%d.cache_control", i)).Exists() {
+				t.Fatalf("deferred tool %d must not receive cache_control; output: %s", i, output)
+			}
+		}
+		if got := gjson.GetBytes(output, "system.0.cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("system cache_control = %q, want ephemeral; output: %s", got, output)
+		}
+	})
+
 	// Test case 4: Tools and system are INDEPENDENT breakpoints
 	// Per Anthropic docs: Up to 4 breakpoints allowed, tools and system are cached separately
 	t.Run("Independent Cache Breakpoints", func(t *testing.T) {
