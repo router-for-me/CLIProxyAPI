@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/volcengine/ve-tos-golang-sdk/v2/tos"
 	"github.com/volcengine/ve-tos-golang-sdk/v2/tos/codes"
@@ -126,6 +127,22 @@ func TestShouldUseMultipart(t *testing.T) {
 				t.Fatalf("shouldUseMultipart(%d) = %v, want %v", test.size, got, test.want)
 			}
 		})
+	}
+}
+
+func TestMultipartUploadTuningDefaults(t *testing.T) {
+	t.Parallel()
+	if tosMultipartConcurrency != 4 {
+		t.Fatalf("tosMultipartConcurrency = %d, want 4", tosMultipartConcurrency)
+	}
+	if tosMultipartPartTimeout != 5*time.Minute {
+		t.Fatalf("tosMultipartPartTimeout = %s, want 5m", tosMultipartPartTimeout)
+	}
+	if tosMultipartStallTimeout != 15*time.Minute {
+		t.Fatalf("tosMultipartStallTimeout = %s, want 15m", tosMultipartStallTimeout)
+	}
+	if tosMultipartPartAttempts != 3 {
+		t.Fatalf("tosMultipartPartAttempts = %d, want 3", tosMultipartPartAttempts)
 	}
 }
 

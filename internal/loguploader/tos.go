@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -139,7 +140,19 @@ const tosMultipartThreshold = 256 * 1024 * 1024
 const tosMultipartPartSize = 64 * 1024 * 1024
 
 // tosMultipartConcurrency is the number of parts uploaded in parallel.
-const tosMultipartConcurrency = 8
+// Kept moderate so weak uplinks are less likely to stall half-open connections.
+const tosMultipartConcurrency = 4
+
+// tosMultipartPartTimeout bounds a single UploadPartFromFile call so a hung
+// TCP write becomes an error and can be retried instead of blocking forever.
+const tosMultipartPartTimeout = 5 * time.Minute
+
+// tosMultipartStallTimeout cancels the whole multipart upload when no part has
+// succeeded for this long (progress watchdog).
+const tosMultipartStallTimeout = 15 * time.Minute
+
+// tosMultipartPartAttempts is the max tries per part (including the first).
+const tosMultipartPartAttempts = 3
 
 // shouldUseMultipart reports whether an archive of the given size should be
 // uploaded with multipart (true for size >= 256 MiB).
@@ -184,11 +197,51 @@ func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, pa
 
 	totalParts := len(specs)
 	log.WithFields(log.Fields{
-		"object_key":   objectKey,
-		"total_parts":  totalParts,
-		"part_size_mb": tosMultipartPartSize / (1024 * 1024),
-		"concurrency":  tosMultipartConcurrency,
+		"object_key":    objectKey,
+		"total_parts":   totalParts,
+		"part_size_mb":  tosMultipartPartSize / (1024 * 1024),
+		"concurrency":   tosMultipartConcurrency,
+		"part_timeout":  tosMultipartPartTimeout.String(),
+		"stall_timeout": tosMultipartStallTimeout.String(),
 	}).Info("starting multipart upload")
+
+	// uploadCtx is cancelled on parent cancel, part failure, or stall watchdog.
+	uploadCtx, cancelUpload := context.WithCancel(ctx)
+	defer cancelUpload()
+
+	var lastProgress atomic.Value // time.Time of last successful part
+	lastProgress.Store(time.Now())
+
+	watchDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-watchDone:
+				return
+			case <-uploadCtx.Done():
+				return
+			case <-ticker.C:
+				last, _ := lastProgress.Load().(time.Time)
+				if last.IsZero() {
+					continue
+				}
+				stalledFor := time.Since(last)
+				if stalledFor < tosMultipartStallTimeout {
+					continue
+				}
+				log.WithFields(log.Fields{
+					"object_key":  objectKey,
+					"stalled_for": stalledFor.String(),
+					"timeout":     tosMultipartStallTimeout.String(),
+				}).Error("multipart upload stalled with no successful parts; cancelling")
+				cancelUpload()
+				return
+			}
+		}
+	}()
+	defer close(watchDone)
 
 	// Upload parts with bounded concurrency.
 	var (
@@ -200,7 +253,7 @@ func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, pa
 	sem := make(chan struct{}, tosMultipartConcurrency)
 
 	for _, spec := range specs {
-		if ctx.Err() != nil {
+		if uploadCtx.Err() != nil {
 			break
 		}
 		wg.Add(1)
@@ -211,7 +264,11 @@ func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, pa
 
 			var partOut *tos.UploadPartFromFileOutput
 			var errPart error
-			for attempt := 0; attempt < 3; attempt++ {
+			for attempt := 0; attempt < tosMultipartPartAttempts; attempt++ {
+				if uploadCtx.Err() != nil {
+					errPart = uploadCtx.Err()
+					break
+				}
 				if attempt > 0 {
 					log.WithFields(log.Fields{
 						"part_number": s.number,
@@ -220,7 +277,8 @@ func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, pa
 					}).Warn("retrying multipart upload part")
 				}
 				partStart := time.Now()
-				partOut, errPart = u.client.UploadPartFromFile(ctx, &tos.UploadPartFromFileInput{
+				partCtx, cancelPart := context.WithTimeout(uploadCtx, tosMultipartPartTimeout)
+				partOut, errPart = u.client.UploadPartFromFile(partCtx, &tos.UploadPartFromFileInput{
 					UploadPartBasicInput: tos.UploadPartBasicInput{
 						Bucket:     bucket,
 						Key:        objectKey,
@@ -231,7 +289,9 @@ func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, pa
 					Offset:   uint64(s.offset),
 					PartSize: s.size,
 				})
+				cancelPart()
 				if errPart == nil {
+					lastProgress.Store(time.Now())
 					log.WithFields(log.Fields{
 						"part_number": s.number,
 						"total_parts": totalParts,
@@ -240,8 +300,8 @@ func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, pa
 					}).Info("multipart part uploaded")
 					break
 				}
-				if ctx.Err() != nil {
-					break
+				if errors.Is(errPart, context.DeadlineExceeded) {
+					errPart = fmt.Errorf("part %d attempt %d timed out after %s: %w", s.number, attempt+1, tosMultipartPartTimeout, errPart)
 				}
 			}
 
@@ -250,6 +310,8 @@ func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, pa
 			if errPart != nil {
 				if firstErr == nil {
 					firstErr = fmt.Errorf("upload part %d: %w", s.number, errPart)
+					// Stop sibling workers; do not wait forever on hung peers.
+					cancelUpload()
 				}
 				return
 			}
@@ -262,12 +324,16 @@ func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, pa
 	wg.Wait()
 
 	if firstErr != nil {
-		_, _ = u.client.AbortMultipartUpload(ctx, &tos.AbortMultipartUploadInput{
-			Bucket:   bucket,
-			Key:      objectKey,
-			UploadID: uploadID,
-		})
+		u.abortMultipartUpload(bucket, objectKey, uploadID)
 		return firstErr
+	}
+	if errCtx := uploadCtx.Err(); errCtx != nil && len(parts) < totalParts {
+		u.abortMultipartUpload(bucket, objectKey, uploadID)
+		return fmt.Errorf("multipart upload cancelled: %w", errCtx)
+	}
+	if len(parts) != totalParts {
+		u.abortMultipartUpload(bucket, objectKey, uploadID)
+		return fmt.Errorf("multipart incomplete: got %d parts, want %d", len(parts), totalParts)
 	}
 
 	// Sort parts by part number (required by TOS).
@@ -275,7 +341,9 @@ func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, pa
 		return parts[i].PartNumber < parts[j].PartNumber
 	})
 
-	_, errComplete := u.client.CompleteMultipartUploadV2(ctx, &tos.CompleteMultipartUploadV2Input{
+	completeCtx, cancelComplete := context.WithTimeout(ctx, tosMultipartPartTimeout)
+	defer cancelComplete()
+	_, errComplete := u.client.CompleteMultipartUploadV2(completeCtx, &tos.CompleteMultipartUploadV2Input{
 		Bucket:          bucket,
 		Key:             objectKey,
 		UploadID:        uploadID,
@@ -283,11 +351,7 @@ func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, pa
 		Parts:           parts,
 	})
 	if errComplete != nil {
-		_, _ = u.client.AbortMultipartUpload(ctx, &tos.AbortMultipartUploadInput{
-			Bucket:   bucket,
-			Key:      objectKey,
-			UploadID: uploadID,
-		})
+		u.abortMultipartUpload(bucket, objectKey, uploadID)
 		return fmt.Errorf("complete multipart upload: %w", errComplete)
 	}
 	log.WithFields(log.Fields{
@@ -297,6 +361,25 @@ func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, pa
 		"total_duration": time.Since(multipartStart).String(),
 	}).Info("multipart upload completed")
 	return nil
+}
+
+// abortMultipartUpload best-effort aborts a remote multipart session. Uses a
+// short background timeout so cleanup still runs when the upload context was
+// already cancelled by stall/part timeout.
+func (u *TOSUploader) abortMultipartUpload(bucket, objectKey, uploadID string) {
+	abortCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, errAbort := u.client.AbortMultipartUpload(abortCtx, &tos.AbortMultipartUploadInput{
+		Bucket:   bucket,
+		Key:      objectKey,
+		UploadID: uploadID,
+	})
+	if errAbort != nil {
+		log.WithError(errAbort).WithFields(log.Fields{
+			"object_key": objectKey,
+			"upload_id":  uploadID,
+		}).Warn("abort multipart upload failed")
+	}
 }
 
 // MatchObject reports whether a remote object has the same size and SHA-256 metadata as a local archive.
