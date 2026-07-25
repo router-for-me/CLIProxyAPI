@@ -97,7 +97,9 @@ func (u *TOSUploader) UploadFile(ctx context.Context, bucket, objectKey, path st
 	if errStat != nil {
 		return fmt.Errorf("stat archive for upload: %w", errStat)
 	}
-	if fileInfo.Size() > tosMaxSinglePutSize {
+	// Prefer multipart for multi-hundred-MiB archives so flaky links only
+	// retry a 64 MiB part instead of re-sending a multi-GB single PUT.
+	if shouldUseMultipart(fileInfo.Size()) {
 		return u.uploadMultipart(ctx, bucket, objectKey, path, fileInfo.Size())
 	}
 	checksum, _, errChecksum := fileSHA256(path)
@@ -128,14 +130,22 @@ func (u *TOSUploader) UploadFile(ctx context.Context, bucket, objectKey, path st
 	return nil
 }
 
-// tosMaxSinglePutSize is the TOS single PUT limit (5 GiB).
-const tosMaxSinglePutSize = 5 * 1024 * 1024 * 1024
+// tosMultipartThreshold is the minimum archive size that uses multipart upload.
+// Kept far below the TOS single-PUT hard limit (5 GiB) so typical multi-GB
+// hourly .zst archives get per-part retries under unstable uplinks.
+const tosMultipartThreshold = 256 * 1024 * 1024
 
 // tosMultipartPartSize is the size of each part for multipart uploads (64 MiB).
 const tosMultipartPartSize = 64 * 1024 * 1024
 
 // tosMultipartConcurrency is the number of parts uploaded in parallel.
 const tosMultipartConcurrency = 8
+
+// shouldUseMultipart reports whether an archive of the given size should be
+// uploaded with multipart (true for size >= 256 MiB).
+func shouldUseMultipart(fileSize int64) bool {
+	return fileSize >= tosMultipartThreshold
+}
 
 func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, path string, fileSize int64) error {
 	multipartStart := time.Now()
@@ -281,10 +291,10 @@ func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, pa
 		return fmt.Errorf("complete multipart upload: %w", errComplete)
 	}
 	log.WithFields(log.Fields{
-		"object_key":      objectKey,
-		"file_size_mb":    fileSize / (1024 * 1024),
-		"total_parts":     totalParts,
-		"total_duration":  time.Since(multipartStart).String(),
+		"object_key":     objectKey,
+		"file_size_mb":   fileSize / (1024 * 1024),
+		"total_parts":    totalParts,
+		"total_duration": time.Since(multipartStart).String(),
 	}).Info("multipart upload completed")
 	return nil
 }

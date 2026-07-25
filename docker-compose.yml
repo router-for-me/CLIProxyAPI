@@ -62,7 +62,11 @@ services:
 
   # Read-only quality checker for unuploaded local request logs.
   # Does not take uploader locks and never deletes source logs.
+  # Opt-in only: not started by default (docker-build.sh / compose up).
+  # Enable with: docker compose --profile log-qa up -d log-qa
   log-qa:
+    profiles:
+      - log-qa
     image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
     pull_policy: never
     build:

@@ -3,7 +3,8 @@
 # Builds (optional) and starts:
 #   - cli-proxy-api
 #   - log-uploader
-#   - log-qa
+#
+# log-qa is optional (compose profile "log-qa") and is NOT started by default.
 
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
@@ -21,6 +22,24 @@ function Ensure-FileFromExample {
     }
     Copy-Item $Example $Target
     Write-Host "[prep] created $Target from $Example"
+}
+
+function Start-Services {
+    param(
+        [string]$Mode
+    )
+    $services = @("cli-proxy-api", "log-uploader")
+    if ($Mode -eq "prebuilt") {
+        docker compose up -d --remove-orphans --no-build @services
+    } else {
+        docker compose up -d --remove-orphans --pull never @services
+    }
+    $running = docker ps --filter "name=cli-proxy-api-log-qa" --format "{{.Names}}" 2>$null
+    if ($running -match "cli-proxy-api-log-qa") {
+        Write-Host "[prep] stopping existing log-qa container (disabled by default)"
+        docker stop cli-proxy-api-log-qa | Out-Null
+        docker update --restart=no cli-proxy-api-log-qa 2>$null | Out-Null
+    }
 }
 
 Write-Host "--- Preparing config files ---"
@@ -49,9 +68,10 @@ function Show-Status {
     Write-Host "========================================"
     Write-Host "  Deploy complete"
     Write-Host "========================================"
-    Write-Host "Services: cli-proxy-api, log-uploader, log-qa"
+    Write-Host "Services started: cli-proxy-api, log-uploader"
+    Write-Host "Services not started: log-qa (optional)"
     Write-Host "Management UI: http://<server-ip>:8317/management.html"
-    Write-Host "Log QA button: right side of Management after login"
+    Write-Host "Start log-qa later: docker compose --profile log-qa up -d log-qa"
     Write-Host "QA reports:    .\logs\log-qa\reports\"
     Write-Host ""
     docker compose ps
@@ -60,8 +80,8 @@ function Show-Status {
 switch ($choice) {
     "1" {
         Write-Host "--- Running with Pre-built Image ---"
-        Write-Host "Note: remote image must include ./log-qa. If missing, use option 2."
-        docker compose up -d --remove-orphans --no-build
+        Write-Host "Note: starts cli-proxy-api + log-uploader only (log-qa profile off)."
+        Start-Services -Mode prebuilt
         Show-Status
     }
     "2" {
@@ -79,7 +99,8 @@ switch ($choice) {
         $env:DOCKER_BUILDKIT = "1"
 
         docker compose build --build-arg VERSION=$VERSION --build-arg COMMIT=$COMMIT --build-arg BUILD_DATE=$BUILD_DATE
-        docker compose up -d --remove-orphans --pull never
+        Write-Host "Starting cli-proxy-api + log-uploader (log-qa not started)..."
+        Start-Services -Mode local
         Show-Status
     }
     default {

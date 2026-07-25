@@ -105,6 +105,104 @@ func TestFileSHA256(t *testing.T) {
 	}
 }
 
+func TestShouldUseMultipart(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		size int64
+		want bool
+	}{
+		{name: "empty", size: 0, want: false},
+		{name: "small archive", size: 16 * 1024 * 1024, want: false},
+		{name: "just under threshold", size: tosMultipartThreshold - 1, want: false},
+		{name: "at threshold uses multipart", size: tosMultipartThreshold, want: true},
+		{name: "multi-GB archive", size: 4 * 1024 * 1024 * 1024, want: true},
+		{name: "above former 5GiB single-put limit", size: 6 * 1024 * 1024 * 1024, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldUseMultipart(test.size); got != test.want {
+				t.Fatalf("shouldUseMultipart(%d) = %v, want %v", test.size, got, test.want)
+			}
+		})
+	}
+}
+
+func TestUploadFileUsesMultipartAtThreshold(t *testing.T) {
+	t.Parallel()
+
+	// Sparse/truncating to the threshold size avoids writing 256 MiB of data.
+	path := filepath.Join(t.TempDir(), "large.jsonl.zst")
+	file, errCreate := os.Create(path)
+	if errCreate != nil {
+		t.Fatalf("create fixture: %v", errCreate)
+	}
+	if errTruncate := file.Truncate(tosMultipartThreshold); errTruncate != nil {
+		_ = file.Close()
+		t.Fatalf("truncate fixture: %v", errTruncate)
+	}
+	if errClose := file.Close(); errClose != nil {
+		t.Fatalf("close fixture: %v", errClose)
+	}
+
+	client := &countingMultipartTOSClient{}
+	uploader := &TOSUploader{client: client}
+	if errUpload := uploader.UploadFile(context.Background(), "llm-d1", "logs/archive.jsonl.zst", path); errUpload != nil {
+		t.Fatalf("UploadFile: %v", errUpload)
+	}
+	if client.putCalls != 0 {
+		t.Fatalf("PutObjectFromFile calls = %d, want 0 (multipart path)", client.putCalls)
+	}
+	if client.createCalls != 1 {
+		t.Fatalf("CreateMultipartUploadV2 calls = %d, want 1", client.createCalls)
+	}
+	if client.partCalls < 1 {
+		t.Fatalf("UploadPartFromFile calls = %d, want >= 1", client.partCalls)
+	}
+	if client.completeCalls != 1 {
+		t.Fatalf("CompleteMultipartUploadV2 calls = %d, want 1", client.completeCalls)
+	}
+}
+
+// countingMultipartTOSClient tracks single-put vs multipart API usage.
+type countingMultipartTOSClient struct {
+	putCalls      int
+	createCalls   int
+	partCalls     int
+	completeCalls int
+	abortCalls    int
+}
+
+func (c *countingMultipartTOSClient) PutObjectFromFile(context.Context, *tos.PutObjectFromFileInput) (*tos.PutObjectFromFileOutput, error) {
+	c.putCalls++
+	return &tos.PutObjectFromFileOutput{}, nil
+}
+
+func (c *countingMultipartTOSClient) HeadObjectV2(context.Context, *tos.HeadObjectV2Input) (*tos.HeadObjectV2Output, error) {
+	return &tos.HeadObjectV2Output{}, nil
+}
+
+func (c *countingMultipartTOSClient) CreateMultipartUploadV2(context.Context, *tos.CreateMultipartUploadV2Input) (*tos.CreateMultipartUploadV2Output, error) {
+	c.createCalls++
+	return &tos.CreateMultipartUploadV2Output{UploadID: "test-upload-id"}, nil
+}
+
+func (c *countingMultipartTOSClient) UploadPartFromFile(_ context.Context, input *tos.UploadPartFromFileInput) (*tos.UploadPartFromFileOutput, error) {
+	c.partCalls++
+	return &tos.UploadPartFromFileOutput{UploadPartV2Output: tos.UploadPartV2Output{ETag: "etag", PartNumber: input.PartNumber}}, nil
+}
+
+func (c *countingMultipartTOSClient) CompleteMultipartUploadV2(context.Context, *tos.CompleteMultipartUploadV2Input) (*tos.CompleteMultipartUploadV2Output, error) {
+	c.completeCalls++
+	return &tos.CompleteMultipartUploadV2Output{}, nil
+}
+
+func (c *countingMultipartTOSClient) AbortMultipartUpload(context.Context, *tos.AbortMultipartUploadInput) (*tos.AbortMultipartUploadOutput, error) {
+	c.abortCalls++
+	return &tos.AbortMultipartUploadOutput{}, nil
+}
+
 func TestParseTOSEndpoint(t *testing.T) {
 	t.Parallel()
 
