@@ -544,21 +544,34 @@ func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
 		providerKey:       providerKey,
 		priority:          authPriority(auth),
 		websocketEnabled:  authWebsocketsEnabled(auth),
-		supportedModelSet: supportedModelSetForAuth(auth.ID),
+		supportedModelSet: supportedModelSetForAuth(auth),
 	}
 }
 
 // supportedModelSetForAuth snapshots the registry models currently registered for an auth.
-func supportedModelSetForAuth(authID string) map[string]struct{} {
-	authID = strings.TrimSpace(authID)
+//
+// The snapshot also expands each registered model ID to include the other
+// side of any OAuth model alias configured on the auth. This is necessary
+// because, when an alias has fork=false, registration drops one name from
+// the visible model set (see applyOpenAIModelAliasEntries), yet requests
+// may still arrive naming either side — e.g. a per-API-key model_route can
+// pin the upstream name while only the alias id is registered. Without this
+// expansion the scheduler's supportsModel gate would reject the auth for
+// the dropped-name route and surface a spurious 503
+// "auth_unavailable: no auth available".
+func supportedModelSetForAuth(auth *Auth) map[string]struct{} {
+	if auth == nil {
+		return nil
+	}
+	authID := strings.TrimSpace(auth.ID)
 	if authID == "" {
 		return nil
 	}
 	models := registry.GetGlobalRegistry().GetModelsForClient(authID)
-	if len(models) == 0 {
+	if len(models) == 0 && len(auth.Attributes) == 0 {
 		return nil
 	}
-	set := make(map[string]struct{}, len(models))
+	set := make(map[string]struct{}, len(models)+len(auth.Attributes))
 	for _, model := range models {
 		if model == nil {
 			continue
@@ -568,6 +581,18 @@ func supportedModelSetForAuth(authID string) map[string]struct{} {
 			continue
 		}
 		set[modelKey] = struct{}{}
+	}
+	// Add the counterpart side of each OAuth alias configured on the auth so
+	// requests naming the dropped (non-registered) side still route.
+	for _, alias := range OAuthModelAliasesFromAttributes(auth.Attributes) {
+		name := canonicalModelKey(alias.Name)
+		aliasName := canonicalModelKey(alias.Alias)
+		if name != "" {
+			set[name] = struct{}{}
+		}
+		if aliasName != "" {
+			set[aliasName] = struct{}{}
+		}
 	}
 	return set
 }

@@ -1674,7 +1674,81 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 		return true
 	}
 	selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
-	return selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey)
+	if selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey) {
+		return true
+	}
+	// The registry registers only the request-facing alias name when an
+	// OAuth model alias is configured with fork=false (the default): the
+	// upstream name is dropped to avoid exposing it to clients. A request
+	// may still arrive naming the upstream model directly — e.g. because a
+	// per-API-key model_route pins the upstream name. Such an auth DOES hold
+	// valid material for the model; rejecting it here (before the runtime
+	// alias resolution in executionModelCandidatesWithAlias runs) produces a
+	// spurious 503 "auth_unavailable: no auth available". Accept the auth if
+	// any of its alias entries maps FROM the routeModel (treated as upstream
+	// name) TO a registered alias name, or FROM the routeModel (treated as
+	// alias) TO a registered upstream name.
+	return m.authSupportsRouteModelViaAlias(registryRef, auth, routeKey)
+}
+
+// authSupportsRouteModelViaAlias is the bidirectional tail of
+// authSupportsRouteModel: it accepts an auth whose OAuth model-alias table
+// links the route model to a model ID that IS registered for the auth,
+// covering the fork=false case where the route model names the dropped
+// (non-registered) side of an alias pair.
+func (m *Manager) authSupportsRouteModelViaAlias(registryRef *registry.ModelRegistry, auth *Auth, routeKey string) bool {
+	if registryRef == nil || auth == nil || routeKey == "" {
+		return false
+	}
+	for _, alias := range OAuthModelAliasesFromAttributes(authAttributes(auth)) {
+		name := strings.TrimSpace(alias.Name)
+		aliasName := strings.TrimSpace(alias.Alias)
+		if name == "" || aliasName == "" {
+			continue
+		}
+		// routeModel is the upstream name; alias name is request-facing and
+		// registered (fork=false drops the upstream id).
+		if strings.EqualFold(canonicalModelKey(name), routeKey) &&
+			registryRef.ClientSupportsModel(auth.ID, canonicalModelKey(aliasName)) {
+			return true
+		}
+		// routeModel is the request-facing alias; upstream name is registered
+		// (covers the inverse fork=false configuration where the alias id is
+		// dropped but the upstream id is kept).
+		if strings.EqualFold(canonicalModelKey(aliasName), routeKey) &&
+			registryRef.ClientSupportsModel(auth.ID, canonicalModelKey(name)) {
+			return true
+		}
+	}
+	// Fall back to the global alias table when the auth has no per-auth
+	// attributes (legacy / centrally configured aliases).
+	channel := modelAliasChannel(auth)
+	if channel == "" {
+		return false
+	}
+	raw := m.oauthModelAlias.Load()
+	table, _ := raw.(*oauthModelAliasTable)
+	if table == nil || table.reverse == nil {
+		return false
+	}
+	rev := table.reverse[channel]
+	if rev == nil {
+		return false
+	}
+	for aliasLower, entry := range rev {
+		upstream := canonicalModelKey(entry.upstreamModel)
+		// routeModel == upstream name; the registered alias id may match.
+		if upstream != "" && upstream == routeKey &&
+			registryRef.ClientSupportsModel(auth.ID, canonicalModelKey(aliasLower)) {
+			return true
+		}
+		// routeModel == alias name; the registered upstream id may match.
+		if canonicalModelKey(aliasLower) == routeKey && upstream != "" &&
+			registryRef.ClientSupportsModel(auth.ID, upstream) {
+			return true
+		}
+	}
+	return false
 }
 
 func discardStreamChunks(ch <-chan cliproxyexecutor.StreamChunk) {
