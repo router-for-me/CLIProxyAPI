@@ -700,15 +700,15 @@
       }
     },
     {
-      "id": "gemini-3.1-pro",
+      "id": "gemini-3.1-pro-preview",
       "object": "model",
       "created": 1771459200,
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3.1 Pro",
-      "name": "models/gemini-3.1-pro",
+      "display_name": "Gemini 3.1 Pro Preview",
+      "name": "models/gemini-3.1-pro-preview",
       "version": "3.1",
-      "description": "Gemini 3.1 Pro",
+      "description": "Gemini 3.1 Pro Preview",
       "inputTokenLimit": 1048576,
       "outputTokenLimit": 65536,
       "supportedGenerationMethods": [

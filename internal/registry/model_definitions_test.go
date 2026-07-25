@@ -35,6 +35,27 @@ func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
 	t.Fatalf("Vertex models do not contain %q", releaseID)
 }
 
+func TestGeminiVertexModelsUse31ProPreviewID(t *testing.T) {
+	const previewID = "gemini-3.1-pro-preview"
+	const bareID = "gemini-3.1-pro"
+
+	foundPreview := false
+	for _, model := range GetGeminiVertexModels() {
+		if model == nil {
+			continue
+		}
+		if model.ID == bareID {
+			t.Fatalf("Vertex model ID = %q, want preview ID %q", model.ID, previewID)
+		}
+		if model.ID == previewID {
+			foundPreview = true
+		}
+	}
+	if !foundPreview {
+		t.Fatalf("Vertex models do not contain %q", previewID)
+	}
+}
+
 func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 
