@@ -9,7 +9,29 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 )
+
+// UpstreamProviderResponse is the dashboard-facing projection of a
+// store.UpstreamProvider row. It embeds the row verbatim and adds a
+// computed ProviderKey: the executor/registry identifier the proxy uses for
+// auth selection (e.g. "openai-compatible-opencode", "claude"). The
+// dashboard's per-model routing picker surfaces ProviderKey next to each
+// upstream provider so an operator can pin a model to a provider even when
+// no live auth has registered for it yet (the in-memory registry would
+// otherwise hide such providers — see GetModelProviders).
+type UpstreamProviderResponse struct {
+	store.UpstreamProvider
+	ProviderKey string `json:"provider_key"`
+}
+
+// toUpstreamProviderResponse wraps a store row with its computed provider key.
+func toUpstreamProviderResponse(p store.UpstreamProvider) UpstreamProviderResponse {
+	return UpstreamProviderResponse{
+		UpstreamProvider: p,
+		ProviderKey:      util.UpstreamProviderKey(p.ProviderType, p.Name),
+	}
+}
 
 // upstreamProvidersStore returns the PG-backed upstream provider store,
 // writing a 503 response when PG is not configured.
@@ -127,10 +149,10 @@ func (h *Handler) ListUpstreamProviders(c *gin.Context) {
 			h.upstreamProviderErrorResponse(c, err)
 			return
 		}
-		filtered := make([]store.UpstreamProvider, 0, len(all))
+		filtered := make([]UpstreamProviderResponse, 0, len(all))
 		for _, p := range all {
 			if p.ProviderType == v {
-				filtered = append(filtered, p)
+				filtered = append(filtered, toUpstreamProviderResponse(p))
 			}
 		}
 		c.JSON(http.StatusOK, gin.H{"providers": filtered})
@@ -141,7 +163,11 @@ func (h *Handler) ListUpstreamProviders(c *gin.Context) {
 		h.upstreamProviderErrorResponse(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"providers": rows})
+	out := make([]UpstreamProviderResponse, 0, len(rows))
+	for _, p := range rows {
+		out = append(out, toUpstreamProviderResponse(p))
+	}
+	c.JSON(http.StatusOK, gin.H{"providers": out})
 }
 
 // GetUpstreamProvider handles GET /v0/management/upstream-providers/:id.
@@ -162,7 +188,7 @@ func (h *Handler) GetUpstreamProvider(c *gin.Context) {
 		h.upstreamProviderErrorResponse(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, p)
+	c.JSON(http.StatusOK, toUpstreamProviderResponse(*p))
 }
 
 // CreateUpstreamProvider handles POST /v0/management/upstream-providers.
@@ -189,7 +215,7 @@ func (h *Handler) CreateUpstreamProvider(c *gin.Context) {
 		return
 	}
 	h.applyUpstreamProviders(c.Request.Context())
-	c.JSON(http.StatusCreated, created)
+	c.JSON(http.StatusCreated, toUpstreamProviderResponse(*created))
 }
 
 // UpdateUpstreamProvider handles PUT /v0/management/upstream-providers/:id.
@@ -223,7 +249,7 @@ func (h *Handler) UpdateUpstreamProvider(c *gin.Context) {
 		return
 	}
 	h.applyUpstreamProviders(c.Request.Context())
-	c.JSON(http.StatusOK, updated)
+	c.JSON(http.StatusOK, toUpstreamProviderResponse(*updated))
 }
 
 // DeleteUpstreamProvider handles DELETE /v0/management/upstream-providers/:id.
