@@ -418,6 +418,12 @@ func TestClaudeExecutor_LogsSanitizedClaudeUpstreamSignatures(t *testing.T) {
 					{"type": "text", "text": "hello"},
 					{"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {}, "signature": "` + rawSignature + `"}
 				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_123", "content": "sunny"}
+				]
 			}
 		]
 	}`)

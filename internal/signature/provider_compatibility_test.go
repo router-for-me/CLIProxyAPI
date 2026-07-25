@@ -416,7 +416,7 @@ func TestSanitizeClaudeMessagesSignaturesForModel_DropsEmptyAssistantMessage(t *
 }
 
 func TestSanitizeClaudeMessagesForClaudeUpstream_DropsInvalidThinkingAndCleansToolUse(t *testing.T) {
-	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"drop me","signature":""},{"type":"text","text":"answer"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"git status"},"signature":"bad","thoughtSignature":"bad2","thought_signature":"bad3","model":"claude-sonnet-4-5","extra_content":{"google":{"thought_signature":"bad4"}}}]}]}`)
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"drop me","signature":""},{"type":"text","text":"answer"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"git status"},"signature":"bad","thoughtSignature":"bad2","thought_signature":"bad3","model":"claude-sonnet-4-5","extra_content":{"google":{"thought_signature":"bad4"}}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}]}`)
 
 	output, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4-5")
 	if report.DroppedBlocks != 1 {
@@ -446,6 +446,273 @@ func TestSanitizeClaudeMessagesForClaudeUpstream_DropsInvalidThinkingAndCleansTo
 		if toolUse.Get(path).Exists() {
 			t.Fatalf("tool_use.%s should be removed: %s", path, toolUse.Raw)
 		}
+	}
+}
+
+func TestSanitizeClaudeMessagesForClaudeUpstreamPreservesValidParallelToolHistory(t *testing.T) {
+	input := []byte(`{"messages":[
+		{"role":"assistant","content":[
+			{"type":"text","text":"running tools"},
+			{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"a"}},
+			{"type":"tool_use","id":"toolu_2","name":"Read","input":{"path":"b"}}
+		]},
+		{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"toolu_2","content":"b"},
+			{"type":"tool_result","tool_use_id":"toolu_1","content":"a"},
+			{"type":"text","text":"continue"}
+		]}
+	]}`)
+
+	output, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4-5")
+	if report.DroppedBlocks != 0 {
+		t.Fatalf("DroppedBlocks = %d, want 0; report=%+v", report.DroppedBlocks, report)
+	}
+	if string(output) != string(input) {
+		t.Fatalf("valid tool history changed:\n got: %s\nwant: %s", output, input)
+	}
+	if &output[0] != &input[0] {
+		t.Fatal("valid tool history was copied")
+	}
+}
+
+func TestSanitizeClaudeMessagesForClaudeUpstreamPairsAcrossConsecutiveSameRoleMessages(t *testing.T) {
+	input := []byte(`{"messages":[
+		{"role":"assistant","content":[
+			{"type":"text","text":"running tools"},
+			{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"a"}}
+		]},
+		{"role":"assistant","content":[
+			{"type":"tool_use","id":"toolu_2","name":"Read","input":{"path":"b"}}
+		]},
+		{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"toolu_1","content":"a"}
+		]},
+		{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"toolu_2","content":"b"},
+			{"type":"text","text":"continue"}
+		]}
+	]}`)
+
+	output, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4-5")
+	if report.DroppedBlocks != 0 {
+		t.Fatalf("DroppedBlocks = %d, want 0; report=%+v", report.DroppedBlocks, report)
+	}
+	if string(output) != string(input) {
+		t.Fatalf("valid split logical turn changed:\n got: %s\nwant: %s", output, input)
+	}
+	if &output[0] != &input[0] {
+		t.Fatal("valid split logical turn was copied")
+	}
+}
+
+func TestSanitizeClaudeMessagesForClaudeUpstreamStopsSplitResultsAfterText(t *testing.T) {
+	input := []byte(`{"messages":[
+		{"role":"assistant","content":[
+			{"type":"text","text":"running"},
+			{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"a"}},
+			{"type":"tool_use","id":"toolu_2","name":"Read","input":{"path":"b"}}
+		]},
+		{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"toolu_1","content":"a"},
+			{"type":"text","text":"tool two was cancelled"}
+		]},
+		{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"toolu_2","content":"late"}
+		]}
+	]}`)
+
+	output, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4-5")
+	if report.DroppedBlocks != 2 {
+		t.Fatalf("DroppedBlocks = %d, want 2; report=%+v", report.DroppedBlocks, report)
+	}
+	messages := gjson.GetBytes(output, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("messages length = %d, want 2 after empty trailing user message removal: %s", len(messages), output)
+	}
+	assistantParts := messages[0].Get("content").Array()
+	if len(assistantParts) != 2 || assistantParts[1].Get("id").String() != "toolu_1" {
+		t.Fatalf("assistant content = %s, want text plus toolu_1", messages[0].Get("content").Raw)
+	}
+	userParts := messages[1].Get("content").Array()
+	if len(userParts) != 2 || userParts[0].Get("tool_use_id").String() != "toolu_1" || userParts[1].Get("text").String() != "tool two was cancelled" {
+		t.Fatalf("user content = %s, want toolu_1 result then text", messages[1].Get("content").Raw)
+	}
+}
+
+func TestSanitizeClaudeMessagesForClaudeUpstreamRequiresExactToolUseIDs(t *testing.T) {
+	input := []byte(`{"messages":[
+		{"role":"assistant","content":[
+			{"type":"text","text":"running"},
+			{"type":"tool_use","id":" toolu_1 ","name":"Read","input":{"path":"a"}}
+		]},
+		{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"toolu_1","content":"a"},
+			{"type":"text","text":"continue"}
+		]}
+	]}`)
+
+	output, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4-5")
+	if report.DroppedBlocks != 2 {
+		t.Fatalf("DroppedBlocks = %d, want 2 for non-identical raw IDs; report=%+v", report.DroppedBlocks, report)
+	}
+	messages := gjson.GetBytes(output, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("messages length = %d, want 2: %s", len(messages), output)
+	}
+	if got := messages[0].Get("content.#").Int(); got != 1 || messages[0].Get("content.0.text").String() != "running" {
+		t.Fatalf("assistant content = %s, want only running text", messages[0].Get("content").Raw)
+	}
+	if got := messages[1].Get("content.#").Int(); got != 1 || messages[1].Get("content.0.text").String() != "continue" {
+		t.Fatalf("user content = %s, want only continue text", messages[1].Get("content").Raw)
+	}
+}
+
+func TestSanitizeClaudeMessagesForClaudeUpstreamRejectsNonStringToolUseIDs(t *testing.T) {
+	input := []byte(`{"messages":[
+		{"role":"assistant","content":[
+			{"type":"text","text":"running"},
+			{"type":"tool_use","id":1,"name":"Read","input":{"path":"a"}}
+		]},
+		{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"1","content":"a"},
+			{"type":"text","text":"continue"}
+		]}
+	]}`)
+
+	output, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4-5")
+	if report.DroppedBlocks != 2 {
+		t.Fatalf("DroppedBlocks = %d, want 2 for non-string tool_use.id; report=%+v", report.DroppedBlocks, report)
+	}
+	messages := gjson.GetBytes(output, "messages").Array()
+	if len(messages) != 2 || messages[0].Get("content.#").Int() != 1 || messages[1].Get("content.#").Int() != 1 {
+		t.Fatalf("sanitized messages = %s, want only the two text blocks", output)
+	}
+}
+
+func TestSanitizeClaudeMessagesForClaudeUpstreamRejectsDuplicateToolUseIDs(t *testing.T) {
+	input := []byte(`{"messages":[
+		{"role":"assistant","content":[
+			{"type":"text","text":"running"},
+			{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"a"}},
+			{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"b"}}
+		]},
+		{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"toolu_1","content":"a"},
+			{"type":"tool_result","tool_use_id":"toolu_1","content":"b"},
+			{"type":"text","text":"continue"}
+		]}
+	]}`)
+
+	output, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4-5")
+	if report.DroppedBlocks != 4 {
+		t.Fatalf("DroppedBlocks = %d, want all four ambiguous duplicate-ID blocks dropped; report=%+v", report.DroppedBlocks, report)
+	}
+	messages := gjson.GetBytes(output, "messages").Array()
+	if len(messages) != 2 || messages[0].Get("content.#").Int() != 1 || messages[1].Get("content.#").Int() != 1 {
+		t.Fatalf("sanitized messages = %s, want only the two text blocks", output)
+	}
+}
+
+func TestSanitizeClaudeMessagesForClaudeUpstreamDropsOrphanToolUsesAndResults(t *testing.T) {
+	input := []byte(`{"messages":[
+		{"role":"assistant","content":[
+			{"type":"text","text":"answer"},
+			{"type":"tool_use","id":"toolu_orphan","name":"Read","input":{"path":"a"}}
+		]},
+		{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"toolu_stale","content":"stale"},
+			{"type":"text","text":"new question"}
+		]}
+	]}`)
+
+	output, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4-5")
+	if report.DroppedBlocks != 2 {
+		t.Fatalf("DroppedBlocks = %d, want 2; report=%+v", report.DroppedBlocks, report)
+	}
+	if got := gjson.GetBytes(output, "messages.0.content.#").Int(); got != 1 {
+		t.Fatalf("assistant content length = %d, want 1: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "messages.0.content.0.text").String(); got != "answer" {
+		t.Fatalf("assistant text = %q, want answer: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "messages.1.content.#").Int(); got != 1 {
+		t.Fatalf("user content length = %d, want 1: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "messages.1.content.0.text").String(); got != "new question" {
+		t.Fatalf("user text = %q, want new question: %s", got, output)
+	}
+}
+
+func TestSanitizeClaudeMessagesForClaudeUpstreamRequiresLeadingToolResults(t *testing.T) {
+	input := []byte(`{"messages":[
+		{"role":"assistant","content":[
+			{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"a"}}
+		]},
+		{"role":"user","content":[
+			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1n"}},
+			{"type":"tool_result","tool_use_id":"toolu_1","content":"late"},
+			{"type":"text","text":"continue"}
+		]}
+	]}`)
+
+	output, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4-5")
+	if report.DroppedBlocks != 2 {
+		t.Fatalf("DroppedBlocks = %d, want 2; report=%+v", report.DroppedBlocks, report)
+	}
+	messages := gjson.GetBytes(output, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("messages length = %d, want 1: %s", len(messages), output)
+	}
+	parts := messages[0].Get("content").Array()
+	if len(parts) != 2 || parts[0].Get("type").String() != "image" || parts[1].Get("text").String() != "continue" {
+		t.Fatalf("remaining user content = %s, want image then text", messages[0].Get("content").Raw)
+	}
+}
+
+func TestSanitizeClaudeMessagesForClaudeUpstreamDropsOnlyUnmatchedParallelToolUse(t *testing.T) {
+	input := []byte(`{"messages":[
+		{"role":"assistant","content":[
+			{"type":"text","text":"running"},
+			{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"a"}},
+			{"type":"tool_use","id":"toolu_2","name":"Read","input":{"path":"b"}}
+		]},
+		{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"toolu_1","content":"a"},
+			{"type":"text","text":"tool two was cancelled"}
+		]}
+	]}`)
+
+	output, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4-5")
+	if report.DroppedBlocks != 1 {
+		t.Fatalf("DroppedBlocks = %d, want 1; report=%+v", report.DroppedBlocks, report)
+	}
+	if got := gjson.GetBytes(output, "messages.0.content.1.id").String(); got != "toolu_1" {
+		t.Fatalf("remaining tool_use id = %q, want toolu_1: %s", got, output)
+	}
+	if gjson.GetBytes(output, "messages.0.content.2").Exists() {
+		t.Fatalf("unmatched parallel tool_use was preserved: %s", output)
+	}
+	if got := gjson.GetBytes(output, "messages.1.content.0.tool_use_id").String(); got != "toolu_1" {
+		t.Fatalf("matching tool_result id = %q, want toolu_1: %s", got, output)
+	}
+}
+
+func TestSanitizeClaudeMessagesSignaturesForTargetPreservesOrphanToolHistoryByDefault(t *testing.T) {
+	input := []byte(`{"messages":[
+		{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]},
+		{"role":"user","content":[{"type":"text","text":"no result"}]}
+	]}`)
+
+	output, report := SanitizeClaudeMessagesSignaturesForTarget(input, ClaudeMessagesSignatureSanitizeOptions{
+		TargetProvider:    SignatureProviderClaude,
+		TargetModel:       "claude-sonnet-4-5",
+		DropEmptyMessages: true,
+	})
+	if report.DroppedBlocks != 0 {
+		t.Fatalf("DroppedBlocks = %d, want 0; report=%+v", report.DroppedBlocks, report)
+	}
+	if string(output) != string(input) {
+		t.Fatalf("generic signature sanitizer changed tool history:\n got: %s\nwant: %s", output, input)
 	}
 }
 

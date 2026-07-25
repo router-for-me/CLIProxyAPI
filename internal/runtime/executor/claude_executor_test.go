@@ -1972,6 +1972,58 @@ func TestClaudeExecutor_ExecuteSanitizesSignaturesBeforeUpstream(t *testing.T) {
 	}
 }
 
+func TestClaudeExecutorExecuteDropsInvalidToolHistoryBeforeUpstream(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-4-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"max_tokens":16,
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"text","text":"old answer"},
+				{"type":"tool_use","id":"toolu_orphan","name":"Read","input":{"path":"old"}}
+			]},
+			{"role":"user","content":[
+				{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1n"}},
+				{"type":"tool_result","tool_use_id":"toolu_orphan","content":"late result"},
+				{"type":"text","text":"new question"}
+			]}
+		]
+	}`)
+
+	if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")}); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	messages := gjson.GetBytes(seenBody, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("messages length = %d, want 2; body=%s", len(messages), seenBody)
+	}
+	assistantParts := messages[0].Get("content").Array()
+	if len(assistantParts) != 1 || assistantParts[0].Get("text").String() != "old answer" {
+		t.Fatalf("assistant content = %s, want old answer only", messages[0].Get("content").Raw)
+	}
+	userParts := messages[1].Get("content").Array()
+	if len(userParts) != 2 || userParts[0].Get("type").String() != "image" || userParts[1].Get("text").String() != "new question" {
+		t.Fatalf("user content = %s, want image then new question", messages[1].Get("content").Raw)
+	}
+}
+
 func TestClaudeExecutor_Execute_InvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
 	testClaudeExecutorInvalidCompressedErrorBody(t, func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
 		_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{

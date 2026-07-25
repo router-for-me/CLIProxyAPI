@@ -14,6 +14,7 @@ type ClaudeMessagesSignatureSanitizeOptions struct {
 	DropEmptyMessages             bool
 	DropToolSignatures            bool
 	DropEmptyThinkingPlaceholders bool
+	DropOrphanToolUse             bool
 }
 
 type SignatureSanitizeReport struct {
@@ -38,9 +39,9 @@ func SanitizeClaudeMessagesSignaturesForModel(payload []byte, targetModel string
 
 // SanitizeClaudeMessagesForClaudeUpstream prepares a Claude /v1/messages body
 // for Claude-compatible upstreams. Valid Claude signatures are normalized to
-// provider-native E-form, valid Claude CAIS signatures are kept,
-// incompatible thinking blocks are dropped, and tool_use blocks keep only their
-// tool-call payload.
+// provider-native E-form, valid Claude CAIS signatures are kept, incompatible
+// thinking blocks are dropped, tool_use blocks keep only their tool-call
+// payload, and invalid tool-call history is removed before reaching Anthropic.
 func SanitizeClaudeMessagesForClaudeUpstream(payload []byte, targetModel string) ([]byte, SignatureSanitizeReport) {
 	return SanitizeClaudeMessagesSignaturesForTarget(payload, ClaudeMessagesSignatureSanitizeOptions{
 		TargetProvider:                SignatureProviderClaude,
@@ -48,6 +49,7 @@ func SanitizeClaudeMessagesForClaudeUpstream(payload []byte, targetModel string)
 		DropEmptyMessages:             true,
 		DropToolSignatures:            true,
 		DropEmptyThinkingPlaceholders: true,
+		DropOrphanToolUse:             true,
 	})
 }
 
@@ -168,11 +170,165 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 		keptMessages = append(keptMessages, message.Raw)
 	}
 
-	if !modified {
-		return payload, report
+	output := payload
+	if modified {
+		output, _ = sjson.SetRawBytes(payload, "messages", []byte("["+strings.Join(keptMessages, ",")+"]"))
 	}
-	output, _ := sjson.SetRawBytes(payload, "messages", []byte("["+strings.Join(keptMessages, ",")+"]"))
+	if opts.DropOrphanToolUse {
+		var droppedToolBlocks int
+		output, droppedToolBlocks = sanitizeClaudeToolHistory(output, opts.DropEmptyMessages)
+		report.DroppedBlocks += droppedToolBlocks
+	}
 	return output, report
+}
+
+func sanitizeClaudeToolHistory(payload []byte, dropEmptyMessages bool) ([]byte, int) {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return payload, 0
+	}
+
+	messageResults := messages.Array()
+	dropParts := make([][]bool, len(messageResults))
+	for messageIndex, message := range messageResults {
+		content := message.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		parts := content.Array()
+		dropParts[messageIndex] = make([]bool, len(parts))
+		for partIndex, part := range parts {
+			switch part.Get("type").String() {
+			case "tool_use", "tool_result":
+				dropParts[messageIndex][partIndex] = true
+			}
+		}
+	}
+
+	type toolBlockRef struct {
+		messageIndex int
+		partIndex    int
+	}
+	for turnStart := 0; turnStart < len(messageResults); {
+		role := messageResults[turnStart].Get("role").String()
+		turnEnd := turnStart + 1
+		for turnEnd < len(messageResults) && messageResults[turnEnd].Get("role").String() == role {
+			turnEnd++
+		}
+		if role != "assistant" || turnEnd >= len(messageResults) || messageResults[turnEnd].Get("role").String() != "user" {
+			turnStart = turnEnd
+			continue
+		}
+
+		userEnd := turnEnd + 1
+		for userEnd < len(messageResults) && messageResults[userEnd].Get("role").String() == "user" {
+			userEnd++
+		}
+		pendingByID := make(map[string][]toolBlockRef)
+		duplicateIDs := make(map[string]struct{})
+		for messageIndex := turnStart; messageIndex < turnEnd; messageIndex++ {
+			content := messageResults[messageIndex].Get("content")
+			if !content.IsArray() {
+				continue
+			}
+			for partIndex, part := range content.Array() {
+				if part.Get("type").String() != "tool_use" {
+					continue
+				}
+				idResult := part.Get("id")
+				if idResult.Type != gjson.String {
+					continue
+				}
+				id := idResult.String()
+				if strings.TrimSpace(id) != "" {
+					if len(pendingByID[id]) > 0 {
+						duplicateIDs[id] = struct{}{}
+					}
+					pendingByID[id] = append(pendingByID[id], toolBlockRef{messageIndex: messageIndex, partIndex: partIndex})
+				}
+			}
+		}
+
+		leadingResults := true
+		for messageIndex := turnEnd; messageIndex < userEnd; messageIndex++ {
+			content := messageResults[messageIndex].Get("content")
+			if !content.IsArray() {
+				leadingResults = false
+				continue
+			}
+			for partIndex, part := range content.Array() {
+				if !leadingResults {
+					continue
+				}
+				if part.Get("type").String() != "tool_result" {
+					leadingResults = false
+					continue
+				}
+				idResult := part.Get("tool_use_id")
+				if idResult.Type != gjson.String {
+					continue
+				}
+				id := idResult.String()
+				if _, duplicate := duplicateIDs[id]; duplicate {
+					continue
+				}
+				pending := pendingByID[id]
+				if strings.TrimSpace(id) == "" || len(pending) == 0 {
+					continue
+				}
+				toolUse := pending[0]
+				pendingByID[id] = pending[1:]
+				dropParts[toolUse.messageIndex][toolUse.partIndex] = false
+				dropParts[messageIndex][partIndex] = false
+			}
+		}
+		turnStart = userEnd
+	}
+
+	droppedBlocks := 0
+	for _, messageDrops := range dropParts {
+		for _, drop := range messageDrops {
+			if drop {
+				droppedBlocks++
+			}
+		}
+	}
+	if droppedBlocks == 0 {
+		return payload, 0
+	}
+
+	keptMessages := make([]string, 0, len(messageResults))
+	for messageIndex, message := range messageResults {
+		content := message.Get("content")
+		messageDrops := dropParts[messageIndex]
+		if !content.IsArray() || len(messageDrops) == 0 {
+			keptMessages = append(keptMessages, message.Raw)
+			continue
+		}
+
+		parts := content.Array()
+		keptParts := make([]string, 0, len(parts))
+		messageChanged := false
+		for partIndex, part := range parts {
+			if messageDrops[partIndex] {
+				messageChanged = true
+				continue
+			}
+			keptParts = append(keptParts, part.Raw)
+		}
+		if !messageChanged {
+			keptMessages = append(keptMessages, message.Raw)
+			continue
+		}
+		if len(keptParts) == 0 && dropEmptyMessages {
+			continue
+		}
+		updated, _ := sjson.SetRaw(message.Raw, "content", "["+strings.Join(keptParts, ",")+"]")
+		keptMessages = append(keptMessages, updated)
+	}
+
+	output, _ := sjson.SetRawBytes(payload, "messages", []byte("["+strings.Join(keptMessages, ",")+"]"))
+	return output, droppedBlocks
 }
 
 func stripClaudeToolUseSignatureFields(part gjson.Result) (string, bool) {

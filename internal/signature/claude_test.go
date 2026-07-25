@@ -389,9 +389,9 @@ func TestSanitizeClaudeMessagesForClaudeUpstream_ClaudeCAIS(t *testing.T) {
 		t.Fatalf("signature = %q, want preserved %q", got, observedFable5Sample)
 	}
 
-	inputTool := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"keep","signature":"` + observedFable5Sample + `"},{"type":"text","text":"answer"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"pwd"},"signature":"` + observedFable5Sample + `"}]}]}`)
+	inputTool := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"keep","signature":"` + observedFable5Sample + `"},{"type":"text","text":"answer"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"pwd"},"signature":"` + observedFable5Sample + `"}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}]}`)
 	outputTool, reportTool := SanitizeClaudeMessagesForClaudeUpstream(inputTool, "claude-fable-5")
-	if reportTool.Preserved != 1 {
+	if reportTool.Preserved != 1 || reportTool.DroppedBlocks != 0 {
 		t.Fatalf("unexpected report for tool input: %+v", reportTool)
 	}
 	partsTool := gjson.GetBytes(outputTool, "messages.0.content").Array()
