@@ -10,8 +10,12 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 // CodexWebsocketsExecutor executes Codex Responses requests using a WebSocket transport.
@@ -87,6 +91,9 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
 		return nil, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
 	}
+	if codexPriorityWebsocketEligible(e.wsExec.cfg, auth, req, opts) {
+		return e.wsExec.ExecuteStream(ctx, auth, req, opts)
+	}
 	return e.httpExec.ExecuteStream(ctx, auth, req, opts)
 }
 
@@ -116,6 +123,39 @@ func (e *CodexAutoExecutor) UpstreamDisconnectChan(sessionID string) <-chan erro
 		return nil
 	}
 	return e.wsExec.UpstreamDisconnectChan(sessionID)
+}
+
+// codexPriorityWebsocketEligible reports whether a streaming request from an
+// HTTP/SSE downstream should be routed to the upstream websocket transport
+// because its resolved payload requests service_tier=priority.
+//
+// The ChatGPT Codex backend applies priority (fast mode) scheduling only on the
+// Responses websocket transport; the same payload sent over HTTP POST is served
+// at the standard tier even though it carries service_tier=priority. The
+// official Codex CLI always uses the websocket transport, so priority requests
+// from HTTP downstreams silently lose their fast-mode intent unless they are
+// bridged here. Only auths explicitly marked websockets=true participate.
+//
+// The function is intentionally side-effect free: it mirrors only the request
+// translation and payload-rule resolution needed for the routing decision,
+// while ExecuteStream keeps ownership of the complete websocket normalization
+// and session lifecycle.
+func codexPriorityWebsocketEligible(cfg *config.Config, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) bool {
+	if !codexWebsocketsEnabled(auth) {
+		return false
+	}
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	from := opts.SourceFormat
+	to := sdktranslator.FromString("codex")
+	originalPayload := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = opts.OriginalRequest
+	}
+	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true)
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	requestPath := helps.PayloadRequestPath(opts)
+	body = helps.ApplyPayloadConfigWithRequest(cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	return gjson.GetBytes(body, "service_tier").String() == "priority"
 }
 
 func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
