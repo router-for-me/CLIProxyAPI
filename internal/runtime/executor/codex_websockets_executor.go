@@ -149,6 +149,13 @@ func codexPriorityWebsocketEligible(cfg *config.Config, auth *cliproxyauth.Auth,
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
+	if !codexPayloadRulesConfigured(cfg) {
+		// Without payload rules the resolved tier equals the translated
+		// payload's tier: thinking application and image-generation filtering
+		// never touch service_tier, so the full resolution pass is skipped.
+		body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+		return gjson.GetBytes(body, "service_tier").String() == "priority"
+	}
 	originalPayload := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = opts.OriginalRequest
@@ -162,6 +169,14 @@ func codexPriorityWebsocketEligible(cfg *config.Config, auth *cliproxyauth.Auth,
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	return gjson.GetBytes(body, "service_tier").String() == "priority"
+}
+
+func codexPayloadRulesConfigured(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	payload := cfg.Payload
+	return len(payload.Default) > 0 || len(payload.DefaultRaw) > 0 || len(payload.Override) > 0 || len(payload.OverrideRaw) > 0 || len(payload.Filter) > 0
 }
 
 func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
