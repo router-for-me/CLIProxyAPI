@@ -917,6 +917,69 @@ export async function deleteAuthFile(names) {
   return cpaFetch(`/auth-files?${qs}`, { method: 'DELETE' });
 }
 
+// uploadAuthFile uploads one or more auth-dir JSON files via multipart/form-data
+// to POST /auth-files (server's UploadAuthFile handler at auth_files.go).
+// `files` is an array of File/Blob objects with a `name` ending in .json.
+// Returns the server's response (status ok / partial when some fail).
+export async function uploadAuthFile(files) {
+  const arr = Array.isArray(files) ? files : [files];
+  if (arr.length === 0) {
+    throw new ApiError('No files to upload', 400);
+  }
+  const token = getStoredToken();
+  const form = new FormData();
+  for (const f of arr) form.append('files', f, f.name);
+  const res = await fetch(`${API_BASE}/auth-files`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    // Let the browser set the multipart boundary — do NOT pass Content-Type.
+    body: form,
+  });
+  const contentType = res.headers.get('content-type') || '';
+  const isJSON = contentType.includes('application/json');
+  const payload = isJSON ? await res.json().catch(() => null) : null;
+  if (!res.ok) {
+    const message = extractErrorMessage(payload, `Upload failed (${res.status})`);
+    const err = new ApiError(message, res.status);
+    err.payload = payload;
+    throw err;
+  }
+  return payload;
+}
+
+// uploadAuthFileRaw writes a single auth-dir JSON file under the given name
+// using a raw JSON body to POST /auth-files?name=<name>.json. The server
+// handler at auth_files.go (dry body path) reads the body bytes verbatim and
+// persists them to cfg.AuthDir, then registers the auth in-memory. Use this to
+// import a parsed/pasted token JSON without going through multipart encoding.
+//
+// `name` may or may not include the .json suffix; it is normalized here.
+export async function uploadAuthFileRaw(name, jsonString) {
+  const fileName = name.endsWith('.json') ? name : `${name}.json`;
+  const token = getStoredToken();
+  const res = await fetch(
+    `${API_BASE}/auth-files?name=${encodeURIComponent(fileName)}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: jsonString,
+    },
+  );
+  const contentType = res.headers.get('content-type') || '';
+  const isJSON = contentType.includes('application/json');
+  const payload = isJSON ? await res.json().catch(() => null) : null;
+  if (!res.ok) {
+    const message = extractErrorMessage(payload, `Upload failed (${res.status})`);
+    const err = new ApiError(message, res.status);
+    err.payload = payload;
+    throw err;
+  }
+  return payload;
+}
+
 // --- Provider-key config lists (Gemini, Claude, Codex, xAI, Vertex, OpenAI) --
 
 function providerListEndpoint(provider) {
