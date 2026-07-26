@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -11,6 +12,30 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
+
+// proxyTransports caches one transport per proxy URL so connection pools are
+// shared across requests. Building a fresh transport per request defeats
+// keep-alive pooling and leaks idle connections until their timeout expires.
+var (
+	proxyTransportsMu sync.Mutex
+	proxyTransports   = make(map[string]*http.Transport)
+)
+
+// sharedProxyTransport returns the cached transport for a proxy URL, building
+// it on first use. Returns nil when the proxy URL is invalid.
+func sharedProxyTransport(proxyURL string) *http.Transport {
+	proxyTransportsMu.Lock()
+	defer proxyTransportsMu.Unlock()
+	if transport, ok := proxyTransports[proxyURL]; ok {
+		return transport
+	}
+	transport := buildProxyTransport(proxyURL)
+	if transport == nil {
+		return nil
+	}
+	proxyTransports[proxyURL] = transport
+	return transport
+}
 
 // NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
@@ -44,7 +69,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 
 	// If we have a proxy URL configured, set up the transport
 	if proxyURL != "" {
-		transport := buildProxyTransport(proxyURL)
+		transport := sharedProxyTransport(proxyURL)
 		if transport != nil {
 			httpClient.Transport = transport
 			return httpClient

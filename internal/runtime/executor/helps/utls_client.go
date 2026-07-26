@@ -22,8 +22,27 @@ import (
 type utlsRoundTripper struct {
 	mu          sync.Mutex
 	connections map[string]*http2.ClientConn
-	pending     map[string]*sync.Cond
+	dials       map[string]chan struct{}
 	dialer      proxy.Dialer
+}
+
+// utlsRoundTrippers caches one round tripper per proxy URL so HTTP/2
+// connections are reused across requests instead of being re-established
+// (TCP + uTLS handshake) on every call.
+var (
+	utlsRoundTrippersMu sync.Mutex
+	utlsRoundTrippers   = make(map[string]*utlsRoundTripper)
+)
+
+func sharedUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
+	utlsRoundTrippersMu.Lock()
+	defer utlsRoundTrippersMu.Unlock()
+	if rt, ok := utlsRoundTrippers[proxyURL]; ok {
+		return rt
+	}
+	rt := newUtlsRoundTripper(proxyURL)
+	utlsRoundTrippers[proxyURL] = rt
+	return rt
 }
 
 func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
@@ -38,49 +57,61 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	}
 	return &utlsRoundTripper{
 		connections: make(map[string]*http2.ClientConn),
-		pending:     make(map[string]*sync.Cond),
+		dials:       make(map[string]chan struct{}),
 		dialer:      dialer,
 	}
 }
 
-func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.ClientConn, error) {
-	t.mu.Lock()
-
-	if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
-		t.mu.Unlock()
-		return h2Conn, nil
-	}
-
-	if cond, ok := t.pending[host]; ok {
-		cond.Wait()
+func (t *utlsRoundTripper) getOrCreateConnection(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
+	for {
+		t.mu.Lock()
 		if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
 			t.mu.Unlock()
 			return h2Conn, nil
 		}
+		if inflight, ok := t.dials[host]; ok {
+			t.mu.Unlock()
+			select {
+			case <-inflight:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		done := make(chan struct{})
+		t.dials[host] = done
+		t.mu.Unlock()
+
+		h2Conn, err := t.createConnection(ctx, host, addr)
+
+		t.mu.Lock()
+		delete(t.dials, host)
+		close(done)
+		if err != nil {
+			t.mu.Unlock()
+			return nil, err
+		}
+		if previous, ok := t.connections[host]; ok && previous != h2Conn {
+			// Let in-flight streams on the replaced connection finish, then close it.
+			go func() { _ = previous.Shutdown(context.Background()) }()
+		}
+		t.connections[host] = h2Conn
+		t.mu.Unlock()
+		return h2Conn, nil
 	}
-
-	cond := sync.NewCond(&t.mu)
-	t.pending[host] = cond
-	t.mu.Unlock()
-
-	h2Conn, err := t.createConnection(host, addr)
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	delete(t.pending, host)
-	cond.Broadcast()
-
-	if err != nil {
-		return nil, err
-	}
-
-	t.connections[host] = h2Conn
-	return h2Conn, nil
 }
 
-func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientConn, error) {
-	conn, err := t.dialer.Dial("tcp", addr)
+// dialContext propagates request cancellation into the dial when the
+// underlying dialer supports it. No fixed timeout is applied.
+func (t *utlsRoundTripper) dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	if contextDialer, ok := t.dialer.(proxy.ContextDialer); ok {
+		return contextDialer.DialContext(ctx, network, addr)
+	}
+	return t.dialer.Dial(network, addr)
+}
+
+func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
+	conn, err := t.dialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +119,7 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	tlsConfig := &tls.Config{ServerName: host}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
-	if err := tlsConn.Handshake(); err != nil {
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -111,18 +142,27 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	addr := net.JoinHostPort(hostname, port)
 
-	h2Conn, err := t.getOrCreateConnection(hostname, addr)
+	h2Conn, err := t.getOrCreateConnection(req.Context(), hostname, addr)
 	if err != nil {
 		return nil, err
 	}
 
 	resp, err := h2Conn.RoundTrip(req)
 	if err != nil {
-		t.mu.Lock()
-		if cached, ok := t.connections[hostname]; ok && cached == h2Conn {
-			delete(t.connections, hostname)
+		// Only evict when the connection itself is unusable; stream-level
+		// errors must not tear down a shared connection other requests are
+		// using. A cancelled request never evicts: CanTakeNewRequest also
+		// reports false while the connection is merely at its concurrent
+		// stream limit, which is not a connection failure.
+		if req.Context().Err() == nil && !h2Conn.CanTakeNewRequest() {
+			t.mu.Lock()
+			if cached, ok := t.connections[hostname]; ok && cached == h2Conn {
+				delete(t.connections, hostname)
+			}
+			t.mu.Unlock()
+			// Graceful shutdown: waits for remaining in-flight streams.
+			go func() { _ = h2Conn.Shutdown(context.Background()) }()
 		}
-		t.mu.Unlock()
 		return nil, err
 	}
 
@@ -169,10 +209,10 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var utlsRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
+	var utlsRT http.RoundTripper = sharedUtlsRoundTripper(proxyURL)
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
-		if transport := buildProxyTransport(proxyURL); transport != nil {
+		if transport := sharedProxyTransport(proxyURL); transport != nil {
 			standardTransport = transport
 		}
 	} else if ctxRoundTripper != nil {
