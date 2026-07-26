@@ -124,6 +124,15 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 			}
 
 			rawSignature := part.Get("signature").String()
+			// A signed thinking block whose text was stripped by a client cannot be
+			// replayed safely: provider-side signature validation checks the
+			// signature against the original thinking text. Drop the block so the
+			// conversation can continue without replaying invalid signed content.
+			if targetProvider == SignatureProviderClaude && strings.TrimSpace(rawSignature) != "" && strings.TrimSpace(claudeThinkingBlockText(part)) == "" {
+				report.DroppedBlocks++
+				messageModified = true
+				continue
+			}
 			decision := DecideSignatureCompatibility(targetProvider, rawSignature, SignatureBlockKindClaudeThinking)
 			decision.Reason = fmt.Sprintf("messages[%d].content[%d]: %s", i, j, decision.Reason)
 			report.Decisions = append(report.Decisions, decision)
