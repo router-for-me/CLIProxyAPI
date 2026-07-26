@@ -42,11 +42,12 @@ export function ErrorBanner({ error, onRetry }) {
   );
 }
 
-export function EmptyState({ title = 'Nothing here yet', hint }) {
+export function EmptyState({ title = 'Nothing here yet', hint, actions }) {
   return (
     <div className="empty-state">
       <div className="empty-state__title">{title}</div>
       {hint && <div className="dim" style={{ marginTop: 4, fontSize: 12 }}>{hint}</div>}
+      {actions && <div className="row gap-sm" style={{ marginTop: 12, justifyContent: 'center' }}>{actions}</div>}
     </div>
   );
 }
