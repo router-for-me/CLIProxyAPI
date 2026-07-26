@@ -2018,6 +2018,352 @@ tr:focus-within .row-actions {
   white-space: nowrap;
 }
 
+/* Secondary button — used for "import" / "refresh" style actions that are
+   not destructive but also not the page's primary CTA. Visually identical to
+   the default button but inverts on hover like .primary does. */
+button.secondary {
+  border-color: var(--border-strong);
+}
+button.secondary:hover:not(:disabled) {
+  background: var(--bg-elevated);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Ghost button — flat, transparent, no border. Used inside list rows for
+   inline actions so they don't compete with the row's own hover state. */
+button.ghost {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  padding: 4px 10px;
+}
+button.ghost:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--border);
+  background: var(--bg);
+}
+
+/* Sortable table header — clickable, with a directional chevron on the
+   active column. */
+.th-sort {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.th-sort:hover {
+  color: var(--text);
+}
+.th-sort__arrow {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 10px;
+  color: var(--text-muted);
+  width: 8px;
+}
+.th-sort.is-active .th-sort__arrow {
+  color: var(--accent);
+}
+
+/* Filter chip — small pill used in the toolbar to surface active filters and
+   allow one-click removal. */
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+}
+.filter-chip__x {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+.filter-chip__x:hover {
+  color: var(--accent);
+}
+
+/* Dropzone — used by the Import Upload tab as a friendlier wrapper around
+   <input type=file>. Dashed border, hover + drag-over state. */
+.dropzone {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md, 8px);
+  padding: 28px 16px;
+  text-align: center;
+  background: var(--bg-elevated);
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.dropzone--hover {
+  border-color: var(--accent);
+  background: rgba(255, 255, 255, 0.02);
+}
+.dropzone__hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+/* Modal tab bar — segmented control used by the Import modal. */
+.tab-bar {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-elevated);
+}
+.tab-bar__btn {
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--border-strong);
+  border-radius: 0;
+  padding: 6px 14px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.tab-bar__btn:last-child {
+  border-right: none;
+}
+.tab-bar__btn:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg);
+}
+.tab-bar__btn.is-active {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+/* Preview card — used by Import modal to summarize what will be created. */
+.preview-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  background: var(--bg-elevated);
+  margin-top: 12px;
+}
+.preview-card__title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+.preview-card__row {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 8px;
+  font-size: 12px;
+  padding: 3px 0;
+  align-items: baseline;
+}
+.preview-card__row dt {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.preview-card__row dd {
+  margin: 0;
+  word-break: break-word;
+  font-family: var(--mono, ui-monospace, monospace);
+}
+.preview-card__notice {
+  margin: -4px 0 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(248, 113, 113, 0.06);
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* Editor summary banner — appears at the top of the Upstream Provider editor
+   modal so the operator can see at-a-glance which row they're editing and
+   what saving it will trigger. */
+.editor-summary {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.editor-summary__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.editor-summary__id {
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.editor-summary__dirty {
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+.editor-summary__hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+/* Pagination bar — rendered under the providers table. Two-row layout on
+   narrow widths via flex-wrap; row-range text on the left, navigation on
+   the right. */
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 4px 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.pagination-bar .ghost {
+  /* Compact page-nav buttons — slightly tighter than default ghost. */
+  padding: 4px 8px;
+  font-size: 12px;
+  line-height: 1;
+}
+.pagination-bar .ghost:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Bulk actions ----------------------------------------------------------- */
+
+/* Checkbox column — narrow, centered. The header checkbox uses native
+   :indeterminate styling (browser-driven) which the browser paints when the
+   `indeterminate` IDL property is set. */
+.col-check {
+  width: 36px;
+  padding-left: 12px;
+  padding-right: 4px;
+  text-align: center;
+}
+.col-check input[type='checkbox'] {
+  margin: 0;
+  cursor: pointer;
+  width: 14px;
+  height: 14px;
+}
+
+/* Selected row — accent-tinted background, slightly stronger border on the
+   left so it reads as "marked" without competing with the row hover. */
+.table tbody tr.row--selected {
+  background: var(--accent-dim);
+}
+.table tbody tr.row--selected:hover {
+  /* Slightly stronger tint on hover so the two states remain distinguishable
+     when the operator sweeps the cursor across the table. */
+  background: var(--accent-dim);
+  filter: brightness(1.08);
+}
+
+/* Bulk-action bar — sits directly below the table (inside the same card),
+   full-width accent-tinted strip. Three columns: count, breakdown chips,
+   actions. Wraps gracefully on narrow widths. */
+.bulk-action-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--accent);
+  background: var(--accent-dim);
+  border-radius: var(--radius-sm);
+}
+.bulk-action-bar__count {
+  font-size: 13px;
+  color: var(--accent);
+}
+.bulk-action-bar__breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.bulk-action-bar__breakdown .filter-chip {
+  /* Read-only chips in the bulk bar — remove the hover affordance so they
+     don't masquerade as interactive filter controls. */
+  cursor: default;
+}
+.bulk-action-bar__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.bulk-action-bar__actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Bulk-delete confirm list — compact identifier list inside the confirm
+   modal. Capped at 12 rows server-side via the prop; this is purely visual. */
+.bulk-confirm__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  max-height: 240px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+.bulk-confirm__list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.bulk-confirm__list li:last-child {
+  border-bottom: none;
+}
+.bulk-confirm__type {
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.bulk-confirm__ident {
+  font-family: var(--mono, ui-monospace, monospace);
+  word-break: break-word;
+}
+
+/* Inline variant of the bulk-action bar used inside the Import modal —
+   slightly tighter so it nests cleanly under the auth-files table without
+   competing with the PreviewCard for vertical space. */
+.bulk-action-bar--inline {
+  margin-top: 10px;
+}
+.bulk-action-bar--inline .bulk-action-bar__count {
+  font-size: 12px;
+}
+
 /* Models tab — one model entry is a stacked group of rows. */
 .up-model-row {
   display: flex;
