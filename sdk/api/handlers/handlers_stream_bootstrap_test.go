@@ -555,6 +555,96 @@ func TestExecuteStreamWithAuthManager_RetriesAfterDroppedBootstrapPayload(t *tes
 	}
 }
 
+func TestExecuteStreamWithAuthManager_RetriesAfterOpenAIResponsesEventPrefixOnly(t *testing.T) {
+	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, call int) (*coreexecutor.StreamResult, error) {
+		chunks := make(chan coreexecutor.StreamChunk, 3)
+		chunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.created")}
+		if call == 1 {
+			chunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{
+				Code:       "upstream_closed",
+				Message:    "stream closed before response.completed",
+				HTTPStatus: http.StatusRequestTimeout,
+			}}
+		} else {
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed","response":{"id":"resp-2","output":[]}}`)}
+		}
+		close(chunks)
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}}
+	handler, _ := registerBootstrapExecutor(t, executor)
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(
+		context.Background(),
+		"openai-response",
+		"bootstrap-model",
+		[]byte(`{"model":"bootstrap-model","input":"hello"}`),
+		"",
+	)
+
+	var got []string
+	for chunk := range dataChan {
+		got = append(got, string(chunk))
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	if executor.Calls() != 2 {
+		t.Fatalf("stream attempts = %d, want retry after prefix-only failure", executor.Calls())
+	}
+	want := []string{
+		"event: response.created",
+		`data: {"type":"response.completed","response":{"id":"resp-2","output":[]}}`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("forwarded chunks = %#v, want only successful attempt %#v", got, want)
+	}
+}
+
+func TestExecuteStreamWithAuthManager_BoundsOpenAIResponsesPrefixBuffer(t *testing.T) {
+	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, _ int) (*coreexecutor.StreamResult, error) {
+		chunks := make(chan coreexecutor.StreamChunk, 128)
+		for index := 0; index < 128; index++ {
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(": queued heartbeat")}
+		}
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}}
+	handler, _ := registerBootstrapExecutor(t, executor)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type streamResult struct {
+		data <-chan []byte
+		errs <-chan *interfaces.ErrorMessage
+	}
+	results := make(chan streamResult, 1)
+	go func() {
+		dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(
+			ctx,
+			"openai-response",
+			"bootstrap-model",
+			[]byte(`{"model":"bootstrap-model","input":"hello"}`),
+			"",
+		)
+		results <- streamResult{data: dataChan, errs: errChan}
+	}()
+
+	var result streamResult
+	select {
+	case result = <-results:
+	case <-time.After(time.Second):
+		cancel()
+		<-results
+		t.Fatal("prefix-only Responses stream kept bootstrap blocked without a bound")
+	}
+	cancel()
+	for range result.data {
+	}
+	for range result.errs {
+	}
+}
+
 func TestExecuteStreamWithAuthManager_CancelDuringSynchronousBootstrap(t *testing.T) {
 	started := make(chan struct{})
 	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, _ int) (*coreexecutor.StreamResult, error) {

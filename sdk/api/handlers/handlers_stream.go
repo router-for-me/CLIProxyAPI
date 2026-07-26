@@ -13,6 +13,11 @@ import (
 	"golang.org/x/net/context"
 )
 
+const (
+	maxResponsesBootstrapPrefixChunks = 32
+	maxResponsesBootstrapPrefixBytes  = 64 << 10
+)
+
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
@@ -387,7 +392,8 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return payload, true, nil
 	}
 
-	var bootstrapPayload []byte
+	var bootstrapPayloads [][]byte
+	bootstrapPayloadBytes := 0
 	bootstrapChunkIndex := 0
 	var bootstrapHistoryChunks [][]byte
 	var bootstrapStreamErr error
@@ -426,8 +432,15 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			if !deliverable {
 				continue
 			}
-			bootstrapPayload = payload
-			return
+			bootstrapPayloads = append(bootstrapPayloads, payload)
+			bootstrapPayloadBytes += len(payload)
+			if streamInterceptorsActive {
+				bootstrapHistoryChunks = appendStreamInterceptorHistory(bootstrapHistoryChunks, payload)
+			}
+			if streamBootstrapPayloadCommitsResponse(responseProtocol, payload) ||
+				streamBootstrapPrefixBufferFull(responseProtocol, len(bootstrapPayloads), bootstrapPayloadBytes) {
+				return
+			}
 		}
 	}
 
@@ -478,7 +491,8 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		streamHeaderInitialized = false
 		streamClosedBeforeRead = false
 		bootstrapStreamErr = nil
-		bootstrapPayload = nil
+		bootstrapPayloads = nil
+		bootstrapPayloadBytes = 0
 		bootstrapChunkIndex = 0
 		bootstrapHistoryChunks = nil
 		chunks = retryResult.Chunks
@@ -557,7 +571,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 
 		chunkIndex := bootstrapChunkIndex
 		historyChunks := bootstrapHistoryChunks
-		if bootstrapPayload != nil {
+		for _, bootstrapPayload := range bootstrapPayloads {
 			if okSendData := sendData(bootstrapPayload); !okSendData {
 				completionOutcome = pluginapi.RequestCompletionCanceled
 				completionStatus = 0
@@ -565,9 +579,6 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 					completionErr = ctx.Err()
 				}
 				return
-			}
-			if streamInterceptorsActive {
-				historyChunks = appendStreamInterceptorHistory(historyChunks, bootstrapPayload)
 			}
 		}
 		for {
@@ -627,6 +638,34 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 	}()
 	return dataChan, upstreamHeaders, errChan
+}
+
+func streamBootstrapPrefixBufferFull(responseProtocol string, chunks, bytes int) bool {
+	return responseProtocol == "openai-response" &&
+		(chunks >= maxResponsesBootstrapPrefixChunks || bytes >= maxResponsesBootstrapPrefixBytes)
+}
+
+func streamBootstrapPayloadCommitsResponse(responseProtocol string, payload []byte) bool {
+	if responseProtocol != "openai-response" {
+		return true
+	}
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 {
+		return false
+	}
+	if json.Valid(trimmed) {
+		return true
+	}
+	for _, line := range bytes.Split(payload, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		if len(bytes.TrimSpace(line[5:])) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func validateSSEDataJSON(chunk []byte) error {
