@@ -111,6 +111,9 @@ plugins:
 # When true, disable high-overhead request logging and HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
 
+# Format for request log files: "text" (default) or "json" (NDJSON)
+request-log-format: "text"
+
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
 

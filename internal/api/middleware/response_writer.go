@@ -90,6 +90,7 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 		select {
 		case w.chunkChannel <- append([]byte(nil), data...): // Non-blocking send with copy
 		default: // Channel full, skip logging to avoid blocking
+			w.markStreamingLogTruncated()
 		}
 		return n, err
 	}
@@ -137,6 +138,7 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 		select {
 		case w.chunkChannel <- []byte(data):
 		default:
+			w.markStreamingLogTruncated()
 		}
 		return n, err
 	}
@@ -145,6 +147,12 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 		w.body.WriteString(data)
 	}
 	return n, err
+}
+
+func (w *ResponseWriterWrapper) markStreamingLogTruncated() {
+	if marker, ok := w.streamWriter.(interface{ MarkResponseBodyTruncated() }); ok {
+		marker.MarkResponseBodyTruncated()
+	}
 }
 
 // WriteHeader wraps the underlying ResponseWriter's WriteHeader method.

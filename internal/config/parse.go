@@ -23,6 +23,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	var cfg Config
 	// Keep defaults aligned with LoadConfigOptional.
 	cfg.Host = "" // Default empty: binds to all interfaces (IPv4 + IPv6)
+	cfg.RequestLogFormat = "text"
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
@@ -86,6 +87,10 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
+	}
+	cfg.RequestLogFormat = strings.ToLower(strings.TrimSpace(cfg.RequestLogFormat))
+	if cfg.RequestLogFormat != "json" {
+		cfg.RequestLogFormat = "text"
 	}
 
 	cfg.NormalizePluginsConfig()

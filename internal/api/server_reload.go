@@ -74,6 +74,11 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 			setter.SetHomeEnabled(cfg.Home.Enabled)
 		}
 	}
+	if oldCfg == nil || oldCfg.RequestLogFormat != cfg.RequestLogFormat {
+		if setter, ok := s.requestLogger.(interface{ SetFormat(string) }); ok {
+			setter.SetFormat(cfg.RequestLogFormat)
+		}
+	}
 
 	if oldCfg == nil || oldCfg.LoggingToFile != cfg.LoggingToFile || oldCfg.LogsMaxTotalSizeMB != cfg.LogsMaxTotalSizeMB {
 		if err := logging.ConfigureLogOutput(cfg); err != nil {

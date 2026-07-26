@@ -173,9 +173,12 @@ func (l *testRequestLogger) IsEnabled() bool {
 type testStreamingLogWriter struct {
 	apiWebsocketTimeline []byte
 	closed               bool
+	truncated            bool
 }
 
 func (w *testStreamingLogWriter) WriteChunkAsync([]byte) {}
+
+func (w *testStreamingLogWriter) MarkResponseBodyTruncated() { w.truncated = true }
 
 func (w *testStreamingLogWriter) WriteStatus(int, map[string][]string) error {
 	return nil
@@ -199,4 +202,13 @@ func (w *testStreamingLogWriter) SetFirstChunkTimestamp(time.Time) {}
 func (w *testStreamingLogWriter) Close() error {
 	w.closed = true
 	return nil
+}
+
+func TestResponseWriterWrapperMarksFirstStageStreamingDrops(t *testing.T) {
+	streamWriter := &testStreamingLogWriter{}
+	wrapper := &ResponseWriterWrapper{streamWriter: streamWriter}
+	wrapper.markStreamingLogTruncated()
+	if !streamWriter.truncated {
+		t.Fatalf("expected middleware queue drop to mark stream truncated")
+	}
 }

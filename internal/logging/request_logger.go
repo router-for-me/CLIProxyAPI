@@ -6,6 +6,8 @@ package logging
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
@@ -144,6 +146,9 @@ type FileRequestLogger struct {
 	errorLogsMaxFiles int
 
 	homeEnabled bool
+
+	// format stores the normalized log entry structure ("text" or "json").
+	format atomic.Value
 }
 
 // NewFileRequestLogger creates a new file-based request logger.
@@ -158,6 +163,11 @@ type FileRequestLogger struct {
 // Returns:
 //   - *FileRequestLogger: A new file-based request logger instance
 func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorLogsMaxFiles int) *FileRequestLogger {
+	return NewFileRequestLoggerWithFormat(enabled, logsDir, configDir, errorLogsMaxFiles, "text")
+}
+
+// NewFileRequestLoggerWithFormat creates a file request logger with the selected output format.
+func NewFileRequestLoggerWithFormat(enabled bool, logsDir string, configDir string, errorLogsMaxFiles int, format string) *FileRequestLogger {
 	// Resolve logsDir relative to the configuration file directory when it's not absolute.
 	if !filepath.IsAbs(logsDir) {
 		// If configDir is provided, resolve logsDir relative to it.
@@ -165,12 +175,39 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 			logsDir = filepath.Join(configDir, logsDir)
 		}
 	}
-	return &FileRequestLogger{
+	logger := &FileRequestLogger{
 		enabled:           enabled,
 		logsDir:           logsDir,
 		errorLogsMaxFiles: errorLogsMaxFiles,
 		homeEnabled:       false,
 	}
+	logger.format.Store(normalizeRequestLogFormat(format))
+	return logger
+}
+
+func normalizeRequestLogFormat(format string) string {
+	if strings.EqualFold(strings.TrimSpace(format), "json") {
+		return "json"
+	}
+	return "text"
+}
+
+// SetFormat updates the output format used for future request log entries.
+func (l *FileRequestLogger) SetFormat(format string) {
+	if l == nil {
+		return
+	}
+	l.format.Store(normalizeRequestLogFormat(format))
+}
+
+func (l *FileRequestLogger) currentFormat() string {
+	if l == nil {
+		return "text"
+	}
+	if format, ok := l.format.Load().(string); ok {
+		return format
+	}
+	return "text"
 }
 
 // IsEnabled returns whether request logging is currently enabled.
