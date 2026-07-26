@@ -19,6 +19,17 @@
   var activeRequest = null;
   var previousBodyOverflow = '';
   var ui = null;
+  // Client-side view state: full payload is loaded once; tables/cards are paged locally.
+  var viewState = {
+    payload: null,
+    dayPage: 1,
+    dayPageSize: 10,
+    dayKeyPage: 1,
+    dayKeyPageSize: 6,
+    keyPage: 1,
+    keyPageSize: 8,
+    keyFilter: '',
+  };
 
   function managementTarget(input) {
     var raw = input;
@@ -298,8 +309,22 @@
       '.cpa-rlu-provider[data-provider="grok45"]{border-color:color-mix(in srgb,#0f766e 45%,var(--border-color,#d8dee9));color:#0f766e;font-weight:650}',
       '.cpa-rlu-empty{padding:34px 16px;text-align:center;color:var(--text-secondary,#64748b);font-size:14px}',
       '.cpa-rlu-footer{margin-top:13px;color:var(--text-secondary,#64748b);font-size:11px;line-height:1.5}',
-      '@media(prefers-color-scheme:dark){.cpa-rlu-panel{background:var(--bg-primary,#15181e);color:var(--text-primary,#eef2f7);border-color:var(--border-color,#343a46)}.cpa-rlu-summary-card,.cpa-rlu-key-card,.cpa-rlu-daily,.cpa-rlu-button,.cpa-rlu-close{background:var(--bg-secondary,#20242d);border-color:var(--border-color,#343a46)}.cpa-rlu-metric,.cpa-rlu-table-wrap,.cpa-rlu-badge,.cpa-rlu-model{background:var(--bg-primary,#15181e);border-color:var(--border-color,#343a46)}.cpa-rlu-status[data-kind="error"]{color:#fca5a5}.cpa-rlu-status[data-kind="warning"]{color:#fcd34d}}',
-      '@media(max-width:760px){#cpa-request-log-usage-button{top:42%;padding:11px 8px}#cpa-request-log-usage-overlay{align-items:flex-end;padding:0}.cpa-rlu-panel{width:100%;max-height:92vh;border-radius:16px 16px 0 0}.cpa-rlu-header{padding:16px}.cpa-rlu-title{font-size:18px}.cpa-rlu-subtitle{font-size:12px}.cpa-rlu-body{padding:14px 14px 20px}.cpa-rlu-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.cpa-rlu-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.cpa-rlu-section-head{align-items:flex-start;flex-direction:column;gap:4px}}',
+      '.cpa-rlu-toolbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;margin:0 0 12px}',
+      '.cpa-rlu-toolbar-left,.cpa-rlu-toolbar-right{display:flex;flex-wrap:wrap;align-items:center;gap:8px}',
+      '.cpa-rlu-search{min-width:min(240px,100%);border:1px solid var(--border-color,#d8dee9);border-radius:9px;padding:7px 10px;background:var(--bg-primary,#fff);color:var(--text-primary,#172033);font:500 13px/1.3 inherit}',
+      '.cpa-rlu-search:focus{outline:2px solid color-mix(in srgb,var(--primary-color,#2563eb) 42%,transparent);outline-offset:1px;border-color:var(--primary-color,#2563eb)}',
+      '.cpa-rlu-select{border:1px solid var(--border-color,#d8dee9);border-radius:9px;padding:7px 10px;background:var(--bg-primary,#fff);color:var(--text-primary,#172033);font:600 12px/1.2 inherit}',
+      '.cpa-rlu-pager{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin-top:10px}',
+      '.cpa-rlu-pager-meta{color:var(--text-secondary,#64748b);font-size:12px;font-variant-numeric:tabular-nums}',
+      '.cpa-rlu-pager-actions{display:flex;align-items:center;gap:6px}',
+      '.cpa-rlu-page-btn{min-width:34px;height:32px;padding:0 10px;border:1px solid var(--border-color,#d8dee9);border-radius:8px;background:var(--bg-primary,#fff);color:var(--text-primary,#172033);font:650 12px/1 inherit;cursor:pointer}',
+      '.cpa-rlu-page-btn:hover:not(:disabled){border-color:var(--primary-color,#2563eb);color:var(--primary-color,#2563eb)}',
+      '.cpa-rlu-page-btn:disabled{opacity:.45;cursor:not-allowed}',
+      '.cpa-rlu-daily-table th:first-child,.cpa-rlu-daily-table td:first-child{position:sticky;left:0;z-index:1;background:var(--bg-primary,#fff);box-shadow:1px 0 0 var(--border-color,#d8dee9)}',
+      '.cpa-rlu-daily-table th:nth-child(2),.cpa-rlu-daily-table td:nth-child(2){position:sticky;left:4.5rem;z-index:1;background:var(--bg-primary,#fff);box-shadow:1px 0 0 var(--border-color,#d8dee9)}',
+      '.cpa-rlu-section-block{margin:0 0 16px}',
+      '@media(prefers-color-scheme:dark){.cpa-rlu-panel{background:var(--bg-primary,#15181e);color:var(--text-primary,#eef2f7);border-color:var(--border-color,#343a46)}.cpa-rlu-summary-card,.cpa-rlu-key-card,.cpa-rlu-daily,.cpa-rlu-button,.cpa-rlu-close{background:var(--bg-secondary,#20242d);border-color:var(--border-color,#343a46)}.cpa-rlu-metric,.cpa-rlu-table-wrap,.cpa-rlu-badge,.cpa-rlu-model,.cpa-rlu-search,.cpa-rlu-select,.cpa-rlu-page-btn{background:var(--bg-primary,#15181e);border-color:var(--border-color,#343a46)}.cpa-rlu-daily-table th:first-child,.cpa-rlu-daily-table td:first-child,.cpa-rlu-daily-table th:nth-child(2),.cpa-rlu-daily-table td:nth-child(2){background:var(--bg-primary,#15181e)}.cpa-rlu-status[data-kind="error"]{color:#fca5a5}.cpa-rlu-status[data-kind="warning"]{color:#fcd34d}}',
+      '@media(max-width:760px){#cpa-request-log-usage-button{top:42%;padding:11px 8px}#cpa-request-log-usage-overlay{align-items:flex-end;padding:0}.cpa-rlu-panel{width:100%;max-height:92vh;border-radius:16px 16px 0 0}.cpa-rlu-header{padding:16px}.cpa-rlu-title{font-size:18px}.cpa-rlu-subtitle{font-size:12px}.cpa-rlu-body{padding:14px 14px 20px}.cpa-rlu-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.cpa-rlu-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.cpa-rlu-section-head{align-items:flex-start;flex-direction:column;gap:4px}.cpa-rlu-daily-table th:nth-child(2),.cpa-rlu-daily-table td:nth-child(2){left:auto;position:static;box-shadow:none}}',
       '@media(max-width:420px){.cpa-rlu-summary,.cpa-rlu-metrics{grid-template-columns:1fr}.cpa-rlu-key-head{align-items:flex-start;flex-direction:column}.cpa-rlu-badge{align-self:flex-start}}',
     ].join('');
     document.head.appendChild(style);
@@ -600,6 +625,133 @@
     row.appendChild(cell);
   }
 
+  function pageCount(total, pageSize) {
+    var size = Math.max(1, numberValue(pageSize) || 1);
+    return Math.max(1, Math.ceil(Math.max(0, numberValue(total)) / size));
+  }
+
+  function clampPage(page, total, pageSize) {
+    var pages = pageCount(total, pageSize);
+    var current = Math.floor(numberValue(page) || 1);
+    if (current < 1) {
+      return 1;
+    }
+    if (current > pages) {
+      return pages;
+    }
+    return current;
+  }
+
+  function slicePage(items, page, pageSize) {
+    var list = arrayValue(items);
+    var size = Math.max(1, numberValue(pageSize) || 1);
+    var current = clampPage(page, list.length, size);
+    var start = (current - 1) * size;
+    return {
+      page: current,
+      pageSize: size,
+      total: list.length,
+      pages: pageCount(list.length, size),
+      items: list.slice(start, start + size),
+      start: list.length === 0 ? 0 : start + 1,
+      end: Math.min(list.length, start + size),
+    };
+  }
+
+  function buildPager(label, pageInfo, onPageChange) {
+    var pager = element('div', 'cpa-rlu-pager');
+    var meta = element(
+      'div',
+      'cpa-rlu-pager-meta',
+      label +
+        '：' +
+        integer(pageInfo.start) +
+        '–' +
+        integer(pageInfo.end) +
+        ' / 共 ' +
+        integer(pageInfo.total) +
+        ' · 第 ' +
+        integer(pageInfo.page) +
+        '/' +
+        integer(pageInfo.pages) +
+        ' 页'
+    );
+    var actions = element('div', 'cpa-rlu-pager-actions');
+    var prev = element('button', 'cpa-rlu-page-btn', '上一页');
+    prev.type = 'button';
+    prev.disabled = pageInfo.page <= 1;
+    prev.addEventListener('click', function () {
+      if (pageInfo.page > 1) {
+        onPageChange(pageInfo.page - 1);
+      }
+    });
+    var next = element('button', 'cpa-rlu-page-btn', '下一页');
+    next.type = 'button';
+    next.disabled = pageInfo.page >= pageInfo.pages;
+    next.addEventListener('click', function () {
+      if (pageInfo.page < pageInfo.pages) {
+        onPageChange(pageInfo.page + 1);
+      }
+    });
+    actions.appendChild(prev);
+    actions.appendChild(next);
+    pager.appendChild(meta);
+    pager.appendChild(actions);
+    return pager;
+  }
+
+  function buildPageSizeSelect(current, options, onChange, labelPrefix) {
+    var select = element('select', 'cpa-rlu-select');
+    var prefix = labelPrefix || '每页';
+    arrayValue(options).forEach(function (size) {
+      var option = document.createElement('option');
+      option.value = String(size);
+      option.textContent = prefix + ' ' + size;
+      if (Number(size) === Number(current)) {
+        option.selected = true;
+      }
+      select.appendChild(option);
+    });
+    select.addEventListener('change', function () {
+      onChange(Number(select.value) || current);
+    });
+    return select;
+  }
+
+  function sortedDays(days) {
+    return arrayValue(days)
+      .slice()
+      .sort(function (left, right) {
+        return String((right && right.date) || '').localeCompare(String((left && left.date) || ''));
+      });
+  }
+
+  function sortedKeys(keys, filterText) {
+    var needle = String(filterText || '')
+      .trim()
+      .toLowerCase();
+    return arrayValue(keys)
+      .slice()
+      .filter(function (entry) {
+        if (!needle) {
+          return true;
+        }
+        var keyName = String((entry && entry.key_name) || '').toLowerCase();
+        var displayName = String((entry && entry.display_name) || '').toLowerCase();
+        return keyName.indexOf(needle) >= 0 || displayName.indexOf(needle) >= 0;
+      })
+      .sort(function (left, right) {
+        var byteDiff = numberValue(right.source_bytes) - numberValue(left.source_bytes);
+        if (byteDiff !== 0) {
+          return byteDiff;
+        }
+        return String((left && left.display_name) || (left && left.key_name) || '').localeCompare(
+          String((right && right.display_name) || (right && right.key_name) || ''),
+          'zh-CN'
+        );
+      });
+  }
+
   function buildDailyOverview(days, keys) {
     var displayNames = {};
     arrayValue(keys).forEach(function (entry) {
@@ -622,11 +774,52 @@
       return String(displayNames[left] || left).localeCompare(String(displayNames[right] || right), 'zh-CN');
     });
 
+    var dayList = sortedDays(days);
+    viewState.dayPage = clampPage(viewState.dayPage, dayList.length, viewState.dayPageSize);
+    viewState.dayKeyPage = clampPage(viewState.dayKeyPage, dailyKeyNames.length, viewState.dayKeyPageSize);
+    var daySlice = slicePage(dayList, viewState.dayPage, viewState.dayPageSize);
+    var keyColSlice = slicePage(dailyKeyNames, viewState.dayKeyPage, viewState.dayKeyPageSize);
+
     var section = element('section', 'cpa-rlu-daily');
     var sectionHead = element('div', 'cpa-rlu-section-head');
     sectionHead.appendChild(element('h3', 'cpa-rlu-section-title', '每日总量与每人用量'));
-    sectionHead.appendChild(element('p', 'cpa-rlu-section-help', '单元格显示原始大小 / 日志条数'));
+    sectionHead.appendChild(
+      element(
+        'p',
+        'cpa-rlu-section-help',
+        '单元格显示原始大小 / 日志条数；日期与人员列均支持分页'
+      )
+    );
     section.appendChild(sectionHead);
+
+    var toolbar = element('div', 'cpa-rlu-toolbar');
+    var left = element('div', 'cpa-rlu-toolbar-left');
+    left.appendChild(
+      buildPageSizeSelect(
+        viewState.dayPageSize,
+        [7, 10, 14, 30],
+        function (size) {
+          viewState.dayPageSize = size;
+          viewState.dayPage = 1;
+          renderUsage(viewState.payload);
+        },
+        '每日'
+      )
+    );
+    left.appendChild(
+      buildPageSizeSelect(
+        viewState.dayKeyPageSize,
+        [4, 6, 8, 12],
+        function (size) {
+          viewState.dayKeyPageSize = size;
+          viewState.dayKeyPage = 1;
+          renderUsage(viewState.payload);
+        },
+        '人员列'
+      )
+    );
+    toolbar.appendChild(left);
+    section.appendChild(toolbar);
 
     var wrap = element('div', 'cpa-rlu-table-wrap');
     var table = element('table', 'cpa-rlu-table cpa-rlu-daily-table');
@@ -634,19 +827,21 @@
     var headerRow = element('tr');
     headerRow.appendChild(element('th', '', '日期'));
     headerRow.appendChild(element('th', '', '每日总量'));
-    dailyKeyNames.forEach(function (keyName) {
+    keyColSlice.items.forEach(function (keyName) {
       headerRow.appendChild(element('th', '', displayNames[keyName] || keyName));
     });
     head.appendChild(headerRow);
     table.appendChild(head);
 
     var body = element('tbody');
-    arrayValue(days)
-      .slice()
-      .sort(function (left, right) {
-        return String((right && right.date) || '').localeCompare(String((left && left.date) || ''));
-      })
-      .forEach(function (day) {
+    if (daySlice.items.length === 0) {
+      var emptyRow = element('tr');
+      var emptyCell = element('td', '', '暂无按日数据');
+      emptyCell.colSpan = 2 + keyColSlice.items.length;
+      emptyRow.appendChild(emptyCell);
+      body.appendChild(emptyRow);
+    } else {
+      daySlice.items.forEach(function (day) {
         var row = element('tr');
         row.appendChild(element('td', '', String((day && day.date) || '—')));
         appendDailyUsageCell(row, day);
@@ -654,14 +849,30 @@
         arrayValue(day && day.keys).forEach(function (entry) {
           entries[String((entry && entry.key_name) || '')] = entry;
         });
-        dailyKeyNames.forEach(function (keyName) {
+        keyColSlice.items.forEach(function (keyName) {
           appendDailyUsageCell(row, entries[keyName]);
         });
         body.appendChild(row);
       });
+    }
     table.appendChild(body);
     wrap.appendChild(table);
     section.appendChild(wrap);
+
+    section.appendChild(
+      buildPager('日期', daySlice, function (page) {
+        viewState.dayPage = page;
+        renderUsage(viewState.payload);
+      })
+    );
+    if (dailyKeyNames.length > 0) {
+      section.appendChild(
+        buildPager('人员列', keyColSlice, function (page) {
+          viewState.dayKeyPage = page;
+          renderUsage(viewState.payload);
+        })
+      );
+    }
     return section;
   }
 
@@ -726,7 +937,90 @@
     return details;
   }
 
+  function appendModelChips(container, models, limit) {
+    var list = arrayValue(models);
+    var max = Math.max(1, numberValue(limit) || 8);
+    var shown = list.slice(0, max);
+    shown.forEach(function (model) {
+      container.appendChild(element('span', 'cpa-rlu-model', modelText([model])));
+    });
+    if (list.length > max) {
+      container.appendChild(element('span', 'cpa-rlu-model', '还有 ' + integer(list.length - max) + ' 个模型'));
+    }
+  }
+
+  function buildKeyCard(entry, payload, timezone) {
+    var keyName = String((entry && entry.key_name) || 'unknown');
+    var displayName = String((entry && entry.display_name) || keyName);
+    var card = element('article', 'cpa-rlu-key-card');
+    var cardHead = element('div', 'cpa-rlu-key-head');
+    cardHead.appendChild(element('div', 'cpa-rlu-key-name', displayName));
+    var badge = element('span', 'cpa-rlu-badge', entry && entry.configured ? '当前配置' : '历史名称');
+    badge.dataset.configured = entry && entry.configured ? 'true' : 'false';
+    cardHead.appendChild(badge);
+    card.appendChild(cardHead);
+
+    var metrics = element('div', 'cpa-rlu-metrics');
+    metrics.appendChild(metric('已上传原始日志', bytes(entry && entry.source_bytes)));
+    metrics.appendChild(metric('已上传日志数', integer(entry && entry.source_count)));
+    metrics.appendChild(
+      metric(
+        '本地尚存日志',
+        bytes(entry && entry.pending_bytes) + ' / ' + integer(entry && entry.pending_count) + ' 条'
+      )
+    );
+    metrics.appendChild(metric('小时批次', integer(entry && entry.batch_count)));
+    metrics.appendChild(
+      metric(
+        '时间范围',
+        dateTime(entry && entry.first_hour, timezone) + ' — ' + dateTime(entry && entry.last_hour, timezone)
+      )
+    );
+    card.appendChild(metrics);
+
+    var providers = providerEntries(entry && entry.providers);
+    if (providers.length > 0) {
+      var providerList = element('div', 'cpa-rlu-models');
+      providers.forEach(function (providerEntry) {
+        var chip = element(
+          'span',
+          'cpa-rlu-provider',
+          providerLabel(providerEntry.provider) +
+            ' · ' +
+            integer(providerEntry.source_count) +
+            ' 条 · ' +
+            bytes(providerEntry.source_bytes)
+        );
+        chip.dataset.provider = String(providerEntry.provider || '');
+        providerList.appendChild(chip);
+      });
+      card.appendChild(providerList);
+    }
+
+    var models = arrayValue(entry && entry.models);
+    if (models.length > 0) {
+      var modelList = element('div', 'cpa-rlu-models');
+      appendModelChips(modelList, models, 8);
+      card.appendChild(modelList);
+    }
+
+    var keyDays = daysForKey(payload, keyName);
+    if (keyDays.length > 0) {
+      card.appendChild(buildDayTable(keyDays));
+    }
+
+    var keyHours = hoursForKey(payload, keyName);
+    if (keyHours.length > 0) {
+      card.appendChild(buildHourTable(keyHours, timezone));
+    }
+    return card;
+  }
+
   function renderUsage(payload) {
+    if (!ui) {
+      return;
+    }
+    viewState.payload = payload || null;
     var fragment = document.createDocumentFragment();
     var totals = payload && typeof payload.totals === 'object' ? payload.totals : {};
     var keys = arrayValue(payload && payload.keys);
@@ -759,7 +1053,7 @@
       element(
         'p',
         'cpa-rlu-note',
-        '大小按完整原始 .log 文件计算，不是压缩包分摊值。本地尚存日志在保留源文件或清理未完成时可能已上传。Key 改名后，旧名称会作为独立历史记录保留。'
+        '大小按完整原始 .log 文件计算，不是压缩包分摊值。本地尚存日志在保留源文件或清理未完成时可能已上传。Key 改名后，旧名称会作为独立历史记录保留。每日表与 Key 列表支持分页与搜索，无需重新请求后端。'
       )
     );
 
@@ -767,85 +1061,68 @@
       fragment.appendChild(buildDailyOverview(days, keys));
     }
 
+    var keySection = element('section', 'cpa-rlu-section-block');
+    var keyHead = element('div', 'cpa-rlu-section-head');
+    keyHead.appendChild(element('h3', 'cpa-rlu-section-title', '每人 / Key 用量'));
+    keyHead.appendChild(element('p', 'cpa-rlu-section-help', '按已上传原始大小降序；支持搜索与分页'));
+    keySection.appendChild(keyHead);
+
+    var filteredKeys = sortedKeys(keys, viewState.keyFilter);
+    viewState.keyPage = clampPage(viewState.keyPage, filteredKeys.length, viewState.keyPageSize);
+    var keySlice = slicePage(filteredKeys, viewState.keyPage, viewState.keyPageSize);
+
+    var keyToolbar = element('div', 'cpa-rlu-toolbar');
+    var keyLeft = element('div', 'cpa-rlu-toolbar-left');
+    var search = element('input', 'cpa-rlu-search');
+    search.type = 'search';
+    search.placeholder = '搜索 Key 名称…';
+    search.value = viewState.keyFilter;
+    search.setAttribute('aria-label', '搜索 Key 名称');
+    var searchTimer = null;
+    search.addEventListener('input', function () {
+      if (searchTimer) {
+        window.clearTimeout(searchTimer);
+      }
+      searchTimer = window.setTimeout(function () {
+        viewState.keyFilter = search.value || '';
+        viewState.keyPage = 1;
+        renderUsage(viewState.payload);
+      }, 180);
+    });
+    keyLeft.appendChild(search);
+    keyLeft.appendChild(
+      buildPageSizeSelect(
+        viewState.keyPageSize,
+        [5, 8, 12, 20],
+        function (size) {
+          viewState.keyPageSize = size;
+          viewState.keyPage = 1;
+          renderUsage(viewState.payload);
+        },
+        'Key 每页'
+      )
+    );
+    keyToolbar.appendChild(keyLeft);
+    keySection.appendChild(keyToolbar);
+
     if (keys.length === 0) {
-      fragment.appendChild(element('div', 'cpa-rlu-empty', '暂时没有 Key 日志用量记录。'));
+      keySection.appendChild(element('div', 'cpa-rlu-empty', '暂时没有 Key 日志用量记录。'));
+    } else if (filteredKeys.length === 0) {
+      keySection.appendChild(element('div', 'cpa-rlu-empty', '没有匹配的 Key，请调整搜索关键词。'));
     } else {
       var list = element('div', 'cpa-rlu-key-list');
-      keys
-        .slice()
-        .sort(function (left, right) {
-          return numberValue(right.source_bytes) - numberValue(left.source_bytes);
+      keySlice.items.forEach(function (entry) {
+        list.appendChild(buildKeyCard(entry, payload, timezone));
+      });
+      keySection.appendChild(list);
+      keySection.appendChild(
+        buildPager('Key', keySlice, function (page) {
+          viewState.keyPage = page;
+          renderUsage(viewState.payload);
         })
-        .forEach(function (entry) {
-          var keyName = String((entry && entry.key_name) || 'unknown');
-          var displayName = String((entry && entry.display_name) || keyName);
-          var card = element('article', 'cpa-rlu-key-card');
-          var cardHead = element('div', 'cpa-rlu-key-head');
-          cardHead.appendChild(element('div', 'cpa-rlu-key-name', displayName));
-          var badge = element('span', 'cpa-rlu-badge', entry && entry.configured ? '当前配置' : '历史名称');
-          badge.dataset.configured = entry && entry.configured ? 'true' : 'false';
-          cardHead.appendChild(badge);
-          card.appendChild(cardHead);
-
-          var metrics = element('div', 'cpa-rlu-metrics');
-          metrics.appendChild(metric('已上传原始日志', bytes(entry && entry.source_bytes)));
-          metrics.appendChild(metric('已上传日志数', integer(entry && entry.source_count)));
-          metrics.appendChild(
-            metric(
-              '本地尚存日志',
-              bytes(entry && entry.pending_bytes) + ' / ' + integer(entry && entry.pending_count) + ' 条'
-            )
-          );
-          metrics.appendChild(metric('小时批次', integer(entry && entry.batch_count)));
-          metrics.appendChild(
-            metric(
-              '时间范围',
-              dateTime(entry && entry.first_hour, timezone) + ' — ' + dateTime(entry && entry.last_hour, timezone)
-            )
-          );
-          card.appendChild(metrics);
-
-          var providers = providerEntries(entry && entry.providers);
-          if (providers.length > 0) {
-            var providerList = element('div', 'cpa-rlu-models');
-            providers.forEach(function (providerEntry) {
-              var chip = element(
-                'span',
-                'cpa-rlu-provider',
-                providerLabel(providerEntry.provider) +
-                  ' · ' +
-                  integer(providerEntry.source_count) +
-                  ' 条 · ' +
-                  bytes(providerEntry.source_bytes)
-              );
-              chip.dataset.provider = String(providerEntry.provider || '');
-              providerList.appendChild(chip);
-            });
-            card.appendChild(providerList);
-          }
-
-          var models = arrayValue(entry && entry.models);
-          if (models.length > 0) {
-            var modelList = element('div', 'cpa-rlu-models');
-            models.forEach(function (model) {
-              modelList.appendChild(element('span', 'cpa-rlu-model', modelText([model])));
-            });
-            card.appendChild(modelList);
-          }
-
-          var keyDays = daysForKey(payload, keyName);
-          if (keyDays.length > 0) {
-            card.appendChild(buildDayTable(keyDays));
-          }
-
-          var keyHours = hoursForKey(payload, keyName);
-          if (keyHours.length > 0) {
-            card.appendChild(buildHourTable(keyHours, timezone));
-          }
-          list.appendChild(card);
-        });
-      fragment.appendChild(list);
+      );
     }
+    fragment.appendChild(keySection);
 
     var parseErrors = parseErrorCount(payload && payload.parse_errors);
     var footerText = timezone ? '统计时区：' + timezone + '。' : '';

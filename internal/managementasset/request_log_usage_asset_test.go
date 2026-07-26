@@ -40,6 +40,12 @@ func TestRequestLogUsageScriptReturnsCopy(t *testing.T) {
 		[]byte("cache: 'no-store'"),
 		[]byte("grok45"),
 		[]byte("return 'Grok'"),
+		[]byte("viewState"),
+		[]byte("buildPager"),
+		[]byte("上一页"),
+		[]byte("下一页"),
+		[]byte("搜索 Key 名称"),
+		[]byte("slicePage"),
 	} {
 		if !bytes.Contains(second, required) {
 			t.Fatalf("request log usage script is missing %q", required)
