@@ -14,6 +14,7 @@ dev = [
     "httpx>=0.27",
     "ruff>=0.5",
     "mypy>=1.10",
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
