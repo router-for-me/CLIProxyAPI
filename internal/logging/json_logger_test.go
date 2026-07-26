@@ -2,6 +2,7 @@ package logging
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -580,6 +581,48 @@ func TestJSONRequestLoggingMergesInlineAndFileBackedAPISections(t *testing.T) {
 	}
 	if entry.APIResponseRaw != "source-response\ninline-response" {
 		t.Fatalf("api_response_raw = %q", entry.APIResponseRaw)
+	}
+}
+
+func TestJSONRequestLoggingEncodesInvalidUTF8Losslessly(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := NewFileRequestLoggerWithFormat(true, tempDir, "", 10, "json")
+	binary := []byte{0xff, 0xfe, 0x00, 0x80}
+	err := logger.LogRequest(
+		"/v1/files", "POST", nil, binary, 200, nil, binary,
+		nil, binary, binary, nil, nil, "req-binary-123", time.Now(), time.Time{},
+	)
+	if err != nil {
+		t.Fatalf("LogRequest failed: %v", err)
+	}
+	data := readOnlyLogFile(t, tempDir)
+	var entry struct {
+		RequestBodyRaw      string `json:"request_body_raw"`
+		RequestBodyEncoding string `json:"request_body_encoding"`
+		APIRequestRaw       string `json:"api_request_raw"`
+		APIRequestEncoding  string `json:"api_request_encoding"`
+		APIResponseRaw      string `json:"api_response_raw"`
+		APIResponseEncoding string `json:"api_response_encoding"`
+		Response            struct {
+			BodyRaw      string `json:"body_raw"`
+			BodyEncoding string `json:"body_encoding"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("unmarshal JSON log: %v", err)
+	}
+	want := base64.StdEncoding.EncodeToString(binary)
+	if entry.RequestBodyRaw != want || entry.RequestBodyEncoding != "base64" {
+		t.Fatalf("request body = %q encoding=%q", entry.RequestBodyRaw, entry.RequestBodyEncoding)
+	}
+	if entry.APIRequestRaw != want || entry.APIRequestEncoding != "base64" {
+		t.Fatalf("API request = %q encoding=%q", entry.APIRequestRaw, entry.APIRequestEncoding)
+	}
+	if entry.APIResponseRaw != want || entry.APIResponseEncoding != "base64" {
+		t.Fatalf("API response = %q encoding=%q", entry.APIResponseRaw, entry.APIResponseEncoding)
+	}
+	if entry.Response.BodyRaw != want || entry.Response.BodyEncoding != "base64" {
+		t.Fatalf("response = %q encoding=%q", entry.Response.BodyRaw, entry.Response.BodyEncoding)
 	}
 }
 

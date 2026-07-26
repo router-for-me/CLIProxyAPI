@@ -2,12 +2,14 @@ package logging
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"time"
+	"unicode/utf8"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
@@ -30,13 +32,16 @@ type jsonLogPayload struct {
 	Headers                       map[string][]string `json:"headers,omitempty"`
 	RequestBody                   json.RawMessage     `json:"request_body,omitempty"`
 	RequestBodyRaw                string              `json:"request_body_raw,omitempty"`
+	RequestBodyEncoding           string              `json:"request_body_encoding,omitempty"`
 	RequestBodyTruncated          bool                `json:"request_body_truncated,omitempty"`
 	Response                      *jsonLogResponse    `json:"response,omitempty"`
 	APIRequest                    json.RawMessage     `json:"api_request,omitempty"`
 	APIRequestRaw                 string              `json:"api_request_raw,omitempty"`
+	APIRequestEncoding            string              `json:"api_request_encoding,omitempty"`
 	APIRequestTruncated           bool                `json:"api_request_truncated,omitempty"`
 	APIResponse                   json.RawMessage     `json:"api_response,omitempty"`
 	APIResponseRaw                string              `json:"api_response_raw,omitempty"`
+	APIResponseEncoding           string              `json:"api_response_encoding,omitempty"`
 	APIResponseTruncated          bool                `json:"api_response_truncated,omitempty"`
 	APIResponseErrors             []jsonLogError      `json:"api_response_errors,omitempty"`
 	APIResponseTimestamp          string              `json:"api_response_timestamp,omitempty"`
@@ -57,6 +62,7 @@ type jsonLogResponse struct {
 	Headers            map[string][]string `json:"headers,omitempty"`
 	Body               json.RawMessage     `json:"body,omitempty"`
 	BodyRaw            string              `json:"body_raw,omitempty"`
+	BodyEncoding       string              `json:"body_encoding,omitempty"`
 	BodyTruncated      bool                `json:"body_truncated,omitempty"`
 	DecompressionError string              `json:"decompression_error,omitempty"`
 }
@@ -134,7 +140,7 @@ func (l *FileRequestLogger) writeJSONLog(
 		Headers:              maskHeaders(requestHeaders),
 		RequestBodyTruncated: requestBodyTruncated,
 	}
-	setJSONPayload(requestBytes, &entry.RequestBody, &entry.RequestBodyRaw)
+	setJSONPayload(requestBytes, &entry.RequestBody, &entry.RequestBodyRaw, &entry.RequestBodyEncoding)
 	if !apiResponseTimestamp.IsZero() {
 		entry.APIResponseTimestamp = apiResponseTimestamp.Format(time.RFC3339Nano)
 	}
@@ -144,14 +150,14 @@ func (l *FileRequestLogger) writeJSONLog(
 		return fmt.Errorf("read JSON API request: %w", errMerge)
 	}
 	entry.APIRequestTruncated = truncated
-	setJSONPayload(apiRequestBytes, &entry.APIRequest, &entry.APIRequestRaw)
+	setJSONPayload(apiRequestBytes, &entry.APIRequest, &entry.APIRequestRaw, &entry.APIRequestEncoding)
 
 	apiResponseBytes, truncated, errMerge := mergeJSONSectionLimited(apiResponseSource, apiResponse, maxJSONFileBackedSectionBytes)
 	if errMerge != nil {
 		return fmt.Errorf("read JSON API response: %w", errMerge)
 	}
 	entry.APIResponseTruncated = truncated
-	setJSONPayload(apiResponseBytes, &entry.APIResponse, &entry.APIResponseRaw)
+	setJSONPayload(apiResponseBytes, &entry.APIResponse, &entry.APIResponseRaw, &entry.APIResponseEncoding)
 
 	for _, apiErr := range apiResponseErrors {
 		if apiErr == nil {
@@ -195,7 +201,7 @@ func (l *FileRequestLogger) writeJSONLog(
 		responseBodyTruncated = true
 	}
 	responseEntry.BodyTruncated = responseBodyTruncated
-	setJSONPayload(response, &responseEntry.Body, &responseEntry.BodyRaw)
+	setJSONPayload(response, &responseEntry.Body, &responseEntry.BodyRaw, &responseEntry.BodyEncoding)
 	entry.Response = responseEntry
 
 	data, errMarshal := json.Marshal(&entry)
@@ -207,12 +213,17 @@ func (l *FileRequestLogger) writeJSONLog(
 	return errWrite
 }
 
-func setJSONPayload(payload []byte, structured *json.RawMessage, raw *string) {
+func setJSONPayload(payload []byte, structured *json.RawMessage, raw, encoding *string) {
 	if len(payload) == 0 {
 		return
 	}
 	if json.Valid(payload) {
 		*structured = json.RawMessage(payload)
+		return
+	}
+	if !utf8.Valid(payload) {
+		*raw = base64.StdEncoding.EncodeToString(payload)
+		*encoding = "base64"
 		return
 	}
 	*raw = string(payload)
