@@ -741,6 +741,16 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 		}
 		return wait, true
 	}
+	if isTransientOverloadStatus(status) {
+		if !m.retryAllowed(attempt, providers) {
+			return 0, false
+		}
+		overloadWait := transientOverloadBackoff(attempt)
+		if overloadWait > maxWait {
+			overloadWait = maxWait
+		}
+		return overloadWait, true
+	}
 	if status != http.StatusTooManyRequests {
 		return 0, false
 	}
@@ -752,6 +762,41 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 		return 0, false
 	}
 	return *retryAfter, true
+}
+
+// statusOverloaded is the non-standard 529 upstreams such as Anthropic return
+// as "overloaded_error". Like 503 it signals a transient capacity dip rather
+// than a problem with the request or the credential.
+const statusOverloaded = 529
+
+// transientOverloadMaxBackoff caps the per-attempt overload backoff so a high
+// request-retry setting cannot turn a capacity dip into a multi-minute stall.
+const transientOverloadMaxBackoff = 8 * time.Second
+
+// isTransientOverloadStatus reports whether a status describes upstream
+// capacity exhaustion that is worth retrying on the same credential. Rotating
+// credentials does not help here, so these are deliberately kept separate from
+// the quota/cooldown path above.
+func isTransientOverloadStatus(status int) bool {
+	return status == http.StatusServiceUnavailable || status == statusOverloaded
+}
+
+// transientOverloadBackoff returns how long to wait before the given retry
+// attempt for a transient overload. Unlike 429, these responses rarely carry a
+// Retry-After hint, so the schedule doubles from one second up to
+// transientOverloadMaxBackoff instead of relying on the provider.
+func transientOverloadBackoff(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	wait := time.Second
+	for i := 0; i < attempt && wait < transientOverloadMaxBackoff; i++ {
+		wait *= 2
+	}
+	if wait > transientOverloadMaxBackoff {
+		wait = transientOverloadMaxBackoff
+	}
+	return wait
 }
 
 // cooldownWaitJitterCap bounds the random jitter added to cooldown waits so a
