@@ -55,7 +55,13 @@ func (e *KimiExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth
 	}
 	token := kimiCreds(auth)
 	if strings.TrimSpace(token) != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+		// Apply the same device/identity headers as the inference path
+		// (Execute/ExecuteStream). PrepareRequest is the credential path for
+		// non-inference HTTP calls (e.g. the usage probe), and Kimi's API
+		// requires the X-Msh-* device headers — especially the device-flow
+		// device_id — to accept device-flow tokens, so they must be applied
+		// here too, not only in Execute.
+		applyKimiHeadersWithAuth(req, token, false, auth)
 	}
 	var attrs map[string]string
 	if auth != nil {

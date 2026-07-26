@@ -28,6 +28,59 @@ func TestNewKimiExecutorInitializesDelegatedClaudeConfig(t *testing.T) {
 	}
 }
 
+func TestKimiExecutorPrepareRequestAppliesDeviceHeaders(t *testing.T) {
+	// Non-inference HTTP callers (e.g. the usage probe) reach Kimi through
+	// PrepareRequest rather than Execute, so PrepareRequest must apply the same
+	// X-Msh-* device headers as the inference path — especially X-Msh-Device-Id
+	// bound to the device-flow token — or Kimi rejects the request.
+	executor := NewKimiExecutor(&config.Config{})
+	req := httptest.NewRequest(http.MethodGet, "https://api.kimi.com/coding/v1/usages", nil)
+	auth := &cliproxyauth.Auth{
+		Provider: "kimi",
+		Metadata: map[string]any{
+			"access_token": "oauth-bearer",
+			"device_id":    "device-abc",
+		},
+	}
+
+	if err := executor.PrepareRequest(req, auth); err != nil {
+		t.Fatalf("PrepareRequest returned error: %v", err)
+	}
+
+	if got := req.Header.Get("Authorization"); got != "Bearer oauth-bearer" {
+		t.Errorf("Authorization = %q, want %q", got, "Bearer oauth-bearer")
+	}
+	if got := req.Header.Get("X-Msh-Device-Id"); got != "device-abc" {
+		t.Errorf("X-Msh-Device-Id = %q, want %q (device-flow device_id from Metadata)", got, "device-abc")
+	}
+	if got := req.Header.Get("X-Msh-Platform"); got != "CLIProxyAPI" {
+		t.Errorf("X-Msh-Platform = %q, want %q", got, "CLIProxyAPI")
+	}
+	for _, h := range []string{"X-Msh-Device-Name", "X-Msh-Device-Model"} {
+		if v := req.Header.Get(h); strings.TrimSpace(v) == "" {
+			t.Errorf("%s header must be set, got empty", h)
+		}
+	}
+}
+
+// When there is no usable token, PrepareRequest must not fabricate credentials
+// or device headers.
+func TestKimiExecutorPrepareRequestNoTokenSkipsHeaders(t *testing.T) {
+	executor := NewKimiExecutor(&config.Config{})
+	req := httptest.NewRequest(http.MethodGet, "https://api.kimi.com/coding/v1/usages", nil)
+	auth := &cliproxyauth.Auth{Provider: "kimi"} // no token anywhere
+
+	if err := executor.PrepareRequest(req, auth); err != nil {
+		t.Fatalf("PrepareRequest returned error: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Errorf("Authorization should be empty without a token, got %q", got)
+	}
+	if got := req.Header.Get("X-Msh-Device-Id"); got != "" {
+		t.Errorf("X-Msh-Device-Id should not be set without a token, got %q", got)
+	}
+}
+
 func TestKimiExecutorClaudeRequestPreservesInternalModelSemantics(t *testing.T) {
 	var upstreamBody []byte
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {

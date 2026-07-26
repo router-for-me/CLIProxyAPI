@@ -317,6 +317,22 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 	h.persist(c)
 }
 
+// KimiUsageQueryEnabled
+func (h *Handler) GetKimiUsageQueryEnabled(c *gin.Context) {
+	c.JSON(200, gin.H{"kimi-usage-query-enabled": h.cfg.KimiUsageQueryEnabled})
+}
+func (h *Handler) PutKimiUsageQueryEnabled(c *gin.Context) {
+	h.updateBoolField(c, func(v bool) { h.cfg.KimiUsageQueryEnabled = v })
+}
+
+// KimiUsageQueryIntervalSeconds
+func (h *Handler) GetKimiUsageQueryIntervalSeconds(c *gin.Context) {
+	c.JSON(200, gin.H{"kimi-usage-query-interval-seconds": h.cfg.KimiUsageQueryIntervalSeconds})
+}
+func (h *Handler) PutKimiUsageQueryIntervalSeconds(c *gin.Context) {
+	h.updateIntField(c, func(v int) { h.cfg.KimiUsageQueryIntervalSeconds = v })
+}
+
 // Proxy URL
 func (h *Handler) GetProxyURL(c *gin.Context) { c.JSON(200, gin.H{"proxy-url": h.cfg.ProxyURL}) }
 func (h *Handler) PutProxyURL(c *gin.Context) {
