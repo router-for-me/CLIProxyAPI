@@ -2585,13 +2585,23 @@ func TestServiceAppliesSameValueNewestSelectorCommit(t *testing.T) {
 		t.Fatal("stale same-value config runtime apply succeeded")
 	}
 
-	for range 2 {
+	// Fill-first selection is shuffled per process, so the first pick is not
+	// deterministic across runs. Assert it stays stable and valid instead.
+	var firstID string
+	for i := range 2 {
 		selected, errSelect := manager.SelectAuth(context.Background(), "plugin-provider", "", cliproxyexecutor.Options{})
 		if errSelect != nil {
 			t.Fatalf("SelectAuth() error = %v", errSelect)
 		}
-		if selected == nil || selected.ID != "auth-a" {
-			t.Fatalf("selector picked = %+v, want auth-a from fill-first", selected)
+		if selected == nil || (selected.ID != "auth-a" && selected.ID != "auth-b") {
+			t.Fatalf("selector picked = %+v, want a registered auth from fill-first", selected)
+		}
+		if i == 0 {
+			firstID = selected.ID
+			continue
+		}
+		if selected.ID != firstID {
+			t.Fatalf("fill-first pick changed between calls: first %q, then %q", firstID, selected.ID)
 		}
 	}
 }

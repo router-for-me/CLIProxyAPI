@@ -174,6 +174,49 @@ func TestFailoverAfterReconnectFailureDisabledDoesNotSwitchToClusterNode(t *test
 	}
 }
 
+func TestNewLifetimePreservesClusterFailoverState(t *testing.T) {
+	client := New(config.HomeConfig{Enabled: true, Host: "seed.example.com", Port: 8327})
+	client.mu.Lock()
+	client.homeCfg.Host = "failed.example.com"
+	client.clusterNodes = []clusterNode{
+		{IP: "failed.example.com", Port: 8327, ClientCount: 1},
+		{IP: "healthy.example.com", Port: 8327, ClientCount: 2},
+	}
+	client.reconnectFailures = homeReconnectFailoverThreshold - 1
+	client.mu.Unlock()
+	client.Close()
+
+	next := client.NewLifetime()
+	if next == nil {
+		t.Fatal("NewLifetime() = nil")
+	}
+	if got, _ := next.addr(); got != "failed.example.com:8327" {
+		t.Fatalf("addr() = %q, want failed.example.com:8327", got)
+	}
+	next.mu.Lock()
+	seedHost, seedPort := next.seedHost, next.seedPort
+	nodes := append([]clusterNode(nil), next.clusterNodes...)
+	failures := next.reconnectFailures
+	next.mu.Unlock()
+	if seedHost != "seed.example.com" || seedPort != 8327 {
+		t.Fatalf("seed = %s:%d, want seed.example.com:8327", seedHost, seedPort)
+	}
+	if !reflect.DeepEqual(nodes, []clusterNode{
+		{IP: "failed.example.com", Port: 8327, ClientCount: 1},
+		{IP: "healthy.example.com", Port: 8327, ClientCount: 2},
+	}) {
+		t.Fatalf("cluster nodes = %#v", nodes)
+	}
+	if failures != homeReconnectFailoverThreshold-1 {
+		t.Fatalf("reconnect failures = %d, want %d", failures, homeReconnectFailoverThreshold-1)
+	}
+
+	switched, addr := next.failoverAfterReconnectFailure()
+	if !switched || addr != "healthy.example.com:8327" {
+		t.Fatalf("failover = %t, %q, want true, healthy.example.com:8327", switched, addr)
+	}
+}
+
 func TestBuildKVSetArgs(t *testing.T) {
 	args, errArgs := buildKVSetArgs("key", []byte("value"), KVSetOptions{EX: 2 * time.Second, NX: true})
 	if errArgs != nil {
@@ -1130,7 +1173,10 @@ func TestRunConfigSubscriberLifetimeReturnsAfterHeartbeatLoss(t *testing.T) {
 	if errPort != nil {
 		t.Fatalf("parse listener port: %v", errPort)
 	}
-	client := New(config.HomeConfig{Enabled: true, Host: host, Port: port, DisableClusterDiscovery: true})
+	client := New(config.HomeConfig{Enabled: true, Host: host, Port: port})
+	client.mu.Lock()
+	client.clusterNodes = []clusterNode{{IP: "failover.example.com", Port: 8327}}
+	client.mu.Unlock()
 
 	ready := make(chan struct{}, 1)
 	errRun := client.RunConfigSubscriberLifetime(context.Background(), func(raw []byte) error {
@@ -1153,6 +1199,9 @@ func TestRunConfigSubscriberLifetimeReturnsAfterHeartbeatLoss(t *testing.T) {
 	}
 	if client.HeartbeatOK() {
 		t.Fatal("HeartbeatOK() = true after heartbeat loss")
+	}
+	if got, _ := client.addr(); got != "failover.example.com:8327" {
+		t.Fatalf("addr() = %q, want failover.example.com:8327 after heartbeat timeout", got)
 	}
 	client.mu.Lock()
 	commandClient, subscriptionClient := client.cmd, client.sub
@@ -1190,12 +1239,20 @@ func TestRunConfigSubscriberLifetimeRejectsInvalidSubscriptionACK(t *testing.T) 
 					return "+OK\r\n"
 				}
 			})
+			client.mu.Lock()
+			client.homeCfg.DisableClusterDiscovery = false
+			client.clusterNodes = []clusterNode{{IP: "failover.example.com", Port: 8327}}
+			client.reconnectFailures = homeReconnectFailoverThreshold - 1
+			client.mu.Unlock()
 			errRun := client.RunConfigSubscriberLifetime(context.Background(), func([]byte) error { return nil }, nil)
 			if errRun == nil {
 				t.Fatal("RunConfigSubscriberLifetime() error = nil, want invalid ACK rejection")
 			}
 			if command := findRedisCommand(commands.All(), "PING"); command != nil {
 				t.Fatalf("PING command = %#v, want no command pool exposure before valid ACK", command)
+			}
+			if got, _ := client.addr(); got != "failover.example.com:8327" {
+				t.Fatalf("addr() = %q, want failover.example.com:8327 after repeated subscription failure", got)
 			}
 		})
 	}
