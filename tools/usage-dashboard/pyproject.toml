@@ -3,7 +3,9 @@ name = "usage-dashboard"
 version = "0.1.0"
 description = "CLIProxyAPI usage statistics sidecar"
 requires-python = ">=3.10"
-dependencies = []  # legacy path stays stdlib-only
+dependencies = [
+    "sqlmodel>=0.0.22",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -13,8 +15,6 @@ dev = [
     "ruff>=0.5",
     "mypy>=1.10",
 ]
-# Future runtime deps (land in Phase 1, NOT here):
-#   fastapi, uvicorn, sqlmodel, sqlalchemy, pydantic, httpx, anyio
 
 [project.scripts]
 usage-dashboard = "usage_dashboard.__main__:main"
@@ -32,6 +32,7 @@ testpaths = ["tests", "."]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+exclude = ["usage_dashboard/", "test_usage_dashboard.py", "tests/test_ci_workflow.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
