@@ -29,6 +29,7 @@ __pycache__/
 .venv/
 venv/
 env/
+*.egg-info/
 
 # OS / editor noise
 .DS_Store
