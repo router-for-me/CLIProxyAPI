@@ -305,6 +305,72 @@ func TestCodexAutoExecutorDownstreamWebsocketDispatchUnchanged(t *testing.T) {
 	}
 }
 
+// A payload rule gated on reasoning.effort — materialized from a thinking
+// suffix such as "gpt-5.4(high)" — must be evaluated after ApplyThinking,
+// mirroring the order the HTTP and websocket executors resolve the payload.
+func TestCodexAutoExecutorThinkingSuffixPriorityRuleUsesUpstreamWebsocket(t *testing.T) {
+	transport := newCodexPriorityTransportTestServer(t)
+	exec := NewCodexAutoExecutor(&config.Config{
+		SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll},
+		Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+			Models: []config.PayloadModelRule{{
+				Name:     "gpt-5.4",
+				Protocol: "codex",
+				Match:    []map[string]any{{"reasoning.effort": "high"}},
+			}},
+			Params: map[string]any{"service_tier": "priority"},
+		}}},
+	})
+	result, err := exec.ExecuteStream(context.Background(), transport.auth(true), cliproxyexecutor.Request{
+		Model:   "gpt-5.4(high)",
+		Payload: []byte(`{"model":"gpt-5.4(high)","input":"active"}`),
+	}, priorityStreamOptions())
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	drainCodexPriorityStream(t, result)
+
+	select {
+	case body := <-transport.wsBodies:
+		if got := gjson.GetBytes(body, "service_tier").String(); got != "priority" {
+			t.Fatalf("websocket service_tier = %q, want priority; body=%s", got, body)
+		}
+		if got := gjson.GetBytes(body, "reasoning.effort").String(); got != "high" {
+			t.Fatalf("websocket reasoning.effort = %q, want high; body=%s", got, body)
+		}
+		if got := gjson.GetBytes(body, "model").String(); got != "gpt-5.4" {
+			t.Fatalf("websocket model = %q, want gpt-5.4; body=%s", got, body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for thinking-suffix websocket request")
+	}
+	select {
+	case body := <-transport.httpBodies:
+		t.Fatalf("unexpected HTTP request: %s", body)
+	default:
+	}
+}
+
+// OpenAI image requests have a specialized HTTP execution path and must never
+// be routed onto the websocket transport, even when priority is requested.
+func TestCodexPriorityWebsocketEligibleExcludesImageRequests(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"websockets": "true"}}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Stream:       true,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-image-2",
+		Payload: []byte(`{"model":"gpt-image-2","prompt":"a cat","service_tier":"priority"}`),
+	}
+	if codexPriorityWebsocketEligible(emptyPriorityTestConfig(), auth, req, opts) {
+		t.Fatal("image requests must stay on the specialized HTTP path")
+	}
+}
+
 // Non-streaming execution is intentionally out of scope for the priority
 // websocket bridge; this locks the dispatch so the change stays stream-only.
 func TestCodexAutoExecutorPriorityNonStreamExecuteUsesHTTP(t *testing.T) {

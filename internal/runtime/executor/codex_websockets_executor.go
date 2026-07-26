@@ -137,11 +137,13 @@ func (e *CodexAutoExecutor) UpstreamDisconnectChan(sessionID string) <-chan erro
 // bridged here. Only auths explicitly marked websockets=true participate.
 //
 // The function is intentionally side-effect free: it mirrors only the request
-// translation and payload-rule resolution needed for the routing decision,
-// while ExecuteStream keeps ownership of the complete websocket normalization
-// and session lifecycle.
+// translation, thinking application, and payload-rule resolution needed for the
+// routing decision — in the same order the HTTP and websocket executors resolve
+// the payload — while ExecuteStream keeps ownership of the complete websocket
+// normalization and session lifecycle. OpenAI image requests are excluded so
+// they keep their specialized HTTP execution path.
 func codexPriorityWebsocketEligible(cfg *config.Config, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) bool {
-	if !codexWebsocketsEnabled(auth) {
+	if !codexWebsocketsEnabled(auth) || isCodexOpenAIImageRequest(opts) {
 		return false
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -152,6 +154,10 @@ func codexPriorityWebsocketEligible(cfg *config.Config, auth *cliproxyauth.Auth,
 		originalPayload = opts.OriginalRequest
 	}
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true)
+	body, errThinking := thinking.ApplyThinking(body, req.Model, from.String(), to.String(), "codex")
+	if errThinking != nil {
+		return false
+	}
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
