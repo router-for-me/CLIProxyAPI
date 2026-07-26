@@ -710,10 +710,13 @@ function buildSchemas() {
       hint: 'Skip the cooldown schedule when this credential hits an error.' },
   ];
 
-  // API-key provider schemas share most structure.
-  const apiKeyBase = (extraBehavior = [], extraSections = []) => ({
+  // API-key provider schemas share most structure. The optional
+  // `extraIdentity` fields are prepended to the Identity section (used to add
+  // the per-type Identifier field, e.g. for Claude).
+  const apiKeyBase = (extraBehavior = [], extraSections = [], extraIdentity = []) => ({
     sections: [
       { title: 'Identity', fields: [
+        ...extraIdentity,
         { name: 'api_key', label: 'API key', type: 'password', placeholder: 'sk-…', required: true,
           hint: 'The credential that authenticates requests to this provider.' },
       ]},
@@ -723,6 +726,16 @@ function buildSchemas() {
       ...extraSections,
     ],
   });
+
+  // Identifier field for Claude upstreams. Maps to the generic `name` column,
+  // which the dashboard already lists as the first-choice identifier and the
+  // proxy lower-cases into the executor/routing provider key
+  // (see util.UpstreamProviderKey). Optional — leave blank to keep the
+  // auto-derived key (empty name → path-based fallback).
+  const claudeIdentifierField = {
+    name: 'name', label: 'Identifier', type: 'text', placeholder: 'claude-team-a',
+    hint: 'Optional stable identifier for this Claude upstream. Lower-cased to form its routing key; shown in the provider list.',
+  };
 
   const claudeCloakSection = {
     title: 'Cloak',
@@ -763,6 +776,7 @@ function buildSchemas() {
           hint: 'Opt-in final-body cch signing for cloaked Claude /v1/messages requests.' },
       ],
       [claudeCloakSection],
+      [claudeIdentifierField],
     ),
     'vertex-api-key': apiKeyBase(),
     'openai-compatibility': {
@@ -804,10 +818,15 @@ function buildSchemas() {
   };
 
   // OAuth provider schemas — share a common identity/token/behavior shape,
-  // with cloak added for oauth:claude.
+  // with cloak + identifier added for oauth:claude.
   for (const oauthType of OAUTH_TYPES.map((t) => t.value)) {
+    // For oauth:claude an Identifier is also surfaced — it populates the
+    // generic `name` column shown in the provider list (the executor key for
+    // oauth:* is fixed to the channel, so it stays "claude" regardless).
+    const identityFields = oauthType === 'oauth:claude' ? [claudeIdentifierField] : [];
     const sections = [
       { title: 'Identity', fields: [
+        ...identityFields,
         { name: 'email', label: 'Account email', type: 'text', placeholder: 'user@example.com',
           hint: 'The OAuth account email (read from the auth file).' },
         { name: 'file_name', label: 'File name', type: 'text', placeholder: 'claude-account-1', required: !false,
@@ -1607,6 +1626,8 @@ function buildPayload(form, providerType) {
   }
 
   if (claude) {
+    // The Identifier field is mapped to the generic `name` column.
+    payload.name = (form.name || '').trim();
     payload.rebuild_mid_system_message = !!form.rebuild_mid_system_message;
     payload.experimental_cch_signing = !!form.experimental_cch_signing;
     payload.cloak_mode = form.cloak_mode || '';
