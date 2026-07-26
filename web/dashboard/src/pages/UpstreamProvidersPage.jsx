@@ -10,6 +10,8 @@ import {
   listAuthFiles,
   getAuthFileModels,
   fetchAuthFileJSON,
+  uploadAuthFile,
+  uploadAuthFileRaw,
   getOAuthModelAlias,
   patchOAuthModelAlias,
   deleteOAuthModelAlias,
@@ -84,26 +86,189 @@ export default function UpstreamProvidersPage() {
   const [typeFilter, setTypeFilter] = useState('');
   const [editing, setEditing] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  // Table sort: { key, dir } — null = leave server order. Keys map 1:1 to
+  // row fields so the sort happens purely client-side over the filtered list.
+  const [sort, setSort] = useState({ key: 'updated_at', dir: 'desc' });
+  // Client-side pagination. Rows/page is operator-selectable; the current page
+  // resets whenever filters/search/sort change so the operator never lands on
+  // an out-of-range page after narrowing the list.
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  // Bulk-action selection. Stored as a Set of upstream_provider.id values so
+  // it survives filter/sort/page changes (operators can narrow, act, then
+  // re-broaden without losing the selection). `null` when no bulk action is
+  // in flight; otherwise the action identifier ("delete" | "enable" | "disable").
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [bulkAction, setBulkAction] = useState(null);   // pending confirm
+  const [bulkRunning, setBulkRunning] = useState(false); // operation in flight
+  // Confirm-modal for destructive bulk delete (non-destructive Enable/Disable
+  // confirm inline via a single toast, matching how single-row toggles work).
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(null);
 
   const providers = data?.providers || [];
 
+  // typeFilter accepts three shapes:
+  //   ''                 → no filter
+  //   'api' / 'oauth'    → category filter (from the stat tiles)
+  //   '<provider_type>'  → exact match (from the dropdown + channel chips)
+  function matchesTypeFilter(providerType) {
+    if (!typeFilter) return true;
+    if (typeFilter === 'api') return !isOAuth(providerType);
+    if (typeFilter === 'oauth') return isOAuth(providerType);
+    return providerType === typeFilter;
+  }
+
   const filtered = useMemo(() => {
     let out = providers;
-    if (typeFilter) out = out.filter((p) => p.provider_type === typeFilter);
+    if (typeFilter) out = out.filter((p) => matchesTypeFilter(p.provider_type));
     if (search.trim()) {
       const q = search.trim().toLowerCase();
       out = out.filter((p) =>
         [p.provider_type, p.name, p.label, p.email, p.file_name, p.base_url]
           .filter(Boolean).some((v) => v.toLowerCase().includes(q)));
     }
+    if (sort && sort.key) {
+      const k = sort.key;
+      const dir = sort.dir === 'asc' ? 1 : -1;
+      out = [...out].sort((a, b) => {
+        const av = a?.[k];
+        const bv = b?.[k];
+        if (av == null && bv == null) return 0;
+        if (av == null) return 1;       // nulls last
+        if (bv == null) return -1;
+        if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
+        return String(av).localeCompare(String(bv), undefined, { numeric: true, sensitivity: 'base' }) * dir;
+      });
+    }
     return out;
-  }, [providers, search, typeFilter]);
+  }, [providers, search, typeFilter, sort]);
 
-  const counts = useMemo(() => ({
-    total: providers.length,
-    apiKeys: providers.filter((p) => !isOAuth(p.provider_type)).length,
-    oauth: providers.filter((p) => isOAuth(p.provider_type)).length,
-  }), [providers]);
+  // Reset to page 1 whenever the result set's shape changes (filter, search,
+  // sort, or the underlying provider list). Without this the operator can
+  // narrow the list and land on an empty page.
+  useEffect(() => { setPage(1); }, [search, typeFilter, sort, providers.length]);
+
+  const totalFiltered = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(totalFiltered / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const pageStart = totalFiltered === 0 ? 0 : (safePage - 1) * pageSize + 1;
+  const pageEnd = Math.min(totalFiltered, safePage * pageSize);
+  const pagedRows = useMemo(
+    () => filtered.slice(pageStart - 1, pageEnd),
+    [filtered, pageStart, pageEnd],
+  );
+
+  // Resolve the Set of selected IDs back to provider rows. Drops any
+  // selections that no longer exist in `providers` (e.g. after a reload
+  // following a delete from another session). Recomputed on every render so
+  // the bulk toolbar always reflects current truth.
+  const selectedProviders = useMemo(() => {
+    if (selectedIds.size === 0) return [];
+    const byId = new Map(providers.map((p) => [p.id, p]));
+    const out = [];
+    for (const id of selectedIds) {
+      const p = byId.get(id);
+      if (p) out.push(p);
+    }
+    return out;
+  }, [selectedIds, providers]);
+  const selectedCount = selectedProviders.length;
+  // Header checkbox is in three states: empty (none of the paged rows
+  // selected), all (every paged row selected), indeterminate (mixed).
+  const pagedSelectedCount = pagedRows.reduce(
+    (n, p) => n + (selectedIds.has(p.id) ? 1 : 0), 0,
+  );
+  const allPagedSelected = pagedRows.length > 0 && pagedSelectedCount === pagedRows.length;
+  const somePagedSelected = pagedSelectedCount > 0 && !allPagedSelected;
+
+  const toggleRowSelected = (id) => {
+    setSelectedIds((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const toggleAllPaged = () => {
+    setSelectedIds((s) => {
+      const next = new Set(s);
+      if (allPagedSelected) {
+        // Unselect everything currently paged.
+        for (const p of pagedRows) next.delete(p.id);
+      } else {
+        // Select everything currently paged.
+        for (const p of pagedRows) next.add(p.id);
+      }
+      return next;
+    });
+  };
+  const clearSelection = () => setSelectedIds(new Set());
+
+  // Garbage-collect stale IDs from the selection whenever the providers list
+  // changes (after reload). Keeps `selectedProviders` honest without forcing
+  // the operator to re-tick boxes after a delete from another tab.
+  useEffect(() => {
+    if (selectedIds.size === 0) return;
+    const liveIds = new Set(providers.map((p) => p.id));
+    let changed = false;
+    for (const id of selectedIds) {
+      if (!liveIds.has(id)) { changed = true; break; }
+    }
+    if (changed) {
+      const next = new Set();
+      for (const id of selectedIds) if (liveIds.has(id)) next.add(id);
+      setSelectedIds(next);
+    }
+    // We intentionally key off providers.length + first/last id instead of the
+    // full `providers` array to avoid recomputing on unrelated edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providers.length, providers[0]?.id, providers[providers.length - 1]?.id]);
+
+  const counts = useMemo(() => {
+    const c = { total: providers.length, apiKeys: 0, oauth: 0, disabled: 0 };
+    for (const p of providers) {
+      if (isOAuth(p.provider_type)) c.oauth += 1; else c.apiKeys += 1;
+      if (p.disabled) c.disabled += 1;
+    }
+    return c;
+  }, [providers]);
+
+  // Per-channel OAuth counts for the secondary stat strip — surfaces which
+  // OAuth channels are actually configured without forcing the operator to
+  // scan the type filter.
+  const oauthByChannel = useMemo(() => {
+    const m = new Map();
+    for (const p of providers) {
+      if (!isOAuth(p.provider_type)) continue;
+      const ch = p.provider_type.replace(/^oauth:/, '');
+      m.set(ch, (m.get(ch) || 0) + 1);
+    }
+    return m;
+  }, [providers]);
+
+  const toggleSort = (key) => {
+    setSort((s) => {
+      if (s?.key !== key) return { key, dir: 'asc' };
+      if (s.dir === 'asc') return { key, dir: 'desc' };
+      return null; // third click clears the sort
+    });
+  };
+  const SortHeader = ({ k, children, align = 'left' }) => {
+    const active = sort?.key === k;
+    const arrow = active ? (sort.dir === 'asc' ? '▲' : '▼') : '↕';
+    return (
+      <th
+        className={`th-sort${active ? ' is-active' : ''}`}
+        onClick={() => toggleSort(k)}
+        aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+        style={align === 'right' ? { textAlign: 'right' } : undefined}
+        title="Click to sort"
+      >
+        {children}<span className="th-sort__arrow" aria-hidden="true">{arrow}</span>
+      </th>
+    );
+  };
+
+  const hasFilters = !!search.trim() || !!typeFilter;
 
   const siblingNames = useMemo(
     () => providers.filter((p) => isOpenAI(p.provider_type)).map((p) => p.name).filter(Boolean),
@@ -121,6 +286,67 @@ export default function UpstreamProvidersPage() {
     }
   };
 
+  // runBulk performs a single bulk action ("enable" | "disable" | "delete")
+  // over the currently selected providers. Runs the per-row mutations in
+  // parallel via Promise.allSettled so a single 4xx/5xx doesn't block the
+  // rest. Reports a final summary toast (`X succeeded, Y failed`) and
+  // collapses the bulk toolbar (clears selection) on full success. On
+  // partial failure the operator keeps the selection so they can retry
+  // just the failures.
+  const runBulk = async (action) => {
+    if (selectedCount === 0) return;
+    setBulkRunning(true);
+    const progressId = toast.info(
+      `${action === 'delete' ? 'Deleting' : action === 'enable' ? 'Enabling' : 'Disabling'} ${selectedCount} provider${selectedCount === 1 ? '' : 's'}…`,
+      { duration: 0 },
+    );
+    const targets = selectedProviders.slice();
+    const verbs = { enable: 'enable', disable: 'disable', delete: 'delete' };
+    const tasks = targets.map((p) => {
+      if (action === 'delete') return deleteUpstreamProvider(p.id).then(() => p);
+      // Enable / Disable: PUT with the smallest payload possible so we don't
+      // clobber fields the operator didn't intend to change. The server only
+      // cares about `disabled` here.
+      return updateUpstreamProvider(p.id, { disabled: action === 'disable' }).then(() => p);
+    });
+    const settled = await Promise.allSettled(tasks);
+    toast.dismiss(progressId);
+    const ok = [];
+    const failed = [];
+    settled.forEach((r, i) => {
+      if (r.status === 'fulfilled') ok.push(targets[i]);
+      else failed.push({ p: targets[i], err: r.reason });
+    });
+    setBulkRunning(false);
+    setBulkAction(null);
+    if (failed.length === 0) {
+      clearSelection();
+      toast.success(
+        `${capitalize(verbs[action])}d ${ok.length} provider${ok.length === 1 ? '' : 's'}`,
+      );
+      reload();
+    } else if (ok.length > 0) {
+      // Partial — drop the OK rows from the selection so retry targets the failures only.
+      const failedIds = new Set(failed.map((f) => f.p.id));
+      setSelectedIds((s) => {
+        const next = new Set();
+        for (const id of s) if (failedIds.has(id)) next.add(id);
+        return next;
+      });
+      toast.error(
+        `${verbs[action]}d ${ok.length}, ${failed.length} failed: ${failed[0].err?.message || 'unknown error'}` +
+          (failed.length > 1 ? ` (+${failed.length - 1} more)` : ''),
+        { duration: 7000 },
+      );
+      reload();
+    } else {
+      toast.error(
+        `All ${failed.length} ${verbs[action]} calls failed: ${failed[0].err?.message || 'unknown error'}`,
+        { duration: 7000 },
+      );
+    }
+  };
+
   return (
     <>
       <div className="main__header">
@@ -133,15 +359,53 @@ export default function UpstreamProvidersPage() {
           </div>
         </div>
         <div className="row gap-sm">
-          <button onClick={() => { reload(); toast.info('Providers refreshed'); }}>Refresh</button>
+          <button
+            className="secondary"
+            onClick={() => { reload(); toast.info('Providers refreshed'); }}
+            disabled={loading}
+            aria-label="Refresh providers"
+            title="Refresh"
+          >
+            ↻ Refresh
+          </button>
           <button className="primary" onClick={() => setEditing({})}>+ New Provider</button>
         </div>
       </div>
 
-      <div className="row gap-sm" style={{ marginBottom: 12 }}>
-        <Stat label="Total" value={counts.total} />
-        <Stat label="API Keys" value={counts.apiKeys} />
-        <Stat label="OAuth" value={counts.oauth} />
+      <div className="row gap-sm" style={{ marginBottom: 12, flexWrap: 'wrap' }}>
+        <Stat label="Total" value={counts.total} active={!hasFilters} onClick={() => { setTypeFilter(''); setSearch(''); }} />
+        <Stat
+          label="API Keys"
+          value={counts.apiKeys}
+          active={typeFilter === 'api' || (!!typeFilter && !isOAuth(typeFilter) && typeFilter !== 'oauth')}
+          onClick={() => setTypeFilter(typeFilter === 'api' ? '' : 'api')}
+        />
+        <Stat
+          label="OAuth"
+          value={counts.oauth}
+          active={typeFilter === 'oauth' || isOAuth(typeFilter)}
+          onClick={() => setTypeFilter(typeFilter === 'oauth' ? '' : 'oauth')}
+        />
+        {counts.disabled > 0 && (
+          <Stat label="Disabled" value={counts.disabled} dim
+            onClick={() => { setSearch('disabled'); }} />
+        )}
+        {oauthByChannel.size > 0 && (
+          <div className="row gap-sm" style={{ marginLeft: 'auto', flexWrap: 'wrap', alignItems: 'center' }}>
+            <span className="dim" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em' }}>OAuth channels</span>
+            {[...oauthByChannel.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([ch, n]) => (
+              <button
+                key={ch}
+                className={`filter-chip${typeFilter === `oauth:${ch}` ? ' filter-chip--active' : ''}`}
+                onClick={() => setTypeFilter(typeFilter === `oauth:${ch}` ? '' : `oauth:${ch}`)}
+                title={`Filter to oauth:${ch}`}
+                style={typeFilter === `oauth:${ch}` ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : undefined}
+              >
+                {ch}<span className="dim">×{n}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="card">
@@ -163,8 +427,24 @@ export default function UpstreamProvidersPage() {
           >
             <option value="">All provider types</option>
             <optgroup label="API Key">{API_KEY_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</optgroup>
-            <optgroup label="OAuth">{OAUTH_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</optgroup>
+            <optgroup label="OAuth / File-backed">{OAUTH_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</optgroup>
           </select>
+          {hasFilters && (
+            <button
+              className="ghost"
+              onClick={() => { setSearch(''); setTypeFilter(''); }}
+              aria-label="Clear all filters"
+              title="Clear filters"
+            >
+              Clear filters
+            </button>
+          )}
+          <span className="catalog-toolbar__spacer" />
+          <span className="catalog-toolbar__count dim" style={{ fontSize: 11 }}>
+            {totalFiltered === providers.length
+              ? `${providers.length} provider${providers.length === 1 ? '' : 's'}`
+              : `${totalFiltered} of ${providers.length}`}
+          </span>
         </div>
 
         {loading ? (
@@ -173,25 +453,61 @@ export default function UpstreamProvidersPage() {
           <ErrorBanner error={error} onRetry={reload} />
         ) : filtered.length === 0 ? (
           <EmptyState
-            title="No upstream providers"
-            hint={search || typeFilter
-              ? 'No providers match the current filters.'
+            title={hasFilters ? 'No providers match the filters' : 'No upstream providers yet'}
+            hint={hasFilters
+              ? 'Try clearing the search or the type filter.'
               : 'Create one with "+ New Provider", or seed from config.yaml on first PG boot.'}
+            actions={hasFilters ? (
+              <button onClick={() => { setSearch(''); setTypeFilter(''); }}>Clear filters</button>
+            ) : (
+              <div className="row gap-sm">
+                <button className="primary" onClick={() => setEditing({})}>+ New Provider</button>
+              </div>
+            )}
           />
         ) : (
           <table className="table">
             <thead>
               <tr>
-                <th>Provider</th><th>Identifier</th><th>Priority</th>
-                <th>Base URL</th><th>Status</th><th>Models</th>
-                <th>Updated</th><th aria-label="Actions" />
+                <th className="col-check">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all on this page"
+                    title={allPagedSelected ? 'Unselect this page' : 'Select this page'}
+                    checked={allPagedSelected}
+                    ref={(el) => { if (el) el.indeterminate = somePagedSelected; }}
+                    onChange={toggleAllPaged}
+                  />
+                </th>
+                <SortHeader k="provider_type">Provider</SortHeader>
+                <SortHeader k="name">Identifier</SortHeader>
+                <SortHeader k="priority">Priority</SortHeader>
+                <SortHeader k="base_url">Base URL</SortHeader>
+                <SortHeader k="disabled">Status</SortHeader>
+                <SortHeader k="model_count">Models</SortHeader>
+                <SortHeader k="updated_at">Updated</SortHeader>
+                <th aria-label="Actions" />
               </tr>
             </thead>
             <tbody>
-              {filtered.map((p) => {
+              {pagedRows.map((p) => {
                 const ident = p.name || p.label || p.email || p.file_name || '—';
+                const modelCount = (p.models || []).length;
+                const isSel = selectedIds.has(p.id);
                 return (
-                  <tr key={p.id} className="clickable-row" onClick={() => setEditing(p)} style={{ cursor: 'pointer' }}>
+                  <tr key={p.id}
+                    className={`clickable-row${isSel ? ' row--selected' : ''}`}
+                    onClick={() => setEditing(p)}
+                    style={{ cursor: 'pointer' }}
+                  >
+                    <td className="col-check" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${ident}`}
+                        checked={isSel}
+                        onChange={() => toggleRowSelected(p.id)}
+                      />
+                    </td>
                     <td>
                       <div className="cell-stack">
                         <span className="cell-stack__main">{TYPE_LABEL[p.provider_type] || p.provider_type}</span>
@@ -200,25 +516,68 @@ export default function UpstreamProvidersPage() {
                         </span>
                       </div>
                     </td>
-                    <td>{ident}</td>
-                    <td>{p.priority}</td>
-                    <td className="truncate-cell">{p.base_url || <span className="dim">—</span>}</td>
+                    <td>
+                      <div className="cell-stack">
+                        <span className="cell-stack__main">{ident}</span>
+                        {p.email && p.email !== ident && (
+                          <span className="dim" style={{ fontSize: 11 }}>{p.email}</span>
+                        )}
+                      </div>
+                    </td>
+                    <td>
+                      {p.priority > 0 ? (
+                        <span className="badge badge--muted">{p.priority}</span>
+                      ) : (
+                        <span className="dim">0</span>
+                      )}
+                    </td>
+                    <td className="truncate-cell" title={p.base_url || ''}>{p.base_url || <span className="dim">—</span>}</td>
                     <td>
                       <span className={`badge ${p.disabled ? 'badge--disabled' : 'badge--active'}`}>
                         {p.disabled ? 'disabled' : 'active'}
                       </span>
                     </td>
-                    <td>{(p.models || []).length}</td>
-                    <td className="dim">{p.updated_at ? formatTime(p.updated_at) : '—'}</td>
+                    <td>{modelCount > 0 ? modelCount : <span className="dim">0</span>}</td>
+                    <td className="dim" title={p.updated_at ? formatTime(p.updated_at) : ''}>
+                      {p.updated_at ? formatRelativeTime(p.updated_at) : '—'}
+                    </td>
                     <td>
-                      <button className="btn-icon" title="Delete" aria-label="Delete provider"
-                        onClick={(e) => { e.stopPropagation(); setConfirmDelete(p); }}>✕</button>
+                      <div className="row gap-sm" style={{ justifyContent: 'flex-end' }}>
+                        <button className="btn-icon" title="Edit" aria-label="Edit provider"
+                          onClick={(e) => { e.stopPropagation(); setEditing(p); }}>✎</button>
+                        <button className="btn-icon" title="Delete" aria-label="Delete provider"
+                          onClick={(e) => { e.stopPropagation(); setConfirmDelete(p); }}>✕</button>
+                      </div>
                     </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
+        )}
+        {selectedCount > 0 && !loading && !error && totalFiltered > 0 && (
+          <BulkActionBar
+            count={selectedCount}
+            total={totalFiltered}
+            selected={selectedProviders}
+            running={bulkRunning}
+            onEnable={() => runBulk('enable')}
+            onDisable={() => runBulk('disable')}
+            onDelete={() => setConfirmBulkDelete(selectedProviders)}
+            onClear={clearSelection}
+          />
+        )}
+        {!loading && !error && totalFiltered > 0 && (
+          <PaginationBar
+            page={safePage}
+            totalPages={totalPages}
+            pageSize={pageSize}
+            pageStart={pageStart}
+            pageEnd={pageEnd}
+            total={totalFiltered}
+            onPageChange={setPage}
+            onPageSizeChange={(n) => { setPageSize(n); setPage(1); }}
+          />
         )}
       </div>
 
@@ -249,17 +608,209 @@ export default function UpstreamProvidersPage() {
         </Modal>
       )}
 
+      {confirmBulkDelete && (
+        <BulkDeleteConfirmModal
+          targets={confirmBulkDelete}
+          running={bulkRunning}
+          onCancel={() => setConfirmBulkDelete(null)}
+          onConfirm={async () => {
+            const ids = new Set(confirmBulkDelete.map((p) => p.id));
+            setConfirmBulkDelete(null);
+            await runBulk('delete');
+            // runBulk already cleared/updated selection + reloaded; ids is no
+            // longer needed but kept here for symmetry with future flows.
+            void ids;
+          }}
+        />
+      )}
+
       <GlobalOAuthModelAliasCard />
     </>
   );
 }
 
-function Stat({ label, value }) {
-  return (
-    <div className="stat">
+// Clickable stat tile. When onClick is provided the tile is rendered as a
+// button so the operator can pivot the filter with one click (e.g. "OAuth"
+// click sets the type filter to any oauth:* type). `active` highlights the
+// current filter state. `dim` mutes the value for non-primary metrics like
+// "Disabled" so they read as context rather than a call to action.
+function Stat({ label, value, onClick, active = false, dim = false }) {
+  const content = (
+    <>
       <div className="stat__label">{label}</div>
-      <div className="stat__value">{value}</div>
+      <div className="stat__value" style={dim ? { color: 'var(--text-muted)' } : undefined}>{value}</div>
+    </>
+  );
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        className="stat"
+        onClick={onClick}
+        aria-pressed={active}
+        title={active ? `Click to clear "${label}" filter` : `Click to filter to "${label}"`}
+        style={{
+          textAlign: 'left',
+          cursor: 'pointer',
+          background: active ? 'var(--accent-dim)' : 'var(--bg-elevated)',
+          border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+          borderRadius: 'var(--radius-sm)',
+          padding: '10px 14px',
+          color: active ? 'var(--accent)' : 'inherit',
+          transition: 'all 0.12s ease',
+        }}
+      >
+        {content}
+      </button>
+    );
+  }
+  return <div className="stat">{content}</div>;
+}
+
+// PaginationBar — compact footer rendered under the table. Shows the visible
+// row range, total count, current page, and a first/prev/next/last page
+// navigator. Page-size selector uses common values (10/25/50/100). When the
+// total fits on one page the prev/next buttons are disabled; the row-range
+// text + page size still render so the operator sees the absolute total.
+function PaginationBar({ page, totalPages, pageSize, pageStart, pageEnd, total, onPageChange, onPageSizeChange }) {
+  const canPrev = page > 1;
+  const canNext = page < totalPages;
+  return (
+    <div className="pagination-bar" role="navigation" aria-label="Table pagination">
+      <div className="dim" style={{ fontSize: 11 }}>
+        {total === 0
+          ? '0 results'
+          : <>Showing <strong>{pageStart}</strong>–<strong>{pageEnd}</strong> of <strong>{total}</strong></>}
+      </div>
+      <div className="row gap-sm" style={{ alignItems: 'center' }}>
+        <label className="row gap-sm" style={{ alignItems: 'center', fontSize: 11, color: 'var(--text-muted)' }}>
+          Rows
+          <select
+            value={pageSize}
+            onChange={(e) => onPageSizeChange(Number(e.target.value))}
+            aria-label="Rows per page"
+            style={{ width: 'auto', padding: '4px 8px', fontSize: 12 }}
+          >
+            {[10, 25, 50, 100].map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </label>
+        <div className="row gap-sm" style={{ alignItems: 'center' }}>
+          <button
+            className="ghost"
+            disabled={!canPrev}
+            onClick={() => onPageChange(1)}
+            aria-label="First page"
+            title="First page"
+          >«</button>
+          <button
+            className="ghost"
+            disabled={!canPrev}
+            onClick={() => onPageChange(page - 1)}
+            aria-label="Previous page"
+            title="Previous page"
+          >‹ Prev</button>
+          <span className="dim" style={{ fontSize: 11, minWidth: 60, textAlign: 'center' }}>
+            Page <strong style={{ color: 'var(--text)' }}>{page}</strong> / {totalPages}
+          </span>
+          <button
+            className="ghost"
+            disabled={!canNext}
+            onClick={() => onPageChange(page + 1)}
+            aria-label="Next page"
+            title="Next page"
+          >Next ›</button>
+          <button
+            className="ghost"
+            disabled={!canNext}
+            onClick={() => onPageChange(totalPages)}
+            aria-label="Last page"
+            title="Last page"
+          >»</button>
+        </div>
+      </div>
     </div>
+  );
+}
+
+// BulkActionBar — appears under the table when one or more rows are
+// selected. Shows the live selection count and three destructive / state
+// actions. Enable/Disable fire immediately (mirrors single-row toggle
+// semantics — no confirmation step), Delete opens a separate confirm modal
+// via the parent because it cannot be undone.
+function BulkActionBar({ count, total, selected, running, onEnable, onDisable, onDelete, onClear }) {
+  const all = count === total;
+  // Breakdown of selection by provider_type for the operator's situational
+  // awareness — surfaces what category of credentials they're about to
+  // affect without forcing them to scroll the table.
+  const byType = useMemo(() => {
+    const m = new Map();
+    for (const p of selected) {
+      const k = p.provider_type || 'unknown';
+      m.set(k, (m.get(k) || 0) + 1);
+    }
+    return [...m.entries()].sort((a, b) => b[1] - a[1]);
+  }, [selected]);
+  return (
+    <div className="bulk-action-bar" role="region" aria-label="Bulk actions">
+      <div className="bulk-action-bar__count">
+        <strong>{count}</strong> selected{all ? '' : <> of <strong>{total}</strong></>}
+      </div>
+      <div className="bulk-action-bar__breakdown">
+        {byType.map(([k, n]) => (
+          <span key={k} className="filter-chip" title={`${n} ${k}`}>
+            {k}<span className="dim">×{n}</span>
+          </span>
+        ))}
+      </div>
+      <div className="bulk-action-bar__actions">
+        <button onClick={onEnable} disabled={running} title="Enable selected">✓ Enable</button>
+        <button onClick={onDisable} disabled={running} title="Disable selected">⊘ Disable</button>
+        <button className="danger" onClick={onDelete} disabled={running} title="Delete selected (irreversible)">✕ Delete</button>
+        <button className="ghost" onClick={onClear} disabled={running} title="Clear selection">Clear</button>
+      </div>
+    </div>
+  );
+}
+
+// BulkDeleteConfirmModal — destructive-confirm pattern for the bulk delete
+// path. Shows a count, breakdown by provider_type, and a list of identifiers
+// (capped to 12 rows, with a "+N more" suffix) so the operator can confirm
+// the exact set they're about to nuke. Config.yaml / auth-dir re-render
+// warning is repeated here (mirrors the single-row confirm) because the
+// bulk path doesn't go through the single-row modal first.
+function BulkDeleteConfirmModal({ targets, running, onCancel, onConfirm }) {
+  const maxRows = 12;
+  const shown = targets.slice(0, maxRows);
+  const more = targets.length - shown.length;
+  return (
+    <Modal
+      title={`Delete ${targets.length} upstream provider${targets.length === 1 ? '' : 's'}?`}
+      size="md"
+      onClose={running ? () => {} : onCancel}
+      footer={<>
+        <button onClick={onCancel} disabled={running}>Cancel</button>
+        <button className="danger" onClick={onConfirm} disabled={running}>
+          {running ? 'Deleting…' : `Delete ${targets.length}`}
+        </button>
+      </>}
+    >
+      <p style={{ marginBottom: 12 }}>
+        This action <strong>cannot be undone</strong>. The selected providers
+        will be removed and <code>config.yaml</code> + auth-dir artifacts will
+        be re-rendered. In-memory clients are reloaded automatically.
+      </p>
+      <ul className="bulk-confirm__list">
+        {shown.map((p) => (
+          <li key={p.id}>
+            <code className="bulk-confirm__type">{p.provider_type}</code>
+            <span className="bulk-confirm__ident">
+              {p.name || p.label || p.email || p.file_name || `id:${p.id}`}
+            </span>
+          </li>
+        ))}
+        {more > 0 && <li className="dim">…and {more} more</li>}
+      </ul>
+    </Modal>
   );
 }
 
@@ -961,6 +1512,16 @@ function UpstreamProviderEditor({ provider, siblingNames = [], onClose, onSaved 
     ? `Edit ${TYPE_LABEL[providerType] || providerType}`
     : 'New Upstream Provider';
 
+  // Summary banner content for the editor header. Operators editing OAuth
+  // accounts care about file_name (auth-dir collision key) and the account
+  // email; for API-key providers it's the api_key entries count.
+  const summary = isEdit
+    ? {
+        identifier: provider?.file_name || provider?.name || provider?.label || '',
+        secondary: provider?.email || provider?.base_url || '',
+      }
+    : null;
+
   return (
     <Modal
       title={title}
@@ -980,6 +1541,36 @@ function UpstreamProviderEditor({ provider, siblingNames = [], onClose, onSaved 
           <div className="error-summary">
             <strong>Please fix {Object.keys(errors).length} field{Object.keys(errors).length === 1 ? '' : 's'}:</strong>
             <ul>{Object.entries(errors).map(([k, v]) => <li key={k}>{v}</li>)}</ul>
+          </div>
+        )}
+
+        {/* Editor summary banner. Surfaces the provider type + identifier
+            (file_name for OAuth, name for OpenAI-compat, base_url for API-key)
+            and a one-line "save will re-render" hint so the operator never
+            has to remember what an upstream provider row actually controls. */}
+        {providerType && (
+          <div className="editor-summary" role="region" aria-label="Editor summary">
+            <div className="editor-summary__head">
+              <span className="badge badge--muted" style={{ fontSize: 10 }}>{providerType}</span>
+              {summary?.identifier && (
+                <code className="editor-summary__id">{summary.identifier}</code>
+              )}
+              {dirty && (
+                <span className="editor-summary__dirty" title="You have unsaved changes">● unsaved changes</span>
+              )}
+            </div>
+            <div className="editor-summary__hint">
+              {isOAuth(providerType) && (
+                <>Saves write a row to <code>upstream_providers</code> + a normalized JSON file to the auth-dir.</>
+              )}
+              {isOpenAI(providerType) && (
+                <>Saves write a row to <code>upstream_providers</code>; base URL becomes the routing key.</>
+              )}
+              {!isOAuth(providerType) && !isOpenAI(providerType) && (
+                <>Saves write a row to <code>upstream_providers</code> + re-render the matching <code>config.yaml</code> provider block.</>
+              )}
+              {' '}Reload is triggered automatically.
+            </div>
           </div>
         )}
 
@@ -1454,8 +2045,6 @@ function OAuthConnectSection({ providerType, onCompleted }) {
   );
 }
 
-// APIKeyEntriesEditor — multi-row editor for openai-compatibility
-// api-key-entries. Each row is a PasswordInput + proxy URL input.
 function APIKeyEntriesEditor({ entries, onChange }) {
   const safe = Array.isArray(entries) ? entries : [];
   function update(idx, patch) {
@@ -1690,6 +2279,14 @@ function validate(form, schema, providerType, siblingNames, isEdit) {
 // Helpers
 // ============================================================================
 
+// capitalize — first-letter uppercase for verbs in bulk-summary toasts. We
+// don't need full title-case because the strings are short ("Enabled" /
+// "Disabled" / "Deleted").
+function capitalize(s) {
+  if (!s) return '';
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 function formatRFC3339(t) {
   if (!t) return '';
   try {
@@ -1715,4 +2312,23 @@ function formatTime(iso) {
     if (Number.isNaN(d.getTime())) return '—';
     return d.toLocaleString();
   } catch { return '—'; }
+}
+
+// formatRelativeTime returns a compact "5m ago / 2h ago / 3d ago" string for
+// recent timestamps and falls back to a short date for older ones. Operators
+// scanning the table care about "is this fresh" more than the exact time, so
+// the relative form reads more clearly than "1/26/2026, 9:31:42 AM".
+function formatRelativeTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  const diffMs = Date.now() - d.getTime();
+  const sec = Math.round(diffMs / 1000);
+  if (sec < 60) return 'just now';
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.round(hr / 24);
+  if (day < 30) return `${day}d ago`;
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
