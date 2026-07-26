@@ -339,7 +339,19 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 	if auth == nil {
 		return time.Time{}, false
 	}
-	if hasUnauthorizedAuthFailure(auth) {
+	// Stop scheduling only for refresh-sourced permanent failures
+	// (Unavailable=true + NextRetryAfter zero — refreshAuthForRequest's
+	// permanent branch sets exactly this combination). Request-side
+	// invalid_grant cooldowns must remain schedulable so proactive
+	// refresh can recover them early (codex review):
+	//   - Single-model all-cooldown: Unavailable=true + non-zero
+	//     NextRetryAfter → falls through.
+	//   - Multi-model partial cooldown: Unavailable=false + zero
+	//     NextRetryAfter (a clean model keeps the auth available) →
+	//     falls through. Without the Unavailable check, the cooled
+	//     model's LastError would unschedule the auth and prevent
+	//     early recovery of the cooled model.
+	if auth.Unavailable && hasPermanentAuthFailure(auth) && auth.NextRetryAfter.IsZero() {
 		return time.Time{}, false
 	}
 

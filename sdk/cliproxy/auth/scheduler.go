@@ -835,13 +835,23 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
 
-// availabilitySummaryLocked summarizes total candidates, cooldown count, and earliest retry time.
+// availabilitySummaryLocked summarizes total candidates, unavailable count
+// (cooldown + permanently blocked), and earliest cooldown retry time.
+//
+// Permanently blocked auths (e.g. refresh returned 400 invalid_grant,
+// mapped to scheduledStateBlocked by upsertEntryLocked) are counted as
+// unavailable so that a mix of dead + cooldown auths still reports a
+// cooldown error with the cooldown auths' earliest retry time, instead
+// of falling through to a generic auth_unavailable error that hides the
+// cooldown recovery window from callers. Only scheduledStateCooldown
+// entries contribute to earliest; scheduledStateBlocked entries have
+// zero nextRetryAt and would not affect earliest anyway.
 func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth) bool) (int, int, time.Time) {
 	if m == nil {
 		return 0, 0, time.Time{}
 	}
 	total := 0
-	cooldownCount := 0
+	unavailableCount := 0
 	earliest := time.Time{}
 	for _, entry := range m.entries {
 		if predicate != nil && !predicate(entry) {
@@ -851,15 +861,19 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 		if entry == nil || entry.auth == nil {
 			continue
 		}
+		if entry.state == scheduledStateReady {
+			continue
+		}
+		// Both cooldown and permanently blocked count as unavailable.
+		unavailableCount++
 		if entry.state != scheduledStateCooldown {
 			continue
 		}
-		cooldownCount++
 		if !entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
 			earliest = entry.nextRetryAt
 		}
 	}
-	return total, cooldownCount, earliest
+	return total, unavailableCount, earliest
 }
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.
