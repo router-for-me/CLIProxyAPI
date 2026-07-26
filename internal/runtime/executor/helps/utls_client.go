@@ -17,23 +17,19 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-// utlsReadIdleTimeout is a liveness health check, not a request timeout: when a
-// pooled connection has been silent for this long, an HTTP/2 PING is sent and
-// the connection is closed only if the peer does not answer. This detects
-// connections silently dropped by NATs/firewalls, which per-request dialing
-// never had to worry about.
-const utlsReadIdleTimeout = 60 * time.Second
-
 // utlsIdleConnTimeout closes a pooled connection with no active streams after
 // this long, matching http.DefaultTransport's idle-connection hygiene that the
-// rest of the codebase already relies on.
+// rest of the codebase already relies on. It never affects a connection with
+// an in-flight stream. Keeping it well below typical NAT/firewall mapping
+// expiry (5-15 min) also ensures requests are not routed onto connections
+// whose path was silently dropped while idle.
 const utlsIdleConnTimeout = 90 * time.Second
 
 // utlsRoundTripper implements http.RoundTripper using utls with Chrome fingerprint
 // to bypass Cloudflare's TLS fingerprinting on Anthropic domains.
-// Connections are pooled per host: when every pooled connection is at its
-// concurrent-stream limit, an additional connection is dialed and kept
-// alongside the others (never replacing them).
+// Connections are pooled per destination authority (host:port): when every
+// pooled connection is at its concurrent-stream limit, an additional
+// connection is dialed and kept alongside the others (never replacing them).
 type utlsRoundTripper struct {
 	mu     sync.Mutex
 	conns  map[string][]*http2.ClientConn
@@ -77,15 +73,15 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	}
 }
 
-// reserveConnLocked prunes dead connections for host and reserves a stream on
-// the first pooled connection that can take one. Callers must hold t.mu.
-// ReserveNewRequest (rather than CanTakeNewRequest) is used so the slot cannot
-// be stolen between selection and RoundTrip; the reservation is consumed by
-// the next RoundTrip on that connection.
-func (t *utlsRoundTripper) reserveConnLocked(host string) *http2.ClientConn {
-	kept := t.conns[host][:0]
+// reserveConnLocked prunes dead connections for addr (host:port) and reserves
+// a stream on the first pooled connection that can take one. Callers must hold
+// t.mu. ReserveNewRequest (rather than CanTakeNewRequest) is used so the slot
+// cannot be stolen between selection and RoundTrip; the reservation is
+// consumed by the next RoundTrip on that connection.
+func (t *utlsRoundTripper) reserveConnLocked(addr string) *http2.ClientConn {
+	kept := t.conns[addr][:0]
 	var reserved *http2.ClientConn
-	for _, conn := range t.conns[host] {
+	for _, conn := range t.conns[addr] {
 		state := conn.State()
 		if state.Closed || state.Closing {
 			// Closed/closing connections terminate on their own once their
@@ -97,18 +93,18 @@ func (t *utlsRoundTripper) reserveConnLocked(host string) *http2.ClientConn {
 			reserved = conn
 		}
 	}
-	t.conns[host] = kept
+	t.conns[addr] = kept
 	return reserved
 }
 
 func (t *utlsRoundTripper) getOrCreateConnection(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
 	for {
 		t.mu.Lock()
-		if conn := t.reserveConnLocked(host); conn != nil {
+		if conn := t.reserveConnLocked(addr); conn != nil {
 			t.mu.Unlock()
 			return conn, nil
 		}
-		if inflight, ok := t.dials[host]; ok {
+		if inflight, ok := t.dials[addr]; ok {
 			t.mu.Unlock()
 			select {
 			case <-inflight:
@@ -118,19 +114,19 @@ func (t *utlsRoundTripper) getOrCreateConnection(ctx context.Context, host, addr
 			continue
 		}
 		done := make(chan struct{})
-		t.dials[host] = done
+		t.dials[addr] = done
 		t.mu.Unlock()
 
 		conn, err := t.createConnection(ctx, host, addr)
 
 		t.mu.Lock()
-		delete(t.dials, host)
+		delete(t.dials, addr)
 		close(done)
 		if err != nil {
 			t.mu.Unlock()
 			return nil, err
 		}
-		t.conns[host] = append(t.conns[host], conn)
+		t.conns[addr] = append(t.conns[addr], conn)
 		if !conn.ReserveNewRequest() {
 			// Freshly dialed connections always have free slots; defensive.
 			t.mu.Unlock()
@@ -164,8 +160,10 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
 		return nil, err
 	}
 
+	// No ReadIdleTimeout: its PING health check would also fire during long
+	// silent periods of an active stream and could close the connection,
+	// which conflicts with the no-post-connect-timeout policy.
 	tr := &http2.Transport{
-		ReadIdleTimeout: utlsReadIdleTimeout,
 		IdleConnTimeout: utlsIdleConnTimeout,
 	}
 	h2Conn, err := tr.NewClientConn(tlsConn)
@@ -197,10 +195,10 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 		// are actually closed or draining (GOAWAY).
 		if state := h2Conn.State(); state.Closed || state.Closing {
 			t.mu.Lock()
-			conns := t.conns[hostname]
+			conns := t.conns[addr]
 			for i, cached := range conns {
 				if cached == h2Conn {
-					t.conns[hostname] = append(conns[:i], conns[i+1:]...)
+					t.conns[addr] = append(conns[:i], conns[i+1:]...)
 					break
 				}
 			}
