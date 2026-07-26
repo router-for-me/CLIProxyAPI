@@ -17,13 +17,28 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+// utlsReadIdleTimeout is a liveness health check, not a request timeout: when a
+// pooled connection has been silent for this long, an HTTP/2 PING is sent and
+// the connection is closed only if the peer does not answer. This detects
+// connections silently dropped by NATs/firewalls, which per-request dialing
+// never had to worry about.
+const utlsReadIdleTimeout = 60 * time.Second
+
+// utlsIdleConnTimeout closes a pooled connection with no active streams after
+// this long, matching http.DefaultTransport's idle-connection hygiene that the
+// rest of the codebase already relies on.
+const utlsIdleConnTimeout = 90 * time.Second
+
 // utlsRoundTripper implements http.RoundTripper using utls with Chrome fingerprint
 // to bypass Cloudflare's TLS fingerprinting on Anthropic domains.
+// Connections are pooled per host: when every pooled connection is at its
+// concurrent-stream limit, an additional connection is dialed and kept
+// alongside the others (never replacing them).
 type utlsRoundTripper struct {
-	mu          sync.Mutex
-	connections map[string]*http2.ClientConn
-	dials       map[string]chan struct{}
-	dialer      proxy.Dialer
+	mu     sync.Mutex
+	conns  map[string][]*http2.ClientConn
+	dials  map[string]chan struct{}
+	dialer proxy.Dialer
 }
 
 // utlsRoundTrippers caches one round tripper per proxy URL so HTTP/2
@@ -56,18 +71,42 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 		}
 	}
 	return &utlsRoundTripper{
-		connections: make(map[string]*http2.ClientConn),
-		dials:       make(map[string]chan struct{}),
-		dialer:      dialer,
+		conns:  make(map[string][]*http2.ClientConn),
+		dials:  make(map[string]chan struct{}),
+		dialer: dialer,
 	}
+}
+
+// reserveConnLocked prunes dead connections for host and reserves a stream on
+// the first pooled connection that can take one. Callers must hold t.mu.
+// ReserveNewRequest (rather than CanTakeNewRequest) is used so the slot cannot
+// be stolen between selection and RoundTrip; the reservation is consumed by
+// the next RoundTrip on that connection.
+func (t *utlsRoundTripper) reserveConnLocked(host string) *http2.ClientConn {
+	kept := t.conns[host][:0]
+	var reserved *http2.ClientConn
+	for _, conn := range t.conns[host] {
+		state := conn.State()
+		if state.Closed || state.Closing {
+			// Closed/closing connections terminate on their own once their
+			// remaining streams finish; dropping the reference is enough.
+			continue
+		}
+		kept = append(kept, conn)
+		if reserved == nil && conn.ReserveNewRequest() {
+			reserved = conn
+		}
+	}
+	t.conns[host] = kept
+	return reserved
 }
 
 func (t *utlsRoundTripper) getOrCreateConnection(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
 	for {
 		t.mu.Lock()
-		if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
+		if conn := t.reserveConnLocked(host); conn != nil {
 			t.mu.Unlock()
-			return h2Conn, nil
+			return conn, nil
 		}
 		if inflight, ok := t.dials[host]; ok {
 			t.mu.Unlock()
@@ -82,7 +121,7 @@ func (t *utlsRoundTripper) getOrCreateConnection(ctx context.Context, host, addr
 		t.dials[host] = done
 		t.mu.Unlock()
 
-		h2Conn, err := t.createConnection(ctx, host, addr)
+		conn, err := t.createConnection(ctx, host, addr)
 
 		t.mu.Lock()
 		delete(t.dials, host)
@@ -91,13 +130,14 @@ func (t *utlsRoundTripper) getOrCreateConnection(ctx context.Context, host, addr
 			t.mu.Unlock()
 			return nil, err
 		}
-		if previous, ok := t.connections[host]; ok && previous != h2Conn {
-			// Let in-flight streams on the replaced connection finish, then close it.
-			go func() { _ = previous.Shutdown(context.Background()) }()
+		t.conns[host] = append(t.conns[host], conn)
+		if !conn.ReserveNewRequest() {
+			// Freshly dialed connections always have free slots; defensive.
+			t.mu.Unlock()
+			continue
 		}
-		t.connections[host] = h2Conn
 		t.mu.Unlock()
-		return h2Conn, nil
+		return conn, nil
 	}
 }
 
@@ -124,7 +164,10 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
 		return nil, err
 	}
 
-	tr := &http2.Transport{}
+	tr := &http2.Transport{
+		ReadIdleTimeout: utlsReadIdleTimeout,
+		IdleConnTimeout: utlsIdleConnTimeout,
+	}
 	h2Conn, err := tr.NewClientConn(tlsConn)
 	if err != nil {
 		tlsConn.Close()
@@ -149,19 +192,19 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	resp, err := h2Conn.RoundTrip(req)
 	if err != nil {
-		// Only evict when the connection itself is unusable; stream-level
-		// errors must not tear down a shared connection other requests are
-		// using. A cancelled request never evicts: CanTakeNewRequest also
-		// reports false while the connection is merely at its concurrent
-		// stream limit, which is not a connection failure.
-		if req.Context().Err() == nil && !h2Conn.CanTakeNewRequest() {
+		// Stream-level errors (e.g. caller cancellation) must not evict a
+		// connection other requests are using; only drop connections that
+		// are actually closed or draining (GOAWAY).
+		if state := h2Conn.State(); state.Closed || state.Closing {
 			t.mu.Lock()
-			if cached, ok := t.connections[hostname]; ok && cached == h2Conn {
-				delete(t.connections, hostname)
+			conns := t.conns[hostname]
+			for i, cached := range conns {
+				if cached == h2Conn {
+					t.conns[hostname] = append(conns[:i], conns[i+1:]...)
+					break
+				}
 			}
 			t.mu.Unlock()
-			// Graceful shutdown: waits for remaining in-flight streams.
-			go func() { _ = h2Conn.Shutdown(context.Background()) }()
 		}
 		return nil, err
 	}
@@ -209,15 +252,18 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var utlsRT http.RoundTripper = sharedUtlsRoundTripper(proxyURL)
+	var utlsRT http.RoundTripper
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
+		utlsRT = sharedUtlsRoundTripper(proxyURL)
 		if transport := sharedProxyTransport(proxyURL); transport != nil {
 			standardTransport = transport
 		}
 	} else if ctxRoundTripper != nil {
 		utlsRT = ctxRoundTripper
 		standardTransport = ctxRoundTripper
+	} else {
+		utlsRT = sharedUtlsRoundTripper("")
 	}
 
 	client := &http.Client{
