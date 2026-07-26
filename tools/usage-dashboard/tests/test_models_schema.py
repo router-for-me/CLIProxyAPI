@@ -10,11 +10,16 @@ from usage_dashboard import models  # noqa: F401  (registers tables)
 from usage_dashboard.storage import _TARGET_COLUMNS, run_migrations
 
 
+def _ensure_collector_state(conn):
+    conn.execute("CREATE TABLE IF NOT EXISTS collector_state(key TEXT PRIMARY KEY, value TEXT)")
+
+
 def _applied_schema(db_path: str) -> dict[str, list[str]]:
     """Return {table_name: [column_names]} from an applied v4 DB."""
     cfg = {"data_dir": str(Path(db_path).parent)}
     run_migrations(cfg)
     conn = sqlite3.connect(db_path)
+    _ensure_collector_state(conn)
     conn.row_factory = sqlite3.Row
     out = {}
     for table in ("usage_events", "key_aliases", "collector_state", "schema_meta"):
