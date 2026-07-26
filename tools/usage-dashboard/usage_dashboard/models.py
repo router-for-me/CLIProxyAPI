@@ -5,34 +5,33 @@ Declarative only — schema creation and migration stay in storage.py
 tests/test_models_schema.py guards drift.
 """
 
-from typing import Optional
 
-from sqlmodel import SQLModel, Field
+from sqlmodel import Field, SQLModel
 
 
 class UsageEvent(SQLModel, table=True):
     __tablename__ = "usage_events"
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     event_key: str = Field(unique=True, index=True)
     timestamp: str
     ts_epoch: float = Field(index=True)
     utc_date: str = Field(index=True)
     utc_hour: str = Field(index=True)
-    request_id: Optional[str] = None
-    account_hash: Optional[str] = Field(default=None, index=True)
-    provider: Optional[str] = None
-    model: Optional[str] = Field(default=None, index=True)
-    alias: Optional[str] = None
-    endpoint: Optional[str] = None
-    auth_type: Optional[str] = None
-    executor_type: Optional[str] = None
-    service_tier: Optional[str] = None
-    reasoning_effort: Optional[str] = None
+    request_id: str | None = None
+    account_hash: str | None = Field(default=None, index=True)
+    provider: str | None = None
+    model: str | None = Field(default=None, index=True)
+    alias: str | None = None
+    endpoint: str | None = None
+    auth_type: str | None = None
+    executor_type: str | None = None
+    service_tier: str | None = None
+    reasoning_effort: str | None = None
     failed: int = 0
-    fail_status: Optional[int] = 0
-    latency_ms: Optional[int] = 0
-    ttft_ms: Optional[int] = 0
+    fail_status: int | None = 0
+    latency_ms: int | None = 0
+    ttft_ms: int | None = 0
     input_tokens: int = 0
     output_tokens: int = 0
     reasoning_tokens: int = 0

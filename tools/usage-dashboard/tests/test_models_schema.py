@@ -3,8 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-import pytest
-from sqlmodel import SQLModel, create_engine
+from sqlmodel import SQLModel
 
 from usage_dashboard import models  # noqa: F401  (registers tables)
 from usage_dashboard.storage import _TARGET_COLUMNS, run_migrations
