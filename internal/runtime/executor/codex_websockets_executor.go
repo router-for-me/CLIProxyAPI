@@ -142,6 +142,15 @@ func (e *CodexAutoExecutor) UpstreamDisconnectChan(sessionID string) <-chan erro
 // the payload — while ExecuteStream keeps ownership of the complete websocket
 // normalization and session lifecycle. OpenAI image requests are excluded so
 // they keep their specialized HTTP execution path.
+//
+// The probe deliberately reuses the plugin-backed translation pipeline:
+// request-normalizer plugins (e.g. examples/plugin/codex-service-tier) inject
+// service_tier through those hooks, so bypassing them would hide plugin-set
+// priority from the routing decision. Normalize hooks already run more than
+// once per request via translateCodexRequestPair (original + active payload),
+// so idempotent hooks are an existing contract; if a hook still diverges
+// between probe and execution, only the transport choice is affected — the
+// payload sent upstream is always the executor's own resolution.
 func codexPriorityWebsocketEligible(cfg *config.Config, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) bool {
 	if !codexWebsocketsEnabled(auth) || isCodexOpenAIImageRequest(opts) {
 		return false
