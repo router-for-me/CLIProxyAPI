@@ -249,12 +249,19 @@ func TestManager_Execute_UnauthorizedRefreshFailureFallsBackToNextAuth(t *testin
 	if !ok || updated == nil {
 		t.Fatalf("primary auth missing after failed refresh")
 	}
-	state := updated.ModelStates[model]
-	if state == nil || !state.Unavailable {
-		t.Fatalf("expected primary model to be suspended after refresh failure")
+	// Refresh returned a permanent failure (401), so refreshAuthForRequest's
+	// permanent branch set Unavailable=true + zero NextRetryAfter + permanent
+	// LastError. MarkResult's early-skip for refresh-sourced permanent
+	// failures preserves this marker instead of overwriting it with a
+	// transient 401 model cooldown (codex review on 358d49b2).
+	if !updated.Unavailable {
+		t.Fatalf("expected primary auth to be permanently unavailable after refresh failure")
 	}
-	if state.StatusMessage != "unauthorized" && (state.LastError == nil || state.LastError.StatusCode() != http.StatusUnauthorized) {
-		t.Fatalf("expected unauthorized suspension, got state=%+v", state)
+	if !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected primary auth NextRetryAfter to stay zero (permanent marker preserved), got %v", updated.NextRetryAfter)
+	}
+	if !hasPermanentAuthFailure(updated) {
+		t.Fatalf("expected primary auth to carry permanent failure marker, got LastError=%+v", updated.LastError)
 	}
 }
 

@@ -87,6 +87,15 @@ type Auth struct {
 	NextRefreshAfter time.Time `json:"next_refresh_after"`
 	// NextRetryAfter is the earliest time a retry should retrigger.
 	NextRetryAfter time.Time `json:"next_retry_after"`
+	// PermanentRefreshFailure marks an auth as permanently failed by the
+	// refresh path (e.g. 400 invalid_grant with revoked refresh token).
+	// Set ONLY by refreshAuthForRequest's permanent branch; never set by
+	// request-side failure paths (applyAuthFailureState), which can
+	// produce the same Unavailable=true + zero NextRetryAfter shape under
+	// disable-cooling but are transient. This field is the discriminator
+	// that lets hasPermanentAuthFailure distinguish refresh-sourced
+	// permanent failures from disable-cooling transient failures.
+	PermanentRefreshFailure bool `json:"permanent_refresh_failure,omitempty"`
 	// ModelStates tracks per-model runtime availability data.
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
 
