@@ -847,6 +847,16 @@ func (m *Manager) cooldownStateSnapshot() ([]CooldownStateRecord, CooldownStateS
 	return records, store
 }
 
+// CooldownStateSnapshot returns a live snapshot of every auth/model pair
+// currently in cooldown. Returns nil when no cooldown store is configured
+// (e.g. cooldown persistence disabled). Safe to call concurrently with the
+// scheduler/selector. Used by the management API to surface operating
+// cooldowns to the dashboard.
+func (m *Manager) CooldownStateSnapshot() []CooldownStateRecord {
+	records, _ := m.cooldownStateSnapshot()
+	return records
+}
+
 func (m *Manager) cooldownStateRecordsForAuthLocked(auth *Auth, now time.Time) []CooldownStateRecord {
 	if auth == nil || auth.ID == "" || auth.Disabled || auth.Status == StatusDisabled || m.cooldownDisabledForAuth(auth) {
 		return nil

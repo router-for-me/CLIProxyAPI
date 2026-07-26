@@ -1028,6 +1028,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage-stats/filters", s.mgmt.GetUsageFilters)
 		mgmt.GET("/usage-windows/:api_key_id", s.mgmt.GetUsageWindows)
 
+		// Live snapshot of upstream auth/model pairs currently in cooldown.
+		// Read-only; the dashboard's per-row "Reset" button calls the
+		// existing POST /v0/management/reset-quota route with auth_index.
+		mgmt.GET("/cooldown-providers", s.mgmt.GetCooldownProviders)
+
 		// Operator-customizable error response text, keyed by HTTP status code.
 		// The preview route is POST because it accepts a candidate body to
 		// render (GET would conflict with the "/:code" pattern and has no

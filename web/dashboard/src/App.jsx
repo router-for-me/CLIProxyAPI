@@ -8,6 +8,7 @@ import LoginPage from './pages/LoginPage.jsx';
 import ApiKeysPage from './pages/ApiKeysPage.jsx';
 import ApiKeyDetailPage from './pages/ApiKeyDetailPage.jsx';
 import UsageStatsPage from './pages/UsageStatsPage.jsx';
+import ErrorsPage from './pages/ErrorsPage.jsx';
 import InternalUsersPage from './pages/InternalUsersPage.jsx';
 import InternalUserDetailPage from './pages/InternalUserDetailPage.jsx';
 import ModelsCatalogPage from './pages/ModelsCatalogPage.jsx';
@@ -17,6 +18,7 @@ import ApiTokensPage from './pages/ApiTokensPage.jsx';
 import ApiTokenDetailPage from './pages/ApiTokenDetailPage.jsx';
 import DeveloperPage from './pages/DeveloperPage.jsx';
 import UpstreamProvidersPage from './pages/UpstreamProvidersPage.jsx';
+import CooldownProvidersPage from './pages/CooldownProvidersPage.jsx';
 import ManageCpaLayout from './pages/manage-cpa/ManageCpaLayout.jsx';
 import OverviewTab from './pages/manage-cpa/OverviewTab.jsx';
 import ProvidersTab from './pages/manage-cpa/ProvidersTab.jsx';
@@ -156,6 +158,8 @@ export default function App() {
             <Route path="/" element={<ApiKeysPage />} />
             <Route path="/api-keys/:id" element={<ApiKeyDetailPage />} />
             <Route path="/usage" element={<UsageStatsPage />} />
+            <Route path="/errors" element={<ErrorsPage />} />
+            <Route path="/cooldown-providers" element={<CooldownProvidersPage />} />
             <Route path="/internal-users" element={<InternalUsersPage />} />
             <Route path="/internal-users/:id" element={<InternalUserDetailPage />} />
             <Route path="/models" element={<ModelsCatalogPage />} />

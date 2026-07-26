@@ -99,15 +99,18 @@ export default function Sidebar({
   );
 }
 
-// NAV_GROUPS — two logical sections. "Overview" groups the operate-the-service
-// items; "System" holds settings. Order matches the prior flat list so muscle
-// memory transfers. Sign out is footer-only and not duplicated here.
+// NAV_GROUPS — three logical sections. "Overview" groups the operate-the-service
+// items; "Analysis" groups the read-only observability surfaces — Usage Stats
+// and Errors. Errors was split out of the Usage Stats tab into its own page so
+// operators can triage failures without losing the events view, and lives
+// next to Usage Stats in the sidebar so the two pages share a context.
+// "System" holds settings. Order matches the prior flat list so muscle memory
+// transfers. Sign out is footer-only and not duplicated here.
 const NAV_GROUPS = [
   {
     label: 'Overview',
     items: [
       { to: '/', label: 'API Keys', icon: 'key', end: true },
-      { to: '/usage', label: 'Usage Stats', icon: 'chart' },
       { to: '/internal-users', label: 'Internal Users', icon: 'users' },
       { to: '/models', label: 'Models Catalog', icon: 'cube' },
       { to: '/error-messages', label: 'Error Messages', icon: 'alert' },
@@ -115,6 +118,14 @@ const NAV_GROUPS = [
       { to: '/upstream-providers', label: 'Upstream Providers', icon: 'layers' },
       { to: '/developer', label: 'Developer', icon: 'code' },
       { to: '/manage-cpa', label: 'Manage CPA', icon: 'cpa' },
+    ],
+  },
+  {
+    label: 'Analysis',
+    items: [
+      { to: '/usage', label: 'Usage Stats', icon: 'chart' },
+      { to: '/errors', label: 'Errors', icon: 'bug' },
+      { to: '/cooldown-providers', label: 'Cooldown Providers', icon: 'snow' },
     ],
   },
   {
@@ -159,7 +170,9 @@ const ICON_MAP = {
   alert: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><path d="M8 1l7 13H1L8 1zM8 6v4M8 11.5v0.5" strokeLinecap="round" /></svg>,
   shield: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><path d="M8 1l6 2v5c0 3.5-2.5 6.5-6 7.5-3.5-1-6-4-6-7.5V3l6-2z" /><path d="M5.5 8l1.8 1.8L10.5 6.5" strokeLinecap="round" /></svg>,
   code: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6 4L2 8l4 4M10 4l4 4-4 4" /></svg>,
+  bug: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M4 8V6a4 4 0 0 1 8 0v2" /><path d="M3 8h10" /><path d="M4 8v3a3 3 0 0 0 3 3h2a3 3 0 0 0 3-3V8" /><path d="M2 6l2 1M14 6l-2 1M2 11l2-1M14 11l-2-1M6 2.5L5 1M10 2.5L11 1" /></svg>,
   cpa: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><rect x="2" y="2" width="5" height="5" rx="1" /><rect x="9" y="2" width="5" height="5" rx="1" /><rect x="2" y="9" width="5" height="5" rx="1" /><rect x="9" y="9" width="5" height="5" rx="1" /></svg>,
   layers: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round"><path d="M8 1l6 3-6 3-6-3 6-3zM2 8l6 3 6-3M2 11l6 3 6-3" /></svg>,
   gear: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="2" /><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3" strokeLinecap="round" /></svg>,
+  snow: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M8 1v14M1 8h14M3 3l10 10M13 3L3 13M8 3L6 1M8 3l2-2M8 13l-2 2M8 13l2 2M3 8L1 6M3 8l-2 2M13 8l2-2M13 8l2 2" /></svg>,
 };

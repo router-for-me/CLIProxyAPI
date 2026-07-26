@@ -290,6 +290,26 @@ export async function getUsageError(id) {
   return fetchJSON(`/usage-stats/errors/${encodeURIComponent(id)}`);
 }
 
+// --- Cooldown Providers ----------------------------------------------------
+
+// Live snapshot of upstream auth/model pairs currently in cooldown, sourced
+// in-memory from the auth manager (no persisted table). Returns
+// { records: [...] } where each row carries the auth's runtime Index so the
+// dashboard can call resetCooldownProvider(authIndex) without reconstruction.
+export async function getCooldownProviders() {
+  return fetchJSON('/cooldown-providers');
+}
+
+// Reset quota/cooldown routing state for one auth (e.g. "gemini#0").
+// Routes to the existing POST /v0/management/reset-quota backend handler so
+// the management surface stays a single source of truth for resets.
+export async function resetCooldownProvider(authIndex) {
+  return fetchJSON('/reset-quota', {
+    method: 'POST',
+    body: JSON.stringify({ auth_index: authIndex }),
+  });
+}
+
 // Distinct { api_keys: [{id, alias}], providers, models } observed in the
 // filter window. Used by the dashboard to populate dropdown filter menus so
 // the operator never types a free-text value (which is impossible against
