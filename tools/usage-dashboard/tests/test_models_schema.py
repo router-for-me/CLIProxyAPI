@@ -69,3 +69,17 @@ def test_schema_consistent_across_tables(tmp_path):
     declared = _sqlmodel_schema()
     # Exclude schema_meta from declared (it is internal to the migration runner)
     assert set(declared).issubset(set(applied))
+
+def test_schema_consistency_in_ci(tmp_path):
+    """Fail-fast in CI if SQLModel metadata drifts from the applied schema."""
+    db = tmp_path / "usage.sqlite"
+    applied = _applied_schema(str(db))
+    declared = _sqlmodel_schema()
+    for table_name, cols in declared.items():
+        applied_cols = set(applied[table_name])
+        declared_cols = set(cols)
+        assert applied_cols == declared_cols, (
+            f"Schema drift on {table_name}: "
+            f"missing_in_declared={applied_cols - declared_cols}, "
+            f"missing_in_applied={declared_cols - applied_cols}"
+        )
