@@ -34,6 +34,8 @@ type UsageEvent struct {
 	Model               string    `json:"model"`
 	Alias               string    `json:"alias,omitempty"`
 	Endpoint            string    `json:"endpoint,omitempty"`
+	ClientIP            string    `json:"client_ip,omitempty"`
+	ForwardedFor        string    `json:"forwarded_for,omitempty"`
 	AuthType            string    `json:"auth_type,omitempty"`
 	Source              string    `json:"source,omitempty"`
 	ReasoningEffort     string    `json:"reasoning_effort,omitempty"`
@@ -182,7 +184,7 @@ func (s *UsageStore) PricingTable() string {
 
 const usageEventColumnList = `
 	request_id, api_key_id, api_key_principal, user_id, provider, executor_type, model,
-	alias, endpoint, auth_type, source, reasoning_effort, service_tier,
+	alias, endpoint, client_ip, forwarded_for, auth_type, source, reasoning_effort, service_tier,
 	response_service_tier, input_tokens, output_tokens, reasoning_tokens,
 	cached_tokens, cache_creation_tokens, total_tokens, cost_usd, latency_ms,
 	ttft_ms, failed, fail_status_code, generate, requested_at
@@ -208,11 +210,13 @@ func (s *UsageStore) InsertEvent(ctx context.Context, e UsageEvent) error {
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (%s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
-			$24, $25, $26, $27)
+			$24, $25, $26, $27, $28, $29)
 	`, s.eventsTable, usageEventColumnList),
 		e.RequestID, nullableString(e.APIKeyID), nullableString(principal),
 		nullableString(e.UserID),
-		e.Provider, e.ExecutorType, e.Model, e.Alias, e.Endpoint, e.AuthType,
+		e.Provider, e.ExecutorType, e.Model, e.Alias, e.Endpoint,
+		nullableString(e.ClientIP), nullableString(e.ForwardedFor),
+		e.AuthType,
 		e.Source, e.ReasoningEffort, e.ServiceTier, e.ResponseServiceTier,
 		e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens,
 		e.CacheCreationTokens, e.TotalTokens, e.CostUSD, e.LatencyMs, e.TTFTMs,
@@ -240,18 +244,18 @@ func (s *UsageStore) BatchInsertEvents(ctx context.Context, events []UsageEvent)
 	b.WriteString(" (")
 	b.WriteString(usageEventColumnList)
 	b.WriteString(") VALUES ")
-	args := make([]any, 0, len(events)*27)
+	args := make([]any, 0, len(events)*29)
 	for i, ev := range events {
 		if i > 0 {
 			b.WriteByte(',')
 		}
 		b.WriteByte('(')
-		for j := 1; j <= 27; j++ {
+		for j := 1; j <= 29; j++ {
 			if j > 1 {
 				b.WriteByte(',')
 			}
 			b.WriteByte('$')
-			b.WriteString(itoa(i*27 + j))
+			b.WriteString(itoa(i*29 + j))
 		}
 		b.WriteByte(')')
 		if ev.RequestedAt.IsZero() {
@@ -266,7 +270,9 @@ func (s *UsageStore) BatchInsertEvents(ctx context.Context, events []UsageEvent)
 		}
 		args = append(args, ev.RequestID, nullableString(ev.APIKeyID), nullableString(principal),
 			nullableString(ev.UserID),
-			ev.Provider, ev.ExecutorType, ev.Model, ev.Alias, ev.Endpoint, ev.AuthType,
+			ev.Provider, ev.ExecutorType, ev.Model, ev.Alias, ev.Endpoint,
+			nullableString(ev.ClientIP), nullableString(ev.ForwardedFor),
+			ev.AuthType,
 			ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
 			ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
 			ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.LatencyMs, ev.TTFTMs,
@@ -902,6 +908,8 @@ type UsageEventRow struct {
 	Model               string  `json:"model"`
 	Alias               string  `json:"alias,omitempty"`
 	Endpoint            string  `json:"endpoint,omitempty"`
+	ClientIP            string  `json:"client_ip,omitempty"`
+	ForwardedFor        string  `json:"forwarded_for,omitempty"`
 	AuthType            string  `json:"auth_type,omitempty"`
 	Source              string  `json:"source,omitempty"`
 	ReasoningEffort     string  `json:"reasoning_effort,omitempty"`
@@ -933,7 +941,9 @@ type UsageEventRow struct {
 const eventRowSelectColumns = `
 	e.id, e.request_id, e.api_key_id,
 	COALESCE(NULLIF(k.key_alias, ''), k.name, '') AS key_alias,
-	e.provider, e.executor_type, e.model, e.alias, e.endpoint, e.auth_type,
+	e.provider, e.executor_type, e.model, e.alias, e.endpoint,
+	e.client_ip, e.forwarded_for,
+	e.auth_type,
 	e.source, e.reasoning_effort, e.service_tier, e.response_service_tier,
 	e.input_tokens, e.output_tokens, e.reasoning_tokens,
 	e.cached_tokens, e.cache_creation_tokens, e.total_tokens, e.cost_usd,
@@ -946,20 +956,32 @@ func (s *UsageStore) eventJoin() string {
 }
 
 // scanEventRow scans one row from the column order defined above. Shared by
-// SelectEvents and GetEvent so the two stay in sync.
+// SelectEvents and GetEvent so the two stay in sync. client_ip and
+// forwarded_for are nullable (added via idempotent ALTER; pre-existing rows
+// carry NULL), so they are scanned into sql.NullString and then resolved to
+// plain strings — mirroring how route_model is handled on the errors path.
 func scanEventRow(scanner interface {
 	Scan(dest ...any) error
 }) (UsageEventRow, error) {
 	var r UsageEventRow
+	var clientIP, forwardedFor sql.NullString
 	if err := scanner.Scan(
 		&r.ID, &r.RequestID, &r.APIKeyID, &r.KeyAlias,
-		&r.Provider, &r.ExecutorType, &r.Model, &r.Alias, &r.Endpoint, &r.AuthType,
+		&r.Provider, &r.ExecutorType, &r.Model, &r.Alias, &r.Endpoint,
+		&clientIP, &forwardedFor,
+		&r.AuthType,
 		&r.Source, &r.ReasoningEffort, &r.ServiceTier, &r.ResponseServiceTier,
 		&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens,
 		&r.CacheCreationTokens, &r.TotalTokens, &r.CostUSD, &r.LatencyMs, &r.TTFTMs,
 		&r.Failed, &r.FailStatusCode, &r.Generate, &r.RequestedAt,
 	); err != nil {
 		return UsageEventRow{}, err
+	}
+	if clientIP.Valid {
+		r.ClientIP = clientIP.String
+	}
+	if forwardedFor.Valid {
+		r.ForwardedFor = forwardedFor.String
 	}
 	return r, nil
 }

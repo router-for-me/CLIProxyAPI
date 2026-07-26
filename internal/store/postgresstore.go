@@ -541,6 +541,32 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: add usage_events.route_model column: %w", err)
 	}
+	// client_ip / forwarded_for record the requesting client's address for both
+	// usage_events and usage_errors so failed requests can be attributed to a
+	// source IP and multi-hop proxy chains stay auditable. client_ip comes from
+	// gin ClientIP() (honors trusted-proxy headers); forwarded_for is the raw
+	// X-Forwarded-For header captured at the edge. Idempotent ALTER so
+	// pre-existing stores pick the columns up on the next start.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS client_ip TEXT`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: add usage_events.client_ip column: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS forwarded_for TEXT`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: add usage_events.forwarded_for column: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS client_ip TEXT`, usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: add usage_errors.client_ip column: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS forwarded_for TEXT`, usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: add usage_errors.forwarded_for column: %w", err)
+	}
 
 	usageWindowsTable := s.fullTableName(s.cfg.UsageWindowsTable)
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`

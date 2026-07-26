@@ -68,6 +68,15 @@ type Record struct {
 	// endpoint), which is otherwise impossible to reconstruct for failed
 	// attempts.
 	Endpoint string
+	// ClientIP is the client TCP address as resolved by gin (honors reverse
+	// proxy headers like X-Forwarded-For / X-Real-IP). Persisted on both
+	// usage_events and usage_errors so failed requests can be attributed to a
+	// source IP.
+	ClientIP string
+	// ForwardedFor is the raw X-Forwarded-For header captured at the edge,
+	// kept separately so multi-hop proxy chains remain auditable even when
+	// gin collapses the chained addresses into a single ClientIP.
+	ForwardedFor string
 }
 
 // Failure holds HTTP failure metadata for an upstream request attempt.

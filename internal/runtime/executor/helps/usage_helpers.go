@@ -28,6 +28,8 @@ type UsageReporter struct {
 	alias        string
 	routeModel   string
 	endpoint     string
+	clientIP     string
+	forwardedFor string
 	authID       string
 	authIndex    string
 	authType     string
@@ -64,17 +66,20 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	if alias == "" {
 		alias = model
 	}
+	clientIP, forwardedFor := clientInfoFromContext(ctx)
 	reporter := &UsageReporter{
-		provider:    provider,
-		model:       model,
-		alias:       strings.TrimSpace(alias),
-		requestedAt: time.Now(),
-		apiKey:      apiKey,
-		source:      resolveUsageSource(auth, apiKey),
-		authType:    resolveUsageAuthType(auth),
-		reasoning:   usage.ReasoningEffortFromContext(ctx),
-		serviceTier: usage.ServiceTierFromContext(ctx),
-		generate:    usage.GenerateFromContext(ctx),
+		provider:     provider,
+		model:        model,
+		alias:        strings.TrimSpace(alias),
+		requestedAt:  time.Now(),
+		apiKey:       apiKey,
+		source:       resolveUsageSource(auth, apiKey),
+		authType:     resolveUsageAuthType(auth),
+		reasoning:    usage.ReasoningEffortFromContext(ctx),
+		serviceTier:  usage.ServiceTierFromContext(ctx),
+		generate:     usage.GenerateFromContext(ctx),
+		clientIP:     clientIP,
+		forwardedFor: forwardedFor,
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -298,6 +303,8 @@ func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, d
 		Alias:               r.alias,
 		RouteModel:          r.routeModel,
 		Endpoint:            r.endpoint,
+		ClientIP:            r.clientIP,
+		ForwardedFor:        r.forwardedFor,
 		Source:              r.source,
 		APIKey:              r.apiKey,
 		AuthID:              r.authID,
@@ -433,6 +440,26 @@ func APIKeyFromContext(ctx context.Context) string {
 		}
 	}
 	return ""
+}
+
+// clientInfoFromContext extracts the client TCP address (via gin.ClientIP, which
+// honors X-Forwarded-For / X-Real-IP at the trusted-proxy boundary) and the raw
+// X-Forwarded-For header from the gin context that the request handler injected
+// under the "gin" key. Both are persisted on usage_events / usage_errors so a
+// failed request can be attributed to a source IP, and multi-hop proxy chains
+// remain auditable even when gin collapses them into a single ClientIP.
+// Returns empty strings when no gin context is wired in (e.g. direct SDK uses
+// or tests that inject a request-less gin.Context).
+func clientInfoFromContext(ctx context.Context) (clientIP, forwardedFor string) {
+	if ctx == nil {
+		return "", ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil {
+		return "", ""
+	}
+	return strings.TrimSpace(ginCtx.ClientIP()),
+		strings.TrimSpace(ginCtx.GetHeader("X-Forwarded-For"))
 }
 
 func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
