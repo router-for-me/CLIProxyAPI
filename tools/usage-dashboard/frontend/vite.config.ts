@@ -10,6 +10,7 @@ export default defineConfig({
       "/static": "http://127.0.0.1:8320",
     },
   },
+  // @ts-expect-error - test config is a vitest extension
   test: {
     environment: "jsdom",
     globals: true,
