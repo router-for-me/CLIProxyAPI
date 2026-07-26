@@ -98,6 +98,9 @@ func antigravityReasoningReplayClientSessionKey(ctx context.Context, req cliprox
 			return "prompt-cache:" + value
 		}
 	}
+	if value := helps.DerivedSessionID(opts.Metadata, req.Metadata); value != "" {
+		return "derived:" + value
+	}
 	return ""
 }
 

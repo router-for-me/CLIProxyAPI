@@ -157,6 +157,22 @@ func New(homeCfg config.HomeConfig) *Client {
 	}
 }
 
+// NewLifetime creates a fresh client while preserving cluster failover state.
+func (c *Client) NewLifetime() *Client {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return &Client{
+		homeCfg:           c.homeCfg,
+		seedHost:          c.seedHost,
+		seedPort:          c.seedPort,
+		clusterNodes:      append([]clusterNode(nil), c.clusterNodes...),
+		reconnectFailures: c.reconnectFailures,
+	}
+}
+
 func (c *Client) Enabled() bool {
 	if c == nil {
 		return false
@@ -1568,11 +1584,17 @@ func (c *Client) RunConfigSubscriberLifetime(ctx context.Context, onConfig func(
 
 	c.closeBootstrapPools()
 	if errEnsure := c.ensureClients(); errEnsure != nil {
+		if ctx.Err() == nil {
+			c.markReconnectFailure("connect")
+		}
 		return c.endConfigSubscriberLifetime(errEnsure)
 	}
 
 	raw, errGet := c.GetConfig(ctx)
 	if errGet != nil {
+		if ctx.Err() == nil {
+			c.markReconnectFailure("config fetch")
+		}
 		return c.endConfigSubscriberLifetime(errGet)
 	}
 	if errApply := onConfig(raw); errApply != nil {
@@ -1581,21 +1603,34 @@ func (c *Client) RunConfigSubscriberLifetime(ctx context.Context, onConfig func(
 
 	sub, errSubClient := c.subscriptionClient()
 	if errSubClient != nil {
+		if ctx.Err() == nil {
+			c.markReconnectFailure("subscribe client")
+		}
 		return c.endConfigSubscriberLifetime(errSubClient)
 	}
 	args, receiveTimeout := c.subscriptionParameters()
 	pubsub := sub.Subscribe(ctx, args...)
 	if pubsub == nil {
+		if ctx.Err() == nil {
+			c.markReconnectFailure("subscribe")
+		}
 		return c.endConfigSubscriberLifetime(ErrNotConnected)
 	}
 
 	if errACK := receiveSubscriptionACKs(ctx, pubsub, receiveTimeout, args[:1]); errACK != nil {
+		if ctx.Err() == nil {
+			c.markReconnectFailure("subscribe")
+		}
 		return c.endConfigSubscriberLifetimeWithSubscription(errACK, pubsub, "failed ACK")
 	}
 
 	if errProbe := c.rebuildCommandPoolAndProbe(ctx); errProbe != nil {
+		if ctx.Err() == nil {
+			c.markReconnectFailure("command probe")
+		}
 		return c.endConfigSubscriberLifetimeWithSubscription(errProbe, pubsub, "fresh command probe failure")
 	}
+	c.resetReconnectFailures()
 	c.heartbeatOK.Store(true)
 	if onReady != nil {
 		onReady()
@@ -1605,6 +1640,13 @@ func (c *Client) RunConfigSubscriberLifetime(ctx context.Context, onConfig func(
 		_, receiveTimeout = c.subscriptionParameters()
 		event, errReceive := pubsub.ReceiveTimeout(ctx, receiveTimeout)
 		if errReceive != nil {
+			if ctx.Err() == nil {
+				if isTimeoutError(errReceive) {
+					c.markSubscriptionTimeout()
+				} else {
+					c.markReconnectFailure("subscription")
+				}
+			}
 			return c.endConfigSubscriberLifetimeWithSubscription(errReceive, pubsub, "heartbeat loss")
 		}
 		switch msg := event.(type) {

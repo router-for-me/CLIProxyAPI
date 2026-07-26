@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -1205,6 +1206,55 @@ func TestApplyCodexPromptCacheHeadersSetsSessionIDAndLegacyConversation(t *testi
 	}
 	if got := headers.Get("Conversation_id"); got != "cache-1" {
 		t.Fatalf("Conversation_id = %s, want cache-1", got)
+	}
+}
+
+func TestApplyCodexPromptCacheHeadersUsesDerivedSessionUUID(t *testing.T) {
+	t.Parallel()
+
+	req := cliproxyexecutor.Request{
+		Model:    "gpt-5-codex",
+		Payload:  []byte(`{"input":"hello"}`),
+		Metadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:derived-root"},
+	}
+	body, headers := applyCodexPromptCacheHeaders(sdktranslator.FormatInteractions, req, []byte(`{"model":"gpt-5-codex"}`))
+	cacheKey := gjson.GetBytes(body, "prompt_cache_key").String()
+	if _, errParse := uuid.Parse(cacheKey); errParse != nil {
+		t.Fatalf("prompt_cache_key %q is not a UUID: %v", cacheKey, errParse)
+	}
+	if got := headers["session_id"]; len(got) != 1 || got[0] != cacheKey {
+		t.Fatalf("session_id = %#v, want [%q]", got, cacheKey)
+	}
+	if got := headers.Get("Conversation_id"); got != cacheKey {
+		t.Fatalf("Conversation_id = %q, want %q", got, cacheKey)
+	}
+}
+
+func TestApplyCodexPromptCacheHeadersKeepsExecutionSessionAcrossIncrementalRoots(t *testing.T) {
+	t.Parallel()
+
+	firstReq := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"input":"first"}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "connection-1",
+			cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:first-root",
+		},
+	}
+	secondReq := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"input":"second"}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "connection-1",
+			cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:second-root",
+		},
+	}
+	firstBody, _ := applyCodexPromptCacheHeaders(sdktranslator.FormatOpenAIResponse, firstReq, []byte(`{"model":"gpt-5-codex"}`))
+	secondBody, _ := applyCodexPromptCacheHeaders(sdktranslator.FormatOpenAIResponse, secondReq, []byte(`{"model":"gpt-5-codex"}`))
+	firstKey := gjson.GetBytes(firstBody, "prompt_cache_key").String()
+	secondKey := gjson.GetBytes(secondBody, "prompt_cache_key").String()
+	if firstKey == "" || firstKey != secondKey {
+		t.Fatalf("incremental websocket roots changed prompt cache key: first=%q second=%q", firstKey, secondKey)
 	}
 }
 
