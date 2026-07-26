@@ -72,7 +72,7 @@ class TestStorage(BaseTempData):
     def test_extended_indexes_exist(self):
         with st.db_connect(self.cfg) as conn:
             names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
-        for idx in ("idx_usage_ts", "idx_usage_model_ts", "idx_usage_provider_ts"):
+        for idx in ("idx_events_ts", "idx_events_hour_model", "idx_events_hour"):
             self.assertIn(idx, names)
 
     def test_migration_failure_leaves_prior_version_intact(self):
@@ -80,7 +80,7 @@ class TestStorage(BaseTempData):
             conn.execute("DELETE FROM schema_meta")
         original_migs = st.MIGRATIONS[:]
         original_sv = st.SCHEMA_VERSION
-        st.SCHEMA_VERSION = 4
+        st.SCHEMA_VERSION = 5
 
         def _failing(conn):
             raise Exception("migration failed")
@@ -89,7 +89,7 @@ class TestStorage(BaseTempData):
         try:
             with self.assertRaises(Exception):
                 st.run_migrations(self.cfg)
-            self.assertEqual(st.current_version(self.cfg), 3)
+            self.assertEqual(st.current_version(self.cfg), 4)
         finally:
             st.MIGRATIONS[:] = original_migs
             st.SCHEMA_VERSION = original_sv
@@ -607,6 +607,132 @@ class TestStaticAssets(BaseTempData):
         self.assertEqual(resp.status, 404)
 
 
+
+# ── Key Aliases tests ──────────────────────────────────────────────────
+
+
+class TestAliases(BaseTempData):
+    def test_initial_empty(self):
+        self.assertEqual(st.get_aliases(self.cfg), [])
+
+    def test_upsert_and_get(self):
+        st.upsert_alias(self.cfg, "hash1", "My Key")
+        aliases = st.get_aliases(self.cfg)
+        self.assertEqual(len(aliases), 1)
+        self.assertEqual(aliases[0]["account_hash"], "hash1")
+        self.assertEqual(aliases[0]["alias"], "My Key")
+
+    def test_upsert_update(self):
+        st.upsert_alias(self.cfg, "hash1", "Original")
+        st.upsert_alias(self.cfg, "hash1", "Updated")
+        aliases = st.get_aliases(self.cfg)
+        self.assertEqual(aliases[0]["alias"], "Updated")
+
+    def test_delete(self):
+        st.upsert_alias(self.cfg, "hash1", "My Key")
+        st.delete_alias(self.cfg, "hash1")
+        self.assertEqual(st.get_aliases(self.cfg), [])
+
+    def test_delete_nonexistent(self):
+        st.delete_alias(self.cfg, "nonexistent")
+        self.assertEqual(st.get_aliases(self.cfg), [])
+
+    def test_query_summary_accounts_with_alias(self):
+        col.insert_usage(self.cfg, [nrec(account_hash="hash1")])
+        st.upsert_alias(self.cfg, "ca978112ca1b", "My Key")
+        result = qy.query_summary(self.cfg, {"range": ["30d"]})
+        accounts = result["accounts"]
+        self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["account"], "My Key")
+
+    def test_query_accounts_with_alias(self):
+        col.insert_usage(self.cfg, [nrec(account_hash="hash1")])
+        st.upsert_alias(self.cfg, "ca978112ca1b", "My Key")
+        result = qy.query_accounts(self.cfg, {"range": ["30d"]})
+        self.assertEqual(result["accounts"][0]["account"], "My Key")
+
+    def test_query_requests_with_alias(self):
+        col.insert_usage(self.cfg, [nrec(account_hash="hash1")])
+        st.upsert_alias(self.cfg, "ca978112ca1b", "My Key")
+        result = qy.query_requests(self.cfg, {"range": ["30d"], "limit": ["10"]})
+        self.assertEqual(result["requests"][0]["account"], "My Key")
+
+    def test_query_accounts_fallback_to_hash(self):
+        col.insert_usage(self.cfg, [nrec(account_hash="sha256:abcdef123456")])
+        result = qy.query_accounts(self.cfg, {"range": ["30d"]})
+        self.assertEqual(result["accounts"][0]["account"], "ca978112ca1b")
+
+
+class TestAliasesHTTP(BaseTempData):
+    def setUp(self):
+        super().setUp()
+        self._httpd = None
+
+    def _start(self, cfg):
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), srv.make_handler(cfg))
+        t = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        t.start()
+        return self._httpd.server_address[1]
+
+    def _get(self, port, path):
+        url = f"http://127.0.0.1:{port}{path}"
+        with urllib.request.urlopen(url) as resp:
+            return resp.status, resp.read().decode()
+
+    def _put(self, port, path, body):
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}{path}",
+            data=data, method="PUT",
+        )
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, resp.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def _delete(self, port, path):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}{path}",
+            method="DELETE",
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, resp.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def test_get_aliases_empty(self):
+        port = self._start(self.cfg)
+        s, body = self._get(port, "/api/v1/aliases")
+        self.assertEqual(s, 200)
+        self.assertEqual(json.loads(body), [])
+
+    def test_put_and_get(self):
+        port = self._start(self.cfg)
+        s, _ = self._put(port, "/api/v1/aliases",
+                         {"account_hash": "hash1", "alias": "My Key"})
+        self.assertEqual(s, 200)
+        s, body = self._get(port, "/api/v1/aliases")
+        self.assertEqual(s, 200)
+        data = json.loads(body)
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["account_hash"], "hash1")
+        self.assertEqual(data[0]["alias"], "My Key")
+
+    def test_delete(self):
+        port = self._start(self.cfg)
+        st.upsert_alias(self.cfg, "hash1", "My Key")
+        s, _ = self._delete(port, "/api/v1/aliases/hash1")
+        self.assertEqual(s, 200)
+        s, body = self._get(port, "/api/v1/aliases")
+        self.assertEqual(json.loads(body), [])
+
+    def test_put_missing_field_400(self):
+        port = self._start(self.cfg)
+        s, _ = self._put(port, "/api/v1/aliases", {"account_hash": "hash1"})
+        self.assertEqual(s, 400)
 # ── Bootstrap ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

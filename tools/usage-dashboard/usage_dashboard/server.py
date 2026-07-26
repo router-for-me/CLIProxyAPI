@@ -1,4 +1,5 @@
 """HTTP server: auth, routing, and stable error responses."""
+import datetime
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -6,6 +7,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import collector as col
 from . import config as cfg_mod
+from . import pricing as pr
 from . import query as qy
 from . import storage as st
 
@@ -17,6 +19,43 @@ def json_response(handler, payload, status=200):
     handler.send_header("Content-Length", str(len(body)))
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def csv_response(handler, rows, filename):
+    """Return rows as CSV download."""
+    import io
+    cols = ["Time", "Account", "Model", "Endpoint", "Provider",
+            "Input Tokens", "Output Tokens", "Cache Tokens", "Total Tokens",
+            "Cost", "Latency", "Status"]
+    buf = io.StringIO()
+    buf.write(",".join(cols) + "\n")
+    for r in rows:
+        cost = r.get("estimated_cost", 0) or 0
+        lat = r.get("latency_ms", 0) or 0
+        status = r.get("fail_status", "OK") if not r.get("failed") else f"FAIL {r.get('fail_status', '')}"
+        row = [
+            r.get("local_time", ""),
+            r.get("account", ""),
+            r.get("model", ""),
+            r.get("endpoint", ""),
+            r.get("provider", ""),
+            str(r.get("input_tokens", 0) or 0),
+            str(r.get("output_tokens", 0) or 0),
+            str((r.get("cached_tokens", 0) or 0) + (r.get("cache_read_tokens", 0) or 0) + (r.get("cache_creation_tokens", 0) or 0)),
+            str(r.get("total_tokens", 0) or 0),
+            f"{cost:.6f}",
+            str(lat),
+            status,
+        ]
+        buf.write(",".join(f'"{c}"' if "," in str(c) else str(c) for c in row) + "\n")
+    body = buf.getvalue().encode("utf-8")
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/csv; charset=utf-8")
+    handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", "no-store")
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -74,7 +113,7 @@ def _serve_static(handler, filename):
 
 
 _STATIC_MIME_CACHE = {"chart.4.4.1.min.js": _load_static_bytes("chart.4.4.1.min.js")}
-_PUBLIC_PATHS = {"/", "/index.html", "/api/v1/auth/check", "/static/chart.js"}
+_PUBLIC_PATHS = {"/", "/usage", "/index.html", "/login", "/api/v1/auth/check", "/static/chart.js"}
 
 
 def make_handler(cfg):
@@ -99,7 +138,7 @@ def make_handler(cfg):
                     return
             qs = parse_qs(parsed.query, keep_blank_values=True)
             try:
-                if parsed.path in ("/", "/index.html"):
+                if parsed.path in ("/", "/usage", "/index.html", "/login"):
                     self._serve_html()
                 elif parsed.path == "/api/v1/auth/check":
                     required = bool(cfg.get("dashboard_token"))
@@ -115,6 +154,10 @@ def make_handler(cfg):
                     json_response(self, qy.query_timeseries(cfg, qs))
                 elif parsed.path == "/api/v1/models":
                     json_response(self, qy.query_models(cfg, qs))
+                elif parsed.path == "/api/v1/providers":
+                    json_response(self, qy.query_providers(cfg, qs))
+                elif parsed.path == "/api/v1/endpoints":
+                    json_response(self, qy.query_endpoints(cfg, qs))
                 elif parsed.path == "/api/v1/accounts":
                     json_response(self, qy.query_accounts(cfg, qs))
                 elif parsed.path == "/api/v1/errors":
@@ -123,6 +166,32 @@ def make_handler(cfg):
                     json_response(self, qy.query_prices(cfg))
                 elif parsed.path == "/api/v1/requests":
                     json_response(self, qy.query_requests(cfg, qs))
+                elif parsed.path == "/api/v1/export":
+                    data = qy.query_requests(cfg, qs, no_limit=True)
+                    rows = data.get("requests", [])
+                    pricing_cfg = pr.load_pricing(cfg)
+                    for r in rows:
+                        ts_str = r.get("timestamp", "")
+                        ts = 0
+                        if ts_str:
+                            try:
+                                ts = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+                            except Exception:
+                                ts = 0
+                        iv = pr.price_for(pricing_cfg, r.get("model", ""), ts)
+                        if iv:
+                            cost = (
+                                (r.get("input_tokens", 0) or 0) * float(iv.get("input_per_million", 0)) / 1_000_000
+                                + (r.get("output_tokens", 0) or 0) * float(iv.get("output_per_million", 0)) / 1_000_000
+                                + (r.get("cached_tokens", 0) or 0) * float(iv.get("cached_input_per_million", 0)) / 1_000_000
+                                + (r.get("reasoning_tokens", 0) or 0) * float(iv.get("reasoning_per_million", 0)) / 1_000_000
+                            )
+                            r["estimated_cost"] = cost
+                        else:
+                            r["estimated_cost"] = 0
+                    csv_response(self, rows, "usage_export.csv")
+                elif parsed.path == "/api/v1/aliases":
+                    json_response(self, st.get_aliases(cfg))
                 elif parsed.path == "/api/health":
                     json_response(self, {"ok": True, "db_path": cfg_mod.db_path_for(cfg)})
                 elif parsed.path == "/api/summary":
@@ -143,6 +212,45 @@ def make_handler(cfg):
                     json_response(self, {"error": "pricing configuration error"}, 500)
                 else:
                     json_response(self, {"error": msg}, 400)
+            except Exception:
+                json_response(self, {"error": "internal error"}, 500)
+
+        def do_PUT(self):
+            parsed = urlparse(self.path)
+            if not self._gate():
+                return
+            try:
+                if parsed.path == "/api/v1/aliases":
+                    length = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(length).decode()) if length else {}
+                    account_hash = (body.get("account_hash") or "").strip()
+                    alias = (body.get("alias") or "").strip()
+                    if not account_hash or not alias:
+                        json_response(self, {"error": "account_hash and alias required"}, 400)
+                        return
+                    st.upsert_alias(cfg, account_hash, alias)
+                    json_response(self, {"ok": True})
+                else:
+                    json_response(self, {"error": "not found"}, 404)
+            except json.JSONDecodeError:
+                json_response(self, {"error": "invalid JSON"}, 400)
+            except Exception:
+                json_response(self, {"error": "internal error"}, 500)
+
+        def do_DELETE(self):
+            parsed = urlparse(self.path)
+            if not self._gate():
+                return
+            try:
+                if parsed.path.startswith("/api/v1/aliases/"):
+                    account_hash = parsed.path[len("/api/v1/aliases/"):]
+                    if not account_hash:
+                        json_response(self, {"error": "account_hash required"}, 400)
+                        return
+                    st.delete_alias(cfg, account_hash)
+                    json_response(self, {"ok": True})
+                else:
+                    json_response(self, {"error": "not found"}, 404)
             except Exception:
                 json_response(self, {"error": "internal error"}, 500)
 
