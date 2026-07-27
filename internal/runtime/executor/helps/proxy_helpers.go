@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"net/http"
@@ -16,52 +17,112 @@ import (
 )
 
 // proxyHTTPClientPoolSize is the number of reusable *http.Client values kept per
-// proxy URL + timeout pair. Keep this in the 5-10 range so concurrent upstream
-// calls can reuse keep-alive connections without creating a client per request.
+// cache entry. Keep this in the 5-10 range.
 const proxyHTTPClientPoolSize = 8
 
+// proxyHTTPClientPoolMaxEntries caps how many proxy/account pool entries are retained.
+const proxyHTTPClientPoolMaxEntries = 64
+
+// proxyHTTPClientPoolIdleTTL is how long an unused pool entry may stay cached
+// before its idle connections are closed and the entry is evicted.
+const proxyHTTPClientPoolIdleTTL = 5 * time.Minute
+
 type proxyHTTPClientPool struct {
-	clients []*http.Client
-	cursor  uint64
+	key       string
+	clients   []*http.Client
+	transport *http.Transport
+	cursor    uint64
+	lastUsed  atomic.Int64 // unix nano
 }
 
 func (p *proxyHTTPClientPool) get() *http.Client {
 	if p == nil || len(p.clients) == 0 {
 		return &http.Client{}
 	}
+	p.lastUsed.Store(time.Now().UnixNano())
 	idx := atomic.AddUint64(&p.cursor, 1) - 1
 	return p.clients[int(idx%uint64(len(p.clients)))]
 }
 
-var proxyHTTPClientPools sync.Map // map[string]*proxyHTTPClientPool
-
-func proxyHTTPClientPoolKey(proxyURL string, timeout time.Duration) string {
-	return fmt.Sprintf("%s\x00%d", proxyURL, int64(timeout))
+func (p *proxyHTTPClientPool) closeIdle() {
+	if p == nil || p.transport == nil {
+		return
+	}
+	p.transport.CloseIdleConnections()
 }
 
-// getPooledProxyHTTPClient returns a reusable client for the proxy URL.
-// Clients in the pool share one *http.Transport so idle connections are reused.
-func getPooledProxyHTTPClient(proxyURL string, timeout time.Duration) *http.Client {
-	key := proxyHTTPClientPoolKey(proxyURL, timeout)
-	if existing, ok := proxyHTTPClientPools.Load(key); ok {
-		return existing.(*proxyHTTPClientPool).get()
+type proxyHTTPClientCache struct {
+	mu      sync.Mutex
+	entries map[string]*list.Element
+	order   *list.List // front = most recently used
+	stopCh  chan struct{}
+	once    sync.Once
+}
+
+func newProxyHTTPClientCache() *proxyHTTPClientCache {
+	c := &proxyHTTPClientCache{
+		entries: make(map[string]*list.Element),
+		order:   list.New(),
+		stopCh:  make(chan struct{}),
 	}
+	c.once.Do(func() {
+		go c.reclaimLoop()
+	})
+	return c
+}
+
+var sharedProxyHTTPClientCache = newProxyHTTPClientCache()
+
+func (c *proxyHTTPClientCache) reclaimLoop() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			c.reclaimIdle(time.Now())
+		case <-c.stopCh:
+			return
+		}
+	}
+}
+
+func (c *proxyHTTPClientCache) reclaimIdle(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cutoff := now.Add(-proxyHTTPClientPoolIdleTTL).UnixNano()
+	for e := c.order.Back(); e != nil; {
+		prev := e.Prev()
+		pool := e.Value.(*proxyHTTPClientPool)
+		if pool.lastUsed.Load() >= cutoff {
+			break
+		}
+		c.removeElement(e)
+		pool.closeIdle()
+		e = prev
+	}
+}
+
+func (c *proxyHTTPClientCache) removeElement(e *list.Element) {
+	pool := e.Value.(*proxyHTTPClientPool)
+	delete(c.entries, pool.key)
+	c.order.Remove(e)
+}
+
+func (c *proxyHTTPClientCache) getOrCreate(key, proxyURL string, timeout time.Duration) *http.Client {
+	c.mu.Lock()
+	if el, ok := c.entries[key]; ok {
+		c.order.MoveToFront(el)
+		pool := el.Value.(*proxyHTTPClientPool)
+		c.mu.Unlock()
+		return pool.get()
+	}
+	c.mu.Unlock()
 
 	transport := buildProxyTransport(proxyURL)
 	if transport == nil {
 		return nil
 	}
-
-	// Tune keep-alive for long-lived proxy tunnels (WARP/HTTP CONNECT).
-	if transport.IdleConnTimeout == 0 || transport.IdleConnTimeout > 30*time.Second {
-		transport.IdleConnTimeout = 30 * time.Second
-	}
-	if transport.MaxIdleConns == 0 || transport.MaxIdleConns < 100 {
-		transport.MaxIdleConns = 100
-	}
-	if transport.MaxIdleConnsPerHost == 0 || transport.MaxIdleConnsPerHost < 32 {
-		transport.MaxIdleConnsPerHost = 32
-	}
+	tuneProxyTransport(transport)
 
 	clients := make([]*http.Client, 0, proxyHTTPClientPoolSize)
 	for i := 0; i < proxyHTTPClientPoolSize; i++ {
@@ -71,9 +132,106 @@ func getPooledProxyHTTPClient(proxyURL string, timeout time.Duration) *http.Clie
 		}
 		clients = append(clients, client)
 	}
-	pool := &proxyHTTPClientPool{clients: clients}
-	actual, _ := proxyHTTPClientPools.LoadOrStore(key, pool)
-	return actual.(*proxyHTTPClientPool).get()
+	pool := &proxyHTTPClientPool{
+		key:       key,
+		clients:   clients,
+		transport: transport,
+	}
+	pool.lastUsed.Store(time.Now().UnixNano())
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if el, ok := c.entries[key]; ok {
+		// Lost the race; reuse the winner and drop the temporary transport.
+		c.order.MoveToFront(el)
+		transport.CloseIdleConnections()
+		return el.Value.(*proxyHTTPClientPool).get()
+	}
+	el := c.order.PushFront(pool)
+	c.entries[key] = el
+	for c.order.Len() > proxyHTTPClientPoolMaxEntries {
+		oldest := c.order.Back()
+		if oldest == nil {
+			break
+		}
+		oldPool := oldest.Value.(*proxyHTTPClientPool)
+		c.removeElement(oldest)
+		oldPool.closeIdle()
+	}
+	return pool.get()
+}
+
+func tuneProxyTransport(transport *http.Transport) {
+	if transport == nil {
+		return
+	}
+	if transport.IdleConnTimeout == 0 || transport.IdleConnTimeout > 30*time.Second {
+		transport.IdleConnTimeout = 30 * time.Second
+	}
+	if transport.MaxIdleConns == 0 || transport.MaxIdleConns < 100 {
+		transport.MaxIdleConns = 100
+	}
+	if transport.MaxIdleConnsPerHost == 0 || transport.MaxIdleConnsPerHost < 32 {
+		transport.MaxIdleConnsPerHost = 32
+	}
+}
+
+func resolveUpstreamProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if auth != nil {
+		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
+			return proxyURL
+		}
+	}
+	if cfg != nil {
+		return strings.TrimSpace(cfg.ProxyURL)
+	}
+	return ""
+}
+
+func resolveUpstreamAccountScope(auth *cliproxyauth.Auth, proxyURL string) string {
+	if auth == nil {
+		return ""
+	}
+	// Only isolate by account when the auth carries its own proxy override.
+	// Global proxy-url traffic shares one pool across accounts.
+	if strings.TrimSpace(auth.ProxyURL) == "" {
+		return ""
+	}
+	if id := strings.TrimSpace(auth.ID); id != "" {
+		return id
+	}
+	if idx := strings.TrimSpace(auth.Index); idx != "" {
+		return idx
+	}
+	if fileName := strings.TrimSpace(auth.FileName); fileName != "" {
+		return fileName
+	}
+	return ""
+}
+
+func proxyHTTPClientPoolKey(proxyURL, accountScope string, timeout time.Duration) string {
+	return fmt.Sprintf("%s\x00%s\x00%d", proxyURL, accountScope, int64(timeout))
+}
+
+// getPooledProxyHTTPClient returns a reusable client for the proxy/account scope.
+func getPooledProxyHTTPClient(proxyURL, accountScope string, timeout time.Duration) *http.Client {
+	key := proxyHTTPClientPoolKey(proxyURL, accountScope, timeout)
+	return sharedProxyHTTPClientCache.getOrCreate(key, proxyURL, timeout)
+}
+
+// HTTPUpstreamDo is the unified upstream request helper.
+// It reuses a pooled http.Client/Transport keyed by effective proxy URL and,
+// when an auth-level proxy override is present, by account identity.
+func HTTPUpstreamDo(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, req *http.Request, timeout time.Duration) (*http.Response, error) {
+	if req == nil {
+		return nil, fmt.Errorf("http upstream: request is nil")
+	}
+	if ctx == nil {
+		ctx = req.Context()
+	}
+	httpReq := req.WithContext(ctx)
+	client := NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+	return client.Do(httpReq)
 }
 
 // NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
@@ -81,35 +239,15 @@ func getPooledProxyHTTPClient(proxyURL string, timeout time.Duration) *http.Clie
 // 2. Use cfg.ProxyURL if auth proxy is not configured
 // 3. Use RoundTripper from context if neither are configured
 //
-// When a proxy URL is configured, clients are taken from a small process-wide pool
-// (see proxyHTTPClientPoolSize) so keep-alive connections to the upstream proxy are reused.
-//
-// Parameters:
-//   - ctx: The context containing optional RoundTripper
-//   - cfg: The application configuration
-//   - auth: The authentication information
-//   - timeout: The client timeout (0 means no timeout)
-//
-// Returns:
-//   - *http.Client: An HTTP client with configured proxy or transport
+// When a proxy URL is configured, clients are taken from a process-wide pool with
+// LRU eviction and idle reclaim so keep-alive connections are reused.
 func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	// Priority 1: Use auth.ProxyURL if configured
-	var proxyURL string
-	if auth != nil {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
-
-	// Priority 2: Use cfg.ProxyURL if auth proxy is not configured
-	if proxyURL == "" && cfg != nil {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
-	}
-
-	// If we have a proxy URL configured, use a pooled client/transport.
+	proxyURL := resolveUpstreamProxyURL(cfg, auth)
 	if proxyURL != "" {
-		if client := getPooledProxyHTTPClient(proxyURL, timeout); client != nil {
+		accountScope := resolveUpstreamAccountScope(auth, proxyURL)
+		if client := getPooledProxyHTTPClient(proxyURL, accountScope, timeout); client != nil {
 			return client
 		}
-		// If proxy setup failed, log and fall through to context RoundTripper
 		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
 	}
 
@@ -117,23 +255,13 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	if timeout > 0 {
 		httpClient.Timeout = timeout
 	}
-
-	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
 		httpClient.Transport = rt
 	}
-
 	return httpClient
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.
-// It supports SOCKS5, HTTP, and HTTPS proxy protocols.
-//
-// Parameters:
-//   - proxyURL: The proxy URL string (e.g., "socks5://user:pass@host:port", "http://host:port")
-//
-// Returns:
-//   - *http.Transport: A configured transport, or nil if the proxy URL is invalid
 func buildProxyTransport(proxyURL string) *http.Transport {
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
 	if errBuild != nil {

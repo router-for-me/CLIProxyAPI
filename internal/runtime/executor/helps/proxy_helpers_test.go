@@ -82,3 +82,27 @@ func TestNewProxyAwareHTTPClientPoolKeyIncludesTimeout(t *testing.T) {
 		t.Fatalf("Timeout = %v, want 0", noTimeout.Timeout)
 	}
 }
+
+func TestNewProxyAwareHTTPClientAccountProxyIsIsolated(t *testing.T) {
+	cfg := &config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}}
+	authA := &cliproxyauth.Auth{ID: "account-a", ProxyURL: "http://account-a-proxy.example.com:8080"}
+	authB := &cliproxyauth.Auth{ID: "account-b", ProxyURL: "http://account-a-proxy.example.com:8080"}
+
+	clientA := NewProxyAwareHTTPClient(context.Background(), cfg, authA, 0)
+	clientB := NewProxyAwareHTTPClient(context.Background(), cfg, authB, 0)
+	if clientA.Transport == clientB.Transport {
+		t.Fatal("per-account proxy overrides with different account IDs should not share transport")
+	}
+
+	clientA2 := NewProxyAwareHTTPClient(context.Background(), cfg, authA, 0)
+	if clientA.Transport != clientA2.Transport {
+		t.Fatal("same account proxy scope should reuse transport")
+	}
+}
+
+func TestHTTPUpstreamDoNilRequest(t *testing.T) {
+	_, err := HTTPUpstreamDo(context.Background(), nil, nil, nil, 0)
+	if err == nil {
+		t.Fatal("expected error for nil request")
+	}
+}
