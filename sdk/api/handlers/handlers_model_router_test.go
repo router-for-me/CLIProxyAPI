@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -193,6 +195,150 @@ func TestHandlerModelRouterRoutesBeforeRequestDetails(t *testing.T) {
 	}
 	if host.lastOptions.Metadata[coreexecutor.RequestedModelMetadataKey] != originalModel {
 		t.Fatalf("requested model metadata = %#v, want original model", host.lastOptions.Metadata[coreexecutor.RequestedModelMetadataKey])
+	}
+}
+
+func TestImageRequiredProviderRejectsConflictingModelRouterTargets(t *testing.T) {
+	const model = "shared-native-image"
+	tests := []struct {
+		name     string
+		response pluginapi.ModelRouteResponse
+	}{
+		{
+			name: "plugin executor",
+			response: pluginapi.ModelRouteResponse{
+				Handled:    true,
+				TargetKind: pluginapi.ModelRouteTargetExecutor,
+				Target:     "image-plugin",
+			},
+		},
+		{
+			name: "different provider",
+			response: pluginapi.ModelRouteResponse{
+				Handled:    true,
+				TargetKind: pluginapi.ModelRouteTargetProvider,
+				Target:     "openai-compatibility",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			host := &handlerDirectExecutorRouteHost{}
+			host.hasRouters = true
+			host.route = func(context.Context, pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+				return tc.response, true
+			}
+			handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+			handler.SetModelRouterHost(host)
+
+			body, _, errMsg := handler.ExecuteImageWithAuthManagerForProvider(
+				context.Background(),
+				"openai-image",
+				"xai",
+				model,
+				[]byte(`{"model":"shared-native-image","prompt":"draw"}`),
+				"",
+			)
+			if body != nil || errMsg == nil || errMsg.StatusCode != http.StatusBadRequest {
+				t.Fatalf("ExecuteImageWithAuthManagerForProvider() = %q, %#v; want BadRequest", body, errMsg)
+			}
+			if errMsg.Error == nil || !strings.Contains(errMsg.Error.Error(), "requires native xai execution") {
+				t.Fatalf("error = %v, want required xAI provider context", errMsg.Error)
+			}
+			if host.lastPluginID != "" {
+				t.Fatalf("conflicting plugin executor was invoked with %q", host.lastPluginID)
+			}
+		})
+	}
+}
+
+func TestImageRequiredProviderUsesSameProviderModelRouterTarget(t *testing.T) {
+	const (
+		originalModel = "native-image-original"
+		targetModel   = "native-image-target"
+	)
+	tests := []struct {
+		name        string
+		targetModel string
+		wantModel   string
+	}{
+		{
+			name:        "target model",
+			targetModel: targetModel,
+			wantModel:   targetModel,
+		},
+		{
+			name:      "no target model",
+			wantModel: originalModel,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := &modelExecutionCaptureExecutor{provider: "xai"}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.RegisterExecutor(executor)
+			authID := "model-router-required-provider-" + strings.ReplaceAll(tc.name, " ", "-")
+			auth := &coreauth.Auth{
+				ID:       authID,
+				Provider: "xai",
+				Status:   coreauth.StatusActive,
+			}
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("manager.Register(): %v", errRegister)
+			}
+			models := []*registry.ModelInfo{{
+				ID:               originalModel,
+				SupportsImageAPI: true,
+				ChatDisabled:     true,
+			}}
+			if tc.targetModel != "" {
+				models = append(models, &registry.ModelInfo{
+					ID:               tc.targetModel,
+					SupportsImageAPI: true,
+					ChatDisabled:     true,
+				})
+			}
+			modelRegistry := registry.GetGlobalRegistry()
+			modelRegistry.RegisterClient(authID, auth.Provider, models)
+			manager.RefreshSchedulerEntry(authID)
+			t.Cleanup(func() {
+				modelRegistry.UnregisterClient(authID)
+			})
+
+			host := &handlerDirectExecutorRouteHost{}
+			host.hasRouters = true
+			host.route = func(context.Context, pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+				return pluginapi.ModelRouteResponse{
+					Handled:     true,
+					TargetKind:  pluginapi.ModelRouteTargetProvider,
+					Target:      "xai",
+					TargetModel: tc.targetModel,
+				}, true
+			}
+			handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+			handler.SetModelRouterHost(host)
+
+			body, _, errMsg := handler.ExecuteImageWithAuthManagerForProvider(
+				context.Background(),
+				"openai-image",
+				"xai",
+				originalModel,
+				[]byte(`{"model":"native-image-original","prompt":"draw"}`),
+				"",
+			)
+			if errMsg != nil {
+				t.Fatalf("ExecuteImageWithAuthManagerForProvider() error = %+v", errMsg)
+			}
+			if string(body) != "model-execution-ok" {
+				t.Fatalf("body = %q, want model-execution-ok", body)
+			}
+			gotReq, _ := executor.captured()
+			if gotReq.Model != tc.wantModel {
+				t.Fatalf("executor model = %q, want %q", gotReq.Model, tc.wantModel)
+			}
+		})
 	}
 }
 

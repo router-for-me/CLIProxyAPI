@@ -9,6 +9,7 @@ import (
 func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 	modelID := "mimo-v2.5-pro-codex-test"
 	textOnlyModelID := "mimo-text-only-codex-test"
+	sharedImageModelID := "compat-shared-image-codex-test"
 	modelRegistry := registry.GetGlobalRegistry()
 	modelRegistry.RegisterClient("codex-input-modalities-test", "openai-compatibility", []*registry.ModelInfo{
 		{
@@ -41,6 +42,13 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 			OwnedBy: "mimo",
 			Type:    registry.OpenAIImageModelType,
 		},
+		{
+			ID:               sharedImageModelID,
+			Object:           "model",
+			OwnedBy:          "mimo",
+			Type:             "openai-compatibility",
+			SupportsImageAPI: true,
+		},
 	})
 	t.Cleanup(func() {
 		modelRegistry.UnregisterClient("codex-input-modalities-test")
@@ -57,6 +65,7 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 	var textOnlyEntry map[string]any
 	var mixedEntry map[string]any
 	var imageEntry map[string]any
+	var sharedImageEntry map[string]any
 	for _, entry := range models {
 		slug := stringModelValue(entry, "slug")
 		switch slug {
@@ -68,6 +77,8 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 			mixedEntry = entry
 		case "compat-image-only-codex-test":
 			imageEntry = entry
+		case sharedImageModelID:
+			sharedImageEntry = entry
 		}
 	}
 	if visionEntry == nil {
@@ -127,6 +138,306 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 	if _, exists := imageEntry["input_modalities"]; exists {
 		t.Fatalf("image endpoint model should not expose input_modalities from registry: %#v", imageEntry["input_modalities"])
 	}
+	if sharedImageEntry == nil {
+		t.Fatalf("expected codex entry for %q", sharedImageModelID)
+	}
+	if got, _ := sharedImageEntry["visibility"].(string); got == "hide" {
+		t.Fatalf("shared image-capable model visibility = %q, want visible", got)
+	}
+}
+
+func TestCodexClientModelsResponse_SharedImageAliasPrefersChatRegistration(t *testing.T) {
+	const modelID = "gpt-image-2"
+
+	for _, imageFirst := range []bool{false, true} {
+		name := "chat-first"
+		if imageFirst {
+			name = "image-first"
+		}
+		t.Run(name, func(t *testing.T) {
+			modelRegistry := registry.GetGlobalRegistry()
+			chatClientID := "codex-shared-chat-" + name
+			imageClientID := "codex-shared-image-" + name
+			chat := &registry.ModelInfo{
+				ID:                       modelID,
+				Object:                   "model",
+				OwnedBy:                  "chat-owner",
+				Type:                     "openai-compatibility",
+				DisplayName:              "Shared Chat Model",
+				Description:              "Chat metadata",
+				ContextLength:            123456,
+				SupportedInputModalities: []string{"text", "image"},
+				Thinking:                 &registry.ThinkingSupport{Levels: []string{"low", "high"}},
+			}
+			image := &registry.ModelInfo{
+				ID:          modelID,
+				Object:      "model",
+				OwnedBy:     "image-owner",
+				Type:        registry.OpenAIImageModelType,
+				DisplayName: "Image-only Model",
+				Description: "Image metadata",
+			}
+			registerChat := func() {
+				modelRegistry.RegisterClient(chatClientID, "openai-compatibility", []*registry.ModelInfo{chat})
+			}
+			registerImage := func() {
+				modelRegistry.RegisterClient(imageClientID, "codex", []*registry.ModelInfo{image})
+			}
+			if imageFirst {
+				registerImage()
+				registerChat()
+			} else {
+				registerChat()
+				registerImage()
+			}
+			t.Cleanup(func() {
+				modelRegistry.UnregisterClient(chatClientID)
+				modelRegistry.UnregisterClient(imageClientID)
+			})
+
+			entry := codexClientModelTestEntry(t, modelRegistry, modelID)
+			if got := stringModelValue(entry, "display_name"); got != "Shared Chat Model" {
+				t.Fatalf("shared display_name = %q, want chat metadata", got)
+			}
+			if got := stringModelValue(entry, "visibility"); got == "hide" {
+				t.Fatalf("shared visibility = %q, want visible chat route", got)
+			}
+			modalities, ok := entry["input_modalities"].([]any)
+			if !ok || len(modalities) != 2 || modalities[0] != "text" || modalities[1] != "image" {
+				t.Fatalf("shared input_modalities = %#v, want chat metadata", entry["input_modalities"])
+			}
+			levels, ok := entry["supported_reasoning_levels"].([]any)
+			if !ok || len(levels) != 2 {
+				t.Fatalf("shared supported_reasoning_levels = %#v, want chat metadata", entry["supported_reasoning_levels"])
+			}
+			high, ok := levels[1].(map[string]any)
+			if !ok || stringModelValue(high, "effort") != "high" {
+				t.Fatalf("shared supported_reasoning_levels = %#v, want high effort", entry["supported_reasoning_levels"])
+			}
+
+			modelRegistry.UnregisterClient(chatClientID)
+
+			entry = codexClientModelTestEntry(t, modelRegistry, modelID)
+			if got := stringModelValue(entry, "display_name"); got != "Image-only Model" {
+				t.Fatalf("remaining display_name = %q, want image metadata", got)
+			}
+			if got := stringModelValue(entry, "visibility"); got != "hide" {
+				t.Fatalf("remaining visibility = %q, want hidden image-only route", got)
+			}
+			if _, exists := entry["input_modalities"]; exists {
+				t.Fatalf("image-only route input_modalities = %#v, want omitted", entry["input_modalities"])
+			}
+		})
+	}
+}
+
+func TestCodexClientModelsResponse_HardcodedImageIDWithChatOnlyRouteIsVisible(t *testing.T) {
+	const (
+		clientID = "codex-hardcoded-chat-only-test"
+		modelID  = "gpt-image-2"
+	)
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(clientID, "openai-compatibility", []*registry.ModelInfo{{
+		ID:          modelID,
+		Object:      "model",
+		OwnedBy:     "chat-owner",
+		Type:        "openai-compatibility",
+		DisplayName: "Chat-only Alias",
+	}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	info, supportsChat := modelRegistry.GetCatalogModelInfo(modelID)
+	if !supportsChat || info == nil || info.SupportsImageAPI {
+		t.Fatalf("chat-only aggregate = %#v, supportsChat=%v", info, supportsChat)
+	}
+	entry := codexClientModelTestEntry(t, modelRegistry, modelID)
+	if got := stringModelValue(entry, "visibility"); got == "hide" {
+		t.Fatalf("chat-only hardcoded alias visibility = %q, want visible", got)
+	}
+	if got := stringModelValue(entry, "display_name"); got != "Chat-only Alias" {
+		t.Fatalf("chat-only hardcoded alias display_name = %q", got)
+	}
+}
+
+func TestCodexClientModelsResponse_TemplateSlugUsesAggregateChatCapability(t *testing.T) {
+	const (
+		modelID       = "gpt-5.5"
+		imageClientID = "codex-template-image-only"
+		chatClientID  = "codex-template-chat"
+	)
+	assertReasoningLevels := func(t *testing.T, entry map[string]any, expected ...string) {
+		t.Helper()
+		levels, ok := entry["supported_reasoning_levels"].([]any)
+		if !ok || len(levels) != len(expected) {
+			t.Fatalf("supported_reasoning_levels = %#v, want %v", entry["supported_reasoning_levels"], expected)
+		}
+		for i, expectedLevel := range expected {
+			level, ok := levels[i].(map[string]any)
+			if !ok || stringModelValue(level, "effort") != expectedLevel {
+				t.Fatalf("supported_reasoning_levels = %#v, want %v", entry["supported_reasoning_levels"], expected)
+			}
+		}
+	}
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(imageClientID)
+	modelRegistry.UnregisterClient(chatClientID)
+	modelRegistry.RegisterClient(imageClientID, "codex", []*registry.ModelInfo{{
+		ID:               modelID,
+		Type:             "openai",
+		DisplayName:      "Template Image Alias",
+		SupportsImageAPI: true,
+		ChatDisabled:     true,
+	}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(imageClientID)
+		modelRegistry.UnregisterClient(chatClientID)
+	})
+
+	entry := codexClientModelTestEntry(t, modelRegistry, modelID)
+	if got := stringModelValue(entry, "visibility"); got != "hide" {
+		t.Fatalf("image-only template visibility = %q, want hide", got)
+	}
+	if _, exists := entry["input_modalities"]; exists {
+		t.Fatalf("image-only template input_modalities = %#v, want omitted", entry["input_modalities"])
+	}
+	if _, exists := entry["supports_image_detail_original"]; exists {
+		t.Fatalf("image-only template supports_image_detail_original = %#v, want omitted", entry["supports_image_detail_original"])
+	}
+
+	modelRegistry.RegisterClient(chatClientID, "codex", []*registry.ModelInfo{{
+		ID:                       modelID,
+		Type:                     "openai",
+		DisplayName:              "Template Chat Alias",
+		SupportedInputModalities: []string{"text", "image"},
+		Thinking:                 &registry.ThinkingSupport{Levels: []string{"low", "high"}},
+	}})
+	entry = codexClientModelTestEntry(t, modelRegistry, modelID)
+	if got := stringModelValue(entry, "visibility"); got == "hide" {
+		t.Fatalf("shared template visibility = %q, want visible chat route", got)
+	}
+	if got := stringModelValue(entry, "display_name"); got != "Template Chat Alias" {
+		t.Fatalf("shared template display_name = %q, want chat metadata", got)
+	}
+	modalities, ok := entry["input_modalities"].([]any)
+	if !ok || len(modalities) != 2 || modalities[0] != "text" || modalities[1] != "image" {
+		t.Fatalf("shared template input_modalities = %#v, want [text image]", entry["input_modalities"])
+	}
+	assertReasoningLevels(t, entry, "low", "high")
+	if got := stringModelValue(entry, "default_reasoning_level"); got != "low" {
+		t.Fatalf("configured default_reasoning_level = %q, want low", got)
+	}
+
+	modelRegistry.RegisterClient(chatClientID, "codex", []*registry.ModelInfo{{
+		ID:                       modelID,
+		Type:                     "openai",
+		DisplayName:              "Template Chat Alias",
+		SupportedInputModalities: []string{"text", "image"},
+	}})
+	entry = codexClientModelTestEntry(t, modelRegistry, modelID)
+	assertReasoningLevels(t, entry, "low", "medium", "high", "xhigh")
+	if got := stringModelValue(entry, "default_reasoning_level"); got != "medium" {
+		t.Fatalf("template default_reasoning_level = %q, want medium", got)
+	}
+}
+
+func TestCodexClientModelsResponse_NativeImageAliasUsesNonChatMetadata(t *testing.T) {
+	const (
+		clientID = "codex-native-image-alias-test"
+		modelID  = "tenant/public-image"
+	)
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(clientID, "xai", []*registry.ModelInfo{{
+		ID:               modelID,
+		Object:           "model",
+		OwnedBy:          "xai",
+		Type:             "xai",
+		DisplayName:      "Public Image",
+		SupportsImageAPI: true,
+		ChatDisabled:     true,
+	}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	entry := codexClientModelTestEntry(t, modelRegistry, modelID)
+	if got := stringModelValue(entry, "visibility"); got != "hide" {
+		t.Fatalf("native image alias visibility = %q, want hide", got)
+	}
+	if _, exists := entry["input_modalities"]; exists {
+		t.Fatalf("native image alias input_modalities = %#v, want omitted", entry["input_modalities"])
+	}
+}
+
+func TestCodexClientModelsResponse_SharedImageAliasSuspensionTransitions(t *testing.T) {
+	const (
+		chatClientID  = "codex-shared-suspension-chat-test"
+		imageClientID = "codex-shared-suspension-image-test"
+		modelID       = "gpt-image-2"
+	)
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(chatClientID, "openai-compatibility", []*registry.ModelInfo{{
+		ID:          modelID,
+		Object:      "model",
+		OwnedBy:     "chat-owner",
+		Type:        "openai-compatibility",
+		DisplayName: "Suspension Chat Model",
+	}})
+	modelRegistry.RegisterClient(imageClientID, "openai-compatibility", []*registry.ModelInfo{{
+		ID:               modelID,
+		Object:           "model",
+		OwnedBy:          "image-owner",
+		Type:             registry.OpenAIImageModelType,
+		DisplayName:      "Suspension Image Model",
+		SupportsImageAPI: true,
+	}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(chatClientID)
+		modelRegistry.UnregisterClient(imageClientID)
+	})
+
+	modelRegistry.SuspendClientModel(chatClientID, modelID, "model_not_supported")
+	entry := codexClientModelTestEntry(t, modelRegistry, modelID)
+	if got := stringModelValue(entry, "visibility"); got != "hide" {
+		t.Fatalf("chat-suspended visibility = %q, want hidden image-only route", got)
+	}
+	if got := stringModelValue(entry, "display_name"); got != "Suspension Image Model" {
+		t.Fatalf("chat-suspended display_name = %q, want image metadata", got)
+	}
+
+	modelRegistry.ResumeClientModel(chatClientID, modelID)
+	entry = codexClientModelTestEntry(t, modelRegistry, modelID)
+	if got := stringModelValue(entry, "visibility"); got == "hide" {
+		t.Fatalf("resumed chat visibility = %q, want visible", got)
+	}
+	if got := stringModelValue(entry, "display_name"); got != "Suspension Chat Model" {
+		t.Fatalf("resumed chat display_name = %q, want chat metadata", got)
+	}
+
+	modelRegistry.SuspendClientModel(imageClientID, modelID, "model_not_supported")
+	info, supportsChat := modelRegistry.GetCatalogModelInfo(modelID)
+	if !supportsChat || info == nil || info.SupportsImageAPI {
+		t.Fatalf("image-suspended aggregate = %#v, supportsChat=%v", info, supportsChat)
+	}
+	entry = codexClientModelTestEntry(t, modelRegistry, modelID)
+	if got := stringModelValue(entry, "visibility"); got == "hide" {
+		t.Fatalf("image-suspended chat visibility = %q, want visible", got)
+	}
+}
+
+func codexClientModelTestEntry(t *testing.T, modelRegistry *registry.ModelRegistry, modelID string) map[string]any {
+	t.Helper()
+	response := BuildResponse(modelRegistry.GetAvailableModels("openai"), nil, false)
+	models, ok := response["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models type = %T, want []map[string]any", response["models"])
+	}
+	for _, entry := range models {
+		if stringModelValue(entry, "slug") == modelID {
+			return entry
+		}
+	}
+	t.Fatalf("expected Codex client entry for %q", modelID)
+	return nil
 }
 
 func TestCodexClientModelsResponse_AppliesDisplayNameToTemplateModel(t *testing.T) {
@@ -298,12 +609,12 @@ func TestApplyCodexClientModelMetadataPreservesMultiAgentVersionWhenDisabled(t *
 	entry := map[string]any{"multi_agent_version": "v1"}
 	model := map[string]any{"id": "custom-model"}
 
-	applyCodexClientModelMetadata(entry, "custom-model", model, false)
+	applyCodexClientModelMetadata(entry, "custom-model", model, nil, false, false)
 	if got := entry["multi_agent_version"]; got != "v1" {
 		t.Fatalf("disabled multi_agent_version = %#v, want preserved v1", got)
 	}
 
-	applyCodexClientModelMetadata(entry, "custom-model", model, true)
+	applyCodexClientModelMetadata(entry, "custom-model", model, nil, false, true)
 	if got := entry["multi_agent_version"]; got != "v2" {
 		t.Fatalf("enabled multi_agent_version = %#v, want v2", got)
 	}

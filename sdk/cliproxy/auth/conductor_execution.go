@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
@@ -259,6 +260,67 @@ func mergeRequestHeaders(current, updates http.Header, clear []string) http.Head
 	return out
 }
 
+func imageExecutionFromOptions(opts cliproxyexecutor.Options) bool {
+	value, _ := opts.Metadata[cliproxyexecutor.ImageExecutionMetadataKey].(bool)
+	return value
+}
+
+func videoExecutionFromOptions(opts cliproxyexecutor.Options) bool {
+	value, _ := opts.Metadata[cliproxyexecutor.VideoExecutionMetadataKey].(bool)
+	return value || strings.EqualFold(strings.TrimSpace(opts.SourceFormat.String()), "openai-video")
+}
+
+func modelExecutionKindFromOptions(opts cliproxyexecutor.Options) apiKeyModelExecutionKind {
+	if imageExecutionFromOptions(opts) {
+		return apiKeyModelExecutionImage
+	}
+	if videoExecutionFromOptions(opts) {
+		return apiKeyModelExecutionVideo
+	}
+	return apiKeyModelExecutionChat
+}
+
+func modelExecutionKindName(kind apiKeyModelExecutionKind) string {
+	switch kind {
+	case apiKeyModelExecutionImage:
+		return "image"
+	case apiKeyModelExecutionVideo:
+		return "video"
+	default:
+		return "chat"
+	}
+}
+
+const resolvedAPIKeyModelInfoMetadataKey = "cliproxy.resolved_api_key_model_info"
+
+// ResolvedAPIKeyModelInfo returns the configured model definition selected for
+// this API-key execution attempt.
+func ResolvedAPIKeyModelInfo(req cliproxyexecutor.Request) (*registry.ModelInfo, bool) {
+	modelInfo, ok := req.Metadata[resolvedAPIKeyModelInfoMetadataKey].(*registry.ModelInfo)
+	if !ok || modelInfo == nil {
+		return nil, false
+	}
+	return modelInfo, true
+}
+
+func (m *Manager) attachResolvedAPIKeyModelInfo(req cliproxyexecutor.Request, auth *Auth, routeModel, upstreamModel string) cliproxyexecutor.Request {
+	return attachResolvedAPIKeyModelInfo(m.loadAPIKeyModelRouting(), req, auth, routeModel, upstreamModel, apiKeyModelExecutionChat)
+}
+
+func attachResolvedAPIKeyModelInfo(routing *apiKeyModelRoutingSnapshot, req cliproxyexecutor.Request, auth *Auth, routeModel, upstreamModel string, executionKind apiKeyModelExecutionKind) cliproxyexecutor.Request {
+	route, _, compatible := lookupAPIKeyModelCapability(routing, auth, routeModel, upstreamModel, executionKind)
+	if !compatible || route.modelInfo == nil {
+		return req
+	}
+	metadata := make(map[string]any, len(req.Metadata)+1)
+	for key, value := range req.Metadata {
+		metadata[key] = value
+	}
+	metadata[resolvedAPIKeyModelInfoMetadataKey] = route.modelInfo
+	req.Metadata = metadata
+	return req
+}
+
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -302,8 +364,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 
-		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel, modelExecutionKindFromOptions(opts))
 		if len(models) == 0 {
+			if homeMode {
+				homeAuthCount++
+			}
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
@@ -329,6 +394,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
 				return cliproxyexecutor.Response{}, errIntercept
+			}
+			if !restoreExecutionModel {
+				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel, modelExecutionKindFromOptions(execOpts))
 			}
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
 			if errExec != nil {
@@ -360,7 +428,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				continue
 			}
 			m.MarkResult(execCtx, result)
-			rewriteForceMappedResponse(&resp, aliasResult)
+			responseAliasResult := aliasResultForAPIKeyModelCandidate(routing, auth, routeModel, upstreamModel, modelExecutionKindFromOptions(execOpts), aliasResult)
+			rewriteForceMappedResponse(&resp, responseAliasResult)
 			return resp, nil
 		}
 		if authErr != nil {
@@ -419,8 +488,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 
-		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel, modelExecutionKindFromOptions(opts))
 		if len(models) == 0 {
+			if homeMode {
+				homeAuthCount++
+			}
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
@@ -446,6 +518,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
 				return cliproxyexecutor.Response{}, errIntercept
+			}
+			if !restoreExecutionModel {
+				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel, modelExecutionKindFromOptions(execOpts))
 			}
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
 			if errExec != nil {
@@ -485,7 +560,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				continue
 			}
 			m.MarkResult(execCtx, result)
-			rewriteForceMappedResponse(&resp, aliasResult)
+			responseAliasResult := aliasResultForAPIKeyModelCandidate(routing, auth, routeModel, upstreamModel, modelExecutionKindFromOptions(execOpts), aliasResult)
+			rewriteForceMappedResponse(&resp, responseAliasResult)
 			return resp, nil
 		}
 		if authErr != nil {
@@ -553,6 +629,28 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
+		if selection != nil {
+			upstreamModel := ""
+			if auth.Attributes != nil {
+				upstreamModel = auth.Attributes[homeUpstreamModelAttributeKey]
+			}
+			if homeAuthKnownIneligibleForExecution(auth, routeModel, upstreamModel, opts) {
+				if _, seen := tried[auth.ID]; seen {
+					selection.End("repeated_auth")
+					if lastErr != nil {
+						return nil, lastErr
+					}
+					return nil, repeatedHomeAuthError()
+				}
+				tried[auth.ID] = struct{}{}
+				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "execution_ineligible"); errEnd != nil {
+					return nil, errEnd
+				}
+				lastErr = &Error{Code: "auth_not_found", Message: "selected auth does not support " + modelExecutionKindName(modelExecutionKindFromOptions(opts)) + " execution"}
+				homeAuthCount++
+				continue
+			}
+		}
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, routeModel)
@@ -579,7 +677,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel, modelExecutionKindFromOptions(opts))
 		if selection != nil && aliasResult.ForceMapping && responseAlias != "" {
 			aliasResult.OriginalAlias = responseAlias
 		}
@@ -589,6 +687,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "no_execution_models"); errEnd != nil {
 					return nil, errEnd
 				}
+				lastErr = &Error{Code: "auth_not_found", Message: "no execution models available"}
+				homeAuthCount++
 			}
 			continue
 		}
@@ -628,7 +728,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			models = models[:1]
 			pooled = false
 		}
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, !homeMode, selection != nil)
+		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode, selection != nil)
 		if errStream != nil {
 			if selection != nil {
 				releaseAttempt()

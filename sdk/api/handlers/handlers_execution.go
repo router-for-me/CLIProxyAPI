@@ -34,6 +34,14 @@ func (h *BaseAPIHandler) ExecuteImageWithAuthManager(ctx context.Context, handle
 	return h.executeWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, true)
 }
 
+// ExecuteImageWithAuthManagerForProvider executes an image endpoint request
+// using only credentials registered for provider.
+func (h *BaseAPIHandler) ExecuteImageWithAuthManagerForProvider(ctx context.Context, handlerType, provider, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	return h.executeWithAuthManagerFormats(ctx, handlerType, handlerType, modelName, rawJSON, alt, true, modelExecutionOptions{
+		ForcedProvider: provider,
+	})
+}
+
 func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	return h.executeWithAuthManagerFormats(ctx, handlerType, handlerType, modelName, rawJSON, alt, allowImageModel, modelExecutionOptions{})
 }
@@ -42,7 +50,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
-	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
+	if errMsg := validateRequiredProviderExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
 		return nil, nil, errMsg
 	}
 	if routeDecision.ExecutorPluginID != "" {
@@ -55,6 +63,12 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
+	if allowImageModel {
+		reqMeta[coreexecutor.ImageExecutionMetadataKey] = true
+	}
+	if entryProtocol == "openai-video" {
+		reqMeta[coreexecutor.VideoExecutionMetadataKey] = true
+	}
 	addAuthSelectionModelMetadata(reqMeta, execOptions.AuthSelectionModel)
 	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
 	setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, rawJSON)
@@ -121,6 +135,9 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	providers = adjustExecutionProvidersForEntryProtocol(handlerType, providers)
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
+	if handlerType == "openai-video" {
+		reqMeta[coreexecutor.VideoExecutionMetadataKey] = true
+	}
 	addAuthSelectionModelMetadata(reqMeta, execOptions.AuthSelectionModel)
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)

@@ -204,7 +204,7 @@ func imagesModelBase(model string) string {
 	return strings.ToLower(strings.TrimSpace(baseModel))
 }
 
-func isXAIImagesModel(model string) bool {
+func isBuiltinXAIImagesModel(model string) bool {
 	prefix, baseModel := imagesModelParts(model)
 	baseModel = strings.ToLower(strings.TrimSpace(baseModel))
 	if baseModel != defaultXAIImagesModel && baseModel != xaiImagesQualityModel {
@@ -215,29 +215,68 @@ func isXAIImagesModel(model string) bool {
 	return prefix == "" || prefix == "xai" || prefix == "x-ai" || prefix == "grok"
 }
 
-func isSupportedImagesModel(model string) bool {
-	if isCodexImagesToolModel(model) {
-		return true
+type imagesModelKind uint8
+
+const (
+	imagesModelUnsupported imagesModelKind = iota
+	imagesModelCodex
+	imagesModelXAI
+	imagesModelOpenAICompat
+)
+
+type imagesModelClassification struct {
+	kind    imagesModelKind
+	dynamic bool
+}
+
+func classifyImagesModel(model string) imagesModelClassification {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return imagesModelClassification{}
 	}
-	return isXAIImagesModel(model) || isOpenAICompatImagesModel(model)
+
+	snapshot, found := registry.GetGlobalRegistry().LookupModelExecutionSnapshot(model, registry.ModelExecutionImage)
+	if found {
+		switch {
+		case snapshot.ProviderSupports("xai"):
+			return imagesModelClassification{kind: imagesModelXAI, dynamic: true}
+		case snapshot.ProviderSupports("codex"):
+			return imagesModelClassification{kind: imagesModelCodex, dynamic: true}
+		case snapshot.Supported:
+			return imagesModelClassification{kind: imagesModelOpenAICompat, dynamic: true}
+		default:
+			return imagesModelClassification{dynamic: true}
+		}
+	}
+
+	baseModel := imagesModelBase(model)
+	if baseModel == gptImage15Model || baseModel == defaultImagesToolModel {
+		return imagesModelClassification{kind: imagesModelCodex}
+	}
+	if isBuiltinXAIImagesModel(model) {
+		return imagesModelClassification{kind: imagesModelXAI}
+	}
+	return imagesModelClassification{}
+}
+
+func isXAIImagesModel(model string) bool {
+	return classifyImagesModel(model).kind == imagesModelXAI
+}
+
+func isSupportedImagesModel(model string) bool {
+	return classifyImagesModel(model).kind != imagesModelUnsupported
 }
 
 func isCodexImagesToolModel(model string) bool {
-	baseModel := imagesModelBase(model)
-	return baseModel == gptImage15Model || baseModel == defaultImagesToolModel
+	return classifyImagesModel(model).kind == imagesModelCodex
 }
 
 func isOpenAICompatImagesModel(model string) bool {
-	model = strings.TrimSpace(model)
-	if model == "" {
-		return false
-	}
-	info := registry.LookupModelInfo(model)
-	return info != nil && info.Type == registry.OpenAIImageModelType
+	return classifyImagesModel(model).kind == imagesModelOpenAICompat
 }
 
-func rejectUnsupportedImagesModel(c *gin.Context, model string) bool {
-	if isSupportedImagesModel(model) {
+func rejectUnsupportedImagesModel(c *gin.Context, model string, classification imagesModelClassification) bool {
+	if classification.kind != imagesModelUnsupported {
 		return false
 	}
 
@@ -258,9 +297,19 @@ func normalizeImagesResponseFormat(responseFormat string) string {
 }
 
 func canonicalXAIImagesModel(model string) string {
-	baseModel := imagesModelBase(model)
-	if baseModel == xaiImagesQualityModel {
-		return xaiImagesQualityModel
+	return canonicalXAIImagesModelForClassification(model, classifyImagesModel(model))
+}
+
+func canonicalXAIImagesModelForClassification(model string, classification imagesModelClassification) string {
+	if classification.kind == imagesModelXAI && classification.dynamic {
+		return strings.TrimSpace(model)
+	}
+	if classification.kind == imagesModelXAI && isBuiltinXAIImagesModel(model) {
+		baseModel := imagesModelBase(model)
+		if baseModel == xaiImagesQualityModel {
+			return xaiImagesQualityModel
+		}
+		return defaultXAIImagesModel
 	}
 	return defaultXAIImagesModel
 }
@@ -321,9 +370,9 @@ func xaiImagesRef(imageURL string) []byte {
 	return ref
 }
 
-func buildXAIImagesBaseRequest(model string, prompt string, responseFormat string, aspectRatio string, resolution string, n int64) []byte {
+func buildXAIImagesBaseRequest(model string, classification imagesModelClassification, prompt string, responseFormat string, aspectRatio string, resolution string, n int64) []byte {
 	req := []byte(`{}`)
-	req, _ = sjson.SetBytes(req, "model", canonicalXAIImagesModel(model))
+	req, _ = sjson.SetBytes(req, "model", canonicalXAIImagesModelForClassification(model, classification))
 	req, _ = sjson.SetBytes(req, "prompt", strings.TrimSpace(prompt))
 	req, _ = sjson.SetBytes(req, "response_format", normalizeImagesResponseFormat(responseFormat))
 	if aspectRatio != "" {
@@ -338,7 +387,7 @@ func buildXAIImagesBaseRequest(model string, prompt string, responseFormat strin
 	return req
 }
 
-func buildXAIImagesGenerationsRequest(rawJSON []byte, model string, responseFormat string) []byte {
+func buildXAIImagesGenerationsRequest(rawJSON []byte, model string, classification imagesModelClassification, responseFormat string) []byte {
 	prompt := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt").String())
 	size := strings.TrimSpace(gjson.GetBytes(rawJSON, "size").String())
 	aspectRatio := xaiImagesAspectRatio(gjson.GetBytes(rawJSON, "aspect_ratio").String(), "")
@@ -351,11 +400,11 @@ func buildXAIImagesGenerationsRequest(rawJSON []byte, model string, responseForm
 	if v := gjson.GetBytes(rawJSON, "n"); v.Exists() && v.Type == gjson.Number {
 		n = v.Int()
 	}
-	return buildXAIImagesBaseRequest(model, prompt, responseFormat, aspectRatio, resolution, n)
+	return buildXAIImagesBaseRequest(model, classification, prompt, responseFormat, aspectRatio, resolution, n)
 }
 
-func buildXAIImagesEditRequest(model string, prompt string, images []string, responseFormat string, aspectRatio string, resolution string, n int64) []byte {
-	req := buildXAIImagesBaseRequest(model, prompt, responseFormat, aspectRatio, resolution, n)
+func buildXAIImagesEditRequest(model string, classification imagesModelClassification, prompt string, images []string, responseFormat string, aspectRatio string, resolution string, n int64) []byte {
+	req := buildXAIImagesBaseRequest(model, classification, prompt, responseFormat, aspectRatio, resolution, n)
 	trimmedImages := make([]string, 0, len(images))
 	for _, img := range images {
 		if strings.TrimSpace(img) != "" {
@@ -607,7 +656,8 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
-	if rejectUnsupportedImagesModel(c, imageModel) {
+	classification := classifyImagesModel(imageModel)
+	if rejectUnsupportedImagesModel(c, imageModel, classification) {
 		return
 	}
 
@@ -628,17 +678,17 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 
-	if isCodexImagesToolModel(imageModel) {
+	if classification.kind == imagesModelCodex {
 		imageReq := buildOpenAICompatImagesJSONRequest(rawJSON, imageModel, stream)
 		h.handleRoutedImages(c, imageReq, imageModel, stream)
 		return
 	}
-	if isXAIImagesModel(imageModel) {
-		xaiReq := buildXAIImagesGenerationsRequest(rawJSON, imageModel, responseFormat)
+	if classification.kind == imagesModelXAI {
+		xaiReq := buildXAIImagesGenerationsRequest(rawJSON, imageModel, classification, responseFormat)
 		h.handleXAIImages(c, xaiReq, responseFormat, "image_generation", stream)
 		return
 	}
-	if isOpenAICompatImagesModel(imageModel) {
+	if classification.kind == imagesModelOpenAICompat {
 		compatReq := buildOpenAICompatImagesJSONRequest(rawJSON, imageModel, stream)
 		h.handleOpenAICompatImages(c, compatReq, imageModel, responseFormat, "image_generation", stream)
 		return
@@ -721,7 +771,8 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
-	if rejectUnsupportedImagesModel(c, imageModel) {
+	classification := classifyImagesModel(imageModel)
+	if rejectUnsupportedImagesModel(c, imageModel, classification) {
 		return
 	}
 
@@ -773,7 +824,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	}
 	stream := parseBoolField(c.PostForm("stream"), false)
 
-	if isCodexImagesToolModel(imageModel) {
+	if classification.kind == imagesModelCodex {
 		imageReq, contentType, errBuild := buildOpenAICompatImagesMultipartRequest(form, imageModel, stream)
 		if errBuild != nil {
 			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
@@ -788,16 +839,16 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		h.handleRoutedImages(c, imageReq, imageModel, stream)
 		return
 	}
-	if isXAIImagesModel(imageModel) {
+	if classification.kind == imagesModelXAI {
 		aspectRatio := xaiImagesAspectRatio(c.PostForm("aspect_ratio"), "")
 		aspectRatio = xaiImagesAspectRatioFromSize(c.PostForm("size"), aspectRatio)
 		resolution := xaiImagesResolution(c.PostForm("resolution"), c.PostForm("size"), "")
 		n := parseIntField(c.PostForm("n"), 0)
-		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, images, responseFormat, aspectRatio, resolution, n)
+		xaiReq := buildXAIImagesEditRequest(imageModel, classification, prompt, images, responseFormat, aspectRatio, resolution, n)
 		h.handleXAIImages(c, xaiReq, responseFormat, "image_edit", stream)
 		return
 	}
-	if isOpenAICompatImagesModel(imageModel) {
+	if classification.kind == imagesModelOpenAICompat {
 		compatReq, contentType, errBuild := buildOpenAICompatImagesMultipartRequest(form, imageModel, stream)
 		if errBuild != nil {
 			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
@@ -894,7 +945,8 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
-	if rejectUnsupportedImagesModel(c, imageModel) {
+	classification := classifyImagesModel(imageModel)
+	if rejectUnsupportedImagesModel(c, imageModel, classification) {
 		return
 	}
 
@@ -915,12 +967,12 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 
-	if isCodexImagesToolModel(imageModel) {
+	if classification.kind == imagesModelCodex {
 		imageReq := buildOpenAICompatImagesJSONRequest(rawJSON, imageModel, stream)
 		h.handleRoutedImages(c, imageReq, imageModel, stream)
 		return
 	}
-	if isXAIImagesModel(imageModel) {
+	if classification.kind == imagesModelXAI {
 		images := collectXAIImagesFromJSON(rawJSON)
 		if len(images) == 0 {
 			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
@@ -932,11 +984,11 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 			return
 		}
 		aspectRatio, resolution, n := xaiImagesEditOptionsFromJSON(rawJSON)
-		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, images, responseFormat, aspectRatio, resolution, n)
+		xaiReq := buildXAIImagesEditRequest(imageModel, classification, prompt, images, responseFormat, aspectRatio, resolution, n)
 		h.handleXAIImages(c, xaiReq, responseFormat, "image_edit", stream)
 		return
 	}
-	if isOpenAICompatImagesModel(imageModel) {
+	if classification.kind == imagesModelOpenAICompat {
 		compatReq := buildOpenAICompatImagesJSONRequest(rawJSON, imageModel, stream)
 		h.handleOpenAICompatImages(c, compatReq, imageModel, responseFormat, "image_edit", stream)
 		return
@@ -1133,7 +1185,7 @@ func (h *OpenAIAPIHandler) handleOpenAICompatImages(c *gin.Context, compatReq []
 		h.streamOpenAICompatImages(c, compatReq, imageModel)
 		return
 	}
-	h.collectImagesWithModel(c, compatReq, imageModel, responseFormat)
+	h.collectImagesWithModel(c, compatReq, imageModel, responseFormat, "")
 }
 
 func (h *OpenAIAPIHandler) handleRoutedImages(c *gin.Context, imageReq []byte, imageModel string, stream bool) {
@@ -1142,6 +1194,13 @@ func (h *OpenAIAPIHandler) handleRoutedImages(c *gin.Context, imageReq []byte, i
 		return
 	}
 	h.collectRoutedImages(c, imageReq, imageModel)
+}
+
+func (h *OpenAIAPIHandler) executeImageRequest(cliCtx context.Context, model string, imageReq []byte, requiredProvider string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	if requiredProvider == "" {
+		return h.ExecuteImageWithAuthManager(cliCtx, xaiImagesHandlerType, model, imageReq, "")
+	}
+	return h.ExecuteImageWithAuthManagerForProvider(cliCtx, xaiImagesHandlerType, requiredProvider, model, imageReq, "")
 }
 
 func (h *OpenAIAPIHandler) collectRoutedImages(c *gin.Context, imageReq []byte, imageModel string) {
@@ -1391,17 +1450,17 @@ func (h *OpenAIAPIHandler) streamOpenAICompatImages(c *gin.Context, compatReq []
 
 func (h *OpenAIAPIHandler) collectXAIImages(c *gin.Context, xaiReq []byte, responseFormat string) {
 	model := strings.TrimSpace(gjson.GetBytes(xaiReq, "model").String())
-	h.collectImagesWithModel(c, xaiReq, model, responseFormat)
+	h.collectImagesWithModel(c, xaiReq, model, responseFormat, "xai")
 }
 
-func (h *OpenAIAPIHandler) collectImagesWithModel(c *gin.Context, imageReq []byte, model string, responseFormat string) {
+func (h *OpenAIAPIHandler) collectImagesWithModel(c *gin.Context, imageReq []byte, model string, responseFormat string, requiredProvider string) {
 	c.Header("Content-Type", "application/json")
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	model = strings.TrimSpace(model)
-	resp, upstreamHeaders, errMsg := h.ExecuteImageWithAuthManager(cliCtx, xaiImagesHandlerType, model, imageReq, "")
+	resp, upstreamHeaders, errMsg := h.executeImageRequest(cliCtx, model, imageReq, requiredProvider)
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -1428,10 +1487,10 @@ func (h *OpenAIAPIHandler) collectImagesWithModel(c *gin.Context, imageReq []byt
 
 func (h *OpenAIAPIHandler) streamXAIImages(c *gin.Context, xaiReq []byte, responseFormat string, streamPrefix string) {
 	model := strings.TrimSpace(gjson.GetBytes(xaiReq, "model").String())
-	h.streamImagesWithModel(c, xaiReq, model, responseFormat, streamPrefix)
+	h.streamImagesWithModel(c, xaiReq, model, responseFormat, streamPrefix, "xai")
 }
 
-func (h *OpenAIAPIHandler) streamImagesWithModel(c *gin.Context, imageReq []byte, model string, responseFormat string, streamPrefix string) {
+func (h *OpenAIAPIHandler) streamImagesWithModel(c *gin.Context, imageReq []byte, model string, responseFormat string, streamPrefix string, requiredProvider string) {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
@@ -1452,7 +1511,7 @@ func (h *OpenAIAPIHandler) streamImagesWithModel(c *gin.Context, imageReq []byte
 	}
 	resultChan := make(chan imageStreamResult, 1)
 	go func() {
-		resp, upstreamHeaders, errMsg := h.ExecuteImageWithAuthManager(cliCtx, xaiImagesHandlerType, model, imageReq, "")
+		resp, upstreamHeaders, errMsg := h.executeImageRequest(cliCtx, model, imageReq, requiredProvider)
 		resultChan <- imageStreamResult{resp: resp, upstreamHeaders: upstreamHeaders, errMsg: errMsg}
 	}()
 

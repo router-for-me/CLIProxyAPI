@@ -4,11 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelconfig"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
 // ComputeOpenAICompatModelsHash returns a stable hash for OpenAI-compat models.
@@ -21,7 +22,12 @@ func ComputeOpenAICompatModelsHash(models []config.OpenAICompatibilityModel) str
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("image=%t", model.Image))
+			out(configuredModelHashKey(name, alias, model.DisplayName, configuredModelHashMetadata{
+				Thinking:         model.Thinking,
+				Image:            model.Image,
+				InputModalities:  model.InputModalities,
+				OutputModalities: model.OutputModalities,
+			}))
 		}
 	})
 	return hashJoined(keys)
@@ -36,7 +42,7 @@ func ComputeVertexCompatModelsHash(models []config.VertexCompatModel) string {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName))
+			out(configuredModelHashKey(name, alias, model.DisplayName, configuredModelHashMetadata{Thinking: model.Thinking}))
 		}
 	})
 	return hashJoined(keys)
@@ -51,7 +57,7 @@ func ComputeClaudeModelsHash(models []config.ClaudeModel) string {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName))
+			out(configuredModelHashKey(name, alias, model.DisplayName, configuredModelHashMetadata{Thinking: model.Thinking}))
 		}
 	})
 	return hashJoined(keys)
@@ -66,7 +72,10 @@ func ComputeCodexModelsHash(models []config.CodexModel) string {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping))
+			out(configuredModelHashKey(name, alias, model.DisplayName, configuredModelHashMetadata{
+				Thinking:     model.Thinking,
+				ForceMapping: model.ForceMapping,
+			}))
 		}
 	})
 	return hashJoined(keys)
@@ -81,10 +90,42 @@ func ComputeGeminiModelsHash(models []config.GeminiModel) string {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName))
+			out(configuredModelHashKey(name, alias, model.DisplayName, configuredModelHashMetadata{Thinking: model.Thinking}))
 		}
 	})
 	return hashJoined(keys)
+}
+
+type configuredModelHashMetadata struct {
+	Thinking         *registry.ThinkingSupport
+	Image            bool
+	ForceMapping     bool
+	InputModalities  []string
+	OutputModalities []string
+}
+
+func configuredModelHashKey(name, alias, displayName string, metadata configuredModelHashMetadata) string {
+	payload := struct {
+		Name             string                    `json:"name"`
+		Alias            string                    `json:"alias"`
+		DisplayName      string                    `json:"display_name,omitempty"`
+		Thinking         *registry.ThinkingSupport `json:"thinking,omitempty"`
+		Image            bool                      `json:"image,omitempty"`
+		ForceMapping     bool                      `json:"force_mapping,omitempty"`
+		InputModalities  []string                  `json:"input_modalities,omitempty"`
+		OutputModalities []string                  `json:"output_modalities,omitempty"`
+	}{
+		Name:             strings.ToLower(strings.TrimSpace(name)),
+		Alias:            strings.ToLower(strings.TrimSpace(alias)),
+		DisplayName:      strings.TrimSpace(displayName),
+		Thinking:         metadata.Thinking,
+		Image:            metadata.Image,
+		ForceMapping:     metadata.ForceMapping,
+		InputModalities:  modelconfig.NormalizeModalities(metadata.InputModalities),
+		OutputModalities: modelconfig.NormalizeModalities(metadata.OutputModalities),
+	}
+	data, _ := json.Marshal(payload)
+	return string(data)
 }
 
 // ComputeExcludedModelsHash returns a normalized hash for excluded model lists.

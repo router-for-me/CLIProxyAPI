@@ -13,6 +13,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	modelregistry "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -162,6 +163,31 @@ func repeatedHomeAuthError() *Error {
 		Message:    "home returned a previously tried auth",
 		HTTPStatus: http.StatusServiceUnavailable,
 	}
+}
+
+func homeAuthKnownIneligibleForExecution(auth *Auth, routeModel, upstreamModel string, opts cliproxyexecutor.Options) bool {
+	if auth == nil {
+		return false
+	}
+	executionKind := modelExecutionKindFromOptions(opts)
+	registryRef := modelregistry.GetGlobalRegistry()
+	seen := make(map[string]struct{}, 2)
+	for _, model := range []string{routeModel, upstreamModel} {
+		model = canonicalModelKey(model)
+		key := strings.ToLower(strings.TrimSpace(model))
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		if !registryRef.ClientSupportsModel(auth.ID, model) {
+			continue
+		}
+		return !registryRef.ClientModelSupportsExecution(auth.ID, model, executionKind)
+	}
+	return false
 }
 
 type homeAuthDispatchResponse struct {
@@ -1045,7 +1071,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		}
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
-		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(c.auth, routeModel)
+		models, pooled, aliasResult, _ := m.executionModelCandidatesWithAlias(c.auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
@@ -1099,11 +1125,11 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		}
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
-		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(c.auth, routeModel)
+		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(c.auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
-		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult, true, false)
+		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult, routing, true, false)
 		if errStream != nil {
 			continue
 		}

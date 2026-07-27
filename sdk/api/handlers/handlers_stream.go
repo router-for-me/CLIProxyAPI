@@ -232,7 +232,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		routeDecision = h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
 	}
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
-	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
+	if errMsg := validateRequiredProviderExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
 		close(errChan)
@@ -251,6 +251,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
+	if allowImageModel {
+		reqMeta[coreexecutor.ImageExecutionMetadataKey] = true
+	}
+	if entryProtocol == "openai-video" {
+		reqMeta[coreexecutor.VideoExecutionMetadataKey] = true
+	}
 	addAuthSelectionModelMetadata(reqMeta, execOptions.AuthSelectionModel)
 	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
 	setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, rawJSON)

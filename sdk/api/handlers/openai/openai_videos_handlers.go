@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -144,7 +145,7 @@ func videosModelBase(model string) string {
 	return strings.ToLower(strings.TrimSpace(baseModel))
 }
 
-func isXAIVideosModel(model string) bool {
+func isBuiltinXAIVideosModel(model string) bool {
 	prefix, baseModel := imagesModelParts(model)
 	baseModel = strings.ToLower(strings.TrimSpace(baseModel))
 	if baseModel != defaultXAIVideosModel && baseModel != xaiVideos15PreviewModel {
@@ -153,6 +154,13 @@ func isXAIVideosModel(model string) bool {
 
 	prefix = strings.ToLower(strings.TrimSpace(prefix))
 	return prefix == "" || prefix == "xai" || prefix == "x-ai" || prefix == "grok"
+}
+
+func isXAIVideosModel(model string) bool {
+	if capabilities, found := registry.LookupModelEndpointCapabilities(model); found {
+		return capabilities.Video
+	}
+	return isBuiltinXAIVideosModel(model)
 }
 
 func isSoraVideosModel(model string) bool {
@@ -196,11 +204,16 @@ func canonicalXAIVideosModel(model string) string {
 	if isSoraVideosModel(model) {
 		return defaultXAIVideosModel
 	}
-	switch videosModelBase(model) {
-	case defaultXAIVideosModel:
-		return defaultXAIVideosModel
-	case xaiVideos15PreviewModel:
-		return xaiVideos15PreviewModel
+	if isBuiltinXAIVideosModel(model) {
+		switch videosModelBase(model) {
+		case defaultXAIVideosModel:
+			return defaultXAIVideosModel
+		case xaiVideos15PreviewModel:
+			return xaiVideos15PreviewModel
+		}
+	}
+	if capabilities, found := registry.LookupModelEndpointCapabilities(model); found && capabilities.Video {
+		return strings.TrimSpace(model)
 	}
 	return defaultXAIVideosModel
 }

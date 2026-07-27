@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -577,7 +578,7 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 			addModel(model)
 		}
 		clone := *model
-		clone.ID = trimmedPrefix + "/" + baseID
+		modelconfig.RebindModelInfo(&clone, baseID, trimmedPrefix+"/"+baseID)
 		addModel(&clone)
 	}
 	return out
@@ -631,9 +632,10 @@ type modelEntry interface {
 	GetName() string
 	GetAlias() string
 	GetDisplayName() string
+	GetThinking() *registry.ThinkingSupport
 }
 
-func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, created int64, fallbackDisplayName string, userDefined bool) *ModelInfo {
+func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType, provider string, created int64, fallbackDisplayName string, userDefined bool) *ModelInfo {
 	name := strings.TrimSpace(model.GetName())
 	alias := strings.TrimSpace(model.GetAlias())
 	if alias == "" {
@@ -642,6 +644,9 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 	if alias == "" {
 		return nil
 	}
+	if name == "" {
+		name = alias
+	}
 	displayName := strings.TrimSpace(model.GetDisplayName())
 	if displayName == "" {
 		displayName = fallbackDisplayName
@@ -649,15 +654,15 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 	if displayName == "" {
 		displayName = alias
 	}
-	return &ModelInfo{
-		ID:          alias,
-		Object:      "model",
-		Created:     created,
-		OwnedBy:     ownedBy,
-		Type:        modelType,
-		DisplayName: displayName,
-		UserDefined: userDefined,
-	}
+	info := modelconfig.ResolveModelInfoForProvider(name, modelType, provider, model.GetThinking())
+	modelconfig.RebindModelInfo(info, name, alias)
+	info.Object = "model"
+	info.Created = created
+	info.OwnedBy = ownedBy
+	info.Type = modelType
+	info.DisplayName = displayName
+	info.UserDefined = userDefined
+	return info
 }
 
 func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []*ModelInfo {
@@ -665,53 +670,64 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		return nil
 	}
 	now := time.Now().Unix()
-	models := make([]*ModelInfo, 0, len(compat.Models))
+	type aliasGroup struct {
+		firstIndex int
+		chatIndex  int
+		image      bool
+	}
+	groups := make(map[string]*aliasGroup)
+	order := make([]string, 0, len(compat.Models))
 	for i := range compat.Models {
 		model := compat.Models[i]
-		modelType := "openai-compatibility"
-		if model.Image {
-			modelType = registry.OpenAIImageModelType
+		modelID := strings.TrimSpace(model.Alias)
+		if modelID == "" {
+			modelID = strings.TrimSpace(model.Name)
 		}
-		info := buildConfiguredModelInfo(model, compat.Name, modelType, now, strings.TrimSpace(model.Alias), false)
+		if modelID == "" {
+			continue
+		}
+		key := strings.ToLower(modelID)
+		group := groups[key]
+		if group == nil {
+			group = &aliasGroup{firstIndex: i, chatIndex: -1}
+			groups[key] = group
+			order = append(order, key)
+		}
+		if model.Image {
+			group.image = true
+		} else if group.chatIndex < 0 {
+			group.chatIndex = i
+		}
+	}
+
+	models := make([]*ModelInfo, 0, len(order))
+	for _, key := range order {
+		group := groups[key]
+		modelIndex := group.firstIndex
+		if group.chatIndex >= 0 {
+			modelIndex = group.chatIndex
+		}
+		model := compat.Models[modelIndex]
+		info := buildConfiguredModelInfo(model, compat.Name, "openai-compatibility", "openai-compatibility", now, strings.TrimSpace(model.Alias), false)
 		if info == nil {
 			continue
 		}
-		thinking := model.Thinking
-		if thinking == nil && !model.Image {
-			thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+		info.SupportsImageAPI = group.image
+		if group.image && group.chatIndex < 0 {
+			info.Type = registry.OpenAIImageModelType
+			info.ChatDisabled = true
 		}
-		info.Thinking = thinking
-		info.SupportedInputModalities = normalizeCompatConfigModalities(model.InputModalities)
-		info.SupportedOutputModalities = normalizeCompatConfigModalities(model.OutputModalities)
+		if info.Thinking == nil && !model.Image {
+			info.Thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+		}
+		info.SupportedInputModalities = modelconfig.NormalizeModalities(model.InputModalities)
+		info.SupportedOutputModalities = modelconfig.NormalizeModalities(model.OutputModalities)
 		models = append(models, info)
 	}
 	return models
 }
 
-func normalizeCompatConfigModalities(raw []string) []string {
-	if len(raw) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(raw))
-	seen := make(map[string]struct{}, len(raw))
-	for _, item := range raw {
-		modality := strings.ToLower(strings.TrimSpace(item))
-		if modality == "" {
-			continue
-		}
-		if _, exists := seen[modality]; exists {
-			continue
-		}
-		seen[modality] = struct{}{}
-		out = append(out, modality)
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {
+func buildConfigModels[T modelEntry](models []T, ownedBy, modelType, provider string) []*ModelInfo {
 	if len(models) == 0 {
 		return nil
 	}
@@ -720,8 +736,7 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 	seen := make(map[string]struct{}, len(models))
 	for i := range models {
 		model := models[i]
-		name := strings.TrimSpace(model.GetName())
-		info := buildConfiguredModelInfo(model, ownedBy, modelType, now, name, true)
+		info := buildConfiguredModelInfo(model, ownedBy, modelType, provider, now, strings.TrimSpace(model.GetName()), true)
 		if info == nil {
 			continue
 		}
@@ -731,11 +746,6 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 			continue
 		}
 		seen[key] = struct{}{}
-		if name != "" {
-			if upstream := registry.LookupStaticModelInfo(name); upstream != nil && upstream.Thinking != nil {
-				info.Thinking = upstream.Thinking
-			}
-		}
 		out = append(out, info)
 	}
 	return out
@@ -745,28 +755,28 @@ func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
-	return buildConfigModels(entry.Models, "google", "vertex")
+	return buildConfigModels(entry.Models, "google", "vertex", "vertex")
 }
 
 func buildGeminiConfigModels(entry *config.GeminiKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
-	return buildConfigModels(entry.Models, "google", "gemini")
+	return buildConfigModels(entry.Models, "google", "gemini", "gemini")
 }
 
 func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
-	return buildConfigModels(entry.Models, "anthropic", "claude")
+	return buildConfigModels(entry.Models, "anthropic", "claude", "claude")
 }
 
 func buildXAIConfigModels(entry *config.XAIKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
-	return buildConfigModels(entry.Models, "xai", "xai")
+	return buildConfigModels(entry.Models, "xai", "xai", "xai")
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
@@ -774,7 +784,7 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 		return nil
 	}
 
-	models := registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "openai"))
+	models := registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "openai", "codex"))
 	configuredDisplayNames := make(map[string]string, len(entry.Models))
 	seenConfiguredModels := make(map[string]struct{}, len(entry.Models))
 	for i := range entry.Models {
@@ -806,32 +816,6 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 		}
 	}
 	return models
-}
-
-func rewriteModelInfoName(name, oldID, newID string) string {
-	trimmed := strings.TrimSpace(name)
-	if trimmed == "" {
-		return name
-	}
-	oldID = strings.TrimSpace(oldID)
-	newID = strings.TrimSpace(newID)
-	if oldID == "" || newID == "" {
-		return name
-	}
-	if strings.EqualFold(oldID, newID) {
-		return name
-	}
-	if strings.EqualFold(trimmed, oldID) {
-		return newID
-	}
-	if strings.HasSuffix(trimmed, "/"+oldID) {
-		prefix := strings.TrimSuffix(trimmed, oldID)
-		return prefix + newID
-	}
-	if trimmed == "models/"+oldID {
-		return "models/" + newID
-	}
-	return name
 }
 
 func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {
@@ -964,12 +948,9 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 			}
 			seen[aliasKey] = struct{}{}
 			clone := *model
-			clone.ID = mappedID
+			modelconfig.RebindModelInfo(&clone, id, mappedID)
 			if entry.displayName != "" {
 				clone.DisplayName = entry.displayName
-			}
-			if clone.Name != "" {
-				clone.Name = rewriteModelInfoName(clone.Name, id, mappedID)
 			}
 			out = append(out, &clone)
 			addedAlias = true

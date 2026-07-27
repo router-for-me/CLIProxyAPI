@@ -439,26 +439,44 @@ func builtinSchedulerStrategy(delegate string) (schedulerStrategy, bool) {
 	}
 }
 
-func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedulerStrategy, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, bool, error) {
+func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedulerStrategy, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, candidates []*Auth) (*Auth, bool, error) {
 	if m == nil || m.scheduler == nil {
 		return nil, false, nil
 	}
+	allowed := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if candidate != nil && strings.TrimSpace(candidate.ID) != "" {
+			allowed[candidate.ID] = struct{}{}
+		}
+	}
+	restrictedTried := make(map[string]struct{}, len(tried))
+	for authID := range tried {
+		restrictedTried[authID] = struct{}{}
+	}
+	m.mu.RLock()
+	for authID := range m.auths {
+		if _, ok := allowed[authID]; !ok {
+			restrictedTried[authID] = struct{}{}
+		}
+	}
+	m.mu.RUnlock()
+
 	providerKey := strings.ToLower(strings.TrimSpace(provider))
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 	for {
 		var selected *Auth
 		var errPick error
 		if providerKey == "mixed" {
-			selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
+			selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, restrictedTried, strategy)
 			if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 				m.syncScheduler()
-				selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
+				selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, restrictedTried, strategy)
 			}
 		} else {
-			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
+			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, restrictedTried, strategy)
 			if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 				m.syncScheduler()
-				selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
+				selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, restrictedTried, strategy)
 			}
 		}
 		if errPick != nil {
@@ -467,11 +485,12 @@ func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedule
 		if selected == nil {
 			return nil, true, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 		}
+		if _, ok := allowed[selected.ID]; !ok {
+			restrictedTried[selected.ID] = struct{}{}
+			continue
+		}
 		if disallowFreeAuth && isFreeCodexAuth(selected) {
-			if tried == nil {
-				tried = make(map[string]struct{})
-			}
-			tried[selected.ID] = struct{}{}
+			restrictedTried[selected.ID] = struct{}{}
 			continue
 		}
 		return selected, true, nil
@@ -510,7 +529,7 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 	if !okStrategy {
 		return nil, false, nil
 	}
-	return m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried)
+	return m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried, candidates)
 }
 
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
@@ -526,6 +545,31 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 	}
 	selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
 	return selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey)
+}
+
+func (m *Manager) authSupportsExecutionModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string, opts cliproxyexecutor.Options) bool {
+	if !m.authSupportsRouteModel(registryRef, auth, routeModel) {
+		return false
+	}
+	if registryRef == nil || auth == nil {
+		return true
+	}
+	executionKind := modelExecutionKindFromOptions(opts)
+	supportsExecution := func(modelID string) bool {
+		return registryRef.ClientModelSupportsExecution(auth.ID, modelID, executionKind)
+	}
+	routeKey := canonicalModelKey(routeModel)
+	if routeKey != "" && supportsExecution(routeKey) {
+		return true
+	}
+	selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
+	if selectionKey != "" && selectionKey != routeKey && supportsExecution(selectionKey) {
+		return true
+	}
+	if routeKey == "" && selectionKey == "" {
+		return executionKind == apiKeyModelExecutionChat
+	}
+	return false
 }
 
 func (m *Manager) normalizeProviders(providers []string) []string {
@@ -965,7 +1009,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if _, used := tried[candidate.ID]; used {
 			continue
 		}
-		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+		if modelKey != "" && !m.authSupportsExecutionModel(registryRef, candidate, model, opts) {
 			continue
 		}
 		candidates = append(candidates, candidate)
@@ -1078,6 +1122,29 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
 		if errSelection != nil {
 			return nil, errSelection
 		}
+		selectionAuth := selection.CloneAuthForRoute(model)
+		upstreamModel := ""
+		if selectionAuth != nil && selectionAuth.Attributes != nil {
+			upstreamModel = selectionAuth.Attributes[homeUpstreamModelAttributeKey]
+		}
+		if homeAuthKnownIneligibleForExecution(selectionAuth, model, upstreamModel, opts) {
+			authID := ""
+			if selectionAuth != nil {
+				authID = strings.TrimSpace(selectionAuth.ID)
+			}
+			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "execution_ineligible"); errEnd != nil {
+				return nil, errEnd
+			}
+			if authID == "" {
+				return nil, &Error{Code: "auth_not_found", Message: "selected auth has no ID"}
+			}
+			if _, alreadyTried := tried[authID]; alreadyTried {
+				return nil, repeatedHomeAuthError()
+			}
+			tried[authID] = struct{}{}
+			homeAuthCount++
+			continue
+		}
 		providerMatches := strings.TrimSpace(provider) == "" || strings.EqualFold(strings.TrimSpace(selection.Provider), strings.TrimSpace(provider))
 		kindMatches := selection.Auth != nil && selection.Auth.AuthKind() == requiredKind
 		if providerMatches && kindMatches {
@@ -1112,10 +1179,11 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		return auth, exec, err
 	}
 
-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+	if modelExecutionKindFromOptions(opts) != apiKeyModelExecutionChat || m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
 	if strings.TrimSpace(model) != "" {
+		registryRef := registry.GetGlobalRegistry()
 		m.mu.RLock()
 		for _, candidate := range m.auths {
 			if candidate == nil || executorKeyFromAuth(candidate) != provider || candidate.Disabled {
@@ -1124,7 +1192,8 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			if _, used := tried[candidate.ID]; used {
 				continue
 			}
-			if m.routeAwareSelectionRequired(candidate, model) {
+			routeSupported := m.authSupportsRouteModel(registryRef, candidate, model)
+			if m.routeAwareSelectionRequired(candidate, model) || (routeSupported && !m.authSupportsExecutionModel(registryRef, candidate, model, opts)) {
 				m.mu.RUnlock()
 				return m.pickNextLegacy(ctx, provider, model, opts, tried)
 			}
@@ -1224,7 +1293,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if _, ok := m.executors[providerKey]; !ok {
 			continue
 		}
-		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+		if modelKey != "" && !m.authSupportsExecutionModel(registryRef, candidate, model, opts) {
 			continue
 		}
 		candidates = append(candidates, candidate)
@@ -1276,7 +1345,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
 
-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+	if modelExecutionKindFromOptions(opts) != apiKeyModelExecutionChat || m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
 
@@ -1300,6 +1369,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	if strings.TrimSpace(model) != "" {
+		registryRef := registry.GetGlobalRegistry()
 		providerSet := make(map[string]struct{}, len(eligibleProviders))
 		for _, providerKey := range eligibleProviders {
 			providerSet[providerKey] = struct{}{}
@@ -1315,7 +1385,8 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			if _, used := tried[candidate.ID]; used {
 				continue
 			}
-			if m.routeAwareSelectionRequired(candidate, model) {
+			routeSupported := m.authSupportsRouteModel(registryRef, candidate, model)
+			if m.routeAwareSelectionRequired(candidate, model) || (routeSupported && !m.authSupportsExecutionModel(registryRef, candidate, model, opts)) {
 				m.mu.RUnlock()
 				return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 			}

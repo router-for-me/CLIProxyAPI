@@ -3,6 +3,8 @@ package auth
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"strings"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/sjson"
@@ -38,6 +40,26 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			}
 			return cliproxyexecutor.Response{}, repeatedHomeAuthError()
 		}
+		if !homeSelectionMatchesProviders(selection, providers) {
+			tried[auth.ID] = struct{}{}
+			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "provider_mismatch"); errEnd != nil {
+				return cliproxyexecutor.Response{}, errEnd
+			}
+			lastErr = homeProviderMismatchError(selection.Provider, providers)
+			continue
+		}
+		upstreamModel := ""
+		if auth.Attributes != nil {
+			upstreamModel = auth.Attributes[homeUpstreamModelAttributeKey]
+		}
+		if homeAuthKnownIneligibleForExecution(auth, routeModel, upstreamModel, opts) {
+			tried[auth.ID] = struct{}{}
+			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "execution_ineligible"); errEnd != nil {
+				return cliproxyexecutor.Response{}, errEnd
+			}
+			lastErr = &Error{Code: "auth_not_found", Message: "selected auth does not support " + modelExecutionKindName(modelExecutionKindFromOptions(opts)) + " execution"}
+			continue
+		}
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, selection.Provider, routeModel)
 		if errRuntimeAuth := m.bindHomeSelectionRuntimeAuth(ctx, opts, selection); errRuntimeAuth != nil {
@@ -55,7 +77,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel, modelExecutionKindFromOptions(opts))
 		if aliasResult.ForceMapping && responseAlias != "" {
 			aliasResult.OriginalAlias = responseAlias
 		}
@@ -97,6 +119,9 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 				selection.End("request_intercepted")
 				return cliproxyexecutor.Response{}, errIntercept
 			}
+			if !restoreExecutionModel {
+				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, preparedAuth, routeModel, upstreamModel, modelExecutionKindFromOptions(execOpts))
+			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				releaseAttempt()
 				selection.End("attempt_canceled")
@@ -113,7 +138,8 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			if errExecute == nil {
 				m.reportHomeResult(execCtx, result, preparedAuth)
 				releaseAttempt()
-				rewriteForceMappedResponse(&response, aliasResult)
+				responseAliasResult := aliasResultForAPIKeyModelCandidate(routing, preparedAuth, routeModel, upstreamModel, modelExecutionKindFromOptions(execOpts), aliasResult)
+				rewriteForceMappedResponse(&response, responseAliasResult)
 				if !m.retainHomeWebsocketSelection(ctx, opts, routeModel, selection) {
 					selection.End("completed")
 				}
@@ -136,6 +162,32 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		if errCtx := execCtx.Err(); errCtx != nil && ctx != nil && ctx.Err() != nil {
 			return cliproxyexecutor.Response{}, errCtx
 		}
+	}
+}
+
+func homeSelectionMatchesProviders(selection *HomeDispatchSelection, providers []string) bool {
+	provider := ""
+	executorProvider := ""
+	if selection != nil {
+		provider = strings.ToLower(strings.TrimSpace(selection.Provider))
+		if selection.Executor != nil {
+			executorProvider = strings.ToLower(strings.TrimSpace(selection.Executor.Identifier()))
+		}
+	}
+	for _, candidate := range providers {
+		candidate = strings.ToLower(strings.TrimSpace(candidate))
+		if candidate == "home" || candidate == provider || candidate == executorProvider {
+			return true
+		}
+	}
+	return false
+}
+
+func homeProviderMismatchError(provider string, providers []string) *Error {
+	return &Error{
+		Code:       "provider_mismatch",
+		Message:    fmt.Sprintf("home selected provider %q, but request requires provider %q", strings.TrimSpace(provider), strings.Join(providers, ", ")),
+		HTTPStatus: http.StatusServiceUnavailable,
 	}
 }
 

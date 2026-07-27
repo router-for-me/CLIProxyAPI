@@ -1510,14 +1510,22 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 			ContextLength: 123456,
 			Thinking:      &registry.ThinkingSupport{Levels: []string{"none", "minimal", "low", "medium", "unsupported", "high", "xhigh"}},
 		},
-		{ID: "grok-imagine-image-quality", Object: "model", OwnedBy: "xai", Type: "openai"},
-		{ID: "gpt-image-2", Object: "model", OwnedBy: "openai", Type: "openai"},
-		{ID: "grok-imagine-image", Object: "model", OwnedBy: "xai", Type: "openai"},
-		{ID: "grok-imagine-video", Object: "model", OwnedBy: "xai", Type: "openai"},
-		{ID: "grok-imagine-video-1.5-preview", Object: "model", OwnedBy: "xai", Type: "openai"},
+	})
+	codexBuiltinClientID := clientID + "-codex-builtins"
+	modelRegistry.RegisterClient(codexBuiltinClientID, "codex", []*registry.ModelInfo{
+		{ID: "gpt-image-2", Object: "model", OwnedBy: "openai", Type: "openai", SupportsImageAPI: true, ChatDisabled: true},
+	})
+	xaiBuiltinClientID := clientID + "-xai-builtins"
+	modelRegistry.RegisterClient(xaiBuiltinClientID, "xai", []*registry.ModelInfo{
+		{ID: "grok-imagine-image-quality", Object: "model", OwnedBy: "xai", Type: "xai", SupportsImageAPI: true, ChatDisabled: true},
+		{ID: "grok-imagine-image", Object: "model", OwnedBy: "xai", Type: "xai", SupportsImageAPI: true, ChatDisabled: true},
+		{ID: "grok-imagine-video", Object: "model", OwnedBy: "xai", Type: "xai", ChatDisabled: true},
+		{ID: "grok-imagine-video-1.5-preview", Object: "model", OwnedBy: "xai", Type: "xai", ChatDisabled: true},
 	})
 	t.Cleanup(func() {
 		modelRegistry.UnregisterClient(clientID)
+		modelRegistry.UnregisterClient(codexBuiltinClientID)
+		modelRegistry.UnregisterClient(xaiBuiltinClientID)
 	})
 
 	server := newTestServer(t)

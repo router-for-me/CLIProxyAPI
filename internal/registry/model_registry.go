@@ -15,13 +15,42 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// OpenAIImageModelType marks models that are callable through OpenAI-compatible image endpoints.
+// OpenAIImageModelType marks image-only models that must not be routed through chat endpoints.
 const OpenAIImageModelType = "openai-image"
 
 const (
 	DefaultClaudeMaxInputTokens  = 200000
 	DefaultClaudeMaxOutputTokens = 64000
 )
+
+// ModelExecutionKind identifies the endpoint family used to execute a model.
+type ModelExecutionKind uint8
+
+const (
+	ModelExecutionAny ModelExecutionKind = iota
+	ModelExecutionChat
+	ModelExecutionImage
+	ModelExecutionVideo
+)
+
+// ModelEndpointCapabilities reports the endpoint families exposed by a model.
+type ModelEndpointCapabilities struct {
+	Chat  bool
+	Image bool
+	Video bool
+}
+
+// ModelExecutionSnapshot describes the providers that expose an exact dynamic
+// model registration through one endpoint family.
+type ModelExecutionSnapshot struct {
+	Supported bool
+	Providers map[string]bool
+}
+
+// ProviderSupports reports whether the snapshot includes execution support from provider.
+func (s ModelExecutionSnapshot) ProviderSupports(provider string) bool {
+	return s.Providers[strings.ToLower(strings.TrimSpace(provider))]
+}
 
 // ModelInfo represents information about an available model
 type ModelInfo struct {
@@ -62,6 +91,15 @@ type ModelInfo struct {
 	// SupportsWebSearch indicates this Antigravity model is listed by
 	// fetchAvailableModels.webSearchModelIds and can execute native googleSearch.
 	SupportsWebSearch bool `json:"supports_web_search,omitempty"`
+	// SupportsImageAPI indicates that the model is callable through OpenAI-compatible image endpoints.
+	// Unlike OpenAIImageModelType, this may also be true for a chat-capable shared alias.
+	SupportsImageAPI bool `json:"-"`
+	// SupportsVideoAPI indicates that the model is callable through OpenAI-compatible video endpoints.
+	// This may also be true for a chat-capable shared alias.
+	SupportsVideoAPI bool `json:"-"`
+	// ChatDisabled marks models that must not be advertised or selected for chat endpoints.
+	// The default false value preserves chat support for existing model definitions.
+	ChatDisabled bool `json:"-"`
 
 	// Thinking holds provider-specific reasoning/thinking budget capabilities.
 	// This is optional and currently used for Gemini thinking budget normalization.
@@ -195,6 +233,164 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 		return cloneModelInfo(info)
 	}
 	return cloneModelInfo(LookupStaticModelInfo(modelID))
+}
+
+// LookupModelEndpointCapabilities returns exact dynamic aggregate capabilities,
+// falling back to an exact static definition only when no dynamic registration exists.
+func LookupModelEndpointCapabilities(modelID string) (ModelEndpointCapabilities, bool) {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return ModelEndpointCapabilities{}, false
+	}
+	if info, supportsChat := GetGlobalRegistry().GetCatalogModelInfo(modelID); info != nil {
+		return modelEndpointCapabilities(info, supportsChat), true
+	}
+	info := LookupStaticModelInfo(modelID)
+	if info == nil {
+		return ModelEndpointCapabilities{}, false
+	}
+	return modelEndpointCapabilities(info, modelInfoSupportsChat(info)), true
+}
+
+// ModelSupportsImageAPI reports whether an exact model registration exposes image endpoints.
+func ModelSupportsImageAPI(modelID string) bool {
+	capabilities, found := LookupModelEndpointCapabilities(modelID)
+	return found && capabilities.Image
+}
+
+// ModelIsImageOnly reports whether modelID is available exclusively through
+// OpenAI-compatible image endpoints.
+func ModelIsImageOnly(modelID string) bool {
+	capabilities, found := LookupModelEndpointCapabilities(modelID)
+	return found && capabilities.Image && !capabilities.Chat
+}
+
+// GetCatalogModelInfo returns aggregate metadata for the catalog-participating model.
+// Chat-capable metadata takes precedence over endpoint-only metadata, while image/video
+// capabilities are aggregated across participating client registrations. Non-quota suspensions are
+// excluded; quota suspensions retain existing catalog visibility. The second result
+// reports whether at least one participating registration can serve chat endpoints.
+func (r *ModelRegistry) GetCatalogModelInfo(modelID string) (*ModelInfo, bool) {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return nil, false
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	return r.catalogModelInfoLocked(modelID)
+}
+
+func (r *ModelRegistry) catalogModelInfoLocked(modelID string) (*ModelInfo, bool) {
+	registration := r.models[modelID]
+	if registration == nil {
+		return nil, false
+	}
+
+	var chatClientID string
+	var chatInfo *ModelInfo
+	var nonChatClientID string
+	var nonChatInfo *ModelInfo
+	supportsImageAPI := false
+	supportsVideoAPI := false
+	hasCurrentClientInfo := false
+
+	for clientID, infos := range r.clientModelInfos {
+		info := infos[modelID]
+		if info == nil || !r.clientHasModelLocked(clientID, modelID) {
+			continue
+		}
+		hasCurrentClientInfo = true
+		// Quota suspensions retain the model in catalogs during recovery windows.
+		if reason, suspended := registration.SuspendedClients[clientID]; suspended && !strings.EqualFold(strings.TrimSpace(reason), "quota") {
+			continue
+		}
+
+		if info.Type == OpenAIImageModelType || info.SupportsImageAPI {
+			supportsImageAPI = true
+		}
+		if info.SupportsVideoAPI {
+			supportsVideoAPI = true
+		}
+		if !modelInfoSupportsChat(info) {
+			if nonChatInfo == nil || clientID < nonChatClientID {
+				nonChatClientID = clientID
+				nonChatInfo = info
+			}
+			continue
+		}
+		if chatInfo == nil || clientID < chatClientID {
+			chatClientID = clientID
+			chatInfo = info
+		}
+	}
+
+	selected := chatInfo
+	supportsChat := selected != nil
+	if selected == nil {
+		selected = nonChatInfo
+	}
+	if selected == nil && !hasCurrentClientInfo {
+		// Keep registries assembled without per-client metadata usable.
+		selected = registration.Info
+		supportsChat = modelInfoSupportsChat(selected)
+		if selected != nil && (selected.Type == OpenAIImageModelType || selected.SupportsImageAPI) {
+			supportsImageAPI = true
+		}
+		if selected != nil && selected.SupportsVideoAPI {
+			supportsVideoAPI = true
+		}
+	}
+	if selected == nil {
+		return nil, false
+	}
+
+	result := cloneModelInfo(selected)
+	result.SupportsImageAPI = supportsImageAPI
+	result.SupportsVideoAPI = supportsVideoAPI
+	return result, supportsChat
+}
+
+func modelInfoSupportsChat(info *ModelInfo) bool {
+	return info != nil && info.Type != OpenAIImageModelType && !info.ChatDisabled
+}
+
+func modelEndpointCapabilities(info *ModelInfo, supportsChat bool) ModelEndpointCapabilities {
+	if info == nil {
+		return ModelEndpointCapabilities{}
+	}
+	return ModelEndpointCapabilities{
+		Chat:  supportsChat,
+		Image: info.Type == OpenAIImageModelType || info.SupportsImageAPI,
+		Video: info.SupportsVideoAPI,
+	}
+}
+
+func modelInfoSupportsExecution(info *ModelInfo, kind ModelExecutionKind) bool {
+	if info == nil {
+		return false
+	}
+	switch kind {
+	case ModelExecutionAny:
+		return true
+	case ModelExecutionChat:
+		return modelInfoSupportsChat(info)
+	case ModelExecutionImage:
+		return info.Type == OpenAIImageModelType || info.SupportsImageAPI
+	case ModelExecutionVideo:
+		return info.SupportsVideoAPI
+	default:
+		return false
+	}
+}
+
+func (r *ModelRegistry) clientHasModelLocked(clientID, modelID string) bool {
+	for _, registeredModelID := range r.clientModels[clientID] {
+		if registeredModelID == modelID {
+			return true
+		}
+	}
+	return false
 }
 
 // ModelOverrideHeaders returns models.json config.override_header for the model, if any.
@@ -801,6 +997,123 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	return false
 }
 
+// ClientModelSupportsExecution reports whether a specific client registration
+// exposes modelID through the requested endpoint family.
+func (r *ModelRegistry) ClientModelSupportsExecution(clientID, modelID string, kind ModelExecutionKind) bool {
+	clientID = strings.TrimSpace(clientID)
+	modelID = strings.TrimSpace(modelID)
+	if clientID == "" || modelID == "" {
+		return false
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	return r.clientModelSupportsExecutionLocked(clientID, modelID, kind)
+}
+
+func (r *ModelRegistry) clientModelSupportsExecutionLocked(clientID, modelID string, kind ModelExecutionKind) bool {
+	registered := false
+	for _, id := range r.clientModels[clientID] {
+		if strings.EqualFold(strings.TrimSpace(id), modelID) {
+			registered = true
+			break
+		}
+	}
+	if !registered {
+		return false
+	}
+	infos := r.clientModelInfos[clientID]
+	for id, info := range infos {
+		if !strings.EqualFold(strings.TrimSpace(id), modelID) {
+			continue
+		}
+		if info == nil {
+			return kind == ModelExecutionAny || kind == ModelExecutionChat
+		}
+		return modelInfoSupportsExecution(info, kind)
+	}
+	return kind == ModelExecutionAny || kind == ModelExecutionChat
+}
+
+// ProviderModelSupportsExecution reports whether any client registered under
+// provider exposes modelID through the requested endpoint family.
+func (r *ModelRegistry) ProviderModelSupportsExecution(provider, modelID string, kind ModelExecutionKind) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	modelID = strings.TrimSpace(modelID)
+	if provider == "" || modelID == "" {
+		return false
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	for clientID, clientProvider := range r.clientProviders {
+		if clientProvider != provider {
+			continue
+		}
+		if r.clientModelSupportsExecutionLocked(clientID, modelID, kind) {
+			return true
+		}
+	}
+	return false
+}
+
+// LookupModelExecutionSnapshot returns execution support aggregated from every client
+// for one exact dynamic model registration. Suspension and cooldown state do not alter
+// the registration's declared endpoint capabilities.
+func (r *ModelRegistry) LookupModelExecutionSnapshot(modelID string, kind ModelExecutionKind) (ModelExecutionSnapshot, bool) {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return ModelExecutionSnapshot{}, false
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	registration, found := r.models[modelID]
+	if !found || registration == nil || registration.Count <= 0 {
+		return ModelExecutionSnapshot{}, false
+	}
+
+	snapshot := ModelExecutionSnapshot{Providers: make(map[string]bool)}
+	for clientID, registeredModels := range r.clientModels {
+		registered := false
+		for _, registeredModelID := range registeredModels {
+			if strings.TrimSpace(registeredModelID) == modelID {
+				registered = true
+				break
+			}
+		}
+		if !registered {
+			continue
+		}
+
+		info := r.clientModelInfos[clientID][modelID]
+		if !modelInfoSupportsExecution(info, kind) {
+			continue
+		}
+		snapshot.Supported = true
+		if provider := strings.ToLower(strings.TrimSpace(r.clientProviders[clientID])); provider != "" {
+			snapshot.Providers[provider] = true
+		}
+	}
+	return snapshot, true
+}
+
+// ClientModelSupportsImageAPI reports whether a specific client registration
+// exposes modelID through OpenAI-compatible image endpoints.
+func (r *ModelRegistry) ClientModelSupportsImageAPI(clientID, modelID string) bool {
+	return r.ClientModelSupportsExecution(clientID, modelID, ModelExecutionImage)
+}
+
+// ClientModelSupportsChat reports whether a specific client registration can
+// serve modelID through chat endpoints. Registrations without metadata retain
+// the legacy chat-capable default.
+func (r *ModelRegistry) ClientModelSupportsChat(clientID, modelID string) bool {
+	return r.ClientModelSupportsExecution(clientID, modelID, ModelExecutionChat)
+}
+
 // GetAvailableModels returns all models that have at least one available client
 // Parameters:
 //   - handlerType: The handler type to filter models for (e.g., "openai", "claude", "gemini")
@@ -839,7 +1152,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 	models := make([]map[string]any, 0, len(r.models))
 	var expiresAt time.Time
 
-	for _, registration := range r.models {
+	for modelID, registration := range r.models {
 		availableClients := registration.Count
 
 		expiredClients := 0
@@ -874,7 +1187,8 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 		}
 
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
-			model := r.convertModelToMap(registration.Info, handlerType)
+			info, _ := r.catalogModelInfoLocked(modelID)
+			model := r.convertModelToMap(info, handlerType)
 			if model != nil {
 				models = append(models, model)
 			}

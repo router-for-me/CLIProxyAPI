@@ -133,77 +133,89 @@ func normalizeAntigravityCapabilityModelID(modelID string) string {
 
 func codexBuiltinImage15ModelInfo() *ModelInfo {
 	return &ModelInfo{
-		ID:          codexBuiltinImage15ModelID,
-		Object:      "model",
-		Created:     1704067200, // 2024-01-01
-		OwnedBy:     "openai",
-		Type:        "openai",
-		DisplayName: "GPT Image 1.5",
-		Version:     codexBuiltinImage15ModelID,
+		ID:               codexBuiltinImage15ModelID,
+		Object:           "model",
+		Created:          1704067200, // 2024-01-01
+		OwnedBy:          "openai",
+		Type:             "openai",
+		DisplayName:      "GPT Image 1.5",
+		Version:          codexBuiltinImage15ModelID,
+		SupportsImageAPI: true,
+		ChatDisabled:     true,
 	}
 }
 
 func codexBuiltinImageModelInfo() *ModelInfo {
 	return &ModelInfo{
-		ID:          codexBuiltinImageModelID,
-		Object:      "model",
-		Created:     1704067200, // 2024-01-01
-		OwnedBy:     "openai",
-		Type:        "openai",
-		DisplayName: "GPT Image 2",
-		Version:     codexBuiltinImageModelID,
+		ID:               codexBuiltinImageModelID,
+		Object:           "model",
+		Created:          1704067200, // 2024-01-01
+		OwnedBy:          "openai",
+		Type:             "openai",
+		DisplayName:      "GPT Image 2",
+		Version:          codexBuiltinImageModelID,
+		SupportsImageAPI: true,
+		ChatDisabled:     true,
 	}
 }
 
 func xaiBuiltinImageModelInfo() *ModelInfo {
 	return &ModelInfo{
-		ID:          xaiBuiltinImageModelID,
-		Object:      "model",
-		Created:     1735689600, // 2025-01-01
-		OwnedBy:     "xai",
-		Type:        "xai",
-		DisplayName: "Grok Imagine Image",
-		Name:        xaiBuiltinImageModelID,
-		Description: "xAI Grok image generation model.",
+		ID:               xaiBuiltinImageModelID,
+		Object:           "model",
+		Created:          1735689600, // 2025-01-01
+		OwnedBy:          "xai",
+		Type:             "xai",
+		DisplayName:      "Grok Imagine Image",
+		Name:             xaiBuiltinImageModelID,
+		Description:      "xAI Grok image generation model.",
+		SupportsImageAPI: true,
+		ChatDisabled:     true,
 	}
 }
 
 func xaiBuiltinImageQualityModelInfo() *ModelInfo {
 	return &ModelInfo{
-		ID:          xaiBuiltinImageQualityModelID,
-		Object:      "model",
-		Created:     1735689600, // 2025-01-01
-		OwnedBy:     "xai",
-		Type:        "xai",
-		DisplayName: "Grok Imagine Image Quality",
-		Name:        xaiBuiltinImageQualityModelID,
-		Description: "xAI Grok higher-fidelity image generation model.",
+		ID:               xaiBuiltinImageQualityModelID,
+		Object:           "model",
+		Created:          1735689600, // 2025-01-01
+		OwnedBy:          "xai",
+		Type:             "xai",
+		DisplayName:      "Grok Imagine Image Quality",
+		Name:             xaiBuiltinImageQualityModelID,
+		Description:      "xAI Grok higher-fidelity image generation model.",
+		SupportsImageAPI: true,
+		ChatDisabled:     true,
 	}
 }
 
 func xaiBuiltinVideoModelInfo() *ModelInfo {
 	return &ModelInfo{
-		ID:          xaiBuiltinVideoModelID,
-		Object:      "model",
-		Created:     1735689600, // 2025-01-01
-		OwnedBy:     "xai",
-		Type:        "xai",
-		DisplayName: "Grok Imagine Video",
-		Name:        xaiBuiltinVideoModelID,
-		Description: "xAI Grok video generation model.",
+		ID:               xaiBuiltinVideoModelID,
+		Object:           "model",
+		Created:          1735689600, // 2025-01-01
+		OwnedBy:          "xai",
+		Type:             "xai",
+		DisplayName:      "Grok Imagine Video",
+		Name:             xaiBuiltinVideoModelID,
+		Description:      "xAI Grok video generation model.",
+		SupportsVideoAPI: true,
+		ChatDisabled:     true,
 	}
 }
 
 func xaiBuiltinVideo15PreviewModelInfo() *ModelInfo {
 	return &ModelInfo{
-		ID:          xaiBuiltinVideo15PreviewModelID,
-		Object:      "model",
-		Created:     1735689600, // 2025-01-01
-		OwnedBy:     "xai",
-		Type:        "xai",
-		DisplayName: "Grok Imagine Video 1.5 Preview",
-		Name:        xaiBuiltinVideo15PreviewModelID,
-		Description: "xAI Grok preview video generation model.",
+		ID:               xaiBuiltinVideo15PreviewModelID,
+		Object:           "model",
+		Created:          1735689600, // 2025-01-01
+		OwnedBy:          "xai",
+		Type:             "xai",
+		DisplayName:      "Grok Imagine Video 1.5 Preview",
+		Name:             xaiBuiltinVideo15PreviewModelID,
+		Description:      "xAI Grok preview video generation model.",
+		SupportsVideoAPI: true,
+		ChatDisabled:     true,
 	}
 }
 
@@ -301,11 +313,28 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	}
 }
 
+// LookupStaticModelInfoByChannel searches one provider channel for an exact model ID.
+func LookupStaticModelInfoByChannel(modelID, channel string) *ModelInfo {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return nil
+	}
+	for _, info := range GetStaticModelDefinitionsByChannel(channel) {
+		if info != nil && strings.EqualFold(strings.TrimSpace(info.ID), modelID) {
+			return cloneModelInfo(info)
+		}
+	}
+	return nil
+}
+
 // LookupStaticModelInfo searches all static model definitions for a model by ID.
 // Returns nil if no matching model is found.
 func LookupStaticModelInfo(modelID string) *ModelInfo {
 	if modelID == "" {
 		return nil
+	}
+	if builtin := lookupBuiltinModelInfo(modelID); builtin != nil {
+		return builtin
 	}
 
 	data := getModels()
@@ -328,4 +357,23 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 	}
 
 	return nil
+}
+
+func lookupBuiltinModelInfo(modelID string) *ModelInfo {
+	switch strings.ToLower(strings.TrimSpace(modelID)) {
+	case codexBuiltinImage15ModelID:
+		return codexBuiltinImage15ModelInfo()
+	case codexBuiltinImageModelID:
+		return codexBuiltinImageModelInfo()
+	case xaiBuiltinImageModelID:
+		return xaiBuiltinImageModelInfo()
+	case xaiBuiltinImageQualityModelID:
+		return xaiBuiltinImageQualityModelInfo()
+	case xaiBuiltinVideoModelID:
+		return xaiBuiltinVideoModelInfo()
+	case xaiBuiltinVideo15PreviewModelID:
+		return xaiBuiltinVideo15PreviewModelInfo()
+	default:
+		return nil
+	}
 }

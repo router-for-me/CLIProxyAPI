@@ -126,6 +126,15 @@ func (e *videoAuthCaptureExecutor) Models() []string {
 	return out
 }
 
+func testXAIVideoModelInfo(modelID string) *registry.ModelInfo {
+	return &registry.ModelInfo{
+		ID:               modelID,
+		Type:             "xai",
+		SupportsVideoAPI: true,
+		ChatDisabled:     true,
+	}
+}
+
 func resetVideoAuthBindingsForTest(t *testing.T) {
 	t.Helper()
 	previous := videoAuthBindings
@@ -151,7 +160,7 @@ func newVideoAuthBindingTestHandler(t *testing.T, executor *videoAuthCaptureExec
 		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 			t.Fatalf("manager.Register(%s): %v", authID, errRegister)
 		}
-		registry.GetGlobalRegistry().RegisterClient(authID, auth.Provider, []*registry.ModelInfo{{ID: defaultXAIVideosModel}})
+		registry.GetGlobalRegistry().RegisterClient(authID, auth.Provider, []*registry.ModelInfo{testXAIVideoModelInfo(defaultXAIVideosModel)})
 		manager.RefreshSchedulerEntry(authID)
 	}
 	t.Cleanup(func() {
@@ -190,6 +199,71 @@ func TestVideosModelValidationAllowsXAIVideoModel(t *testing.T) {
 	}
 	if isSupportedVideosModel("codex/grok-imagine-video-1.5-preview") {
 		t.Fatal("expected codex/grok-imagine-video-1.5-preview to be rejected")
+	}
+}
+
+func TestXAIVideosNativeConfiguredAliasSelectsVideoAuthAndResolvesUpstreamModel(t *testing.T) {
+	const (
+		alias       = "tenant/public-video"
+		apiKey      = "video-key"
+		videoAuthID = "video-handler-alias-auth"
+		chatAuthID  = "chat-handler-alias-auth"
+	)
+	executor := &videoAuthCaptureExecutor{requestID: "video-handler-alias"}
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(executor)
+	manager.SetConfig(&sdkconfig.Config{XAIKey: []sdkconfig.XAIKey{{
+		APIKey: apiKey,
+		Models: []sdkconfig.XAIModel{{
+			Name:  defaultXAIVideosModel,
+			Alias: alias,
+		}},
+	}}})
+
+	auths := []*coreauth.Auth{
+		{
+			ID:       chatAuthID,
+			Provider: "xai",
+			Status:   coreauth.StatusActive,
+		},
+		{
+			ID:       videoAuthID,
+			Provider: "xai",
+			Status:   coreauth.StatusActive,
+			Attributes: map[string]string{
+				coreauth.AttributeAPIKey: apiKey,
+				coreauth.AttributeSource: "config:xai[test]",
+			},
+		},
+	}
+	modelRegistry := registry.GetGlobalRegistry()
+	for _, auth := range auths {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("manager.Register(%s): %v", auth.ID, errRegister)
+		}
+		info := &registry.ModelInfo{ID: alias, Type: "xai"}
+		if auth.ID == videoAuthID {
+			info = testXAIVideoModelInfo(alias)
+		}
+		modelRegistry.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{info})
+		manager.RefreshSchedulerEntry(auth.ID)
+	}
+	t.Cleanup(func() {
+		for _, auth := range auths {
+			modelRegistry.UnregisterClient(auth.ID)
+		}
+	})
+
+	handler := NewOpenAIAPIHandler(apihandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+	resp := performVideosEndpointRequest(t, http.MethodPost, xaiVideosGenerationsAPI, "application/json", strings.NewReader(`{"model":"`+alias+`","prompt":"make a video"}`), handler.XAIVideosGenerations)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if got := executor.AuthIDs(); len(got) != 1 || got[0] != videoAuthID {
+		t.Fatalf("selected auths = %v, want [%s]", got, videoAuthID)
+	}
+	if got := executor.Models(); len(got) != 1 || got[0] != defaultXAIVideosModel {
+		t.Fatalf("execution models = %v, want [%s]", got, defaultXAIVideosModel)
 	}
 }
 
@@ -546,7 +620,8 @@ func TestVideosContentUsesSelectedAuthProxyForDownload(t *testing.T) {
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("manager.Register() error = %v", errRegister)
 	}
-	registry.GetGlobalRegistry().RegisterClient(authID, auth.Provider, []*registry.ModelInfo{{ID: defaultXAIVideosModel}})
+	registry.GetGlobalRegistry().RegisterClient(authID, auth.Provider, []*registry.ModelInfo{testXAIVideoModelInfo(defaultXAIVideosModel)})
+	manager.RefreshSchedulerEntry(authID)
 	t.Cleanup(func() {
 		registry.GetGlobalRegistry().UnregisterClient(authID)
 	})
@@ -756,7 +831,7 @@ func TestXAIVideosNativeRetrieveUsesBoundModel(t *testing.T) {
 		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 			t.Fatalf("manager.Register(%s): %v", entry.authID, errRegister)
 		}
-		registry.GetGlobalRegistry().RegisterClient(entry.authID, auth.Provider, []*registry.ModelInfo{{ID: entry.model}})
+		registry.GetGlobalRegistry().RegisterClient(entry.authID, auth.Provider, []*registry.ModelInfo{testXAIVideoModelInfo(entry.model)})
 		manager.RefreshSchedulerEntry(entry.authID)
 	}
 	t.Cleanup(func() {
