@@ -432,11 +432,14 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			tcType := tc.Get("type").String()
 			if tcType == "function" {
 				name := tc.Get("function.name").String()
+				if toolCatalog.familyForChatCall(name) == toolFamilyCustom {
+					tcType = "custom"
+				}
 				if name != "" {
 					name = toolCatalog.shorten(name)
 				}
 				choice := []byte(`{}`)
-				choice, _ = sjson.SetBytes(choice, "type", "function")
+				choice, _ = sjson.SetBytes(choice, "type", tcType)
 				if name != "" {
 					choice, _ = sjson.SetBytes(choice, "name", name)
 				}

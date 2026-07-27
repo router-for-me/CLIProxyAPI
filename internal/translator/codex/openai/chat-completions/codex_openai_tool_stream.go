@@ -16,6 +16,7 @@ type toolCallStreamState struct {
 	name             string
 	family           toolFamily
 	announced        bool
+	inputDeltaSeen   bool
 	emittedInput     string
 	bufferedInput    string
 	completeInput    string
@@ -262,6 +263,9 @@ func emitAvailableToolCall(template []byte, state *toolCallStreamState, complete
 	if hasComplete {
 		state.completeInput = complete
 		state.hasCompleteInput = true
+	}
+	if state.hasCompleteInput && state.itemDone {
+		return nil
 	}
 
 	value := state.bufferedInput

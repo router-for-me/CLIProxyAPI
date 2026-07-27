@@ -214,6 +214,9 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			state.bufferedInput += deltaValue
 			return [][]byte{}
 		}
+		if deltaValue != "" {
+			state.inputDeltaSeen = true
+		}
 		chunk := emitToolInputDelta(template, state, deltaValue)
 		if chunk == nil {
 			return [][]byte{}
@@ -228,6 +231,9 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		}
 		state := params.ToolCalls.stateForEvent(rootResult, gjson.Result{}, family, true, false)
 		if state == nil {
+			return [][]byte{}
+		}
+		if state.inputDeltaSeen && family == toolFamilyFunction {
 			return [][]byte{}
 		}
 		inputResult := rootResult.Get(inputPath)
@@ -283,6 +289,10 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		}
 		state.name = buildToolCatalog(originalRequestRawJSON).restore(state.name)
 		input, hasInput := toolInputFromItem(itemResult, family)
+		if state.inputDeltaSeen && family == toolFamilyFunction {
+			state.itemDone = true
+			return [][]byte{}
+		}
 		chunks := emitAvailableToolCall(template, state, input, hasInput)
 		state.itemDone = true
 		return chunks
