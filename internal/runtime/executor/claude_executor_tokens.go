@@ -19,6 +19,86 @@ import (
 
 func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	from := opts.SourceFormat
+	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
+	to := sdktranslator.FromString("claude")
+
+	// Use streaming translation to preserve function calling, except for claude.
+	stream := from != to
+	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, stream)
+	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
+		body = rebuildMidSystemMessagesToTopLevel(body)
+	}
+	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel)
+	if errValidate := validateClaudeTokenCountRequest(body); errValidate != nil {
+		return cliproxyexecutor.Response{}, errValidate
+	}
+
+	// Count locally so generation-only Claude Code system instructions are never
+	// injected into the payload being measured and OAuth does not require an
+	// additional upstream count_tokens request.
+	count, err := helps.CountClaudeInputTokens(body)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("claude executor: token counting failed: %w", err)
+	}
+
+	usageJSON := []byte(fmt.Sprintf(`{"input_tokens":%d}`, count))
+	out := sdktranslator.TranslateTokenCount(ctx, to, responseFormat, count, usageJSON)
+	return cliproxyexecutor.Response{Payload: out}, nil
+}
+
+type claudeTokenCountValidationError struct {
+	statusErr
+}
+
+func (claudeTokenCountValidationError) IsRequestScoped() bool {
+	return true
+}
+
+func newClaudeTokenCountValidationError(message string) error {
+	return claudeTokenCountValidationError{statusErr{code: http.StatusBadRequest, msg: message}}
+}
+
+func validateClaudeTokenCountRequest(body []byte) error {
+	if !gjson.ValidBytes(body) {
+		return newClaudeTokenCountValidationError("invalid Claude token count request JSON")
+	}
+	root := gjson.ParseBytes(body)
+	if !root.IsObject() {
+		return newClaudeTokenCountValidationError("Claude token count request must be a JSON object")
+	}
+	messages := root.Get("messages")
+	if !messages.IsArray() || len(messages.Array()) == 0 {
+		return newClaudeTokenCountValidationError("Claude token count request messages must be a non-empty array")
+	}
+	for _, message := range messages.Array() {
+		if !message.IsObject() {
+			return newClaudeTokenCountValidationError("Claude token count request messages must contain objects")
+		}
+		role := message.Get("role").String()
+		if role != "user" && role != "assistant" {
+			return newClaudeTokenCountValidationError("Claude token count request message role must be user or assistant")
+		}
+		content := message.Get("content")
+		if content.Type == gjson.String {
+			continue
+		}
+		if !content.IsArray() {
+			return newClaudeTokenCountValidationError("Claude token count request message content must be a string or array")
+		}
+		for _, block := range content.Array() {
+			if !block.IsObject() || block.Get("type").Type != gjson.String || block.Get("type").String() == "" {
+				return newClaudeTokenCountValidationError("Claude token count request content blocks must be typed objects")
+			}
+		}
+	}
+	return nil
+}
+
+// countTokensUpstream preserves native token counting for Claude-compatible
+// providers that expose their own count_tokens endpoint.
+func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	upstreamModel := e.upstreamModel(baseModel)
 
 	apiKey, baseURL := claudeCreds(auth)

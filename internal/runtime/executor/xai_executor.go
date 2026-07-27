@@ -52,9 +52,8 @@ const (
 	xaiUsingAPIAttr = "using_api"
 )
 
-// Always inject native x_search when the client did not declare it so Grok can
-// run X Search server-side. Internal subtool traces are still filtered downstream
-// when this native tool is present (see filterInternalXSearch).
+// xaiXSearchToolJSON is the native X Search tool injected when enabled by config.
+// Internal subtool traces are still filtered downstream when this tool is present.
 var xaiXSearchToolJSON = []byte(`{"type":"x_search"}`)
 
 // XAIExecutor is a stateless executor for xAI Grok's Responses API.

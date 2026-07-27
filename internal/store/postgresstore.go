@@ -20,29 +20,32 @@ import (
 )
 
 const (
-	defaultConfigTable = "config_store"
-	defaultAuthTable   = "auth_store"
-	defaultConfigKey   = "config"
+	defaultConfigTable   = "config_store"
+	defaultAuthTable     = "auth_store"
+	defaultCooldownTable = "cooldown_store"
+	defaultConfigKey     = "config"
 )
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
 type PostgresStoreConfig struct {
-	DSN         string
-	Schema      string
-	ConfigTable string
-	AuthTable   string
-	SpoolDir    string
+	DSN           string
+	Schema        string
+	ConfigTable   string
+	AuthTable     string
+	CooldownTable string
+	SpoolDir      string
 }
 
 // PostgresStore persists configuration and authentication metadata using PostgreSQL as backend
 // while mirroring data to a local workspace so existing file-based workflows continue to operate.
 type PostgresStore struct {
-	db         *sql.DB
-	cfg        PostgresStoreConfig
-	spoolRoot  string
-	configPath string
-	authDir    string
-	mu         sync.Mutex
+	db            *sql.DB
+	cfg           PostgresStoreConfig
+	spoolRoot     string
+	configPath    string
+	authDir       string
+	cooldownStore *postgresCooldownStateStore
+	mu            sync.Mutex
 }
 
 // NewPostgresStore establishes a connection to PostgreSQL and prepares the local workspace.
@@ -57,6 +60,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.AuthTable == "" {
 		cfg.AuthTable = defaultAuthTable
+	}
+	if cfg.CooldownTable == "" {
+		cfg.CooldownTable = defaultCooldownTable
 	}
 
 	spoolRoot := strings.TrimSpace(cfg.SpoolDir)
@@ -96,6 +102,7 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 		configPath: filepath.Join(configDir, "config.yaml"),
 		authDir:    authDir,
 	}
+	store.cooldownStore = &postgresCooldownStateStore{store: store}
 	return store, nil
 }
 
@@ -139,6 +146,20 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		)
 	`, authTable)); err != nil {
 		return fmt.Errorf("postgres store: create auth table: %w", err)
+	}
+	cooldownTable := s.fullTableName(s.cfg.CooldownTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			auth_id TEXT NOT NULL,
+			model TEXT NOT NULL DEFAULT '',
+			content JSONB NOT NULL,
+			deleted BOOLEAN NOT NULL DEFAULT FALSE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (auth_id, model)
+		)
+	`, cooldownTable)); err != nil {
+		return fmt.Errorf("postgres store: create cooldown table: %w", err)
 	}
 	return nil
 }

@@ -384,6 +384,9 @@ func (s *Service) resolveCooldownStateStore(cfg *config.Config) coreauth.Cooldow
 	if cfg == nil || !cfg.SaveCooldownStatus || cfg.Home.Enabled {
 		return nil
 	}
+	if s != nil && s.cooldownStateStore != nil {
+		return s.cooldownStateStore
+	}
 	authDir, errResolve := resolveCooldownStateAuthDir(cfg)
 	if errResolve != nil {
 		log.Warnf("failed to resolve cooldown state directory: %v", errResolve)
