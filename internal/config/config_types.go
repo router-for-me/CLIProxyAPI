@@ -118,6 +118,12 @@ type CodexHeaderDefaults struct {
 	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
 }
 
+// XAIConfig configures provider-wide xAI request behavior.
+type XAIConfig struct {
+	// InjectXSearch injects xAI's native x_search tool when the request does not declare it.
+	InjectXSearch bool `yaml:"inject-x-search" json:"inject-x-search"`
+}
+
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`

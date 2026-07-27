@@ -347,6 +347,11 @@ func (h *Host) HasExecutorCandidateProvider(provider string) bool {
 	return false
 }
 
+// OwnsExecutor reports whether executor is an adapter managed by this host.
+func (h *Host) OwnsExecutor(executor coreauth.ProviderExecutor) bool {
+	return h.ownsExecutor(executor)
+}
+
 func (h *Host) ownsExecutor(executor coreauth.ProviderExecutor) bool {
 	adapter, okAdapter := executor.(*executorAdapter)
 	return okAdapter && adapter != nil && adapter.host == h

@@ -187,15 +187,17 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			return resp, errValidate
 		}
 		lines := bytes.Split(data, []byte("\n"))
-		for _, line := range lines {
+		for i, line := range lines {
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
+			lines[i] = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 		}
+		data = bytes.Join(lines, []byte("\n"))
 	} else {
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
+		data = restoreClaudeOAuthToolNamesFromResponse(data, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 	}
-	data = restoreClaudeOAuthToolNamesFromResponse(data, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 	data = e.restoreResponseModel(data, req.Model)
 	var param any
 	out := sdktranslator.TranslateNonStream(

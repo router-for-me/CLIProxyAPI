@@ -303,10 +303,9 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 			return
 		}
 		if !forceReplace {
-			if existingExecutor, hasExecutor := s.coreManager.Executor(providerKey); hasExecutor {
-				if _, isOpenAICompatExecutor := existingExecutor.(*executor.OpenAICompatExecutor); isOpenAICompatExecutor {
-					return
-				}
+			if existingExecutor, hasExecutor := s.coreManager.Executor(providerKey); hasExecutor &&
+				(s.pluginHost == nil || !s.pluginHost.OwnsExecutor(existingExecutor)) {
+				return
 			}
 		}
 		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(providerKey, cfg))

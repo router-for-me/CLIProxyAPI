@@ -74,6 +74,13 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	model := strings.TrimSpace(gjson.GetBytes(req.Payload, "model").String())
+	if model == "" {
+		model = strings.TrimSpace(req.Model)
+	}
+	reporter := helps.NewExecutorUsageReporter(ctx, e, model, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
 	token, baseURL := xaiCreds(auth)
 	if baseURL == "" {
 		baseURL = xaiauth.DefaultAPIBaseURL
@@ -113,6 +120,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), payload)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -137,5 +145,6 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
+	reporter.EnsurePublished(ctx)
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }

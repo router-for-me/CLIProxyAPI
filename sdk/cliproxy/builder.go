@@ -48,6 +48,9 @@ type Builder struct {
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
 
+	// cooldownStateStore overrides runtime cooldown persistence.
+	cooldownStateStore coreauth.CooldownStateStore
+
 	// pluginHost owns dynamic plugin lifecycle and adapters.
 	pluginHost *pluginhost.Host
 
@@ -146,6 +149,12 @@ func (b *Builder) WithCoreAuthManager(mgr *coreauth.Manager) *Builder {
 	return b
 }
 
+// WithCooldownStateStore overrides the store used for runtime cooldown persistence.
+func (b *Builder) WithCooldownStateStore(store coreauth.CooldownStateStore) *Builder {
+	b.cooldownStateStore = store
+	return b
+}
+
 // WithPluginHost overrides the dynamic plugin host used by the service.
 func (b *Builder) WithPluginHost(host *pluginhost.Host) *Builder {
 	b.pluginHost = host
@@ -227,11 +236,17 @@ func (b *Builder) Build() (*Service, error) {
 	accessManager.SetProviders(sdkaccess.RegisteredProviders())
 
 	coreManager := b.coreManager
+	cooldownStateStore := b.cooldownStateStore
 	var appliedRoutingState *routingRuntimeState
 	if coreManager == nil {
 		tokenStore := sdkAuth.GetTokenStore()
 		if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok && b.cfg != nil {
 			dirSetter.SetBaseDir(b.cfg.AuthDir)
+		}
+		if cooldownStateStore == nil {
+			if provider, ok := tokenStore.(coreauth.CooldownStateStoreProvider); ok {
+				cooldownStateStore = provider.CooldownStateStore()
+			}
 		}
 
 		routingState := normalizedRoutingRuntimeState(b.cfg)
@@ -256,6 +271,7 @@ func (b *Builder) Build() (*Service, error) {
 		authManager:         authManager,
 		accessManager:       accessManager,
 		coreManager:         coreManager,
+		cooldownStateStore:  cooldownStateStore,
 		pluginHost:          pluginHost,
 		appliedRoutingState: appliedRoutingState,
 		serverOptions:       append([]api.ServerOption(nil), b.serverOptions...),
