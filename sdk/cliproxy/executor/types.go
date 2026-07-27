@@ -44,6 +44,10 @@ const (
 	SelectedAuthIndexCallbackMetadataKey = "selected_auth_index_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
+	// DerivedSessionIDMetadataKey stores a stable session identity inferred from request context.
+	DerivedSessionIDMetadataKey = "derived_session_id"
+	// CallerScopeMetadataKey isolates inferred session identities between downstream callers.
+	CallerScopeMetadataKey = "caller_scope"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.
