@@ -299,3 +299,208 @@ func TestConvertOpenAIRequestToGeminiCleansToolSchemaRequiredFields(t *testing.T
 		t.Fatalf("required[1] = %q, want industry. Schema: %s", got, schema.Raw)
 	}
 }
+
+func TestConvertOpenAIRequestToGemini_ResponseFormatJSONSchema(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.1-flash-lite",
+		"temperature": 0.2,
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "text",
+						"text": "Return structured JSON."
+					}
+				]
+			}
+		],
+		"response_format": {
+			"type": "json_schema",
+			"json_schema": {
+				"name": "response",
+				"strict": true,
+				"schema": {
+					"type": "object",
+					"properties": {
+						"cleanedContent": {
+							"type": "string"
+						}
+					},
+					"required": [
+						"cleanedContent"
+					],
+					"additionalProperties": false
+				}
+			}
+		}
+	}`
+
+	output := ConvertOpenAIRequestToGemini("gemini-3.1-flash-lite", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+	genConfig := result.Get("generationConfig")
+
+	if got := genConfig.Get("responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json. Output: %s", got, output)
+	}
+	schema := genConfig.Get("responseJsonSchema")
+	if !schema.Exists() {
+		t.Fatalf("responseJsonSchema missing. Output: %s", output)
+	}
+	if genConfig.Get("responseSchema").Exists() {
+		t.Fatalf("responseSchema should not be set with responseJsonSchema. Output: %s", output)
+	}
+	if got := schema.Get("type").String(); got != "object" {
+		t.Fatalf("schema type = %q, want object. Output: %s", got, output)
+	}
+	if got := schema.Get("properties.cleanedContent.type").String(); got != "string" {
+		t.Fatalf("cleanedContent type = %q, want string. Output: %s", got, output)
+	}
+	if additionalProperties := schema.Get("additionalProperties"); !additionalProperties.Exists() || additionalProperties.Bool() {
+		t.Fatalf("additionalProperties = %s, want false. Output: %s", additionalProperties.Raw, output)
+	}
+	if got := genConfig.Get("temperature").Float(); got != 0.2 {
+		t.Fatalf("temperature = %v, want 0.2. Output: %s", got, output)
+	}
+}
+
+func TestConvertOpenAIRequestToGemini_ResponseFormatJSONObject(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-flash-lite",
+		"messages": [{"role": "user", "content": "Return a JSON object."}],
+		"response_format": {
+			"type": "json_object"
+		}
+	}`
+
+	output := ConvertOpenAIRequestToGemini("gemini-3.1-flash-lite", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+	genConfig := result.Get("generationConfig")
+
+	if got := genConfig.Get("responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json. Output: %s", got, output)
+	}
+	if genConfig.Get("responseJsonSchema").Exists() {
+		t.Fatalf("responseJsonSchema should not be set for json_object. Output: %s", output)
+	}
+}
+
+func TestConvertOpenAIRequestToGemini_ResponseFormatAbsent(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-flash-lite",
+		"messages": [{"role": "user", "content": "plain text, no response_format"}],
+		"temperature": 0.5
+	}`
+
+	output := ConvertOpenAIRequestToGemini("gemini-3.1-flash-lite", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+
+	if result.Get("generationConfig.responseMimeType").Exists() {
+		t.Fatalf("responseMimeType should not be set when response_format absent. Output: %s", output)
+	}
+	if result.Get("generationConfig.responseJsonSchema").Exists() {
+		t.Fatalf("responseJsonSchema should not be set when response_format absent. Output: %s", output)
+	}
+	if got := result.Get("generationConfig.temperature").Float(); got != 0.5 {
+		t.Fatalf("temperature = %v, want 0.5. Output: %s", got, output)
+	}
+}
+
+func TestConvertOpenAIRequestToGemini_ResponseFormatJSONSchemaNoSchema(t *testing.T) {
+	// json_schema without an inner schema field: responseMimeType is still set,
+	// but responseJsonSchema is not (there is nothing to embed).
+	inputJSON := `{
+		"model": "gemini-flash-lite",
+		"messages": [{"role": "user", "content": "shape only"}],
+		"response_format": {
+			"type": "json_schema",
+			"json_schema": {
+				"name": "response"
+			}
+		}
+	}`
+
+	output := ConvertOpenAIRequestToGemini("gemini-3.1-flash-lite", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+	genConfig := result.Get("generationConfig")
+
+	if got := genConfig.Get("responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json. Output: %s", got, output)
+	}
+	if genConfig.Get("responseJsonSchema").Exists() {
+		t.Fatalf("responseJsonSchema should not be set when no schema provided. Output: %s", output)
+	}
+}
+
+func TestConvertOpenAIRequestToGemini_ResponseFormatUnknownType(t *testing.T) {
+	// An unrecognized response_format.type is a no-op: no responseMimeType,
+	// no responseJsonSchema, no spurious generationConfig created. Sibling
+	// fields like temperature still pass through.
+	inputJSON := `{
+		"model": "gemini-flash-lite",
+		"messages": [{"role": "user", "content": "plain text"}],
+		"temperature": 0.7,
+		"response_format": {
+			"type": "text"
+		}
+	}`
+
+	output := ConvertOpenAIRequestToGemini("gemini-3.1-flash-lite", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+
+	if result.Get("generationConfig.responseMimeType").Exists() {
+		t.Fatalf("responseMimeType should not be set for unknown type. Output: %s", output)
+	}
+	if result.Get("generationConfig.responseJsonSchema").Exists() {
+		t.Fatalf("responseJsonSchema should not be set for unknown type. Output: %s", output)
+	}
+	if got := result.Get("generationConfig.temperature").Float(); got != 0.7 {
+		t.Fatalf("temperature = %v, want 0.7. Output: %s", got, output)
+	}
+}
+
+func TestConvertOpenAIRequestToGemini_ResponseFormatPreservesUserGenerationConfig(t *testing.T) {
+	// A user-supplied generationConfig must be preserved; response_format only
+	// adds responseMimeType/responseJsonSchema on top rather than replacing it.
+	inputJSON := `{
+		"model": "gemini-flash-lite",
+		"messages": [{"role": "user", "content": "merge check"}],
+		"generationConfig": {
+			"temperature": 0.9,
+			"topP": 0.8
+		},
+		"response_format": {
+			"type": "json_schema",
+			"json_schema": {
+				"schema": {
+					"type": "object",
+					"properties": {"answer": {"type": "string"}},
+					"required": ["answer"],
+					"additionalProperties": false
+				}
+			}
+		}
+	}`
+
+	output := ConvertOpenAIRequestToGemini("gemini-3.1-flash-lite", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+	genConfig := result.Get("generationConfig")
+
+	if got := genConfig.Get("responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json. Output: %s", got, output)
+	}
+	schema := genConfig.Get("responseJsonSchema")
+	if !schema.Exists() {
+		t.Fatalf("responseJsonSchema missing. Output: %s", output)
+	}
+	if got := schema.Get("type").String(); got != "object" {
+		t.Fatalf("schema type = %q, want object. Output: %s", got, output)
+	}
+	// User-supplied generationConfig fields survive the merge.
+	if got := genConfig.Get("temperature").Float(); got != 0.9 {
+		t.Fatalf("user temperature = %v, want 0.9. Output: %s", got, output)
+	}
+	if got := genConfig.Get("topP").Float(); got != 0.8 {
+		t.Fatalf("user topP = %v, want 0.8. Output: %s", got, output)
+	}
+}
