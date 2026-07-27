@@ -54,10 +54,18 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 
 	ctx, cancelCtx := context.WithCancel(parent)
 	workers := refreshMaxConcurrency
-	if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil && cfg.AuthAutoRefreshWorkers > 0 {
-		workers = cfg.AuthAutoRefreshWorkers
+	maxPerMinute := 0
+	jitter := time.Duration(0)
+	if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil {
+		if cfg.AuthAutoRefreshWorkers > 0 {
+			workers = cfg.AuthAutoRefreshWorkers
+		}
+		maxPerMinute = cfg.AuthAutoRefreshMaxPerMinute
+		if cfg.AuthAutoRefreshJitterSeconds > 0 {
+			jitter = time.Duration(cfg.AuthAutoRefreshJitterSeconds) * time.Second
+		}
 	}
-	loop := newAuthAutoRefreshLoop(m, interval, workers)
+	loop := newAuthAutoRefreshLoopWithSmoothing(m, interval, workers, maxPerMinute, jitter)
 
 	m.mu.Lock()
 	m.refreshCancel = cancelCtx
