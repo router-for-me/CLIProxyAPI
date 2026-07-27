@@ -141,6 +141,10 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 		// stream regardless of whether decompression was applied.
 		pb := &peekableBody{Reader: bufio.NewReader(body), closer: body}
 		magic, peekErr := pb.Peek(4)
+		if isClaudeContextCanceled(peekErr) {
+			_ = pb.Close()
+			return nil, peekErr
+		}
 		if peekErr == nil || (peekErr == io.EOF && len(magic) >= 2) {
 			switch {
 			case len(magic) >= 2 && magic[0] == 0x1f && magic[1] == 0x8b:
@@ -479,14 +483,21 @@ func normalizeClaudeAssistantPrefill(payload []byte) []byte {
 	if !strings.EqualFold(strings.TrimSpace(last.Get("role").String()), "assistant") || !isClaudeAssistantPrefillMessage(last) {
 		return payload
 	}
-	keptMessages := make([]string, 0, len(messageArray)-1)
-	for _, message := range messageArray[:len(messageArray)-1] {
+	keptMessages := make([]string, 0, len(messageArray)+1)
+	for _, message := range messageArray {
 		keptMessages = append(keptMessages, message.Raw)
 	}
+	keptMessages = append(keptMessages, claudeContinuationUserMessage())
 	if updated, errSetMessages := sjson.SetRawBytes(payload, "messages", rawJSONArray(keptMessages)); errSetMessages == nil {
 		return updated
 	}
 	return payload
+}
+
+func claudeContinuationUserMessage() string {
+	block := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
+	block, _ = sjson.SetBytes(block, "content.0.text", "Continue the preceding assistant response without repeating it.")
+	return string(block)
 }
 
 func isClaudeAssistantPrefillMessage(message gjson.Result) bool {

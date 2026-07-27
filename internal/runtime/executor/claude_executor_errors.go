@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -48,6 +49,9 @@ func normalizeClaudeUpstreamTransportError(model string, err error) error {
 	if err == nil {
 		return nil
 	}
+	if isClaudeContextCanceled(err) {
+		return err
+	}
 	detail := sanitizeClaudeUpstreamDetail(err.Error())
 	lower := strings.ToLower(err.Error())
 	if isClaudeTimeoutError(err, lower) {
@@ -57,6 +61,19 @@ func normalizeClaudeUpstreamTransportError(model string, err error) error {
 		return claudeUpstreamStatusErr(http.StatusServiceUnavailable, "overloaded_error", claudeUpstreamCapacityMessage(model, detail))
 	}
 	return claudeUpstreamStatusErr(http.StatusBadGateway, "api_error", claudeUpstreamConnectionMessage(model, detail))
+}
+
+func normalizeClaudeUpstreamStreamingValidationError(model string, data []byte, err error) error {
+	if err == nil {
+		return nil
+	}
+	if isClaudeContextCanceled(err) {
+		return err
+	}
+	if payload, ok := firstClaudeSSEErrorPayload(data); ok {
+		return normalizeClaudeUpstreamSSEError(model, payload, false)
+	}
+	return claudeUpstreamStreamInterruptedError(model, err.Error(), false)
 }
 
 func normalizeClaudeUpstreamSSEError(model string, payload []byte, partialOutput bool) error {
@@ -174,6 +191,10 @@ func isClaudeTimeoutError(err error, lower string) bool {
 	return strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded")
 }
 
+func isClaudeContextCanceled(err error) bool {
+	return errors.Is(err, context.Canceled)
+}
+
 func isClaudeCapacityErrorText(lower string) bool {
 	for _, marker := range []string{"overloaded", "capacity", "temporarily unavailable", "server busy", "too busy", "try again later", "no healthy upstream"} {
 		if strings.Contains(lower, marker) {
@@ -195,12 +216,8 @@ func claudeSSEDataPayload(line []byte) ([]byte, bool) {
 	return payload, true
 }
 
-func claudeSSELineType(line []byte) string {
-	trimmed := bytes.TrimSpace(line)
-	if bytes.HasPrefix(trimmed, []byte("event:")) {
-		return strings.TrimSpace(string(bytes.TrimSpace(trimmed[len("event:"):])))
-	}
-	payload, ok := claudeSSEDataPayload(trimmed)
+func claudeSSEDataType(line []byte) string {
+	payload, ok := claudeSSEDataPayload(line)
 	if !ok || !gjson.ValidBytes(payload) {
 		return ""
 	}
@@ -212,8 +229,19 @@ func claudeSSEErrorPayload(line []byte) ([]byte, bool) {
 	if !ok || !gjson.ValidBytes(payload) {
 		return nil, false
 	}
-	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) != "error" {
+	if claudeSSEDataType(line) != "error" {
 		return nil, false
 	}
 	return payload, true
+}
+
+func firstClaudeSSEErrorPayload(data []byte) ([]byte, bool) {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(nil, 52_428_800)
+	for scanner.Scan() {
+		if payload, ok := claudeSSEErrorPayload(scanner.Bytes()); ok {
+			return payload, true
+		}
+	}
+	return nil, false
 }

@@ -28,7 +28,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
-	defer reporter.TrackFailure(ctx, &err)
+	defer func() {
+		if !isClaudeContextCanceled(err) {
+			reporter.TrackFailure(ctx, &err)
+		}
+	}()
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("claude")
@@ -137,6 +141,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
+		if isClaudeContextCanceled(err) {
+			return resp, err
+		}
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		if normalizeEbayUpstreamErrors {
 			return resp, normalizeClaudeUpstreamTransportError(baseModel, err)
@@ -150,13 +157,25 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		// compression.  This keeps error-path behaviour consistent with the success path.
 		errBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 		if decErr != nil {
+			if isClaudeContextCanceled(decErr) {
+				return resp, decErr
+			}
 			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
 			helps.LogWithRequestID(ctx).Warn(msg)
+			if normalizeEbayUpstreamErrors && (httpResp.StatusCode >= http.StatusInternalServerError || httpResp.StatusCode == 529) {
+				return resp, normalizeClaudeUpstreamHTTPStatusError(baseModel, httpResp.StatusCode, []byte(msg))
+			}
 			return resp, statusErr{code: httpResp.StatusCode, msg: msg}
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
+			if isClaudeContextCanceled(readErr) {
+				if errClose := errBody.Close(); errClose != nil {
+					log.Errorf("response body close error: %v", errClose)
+				}
+				return resp, readErr
+			}
 			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
 			helps.LogWithRequestID(ctx).Warn(msg)
@@ -176,6 +195,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 	if err != nil {
+		if isClaudeContextCanceled(err) {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("response body close error: %v", errClose)
+			}
+			return resp, err
+		}
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
@@ -192,6 +217,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}()
 	data, err := io.ReadAll(decodedBody)
 	if err != nil {
+		if isClaudeContextCanceled(err) {
+			return resp, err
+		}
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		if normalizeEbayUpstreamErrors {
 			return resp, normalizeClaudeUpstreamTransportError(baseModel, err)
@@ -201,11 +229,15 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if stream {
 		if errValidate := validateClaudeStreamingResponse(data); errValidate != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errValidate)
-			if normalizeEbayUpstreamErrors {
-				return resp, claudeUpstreamStreamInterruptedError(baseModel, errValidate.Error(), false)
+			if isClaudeContextCanceled(errValidate) {
+				return resp, errValidate
 			}
-			return resp, errValidate
+			errOut := errValidate
+			if normalizeEbayUpstreamErrors {
+				errOut = normalizeClaudeUpstreamStreamingValidationError(baseModel, data, errValidate)
+			}
+			helps.RecordAPIResponseError(ctx, e.cfg, errOut)
+			return resp, errOut
 		}
 		lines := bytes.Split(data, []byte("\n"))
 		for i, line := range lines {
