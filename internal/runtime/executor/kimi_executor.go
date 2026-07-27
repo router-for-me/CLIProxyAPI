@@ -106,7 +106,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, false)
 	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, bytes.Clone(req.Payload), false)
 
-	// Strip kimi- prefix and any [1m] suffix for upstream API
+	// Normalize the CLIProxyAPI model ID to the Kimi Code upstream model ID.
 	upstreamModel := normalizeKimiUpstreamModel(baseModel)
 	body, err = sjson.SetBytes(body, "model", upstreamModel)
 	if err != nil {
@@ -215,7 +215,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true)
 	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, bytes.Clone(req.Payload), true)
 
-	// Strip kimi- prefix and any [1m] suffix for upstream API
+	// Normalize the CLIProxyAPI model ID to the Kimi Code upstream model ID.
 	upstreamModel := normalizeKimiUpstreamModel(baseModel)
 	body, err = sjson.SetBytes(body, "model", upstreamModel)
 	if err != nil {
@@ -786,10 +786,10 @@ func stripKimiPrefix(model string) string {
 	return model
 }
 
-// normalizeKimiUpstreamModel returns the canonical upstream model ID for Kimi.
+// normalizeKimiUpstreamModel returns the canonical Kimi Code upstream model ID.
 // It strips the CLIProxyAPI "kimi-" prefix and any Claude Code "[1m]" context
-// suffix while preserving a trailing thinking suffix (e.g. "(1024)"), so that
-// the upstream API receives IDs such as "k3(1024)" instead of "kimi-k3[1m](1024)".
+// suffix, maps K2.7 Code variants to their official Kimi Code IDs, and preserves
+// a trailing thinking suffix (e.g. "(1024)").
 func normalizeKimiUpstreamModel(model string) string {
 	model = strings.TrimSpace(model)
 	parsed := thinking.ParseSuffix(model)
@@ -798,6 +798,12 @@ func normalizeKimiUpstreamModel(model string) string {
 		base = base[:len(base)-len("[1m]")]
 	}
 	normalized := strings.ToLower(stripKimiPrefix(strings.TrimSpace(base)))
+	switch normalized {
+	case "k2.7-code":
+		normalized = "kimi-for-coding"
+	case "k2.7-code-highspeed":
+		normalized = "kimi-for-coding-highspeed"
+	}
 	if parsed.HasSuffix {
 		return normalized + "(" + parsed.RawSuffix + ")"
 	}
