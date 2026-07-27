@@ -42,6 +42,7 @@ const (
 	defaultUpstreamProviderHeadersTable  = "upstream_provider_headers"
 	defaultUpstreamProviderExcludedTable = "upstream_provider_excluded_models"
 	defaultUpstreamProviderEntriesTable  = "upstream_provider_api_key_entries"
+	defaultModelGroupsTable              = "model_groups"
 )
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
@@ -122,6 +123,15 @@ type PostgresStoreConfig struct {
 	// UpstreamProviderEntriesTable stores the api-key-entries[] list for
 	// openai-compatibility providers as child rows. FK cascade.
 	UpstreamProviderEntriesTable string
+
+	// ModelGroupsTable stores reusable Model Group templates: an
+	// allowed_models / blocked_models grant list plus optional per-model
+	// upstream routing (ModelRoutes). Groups can be attached to either an
+	// API-key policy or an internal user via their model_group_id column.
+	// Attachment is single-valued (one group per entity); when attached the
+	// group's allowed/blocked lists (and, for API-key policies, routes) are
+	// the source of truth, overriding the entity's own fields.
+	ModelGroupsTable string
 
 	// UsageEncryptionKey is the passphrase used to derive an AES-256-GCM
 	// key for sealing sensitive columns (api_key_principal in usage_events)
@@ -212,6 +222,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.UpstreamProviderEntriesTable == "" {
 		cfg.UpstreamProviderEntriesTable = defaultUpstreamProviderEntriesTable
+	}
+	if cfg.ModelGroupsTable == "" {
+		cfg.ModelGroupsTable = defaultModelGroupsTable
 	}
 
 	spoolRoot := strings.TrimSpace(cfg.SpoolDir)
@@ -1015,6 +1028,46 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: create upstream_provider_api_key_entries index: %w", err)
 	}
+
+	// model_groups stores reusable Model Group templates: an allowed_models /
+	// blocked_models grant list plus optional per-model upstream routing
+	// (model_routes). Groups are attached to API-key policies or internal
+	// users via the model_group_id nullable TEXT column added below. The group
+	// is the source of truth for allowed/blocked (and routes, for API-key
+	// policies) once attached — see policy.enforce.go for the override path.
+	modelGroupsTable := s.fullTableName(s.cfg.ModelGroupsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id             TEXT PRIMARY KEY,
+			name           TEXT NOT NULL UNIQUE,
+			description    TEXT,
+			allowed_models JSONB NOT NULL DEFAULT '[]'::jsonb,
+			blocked_models JSONB NOT NULL DEFAULT '[]'::jsonb,
+			model_routes   JSONB NOT NULL DEFAULT '[]'::jsonb,
+			metadata       JSONB NOT NULL DEFAULT '{}'::jsonb,
+			created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, modelGroupsTable)); err != nil {
+		return fmt.Errorf("postgres store: create model_groups table: %w", err)
+	}
+	// Backfill model_group_id on api_key_policies (1:1 nullable attachment to
+	// a model group). When set, the group's allowed/blocked lists and routes
+	// override the policy's own values at enforcement time. Idempotent.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS model_group_id TEXT`, policiesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter api_key_policies add model_group_id: %w", err)
+	}
+	// model_group_id is nullable on api_key_policies (no FK so policy updates
+	// do not require a join validation; group existence is checked at attach
+	// time). An index helps the "which entities use this group?" lookup used
+	// by the delete guard.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_api_key_policies_model_group_id ON %s(model_group_id) WHERE model_group_id IS NOT NULL`, policiesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create api_key_policies model_group_id index: %w", err)
+	}
 	return nil
 }
 
@@ -1251,6 +1304,16 @@ func (s *PostgresStore) UpstreamProviderEntriesTable() string {
 		return quoteIdentifier(defaultUpstreamProviderEntriesTable)
 	}
 	return s.fullTableName(s.cfg.UpstreamProviderEntriesTable)
+}
+
+// ModelGroupsTable returns the fully-qualified name of the model_groups
+// table (reusable Model Group templates attachable to API-key policies and
+// internal users).
+func (s *PostgresStore) ModelGroupsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultModelGroupsTable)
+	}
+	return s.fullTableName(s.cfg.ModelGroupsTable)
 }
 
 // Save persists authentication metadata to disk and PostgreSQL.
