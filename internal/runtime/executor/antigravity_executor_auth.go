@@ -265,20 +265,57 @@ func tokenExpiry(metadata map[string]any) time.Time {
 	if metadata == nil {
 		return time.Time{}
 	}
-	if expStr, ok := metadata["expired"].(string); ok {
-		expStr = strings.TrimSpace(expStr)
-		if expStr != "" {
-			if parsed, errParse := time.Parse(time.RFC3339, expStr); errParse == nil {
-				return parsed
+	if ts, ok := expiryFromMetadata(metadata); ok {
+		return ts
+	}
+	// Legacy auth files store the credential under a nested "token" object
+	// (e.g. {"token":{"expiry":"...","expires_in":...}}). Fall back to that
+	// shape so historical on-disk antigravity auths remain usable.
+	if tokenMap, ok := metadata["token"].(map[string]any); ok {
+		if ts, ok := expiryFromMetadata(tokenMap); ok {
+			return ts
+		}
+	}
+	return time.Time{}
+}
+
+// expiryFromMetadata parses the expiry timestamp from a metadata map using the
+// same key set as sdk/cliproxy/auth.expirationFromMap (RFC3339 "expired" /
+// "expiry" / "expires_at", or "expires_in"+"timestamp" pair), but stays local
+// to the antigravity executor to avoid an import cycle.
+func expiryFromMetadata(meta map[string]any) (time.Time, bool) {
+	if meta == nil {
+		return time.Time{}, false
+	}
+	for _, key := range []string{"expired", "expire", "expires_at", "expiresAt", "expiry", "expires"} {
+		if v, ok := meta[key]; ok {
+			if ts, ok := parseTimeValue(v); ok {
+				return ts, true
 			}
 		}
 	}
-	expiresIn, hasExpires := int64Value(metadata["expires_in"])
-	tsMs, hasTimestamp := int64Value(metadata["timestamp"])
+	expiresIn, hasExpires := int64Value(meta["expires_in"])
+	tsMs, hasTimestamp := int64Value(meta["timestamp"])
 	if hasExpires && hasTimestamp {
-		return time.Unix(0, tsMs*int64(time.Millisecond)).Add(time.Duration(expiresIn) * time.Second)
+		return time.Unix(0, tsMs*int64(time.Millisecond)).Add(time.Duration(expiresIn) * time.Second), true
 	}
-	return time.Time{}
+	return time.Time{}, false
+}
+
+func parseTimeValue(v any) (time.Time, bool) {
+	switch typed := v.(type) {
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return time.Time{}, false
+		}
+		if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
+			return parsed, true
+		}
+	case time.Time:
+		return typed, true
+	}
+	return time.Time{}, false
 }
 
 func metaStringValue(metadata map[string]any, key string) string {
@@ -291,6 +328,20 @@ func metaStringValue(metadata map[string]any, key string) string {
 			return strings.TrimSpace(typed)
 		case []byte:
 			return strings.TrimSpace(string(typed))
+		}
+	}
+	// Legacy auth files store credentials under a nested "token" object
+	// (e.g. {"token":{"access_token":"...","refresh_token":"..."}}). Fall
+	// back to it so historical on-disk antigravity auths remain readable
+	// even when they were not migrated to the flat canonical form.
+	if tokenMap, ok := metadata["token"].(map[string]any); ok {
+		if v, ok := tokenMap[key]; ok {
+			switch typed := v.(type) {
+			case string:
+				return strings.TrimSpace(typed)
+			case []byte:
+				return strings.TrimSpace(string(typed))
+			}
 		}
 	}
 	return ""
