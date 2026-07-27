@@ -351,3 +351,114 @@ func TestUsageErrorTimeFilter(t *testing.T) {
 		t.Errorf("count all = %d; want 2", countAll)
 	}
 }
+
+// TestUsageRequestIDFilter guards that the RequestID filter narrows both
+// usage_events and usage_errors on the per-request correlation identifier, so
+// the dashboard's Request ID search box can pinpoint a single row across both
+// tables.
+func TestUsageRequestIDFilter(t *testing.T) {
+	store := newTestPostgresStore(t, "usage_request_id")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+
+	apiKeys := NewAPIKeyStore(store)
+	key, _, err := apiKeys.Create(ctx, "rid", "", "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Create api key: %v", err)
+	}
+
+	// Two events with distinct request ids, one without.
+	evtMatch := UsageEvent{
+		APIKeyID:    key.ID,
+		Provider:    "anthropic",
+		Model:       "rid-model",
+		RequestID:   "req-AAAA",
+		RequestedAt: now(),
+	}
+	evtOther := UsageEvent{
+		APIKeyID:    key.ID,
+		Provider:    "anthropic",
+		Model:       "rid-model",
+		RequestID:   "req-BBBB",
+		RequestedAt: now(),
+	}
+	evtNone := UsageEvent{
+		APIKeyID:    key.ID,
+		Provider:    "anthropic",
+		Model:       "rid-model",
+		RequestedAt: now(),
+	}
+	for _, ev := range []UsageEvent{evtMatch, evtOther, evtNone} {
+		if err := us.InsertEvent(ctx, ev); err != nil {
+			t.Fatalf("InsertEvent: %v", err)
+		}
+	}
+
+	// Two errors with distinct request ids.
+	errMatch := UsageError{
+		APIKeyID:       key.ID,
+		Provider:       "anthropic",
+		Model:          "rid-model",
+		RequestID:      "req-AAAA",
+		FailStatusCode: 429,
+		ErrorMessage:   "rate limited",
+		RequestedAt:    now(),
+	}
+	errOther := UsageError{
+		APIKeyID:       key.ID,
+		Provider:       "anthropic",
+		Model:          "rid-model",
+		RequestID:      "req-BBBB",
+		FailStatusCode: 500,
+		ErrorMessage:   "internal error",
+		RequestedAt:    now(),
+	}
+	for _, er := range []UsageError{errMatch, errOther} {
+		if err := us.InsertError(ctx, er); err != nil {
+			t.Fatalf("InsertError: %v", err)
+		}
+	}
+
+	// Filter events by the matching request id: exactly one row.
+	rows, total, err := us.SelectEvents(ctx, UsageFilter{APIKeyID: key.ID, RequestID: "req-AAAA"}, 1, 25)
+	if err != nil {
+		t.Fatalf("SelectEvents: %v", err)
+	}
+	if total != 1 || len(rows) != 1 || rows[0].RequestID != "req-AAAA" {
+		t.Fatalf("events filter = total=%d rows=%d; want exactly 1 matching req-AAAA: %+v", total, len(rows), rows)
+	}
+
+	// Filter errors by the matching request id: exactly one row.
+	errRows, errTotal, err := us.SelectErrors(ctx, UsageFilter{APIKeyID: key.ID, RequestID: "req-AAAA"}, 1, 25)
+	if err != nil {
+		t.Fatalf("SelectErrors: %v", err)
+	}
+	if errTotal != 1 || len(errRows) != 1 || errRows[0].RequestID != "req-AAAA" {
+		t.Fatalf("errors filter = total=%d rows=%d; want exactly 1 matching req-AAAA: %+v", errTotal, len(errRows), errRows)
+	}
+
+	// No-filter baseline sees every row.
+	allEvt, _, err := us.SelectEvents(ctx, UsageFilter{APIKeyID: key.ID}, 1, 25)
+	if err != nil {
+		t.Fatalf("SelectEvents all: %v", err)
+	}
+	if len(allEvt) != 3 {
+		t.Errorf("events all = %d; want 3", len(allEvt))
+	}
+	allErr, _, err := us.SelectErrors(ctx, UsageFilter{APIKeyID: key.ID}, 1, 25)
+	if err != nil {
+		t.Fatalf("SelectErrors all: %v", err)
+	}
+	if len(allErr) != 2 {
+		t.Errorf("errors all = %d; want 2", len(allErr))
+	}
+
+	// A request id that no row carries returns zero.
+	noneRows, noneTotal, err := us.SelectEvents(ctx, UsageFilter{APIKeyID: key.ID, RequestID: "req-ZZZZ"}, 1, 25)
+	if err != nil {
+		t.Fatalf("SelectEvents miss: %v", err)
+	}
+	if noneTotal != 0 || len(noneRows) != 0 {
+		t.Errorf("events miss = total=%d rows=%d; want 0", noneTotal, len(noneRows))
+	}
+}

@@ -38,12 +38,17 @@ type UsageReporter struct {
 	reasoning    string
 	serviceTier  string
 	generate     bool
-	requestedAt  time.Time
-	ttftMu       sync.RWMutex
-	ttft         time.Duration
-	ttftStart    time.Time
-	ttftSet      bool
-	once         sync.Once
+	// requestID is the per-request correlation identifier sourced from the
+	// logging context. Persisted on usage_events/usage_errors so a row can be
+	// traced back to its log entries and searched via the dashboard's Request
+	// ID filter. Empty when no request id was assigned upstream.
+	requestID   string
+	requestedAt time.Time
+	ttftMu      sync.RWMutex
+	ttft        time.Duration
+	ttftStart   time.Time
+	ttftSet     bool
+	once        sync.Once
 }
 
 type usageExecutor interface {
@@ -80,6 +85,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reasoning:    usage.ReasoningEffortFromContext(ctx),
 		serviceTier:  usage.ServiceTierFromContext(ctx),
 		generate:     usage.GenerateFromContext(ctx),
+		requestID:    internallogging.GetRequestID(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -314,6 +320,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		ForwardedFor:        r.forwardedFor,
 		Source:              r.source,
 		APIKey:              r.apiKey,
+		RequestID:           r.requestID,
 		AuthID:              r.authID,
 		AuthIndex:           r.authIndex,
 		AuthType:            r.authType,

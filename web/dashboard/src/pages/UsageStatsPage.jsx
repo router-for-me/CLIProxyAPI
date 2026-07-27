@@ -32,6 +32,7 @@ export default function UsageStatsPage() {
     api_key_id: '',
     provider: '',
     model: '',
+    request_id: '',
     // from/to/interval are auto-derived from the preset unless the user
     // types custom values.
     customFrom: '',
@@ -56,9 +57,10 @@ export default function UsageStatsPage() {
     api_key_id: filter.api_key_id || undefined,
     provider: filter.provider || undefined,
     model: filter.model || undefined,
+    request_id: filter.request_id.trim() || undefined,
     from: rangeParams.from,
     to: rangeParams.to,
-  }), [filter.api_key_id, filter.provider, filter.model, rangeParams.from, rangeParams.to]);
+  }), [filter.api_key_id, filter.provider, filter.model, filter.request_id, rangeParams.from, rangeParams.to]);
 
   const totals = useAsync(() => getUsageTotals(baseFilter), [JSON.stringify(baseFilter)]);
   const ts = useAsync(() => getUsageTimeSeries(baseFilter, rangeParams.interval), [JSON.stringify(baseFilter), rangeParams.interval]);
@@ -222,6 +224,16 @@ export default function UsageStatsPage() {
             </select>
           </div>
         </div>
+        <div className="form__row" style={{ marginBottom: 0, marginTop: 8 }}>
+          <label className="form__label">Request ID</label>
+          <input
+            type="text"
+            className="search-input"
+            placeholder="filter by request id (exact match)"
+            value={filter.request_id}
+            onChange={(e) => updateFilter({ request_id: e.target.value })}
+          />
+        </div>
         {filter.useCustomRange && (
           <div className="usage-toolbar__range">
             <div className="row gap-sm">
@@ -380,6 +392,7 @@ function EventsTableBody({ events, page, pageSize, onPage, onRowClick }) {
             <thead>
               <tr>
                 <th>Time (UTC)</th>
+                <th>Request ID</th>
                 <th>Key / Alias</th>
                 <th>Provider</th>
                 <th>Model</th>
@@ -392,6 +405,7 @@ function EventsTableBody({ events, page, pageSize, onPage, onRowClick }) {
             <tbody>
               {Array.from({ length: 4 }).map((_, i) => (
                 <tr key={i} className="skeleton-row">
+                  <td><span className="skeleton-line" /></td>
                   <td><span className="skeleton-line" /></td>
                   <td><span className="skeleton-line" /></td>
                   <td><span className="skeleton-line" /></td>
@@ -417,6 +431,7 @@ function EventsTableBody({ events, page, pageSize, onPage, onRowClick }) {
               <thead>
                 <tr>
                   <th>Time (UTC)</th>
+                  <th>Request ID</th>
                   <th>Key / Alias</th>
                   <th>Provider</th>
                   <th>Model</th>
@@ -436,6 +451,7 @@ function EventsTableBody({ events, page, pageSize, onPage, onRowClick }) {
                     <td className="mono" style={{ whiteSpace: 'nowrap' }}>
                       {e.requested_at ? new Date(e.requested_at).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z') : '—'}
                     </td>
+                    <td className="mono" style={{ whiteSpace: 'nowrap' }}>{e.request_id || '—'}</td>
                     <td className="mono">{e.key_alias || e.api_key_id || '—'}</td>
                     <td>{e.provider || '—'}</td>
                     <td className="mono">{e.model || '—'}</td>

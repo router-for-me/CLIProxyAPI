@@ -434,6 +434,11 @@ func (s *UsageStore) SelectErrorAggregate(ctx context.Context, filter UsageFilte
 		b.WriteString(" AND e.model = $")
 		b.WriteString(itoa(len(args)))
 	}
+	if filter.RequestID != "" {
+		args = append(args, filter.RequestID)
+		b.WriteString(" AND e.request_id = $")
+		b.WriteString(itoa(len(args)))
+	}
 	if !filter.From.IsZero() {
 		args = append(args, filter.From)
 		b.WriteString(" AND e.requested_at >= $")

@@ -75,6 +75,10 @@ type UsageFilter struct {
 	Provider  string
 	Model     string
 	UserID    string
+	// RequestID narrows to a single per-request correlation identifier. Exact
+	// match against usage_events.request_id / usage_errors.request_id; empty
+	// means no constraint.
+	RequestID string
 	From      time.Time
 	To        time.Time
 	// GroupBy selects the aggregation dimension: "api_key_id" | "model" |
@@ -451,6 +455,11 @@ func (s *UsageStore) SelectAggregate(ctx context.Context, filter UsageFilter) ([
 	if filter.Model != "" {
 		args = append(args, filter.Model)
 		b.WriteString(" AND e.model = $")
+		b.WriteString(itoa(len(args)))
+	}
+	if filter.RequestID != "" {
+		args = append(args, filter.RequestID)
+		b.WriteString(" AND e.request_id = $")
 		b.WriteString(itoa(len(args)))
 	}
 	if !filter.From.IsZero() {
@@ -1260,6 +1269,11 @@ func buildWhereClause(b *strings.Builder, filter UsageFilter) []any {
 	if filter.Model != "" {
 		args = append(args, filter.Model)
 		b.WriteString(" AND e.model = $")
+		b.WriteString(itoa(len(args)))
+	}
+	if filter.RequestID != "" {
+		args = append(args, filter.RequestID)
+		b.WriteString(" AND e.request_id = $")
 		b.WriteString(itoa(len(args)))
 	}
 	if !filter.From.IsZero() {

@@ -3,6 +3,7 @@ package management
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,6 +19,7 @@ type usageStatsQuery struct {
 	UserID    string
 	Provider  string
 	Model     string
+	RequestID string
 	From      time.Time
 	To        time.Time
 	GroupBy   string
@@ -31,6 +33,7 @@ func parseUsageStatsQuery(c *gin.Context) usageStatsQuery {
 		UserID:    c.Query("user_id"),
 		Provider:  c.Query("provider"),
 		Model:     c.Query("model"),
+		RequestID: strings.TrimSpace(c.Query("request_id")),
 		GroupBy:   c.DefaultQuery("group_by", "model"),
 	}
 	if from := c.Query("from"); from != "" {
@@ -68,6 +71,7 @@ func (h *Handler) GetUsageStats(c *gin.Context) {
 		UserID:    q.UserID,
 		Provider:  q.Provider,
 		Model:     q.Model,
+		RequestID: q.RequestID,
 		From:      q.From,
 		To:        q.To,
 		GroupBy:   q.GroupBy,
@@ -267,6 +271,7 @@ func filterFromQuery(q usageStatsQuery) store.UsageFilter {
 		UserID:    q.UserID,
 		Provider:  q.Provider,
 		Model:     q.Model,
+		RequestID: q.RequestID,
 		From:      q.From,
 		To:        q.To,
 		GroupBy:   q.GroupBy,
