@@ -72,6 +72,10 @@ func (m *mockPolicyService) ResolvedModelLists(_ context.Context, _ string) ([]s
 	return m.allowed, m.blocked
 }
 
+func (m *mockPolicyService) ResolvedIPLists(_ context.Context, _ string) ([]string, []string) {
+	return nil, nil
+}
+
 func newTestRouter(svc policy.PolicyService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

@@ -438,6 +438,18 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: alter api_key_policies add model_routes: %w", err)
 	}
+	// Backfill allowed_ips / blocked_ips on api_key_policies (per-API-key
+	// source IP allowlist/blocklist). Idempotent.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS allowed_ips JSONB NOT NULL DEFAULT '[]'::jsonb`, policiesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter api_key_policies add allowed_ips: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS blocked_ips JSONB NOT NULL DEFAULT '[]'::jsonb`, policiesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter api_key_policies add blocked_ips: %w", err)
+	}
 
 	usageEventsTable := s.fullTableName(s.cfg.UsageEventsTable)
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`

@@ -226,6 +226,18 @@ func (h *Handler) CreatePGAPIKey(c *gin.Context) {
 			return
 		}
 	}
+	// Validate IP allowlist/blocklist entries up front so a malformed pattern
+	// is rejected at write time rather than silently skipped at enforcement.
+	if req.Policy != nil {
+		if msg := policy.ValidateIPPatterns(req.Policy.AllowedIPs); msg != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": "allowed_ips: " + msg}})
+			return
+		}
+		if msg := policy.ValidateIPPatterns(req.Policy.BlockedIPs); msg != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": "blocked_ips: " + msg}})
+			return
+		}
+	}
 	key, secret, err := apiKeys.Create(c.Request.Context(), req.Name, req.Alias, req.Secret, req.ExpiresAt, req.Metadata, req.Policy)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
@@ -456,6 +468,16 @@ func (h *Handler) PutPGAPIKeyPolicy(c *gin.Context) {
 	var p store.Policy
 	if err := c.ShouldBindJSON(&p); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": err.Error()}})
+		return
+	}
+	// Validate IP allowlist/blocklist entries up front so a malformed pattern
+	// is rejected at write time rather than silently skipped at enforcement.
+	if msg := policy.ValidateIPPatterns(p.AllowedIPs); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": "allowed_ips: " + msg}})
+		return
+	}
+	if msg := policy.ValidateIPPatterns(p.BlockedIPs); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": "blocked_ips: " + msg}})
 		return
 	}
 	// When a model_group_id is attached, the group becomes the source of

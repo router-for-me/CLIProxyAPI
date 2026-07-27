@@ -120,6 +120,15 @@ type PolicyService interface {
 	// API key without an extra DB round-trip.
 	ResolvedModelLists(ctx context.Context, principal string) (allowed, blocked []string)
 
+	// ResolvedIPLists returns the AllowedIPs/BlockedIPs configured on the
+	// principal's policy (snapshot-cached). Returns nil slices when the service
+	// is inactive, no policy is attached, the principal is unknown (legacy/
+	// file-only key), or both lists are empty — callers treat nil as "do not
+	// filter by IP" so non-PG keys keep default behavior. The middleware uses
+	// this to enforce the per-API-key source IP allowlist/blocklist right
+	// after svc.Check, before AcquireParallel, without an extra DB round-trip.
+	ResolvedIPLists(ctx context.Context, principal string) (allowed, blocked []string)
+
 	// Consume records tokens + cost against the budget windows. Called from
 	// the usage plugin sink after the upstream response has been parsed.
 	Consume(ctx context.Context, principal, model string, tokens TokenCounts) error

@@ -84,8 +84,16 @@ type Policy struct {
 	// are an API-key-policy concept; an internal-user-attached group ignores
 	// the group's routes. Empty/nil = no group attached (entity fields apply
 	// as before). Nullable; validated for existence at attach time.
-	ModelGroupID *string   `json:"model_group_id,omitempty"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ModelGroupID *string `json:"model_group_id,omitempty"`
+	// AllowedIPs / BlockedIPs restrict which source IP addresses may use the
+	// API key. Entries are single IPs ("10.0.0.5") or CIDR ranges
+	// ("10.0.0.0/8", "2001:db8::/32"). BlockedIPs takes precedence: a match
+	// denies the request even when AllowedIPs would also match. When
+	// AllowedIPs is non-empty, the client IP must match at least one entry;
+	// an empty AllowedIPs means "all IPs allowed" (subject to BlockedIPs).
+	AllowedIPs []string  `json:"allowed_ips,omitempty"`
+	BlockedIPs []string  `json:"blocked_ips,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // ModelRoute pins a single model ID to a set of upstream providers. Requests
@@ -244,7 +252,8 @@ func (s *APIKeyStore) LookupByHash(ctx context.Context, hash string) (*APIKey, *
 		       k.created_at, k.updated_at, k.expires_at, k.last_used_at, k.metadata,
 		       p.rpm_limit, p.hourly_rate_limit, p.budget_hourly_usd, p.budget_weekly_usd,
 		       p.budget_monthly_usd, p.max_parallel_requests,
-		       p.allowed_models, p.blocked_models, p.model_routes, p.model_group_id, p.updated_at
+		       p.allowed_models, p.blocked_models, p.model_routes, p.model_group_id,
+		       p.allowed_ips, p.blocked_ips, p.updated_at
 		FROM %s k
 		LEFT JOIN %s u ON u.id = k.user_id
 		LEFT JOIN %s p ON p.api_key_id = k.id
@@ -272,7 +281,8 @@ func (s *APIKeyStore) LookupByID(ctx context.Context, id string) (*APIKey, *Poli
 		       k.created_at, k.updated_at, k.expires_at, k.last_used_at, k.metadata,
 		       p.rpm_limit, p.hourly_rate_limit, p.budget_hourly_usd, p.budget_weekly_usd,
 		       p.budget_monthly_usd, p.max_parallel_requests,
-		       p.allowed_models, p.blocked_models, p.model_routes, p.model_group_id, p.updated_at
+		       p.allowed_models, p.blocked_models, p.model_routes, p.model_group_id,
+		       p.allowed_ips, p.blocked_ips, p.updated_at
 		FROM %s k
 		LEFT JOIN %s u ON u.id = k.user_id
 		LEFT JOIN %s p ON p.api_key_id = k.id
@@ -302,6 +312,8 @@ func scanAPIKeyRow(row *sql.Row) (*APIKey, *Policy, error) {
 		blockedModels   []byte
 		modelRoutes     []byte
 		modelGroupID    sql.NullString
+		allowedIPs      []byte
+		blockedIPs      []byte
 		policyUpdatedAt sql.NullTime
 	)
 	if err := row.Scan(
@@ -311,7 +323,8 @@ func scanAPIKeyRow(row *sql.Row) (*APIKey, *Policy, error) {
 		&key.CreatedAt, &key.UpdatedAt, &key.ExpiresAt, &key.LastUsedAt, &metadata,
 		&rpmLimit, &hourlyRateLimit, &budgetHourly, &budgetWeekly, &budgetMonthly,
 		&maxParallel,
-		&allowedModels, &blockedModels, &modelRoutes, &modelGroupID, &policyUpdatedAt,
+		&allowedModels, &blockedModels, &modelRoutes, &modelGroupID,
+		&allowedIPs, &blockedIPs, &policyUpdatedAt,
 	); err != nil {
 		return nil, nil, err
 	}
@@ -356,6 +369,8 @@ func scanAPIKeyRow(row *sql.Row) (*APIKey, *Policy, error) {
 			id := modelGroupID.String
 			p.ModelGroupID = &id
 		}
+		p.AllowedIPs = decodeStringArray(allowedIPs)
+		p.BlockedIPs = decodeStringArray(blockedIPs)
 		policy = &p
 	}
 	return &key, policy, nil
@@ -521,6 +536,8 @@ func upsertPolicyTx(ctx context.Context, tx *sql.Tx, policiesTable string, polic
 	allowed, _ := json.Marshal(normalizeStringSlice(policy.AllowedModels))
 	blocked, _ := json.Marshal(normalizeStringSlice(policy.BlockedModels))
 	routes, _ := json.Marshal(normalizeModelRoutes(policy.ModelRoutes))
+	allowedIPs, _ := json.Marshal(normalizeStringSlice(policy.AllowedIPs))
+	blockedIPs, _ := json.Marshal(normalizeStringSlice(policy.BlockedIPs))
 	// model_group_id: a non-empty id attaches the policy to a group (group
 	// becomes the source of truth at enforcement time). A nil pointer means
 	// "leave unchanged"; an empty pointer ("" via the dashboard clearing the
@@ -541,8 +558,9 @@ func upsertPolicyTx(ctx context.Context, tx *sql.Tx, policiesTable string, polic
 			api_key_id, rpm_limit, hourly_rate_limit,
 			budget_hourly_usd, budget_weekly_usd, budget_monthly_usd,
 			max_parallel_requests,
-			allowed_models, blocked_models, model_routes, model_group_id, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11, NOW())
+			allowed_models, blocked_models, model_routes, model_group_id,
+			allowed_ips, blocked_ips, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12::jsonb, $13::jsonb, NOW())
 		ON CONFLICT (api_key_id) DO UPDATE SET
 			rpm_limit = EXCLUDED.rpm_limit,
 			hourly_rate_limit = EXCLUDED.hourly_rate_limit,
@@ -554,12 +572,15 @@ func upsertPolicyTx(ctx context.Context, tx *sql.Tx, policiesTable string, polic
 			blocked_models = EXCLUDED.blocked_models,
 			model_routes = EXCLUDED.model_routes,
 			model_group_id = EXCLUDED.model_group_id,
+			allowed_ips = EXCLUDED.allowed_ips,
+			blocked_ips = EXCLUDED.blocked_ips,
 			updated_at = NOW()
 	`, policiesTable),
 		policy.APIKeyID, policy.RPMLimit, policy.HourlyRateLimit,
 		policy.BudgetHourlyUSD, policy.BudgetWeeklyUSD, policy.BudgetMonthlyUSD,
 		policy.MaxParallelRequests,
 		string(allowed), string(blocked), string(routes), modelGroupIDArg,
+		string(allowedIPs), string(blockedIPs),
 	); err != nil {
 		return fmt.Errorf("postgres store: upsert policy: %w", err)
 	}

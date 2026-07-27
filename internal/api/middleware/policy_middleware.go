@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -88,6 +89,30 @@ func PolicyMiddleware(svc policy.PolicyService) gin.HandlerFunc {
 			// (e.g. custom 429 / 402 text) apply without a server restart.
 			errormessages.Respond(c, status, decision.Reason)
 			return
+		}
+
+		// IP allowlist/blocklist. Reuses the snapshot cache populated by Check
+		// (no extra DB round-trip). Deny-first: an explicit block match always
+		// rejects, even when the IP is also on the allowlist. When an allowlist
+		// is configured, the client IP must match at least one entry; an empty
+		// allowlist means "all IPs allowed" (subject to BlockedIPs). Mirror of
+		// the management-token IP enforcement in mgmt_policy.go, kept here so
+		// API-key policy is enforced on the same source-IP dimension.
+		allowedIPs, blockedIPs := svc.ResolvedIPLists(c.Request.Context(), principalStr)
+		if len(allowedIPs) > 0 || len(blockedIPs) > 0 {
+			clientIP := c.ClientIP()
+			if matched, pattern := policy.IPMatches(clientIP, blockedIPs); matched {
+				errormessages.Respond(c, http.StatusForbidden,
+					fmt.Sprintf("API key policy blocks this source IP (%s)", pattern))
+				return
+			}
+			if len(allowedIPs) > 0 {
+				if allowed, _ := policy.IPMatches(clientIP, allowedIPs); !allowed {
+					errormessages.Respond(c, http.StatusForbidden,
+						"API key policy does not allow this source IP")
+					return
+				}
+			}
 		}
 
 		// Re-resolve the per-model upstream routes for the principal so the

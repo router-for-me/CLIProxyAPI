@@ -350,6 +350,23 @@ func (s *service) ResolvedModelLists(ctx context.Context, principal string) (all
 	return snap.Policy.AllowedModels, snap.Policy.BlockedModels
 }
 
+// ResolvedIPLists returns the AllowedIPs/BlockedIPs configured on the
+// principal's policy. It reuses the snapshot cache populated by Check so the
+// per-request hot path pays no extra DB round-trip. Returns nil, nil when the
+// service is inactive, the principal is unknown (legacy/file-only key), or no
+// policy is attached — callers treat nil as "do not filter by IP" so non-PG
+// keys keep default behavior.
+func (s *service) ResolvedIPLists(ctx context.Context, principal string) (allowed, blocked []string) {
+	if !s.Active() || principal == "" {
+		return nil, nil
+	}
+	snap, err := s.snapshot(ctx, principal)
+	if err != nil || snap.Policy == nil {
+		return nil, nil
+	}
+	return snap.Policy.AllowedIPs, snap.Policy.BlockedIPs
+}
+
 // checkBudget returns (decision, denied=true) when any budget cap has been
 // exceeded. The decision carries the most restrictive cap that was hit so the
 // caller can surface a meaningful error. Window start/end are anchored to the

@@ -425,6 +425,10 @@ func (r *recordingService) ResolvedModelLists(_ context.Context, _ string) ([]st
 	return nil, nil
 }
 
+func (r *recordingService) ResolvedIPLists(_ context.Context, _ string) ([]string, []string) {
+	return nil, nil
+}
+
 func TestUsagePluginForwardsCacheTokens(t *testing.T) {
 	rec := &recordingService{}
 	plugin := NewUsagePlugin(rec)
