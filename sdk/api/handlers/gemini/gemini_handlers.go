@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 )
@@ -46,12 +48,24 @@ func (h *GeminiAPIHandler) Models() []map[string]any {
 }
 
 // GeminiModels handles the Gemini models listing endpoint.
-// It returns a JSON response containing available Gemini models and their specifications.
+// It returns a JSON response containing available Gemini models and their
+// specifications. The list is filtered to the caller's resolved allowed/blocked
+// model lists (after Model Group override) when a per-API-key policy is
+// attached; non-PG keys see every model.
 func (h *GeminiAPIHandler) GeminiModels(c *gin.Context) {
 	rawModels := h.Models()
+	allowed, blocked := middleware.ModelListsFor(c)
 	normalizedModels := make([]map[string]any, 0, len(rawModels))
 	defaultMethods := []string{"generateContent"}
 	for _, model := range rawModels {
+		// Filter by the caller's resolved policy. The registry key is the bare
+		// model id (the handler below may prepend "models/" for the response).
+		if id, ok := model["name"].(string); ok {
+			bare := strings.TrimPrefix(id, "models/")
+			if !policy.ModelVisible(allowed, blocked, bare) {
+				continue
+			}
+		}
 		normalizedModel := make(map[string]any, len(model))
 		for k, v := range model {
 			normalizedModel[k] = v

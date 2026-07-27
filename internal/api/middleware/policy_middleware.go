@@ -34,6 +34,12 @@ const (
 	// handler reads it to confine provider selection to the pinned set. Absent
 	// when no policy/service is active or no routes are configured.
 	CtxPolicyModelRoutes = "policy.model_routes"
+	// CtxPolicyAllowedModels carries the resolved allowed/blocked model lists
+	// for the principal (a policy.ModelLists, post Model Group override). The
+	// /v1/models (and /v1beta/models) handlers read it to filter the catalog
+	// per API key. Absent when the service is inactive, no policy is attached,
+	// or both lists are empty — handlers treat absence as "list everything".
+	CtxPolicyAllowedModels = "policy.allowed_models"
 )
 
 // PolicyMiddleware returns a Gin middleware that delegates to the supplied
@@ -93,6 +99,13 @@ func PolicyMiddleware(svc policy.PolicyService) gin.HandlerFunc {
 			c.Set(CtxPolicyModelRoutes, routes)
 		}
 
+		// Stash the resolved allowed/blocked model lists so the /v1/models (and
+		// /v1beta/models) handlers can filter the registry catalog per API key.
+		// Reuses the snapshot cache populated by Check (no extra DB round-trip).
+		if allowed, blocked := svc.ResolvedModelLists(c.Request.Context(), principalStr); len(allowed) > 0 || len(blocked) > 0 {
+			c.Set(CtxPolicyAllowedModels, policy.ModelLists{Allowed: allowed, Blocked: blocked})
+		}
+
 		// Acquire an in-flight slot under the configured max_parallel_requests
 		// cap. The slot is released in a defer so the counter does not leak,
 		// including the upstream handler's panic / early-return paths. When
@@ -145,6 +158,25 @@ func RoutesForModel(c *gin.Context, modelID string) []string {
 		}
 	}
 	return nil
+}
+
+// ModelListsFor returns the resolved allowed/blocked model lists stashed by
+// PolicyMiddleware for the current principal (post Model Group override).
+// Returns nil, nil when no policy/service is active or both lists are empty,
+// in which case the caller should list every model (no filtering).
+func ModelListsFor(c *gin.Context) (allowed, blocked []string) {
+	if c == nil {
+		return nil, nil
+	}
+	raw, ok := c.Get(CtxPolicyAllowedModels)
+	if !ok || raw == nil {
+		return nil, nil
+	}
+	lists, ok := raw.(policy.ModelLists)
+	if !ok {
+		return nil, nil
+	}
+	return lists.Allowed, lists.Blocked
 }
 
 // extractModel reads the request body to find a "model" field. The body is

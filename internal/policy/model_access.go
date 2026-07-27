@@ -49,6 +49,35 @@ func ModelCoveredByAllowed(allowedModels []string, model string) bool {
 	return false
 }
 
+// ModelVisible reports whether modelID is visible to the caller given the
+// resolved policy lists from ResolvedModelLists. It is the listing-endpoint
+// analogue of Allowed: blocked takes precedence, an empty allowed list means
+// "all allowed", and entries support a trailing '*' wildcard. modelID is
+// expected to be the bare registry/handler model id (no "models/" prefix).
+// Returns true when both lists are nil/empty so non-PG keys and Home callers
+// without an attached policy keep listing the full catalog.
+func ModelVisible(allowed, blocked []string, modelID string) bool {
+	if modelID == "" {
+		// No id to match (malformed entry) — keep it visible rather than
+		// silently dropping registry-defined models we cannot identify.
+		return true
+	}
+	for _, b := range blocked {
+		if modelMatches(b, modelID) {
+			return false
+		}
+	}
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, a := range allowed {
+		if modelMatches(a, modelID) {
+			return true
+		}
+	}
+	return false
+}
+
 // modelMatches compares a policy entry against the requested model. Entries
 // support a trailing '*' wildcard that matches any prefix, which is useful
 // for guarding families like "gpt-4*" or "claude-*".

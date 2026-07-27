@@ -70,6 +70,15 @@ type Policy struct {
 	ModelRoutes []store.ModelRoute
 }
 
+// ModelLists carries the resolved AllowedModels / BlockedModels for a
+// principal's policy (after Model Group override). The policy middleware
+// stashes it into the gin context so /v1/models can filter the registry
+// catalog per API key without re-running the snapshot.
+type ModelLists struct {
+	Allowed []string
+	Blocked []string
+}
+
 // APIKeySnapshot pairs a key's identity with its resolved policy for caching.
 type APIKeySnapshot struct {
 	APIKey store.APIKey
@@ -101,6 +110,15 @@ type PolicyService interface {
 	// The middleware stashes the result into the request context so the
 	// handler can confine provider selection to the pinned set.
 	ResolvedRoutes(ctx context.Context, principal string) []store.ModelRoute
+
+	// ResolvedModelLists returns the post-override AllowedModels/BlockedModels
+	// for the principal's policy (snapshot-cached, includes Model Group
+	// override). Returns nil slices when the service is inactive, no policy is
+	// attached, or the principal is unknown (legacy/file-only key — in which
+	// case /v1/models lists everything, preserving default behavior). The
+	// middleware stashes the result so /v1/models can filter the catalog per
+	// API key without an extra DB round-trip.
+	ResolvedModelLists(ctx context.Context, principal string) (allowed, blocked []string)
 
 	// Consume records tokens + cost against the budget windows. Called from
 	// the usage plugin sink after the upstream response has been parsed.

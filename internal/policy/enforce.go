@@ -331,6 +331,25 @@ func (s *service) ResolvedRoutes(ctx context.Context, principal string) []store.
 	return snap.Policy.ModelRoutes
 }
 
+// ResolvedModelLists returns the post-override AllowedModels/BlockedModels for
+// the principal's policy. It reuses the snapshot cache populated by Check so
+// the /v1/models hot path pays no extra DB round-trip. Returns nil, nil when
+// the service is inactive, the principal is unknown (legacy/file-only key), or
+// no policy is attached — callers treat nil as "do not filter" so non-PG keys
+// keep listing the full registry catalog. The returned slices reflect the Model
+// Group override applied in snapshot, so /v1/models honors the group's
+// allowed/blocked lists when a group is attached to the API-key policy.
+func (s *service) ResolvedModelLists(ctx context.Context, principal string) (allowed, blocked []string) {
+	if !s.Active() || principal == "" {
+		return nil, nil
+	}
+	snap, err := s.snapshot(ctx, principal)
+	if err != nil || snap.Policy == nil {
+		return nil, nil
+	}
+	return snap.Policy.AllowedModels, snap.Policy.BlockedModels
+}
+
 // checkBudget returns (decision, denied=true) when any budget cap has been
 // exceeded. The decision carries the most restrictive cap that was hit so the
 // caller can surface a meaningful error. Window start/end are anchored to the

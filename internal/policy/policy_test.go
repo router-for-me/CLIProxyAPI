@@ -94,6 +94,35 @@ func TestAllowedEmptyModelDefers(t *testing.T) {
 	}
 }
 
+func TestModelVisible(t *testing.T) {
+	cases := []struct {
+		name    string
+		allowed []string
+		blocked []string
+		model   string
+		expect  bool
+	}{
+		{"both_empty_means_all", nil, nil, "deepseek-v4-pro", true},
+		{"allowed_exact_match", []string{"gpt-4o", "claude-3"}, nil, "gpt-4o", true},
+		{"allowed_no_match", []string{"gpt-4o"}, nil, "claude-3", false},
+		{"wildcard_match", []string{"gpt-4*"}, nil, "gpt-4o-mini", true},
+		{"wildcard_no_match", []string{"gpt-4*"}, nil, "claude-3", false},
+		{"blocked_takes_precedence", []string{"gpt-4o"}, []string{"gpt-*"}, "gpt-4o", false},
+		{"blocked_wildcard_drops_only_matching", []string{}, []string{"gpt-*"}, "claude-3", true},
+		{"empty_model_kept_visible", nil, nil, "", true},
+		{"empty_model_kept_visible_even_with_blocked", nil, []string{"gpt-*"}, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ModelVisible(tc.allowed, tc.blocked, tc.model)
+			if got != tc.expect {
+				t.Fatalf("ModelVisible(allowed=%v, blocked=%v, %q) = %v, want %v",
+					tc.allowed, tc.blocked, tc.model, got, tc.expect)
+			}
+		})
+	}
+}
+
 func TestSlidingWindowAllowAndIncrement(t *testing.T) {
 	w := newSlidingWindow()
 	key := "k1"
@@ -390,6 +419,10 @@ func (r *recordingService) AcquireParallel(_ context.Context, _ string) (bool, e
 func (r *recordingService) ReleaseParallel(_ context.Context, _ string) error { return nil }
 func (r *recordingService) ResolvedRoutes(_ context.Context, _ string) []store.ModelRoute {
 	return nil
+}
+
+func (r *recordingService) ResolvedModelLists(_ context.Context, _ string) ([]string, []string) {
+	return nil, nil
 }
 
 func TestUsagePluginForwardsCacheTokens(t *testing.T) {

@@ -26,6 +26,8 @@ type mockPolicyService struct {
 	invalidateKey string
 	invalidateAll bool
 	routes        []store.ModelRoute
+	allowed       []string
+	blocked       []string
 }
 
 func (m *mockPolicyService) Active() bool { return m.active }
@@ -64,6 +66,10 @@ func (m *mockPolicyService) ReleaseParallel(_ context.Context, _ string) error {
 
 func (m *mockPolicyService) ResolvedRoutes(_ context.Context, _ string) []store.ModelRoute {
 	return m.routes
+}
+
+func (m *mockPolicyService) ResolvedModelLists(_ context.Context, _ string) ([]string, []string) {
+	return m.allowed, m.blocked
 }
 
 func newTestRouter(svc policy.PolicyService) *gin.Engine {
@@ -186,6 +192,63 @@ func TestPolicyMiddlewareSkipsWhenNoPrincipal(t *testing.T) {
 	// No principal set → middleware defers (open mode).
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 (no principal); got %d", w.Code)
+	}
+}
+
+func TestPolicyMiddlewareStashesAllowedModels(t *testing.T) {
+	svc := &mockPolicyService{
+		active:        true,
+		checkDecision: policy.Decision{Allow: true},
+		allowed:       []string{"gpt-4o", "claude-*"},
+		blocked:       []string{"gpt-3*"},
+	}
+	var gotAllowed, gotBlocked []string
+	r := gin.New()
+	gin.SetMode(gin.TestMode)
+	r.Use(func(c *gin.Context) { c.Set("userApiKey", "p"); c.Next() })
+	r.Use(PolicyMiddleware(svc))
+	r.POST("/x", func(c *gin.Context) {
+		gotAllowed, gotBlocked = ModelListsFor(c)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/x", bytes.NewBufferString(`{"model":"gpt-4o"}`))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200; got %d", w.Code)
+	}
+	if len(gotAllowed) != 2 || gotAllowed[0] != "gpt-4o" {
+		t.Errorf("allowed = %v; want [gpt-4o claude-*]", gotAllowed)
+	}
+	if len(gotBlocked) != 1 || gotBlocked[0] != "gpt-3*" {
+		t.Errorf("blocked = %v; want [gpt-3*]", gotBlocked)
+	}
+}
+
+func TestPolicyMiddlewareOmitsAllowedModelsWhenEmpty(t *testing.T) {
+	// No policy attached → ResolvedModelLists returns nil/nil → the stash is
+	// absent and ModelListsFor returns nil so handlers list every model.
+	svc := &mockPolicyService{active: true, checkDecision: policy.Decision{Allow: true}}
+	var present bool
+	r := gin.New()
+	gin.SetMode(gin.TestMode)
+	r.Use(func(c *gin.Context) { c.Set("userApiKey", "p"); c.Next() })
+	r.Use(PolicyMiddleware(svc))
+	r.POST("/x", func(c *gin.Context) {
+		a, b := ModelListsFor(c)
+		if a != nil || b != nil {
+			present = true
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/x", bytes.NewBufferString(`{"model":"gpt-4o"}`))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200; got %d", w.Code)
+	}
+	if present {
+		t.Errorf("ModelListsFor should return nil,nil when no lists are configured")
 	}
 }
 

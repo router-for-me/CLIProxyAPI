@@ -326,6 +326,14 @@ func boolFromQuery(v string) bool {
 // set is then upserted into models_catalog via the ModelsStore so pricing
 // rows can be attached.
 //
+// Note: /v1/models is now filtered by the caller's resolved policy (per-API-key
+// allowed/blocked lists, including Model Group override). The auto-picked
+// caller key comes from cfg.APIKeys (legacy plaintext keys with no PG policy),
+// so the default sync stays unfiltered. When an operator supplies a
+// caller_key that is a PG-managed key with a restricted policy, the sync will
+// only surface that key's visible models — use an unrestricted key for full
+// catalog syncs.
+//
 // Body parameters (all optional JSON):
 //   - caller_key: override the auto-picked key. Use when the operator wants
 //     to sync with a key that has a specific policy (e.g. unrestricted).

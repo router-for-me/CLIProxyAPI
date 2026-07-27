@@ -14,8 +14,10 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -57,19 +59,27 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 
 // OpenAIModels handles the /v1/models endpoint.
 // It returns a list of available AI models with their capabilities
-// and specifications in OpenAI-compatible format.
+// and specifications in OpenAI-compatible format. The list is filtered to the
+// caller's resolved allowed/blocked model lists (after Model Group override)
+// when a per-API-key policy is attached; non-PG keys see every model.
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
+	// Filter to the caller's policy-resolved allowed models when present.
+	allowed, blocked := middleware.ModelListsFor(c)
+
 	if _, ok := c.Request.URL.Query()["client_version"]; ok {
-		c.JSON(http.StatusOK, h.codexClientModelsResponse())
+		c.JSON(http.StatusOK, h.codexClientModelsResponseFiltered(allowed, blocked))
 		return
 	}
 
 	// Get all available models
 	allModels := h.Models()
-
-	// Filter to only include the 4 required fields: id, object, created, owned_by
-	filteredModels := make([]map[string]any, len(allModels))
-	for i, model := range allModels {
+	filteredModels := make([]map[string]any, 0, len(allModels))
+	for _, model := range allModels {
+		id, _ := model["id"].(string)
+		if !policy.ModelVisible(allowed, blocked, id) {
+			continue
+		}
+		// Filter to only include the 4 required fields: id, object, created, owned_by
 		filteredModel := map[string]any{
 			"id":     model["id"],
 			"object": model["object"],
@@ -85,7 +95,7 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			filteredModel["owned_by"] = ownedBy
 		}
 
-		filteredModels[i] = filteredModel
+		filteredModels = append(filteredModels, filteredModel)
 	}
 
 	c.JSON(http.StatusOK, gin.H{

@@ -14,11 +14,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
 	codexmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -512,6 +514,7 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
 	if !ok {
 		return
 	}
+	entries = filterHomeEntries(c, entries)
 
 	models := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
@@ -566,11 +569,29 @@ type homeModelEntry struct {
 	maxCompletionTokens int
 }
 
+// filterHomeEntries drops Home model entries the caller's resolved policy does
+// not permit. Returns the input unchanged when no policy is attached (non-PG
+// keys / no allowed+blocked lists), preserving the full Home catalog.
+func filterHomeEntries(c *gin.Context, entries []homeModelEntry) []homeModelEntry {
+	allowed, blocked := middleware.ModelListsFor(c)
+	if len(allowed) == 0 && len(blocked) == 0 {
+		return entries
+	}
+	filtered := make([]homeModelEntry, 0, len(entries))
+	for _, e := range entries {
+		if policy.ModelVisible(allowed, blocked, e.id) {
+			filtered = append(filtered, e)
+		}
+	}
+	return filtered
+}
+
 func (s *Server) handleHomeModels(c *gin.Context) {
 	entries, ok := s.loadHomeModelEntries(c)
 	if !ok {
 		return
 	}
+	entries = filterHomeEntries(c, entries)
 
 	isClaude := isAnthropicModelsRequest(c)
 
@@ -640,6 +661,7 @@ func (s *Server) handleHomeGeminiModels(c *gin.Context) {
 	if !ok {
 		return
 	}
+	entries = filterHomeEntries(c, entries)
 
 	c.JSON(http.StatusOK, gin.H{
 		"models": formatHomeGeminiModels(entries),

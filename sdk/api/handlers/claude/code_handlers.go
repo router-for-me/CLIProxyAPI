@@ -18,9 +18,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
@@ -150,11 +152,24 @@ func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 
 // ClaudeModels handles the Claude models listing endpoint.
 // It returns a JSON response containing available Claude models and their specifications.
+// The list is filtered to the caller's resolved allowed/blocked model lists (after
+// Model Group override) when a per-API-key policy is attached; non-PG keys see every model.
 //
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
-	c.JSON(http.StatusOK, claudemodels.BuildResponse(h.Models()))
+	models := h.Models()
+	if allowed, blocked := middleware.ModelListsFor(c); len(allowed) > 0 || len(blocked) > 0 {
+		filtered := make([]map[string]any, 0, len(models))
+		for _, m := range models {
+			id, _ := m["id"].(string)
+			if policy.ModelVisible(allowed, blocked, id) {
+				filtered = append(filtered, m)
+			}
+		}
+		models = filtered
+	}
+	c.JSON(http.StatusOK, claudemodels.BuildResponse(models))
 }
 
 // handleNonStreamingResponse handles non-streaming content generation requests for Claude models.
