@@ -203,6 +203,9 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 		if entry.DisableCooling {
 			metadata["disable_cooling"] = true
 		}
+		if entry.DisableImageGeneration {
+			metadata["disable_image_generation"] = true
+		}
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
 		}

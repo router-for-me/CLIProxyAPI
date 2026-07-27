@@ -718,6 +718,14 @@ func payloadQueryTermMatches(item gjson.Result, term string) bool {
 	return gjson.GetBytes(wrapped, "#("+term+")").Exists()
 }
 
+// StripImageGenerationTools removes image_generation tool entries and matching tool_choice
+// from a codex/openai-style payload (tools at the top level).
+func StripImageGenerationTools(payload []byte) []byte {
+	payload = removeToolTypeFromPayloadWithRoot(payload, "", "image_generation")
+	payload = removeToolChoiceFromPayloadWithRoot(payload, "", "image_generation")
+	return payload
+}
+
 func removeToolTypeFromPayloadWithRoot(payload []byte, root string, toolType string) []byte {
 	if len(payload) == 0 {
 		return payload

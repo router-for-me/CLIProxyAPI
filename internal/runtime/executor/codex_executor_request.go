@@ -408,6 +408,32 @@ func isCodexResponsesLiteRequest(body []byte, headers http.Header) bool {
 	return value.Type == gjson.True || value.Type == gjson.String && strings.EqualFold(strings.TrimSpace(value.String()), "true")
 }
 
+// shouldInjectImageGeneration reports whether the built-in image_generation tool may be
+// auto-injected for this request. Global disable-image-generation modes other than Off never
+// inject. When the global mode is Off, a per-auth disable_image_generation override still blocks injection.
+func shouldInjectImageGeneration(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	if cfg != nil && cfg.DisableImageGeneration != config.DisableImageGenerationOff {
+		return false
+	}
+	if auth != nil && auth.DisableImageGenerationOverride() {
+		return false
+	}
+	return true
+}
+
+// applyCodexImageGenerationPolicy applies per-auth image_generation policy after the global
+// payload config has already run. When this credential opts out, strip any remaining
+// image_generation tools/tool_choice that the client or prior stages may have left in place.
+func applyCodexImageGenerationPolicy(cfg *config.Config, auth *cliproxyauth.Auth, body []byte, baseModel string, headers http.Header) []byte {
+	if auth != nil && auth.DisableImageGenerationOverride() {
+		return helps.StripImageGenerationTools(body)
+	}
+	if shouldInjectImageGeneration(cfg, auth) {
+		return ensureImageGenerationTool(body, baseModel, auth, headers)
+	}
+	return body
+}
+
 func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth, headers http.Header) []byte {
 	if isCodexResponsesLiteRequest(body, headers) {
 		return body

@@ -286,3 +286,72 @@ func TestEnsureImageGenerationTool_FreeCodexAuthDoesNotInjectTool(t *testing.T) 
 		t.Fatalf("expected no tools for free codex auth, got %s", gjson.GetBytes(result, "tools").Raw)
 	}
 }
+
+func TestShouldInjectImageGeneration_GlobalModes(t *testing.T) {
+	if !shouldInjectImageGeneration(nil, nil) {
+		t.Fatal("nil cfg should inject")
+	}
+	if !shouldInjectImageGeneration(&config.Config{}, nil) {
+		t.Fatal("Off mode should inject")
+	}
+	cfgAll := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}}
+	if shouldInjectImageGeneration(cfgAll, nil) {
+		t.Fatal("All mode must not inject")
+	}
+	cfgChat := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationChat}}
+	if shouldInjectImageGeneration(cfgChat, nil) {
+		t.Fatal("Chat mode must not inject")
+	}
+}
+
+func TestShouldInjectImageGeneration_PerAuthOverride(t *testing.T) {
+	cfgOff := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationOff}}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"disable_image_generation": true}}
+	if shouldInjectImageGeneration(cfgOff, auth) {
+		t.Fatal("per-auth override must block injection when global is Off")
+	}
+	authFalse := &cliproxyauth.Auth{Metadata: map[string]any{"disable_image_generation": false}}
+	if !shouldInjectImageGeneration(cfgOff, authFalse) {
+		t.Fatal("false override must be treated as unset")
+	}
+}
+
+func TestApplyCodexImageGenerationPolicy_PerAuthOverrideStripsClientTool(t *testing.T) {
+	cfgOff := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationOff}}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"disable-image-generation": true}}
+	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"image_generation","output_format":"png"},{"type":"function","name":"f1"}],"tool_choice":{"type":"image_generation"}}`)
+	result := applyCodexImageGenerationPolicy(cfgOff, auth, body, "gpt-5.4", nil)
+
+	tools := gjson.GetBytes(result, "tools")
+	if !tools.IsArray() || len(tools.Array()) != 1 {
+		t.Fatalf("expected only function tool remaining, got %s", tools.Raw)
+	}
+	if tools.Array()[0].Get("type").String() != "function" {
+		t.Fatalf("expected remaining tool type=function, got %s", tools.Array()[0].Get("type").String())
+	}
+	if gjson.GetBytes(result, "tool_choice").Exists() {
+		t.Fatalf("expected tool_choice removed, got %s", gjson.GetBytes(result, "tool_choice").Raw)
+	}
+}
+
+func TestApplyCodexImageGenerationPolicy_InjectsWhenEnabled(t *testing.T) {
+	cfgOff := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationOff}}
+	body := []byte(`{"model":"gpt-5.4","input":"draw a cat"}`)
+	result := applyCodexImageGenerationPolicy(cfgOff, nil, body, "gpt-5.4", nil)
+	tools := gjson.GetBytes(result, "tools")
+	if !tools.IsArray() || len(tools.Array()) != 1 {
+		t.Fatalf("expected injected image_generation tool, got %s", tools.Raw)
+	}
+	if tools.Array()[0].Get("type").String() != "image_generation" {
+		t.Fatalf("expected type=image_generation, got %s", tools.Array()[0].Get("type").String())
+	}
+}
+
+func TestApplyCodexImageGenerationPolicy_GlobalChatDoesNotInject(t *testing.T) {
+	cfgChat := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationChat}}
+	body := []byte(`{"model":"gpt-5.4","input":"draw a cat"}`)
+	result := applyCodexImageGenerationPolicy(cfgChat, nil, body, "gpt-5.4", nil)
+	if gjson.GetBytes(result, "tools").Exists() {
+		t.Fatalf("expected no tools injection in chat mode, got %s", gjson.GetBytes(result, "tools").Raw)
+	}
+}
