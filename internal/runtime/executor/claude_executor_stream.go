@@ -51,6 +51,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
+	if isEbayClaudeGatewayBaseURL(baseURL) {
+		body = moveSystemRoleMessagesToFirstUser(body)
+		body = normalizeClaudeAssistantPrefill(body)
+	}
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
@@ -104,6 +108,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
+	normalizeEbayUpstreamErrors := isEbayClaudeGatewayURL(httpReq.URL)
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg, opts.Headers); errHeaders != nil {
 		return nil, errHeaders
 	}
@@ -130,6 +135,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		if normalizeEbayUpstreamErrors {
+			return nil, normalizeClaudeUpstreamTransportError(baseModel, err)
+		}
 		return nil, err
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
@@ -156,7 +164,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		if normalizeEbayUpstreamErrors && (httpResp.StatusCode >= http.StatusInternalServerError || httpResp.StatusCode == 529) {
+			err = normalizeClaudeUpstreamHTTPStatusError(baseModel, httpResp.StatusCode, b)
+		} else {
+			err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		}
 		return nil, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
@@ -164,6 +176,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
+		}
+		if normalizeEbayUpstreamErrors {
+			return nil, normalizeClaudeUpstreamTransportError(baseModel, err)
 		}
 		return nil, err
 	}
@@ -181,6 +196,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			scanner := bufio.NewScanner(decodedBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
 			var event bytes.Buffer
+			sawMessageStop := false
+			emittedChunk := false
 			flushEvent := func() bool {
 				if event.Len() == 0 {
 					return true
@@ -189,6 +206,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				event.Reset()
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
+					emittedChunk = true
 					return true
 				case <-ctx.Done():
 					return false
@@ -199,6 +217,21 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					reporter.Publish(ctx, detail)
+				}
+				if lineType := claudeSSELineType(line); lineType == "message_stop" {
+					sawMessageStop = true
+				}
+				if normalizeEbayUpstreamErrors {
+					if payload, ok := claudeSSEErrorPayload(line); ok {
+						errUpstream := normalizeClaudeUpstreamSSEError(baseModel, payload, emittedChunk)
+						helps.RecordAPIResponseError(ctx, e.cfg, errUpstream)
+						reporter.PublishFailure(ctx, errUpstream)
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: errUpstream}:
+						case <-ctx.Done():
+						}
+						return
+					}
 				}
 				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 				line = e.restoreResponseModel(line, req.Model)
@@ -213,9 +246,31 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			if errScan := scanner.Err(); errScan != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-				reporter.PublishFailure(ctx, errScan)
+				errOut := errScan
+				if normalizeEbayUpstreamErrors {
+					if emittedChunk {
+						errOut = claudeUpstreamStreamInterruptedError(baseModel, errScan.Error(), true)
+					} else {
+						errOut = normalizeClaudeUpstreamTransportError(baseModel, errScan)
+					}
+				}
+				reporter.PublishFailure(ctx, errOut)
 				select {
-				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+				case out <- cliproxyexecutor.StreamChunk{Err: errOut}:
+				case <-ctx.Done():
+				}
+				return
+			}
+			if !sawMessageStop {
+				errMissingStop := statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream stream ended before message_stop"}
+				var errOut error = errMissingStop
+				if normalizeEbayUpstreamErrors {
+					errOut = claudeUpstreamStreamInterruptedError(baseModel, errMissingStop.Error(), emittedChunk)
+				}
+				helps.RecordAPIResponseError(ctx, e.cfg, errOut)
+				reporter.PublishFailure(ctx, errOut)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: errOut}:
 				case <-ctx.Done():
 				}
 			}
@@ -226,11 +281,28 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		scanner := bufio.NewScanner(decodedBody)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+		sawMessageStop := false
+		emittedChunk := false
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
+			}
+			if lineType := claudeSSELineType(line); lineType == "message_stop" {
+				sawMessageStop = true
+			}
+			if normalizeEbayUpstreamErrors {
+				if payload, ok := claudeSSEErrorPayload(line); ok {
+					errUpstream := normalizeClaudeUpstreamSSEError(baseModel, payload, emittedChunk)
+					helps.RecordAPIResponseError(ctx, e.cfg, errUpstream)
+					reporter.PublishFailure(ctx, errUpstream)
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: errUpstream}:
+					case <-ctx.Done():
+					}
+					return
+				}
 			}
 			line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 			line = e.restoreResponseModel(line, req.Model)
@@ -247,6 +319,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					emittedChunk = true
 				case <-ctx.Done():
 					return
 				}
@@ -254,9 +327,31 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
+			errOut := errScan
+			if normalizeEbayUpstreamErrors {
+				if emittedChunk {
+					errOut = claudeUpstreamStreamInterruptedError(baseModel, errScan.Error(), true)
+				} else {
+					errOut = normalizeClaudeUpstreamTransportError(baseModel, errScan)
+				}
+			}
+			reporter.PublishFailure(ctx, errOut)
 			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+			case out <- cliproxyexecutor.StreamChunk{Err: errOut}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		if !sawMessageStop {
+			errMissingStop := statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream stream ended before message_stop"}
+			var errOut error = errMissingStop
+			if normalizeEbayUpstreamErrors {
+				errOut = claudeUpstreamStreamInterruptedError(baseModel, errMissingStop.Error(), emittedChunk)
+			}
+			helps.RecordAPIResponseError(ctx, e.cfg, errOut)
+			reporter.PublishFailure(ctx, errOut)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errOut}:
 			case <-ctx.Done():
 			}
 		}
@@ -271,6 +366,7 @@ func validateClaudeStreamingResponse(data []byte) error {
 	hasData := false
 	hasMessageStart := false
 	hasMessageDelta := false
+	hasMessageStop := false
 
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
@@ -305,6 +401,8 @@ func validateClaudeStreamingResponse(data []byte) error {
 			hasMessageStart = true
 		case "message_delta":
 			hasMessageDelta = true
+		case "message_stop":
+			hasMessageStop = true
 		}
 	}
 	if errScan := scanner.Err(); errScan != nil {
@@ -318,6 +416,9 @@ func validateClaudeStreamingResponse(data []byte) error {
 	}
 	if !hasMessageDelta {
 		return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream stream response ended before message completion"}
+	}
+	if !hasMessageStop {
+		return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream stream ended before message_stop"}
 	}
 	return nil
 }

@@ -66,7 +66,7 @@ func (e *modelCooldownError) Error() string {
 	if modelName == "" {
 		modelName = "requested model"
 	}
-	message := fmt.Sprintf("All credentials for model %s are cooling down", modelName)
+	message := fmt.Sprintf("configured upstream routes for model %s are temporarily unavailable/cooling down after recent failures", modelName)
 	if e.provider != "" {
 		message = fmt.Sprintf("%s via provider %s", message, e.provider)
 	}

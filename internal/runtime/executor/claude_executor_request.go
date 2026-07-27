@@ -406,6 +406,116 @@ func rebuildMidSystemMessagesToTopLevel(payload []byte) []byte {
 	return payload
 }
 
+func moveSystemRoleMessagesToFirstUser(payload []byte) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return payload
+	}
+
+	var movedSystemParts []string
+	keptMessages := make([]string, 0, int(messages.Get("#").Int()))
+	firstUserIndex := -1
+	messages.ForEach(func(_, message gjson.Result) bool {
+		role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
+		if role == "system" {
+			movedSystemParts = append(movedSystemParts, claudeSystemTextParts(message.Get("content"))...)
+			return true
+		}
+		if role == "user" && firstUserIndex < 0 {
+			firstUserIndex = len(keptMessages)
+		}
+		keptMessages = append(keptMessages, message.Raw)
+		return true
+	})
+	if len(movedSystemParts) == 0 {
+		return payload
+	}
+
+	systemContent := rawJSONArray(movedSystemParts)
+	if firstUserIndex < 0 {
+		userMessage := []byte(`{"role":"user","content":[]}`)
+		userMessage, _ = sjson.SetRawBytes(userMessage, "content", systemContent)
+		keptMessages = append([]string{string(userMessage)}, keptMessages...)
+	} else {
+		firstUser := []byte(keptMessages[firstUserIndex])
+		firstUser, _ = sjson.SetRawBytes(firstUser, "content", mergeClaudeContentBlocks(movedSystemParts, gjson.GetBytes(firstUser, "content")))
+		keptMessages[firstUserIndex] = string(firstUser)
+	}
+
+	if updated, errSetMessages := sjson.SetRawBytes(payload, "messages", rawJSONArray(keptMessages)); errSetMessages == nil {
+		return updated
+	}
+	return payload
+}
+
+func mergeClaudeContentBlocks(prefix []string, content gjson.Result) []byte {
+	items := make([]string, 0, len(prefix)+1)
+	items = append(items, prefix...)
+	if content.Type == gjson.String {
+		block := []byte(`{"type":"text","text":""}`)
+		block, _ = sjson.SetBytes(block, "text", content.String())
+		items = append(items, string(block))
+	} else if content.IsArray() {
+		content.ForEach(func(_, item gjson.Result) bool {
+			items = append(items, item.Raw)
+			return true
+		})
+	} else if content.Exists() {
+		items = append(items, content.Raw)
+	}
+	return rawJSONArray(items)
+}
+
+func normalizeClaudeAssistantPrefill(payload []byte) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return payload
+	}
+	messageArray := messages.Array()
+	if len(messageArray) == 0 {
+		return payload
+	}
+	last := messageArray[len(messageArray)-1]
+	if !strings.EqualFold(strings.TrimSpace(last.Get("role").String()), "assistant") || !isClaudeAssistantPrefillMessage(last) {
+		return payload
+	}
+	keptMessages := make([]string, 0, len(messageArray)-1)
+	for _, message := range messageArray[:len(messageArray)-1] {
+		keptMessages = append(keptMessages, message.Raw)
+	}
+	if updated, errSetMessages := sjson.SetRawBytes(payload, "messages", rawJSONArray(keptMessages)); errSetMessages == nil {
+		return updated
+	}
+	return payload
+}
+
+func isClaudeAssistantPrefillMessage(message gjson.Result) bool {
+	content := message.Get("content")
+	if content.Type == gjson.String {
+		return strings.TrimSpace(content.String()) != ""
+	}
+	if !content.IsArray() {
+		return false
+	}
+	hasVisibleText := false
+	for _, item := range content.Array() {
+		itemType := item.Get("type").String()
+		switch itemType {
+		case "text":
+			if strings.TrimSpace(item.Get("text").String()) != "" {
+				hasVisibleText = true
+			}
+		case "":
+			if item.Type == gjson.String && strings.TrimSpace(item.String()) != "" {
+				hasVisibleText = true
+			}
+		default:
+			return false
+		}
+	}
+	return hasVisibleText
+}
+
 func claudeSystemTextParts(content gjson.Result) []string {
 	if !content.Exists() {
 		return nil

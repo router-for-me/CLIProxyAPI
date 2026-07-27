@@ -50,6 +50,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
+	if isEbayClaudeGatewayBaseURL(baseURL) {
+		body = moveSystemRoleMessagesToFirstUser(body)
+		body = normalizeClaudeAssistantPrefill(body)
+	}
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
@@ -107,6 +111,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
+	normalizeEbayUpstreamErrors := isEbayClaudeGatewayURL(httpReq.URL)
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, opts.Headers); errHeaders != nil {
 		return resp, errHeaders
 	}
@@ -133,6 +138,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		if normalizeEbayUpstreamErrors {
+			return resp, normalizeClaudeUpstreamTransportError(baseModel, err)
+		}
 		return resp, err
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
@@ -156,7 +164,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		if normalizeEbayUpstreamErrors && (httpResp.StatusCode >= http.StatusInternalServerError || httpResp.StatusCode == 529) {
+			err = normalizeClaudeUpstreamHTTPStatusError(baseModel, httpResp.StatusCode, b)
+		} else {
+			err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		}
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
@@ -168,6 +180,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
+		if normalizeEbayUpstreamErrors {
+			return resp, normalizeClaudeUpstreamTransportError(baseModel, err)
+		}
 		return resp, err
 	}
 	defer func() {
@@ -178,12 +193,18 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	data, err := io.ReadAll(decodedBody)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		if normalizeEbayUpstreamErrors {
+			return resp, normalizeClaudeUpstreamTransportError(baseModel, err)
+		}
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if stream {
 		if errValidate := validateClaudeStreamingResponse(data); errValidate != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errValidate)
+			if normalizeEbayUpstreamErrors {
+				return resp, claudeUpstreamStreamInterruptedError(baseModel, errValidate.Error(), false)
+			}
 			return resp, errValidate
 		}
 		lines := bytes.Split(data, []byte("\n"))

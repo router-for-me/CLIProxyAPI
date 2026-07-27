@@ -250,6 +250,10 @@ func TestSelectorPick_AllCooldownReturnsModelCooldownError(t *testing.T) {
 		if got, _ := rawErr["code"].(string); got != "model_cooldown" {
 			t.Fatalf("Error().error.code = %q, want %q", got, "model_cooldown")
 		}
+		message, _ := rawErr["message"].(string)
+		if !strings.Contains(message, "configured upstream routes") || !strings.Contains(message, "temporarily unavailable/cooling down after recent failures") {
+			t.Fatalf("Error().error.message = %q, want upstream route cooldown context", message)
+		}
 		if _, ok := rawErr["provider"]; ok {
 			t.Fatalf("Error().error.provider exists for mixed provider: %v", rawErr["provider"])
 		}
