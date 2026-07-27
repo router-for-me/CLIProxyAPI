@@ -203,9 +203,9 @@ export const sections = [
           { name: 'user_id', in: 'body', type: 'string', required: true, default: '', description: 'Owning Internal User id.' },
           { name: 'expires_at', in: 'body', type: 'string', required: false, default: 'null', description: 'RFC3339 expiry timestamp.' },
           { name: 'metadata', in: 'body', type: 'object', required: false, default: '{}', description: 'Arbitrary JSON metadata.' },
-          { name: 'policy', in: 'body', type: 'object', required: false, default: 'null', description: 'Per-key Policy (see PUT /:id/policy).' },
+          { name: 'policy', in: 'body', type: 'object', required: false, default: 'null', description: 'Per-key Policy (see PUT /:id/policy). May include policy.model_group_id to attach a reusable Model Group at creation time — the group then becomes the source of truth for allowed/blocked/routes (entity fields ignored at enforcement time).' },
         ],
-        examplePayload: `{\n  "name": "prod-app",\n  "user_id": "u-abc123",\n  "expires_at": "2026-12-31T23:59:59Z",\n  "policy": { "rpm_limit": 100, "allowed_models": ["gpt-4o"] }\n}`,
+        examplePayload: `{\n  "name": "prod-app",\n  "user_id": "u-abc123",\n  "expires_at": "2026-12-31T23:59:59Z",\n  "policy": { "rpm_limit": 100, "allowed_models": ["gpt-4o"], "model_group_id": "g-abc123" }\n}`,
         exampleCurl: `curl -s -X POST "${'{API_BASE}'}/api-keys-pg" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"name":"prod-app","user_id":"u-abc123"}'`,
         responses: [
           { status: 201, label: 'Created', body: `{"id":"k-def1","name":"prod-app","key_prefix":"sk-abcd","status":"active","user_id":"u-abc123","secret":"sk-xxxxxxxxxxxxxxxx","policy":{...}}` },
@@ -229,6 +229,7 @@ export const sections = [
           { name: 'id', in: 'path', type: 'string', required: true, default: '', description: 'Key id.' },
           { name: 'status', in: 'body', type: 'string', required: false, default: '', description: 'active | disabled | revoked.' },
           { name: 'clear_expiry', in: 'body', type: 'boolean', required: false, default: 'false', description: 'Clear the expiry.' },
+          { name: 'model_group_id', in: 'body', type: 'string', required: false, default: 'null', description: 'Attach (non-empty, group must exist) or detach (empty string) a Model Group in a single PATCH. When attached the group becomes the source of truth for this key\'s allowed/blocked lists and per-model routes at enforcement time. If the key has no policy row yet, attaching materializes an empty policy carrying only the model_group_id. Detaching a policy-less key is a no-op (200).' },
         ],
         examplePayload: `{"status":"disabled","clear_expiry":true}`,
         exampleCurl: `curl -s -X PATCH "${'{API_BASE}'}/api-keys-pg/k-def1" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"status":"disabled"}'`,
@@ -245,8 +246,10 @@ export const sections = [
           { name: 'budget_hourly_usd', in: 'body', type: 'number', required: false, default: 'null', description: 'Hourly USD cap.' },
           { name: 'budget_weekly_usd', in: 'body', type: 'number', required: false, default: 'null', description: 'Weekly USD cap.' },
           { name: 'budget_monthly_usd', in: 'body', type: 'number', required: false, default: 'null', description: 'Monthly USD cap.' },
-          { name: 'allowed_models', in: 'body', type: 'string[]', required: false, default: '[]', description: 'Allow-list (empty = all).' },
-          { name: 'blocked_models', in: 'body', type: 'string[]', required: false, default: '[]', description: 'Deny-list.' },
+          { name: 'allowed_models', in: 'body', type: 'string[]', required: false, default: '[]', description: 'Allow-list (empty = all). Ignored at enforcement time when model_group_id is set (group is the source of truth).' },
+          { name: 'blocked_models', in: 'body', type: 'string[]', required: false, default: '[]', description: 'Deny-list. Ignored at enforcement time when model_group_id is set.' },
+          { name: 'model_routes', in: 'body', type: 'object[]', required: false, default: '[]', description: 'Per-concrete-model upstream provider pinning. { model, providers }. Ignored at enforcement time when model_group_id is set.' },
+          { name: 'model_group_id', in: 'body', type: 'string', required: false, default: 'null', description: 'Attach (non-empty) or detach (empty) a Model Group. When set, the group\'s allowed/blocked/routes OVERRIDE this policy\'s own fields at enforcement time. Existence is validated; passing null preserves the previous value.' },
         ],
         examplePayload: `{"rpm_limit":100,"budget_monthly_usd":50.0,"allowed_models":["gpt-4o","claude-3-5-sonnet"]}`,
         exampleCurl: `curl -s -X PUT "${'{API_BASE}'}/api-keys-pg/k-def1/policy" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"rpm_limit":100,"allowed_models":["gpt-4o"]}'`,
@@ -277,7 +280,125 @@ export const sections = [
   },
 
   // =========================================================================
-  // 3. Available Models
+  // 3. Model Groups
+  // =========================================================================
+  {
+    id: 'model-groups',
+    title: 'Model Groups',
+    description:
+      'Reusable templates of an allowed-models grant list (with trailing-\'*\' wildcards) plus optional per-model upstream routing (model_routes). ' +
+      'A group can be attached to an API-key policy in one of two ways: ' +
+      '(a) via the dedicated /model-groups/:id/attach endpoint, or ' +
+      '(b) by setting policy.model_group_id on POST /api-keys-pg or PUT /api-keys-pg/:id/policy, or by passing model_group_id on PATCH /api-keys-pg/:id. ' +
+      'When attached, the group becomes the source of truth for that key\'s allowed/blocked lists and per-model routes at enforcement time — the key\'s own fields are overridden. ' +
+      'Model groups attach ONLY to API-key policies (not to Internal Users). ' +
+      'All routes return 503 when the PG store is not configured.',
+    endpoints: [
+      {
+        method: 'GET', path: '/model-groups', summary: 'List model groups (paginated, filterable, sortable).',
+        params: [
+          { name: 'page', in: 'query', type: 'integer', required: false, default: '1', description: '1-indexed page.' },
+          { name: 'page_size', in: 'query', type: 'integer', required: false, default: '25', description: 'Rows per page (max 200).' },
+          { name: 'search', in: 'query', type: 'string', required: false, default: '', description: 'Case-insensitive substring on name OR description.' },
+          { name: 'sort_by', in: 'query', type: 'string', required: false, default: 'name', description: 'name | created_at | updated_at.' },
+          { name: 'sort_order', in: 'query', type: 'string', required: false, default: 'asc', description: 'asc | desc.' },
+        ],
+        examplePayload: null,
+        exampleCurl: `curl -s "${'{API_BASE}'}/model-groups?page=1&page_size=25&search=gpt" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
+        responses: [
+          { status: 200, label: 'OK', body: `{\n  "groups": [\n    {\n      "id": "g-abc123",\n      "name": "gpt-only",\n      "description": "GPT family + gpt-4o pinned to openai oauth",\n      "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n      "blocked_models": [],\n      "model_routes": [\n        { "model": "gpt-4o", "providers": ["openai"] }\n      ],\n      "metadata": {},\n      "created_at": "2026-07-22T09:00:00Z",\n      "updated_at": "2026-07-22T09:05:00Z"\n    }\n  ],\n  "page": 1,\n  "page_size": 25,\n  "total": 1,\n  "total_pages": 1\n}` },
+          { status: 503, label: 'PG store not configured', body: `{"error":{"type":"pg_store_not_configured","message":"..."}}` },
+        ],
+      },
+      {
+        method: 'POST', path: '/model-groups', summary: 'Create a group. Name is required and unique. model_routes is validated against allowed_models.',
+        params: [
+          { name: 'name', in: 'body', type: 'string', required: true, default: '', description: 'Unique human label.' },
+          { name: 'description', in: 'body', type: 'string', required: false, default: '', description: 'Free-form description.' },
+          { name: 'allowed_models', in: 'body', type: 'string[]', required: false, default: '[]', description: 'Allow-list (empty = all allowed). Supports trailing-\'*\' wildcards.' },
+          { name: 'blocked_models', in: 'body', type: 'string[]', required: false, default: '[]', description: 'Deny-list. Takes precedence over allowed.' },
+          { name: 'model_routes', in: 'body', type: 'object[]', required: false, default: '[]', description: 'Per-concrete-model upstream provider pinning. Each entry: { model, providers: string[] }. model must be in allowed_models; wildcard models cannot be routed.' },
+          { name: 'metadata', in: 'body', type: 'object', required: false, default: '{}', description: 'Arbitrary JSON metadata.' },
+        ],
+        examplePayload: `{\n  "name": "gpt-only",\n  "description": "GPT family + gpt-4o pinned to openai oauth",\n  "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n  "model_routes": [\n    { "model": "gpt-4o", "providers": ["openai"] }\n  ]\n}`,
+        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/model-groups" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "name": "gpt-only",\n    "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n    "model_routes": [{ "model": "gpt-4o", "providers": ["openai"] }]\n  }'`,
+        responses: [
+          { status: 201, label: 'Created', body: `{"id":"g-abc123","name":"gpt-only","allowed_models":["gpt-4o","gpt-4o-mini","gpt-4*"],"model_routes":[{"model":"gpt-4o","providers":["openai"]}],"created_at":"2026-07-22T09:00:00Z","updated_at":"2026-07-22T09:00:00Z"}` },
+          { status: 400, label: 'Invalid request (name missing / route out of allowed)', body: `{"error":{"type":"invalid_request","message":"postgres store: model group name is required"}}` },
+          { status: 409, label: 'Name taken', body: `{"error":{"type":"conflict","message":"model group name already taken"}}` },
+        ],
+      },
+      {
+        method: 'GET', path: '/model-groups/:id', summary: 'Get a single group AND its current attachments (API-key policies that reference it).',
+        params: [{ name: 'id', in: 'path', type: 'string', required: true, default: '', description: 'Group id.' }],
+        examplePayload: null,
+        exampleCurl: `curl -s "${'{API_BASE}'}/model-groups/g-abc123" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
+        responses: [
+          { status: 200, label: 'OK', body: `{\n  "group": {\n    "id": "g-abc123",\n    "name": "gpt-only",\n    "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n    "blocked_models": [],\n    "model_routes": [{ "model": "gpt-4o", "providers": ["openai"] }],\n    "metadata": {},\n    "created_at": "2026-07-22T09:00:00Z",\n    "updated_at": "2026-07-22T09:05:00Z"\n  },\n  "attachments": [\n    {\n      "entity_id": "k-def1",\n      "entity_label": "prod-app",\n      "entity_user_id": "u-abc123",\n      "entity_user_alias": "alice",\n      "entity_user_email": "alice@example.com"\n    }\n  ]\n}` },
+          { status: 404, label: 'Not found', body: `{"error":{"type":"not_found","message":"model group not found"}}` },
+        ],
+      },
+      {
+        method: 'PUT', path: '/model-groups/:id', summary: 'Partial update. Pointer-typed fields apply only when non-nil.',
+        params: [
+          { name: 'id', in: 'path', type: 'string', required: true, default: '', description: 'Group id.' },
+          { name: 'name', in: 'body', type: 'string', required: false, default: '', description: 'Unique name.' },
+          { name: 'description', in: 'body', type: 'string', required: false, default: '', description: 'Description.' },
+          { name: 'allowed_models', in: 'body', type: 'string[]', required: false, default: '—', description: 'Replace the allow-list.' },
+          { name: 'blocked_models', in: 'body', type: 'string[]', required: false, default: '—', description: 'Replace the deny-list.' },
+          { name: 'model_routes', in: 'body', type: 'object[]', required: false, default: '—', description: 'Replace routes.' },
+          { name: 'metadata', in: 'body', type: 'object', required: false, default: '—', description: 'Replace metadata.' },
+        ],
+        examplePayload: `{"allowed_models":["gpt-4o"]}`,
+        exampleCurl: `curl -s -X PUT "${'{API_BASE}'}/model-groups/g-abc123" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"allowed_models":["gpt-4o"]}'`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"id":"g-abc123","name":"gpt-only","allowed_models":["gpt-4o"],...}` },
+          { status: 404, label: 'Not found', body: `{"error":{"type":"not_found","message":"model group not found"}}` },
+          { status: 409, label: 'Name taken', body: `{"error":{"type":"conflict","message":"model group name already taken"}}` },
+        ],
+      },
+      {
+        method: 'DELETE', path: '/model-groups/:id', summary: 'Permanently delete a group. Rejected with 409 while any API-key policy still references it.',
+        params: [{ name: 'id', in: 'path', type: 'string', required: true, default: '', description: 'Group id.' }],
+        examplePayload: null,
+        exampleCurl: `curl -s -X DELETE "${'{API_BASE}'}/model-groups/g-abc123" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"id":"g-abc123","deleted":true}` },
+          { status: 404, label: 'Not found', body: `{"error":{"type":"not_found","message":"model group not found"}}` },
+          { status: 409, label: 'In use (still attached)', body: `{"error":{"type":"in_use","message":"model group is still attached to one or more entities: attached to 1 api_key_policies"}}` },
+        ],
+      },
+      {
+        method: 'POST', path: '/model-groups/:id/attach', summary: 'Attach the group to an API-key policy. The group becomes the source of truth for that key\'s model access (allowed/blocked + routes).',
+        params: [
+          { name: 'id', in: 'path', type: 'string', required: true, default: '', description: 'Group id.' },
+          { name: 'api_key_id', in: 'body', type: 'string', required: true, default: '', description: 'The API key id whose policy row will carry the model_group_id. The key\'s policy row must already exist (PUT /api-keys-pg/:id/policy) — attach is an UPDATE, not an upsert.' },
+        ],
+        examplePayload: `{"api_key_id":"k-def1"}`,
+        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/model-groups/g-abc123/attach" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"api_key_id":"k-def1"}'`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"group_id":"g-abc123","api_key_id":"k-def1","attached":true}` },
+          { status: 404, label: 'Group or API key not found', body: `{"error":{"type":"not_found","message":"model group not found"}} or {"error":{"type":"not_found","message":"api key not found"}}` },
+        ],
+      },
+      {
+        method: 'POST', path: '/model-groups/:id/detach', summary: 'Clear the model_group_id on an API-key policy so the policy\'s own allowed/blocked/routes fields apply again. Idempotent — detaching a policy-less key is a no-op.',
+        params: [
+          { name: 'id', in: 'path', type: 'string', required: true, default: '', description: 'Group id (informational; not validated on detach).' },
+          { name: 'api_key_id', in: 'body', type: 'string', required: true, default: '', description: 'The API key id whose policy should be detached.' },
+        ],
+        examplePayload: `{"api_key_id":"k-def1"}`,
+        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/model-groups/g-abc123/detach" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"api_key_id":"k-def1"}'`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"group_id":"g-abc123","api_key_id":"k-def1","detached":true}` },
+          { status: 404, label: 'API key not found', body: `{"error":{"type":"not_found","message":"api key not found"}}` },
+        ],
+      },
+    ],
+  },
+
+  // =========================================================================
+  // 4. Available Models
   // =========================================================================
   {
     id: 'models',
