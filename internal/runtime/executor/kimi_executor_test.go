@@ -526,6 +526,9 @@ func TestNormalizeKimiUpstreamModel(t *testing.T) {
 		{"kimi-k2.6[1m]", "k2.6"},
 		{"kimi-k3(1024)", "k3(1024)"},
 		{"kimi-k3[1m](1024)", "k3(1024)"},
+		{"kimi-k3-256k", "k3-256k"},
+		{"kimi-k3-256k[1m]", "k3-256k"},
+		{"kimi-k3-256k(high)", "k3-256k(high)"},
 		{"kimi-k2.6(high)", "k2.6(high)"},
 		{"kimi-k2.6[1m](high)", "k2.6(high)"},
 	}

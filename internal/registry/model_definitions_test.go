@@ -35,6 +35,32 @@ func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
 	t.Fatalf("Vertex models do not contain %q", releaseID)
 }
 
+func TestGetKimiModelsIncludesK3_256K(t *testing.T) {
+	for _, model := range GetKimiModels() {
+		if model == nil || model.ID != "kimi-k3-256k" {
+			continue
+		}
+		if model.ContextLength != 262144 {
+			t.Fatalf("kimi-k3-256k context_length = %d, want 262144 (256K)", model.ContextLength)
+		}
+		if model.Thinking == nil {
+			t.Fatal("kimi-k3-256k thinking config = nil, want levels low/high/max")
+		}
+		wantLevels := map[string]bool{"low": true, "high": true, "max": true}
+		if len(model.Thinking.Levels) != len(wantLevels) {
+			t.Fatalf("kimi-k3-256k thinking levels = %v, want [low high max]", model.Thinking.Levels)
+		}
+		for _, level := range model.Thinking.Levels {
+			if !wantLevels[level] {
+				t.Fatalf("kimi-k3-256k thinking level %q not in [low high max]", level)
+			}
+		}
+		return
+	}
+
+	t.Fatal("Kimi models do not contain kimi-k3-256k")
+}
+
 func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 
