@@ -1,8 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   getAPIKey, patchAPIKey, putAPIKeyPolicy, regenerateAPIKey, deleteAPIKey, getUsageWindows,
-  getInternalUser,
+  getInternalUser, getModelGroup,
 } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import { Spinner, ErrorBanner, StatusBadge, Modal, RoleBadge } from '../components/Primitives.jsx';
@@ -328,6 +328,29 @@ function formatDate(s) {
 function PolicyCard({ apiKeyId, policy: initial, onUpdated }) {
   const toast = useToast();
   const [editing, setEditing] = useState(false);
+  // When a Model Group drives this key's allowed/blocked lists, fetch its
+  // name + grant summary so the read-only card can surface which group is in
+  // effect (the policy's own allowed/blocked fields are overridden and thus
+  // not shown in that case). Mirrors the fetch pattern in PolicyForm.
+  const [group, setGroup] = useState(null);
+  const [groupLoading, setGroupLoading] = useState(false);
+  useEffect(() => {
+    const gid = initial?.model_group_id;
+    if (!gid) { setGroup(null); return; }
+    let cancelled = false;
+    setGroupLoading(true);
+    (async () => {
+      try {
+        const res = await getModelGroup(gid);
+        if (!cancelled) setGroup(res?.group || null);
+      } catch {
+        if (!cancelled) setGroup(null);
+      } finally {
+        if (!cancelled) setGroupLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [initial?.model_group_id]);
   if (!initial && !editing) {
     return (
       <div className="card">
@@ -351,6 +374,7 @@ function PolicyCard({ apiKeyId, policy: initial, onUpdated }) {
       />
     );
   }
+  const usingGroup = !!initial?.model_group_id;
   return (
     <div className="card">
       <h3 className="card__title">Policy</h3>
@@ -362,33 +386,69 @@ function PolicyCard({ apiKeyId, policy: initial, onUpdated }) {
         <PolicyStat label="Monthly Budget" value={fmtUSD(initial.budget_monthly_usd)} />
         <PolicyStat label="Max Parallel" value={initial.max_parallel_requests ?? 'unlimited'} />
       </div>
-      {initial.allowed_models && initial.allowed_models.length > 0 && (
-        <div className="form__row">
-          <div className="form__label">Allowed models</div>
-          <ul className="list-bare">
-            {initial.allowed_models.map((m) => {
-              const route = (initial.model_routes || []).find((r) => r.model === m);
-              return (
-                <li key={m} className="mono">
-                  {m}
-                  {route && route.providers && route.providers.length > 0 && (
-                    <span className="muted" style={{ marginLeft: 8 }}>
-                      → {route.providers.join(', ')}
-                    </span>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
+      {usingGroup ? (
+        <div className="form__row group-summary">
+          <div className="form__label">Model access</div>
+          {groupLoading ? (
+            <div className="muted">Loading model group…</div>
+          ) : group ? (
+            <div>
+              <div>
+                <span className="badge badge--info">Model Group</span>{' '}
+                <Link to={`/model-groups/${group.id}`} className="dim">{group.name}</Link>
+              </div>
+              <div className="muted" style={{ marginTop: 4 }}>
+                Allowed: {Array.isArray(group.allowed_models) && group.allowed_models.length === 0
+                  ? 'all models'
+                  : (group.allowed_models || []).join(', ') || '—'}
+              </div>
+              {Array.isArray(group.blocked_models) && group.blocked_models.length > 0 && (
+                <div className="muted">Blocked: {group.blocked_models.join(', ')}</div>
+              )}
+              {Array.isArray(group.model_routes) && group.model_routes.length > 0 && (
+                <div className="muted">Routes: {group.model_routes.length} pinned</div>
+              )}
+              <div className="muted" style={{ marginTop: 4, fontSize: '0.85em' }}>
+                This group overrides the key's allowed/blocked lists and per-model routes.
+              </div>
+            </div>
+          ) : (
+            <div className="muted">
+              Attached Model Group (id: <span className="mono">{initial.model_group_id}</span>) could not be loaded.
+            </div>
+          )}
         </div>
-      )}
-      {initial.blocked_models && initial.blocked_models.length > 0 && (
-        <div className="form__row">
-          <div className="form__label">Blocked models</div>
-          <ul className="list-bare">
-            {initial.blocked_models.map((m) => <li key={m} className="mono">{m}</li>)}
-          </ul>
-        </div>
+      ) : (
+        <>
+          {initial.allowed_models && initial.allowed_models.length > 0 && (
+            <div className="form__row">
+              <div className="form__label">Allowed models</div>
+              <ul className="list-bare">
+                {initial.allowed_models.map((m) => {
+                  const route = (initial.model_routes || []).find((r) => r.model === m);
+                  return (
+                    <li key={m} className="mono">
+                      {m}
+                      {route && route.providers && route.providers.length > 0 && (
+                        <span className="muted" style={{ marginLeft: 8 }}>
+                          → {route.providers.join(', ')}
+                        </span>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+          {initial.blocked_models && initial.blocked_models.length > 0 && (
+            <div className="form__row">
+              <div className="form__label">Blocked models</div>
+              <ul className="list-bare">
+                {initial.blocked_models.map((m) => <li key={m} className="mono">{m}</li>)}
+              </ul>
+            </div>
+          )}
+        </>
       )}
       <div className="form__actions">
         <button onClick={() => setEditing(true)}>Edit Policy</button>

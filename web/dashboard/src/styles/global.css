@@ -499,6 +499,7 @@ code, pre {
   letter-spacing: 0.02em;
 }
 .badge--active   { background: var(--success-dim); color: var(--success); }
+.badge--info     { background: var(--accent-dim); color: var(--accent); }
 .badge--disabled { background: var(--warning-dim); color: var(--warning); }
 .badge--revoked  { background: var(--danger-dim); color: var(--danger); }
 .badge--expired  { background: var(--danger-dim); color: var(--danger); }
