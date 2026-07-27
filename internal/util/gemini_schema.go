@@ -15,6 +15,15 @@ var gjsonPathKeyReplacer = strings.NewReplacer(".", "\\.", "*", "\\*", "?", "\\?
 
 const placeholderReasonDescription = "Brief explanation of why you are calling this tool"
 
+// Pass a single JSON schema to the functions below — never a whole request document.
+//
+// Cleaning walks every node and rewrites keys by name, and schema keywords such as "title",
+// "format", "default" and "const" are also ordinary data keys. Handing these functions a request
+// silently rewrites tool-call arguments inside the conversation history: the guard that protects
+// a key under ".properties" does not apply to argument values, so the keys are deleted outright
+// and replacements such as "enum" and "type" are fabricated. That regression reached production
+// once already; scope every call site to the schema itself.
+
 // CleanJSONSchemaForAntigravity transforms a JSON schema to be compatible with Antigravity API.
 // It handles unsupported keywords, type flattening, and schema simplification while preserving
 // semantic information as description hints.
@@ -685,26 +694,37 @@ func descriptionPath(parentPath string) string {
 	return parentPath + ".description"
 }
 
+// mergeHint combines an existing description with a hint. Cleaning is not always a single pass:
+// a schema may be cleaned by a translator and again by an executor, so an already-present hint is
+// kept as-is instead of being appended a second time.
+func mergeHint(existing, hint string) string {
+	if existing == "" {
+		return hint
+	}
+	// A hint added to an empty description is stored bare and later hints are appended after it, so
+	// the bare form may sit alone, lead the description, or appear parenthesised further along.
+	if existing == hint ||
+		strings.HasPrefix(existing, hint+" (") ||
+		strings.Contains(existing, fmt.Sprintf("(%s)", hint)) {
+		return existing
+	}
+	return fmt.Sprintf("%s (%s)", existing, hint)
+}
+
 func appendHint(jsonStr, parentPath, hint string) string {
 	descPath := parentPath + ".description"
 	if parentPath == "" || parentPath == "@this" {
 		descPath = "description"
 	}
-	existing := gjson.Get(jsonStr, descPath).String()
-	if existing != "" {
-		hint = fmt.Sprintf("%s (%s)", existing, hint)
-	}
-	updated, _ := sjson.SetBytes([]byte(jsonStr), descPath, hint)
+	merged := mergeHint(gjson.Get(jsonStr, descPath).String(), hint)
+	updated, _ := sjson.SetBytes([]byte(jsonStr), descPath, merged)
 	jsonStr = string(updated)
 	return jsonStr
 }
 
 func appendHintRaw(jsonRaw, hint string) string {
-	existing := gjson.Get(jsonRaw, "description").String()
-	if existing != "" {
-		hint = fmt.Sprintf("%s (%s)", existing, hint)
-	}
-	updated, _ := sjson.SetBytes([]byte(jsonRaw), "description", hint)
+	merged := mergeHint(gjson.Get(jsonRaw, "description").String(), hint)
+	updated, _ := sjson.SetBytes([]byte(jsonRaw), "description", merged)
 	jsonRaw = string(updated)
 	return jsonRaw
 }

@@ -114,7 +114,7 @@ func openAICompatKey(entry config.OpenAICompatibility, index int) (string, strin
 	}
 	base := strings.TrimSpace(entry.BaseURL)
 	if base != "" {
-		return "base:" + base, base
+		return "base:" + base, formatURL(base)
 	}
 	for _, model := range entry.Models {
 		alias := strings.TrimSpace(model.Alias)

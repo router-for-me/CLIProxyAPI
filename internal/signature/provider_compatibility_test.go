@@ -143,28 +143,23 @@ func TestGeminiASCIIUUIDSignatureUsesBypass(t *testing.T) {
 	}
 }
 
-func TestGeminiWrappedUUIDFunctionCallSignatureIsUnknown(t *testing.T) {
+func TestGeminiWrappedUUIDFunctionCallSignatureIsCompatible(t *testing.T) {
 	sig := testGemini3ThoughtSignature([]byte("e24830a7-5cd6-42fe-998b-ee539e72b9c3"))
 
-	if got := DetectSignatureProvider(sig); got != SignatureProviderUnknown {
-		t.Fatalf("DetectSignatureProvider(wrapped UUID) = %q, want %q", got, SignatureProviderUnknown)
+	if got := DetectSignatureProvider(sig); got != SignatureProviderGemini {
+		t.Fatalf("DetectSignatureProvider(wrapped UUID) = %q, want %q", got, SignatureProviderGemini)
 	}
-	if got := DetectSignatureProviderForBlock(sig, SignatureBlockKindGeminiFunctionCall); got != SignatureProviderUnknown {
-		t.Fatalf("DetectSignatureProviderForBlock(wrapped UUID tool call) = %q, want %q", got, SignatureProviderUnknown)
+	if got := DetectSignatureProviderForBlock(sig, SignatureBlockKindGeminiFunctionCall); got != SignatureProviderGemini {
+		t.Fatalf("DetectSignatureProviderForBlock(wrapped UUID tool call) = %q, want %q", got, SignatureProviderGemini)
 	}
-	if normalized, ok := CompatibleSignatureForProviderBlock(SignatureProviderGemini, sig, SignatureBlockKindGeminiFunctionCall); ok || normalized != "" {
-		t.Fatalf("wrapped UUID tool-call signature normalized=%q ok=%v, want empty and false", normalized, ok)
+	if normalized, ok := CompatibleSignatureForProviderBlock(SignatureProviderGemini, sig, SignatureBlockKindGeminiFunctionCall); !ok || normalized != sig {
+		t.Fatalf("wrapped UUID tool-call signature normalized=%q ok=%v, want original and true", normalized, ok)
 	}
-	decision := DecideSignatureCompatibility(SignatureProviderGemini, sig, SignatureBlockKindGeminiFunctionCall)
-	if decision.Action != SignatureActionReplaceWithGeminiBypass {
-		t.Fatalf("function-call wrapped UUID action = %q, want %q", decision.Action, SignatureActionReplaceWithGeminiBypass)
-	}
-	if decision.ReplacementSignature != GeminiSkipThoughtSignatureValidator {
-		t.Fatalf("function-call wrapped UUID replacement = %q, want %q", decision.ReplacementSignature, GeminiSkipThoughtSignatureValidator)
-	}
-	decision = DecideSignatureCompatibility(SignatureProviderGemini, sig, SignatureBlockKindGeminiModelPart)
-	if decision.Action != SignatureActionReplaceWithGeminiBypass {
-		t.Fatalf("model-part wrapped UUID action = %q, want %q", decision.Action, SignatureActionReplaceWithGeminiBypass)
+	for _, blockKind := range []SignatureBlockKind{SignatureBlockKindGeminiFunctionCall, SignatureBlockKindGeminiModelPart} {
+		decision := DecideSignatureCompatibility(SignatureProviderGemini, sig, blockKind)
+		if !decision.Compatible || decision.Action != SignatureActionPreserve || decision.NormalizedSignature != sig {
+			t.Fatalf("wrapped UUID decision for %s = %+v, want preserved", blockKind, decision)
+		}
 	}
 }
 

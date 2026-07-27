@@ -71,6 +71,8 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		provider:     provider,
 		model:        model,
 		alias:        strings.TrimSpace(alias),
+		clientIP:     clientIP,
+		forwardedFor: forwardedFor,
 		requestedAt:  time.Now(),
 		apiKey:       apiKey,
 		source:       resolveUsageSource(auth, apiKey),
@@ -78,44 +80,12 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reasoning:    usage.ReasoningEffortFromContext(ctx),
 		serviceTier:  usage.ServiceTierFromContext(ctx),
 		generate:     usage.GenerateFromContext(ctx),
-		clientIP:     clientIP,
-		forwardedFor: forwardedFor,
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
 		reporter.authIndex = auth.EnsureIndex()
 	}
 	return reporter
-}
-
-func ExecutorTypeName(executor any) string {
-	if executor == nil {
-		return ""
-	}
-	executorType := reflect.TypeOf(executor)
-	for executorType.Kind() == reflect.Pointer {
-		executorType = executorType.Elem()
-	}
-	return strings.TrimSpace(executorType.Name())
-}
-
-func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
-	r.publishWithOutcome(ctx, detail, false, usage.Failure{})
-}
-
-func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string, detail usage.Detail) {
-	record, ok := r.buildAdditionalModelRecord(ctx, model, detail)
-	if !ok {
-		return
-	}
-	r.publishRecord(ctx, record)
-}
-
-func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format string) {
-	if r == nil {
-		return
-	}
-	r.reasoning = thinking.ExtractTranslatedReasoningEffort(payload, format)
 }
 
 // SetRouteModel records the model name exactly as the client requested it
@@ -139,6 +109,54 @@ func (r *UsageReporter) SetEndpoint(endpoint string) {
 		return
 	}
 	r.endpoint = strings.TrimSpace(endpoint)
+}
+
+// clientInfoFromContext resolves the caller's apparent client IP and the raw
+// X-Forwarded-For header from the gin context embedded in ctx. Both are
+// persisted on usage_events so proxy hops and spoofed-client patterns
+// remain auditable even when gin collapses them into a single ClientIP.
+// Returns empty strings when no gin context is wired in (e.g. direct SDK uses
+// or tests that inject a request-less gin.Context).
+func clientInfoFromContext(ctx context.Context) (clientIP, forwardedFor string) {
+	if ctx == nil {
+		return "", ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil {
+		return "", ""
+	}
+	return strings.TrimSpace(ginCtx.ClientIP()),
+		strings.TrimSpace(ginCtx.GetHeader("X-Forwarded-For"))
+}
+
+func ExecutorTypeName(executor any) string {
+	if executor == nil {
+		return ""
+	}
+	executorType := reflect.TypeOf(executor)
+	for executorType.Kind() == reflect.Pointer {
+		executorType = executorType.Elem()
+	}
+	return strings.TrimSpace(executorType.Name())
+}
+
+func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
+	r.publishWithOutcome(ctx, detail, false, usage.Failure{})
+}
+
+func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string, detail usage.Detail) {
+	record, ok := r.buildAdditionalModelRecord(model, detail)
+	if !ok {
+		return
+	}
+	r.publishRecord(ctx, record)
+}
+
+func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format string) {
+	if r == nil {
+		return
+	}
+	r.reasoning = thinking.ExtractTranslatedReasoningEffort(payload, format)
 }
 
 func (r *UsageReporter) TrackHTTPClient(client *http.Client) *http.Client {
@@ -199,7 +217,7 @@ func (r *UsageReporter) MarkFirstResponseByte() {
 	r.setTTFT(time.Since(start))
 }
 
-func (r *UsageReporter) buildAdditionalModelRecord(ctx context.Context, model string, detail usage.Detail) (usage.Record, bool) {
+func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {
 	if r == nil {
 		return usage.Record{}, false
 	}
@@ -207,11 +225,11 @@ func (r *UsageReporter) buildAdditionalModelRecord(ctx context.Context, model st
 	if model == "" {
 		return usage.Record{}, false
 	}
-	detail = normalizeUsageDetailTotal(detail)
+	detail = normalizeUsageDetailTotal(detail, r.provider, r.executorType)
 	if !hasNonZeroTokenUsage(detail) {
 		return usage.Record{}, false
 	}
-	return r.buildRecordForModel(ctx, model, detail, false, usage.Failure{}), true
+	return r.buildRecordForModel(model, detail, false, usage.Failure{}), true
 }
 
 func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
@@ -231,25 +249,14 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	if r == nil {
 		return
 	}
-	detail = normalizeUsageDetailTotal(detail)
+	detail = normalizeUsageDetailTotal(detail, r.provider, r.executorType)
 	r.once.Do(func() {
-		r.publishRecord(ctx, r.buildRecord(ctx, detail, failed, fail))
+		r.publishRecord(ctx, r.buildRecord(detail, failed, fail))
 	})
 }
 
-func normalizeUsageDetailTotal(detail usage.Detail) usage.Detail {
-	if detail.TotalTokens == 0 {
-		// Cache read/creation tokens are independent of InputTokens for
-		// Anthropic and subtracted-out for OpenAI/Gemini, so the fallback total
-		// must add them on top of input+output+reasoning for the dashboard
-		// breakdown to reconcile (Σ segments == total_tokens).
-		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens +
-			detail.CacheReadTokens + detail.CacheCreationTokens
-		if total > 0 {
-			detail.TotalTokens = total
-		}
-	}
-	return detail
+func normalizeUsageDetailTotal(detail usage.Detail, provider, executorType string) usage.Detail {
+	return usage.EnsureTokenBreakdownForProvider(detail, provider, executorType)
 }
 
 func hasNonZeroTokenUsage(detail usage.Detail) bool {
@@ -259,7 +266,8 @@ func hasNonZeroTokenUsage(detail usage.Detail) bool {
 		detail.CachedTokens != 0 ||
 		detail.CacheReadTokens != 0 ||
 		detail.CacheCreationTokens != 0 ||
-		detail.TotalTokens != 0
+		detail.TotalTokens != 0 ||
+		detail.TokenBreakdown.TotalTokens != 0
 }
 
 // ensurePublished guarantees that a usage record is emitted exactly once.
@@ -271,7 +279,7 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		r.publishRecord(ctx, r.buildRecord(ctx, usage.Detail{}, false, usage.Failure{}))
+		r.publishRecord(ctx, r.buildRecord(usage.Detail{}, false, usage.Failure{}))
 	})
 }
 
@@ -280,23 +288,22 @@ func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) 
 	usage.PublishRecord(ctx, record)
 }
 
-func (r *UsageReporter) buildRecord(ctx context.Context, detail usage.Detail, failed bool, failures ...usage.Failure) usage.Record {
+func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures ...usage.Failure) usage.Record {
 	var fail usage.Failure
 	if len(failures) > 0 {
 		fail = failures[0]
 	}
 	if r == nil {
-		return usage.Record{RequestID: requestIDFromContext(ctx), Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
+		return usage.Record{Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
 	}
-	return r.buildRecordForModel(ctx, r.model, detail, failed, fail)
+	return r.buildRecordForModel(r.model, detail, failed, fail)
 }
 
-func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, detail usage.Detail, failed bool, fail usage.Failure) usage.Record {
+func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, failed bool, fail usage.Failure) usage.Record {
 	if r == nil {
-		return usage.Record{RequestID: requestIDFromContext(ctx), Model: model, Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
+		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
 	}
 	return usage.Record{
-		RequestID:           requestIDFromContext(ctx),
 		Provider:            r.provider,
 		ExecutorType:        r.executorType,
 		Model:               model,
@@ -321,17 +328,6 @@ func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, d
 		Fail:                fail,
 		Detail:              detail,
 	}
-}
-
-// requestIDFromContext returns the per-request correlation identifier from the
-// logging context (the same source used by LogWithRequestID). Persisted on
-// usage_events / usage_errors so failures can be correlated back to log
-// entries.
-func requestIDFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	return internallogging.GetRequestID(ctx)
 }
 
 func failFromErrors(errs ...error) usage.Failure {
@@ -440,26 +436,6 @@ func APIKeyFromContext(ctx context.Context) string {
 		}
 	}
 	return ""
-}
-
-// clientInfoFromContext extracts the client TCP address (via gin.ClientIP, which
-// honors X-Forwarded-For / X-Real-IP at the trusted-proxy boundary) and the raw
-// X-Forwarded-For header from the gin context that the request handler injected
-// under the "gin" key. Both are persisted on usage_events / usage_errors so a
-// failed request can be attributed to a source IP, and multi-hop proxy chains
-// remain auditable even when gin collapses them into a single ClientIP.
-// Returns empty strings when no gin context is wired in (e.g. direct SDK uses
-// or tests that inject a request-less gin.Context).
-func clientInfoFromContext(ctx context.Context) (clientIP, forwardedFor string) {
-	if ctx == nil {
-		return "", ""
-	}
-	ginCtx, ok := ctx.Value("gin").(*gin.Context)
-	if !ok || ginCtx == nil || ginCtx.Request == nil {
-		return "", ""
-	}
-	return strings.TrimSpace(ginCtx.ClientIP()),
-		strings.TrimSpace(ginCtx.GetHeader("X-Forwarded-For"))
 }
 
 func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
@@ -627,11 +603,14 @@ func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
 	if !usageNode.Exists() || !usageNode.IsObject() {
 		return false
 	}
+	return usageNode.Get("total_tokens").Exists() || hasOpenAIStyleUsageBucketFields(usageNode)
+}
+
+func hasOpenAIStyleUsageBucketFields(usageNode gjson.Result) bool {
 	return usageNode.Get("prompt_tokens").Exists() ||
 		usageNode.Get("input_tokens").Exists() ||
 		usageNode.Get("completion_tokens").Exists() ||
 		usageNode.Get("output_tokens").Exists() ||
-		usageNode.Get("total_tokens").Exists() ||
 		usageNode.Get("prompt_tokens_details.cached_tokens").Exists() ||
 		usageNode.Get("input_tokens_details.cached_tokens").Exists() ||
 		usageNode.Get("prompt_tokens_details.cache_write_tokens").Exists() ||
@@ -651,9 +630,8 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if !outputNode.Exists() {
 		outputNode = usageNode.Get("output_tokens")
 	}
-	inputTokens := inputNode.Int()
 	detail := usage.Detail{
-		InputTokens:  inputTokens,
+		InputTokens:  inputNode.Int(),
 		OutputTokens: outputNode.Int(),
 		TotalTokens:  usageNode.Get("total_tokens").Int(),
 	}
@@ -662,19 +640,8 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 		cached = usageNode.Get("input_tokens_details.cached_tokens")
 	}
 	if cached.Exists() {
-		// OpenAI/Gemini-style providers fold cached prompt tokens into
-		// prompt_tokens/input_tokens. To keep the dashboard breakdown
-		// non-overlapping (input excludes cache-read), subtract the cached
-		// portion from input. Clamped to 0 to defend against upstream payloads
-		// where cached_tokens > input_tokens (should never happen for valid
-		// responses, but never trust upstream blindly).
-		cachedTokens := cached.Int()
-		if cachedTokens > inputTokens {
-			cachedTokens = inputTokens
-		}
-		detail.InputTokens = inputTokens - cachedTokens
-		detail.CachedTokens = cachedTokens
-		detail.CacheReadTokens = cachedTokens
+		detail.CachedTokens = cached.Int()
+		detail.CacheReadTokens = cached.Int()
 	}
 	cacheCreation := firstExistingUsageNode(
 		usageNode,
@@ -692,6 +659,42 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	}
 	if reasoning.Exists() {
 		detail.ReasoningTokens = reasoning.Int()
+	}
+	if hasOpenAIStyleUsageBucketFields(usageNode) {
+		if inputNode.Exists() && outputNode.Exists() {
+			detail.TokenBreakdown = usage.NewSubsetTokenBreakdown(
+				detail.InputTokens,
+				detail.CacheReadTokens,
+				detail.CacheCreationTokens,
+				detail.OutputTokens,
+				detail.ReasoningTokens,
+				detail.TotalTokens,
+			)
+		} else {
+			cacheReadTokens := detail.CacheReadTokens
+			cacheCreationTokens := detail.CacheCreationTokens
+			if !inputNode.Exists() {
+				cacheReadTokens = 0
+				cacheCreationTokens = 0
+			}
+			reasoningTokens := detail.ReasoningTokens
+			if !outputNode.Exists() {
+				reasoningTokens = 0
+			}
+			detail.TokenBreakdown = usage.NewPartialSubsetTokenBreakdown(
+				detail.InputTokens,
+				cacheReadTokens,
+				cacheCreationTokens,
+				detail.OutputTokens,
+				reasoningTokens,
+				detail.TotalTokens,
+			)
+		}
+	} else {
+		detail.TokenBreakdown = usage.NewUnclassifiedTokenBreakdown(detail.TotalTokens)
+	}
+	if detail.TotalTokens == 0 {
+		detail.TotalTokens = detail.TokenBreakdown.TotalTokens
 	}
 	return detail
 }
@@ -744,69 +747,97 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		CacheReadTokens:     cacheReadTokens,
 		CacheCreationTokens: cacheCreationTokens,
 	}
-	// Anthropic reports cache_read and cache_creation as separate counters on
-	// top of input_tokens (input_tokens never includes cache tokens). Keep
-	// cached_tokens strictly cache-read so the dashboard's "Cached" segment
-	// never silently becomes cache-write when only creation was billed —
-	// cache-creation already has its own segment via CacheCreationTokens.
+	if detail.CachedTokens == 0 {
+		detail.CachedTokens = detail.CacheCreationTokens
+	}
 	detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.CacheReadTokens + detail.CacheCreationTokens
+	detail.TokenBreakdown = usage.NewIndependentTokenBreakdown(
+		detail.InputTokens,
+		detail.CacheReadTokens,
+		detail.CacheCreationTokens,
+		detail.OutputTokens,
+		detail.ReasoningTokens,
+		detail.TotalTokens,
+	)
 	return detail
 }
 
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 	cachedTokens := node.Get("cachedContentTokenCount").Int()
-	inputTokens := node.Get("promptTokenCount").Int()
-	// Gemini's promptTokenCount already includes cachedContentTokenCount. To
-	// make the dashboard breakdown non-overlapping (input excludes cache-read,
-	// mirroring the OpenAI parser), subtract the cached portion from input.
-	// Clamped to 0 to defend against malformed upstream payloads.
-	if cachedTokens > inputTokens {
-		cachedTokens = inputTokens
-	}
+	toolUseTokens := firstExistingUsageNode(node, "toolUsePromptTokenCount", "tool_use_prompt_token_count").Int()
+	inputTokens, okInput := safeUsageTokenSum(node.Get("promptTokenCount").Int(), toolUseTokens)
 	detail := usage.Detail{
-		InputTokens:     inputTokens - cachedTokens,
+		InputTokens:     inputTokens,
 		OutputTokens:    node.Get("candidatesTokenCount").Int(),
 		ReasoningTokens: node.Get("thoughtsTokenCount").Int(),
 		TotalTokens:     node.Get("totalTokenCount").Int(),
 		CachedTokens:    cachedTokens,
 		CacheReadTokens: cachedTokens,
 	}
-	if detail.TotalTokens == 0 {
-		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+	if !okInput {
+		detail.TokenBreakdown = invalidUsageTokenBreakdown(detail.TotalTokens)
+		return detail
 	}
+	if detail.TotalTokens == 0 {
+		var okTotal bool
+		detail.TotalTokens, okTotal = safeUsageTokenSum(detail.InputTokens, detail.OutputTokens, detail.ReasoningTokens)
+		if !okTotal {
+			detail.TotalTokens = 0
+			detail.TokenBreakdown = invalidUsageTokenBreakdown(0)
+			return detail
+		}
+	}
+	detail.TokenBreakdown = usage.NewSeparateReasoningTokenBreakdown(
+		detail.InputTokens,
+		detail.CacheReadTokens,
+		detail.CacheCreationTokens,
+		detail.OutputTokens,
+		detail.ReasoningTokens,
+		detail.TotalTokens,
+	)
 	return detail
 }
 
 func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 	cacheRead := firstExistingUsageNode(node, "cache_read_tokens", "cacheReadTokens")
-	totalCached := firstExistingUsageNode(node, "cached_tokens", "cachedContentTokenCount", "total_cached_tokens")
+	toolUseTokens := firstExistingUsageNode(node, "tool_use_tokens", "total_tool_use_tokens", "toolUseTokens", "totalToolUseTokens").Int()
+	inputTokens, okInput := safeUsageTokenSum(
+		firstExistingUsageNode(node, "input_tokens", "prompt_tokens", "total_input_tokens").Int(),
+		toolUseTokens,
+	)
 	detail := usage.Detail{
-		InputTokens:         firstExistingUsageNode(node, "input_tokens", "prompt_tokens", "total_input_tokens").Int(),
+		InputTokens:         inputTokens,
 		OutputTokens:        firstExistingUsageNode(node, "output_tokens", "completion_tokens", "total_output_tokens").Int(),
 		ReasoningTokens:     firstExistingUsageNode(node, "reasoning_tokens", "thoughtsTokenCount", "total_thought_tokens").Int(),
 		TotalTokens:         firstExistingUsageNode(node, "total_tokens", "totalTokenCount").Int(),
+		CachedTokens:        firstExistingUsageNode(node, "cached_tokens", "cachedContentTokenCount", "total_cached_tokens").Int(),
+		CacheReadTokens:     cacheRead.Int(),
 		CacheCreationTokens: firstExistingUsageNode(node, "cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens").Int(),
 	}
-	// cached_tokens is conventionally a cache-read counter. When the upstream
-	// payload exposes only an aggregate "cached_tokens"/"total_cached_tokens"
-	// (= cache_read + cache_creation), treat it as cache-read only if no
-	// cache_creation was reported separately — otherwise leave CachedTokens at
-	// 0 to avoid double-counting creation tokens as cache-read.
-	if cacheRead.Exists() {
-		detail.CacheReadTokens = cacheRead.Int()
-		detail.CachedTokens = detail.CacheReadTokens
-	} else if detail.CacheCreationTokens == 0 && totalCached.Exists() {
-		detail.CachedTokens = totalCached.Int()
+	if !okInput {
+		detail.TokenBreakdown = invalidUsageTokenBreakdown(detail.TotalTokens)
+		return detail
+	}
+	if !cacheRead.Exists() && detail.CachedTokens > 0 {
 		detail.CacheReadTokens = detail.CachedTokens
 	}
 	if detail.TotalTokens == 0 {
-		// Σ segments must reconcile with total_tokens, so include the cache
-		// counters — they are independent of InputTokens for Anthropic and
-		// already subtracted for OpenAI/Gemini-style payloads that fold cache
-		// reads into input_tokens.
-		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens +
-			detail.CacheReadTokens + detail.CacheCreationTokens
+		var okTotal bool
+		detail.TotalTokens, okTotal = safeUsageTokenSum(detail.InputTokens, detail.OutputTokens, detail.ReasoningTokens)
+		if !okTotal {
+			detail.TotalTokens = 0
+			detail.TokenBreakdown = invalidUsageTokenBreakdown(0)
+			return detail
+		}
 	}
+	detail.TokenBreakdown = usage.NewSeparateReasoningTokenBreakdown(
+		detail.InputTokens,
+		detail.CacheReadTokens,
+		detail.CacheCreationTokens,
+		detail.OutputTokens,
+		detail.ReasoningTokens,
+		detail.TotalTokens,
+	)
 	return detail
 }
 
@@ -896,6 +927,29 @@ func firstExistingUsageNode(root gjson.Result, paths ...string) gjson.Result {
 		}
 	}
 	return gjson.Result{}
+}
+
+func safeUsageTokenSum(values ...int64) (int64, bool) {
+	var total int64
+	for _, value := range values {
+		if value < 0 || total > int64(^uint64(0)>>1)-value {
+			return 0, false
+		}
+		total += value
+	}
+	return total, true
+}
+
+func invalidUsageTokenBreakdown(total int64) usage.TokenBreakdown {
+	if total < 0 {
+		total = 0
+	}
+	return usage.TokenBreakdown{
+		SchemaVersion:      usage.TokenAccountingSchemaVersion,
+		Quality:            usage.TokenAccountingQualityInconsistent,
+		TotalTokens:        total,
+		UnclassifiedTokens: total,
+	}
 }
 
 func ParseAntigravityUsage(data []byte) usage.Detail {

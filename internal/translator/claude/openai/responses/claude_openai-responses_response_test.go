@@ -2,6 +2,7 @@ package responses
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -163,6 +164,486 @@ func TestConvertClaudeResponseToOpenAIResponses_AggregatesTextBlocksUntilMessage
 	}
 	if got := completed.Get("response.output.0.content.0.annotations.0.type").String(); got != "web_search_result_location" {
 		t.Fatalf("completed annotation type = %q", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_FinalizesMessageBeforeFunctionCall(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Checking the workspace."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_123","name":"exec_command","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"pwd\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
+
+	messageAddedPosition := -1
+	messageDonePosition := -1
+	functionAddedPosition := -1
+	functionDonePosition := -1
+	messageDoneCount := 0
+	functionDoneCount := 0
+	var completed gjson.Result
+	for position, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		itemType := data.Get("item.type").String()
+		switch {
+		case event == "response.output_item.added" && itemType == "message":
+			messageAddedPosition = position
+			if got := data.Get("output_index").Int(); got != 0 {
+				t.Fatalf("message added output_index = %d, want 0", got)
+			}
+		case event == "response.output_item.done" && itemType == "message":
+			messageDonePosition = position
+			messageDoneCount++
+			if got := data.Get("output_index").Int(); got != 0 {
+				t.Fatalf("message done output_index = %d, want 0", got)
+			}
+		case event == "response.output_item.added" && itemType == "function_call":
+			functionAddedPosition = position
+			if got := data.Get("output_index").Int(); got != 1 {
+				t.Fatalf("function added output_index = %d, want 1", got)
+			}
+		case event == "response.output_item.done" && itemType == "function_call":
+			functionDonePosition = position
+			functionDoneCount++
+			if got := data.Get("output_index").Int(); got != 1 {
+				t.Fatalf("function done output_index = %d, want 1", got)
+			}
+		case event == "response.completed":
+			completed = data
+		}
+	}
+
+	if messageAddedPosition < 0 || messageDonePosition < 0 || functionAddedPosition < 0 || functionDonePosition < 0 {
+		t.Fatalf(
+			"missing lifecycle event: message added=%d done=%d, function added=%d done=%d",
+			messageAddedPosition,
+			messageDonePosition,
+			functionAddedPosition,
+			functionDonePosition,
+		)
+	}
+	if messageDonePosition >= functionAddedPosition {
+		t.Fatalf(
+			"message done position = %d, want before function added position %d",
+			messageDonePosition,
+			functionAddedPosition,
+		)
+	}
+	if functionAddedPosition >= functionDonePosition {
+		t.Fatalf("function added position = %d, want before done position %d", functionAddedPosition, functionDonePosition)
+	}
+	if messageDoneCount != 1 {
+		t.Fatalf("message output_item.done count = %d, want 1", messageDoneCount)
+	}
+	if functionDoneCount != 1 {
+		t.Fatalf("function output_item.done count = %d, want 1", functionDoneCount)
+	}
+	if !completed.Exists() {
+		t.Fatal("expected response.completed event")
+	}
+	if got := completed.Get("response.output.#").Int(); got != 2 {
+		t.Fatalf("completed output count = %d, want 2", got)
+	}
+	if got := completed.Get("response.output.0.type").String(); got != "message" {
+		t.Fatalf("completed output[0] type = %q, want message", got)
+	}
+	if got := completed.Get("response.output.0.content.0.text").String(); got != "Checking the workspace." {
+		t.Fatalf("completed message text = %q", got)
+	}
+	if got := completed.Get("response.output.1.type").String(); got != "function_call" {
+		t.Fatalf("completed output[1] type = %q, want function_call", got)
+	}
+	if got := completed.Get("response.output.1.call_id").String(); got != "call_123" {
+		t.Fatalf("completed function call_id = %q, want call_123", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_UsesContiguousIndicesForReasoningTextAndTool(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srv_123","name":"web_search","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"Qwen3\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srv_123","content":[]}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"content_block_start","index":2,"content_block":{"type":"thinking","thinking":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":2,"delta":{"type":"thinking_delta","thinking":"Inspect first."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":2}`),
+		[]byte(`data: {"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"Checking the workspace."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":3}`),
+		[]byte(`data: {"type":"content_block_start","index":4,"content_block":{"type":"tool_use","id":"call_123","name":"exec_command","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":4,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"pwd\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":4}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
+
+	seen := map[string]int{}
+	var completed gjson.Result
+	for _, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		var itemType string
+		var wantIndex int64
+		switch {
+		case event == "response.output_item.added" || event == "response.output_item.done":
+			itemType = data.Get("item.type").String()
+			switch itemType {
+			case "reasoning":
+				wantIndex = 0
+			case "message":
+				wantIndex = 1
+			case "function_call":
+				wantIndex = 2
+			default:
+				continue
+			}
+		case strings.HasPrefix(event, "response.reasoning_"):
+			itemType = "reasoning"
+			wantIndex = 0
+		case strings.HasPrefix(event, "response.output_text.") || strings.HasPrefix(event, "response.content_part."):
+			itemType = "message"
+			wantIndex = 1
+		case strings.HasPrefix(event, "response.function_call_arguments."):
+			itemType = "function_call"
+			wantIndex = 2
+		case event == "response.completed":
+			completed = data
+			continue
+		default:
+			continue
+		}
+
+		if !data.Get("output_index").Exists() {
+			t.Fatalf("%s %s event missing output_index: %s", itemType, event, data.Raw)
+		}
+		if got := data.Get("output_index").Int(); got != wantIndex {
+			t.Fatalf("%s %s output_index = %d, want %d", itemType, event, got, wantIndex)
+		}
+		seen[itemType]++
+	}
+
+	for _, itemType := range []string{"reasoning", "message", "function_call"} {
+		if seen[itemType] == 0 {
+			t.Fatalf("no indexed %s events observed", itemType)
+		}
+	}
+	if got := completed.Get("response.output.#").Int(); got != 3 {
+		t.Fatalf("completed output count = %d, want 3", got)
+	}
+	for index, wantType := range []string{"reasoning", "message", "function_call"} {
+		if got := completed.Get(fmt.Sprintf("response.output.%d.type", index)).String(); got != wantType {
+			t.Fatalf("completed output[%d].type = %q, want %q", index, got, wantType)
+		}
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_HiddenServerToolsDoNotCreateOutputIndexGaps(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Searching. "}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"srv_123","name":"web_search","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"Qwen3\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"content_block_start","index":2,"content_block":{"type":"web_search_tool_result","tool_use_id":"srv_123","content":[]}}`),
+		[]byte(`data: {"type":"content_block_stop","index":2}`),
+		[]byte(`data: {"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"Found it."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":3}`),
+		[]byte(`data: {"type":"content_block_start","index":4,"content_block":{"type":"tool_use","id":"call_123","name":"exec_command","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":4,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"pwd\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":4}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
+
+	messageAddedCount := 0
+	messageDoneCount := 0
+	var outputTextDone gjson.Result
+	var completed gjson.Result
+	for _, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		switch {
+		case event == "response.output_item.added" && data.Get("item.type").String() == "message":
+			messageAddedCount++
+			if got := data.Get("output_index").Int(); got != 0 {
+				t.Fatalf("message added output_index = %d, want 0", got)
+			}
+		case event == "response.output_item.done" && data.Get("item.type").String() == "message":
+			messageDoneCount++
+			if got := data.Get("output_index").Int(); got != 0 {
+				t.Fatalf("message done output_index = %d, want 0", got)
+			}
+		case strings.HasPrefix(event, "response.output_text.") || strings.HasPrefix(event, "response.content_part."):
+			if got := data.Get("output_index").Int(); got != 0 {
+				t.Fatalf("%s output_index = %d, want 0", event, got)
+			}
+			if event == "response.output_text.done" {
+				outputTextDone = data
+			}
+		case event == "response.output_item.added" && data.Get("item.type").String() == "function_call",
+			event == "response.output_item.done" && data.Get("item.type").String() == "function_call",
+			strings.HasPrefix(event, "response.function_call_arguments."):
+			if got := data.Get("output_index").Int(); got != 1 {
+				t.Fatalf("%s output_index = %d, want 1", event, got)
+			}
+		case event == "response.completed":
+			completed = data
+		}
+	}
+
+	if messageAddedCount != 1 || messageDoneCount != 1 {
+		t.Fatalf("message lifecycle counts: added=%d done=%d, want 1 each", messageAddedCount, messageDoneCount)
+	}
+	if got := outputTextDone.Get("text").String(); got != "Searching. Found it." {
+		t.Fatalf("aggregated message text = %q, want %q", got, "Searching. Found it.")
+	}
+	if got := completed.Get("response.output.#").Int(); got != 2 {
+		t.Fatalf("completed output count = %d, want 2", got)
+	}
+	if got := completed.Get("response.output.0.type").String(); got != "message" {
+		t.Fatalf("completed output[0].type = %q, want message", got)
+	}
+	if got := completed.Get("response.output.1.type").String(); got != "function_call" {
+		t.Fatalf("completed output[1].type = %q, want function_call", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_StartsNewMessageAfterFunctionCall(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Before tool."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_123","name":"exec_command","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"pwd\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"After tool."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":2}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
+
+	var lifecycle []string
+	var messageIDs []string
+	var completed gjson.Result
+	for _, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		if event == "response.output_item.added" || event == "response.output_item.done" {
+			itemType := data.Get("item.type").String()
+			lifecycle = append(lifecycle, fmt.Sprintf("%s:%d:%s", event, data.Get("output_index").Int(), itemType))
+			if event == "response.output_item.added" && itemType == "message" {
+				messageIDs = append(messageIDs, data.Get("item.id").String())
+			}
+		}
+		if event == "response.completed" {
+			completed = data
+		}
+	}
+
+	wantLifecycle := strings.Join([]string{
+		"response.output_item.added:0:message",
+		"response.output_item.done:0:message",
+		"response.output_item.added:1:function_call",
+		"response.output_item.done:1:function_call",
+		"response.output_item.added:2:message",
+		"response.output_item.done:2:message",
+	}, ",")
+	if got := strings.Join(lifecycle, ","); got != wantLifecycle {
+		t.Fatalf("item lifecycle = %q, want %q", got, wantLifecycle)
+	}
+	if len(messageIDs) != 2 || messageIDs[0] == messageIDs[1] {
+		t.Fatalf("message IDs = %v, want two unique IDs", messageIDs)
+	}
+	if got := completed.Get("response.output.#").Int(); got != 3 {
+		t.Fatalf("completed output count = %d, want 3", got)
+	}
+	for index, wantType := range []string{"message", "function_call", "message"} {
+		if got := completed.Get(fmt.Sprintf("response.output.%d.type", index)).String(); got != wantType {
+			t.Fatalf("completed output[%d].type = %q, want %q", index, got, wantType)
+		}
+	}
+	if got := completed.Get("response.output.0.content.0.text").String(); got != "Before tool." {
+		t.Fatalf("first completed message text = %q", got)
+	}
+	if got := completed.Get("response.output.2.content.0.text").String(); got != "After tool." {
+		t.Fatalf("second completed message text = %q", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_FinalizesMessageBeforeReasoning(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Visible first."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"Reason later."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
+
+	var lifecycle []string
+	var completed gjson.Result
+	for _, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		if event == "response.output_item.added" || event == "response.output_item.done" {
+			lifecycle = append(lifecycle, fmt.Sprintf("%s:%d:%s", event, data.Get("output_index").Int(), data.Get("item.type").String()))
+		}
+		if event == "response.completed" {
+			completed = data
+		}
+	}
+
+	wantLifecycle := strings.Join([]string{
+		"response.output_item.added:0:message",
+		"response.output_item.done:0:message",
+		"response.output_item.added:1:reasoning",
+		"response.output_item.done:1:reasoning",
+	}, ",")
+	if got := strings.Join(lifecycle, ","); got != wantLifecycle {
+		t.Fatalf("item lifecycle = %q, want %q", got, wantLifecycle)
+	}
+	for index, wantType := range []string{"message", "reasoning"} {
+		if got := completed.Get(fmt.Sprintf("response.output.%d.type", index)).String(); got != wantType {
+			t.Fatalf("completed output[%d].type = %q, want %q", index, got, wantType)
+		}
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_PreservesMultipleReasoningItems(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"First reason."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"Second reason."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"Visible response."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":2}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
+
+	reasoningDoneCount := 0
+	var completed gjson.Result
+	for _, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		if event == "response.output_item.done" && data.Get("item.type").String() == "reasoning" {
+			if got := data.Get("output_index").Int(); got != int64(reasoningDoneCount) {
+				t.Fatalf("reasoning done output_index = %d, want %d", got, reasoningDoneCount)
+			}
+			reasoningDoneCount++
+		}
+		if event == "response.completed" {
+			completed = data
+		}
+	}
+
+	if reasoningDoneCount != 2 {
+		t.Fatalf("reasoning done count = %d, want 2", reasoningDoneCount)
+	}
+	if got := completed.Get("response.output.#").Int(); got != 3 {
+		t.Fatalf("completed output count = %d, want 3", got)
+	}
+	for index, wantType := range []string{"reasoning", "reasoning", "message"} {
+		if got := completed.Get(fmt.Sprintf("response.output.%d.type", index)).String(); got != wantType {
+			t.Fatalf("completed output[%d].type = %q, want %q", index, got, wantType)
+		}
+	}
+	for index, wantText := range []string{"First reason.", "Second reason."} {
+		if got := completed.Get(fmt.Sprintf("response.output.%d.summary.0.text", index)).String(); got != wantText {
+			t.Fatalf("completed reasoning[%d] text = %q, want %q", index, got, wantText)
+		}
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_NormalizesEmptyFunctionArguments(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_123","name":"exec_command","input":{}}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
+
+	var functionDone gjson.Result
+	var completed gjson.Result
+	for _, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		if event == "response.output_item.done" && data.Get("item.type").String() == "function_call" {
+			functionDone = data
+		}
+		if event == "response.completed" {
+			completed = data
+		}
+	}
+
+	if got := functionDone.Get("item.arguments").String(); got != "{}" {
+		t.Fatalf("function done arguments = %q, want {}", got)
+	}
+	if got := completed.Get("response.output.0.arguments").String(); got != "{}" {
+		t.Fatalf("completed function arguments = %q, want {}", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_IncludesEmptyReasoningInCompletedOutput(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Visible response."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
+
+	var reasoningDone gjson.Result
+	var completed gjson.Result
+	for _, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		if event == "response.output_item.done" && data.Get("item.type").String() == "reasoning" {
+			reasoningDone = data
+		}
+		if event == "response.completed" {
+			completed = data
+		}
+	}
+
+	if got := reasoningDone.Get("item.summary.#").Int(); got != 1 {
+		t.Fatalf("reasoning done summary count = %d, want 1", got)
+	}
+	if got := completed.Get("response.output.#").Int(); got != 2 {
+		t.Fatalf("completed output count = %d, want 2", got)
+	}
+	if got := completed.Get("response.output.0.type").String(); got != "reasoning" {
+		t.Fatalf("completed output[0].type = %q, want reasoning", got)
+	}
+	if got := completed.Get("response.output.0.summary.#").Int(); got != 1 {
+		t.Fatalf("completed reasoning summary count = %d, want 1", got)
+	}
+	if got := completed.Get("response.output.1.type").String(); got != "message" {
+		t.Fatalf("completed output[1].type = %q, want message", got)
 	}
 }
 

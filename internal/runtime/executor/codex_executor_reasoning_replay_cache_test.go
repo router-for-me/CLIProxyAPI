@@ -1090,3 +1090,25 @@ func TestCodexExecutorReasoningReplayCacheMatchesShortenedClaudeToolResultCallID
 		t.Fatalf("input.3.call_id = %q, want shortened call_id %q; body=%s", got, shortCallID, string(secondBody))
 	}
 }
+
+func TestCodexReplayPrefixFingerprintsMatchesDirectComputation(t *testing.T) {
+	items := []gjson.Result{
+		gjson.Parse(`{"type":"message","role":"user","content":"a"}`),
+		gjson.Parse(`{"type":"reasoning","encrypted_content":"abc"}`),
+		gjson.Parse(`{"type":"function_call","call_id":"call_1"}`),
+		gjson.Parse(`{"type":"function_call_output","call_id":"call_1","output":"ok"}`),
+	}
+	cache := newCodexReplayPrefixFingerprints(items)
+	// Out-of-order and repeated probes mirror the downward anchor scan.
+	for _, end := range []int{4, 2, 0, 3, 1, 4, 2} {
+		want := codexReplayInputPrefixFingerprint(items, end)
+		if got := cache.at(end); got != want {
+			t.Fatalf("cache.at(%d) = %q, want %q", end, got, want)
+		}
+	}
+	for _, end := range []int{-1, 5} {
+		if got := cache.at(end); got != "" {
+			t.Fatalf("cache.at(%d) = %q, want empty for out-of-range", end, got)
+		}
+	}
+}

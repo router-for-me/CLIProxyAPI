@@ -5,8 +5,10 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
@@ -87,8 +89,27 @@ func TestForceHomeRuntimeConfigEnablesUsageStatistics(t *testing.T) {
 	}
 }
 
-func TestApplyHomeOverlayForcesUsageStatisticsEnabled(t *testing.T) {
-	baseCfg := &config.Config{}
+func TestLifetimeRegistryObservesBarrierFromAppliedHomeConfig(t *testing.T) {
+	registry := executionregistry.New()
+	manager := coreauth.NewManager(nil, nil, nil)
+	cfg := internalconfig.DefaultCredentialInFlightConfig()
+	cfg.SnapshotInterval = "30ms"
+
+	if errApply := applyHomeInFlightPublisherConfig(manager, cfg); errApply != nil {
+		t.Fatal(errApply)
+	}
+	applyHomeObservationBarrier(registry, 14)
+
+	if freeze := registry.FreezeInFlight(time.Now().UTC()); freeze.BarrierRevision != 14 {
+		t.Fatalf("barrier revision = %d, want 14", freeze.BarrierRevision)
+	}
+	if got := manager.HomeInFlightPublisherConfig(); got.SnapshotInterval != 30*time.Millisecond {
+		t.Fatalf("publisher interval = %v, want 30ms", got.SnapshotInterval)
+	}
+}
+
+func TestApplyHomeOverlayDoesNotApplyWithoutReadyClient(t *testing.T) {
+	baseCfg := &config.Config{UsageStatisticsEnabled: false, SaveCooldownStatus: true}
 	baseCfg.Home.Enabled = true
 	service := &Service{cfg: baseCfg}
 
@@ -97,13 +118,13 @@ func TestApplyHomeOverlayForcesUsageStatisticsEnabled(t *testing.T) {
 		SaveCooldownStatus:     true,
 	})
 
-	if service.cfg == nil || !service.cfg.UsageStatisticsEnabled {
-		t.Fatal("expected home overlay to force usage statistics enabled")
+	if service.cfg == nil || service.cfg.UsageStatisticsEnabled {
+		t.Fatal("unready home overlay changed usage statistics")
 	}
 	if !service.cfg.Home.Enabled {
-		t.Fatal("expected home overlay to preserve local home settings")
+		t.Fatal("unready home overlay changed local home settings")
 	}
-	if service.cfg.SaveCooldownStatus {
-		t.Fatal("expected home overlay to force cooldown status persistence disabled")
+	if !service.cfg.SaveCooldownStatus {
+		t.Fatal("unready home overlay changed cooldown status persistence")
 	}
 }

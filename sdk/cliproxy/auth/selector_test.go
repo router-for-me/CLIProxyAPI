@@ -706,6 +706,45 @@ func TestExtractSessionID_IdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestExtractSessionID_DerivedSessionAndExplicitPriority(t *testing.T) {
+	t.Parallel()
+
+	metadata := map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:derived-root"}
+	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	if got := ExtractSessionID(nil, payload, metadata); got != "derived:ctx:v1:derived-root" {
+		t.Fatalf("ExtractSessionID() = %q, want derived identity", got)
+	}
+
+	executionMetadata := map[string]any{
+		cliproxyexecutor.ExecutionSessionMetadataKey: "execution-session",
+		cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:derived-root",
+	}
+	if got := ExtractSessionID(nil, payload, executionMetadata); got != "execution:execution-session" {
+		t.Fatalf("ExtractSessionID() = %q, want explicit execution session", got)
+	}
+
+	explicitPayload := []byte(`{"session_id":"explicit-session","prompt_cache_key":"explicit-cache","messages":[{"role":"user","content":"hello"}]}`)
+	if got := ExtractSessionID(nil, explicitPayload, metadata); got != "session:explicit-session" {
+		t.Fatalf("ExtractSessionID() = %q, want explicit body session", got)
+	}
+
+	userPayload := []byte(`{"metadata":{"user_id":"explicit-user"},"conversation_id":"explicit-conversation","messages":[{"role":"user","content":"hello"}]}`)
+	if got := ExtractSessionID(nil, userPayload, metadata); got != "user:explicit-user" {
+		t.Fatalf("ExtractSessionID() = %q, want explicit metadata.user_id", got)
+	}
+
+	lowercaseHeaders := http.Header{"x-session-id": []string{" lowercase-session "}}
+	if got := ExtractSessionID(lowercaseHeaders, payload, metadata); got != "header:lowercase-session" {
+		t.Fatalf("ExtractSessionID() = %q, want case-insensitive trimmed header session", got)
+	}
+
+	headers := make(http.Header)
+	headers.Set("X-Session-ID", "header-session")
+	if got := ExtractSessionID(headers, explicitPayload, metadata); got != "header:header-session" {
+		t.Fatalf("ExtractSessionID() = %q, want explicit header session", got)
+	}
+}
+
 func TestExtractSessionID_MessageHashFallback(t *testing.T) {
 	t.Parallel()
 

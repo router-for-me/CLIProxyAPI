@@ -336,7 +336,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 	// Handle usage information separately (this comes in a later chunk)
 	// Only process if usage has actual values (not null)
-	if param.FinishReason != "" {
+	if param.FinishReason != "" && !param.MessageDeltaSent {
 		usage := root.Get("usage")
 		var inputTokens, outputTokens, cachedTokens int64
 		if usage.Exists() && usage.Type != gjson.Null {

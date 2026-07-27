@@ -114,6 +114,31 @@ func TestKimiExecutorCountTokensUsesCanonicalUpstreamModel(t *testing.T) {
 	}
 }
 
+func TestKimiExecutorCountTokensInvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     http.Header{"Content-Encoding": []string{"gzip"}},
+			Body:       io.NopCloser(strings.NewReader("not-a-valid-gzip-stream")),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-token"},
+	}
+	payload := []byte(`{"model":"kimi-k3","messages":[{"role":"user","content":"hello"}]}`)
+	_, err := executor.CountTokens(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	assertStatusErr(t, err, http.StatusBadRequest)
+	if !strings.Contains(err.Error(), "failed to decode error response body") {
+		t.Fatalf("CountTokens() error = %q, want decode failure", err)
+	}
+}
+
 func TestKimiExecutorClaudeStreamForwardsAnthropicBetaAndLogsUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

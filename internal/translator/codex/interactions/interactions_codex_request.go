@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -19,7 +20,9 @@ func ConvertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, st
 	}
 	out = copyInteractionsSystemToCodex(out, root)
 	out = copyInteractionsGenerationConfigToCodex(out, root)
-	out = appendInteractionsInputToCodex(out, root.Get("input"))
+	inputItems := translatorcommon.NewRawArrayItems(root.Get("input.#").Int())
+	appendInteractionsInputToCodex(&inputItems, root.Get("input"))
+	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
 	out = copyInteractionsToolsToCodex(out, root)
 	out = copyInteractionsCodexTopLevel(out, root)
 	return out
@@ -184,99 +187,97 @@ func interactionsCodexReasoningSummary(cfg gjson.Result) string {
 	return ""
 }
 
-func appendInteractionsInputToCodex(out []byte, input gjson.Result) []byte {
+func appendInteractionsInputToCodex(items *[][]byte, input gjson.Result) {
 	if !input.Exists() {
-		return out
+		return
 	}
 	if input.Type == gjson.String {
-		return appendInteractionsTextToCodex(out, "user", input.String())
+		appendInteractionsTextToCodex(items, "user", input.String())
+		return
 	}
 	if input.IsArray() {
 		input.ForEach(func(_, step gjson.Result) bool {
-			out = appendInteractionsStepToCodex(out, step, "user")
+			appendInteractionsStepToCodex(items, step, "user")
 			return true
 		})
-		return out
+		return
 	}
 	if steps := input.Get("steps"); steps.Exists() && steps.IsArray() {
 		defaultRole := interactionsCodexDefaultRole(input.Get("role").String(), "user")
 		steps.ForEach(func(_, step gjson.Result) bool {
-			out = appendInteractionsStepToCodex(out, step, defaultRole)
+			appendInteractionsStepToCodex(items, step, defaultRole)
 			return true
 		})
-		return out
+		return
 	}
-	return appendInteractionsStepToCodex(out, input, "user")
+	appendInteractionsStepToCodex(items, input, "user")
 }
 
-func appendInteractionsStepToCodex(out []byte, step gjson.Result, defaultRole string) []byte {
+func appendInteractionsStepToCodex(items *[][]byte, step gjson.Result, defaultRole string) {
 	if step.Type == gjson.String {
-		return appendInteractionsTextToCodex(out, defaultRole, step.String())
+		appendInteractionsTextToCodex(items, defaultRole, step.String())
+		return
 	}
 	if steps := step.Get("steps"); steps.Exists() && steps.IsArray() {
 		role := interactionsCodexDefaultRole(step.Get("role").String(), defaultRole)
 		steps.ForEach(func(_, nested gjson.Result) bool {
-			out = appendInteractionsStepToCodex(out, nested, role)
+			appendInteractionsStepToCodex(items, nested, role)
 			return true
 		})
-		return out
+		return
 	}
 	stepType := strings.ToLower(strings.TrimSpace(step.Get("type").String()))
 	switch stepType {
 	case "function_call":
-		return appendInteractionsFunctionCallToCodex(out, step)
+		appendInteractionsFunctionCallToCodex(items, step)
 	case "function_result", "function_call_output":
-		return appendInteractionsFunctionResultToCodex(out, step)
+		appendInteractionsFunctionResultToCodex(items, step)
 	case "model_output", "assistant":
-		return appendInteractionsContentToCodexItem(out, step.Get("content"), "assistant")
+		appendInteractionsContentToCodexItem(items, step.Get("content"), "assistant")
 	case "thought", "reasoning":
-		return appendInteractionsThoughtToCodex(out, step)
+		appendInteractionsThoughtToCodex(items, step)
 	case "user_input", "message", "":
 		role := interactionsCodexDefaultRole(step.Get("role").String(), defaultRole)
 		if content := step.Get("content"); content.Exists() {
-			return appendInteractionsContentToCodexItem(out, content, role)
-		}
-		if text := step.Get("text"); text.Exists() {
-			return appendInteractionsTextToCodex(out, role, text.String())
+			appendInteractionsContentToCodexItem(items, content, role)
+		} else if text := step.Get("text"); text.Exists() {
+			appendInteractionsTextToCodex(items, role, text.String())
 		}
 	default:
 		role := interactionsCodexDefaultRole(step.Get("role").String(), defaultRole)
 		if content := step.Get("content"); content.Exists() {
-			return appendInteractionsContentToCodexItem(out, content, role)
-		}
-		if text := step.Get("text"); text.Exists() {
-			return appendInteractionsTextToCodex(out, role, text.String())
+			appendInteractionsContentToCodexItem(items, content, role)
+		} else if text := step.Get("text"); text.Exists() {
+			appendInteractionsTextToCodex(items, role, text.String())
 		}
 	}
-	return out
 }
 
-func appendInteractionsContentToCodexItem(out []byte, content gjson.Result, role string) []byte {
+func appendInteractionsContentToCodexItem(items *[][]byte, content gjson.Result, role string) {
 	if !content.Exists() {
-		return out
+		return
 	}
 	if content.Type == gjson.String {
-		return appendInteractionsTextToCodex(out, role, content.String())
+		appendInteractionsTextToCodex(items, role, content.String())
+		return
 	}
 	if content.IsArray() {
 		content.ForEach(func(_, part gjson.Result) bool {
-			item := interactionsCodexMessagePart(part, role)
-			if len(item) > 0 {
-				out = appendInteractionsMessagePartToCodex(out, role, item)
+			if item := interactionsCodexMessagePart(part, role); len(item) > 0 {
+				appendInteractionsMessagePartToCodex(items, role, item)
 			}
 			return true
 		})
-		return out
+		return
 	}
 	if content.IsObject() {
 		if item := interactionsCodexMessagePart(content, role); len(item) > 0 {
-			return appendInteractionsMessagePartToCodex(out, role, item)
+			appendInteractionsMessagePartToCodex(items, role, item)
 		}
 	}
-	return out
 }
 
-func appendInteractionsFunctionCallToCodex(out []byte, step gjson.Result) []byte {
+func appendInteractionsFunctionCallToCodex(items *[][]byte, step gjson.Result) {
 	item := []byte(`{"type":"function_call"}`)
 	if name := step.Get("name"); name.Exists() {
 		item, _ = sjson.SetBytes(item, "name", shortenCodexToolNameIfNeeded(name.String()))
@@ -289,11 +290,10 @@ func appendInteractionsFunctionCallToCodex(out []byte, step gjson.Result) []byte
 	} else if args := step.Get("args"); args.Exists() {
 		item, _ = sjson.SetBytes(item, "arguments", interactionsCodexJSONString(args))
 	}
-	out, _ = sjson.SetRawBytes(out, "input.-1", item)
-	return out
+	*items = append(*items, item)
 }
 
-func appendInteractionsFunctionResultToCodex(out []byte, step gjson.Result) []byte {
+func appendInteractionsFunctionResultToCodex(items *[][]byte, step gjson.Result) {
 	item := []byte(`{"type":"function_call_output"}`)
 	if callID := interactionsCodexCallID(step); callID != "" {
 		item, _ = sjson.SetBytes(item, "call_id", callID)
@@ -303,8 +303,7 @@ func appendInteractionsFunctionResultToCodex(out []byte, step gjson.Result) []by
 	} else if output := step.Get("output"); output.Exists() {
 		item, _ = sjson.SetBytes(item, "output", interactionsCodexOutputString(output))
 	}
-	out, _ = sjson.SetRawBytes(out, "input.-1", item)
-	return out
+	*items = append(*items, item)
 }
 
 func copyInteractionsToolsToCodex(out []byte, root gjson.Result) []byte {
@@ -349,20 +348,35 @@ func copyInteractionsToolsToCodex(out []byte, root gjson.Result) []byte {
 
 func copyInteractionsCodexTopLevel(out []byte, root gjson.Result) []byte {
 	if serviceTier := normalizeInteractionsCodexServiceTier(root.Get("service_tier")); serviceTier != "" {
-		out, _ = sjson.SetBytes(out, "service_tier", serviceTier)
+		current := gjson.GetBytes(out, "service_tier")
+		if current.Type != gjson.String || current.String() != serviceTier {
+			out, _ = sjson.SetBytes(out, "service_tier", serviceTier)
+		}
 	}
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
+		out = setInteractionsCodexRawIfDifferent(out, "tool_choice", toolChoice)
 	}
 	for _, path := range []string{"parallel_tool_calls", "store", "metadata", "include", "truncation"} {
 		if value := root.Get(path); value.Exists() {
-			out, _ = sjson.SetRawBytes(out, path, []byte(value.Raw))
+			out = setInteractionsCodexRawIfDifferent(out, path, value)
 		}
 	}
 	return out
 }
 
-func appendInteractionsThoughtToCodex(out []byte, step gjson.Result) []byte {
+func setInteractionsCodexRawIfDifferent(out []byte, path string, value gjson.Result) []byte {
+	current := gjson.GetBytes(out, path)
+	if current.Exists() && current.Raw == value.Raw {
+		return out
+	}
+	updated, errSet := sjson.SetRawBytes(out, path, []byte(value.Raw))
+	if errSet != nil {
+		return out
+	}
+	return updated
+}
+
+func appendInteractionsThoughtToCodex(items *[][]byte, step gjson.Result) {
 	text := interactionsCodexContentText(step.Get("content"))
 	if text == "" {
 		text = step.Get("text").String()
@@ -374,11 +388,10 @@ func appendInteractionsThoughtToCodex(out []byte, step gjson.Result) []byte {
 	if id := step.Get("id"); id.Exists() {
 		item, _ = sjson.SetBytes(item, "id", id.String())
 	}
-	out, _ = sjson.SetRawBytes(out, "input.-1", item)
-	return out
+	*items = append(*items, item)
 }
 
-func appendInteractionsTextToCodex(out []byte, role, text string) []byte {
+func appendInteractionsTextToCodex(items *[][]byte, role, text string) {
 	part := []byte(`{"type":"","text":""}`)
 	if role == "assistant" {
 		part, _ = sjson.SetBytes(part, "type", "output_text")
@@ -386,15 +399,14 @@ func appendInteractionsTextToCodex(out []byte, role, text string) []byte {
 		part, _ = sjson.SetBytes(part, "type", "input_text")
 	}
 	part, _ = sjson.SetBytes(part, "text", text)
-	return appendInteractionsMessagePartToCodex(out, role, part)
+	appendInteractionsMessagePartToCodex(items, role, part)
 }
 
-func appendInteractionsMessagePartToCodex(out []byte, role string, part []byte) []byte {
+func appendInteractionsMessagePartToCodex(items *[][]byte, role string, part []byte) {
 	message := []byte(`{"type":"message","role":"","content":[]}`)
 	message, _ = sjson.SetBytes(message, "role", role)
-	message, _ = sjson.SetRawBytes(message, "content.-1", part)
-	out, _ = sjson.SetRawBytes(out, "input.-1", message)
-	return out
+	message, _ = sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray([][]byte{part}))
+	*items = append(*items, message)
 }
 
 func interactionsCodexMessagePart(part gjson.Result, role string) []byte {
@@ -568,8 +580,12 @@ func codexToolFromDeclaration(declaration gjson.Result) map[string]any {
 
 func cleanedCodexToolParameters(params gjson.Result) json.RawMessage {
 	cleaned := []byte(params.Raw)
-	cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
-	cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
+	if params.Get("$schema").Exists() {
+		cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
+	}
+	if params.Get("additionalProperties").Type != gjson.False {
+		cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
+	}
 	return json.RawMessage(cleaned)
 }
 

@@ -55,6 +55,56 @@ func TestConvertOpenAIRequestToAntigravitySkipsEmptyTextPartsWithoutNulls(t *tes
 	}
 }
 
+func TestConvertOpenAIRequestToAntigravity_ClaudeModelSanitizesUnsignedReasoningContent(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-sonnet-4-6",
+		"messages": [
+			{"role": "user", "content": "hi"},
+			{"role": "assistant", "content": "visible text", "reasoning_content": "unsigned reasoning"},
+			{"role": "user", "content": "say ok"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToAntigravity("claude-sonnet-4-6", []byte(inputJSON), false)
+	contents := gjson.GetBytes(result, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents length = %d, want 3. Output: %s", len(contents), result)
+	}
+	parts := contents[1].Get("parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("model parts length = %d, want 1 (thinking part dropped). Output: %s", len(parts), result)
+	}
+	if got := parts[0].Get("text").String(); got != "visible text" {
+		t.Fatalf("parts[0].text = %q, want visible text. Output: %s", got, result)
+	}
+	if parts[0].Get("thought").Exists() {
+		t.Fatalf("parts[0] should not be thought part. Output: %s", result)
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravity_ClaudeModelDropsEmptyAssistantTurnAfterSanitizingReasoningContent(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-sonnet-4-6",
+		"messages": [
+			{"role": "user", "content": "hi"},
+			{"role": "assistant", "content": "", "reasoning_content": "unsigned reasoning"},
+			{"role": "user", "content": "say ok"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToAntigravity("claude-sonnet-4-6", []byte(inputJSON), false)
+	contents := gjson.GetBytes(result, "request.contents").Array()
+	if len(contents) != 2 {
+		t.Fatalf("contents length = %d, want 2 (empty model turn dropped). Output: %s", len(contents), result)
+	}
+	if got := contents[0].Get("role").String(); got != "user" {
+		t.Fatalf("contents[0].role = %q, want user. Output: %s", got, result)
+	}
+	if got := contents[1].Get("role").String(); got != "user" {
+		t.Fatalf("contents[1].role = %q, want user. Output: %s", got, result)
+	}
+}
+
 func TestConvertOpenAIRequestToAntigravityPreservesReasoningContent(t *testing.T) {
 	inputJSON := `{
 		"model": "gemini-3-flash",

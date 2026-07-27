@@ -13,6 +13,9 @@ import (
 )
 
 type serviceTestPluginExecutor struct{}
+type serviceTestSDKExecutor struct{ serviceTestPluginExecutor }
+
+func (serviceTestSDKExecutor) Identifier() string { return "sdk-provider" }
 
 func (serviceTestPluginExecutor) Identifier() string {
 	return "plugin-provider"
@@ -98,6 +101,32 @@ func TestRegisterAvailableExecutors(t *testing.T) {
 	resolved, _ := service.coreManager.Executor("plugin-provider")
 	if _, isPlugin := resolved.(serviceTestPluginExecutor); !isPlugin {
 		t.Fatalf("executor type = %T, want serviceTestPluginExecutor", resolved)
+	}
+}
+
+func TestSyncPluginModelRuntimePreservesSDKExecutorUnlessForced(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	custom := serviceTestSDKExecutor{}
+	manager.RegisterExecutor(custom)
+	auth := &coreauth.Auth{ID: "private-auth", Provider: custom.Identifier()}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{cfg: &config.Config{}, coreManager: manager, pluginHost: pluginhost.New()}
+
+	service.syncPluginModelRuntime(context.Background())
+	got, ok := manager.Executor(custom.Identifier())
+	if !ok || got != custom {
+		t.Fatalf("plugin model sync replaced SDK executor with %T", got)
+	}
+
+	service.registerExecutorForAuth(auth, true)
+	got, ok = manager.Executor(custom.Identifier())
+	if !ok {
+		t.Fatal("forced registration removed executor")
+	}
+	if _, replaced := got.(*runtimeexecutor.OpenAICompatExecutor); !replaced {
+		t.Fatalf("forced registration kept %T, want *executor.OpenAICompatExecutor", got)
 	}
 }
 

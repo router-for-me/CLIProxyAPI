@@ -25,10 +25,7 @@ type homeAppLogPayload struct {
 	Level     string `json:"level,omitempty"`
 	Timestamp string `json:"timestamp,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
-}
-
-var currentHomeAppLogClient = func() homeAppLogClient {
-	return home.Current()
+	client    homeAppLogClient
 }
 
 // HomeAppLogForwarder forwards application logs to Home after the control connection is healthy.
@@ -39,9 +36,69 @@ type HomeAppLogForwarder struct {
 	stopOnce  sync.Once
 	wg        sync.WaitGroup
 	enabled   atomic.Bool
+	stopped   atomic.Bool
+	ownerMu   sync.Mutex
+	owner     homeAppLogClient
 }
 
-// StartHomeAppLogForwarder installs a logrus hook that forwards future application logs to Home.
+type homeAppLogMux struct {
+	mu      sync.Mutex
+	targets map[*HomeAppLogForwarder]struct{}
+}
+
+func (h *homeAppLogMux) Levels() []log.Level {
+	return log.AllLevels
+}
+
+func (h *homeAppLogMux) Fire(entry *log.Entry) error {
+	h.mu.Lock()
+	targets := make([]*HomeAppLogForwarder, 0, len(h.targets))
+	for target := range h.targets {
+		targets = append(targets, target)
+	}
+	h.mu.Unlock()
+	for _, target := range targets {
+		if errFire := target.Fire(entry); errFire != nil {
+			return errFire
+		}
+	}
+	return nil
+}
+
+func (h *homeAppLogMux) register(target *HomeAppLogForwarder) {
+	if target == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.targets == nil {
+		h.targets = make(map[*HomeAppLogForwarder]struct{})
+	}
+	h.targets[target] = struct{}{}
+}
+
+func (h *homeAppLogMux) unregister(target *HomeAppLogForwarder) {
+	if target == nil {
+		return
+	}
+	h.mu.Lock()
+	delete(h.targets, target)
+	h.mu.Unlock()
+}
+
+var (
+	homeAppLogMuxHook        = &homeAppLogMux{}
+	homeAppLogMuxInstallOnce sync.Once
+)
+
+func registerHomeAppLogForwarder(forwarder *HomeAppLogForwarder) {
+	homeAppLogMuxInstallOnce.Do(func() {
+		log.AddHook(homeAppLogMuxHook)
+	})
+	homeAppLogMuxHook.register(forwarder)
+}
+
+// StartHomeAppLogForwarder registers a Home log forwarding target with the process-wide logrus hook.
 func StartHomeAppLogForwarder(queueSize int) *HomeAppLogForwarder {
 	if queueSize <= 0 {
 		queueSize = defaultHomeAppLogQueueSize
@@ -54,7 +111,7 @@ func StartHomeAppLogForwarder(queueSize int) *HomeAppLogForwarder {
 	forwarder.enabled.Store(true)
 	forwarder.wg.Add(1)
 	go forwarder.run()
-	log.AddHook(forwarder)
+	registerHomeAppLogForwarder(forwarder)
 	return forwarder
 }
 
@@ -64,10 +121,55 @@ func (f *HomeAppLogForwarder) Stop() {
 		return
 	}
 	f.stopOnce.Do(func() {
+		f.stopped.Store(true)
+		f.ownerMu.Lock()
+		f.owner = nil
+		f.ownerMu.Unlock()
 		f.enabled.Store(false)
+		homeAppLogMuxHook.unregister(f)
 		close(f.stop)
 		f.wg.Wait()
 	})
+}
+
+// Bind activates forwarding to client.
+func (f *HomeAppLogForwarder) Bind(client *home.Client) {
+	f.bind(client)
+}
+
+func (f *HomeAppLogForwarder) bind(client homeAppLogClient) {
+	if f == nil || client == nil || f.stopped.Load() {
+		return
+	}
+	f.ownerMu.Lock()
+	defer f.ownerMu.Unlock()
+	if f.stopped.Load() {
+		return
+	}
+	f.owner = client
+	f.enabled.Store(true)
+}
+
+// Deactivate stops forwarding only when client owns the forwarder.
+func (f *HomeAppLogForwarder) Deactivate(client *home.Client) {
+	f.deactivate(client)
+}
+
+func (f *HomeAppLogForwarder) deactivate(client homeAppLogClient) {
+	if f == nil || client == nil {
+		return
+	}
+	f.ownerMu.Lock()
+	if f.owner == client {
+		f.owner = nil
+	}
+	f.ownerMu.Unlock()
+}
+
+func (f *HomeAppLogForwarder) client() homeAppLogClient {
+	f.ownerMu.Lock()
+	defer f.ownerMu.Unlock()
+	return f.owner
 }
 
 // Levels implements logrus.Hook.
@@ -80,7 +182,7 @@ func (f *HomeAppLogForwarder) Fire(entry *log.Entry) error {
 	if f == nil || entry == nil || !f.enabled.Load() {
 		return nil
 	}
-	client := currentHomeAppLogClient()
+	client := f.client()
 	if client == nil || !client.HeartbeatOK() {
 		return nil
 	}
@@ -94,6 +196,7 @@ func (f *HomeAppLogForwarder) Fire(entry *log.Entry) error {
 		Level:     entry.Level.String(),
 		Timestamp: entry.Time.Format(time.RFC3339Nano),
 		RequestID: appLogRequestID(entry),
+		client:    client,
 	}
 	select {
 	case f.queue <- payload:
@@ -139,11 +242,14 @@ func (f *HomeAppLogForwarder) run() {
 }
 
 func (f *HomeAppLogForwarder) forward(payload homeAppLogPayload) {
-	if !f.enabled.Load() {
+	client := payload.client
+	if client == nil {
+		client = f.client()
+	}
+	if !f.enabled.Load() || client == nil || f.client() != client {
 		return
 	}
-	client := currentHomeAppLogClient()
-	if client == nil || !client.HeartbeatOK() {
+	if !client.HeartbeatOK() {
 		return
 	}
 	raw, errMarshal := json.Marshal(&payload)
@@ -151,8 +257,17 @@ func (f *HomeAppLogForwarder) forward(payload homeAppLogPayload) {
 		return
 	}
 	if errPush := client.RPushAppLog(context.Background(), raw); errPush != nil && isHomeAppLogUnsupported(errPush) {
-		f.enabled.Store(false)
+		f.disableIfCurrentOwner(client)
 	}
+}
+
+func (f *HomeAppLogForwarder) disableIfCurrentOwner(client homeAppLogClient) {
+	f.ownerMu.Lock()
+	defer f.ownerMu.Unlock()
+	if f.owner != client {
+		return
+	}
+	f.enabled.Store(false)
 }
 
 func isHomeAppLogUnsupported(err error) bool {

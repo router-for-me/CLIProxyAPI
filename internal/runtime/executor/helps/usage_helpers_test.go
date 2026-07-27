@@ -12,35 +12,39 @@ import (
 )
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
-	// prompt_tokens=1 with cached_tokens=4 is a malformed payload (cached >
-	// input); the parser clamps cached to input so InputTokens stays non-negative.
-	data := []byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
+	data := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":6,"total_tokens":16,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
 	detail := ParseOpenAIUsage(data)
-	if detail.InputTokens != 0 {
-		t.Fatalf("input tokens = %d, want 0 (1 - clamped cached)", detail.InputTokens)
+	if detail.InputTokens != 10 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 10)
 	}
-	if detail.OutputTokens != 2 {
-		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 2)
+	if detail.OutputTokens != 6 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 6)
 	}
-	if detail.TotalTokens != 3 {
-		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 3)
+	if detail.TotalTokens != 16 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 16)
 	}
-	if detail.CachedTokens != 1 {
-		t.Fatalf("cached tokens = %d, want 1 (clamped to input)", detail.CachedTokens)
+	if detail.CachedTokens != 4 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 4)
 	}
-	if detail.CacheReadTokens != 1 {
-		t.Fatalf("cache read tokens = %d, want 1 (clamped to input)", detail.CacheReadTokens)
+	if detail.CacheReadTokens != 4 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 4)
 	}
 	if detail.ReasoningTokens != 5 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 5)
+	}
+	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
+	if detail.TokenBreakdown.Input.UncachedTokens != 6 || detail.TokenBreakdown.Output.NonReasoningTokens != 1 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
 	}
 }
 
 func TestParseOpenAIUsageResponses(t *testing.T) {
 	data := []byte(`{"service_tier":"default","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7},"output_tokens_details":{"reasoning_tokens":9}}}`)
 	detail := ParseOpenAIUsage(data)
-	if detail.InputTokens != 3 {
-		t.Fatalf("input tokens = %d, want 3 (10 - 7 cached)", detail.InputTokens)
+	if detail.InputTokens != 10 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 10)
 	}
 	if detail.OutputTokens != 20 {
 		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 20)
@@ -60,6 +64,32 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	if detail.ResponseServiceTier != "default" {
 		t.Fatalf("response service tier = %q, want default", detail.ResponseServiceTier)
 	}
+	if detail.TokenBreakdown.Input.UncachedTokens != 3 || detail.TokenBreakdown.Output.NonReasoningTokens != 11 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
+}
+
+func TestParseOpenAIUsageTotalOnlyIsUnclassified(t *testing.T) {
+	detail := ParseOpenAIUsage([]byte(`{"usage":{"total_tokens":42}}`))
+	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityUnclassified ||
+		detail.TotalTokens != 42 || detail.TokenBreakdown.UnclassifiedTokens != 42 {
+		t.Fatalf("detail = %+v", detail)
+	}
+}
+
+func TestParseOpenAIUsagePartialBucketsPreserveKnownTokens(t *testing.T) {
+	detail := ParseOpenAIUsage([]byte(`{"usage":{"input_tokens":10,"total_tokens":15}}`))
+	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityUnclassified ||
+		detail.TokenBreakdown.Input.TotalTokens != 10 || detail.TokenBreakdown.UnclassifiedTokens != 5 {
+		t.Fatalf("detail = %+v", detail)
+	}
+}
+
+func TestParseOpenAIUsageExplicitZeroBucketsRemainInconsistent(t *testing.T) {
+	detail := ParseOpenAIUsage([]byte(`{"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":42}}`))
+	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityInconsistent {
+		t.Fatalf("detail = %+v", detail)
+	}
 }
 
 func TestParseCodexUsageIncludesCacheWriteTokens(t *testing.T) {
@@ -68,8 +98,8 @@ func TestParseCodexUsageIncludesCacheWriteTokens(t *testing.T) {
 	if !ok {
 		t.Fatal("ParseCodexUsage() ok = false, want true")
 	}
-	if detail.InputTokens != 70 {
-		t.Fatalf("input tokens = %d, want 70 (100 - 30 cached)", detail.InputTokens)
+	if detail.InputTokens != 100 {
+		t.Fatalf("input tokens = %d, want 100", detail.InputTokens)
 	}
 	if detail.OutputTokens != 20 {
 		t.Fatalf("output tokens = %d, want 20", detail.OutputTokens)
@@ -89,14 +119,14 @@ func TestParseCodexUsageIncludesCacheWriteTokens(t *testing.T) {
 	if detail.ResponseServiceTier != "priority" {
 		t.Fatalf("response service tier = %q, want priority", detail.ResponseServiceTier)
 	}
+	if detail.TokenBreakdown.Input.UncachedTokens != 30 || detail.TokenBreakdown.Input.CacheWriteTokens != 40 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
 }
 
 func TestParseOpenAIUsageNormalizesCacheCreationAlias(t *testing.T) {
 	data := []byte(`{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"input_tokens_details":{"cache_creation_tokens":4}}}`)
 	detail := ParseOpenAIUsage(data)
-	if detail.InputTokens != 10 {
-		t.Fatalf("input tokens = %d, want 10 (no cached_tokens to subtract)", detail.InputTokens)
-	}
 	if detail.CacheCreationTokens != 4 {
 		t.Fatalf("cache creation tokens = %d, want 4", detail.CacheCreationTokens)
 	}
@@ -141,8 +171,8 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	if !ok {
 		t.Fatal("ParseOpenAIStreamUsage() ok = false, want true")
 	}
-	if detail.InputTokens != 5 {
-		t.Fatalf("input tokens = %d, want 5 (8 - 3 cached)", detail.InputTokens)
+	if detail.InputTokens != 8 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 8)
 	}
 	if detail.OutputTokens != 5 {
 		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 5)
@@ -288,57 +318,63 @@ func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
 	if detail.TotalTokens != 22859 {
 		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 22859)
 	}
+	if detail.TokenBreakdown.Input.TotalTokens != 22606 || detail.TokenBreakdown.Input.UncachedTokens != 3085 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
 }
 
-func TestParseClaudeUsageNoCacheReadDoesNotFallBackToCreation(t *testing.T) {
-	// When only cache_creation_input_tokens is reported (no cache read), the
-	// parser must NOT alias creation tokens into cached_tokens — doing so
-	// caused the dashboard to render cache-creation tokens twice (as "Cached"
-	// and again as "Cache write") and attributed them at the cache-read
-	// discount rate, double-counting against cost_usd.
+func TestParseClaudeUsageFallsBackCachedTokensToCacheCreation(t *testing.T) {
 	data := []byte(`{"usage":{"input_tokens":3085,"output_tokens":253,"cache_creation_input_tokens":19514}}`)
 	detail := ParseClaudeUsage(data)
-	if detail.CachedTokens != 0 {
-		t.Fatalf("cached tokens = %d, want 0 (no cache read reported)", detail.CachedTokens)
-	}
-	if detail.CacheReadTokens != 0 {
-		t.Fatalf("cache read tokens = %d, want 0", detail.CacheReadTokens)
-	}
-	if detail.CacheCreationTokens != 19514 {
-		t.Fatalf("cache creation tokens = %d, want 19514", detail.CacheCreationTokens)
+	if detail.CachedTokens != 19514 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 19514)
 	}
 	if detail.TotalTokens != 22852 {
-		t.Fatalf("total tokens = %d, want 22852 (input+output+creation, no read)", detail.TotalTokens)
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 22852)
 	}
 }
 
 func TestParseGeminiUsageNormalizesCachedContent(t *testing.T) {
 	detail := ParseGeminiUsage([]byte(`{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"cachedContentTokenCount":4,"totalTokenCount":12}}`))
-	if detail.InputTokens != 6 {
-		t.Fatalf("input tokens = %d, want 6 (10 - 4 cached)", detail.InputTokens)
-	}
 	if detail.CachedTokens != 4 {
 		t.Fatalf("cached tokens = %d, want 4", detail.CachedTokens)
 	}
 	if detail.CacheReadTokens != 4 {
 		t.Fatalf("cache read tokens = %d, want 4", detail.CacheReadTokens)
 	}
+	if detail.TokenBreakdown.Input.UncachedTokens != 6 || detail.TokenBreakdown.TotalTokens != 12 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
 }
 
-func TestParseGeminiUsageWithoutCachedContent(t *testing.T) {
-	detail := ParseGeminiUsage([]byte(`{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}}`))
-	if detail.InputTokens != 10 {
-		t.Fatalf("input tokens = %d, want 10 (no cached to subtract)", detail.InputTokens)
+func TestParseGeminiUsageIncludesToolUsePromptTokens(t *testing.T) {
+	detail := ParseGeminiUsage([]byte(`{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"toolUsePromptTokenCount":5,"totalTokenCount":20}}`))
+	if detail.InputTokens != 15 || detail.TotalTokens != 20 {
+		t.Fatalf("detail = %+v", detail)
 	}
-	if detail.CachedTokens != 0 {
-		t.Fatalf("cached tokens = %d, want 0", detail.CachedTokens)
+	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete ||
+		detail.TokenBreakdown.Input.UncachedTokens != 15 || detail.TokenBreakdown.Output.ReasoningTokens != 3 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
+}
+
+func TestParseGeminiUsageRejectsInvalidToolUseSums(t *testing.T) {
+	tests := map[string]string{
+		"negative": `{"usageMetadata":{"promptTokenCount":10,"toolUsePromptTokenCount":-1,"totalTokenCount":10}}`,
+		"overflow": `{"usageMetadata":{"promptTokenCount":9223372036854775807,"toolUsePromptTokenCount":1,"totalTokenCount":9223372036854775807}}`,
+	}
+	for name, payload := range tests {
+		t.Run(name, func(t *testing.T) {
+			detail := ParseGeminiUsage([]byte(payload))
+			if detail.InputTokens < 0 || !detail.TokenBreakdown.Valid() ||
+				detail.TokenBreakdown.Quality != usage.TokenAccountingQualityInconsistent {
+				t.Fatalf("detail = %+v", detail)
+			}
+		})
 	}
 }
 
 func TestParseInteractionsUsage(t *testing.T) {
-	// input_tokens=3 with cached_tokens=2 (processed via interactions
-	// schema). cached_tokens here is cache-read; input_tokens in this schema
-	// is reported separately (no OpenAI-style folding), so input stays 3.
 	detail := ParseInteractionsUsage([]byte(`{"usage":{"input_tokens":3,"output_tokens":4,"reasoning_tokens":5,"cached_tokens":2}}`))
 	if detail.InputTokens != 3 {
 		t.Fatalf("input tokens = %d, want 3", detail.InputTokens)
@@ -349,8 +385,8 @@ func TestParseInteractionsUsage(t *testing.T) {
 	if detail.ReasoningTokens != 5 {
 		t.Fatalf("reasoning tokens = %d, want 5", detail.ReasoningTokens)
 	}
-	if detail.TotalTokens != 14 {
-		t.Fatalf("total tokens = %d, want 14 (3+4+5+2 cached)", detail.TotalTokens)
+	if detail.TotalTokens != 12 {
+		t.Fatalf("total tokens = %d, want 12", detail.TotalTokens)
 	}
 	if detail.CachedTokens != 2 {
 		t.Fatalf("cached tokens = %d, want 2", detail.CachedTokens)
@@ -358,12 +394,40 @@ func TestParseInteractionsUsage(t *testing.T) {
 	if detail.CacheReadTokens != 2 {
 		t.Fatalf("cache read tokens = %d, want 2", detail.CacheReadTokens)
 	}
+	if detail.TokenBreakdown.Input.UncachedTokens != 1 || detail.TokenBreakdown.Output.TotalTokens != 9 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
+}
+
+func TestNormalizeUsageDetailTotalDoesNotDoubleCountReasoning(t *testing.T) {
+	detail := normalizeUsageDetailTotal(usage.Detail{
+		InputTokens:     100,
+		OutputTokens:    30,
+		ReasoningTokens: 12,
+	}, "openai", "")
+	if detail.TotalTokens != 130 {
+		t.Fatalf("total tokens = %d, want 130", detail.TotalTokens)
+	}
+	if detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete || detail.TokenBreakdown.Output.ReasoningTokens != 12 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
 }
 
 func TestParseInteractionsUsageNormalizesCacheWriteAlias(t *testing.T) {
 	detail := ParseInteractionsUsage([]byte(`{"usage":{"input_tokens":3,"cache_write_tokens":2}}`))
 	if detail.CacheCreationTokens != 2 {
 		t.Fatalf("cache creation tokens = %d, want 2", detail.CacheCreationTokens)
+	}
+}
+
+func TestParseInteractionsUsageIncludesToolUseTokens(t *testing.T) {
+	detail := ParseInteractionsUsage([]byte(`{"usage":{"total_input_tokens":2,"total_output_tokens":6,"total_thought_tokens":3,"total_tool_use_tokens":4,"total_tokens":15}}`))
+	if detail.InputTokens != 6 || detail.OutputTokens != 6 || detail.ReasoningTokens != 3 || detail.TotalTokens != 15 {
+		t.Fatalf("detail = %+v", detail)
+	}
+	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete ||
+		detail.TokenBreakdown.Input.UncachedTokens != 6 || detail.TokenBreakdown.Output.TotalTokens != 9 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
 	}
 }
 
@@ -397,12 +461,8 @@ func TestParseInteractionsStreamUsageOfficialMetadata(t *testing.T) {
 	if detail.CacheReadTokens != 1 {
 		t.Fatalf("cache read tokens = %d, want 1", detail.CacheReadTokens)
 	}
-	// Upstream total (11) is used as-is; the parser does not recompute it when
-	// the payload supplies one. Note the upstream's total here excludes the
-	// cached counter (2+6+3+1=12), which surfaces as a small "different by 1"
-	// in the dashboard — that drift originates upstream, not in normalization.
 	if detail.TotalTokens != 11 {
-		t.Fatalf("total tokens = %d, want 11 (upstream-supplied)", detail.TotalTokens)
+		t.Fatalf("total tokens = %d, want 11", detail.TotalTokens)
 	}
 }
 
@@ -413,7 +473,7 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 		requestedAt: time.Now().Add(-1500 * time.Millisecond),
 	}
 
-	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
 	if record.Latency < time.Second {
 		t.Fatalf("latency = %v, want >= 1s", record.Latency)
 	}
@@ -461,7 +521,7 @@ func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
 	ctx := usage.WithRequestedModelAlias(context.Background(), "client-gpt")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
 
-	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
 	if record.Model != "gpt-5.4" {
 		t.Fatalf("model = %q, want %q", record.Model, "gpt-5.4")
 	}
@@ -473,7 +533,7 @@ func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
 func TestNewExecutorUsageReporterIncludesExecutorType(t *testing.T) {
 	reporter := NewExecutorUsageReporter(context.Background(), &TestUsageExecutor{}, "gpt-5.4", nil)
 
-	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
 	if record.Provider != "test-provider" {
 		t.Fatalf("provider = %q, want %q", record.Provider, "test-provider")
 	}
@@ -486,7 +546,7 @@ func TestUsageReporterBuildRecordIncludesReasoningEffort(t *testing.T) {
 	ctx := usage.WithReasoningEffort(context.Background(), "medium")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
 
-	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
 	if record.ReasoningEffort != "medium" {
 		t.Fatalf("reasoning effort = %q, want %q", record.ReasoningEffort, "medium")
 	}
@@ -496,7 +556,7 @@ func TestUsageReporterBuildRecordIncludesServiceTier(t *testing.T) {
 	ctx := usage.WithServiceTier(context.Background(), "auto")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
 
-	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3, ResponseServiceTier: "default"}, false)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3, ResponseServiceTier: "default"}, false)
 	if record.ServiceTier != "auto" {
 		t.Fatalf("service tier = %q, want %q", record.ServiceTier, "auto")
 	}
@@ -508,7 +568,7 @@ func TestUsageReporterBuildRecordIncludesServiceTier(t *testing.T) {
 func TestUsageReporterBuildRecordDefaultsGenerateTrue(t *testing.T) {
 	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
 
-	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
 	if !usage.GenerateEnabled(record.Generate) {
 		t.Fatalf("generate = %v, want true", usage.GenerateEnabled(record.Generate))
 	}
@@ -518,7 +578,7 @@ func TestUsageReporterBuildRecordIncludesGenerateFalse(t *testing.T) {
 	ctx := usage.WithGenerate(context.Background(), false)
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
 
-	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
 	if usage.GenerateEnabled(record.Generate) {
 		t.Fatalf("generate = %v, want false", usage.GenerateEnabled(record.Generate))
 	}
@@ -530,7 +590,7 @@ func TestUsageReporterSetTranslatedReasoningEffortPreservesClientServiceTier(t *
 
 	reporter.SetTranslatedReasoningEffort([]byte(`{"service_tier":"priority"}`), "openai")
 
-	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
 	if record.ServiceTier != "auto" {
 		t.Fatalf("service tier = %q, want %q", record.ServiceTier, "auto")
 	}
@@ -543,13 +603,13 @@ func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 		requestedAt: time.Now(),
 	}
 
-	if _, ok := reporter.buildAdditionalModelRecord(context.Background(), "gpt-image-2", usage.Detail{}); ok {
+	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{}); ok {
 		t.Fatalf("expected all-zero token usage to be skipped")
 	}
-	if _, ok := reporter.buildAdditionalModelRecord(context.Background(), "gpt-image-2", usage.Detail{InputTokens: 2}); !ok {
+	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{InputTokens: 2}); !ok {
 		t.Fatalf("expected non-zero input token usage to be recorded")
 	}
-	if _, ok := reporter.buildAdditionalModelRecord(context.Background(), "gpt-image-2", usage.Detail{CachedTokens: 2}); !ok {
+	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{CachedTokens: 2}); !ok {
 		t.Fatalf("expected non-zero cached token usage to be recorded")
 	}
 }

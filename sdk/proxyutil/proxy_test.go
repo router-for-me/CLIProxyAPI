@@ -2,6 +2,7 @@ package proxyutil
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -266,6 +267,80 @@ func TestBuildDialerHTTPProxyCONNECT(t *testing.T) {
 
 	if errServer := <-done; errServer != nil {
 		t.Fatalf("proxy server returned error: %v", errServer)
+	}
+}
+
+func TestBuildDialerHTTPProxyCONNECTCancellation(t *testing.T) {
+	t.Parallel()
+
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("net.Listen returned error: %v", errListen)
+	}
+	defer func() { _ = listener.Close() }()
+	requestRead := make(chan struct{})
+	serverDone := make(chan error, 1)
+	go func() {
+		connection, errAccept := listener.Accept()
+		if errAccept != nil {
+			serverDone <- errAccept
+			return
+		}
+		defer func() { _ = connection.Close() }()
+		if _, errRead := http.ReadRequest(bufio.NewReader(connection)); errRead != nil {
+			serverDone <- errRead
+			return
+		}
+		close(requestRead)
+		if errDeadline := connection.SetReadDeadline(time.Now().Add(5 * time.Second)); errDeadline != nil {
+			serverDone <- errDeadline
+			return
+		}
+		var buffer [1]byte
+		_, errRead := connection.Read(buffer[:])
+		serverDone <- errRead
+	}()
+
+	dialer, mode, errBuild := BuildDialer("http://" + listener.Addr().String())
+	if errBuild != nil || mode != ModeProxy {
+		t.Fatalf("BuildDialer mode=%d error=%v", mode, errBuild)
+	}
+	contextDialer, ok := dialer.(interface {
+		DialContext(context.Context, string, string) (net.Conn, error)
+	})
+	if !ok {
+		t.Fatal("HTTP CONNECT dialer does not support context cancellation")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	dialDone := make(chan error, 1)
+	go func() {
+		connection, errDial := contextDialer.DialContext(ctx, "tcp", "20.42.0.20:443")
+		if connection != nil {
+			_ = connection.Close()
+		}
+		dialDone <- errDial
+	}()
+	select {
+	case <-requestRead:
+	case <-time.After(time.Second):
+		t.Fatal("proxy did not receive CONNECT request")
+	}
+	cancel()
+	select {
+	case errDial := <-dialDone:
+		if errDial == nil {
+			t.Fatal("canceled CONNECT dial returned nil error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled CONNECT dial did not return")
+	}
+	select {
+	case errServer := <-serverDone:
+		if errServer == nil {
+			t.Fatal("proxy connection stayed open after cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("proxy connection was not closed after cancellation")
 	}
 }
 

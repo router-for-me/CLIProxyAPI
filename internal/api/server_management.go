@@ -1,0 +1,449 @@
+package api
+
+import (
+	"context"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
+	log "github.com/sirupsen/logrus"
+)
+
+func (s *Server) registerManagementRoutes() {
+	if s == nil || s.engine == nil || s.mgmt == nil {
+		return
+	}
+	if !s.managementRoutesRegistered.CompareAndSwap(false, true) {
+		return
+	}
+
+	log.Info("management routes registered after secret key configuration")
+
+	s.engine.POST("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.PostOAuthCallback)
+	s.engine.GET("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.GetOAuthCallback)
+
+	mgmt := s.engine.Group("/v0/management")
+	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), s.mgmt.EnforceTokenPolicy(), s.mgmt.AuditTokenCall())
+	{
+		mgmt.GET("/config", s.mgmt.GetConfig)
+		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
+		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
+		mgmt.GET("/latest-version", s.mgmt.GetLatestVersion)
+		mgmt.GET("/plugins", s.mgmt.ListPlugins)
+		mgmt.GET("/plugin-store", s.mgmt.ListPluginStore)
+		mgmt.POST("/plugin-store/:id/install", s.mgmt.InstallPluginFromStore)
+		mgmt.DELETE("/plugins/:id", s.mgmt.DeletePlugin)
+		mgmt.PATCH("/plugins/:id/enabled", s.mgmt.PatchPluginEnabled)
+		mgmt.GET("/plugins/:id/config", s.mgmt.GetPluginConfig)
+		mgmt.PUT("/plugins/:id/config", s.mgmt.PutPluginConfig)
+		mgmt.PATCH("/plugins/:id/config", s.mgmt.PatchPluginConfig)
+
+		mgmt.GET("/debug", s.mgmt.GetDebug)
+		mgmt.PUT("/debug", s.mgmt.PutDebug)
+		mgmt.PATCH("/debug", s.mgmt.PutDebug)
+
+		mgmt.GET("/logging-to-file", s.mgmt.GetLoggingToFile)
+		mgmt.PUT("/logging-to-file", s.mgmt.PutLoggingToFile)
+		mgmt.PATCH("/logging-to-file", s.mgmt.PutLoggingToFile)
+
+		mgmt.GET("/logs-max-total-size-mb", s.mgmt.GetLogsMaxTotalSizeMB)
+		mgmt.PUT("/logs-max-total-size-mb", s.mgmt.PutLogsMaxTotalSizeMB)
+		mgmt.PATCH("/logs-max-total-size-mb", s.mgmt.PutLogsMaxTotalSizeMB)
+
+		mgmt.GET("/error-logs-max-files", s.mgmt.GetErrorLogsMaxFiles)
+		mgmt.PUT("/error-logs-max-files", s.mgmt.PutErrorLogsMaxFiles)
+		mgmt.PATCH("/error-logs-max-files", s.mgmt.PutErrorLogsMaxFiles)
+
+		mgmt.GET("/usage-statistics-enabled", s.mgmt.GetUsageStatisticsEnabled)
+		mgmt.PUT("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
+		mgmt.PATCH("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
+
+		mgmt.GET("/proxy-url", s.mgmt.GetProxyURL)
+		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)
+		mgmt.PATCH("/proxy-url", s.mgmt.PutProxyURL)
+		mgmt.DELETE("/proxy-url", s.mgmt.DeleteProxyURL)
+
+		mgmt.POST("/api-call", s.mgmt.APICall)
+
+		mgmt.GET("/quota-exceeded/switch-project", s.mgmt.GetSwitchProject)
+		mgmt.PUT("/quota-exceeded/switch-project", s.mgmt.PutSwitchProject)
+		mgmt.PATCH("/quota-exceeded/switch-project", s.mgmt.PutSwitchProject)
+
+		mgmt.GET("/quota-exceeded/switch-preview-model", s.mgmt.GetSwitchPreviewModel)
+		mgmt.PUT("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
+		mgmt.PATCH("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
+		mgmt.POST("/reset-quota", s.mgmt.ResetQuota)
+
+		mgmt.GET("/api-keys", s.mgmt.GetAPIKeys)
+		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
+		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
+		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
+		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
+		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
+
+		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
+		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
+		mgmt.PATCH("/gemini-api-key", s.mgmt.PatchGeminiKey)
+		mgmt.DELETE("/gemini-api-key", s.mgmt.DeleteGeminiKey)
+
+		mgmt.GET("/interactions-api-key", s.mgmt.GetInteractionsKeys)
+		mgmt.PUT("/interactions-api-key", s.mgmt.PutInteractionsKeys)
+		mgmt.PATCH("/interactions-api-key", s.mgmt.PatchInteractionsKey)
+		mgmt.DELETE("/interactions-api-key", s.mgmt.DeleteInteractionsKey)
+
+		mgmt.GET("/logs", s.mgmt.GetLogs)
+		mgmt.DELETE("/logs", s.mgmt.DeleteLogs)
+		mgmt.GET("/request-error-logs", s.mgmt.GetRequestErrorLogs)
+		mgmt.GET("/request-error-logs/:name", s.mgmt.DownloadRequestErrorLog)
+		mgmt.GET("/request-log-by-id/:id", s.mgmt.GetRequestLogByID)
+		mgmt.GET("/request-log", s.mgmt.GetRequestLog)
+		mgmt.PUT("/request-log", s.mgmt.PutRequestLog)
+		mgmt.PATCH("/request-log", s.mgmt.PutRequestLog)
+		mgmt.GET("/ws-auth", s.mgmt.GetWebsocketAuth)
+		mgmt.PUT("/ws-auth", s.mgmt.PutWebsocketAuth)
+		mgmt.PATCH("/ws-auth", s.mgmt.PutWebsocketAuth)
+
+		mgmt.GET("/request-retry", s.mgmt.GetRequestRetry)
+		mgmt.PUT("/request-retry", s.mgmt.PutRequestRetry)
+		mgmt.PATCH("/request-retry", s.mgmt.PutRequestRetry)
+		mgmt.GET("/max-retry-interval", s.mgmt.GetMaxRetryInterval)
+		mgmt.PUT("/max-retry-interval", s.mgmt.PutMaxRetryInterval)
+		mgmt.PATCH("/max-retry-interval", s.mgmt.PutMaxRetryInterval)
+
+		mgmt.GET("/force-model-prefix", s.mgmt.GetForceModelPrefix)
+		mgmt.PUT("/force-model-prefix", s.mgmt.PutForceModelPrefix)
+		mgmt.PATCH("/force-model-prefix", s.mgmt.PutForceModelPrefix)
+
+		mgmt.GET("/routing/strategy", s.mgmt.GetRoutingStrategy)
+		mgmt.PUT("/routing/strategy", s.mgmt.PutRoutingStrategy)
+		mgmt.PATCH("/routing/strategy", s.mgmt.PutRoutingStrategy)
+
+		mgmt.GET("/claude-api-key", s.mgmt.GetClaudeKeys)
+		mgmt.PUT("/claude-api-key", s.mgmt.PutClaudeKeys)
+		mgmt.PATCH("/claude-api-key", s.mgmt.PatchClaudeKey)
+		mgmt.DELETE("/claude-api-key", s.mgmt.DeleteClaudeKey)
+
+		mgmt.GET("/codex-api-key", s.mgmt.GetCodexKeys)
+		mgmt.PUT("/codex-api-key", s.mgmt.PutCodexKeys)
+		mgmt.PATCH("/codex-api-key", s.mgmt.PatchCodexKey)
+		mgmt.DELETE("/codex-api-key", s.mgmt.DeleteCodexKey)
+
+		mgmt.GET("/xai-api-key", s.mgmt.GetXAIKeys)
+		mgmt.PUT("/xai-api-key", s.mgmt.PutXAIKeys)
+		mgmt.PATCH("/xai-api-key", s.mgmt.PatchXAIKey)
+		mgmt.DELETE("/xai-api-key", s.mgmt.DeleteXAIKey)
+
+		mgmt.GET("/openai-compatibility", s.mgmt.GetOpenAICompat)
+		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)
+		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)
+		mgmt.DELETE("/openai-compatibility", s.mgmt.DeleteOpenAICompat)
+
+		mgmt.GET("/vertex-api-key", s.mgmt.GetVertexCompatKeys)
+		mgmt.PUT("/vertex-api-key", s.mgmt.PutVertexCompatKeys)
+		mgmt.PATCH("/vertex-api-key", s.mgmt.PatchVertexCompatKey)
+		mgmt.DELETE("/vertex-api-key", s.mgmt.DeleteVertexCompatKey)
+
+		mgmt.GET("/oauth-excluded-models", s.mgmt.GetOAuthExcludedModels)
+		mgmt.PUT("/oauth-excluded-models", s.mgmt.PutOAuthExcludedModels)
+		mgmt.PATCH("/oauth-excluded-models", s.mgmt.PatchOAuthExcludedModels)
+		mgmt.DELETE("/oauth-excluded-models", s.mgmt.DeleteOAuthExcludedModels)
+
+		mgmt.GET("/oauth-model-alias", s.mgmt.GetOAuthModelAlias)
+		mgmt.PUT("/oauth-model-alias", s.mgmt.PutOAuthModelAlias)
+		mgmt.PATCH("/oauth-model-alias", s.mgmt.PatchOAuthModelAlias)
+		mgmt.DELETE("/oauth-model-alias", s.mgmt.DeleteOAuthModelAlias)
+
+		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
+		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
+		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
+		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
+		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
+		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
+		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
+		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
+		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
+
+		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
+		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
+		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
+		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
+		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
+		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+		mgmt.DELETE("/oauth-session", s.mgmt.CancelAuthSession)
+
+		// Server-side remote probe used by the dashboard's "Discover
+		// models" section. Avoids CORS: the browser would otherwise
+		// block cross-origin GET <upstream>/v1/models from the page.
+		mgmt.POST("/remote-probe/models", s.mgmt.RemoteProbeModels)
+
+		// PG-backed API keys + policy management. These routes return 503
+		// when the PG store is not configured so callers can detect absence.
+		mgmt.GET("/api-keys-pg", s.mgmt.ListPGAPIKeys)
+		mgmt.POST("/api-keys-pg", s.mgmt.CreatePGAPIKey)
+		mgmt.GET("/api-keys-pg/:id", s.mgmt.GetPGAPIKey)
+		mgmt.PATCH("/api-keys-pg/:id", s.mgmt.PatchPGAPIKey)
+		mgmt.PUT("/api-keys-pg/:id/policy", s.mgmt.PutPGAPIKeyPolicy)
+		mgmt.POST("/api-keys-pg/:id/regenerate", s.mgmt.RegeneratePGAPIKey)
+		mgmt.DELETE("/api-keys-pg/:id", s.mgmt.DeletePGAPIKey)
+
+		// Internal Users (LiteLLM-style key owners with per-user
+		// budget/RPM/TPM enforcement, max-p concurrent-request caps, and
+		// benchmark dashboards). Return 503 when the PG store is not
+		// configured. Path prefix /internal-users/* mirrors LiteLLM's
+		// /user/* (kept for backward compatibility — see internal_users.go
+		// file-level comment for the equivalence table).
+		mgmt.GET("/internal-users", s.mgmt.ListInternalUsers)
+		mgmt.POST("/internal-users", s.mgmt.CreateInternalUser)
+		mgmt.GET("/internal-users/leaderboard", s.mgmt.GetInternalUsersLeaderboard)
+		mgmt.POST("/internal-users/reconcile-all", s.mgmt.ReconcileAllSpend)
+		mgmt.GET("/internal-users/:id", s.mgmt.GetInternalUser)
+		mgmt.PATCH("/internal-users/:id", s.mgmt.PatchInternalUser)
+		mgmt.DELETE("/internal-users/:id", s.mgmt.DeleteInternalUser)
+		mgmt.POST("/internal-users/:id/reset-spend", s.mgmt.ResetInternalUserSpend)
+		mgmt.POST("/internal-users/:id/reconcile-spend", s.mgmt.ReconcileInternalUserSpend)
+		mgmt.GET("/internal-users/:id/keys", s.mgmt.ListInternalUserKeys)
+		mgmt.POST("/internal-users/:id/keys/:keyId/attach", s.mgmt.AttachKeyToUser)
+		mgmt.DELETE("/internal-users/:id/keys/:keyId", s.mgmt.DetachKeyFromUser)
+		// Per-user benchmark endpoints (mirror /usage-stats but scoped to a user).
+		mgmt.GET("/internal-users/:id/totals", s.mgmt.GetInternalUserTotals)
+		mgmt.GET("/internal-users/:id/timeseries", s.mgmt.GetInternalUserTimeSeries)
+		mgmt.GET("/internal-users/:id/top", s.mgmt.GetInternalUserTop)
+		mgmt.GET("/internal-users/:id/events", s.mgmt.GetInternalUserEvents)
+		mgmt.GET("/internal-users/:id/errors", s.mgmt.GetInternalUserErrors)
+		mgmt.GET("/internal-users/:id/windows", s.mgmt.GetInternalUserWindows)
+		mgmt.GET("/internal-users/:id/model-spend", s.mgmt.GetInternalUserModelSpend)
+		mgmt.GET("/internal-users/:id/models", s.mgmt.GetInternalUserModels)
+
+		// Aggregate usage stats powered by the PG usage_events table.
+		mgmt.GET("/usage-stats", s.mgmt.GetUsageStats)
+		mgmt.GET("/usage-stats/summary", s.mgmt.GetUsageSummary)
+		mgmt.GET("/usage-stats/totals", s.mgmt.GetUsageTotals)
+		mgmt.GET("/usage-stats/timeseries", s.mgmt.GetUsageTimeSeries)
+		mgmt.GET("/usage-stats/top", s.mgmt.GetUsageTop)
+		mgmt.GET("/usage-stats/events", s.mgmt.GetUsageEvents)
+		mgmt.GET("/usage-stats/events/:id", s.mgmt.GetUsageEvent)
+		mgmt.GET("/usage-stats/errors", s.mgmt.GetUsageErrors)
+		mgmt.GET("/usage-stats/errors/:id", s.mgmt.GetUsageError)
+		mgmt.GET("/usage-stats/filters", s.mgmt.GetUsageFilters)
+		mgmt.GET("/usage-windows/:api_key_id", s.mgmt.GetUsageWindows)
+
+		// Live snapshot of upstream auth/model pairs currently in cooldown.
+		// Read-only; the dashboard's per-row "Reset" button calls the
+		// existing POST /v0/management/reset-quota route with auth_index.
+		mgmt.GET("/cooldown-providers", s.mgmt.GetCooldownProviders)
+
+		// Operator-customizable error response text, keyed by HTTP status code.
+		// The preview route is POST because it accepts a candidate body to
+		// render (GET would conflict with the "/:code" pattern and has no
+		// query-string body semantics).
+		mgmt.GET("/error-messages", s.mgmt.ListErrorMessages)
+		mgmt.POST("/error-messages/preview", s.mgmt.PreviewErrorMessage)
+		mgmt.GET("/error-messages/:code", s.mgmt.GetErrorMessage)
+		mgmt.PUT("/error-messages/:code", s.mgmt.PutErrorMessage)
+		mgmt.DELETE("/error-messages/:code", s.mgmt.DeleteErrorMessage)
+
+		// PG-backed model catalog and pricing management.
+		mgmt.GET("/models-catalog", s.mgmt.ListModelsCatalog)
+		mgmt.GET("/models-catalog/count", s.mgmt.GetModelsCatalogCount)
+		mgmt.GET("/models-catalog/summary", s.mgmt.GetModelsCatalogSummary)
+		mgmt.GET("/models-catalog/distinct", s.mgmt.GetModelsCatalogDistinct)
+		mgmt.GET("/models-catalog/providers-for-model", s.mgmt.GetModelProviders)
+		mgmt.GET("/models-catalog/sync-status", s.mgmt.SyncStatus)
+		mgmt.GET("/models-catalog/:id/pricing", s.mgmt.GetModelPricing)
+		mgmt.PUT("/models-catalog/:id/pricing", s.mgmt.PutModelPricing)
+		mgmt.POST("/models-catalog/sync-from-v1", s.mgmt.SyncModelsFromV1)
+		mgmt.POST("/models-catalog/sync-pricing-preview", s.mgmt.SyncPricingPreview)
+		mgmt.POST("/models-catalog/sync-pricing-apply", s.mgmt.SyncPricingApply)
+		mgmt.GET("/models-catalog/entry/:id/:provider", s.mgmt.GetModelEntry)
+		mgmt.PUT("/models-catalog/entry/:id/:provider", s.mgmt.PutModelEntry)
+		mgmt.DELETE("/models-catalog/entry/:id/:provider", s.mgmt.DeleteModelEntry)
+
+		// Operator-managed external pricing catalogs (LiteLLM-format JSON
+		// URLs / uploaded files). Surface as suggestions in the dashboard's
+		// Sync Pricing modal alongside the bundled catalog.
+		mgmt.GET("/pricing-sources", s.mgmt.ListPricingSources)
+		mgmt.POST("/pricing-sources", s.mgmt.CreatePricingSource)
+		mgmt.PUT("/pricing-sources/:id", s.mgmt.UpdatePricingSource)
+		mgmt.DELETE("/pricing-sources/:id", s.mgmt.DeletePricingSource)
+		mgmt.POST("/pricing-sources/refresh-all", s.mgmt.RefreshAllPricingSources)
+		mgmt.POST("/pricing-sources/:id/refresh", s.mgmt.RefreshPricingSource)
+		mgmt.POST("/pricing-sources/:id/upload", s.mgmt.UploadPricingSourceFile)
+
+		// Normalized upstream providers (source of truth for both the
+		// config.yaml-based API-key providers and the OAuth/file-backed auths).
+		// Returns 503 when the PG store is not configured. Every mutation
+		// re-renders config.yaml + auth-dir artifacts from the table and
+		// triggers a client reload.
+		mgmt.GET("/upstream-providers", s.mgmt.ListUpstreamProviders)
+		mgmt.POST("/upstream-providers", s.mgmt.CreateUpstreamProvider)
+		mgmt.GET("/upstream-providers/:id", s.mgmt.GetUpstreamProvider)
+		mgmt.PUT("/upstream-providers/:id", s.mgmt.UpdateUpstreamProvider)
+		mgmt.DELETE("/upstream-providers/:id", s.mgmt.DeleteUpstreamProvider)
+
+		// Reusable Model Group templates (allowed-models grant lists +
+		// per-model upstream routing) attachable to API-key policies and
+		// internal users. Return 503 when the PG store is not configured.
+		// When attached, the group becomes the source of truth for the
+		// entity's allowed/blocked lists (and, for API-key policies, routes).
+		mgmt.GET("/model-groups", s.mgmt.ListModelGroups)
+		mgmt.POST("/model-groups", s.mgmt.CreateModelGroup)
+		mgmt.GET("/model-groups/:id", s.mgmt.GetModelGroup)
+		mgmt.PUT("/model-groups/:id", s.mgmt.UpdateModelGroup)
+		mgmt.DELETE("/model-groups/:id", s.mgmt.DeleteModelGroup)
+		mgmt.POST("/model-groups/:id/attach", s.mgmt.AttachModelGroup)
+		mgmt.POST("/model-groups/:id/detach", s.mgmt.DetachModelGroup)
+
+		// PG-backed management API tokens: gate access to the /v0/management
+		// REST surface with per-token policy (read/write scope, per-endpoint
+		// allowlist, RPM + max-parallel limits, expiry) and a full audit log
+		// of every call made with a token (request/response bodies, status,
+		// latency, errors). Return 503 when the PG store is not configured.
+		mgmt.GET("/api-tokens", s.mgmt.ListAPITokens)
+		mgmt.POST("/api-tokens", s.mgmt.CreateAPIToken)
+		mgmt.GET("/api-tokens/audit-log", s.mgmt.ListAPITokenAuditLog)
+		mgmt.GET("/api-tokens/audit-log/:id", s.mgmt.GetAPITokenAuditEntry)
+		mgmt.GET("/api-tokens/:id", s.mgmt.GetAPIToken)
+		mgmt.PATCH("/api-tokens/:id", s.mgmt.PatchAPIToken)
+		mgmt.PUT("/api-tokens/:id/policy", s.mgmt.PutAPITokenPolicy)
+		mgmt.POST("/api-tokens/:id/regenerate", s.mgmt.RegenerateAPIToken)
+		mgmt.DELETE("/api-tokens/:id", s.mgmt.DeleteAPIToken)
+	}
+}
+
+func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !s.managementAvailable(c) {
+			return
+		}
+		c.Next()
+	}
+}
+
+func (s *Server) managementAvailable(c *gin.Context) bool {
+	if s == nil || s.cfg == nil {
+		c.AbortWithStatus(http.StatusNotFound)
+		return false
+	}
+	if s.cfg.Home.Enabled {
+		c.AbortWithStatus(http.StatusNotFound)
+		return false
+	}
+	if !s.managementRoutesEnabled.Load() {
+		c.AbortWithStatus(http.StatusNotFound)
+		return false
+	}
+	return true
+}
+
+func (s *Server) refreshPluginManagementRoutes() {
+	if s == nil || s.pluginHost == nil || s.engine == nil {
+		return
+	}
+	s.pluginHost.RegisterManagementRoutes(context.Background(), s.registeredManagementRouteKeys())
+}
+
+// RefreshPluginManagementRoutes rebuilds plugin-owned Management API routes.
+func (s *Server) RefreshPluginManagementRoutes() {
+	s.refreshPluginManagementRoutes()
+}
+
+func (s *Server) registeredManagementRouteKeys() map[string]struct{} {
+	out := make(map[string]struct{})
+	if s == nil || s.engine == nil {
+		return out
+	}
+	for _, route := range s.engine.Routes() {
+		if strings.HasPrefix(route.Path, "/v0/management/") || route.Path == "/v0/management" {
+			out[strings.ToUpper(strings.TrimSpace(route.Method))+" "+route.Path] = struct{}{}
+		}
+	}
+	return out
+}
+
+func (s *Server) pluginManagementNoRoute(c *gin.Context) {
+	if s == nil || c == nil || c.Request == nil || c.Request.URL == nil {
+		if c != nil {
+			c.AbortWithStatus(http.StatusNotFound)
+		}
+		return
+	}
+	path := c.Request.URL.Path
+	if strings.HasPrefix(path, "/v0/resource/plugins/") {
+		s.pluginResourceNoRoute(c)
+		return
+	}
+	if path != "/v0/management" && !strings.HasPrefix(path, "/v0/management/") {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	if s.pluginHost == nil || s.mgmt == nil {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	if !s.managementAvailable(c) {
+		return
+	}
+	s.mgmt.Middleware()(c)
+	if c.IsAborted() {
+		return
+	}
+	if s.mgmt.ServePluginAuthURL(c) {
+		c.Abort()
+		return
+	}
+	if s.pluginHost.ServeManagementHTTP(c.Writer, c.Request) {
+		c.Abort()
+		return
+	}
+	c.AbortWithStatus(http.StatusNotFound)
+}
+
+func (s *Server) pluginResourceNoRoute(c *gin.Context) {
+	if s == nil || c == nil || c.Request == nil || c.Request.URL == nil {
+		if c != nil {
+			c.AbortWithStatus(http.StatusNotFound)
+		}
+		return
+	}
+	if s.cfg == nil || s.cfg.Home.Enabled || s.pluginHost == nil {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	if s.pluginHost.ServeResourceHTTP(c.Writer, c.Request) {
+		c.Abort()
+		return
+	}
+	c.AbortWithStatus(http.StatusNotFound)
+}
+
+func (s *Server) serveManagementControlPanel(c *gin.Context) {
+	cfg := s.cfg
+	if cfg == nil || cfg.Home.Enabled || cfg.RemoteManagement.DisableControlPanel {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	filePath := managementasset.FilePath(s.configFilePath)
+	if strings.TrimSpace(filePath) == "" {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+
+	if _, err := os.Stat(filePath); err != nil {
+		if os.IsNotExist(err) {
+			// Synchronously ensure management.html is available with a detached context.
+			// Control panel bootstrap should not be canceled by client disconnects.
+			if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
+				c.AbortWithStatus(http.StatusNotFound)
+				return
+			}
+		} else {
+			log.WithError(err).Error("failed to stat management control panel asset")
+			c.AbortWithStatus(http.StatusInternalServerError)
+			return
+		}
+	}
+
+	c.File(filePath)
+}

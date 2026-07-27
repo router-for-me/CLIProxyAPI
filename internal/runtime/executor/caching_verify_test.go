@@ -215,6 +215,93 @@ func TestEnsureCacheControl(t *testing.T) {
 	})
 }
 
+func TestInjectToolsCacheControlSkipsDeferredTools(t *testing.T) {
+	tests := []struct {
+		name           string
+		input          string
+		wantCacheIndex int
+		wantCacheTTL   string
+	}{
+		{
+			name: "trailing deferred tool",
+			input: `{"tools":[
+				{"name":"resident","defer_loading":false},
+				{"name":"deferred","defer_loading":true}
+			]}`,
+			wantCacheIndex: 0,
+		},
+		{
+			name: "multiple trailing deferred tools",
+			input: `{"tools":[
+				{"name":"resident"},
+				{"name":"deferred_1","defer_loading":true},
+				{"name":"deferred_2","defer_loading":true}
+			]}`,
+			wantCacheIndex: 0,
+		},
+		{
+			name: "middle deferred tool",
+			input: `{"tools":[
+				{"name":"resident_1"},
+				{"name":"deferred","defer_loading":true},
+				{"name":"resident_2"}
+			]}`,
+			wantCacheIndex: 2,
+		},
+		{
+			name: "all tools deferred",
+			input: `{"tools":[
+				{"name":"deferred_1","defer_loading":true},
+				{"name":"deferred_2","defer_loading":true}
+			]}`,
+			wantCacheIndex: -1,
+		},
+		{
+			name: "existing cache control",
+			input: `{"tools":[
+				{"name":"resident_1","cache_control":{"type":"ephemeral","ttl":"1h"}},
+				{"name":"resident_2"}
+			]}`,
+			wantCacheIndex: 0,
+			wantCacheTTL:   "1h",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output := injectToolsCacheControl([]byte(tt.input))
+			tools := gjson.GetBytes(output, "tools").Array()
+			cacheCount := 0
+			for index, tool := range tools {
+				cacheControl := tool.Get("cache_control")
+				if cacheControl.Exists() {
+					cacheCount++
+					if index != tt.wantCacheIndex {
+						t.Errorf("cache_control added to tool %d, want tool %d: %s", index, tt.wantCacheIndex, string(output))
+					}
+				}
+				if tool.Get("defer_loading").Bool() && cacheControl.Exists() {
+					t.Errorf("deferred tool %d must not have cache_control: %s", index, string(output))
+				}
+			}
+
+			wantCacheCount := 1
+			if tt.wantCacheIndex < 0 {
+				wantCacheCount = 0
+			}
+			if cacheCount != wantCacheCount {
+				t.Errorf("cache_control count = %d, want %d: %s", cacheCount, wantCacheCount, string(output))
+			}
+			if tt.wantCacheTTL != "" {
+				path := fmt.Sprintf("tools.%d.cache_control.ttl", tt.wantCacheIndex)
+				if got := gjson.GetBytes(output, path).String(); got != tt.wantCacheTTL {
+					t.Errorf("cache_control TTL = %q, want %q: %s", got, tt.wantCacheTTL, string(output))
+				}
+			}
+		})
+	}
+}
+
 // TestCacheControlOrder verifies the correct order: tools -> system -> messages
 func TestCacheControlOrder(t *testing.T) {
 	input := []byte(`{

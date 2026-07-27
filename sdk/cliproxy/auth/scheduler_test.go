@@ -11,13 +11,21 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-type schedulerTestExecutor struct{}
+type schedulerTestExecutor struct {
+	provider string
+}
 
-func (schedulerTestExecutor) Identifier() string { return "test" }
+func (e schedulerTestExecutor) Identifier() string {
+	if e.provider != "" {
+		return e.provider
+	}
+	return "test"
+}
 
 func (schedulerTestExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	return cliproxyexecutor.Response{}, nil
@@ -77,6 +85,8 @@ func (d *authKindHomeDispatcher) RPopAuth(_ context.Context, _ string, _ string,
 	}
 	return json.Marshal(homeAuthDispatchResponse{Auth: d.auths[count-1]})
 }
+
+func (*authKindHomeDispatcher) AbortAmbiguousDispatch() {}
 
 func (s *inactivePluginScheduler) HasScheduler() bool {
 	return false
@@ -509,66 +519,173 @@ func TestManagerSelectAuthByKindRejectsInvalidKind(t *testing.T) {
 	}
 }
 
-func TestManagerSelectAuthByKindAdvancesHomeAuthCount(t *testing.T) {
-	tests := []struct {
-		name       string
-		auths      []Auth
-		wantAuthID string
-		wantError  string
-	}{
-		{
-			name: "skips API key for OAuth",
-			auths: []Auth{
-				{ID: "home-api-key", Provider: "test", Attributes: map[string]string{AttributeAPIKey: "test-key"}},
-				{ID: "home-oauth", Provider: "test", Metadata: map[string]any{"access_token": "test-token"}},
-			},
-			wantAuthID: "home-oauth",
+func TestManagerLegacySelectAuthFailsClosedWhenHomeEnabled(t *testing.T) {
+	dispatcher := &authKindHomeDispatcher{auths: []Auth{{
+		ID:       "home-oauth",
+		Provider: "test",
+		Metadata: map[string]any{"access_token": "test-token"},
+	}}}
+	oldCurrentHomeDispatcher := currentHomeDispatcher
+	currentHomeDispatcher = func() homeAuthDispatcher { return dispatcher }
+	t.Cleanup(func() { currentHomeDispatcher = oldCurrentHomeDispatcher })
+
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.SetHomeExecutionRegistry(executionregistry.New())
+	manager.RegisterExecutor(schedulerTestExecutor{})
+
+	for name, selectAuth := range map[string]func() (*Auth, error){
+		"SelectAuth": func() (*Auth, error) {
+			return manager.SelectAuth(context.Background(), "test", "model", cliproxyexecutor.Options{})
 		},
-		{
-			name: "returns not found without OAuth",
-			auths: []Auth{
-				{ID: "home-api-key", Provider: "test", Attributes: map[string]string{AttributeAPIKey: "test-key"}},
-			},
-			wantError: "auth_not_found",
+		"SelectAuthByKind": func() (*Auth, error) {
+			return manager.SelectAuthByKind(context.Background(), "test", "model", AuthKindOAuth, cliproxyexecutor.Options{})
 		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dispatcher := &authKindHomeDispatcher{auths: tt.auths}
-			oldCurrentHomeDispatcher := currentHomeDispatcher
-			currentHomeDispatcher = func() homeAuthDispatcher {
-				return dispatcher
+	} {
+		t.Run(name, func(t *testing.T) {
+			selected, errSelect := selectAuth()
+			if selected != nil {
+				t.Fatalf("%s() auth = %#v, want nil", name, selected)
 			}
-			t.Cleanup(func() {
-				currentHomeDispatcher = oldCurrentHomeDispatcher
-			})
-
-			manager := NewManager(nil, nil, nil)
-			manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
-			manager.RegisterExecutor(schedulerTestExecutor{})
-
-			selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", AuthKindOAuth, cliproxyexecutor.Options{})
-			if tt.wantError != "" {
-				if selected != nil {
-					t.Fatalf("SelectAuthByKind() auth = %#v, want nil", selected)
-				}
-				var authErr *Error
-				if !errors.As(errSelect, &authErr) || authErr.Code != tt.wantError {
-					t.Fatalf("SelectAuthByKind() error = %#v, want %s", errSelect, tt.wantError)
-				}
-			} else {
-				if errSelect != nil {
-					t.Fatalf("SelectAuthByKind() error = %v", errSelect)
-				}
-				if selected == nil || selected.ID != tt.wantAuthID {
-					t.Fatalf("SelectAuthByKind() auth = %#v, want %s", selected, tt.wantAuthID)
-				}
-			}
-			if len(dispatcher.counts) != 2 || dispatcher.counts[0] != 1 || dispatcher.counts[1] != 2 {
-				t.Fatalf("home auth counts = %v, want [1 2]", dispatcher.counts)
+			var authErr *Error
+			if !errors.As(errSelect, &authErr) || authErr.Code != "home_unavailable" || authErr.HTTPStatus != http.StatusServiceUnavailable {
+				t.Fatalf("%s() error = %#v, want home_unavailable", name, errSelect)
 			}
 		})
+	}
+	if len(dispatcher.counts) != 0 {
+		t.Fatalf("legacy selection issued Home RPOP calls: %v", dispatcher.counts)
+	}
+}
+
+func TestSelectHomeAuthByKindReturnsHomeSelection(t *testing.T) {
+	dispatcher := &authKindHomeDispatcher{auths: []Auth{{
+		ID:       "home-oauth",
+		Provider: "test",
+		Metadata: map[string]any{"access_token": "test-token"},
+	}}}
+	oldCurrentHomeDispatcher := currentHomeDispatcher
+	currentHomeDispatcher = func() homeAuthDispatcher {
+		return dispatcher
+	}
+	t.Cleanup(func() {
+		currentHomeDispatcher = oldCurrentHomeDispatcher
+	})
+
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.SetHomeExecutionRegistry(executionregistry.New())
+	manager.RegisterExecutor(schedulerTestExecutor{})
+
+	selection, errSelect := manager.SelectHomeAuthByKind(context.Background(), "test", "gpt-5.4", AuthKindOAuth, cliproxyexecutor.Options{})
+	if errSelect != nil {
+		t.Fatalf("SelectHomeAuthByKind() error = %v", errSelect)
+	}
+	if selection == nil || selection.Auth == nil || selection.Auth.ID != "home-oauth" {
+		t.Fatalf("SelectHomeAuthByKind() = %#v, want home-oauth", selection)
+	}
+	if selection.Executor == nil || selection.Provider != "test" {
+		t.Fatalf("selection executor/provider = %#v/%q, want test", selection.Executor, selection.Provider)
+	}
+	selection.End("test_complete")
+}
+
+func TestSelectHomeAuthByKindSkipsProviderMismatch(t *testing.T) {
+	dispatcher := &authKindHomeDispatcher{auths: []Auth{
+		{ID: "wrong-provider", Provider: "other", Metadata: map[string]any{"access_token": "test-token"}},
+		{ID: "matching-provider", Provider: "test", Metadata: map[string]any{"access_token": "test-token"}},
+	}}
+	oldCurrentHomeDispatcher := currentHomeDispatcher
+	currentHomeDispatcher = func() homeAuthDispatcher {
+		return dispatcher
+	}
+	t.Cleanup(func() {
+		currentHomeDispatcher = oldCurrentHomeDispatcher
+	})
+
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.SetHomeExecutionRegistry(executionregistry.New())
+	manager.RegisterExecutor(schedulerTestExecutor{})
+	manager.RegisterExecutor(schedulerTestExecutor{provider: "other"})
+
+	selection, errSelect := manager.SelectHomeAuthByKind(context.Background(), "test", "gpt-5.4", AuthKindOAuth, cliproxyexecutor.Options{})
+	if errSelect != nil {
+		t.Fatalf("SelectHomeAuthByKind() error = %v", errSelect)
+	}
+	if selection == nil || selection.Auth == nil || selection.Auth.ID != "matching-provider" {
+		t.Fatalf("SelectHomeAuthByKind() = %#v, want matching provider auth", selection)
+	}
+	if got := dispatcher.counts; len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Fatalf("home auth counts = %v, want [1 2]", got)
+	}
+	selection.End("test_complete")
+}
+
+func TestSelectHomeAuthByKindKeepsLogicalProviderWhenUsingCompatibilityExecutor(t *testing.T) {
+	dispatcher := &authKindHomeDispatcher{auths: []Auth{{
+		ID:       "compat-auth",
+		Provider: "base-url-provider",
+		Attributes: map[string]string{
+			"base_url":      "https://compat.example.com",
+			AttributeAPIKey: "test-key",
+		},
+	}}}
+	oldCurrentHomeDispatcher := currentHomeDispatcher
+	currentHomeDispatcher = func() homeAuthDispatcher {
+		return dispatcher
+	}
+	t.Cleanup(func() {
+		currentHomeDispatcher = oldCurrentHomeDispatcher
+	})
+
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.SetHomeExecutionRegistry(executionregistry.New())
+	manager.RegisterExecutor(schedulerTestExecutor{provider: "openai-compatibility"})
+
+	selection, errSelect := manager.SelectHomeAuthByKind(context.Background(), "base-url-provider", "gpt-5.4", AuthKindAPIKey, cliproxyexecutor.Options{})
+	if errSelect != nil {
+		t.Fatalf("SelectHomeAuthByKind() error = %v", errSelect)
+	}
+	if selection == nil || selection.Auth == nil || selection.Auth.ID != "compat-auth" {
+		t.Fatalf("SelectHomeAuthByKind() = %#v, want compat-auth", selection)
+	}
+	if selection.Provider != "base-url-provider" {
+		t.Fatalf("selection.Provider = %q, want logical provider base-url-provider", selection.Provider)
+	}
+	if selection.Executor == nil || selection.Executor.Identifier() != "openai-compatibility" {
+		t.Fatalf("selection.Executor = %#v, want openai-compatibility", selection.Executor)
+	}
+	selection.End("test_complete")
+}
+
+func TestPickNextViaHomeEndsPendingOnInvalidAuth(t *testing.T) {
+	dispatcher := &authKindHomeDispatcher{auths: []Auth{{Provider: "test"}}}
+	oldCurrentHomeDispatcher := currentHomeDispatcher
+	currentHomeDispatcher = func() homeAuthDispatcher {
+		return dispatcher
+	}
+	t.Cleanup(func() {
+		currentHomeDispatcher = oldCurrentHomeDispatcher
+	})
+
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	registry := executionregistry.New()
+	manager.SetHomeExecutionRegistry(registry)
+	manager.RegisterExecutor(schedulerTestExecutor{})
+
+	_, _, _, errPick := manager.pickNextViaHome(context.Background(), "gpt-5.4", cliproxyexecutor.Options{}, nil)
+	var authErr *Error
+	if !errors.As(errPick, &authErr) || authErr.Code != "invalid_auth" {
+		t.Fatalf("pickNextViaHome() error = %v, want invalid_auth", errPick)
+	}
+
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), time.Second)
+	defer cancelDrain()
+	if errDrain := registry.Drain(drainCtx); errDrain != nil {
+		t.Fatalf("Drain() error = %v, pending dispatch was not ended", errDrain)
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 )
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
@@ -403,13 +404,13 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 
 // Pick selects an auth with session affinity when possible.
 // Priority for session ID extraction:
-//  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority
-//  2. X-Session-ID header
-//  3. Session_id header (Codex)
-//  4. X-Client-Request-Id header (PI)
-//  5. metadata.user_id (non-Claude Code format)
-//  6. conversation_id field in request body
-//  7. Stable hash from first few messages content (fallback)
+//  1. metadata.user_id containing a Claude Code session
+//  2. Explicit session headers
+//  3. X-Client-Request-Id header
+//  4. Explicit request-body session and user fields
+//  5. Explicit execution session metadata
+//  6. Stable context-derived session identity
+//  7. Legacy message hash fallback
 //
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
@@ -504,13 +505,13 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 
 // ExtractSessionID extracts session identifier from multiple sources.
 // Priority order:
-//  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority for Claude Code clients
-//  2. X-Session-ID header
-//  3. Session_id header (Codex)
-//  4. X-Client-Request-Id header (PI)
-//  5. metadata.user_id (non-Claude Code format)
-//  6. conversation_id field in request body
-//  7. Stable hash from first few messages content (fallback)
+//  1. metadata.user_id containing a Claude Code session
+//  2. Explicit session headers
+//  3. X-Client-Request-Id header
+//  4. Explicit request-body session and user fields
+//  5. Explicit execution session metadata
+//  6. Stable context-derived session identity
+//  7. Legacy message hash fallback
 func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
 	primary, _ := extractSessionIDs(headers, payload, metadata)
 	return primary
@@ -540,46 +541,73 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 	}
 
 	// 2. X-Session-ID header
-	if headers != nil {
-		if sid := headers.Get("X-Session-ID"); sid != "" {
-			return "header:" + sid, ""
-		}
+	if sessionID := sessionHeaderValue(headers, "X-Session-ID"); sessionID != "" {
+		return "header:" + sessionID, ""
 	}
 
 	// 3. Session_id header (Codex)
-	if headers != nil {
-		if sid := headers.Get("Session-Id"); sid != "" {
-			return "codex:" + sid, ""
-		}
-		if sid := headers.Get("Session_id"); sid != "" {
-			return "codex:" + sid, ""
-		}
+	if sessionID := sessionHeaderValue(headers, "Session-Id"); sessionID != "" {
+		return "codex:" + sessionID, ""
+	}
+	if sessionID := sessionHeaderValue(headers, "Session_id"); sessionID != "" {
+		return "codex:" + sessionID, ""
 	}
 
 	// 4. X-Client-Request-Id header (PI)
-	if headers != nil {
-		if rid := headers.Get("X-Client-Request-Id"); rid != "" {
-			return "clientreq:" + rid, ""
+	if requestID := sessionHeaderValue(headers, "X-Client-Request-Id"); requestID != "" {
+		return "clientreq:" + requestID, ""
+	}
+
+	if len(payload) > 0 {
+		// 5. Explicit request-body session fields.
+		for _, path := range []string{"session_id", "sessionId"} {
+			if sessionID := strings.TrimSpace(gjson.GetBytes(payload, path).String()); sessionID != "" {
+				return "session:" + sessionID, ""
+			}
 		}
+		if userID := strings.TrimSpace(gjson.GetBytes(payload, "metadata.user_id").String()); userID != "" {
+			return "user:" + userID, ""
+		}
+		if conversationID := strings.TrimSpace(gjson.GetBytes(payload, "conversation_id").String()); conversationID != "" {
+			return "conv:" + conversationID, ""
+		}
+		if promptCacheKey := strings.TrimSpace(gjson.GetBytes(payload, "prompt_cache_key").String()); promptCacheKey != "" {
+			return "prompt:" + promptCacheKey, ""
+		}
+	}
+
+	// 6. Explicit long-lived execution session.
+	if executionID, ok := metadata[cliproxyexecutor.ExecutionSessionMetadataKey].(string); ok {
+		if executionID = strings.TrimSpace(executionID); executionID != "" {
+			return "execution:" + executionID, ""
+		}
+	}
+
+	// 7. Stable context-derived session identity.
+	if derivedID := cliproxysession.DerivedID(metadata); derivedID != "" {
+		return "derived:" + derivedID, ""
 	}
 
 	if len(payload) == 0 {
 		return "", ""
 	}
 
-	// 6. metadata.user_id (non-Claude Code format)
-	userID := gjson.GetBytes(payload, "metadata.user_id").String()
-	if userID != "" {
-		return "user:" + userID, ""
-	}
-
-	// 7. conversation_id field
-	if convID := gjson.GetBytes(payload, "conversation_id").String(); convID != "" {
-		return "conv:" + convID, ""
-	}
-
-	// 8. Hash-based fallback from message content
+	// 8. Legacy hash-based fallback from message content.
 	return extractMessageHashIDs(payload)
+}
+
+func sessionHeaderValue(headers http.Header, name string) string {
+	for key, values := range headers {
+		if !strings.EqualFold(key, name) {
+			continue
+		}
+		for _, value := range values {
+			if value = strings.TrimSpace(value); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
 }
 
 func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {

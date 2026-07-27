@@ -22,6 +22,7 @@ import (
 const (
 	defaultConfigTable                   = "config_store"
 	defaultAuthTable                     = "auth_store"
+	defaultCooldownTable                 = "cooldown_store"
 	defaultConfigKey                     = "config"
 	defaultAPIKeysTable                  = "api_keys"
 	defaultPoliciesTable                 = "api_key_policies"
@@ -52,6 +53,9 @@ type PostgresStoreConfig struct {
 	ConfigTable string
 	AuthTable   string
 	SpoolDir    string
+	// CooldownTable persists runtime cooldown state (auth_id,model pairs)
+	// independently from auth tokens, so cooldowns survive process restarts.
+	CooldownTable string
 
 	// APIKeysTable is the table that stores client-facing API keys with per-key policy.
 	APIKeysTable string
@@ -150,6 +154,7 @@ type PostgresStore struct {
 	configPath        string
 	authDir           string
 	pricingSourcesDir string
+	cooldownStore     *postgresCooldownStateStore
 	mu                sync.Mutex
 }
 
@@ -165,6 +170,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.AuthTable == "" {
 		cfg.AuthTable = defaultAuthTable
+	}
+	if cfg.CooldownTable == "" {
+		cfg.CooldownTable = defaultCooldownTable
 	}
 	if cfg.APIKeysTable == "" {
 		cfg.APIKeysTable = defaultAPIKeysTable
@@ -276,6 +284,7 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 		authDir:           authDir,
 		pricingSourcesDir: pricingSourcesDir,
 	}
+	store.cooldownStore = &postgresCooldownStateStore{store: store}
 	return store, nil
 }
 
@@ -319,6 +328,21 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		)
 	`, authTable)); err != nil {
 		return fmt.Errorf("postgres store: create auth table: %w", err)
+	}
+
+	cooldownTable := s.fullTableName(s.cfg.CooldownTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			auth_id TEXT NOT NULL,
+			model TEXT NOT NULL DEFAULT '',
+			content JSONB NOT NULL,
+			deleted BOOLEAN NOT NULL DEFAULT FALSE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (auth_id, model)
+		)
+	`, cooldownTable)); err != nil {
+		return fmt.Errorf("postgres store: create cooldown table: %w", err)
 	}
 
 	if err := s.ensurePolicySchema(ctx); err != nil {
