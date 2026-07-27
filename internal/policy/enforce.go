@@ -46,6 +46,7 @@ type service struct {
 	apiKeys *store.APIKeyStore
 	usage   *store.UsageStore
 	users   *store.UserStore
+	groups  *store.ModelGroupStore
 	cfg     ServiceConfig
 
 	mu    sync.RWMutex
@@ -95,6 +96,22 @@ func (s *service) SetUserStore(users *store.UserStore) {
 	}
 	s.mu.Lock()
 	s.users = users
+	s.mu.Unlock()
+}
+
+// SetModelGroupStore wires the reusable Model Group store. When attached, a
+// model_groups row referenced by an API-key policy (via model_group_id) or an
+// internal user becomes the source of truth for allowed/blocked lists (and,
+// for API-key policies, routes) — see resolveGroupOnSnapshot. When left unset
+// (nil), the group-override path is skipped and entities use their own
+// allowed/blocked/routes fields as before. Failures are non-fatal (logged,
+// fail-open with the entity's own fields), mirroring the InternalUser lookup.
+func (s *service) SetModelGroupStore(groups *store.ModelGroupStore) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.groups = groups
 	s.mu.Unlock()
 }
 
@@ -507,14 +524,37 @@ func (s *service) snapshot(ctx context.Context, principal string) (APIKeySnapsho
 	// runs. Lookups are cached alongside the snapshot so the per-request hot
 	// path pays at most one extra DB round-trip every CacheTTL.
 	s.mu.RLock()
-	users := s.users
+	groups := s.groups
 	s.mu.RUnlock()
-	if users != nil && key.UserID != "" && snap.APIKey.UserID != "" {
+	if s.users != nil && key.UserID != "" && snap.APIKey.UserID != "" {
+		// s.users is read here, not above, to keep the lock window tight.
+		s.mu.RLock()
+		users := s.users
+		s.mu.RUnlock()
 		if u, errLookup := users.Get(ctx, key.UserID); errLookup == nil {
 			snap.InternalUser = &u
 		} else if !errors.Is(errLookup, store.ErrInternalUserNotFound) {
 			log.WithError(errLookup).WithField("user_id", key.UserID).
 				Debug("policy: lookup internal user failed; skipping per-user enforcement")
+		}
+	}
+	// When the API-key policy is attached to a model group, the group's
+	// AllowedModels / BlockedModels / ModelRoutes OVERRIDE the policy's own
+	// fields. Per-user group attachment is intentionally NOT supported — model
+	// groups apply only to API-key policies.
+	if snap.Policy != nil && snap.Policy.ModelGroupID != nil && *snap.Policy.ModelGroupID != "" && groups != nil {
+		if g, errGroup := groups.Get(ctx, *snap.Policy.ModelGroupID); errGroup == nil {
+			// Copy so the cached snapshot's mutations do not leak into the
+			// store-backed Policy (defensive — store.Policy is a value, but
+			// the slice fields alias the json-decoded buffers).
+			pCopy := *snap.Policy
+			pCopy.AllowedModels = g.AllowedModels
+			pCopy.BlockedModels = g.BlockedModels
+			pCopy.ModelRoutes = g.ModelRoutes
+			snap.Policy = &pCopy
+		} else if !errors.Is(errGroup, store.ErrModelGroupNotFound) {
+			log.WithError(errGroup).WithField("model_group_id", *snap.Policy.ModelGroupID).
+				Debug("policy: lookup model group for api-key policy failed; using entity fields")
 		}
 	}
 	s.mu.Lock()

@@ -631,6 +631,7 @@ func main() {
 		pgUserStore   *store.UserStore
 		pgMgmtTokens  *store.ManagementTokenStore
 		pgSyncAdapter *registry.PGSync
+		pgModelGroups *store.ModelGroupStore
 		policySvc     policy.PolicyService
 		usageFlusher  *store.UsageFlusher
 	)
@@ -640,12 +641,20 @@ func main() {
 		pgModelsStore = store.NewModelsStore(pgStoreInst)
 		pgUserStore = store.NewUserStore(pgStoreInst)
 		pgMgmtTokens = store.NewManagementTokenStore(pgStoreInst)
+		pgModelGroups = store.NewModelGroupStore(pgStoreInst)
 		pgSyncAdapter = registry.NewPGSync(store.NewPGModelsAdapter(pgModelsStore))
 		policySvc = policy.NewService(pgAPIKeyStore, pgUsageStore, policy.ServiceConfig{})
 		// Attach the user store so per-user budget/RPM enforcement is
 		// active. When left unset, only per-key enforcement runs.
 		if svc, ok := policySvc.(interface{ SetUserStore(*store.UserStore) }); ok {
 			svc.SetUserStore(pgUserStore)
+		}
+		// Attach the model-group store so attached groups resolve into the
+		// per-key snapshot (override allowed/blocked/routes) and into the
+		// per-user snapshot (override Models only — routes are ignored for
+		// users). When left unset, the group-override path is skipped.
+		if svc, ok := policySvc.(interface{ SetModelGroupStore(*store.ModelGroupStore) }); ok {
+			svc.SetModelGroupStore(pgModelGroups)
 		}
 		// Start the policy service background goroutine (sliding-window
 		// cleanup). The goroutine exits when the context is canceled or
@@ -725,6 +734,7 @@ func main() {
 			PricingSourcesDir: pgPricingSourcesDir,
 			ManagementTokens:  pgMgmtTokens,
 			UpstreamProviders: pgUpstreamProviders,
+			ModelGroups:       pgModelGroups,
 		}))
 	}
 

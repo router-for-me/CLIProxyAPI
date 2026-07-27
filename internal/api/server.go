@@ -124,6 +124,10 @@ type PgStoreHandles struct {
 	// OAuth/file-backed auths). nil when PG is not configured — the
 	// /upstream-providers routes return 503 in that case.
 	UpstreamProviders store.UpstreamProviderStore
+	// ModelGroups is the PG-backed store for reusable Model Group templates
+	// (allowed-models grant lists + per-model upstream routing). nil when PG
+	// is not configured — the /model-groups routes return 503 in that case.
+	ModelGroups *store.ModelGroupStore
 }
 
 // ServerOption customises HTTP server construction.
@@ -436,6 +440,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.mgmt.SetUserStore(handles.Users)
 		s.mgmt.SetManagementTokenStore(handles.ManagementTokens)
 		s.mgmt.SetUpstreamProvidersStore(handles.UpstreamProviders)
+		s.mgmt.SetModelGroupStore(handles.ModelGroups)
 		// Surface persisted official_provider values in auth-selection errors.
 		s.handlers.SetModelsCatalogStore(store.NewModelsCatalogResolver(handles.Models))
 	}
@@ -1080,6 +1085,19 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/upstream-providers/:id", s.mgmt.GetUpstreamProvider)
 		mgmt.PUT("/upstream-providers/:id", s.mgmt.UpdateUpstreamProvider)
 		mgmt.DELETE("/upstream-providers/:id", s.mgmt.DeleteUpstreamProvider)
+
+		// Reusable Model Group templates (allowed-models grant lists +
+		// per-model upstream routing) attachable to API-key policies and
+		// internal users. Return 503 when the PG store is not configured.
+		// When attached, the group becomes the source of truth for the
+		// entity's allowed/blocked lists (and, for API-key policies, routes).
+		mgmt.GET("/model-groups", s.mgmt.ListModelGroups)
+		mgmt.POST("/model-groups", s.mgmt.CreateModelGroup)
+		mgmt.GET("/model-groups/:id", s.mgmt.GetModelGroup)
+		mgmt.PUT("/model-groups/:id", s.mgmt.UpdateModelGroup)
+		mgmt.DELETE("/model-groups/:id", s.mgmt.DeleteModelGroup)
+		mgmt.POST("/model-groups/:id/attach", s.mgmt.AttachModelGroup)
+		mgmt.POST("/model-groups/:id/detach", s.mgmt.DetachModelGroup)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)

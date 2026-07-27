@@ -88,6 +88,12 @@ type Handler struct {
 	// /upstream-providers routes return 503 in that case.
 	pgUpstreamProviders store.UpstreamProviderStore
 
+	// pgModelGroups stores reusable Model Group templates (allowed-models
+	// grant lists + per-model upstream routing) attachable to API-key policies
+	// and internal users. nil when PG is not configured — the /model-groups
+	// routes return 503 in that case.
+	pgModelGroups *store.ModelGroupStore
+
 	// v1ModelsHandler is the http.Handler that serves GET /v1/models. It is
 	// wired by api.Server after route setup so the management handler can
 	// trigger an in-process sync into models_catalog without a network
@@ -263,6 +269,20 @@ func (h *Handler) SetUpstreamProvidersStore(upstream store.UpstreamProviderStore
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pgUpstreamProviders = upstream
+}
+
+// SetModelGroupStore wires the PG-backed store for reusable Model Group
+// templates (allowed-models grant lists + per-model upstream routing). When
+// nil, the /v0/management/model-groups routes return 503. The policy service
+// must be wired separately (see policy.Service.SetModelGroupStore) so the
+// enforcement path can resolve attached groups into API-key snapshots.
+func (h *Handler) SetModelGroupStore(groups *store.ModelGroupStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pgModelGroups = groups
 }
 
 // SetErrorMessagesStore wires the PG-backed store for operator-customized

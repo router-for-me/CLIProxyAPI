@@ -210,6 +210,22 @@ func (h *Handler) CreatePGAPIKey(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
 	}
+	// When a model_group_id is supplied on create (carried inside
+	// req.Policy.ModelGroupID), validate existence so the caller cannot
+	// persist a dangling id at key-creation time. The dedicated
+	// /model-groups/:id/attach endpoint is the canonical attach path; this
+	// check keeps POST /api-keys-pg honest when the dashboard sends both
+	// fields at once.
+	if req.Policy != nil && req.Policy.ModelGroupID != nil && strings.TrimSpace(*req.Policy.ModelGroupID) != "" {
+		groups, groupOK := h.requireModelGroups(c)
+		if !groupOK {
+			return
+		}
+		if _, err := groups.Get(c.Request.Context(), *req.Policy.ModelGroupID); err != nil {
+			h.translateModelGroupError(c, err)
+			return
+		}
+	}
 	key, secret, err := apiKeys.Create(c.Request.Context(), req.Name, req.Alias, req.Secret, req.ExpiresAt, req.Metadata, req.Policy)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
@@ -273,7 +289,8 @@ func (h *Handler) GetPGAPIKey(c *gin.Context) {
 }
 
 // pgPatchKeyRequest supports partial updates on a key (status, metadata,
-// name, expiry, alias). Pointer-typed fields are applied only when non-nil.
+// name, expiry, alias, and model_group_id). Pointer-typed fields are applied
+// only when non-nil.
 type pgPatchKeyRequest struct {
 	Status      *string         `json:"status,omitempty"`
 	Metadata    *map[string]any `json:"metadata,omitempty"`
@@ -281,6 +298,13 @@ type pgPatchKeyRequest struct {
 	Alias       *string         `json:"alias,omitempty"`
 	ExpiresAt   *time.Time      `json:"expires_at,omitempty"` // nil clears the expiry
 	ClearExpiry *bool           `json:"clear_expiry,omitempty"`
+	// ModelGroupID attaches (non-empty) or detaches (empty) the key's policy
+	// to a model group in a single PATCH call. When attached, the group's
+	// allowed/blocked lists and per-model routes OVERRIDE the policy's own
+	// fields at enforcement time (group = source of truth). Existence is
+	// validated against the model_groups table. Detaching (empty string)
+	// clears the policy's model_group_id so its own fields apply again.
+	ModelGroupID *string `json:"model_group_id,omitempty"`
 }
 
 // PatchPGAPIKey handles PATCH /v0/management/api-keys-pg/:id.
@@ -331,6 +355,46 @@ func (h *Handler) PatchPGAPIKey(c *gin.Context) {
 			return
 		}
 	}
+	// model_group_id attachment via PATCH. Attach (non-empty) validates the
+	// group exists; detach (empty) clears the policy's model_group_id. When
+	// the key has no policy row yet, attaching materializes an empty policy
+	// carrying only the model_group_id (the group then becomes the source of
+	// truth for allowed/blocked/routes at enforcement time). Detaching a
+	// policy-less key is a no-op (still 200).
+	if req.ModelGroupID != nil {
+		groups, groupOK := h.requireModelGroups(c)
+		if !groupOK {
+			return
+		}
+		gid := strings.TrimSpace(*req.ModelGroupID)
+		if gid != "" {
+			if _, err := groups.Get(ctx, gid); err != nil {
+				h.translateModelGroupError(c, err)
+				return
+			}
+		}
+		_, existingPolicy, errLookup := apiKeys.LookupByID(ctx, id)
+		if errLookup != nil {
+			h.translateKeyError(c, errLookup)
+			return
+		}
+		if existingPolicy == nil {
+			// No policy row yet. Only attach when a group id was supplied;
+			// detaching a policy-less key is a no-op (idempotent).
+			if gid == "" {
+				// Nothing to clear.
+			} else {
+				empty := store.Policy{APIKeyID: id, ModelGroupID: &gid}
+				if err := apiKeys.UpdatePolicy(ctx, id, empty); err != nil {
+					h.translateKeyError(c, err)
+					return
+				}
+			}
+		} else if err := groups.SetAttachment(ctx, id, gid); err != nil {
+			h.translateModelGroupError(c, err)
+			return
+		}
+	}
 	// Any change to the key invalidates the cached snapshot. We pass an
 	// empty principal here because the patch did not change the secret —
 	// but InvalidateAll() is the safe option when principal is unknown.
@@ -350,11 +414,19 @@ func (h *Handler) PatchPGAPIKey(c *gin.Context) {
 // models, and has at least one provider. Returns a non-empty human-readable
 // error message when validation fails, or "" when the routes are valid.
 func validateModelRoutes(p store.Policy) string {
-	if len(p.ModelRoutes) == 0 {
+	return validateModelRoutesFor(p.AllowedModels, p.ModelRoutes)
+}
+
+// validateModelRoutesFor is the parameterized form used by model-groups CRUD
+// (where there is no Policy carrier) and by PUT /policy when a model_group_id
+// is attached (the group fills model_routes at enforcement time, so the policy
+// payload may legitimately carry no routes of its own).
+func validateModelRoutesFor(allowedModels []string, routes []store.ModelRoute) string {
+	if len(routes) == 0 {
 		return ""
 	}
-	seen := make(map[string]struct{}, len(p.ModelRoutes))
-	for _, r := range p.ModelRoutes {
+	seen := make(map[string]struct{}, len(routes))
+	for _, r := range routes {
 		model := strings.TrimSpace(r.Model)
 		if model == "" {
 			return "model_routes: entry with empty model is not allowed"
@@ -367,7 +439,7 @@ func validateModelRoutes(p store.Policy) string {
 			return fmt.Sprintf("model_routes: duplicate route for model %q", model)
 		}
 		seen[key] = struct{}{}
-		if !policy.ModelCoveredByAllowed(p.AllowedModels, model) {
+		if !policy.ModelCoveredByAllowed(allowedModels, model) {
 			return fmt.Sprintf("model_routes: model %q is not in allowed_models", model)
 		}
 	}
@@ -386,9 +458,29 @@ func (h *Handler) PutPGAPIKeyPolicy(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": err.Error()}})
 		return
 	}
-	if msg := validateModelRoutes(p); msg != "" {
+	// When a model_group_id is attached, the group becomes the source of
+	// truth for allowed_models / blocked_models / model_routes at enforcement
+	// time (see policy.enforce.go). The per-entity routes are then redundant —
+	// validate them only when the policy carries explicit routes; an empty
+	// routes list with a group attached is legitimate (the dashboard clears
+	// the entity routes when switching to group mode).
+	if msg := validateModelRoutesFor(p.AllowedModels, p.ModelRoutes); msg != "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": msg}})
 		return
+	}
+	// When attaching a group, validate existence so callers cannot persist a
+	// dangling model_group_id via the policy endpoint. The dedicated
+	// /model-groups/:id/attach endpoint is the canonical path; this check
+	// keeps PUT /policy honest when the dashboard sends both fields at once.
+	if p.ModelGroupID != nil && *p.ModelGroupID != "" {
+		groups, groupOK := h.requireModelGroups(c)
+		if !groupOK {
+			return
+		}
+		if _, err := groups.Get(c.Request.Context(), *p.ModelGroupID); err != nil {
+			h.translateModelGroupError(c, err)
+			return
+		}
 	}
 	if err := apiKeys.UpdatePolicy(c.Request.Context(), id, p); err != nil {
 		h.translateKeyError(c, err)
