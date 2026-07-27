@@ -450,6 +450,22 @@ function PolicyCard({ apiKeyId, policy: initial, onUpdated }) {
           )}
         </>
       )}
+      {initial.allowed_ips && initial.allowed_ips.length > 0 && (
+        <div className="form__row">
+          <div className="form__label">Allowed IPs / CIDRs</div>
+          <ul className="list-bare">
+            {initial.allowed_ips.map((m) => <li key={m} className="mono">{m}</li>)}
+          </ul>
+        </div>
+      )}
+      {initial.blocked_ips && initial.blocked_ips.length > 0 && (
+        <div className="form__row">
+          <div className="form__label">Blocked IPs / CIDRs</div>
+          <ul className="list-bare">
+            {initial.blocked_ips.map((m) => <li key={m} className="mono">{m}</li>)}
+          </ul>
+        </div>
+      )}
       <div className="form__actions">
         <button onClick={() => setEditing(true)}>Edit Policy</button>
       </div>

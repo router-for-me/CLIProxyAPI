@@ -30,6 +30,8 @@ const EMPTY_POLICY = {
   blocked_models: [],
   model_routes: [],
   model_group_id: '',
+  allowed_ips: [],
+  blocked_ips: [],
 };
 
 export function policyToForm(policy) {
@@ -47,6 +49,8 @@ export function policyToForm(policy) {
       ? policy.model_routes.map((r) => ({ model: r.model || '', providers: Array.isArray(r.providers) ? [...r.providers] : [] }))
       : [],
     model_group_id: policy.model_group_id ?? '',
+    allowed_ips: Array.isArray(policy.allowed_ips) ? [...policy.allowed_ips] : [],
+    blocked_ips: Array.isArray(policy.blocked_ips) ? [...policy.blocked_ips] : [],
   };
 }
 
@@ -71,6 +75,8 @@ export function formToPolicy(form, apiKeyId) {
       : (Array.isArray(form.model_routes) ? form.model_routes : [])
           .filter((r) => r && r.model && !r.model.endsWith('*') && form.allowed_models.includes(r.model) && Array.isArray(r.providers) && r.providers.length > 0)
           .map((r) => ({ model: r.model, providers: dedupe(r.providers) })),
+    allowed_ips: dedupe(listFromField(form.allowed_ips)),
+    blocked_ips: dedupe(listFromField(form.blocked_ips)),
   };
   return policy;
 }
@@ -244,6 +250,28 @@ export default function PolicyForm({ initial, onChange }) {
           />
         </>
       )}
+      <div className="form__row">
+        <label className="form__label" htmlFor="allowed-ips">Allowed IPs / CIDRs (one per line)</label>
+        <textarea id="allowed-ips" rows={3}
+          value={Array.isArray(form.allowed_ips) ? form.allowed_ips.join('\n') : ''}
+          onChange={(e) => update({ allowed_ips: e.target.value.split('\n') })}
+          placeholder={'10.0.0.5\n10.0.0.0/8\n2001:db8::/32'} />
+        <div className="form__hint">
+          Single IPs (<code>10.0.0.5</code>) or CIDR ranges (<code>10.0.0.0/8</code>,
+          <code>2001:db8::/32</code>). Empty = all IPs allowed (subject to the block list).
+        </div>
+      </div>
+      <div className="form__row">
+        <label className="form__label" htmlFor="blocked-ips">Blocked IPs / CIDRs (one per line)</label>
+        <textarea id="blocked-ips" rows={3}
+          value={Array.isArray(form.blocked_ips) ? form.blocked_ips.join('\n') : ''}
+          onChange={(e) => update({ blocked_ips: e.target.value.split('\n') })}
+          placeholder={'203.0.113.0/24'} />
+        <div className="form__hint">
+          Blocked entries take precedence over the allow list — a match denies
+          the request even if the IP is also allowlisted.
+        </div>
+      </div>
     </div>
   );
 }

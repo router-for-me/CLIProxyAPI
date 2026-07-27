@@ -148,6 +148,7 @@ function IntroCard() {
           <li><strong>Partial updates:</strong> PATCH bodies use pointer-typed fields; omit a field to leave it unchanged, pass an explicit empty value to clear it.</li>
           <li><strong>Plaintext secrets:</strong> Management tokens and API keys return their plaintext secret <strong>once</strong> at create/regenerate time. Only the SHA-256 hash is persisted.</li>
           <li><strong>Masking:</strong> The <code>key_hash</code> field is never serialized (<code>json:"-"</code>); only <code>key_prefix</code> is exposed for display.</li>
+          <li><strong>IP allowlist/blocklist:</strong> Every API-key policy accepts <code>allowed_ips</code> / <code>blocked_ips</code> — string arrays of single IPs (<code>10.0.0.5</code>) or CIDR ranges (<code>10.0.0.0/8</code>, <code>2001:db8::/32</code>), IPv4 and IPv6. <code>blocked_ips</code> deny-first takes precedence over <code>allowed_ips</code>; an empty allowlist means all IPs allowed (subject to the block list). Patterns are validated at write time (malformed entries return 400). At runtime a denied IP produces <code>403</code> with a message naming the matched pattern. Source IP is resolved via Gin's <code>c.ClientIP()</code> (honors trusted-proxy <code>X-Forwarded-For</code> / <code>X-Real-IP</code> when configured).</li>
         </ul>
       </div>
     </section>
