@@ -112,6 +112,7 @@ const NAV_GROUPS = [
     items: [
       { to: '/', label: 'API Keys', icon: 'key', end: true },
       { to: '/internal-users', label: 'Internal Users', icon: 'users' },
+      { to: '/model-groups', label: 'Model Groups', icon: 'layers' },
       { to: '/models', label: 'Models Catalog', icon: 'cube' },
       { to: '/error-messages', label: 'Error Messages', icon: 'alert' },
       { to: '/api-tokens', label: 'API Management', icon: 'shield' },

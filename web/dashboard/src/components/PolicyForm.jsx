@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import ModelMultiSelect from './ModelMultiSelect.jsx';
-import { getModelProviders, listUpstreamProviders } from '../api/client.js';
+import ModelRoutesEditor from './ModelRoutesEditor.jsx';
+import { listModelGroups, getModelGroup } from '../api/client.js';
 
 // PolicyForm — reusable form for editing a Policy object.
 //
@@ -12,10 +14,11 @@ import { getModelProviders, listUpstreamProviders } from '../api/client.js';
 // via onChange. Submit is delegated to the parent — this keeps worries about
 // API calls (POST vs PUT) out of the form itself.
 //
-// Model allow/blacklist fields are arrays of strings (model IDs or wildcard
-// tokens like `gpt-4*`). The ModelMultiSelect component loads the available
-// models from /v0/management/models-catalog and lets the operator pick or
-// type custom tokens.
+// Model access source: when model_group_id is set, the group becomes the
+// source of truth (the entity's own allowed/blocked/routes are ignored at
+// enforcement time). The form hides those fields and shows a read-only
+// summary of the attached group instead. Operators can still edit the group
+// itself on /model-groups/:id.
 const EMPTY_POLICY = {
   rpm_limit: '',
   hourly_rate_limit: '',
@@ -26,6 +29,7 @@ const EMPTY_POLICY = {
   allowed_models: [],
   blocked_models: [],
   model_routes: [],
+  model_group_id: '',
 };
 
 export function policyToForm(policy) {
@@ -42,6 +46,7 @@ export function policyToForm(policy) {
     model_routes: Array.isArray(policy.model_routes)
       ? policy.model_routes.map((r) => ({ model: r.model || '', providers: Array.isArray(r.providers) ? [...r.providers] : [] }))
       : [],
+    model_group_id: policy.model_group_id ?? '',
   };
 }
 
@@ -54,14 +59,18 @@ export function formToPolicy(form, apiKeyId) {
     budget_weekly_usd: floatOrNull(form.budget_weekly_usd),
     budget_monthly_usd: floatOrNull(form.budget_monthly_usd),
     max_parallel_requests: numOrNull(form.max_parallel_requests),
-    allowed_models: dedupe(listFromField(form.allowed_models)),
-    blocked_models: dedupe(listFromField(form.blocked_models)),
-    // Only keep routes whose model is still in the allowed list and is a
-    // concrete (non-wildcard) model id. Empty-provider routes are dropped
-    // (they mean "use the registry default" — no need to persist).
-    model_routes: (Array.isArray(form.model_routes) ? form.model_routes : [])
-      .filter((r) => r && r.model && !r.model.endsWith('*') && form.allowed_models.includes(r.model) && Array.isArray(r.providers) && r.providers.length > 0)
-      .map((r) => ({ model: r.model, providers: dedupe(r.providers) })),
+    model_group_id: form.model_group_id || null,
+    // When a group is attached, the group is the source of truth — send empty
+    // entity fields so the persisted policy reflects the dashboard's intent
+    // (the enforcement path overrides these anyway, but keeping them empty
+    // avoids confusion when reading the row directly).
+    allowed_models: form.model_group_id ? [] : dedupe(listFromField(form.allowed_models)),
+    blocked_models: form.model_group_id ? [] : dedupe(listFromField(form.blocked_models)),
+    model_routes: form.model_group_id
+      ? []
+      : (Array.isArray(form.model_routes) ? form.model_routes : [])
+          .filter((r) => r && r.model && !r.model.endsWith('*') && form.allowed_models.includes(r.model) && Array.isArray(r.providers) && r.providers.length > 0)
+          .map((r) => ({ model: r.model, providers: dedupe(r.providers) })),
   };
   return policy;
 }
@@ -85,95 +94,41 @@ function dedupe(arr) {
 
 export default function PolicyForm({ initial, onChange }) {
   const [form, setForm] = useState(() => policyToForm(initial));
-  // Map of model id -> upstream providers that actually serve it (from the
-  // in-memory registry). Fetched lazily per routable allowed model so the
-  // routing editor only shows providers that back each model.
-  const [providersByModel, setProvidersByModel] = useState({});
-  // All known upstream providers' executor keys (provider_key) sourced from
-  // the upstream_providers table. The per-model routing picker uses this so
-  // operators can pin a model to an upstream even when no live auth is
-  // currently registered for it — previously the picker only offered
-  // providers that the in-memory registry reported as "currently serving",
-  // which silently capped the available targets to a handful (typically the
-  // first few live clients) and hid every disabled or mid-refresh
-  // provider. Non-disabled rows only, since disabled providers cannot be
-  // selected at runtime anyway.
-  const [allUpstreamProviderKeys, setAllUpstreamProviderKeys] = useState(null);
 
-  // Per-model routing helpers. Routes only apply to concrete (non-wildcard)
-  // allowed models; an empty provider list means "use the registry default".
-  const routableModels = form.allowed_models.filter((m) => m && !m.endsWith('*'));
+  // Available model groups (for the "Model access source" selector). When a
+  // group is selected, it becomes the source of truth at enforcement time
+  // and the per-entity allowed/blocked/routes fields below are hidden.
+  const [modelGroups, setModelGroups] = useState([]);
+  const [attachedGroup, setAttachedGroup] = useState(null);
 
-  // Fetch the catalog of configured upstream providers once on mount. The
-  // resulting set of provider_key strings is merged with each model's live
-  // providers below so every upstream that could serve the model is offered
-  // for pinning, not just the ones with live auths right now.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await listUpstreamProviders();
-        const rows = Array.isArray(res?.providers) ? res.providers : [];
-        const keys = rows
-          .filter((r) => !r.disabled)
-          .map((r) => (typeof r.provider_key === 'string' ? r.provider_key : ''))
-          .filter((k) => k)
-          .sort((a, b) => a.localeCompare(b));
-        if (!cancelled) setAllUpstreamProviderKeys(keys);
+        const res = await listModelGroups({ page: 1, pageSize: 200 });
+        if (!cancelled) setModelGroups(Array.isArray(res?.groups) ? res.groups : []);
       } catch {
-        if (!cancelled) setAllUpstreamProviderKeys([]);
+        if (!cancelled) setModelGroups([]);
       }
     })();
     return () => { cancelled = true; };
   }, []);
 
-  // Fetch the serving providers for each routable allowed model whenever the
-  // set changes. Results are merged into providersByModel.
+  // Load the name + grant summary of the attached group whenever the id
+  // changes so the read-only summary block can render without a click.
   useEffect(() => {
+    if (!form.model_group_id) { setAttachedGroup(null); return; }
     let cancelled = false;
     (async () => {
-      const next = { ...providersByModel };
-      await Promise.all(
-        routableModels.map(async (model) => {
-          if (next[model]) return; // already loaded
-          try {
-            const res = await getModelProviders(model);
-            next[model] = Array.isArray(res?.providers) ? res.providers : [];
-          } catch {
-            next[model] = [];
-          }
-        }),
-      );
-      if (!cancelled) setProvidersByModel(next);
+      try {
+        const res = await getModelGroup(form.model_group_id);
+        if (!cancelled) setAttachedGroup(res?.group || null);
+      } catch {
+        if (!cancelled) setAttachedGroup(null);
+      }
     })();
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.allowed_models.join('|')]);
-
-  // routeProviderChoices returns the deduped, ordered set of upstream
-  // provider keys the picker should offer for a model: live registry
-  // providers first (sorted by availability), followed by any configured
-  // upstream not already included. This guarantees the picker never shows
-  // fewer targets than the operator has configured, even when an upstream
-  // has not registered a live auth yet (or is temporarily disabled at the
-  // registry level while still enabled in the catalog).
-  function routeProviderChoices(model) {
-    const live = providersByModel[model] || [];
-    const seen = new Set();
-    const out = [];
-    for (const p of live) {
-      const key = String(p || '').trim();
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      out.push(key);
-    }
-    for (const key of allUpstreamProviderKeys || []) {
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      out.push(key);
-    }
-    return out;
-  }
+  }, [form.model_group_id]);
 
   // Keep parent in sync whenever the form changes. We only call onChange with
   // the raw form — the parent decides when to convert via formToPolicy.
@@ -184,27 +139,6 @@ export default function PolicyForm({ initial, onChange }) {
 
   function update(partial) {
     setForm((f) => ({ ...f, ...partial }));
-  }
-
-  function routeProvidersFor(model) {
-    const r = form.model_routes.find((x) => x.model === model);
-    return r && Array.isArray(r.providers) ? r.providers : [];
-  }
-  function toggleRouteProvider(model, provider) {
-    setForm((f) => {
-      const routes = f.model_routes.map((x) => ({ ...x, providers: [...x.providers] }));
-      let entry = routes.find((x) => x.model === model);
-      if (!entry) {
-        entry = { model, providers: [] };
-        routes.push(entry);
-      }
-      const idx = entry.providers.indexOf(provider);
-      if (idx >= 0) entry.providers.splice(idx, 1);
-      else entry.providers.push(provider);
-      // Drop entries that ended up empty so "default" isn't persisted as a
-      // zero-provider route (kept in-form only while it has providers).
-      return { ...f, model_routes: routes.filter((x) => x.providers.length > 0) };
-    });
   }
 
   return (
@@ -242,81 +176,74 @@ export default function PolicyForm({ initial, onChange }) {
             placeholder="unset = unlimited concurrent" />
         </div>
       </div>
-      <ModelMultiSelect
-        label="Allowed models"
-        value={form.allowed_models}
-        onChange={(v) => update({ allowed_models: v })}
-        placeholder="leave empty for all models"
-        hint="Pick from the available catalog or press Enter to add a custom / wildcard token (e.g. gpt-4*). Empty = all models. Per-model upstream routing can be configured below."
-      />
-      {routableModels.length > 0 && (
-        <div className="form__row">
-          <label className="form__label">Per-model routing</label>
-          <div className="muted" style={{ marginBottom: 8 }}>
-            Pin each model to specific upstream providers. Empty = use the default round-robin across all serving providers (no failover outside a pinned single-provider set).
-          </div>
-          <div className="model-routes">
-            {routableModels.map((model) => {
-              const selected = routeProvidersFor(model);
-              const liveLoaded = model in providersByModel;
-              // Choices combine live registry providers with every
-              // configured upstream so the operator can pin to an upstream
-              // that has no live auth yet. Loading state reflects both the
-              // per-model live-probe AND the one-time upstream catalog
-              // fetch; while either is pending we show the spinner instead
-              // of a misleading "no providers" message.
-              const choices = routeProviderChoices(model);
-              const loading =
-                !liveLoaded &&
-                allUpstreamProviderKeys === null;
-              const liveLoadedAndEmpty = liveLoaded && (providersByModel[model] || []).length === 0;
-              const catalogEmpty =
-                allUpstreamProviderKeys !== null && allUpstreamProviderKeys.length === 0;
-              return (
-                <div className="model-routes__row" key={model}>
-                  <div className="model-routes__model mono">{model}</div>
-                  <div className="model-routes__providers">
-                    {loading && <span className="muted">Loading providers…</span>}
-                    {!loading && choices.length === 0 && liveLoadedAndEmpty && catalogEmpty && (
-                      <span className="muted">No live providers serve this model, and no upstream providers are configured.</span>
-                    )}
-                    {!loading && choices.length === 0 && liveLoadedAndEmpty && !catalogEmpty && (
-                      <span className="muted">No live providers serve this model; pin to a configured upstream below.</span>
-                    )}
-                    {choices.map((p) => {
-                      const on = selected.includes(p);
-                      const isLive =
-                        liveLoaded &&
-                        (providersByModel[model] || []).includes(p);
-                      return (
-                        <button
-                          type="button"
-                          key={p}
-                          className={`chip ${on ? 'chip--selected' : ''} mono`}
-                          onClick={() => toggleRouteProvider(model, p)}
-                          title={isLive ? 'Live provider (currently serving this model)' : 'Configured upstream (no live auth right now)'}
-                        >
-                          {p}{isLive ? '' : ' *'}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="muted model-routes__hint">
-                    {selected.length === 0 ? 'default' : selected.join(', ')}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+      <div className="form__row">
+        <label className="form__label">Model access source</label>
+        <div className="seg-group model-access-source" role="tablist" aria-label="Model access source">
+          <button
+            type="button"
+            className={`seg-btn ${!form.model_group_id ? 'seg-btn--active' : ''}`}
+            onClick={() => update({ model_group_id: '' })}
+          >Entity settings</button>
+          <button
+            type="button"
+            className={`seg-btn ${form.model_group_id ? 'seg-btn--active' : ''}`}
+            onClick={() => update({ model_group_id: modelGroups[0]?.id || '' })}
+            disabled={modelGroups.length === 0}
+            title={modelGroups.length === 0 ? 'No model groups configured. Create one on /model-groups first.' : 'Use a reusable Model Group as the source of truth.'}
+          >Model Group</button>
         </div>
+        <div className="muted" style={{ marginTop: 6 }}>
+          {!form.model_group_id
+            ? 'Allowed/blocked lists configured below apply directly to this API key.'
+            : 'The attached group overrides this key\'s allowed/blocked lists and per-model routes at enforcement time.'}
+        </div>
+      </div>
+      {form.model_group_id ? (
+        <div className="form__row">
+          <label className="form__label">Attached group</label>
+          <select value={form.model_group_id} onChange={(e) => update({ model_group_id: e.target.value })}>
+            {modelGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </select>
+          {attachedGroup && (
+            <div className="group-summary" style={{ marginTop: 8 }}>
+              <div className="muted">
+                Allowed: {Array.isArray(attachedGroup.allowed_models) && attachedGroup.allowed_models.length === 0
+                  ? 'all models'
+                  : (attachedGroup.allowed_models || []).join(', ') || '—'}
+              </div>
+              {Array.isArray(attachedGroup.blocked_models) && attachedGroup.blocked_models.length > 0 && (
+                <div className="muted">Blocked: {attachedGroup.blocked_models.join(', ')}</div>
+              )}
+              {Array.isArray(attachedGroup.model_routes) && attachedGroup.model_routes.length > 0 && (
+                <div className="muted">Routes: {attachedGroup.model_routes.length} pinned</div>
+              )}
+              <Link to="/model-groups" className="dim">Manage groups →</Link>
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
+          <ModelMultiSelect
+            label="Allowed models"
+            value={form.allowed_models}
+            onChange={(v) => update({ allowed_models: v })}
+            placeholder="leave empty for all models"
+            hint="Pick from the available catalog or press Enter to add a custom / wildcard token (e.g. gpt-4*). Empty = all models. Per-model upstream routing can be configured below."
+          />
+          <ModelRoutesEditor
+            allowedModels={form.allowed_models}
+            routes={form.model_routes}
+            onChange={(routes) => update({ model_routes: routes })}
+          />
+          <ModelMultiSelect
+            label="Blocked models"
+            value={form.blocked_models}
+            onChange={(v) => update({ blocked_models: v })}
+            placeholder="models that should always be rejected"
+            hint="Takes precedence over the allowed list. Supports wildcards like claude-*."
+          />
+        </>
       )}
-      <ModelMultiSelect
-        label="Blocked models"
-        value={form.blocked_models}
-        onChange={(v) => update({ blocked_models: v })}
-        placeholder="models that should always be rejected"
-        hint="Takes precedence over the allowed list. Supports wildcards like claude-*."
-      />
     </div>
   );
 }

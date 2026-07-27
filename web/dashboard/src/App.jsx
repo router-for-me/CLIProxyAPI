@@ -11,6 +11,8 @@ import UsageStatsPage from './pages/UsageStatsPage.jsx';
 import ErrorsPage from './pages/ErrorsPage.jsx';
 import InternalUsersPage from './pages/InternalUsersPage.jsx';
 import InternalUserDetailPage from './pages/InternalUserDetailPage.jsx';
+import ModelGroupsPage from './pages/ModelGroupsPage.jsx';
+import ModelGroupDetailPage from './pages/ModelGroupDetailPage.jsx';
 import ModelsCatalogPage from './pages/ModelsCatalogPage.jsx';
 import ErrorMessagesPage from './pages/ErrorMessagesPage.jsx';
 import SettingsPage from './pages/SettingsPage.jsx';
@@ -162,6 +164,8 @@ export default function App() {
             <Route path="/cooldown-providers" element={<CooldownProvidersPage />} />
             <Route path="/internal-users" element={<InternalUsersPage />} />
             <Route path="/internal-users/:id" element={<InternalUserDetailPage />} />
+            <Route path="/model-groups" element={<ModelGroupsPage />} />
+            <Route path="/model-groups/:id" element={<ModelGroupDetailPage />} />
             <Route path="/models" element={<ModelsCatalogPage />} />
             <Route path="/error-messages" element={<ErrorMessagesPage />} />
             <Route path="/api-tokens" element={<ApiTokensPage />} />

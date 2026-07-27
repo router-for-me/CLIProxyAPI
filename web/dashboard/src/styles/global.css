@@ -2413,3 +2413,42 @@ button.ghost:hover:not(:disabled) {
   font-size: 12px;
   margin-bottom: 14px;
 }
+
+/* --- Model Groups ----------------------------------------------------------
+   Reusable Model Group templates: list page, detail page, and the group
+   selector embedded in PolicyForm / InternalUserPolicyForm. Follows the dark
+   teal design system (recent commit d2d710c8 introduced the upstream-provider
+   block using the same tokens).
+*/
+
+/* chip-count — compact numeric badge for "how many entries in this list".
+   Used in the Model Groups table Allowed/Blocked/Routed columns and anywhere
+   else a compact count is surfaced inline. */
+.chip-count {
+  display: inline-block;
+  min-width: 22px;
+  padding: 2px 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.6;
+}
+
+/* model-access-source — the Entity-settings | Model-Group segmented switch in
+   the policy forms. The seg-group is inline-flex by default; in a form__row we
+   want it to sit on its own line with the hint below it. */
+.model-access-source.seg-group { display: flex; }
+
+/* group-summary — read-only recap of the attached group shown when "Model
+   Group" is selected in a policy form. Keeps the operator oriented without
+   having to open /model-groups/:id. */
+.group-summary {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+.group-summary .muted + .muted { margin-top: 4px; }

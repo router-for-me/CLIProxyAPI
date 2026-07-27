@@ -1393,3 +1393,67 @@ export async function deleteOAuthModelAlias(channel) {
 export async function getModelDefinitions(channel) {
   return fetchJSON(`/model-definitions/${encodeURIComponent(channel)}`);
 }
+
+// --- Model Groups (reusable allowed-models + per-model routing templates) ---
+//
+// A Model Group is a reusable template of allowed_models / blocked_models
+// (with trailing '*' wildcards) plus optional per-model upstream routing
+// (model_routes). Groups attach 1:1 to either an API-key policy or an internal
+// user; when attached the group becomes the source of truth for the entity's
+// model-access fields (and, for API-key policies, routes), overriding the
+// entity's own values.
+
+export async function listModelGroups({
+  page = 1,
+  pageSize = 25,
+  search = '',
+  sortBy = 'name',
+  sortOrder = 'asc',
+} = {}) {
+  const qs = new URLSearchParams();
+  qs.set('page', String(page));
+  qs.set('page_size', String(pageSize));
+  if (search) qs.set('search', search);
+  qs.set('sort_by', sortBy);
+  qs.set('sort_order', sortOrder);
+  return fetchJSON(`/model-groups?${qs}`);
+}
+
+export async function getModelGroup(id) {
+  return fetchJSON(`/model-groups/${encodeURIComponent(id)}`);
+}
+
+export async function createModelGroup(payload) {
+  return fetchJSON('/model-groups', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateModelGroup(id, payload) {
+  return fetchJSON(`/model-groups/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteModelGroup(id) {
+  await fetchJSON(`/model-groups/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+// attachModelGroup attaches a group to an API-key policy (the group becomes
+// the source of truth for that key's allowed/blocked lists and per-model
+// routes at enforcement time). Model groups attach ONLY to API-key policies.
+export async function attachModelGroup(groupID, apiKeyId) {
+  return fetchJSON(`/model-groups/${encodeURIComponent(groupID)}/attach`, {
+    method: 'POST',
+    body: JSON.stringify({ api_key_id: apiKeyId }),
+  });
+}
+
+export async function detachModelGroup(groupID, apiKeyId) {
+  return fetchJSON(`/model-groups/${encodeURIComponent(groupID)}/detach`, {
+    method: 'POST',
+    body: JSON.stringify({ api_key_id: apiKeyId }),
+  });
+}
