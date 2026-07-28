@@ -438,3 +438,23 @@ func TestStripCodexImageGenerationIfDisabled(t *testing.T) {
 		t.Fatalf("expected tool_choice removed, got %s", gjson.GetBytes(got, "tool_choice").Raw)
 	}
 }
+
+func TestCodexAuthImageGenerationDisabledErr_IsRequestScoped(t *testing.T) {
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"disable_image_generation": true}}
+	err := codexAuthImageGenerationDisabledErr(auth)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	// Must expose StatusCode for conductor status routing.
+	if se, ok := err.(interface{ StatusCode() int }); !ok || se.StatusCode() != http.StatusForbidden {
+		t.Fatalf("StatusCode() = %v, want 403", se)
+	}
+	// Must expose IsRequestScoped so MarkResult skips cooldown.
+	if rs, ok := err.(interface{ IsRequestScoped() bool }); !ok || !rs.IsRequestScoped() {
+		t.Fatal("expected IsRequestScoped() true to avoid credential cooldown")
+	}
+	// Must NOT be a permanent/cooldown 403 — conductor should failover to next credential.
+	if _, ok := err.(error); !ok {
+		t.Fatal("must implement error")
+	}
+}
