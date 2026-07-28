@@ -205,9 +205,16 @@ routing:
   # Non-positive weights exclude the credential while this strategy is active.
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
   # Enable universal session-sticky routing for all clients.
-  # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
-  # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
-  # execution or derived session identity, and the existing first-message hash fallback.
+  # All recognized explicit session identifiers (such as X-Gateway-Session-Id,
+  # native Claude Code, Codex, OpenCode, or pi session headers, prompt_cache_key,
+  # Responses conversation IDs, and request body session/conversation IDs) are
+  # bound together as aliases. Only when zero explicit root session identifiers
+  # exist will user metadata, execution session, thread ID, derived session identity,
+  # or the message-content hash fallback be used.
+  # Clients you control can send X-Gateway-Session-Id, X-Gateway-Client,
+  # X-Gateway-Thread-Id and X-Gateway-Parent-Thread-Id to identify sessions explicitly.
+  # Bindings are namespaced per downstream API key, so two callers reusing the
+  # same client session ID never share one credential.
   # Automatic failover is always enabled when bound auth becomes unavailable.
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h

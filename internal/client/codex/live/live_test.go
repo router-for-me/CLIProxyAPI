@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	cpahome "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -98,7 +99,7 @@ type homeDispatcher struct {
 
 func (*homeDispatcher) HeartbeatOK() bool { return true }
 
-func (d *homeDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, _ int) ([]byte, error) {
+func (d *homeDispatcher) RPopAuth(_ context.Context, model string, _ cpahome.DispatchSession, _ http.Header, _ int) ([]byte, error) {
 	d.model = model
 	return json.Marshal(map[string]any{
 		"model":      model,

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,40 @@ import (
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
+
+type firstPickBlockingSelector struct {
+	mu           sync.Mutex
+	calls        int
+	firstEntered chan struct{}
+	releaseFirst chan struct{}
+}
+
+func newFirstPickBlockingSelector() *firstPickBlockingSelector {
+	return &firstPickBlockingSelector{
+		firstEntered: make(chan struct{}),
+		releaseFirst: make(chan struct{}),
+	}
+}
+
+func (s *firstPickBlockingSelector) Pick(_ context.Context, _, _ string, _ cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	s.mu.Lock()
+	call := s.calls
+	s.calls++
+	if call == 0 {
+		close(s.firstEntered)
+	}
+	s.mu.Unlock()
+	if call == 0 {
+		<-s.releaseFirst
+	}
+	return auths[call%len(auths)], nil
+}
+
+func (s *firstPickBlockingSelector) Calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
 
 func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
 	t.Parallel()
@@ -923,33 +958,33 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 	}
 }
 
-func TestExtractSessionID_ClaudeCodePriorityOverHeader(t *testing.T) {
+func TestExtractSessionIDUsesClaudeCodeAsRepresentativeWithGenericAlias(t *testing.T) {
 	t.Parallel()
 
-	// Claude Code metadata.user_id remains higher priority than a generic X-Session-ID header.
 	headers := make(http.Header)
 	headers.Set("X-Session-ID", "header-session-id")
-
 	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344"}}`)
 
-	got := ExtractSessionID(headers, payload, nil)
+	identity := cliproxysession.Extract(headers, payload, nil)
 	want := "claude:ac980658-63bd-4fb3-97ba-8da64cb1e344"
-	if got != want {
-		t.Errorf("ExtractSessionID() = %q, want %q (Claude Code should have highest priority over header)", got, want)
+	if identity.ID != want {
+		t.Errorf("identity.ID = %q, want representative %q", identity.ID, want)
+	}
+	if !containsString(identity.Aliases, "header:header-session-id") {
+		t.Fatalf("identity.Aliases = %#v, want generic header alias", identity.Aliases)
 	}
 }
 
-func TestExtractSessionID_ClaudeCodePriorityOverIdempotencyKey(t *testing.T) {
+func TestExtractSessionIDIgnoresIdempotencyKey(t *testing.T) {
 	t.Parallel()
 
-	// Claude Code metadata.user_id should have highest priority, even when idempotency_key is present
 	metadata := map[string]any{"idempotency_key": "idem-12345"}
 	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344"}}`)
 
 	got := ExtractSessionID(nil, payload, metadata)
 	want := "claude:ac980658-63bd-4fb3-97ba-8da64cb1e344"
 	if got != want {
-		t.Errorf("ExtractSessionID() = %q, want %q (Claude Code should have highest priority over idempotency_key)", got, want)
+		t.Errorf("ExtractSessionID() = %q, want %q", got, want)
 	}
 }
 
@@ -979,30 +1014,41 @@ func TestExtractSessionID_CodexSessionIDHeader(t *testing.T) {
 	}
 }
 
-func TestExtractSessionID_ClientRequestIDHeader(t *testing.T) {
+// TestExtractSessionID_ClientRequestIDHeaderIsLastResort verifies the header still
+// provides affinity for a client that sends nothing else, while never competing
+// with a real root identifier. Live captures show it follows the current thread: a
+// Codex sub-agent sends its own thread identifier there while session-id stays on
+// the root, so it must not join the root alias group when a root exists.
+func TestExtractSessionID_ClientRequestIDHeaderIsLastResort(t *testing.T) {
 	t.Parallel()
 
 	headers := make(http.Header)
 	headers.Set("X-Client-Request-Id", "pi-session-123")
 
-	got := ExtractSessionID(headers, nil, nil)
-	want := "clientreq:pi-session-123"
-	if got != want {
-		t.Errorf("ExtractSessionID() with X-Client-Request-Id = %q, want %q", got, want)
+	if got := ExtractSessionID(headers, nil, nil); got != "clientreq:pi-session-123" {
+		t.Errorf("ExtractSessionID() with only X-Client-Request-Id = %q, want clientreq:pi-session-123", got)
 	}
 }
 
-func TestExtractSessionID_CodexSessionIDPriorityOverClientRequestID(t *testing.T) {
+// TestExtractSessionIDKeepsThreadIdentifiersOutOfTheAliasGroup mirrors a captured
+// Codex sub-agent turn, where x-client-request-id carries the child thread. The
+// alias group must stay the root session only, otherwise every sub-agent adds a
+// throwaway alias to it.
+func TestExtractSessionIDKeepsThreadIdentifiersOutOfTheAliasGroup(t *testing.T) {
 	t.Parallel()
 
 	headers := make(http.Header)
-	headers.Set("X-Client-Request-Id", "pi-session-123")
+	headers.Set("X-Client-Request-Id", "child-thread-123")
 	headers.Set("Session_id", "codex-session-456")
 
-	got := ExtractSessionID(headers, nil, nil)
-	want := "codex:codex-session-456"
-	if got != want {
-		t.Errorf("ExtractSessionID() = %q, want %q (Session_id should take priority over X-Client-Request-Id)", got, want)
+	identity := cliproxysession.Extract(headers, nil, nil)
+	if identity.ID != "codex:codex-session-456" {
+		t.Errorf("identity.ID = %q, want Codex representative", identity.ID)
+	}
+	for _, id := range identity.IDs() {
+		if strings.Contains(id, "child-thread-123") {
+			t.Fatalf("identity.IDs() = %#v, want no thread identifier", identity.IDs())
+		}
 	}
 }
 
@@ -1020,7 +1066,7 @@ func TestExtractSessionID_IdempotencyKey(t *testing.T) {
 	}
 }
 
-func TestExtractSessionID_DerivedSessionAndExplicitPriority(t *testing.T) {
+func TestExtractSessionIDFallbacksAndRepresentativeID(t *testing.T) {
 	t.Parallel()
 
 	metadata := map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:derived-root"}
@@ -1042,9 +1088,14 @@ func TestExtractSessionID_DerivedSessionAndExplicitPriority(t *testing.T) {
 		t.Fatalf("ExtractSessionID() = %q, want explicit body session", got)
 	}
 
-	userPayload := []byte(`{"metadata":{"user_id":"explicit-user"},"conversation_id":"explicit-conversation","messages":[{"role":"user","content":"hello"}]}`)
-	if got := ExtractSessionID(nil, userPayload, metadata); got != "user:explicit-user" {
-		t.Fatalf("ExtractSessionID() = %q, want explicit metadata.user_id", got)
+	sessionWithUserPayload := []byte(`{"metadata":{"user_id":"explicit-user"},"conversation_id":"explicit-conversation","messages":[{"role":"user","content":"hello"}]}`)
+	if got := ExtractSessionID(nil, sessionWithUserPayload, metadata); got != "conv:explicit-conversation" {
+		t.Fatalf("ExtractSessionID() = %q, want conv:explicit-conversation over bare user_id", got)
+	}
+
+	bareUserPayload := []byte(`{"metadata":{"user_id":"explicit-user"},"messages":[{"role":"user","content":"hello"}]}`)
+	if got := ExtractSessionID(nil, bareUserPayload, metadata); got != "user:explicit-user" {
+		t.Fatalf("ExtractSessionID() = %q, want explicit metadata.user_id fallback", got)
 	}
 
 	lowercaseHeaders := http.Header{"x-session-id": []string{" lowercase-session "}}
@@ -1342,13 +1393,228 @@ func TestSessionAffinitySelector_ThreeScenarios(t *testing.T) {
 	})
 }
 
+func TestSessionAffinitySelectorReusesExistingGenericAlias(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+	provider := "test-generic-first"
+
+	// The generic affinity header establishes the initial binding.
+	req1Opts := cliproxyexecutor.Options{
+		Headers: http.Header{"X-Session-Affinity": {"aff-1"}},
+	}
+	pick1, err := selector.Pick(context.Background(), provider, "gpt-test", req1Opts, auths)
+	if err != nil {
+		t.Fatalf("req1 Pick() error = %v", err)
+	}
+
+	// A combined request reuses that binding and joins all identifiers.
+	req2Opts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Claude-Code-Session-Id": {"claude-1"},
+			"X-Session-Affinity":       {"aff-1"},
+		},
+		OriginalRequest: []byte(`{"conversation_id":"conv-1"}`),
+	}
+	pick2, err := selector.Pick(context.Background(), provider, "gpt-test", req2Opts, auths)
+	if err != nil {
+		t.Fatalf("req2 Pick() error = %v", err)
+	}
+	if pick2.ID != pick1.ID {
+		t.Fatalf("combined request changed auth from %q to %q", pick1.ID, pick2.ID)
+	}
+
+	// The newly joined Claude identifier reuses the same auth.
+	req3Opts := cliproxyexecutor.Options{
+		Headers: http.Header{"X-Claude-Code-Session-Id": {"claude-1"}},
+	}
+	pick3, err := selector.Pick(context.Background(), provider, "gpt-test", req3Opts, auths)
+	if err != nil {
+		t.Fatalf("req3 Pick() error = %v", err)
+	}
+	if pick3.ID != pick1.ID {
+		t.Fatalf("claude-only request changed auth from %q to %q", pick1.ID, pick3.ID)
+	}
+
+	// The newly joined body identifier also reuses the same auth.
+	req4Opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"conversation_id":"conv-1"}`),
+	}
+	pick4, err := selector.Pick(context.Background(), provider, "gpt-test", req4Opts, auths)
+	if err != nil {
+		t.Fatalf("req4 Pick() error = %v", err)
+	}
+	if pick4.ID != pick1.ID {
+		t.Fatalf("body-only request changed auth from %q to %q", pick1.ID, pick4.ID)
+	}
+}
+
+// TestSessionAffinitySelectorOpenCodeSubagentReusesParentAuth covers the captured
+// OpenCode convention: a sub-agent gets its own X-Session-Id and reports the root
+// in X-Parent-Session-Id. Without reading the parent header the child looks like an
+// unrelated session and lands on a different credential, losing the parent's cache.
+func TestSessionAffinitySelectorOpenCodeSubagentReusesParentAuth(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+	provider := "test-opencode-subagent"
+	userAgent := "opencode/1.18.4 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+
+	parentOpts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Session-Id":       {"ses_root"},
+			"X-Session-Affinity": {"ses_root"},
+			"User-Agent":         {userAgent},
+		},
+	}
+	parentPick, err := selector.Pick(context.Background(), provider, "gpt-test", parentOpts, auths)
+	if err != nil {
+		t.Fatalf("parent Pick() error = %v", err)
+	}
+
+	// Two concurrent sub-agents must both land on the parent's credential.
+	for _, child := range []string{"ses_child_a", "ses_child_b"} {
+		childOpts := cliproxyexecutor.Options{
+			Headers: http.Header{
+				"X-Session-Id":        {child},
+				"X-Session-Affinity":  {child},
+				"X-Parent-Session-Id": {"ses_root"},
+				"User-Agent":          {userAgent},
+			},
+		}
+		childPick, errChild := selector.Pick(context.Background(), provider, "gpt-test", childOpts, auths)
+		if errChild != nil {
+			t.Fatalf("subagent %s Pick() error = %v", child, errChild)
+		}
+		if childPick.ID != parentPick.ID {
+			t.Fatalf("subagent %s picked auth %q, want the parent auth %q", child, childPick.ID, parentPick.ID)
+		}
+	}
+
+	// The parent keeps its binding after the sub-agents joined the alias group.
+	parentAgain, err := selector.Pick(context.Background(), provider, "gpt-test", parentOpts, auths)
+	if err != nil {
+		t.Fatalf("parent re-Pick() error = %v", err)
+	}
+	if parentAgain.ID != parentPick.ID {
+		t.Fatalf("parent auth changed from %q to %q after subagents bound", parentPick.ID, parentAgain.ID)
+	}
+}
+
+func TestSessionAffinitySelectorFirstMultiIdentifierBindsAllKeys(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+	provider := "test-multi-bind-first"
+
+	firstOpts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Claude-Code-Session-Id": {"cc-100"},
+			"Session-Id":               {"cx-100"},
+		},
+		OriginalRequest: []byte(`{"prompt_cache_key":"pck-100"}`),
+	}
+	firstPick, err := selector.Pick(context.Background(), provider, "gpt-test", firstOpts, auths)
+	if err != nil {
+		t.Fatalf("first Pick() error = %v", err)
+	}
+
+	// Test each single identifier alone
+	for _, singleOpts := range []cliproxyexecutor.Options{
+		{Headers: http.Header{"X-Claude-Code-Session-Id": {"cc-100"}}},
+		{Headers: http.Header{"Session-Id": {"cx-100"}}},
+		{OriginalRequest: []byte(`{"prompt_cache_key":"pck-100"}`)},
+	} {
+		pick, errPick := selector.Pick(context.Background(), provider, "gpt-test", singleOpts, auths)
+		if errPick != nil {
+			t.Fatalf("single identifier Pick() error = %v", errPick)
+		}
+		if pick.ID != firstPick.ID {
+			t.Fatalf("single identifier got %q, want %q", pick.ID, firstPick.ID)
+		}
+	}
+}
+
+func TestSessionAffinitySelectorAliasGroupConflictReselectsAndMergesSymmetrically(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+	provider := "test-conflict-merge"
+
+	// Bind alias 1 to auth-a
+	opts1 := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Affinity": {"aff-conflict"}}}
+	pick1, err := selector.Pick(context.Background(), provider, "gpt-test", opts1, auths)
+	if err != nil {
+		t.Fatalf("opts1 Pick() error = %v", err)
+	}
+
+	// Bind alias 2 to auth-b
+	opts2 := cliproxyexecutor.Options{Headers: http.Header{"X-Claude-Code-Session-Id": {"cc-conflict"}}}
+	pick2, err := selector.Pick(context.Background(), provider, "gpt-test", opts2, auths)
+	if err != nil {
+		t.Fatalf("opts2 Pick() error = %v", err)
+	}
+	if pick1.ID == pick2.ID {
+		t.Fatalf("expected different auths initially, both got %q", pick1.ID)
+	}
+
+	// Combined request triggers conflict resolution
+	combinedOpts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Session-Affinity":       {"aff-conflict"},
+			"X-Claude-Code-Session-Id": {"cc-conflict"},
+		},
+	}
+	combinedPick, err := selector.Pick(context.Background(), provider, "gpt-test", combinedOpts, auths)
+	if err != nil {
+		t.Fatalf("combined Pick() error = %v", err)
+	}
+
+	// Subsequent single alias requests must both yield combinedPick.ID
+	pick1After, err := selector.Pick(context.Background(), provider, "gpt-test", opts1, auths)
+	if err != nil {
+		t.Fatalf("opts1 after Pick() error = %v", err)
+	}
+	if pick1After.ID != combinedPick.ID {
+		t.Fatalf("alias 1 after merge got %q, want %q", pick1After.ID, combinedPick.ID)
+	}
+
+	pick2After, err := selector.Pick(context.Background(), provider, "gpt-test", opts2, auths)
+	if err != nil {
+		t.Fatalf("opts2 after Pick() error = %v", err)
+	}
+	if pick2After.ID != combinedPick.ID {
+		t.Fatalf("alias 2 after merge got %q, want %q", pick2After.ID, combinedPick.ID)
+	}
+}
+
 func TestSessionAffinitySelectorBodyIdentifierTransitionsPreserveBinding(t *testing.T) {
 	t.Parallel()
 
 	bothPayload := []byte(`{"conversation":{"id":"conversation-session"},"prompt_cache_key":"shared-cache-bucket"}`)
-	primaryID, fallbackID := extractSessionIDs(nil, bothPayload, nil)
-	if primaryID != "pck:shared-cache-bucket" || fallbackID != "conv:conversation-session" {
-		t.Fatalf("extractSessionIDs() = (%q, %q), want prompt-cache primary with conversation fallback", primaryID, fallbackID)
+	representativeID, aliasID := extractSessionIDs(nil, bothPayload, nil)
+	if representativeID != "pck:shared-cache-bucket" || aliasID != "conv:conversation-session" {
+		t.Fatalf("extractSessionIDs() = (%q, %q), want prompt-cache representative with conversation alias", representativeID, aliasID)
 	}
 
 	for _, tt := range []struct {
@@ -1425,7 +1691,7 @@ func TestSessionAffinitySelectorPrimaryTrafficKeepsConversationAliasAlive(t *tes
 	if err != nil {
 		t.Fatalf("combined Pick() error = %v", err)
 	}
-	conversationKey := provider + "::conv:conversation-session::" + model
+	conversationKey := sessionCacheKey("", provider, model, "conv:conversation-session")
 	selector.cache.mu.Lock()
 	conversationEntry := selector.cache.entries[conversationKey]
 	conversationEntry.expiresAt = time.Now().Add(-time.Second)
@@ -1513,9 +1779,9 @@ func TestSessionAffinitySelectorConversationIDContainingPromptMarkerRemainsStabl
 func TestSessionCacheSharedPromptKeyCapsStableAliasesByRecency(t *testing.T) {
 	cache := NewSessionCache(time.Minute)
 	defer cache.Stop()
-	const promptKey = "openai::pck:shared-cache-bucket::gpt-test"
+	promptKey := sessionCacheKey("", "openai", "gpt-test", "pck:shared-cache-bucket")
 	for index := 0; index < 128; index++ {
-		conversation := fmt.Sprintf("openai::conv:conversation-%03d::gpt-test", index)
+		conversation := sessionCacheKey("", "openai", "gpt-test", fmt.Sprintf("conv:conversation-%03d", index))
 		cache.SetAliases("auth-a", promptKey, conversation)
 	}
 
@@ -1524,10 +1790,10 @@ func TestSessionCacheSharedPromptKeyCapsStableAliasesByRecency(t *testing.T) {
 	if len(cache.entries) > 65 {
 		t.Fatalf("cache entries = %d, want one prompt key plus at most 64 stable aliases", len(cache.entries))
 	}
-	if _, ok := cache.entries["openai::conv:conversation-127::gpt-test"]; !ok {
+	if _, ok := cache.entries[sessionCacheKey("", "openai", "gpt-test", "conv:conversation-127")]; !ok {
 		t.Fatal("newest conversation alias was not retained")
 	}
-	if _, ok := cache.entries["openai::conv:conversation-000::gpt-test"]; ok {
+	if _, ok := cache.entries[sessionCacheKey("", "openai", "gpt-test", "conv:conversation-000")]; ok {
 		t.Fatal("oldest conversation alias was retained after stable-alias cap")
 	}
 }
@@ -1536,13 +1802,13 @@ func TestSessionCacheRotatingPrimaryEvictsObsoleteAliases(t *testing.T) {
 	cache := NewSessionCache(time.Minute)
 	defer cache.Stop()
 
-	const fallback = "openai::conv:conversation-session::gpt-test"
+	fallback := sessionCacheKey("", "openai", "gpt-test", "conv:conversation-session")
 	for index := 0; index < 16; index++ {
-		primary := fmt.Sprintf("openai::pck:cache-%02d::gpt-test", index)
+		primary := sessionCacheKey("", "openai", "gpt-test", fmt.Sprintf("pck:cache-%02d", index))
 		cache.SetAliases("auth-a", primary, fallback)
 	}
-	latest := "openai::pck:cache-15::gpt-test"
-	oldest := "openai::pck:cache-00::gpt-test"
+	latest := sessionCacheKey("", "openai", "gpt-test", "pck:cache-15")
+	oldest := sessionCacheKey("", "openai", "gpt-test", "pck:cache-00")
 
 	cache.mu.RLock()
 	defer cache.mu.RUnlock()
@@ -1850,6 +2116,124 @@ func TestSessionAffinitySelector_Concurrent(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelectorConcurrentFirstPickUsesOneAuth(t *testing.T) {
+	fallback := newFirstPickBlockingSelector()
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}, {ID: "auth-c"}}
+	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-ID": {"cold-session"}}}
+	type pickResult struct {
+		auth *Auth
+		err  error
+	}
+	const goroutines = 128
+	results := make(chan pickResult, goroutines)
+
+	go func() {
+		auth, errPick := selector.Pick(context.Background(), "openai", "gpt-test", opts, auths)
+		results <- pickResult{auth: auth, err: errPick}
+	}()
+	<-fallback.firstEntered
+
+	for index := 1; index < goroutines; index++ {
+		go func() {
+			auth, errPick := selector.Pick(context.Background(), "openai", "gpt-test", opts, auths)
+			results <- pickResult{auth: auth, err: errPick}
+		}()
+	}
+	for index := 0; index < 1000 && fallback.Calls() == 1; index++ {
+		runtime.Gosched()
+	}
+	close(fallback.releaseFirst)
+
+	selectedID := ""
+	for index := 0; index < goroutines; index++ {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("concurrent cold Pick() error = %v", result.err)
+		}
+		if result.auth == nil {
+			t.Fatal("concurrent cold Pick() returned nil auth")
+		}
+		if selectedID == "" {
+			selectedID = result.auth.ID
+		}
+		if result.auth.ID != selectedID {
+			t.Fatalf("concurrent cold Pick() returned auth %q and %q for one session", selectedID, result.auth.ID)
+		}
+	}
+	if calls := fallback.Calls(); calls != 1 {
+		t.Fatalf("fallback Pick() calls = %d, want 1 atomic first binding", calls)
+	}
+}
+
+func TestSessionAffinitySelectorConcurrentOverlappingAliasesUseOneAuth(t *testing.T) {
+	fallback := newFirstPickBlockingSelector()
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+	left := cliproxyexecutor.Options{Headers: http.Header{
+		"X-Claude-Code-Session-Id": {"alias-a"},
+		"X-Session-Affinity":       {"shared-alias"},
+	}}
+	right := cliproxyexecutor.Options{Headers: http.Header{
+		"X-Session-Affinity": {"shared-alias"},
+		"Session-Id":         {"alias-c"},
+	}}
+	type pickResult struct {
+		auth *Auth
+		err  error
+	}
+	results := make(chan pickResult, 2)
+	go func() {
+		auth, errPick := selector.Pick(context.Background(), "openai", "gpt-test", left, auths)
+		results <- pickResult{auth: auth, err: errPick}
+	}()
+	<-fallback.firstEntered
+	go func() {
+		auth, errPick := selector.Pick(context.Background(), "openai", "gpt-test", right, auths)
+		results <- pickResult{auth: auth, err: errPick}
+	}()
+	for index := 0; index < 1000 && fallback.Calls() == 1; index++ {
+		runtime.Gosched()
+	}
+	close(fallback.releaseFirst)
+
+	first := <-results
+	second := <-results
+	if first.err != nil || second.err != nil {
+		t.Fatalf("overlapping alias Pick() errors = (%v, %v)", first.err, second.err)
+	}
+	if first.auth == nil || second.auth == nil || first.auth.ID != second.auth.ID {
+		t.Fatalf("overlapping alias Picks = (%v, %v), want one auth", first.auth, second.auth)
+	}
+	if calls := fallback.Calls(); calls != 1 {
+		t.Fatalf("fallback Pick() calls = %d, want 1 for overlapping cold aliases", calls)
+	}
+
+	for name, opts := range map[string]cliproxyexecutor.Options{
+		"left":   {Headers: http.Header{"X-Claude-Code-Session-Id": {"alias-a"}}},
+		"shared": {Headers: http.Header{"X-Session-Affinity": {"shared-alias"}}},
+		"right":  {Headers: http.Header{"Session-Id": {"alias-c"}}},
+	} {
+		picked, errPick := selector.Pick(context.Background(), "openai", "gpt-test", opts, auths)
+		if errPick != nil {
+			t.Fatalf("%s alias Pick() error = %v", name, errPick)
+		}
+		if picked.ID != first.auth.ID {
+			t.Fatalf("%s alias Pick() = %q, want %q", name, picked.ID, first.auth.ID)
+		}
+	}
+}
+
 func TestExtractSessionIDNativeSignals(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1910,7 +2294,7 @@ func TestExtractSessionIDNativeSignals(t *testing.T) {
 	}
 }
 
-func TestExtractSessionIDNativeSignalPriority(t *testing.T) {
+func TestExtractSessionIDNativeSignalsRepresentativeID(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
@@ -1919,7 +2303,7 @@ func TestExtractSessionIDNativeSignalPriority(t *testing.T) {
 		want    string
 	}{
 		{
-			name: "claude header beats metadata",
+			name: "claude header representative before metadata",
 			headers: http.Header{
 				"X-Claude-Code-Session-Id": []string{"header-session"},
 			},
@@ -1927,7 +2311,7 @@ func TestExtractSessionIDNativeSignalPriority(t *testing.T) {
 			want:    "claude:header-session",
 		},
 		{
-			name: "claude metadata beats codex header",
+			name: "claude metadata representative before codex header",
 			headers: http.Header{
 				"Session-Id": []string{"codex-session"},
 			},
@@ -1935,7 +2319,7 @@ func TestExtractSessionIDNativeSignalPriority(t *testing.T) {
 			want:    "claude:22222222-2222-4222-8222-222222222222",
 		},
 		{
-			name: "codex header beats x session id and prompt key",
+			name: "codex header representative before x session id and prompt key",
 			headers: http.Header{
 				"Session-Id":   []string{"codex-session"},
 				"X-Session-Id": []string{"generic-session"},
@@ -1944,7 +2328,7 @@ func TestExtractSessionIDNativeSignalPriority(t *testing.T) {
 			want:    "codex:codex-session",
 		},
 		{
-			name: "x session id beats affinity",
+			name: "x session id representative before affinity",
 			headers: http.Header{
 				"X-Session-Id":       []string{"generic-session"},
 				"X-Session-Affinity": []string{"affinity-session"},
@@ -1952,17 +2336,18 @@ func TestExtractSessionIDNativeSignalPriority(t *testing.T) {
 			want: "header:generic-session",
 		},
 		{
-			name:    "prompt cache key beats conversation id",
+			name:    "prompt cache key representative before conversation id",
 			payload: `{"conversation":{"id":"conversation-session"},"prompt_cache_key":"shared-cache-bucket"}`,
 			want:    "pck:shared-cache-bucket",
 		},
 		{
-			name: "client request id beats body fallbacks",
+			// A real root identifier wins, so the body prompt_cache_key stays representative.
+			name: "client request id does not outrank the body prompt cache key",
 			headers: http.Header{
 				"X-Client-Request-Id": []string{"client-session"},
 			},
 			payload: `{"prompt_cache_key":"prompt-session","conversation":{"id":"conversation-session"}}`,
-			want:    "clientreq:client-session",
+			want:    "pck:prompt-session",
 		},
 	}
 
@@ -2006,7 +2391,7 @@ func TestExtractSessionIDRejectsInvalidExplicitSignals(t *testing.T) {
 			want:    "",
 		},
 		{
-			name: "invalid stronger signal falls through",
+			name: "invalid signal is omitted while valid signal remains",
 			headers: http.Header{
 				"X-Claude-Code-Session-Id": []string{"bad\nsession"},
 				"Session-Id":               []string{"valid-codex"},
@@ -2092,5 +2477,84 @@ func TestSessionAffinitySelectorUsesRequestPayloadWhenOriginalRequestMissing(t *
 	}
 	if second.ID != first.ID {
 		t.Fatalf("request-only conversation changed auth from %q to %q", first.ID, second.ID)
+	}
+}
+
+// TestSessionAffinitySelectorManySubagentsKeepParentBinding covers the interaction
+// between the OpenCode parent alias and maxStableSessionAliases. Every sub-agent
+// adds two identifiers to the parent's alias group, so a long-lived session can
+// exceed the per-group alias cap. The parent must not be rebound when that happens,
+// and an early sub-agent whose own aliases were squeezed out must still resolve.
+func TestSessionAffinitySelectorManySubagentsKeepParentBinding(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}, {ID: "auth-c"}}
+	provider := "test-opencode-many-subagents"
+	userAgent := "opencode/1.18.4 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+
+	openCodeOpts := func(session, parent string) cliproxyexecutor.Options {
+		headers := http.Header{
+			"X-Session-Id":       {session},
+			"X-Session-Affinity": {session},
+			"User-Agent":         {userAgent},
+		}
+		if parent != "" {
+			headers.Set("X-Parent-Session-Id", parent)
+		}
+		return cliproxyexecutor.Options{Headers: headers}
+	}
+
+	parentOpts := openCodeOpts("ses_root", "")
+	parentPick, err := selector.Pick(context.Background(), provider, "gpt-test", parentOpts, auths)
+	if err != nil {
+		t.Fatalf("parent Pick() error = %v", err)
+	}
+
+	// Well past maxStableSessionAliases worth of sub-agent identifiers.
+	const subagents = 60
+	for index := 0; index < subagents; index++ {
+		child := fmt.Sprintf("ses_child_%02d", index)
+		pick, errChild := selector.Pick(context.Background(), provider, "gpt-test", openCodeOpts(child, "ses_root"), auths)
+		if errChild != nil {
+			t.Fatalf("subagent #%d Pick() error = %v", index, errChild)
+		}
+		if pick.ID != parentPick.ID {
+			t.Fatalf("subagent #%d picked auth %q, want the parent auth %q", index, pick.ID, parentPick.ID)
+		}
+	}
+
+	parentAgain, err := selector.Pick(context.Background(), provider, "gpt-test", parentOpts, auths)
+	if err != nil {
+		t.Fatalf("parent re-Pick() error = %v", err)
+	}
+	if parentAgain.ID != parentPick.ID {
+		t.Fatalf("parent auth changed from %q to %q after %d subagents", parentPick.ID, parentAgain.ID, subagents)
+	}
+
+	// The first sub-agent's own identifiers were squeezed out of the group, but it
+	// still sends the parent header, so it resolves back to the same credential.
+	earlyPick, err := selector.Pick(context.Background(), provider, "gpt-test", openCodeOpts("ses_child_00", "ses_root"), auths)
+	if err != nil {
+		t.Fatalf("early subagent Pick() error = %v", err)
+	}
+	if earlyPick.ID != parentPick.ID {
+		t.Fatalf("early subagent picked auth %q, want the parent auth %q", earlyPick.ID, parentPick.ID)
+	}
+
+	// An unrelated session must stay a separate alias group.
+	otherPick, err := selector.Pick(context.Background(), provider, "gpt-test", openCodeOpts("ses_other_root", ""), auths)
+	if err != nil {
+		t.Fatalf("unrelated session Pick() error = %v", err)
+	}
+	if otherPick.ID == parentPick.ID {
+		t.Fatalf("unrelated session shares auth %q with the parent group", otherPick.ID)
+	}
+	if stats := selector.cache.Stats(); stats.Groups != 2 {
+		t.Fatalf("cache groups = %d, want 2 distinct sessions (stats %+v)", stats.Groups, stats)
 	}
 }

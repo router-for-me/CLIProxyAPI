@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -21,7 +22,7 @@ func (d *repeatedHomeAuthDispatcher) HeartbeatOK() bool {
 	return true
 }
 
-func (d *repeatedHomeAuthDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (d *repeatedHomeAuthDispatcher) RPopAuth(context.Context, string, home.DispatchSession, http.Header, int) ([]byte, error) {
 	d.calls.Add(1)
 	raw, _ := json.Marshal(homeAuthDispatchResponse{
 		Auth: Auth{

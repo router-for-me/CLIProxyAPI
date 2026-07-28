@@ -65,6 +65,10 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
 	clientRequestMetadata := internallogging.GetClientRequestMetadata(ctx)
+	sessionInfo := record.Session
+	if sessionInfo.IsZero() {
+		sessionInfo = coreusage.SessionInfoFromContext(ctx)
+	}
 
 	usageDetail := coreusage.EnsureTokenBreakdownForProvider(record.Detail, record.Provider, record.ExecutorType)
 	tokens := tokenStats{
@@ -115,6 +119,16 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		ReasoningEffort:     reasoningEffort,
 		ServiceTier:         serviceTier,
 		ResponseServiceTier: responseServiceTier,
+		SessionID:           strings.TrimSpace(sessionInfo.ID),
+		SessionSource:       strings.TrimSpace(sessionInfo.Source),
+		SessionConfidence:   strings.TrimSpace(sessionInfo.Confidence),
+		SessionScope:        strings.TrimSpace(sessionInfo.Scope),
+		ClientType:          strings.TrimSpace(sessionInfo.ClientType),
+		ThreadID:            strings.TrimSpace(sessionInfo.ThreadID),
+		ParentThreadID:      strings.TrimSpace(sessionInfo.ParentThreadID),
+		RequestKind:         strings.TrimSpace(sessionInfo.RequestKind),
+		ThreadSource:        strings.TrimSpace(sessionInfo.ThreadSource),
+		TurnID:              strings.TrimSpace(sessionInfo.TurnID),
 	})
 	if err != nil {
 		return
@@ -124,19 +138,34 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 
 type queuedUsageDetail struct {
 	requestDetail
-	AccountingVersion   int                      `json:"accounting_version"`
-	TokenBreakdown      coreusage.TokenBreakdown `json:"token_breakdown"`
-	Provider            string                   `json:"provider"`
-	ExecutorType        string                   `json:"executor_type"`
-	Model               string                   `json:"model"`
-	Alias               string                   `json:"alias"`
-	Endpoint            string                   `json:"endpoint"`
-	AuthType            string                   `json:"auth_type"`
-	APIKey              string                   `json:"api_key"`
-	RequestID           string                   `json:"request_id"`
-	ReasoningEffort     string                   `json:"reasoning_effort"`
-	ServiceTier         string                   `json:"service_tier"`
-	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
+	AccountingVersion int                      `json:"accounting_version"`
+	TokenBreakdown    coreusage.TokenBreakdown `json:"token_breakdown"`
+	Provider          string                   `json:"provider"`
+	ExecutorType      string                   `json:"executor_type"`
+	Model             string                   `json:"model"`
+	Alias             string                   `json:"alias"`
+	Endpoint          string                   `json:"endpoint"`
+	AuthType          string                   `json:"auth_type"`
+	APIKey            string                   `json:"api_key"`
+	RequestID         string                   `json:"request_id"`
+	ReasoningEffort   string                   `json:"reasoning_effort"`
+	// Session fields group requests into one client conversation. They are omitted
+	// when no session could be resolved, so older consumers stay unaffected.
+	SessionID         string `json:"session_id,omitempty"`
+	SessionSource     string `json:"session_source,omitempty"`
+	SessionConfidence string `json:"session_confidence,omitempty"`
+	SessionScope      string `json:"session_scope,omitempty"`
+	ClientType        string `json:"client_type,omitempty"`
+	ThreadID          string `json:"thread_id,omitempty"`
+	ParentThreadID    string `json:"parent_thread_id,omitempty"`
+	// RequestKind, ThreadSource and TurnID let a session timeline separate real
+	// conversation turns from housekeeping requests such as compaction or title
+	// generation, and group the upstream requests belonging to one client turn.
+	RequestKind         string `json:"request_kind,omitempty"`
+	ThreadSource        string `json:"thread_source,omitempty"`
+	TurnID              string `json:"turn_id,omitempty"`
+	ServiceTier         string `json:"service_tier"`
+	ResponseServiceTier string `json:"response_service_tier,omitempty"`
 }
 
 type requestDetail struct {

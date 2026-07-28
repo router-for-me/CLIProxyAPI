@@ -717,6 +717,7 @@ func withHomeAuthCount(opts cliproxyexecutor.Options, count int) cliproxyexecuto
 	if count <= 0 {
 		count = 1
 	}
+	ensureHomeDispatchSessionState(opts.Metadata)
 	meta := make(map[string]any, len(opts.Metadata)+1)
 	for k, v := range opts.Metadata {
 		meta[k] = v
@@ -878,7 +879,28 @@ func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.O
 	if generate, ok := generateFromOptions(opts); ok {
 		ctx = coreusage.WithGenerate(ctx, generate)
 	}
-	return ctx
+	return coreusage.WithSessionInfo(ctx, sessionInfoFromOptions(opts))
+}
+
+// sessionInfoFromOptions reuses the identity resolved once per request so usage
+// records report the same session the request was routed on.
+func sessionInfoFromOptions(opts cliproxyexecutor.Options) coreusage.SessionInfo {
+	if dispatchSession, ok := homeDispatchSessionFromMetadata(opts.Metadata); ok {
+		return sessionInfoFromHomeDispatch(dispatchSession)
+	}
+	identity := sessionIdentityFromOptions(opts)
+	return coreusage.SessionInfo{
+		ID:             identity.ID,
+		Source:         identity.Source,
+		Confidence:     identity.Confidence,
+		Scope:          identity.Scope,
+		ClientType:     identity.ClientType,
+		ThreadID:       identity.ThreadID,
+		ParentThreadID: identity.ParentThreadID,
+		RequestKind:    identity.RequestKind,
+		ThreadSource:   identity.ThreadSource,
+		TurnID:         identity.TurnID,
+	}
 }
 
 func requestedModelAliasFromOptions(opts cliproxyexecutor.Options, fallback string) string {

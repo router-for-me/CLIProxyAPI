@@ -202,7 +202,7 @@ func TestHomeInFlightPublisherPinsLifetimeRegistry(t *testing.T) {
 type homeInFlightModelDispatcher struct{}
 
 func (homeInFlightModelDispatcher) HeartbeatOK() bool { return true }
-func (homeInFlightModelDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (homeInFlightModelDispatcher) RPopAuth(context.Context, string, home.DispatchSession, http.Header, int) ([]byte, error) {
 	return json.Marshal(homeAuthDispatchResponse{
 		Model: "final-upstream-model",
 		Auth:  Auth{ID: "home-auth", Provider: "home-execution", Status: StatusActive},

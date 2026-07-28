@@ -3459,3 +3459,49 @@ func (failingReadCloser) Read(p []byte) (int, error) {
 func (failingReadCloser) Close() error {
 	return nil
 }
+
+// TestUsageAdapterForwardsSessionObservations covers the session fields plugins
+// need to attribute a record to a conversation. They are a plain field copy, so
+// without this test a dropped line would silently publish empty values.
+func TestUsageAdapterForwardsSessionObservations(t *testing.T) {
+	var got pluginapi.UsageSession
+	plugin := usagePluginFunc(func(_ context.Context, record pluginapi.UsageRecord) {
+		got = record.Session
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-session",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{host: host, pluginID: "usage-session"}
+
+	want := coreusage.SessionInfo{
+		ID:             "codex:019fa90b",
+		Source:         "client_native_header",
+		Confidence:     "high",
+		Scope:          "session",
+		ClientType:     "codex",
+		ThreadID:       "thread-child",
+		ParentThreadID: "thread-root",
+		RequestKind:    "compact",
+		ThreadSource:   "subagent",
+		TurnID:         "turn-1",
+	}
+	adapter.HandleUsage(context.Background(), coreusage.Record{Provider: "openai", Model: "gpt-5.4", Session: want})
+
+	if got != (pluginapi.UsageSession{
+		ID:             want.ID,
+		Source:         want.Source,
+		Confidence:     want.Confidence,
+		Scope:          want.Scope,
+		ClientType:     want.ClientType,
+		ThreadID:       want.ThreadID,
+		ParentThreadID: want.ParentThreadID,
+		RequestKind:    want.RequestKind,
+		ThreadSource:   want.ThreadSource,
+		TurnID:         want.TurnID,
+	}) {
+		t.Fatalf("plugin session = %#v, want all fields forwarded from %#v", got, want)
+	}
+}

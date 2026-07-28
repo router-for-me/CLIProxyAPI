@@ -207,9 +207,14 @@ type RoutingConfig struct {
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
-	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
-	// followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
-	// execution or derived session identity, and the existing message-content hash fallback.
+	// All recognized explicit session identifiers (such as X-Gateway-Session-Id,
+	// native Claude Code, Codex, OpenCode, or pi session headers, prompt_cache_key,
+	// Responses conversation IDs, and request body session/conversation IDs) are
+	// bound together as aliases. Only when zero explicit root session identifiers
+	// exist will user metadata, execution session, thread ID, derived session identity,
+	// or the message-content hash fallback be used.
+	// Bindings are namespaced per downstream API key, so two callers reusing the
+	// same client session ID never share one credential.
 	// Automatic failover is always enabled when bound auth becomes unavailable.
 	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
 

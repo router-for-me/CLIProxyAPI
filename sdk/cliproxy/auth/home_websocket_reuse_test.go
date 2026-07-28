@@ -220,7 +220,7 @@ func (d *homeAuthTransportErrorDispatcher) HeartbeatOK() bool {
 	return true
 }
 
-func (d *homeAuthTransportErrorDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (d *homeAuthTransportErrorDispatcher) RPopAuth(context.Context, string, home.DispatchSession, http.Header, int) ([]byte, error) {
 	return nil, d.err
 }
 

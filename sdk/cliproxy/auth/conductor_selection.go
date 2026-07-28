@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -224,12 +225,27 @@ func (m *Manager) SetSelector(selector Selector) {
 		selector = &RoundRobinSelector{}
 	}
 	m.mu.Lock()
+	oldSelector := m.selector
 	m.selector = selector
 	m.mu.Unlock()
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
 	}
+	if oldSelector != nil && !sameSelector(oldSelector, selector) {
+		if stopper, ok := oldSelector.(interface{ Stop() }); ok {
+			stopper.Stop()
+		}
+	}
+}
+
+func sameSelector(left, right Selector) bool {
+	leftValue := reflect.ValueOf(left)
+	rightValue := reflect.ValueOf(right)
+	if !leftValue.IsValid() || !rightValue.IsValid() || leftValue.Type() != rightValue.Type() {
+		return false
+	}
+	return leftValue.Comparable() && leftValue.Equal(rightValue)
 }
 
 // Selector returns the current credential selector.

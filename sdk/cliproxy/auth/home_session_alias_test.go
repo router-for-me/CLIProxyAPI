@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"net/http"
 	"sync"
 	"testing"
@@ -20,9 +21,9 @@ type sessionAliasCaptureDispatcher struct {
 
 func (*sessionAliasCaptureDispatcher) HeartbeatOK() bool { return true }
 
-func (d *sessionAliasCaptureDispatcher) RPopAuth(_ context.Context, _ string, sessionID string, _ http.Header, _ int) ([]byte, error) {
+func (d *sessionAliasCaptureDispatcher) RPopAuth(_ context.Context, _ string, session home.DispatchSession, _ http.Header, _ int) ([]byte, error) {
 	d.mu.Lock()
-	d.sessions = append(d.sessions, sessionID)
+	d.sessions = append(d.sessions, session.ID)
 	d.mu.Unlock()
 	return json.Marshal(homeAuthDispatchResponse{Auth: Auth{
 		ID:       "home-session-alias-auth",
@@ -39,6 +40,48 @@ func (d *sessionAliasCaptureDispatcher) sessionIDs() []string {
 	return append([]string(nil), d.sessions...)
 }
 
+// TestHomeDispatchSessionCarriesObservations verifies the observation fields reach
+// Home. Home builds session timelines from this payload and cannot re-derive them,
+// because the RESP auth dispatch never sees the original request body or headers.
+func TestHomeDispatchSessionCarriesObservations(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Home:    internalconfig.HomeConfig{Enabled: true},
+		Routing: internalconfig.RoutingConfig{SessionAffinityTTL: "1h"},
+	})
+
+	const root = "019fa90b-31a4-7841-b252-0a2d5dafbbdc"
+	const childThread = "019fa90b-3219-73d2-9aad-9de97611969e"
+	const turnID = "019fa90b-3234-73d2-a061-0622e5f8c57c"
+	opts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"Session-Id":               {root},
+			"Thread-Id":                {childThread},
+			"X-Codex-Parent-Thread-Id": {root},
+			"X-Codex-Turn-Metadata": {`{"session_id":"` + root + `","thread_id":"` + childThread +
+				`","turn_id":"` + turnID + `","request_kind":"compact","thread_source":"subagent"}`},
+			"User-Agent": {"codex_exec/0.145.0 (Mac OS 26.5.2; arm64)"},
+		},
+	}
+
+	session := manager.homeDispatchSession(opts)
+	if session.ID != "codex:"+root {
+		t.Fatalf("session.ID = %q, want codex:%s", session.ID, root)
+	}
+	for _, tc := range []struct{ name, got, want string }{
+		{"RequestKind", session.RequestKind, "compact"},
+		{"ThreadSource", session.ThreadSource, "subagent"},
+		{"TurnID", session.TurnID, turnID},
+		{"ThreadID", session.ThreadID, childThread},
+		{"ParentThreadID", session.ParentThreadID, root},
+		{"ClientType", session.ClientType, "codex"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("session.%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
 func TestHomeSessionAliasCacheClearsWhenConfiguredTTLChanges(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.SetConfig(&internalconfig.Config{
@@ -51,10 +94,10 @@ func TestHomeSessionAliasCacheClearsWhenConfiguredTTLChanges(t *testing.T) {
 	conversationOnly := cliproxyexecutor.Options{OriginalRequest: []byte(
 		`{"conversation":{"id":"ttl-conversation"}}`,
 	)}
-	if got := manager.homeDispatchSessionID(combined); got != "pck:ttl-prompt" {
+	if got := manager.homeDispatchSession(combined).ID; got != "pck:ttl-prompt" {
 		t.Fatalf("combined canonical = %q, want pck:ttl-prompt", got)
 	}
-	if got := manager.homeDispatchSessionID(conversationOnly); got != "pck:ttl-prompt" {
+	if got := manager.homeDispatchSession(conversationOnly).ID; got != "pck:ttl-prompt" {
 		t.Fatalf("conversation canonical before reload = %q, want existing prompt canonical", got)
 	}
 
@@ -62,7 +105,7 @@ func TestHomeSessionAliasCacheClearsWhenConfiguredTTLChanges(t *testing.T) {
 		Home:    internalconfig.HomeConfig{Enabled: true},
 		Routing: internalconfig.RoutingConfig{SessionAffinityTTL: "1m"},
 	})
-	if got := manager.homeDispatchSessionID(conversationOnly); got != "conv:ttl-conversation" {
+	if got := manager.homeDispatchSession(conversationOnly).ID; got != "conv:ttl-conversation" {
 		t.Fatalf("conversation canonical after TTL change = %q, want cleared alias cache", got)
 	}
 }
@@ -137,7 +180,7 @@ func TestHomeSessionAliasCachePrimaryAccessRefreshesWholeAliasGroup(t *testing.T
 	const primary = "pck:shared-cache-bucket"
 	const fallback = "conv:conversation-session"
 
-	if got := cache.canonical(primary, fallback, time.Minute, now); got != primary {
+	if got := cache.canonical([]string{primary, fallback}, time.Minute, now); got != primary {
 		t.Fatalf("initial canonical = %q, want %q", got, primary)
 	}
 	cache.mu.Lock()
@@ -146,10 +189,10 @@ func TestHomeSessionAliasCachePrimaryAccessRefreshesWholeAliasGroup(t *testing.T
 	cache.entries[fallback] = fallbackEntry
 	cache.mu.Unlock()
 
-	if got := cache.canonical(primary, "", time.Minute, now.Add(10*time.Second)); got != primary {
+	if got := cache.canonical([]string{primary}, time.Minute, now.Add(10*time.Second)); got != primary {
 		t.Fatalf("primary-only canonical = %q, want %q", got, primary)
 	}
-	if got := cache.canonical(fallback, "", time.Minute, now.Add(20*time.Second)); got != primary {
+	if got := cache.canonical([]string{fallback}, time.Minute, now.Add(20*time.Second)); got != primary {
 		t.Fatalf("fallback canonical after active primary traffic = %q, want %q", got, primary)
 	}
 }
@@ -161,16 +204,16 @@ func TestHomeSessionAliasCacheSharedPromptKeyPreservesConversationAliases(t *tes
 	const conversationA = "conv:conversation-a"
 	const conversationB = "conv:conversation-b"
 
-	if got := cache.canonical(promptKey, conversationA, time.Minute, now); got != promptKey {
+	if got := cache.canonical([]string{promptKey, conversationA}, time.Minute, now); got != promptKey {
 		t.Fatalf("conversation A canonical = %q, want %q", got, promptKey)
 	}
-	if got := cache.canonical(promptKey, conversationB, time.Minute, now.Add(time.Second)); got != promptKey {
+	if got := cache.canonical([]string{promptKey, conversationB}, time.Minute, now.Add(time.Second)); got != promptKey {
 		t.Fatalf("conversation B canonical = %q, want %q", got, promptKey)
 	}
-	if got := cache.canonical(conversationA, "", time.Minute, now.Add(2*time.Second)); got != promptKey {
+	if got := cache.canonical([]string{conversationA}, time.Minute, now.Add(2*time.Second)); got != promptKey {
 		t.Fatalf("conversation A alias canonical = %q, want %q", got, promptKey)
 	}
-	if got := cache.canonical(conversationB, "", time.Minute, now.Add(3*time.Second)); got != promptKey {
+	if got := cache.canonical([]string{conversationB}, time.Minute, now.Add(3*time.Second)); got != promptKey {
 		t.Fatalf("conversation B alias canonical = %q, want %q", got, promptKey)
 	}
 }
@@ -180,10 +223,10 @@ func TestHomeSessionAliasCacheConversationIDContainingPromptMarkerRemainsStable(
 	now := time.Now()
 	const promptKey = "pck:shared-cache-bucket"
 	const conversation = "conv:a::pck:b"
-	if got := cache.canonical(promptKey, conversation, time.Minute, now); got != promptKey {
+	if got := cache.canonical([]string{promptKey, conversation}, time.Minute, now); got != promptKey {
 		t.Fatalf("combined canonical = %q, want %q", got, promptKey)
 	}
-	if got := cache.canonical(conversation, "", time.Minute, now.Add(time.Second)); got != promptKey {
+	if got := cache.canonical([]string{conversation}, time.Minute, now.Add(time.Second)); got != promptKey {
 		t.Fatalf("conversation-only canonical = %q, want %q", got, promptKey)
 	}
 }
@@ -194,7 +237,7 @@ func TestHomeSessionAliasCacheSharedPromptKeyCapsStableAliasesByRecency(t *testi
 	const promptKey = "pck:shared-cache-bucket"
 	for index := 0; index < 128; index++ {
 		conversation := fmt.Sprintf("conv:conversation-%03d", index)
-		cache.canonical(promptKey, conversation, time.Minute, now.Add(time.Duration(index)*time.Second))
+		cache.canonical([]string{promptKey, conversation}, time.Minute, now.Add(time.Duration(index)*time.Second))
 	}
 
 	cache.mu.Lock()
@@ -217,7 +260,7 @@ func TestHomeSessionAliasCacheRotatingPrimaryEvictsObsoleteAliases(t *testing.T)
 	wantCanonical := "pck:cache-00"
 	for index := 0; index < 16; index++ {
 		primary := fmt.Sprintf("pck:cache-%02d", index)
-		if got := cache.canonical(primary, fallback, time.Minute, now.Add(time.Duration(index)*time.Second)); got != wantCanonical {
+		if got := cache.canonical([]string{primary, fallback}, time.Minute, now.Add(time.Duration(index)*time.Second)); got != wantCanonical {
 			t.Fatalf("canonical at index %d = %q, want %q", index, got, wantCanonical)
 		}
 	}
@@ -249,10 +292,10 @@ func TestHomeSessionAliasCacheDoesNotReconnectCompactedCanonicalAlias(t *testing
 	const currentPrompt = "pck:cache-b"
 	const conversation = "conv:conversation-session"
 
-	if got := cache.canonical(obsoletePrompt, conversation, time.Minute, now); got != obsoletePrompt {
+	if got := cache.canonical([]string{obsoletePrompt, conversation}, time.Minute, now); got != obsoletePrompt {
 		t.Fatalf("initial canonical = %q, want %q", got, obsoletePrompt)
 	}
-	if got := cache.canonical(currentPrompt, conversation, time.Minute, now.Add(time.Second)); got != obsoletePrompt {
+	if got := cache.canonical([]string{currentPrompt, conversation}, time.Minute, now.Add(time.Second)); got != obsoletePrompt {
 		t.Fatalf("rotated canonical = %q, want stable %q", got, obsoletePrompt)
 	}
 
@@ -263,7 +306,7 @@ func TestHomeSessionAliasCacheDoesNotReconnectCompactedCanonicalAlias(t *testing
 	}
 	cache.mu.Unlock()
 
-	if got := cache.canonical(obsoletePrompt, "", time.Minute, now.Add(2*time.Second)); got != obsoletePrompt {
+	if got := cache.canonical([]string{obsoletePrompt}, time.Minute, now.Add(2*time.Second)); got != obsoletePrompt {
 		t.Fatalf("obsolete prompt canonical = %q, want standalone %q", got, obsoletePrompt)
 	}
 
@@ -278,8 +321,48 @@ func TestHomeSessionAliasCacheDoesNotReconnectCompactedCanonicalAlias(t *testing
 	if !conversationOK || !currentOK || !sameHomeSessionAliasGroup(conversationEntry, currentEntry) {
 		t.Fatalf("live aliases were disconnected: conversation=%#v current=%#v", conversationEntry, currentEntry)
 	}
-	if got := cache.canonical(conversation, "", time.Minute, now.Add(3*time.Second)); got != obsoletePrompt {
+	if got := cache.canonical([]string{conversation}, time.Minute, now.Add(3*time.Second)); got != obsoletePrompt {
 		t.Fatalf("live conversation canonical = %q, want %q", got, obsoletePrompt)
+	}
+}
+
+func TestHomeSessionAliasCacheConflictCanonicalIsInputOrderIndependent(t *testing.T) {
+	resolve := func(aliases []string) string {
+		var cache homeSessionAliasCache
+		now := time.Now()
+		cache.canonical([]string{"session:z"}, time.Minute, now)
+		cache.canonical([]string{"session:a"}, time.Minute, now)
+		return cache.canonical(aliases, time.Minute, now.Add(time.Second))
+	}
+
+	forward := resolve([]string{"session:z", "session:a"})
+	reverse := resolve([]string{"session:a", "session:z"})
+	if forward != reverse {
+		t.Fatalf("conflicting groups resolved by input order: forward=%q reverse=%q", forward, reverse)
+	}
+	if forward != "session:a" {
+		t.Fatalf("conflicting groups resolved to %q, want stable session:a", forward)
+	}
+}
+
+func TestHomeSessionAliasCacheIsolatesCallerScopes(t *testing.T) {
+	var cache homeSessionAliasCache
+	now := time.Now()
+	shared := "pck:shared-cache"
+	callerAConversation := "conv:caller-a"
+	callerBConversation := "conv:caller-b"
+
+	if got := cache.canonicalForCaller("caller-a", []string{shared, callerAConversation}, time.Minute, now); got != shared {
+		t.Fatalf("caller A canonical = %q, want %q", got, shared)
+	}
+	if got := cache.canonicalForCaller("caller-b", []string{shared, callerBConversation}, time.Minute, now); got != shared {
+		t.Fatalf("caller B canonical = %q, want %q", got, shared)
+	}
+	if got := cache.canonicalForCaller("caller-a", []string{callerAConversation}, time.Minute, now.Add(time.Second)); got != shared {
+		t.Fatalf("caller A conversation canonical = %q, want %q", got, shared)
+	}
+	if got := cache.canonicalForCaller("caller-b", []string{callerAConversation}, time.Minute, now.Add(time.Second)); got != callerAConversation {
+		t.Fatalf("caller B inherited caller A alias: got %q, want %q", got, callerAConversation)
 	}
 }
 
@@ -287,9 +370,9 @@ func TestHomeSessionAliasCacheSoftLimitEvictsOldestTouchedGroup(t *testing.T) {
 	var cache homeSessionAliasCache
 	now := time.Now()
 	const oldest = "session:zzzz-oldest"
-	cache.canonical(oldest, "", time.Hour, now)
+	cache.canonical([]string{oldest}, time.Hour, now)
 	for index := 0; index < homeSessionAliasSoftLimit; index++ {
-		cache.canonical(fmt.Sprintf("session:%05d", index), "", time.Hour, now)
+		cache.canonical([]string{fmt.Sprintf("session:%05d", index)}, time.Hour, now)
 	}
 
 	cache.mu.Lock()
@@ -309,7 +392,7 @@ func TestHomeSessionAliasCacheEnforcesSoftLimit(t *testing.T) {
 	var cache homeSessionAliasCache
 	now := time.Now()
 	for i := 0; i < homeSessionAliasSoftLimit+32; i++ {
-		cache.canonical(fmt.Sprintf("session:%05d", i), "", time.Hour, now.Add(time.Duration(i)*time.Nanosecond))
+		cache.canonical([]string{fmt.Sprintf("session:%05d", i)}, time.Hour, now.Add(time.Duration(i)*time.Nanosecond))
 	}
 
 	cache.mu.Lock()

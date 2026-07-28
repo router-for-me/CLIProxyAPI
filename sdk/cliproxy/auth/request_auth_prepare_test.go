@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"net/http"
 	"reflect"
 	"strings"
@@ -137,7 +138,7 @@ type homeRequestPrepareDispatcher struct {
 
 func (*homeRequestPrepareDispatcher) HeartbeatOK() bool { return true }
 
-func (d *homeRequestPrepareDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (d *homeRequestPrepareDispatcher) RPopAuth(context.Context, string, home.DispatchSession, http.Header, int) ([]byte, error) {
 	if d.calls.Add(1) > 1 {
 		return json.Marshal(homeErrorEnvelope{Error: &homeErrorDetail{Code: homeRequestRetryExceededErrorCode, Message: "no more Home auths"}})
 	}

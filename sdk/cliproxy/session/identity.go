@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 	"unicode"
@@ -93,8 +94,37 @@ func DerivedID(metadata map[string]any) string {
 	return strings.TrimSpace(value)
 }
 
-// Enrich derives a session identity once and places it in both request and option metadata.
+// Enrich resolves the session identity once and places it, together with the
+// derived identity it may depend on, in both request and option metadata.
+// Every later stage reads the stored identity instead of re-extracting it.
 func Enrich(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
+	req, opts = enrichDerivedIdentity(req, opts)
+	return attachIdentity(req, opts)
+}
+
+// FromMetadata returns the identity stored by Enrich, if present.
+func FromMetadata(metadata map[string]any) (Identity, bool) {
+	if metadata == nil {
+		return Identity{}, false
+	}
+	identity, ok := metadata[cliproxyexecutor.SessionIdentityMetadataKey].(Identity)
+	return identity, ok
+}
+
+// attachIdentity extracts the session identity and stores it for later stages.
+func attachIdentity(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
+	identity := Extract(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if identity.IsZero() && identity.ClientType == "" && identity.ThreadID == "" && identity.ParentThreadID == "" {
+		req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.SessionIdentityMetadataKey)
+		opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.SessionIdentityMetadataKey)
+		return req, opts
+	}
+	req.Metadata = metadataWithValue(req.Metadata, cliproxyexecutor.SessionIdentityMetadataKey, identity)
+	opts.Metadata = metadataWithValue(opts.Metadata, cliproxyexecutor.SessionIdentityMetadataKey, identity)
+	return req, opts
+}
+
+func enrichDerivedIdentity(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
 	payload := opts.OriginalRequest
 	if len(payload) == 0 && len(req.Payload) > 0 {
 		opts.OriginalRequest = bytes.Clone(req.Payload)
@@ -131,47 +161,19 @@ func Enrich(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (clipro
 	return req, opts
 }
 
-func hasExplicitSession(headers map[string][]string, payload []byte) bool {
-	for _, header := range []string{"X-Claude-Code-Session-Id", "X-Session-ID", "Session-Id", "Session_id", "X-Session-Affinity", "X-Client-Request-Id"} {
-		if NormalizeExplicitID(headerValue(headers, header)) != "" {
-			return true
-		}
+// hasExplicitSession reports whether the client already identified the session,
+// in which case no context-derived identity is computed.
+func hasExplicitSession(headers http.Header, payload []byte) bool {
+	if len(extractExplicitRootSignals(headers, payload)) > 0 {
+		return true
+	}
+	if firstHeaderValue(headers, threadHeaders...) != "" {
+		return true
 	}
 	if len(payload) == 0 {
 		return false
 	}
-	root := gjson.ParseBytes(payload)
-	for _, path := range []string{"session_id", "sessionId", "conversation_id", "prompt_cache_key"} {
-		if NormalizeExplicitID(root.Get(path).String()) != "" {
-			return true
-		}
-	}
-	if ClaudeMetadataSessionID(payload) != "" {
-		return true
-	}
-	userID := strings.TrimSpace(root.Get("metadata.user_id").String())
-	if NormalizeExplicitID(userID) != "" {
-		return true
-	}
-	conversation := root.Get("conversation")
-	if NormalizeExplicitID(conversation.Get("id").String()) != "" {
-		return true
-	}
-	return conversation.Type == gjson.String && NormalizeExplicitID(conversation.String()) != ""
-}
-
-func headerValue(headers map[string][]string, name string) string {
-	for key, values := range headers {
-		if !strings.EqualFold(key, name) {
-			continue
-		}
-		for _, value := range values {
-			if normalized := NormalizeExplicitID(value); normalized != "" {
-				return normalized
-			}
-		}
-	}
-	return ""
+	return NormalizeExplicitID(gjson.GetBytes(payload, "metadata.user_id").String()) != ""
 }
 
 // DeriveID builds a stable identity from leading instructions and the first complete user input.

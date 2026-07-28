@@ -51,6 +51,39 @@ type Record struct {
 	Detail      Detail
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
+	// Session describes the client conversation this request belongs to.
+	Session SessionInfo
+}
+
+// SessionInfo carries the session identity resolved once per request so usage
+// records can be grouped into a conversation timeline. It mirrors the routing
+// identity rather than re-deriving one, so observation and routing never disagree.
+type SessionInfo struct {
+	// ID is the canonical namespaced session identifier used for routing.
+	ID string
+	// Source names the signal the identifier came from.
+	Source string
+	// Confidence reports how strongly the identifier represents one conversation.
+	Confidence string
+	// Scope reports whether the identifier addresses a session, thread, user, or transport.
+	Scope string
+	// ClientType names the detected downstream client.
+	ClientType string
+	// ThreadID and ParentThreadID describe sub-agent and fork relationships.
+	ThreadID       string
+	ParentThreadID string
+	// RequestKind names what the client reported this request is: a conversation
+	// turn, or housekeeping such as compaction, title generation or background work.
+	RequestKind string
+	// ThreadSource names where the thread came from: user, subagent, fork.
+	ThreadSource string
+	// TurnID identifies one client turn, which may span several upstream requests.
+	TurnID string
+}
+
+// IsZero reports whether no session information was resolved.
+func (s SessionInfo) IsZero() bool {
+	return s == SessionInfo{}
 }
 
 // Failure holds HTTP failure metadata for an upstream request attempt.
@@ -76,6 +109,7 @@ type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
 type generateContextKey struct{}
+type sessionInfoContextKey struct{}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
@@ -103,6 +137,26 @@ func RequestedModelAliasFromContext(ctx context.Context) string {
 	default:
 		return ""
 	}
+}
+
+// WithSessionInfo stores the resolved session identity for usage sinks.
+func WithSessionInfo(ctx context.Context, info SessionInfo) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if info.IsZero() {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionInfoContextKey{}, info)
+}
+
+// SessionInfoFromContext returns the session identity stored in ctx.
+func SessionInfoFromContext(ctx context.Context) SessionInfo {
+	if ctx == nil {
+		return SessionInfo{}
+	}
+	info, _ := ctx.Value(sessionInfoContextKey{}).(SessionInfo)
+	return info
 }
 
 // WithReasoningEffort stores the client-requested reasoning effort for usage sinks.

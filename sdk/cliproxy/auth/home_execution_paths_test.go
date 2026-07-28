@@ -22,7 +22,7 @@ type homeExecutionDispatcher struct{}
 
 func (homeExecutionDispatcher) HeartbeatOK() bool { return true }
 
-func (homeExecutionDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (homeExecutionDispatcher) RPopAuth(context.Context, string, home.DispatchSession, http.Header, int) ([]byte, error) {
 	return json.Marshal(homeAuthDispatchResponse{Auth: Auth{ID: "home-auth", Provider: "home-execution", Status: StatusActive}})
 }
 
@@ -163,7 +163,7 @@ type homeOAuthLoggingDispatcher struct{}
 
 func (homeOAuthLoggingDispatcher) HeartbeatOK() bool { return true }
 
-func (homeOAuthLoggingDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (homeOAuthLoggingDispatcher) RPopAuth(context.Context, string, home.DispatchSession, http.Header, int) ([]byte, error) {
 	return json.Marshal(homeAuthDispatchResponse{Auth: Auth{
 		ID:       "home-auth",
 		Provider: "home-execution",
@@ -255,7 +255,7 @@ type retainingHomeExecutionDispatcher struct {
 
 func (d *retainingHomeExecutionDispatcher) HeartbeatOK() bool { return true }
 
-func (d *retainingHomeExecutionDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (d *retainingHomeExecutionDispatcher) RPopAuth(context.Context, string, home.DispatchSession, http.Header, int) ([]byte, error) {
 	d.calls.Add(1)
 	return json.Marshal(homeAuthDispatchResponse{Auth: Auth{
 		ID:       "home-auth",
@@ -329,7 +329,7 @@ type changingHomeTargetDispatcher struct {
 }
 
 func (d *changingHomeTargetDispatcher) HeartbeatOK() bool { return true }
-func (d *changingHomeTargetDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (d *changingHomeTargetDispatcher) RPopAuth(context.Context, string, home.DispatchSession, http.Header, int) ([]byte, error) {
 	if d.calls.Add(1) == 2 && d.firstSelection != nil {
 		d.oldEndedBeforeRPop.Store(!d.firstSelection.Active())
 	}
@@ -399,7 +399,7 @@ type unpinnedTargetChangeDispatcher struct {
 }
 
 func (d *unpinnedTargetChangeDispatcher) HeartbeatOK() bool { return true }
-func (d *unpinnedTargetChangeDispatcher) RPopAuth(_ context.Context, _ string, _ string, _ http.Header, _ int) ([]byte, error) {
+func (d *unpinnedTargetChangeDispatcher) RPopAuth(_ context.Context, _ string, _ home.DispatchSession, _ http.Header, _ int) ([]byte, error) {
 	call := d.calls.Add(1)
 	if call == 2 && d.first != nil {
 		d.oldClosedBeforeDispatch.Store(!d.first.Active() && d.closeCalls.Load() == 1)
@@ -490,7 +490,7 @@ type lifecycleRetryDispatcher struct {
 }
 
 func (d *lifecycleRetryDispatcher) HeartbeatOK() bool { return true }
-func (d *lifecycleRetryDispatcher) RPopAuth(_ context.Context, _ string, _ string, _ http.Header, _ int) ([]byte, error) {
+func (d *lifecycleRetryDispatcher) RPopAuth(_ context.Context, _ string, _ home.DispatchSession, _ http.Header, _ int) ([]byte, error) {
 	if d.calls.Add(1) == 2 && d.executor.first != nil {
 		d.firstEndedBeforeRedispatch.Store(!d.executor.first.Active() && d.executor.firstCtx.Err() != nil)
 	}
@@ -753,7 +753,7 @@ type homePerSelectionDispatcher struct {
 }
 
 func (*homePerSelectionDispatcher) HeartbeatOK() bool { return true }
-func (d *homePerSelectionDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (d *homePerSelectionDispatcher) RPopAuth(context.Context, string, home.DispatchSession, http.Header, int) ([]byte, error) {
 	call := d.calls.Add(1)
 	if call == 2 && d.first != nil {
 		d.firstEndedBefore2.Store(!d.first.Active())
@@ -894,7 +894,7 @@ type accountedHomeExecutionDispatcher struct {
 }
 
 func (*accountedHomeExecutionDispatcher) HeartbeatOK() bool { return true }
-func (d *accountedHomeExecutionDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, _ int) ([]byte, error) {
+func (d *accountedHomeExecutionDispatcher) RPopAuth(_ context.Context, model string, _ home.DispatchSession, _ http.Header, _ int) ([]byte, error) {
 	index := int(d.calls.Add(1)) - 1
 	if index >= len(d.auths) {
 		return nil, home.ErrAuthNotFound

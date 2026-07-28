@@ -112,7 +112,7 @@ type accountedAliasTargetDispatcher struct {
 
 func (*accountedAliasTargetDispatcher) HeartbeatOK() bool { return true }
 
-func (d *accountedAliasTargetDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, _ int) ([]byte, error) {
+func (d *accountedAliasTargetDispatcher) RPopAuth(_ context.Context, model string, _ internalhome.DispatchSession, _ http.Header, _ int) ([]byte, error) {
 	call := d.calls.Add(1)
 	if call == 2 {
 		d.releasedBeforeSecondRPop.Store(d.releases.Load() == 1)
@@ -179,7 +179,7 @@ type authSelectionAliasDispatcher struct {
 
 func (*authSelectionAliasDispatcher) HeartbeatOK() bool { return true }
 
-func (d *authSelectionAliasDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, _ int) ([]byte, error) {
+func (d *authSelectionAliasDispatcher) RPopAuth(_ context.Context, model string, _ internalhome.DispatchSession, _ http.Header, _ int) ([]byte, error) {
 	d.mu.Lock()
 	d.models = append(d.models, model)
 	d.mu.Unlock()
@@ -269,7 +269,7 @@ type forceMappingAliasChangeDispatcher struct {
 
 func (*forceMappingAliasChangeDispatcher) HeartbeatOK() bool { return true }
 
-func (d *forceMappingAliasChangeDispatcher) RPopAuth(_ context.Context, _ string, _ string, _ http.Header, _ int) ([]byte, error) {
+func (d *forceMappingAliasChangeDispatcher) RPopAuth(_ context.Context, _ string, _ internalhome.DispatchSession, _ http.Header, _ int) ([]byte, error) {
 	if d.calls.Add(1) == 2 {
 		d.releasedBeforeSecondRPop.Store(d.releases.Load() == 1)
 	}
@@ -392,7 +392,7 @@ type ackOrderedRouteDispatcher struct {
 
 func (*ackOrderedRouteDispatcher) HeartbeatOK() bool { return true }
 
-func (d *ackOrderedRouteDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, _ int) ([]byte, error) {
+func (d *ackOrderedRouteDispatcher) RPopAuth(_ context.Context, model string, _ internalhome.DispatchSession, _ http.Header, _ int) ([]byte, error) {
 	call := d.calls.Add(1)
 	if call == 2 {
 		d.ackedBeforeSecondRPop.Store(d.acks.Load() == 1)
@@ -505,7 +505,7 @@ type prefixedRetainedRouteDispatcher struct {
 
 func (*prefixedRetainedRouteDispatcher) HeartbeatOK() bool { return true }
 
-func (d *prefixedRetainedRouteDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, _ int) ([]byte, error) {
+func (d *prefixedRetainedRouteDispatcher) RPopAuth(_ context.Context, model string, _ internalhome.DispatchSession, _ http.Header, _ int) ([]byte, error) {
 	d.mu.Lock()
 	d.models = append(d.models, model)
 	d.mu.Unlock()

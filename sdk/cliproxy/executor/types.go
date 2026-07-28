@@ -48,6 +48,8 @@ const (
 	DerivedSessionIDMetadataKey = "derived_session_id"
 	// CallerScopeMetadataKey isolates inferred session identities between downstream callers.
 	CallerScopeMetadataKey = "caller_scope"
+	// SessionIdentityMetadataKey stores the structured session identity extracted once per request.
+	SessionIdentityMetadataKey = "session_identity"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.

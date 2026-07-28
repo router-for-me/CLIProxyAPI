@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	homeAuthCountMetadataKey = "__cliproxy_home_auth_count"
+	homeAuthCountMetadataKey       = "__cliproxy_home_auth_count"
+	homeDispatchSessionMetadataKey = "__cliproxy_home_dispatch_session"
 	// CloseAllExecutionSessionsID asks an executor to release all active execution sessions.
 	// Executors that do not support this marker may ignore it.
 	CloseAllExecutionSessionsID = "__all_execution_sessions__"
@@ -176,7 +177,7 @@ type homeAuthDispatchResponse struct {
 
 type homeAuthDispatcher interface {
 	HeartbeatOK() bool
-	RPopAuth(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int) ([]byte, error)
+	RPopAuth(ctx context.Context, requestedModel string, session home.DispatchSession, headers http.Header, count int) ([]byte, error)
 	AbortAmbiguousDispatch()
 }
 
@@ -196,14 +197,28 @@ func setHomeUserAPIKeyOnGinContext(ctx context.Context, apiKey string) {
 	ginCtx.Set("userApiKey", apiKey)
 }
 
-func homeDispatchHeaders(ctx context.Context, headers http.Header) http.Header {
-	apiKey, ok := homeQueryCredentialFromContext(ctx)
-	if !ok {
+// homeDispatchHeaders prepares the header snapshot sent with the auth dispatch RPC.
+// These headers never reach the upstream provider.
+//
+// CPA sees the full request and applies the full client priority order, so its
+// canonical session is authoritative. Publishing it as X-Session-ID keeps a Home
+// version that re-extracts the session from headers on the same identifier CPA
+// routed on locally, instead of a weaker header the client also happened to send.
+func homeDispatchHeaders(ctx context.Context, headers http.Header, canonicalSessionID string) http.Header {
+	apiKey, hasAPIKey := homeQueryCredentialFromContext(ctx)
+	canonicalSessionID = strings.TrimSpace(canonicalSessionID)
+	if !hasAPIKey && canonicalSessionID == "" {
 		return headers
 	}
 	out := headers.Clone()
 	if out == nil {
 		out = http.Header{}
+	}
+	if canonicalSessionID != "" {
+		out.Set("X-Session-ID", canonicalSessionID)
+	}
+	if !hasAPIKey {
+		return out
 	}
 	if out.Get("Authorization") != "" || out.Get("X-Goog-Api-Key") != "" || out.Get("X-Api-Key") != "" {
 		return out
@@ -267,6 +282,50 @@ func contextStringValue(raw any) string {
 	default:
 		return ""
 	}
+}
+
+type homeDispatchSessionState struct {
+	mu      sync.RWMutex
+	session home.DispatchSession
+}
+
+func ensureHomeDispatchSessionState(meta map[string]any) *homeDispatchSessionState {
+	if meta == nil {
+		return nil
+	}
+	if state, ok := meta[homeDispatchSessionMetadataKey].(*homeDispatchSessionState); ok && state != nil {
+		return state
+	}
+	state := &homeDispatchSessionState{}
+	meta[homeDispatchSessionMetadataKey] = state
+	return state
+}
+
+func publishHomeDispatchSessionMetadata(meta map[string]any, session home.DispatchSession) {
+	if session.ID == "" {
+		return
+	}
+	state := ensureHomeDispatchSessionState(meta)
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	state.session = session
+	state.mu.Unlock()
+}
+
+func homeDispatchSessionFromMetadata(meta map[string]any) (home.DispatchSession, bool) {
+	if meta == nil {
+		return home.DispatchSession{}, false
+	}
+	state, ok := meta[homeDispatchSessionMetadataKey].(*homeDispatchSessionState)
+	if !ok || state == nil {
+		return home.DispatchSession{}, false
+	}
+	state.mu.RLock()
+	session := state.session
+	state.mu.RUnlock()
+	return session, session.ID != ""
 }
 
 func homeExecutionSessionIDFromMetadata(meta map[string]any) string {
@@ -693,6 +752,7 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		return nil, errRetained
 	}
 	if retainedOK {
+		publishHomeDispatchSessionMetadata(opts.Metadata, retained.dispatchSession)
 		return retained, nil
 	}
 	if sessionID := homeExecutionSessionIDFromMetadata(opts.Metadata); sessionID != "" {
@@ -717,9 +777,10 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		return nil, &Error{Code: "home_unavailable", Message: "home execution registry unavailable", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
 	}
 
-	sessionID := m.homeDispatchSessionID(opts)
-	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers)
-	raw, errRPop := client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata))
+	dispatchSession := m.homeDispatchSession(opts)
+	publishHomeDispatchSessionMetadata(opts.Metadata, dispatchSession)
+	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers, dispatchSession.ID)
+	raw, errRPop := client.RPopAuth(ctx, requestedModel, dispatchSession, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata))
 	if errRPop != nil {
 		if home.IsAmbiguousDispatchError(errRPop) {
 			client.AbortAmbiguousDispatch()
@@ -874,6 +935,7 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		endScope()
 		return nil, &Error{Code: "home_unavailable", Message: "home execution registry unavailable", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
 	}
+	selection.dispatchSession = dispatchSession
 	if envelope.Present {
 		selection.accountedModel = envelope.Tuple.Model
 	}

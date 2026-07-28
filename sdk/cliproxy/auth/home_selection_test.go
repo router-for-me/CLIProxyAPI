@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -116,7 +117,7 @@ func (d *gatedHomeDispatcher) HeartbeatOK() bool {
 	return true
 }
 
-func (d *gatedHomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (d *gatedHomeDispatcher) RPopAuth(context.Context, string, home.DispatchSession, http.Header, int) ([]byte, error) {
 	d.rpop.Add(1)
 	return nil, errors.New("old Home dispatcher was used")
 }

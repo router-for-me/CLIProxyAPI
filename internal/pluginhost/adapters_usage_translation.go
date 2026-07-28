@@ -172,6 +172,18 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 			TotalTokens:         record.Detail.TotalTokens,
 		},
 		ResponseHeaders: cloneHeader(record.ResponseHeaders),
+		Session: pluginapi.UsageSession{
+			ID:             record.Session.ID,
+			Source:         record.Session.Source,
+			Confidence:     record.Session.Confidence,
+			Scope:          record.Session.Scope,
+			ClientType:     record.Session.ClientType,
+			ThreadID:       record.Session.ThreadID,
+			ParentThreadID: record.Session.ParentThreadID,
+			RequestKind:    record.Session.RequestKind,
+			ThreadSource:   record.Session.ThreadSource,
+			TurnID:         record.Session.TurnID,
+		},
 	})
 }
 

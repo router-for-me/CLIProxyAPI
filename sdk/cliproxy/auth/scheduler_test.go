@@ -94,7 +94,7 @@ func (d *authKindHomeDispatcher) HeartbeatOK() bool {
 	return true
 }
 
-func (d *authKindHomeDispatcher) RPopAuth(_ context.Context, _ string, _ string, _ http.Header, count int) ([]byte, error) {
+func (d *authKindHomeDispatcher) RPopAuth(_ context.Context, _ string, _ home.DispatchSession, _ http.Header, count int) ([]byte, error) {
 	d.counts = append(d.counts, count)
 	if count < 1 || count > len(d.auths) {
 		return nil, home.ErrAuthNotFound

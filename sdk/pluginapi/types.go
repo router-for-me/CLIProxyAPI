@@ -1344,6 +1344,33 @@ type UsageRecord struct {
 	Detail UsageDetail
 	// ResponseHeaders contains selected upstream response headers.
 	ResponseHeaders http.Header
+	// Session describes the client conversation this request belongs to.
+	Session UsageSession
+}
+
+// UsageSession describes the client session a usage record belongs to. It mirrors
+// the identity the request was routed on, so usage timelines and routing agree.
+type UsageSession struct {
+	// ID is the canonical namespaced session identifier.
+	ID string
+	// Source names the signal the identifier came from.
+	Source string
+	// Confidence reports how strongly the identifier represents one conversation.
+	Confidence string
+	// Scope reports whether the identifier addresses a session, thread, user, or transport.
+	Scope string
+	// ClientType names the detected downstream client.
+	ClientType string
+	// ThreadID and ParentThreadID describe sub-agent and fork relationships.
+	ThreadID       string
+	ParentThreadID string
+	// RequestKind names what the client reported this request is: a conversation
+	// turn, or housekeeping such as compaction, title generation or background work.
+	RequestKind string
+	// ThreadSource names where the thread came from: user, subagent, fork.
+	ThreadSource string
+	// TurnID identifies one client turn, which may span several upstream requests.
+	TurnID string
 }
 
 // UsageFailure describes an upstream or executor failure.

@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	cliproxyhome "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -22,7 +23,7 @@ type terminalCodexHomeDispatcher struct {
 }
 
 func (*terminalCodexHomeDispatcher) HeartbeatOK() bool { return true }
-func (d *terminalCodexHomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (d *terminalCodexHomeDispatcher) RPopAuth(context.Context, string, cliproxyhome.DispatchSession, http.Header, int) ([]byte, error) {
 	d.calls.Add(1)
 	return json.Marshal(d.auth)
 }

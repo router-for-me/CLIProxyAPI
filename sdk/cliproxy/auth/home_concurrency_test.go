@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"net/http"
 	"os"
 	"strings"
@@ -28,7 +29,7 @@ type fixtureHomeDispatcher struct {
 
 func (d *fixtureHomeDispatcher) HeartbeatOK() bool { return true }
 
-func (d *fixtureHomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (d *fixtureHomeDispatcher) RPopAuth(context.Context, string, home.DispatchSession, http.Header, int) ([]byte, error) {
 	if len(d.payloads) == 0 {
 		return d.payload, nil
 	}
@@ -60,7 +61,7 @@ type busyHomeRetryDispatcher struct {
 
 func (*busyHomeRetryDispatcher) HeartbeatOK() bool { return true }
 
-func (d *busyHomeRetryDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (d *busyHomeRetryDispatcher) RPopAuth(context.Context, string, home.DispatchSession, http.Header, int) ([]byte, error) {
 	d.calls.Add(1)
 	return []byte(`{"error":{"type":"credential_concurrency_exceeded","message":"busy","retryable":true,"retry_after_ms":20000}}`), nil
 }

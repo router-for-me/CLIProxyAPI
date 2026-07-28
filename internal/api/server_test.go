@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	cliproxyhome "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -132,7 +133,7 @@ type codexSearchHomeDispatcher struct {
 
 func (*codexSearchHomeDispatcher) HeartbeatOK() bool { return true }
 
-func (d *codexSearchHomeDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, _ int) ([]byte, error) {
+func (d *codexSearchHomeDispatcher) RPopAuth(_ context.Context, model string, _ cliproxyhome.DispatchSession, _ http.Header, _ int) ([]byte, error) {
 	d.calls.Add(1)
 	return json.Marshal(map[string]any{
 		"model":      model,
@@ -156,7 +157,7 @@ func (*codexSearchHomeDispatcher) AbortAmbiguousDispatch() {}
 type codexSearchBusyHomeDispatcher struct{}
 
 func (*codexSearchBusyHomeDispatcher) HeartbeatOK() bool { return true }
-func (*codexSearchBusyHomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (*codexSearchBusyHomeDispatcher) RPopAuth(context.Context, string, cliproxyhome.DispatchSession, http.Header, int) ([]byte, error) {
 	return []byte(`{"error":{"type":"credential_concurrency_exceeded","message":"busy","retry_after_ms":750}}`), nil
 }
 func (*codexSearchBusyHomeDispatcher) AbortAmbiguousDispatch() {}

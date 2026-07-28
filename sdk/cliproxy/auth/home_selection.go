@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 )
 
@@ -141,6 +142,7 @@ type HomeDispatchSelection struct {
 	Executor ProviderExecutor
 	Provider string
 
+	dispatchSession  home.DispatchSession
 	scope            *executionregistry.Scope
 	accountedModel   string
 	resources        *executionResources

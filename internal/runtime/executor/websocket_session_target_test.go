@@ -664,7 +664,7 @@ type websocketHomeDispatcher struct {
 
 func (d websocketHomeDispatcher) HeartbeatOK() bool { return true }
 
-func (d websocketHomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (d websocketHomeDispatcher) RPopAuth(context.Context, string, internalhome.DispatchSession, http.Header, int) ([]byte, error) {
 	return json.Marshal(map[string]any{"auth": map[string]any{
 		"id":       "home-websocket-auth",
 		"provider": d.provider,
@@ -687,7 +687,7 @@ type accountedWebsocketHomeDispatcher struct {
 
 func (*accountedWebsocketHomeDispatcher) HeartbeatOK() bool { return true }
 
-func (d *accountedWebsocketHomeDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, _ int) ([]byte, error) {
+func (d *accountedWebsocketHomeDispatcher) RPopAuth(_ context.Context, model string, _ internalhome.DispatchSession, _ http.Header, _ int) ([]byte, error) {
 	call := d.calls.Add(1)
 	if call > 1 && d.releases.Load() != call-1 {
 		d.before.Store(false)
@@ -912,7 +912,7 @@ type codex426RetryDispatcher struct {
 
 func (d *codex426RetryDispatcher) HeartbeatOK() bool { return true }
 
-func (d *codex426RetryDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, _ int) ([]byte, error) {
+func (d *codex426RetryDispatcher) RPopAuth(_ context.Context, model string, _ internalhome.DispatchSession, _ http.Header, _ int) ([]byte, error) {
 	call := int(d.calls.Add(1))
 	if call > len(d.baseURLs) {
 		return nil, fmt.Errorf("unexpected Home dispatch %d", call)

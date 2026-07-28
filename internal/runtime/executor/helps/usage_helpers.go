@@ -33,6 +33,7 @@ type UsageReporter struct {
 	source       string
 	reasoning    string
 	serviceTier  string
+	session      usage.SessionInfo
 	generate     bool
 	requestedAt  time.Time
 	ttftMu       sync.RWMutex
@@ -72,6 +73,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		authType:    resolveUsageAuthType(auth),
 		reasoning:   usage.ReasoningEffortFromContext(ctx),
 		serviceTier: usage.ServiceTierFromContext(ctx),
+		session:     usage.SessionInfoFromContext(ctx),
 		generate:    usage.GenerateFromContext(ctx),
 	}
 	if auth != nil {
@@ -268,6 +270,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		ReasoningEffort:     r.reasoning,
 		ServiceTier:         r.serviceTier,
 		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
+		Session:             r.session,
 		Generate:            usage.GenerateFlag(r.generate),
 		RequestedAt:         r.requestedAt,
 		Latency:             r.latency(),

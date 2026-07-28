@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	cpahome "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -38,7 +39,7 @@ type homeResponsesWebsocketDispatcher struct {
 
 func (*homeResponsesWebsocketDispatcher) HeartbeatOK() bool { return true }
 
-func (d *homeResponsesWebsocketDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (d *homeResponsesWebsocketDispatcher) RPopAuth(context.Context, string, cpahome.DispatchSession, http.Header, int) ([]byte, error) {
 	d.calls.Add(1)
 	return json.Marshal(coreauth.Auth{
 		ID:       "home-responses-websocket-auth",

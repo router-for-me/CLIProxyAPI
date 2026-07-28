@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"math"
 	"net/http"
 	"sort"
@@ -14,7 +13,6 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -530,9 +528,12 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 // SessionAffinitySelector wraps another selector with session-sticky behavior.
 // It extracts session ID from multiple sources and maintains session-to-auth
 // mappings with automatic failover when the bound auth becomes unavailable.
+const sessionAffinityResolutionLockStripes = 256
+
 type SessionAffinitySelector struct {
-	fallback Selector
-	cache    *SessionCache
+	fallback        Selector
+	cache           *SessionCache
+	resolutionLocks [sessionAffinityResolutionLockStripes]sync.Mutex
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -564,18 +565,31 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 }
 
 // Pick selects an auth with session affinity when possible.
-// Explicit Claude Code, Codex, OpenCode, pi, and request-body session signals
-// precede execution metadata, stable derived identity, and the legacy hash fallback.
+// All recognized explicit session signals in the same request act as aliases
+// for the same logical session. Fallback identities are considered only when no
+// explicit root session exists.
 //
-// Note: The cache key includes provider, session ID, and model to handle cases where
-// a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
-// that may be supported by different auth credentials, and to avoid cross-provider conflicts.
+// Note: The cache key includes the caller scope, provider, model, and session ID.
+// Caller scope keeps two downstream API keys that reuse the same client session ID
+// on separate bindings; provider and model handle sessions that span several models
+// supported by different credentials. The client type is deliberately not part of
+// the key: it is detected per request, so a request that arrives without the usual
+// headers would otherwise split an active session onto a second binding.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	entry := selectorLogEntry(ctx)
-	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
-	if primaryID == "" {
+	identity := sessionIdentityFromOptions(opts)
+	ids := identity.IDs()
+	if len(ids) == 0 {
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
 		return s.fallback.Pick(ctx, provider, model, opts, auths)
+	}
+
+	primaryID := identity.ID
+	callerScope := optionsMetadataString(opts, cliproxyexecutor.CallerScopeMetadataKey)
+
+	cacheKeys := make([]string, 0, len(ids))
+	for _, id := range ids {
+		cacheKeys = append(cacheKeys, sessionCacheKey(callerScope, provider, model, id))
 	}
 
 	now := time.Now()
@@ -587,57 +601,117 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if err != nil {
 		return nil, err
 	}
-
-	cacheKey := provider + "::" + primaryID + "::" + model
-	fallbackKey := ""
-	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey = provider + "::" + fallbackID + "::" + model
-	}
-	bind := func(authID string) {
-		if fallbackKey != "" {
-			s.cache.SetAliases(authID, cacheKey, fallbackKey)
-			return
+	availableByID := make(map[string]*Auth, len(available))
+	for _, auth := range available {
+		if auth != nil && auth.ID != "" {
+			availableByID[auth.ID] = auth
 		}
-		s.cache.Set(cacheKey, authID)
 	}
 
-	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
-		for _, auth := range available {
-			if auth.ID == cachedAuthID {
-				bind(auth.ID)
-				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-				return auth, nil
+	for {
+		snapshot := s.cache.bindingSnapshot(cacheKeys)
+		lockKeys := sessionAffinityResolutionLockKeys(cacheKeys, snapshot.groupLockKeys)
+		heldLocks, unlock := s.lockSessionAffinityResolution(lockKeys)
+
+		current := s.cache.bindingSnapshot(cacheKeys)
+		currentLockKeys := sessionAffinityResolutionLockKeys(cacheKeys, current.groupLockKeys)
+		if !sessionAffinityResolutionLocksCover(heldLocks, currentLockKeys) {
+			unlock()
+			continue
+		}
+
+		var selected *Auth
+		resolution := "miss"
+		switch len(current.authIDs) {
+		case 0:
+			selected, err = s.fallback.Pick(ctx, provider, model, opts, auths)
+		case 1:
+			selected = availableByID[current.authIDs[0]]
+			if selected != nil {
+				resolution = "hit"
+				break
 			}
+			resolution = "unavailable"
+			selected, err = s.fallback.Pick(ctx, provider, model, opts, auths)
+		default:
+			resolution = "conflict"
+			selected, err = s.fallback.Pick(ctx, provider, model, opts, auths)
 		}
-		// Cached auth not available, reselect via fallback selector for even distribution
-		auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
 		if err != nil {
+			unlock()
 			return nil, err
 		}
-		bind(auth.ID)
-		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-		return auth, nil
-	}
+		s.cache.SetAliases(selected.ID, cacheKeys...)
+		unlock()
 
-	if fallbackKey != "" {
-		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
-			for _, auth := range available {
-				if auth.ID == cachedAuthID {
-					bind(auth.ID)
-					entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
-					return auth, nil
-				}
-			}
+		switch resolution {
+		case "hit":
+			entry.Infof("session-affinity: cache hit | session=%s aliases=%d auth=%s provider=%s model=%s", truncateSessionID(primaryID), len(ids), selected.ID, provider, model)
+		case "unavailable":
+			entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s aliases=%d auth=%s provider=%s model=%s", truncateSessionID(primaryID), len(ids), selected.ID, provider, model)
+		case "conflict":
+			entry.Warnf("session-affinity: alias group conflict detected, reselecting | aliases=%d auth_count=%d provider=%s model=%s", len(ids), len(current.authIDs), provider, model)
+			entry.Infof("session-affinity: resolved alias group conflict with new binding | session=%s aliases=%d auth=%s provider=%s model=%s", truncateSessionID(primaryID), len(ids), selected.ID, provider, model)
+		default:
+			entry.Infof("session-affinity: cache miss, new binding | session=%s aliases=%d auth=%s provider=%s model=%s", truncateSessionID(primaryID), len(ids), selected.ID, provider, model)
+		}
+		return selected, nil
+	}
+}
+
+func sessionAffinityResolutionLockKeys(cacheKeys, groupLockKeys []string) []string {
+	keys := make([]string, 0, len(cacheKeys)+len(groupLockKeys))
+	for _, key := range cacheKeys {
+		keys = append(keys, "alias\x00"+key)
+	}
+	for _, key := range groupLockKeys {
+		keys = append(keys, "group\x00"+key)
+	}
+	return keys
+}
+
+func sessionAffinityResolutionLockIndex(key string) int {
+	const (
+		offset32 = uint32(2166136261)
+		prime32  = uint32(16777619)
+	)
+	hash := offset32
+	for index := 0; index < len(key); index++ {
+		hash ^= uint32(key[index])
+		hash *= prime32
+	}
+	return int(hash % sessionAffinityResolutionLockStripes)
+}
+
+func (s *SessionAffinitySelector) lockSessionAffinityResolution(keys []string) ([sessionAffinityResolutionLockStripes]bool, func()) {
+	var held [sessionAffinityResolutionLockStripes]bool
+	indices := make([]int, 0, len(keys))
+	for _, key := range keys {
+		index := sessionAffinityResolutionLockIndex(key)
+		if held[index] {
+			continue
+		}
+		held[index] = true
+		indices = append(indices, index)
+	}
+	sort.Ints(indices)
+	for _, index := range indices {
+		s.resolutionLocks[index].Lock()
+	}
+	return held, func() {
+		for index := len(indices) - 1; index >= 0; index-- {
+			s.resolutionLocks[indices[index]].Unlock()
 		}
 	}
+}
 
-	auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
-	if err != nil {
-		return nil, err
+func sessionAffinityResolutionLocksCover(held [sessionAffinityResolutionLockStripes]bool, keys []string) bool {
+	for _, key := range keys {
+		if !held[sessionAffinityResolutionLockIndex(key)] {
+			return false
+		}
 	}
-	bind(auth.ID)
-	entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-	return auth, nil
+	return true
 }
 
 func selectorLogEntry(ctx context.Context) *log.Entry {
@@ -673,361 +747,53 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 	}
 }
 
-// normalizedSessionCandidate validates an explicit client-provided session signal.
-// It keeps opaque printable IDs intact while rejecting values that are unsafe or
-// implausibly large for routing keys and logs.
-func normalizedSessionCandidate(raw string) string {
-	return cliproxysession.NormalizeExplicitID(raw)
+// sessionCacheKeyParts is the number of "::" separated fields in a session cache key.
+const sessionCacheKeyParts = 4
+
+// sessionCacheKey builds a session binding key namespaced by caller scope, provider
+// and model. The session ID is placed last so it can be recovered exactly even when
+// an opaque client identifier itself contains the "::" separator.
+func sessionCacheKey(callerScope, provider, model, sessionID string) string {
+	return strings.Join([]string{callerScope, provider, model, sessionID}, "::")
 }
 
-func sessionHeaderValue(headers http.Header, name string) string {
-	if headers == nil {
+// sessionCacheKeySessionID recovers the session ID from a key built by sessionCacheKey.
+func sessionCacheKeySessionID(key string) string {
+	parts := strings.SplitN(key, "::", sessionCacheKeyParts)
+	if len(parts) < sessionCacheKeyParts {
 		return ""
 	}
-	if value := normalizedSessionCandidate(headers.Get(name)); value != "" {
-		return value
-	}
-	for key, values := range headers {
-		if !strings.EqualFold(key, name) {
-			continue
-		}
-		for _, raw := range values {
-			if value := normalizedSessionCandidate(raw); value != "" {
-				return value
-			}
-		}
-	}
-	return ""
+	return parts[sessionCacheKeyParts-1]
 }
 
-// ExtractSessionID extracts a session identifier from explicit client signals,
-// then falls back to execution metadata, derived identity, and message history.
-// Priority order:
-//  1. X-Claude-Code-Session-Id
-//  2. Claude Code metadata.user_id session
-//  3. Session-Id / Session_id (Codex and compatible clients)
-//  4. X-Session-ID
-//  5. X-Session-Affinity (OpenCode)
-//  6. X-Client-Request-Id (pi Responses)
-//  7. session_id / sessionId
-//  8. prompt_cache_key, with conversation / conversation.id as an alias
-//  9. metadata.user_id and conversation_id legacy body fields
-//  10. explicit execution session metadata
-//  11. stable context-derived session identity
-//  12. stable hash from initial message content
+// sessionIdentityFromOptions returns the identity resolved once per request by
+// session.Enrich, and extracts it on demand for direct SDK callers that bypass Enrich.
+func sessionIdentityFromOptions(opts cliproxyexecutor.Options) cliproxysession.Identity {
+	if identity, ok := cliproxysession.FromMetadata(opts.Metadata); ok {
+		return identity
+	}
+	return cliproxysession.Extract(opts.Headers, opts.OriginalRequest, opts.Metadata)
+}
+
+func optionsMetadataString(opts cliproxyexecutor.Options, key string) string {
+	if opts.Metadata == nil {
+		return ""
+	}
+	value, _ := opts.Metadata[key].(string)
+	return strings.TrimSpace(value)
+}
+
+// ExtractSessionID returns the representative session identifier selected for
+// display and compatibility. Affinity routing uses every ID returned by Identity.IDs.
 func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
-	primary, _ := extractSessionIDs(headers, payload, metadata)
-	return primary
+	return cliproxysession.Extract(headers, payload, metadata).ID
 }
 
-// extractSessionIDs returns (primaryID, fallbackID) for session affinity.
-// fallbackID preserves an earlier binding when a stronger body identifier appears
-// later, and lets callers bind both identifiers when both are present.
+// extractSessionIDs returns the representative ID and first alias for compatibility.
+// SessionAffinitySelector routes on the full identifier set instead.
 func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]any) (string, string) {
-	if sid := sessionHeaderValue(headers, "X-Claude-Code-Session-Id"); sid != "" {
-		return "claude:" + sid, ""
-	}
-	if sid := cliproxysession.ClaudeMetadataSessionID(payload); sid != "" {
-		return "claude:" + sid, ""
-	}
-	if sid := sessionHeaderValue(headers, "Session-Id"); sid != "" {
-		return "codex:" + sid, ""
-	}
-	if sid := sessionHeaderValue(headers, "Session_id"); sid != "" {
-		return "codex:" + sid, ""
-	}
-	if sid := sessionHeaderValue(headers, "X-Session-ID"); sid != "" {
-		return "header:" + sid, ""
-	}
-	if sid := sessionHeaderValue(headers, "X-Session-Affinity"); sid != "" {
-		return "affinity:" + sid, ""
-	}
-	if sid := sessionHeaderValue(headers, "X-Client-Request-Id"); sid != "" {
-		return "clientreq:" + sid, ""
-	}
-
-	if len(payload) > 0 {
-		for _, path := range []string{"session_id", "sessionId"} {
-			if sid := normalizedSessionCandidate(gjson.GetBytes(payload, path).String()); sid != "" {
-				return "session:" + sid, ""
-			}
-		}
-
-		conversationID := ""
-		conversation := gjson.GetBytes(payload, "conversation")
-		if sid := normalizedSessionCandidate(conversation.Get("id").String()); sid != "" {
-			conversationID = "conv:" + sid
-		} else if conversation.Type == gjson.String {
-			if sid := normalizedSessionCandidate(conversation.String()); sid != "" {
-				conversationID = "conv:" + sid
-			}
-		}
-		if sid := normalizedSessionCandidate(gjson.GetBytes(payload, "prompt_cache_key").String()); sid != "" {
-			return "pck:" + sid, conversationID
-		}
-		if conversationID != "" {
-			return conversationID, ""
-		}
-
-		if userID := normalizedSessionCandidate(gjson.GetBytes(payload, "metadata.user_id").String()); userID != "" {
-			return "user:" + userID, ""
-		}
-		if conversationID := normalizedSessionCandidate(gjson.GetBytes(payload, "conversation_id").String()); conversationID != "" {
-			return "conv:" + conversationID, ""
-		}
-	}
-
-	if executionID, ok := metadata[cliproxyexecutor.ExecutionSessionMetadataKey].(string); ok {
-		if executionID = normalizedSessionCandidate(executionID); executionID != "" {
-			return "execution:" + executionID, ""
-		}
-	}
-	if derivedID := normalizedSessionCandidate(cliproxysession.DerivedID(metadata)); derivedID != "" {
-		return "derived:" + derivedID, ""
-	}
-	if len(payload) == 0 {
-		return "", ""
-	}
-	return extractMessageHashIDs(payload)
-}
-
-func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
-	var systemPrompt, firstUserMsg, firstAssistantMsg string
-
-	// OpenAI/Claude messages format
-	messages := gjson.GetBytes(payload, "messages")
-	if messages.Exists() && messages.IsArray() {
-		messages.ForEach(func(_, msg gjson.Result) bool {
-			role := msg.Get("role").String()
-			content := extractMessageContent(msg.Get("content"))
-			if content == "" {
-				return true
-			}
-
-			switch role {
-			case "system":
-				if systemPrompt == "" {
-					systemPrompt = truncateString(content, 100)
-				}
-			case "user":
-				if firstUserMsg == "" {
-					firstUserMsg = truncateString(content, 100)
-				}
-			case "assistant":
-				if firstAssistantMsg == "" {
-					firstAssistantMsg = truncateString(content, 100)
-				}
-			}
-
-			if systemPrompt != "" && firstUserMsg != "" && firstAssistantMsg != "" {
-				return false
-			}
-			return true
-		})
-	}
-
-	// Claude API: top-level "system" field (array or string)
-	if systemPrompt == "" {
-		topSystem := gjson.GetBytes(payload, "system")
-		if topSystem.Exists() {
-			if topSystem.IsArray() {
-				topSystem.ForEach(func(_, part gjson.Result) bool {
-					if text := part.Get("text").String(); text != "" && systemPrompt == "" {
-						systemPrompt = truncateString(text, 100)
-						return false
-					}
-					return true
-				})
-			} else if topSystem.Type == gjson.String {
-				systemPrompt = truncateString(topSystem.String(), 100)
-			}
-		}
-	}
-
-	// Gemini format
-	if systemPrompt == "" && firstUserMsg == "" {
-		sysInstr := gjson.GetBytes(payload, "systemInstruction.parts")
-		if sysInstr.Exists() && sysInstr.IsArray() {
-			sysInstr.ForEach(func(_, part gjson.Result) bool {
-				if text := part.Get("text").String(); text != "" && systemPrompt == "" {
-					systemPrompt = truncateString(text, 100)
-					return false
-				}
-				return true
-			})
-		}
-
-		contents := gjson.GetBytes(payload, "contents")
-		if contents.Exists() && contents.IsArray() {
-			contents.ForEach(func(_, msg gjson.Result) bool {
-				role := msg.Get("role").String()
-				msg.Get("parts").ForEach(func(_, part gjson.Result) bool {
-					text := part.Get("text").String()
-					if text == "" {
-						return true
-					}
-					switch role {
-					case "user":
-						if firstUserMsg == "" {
-							firstUserMsg = truncateString(text, 100)
-						}
-					case "model":
-						if firstAssistantMsg == "" {
-							firstAssistantMsg = truncateString(text, 100)
-						}
-					}
-					return false
-				})
-				if firstUserMsg != "" && firstAssistantMsg != "" {
-					return false
-				}
-				return true
-			})
-		}
-	}
-
-	// OpenAI Responses API format (v1/responses)
-	if systemPrompt == "" && firstUserMsg == "" {
-		if instr := gjson.GetBytes(payload, "instructions").String(); instr != "" {
-			systemPrompt = truncateString(instr, 100)
-		}
-
-		input := gjson.GetBytes(payload, "input")
-		if input.Exists() && input.IsArray() {
-			input.ForEach(func(_, item gjson.Result) bool {
-				itemType := item.Get("type").String()
-				if itemType == "reasoning" {
-					return true
-				}
-				// Skip non-message typed items (function_call, function_call_output, etc.)
-				// but allow items with no type that have a role (inline message format).
-				if itemType != "" && itemType != "message" {
-					return true
-				}
-
-				role := item.Get("role").String()
-				if itemType == "" && role == "" {
-					return true
-				}
-
-				// Handle both string content and array content (multimodal).
-				content := item.Get("content")
-				var text string
-				if content.Type == gjson.String {
-					text = content.String()
-				} else {
-					text = extractResponsesAPIContent(content)
-				}
-				if text == "" {
-					return true
-				}
-
-				switch role {
-				case "developer", "system":
-					if systemPrompt == "" {
-						systemPrompt = truncateString(text, 100)
-					}
-				case "user":
-					if firstUserMsg == "" {
-						firstUserMsg = truncateString(text, 100)
-					}
-				case "assistant":
-					if firstAssistantMsg == "" {
-						firstAssistantMsg = truncateString(text, 100)
-					}
-				}
-
-				if firstUserMsg != "" && firstAssistantMsg != "" {
-					return false
-				}
-				return true
-			})
-		}
-	}
-
-	if systemPrompt == "" && firstUserMsg == "" {
-		return "", ""
-	}
-
-	shortHash := computeSessionHash(systemPrompt, firstUserMsg, "")
-	if firstAssistantMsg == "" {
-		return shortHash, ""
-	}
-
-	fullHash := computeSessionHash(systemPrompt, firstUserMsg, firstAssistantMsg)
-	return fullHash, shortHash
-}
-
-func computeSessionHash(systemPrompt, userMsg, assistantMsg string) string {
-	h := fnv.New64a()
-	if systemPrompt != "" {
-		h.Write([]byte("sys:" + systemPrompt + "\n"))
-	}
-	if userMsg != "" {
-		h.Write([]byte("usr:" + userMsg + "\n"))
-	}
-	if assistantMsg != "" {
-		h.Write([]byte("ast:" + assistantMsg + "\n"))
-	}
-	return fmt.Sprintf("msg:%016x", h.Sum64())
-}
-
-func truncateString(s string, maxLen int) string {
-	if len(s) > maxLen {
-		return s[:maxLen]
-	}
-	return s
-}
-
-// extractMessageContent extracts text content from a message content field.
-// Handles both string content and array content (multimodal messages).
-// For array content, extracts text from all text-type elements.
-func extractMessageContent(content gjson.Result) string {
-	// String content: "Hello world"
-	if content.Type == gjson.String {
-		return content.String()
-	}
-
-	// Array content: [{"type":"text","text":"Hello"},{"type":"image",...}]
-	if content.IsArray() {
-		var texts []string
-		content.ForEach(func(_, part gjson.Result) bool {
-			// Handle Claude format: {"type":"text","text":"content"}
-			if part.Get("type").String() == "text" {
-				if text := part.Get("text").String(); text != "" {
-					texts = append(texts, text)
-				}
-			}
-			// Handle OpenAI format: {"type":"text","text":"content"}
-			// Same structure as Claude, already handled above
-			return true
-		})
-		if len(texts) > 0 {
-			return strings.Join(texts, " ")
-		}
-	}
-
-	return ""
-}
-
-func extractResponsesAPIContent(content gjson.Result) string {
-	if !content.IsArray() {
-		return ""
-	}
-	var texts []string
-	content.ForEach(func(_, part gjson.Result) bool {
-		partType := part.Get("type").String()
-		if partType == "input_text" || partType == "output_text" || partType == "text" {
-			if text := part.Get("text").String(); text != "" {
-				texts = append(texts, text)
-			}
-		}
-		return true
-	})
-	if len(texts) > 0 {
-		return strings.Join(texts, " ")
-	}
-	return ""
+	identity := cliproxysession.Extract(headers, payload, metadata)
+	return identity.ID, identity.FallbackID()
 }
 
 // extractSessionID is kept for backward compatibility.

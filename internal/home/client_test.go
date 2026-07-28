@@ -26,7 +26,7 @@ import (
 )
 
 func TestAuthDispatchRequestIncludesCount(t *testing.T) {
-	req := newAuthDispatchRequest("gpt-5.4", "session-1", http.Header{"Authorization": {"Bearer test"}}, 2)
+	req := newAuthDispatchRequest("gpt-5.4", DispatchSession{ID: "session-1"}, http.Header{"Authorization": {"Bearer test"}}, 2)
 
 	raw, err := json.Marshal(&req)
 	if err != nil {
@@ -46,7 +46,7 @@ func TestAuthDispatchRequestIncludesCount(t *testing.T) {
 }
 
 func TestAuthDispatchRequestDefaultsCountToOne(t *testing.T) {
-	req := newAuthDispatchRequest("gpt-5.4", "", nil, 0)
+	req := newAuthDispatchRequest("gpt-5.4", DispatchSession{}, nil, 0)
 
 	if req.Count != 1 {
 		t.Fatalf("count = %d, want 1", req.Count)
@@ -1648,7 +1648,7 @@ func TestRPopAuthLeavesCompleteServerErrorDeterministic(t *testing.T) {
 	})
 	client.heartbeatOK.Store(true)
 
-	_, errRPop := client.RPopAuth(context.Background(), "gpt-5.4", "", nil, 1)
+	_, errRPop := client.RPopAuth(context.Background(), "gpt-5.4", DispatchSession{}, nil, 1)
 	if errRPop == nil {
 		t.Fatal("RPopAuth() error = nil, want server failure")
 	}
@@ -1695,7 +1695,7 @@ func TestRPopAuthRejectsPreCanceledContextBeforeRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, errRPop := client.RPopAuth(ctx, "gpt-5.4", "", nil, 1)
+	_, errRPop := client.RPopAuth(ctx, "gpt-5.4", DispatchSession{}, nil, 1)
 	if !errors.Is(errRPop, context.Canceled) {
 		t.Fatalf("RPopAuth() error = %v, want context.Canceled", errRPop)
 	}
@@ -1711,7 +1711,7 @@ func TestRPopAuthMarksRequestReadThenCloseAmbiguous(t *testing.T) {
 	client, requestRead, release := newBlockingRPopTestClient(t)
 	result := make(chan error, 1)
 	go func() {
-		_, errRPop := client.RPopAuth(context.Background(), "gpt-5.4", "", nil, 1)
+		_, errRPop := client.RPopAuth(context.Background(), "gpt-5.4", DispatchSession{}, nil, 1)
 		result <- errRPop
 	}()
 	select {
@@ -1764,7 +1764,7 @@ func TestRPopAuthLeavesHELLOSetupInterruptionDeterministic(t *testing.T) {
 	client := New(config.HomeConfig{Enabled: true, Host: host, Port: port, DisableClusterDiscovery: true})
 	t.Cleanup(client.Close)
 
-	_, errRPop := client.RPopAuth(context.Background(), "gpt-5.4", "", nil, 1)
+	_, errRPop := client.RPopAuth(context.Background(), "gpt-5.4", DispatchSession{}, nil, 1)
 	if errRPop == nil {
 		t.Fatal("RPopAuth() error = nil, want setup interruption")
 	}
@@ -1837,7 +1837,7 @@ func TestAbortAmbiguousDispatchClosesBlockedRPopWithoutWaitingForResponse(t *tes
 	client.heartbeatOK.Store(true)
 	result := make(chan error, 1)
 	go func() {
-		_, errRPop := client.RPopAuth(context.Background(), "gpt-5.4", "", nil, 1)
+		_, errRPop := client.RPopAuth(context.Background(), "gpt-5.4", DispatchSession{}, nil, 1)
 		result <- errRPop
 	}()
 	select {
@@ -1884,7 +1884,7 @@ func TestAbortAmbiguousDispatchClosesBlockedRPopWithoutWaitingForResponse(t *tes
 func TestRPopAuthLeavesPreSendFailureDeterministic(t *testing.T) {
 	client := New(config.HomeConfig{Enabled: true, Host: "127.0.0.1", Port: 6379})
 
-	_, errRPop := client.RPopAuth(context.Background(), "", "", nil, 1)
+	_, errRPop := client.RPopAuth(context.Background(), "", DispatchSession{}, nil, 1)
 	if errRPop == nil {
 		t.Fatal("RPopAuth() error = nil, want requested model validation failure")
 	}
@@ -1922,7 +1922,7 @@ func TestAbortAmbiguousDispatchFencesConcurrentRPop(t *testing.T) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			_, errRPop := client.RPopAuth(context.Background(), "gpt-5.4", "", nil, 1)
+			_, errRPop := client.RPopAuth(context.Background(), "gpt-5.4", DispatchSession{}, nil, 1)
 			errs <- errRPop
 		}()
 	}

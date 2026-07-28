@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -17,7 +18,7 @@ type selectedAuthCallbackDispatcher struct {
 }
 
 func (*selectedAuthCallbackDispatcher) HeartbeatOK() bool { return true }
-func (d *selectedAuthCallbackDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+func (d *selectedAuthCallbackDispatcher) RPopAuth(context.Context, string, home.DispatchSession, http.Header, int) ([]byte, error) {
 	if d.calls.Add(1) > 2 {
 		return json.Marshal(homeErrorEnvelope{Error: &homeErrorDetail{Code: homeRequestRetryExceededErrorCode, Message: "no more auths"}})
 	}

@@ -1216,21 +1216,26 @@ func queryToLowerMap(query url.Values) map[string]string {
 	return out
 }
 
-func newAuthDispatchRequest(requestedModel string, sessionID string, headers http.Header, count int) authDispatchRequest {
+func newAuthDispatchRequest(requestedModel string, session DispatchSession, headers http.Header, count int) authDispatchRequest {
 	if count <= 0 {
 		count = 1
 	}
-	return authDispatchRequest{
+	req := authDispatchRequest{
 		Type:                "auth",
 		Model:               requestedModel,
 		Count:               count,
 		ConcurrencyProtocol: 1,
-		SessionID:           strings.TrimSpace(sessionID),
+		SessionID:           strings.TrimSpace(session.ID),
 		Headers:             headersToLowerMap(headers),
 	}
+	if req.SessionID != "" {
+		session.ID = req.SessionID
+		req.Session = &session
+	}
+	return req
 }
 
-func (c *Client) RPopAuth(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int) ([]byte, error) {
+func (c *Client) RPopAuth(ctx context.Context, requestedModel string, session DispatchSession, headers http.Header, count int) ([]byte, error) {
 	if c == nil || c.dispatchFenced.Load() {
 		return nil, ErrDispatchFenced
 	}
@@ -1244,7 +1249,7 @@ func (c *Client) RPopAuth(ctx context.Context, requestedModel string, sessionID 
 	if requestedModel == "" {
 		return nil, fmt.Errorf("home: requested model is empty")
 	}
-	req := newAuthDispatchRequest(requestedModel, sessionID, headers, count)
+	req := newAuthDispatchRequest(requestedModel, session, headers, count)
 	keyBytes, errMarshal := json.Marshal(&req)
 	if errMarshal != nil {
 		return nil, errMarshal

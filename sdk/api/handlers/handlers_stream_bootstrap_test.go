@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	cpahome "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -649,7 +650,7 @@ type handlerAccountedHomeDispatcher struct {
 }
 
 func (*handlerAccountedHomeDispatcher) HeartbeatOK() bool { return true }
-func (d *handlerAccountedHomeDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, _ int) ([]byte, error) {
+func (d *handlerAccountedHomeDispatcher) RPopAuth(_ context.Context, model string, _ cpahome.DispatchSession, _ http.Header, _ int) ([]byte, error) {
 	d.calls.Add(1)
 	return json.Marshal(map[string]any{
 		"concurrency": map[string]any{"accounted": true, "credential_id": "handler-cred", "model": model},

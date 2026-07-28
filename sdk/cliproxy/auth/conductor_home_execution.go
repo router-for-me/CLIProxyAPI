@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/sjson"
 )
 
@@ -55,6 +57,13 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
+		// Usage sinks read the session from the execution context. The dispatch path
+		// publishes the exact canonical Home session into request metadata first.
+		sessionInfo := sessionInfoFromOptions(opts)
+		if selection.dispatchSession.ID != "" {
+			sessionInfo = sessionInfoFromHomeDispatch(selection.dispatchSession)
+		}
+		execCtx = coreusage.WithSessionInfo(execCtx, sessionInfo)
 		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
 		if aliasResult.ForceMapping && responseAlias != "" {
 			aliasResult.OriginalAlias = responseAlias
@@ -136,6 +145,21 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		if errCtx := execCtx.Err(); errCtx != nil && ctx != nil && ctx.Err() != nil {
 			return cliproxyexecutor.Response{}, errCtx
 		}
+	}
+}
+
+func sessionInfoFromHomeDispatch(session home.DispatchSession) coreusage.SessionInfo {
+	return coreusage.SessionInfo{
+		ID:             session.ID,
+		Source:         session.Source,
+		Confidence:     session.Confidence,
+		Scope:          session.Scope,
+		ClientType:     session.ClientType,
+		ThreadID:       session.ThreadID,
+		ParentThreadID: session.ParentThreadID,
+		RequestKind:    session.RequestKind,
+		ThreadSource:   session.ThreadSource,
+		TurnID:         session.TurnID,
 	}
 }
 
