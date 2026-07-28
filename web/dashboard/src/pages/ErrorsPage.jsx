@@ -10,7 +10,8 @@ import {
 import Pager from '../components/Pager.jsx';
 import { useToast } from '../components/Toast.jsx';
 import {
-  PRESETS, presetToRange, toUTC, EVENTS_PAGE_SIZE,
+  PRESETS, presetToRange, toUTC, toUTCFromTZ, EVENTS_PAGE_SIZE,
+  TIMEZONES, loadTimezone, saveTimezone, formatInTZ, tzAbbreviation,
   TokenBreakdownCard, ChartSkeleton,
   FilterSelect, DetailRow,
 } from './usageShared.jsx';
@@ -44,17 +45,24 @@ export default function ErrorsPage() {
     interval: 'hour',
   });
   const [autoRefresh, setAutoRefresh] = useState(() => readAutoRefresh());
+  // Selected display timezone (shared with Usage Stats via localStorage).
+  const [timezone, setTimezone] = useState(() => loadTimezone());
+
+  function changeTimezone(tz) {
+    setTimezone(tz);
+    saveTimezone(tz);
+  }
 
   const rangeParams = useMemo(() => {
     if (filter.useCustomRange && (filter.customFrom || filter.customTo)) {
       return {
-        from: filter.customFrom ? toUTC(filter.customFrom) : undefined,
-        to: filter.customTo ? toUTC(filter.customTo) : undefined,
+        from: filter.customFrom ? toUTCFromTZ(filter.customFrom, timezone) : undefined,
+        to: filter.customTo ? toUTCFromTZ(filter.customTo, timezone) : undefined,
         interval: filter.interval || 'hour',
       };
     }
     return presetToRange(PRESETS[presetIdx]);
-  }, [presetIdx, filter.useCustomRange, filter.customFrom, filter.customTo, filter.interval]);
+  }, [presetIdx, filter.useCustomRange, filter.customFrom, filter.customTo, filter.interval, timezone]);
 
   const baseFilter = useMemo(() => ({
     api_key_id: filter.api_key_id || undefined,
@@ -162,6 +170,18 @@ export default function ErrorsPage() {
             />
             <span className="form__label" style={{ margin: 0 }}>Custom range</span>
           </label>
+          <label className="row gap-sm" style={{ alignItems: 'center' }} title="Display timezone for the Time column and custom range inputs">
+            <span className="form__label" style={{ margin: 0 }}>Timezone</span>
+            <select
+              value={timezone}
+              onChange={(e) => changeTimezone(e.target.value)}
+              style={{ width: 'auto' }}
+            >
+              {TIMEZONES.map((tz) => (
+                <option key={tz} value={tz}>{tz}</option>
+              ))}
+            </select>
+          </label>
         </div>
         <div className="grid grid--4">
           <div className="form__row" style={{ marginBottom: 0 }}>
@@ -220,11 +240,11 @@ export default function ErrorsPage() {
         {filter.useCustomRange && (
           <div className="usage-toolbar__range">
             <div className="row gap-sm">
-              <span className="usage-toolbar__range-label">From (UTC)</span>
+              <span className="usage-toolbar__range-label">From ({timezone})</span>
               <input type="datetime-local" value={filter.customFrom} onChange={(e) => updateFilter({ customFrom: e.target.value })} />
             </div>
             <div className="row gap-sm">
-              <span className="usage-toolbar__range-label">To (UTC)</span>
+              <span className="usage-toolbar__range-label">To ({timezone})</span>
               <input type="datetime-local" value={filter.customTo} onChange={(e) => updateFilter({ customTo: e.target.value })} />
             </div>
           </div>
@@ -263,11 +283,12 @@ export default function ErrorsPage() {
           pageSize={EVENTS_PAGE_SIZE}
           onPage={setErrorsPage}
           onRowClick={setSelectedErrorId}
+          timezone={timezone}
         />
       </div>
 
       {selectedErrorId != null && (
-        <ErrorDetailModal id={selectedErrorId} onClose={() => setSelectedErrorId(null)} />
+        <ErrorDetailModal id={selectedErrorId} timezone={timezone} onClose={() => setSelectedErrorId(null)} />
       )}
     </>
   );
@@ -277,7 +298,7 @@ export default function ErrorsPage() {
 // (usage_errors). Surfaces fail_status_code as a status badge and the
 // error_message truncated, with the full text plus Target URL / IP in the
 // detail modal.
-function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick }) {
+function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick, timezone }) {
   const total = errors.data?.total || 0;
   const rows = errors.data?.errors || [];
   const totalPages = total === 0 ? 1 : Math.ceil(total / pageSize);
@@ -288,11 +309,11 @@ function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick }) {
           <table className="table" style={{ tableLayout: 'fixed' }}>
             <thead>
               <tr>
-                <th>Time (UTC)</th>
+                <th>Time ({timezone})</th>
                 <th>Request ID</th>
                 <th>Key / Alias</th>
-                <th>Provider</th>
-                <th>Model</th>
+                <th>Provider Official</th>
+                <th>Model Alias</th>
                 <th style={{ textAlign: 'right' }}>Status</th>
                 <th>Error message</th>
                 <th style={{ textAlign: 'right' }}>Latency</th>
@@ -325,11 +346,11 @@ function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick }) {
             <table className="table">
               <thead>
                 <tr>
-                  <th>Time (UTC)</th>
+                  <th>Time ({timezone})</th>
                   <th>Request ID</th>
                   <th>Key / Alias</th>
-                  <th>Provider</th>
-                  <th>Model</th>
+                  <th>Provider Official</th>
+                  <th>Model Alias</th>
                   <th style={{ textAlign: 'right' }}>Status</th>
                   <th>Error message</th>
                   <th style={{ textAlign: 'right' }}>Latency</th>
@@ -342,13 +363,13 @@ function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick }) {
                     className="row-link"
                     onClick={() => onRowClick(e.id)}
                   >
-                    <td className="mono" style={{ whiteSpace: 'nowrap' }}>
-                      {e.requested_at ? new Date(e.requested_at).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z') : '—'}
+                    <td className="mono" style={{ whiteSpace: 'nowrap' }} title={e.requested_at ? new Date(e.requested_at).toISOString() : ''}>
+                      {e.requested_at ? formatInTZ(e.requested_at, timezone) : '—'}
                     </td>
                     <td className="mono" style={{ whiteSpace: 'nowrap' }}>{e.request_id || '—'}</td>
                     <td className="mono">{e.key_alias || e.api_key_id || '—'}</td>
-                    <td>{e.provider || '—'}</td>
-                    <td className="mono">{e.model || '—'}</td>
+                    <td>{e.official_provider || e.provider || '—'}</td>
+                    <td className="mono">{e.alias || e.model || '—'}</td>
                     <td style={{ textAlign: 'right' }} className="mono">
                       {e.fail_status_code ? String(e.fail_status_code) : '—'}
                     </td>
@@ -382,7 +403,7 @@ function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick }) {
 // executor actually hit) and the client IP / forwarded-for fields are
 // surfaced here so an operator can correlate a failure to a concrete upstream
 // path and a concrete source IP without leaving the modal.
-function ErrorDetailModal({ id, onClose }) {
+function ErrorDetailModal({ id, timezone, onClose }) {
   const detail = useAsync(() => getUsageError(id), [id]);
   const e = detail.data?.error_event;
   return (
@@ -391,13 +412,15 @@ function ErrorDetailModal({ id, onClose }) {
       {detail.error && <ErrorBanner error={detail.error} />}
       {!detail.loading && !detail.error && e && (
         <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+          <DetailRow label={`Time (${tzAbbreviation(e.requested_at, timezone)})`} value={e.requested_at ? formatInTZ(e.requested_at, timezone) : '—'} mono />
           <DetailRow label="Time (UTC)" value={e.requested_at ? new Date(e.requested_at).toISOString() : '—'} mono />
           <DetailRow label="Request ID" value={e.request_id || '—'} mono />
           <DetailRow label="API Key ID" value={e.api_key_id || '—'} mono />
           <DetailRow label="Key Alias" value={e.key_alias || '—'} mono />
-          <DetailRow label="Provider" value={e.provider || '—'} />
-          <DetailRow label="Model" value={e.model || '—'} mono />
-          <DetailRow label="Alias" value={e.alias || '—'} mono />
+          <DetailRow label="Provider Official" value={e.official_provider || e.provider || '—'} />
+          <DetailRow label="Provider (internal)" value={e.provider || '—'} mono />
+          <DetailRow label="Model Alias" value={e.alias || e.model || '—'} mono />
+          <DetailRow label="Model (resolved)" value={e.model || '—'} mono />
           <DetailRow label="Route Model" value={e.route_model || '—'} mono />
           <DetailRow label="Executor" value={e.executor_type || '—'} />
           <DetailRow label="Auth Type" value={e.auth_type || '—'} />

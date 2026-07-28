@@ -78,10 +78,155 @@ export function fmtUSDCompact(v) {
 export function toUTC(localValue) {
   if (!localValue) return '';
   // datetime-local input produces "2026-07-19T15:30"; assume the user means
-  // local time. Convert to ISO UTC.
+  // local time. Convert to ISO UTC. Prefer toUTCFromTZ when a timezone selector
+  // is on the page — this helper assumes the browser's local zone and is kept
+  // for the presentational UsageToolbar which has no selector of its own.
   const d = new Date(localValue);
   if (isNaN(d.getTime())) return '';
   return d.toISOString();
+}
+
+// Timezones offered in the Usage Stats / Errors toolbar. The list favors the
+// regions an operator is likely to care about; "UTC" is always present so the
+// prior behavior stays one click away. Default is Asia/Jakarta per product.
+export const DEFAULT_TIMEZONE = 'Asia/Jakarta';
+export const TZ_STORAGE = 'nixllm.dashboard.usageTimezone';
+export const TIMEZONES = [
+  'Asia/Jakarta',
+  'UTC',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Asia/Shanghai',
+  'Asia/Kolkata',
+  'Asia/Dubai',
+  'Australia/Sydney',
+  'America/Los_Angeles',
+  'America/New_York',
+  'America/Sao_Paulo',
+  'Europe/London',
+  'Europe/Berlin',
+];
+
+// supportedTimezones returns the set of IANA tz ids the runtime accepts. Used
+// to validate a persisted/localStorage value before applying it, so a stale
+// preference from an older runtime never crashes Intl.DateTimeFormat.
+function supportedTimezones() {
+  try {
+    if (Array.isArray(Intl.supportedValuesOf)) {
+      const v = Intl.supportedValuesOf('timeZone');
+      if (v && v.length) return new Set(v);
+    }
+  } catch { /* older engines — fall through to the hardcoded list */ }
+  return new Set(TIMEZONES);
+}
+
+// loadTimezone reads the operator's tz preference from localStorage, defaulting
+// to Asia/Jakarta. Falls back to the default when the stored value is no longer
+// supported by the current runtime (e.g. an obsolete id) so the UI never
+// throws on a bad Intl time zone.
+export function loadTimezone() {
+  let stored;
+  try { stored = localStorage.getItem(TZ_STORAGE) || ''; } catch { stored = ''; }
+  const supported = supportedTimezones();
+  if (stored && supported.has(stored)) return stored;
+  if (supported.has(DEFAULT_TIMEZONE)) return DEFAULT_TIMEZONE;
+  return 'UTC';
+}
+
+// saveTimezone persists the tz preference so it survives reloads and applies
+// across the Usage Stats and Errors pages.
+export function saveTimezone(tz) {
+  try { localStorage.setItem(TZ_STORAGE, tz); } catch { /* ignore */ }
+}
+
+// formatInTZ renders an ISO timestamp as a wall-clock string in the given IANA
+// timezone, e.g. "2026-07-28 15:30:00". Mirrors the prior
+// toISOString().replace('T',' ') layout so the column width and "mono" cell
+// styling are unchanged; only the displayed offset shifts. Returns '' for a
+// falsy input so the caller can fall back to '—'.
+//
+// Implementation: Intl with en-CA yields "YYYY-MM-DD, HH:MM:SS (AM/PM)" under
+// hour12:false; we strip the leading day-of-week when present and rejoin as
+// "YYYY-MM-DD HH:MM:SS". Doing it via Intl (rather than Date getters) keeps the
+// value correct across DST transitions in the target zone.
+export function formatInTZ(iso, tz) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  let parts;
+  try {
+    parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false,
+    }).formatToParts(d);
+  } catch {
+    // Unsupported tz id — degrade to UTC.
+    return new Date(iso).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
+  }
+  const get = (t) => (parts.find((p) => p.type === t) || {}).value || '';
+  // Intl can render hour "24" near midnight under hour12:false; normalize to 00.
+  let h = get('hour');
+  if (h === '24') h = '00';
+  return `${get('year')}-${get('month')}-${get('day')} ${h}:${get('minute')}:${get('second')}`;
+}
+
+// tzAbbreviation returns the short zone name (e.g. "WIB", "UTC", "PDT") for a
+// tz at the given instant, used in the detail modal to make the wall-clock
+// unambiguous. Falls back to the tz id itself.
+export function tzAbbreviation(iso, tz) {
+  if (!iso) return tz;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return tz;
+  try {
+    const s = new Intl.DateTimeFormat('en', { timeZone: tz, timeZoneName: 'short' })
+      .formatToParts(d)
+      .find((p) => p.type === 'timeZoneName');
+    return (s && s.value) || tz;
+  } catch {
+    return tz;
+  }
+}
+
+// toUTCFromTZ interprets a datetime-local input value ("YYYY-MM-DDTHH:MM") as a
+// wall-clock in the given tz and returns its ISO-UTC equivalent. Replaces toUTC
+// on pages that carry a timezone selector; the server only ever receives UTC
+// from/to. Returns '' for an empty/invalid input.
+//
+// Approach: build a Date whose UTC fields equal the typed wall-clock, format it
+// in the target tz and in UTC, and shift by the observed offset. This avoids
+// any date-fns/dayjs dependency and stays correct across DST boundaries for the
+// typed instant.
+export function toUTCFromTZ(localValue, tz) {
+  if (!localValue) return '';
+  // Parse the "YYYY-MM-DDTHH:MM" (optionally with seconds) components without
+  // leaning on the browser's local-zone Date parsing.
+  const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/.exec(localValue);
+  if (!m) return '';
+  const [, y, mo, d2, h, mi, s] = m;
+  // Construct the wall-clock as UTC so Date.getUTC* returns exactly what was
+  // typed; then reverse the target-tz offset to land on the real UTC instant.
+  const wallUtc = new Date(Date.UTC(+y, +mo - 1, +d2, +h, +mi, +(s || 0)));
+  if (isNaN(wallUtc.getTime())) return '';
+  // Offset (minutes) of `tz` at this instant, e.g. +420 for Asia/Jakarta (WIB).
+  let offsetMin;
+  try {
+    const asTz = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false,
+    }).formatToParts(wallUtc);
+    const get = (t) => (asTz.find((p) => p.type === t) || {}).value || '0';
+    let hh = get('hour'); if (hh === '24') hh = '00';
+    const tzInstant = Date.UTC(+get('year'), +get('month') - 1, +get('day'), +hh, +get('minute'), +get('second'));
+    offsetMin = Math.round((tzInstant - wallUtc.getTime()) / 60000);
+  } catch {
+    // Unsupported tz — treat as UTC.
+    return wallUtc.toISOString();
+  }
+  return new Date(wallUtc.getTime() - offsetMin * 60000).toISOString();
 }
 
 export const EVENTS_PAGE_SIZE = 10;

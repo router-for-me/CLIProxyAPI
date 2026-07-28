@@ -12,7 +12,8 @@ import { Sparkline, BarChart, MultiBarChart } from '../components/Charts.jsx';
 import Pager from '../components/Pager.jsx';
 import { useToast } from '../components/Toast.jsx';
 import {
-  PRESETS, presetToRange, toUTC, EVENTS_PAGE_SIZE,
+  PRESETS, presetToRange, toUTC, toUTCFromTZ, EVENTS_PAGE_SIZE,
+  TIMEZONES, loadTimezone, saveTimezone, formatInTZ, tzAbbreviation,
   CompactTokenBreakdown, TokenBreakdownCard, ChartSkeleton,
   FilterSelect, DetailRow,
 } from './usageShared.jsx';
@@ -41,17 +42,27 @@ export default function UsageStatsPage() {
     interval: 'hour',
   });
   const [autoRefresh, setAutoRefresh] = useState(() => readAutoRefresh());
+  // Selected display timezone. Defaults to Asia/Jakarta (see usageShared) and
+  // persists across reloads + both Usage Stats and Errors pages. The server
+  // always receives UTC from/to; this only affects how wall-clock columns and
+  // the custom-range datetime-local inputs are interpreted/displayed.
+  const [timezone, setTimezone] = useState(() => loadTimezone());
+
+  function changeTimezone(tz) {
+    setTimezone(tz);
+    saveTimezone(tz);
+  }
 
   const rangeParams = useMemo(() => {
     if (filter.useCustomRange && (filter.customFrom || filter.customTo)) {
       return {
-        from: filter.customFrom ? toUTC(filter.customFrom) : undefined,
-        to: filter.customTo ? toUTC(filter.customTo) : undefined,
+        from: filter.customFrom ? toUTCFromTZ(filter.customFrom, timezone) : undefined,
+        to: filter.customTo ? toUTCFromTZ(filter.customTo, timezone) : undefined,
         interval: filter.interval || 'hour',
       };
     }
     return presetToRange(PRESETS[presetIdx]);
-  }, [presetIdx, filter.useCustomRange, filter.customFrom, filter.customTo, filter.interval]);
+  }, [presetIdx, filter.useCustomRange, filter.customFrom, filter.customTo, filter.interval, timezone]);
 
   const baseFilter = useMemo(() => ({
     api_key_id: filter.api_key_id || undefined,
@@ -179,6 +190,18 @@ export default function UsageStatsPage() {
             />
             <span className="form__label" style={{ margin: 0 }}>Custom range</span>
           </label>
+          <label className="row gap-sm" style={{ alignItems: 'center' }} title="Display timezone for the Time column and custom range inputs">
+            <span className="form__label" style={{ margin: 0 }}>Timezone</span>
+            <select
+              value={timezone}
+              onChange={(e) => changeTimezone(e.target.value)}
+              style={{ width: 'auto' }}
+            >
+              {TIMEZONES.map((tz) => (
+                <option key={tz} value={tz}>{tz}</option>
+              ))}
+            </select>
+          </label>
         </div>
         <div className="grid grid--4">
           <div className="form__row" style={{ marginBottom: 0 }}>
@@ -237,11 +260,11 @@ export default function UsageStatsPage() {
         {filter.useCustomRange && (
           <div className="usage-toolbar__range">
             <div className="row gap-sm">
-              <span className="usage-toolbar__range-label">From (UTC)</span>
+              <span className="usage-toolbar__range-label">From ({timezone})</span>
               <input type="datetime-local" value={filter.customFrom} onChange={(e) => updateFilter({ customFrom: e.target.value })} />
             </div>
             <div className="row gap-sm">
-              <span className="usage-toolbar__range-label">To (UTC)</span>
+              <span className="usage-toolbar__range-label">To ({timezone})</span>
               <input type="datetime-local" value={filter.customTo} onChange={(e) => updateFilter({ customTo: e.target.value })} />
             </div>
           </div>
@@ -368,11 +391,12 @@ export default function UsageStatsPage() {
           pageSize={EVENTS_PAGE_SIZE}
           onPage={setEventsPage}
           onRowClick={setSelectedEventId}
+          timezone={timezone}
         />
       </div>
 
       {selectedEventId != null && (
-        <EventDetailModal id={selectedEventId} onClose={() => setSelectedEventId(null)} />
+        <EventDetailModal id={selectedEventId} timezone={timezone} onClose={() => setSelectedEventId(null)} />
       )}
     </>
   );
@@ -380,7 +404,7 @@ export default function UsageStatsPage() {
 
 // EventsTableBody renders the table + pager only (no card). Used by the
 // tabbed Events/Errors switcher, which wraps both in a single card.
-function EventsTableBody({ events, page, pageSize, onPage, onRowClick }) {
+function EventsTableBody({ events, page, pageSize, onPage, onRowClick, timezone }) {
   const total = events.data?.total || 0;
   const rows = events.data?.events || [];
   const totalPages = total === 0 ? 1 : Math.ceil(total / pageSize);
@@ -391,11 +415,11 @@ function EventsTableBody({ events, page, pageSize, onPage, onRowClick }) {
           <table className="table" style={{ tableLayout: 'fixed' }}>
             <thead>
               <tr>
-                <th>Time (UTC)</th>
+                <th>Time ({timezone})</th>
                 <th>Request ID</th>
                 <th>Key / Alias</th>
-                <th>Provider</th>
-                <th>Model</th>
+                <th>Provider Official</th>
+                <th>Model Alias</th>
                 <th style={{ minWidth: 260 }}>Token breakdown</th>
                 <th style={{ textAlign: 'right' }}>Cost</th>
                 <th style={{ textAlign: 'right' }}>Latency</th>
@@ -430,11 +454,11 @@ function EventsTableBody({ events, page, pageSize, onPage, onRowClick }) {
             <table className="table">
               <thead>
                 <tr>
-                  <th>Time (UTC)</th>
+                  <th>Time ({timezone})</th>
                   <th>Request ID</th>
                   <th>Key / Alias</th>
-                  <th>Provider</th>
-                  <th>Model</th>
+                  <th>Provider Official</th>
+                  <th>Model Alias</th>
                   <th style={{ minWidth: 260 }}>Token breakdown</th>
                   <th style={{ textAlign: 'right' }}>Cost</th>
                   <th style={{ textAlign: 'right' }}>Latency</th>
@@ -448,13 +472,13 @@ function EventsTableBody({ events, page, pageSize, onPage, onRowClick }) {
                     className="row-link"
                     onClick={() => onRowClick(e.id)}
                   >
-                    <td className="mono" style={{ whiteSpace: 'nowrap' }}>
-                      {e.requested_at ? new Date(e.requested_at).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z') : '—'}
+                    <td className="mono" style={{ whiteSpace: 'nowrap' }} title={e.requested_at ? new Date(e.requested_at).toISOString() : ''}>
+                      {e.requested_at ? formatInTZ(e.requested_at, timezone) : '—'}
                     </td>
                     <td className="mono" style={{ whiteSpace: 'nowrap' }}>{e.request_id || '—'}</td>
                     <td className="mono">{e.key_alias || e.api_key_id || '—'}</td>
-                    <td>{e.provider || '—'}</td>
-                    <td className="mono">{e.model || '—'}</td>
+                    <td>{e.official_provider || e.provider || '—'}</td>
+                    <td className="mono">{e.alias || e.model || '—'}</td>
                     <td>
                       <CompactTokenBreakdown e={e} />
                     </td>
@@ -482,7 +506,7 @@ function EventsTableBody({ events, page, pageSize, onPage, onRowClick }) {
 // EventDetailModal fetches and renders a single usage event. The sealed
 // api_key_principal is intentionally never shown; the operator sees the
 // non-secret key_alias and the other fields needed for triage.
-function EventDetailModal({ id, onClose }) {
+function EventDetailModal({ id, timezone, onClose }) {
   const detail = useAsync(() => getUsageEvent(id), [id]);
   const e = detail.data?.event;
   return (
@@ -491,13 +515,15 @@ function EventDetailModal({ id, onClose }) {
       {detail.error && <ErrorBanner error={detail.error} />}
       {!detail.loading && !detail.error && e && (
         <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+          <DetailRow label={`Time (${tzAbbreviation(e.requested_at, timezone)})`} value={e.requested_at ? formatInTZ(e.requested_at, timezone) : '—'} mono />
           <DetailRow label="Time (UTC)" value={e.requested_at ? new Date(e.requested_at).toISOString() : '—'} mono />
           <DetailRow label="Request ID" value={e.request_id || '—'} mono />
           <DetailRow label="API Key ID" value={e.api_key_id || '—'} mono />
           <DetailRow label="Key Alias" value={e.key_alias || '—'} mono />
-          <DetailRow label="Provider" value={e.provider || '—'} />
-          <DetailRow label="Model" value={e.model || '—'} mono />
-          <DetailRow label="Alias" value={e.alias || '—'} mono />
+          <DetailRow label="Provider Official" value={e.official_provider || e.provider || '—'} />
+          <DetailRow label="Provider (internal)" value={e.provider || '—'} mono />
+          <DetailRow label="Model Alias" value={e.alias || e.model || '—'} mono />
+          <DetailRow label="Model (resolved)" value={e.model || '—'} mono />
           <DetailRow label="Executor" value={e.executor_type || '—'} />
           <DetailRow label="Auth Type" value={e.auth_type || '—'} />
           <DetailRow label="Source" value={e.source || '—'} />
