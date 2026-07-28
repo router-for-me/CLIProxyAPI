@@ -1,5 +1,4 @@
-- ：仅 Go 实现的插件资源，演示 host 凭证文件回调（、、、）。
-- # 标准动态库插件示例
+# 标准动态库插件示例
 
 本目录包含 CLIProxyAPI C ABI 的标准动态库插件示例。
 
@@ -15,6 +14,7 @@
 - `request-translator/`：只演示请求转换能力。
 - `request-normalizer/`：只演示请求规整能力。
 - `codex-service-tier/`：仅 Go 实现的请求规整插件，启用后会将 Codex `gpt-5.5` 请求设置为 priority service tier。
+- `request-lifecycle/`：仅 Go 实现的请求生命周期插件，演示并发控制、主动终止 HTTP 请求和终态回调。
 - `scheduler/`：仅 Go 实现的调度插件，可选择指定 auth ID、委托内置调度器或拒绝调度。
 - `response-translator/`：只演示响应转换能力。
 - `response-normalizer/`：只演示响应规整能力。
@@ -41,7 +41,21 @@ plugins:
       fast: false
 ```
 
+## 请求生命周期
 
+`request-lifecycle` 同时声明 `request_interceptor` 和 `request_lifecycle_plugin`。它会在认证选择前占用并发槽位，可以直接返回自定义 `403` 或 `429` 响应而不请求上游模型，并在成功、失败、拒绝或取消时通过 `request.complete` 释放已接入请求的槽位。
+
+```yaml
+plugins:
+  configs:
+    request-lifecycle:
+      enabled: true
+      priority: 100
+      max_concurrency: 2
+      reject_keyword: "blocked"
+```
+
+构建方式和生命周期语义详见 `request-lifecycle/README.md`。
 
 ## Host Auth Files 回调
 

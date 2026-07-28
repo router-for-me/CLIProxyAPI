@@ -684,7 +684,7 @@ func convertResponsesFunctionToolToClaude(tool gjson.Result, overrideName string
 	if d := responsesToolDescription(tool); d != "" {
 		tJSON, _ = sjson.SetBytes(tJSON, "description", d)
 	}
-	tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", normalizeClaudeToolInputSchema(responsesToolParameters(tool)))
+	tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", util.NormalizeClaudeToolInputSchema([]byte(responsesToolParameters(tool).Raw)))
 	tJSON = common.AttachCacheControl(tJSON, tool)
 	if !gjson.GetBytes(tJSON, "cache_control").Exists() {
 		tJSON = common.AttachCacheControl(tJSON, tool.Get("function"))
@@ -742,27 +742,6 @@ func responsesToolParameters(tool gjson.Result) gjson.Result {
 		}
 	}
 	return gjson.Result{}
-}
-
-func normalizeClaudeToolInputSchema(parameters gjson.Result) []byte {
-	raw := strings.TrimSpace(parameters.Raw)
-	if raw == "" || raw == "null" || !gjson.Valid(raw) {
-		return []byte(`{"type":"object","properties":{}}`)
-	}
-	result := gjson.Parse(raw)
-	if !result.IsObject() {
-		return []byte(`{"type":"object","properties":{}}`)
-	}
-	schema := []byte(raw)
-	schemaType := result.Get("type").String()
-	if schemaType == "" {
-		schema, _ = sjson.SetBytes(schema, "type", "object")
-		schemaType = "object"
-	}
-	if schemaType == "object" && !result.Get("properties").Exists() {
-		schema, _ = sjson.SetRawBytes(schema, "properties", []byte(`{}`))
-	}
-	return schema
 }
 
 func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {

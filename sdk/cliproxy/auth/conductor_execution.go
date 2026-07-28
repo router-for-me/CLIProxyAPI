@@ -41,6 +41,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		if errExec == nil {
 			return resp, nil
 		}
+		if isRequestTerminatedError(errExec) {
+			return cliproxyexecutor.Response{}, errExec
+		}
 		lastErr = errExec
 		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, retryModel, maxWait)
 		if !shouldRetry {
@@ -83,6 +86,9 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		if errExec == nil {
 			return resp, nil
 		}
+		if isRequestTerminatedError(errExec) {
+			return cliproxyexecutor.Response{}, errExec
+		}
 		lastErr = errExec
 		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, retryModel, maxWait)
 		if !shouldRetry {
@@ -121,6 +127,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		if errStream == nil {
 			return result, nil
 		}
+		if isRequestTerminatedError(errStream) {
+			return nil, errStream
+		}
 		lastErr = errStream
 		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, retryModel, maxWait)
 		if !shouldRetry {
@@ -151,9 +160,14 @@ type requestToFormatResolver interface {
 	RequestToFormat(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) sdktranslator.Format
 }
 
-func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExecutor, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, requestedModel string) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
+func isRequestTerminatedError(err error) bool {
+	var terminated *cliproxyexecutor.RequestTerminatedError
+	return errors.As(err, &terminated) && terminated != nil
+}
+
+func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExecutor, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, requestedModel string) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
 	if opts.RequestAfterAuthInterceptor == nil {
-		return req, opts
+		return req, opts, nil
 	}
 	toFormat := requestToFormat(provider, executor, req, opts)
 	resp := opts.RequestAfterAuthInterceptor(ctx, cliproxyexecutor.RequestAfterAuthInterceptRequest{
@@ -171,7 +185,14 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 		req.Payload = bytes.Clone(resp.Body)
 		opts.OriginalRequest = bytes.Clone(resp.Body)
 	}
-	return req, opts
+	if resp.Terminate {
+		return req, opts, &cliproxyexecutor.RequestTerminatedError{
+			HTTPStatus: resp.StatusCode,
+			Header:     cloneRequestHeaders(resp.ResponseHeaders),
+			Body:       bytes.Clone(resp.ResponseBody),
+		}
+	}
+	return req, opts, nil
 }
 
 func requestToFormat(provider string, executor ProviderExecutor, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) sdktranslator.Format {
@@ -304,7 +325,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				execReq.Model = executionModel
 			}
 			execOpts := opts
-			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			var errIntercept error
+			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			if errIntercept != nil {
+				return cliproxyexecutor.Response{}, errIntercept
+			}
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -417,7 +442,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				execReq.Model = executionModel
 			}
 			execOpts := opts
-			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			var errIntercept error
+			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			if errIntercept != nil {
+				return cliproxyexecutor.Response{}, errIntercept
+			}
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {

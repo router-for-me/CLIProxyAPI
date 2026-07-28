@@ -77,6 +77,9 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 	if auth == nil {
 		return "", fmt.Errorf("auth filestore: auth is nil")
 	}
+	if errWeight := cliproxyauth.ValidateAuthWeight(auth); errWeight != nil {
+		return "", fmt.Errorf("auth filestore: %w", errWeight)
+	}
 
 	path, err := s.resolveAuthPath(auth)
 	if err != nil {
@@ -233,6 +236,9 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 	if err = json.Unmarshal(data, &metadata); err != nil {
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
 	}
+	if errWeight := cliproxyauth.ValidateAuthWeight(&cliproxyauth.Auth{Metadata: metadata}); errWeight != nil {
+		return nil, errWeight
+	}
 	provider, _ := metadata["type"].(string)
 	provider = strings.TrimSpace(provider)
 	if strings.EqualFold(provider, "gemini") {
@@ -277,6 +283,9 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 						auth.Metadata = make(map[string]any)
 					}
 					auth.Metadata["disabled"] = true
+				}
+				if errWeight := cliproxyauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
+					return nil, errWeight
 				}
 				cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 			}
@@ -371,6 +380,9 @@ func compactPluginAuths(auths []*cliproxyauth.Auth) []*cliproxyauth.Auth {
 	out := auths[:0]
 	for _, auth := range auths {
 		if auth == nil {
+			continue
+		}
+		if errWeight := cliproxyauth.ValidateAuthWeight(auth); errWeight != nil {
 			continue
 		}
 		out = append(out, auth)

@@ -509,6 +509,7 @@ func (m *Manager) clearHomeRuntimeAuths() {
 	m.clearHomeRuntimeAuthsLocked()
 	selections := m.takeAllHomeSessionSelectionsLocked()
 	m.mu.Unlock()
+	m.homeSessionAliases.clear()
 	for _, selection := range selections {
 		selection.End("home_disabled")
 	}
@@ -716,7 +717,7 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		return nil, &Error{Code: "home_unavailable", Message: "home execution registry unavailable", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
 	}
 
-	sessionID := ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	sessionID := m.homeDispatchSessionID(opts)
 	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers)
 	raw, errRPop := client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata))
 	if errRPop != nil {
@@ -981,6 +982,9 @@ func hasAntigravityProvider(providers []string) bool {
 }
 
 func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, providers []string) bool {
+	if isRequestTerminatedError(lastErr) {
+		return false
+	}
 	status := statusCodeFromError(lastErr)
 	log.WithFields(log.Fields{
 		"lastErr":   errorString(lastErr),

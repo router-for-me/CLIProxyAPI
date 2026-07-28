@@ -20,6 +20,22 @@ type schedulerTestExecutor struct {
 	provider string
 }
 
+type schedulerLoadStore struct {
+	auths []*Auth
+}
+
+func (s *schedulerLoadStore) List(context.Context) ([]*Auth, error) {
+	return s.auths, nil
+}
+
+func (s *schedulerLoadStore) Save(context.Context, *Auth) (string, error) {
+	return "", nil
+}
+
+func (s *schedulerLoadStore) Delete(context.Context, string) error {
+	return nil
+}
+
 func (e schedulerTestExecutor) Identifier() string {
 	if e.provider != "" {
 		return e.provider
@@ -150,6 +166,165 @@ func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
 		if got.ID != wantID {
 			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
 		}
+	}
+}
+
+func TestSchedulerPick_WeightedRoundRobin(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&WeightedRoundRobinSelector{},
+		&Auth{ID: "a", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "5"}},
+		&Auth{ID: "b", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "3"}},
+		&Auth{ID: "c", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "2"}},
+	)
+
+	counts := make(map[string]int)
+	for index := 0; index < 100; index++ {
+		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		counts[got.ID]++
+	}
+	want := map[string]int{"a": 50, "b": 30, "c": 20}
+	for authID, wantCount := range want {
+		if counts[authID] != wantCount {
+			t.Fatalf("auth %q picks = %d, want %d", authID, counts[authID], wantCount)
+		}
+	}
+}
+
+func TestManagerLoad_WeightedRoundRobinUsesPersistedMetadataWeight(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(&schedulerLoadStore{auths: []*Auth{
+		{ID: "a", Provider: "gemini", Metadata: map[string]any{AttributeWeight: float64(5)}},
+		{ID: "b", Provider: "gemini", Metadata: map[string]any{AttributeWeight: float64(1)}},
+	}}, &WeightedRoundRobinSelector{}, nil)
+	if errLoad := manager.Load(context.Background()); errLoad != nil {
+		t.Fatalf("Load() error = %v", errLoad)
+	}
+
+	counts := make(map[string]int)
+	for index := 0; index < 60; index++ {
+		got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		counts[got.ID]++
+	}
+	if counts["a"] != 50 || counts["b"] != 10 {
+		t.Fatalf("metadata-weighted picks = %#v, want a:b=50:10", counts)
+	}
+}
+
+func TestSchedulerPick_WeightedRoundRobinResetsCreditsWhenWeightsChange(t *testing.T) {
+	t.Parallel()
+
+	authA := &Auth{ID: "a", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "1000000"}}
+	authB := &Auth{ID: "b", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "1"}}
+	scheduler := newSchedulerForTest(&WeightedRoundRobinSelector{}, authA, authB)
+	for index := 0; index < 1000; index++ {
+		if _, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil); errPick != nil {
+			t.Fatalf("warmup pickSingle() #%d error = %v", index, errPick)
+		}
+	}
+
+	authA.Attributes[AttributeWeight] = "1"
+	scheduler.upsertAuth(authA)
+	counts := make(map[string]int)
+	for index := 0; index < 20; index++ {
+		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() after weight change #%d error = %v", index, errPick)
+		}
+		counts[got.ID]++
+	}
+	if counts["a"] != 10 || counts["b"] != 10 {
+		t.Fatalf("picks after weight change = %#v, want a:b=10:10", counts)
+	}
+}
+
+func TestSchedulerPick_WeightedWebsocketResetsCreditsWhenWeightsChange(t *testing.T) {
+	t.Parallel()
+
+	authA := &Auth{ID: "a", Provider: "codex", Attributes: map[string]string{AttributeWeight: "1000000", "websockets": "true"}}
+	authB := &Auth{ID: "b", Provider: "codex", Attributes: map[string]string{AttributeWeight: "1", "websockets": "true"}}
+	scheduler := newSchedulerForTest(&WeightedRoundRobinSelector{}, authA, authB)
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	for index := 0; index < 1000; index++ {
+		if _, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil); errPick != nil {
+			t.Fatalf("warmup websocket pickSingle() #%d error = %v", index, errPick)
+		}
+	}
+
+	authA.Attributes[AttributeWeight] = "1"
+	scheduler.upsertAuth(authA)
+	counts := make(map[string]int)
+	for index := 0; index < 20; index++ {
+		got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("websocket pickSingle() after weight change #%d error = %v", index, errPick)
+		}
+		counts[got.ID]++
+	}
+	if counts["a"] != 10 || counts["b"] != 10 {
+		t.Fatalf("websocket picks after weight change = %#v, want a:b=10:10", counts)
+	}
+}
+
+func TestManagerLegacyWeightedRoundRobinKeepsIndependentAliasPrefixedModelState(t *testing.T) {
+	manager := NewManager(nil, &WeightedRoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	manager.SetPluginScheduler(&fakePluginScheduler{})
+
+	auths := []*Auth{
+		{ID: "a-heavy", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "3"}},
+		{ID: "a-light", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "1"}},
+		{ID: "b-light", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "1"}},
+		{ID: "b-heavy", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "3"}},
+	}
+	for _, auth := range auths {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+	registerSchedulerModels(t, "gemini", "team-a/shared", "a-heavy", "a-light")
+	registerSchedulerModels(t, "gemini", "team-b/shared", "b-light", "b-heavy")
+
+	counts := make(map[string]int)
+	for index := 0; index < 40; index++ {
+		for _, model := range []string{"team-a/shared", "team-b/shared"} {
+			got, _, errPick := manager.pickNext(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+			if errPick != nil {
+				t.Fatalf("pickNext(%q) #%d error = %v", model, index, errPick)
+			}
+			counts[got.ID]++
+		}
+	}
+	want := map[string]int{"a-heavy": 30, "a-light": 10, "b-light": 10, "b-heavy": 30}
+	for authID, wantCount := range want {
+		if counts[authID] != wantCount {
+			t.Fatalf("auth %q picks = %d, want %d; all=%#v", authID, counts[authID], wantCount, counts)
+		}
+	}
+}
+
+func TestSchedulerPick_WeightedRoundRobinSkipsNonPositiveWeightPriorityTier(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&WeightedRoundRobinSelector{},
+		&Auth{ID: "excluded", Provider: "gemini", Attributes: map[string]string{"priority": "10", AttributeWeight: "0"}},
+		&Auth{ID: "available", Provider: "gemini", Attributes: map[string]string{"priority": "0", AttributeWeight: "1"}},
+	)
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != "available" {
+		t.Fatalf("pickSingle() auth = %#v, want available", got)
 	}
 }
 
@@ -313,6 +488,63 @@ func TestSchedulerPick_MixedProvidersUsesWeightedProviderRotationOverReadyCandid
 		if got.ID != wantIDs[index] {
 			t.Fatalf("pickMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
 		}
+	}
+}
+
+func TestSchedulerPick_MixedProvidersWeightedRoundRobin(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&WeightedRoundRobinSelector{},
+		&Auth{ID: "gemini-a", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "5"}},
+		&Auth{ID: "claude-b", Provider: "claude", Attributes: map[string]string{AttributeWeight: "3"}},
+		&Auth{ID: "claude-c", Provider: "claude", Attributes: map[string]string{AttributeWeight: "2"}},
+	)
+
+	counts := make(map[string]int)
+	for index := 0; index < 100; index++ {
+		got, provider, errPick := scheduler.pickMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickMixed() #%d error = %v", index, errPick)
+		}
+		if got == nil || provider == "" {
+			t.Fatalf("pickMixed() #%d returned auth=%v provider=%q", index, got, provider)
+		}
+		counts[got.ID]++
+	}
+	want := map[string]int{"gemini-a": 50, "claude-b": 30, "claude-c": 20}
+	for authID, wantCount := range want {
+		if counts[authID] != wantCount {
+			t.Fatalf("auth %q picks = %d, want %d", authID, counts[authID], wantCount)
+		}
+	}
+}
+
+func TestSchedulerPick_MixedProvidersResetsCreditsWhenWeightsChange(t *testing.T) {
+	t.Parallel()
+
+	authA := &Auth{ID: "gemini-a", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "1000000"}}
+	authB := &Auth{ID: "claude-b", Provider: "claude", Attributes: map[string]string{AttributeWeight: "1"}}
+	scheduler := newSchedulerForTest(&WeightedRoundRobinSelector{}, authA, authB)
+	providers := []string{"gemini", "claude"}
+	for index := 0; index < 1000; index++ {
+		if _, _, errPick := scheduler.pickMixed(context.Background(), providers, "", cliproxyexecutor.Options{}, nil); errPick != nil {
+			t.Fatalf("warmup pickMixed() #%d error = %v", index, errPick)
+		}
+	}
+
+	authA.Attributes[AttributeWeight] = "1"
+	scheduler.upsertAuth(authA)
+	counts := make(map[string]int)
+	for index := 0; index < 20; index++ {
+		got, _, errPick := scheduler.pickMixed(context.Background(), providers, "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickMixed() after weight change #%d error = %v", index, errPick)
+		}
+		counts[got.ID]++
+	}
+	if counts[authA.ID] != 10 || counts[authB.ID] != 10 {
+		t.Fatalf("mixed picks after weight change = %#v, want 10 each", counts)
 	}
 }
 
@@ -481,8 +713,113 @@ func TestManagerSelectAuthByKindSkipsAPIKey(t *testing.T) {
 	if selected == nil || selected.ID != "codex-oauth" {
 		t.Fatalf("SelectAuthByKind() auth = %#v, want codex-oauth", selected)
 	}
-	if scheduler.calls != 2 {
-		t.Fatalf("scheduler.calls = %d, want 2", scheduler.calls)
+	if scheduler.calls != 1 {
+		t.Fatalf("scheduler.calls = %d, want 1", scheduler.calls)
+	}
+	if len(scheduler.requests) != 1 || len(scheduler.requests[0].Candidates) != 1 || scheduler.requests[0].Candidates[0].ID != "codex-oauth" {
+		t.Fatalf("scheduler candidates = %#v, want only codex-oauth", scheduler.requests)
+	}
+}
+
+func TestManagerSelectAuthByKindWeightedRoundRobinIgnoresIneligibleAPIKeyWeight(t *testing.T) {
+	manager := NewManager(nil, &WeightedRoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	for _, candidate := range []*Auth{
+		{ID: "api-high", Provider: "codex", Attributes: map[string]string{AttributeAPIKey: "test-key", AttributeWeight: "100"}},
+		{ID: "oauth-heavy", Provider: "codex", Attributes: map[string]string{AttributeWeight: "5"}, Metadata: map[string]any{"access_token": "heavy-token"}},
+		{ID: "oauth-light", Provider: "codex", Attributes: map[string]string{AttributeWeight: "1"}, Metadata: map[string]any{"access_token": "light-token"}},
+	} {
+		if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", candidate.ID, errRegister)
+		}
+	}
+
+	counts := make(map[string]int)
+	for index := 0; index < 600; index++ {
+		selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", AuthKindOAuth, cliproxyexecutor.Options{})
+		if errSelect != nil {
+			t.Fatalf("SelectAuthByKind() #%d error = %v", index, errSelect)
+		}
+		counts[selected.ID]++
+	}
+	if counts["oauth-heavy"] != 500 || counts["oauth-light"] != 100 || counts["api-high"] != 0 {
+		t.Fatalf("weighted OAuth picks = %#v, want oauth-heavy:oauth-light=500:100 and no API key", counts)
+	}
+}
+
+func TestManagerWeightedRoundRobinDisallowFreeAuthIgnoresFreeWeight(t *testing.T) {
+	tests := []struct {
+		name  string
+		mixed bool
+	}{
+		{name: "single provider"},
+		{name: "mixed providers", mixed: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := NewManager(nil, &WeightedRoundRobinSelector{}, nil)
+			manager.executors["codex"] = schedulerTestExecutor{}
+			lightProvider := "codex"
+			if tt.mixed {
+				lightProvider = "gemini"
+				manager.executors["gemini"] = schedulerTestExecutor{provider: "gemini"}
+			}
+			for _, candidate := range []*Auth{
+				{ID: "free-high", Provider: "codex", Attributes: map[string]string{"plan_type": "free", AttributeWeight: "100"}, Metadata: map[string]any{"access_token": "free-token"}},
+				{ID: "paid-heavy", Provider: "codex", Attributes: map[string]string{"plan_type": "plus", AttributeWeight: "5"}, Metadata: map[string]any{"access_token": "heavy-token"}},
+				{ID: "paid-light", Provider: lightProvider, Attributes: map[string]string{"plan_type": "plus", AttributeWeight: "1"}, Metadata: map[string]any{"access_token": "light-token"}},
+			} {
+				if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+					t.Fatalf("Register(%s) error = %v", candidate.ID, errRegister)
+				}
+			}
+
+			opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.DisallowFreeAuthMetadataKey: true}}
+			counts := make(map[string]int)
+			for index := 0; index < 600; index++ {
+				var selected *Auth
+				var errPick error
+				if tt.mixed {
+					selected, _, _, errPick = manager.pickNextMixed(context.Background(), []string{"codex", "gemini"}, "", opts, nil)
+				} else {
+					selected, _, errPick = manager.pickNext(context.Background(), "codex", "", opts, nil)
+				}
+				if errPick != nil {
+					t.Fatalf("weighted pick #%d error = %v", index, errPick)
+				}
+				counts[selected.ID]++
+			}
+			if counts["paid-heavy"] != 500 || counts["paid-light"] != 100 || counts["free-high"] != 0 {
+				t.Fatalf("weighted non-free picks = %#v, want paid-heavy:paid-light=500:100 and no free auth", counts)
+			}
+		})
+	}
+}
+
+func TestManagerSelectAuthByKindRoundRobinKeepsEligibleRotation(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	for _, candidate := range []*Auth{
+		{ID: "api-key", Provider: "codex", Attributes: map[string]string{AttributeAPIKey: "test-key"}},
+		{ID: "oauth-a", Provider: "codex", Metadata: map[string]any{"access_token": "token-a"}},
+		{ID: "oauth-b", Provider: "codex", Metadata: map[string]any{"access_token": "token-b"}},
+	} {
+		if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", candidate.ID, errRegister)
+		}
+	}
+
+	counts := make(map[string]int)
+	for index := 0; index < 6; index++ {
+		selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", AuthKindOAuth, cliproxyexecutor.Options{})
+		if errSelect != nil {
+			t.Fatalf("SelectAuthByKind() #%d error = %v", index, errSelect)
+		}
+		counts[selected.ID]++
+	}
+	if counts["oauth-a"] != 3 || counts["oauth-b"] != 3 || counts["api-key"] != 0 {
+		t.Fatalf("round-robin OAuth picks = %#v, want three picks per OAuth auth and no API key", counts)
 	}
 }
 

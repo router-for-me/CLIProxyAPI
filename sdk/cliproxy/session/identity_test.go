@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"net/http"
 	"strings"
 	"testing"
@@ -135,8 +136,40 @@ func TestEnrichSkipsDerivationForExplicitSessions(t *testing.T) {
 			headers: http.Header{"X-Session-ID": []string{"header-session"}},
 		},
 		{
+			name:    "Claude Code session header",
+			payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+			headers: http.Header{"X-Claude-Code-Session-Id": []string{"claude-session"}},
+		},
+		{
+			name:    "later valid multi-value session header",
+			payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+			headers: http.Header{"X-Session-Affinity": []string{"", "later-valid-session"}},
+		},
+		{
+			name:    "OpenCode affinity header",
+			payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+			headers: http.Header{"X-Session-Affinity": []string{"opencode-session"}},
+		},
+		{
+			name:    "Responses conversation object",
+			payload: []byte(`{"conversation":{"id":"conversation-session"},"messages":[{"role":"user","content":"hello"}]}`),
+		},
+		{
+			name:    "Responses conversation string",
+			payload: []byte(`{"conversation":"conversation-session","messages":[{"role":"user","content":"hello"}]}`),
+		},
+		{
 			name:    "metadata user id",
 			payload: []byte(`{"metadata":{"user_id":"explicit-user"},"messages":[{"role":"user","content":"hello"}]}`),
+		},
+		{
+			name: "long legacy Claude metadata session",
+			payload: []byte(`{"metadata":{"user_id":"` + strings.Repeat("x", 300) +
+				`_session_ac980658-63bd-4fb3-97ba-8da64cb1e344"},"messages":[{"role":"user","content":"hello"}]}`),
+		},
+		{
+			name:    "JSON metadata user id without nested session",
+			payload: []byte(`{"metadata":{"user_id":"{\"device_id\":\"abc123\"}"},"messages":[{"role":"user","content":"hello"}]}`),
 		},
 		{
 			name:    "body session id",
@@ -196,6 +229,83 @@ func TestEnrichSkipsDerivationForExplicitSessions(t *testing.T) {
 	}
 }
 
+func TestEnrichDerivesAfterInvalidSessionIdentity(t *testing.T) {
+	t.Parallel()
+
+	baseMessages := `"input":"hello"`
+	tests := []struct {
+		name            string
+		payload         []byte
+		headers         http.Header
+		requestMetadata map[string]any
+		optionMetadata  map[string]any
+	}{
+		{
+			name:    "oversized prompt cache key",
+			payload: []byte(`{"prompt_cache_key":"` + strings.Repeat("x", 257) + `",` + baseMessages + `}`),
+		},
+		{
+			name:    "trailing control character prompt cache key",
+			payload: []byte(`{"prompt_cache_key":"tenant\n",` + baseMessages + `}`),
+		},
+		{
+			name:    "leading control character prompt cache key",
+			payload: []byte(`{"prompt_cache_key":"\ttenant",` + baseMessages + `}`),
+		},
+		{
+			name:    "control character session header",
+			payload: []byte(`{` + baseMessages + `}`),
+			headers: http.Header{"X-Session-Affinity": []string{"bad\nsession"}},
+		},
+		{
+			name:           "oversized execution session option metadata",
+			payload:        []byte(`{"input":"hello"}`),
+			optionMetadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: strings.Repeat("x", 257)},
+		},
+		{
+			name:            "control character execution session request metadata",
+			payload:         []byte(`{"input":"hello"}`),
+			requestMetadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "bad\nsession"},
+		},
+		{
+			name:           "oversized retained derived session option metadata",
+			payload:        []byte(`{"input":"hello"}`),
+			optionMetadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: strings.Repeat("x", 257)},
+		},
+		{
+			name:            "control character retained derived session request metadata",
+			payload:         []byte(`{"input":"hello"}`),
+			requestMetadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "bad\nsession"},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			req := cliproxyexecutor.Request{Payload: test.payload, Metadata: test.requestMetadata}
+			opts := cliproxyexecutor.Options{
+				OriginalRequest: test.payload,
+				SourceFormat:    sdktranslator.FormatOpenAIResponse,
+				Headers:         test.headers,
+				Metadata:        test.optionMetadata,
+			}
+			enrichedReq, enrichedOpts := Enrich(req, opts)
+			requestID := DerivedID(enrichedReq.Metadata)
+			optionsID := DerivedID(enrichedOpts.Metadata)
+			wantID := DeriveID(sdktranslator.FormatOpenAIResponse, test.payload, "")
+			if requestID != wantID || optionsID != wantID {
+				t.Fatalf("derived identities = request:%q options:%q, want %q", requestID, optionsID, wantID)
+			}
+			if got := metadataString(enrichedReq.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); got != "" {
+				t.Fatalf("request execution session = %q, want invalid value removed", got)
+			}
+			if got := metadataString(enrichedOpts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); got != "" {
+				t.Fatalf("options execution session = %q, want invalid value removed", got)
+			}
+		})
+	}
+}
+
 func TestEnrichCopiesDerivedIdentityToRequestAndOptions(t *testing.T) {
 	t.Parallel()
 
@@ -214,5 +324,25 @@ func TestEnrichCopiesDerivedIdentityToRequestAndOptions(t *testing.T) {
 	}
 	if _, exists := req.Metadata[cliproxyexecutor.DerivedSessionIDMetadataKey]; exists {
 		t.Fatal("Enrich() mutated original request metadata")
+	}
+}
+
+func TestEnrichCarriesRequestPayloadIntoSelectionOptions(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"conversation":{"id":"request-only-conversation"},"input":"hello"}`)
+	_, enrichedOpts := Enrich(
+		cliproxyexecutor.Request{Payload: payload},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+	)
+
+	if !bytes.Equal(enrichedOpts.OriginalRequest, payload) {
+		t.Fatalf("OriginalRequest = %q, want request payload %q", enrichedOpts.OriginalRequest, payload)
+	}
+	if len(enrichedOpts.OriginalRequest) > 0 && &enrichedOpts.OriginalRequest[0] == &payload[0] {
+		t.Fatal("OriginalRequest aliases Request.Payload instead of preserving a snapshot")
+	}
+	if got := DerivedID(enrichedOpts.Metadata); got != "" {
+		t.Fatalf("DerivedSessionID = %q, want explicit conversation to remain authoritative", got)
 	}
 }
