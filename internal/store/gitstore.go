@@ -933,6 +933,11 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 		Email: "cliproxy@local",
 		When:  time.Now(),
 	}
+	// Save pre-commit HEAD hash for tree integrity validation after commit.
+	prevHeadHash := plumbing.ZeroHash
+	if prevHeadRef, errPrev := repo.Head(); errPrev == nil {
+		prevHeadHash = prevHeadRef.Hash()
+	}
 	commitHash, err := worktree.Commit(message, &git.CommitOptions{
 		Author: signature,
 	})
@@ -941,6 +946,27 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 			return nil
 		}
 		return fmt.Errorf("git token store: commit: %w", err)
+	}
+	// Guard: refuse to rewrite+force-push if the new commit's tree is
+	// missing files that were present in the previous HEAD tree but are not
+	// part of an intentional deletion by the caller. This prevents a
+	// corrupted local index (e.g. after a failed pull due to packfile
+	// corruption) from causing permanent data loss on the remote.
+	if err := s.validateCommitTree(repo, prevHeadHash, commitHash, relPaths); err != nil {
+		// worktree.Commit already advanced local HEAD to the rejected
+		// commit. Reset branch/index/worktree back to the pre-commit
+		// tip so a later persist still compares against the intact
+		// tree; otherwise the missing files become the new baseline
+		// and a subsequent force-push can still wipe the remote.
+		if prevHeadHash != plumbing.ZeroHash {
+			if resetErr := worktree.Reset(&git.ResetOptions{
+				Commit: prevHeadHash,
+				Mode:   git.HardReset,
+			}); resetErr != nil {
+				return fmt.Errorf("git token store: %w (also failed to reset local HEAD after rejection: %v)", err, resetErr)
+			}
+		}
+		return fmt.Errorf("git token store: %w", err)
 	}
 	headRef, errHead := repo.Head()
 	if errHead != nil {
@@ -1007,6 +1033,76 @@ func (s *GitTokenStore) rewriteHeadAsSingleCommit(repo *git.Repository, branch p
 	}
 	if err := repo.Storer.SetReference(plumbing.NewHashReference(branch, newHash)); err != nil {
 		return fmt.Errorf("git token store: update branch reference: %w", err)
+	}
+	return nil
+}
+
+// validateCommitTree checks that the new commit's tree does not lose files
+// present in the previous HEAD tree due to a corrupted local index. When a
+// failed pull (e.g. packfile not found) leaves the git index in an
+// inconsistent state, worktree.Commit may produce a tree that is missing
+// auth/config files. rewriteHeadAsSingleCommit + Force:true push would then
+// permanently delete those files from the remote. validateCommitTree rejects
+// the commit before any damage reaches the remote.
+//
+// intentionalPaths lists the file paths that the caller explicitly intends to
+// modify or delete. Files missing from the new tree that are NOT in
+// intentionalPaths are treated as accidental data loss and cause rejection.
+func (s *GitTokenStore) validateCommitTree(repo *git.Repository, prevHeadHash, commitHash plumbing.Hash, intentionalPaths []string) error {
+	if prevHeadHash == plumbing.ZeroHash {
+		// No previous HEAD — first commit, nothing to compare against.
+		return nil
+	}
+	prevCommit, err := repo.CommitObject(prevHeadHash)
+	if err != nil {
+		return fmt.Errorf("validate tree: inspect previous commit: %w", err)
+	}
+	prevTree, err := prevCommit.Tree()
+	if err != nil {
+		return fmt.Errorf("validate tree: read previous tree: %w", err)
+	}
+	newCommit, err := repo.CommitObject(commitHash)
+	if err != nil {
+		return fmt.Errorf("validate tree: inspect new commit: %w", err)
+	}
+	newTree, err := newCommit.Tree()
+	if err != nil {
+		return fmt.Errorf("validate tree: read new tree: %w", err)
+	}
+
+	// Collect all file paths present in the new tree.
+	newPaths := make(map[string]struct{})
+	if errFiles := newTree.Files().ForEach(func(f *object.File) error {
+		newPaths[f.Name] = struct{}{}
+		return nil
+	}); errFiles != nil {
+		return fmt.Errorf("validate tree: enumerate new tree files: %w", errFiles)
+	}
+
+	// Build intentSet: file paths the caller explicitly intends to modify or delete.
+	intentSet := make(map[string]struct{}, len(intentionalPaths))
+	for _, p := range intentionalPaths {
+		intentSet[filepath.ToSlash(p)] = struct{}{}
+	}
+
+	// Detect files missing from new tree that are not in the intentSet (accidental data loss).
+	var missing []string
+	if errFiles := prevTree.Files().ForEach(func(f *object.File) error {
+		if _, inNew := newPaths[f.Name]; inNew {
+			return nil
+		}
+		if _, intentional := intentSet[f.Name]; intentional {
+			return nil
+		}
+		missing = append(missing, f.Name)
+		return nil
+	}); errFiles != nil {
+		return fmt.Errorf("validate tree: enumerate previous tree files: %w", errFiles)
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("commit tree is missing %d file(s) present in HEAD (possible index corruption), refusing force push to prevent data loss: %s",
+			len(missing), strings.Join(missing, ", "))
 	}
 	return nil
 }

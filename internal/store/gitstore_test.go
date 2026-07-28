@@ -376,6 +376,388 @@ func TestGitTokenStoreRepeatedDeleteDoesNotOverwriteRemoteOnlyChanges(t *testing
 	assertRemoteTreePath(t, remoteDir, "master", "auths/b.json", true)
 }
 
+// TestPersistConfigDoesNotDropAuthAfterStagedIndexDeletion reproduces a production
+// data-loss path: the local index already has a staged auth deletion (for example
+// after a failed pull left the index inconsistent), then PersistConfig only stages
+// config/config.yaml. worktree.Commit uses the full index, so the staged auth
+// deletion is included; rewriteHeadAsSingleCommit + Force push then permanently
+// removes the auth from the remote repository.
+func TestPersistConfigDoesNotDropAuthAfterStagedIndexDeletion(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	baseDir := filepath.Join(root, "workspace", "auths")
+	store.SetBaseDir(baseDir)
+	if err := store.EnsureRepository(); err != nil {
+		t.Fatalf("EnsureRepository: %v", err)
+	}
+
+	authA := &cliproxyauth.Auth{
+		ID:       "a.json",
+		FileName: "a.json",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex", "access_token": "a-token"},
+	}
+	authB := &cliproxyauth.Auth{
+		ID:       "b.json",
+		FileName: "b.json",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex", "access_token": "b-token"},
+	}
+	if _, err := store.Save(context.Background(), authA); err != nil {
+		t.Fatalf("Save a.json: %v", err)
+	}
+	if _, err := store.Save(context.Background(), authB); err != nil {
+		t.Fatalf("Save b.json: %v", err)
+	}
+	assertRemoteTreePath(t, remoteDir, "master", "auths/a.json", true)
+	assertRemoteTreePath(t, remoteDir, "master", "auths/b.json", true)
+
+	// Seed a config file so PersistConfig has something to commit.
+	workspaceDir := filepath.Join(root, "workspace")
+	configPath := filepath.Join(workspaceDir, "config", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+	store.mu.Lock()
+	if err := store.commitAndPushLocked("Update config", "config/config.yaml"); err != nil {
+		store.mu.Unlock()
+		t.Fatalf("seed config commit: %v", err)
+	}
+	store.mu.Unlock()
+	assertRemoteTreePath(t, remoteDir, "master", "config/config.yaml", true)
+
+	// Corrupt the local index the way a failed pull/packfile can: stage a deletion
+	// of a.json while leaving b.json and config intact on disk.
+	localRepo, err := git.PlainOpen(workspaceDir)
+	if err != nil {
+		t.Fatalf("open local repo: %v", err)
+	}
+	localWorktree, err := localRepo.Worktree()
+	if err != nil {
+		t.Fatalf("open local worktree: %v", err)
+	}
+	if err := os.Remove(filepath.Join(baseDir, "a.json")); err != nil {
+		t.Fatalf("remove local a.json: %v", err)
+	}
+	if _, err := localWorktree.Remove("auths/a.json"); err != nil {
+		t.Fatalf("stage removal of a.json: %v", err)
+	}
+
+	// PersistConfig only intends to update config.yaml.
+	if err := os.WriteFile(configPath, []byte("port: 8318\n"), 0o600); err != nil {
+		t.Fatalf("update config: %v", err)
+	}
+	if err := store.PersistConfig(context.Background()); err != nil {
+		// After the fix, PersistConfig must refuse rather than force-push data loss.
+		// Either outcome is acceptable as long as remote auths survive:
+		//   - error returned (preferred fail-closed)
+		//   - success with auths preserved
+		t.Logf("PersistConfig returned error (acceptable if fail-closed): %v", err)
+	}
+
+	assertRemoteTreePath(t, remoteDir, "master", "auths/a.json", true)
+	assertRemoteTreePath(t, remoteDir, "master", "auths/b.json", true)
+	assertRemoteTreePath(t, remoteDir, "master", "config/config.yaml", true)
+}
+
+// TestPersistConfigDoesNotDropSiblingAuthsAfterMultiFileIndexCorruption covers the
+// multi-auth wipe observed in production: several auth deletions are already staged
+// in the local index, then a config persist rewrites HEAD and force-pushes.
+func TestPersistConfigDoesNotDropSiblingAuthsAfterMultiFileIndexCorruption(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	baseDir := filepath.Join(root, "workspace", "auths")
+	store.SetBaseDir(baseDir)
+	if err := store.EnsureRepository(); err != nil {
+		t.Fatalf("EnsureRepository: %v", err)
+	}
+
+	for _, name := range []string{"codex-1.json", "codex-2.json", "codex-3.json", "codex-4.json"} {
+		auth := &cliproxyauth.Auth{
+			ID:       name,
+			FileName: name,
+			Provider: "codex",
+			Metadata: map[string]any{"type": "codex", "access_token": name + "-token"},
+		}
+		if _, err := store.Save(context.Background(), auth); err != nil {
+			t.Fatalf("Save %s: %v", name, err)
+		}
+		assertRemoteTreePath(t, remoteDir, "master", "auths/"+name, true)
+	}
+
+	workspaceDir := filepath.Join(root, "workspace")
+	configPath := filepath.Join(workspaceDir, "config", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("openai-compatibility:\n  - name: demo\n    disabled: false\n"), 0o600); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+	store.mu.Lock()
+	if err := store.commitAndPushLocked("Update config", "config/config.yaml"); err != nil {
+		store.mu.Unlock()
+		t.Fatalf("seed config commit: %v", err)
+	}
+	store.mu.Unlock()
+
+	localRepo, err := git.PlainOpen(workspaceDir)
+	if err != nil {
+		t.Fatalf("open local repo: %v", err)
+	}
+	localWorktree, err := localRepo.Worktree()
+	if err != nil {
+		t.Fatalf("open local worktree: %v", err)
+	}
+	for _, name := range []string{"codex-1.json", "codex-2.json", "codex-3.json", "codex-4.json"} {
+		if err := os.Remove(filepath.Join(baseDir, name)); err != nil {
+			t.Fatalf("remove local %s: %v", name, err)
+		}
+		if _, err := localWorktree.Remove("auths/" + name); err != nil {
+			t.Fatalf("stage removal of %s: %v", name, err)
+		}
+	}
+
+	if err := os.WriteFile(configPath, []byte("openai-compatibility:\n  - name: demo\n    disabled: true\n"), 0o600); err != nil {
+		t.Fatalf("update config: %v", err)
+	}
+	if err := store.PersistConfig(context.Background()); err != nil {
+		t.Logf("PersistConfig returned error (acceptable if fail-closed): %v", err)
+	}
+
+	for _, name := range []string{"codex-1.json", "codex-2.json", "codex-3.json", "codex-4.json"} {
+		assertRemoteTreePath(t, remoteDir, "master", "auths/"+name, true)
+	}
+	assertRemoteTreePath(t, remoteDir, "master", "config/config.yaml", true)
+}
+
+// TestSyncAuthDoesNotDropUnrelatedAuthAfterStagedIndexDeletion covers the non-Remove
+// watcher path ("Sync auth ..."), which is not protected by the Remove-auth guard.
+func TestSyncAuthDoesNotDropUnrelatedAuthAfterStagedIndexDeletion(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	baseDir := filepath.Join(root, "workspace", "auths")
+	store.SetBaseDir(baseDir)
+	if err := store.EnsureRepository(); err != nil {
+		t.Fatalf("EnsureRepository: %v", err)
+	}
+
+	authKeep := &cliproxyauth.Auth{
+		ID:       "keep.json",
+		FileName: "keep.json",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex", "access_token": "keep"},
+	}
+	authSync := &cliproxyauth.Auth{
+		ID:       "sync.json",
+		FileName: "sync.json",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex", "access_token": "sync-v1"},
+	}
+	if _, err := store.Save(context.Background(), authKeep); err != nil {
+		t.Fatalf("Save keep.json: %v", err)
+	}
+	syncPath, err := store.Save(context.Background(), authSync)
+	if err != nil {
+		t.Fatalf("Save sync.json: %v", err)
+	}
+	assertRemoteTreePath(t, remoteDir, "master", "auths/keep.json", true)
+	assertRemoteTreePath(t, remoteDir, "master", "auths/sync.json", true)
+
+	workspaceDir := filepath.Join(root, "workspace")
+	localRepo, err := git.PlainOpen(workspaceDir)
+	if err != nil {
+		t.Fatalf("open local repo: %v", err)
+	}
+	localWorktree, err := localRepo.Worktree()
+	if err != nil {
+		t.Fatalf("open local worktree: %v", err)
+	}
+	if err := os.Remove(filepath.Join(baseDir, "keep.json")); err != nil {
+		t.Fatalf("remove local keep.json: %v", err)
+	}
+	if _, err := localWorktree.Remove("auths/keep.json"); err != nil {
+		t.Fatalf("stage removal of keep.json: %v", err)
+	}
+
+	// Legitimate content update of sync.json via the Sync auth path.
+	if err := os.WriteFile(syncPath, []byte(`{"type":"codex","access_token":"sync-v2"}`), 0o600); err != nil {
+		t.Fatalf("update sync.json: %v", err)
+	}
+	if err := store.PersistAuthFiles(context.Background(), "Sync auth sync.json", syncPath); err != nil {
+		t.Logf("PersistAuthFiles returned error (acceptable if fail-closed): %v", err)
+	}
+
+	assertRemoteTreePath(t, remoteDir, "master", "auths/keep.json", true)
+	assertRemoteTreePath(t, remoteDir, "master", "auths/sync.json", true)
+}
+
+// TestRejectedCommitResetsLocalHeadSoSecondPersistStillProtectsRemote covers the
+// follow-on failure mode of the tree-integrity guard: worktree.Commit advances
+// local HEAD before validation. If the rejected commit is left as HEAD, the next
+// PersistConfig treats the already-corrupted tree as the baseline, the missing
+// auth is no longer detected, and Force push can still wipe the remote.
+func TestRejectedCommitResetsLocalHeadSoSecondPersistStillProtectsRemote(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	baseDir := filepath.Join(root, "workspace", "auths")
+	store.SetBaseDir(baseDir)
+	if err := store.EnsureRepository(); err != nil {
+		t.Fatalf("EnsureRepository: %v", err)
+	}
+
+	authA := &cliproxyauth.Auth{
+		ID:       "a.json",
+		FileName: "a.json",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex", "access_token": "a-token"},
+	}
+	authB := &cliproxyauth.Auth{
+		ID:       "b.json",
+		FileName: "b.json",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex", "access_token": "b-token"},
+	}
+	if _, err := store.Save(context.Background(), authA); err != nil {
+		t.Fatalf("Save a.json: %v", err)
+	}
+	if _, err := store.Save(context.Background(), authB); err != nil {
+		t.Fatalf("Save b.json: %v", err)
+	}
+
+	workspaceDir := filepath.Join(root, "workspace")
+	configPath := filepath.Join(workspaceDir, "config", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+	store.mu.Lock()
+	if err := store.commitAndPushLocked("Update config", "config/config.yaml"); err != nil {
+		store.mu.Unlock()
+		t.Fatalf("seed config commit: %v", err)
+	}
+	store.mu.Unlock()
+
+	localRepo, err := git.PlainOpen(workspaceDir)
+	if err != nil {
+		t.Fatalf("open local repo: %v", err)
+	}
+	preHead, err := localRepo.Head()
+	if err != nil {
+		t.Fatalf("read pre-corruption HEAD: %v", err)
+	}
+	preHeadHash := preHead.Hash()
+
+	localWorktree, err := localRepo.Worktree()
+	if err != nil {
+		t.Fatalf("open local worktree: %v", err)
+	}
+	if err := os.Remove(filepath.Join(baseDir, "a.json")); err != nil {
+		t.Fatalf("remove local a.json: %v", err)
+	}
+	if _, err := localWorktree.Remove("auths/a.json"); err != nil {
+		t.Fatalf("stage removal of a.json: %v", err)
+	}
+
+	if err := os.WriteFile(configPath, []byte("port: 8318\n"), 0o600); err != nil {
+		t.Fatalf("update config first attempt: %v", err)
+	}
+	if err := store.PersistConfig(context.Background()); err == nil {
+		t.Fatal("first PersistConfig: want tree-integrity rejection, got nil")
+	}
+
+	postHead, err := localRepo.Head()
+	if err != nil {
+		t.Fatalf("read post-rejection HEAD: %v", err)
+	}
+	if got := postHead.Hash(); got != preHeadHash {
+		t.Fatalf("local HEAD after rejection = %s, want reset to pre-commit %s", got, preHeadHash)
+	}
+	assertRemoteTreePath(t, remoteDir, "master", "auths/a.json", true)
+	assertRemoteTreePath(t, remoteDir, "master", "auths/b.json", true)
+
+	// Second persist without re-corrupting the index: if the rejected commit had
+	// remained as HEAD, this would treat the missing auth as the new baseline and
+	// force-push the loss. With a proper reset, the config update succeeds and
+	// both auths remain on the remote.
+	if err := os.WriteFile(configPath, []byte("port: 8319\n"), 0o600); err != nil {
+		t.Fatalf("update config second attempt: %v", err)
+	}
+	if err := store.PersistConfig(context.Background()); err != nil {
+		t.Fatalf("second PersistConfig after reset: %v", err)
+	}
+	assertRemoteTreePath(t, remoteDir, "master", "auths/a.json", true)
+	assertRemoteTreePath(t, remoteDir, "master", "auths/b.json", true)
+	assertRemoteTreePath(t, remoteDir, "master", "config/config.yaml", true)
+}
+
+// TestExplicitDeleteStillRemovesOnlyTargetedAuth is the positive control: intentional
+// Delete must still be able to remove exactly the requested auth file.
+func TestExplicitDeleteStillRemovesOnlyTargetedAuth(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	baseDir := filepath.Join(root, "workspace", "auths")
+	store.SetBaseDir(baseDir)
+	if err := store.EnsureRepository(); err != nil {
+		t.Fatalf("EnsureRepository: %v", err)
+	}
+
+	authA := &cliproxyauth.Auth{
+		ID:       "delete-me.json",
+		FileName: "delete-me.json",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex", "access_token": "a"},
+	}
+	authB := &cliproxyauth.Auth{
+		ID:       "keep-me.json",
+		FileName: "keep-me.json",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex", "access_token": "b"},
+	}
+	pathA, err := store.Save(context.Background(), authA)
+	if err != nil {
+		t.Fatalf("Save delete-me.json: %v", err)
+	}
+	if _, err := store.Save(context.Background(), authB); err != nil {
+		t.Fatalf("Save keep-me.json: %v", err)
+	}
+
+	if err := store.Delete(context.Background(), pathA); err != nil {
+		t.Fatalf("Delete delete-me.json: %v", err)
+	}
+	assertRemoteTreePath(t, remoteDir, "master", "auths/delete-me.json", false)
+	assertRemoteTreePath(t, remoteDir, "master", "auths/keep-me.json", true)
+}
+
 func TestCommitAndPushLockedPushesBeforeRunningGC(t *testing.T) {
 	root := t.TempDir()
 	remoteDir := setupGitRemoteRepository(t, root, "master",
