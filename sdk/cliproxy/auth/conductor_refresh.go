@@ -387,7 +387,7 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 		return auth, false
 	}
 	log.Debugf("unauthorized response for %s (%s), refreshing credentials before fallback", auth.Provider, auth.ID)
-	refreshed, errRefresh := m.refreshAuthForRequest(ctx, auth.ID, authAccessToken(auth))
+	refreshed, errRefresh := m.refreshAuthForRequestWithTrigger(ctx, auth.ID, authAccessToken(auth), RefreshTriggerUnauthorizedRetry)
 	if errRefresh != nil || refreshed == nil {
 		log.Debugf("credential refresh before fallback failed for %s (%s): %v", auth.Provider, auth.ID, errRefresh)
 		return auth, false
@@ -396,13 +396,26 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) {
-	_, _ = m.refreshAuthForRequest(ctx, id, "")
+	// The background auto-refresh loop is the only caller of refreshAuth, so
+	// this entrypoint is the canonical "auto" trigger label.
+	_, _ = m.refreshAuthForRequestWithTrigger(ctx, id, "", RefreshTriggerAuto)
 }
 
-// refreshAuthForRequest performs a synchronous credential refresh for the given auth.
-// failedAccessToken lets concurrent callers reuse a refresh that already replaced the
-// access token that produced the unauthorized response.
+// refreshAuthForRequest performs a synchronous credential refresh for the given
+// auth. failedAccessToken lets concurrent callers reuse a refresh that already
+// replaced the access token that produced the unauthorized response.
+//
+// On-demand callers that do not have an explicit trigger context (e.g. ad-hoc
+// management-initiated refreshes) land here and are recorded as "on_demand".
 func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessToken string) (*Auth, error) {
+	return m.refreshAuthForRequestWithTrigger(ctx, id, failedAccessToken, RefreshTriggerOnDemand)
+}
+
+// refreshAuthForRequestWithTrigger is the refresh implementation; trigger
+// labels the caller context (auto / on_demand / unauthorized_retry) and is
+// recorded in the upstream sync log so the dashboard can distinguish routine
+// background refreshes from reactive ones driven by failed requests.
+func (m *Manager) refreshAuthForRequestWithTrigger(ctx context.Context, id, failedAccessToken, trigger string) (*Auth, error) {
 	if m == nil {
 		return nil, errors.New("auth manager is nil")
 	}
@@ -442,9 +455,22 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	}
 
 	cloned := auth.Clone()
+	refreshStart := time.Now()
 	updated, err := exec.Refresh(ctx, cloned)
+	refreshDuration := time.Since(refreshStart)
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
+		// Record the canceled refresh as a failure so operators can see
+		// aborted refreshes in the sync log (common during shutdown).
+		m.recordRefreshOutcome(RefreshOutcome{
+			AuthID:     auth.ID,
+			Provider:   auth.Provider,
+			Trigger:    trigger,
+			Success:    false,
+			Error:      err.Error(),
+			Duration:   refreshDuration,
+			OccurredAt: refreshStart,
+		})
 		return nil, err
 	}
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
@@ -473,6 +499,16 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		if shouldReschedule {
 			m.queueRefreshReschedule(id)
 		}
+		// Record the failed refresh outcome for the sync log.
+		m.recordRefreshOutcome(RefreshOutcome{
+			AuthID:     auth.ID,
+			Provider:   auth.Provider,
+			Trigger:    trigger,
+			Success:    false,
+			Error:      err.Error(),
+			Duration:   refreshDuration,
+			OccurredAt: refreshStart,
+		})
 		return nil, err
 	}
 	if updated == nil {
@@ -503,6 +539,18 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	if errUpdate != nil {
 		log.Debugf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
 	}
+	// Record the successful refresh outcome for the sync log. The credential
+	// was refreshed by the executor regardless of whether persisting the
+	// updated token back to the store succeeded, so this is a success row.
+	// updated is always non-nil at this point (the err==nil branch).
+	m.recordRefreshOutcome(RefreshOutcome{
+		AuthID:     updated.ID,
+		Provider:   updated.Provider,
+		Trigger:    trigger,
+		Success:    true,
+		Duration:   refreshDuration,
+		OccurredAt: refreshStart,
+	})
 	if saved != nil {
 		return saved, nil
 	}

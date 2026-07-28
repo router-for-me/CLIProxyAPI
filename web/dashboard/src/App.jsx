@@ -22,6 +22,7 @@ import ApiTokensPage from './pages/ApiTokensPage.jsx';
 import ApiTokenDetailPage from './pages/ApiTokenDetailPage.jsx';
 import DeveloperPage from './pages/DeveloperPage.jsx';
 import UpstreamProvidersPage from './pages/UpstreamProvidersPage.jsx';
+import UpstreamSyncLogPage from './pages/UpstreamSyncLogPage.jsx';
 import CooldownProvidersPage from './pages/CooldownProvidersPage.jsx';
 import ManageCpaLayout from './pages/manage-cpa/ManageCpaLayout.jsx';
 import OverviewTab from './pages/manage-cpa/OverviewTab.jsx';
@@ -165,6 +166,7 @@ export default function App() {
   <Route path="/recent-events" element={<RecentEventsPage />} />
   <Route path="/errors" element={<ErrorsPage />} />
             <Route path="/cooldown-providers" element={<CooldownProvidersPage />} />
+            <Route path="/upstream-sync-log" element={<UpstreamSyncLogPage />} />
             <Route path="/internal-users" element={<InternalUsersPage />} />
             <Route path="/internal-users/:id" element={<InternalUserDetailPage />} />
             <Route path="/model-groups" element={<ModelGroupsPage />} />

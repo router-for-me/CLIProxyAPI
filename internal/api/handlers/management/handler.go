@@ -95,6 +95,11 @@ type Handler struct {
 	// /upstream-providers routes return 503 in that case.
 	pgUpstreamProviders store.UpstreamProviderStore
 
+	// pgSyncLog stores the upstream OAuth/auth token refresh outcomes recorded
+	// by the auth manager's RefreshSink. nil when PG is not configured — the
+	// /upstream-sync-log routes return 503 in that case.
+	pgSyncLog *store.SyncLogStore
+
 	// pgModelGroups stores reusable Model Group templates (allowed-models
 	// grant lists + per-model upstream routing) attachable to API-key policies
 	// and internal users. nil when PG is not configured — the /model-groups
@@ -276,6 +281,54 @@ func (h *Handler) SetUpstreamProvidersStore(upstream store.UpstreamProviderStore
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pgUpstreamProviders = upstream
+}
+
+// SetSyncLogStore wires the PG-backed store for the upstream_sync_log table
+// (OAuth/auth token refresh outcomes). When nil, the
+// /v0/management/upstream-sync-log routes return 503. Launching the 30-day
+// retention sweep is idempotent; it is started here (once, at wiring time) so
+// the goroutine only runs on PG-configured deployments.
+func (h *Handler) SetSyncLogStore(s *store.SyncLogStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.pgSyncLog = s
+	h.mu.Unlock()
+	store.StartSyncLogSweep(s) // nil-safe
+}
+
+// SyncLogSink returns an auth.RefreshSink that persists refresh outcomes to the
+// upstream_sync_log table. Returns nil when the PG-backed sync log store is not
+// configured, so the auth manager's SetRefreshSink is a no-op (refreshes run
+// uninstrumented). The sink itself inserts via a fire-and-forget goroutine so it
+// never blocks the refresh pipeline.
+func (h *Handler) SyncLogSink() coreauth.RefreshSink {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	syncStore := h.pgSyncLog
+	h.mu.Unlock()
+	if syncStore == nil {
+		return nil
+	}
+	return func(ctx context.Context, o coreauth.RefreshOutcome) {
+		// Use a bounded-time context so a slow DB never pins a goroutine.
+		insertCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := syncStore.InsertSyncLog(insertCtx, store.SyncLogEvent{
+			AuthID:       o.AuthID,
+			Provider:     o.Provider,
+			Trigger:      o.Trigger,
+			Success:      o.Success,
+			ErrorMessage: o.Error,
+			DurationMs:   o.Duration.Milliseconds(),
+			OccurredAt:   o.OccurredAt,
+		}); err != nil {
+			log.WithError(err).WithField("auth_id", o.AuthID).Debug("upstream-sync-log: insert refresh outcome failed")
+		}
+	}
 }
 
 // SetModelGroupStore wires the PG-backed store for reusable Model Group

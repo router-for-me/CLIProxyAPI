@@ -10,6 +10,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 )
 
 // ProviderExecutor defines the contract required by Manager to execute provider calls.
@@ -156,6 +157,12 @@ type Manager struct {
 	// refreshLocks serializes credential refresh per auth ID so concurrent
 	// 401 recoveries and auto-refresh workers do not race the same refresh_token.
 	refreshLocks sync.Map
+	// refreshSink is an optional callback invoked after every OAuth/auth
+	// credential refresh completes (success or failure), so the management
+	// layer can persist the outcome to the upstream_sync_log table. nil when
+	// PG is not configured (no-op). Read atomically via refreshSink.Load;
+	// set via SetRefreshSink so it survives runtime config reloads.
+	refreshSink atomic.Pointer[RefreshSink]
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -187,4 +194,48 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
+}
+
+// SetRefreshSink wires an optional callback invoked after every OAuth/auth
+// credential refresh completes (success or failure). Pass nil to detach an
+// existing sink (e.g. when PG is reconfigured off at runtime). The sink is
+// stored atomically so a runtime config reload can swap it without locking.
+// Implementations must be safe for concurrent use and must never block the
+// refresh pipeline on slow persistence (fire-and-forget internally).
+func (m *Manager) SetRefreshSink(sink RefreshSink) {
+	if m == nil {
+		return
+	}
+	if sink == nil {
+		m.refreshSink.Store(nil)
+		return
+	}
+	m.refreshSink.Store(&sink)
+}
+
+// recordRefreshOutcome fires the configured RefreshSink (if any) with the
+// outcome of a credential refresh. No-op when no sink is attached. It never
+// panics and never blocks the caller: a panicking sink is recovered so a buggy
+// persistence adapter cannot stall refreshes.
+func (m *Manager) recordRefreshOutcome(o RefreshOutcome) {
+	if m == nil {
+		return
+	}
+	sinkPtr := m.refreshSink.Load()
+	if sinkPtr == nil || *sinkPtr == nil {
+		return
+	}
+	if o.OccurredAt.IsZero() {
+		o.OccurredAt = time.Now()
+	}
+	// Fire the sink in its own goroutine with a recovered panic so a slow or
+	// buggy persistence adapter cannot block or crash the refresh pipeline.
+	go func(sink RefreshSink, outcome RefreshOutcome) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.WithField("panic", r).Debug("auth: refresh sink panic recovered")
+			}
+		}()
+		sink(context.Background(), outcome)
+	}(*sinkPtr, o)
 }

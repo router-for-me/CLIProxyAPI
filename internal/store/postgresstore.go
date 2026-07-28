@@ -43,6 +43,7 @@ const (
 	defaultUpstreamProviderHeadersTable  = "upstream_provider_headers"
 	defaultUpstreamProviderExcludedTable = "upstream_provider_excluded_models"
 	defaultUpstreamProviderEntriesTable  = "upstream_provider_api_key_entries"
+	defaultUpstreamSyncLogTable          = "upstream_sync_log"
 	defaultModelGroupsTable              = "model_groups"
 )
 
@@ -127,6 +128,12 @@ type PostgresStoreConfig struct {
 	// UpstreamProviderEntriesTable stores the api-key-entries[] list for
 	// openai-compatibility providers as child rows. FK cascade.
 	UpstreamProviderEntriesTable string
+
+	// UpstreamSyncLogTable stores the outcome of every upstream OAuth/auth
+	// token refresh (success + failure, auto/on-demand/unauthorized-retry
+	// triggers). The error_message column is AES-GCM-sealed at rest when
+	// UsageEncryptionKey is configured. Auto-swept to a 30-day retention.
+	UpstreamSyncLogTable string
 
 	// ModelGroupsTable stores reusable Model Group templates: an
 	// allowed_models / blocked_models grant list plus optional per-model
@@ -230,6 +237,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.UpstreamProviderEntriesTable == "" {
 		cfg.UpstreamProviderEntriesTable = defaultUpstreamProviderEntriesTable
+	}
+	if cfg.UpstreamSyncLogTable == "" {
+		cfg.UpstreamSyncLogTable = defaultUpstreamSyncLogTable
 	}
 	if cfg.ModelGroupsTable == "" {
 		cfg.ModelGroupsTable = defaultModelGroupsTable
@@ -928,6 +938,38 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		return fmt.Errorf("postgres store: create management_audit_log is_error index: %w", err)
 	}
 
+	// upstream_sync_log records the outcome of every upstream OAuth/auth token
+	// refresh (success + failure) performed by the auth manager, including the
+	// trigger that caused it (auto-scheduled / on-demand / unauthorized-retry).
+	// The error_message column is AES-GCM-sealed at rest when
+	// UsageEncryptionKey is configured (forward-encrypting; legacy plaintext
+	// rows remain readable). Auto-swept to a 30-day retention window.
+	upstreamSyncLogTable := s.fullTableName(s.cfg.UpstreamSyncLogTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id            BIGSERIAL PRIMARY KEY,
+			auth_id       TEXT NOT NULL,
+			provider      TEXT NOT NULL,
+			trigger       TEXT NOT NULL,
+			success       BOOLEAN NOT NULL DEFAULT FALSE,
+			error_message TEXT,
+			duration_ms   BIGINT NOT NULL DEFAULT 0,
+			occurred_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, upstreamSyncLogTable)); err != nil {
+		return fmt.Errorf("postgres store: create upstream_sync_log table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_upstream_sync_log_occurred_at ON %s(occurred_at DESC)`, upstreamSyncLogTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create upstream_sync_log occurred_at index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_upstream_sync_log_provider ON %s(provider, occurred_at DESC)`, upstreamSyncLogTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create upstream_sync_log provider index: %w", err)
+	}
+
 	// upstream_providers stores every upstream provider as one normalized row.
 	// It is the source of truth for both the config.yaml-based API-key
 	// providers (gemini/codex/xai/claude/openai-compatibility/vertex/
@@ -1304,6 +1346,15 @@ func (s *PostgresStore) UpstreamProvidersTable() string {
 		return quoteIdentifier(defaultUpstreamProvidersTable)
 	}
 	return s.fullTableName(s.cfg.UpstreamProvidersTable)
+}
+
+// UpstreamSyncLogTable returns the fully-qualified name of the upstream sync
+// log table (records every upstream OAuth/auth token refresh outcome).
+func (s *PostgresStore) UpstreamSyncLogTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultUpstreamSyncLogTable)
+	}
+	return s.fullTableName(s.cfg.UpstreamSyncLogTable)
 }
 
 // UpstreamProviderModelsTable returns the fully-qualified name of the child

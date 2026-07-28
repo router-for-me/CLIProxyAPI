@@ -286,6 +286,15 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/upstream-providers/:id", s.mgmt.UpdateUpstreamProvider)
 		mgmt.DELETE("/upstream-providers/:id", s.mgmt.DeleteUpstreamProvider)
 
+		// Upstream OAuth/auth token refresh outcomes recorded by the auth
+		// manager's RefreshSink into the upstream_sync_log table. Surfaced on
+		// the dashboard under Analysis → Upstream Providers. Returns 503 when
+		// the PG store is not configured.
+		mgmt.GET("/upstream-sync-log", s.mgmt.ListSyncLog)
+		mgmt.GET("/upstream-sync-log/providers", s.mgmt.ListSyncLogProviders)
+		mgmt.GET("/upstream-sync-log/:id", s.mgmt.GetSyncLog)
+		mgmt.DELETE("/upstream-sync-log", s.mgmt.ClearSyncLog)
+
 		// Reusable Model Group templates (allowed-models grant lists +
 		// per-model upstream routing) attachable to API-key policies and
 		// internal users. Return 503 when the PG store is not configured.

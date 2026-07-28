@@ -21,6 +21,41 @@ import (
 // Auth record (e.g., injecting metadata) based on external context.
 type PostAuthHook func(context.Context, *Auth) error
 
+// RefreshTrigger labels what caused an OAuth/auth credential refresh. It is
+// recorded alongside the refresh outcome so the Analysis → Upstream Providers
+// page can distinguish a routine background refresh from a reactive one driven
+// by a failed request. Constants are mirrors of internal/store sync-log labels.
+const (
+	RefreshTriggerAuto              = "auto"
+	RefreshTriggerOnDemand          = "on_demand"
+	RefreshTriggerUnauthorizedRetry = "unauthorized_retry"
+)
+
+// RefreshOutcome captures the result of a single upstream OAuth/auth token
+// refresh performed by the Manager. AuthID/Provider identify the credential,
+// Trigger records what initiated the refresh, Success + Error describe the
+// outcome, Duration is the wall-clock time spent in the executor's Refresh
+// call, and OccurredAt is when the refresh resolved.
+//
+// The sink is fire-and-forget: implementations must never block the refresh
+// pipeline on persistence (a fire-and-forget goroutine is the expected usage).
+type RefreshOutcome struct {
+	AuthID     string
+	Provider   string
+	Trigger    string
+	Success    bool
+	Error      string
+	Duration   time.Duration
+	OccurredAt time.Time
+}
+
+// RefreshSink is invoked by the Manager after every OAuth/auth credential
+// refresh completes (success or failure). It is the bridge that lets the
+// management layer persist refresh outcomes to the upstream_sync_log table
+// without the auth package (which sits in sdk/cliproxy) importing internal/store.
+// Implementations must be safe to call from arbitrary goroutines.
+type RefreshSink func(ctx context.Context, o RefreshOutcome)
+
 // RequestInfo holds information extracted from the HTTP request.
 // It is injected into the context passed to PostAuthHook.
 type RequestInfo struct {

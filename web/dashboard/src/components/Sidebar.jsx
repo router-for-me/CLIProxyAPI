@@ -130,6 +130,7 @@ const NAV_GROUPS = [
       { to: '/recent-events', label: 'Recent Events', icon: 'list' },
       { to: '/errors', label: 'Errors', icon: 'bug' },
       { to: '/cooldown-providers', label: 'Cooldown Providers', icon: 'snow' },
+      { to: '/upstream-sync-log', label: 'Upstream Providers', icon: 'layers' },
     ],
   },
   {

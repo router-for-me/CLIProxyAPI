@@ -241,6 +241,14 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.mgmt.SetManagementTokenStore(handles.ManagementTokens)
 		s.mgmt.SetUpstreamProvidersStore(handles.UpstreamProviders)
 		s.mgmt.SetModelGroupStore(handles.ModelGroups)
+		s.mgmt.SetSyncLogStore(handles.SyncLog)
+		// Attach the refresh-outcome sink so every OAuth/auth token refresh is
+		// persisted to upstream_sync_log. No-op when PG is not configured
+		// (SyncLogSink returns nil, SetRefreshSink detaches). Re-attached on
+		// config reload via server_reload.go (SetAuthManager is re-called).
+		if s.handlers.AuthManager != nil {
+			s.handlers.AuthManager.SetRefreshSink(s.mgmt.SyncLogSink())
+		}
 		// Surface persisted official_provider values in auth-selection errors.
 		s.handlers.SetModelsCatalogStore(store.NewModelsCatalogResolver(handles.Models))
 		// Surface official_provider on Usage Stats / Errors rows so the

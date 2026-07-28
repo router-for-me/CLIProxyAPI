@@ -630,6 +630,7 @@ func main() {
 		pgModelsStore *store.ModelsStore
 		pgUserStore   *store.UserStore
 		pgMgmtTokens  *store.ManagementTokenStore
+		pgSyncLog     *store.SyncLogStore
 		pgSyncAdapter *registry.PGSync
 		pgModelGroups *store.ModelGroupStore
 		policySvc     policy.PolicyService
@@ -641,6 +642,7 @@ func main() {
 		pgModelsStore = store.NewModelsStore(pgStoreInst)
 		pgUserStore = store.NewUserStore(pgStoreInst)
 		pgMgmtTokens = store.NewManagementTokenStore(pgStoreInst)
+		pgSyncLog = store.NewSyncLogStore(pgStoreInst)
 		pgModelGroups = store.NewModelGroupStore(pgStoreInst)
 		pgSyncAdapter = registry.NewPGSync(store.NewPGModelsAdapter(pgModelsStore))
 		policySvc = policy.NewService(pgAPIKeyStore, pgUsageStore, policy.ServiceConfig{})
@@ -734,6 +736,7 @@ func main() {
 			PricingSourcesDir: pgPricingSourcesDir,
 			ManagementTokens:  pgMgmtTokens,
 			UpstreamProviders: pgUpstreamProviders,
+			SyncLog:           pgSyncLog,
 			ModelGroups:       pgModelGroups,
 		}))
 	}

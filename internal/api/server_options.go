@@ -68,6 +68,11 @@ type PgStoreHandles struct {
 	// OAuth/file-backed auths). nil when PG is not configured — the
 	// /upstream-providers routes return 503 in that case.
 	UpstreamProviders store.UpstreamProviderStore
+	// SyncLog is the PG-backed store for the upstream_sync_log table, which
+	// records every upstream OAuth/auth token refresh outcome (success +
+	// failure) for the Analysis → Upstream Providers page. nil when PG is not
+	// configured — the /upstream-sync-log routes return 503 in that case.
+	SyncLog *store.SyncLogStore
 	// ModelGroups is the PG-backed store for reusable Model Group templates
 	// (allowed-models grant lists + per-model upstream routing). nil when PG
 	// is not configured — the /model-groups routes return 503 in that case.

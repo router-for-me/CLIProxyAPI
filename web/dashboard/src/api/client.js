@@ -315,6 +315,44 @@ export async function resetCooldownProvider(authIndex) {
   });
 }
 
+// --- Upstream Sync Log (Analysis → Upstream Providers) ---------------------
+//
+// Records the outcome of every upstream OAuth/auth token refresh performed by
+// the auth manager (success + failure, with the trigger that caused it).
+// Sourced from the upstream_sync_log PG table; 503 when PG is not configured.
+
+// Paged list of refresh outcomes for the Analysis → Upstream Providers table.
+// params: { provider, trigger, success ('true'|'false'), from, to, page, page_size }.
+// Returns { events: [...], total, page, page_size }.
+export async function getUpstreamSyncLog(params = {}) {
+  const qs = new URLSearchParams();
+  if (params.provider) qs.set('provider', params.provider);
+  if (params.trigger) qs.set('trigger', params.trigger);
+  if (params.success) qs.set('success', params.success);
+  if (params.from) qs.set('from', params.from);
+  if (params.to) qs.set('to', params.to);
+  if (params.page) qs.set('page', params.page);
+  if (params.page_size) qs.set('page_size', params.page_size);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return fetchJSON(`/upstream-sync-log${suffix}`);
+}
+
+// A single refresh outcome by ID (full error_message unsealed server-side).
+export async function getUpstreamSyncLogEvent(id) {
+  return fetchJSON(`/upstream-sync-log/${id}`);
+}
+
+// Distinct provider values present in the sync log, for the filter dropdown.
+// Returns { providers: [...] }.
+export async function getUpstreamSyncLogProviders() {
+  return fetchJSON('/upstream-sync-log/providers');
+}
+
+// Operator-initiated manual clear of all sync-log rows. Returns { status, deleted }.
+export async function clearUpstreamSyncLog() {
+  return fetchJSON('/upstream-sync-log', { method: 'DELETE' });
+}
+
 // Distinct { api_keys: [{id, alias}], providers, models } observed in the
 // filter window. Used by the dashboard to populate dropdown filter menus so
 // the operator never types a free-text value (which is impossible against

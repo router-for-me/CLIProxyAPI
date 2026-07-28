@@ -189,6 +189,12 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		s.mgmt.SetConfig(cfg)
 		s.mgmt.SetAuthManager(s.handlers.AuthManager)
 		s.mgmt.SetPluginHost(s.pluginHost)
+		// Re-attach the refresh-outcome sink so a PG reconfiguration that
+		// flips the sync-log store on/off takes effect without a full restart.
+		// No-op when PG is not configured (SyncLogSink returns nil).
+		if s.handlers.AuthManager != nil {
+			s.handlers.AuthManager.SetRefreshSink(s.mgmt.SyncLogSink())
+		}
 	}
 	s.refreshPluginManagementRoutes()
 
