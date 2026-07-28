@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -221,7 +222,12 @@ func (h *Handler) CreateUpstreamProvider(c *gin.Context) {
 // UpdateUpstreamProvider handles PUT /v0/management/upstream-providers/:id.
 //
 // Body: upstreamProviderReq. All mutable fields are replaced. After update
-// the artifacts are re-rendered and the clients reloaded.
+// the artifacts are re-rendered and the clients reloaded. When the upstream
+// name/identifier changed, persisted models_catalog rows are repointed from
+// the old name to the new name so the Models Catalog does not keep a phantom
+// Upstream Provider entry under the old name (catalog rows for OpenAI-
+// compatible providers key their provider column off the upstream name
+// verbatim, via OwnedBy).
 func (h *Handler) UpdateUpstreamProvider(c *gin.Context) {
 	srcs, ok := h.upstreamProvidersStore(c)
 	if !ok {
@@ -241,6 +247,19 @@ func (h *Handler) UpdateUpstreamProvider(c *gin.Context) {
 		}})
 		return
 	}
+	// Capture the pre-update name so a rename can repoint the models_catalog
+	// rows that key their provider column off this upstream's name (OpenAI-
+	// compatible catalog rows use OwnedBy = upstream name verbatim). Built-in
+	// providers (claude / gemini / ...) have their catalog keyed by a fixed
+	// owner string ("anthropic", "google"), not the upstream name, so the
+	// rename is a no-op when nothing matches — safe to run unconditionally.
+	existing, err := srcs.Get(c.Request.Context(), id)
+	if err != nil {
+		h.upstreamProviderErrorResponse(c, err)
+		return
+	}
+	oldName := strings.TrimSpace(existing.Name)
+
 	p := toUpstreamProvider(&body)
 	p.ID = id
 	updated, err := srcs.Update(c.Request.Context(), p)
@@ -248,6 +267,25 @@ func (h *Handler) UpdateUpstreamProvider(c *gin.Context) {
 		h.upstreamProviderErrorResponse(c, err)
 		return
 	}
+
+	// If the upstream name changed, repoint persisted models_catalog rows so
+	// the old name doesn't linger as a phantom Upstream Provider entry in
+	// the Models Catalog. Best-effort: a catalog sync miss never blocks the
+	// upstream save (the row is already updated); only the catalog display
+	// stays stale until the next sync.
+	newName := strings.TrimSpace(updated.Name)
+	if oldName != "" && newName != "" && oldName != newName {
+		_, _, models, _, pgOK := h.requirePG(c)
+		if pgOK && models != nil {
+			if rerr := models.RenameProvider(c.Request.Context(), oldName, newName); rerr != nil {
+				log.WithError(rerr).
+					WithField("old_name", oldName).
+					WithField("new_name", newName).
+					Warn("upstream-providers: models_catalog rename did not complete; catalog may show a stale provider until next sync")
+			}
+		}
+	}
+
 	h.applyUpstreamProviders(c.Request.Context())
 	c.JSON(http.StatusOK, toUpstreamProviderResponse(*updated))
 }
