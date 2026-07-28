@@ -694,12 +694,14 @@ func (r *ModelRegistry) SetModelQuotaExceeded(clientID, modelID string) {
 	defer r.mutex.Unlock()
 	r.ensureAvailableModelsCacheLocked()
 
-	if registration, exists := r.models[modelID]; exists {
-		now := time.Now()
-		registration.QuotaExceededClients[clientID] = &now
-		r.invalidateAvailableModelsCacheLocked()
-		log.Debugf("Marked model %s as quota exceeded for client %s", modelID, clientID)
+	registration, exists := r.models[modelID]
+	if !exists || registration == nil || !r.clientSupportsModelLocked(clientID, modelID) {
+		return
 	}
+	now := time.Now()
+	registration.QuotaExceededClients[clientID] = &now
+	r.invalidateAvailableModelsCacheLocked()
+	log.Debugf("Marked model %s as quota exceeded for client %s", modelID, clientID)
 }
 
 // ClearModelQuotaExceeded removes quota exceeded status for a model and client
@@ -732,7 +734,7 @@ func (r *ModelRegistry) SuspendClientModel(clientID, modelID, reason string) {
 	r.ensureAvailableModelsCacheLocked()
 
 	registration, exists := r.models[modelID]
-	if !exists || registration == nil {
+	if !exists || registration == nil || !r.clientSupportsModelLocked(clientID, modelID) {
 		return
 	}
 	if registration.SuspendedClients == nil {
@@ -786,7 +788,10 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
+	return r.clientSupportsModelLocked(clientID, modelID)
+}
 
+func (r *ModelRegistry) clientSupportsModelLocked(clientID, modelID string) bool {
 	models, exists := r.clientModels[clientID]
 	if !exists || len(models) == 0 {
 		return false
