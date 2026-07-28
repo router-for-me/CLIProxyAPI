@@ -446,6 +446,31 @@ func validateModelRoutesFor(allowedModels []string, routes []store.ModelRoute) s
 		if len(r.Providers) == 0 {
 			return fmt.Sprintf("model_routes: route for %q must list at least one provider", model)
 		}
+		strategy := strings.ToLower(strings.TrimSpace(r.Strategy))
+		if strategy != "" && strategy != "priority" && strategy != "failover" {
+			return fmt.Sprintf("model_routes: route for %q has invalid strategy %q (allowed: \"\", \"priority\", \"failover\")", model, r.Strategy)
+		}
+		if len(r.Priorities) > 0 {
+			providerSet := make(map[string]struct{}, len(r.Providers))
+			for _, p := range r.Providers {
+				providerSet[strings.ToLower(strings.TrimSpace(p))] = struct{}{}
+			}
+			seenPriority := make(map[string]struct{}, len(r.Priorities))
+			for _, pr := range r.Priorities {
+				provider := strings.TrimSpace(pr.Provider)
+				if provider == "" {
+					return fmt.Sprintf("model_routes: route for %q has a priority entry with an empty provider", model)
+				}
+				key := strings.ToLower(provider)
+				if _, ok := providerSet[key]; !ok {
+					return fmt.Sprintf("model_routes: route for %q has a priority for %q which is not in providers", model, provider)
+				}
+				if _, dup := seenPriority[key]; dup {
+					return fmt.Sprintf("model_routes: route for %q has duplicate priority for provider %q", model, provider)
+				}
+				seenPriority[key] = struct{}{}
+			}
+		}
 		key := strings.ToLower(model)
 		if _, dup := seen[key]; dup {
 			return fmt.Sprintf("model_routes: duplicate route for model %q", model)

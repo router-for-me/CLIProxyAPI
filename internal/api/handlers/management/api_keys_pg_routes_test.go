@@ -68,6 +68,69 @@ func TestValidateModelRoutes(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "strategy_priority_with_priorities_ok",
+			policy: store.Policy{
+				AllowedModels: []string{"gpt-4o"},
+				ModelRoutes: []store.ModelRoute{{
+					Model:      "gpt-4o",
+					Providers:  []string{"opencode", "cometapi"},
+					Strategy:   "priority",
+					Priorities: []store.ProviderPriority{{Provider: "opencode", Priority: 10}, {Provider: "cometapi", Priority: 1}},
+				}},
+			},
+			wantErr: false,
+		},
+		{
+			name: "strategy_failover_ok",
+			policy: store.Policy{
+				AllowedModels: []string{"gpt-4o"},
+				ModelRoutes: []store.ModelRoute{{
+					Model:     "gpt-4o",
+					Providers: []string{"opencode", "cometapi"},
+					Strategy:  "failover",
+				}},
+			},
+			wantErr: false,
+		},
+		{
+			name: "strategy_unknown_rejected",
+			policy: store.Policy{
+				AllowedModels: []string{"gpt-4o"},
+				ModelRoutes: []store.ModelRoute{{
+					Model:     "gpt-4o",
+					Providers: []string{"opencode"},
+					Strategy:  "weighted",
+				}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "priority_for_non_allowlisted_provider_rejected",
+			policy: store.Policy{
+				AllowedModels: []string{"gpt-4o"},
+				ModelRoutes: []store.ModelRoute{{
+					Model:      "gpt-4o",
+					Providers:  []string{"opencode"},
+					Strategy:   "priority",
+					Priorities: []store.ProviderPriority{{Provider: "ghost", Priority: 5}},
+				}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "duplicate_priority_for_provider_rejected",
+			policy: store.Policy{
+				AllowedModels: []string{"gpt-4o"},
+				ModelRoutes: []store.ModelRoute{{
+					Model:      "gpt-4o",
+					Providers:  []string{"opencode"},
+					Strategy:   "priority",
+					Priorities: []store.ProviderPriority{{Provider: "opencode", Priority: 5}, {Provider: "opencode", Priority: 3}},
+				}},
+			},
+			wantErr: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
