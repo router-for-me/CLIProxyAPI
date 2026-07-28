@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -511,6 +512,37 @@ func registerBootstrapExecutor(t *testing.T, executor *bootstrapStreamExecutor) 
 		registry.GetGlobalRegistry().UnregisterClient(authRetry.ID)
 	})
 	return NewBaseAPIHandlers(&sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{BootstrapRetries: 1}}, manager), manager
+}
+
+func TestExecuteStreamWithAuthManager_BootstrapRetriesAfterProvisionalFailure(t *testing.T) {
+	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, call int) (*coreexecutor.StreamResult, error) {
+		chunks := make(chan coreexecutor.StreamChunk, 2)
+		if call == 1 {
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("provisional"), Commitment: coreexecutor.StreamCommitmentProvisional}
+			chunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{HTTPStatus: http.StatusBadGateway, Message: "temporary"}}
+		} else {
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("ok"), Commitment: coreexecutor.StreamCommitmentSemantic}
+		}
+		close(chunks)
+		return &coreexecutor.StreamResult{Headers: http.Header{"X-Upstream-Attempt": {strconv.Itoa(call)}}, Chunks: chunks}, nil
+	}}
+	handler, _ := registerBootstrapExecutor(t, executor)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "bootstrap-model", []byte(`{"model":"bootstrap-model"}`), "")
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	if string(got) != "ok" {
+		t.Fatalf("payload = %q, want only winning attempt", got)
+	}
+	if executor.Calls() != 2 {
+		t.Fatalf("calls=%d, want retry attempt", executor.Calls())
+	}
 }
 
 func TestExecuteStreamWithAuthManager_DoesNotRetryAfterDroppedCommittedPayload(t *testing.T) {

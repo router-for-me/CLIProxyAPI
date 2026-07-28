@@ -234,7 +234,7 @@ func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamR
 	}
 }
 
-func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk) ([]cliproxyexecutor.StreamChunk, bool, error) {
+func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk, bufferProvisional bool) ([]cliproxyexecutor.StreamChunk, bool, error) {
 	if ch == nil {
 		return nil, true, nil
 	}
@@ -254,15 +254,21 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			chunk, ok = <-ch
 		}
 		if !ok {
-			if len(buffered) > 0 {
+			if bufferProvisional && len(buffered) > 0 {
 				return nil, false, &Error{Code: "incomplete_stream", Message: "upstream stream closed after provisional framing", Retryable: true, HTTPStatus: http.StatusBadGateway}
 			}
-			return nil, true, nil
+			return buffered, true, nil
 		}
 		if chunk.Err != nil {
 			return nil, false, chunk.Err
 		}
 		buffered = append(buffered, chunk)
+		if !bufferProvisional {
+			if len(chunk.Payload) > 0 {
+				return buffered, false, nil
+			}
+			continue
+		}
 		switch chunk.Commitment {
 		case cliproxyexecutor.StreamCommitmentProvisional:
 			continue
@@ -538,7 +544,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			continue
 		}
 
-		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
+		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks, execOpts.StreamRecovery.Attempts <= 0 && execOpts.StreamRecovery.BootstrapRetries > 0)
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				discardStreamChunks(streamResult.Chunks)
@@ -558,7 +564,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 						streamResult = &cliproxyexecutor.StreamResult{}
 					} else {
 						streamResult = retryStream
-						buffered, closed, bootstrapErr = readStreamBootstrap(ctx, streamResult.Chunks)
+						buffered, closed, bootstrapErr = readStreamBootstrap(ctx, streamResult.Chunks, execOpts.StreamRecovery.Attempts <= 0 && execOpts.StreamRecovery.BootstrapRetries > 0)
 					}
 				}
 			}

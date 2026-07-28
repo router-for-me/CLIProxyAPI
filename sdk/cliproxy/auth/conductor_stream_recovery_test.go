@@ -354,12 +354,36 @@ func TestRecoveryOverflowHoldsSlotThroughRetainedPrefixAndOverflowChunk(t *testi
 	}
 }
 
+func TestReadStreamBootstrapDefaultForwardsProvisionalImmediately(t *testing.T) {
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("start"), Commitment: cliproxyexecutor.StreamCommitmentProvisional}
+	type bootstrapResult struct {
+		buffered []cliproxyexecutor.StreamChunk
+		closed   bool
+		err      error
+	}
+	resultCh := make(chan bootstrapResult, 1)
+	go func() {
+		buffered, closed, err := readStreamBootstrap(context.Background(), chunks, false)
+		resultCh <- bootstrapResult{buffered: buffered, closed: closed, err: err}
+	}()
+	select {
+	case result := <-resultCh:
+		if result.err != nil || result.closed || len(result.buffered) != 1 || string(result.buffered[0].Payload) != "start" {
+			t.Fatalf("buffered=%v closed=%v err=%v", result.buffered, result.closed, result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("default bootstrap blocked on provisional lifecycle chunk")
+	}
+	close(chunks)
+}
+
 func TestReadStreamBootstrapWaitsThroughProvisionalChunks(t *testing.T) {
 	chunks := make(chan cliproxyexecutor.StreamChunk, 2)
 	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("start"), Commitment: cliproxyexecutor.StreamCommitmentProvisional}
 	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("text"), Commitment: cliproxyexecutor.StreamCommitmentSemantic}
 	close(chunks)
-	buffered, closed, err := readStreamBootstrap(context.Background(), chunks)
+	buffered, closed, err := readStreamBootstrap(context.Background(), chunks, true)
 	if err != nil || closed || len(buffered) != 2 {
 		t.Fatalf("buffered=%v closed=%v err=%v", buffered, closed, err)
 	}
@@ -369,7 +393,7 @@ func TestReadStreamBootstrapProvisionalOnlyCloseFails(t *testing.T) {
 	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
 	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("start"), Commitment: cliproxyexecutor.StreamCommitmentProvisional}
 	close(chunks)
-	_, _, err := readStreamBootstrap(context.Background(), chunks)
+	_, _, err := readStreamBootstrap(context.Background(), chunks, true)
 	if err == nil {
 		t.Fatal("expected provisional-only stream failure")
 	}
