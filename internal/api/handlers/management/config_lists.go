@@ -706,6 +706,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Disabled       *bool                               `json:"disabled"`
 		DisableCooling *bool                               `json:"disable-cooling"`
 		BaseURL        *string                             `json:"base-url"`
+		WireAPI        *string                             `json:"wire-api"`
 		APIKeyEntries  *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
 		Models         *[]config.OpenAICompatibilityModel  `json:"models"`
 		Headers        *map[string]string                  `json:"headers"`
@@ -762,6 +763,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 			return
 		}
 		entry.BaseURL = trimmed
+	}
+	if body.Value.WireAPI != nil {
+		entry.WireAPI = strings.ToLower(strings.TrimSpace(*body.Value.WireAPI))
 	}
 	if body.Value.APIKeyEntries != nil {
 		for keyIndex := range *body.Value.APIKeyEntries {
@@ -1550,6 +1554,7 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	}
 	// Trim base-url; empty base-url indicates provider should be removed by sanitization
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.WireAPI = strings.ToLower(strings.TrimSpace(entry.WireAPI))
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {

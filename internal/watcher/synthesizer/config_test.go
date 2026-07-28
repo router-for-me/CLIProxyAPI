@@ -543,6 +543,55 @@ func TestConfigSynthesizer_OpenAICompat_UsesNamespacedProviderKey(t *testing.T) 
 	}
 }
 
+func TestConfigSynthesizer_OpenAICompat_WireAPI(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:          "with-key",
+					BaseURL:       "https://with-key.example.com/v1",
+					WireAPI:       " ReSpOnSeS ",
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "test-key"}},
+				},
+				{
+					Name:    "without-key",
+					BaseURL: "https://without-key.example.com/v1",
+					WireAPI: " FuTuRe-PrOtOcOl ",
+				},
+				{
+					Name:          "default-wire",
+					BaseURL:       "https://default.example.com/v1",
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "default-key"}},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 3 {
+		t.Fatalf("expected 3 auths, got %d", len(auths))
+	}
+	byCompatName := make(map[string]*coreauth.Auth, len(auths))
+	for _, auth := range auths {
+		byCompatName[auth.Attributes["compat_name"]] = auth
+	}
+	if got := byCompatName["with-key"].Attributes["wire_api"]; got != "responses" {
+		t.Fatalf("with-key wire_api = %q, want responses", got)
+	}
+	if got := byCompatName["without-key"].Attributes["wire_api"]; got != "future-protocol" {
+		t.Fatalf("without-key wire_api = %q, want future-protocol", got)
+	}
+	if _, ok := byCompatName["default-wire"].Attributes["wire_api"]; ok {
+		t.Fatal("empty wire-api should not synthesize a wire_api attribute")
+	}
+}
+
 func TestConfigSynthesizer_VertexCompat(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

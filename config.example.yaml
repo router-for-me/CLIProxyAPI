@@ -432,6 +432,7 @@ nonstream-keepalive-interval: 0
 #     disabled: false # optional: set to true to disable this provider without removing it
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     wire-api: "responses" # optional: use the upstream /responses API; omitted or unsupported values keep /chat/completions behavior
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
 #     headers:
 #       X-Custom-Header: "custom-value"

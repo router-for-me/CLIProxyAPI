@@ -194,6 +194,30 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIStreamUsageResponseCompletedFields(t *testing.T) {
+	line := []byte(`data: {"type":"response.completed","response":{"service_tier":"priority","usage":{"input_tokens":8,"output_tokens":5,"total_tokens":13,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}}`)
+	detail, ok := ParseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatal("ParseOpenAIStreamUsage() ok = false, want true")
+	}
+	if detail.InputTokens != 8 || detail.OutputTokens != 5 || detail.TotalTokens != 13 {
+		t.Fatalf("detail = %+v, want input=8 output=5 total=13", detail)
+	}
+	if detail.CachedTokens != 3 || detail.ReasoningTokens != 2 {
+		t.Fatalf("detail = %+v, want cached=3 reasoning=2", detail)
+	}
+	if detail.ResponseServiceTier != "priority" {
+		t.Fatalf("response service tier = %q, want priority", detail.ResponseServiceTier)
+	}
+
+	var buffer StreamUsageBuffer
+	buffer.ObserveOpenAIStream(line)
+	buffered, bufferedOK := buffer.Detail()
+	if !bufferedOK || buffered != detail {
+		t.Fatalf("StreamUsageBuffer.Detail() = (%+v, %v), want (%+v, true)", buffered, bufferedOK, detail)
+	}
+}
+
 func TestStreamUsageBufferKeepsLastUsage(t *testing.T) {
 	var buffer StreamUsageBuffer
 	buffer.Observe(usage.Detail{}, true)

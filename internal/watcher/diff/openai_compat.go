@@ -65,9 +65,12 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	newKeyCount := countAPIKeys(newEntry)
 	oldModelCount := countOpenAIModels(oldEntry.Models)
 	newModelCount := countOpenAIModels(newEntry.Models)
-	details := make([]string, 0, 3)
+	details := make([]string, 0, 4)
 	if oldEntry.Disabled != newEntry.Disabled {
 		details = append(details, fmt.Sprintf("disabled %t -> %t", oldEntry.Disabled, newEntry.Disabled))
+	}
+	if oldEntry.WireAPI != newEntry.WireAPI {
+		details = append(details, fmt.Sprintf("wire-api %q -> %q", oldEntry.WireAPI, newEntry.WireAPI))
 	}
 	if oldKeyCount != newKeyCount {
 		details = append(details, fmt.Sprintf("api-keys %d -> %d", oldKeyCount, newKeyCount))

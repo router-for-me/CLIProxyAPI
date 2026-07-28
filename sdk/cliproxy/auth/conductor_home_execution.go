@@ -91,7 +91,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			execOpts := opts
 			execOpts.ExecutionLifecycle = selection
 			var errIntercept error
-			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, preparedAuth, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
 				releaseAttempt()
 				selection.End("request_intercepted")

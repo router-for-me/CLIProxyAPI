@@ -67,6 +67,26 @@ func TestDiffOpenAICompatibility_RemovedAndUnchanged(t *testing.T) {
 	expectContains(t, changes, "provider removed: provider-a (api-keys=1, models=1)")
 }
 
+func TestDiffOpenAICompatibility_WireAPIVisibleWithoutSecrets(t *testing.T) {
+	oldList := []config.OpenAICompatibility{{
+		Name:          "provider-a",
+		APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "old-secret-key"}},
+	}}
+	newList := []config.OpenAICompatibility{{
+		Name:          "provider-a",
+		WireAPI:       "responses",
+		APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "new-secret-key"}},
+	}}
+
+	changes := DiffOpenAICompatibility(oldList, newList)
+	expectContains(t, changes, `provider updated: provider-a (wire-api "" -> "responses")`)
+	for _, change := range changes {
+		if strings.Contains(change, "old-secret-key") || strings.Contains(change, "new-secret-key") {
+			t.Fatalf("diff leaked API key material: %s", change)
+		}
+	}
+}
+
 func TestOpenAICompatKeyFallbacks(t *testing.T) {
 	entry := config.OpenAICompatibility{
 		BaseURL: "http://base",

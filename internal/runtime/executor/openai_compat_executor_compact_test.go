@@ -35,6 +35,7 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
 		"base_url": server.URL + "/v1",
 		"api_key":  "test",
+		"wire_api": "responses",
 	}}
 	payload := []byte(`{"model":"gpt-5.1-codex-max","input":[{"role":"user","content":"hi"}]}`)
 	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
