@@ -439,7 +439,7 @@ func TestStripCodexImageGenerationIfDisabled(t *testing.T) {
 	}
 }
 
-func TestCodexAuthImageGenerationDisabledErr_IsRequestScoped(t *testing.T) {
+func TestCodexAuthImageGenerationDisabledErr_AvailabilityNeutral(t *testing.T) {
 	auth := &cliproxyauth.Auth{Metadata: map[string]any{"disable_image_generation": true}}
 	err := codexAuthImageGenerationDisabledErr(auth)
 	if err == nil {
@@ -449,12 +449,12 @@ func TestCodexAuthImageGenerationDisabledErr_IsRequestScoped(t *testing.T) {
 	if se, ok := err.(interface{ StatusCode() int }); !ok || se.StatusCode() != http.StatusForbidden {
 		t.Fatalf("StatusCode() = %v, want 403", se)
 	}
-	// Must expose IsRequestScoped so MarkResult skips cooldown.
-	if rs, ok := err.(interface{ IsRequestScoped() bool }); !ok || !rs.IsRequestScoped() {
-		t.Fatal("expected IsRequestScoped() true to avoid credential cooldown")
+	// Must expose AvailabilityNeutral so MarkResult skips cooldown while preserving failover.
+	if an, ok := err.(interface{ AvailabilityNeutral() bool }); !ok || !an.AvailabilityNeutral() {
+		t.Fatal("expected AvailabilityNeutral() true to avoid credential cooldown without stopping failover")
 	}
-	// Must NOT be a permanent/cooldown 403 — conductor should failover to next credential.
-	if _, ok := err.(error); !ok {
-		t.Fatal("must implement error")
+	// Must NOT be request-scoped (that would stop failover).
+	if rs, ok := err.(interface{ IsRequestScoped() bool }); ok && rs.IsRequestScoped() {
+		t.Fatal("must not be request-scoped — that would prevent failover to next credential")
 	}
 }

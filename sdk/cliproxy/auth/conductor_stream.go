@@ -224,7 +224,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			rerr := resultErrorFromError(errStream)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
-			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			m.recordExecResultAware(ctx, result, auth, ephemeralResult, errStream)
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}

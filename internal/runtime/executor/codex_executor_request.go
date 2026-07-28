@@ -448,16 +448,17 @@ func codexAuthImageGenerationDisabledErr(auth *cliproxyauth.Auth) error {
 	return imageGenDisabledErr{}
 }
 
-// imageGenDisabledErr is a request-scoped sentinel for per-key image_generation opt-out.
-// It carries 403 so the auth conductor treats it like a normal upstream 403 for failover,
-// but RequestScopedError prevents the credential from being cooled down.
+// imageGenDisabledErr is a sentinel for per-key image_generation opt-out.
+// It carries 403 so the auth conductor treats it like a normal upstream 403 for failover
+// (isRequestInvalidError returns false for 403). AvailabilityNeutral prevents the credential
+// from being cooled down via recordAvailabilityNeutralResult in MarkResult.
 type imageGenDisabledErr struct{}
 
 func (imageGenDisabledErr) Error() string {
 	return "image generation disabled for this credential (codex-api-key.disable-image-generation=true)"
 }
-func (imageGenDisabledErr) StatusCode() int       { return http.StatusForbidden }
-func (imageGenDisabledErr) IsRequestScoped() bool { return true }
+func (imageGenDisabledErr) StatusCode() int           { return http.StatusForbidden }
+func (imageGenDisabledErr) AvailabilityNeutral() bool { return true }
 
 // stripCodexImageGenerationIfDisabled strips image_generation tools/tool_choice when this
 // credential has opted out. Unlike applyCodexImageGenerationPolicy it never injects tools,
