@@ -13,6 +13,8 @@ permissions:
 env:
   APP_NAME: CLIProxyAPI
   # GitHub Container Registry (GHCR), tied to your account — no extra secrets needed.
+  # Set per-job to a lowercased value (GHCR rejects uppercase repository names);
+  # see the "Lowercase image name" step in each job.
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/cli-proxy-api
 
 jobs:
@@ -41,6 +43,8 @@ jobs:
           echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
           echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
           echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
+          # GHCR requires lowercase repository names (e.g. "GOaroundT-T" -> "goaroundt-t")
+          echo "IMAGE_NAME=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/cli-proxy-api" >> $GITHUB_ENV
       - name: Build and push (amd64)
         uses: docker/build-push-action@v6
         with:
@@ -80,6 +84,8 @@ jobs:
           echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
           echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
           echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
+          # GHCR requires lowercase repository names (e.g. "GOaroundT-T" -> "goaroundt-t")
+          echo "IMAGE_NAME=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/cli-proxy-api" >> $GITHUB_ENV
       - name: Build and push (arm64)
         uses: docker/build-push-action@v6
         with:
@@ -115,6 +121,8 @@ jobs:
           echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
           echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
           echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
+          # GHCR requires lowercase repository names (e.g. "GOaroundT-T" -> "goaroundt-t")
+          echo "IMAGE_NAME=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/cli-proxy-api" >> $GITHUB_ENV
       - name: Create and push multi-arch manifests
         run: |
           docker buildx imagetools create \
