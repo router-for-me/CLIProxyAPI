@@ -35,6 +35,25 @@ func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
 	t.Fatalf("Vertex models do not contain %q", releaseID)
 }
 
+func TestClaudeModelsIncludeOpus5ReleaseID(t *testing.T) {
+	const releaseID = "claude-opus-5"
+	const displayName = "Claude Opus 5"
+
+	for _, model := range GetClaudeModels() {
+		if model == nil {
+			continue
+		}
+		if model.ID == releaseID {
+			if model.DisplayName != displayName {
+				t.Fatalf("Claude model display name = %q, want %q", model.DisplayName, displayName)
+			}
+			return
+		}
+	}
+
+	t.Fatalf("Claude models do not contain %q", releaseID)
+}
+
 func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 
