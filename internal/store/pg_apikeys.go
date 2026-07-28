@@ -98,9 +98,31 @@ type Policy struct {
 
 // ModelRoute pins a single model ID to a set of upstream providers. Requests
 // for Model are confined to the listed Providers (case-insensitive match).
+//
+// Strategy optionally overrides the credential-selection mode for this model:
+//   - ""          (default) inherits the global routing.strategy (round-robin).
+//   - "priority"  pins to the highest-priority provider until it is
+//     exhausted/cooldown, then descends to the next. Priorities
+//     order Providers (highest number = primary).
+//   - "failover"  starts at the highest-priority provider and relies on the
+//     conductor's inner loop to walk to the next provider on a
+//     non-invalid upstream error (5xx/429/cooldown).
+//
+// Priorities is optional and only Providers present in Providers are
+// honored; unlisted providers default to priority 0.
 type ModelRoute struct {
-	Model     string   `json:"model"`
-	Providers []string `json:"providers"`
+	Model      string             `json:"model"`
+	Providers  []string           `json:"providers"`
+	Strategy   string             `json:"strategy,omitempty"`
+	Priorities []ProviderPriority `json:"priorities,omitempty"`
+}
+
+// ProviderPriority assigns a priority weight to a single provider within a
+// ModelRoute. Higher numbers are preferred (served first). Only providers
+// also listed in ModelRoute.Providers are considered.
+type ProviderPriority struct {
+	Provider string `json:"provider"`
+	Priority int    `json:"priority"`
 }
 
 // APIKeyStore provides CRUD operations for client-facing API keys and their
@@ -602,7 +624,9 @@ func normalizeStringSlice(values []string) []string {
 
 // normalizeModelRoutes drops routes with an empty model or no providers and
 // trims whitespace. It returns a non-nil slice (empty when input is empty) so
-// the persisted jsonb column is [] rather than NULL.
+// the persisted jsonb column is [] rather than NULL. Strategy is normalized
+// (lowercased, trimmed); Priorities entries referencing providers not in the
+// route's allowlist are dropped so persisted priorities stay consistent.
 func normalizeModelRoutes(routes []ModelRoute) []ModelRoute {
 	if len(routes) == 0 {
 		return []ModelRoute{}
@@ -614,15 +638,40 @@ func normalizeModelRoutes(routes []ModelRoute) []ModelRoute {
 			continue
 		}
 		providers := make([]string, 0, len(r.Providers))
+		providerSet := make(map[string]struct{}, len(r.Providers))
 		for _, p := range r.Providers {
-			if p = strings.TrimSpace(p); p != "" {
-				providers = append(providers, p)
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
 			}
+			key := strings.ToLower(p)
+			if _, dup := providerSet[key]; dup {
+				continue
+			}
+			providerSet[key] = struct{}{}
+			providers = append(providers, p)
 		}
 		if len(providers) == 0 {
 			continue
 		}
-		out = append(out, ModelRoute{Model: model, Providers: providers})
+		strategy := strings.ToLower(strings.TrimSpace(r.Strategy))
+		var priorities []ProviderPriority
+		for _, pr := range r.Priorities {
+			provider := strings.TrimSpace(pr.Provider)
+			if provider == "" {
+				continue
+			}
+			if _, ok := providerSet[strings.ToLower(provider)]; !ok {
+				continue
+			}
+			priorities = append(priorities, ProviderPriority{Provider: provider, Priority: pr.Priority})
+		}
+		out = append(out, ModelRoute{
+			Model:      model,
+			Providers:  providers,
+			Strategy:   strategy,
+			Priorities: priorities,
+		})
 	}
 	return out
 }

@@ -123,6 +123,61 @@ func TestNormalizeStringSlice(t *testing.T) {
 	}
 }
 
+func TestNormalizeModelRoutesStrategy(t *testing.T) {
+	t.Run("preserves strategy and allowlisted priorities", func(t *testing.T) {
+		got := normalizeModelRoutes([]ModelRoute{{
+			Model:      "gpt-4o",
+			Providers:  []string{"opencode", "cometapi"},
+			Strategy:   "Priority",
+			Priorities: []ProviderPriority{{Provider: "opencode", Priority: 10}, {Provider: "cometapi", Priority: 1}},
+		}})
+		if len(got) != 1 {
+			t.Fatalf("want 1 route; got %d", len(got))
+		}
+		if got[0].Strategy != "priority" {
+			t.Errorf("strategy = %q; want %q", got[0].Strategy, "priority")
+		}
+		if len(got[0].Priorities) != 2 {
+			t.Fatalf("want 2 priorities; got %d", len(got[0].Priorities))
+		}
+	})
+	t.Run("drops priorities referencing non-allowlisted providers", func(t *testing.T) {
+		got := normalizeModelRoutes([]ModelRoute{{
+			Model:      "gpt-4o",
+			Providers:  []string{"opencode"},
+			Strategy:   "failover",
+			Priorities: []ProviderPriority{{Provider: "opencode", Priority: 5}, {Provider: "ghost", Priority: 9}, {Provider: "", Priority: 1}},
+		}})
+		if len(got) != 1 || got[0].Strategy != "failover" {
+			t.Fatalf("unexpected route: %+v", got)
+		}
+		if len(got[0].Priorities) != 1 || got[0].Priorities[0].Provider != "opencode" {
+			t.Fatalf("want only opencode priority; got %+v", got[0].Priorities)
+		}
+	})
+	t.Run("empty strategy and priorities omitted", func(t *testing.T) {
+		got := normalizeModelRoutes([]ModelRoute{{
+			Model:     "gpt-4o",
+			Providers: []string{"opencode"},
+		}})
+		if len(got) != 1 {
+			t.Fatalf("want 1 route; got %d", len(got))
+		}
+		if got[0].Strategy != "" || len(got[0].Priorities) != 0 {
+			t.Errorf("want empty strategy/priorities; got %+v", got[0])
+		}
+	})
+	t.Run("dedups duplicate providers", func(t *testing.T) {
+		got := normalizeModelRoutes([]ModelRoute{{
+			Model:     "gpt-4o",
+			Providers: []string{"opencode", "OpenCode", "cometapi"},
+		}})
+		if len(got[0].Providers) != 2 {
+			t.Errorf("want 2 deduped providers; got %v", got[0].Providers)
+		}
+	})
+}
+
 func TestAPIKeyCreateLookupAndGetLifecycle(t *testing.T) {
 	store := newTestPostgresStore(t, "policy_test")
 	ctx := cancelableTestCtx(t)
