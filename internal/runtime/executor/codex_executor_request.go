@@ -434,6 +434,20 @@ func applyCodexImageGenerationPolicy(cfg *config.Config, auth *cliproxyauth.Auth
 	return body
 }
 
+// codexAuthImageGenerationDisabledErr returns a failover-friendly error when this credential
+// has opted out of hosted image_generation. Image endpoints (/v1/images/*) still build a
+// Responses payload with tool_choice image_generation; rejecting early lets the auth manager
+// try another credential in a mixed pool instead of sending a guaranteed-upstream-403 request.
+func codexAuthImageGenerationDisabledErr(auth *cliproxyauth.Auth) error {
+	if auth == nil || !auth.DisableImageGenerationOverride() {
+		return nil
+	}
+	return statusErr{
+		code: http.StatusForbidden,
+		msg:  "image generation disabled for this credential (codex-api-key.disable-image-generation=true)",
+	}
+}
+
 func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth, headers http.Header) []byte {
 	if isCodexResponsesLiteRequest(body, headers) {
 		return body

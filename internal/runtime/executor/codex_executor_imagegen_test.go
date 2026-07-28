@@ -355,3 +355,70 @@ func TestApplyCodexImageGenerationPolicy_GlobalChatDoesNotInject(t *testing.T) {
 		t.Fatalf("expected no tools injection in chat mode, got %s", gjson.GetBytes(result, "tools").Raw)
 	}
 }
+
+func TestCodexAuthImageGenerationDisabledErr(t *testing.T) {
+	if err := codexAuthImageGenerationDisabledErr(nil); err != nil {
+		t.Fatalf("nil auth must allow image generation, got %v", err)
+	}
+	if err := codexAuthImageGenerationDisabledErr(&cliproxyauth.Auth{}); err != nil {
+		t.Fatalf("auth without override must allow image generation, got %v", err)
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"disable_image_generation": true}}
+	err := codexAuthImageGenerationDisabledErr(auth)
+	if err == nil {
+		t.Fatal("expected error for disabled image-generation auth")
+	}
+	se, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error %T does not expose StatusCode()", err)
+	}
+	if got := se.StatusCode(); got != http.StatusForbidden {
+		t.Fatalf("StatusCode() = %d, want %d", got, http.StatusForbidden)
+	}
+}
+
+func TestExecuteOpenAIImage_PerAuthDisableFailsFast(t *testing.T) {
+	exec := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"disable_image_generation": true},
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": "http://127.0.0.1:1",
+		},
+	}
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-image-2",
+		Payload: []byte(`{"model":"gpt-image-2","prompt":"a cat"}`),
+	}, codexOpenAIImageTestOptions(codexImagesGenerationsPath, false))
+	if err == nil {
+		t.Fatal("expected per-auth image disable to reject /v1/images path")
+	}
+	se, ok := err.(interface{ StatusCode() int })
+	if !ok || se.StatusCode() != http.StatusForbidden {
+		t.Fatalf("got err=%v status, want 403", err)
+	}
+}
+
+func TestExecuteOpenAIImageStream_PerAuthDisableFailsFast(t *testing.T) {
+	exec := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"disable-image-generation": true},
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": "http://127.0.0.1:1",
+		},
+	}
+	_, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-image-2",
+		Payload: []byte(`{"model":"gpt-image-2","prompt":"a cat","stream":true}`),
+	}, codexOpenAIImageTestOptions(codexImagesGenerationsPath, true))
+	if err == nil {
+		t.Fatal("expected per-auth image disable to reject streaming /v1/images path")
+	}
+	se, ok := err.(interface{ StatusCode() int })
+	if !ok || se.StatusCode() != http.StatusForbidden {
+		t.Fatalf("got err=%v status, want 403", err)
+	}
+}
