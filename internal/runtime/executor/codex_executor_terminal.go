@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -259,6 +260,40 @@ func newCodexStatusErr(statusCode int, body []byte) statusErr {
 		err.retryAfter = retryAfter
 	}
 	return err
+}
+
+func newCodexStatusErrWithHeaders(statusCode int, body []byte, headers http.Header) statusErrWithHeaders {
+	err := newCodexStatusErr(statusCode, body)
+	if err.retryAfter == nil {
+		err.retryAfter = parseRetryAfterHeader(headers.Get("Retry-After"), time.Now())
+	}
+	return statusErrWithHeaders{
+		statusErr: err,
+		headers:   headers.Clone(),
+	}
+}
+
+func parseRetryAfterHeader(value string, now time.Time) *time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds < 0 {
+			return nil
+		}
+		delay := time.Duration(seconds) * time.Second
+		return &delay
+	}
+	retryAt, err := http.ParseTime(value)
+	if err != nil {
+		return nil
+	}
+	delay := retryAt.Sub(now)
+	if delay < 0 {
+		delay = 0
+	}
+	return &delay
 }
 
 func classifyCodexStatusError(statusCode int, body []byte) []byte {
