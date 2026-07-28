@@ -12,6 +12,8 @@ import (
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
@@ -612,7 +614,7 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 func TestExtractSessionID_ClaudeCodePriorityOverHeader(t *testing.T) {
 	t.Parallel()
 
-	// Claude Code metadata.user_id should have highest priority, even when X-Session-ID header is present
+	// Claude Code metadata.user_id remains higher priority than a generic X-Session-ID header.
 	headers := make(http.Header)
 	headers.Set("X-Session-ID", "header-session-id")
 
@@ -1028,6 +1030,227 @@ func TestSessionAffinitySelector_ThreeScenarios(t *testing.T) {
 	})
 }
 
+func TestSessionAffinitySelectorBodyIdentifierTransitionsPreserveBinding(t *testing.T) {
+	t.Parallel()
+
+	bothPayload := []byte(`{"conversation":{"id":"conversation-session"},"prompt_cache_key":"shared-cache-bucket"}`)
+	primaryID, fallbackID := extractSessionIDs(nil, bothPayload, nil)
+	if primaryID != "pck:shared-cache-bucket" || fallbackID != "conv:conversation-session" {
+		t.Fatalf("extractSessionIDs() = (%q, %q), want prompt-cache primary with conversation fallback", primaryID, fallbackID)
+	}
+
+	for _, tt := range []struct {
+		name         string
+		firstPayload []byte
+	}{
+		{name: "prompt cache first", firstPayload: []byte(`{"prompt_cache_key":"shared-cache-bucket"}`)},
+		{name: "conversation first", firstPayload: []byte(`{"conversation":{"id":"conversation-session"}}`)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+				Fallback: &RoundRobinSelector{},
+				TTL:      time.Minute,
+			})
+			defer selector.Stop()
+			auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+			provider := "responses-transition-" + tt.name
+
+			first, err := selector.Pick(context.Background(), provider, "gpt-test", cliproxyexecutor.Options{OriginalRequest: tt.firstPayload}, auths)
+			if err != nil {
+				t.Fatalf("first Pick() error = %v", err)
+			}
+			second, err := selector.Pick(context.Background(), provider, "gpt-test", cliproxyexecutor.Options{OriginalRequest: bothPayload}, auths)
+			if err != nil {
+				t.Fatalf("combined-identifier Pick() error = %v", err)
+			}
+			if second.ID != first.ID {
+				t.Fatalf("combined identifiers changed auth from %q to %q", first.ID, second.ID)
+			}
+		})
+	}
+}
+
+func TestSessionAffinitySelectorCombinedIdentifiersBindConversationFallback(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+	provider := "responses-combined-to-conversation"
+
+	combined := []byte(`{"conversation":{"id":"conversation-session"},"prompt_cache_key":"shared-cache-bucket"}`)
+	conversationOnly := []byte(`{"conversation":{"id":"conversation-session"}}`)
+	first, err := selector.Pick(context.Background(), provider, "gpt-test", cliproxyexecutor.Options{OriginalRequest: combined}, auths)
+	if err != nil {
+		t.Fatalf("combined-identifier Pick() error = %v", err)
+	}
+	second, err := selector.Pick(context.Background(), provider, "gpt-test", cliproxyexecutor.Options{OriginalRequest: conversationOnly}, auths)
+	if err != nil {
+		t.Fatalf("conversation-only Pick() error = %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("dropping prompt_cache_key changed auth from %q to %q", first.ID, second.ID)
+	}
+}
+
+func TestSessionAffinitySelectorPrimaryTrafficKeepsConversationAliasAlive(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+	provider := "responses-active-primary-alias"
+	model := "gpt-test"
+	combined := []byte(`{"conversation":{"id":"conversation-session"},"prompt_cache_key":"shared-cache-bucket"}`)
+	promptOnly := []byte(`{"prompt_cache_key":"shared-cache-bucket"}`)
+	conversationOnly := []byte(`{"conversation":{"id":"conversation-session"}}`)
+
+	first, err := selector.Pick(context.Background(), provider, model, cliproxyexecutor.Options{OriginalRequest: combined}, auths)
+	if err != nil {
+		t.Fatalf("combined Pick() error = %v", err)
+	}
+	conversationKey := provider + "::conv:conversation-session::" + model
+	selector.cache.mu.Lock()
+	conversationEntry := selector.cache.entries[conversationKey]
+	conversationEntry.expiresAt = time.Now().Add(-time.Second)
+	selector.cache.entries[conversationKey] = conversationEntry
+	selector.cache.mu.Unlock()
+
+	primary, err := selector.Pick(context.Background(), provider, model, cliproxyexecutor.Options{OriginalRequest: promptOnly}, auths)
+	if err != nil {
+		t.Fatalf("prompt-only Pick() error = %v", err)
+	}
+	if primary.ID != first.ID {
+		t.Fatalf("prompt-only auth = %q, want %q", primary.ID, first.ID)
+	}
+	fallback, err := selector.Pick(context.Background(), provider, model, cliproxyexecutor.Options{OriginalRequest: conversationOnly}, auths)
+	if err != nil {
+		t.Fatalf("conversation-only Pick() error = %v", err)
+	}
+	if fallback.ID != first.ID {
+		t.Fatalf("conversation alias expired during active primary traffic: got %q, want %q", fallback.ID, first.ID)
+	}
+}
+
+func TestSessionAffinitySelectorSharedPromptKeyPreservesConversationAliases(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+	provider := "responses-shared-prompt-key"
+	model := "gpt-test"
+
+	combinedA := []byte(`{"conversation":{"id":"conversation-a"},"prompt_cache_key":"shared-cache-bucket"}`)
+	combinedB := []byte(`{"conversation":{"id":"conversation-b"},"prompt_cache_key":"shared-cache-bucket"}`)
+	conversationA := []byte(`{"conversation":{"id":"conversation-a"}}`)
+	conversationB := []byte(`{"conversation":{"id":"conversation-b"}}`)
+
+	first, err := selector.Pick(context.Background(), provider, model, cliproxyexecutor.Options{OriginalRequest: combinedA}, auths)
+	if err != nil {
+		t.Fatalf("conversation A combined Pick() error = %v", err)
+	}
+	second, err := selector.Pick(context.Background(), provider, model, cliproxyexecutor.Options{OriginalRequest: combinedB}, auths)
+	if err != nil {
+		t.Fatalf("conversation B combined Pick() error = %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("shared prompt key changed auth from %q to %q", first.ID, second.ID)
+	}
+	for name, payload := range map[string][]byte{"conversation A": conversationA, "conversation B": conversationB} {
+		picked, errPick := selector.Pick(context.Background(), provider, model, cliproxyexecutor.Options{OriginalRequest: payload}, auths)
+		if errPick != nil {
+			t.Fatalf("%s Pick() error = %v", name, errPick)
+		}
+		if picked.ID != first.ID {
+			t.Fatalf("%s alias selected %q, want %q", name, picked.ID, first.ID)
+		}
+	}
+}
+
+func TestSessionAffinitySelectorConversationIDContainingPromptMarkerRemainsStable(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+	provider := "responses-opaque-conversation"
+	model := "gpt-test"
+	combined := []byte(`{"conversation":{"id":"a::pck:b"},"prompt_cache_key":"shared-cache-bucket"}`)
+	conversationOnly := []byte(`{"conversation":{"id":"a::pck:b"}}`)
+
+	first, err := selector.Pick(context.Background(), provider, model, cliproxyexecutor.Options{OriginalRequest: combined}, auths)
+	if err != nil {
+		t.Fatalf("combined Pick() error = %v", err)
+	}
+	second, err := selector.Pick(context.Background(), provider, model, cliproxyexecutor.Options{OriginalRequest: conversationOnly}, auths)
+	if err != nil {
+		t.Fatalf("conversation-only Pick() error = %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("opaque conversation alias selected %q, want %q", second.ID, first.ID)
+	}
+}
+
+func TestSessionCacheSharedPromptKeyCapsStableAliasesByRecency(t *testing.T) {
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+	const promptKey = "openai::pck:shared-cache-bucket::gpt-test"
+	for index := 0; index < 128; index++ {
+		conversation := fmt.Sprintf("openai::conv:conversation-%03d::gpt-test", index)
+		cache.SetAliases("auth-a", promptKey, conversation)
+	}
+
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	if len(cache.entries) > 65 {
+		t.Fatalf("cache entries = %d, want one prompt key plus at most 64 stable aliases", len(cache.entries))
+	}
+	if _, ok := cache.entries["openai::conv:conversation-127::gpt-test"]; !ok {
+		t.Fatal("newest conversation alias was not retained")
+	}
+	if _, ok := cache.entries["openai::conv:conversation-000::gpt-test"]; ok {
+		t.Fatal("oldest conversation alias was retained after stable-alias cap")
+	}
+}
+
+func TestSessionCacheRotatingPrimaryEvictsObsoleteAliases(t *testing.T) {
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	const fallback = "openai::conv:conversation-session::gpt-test"
+	for index := 0; index < 16; index++ {
+		primary := fmt.Sprintf("openai::pck:cache-%02d::gpt-test", index)
+		cache.SetAliases("auth-a", primary, fallback)
+	}
+	latest := "openai::pck:cache-15::gpt-test"
+	oldest := "openai::pck:cache-00::gpt-test"
+
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	if len(cache.entries) != 2 {
+		t.Fatalf("cache entries = %d, want only latest primary and fallback", len(cache.entries))
+	}
+	if _, ok := cache.entries[latest]; !ok {
+		t.Fatalf("latest primary %q was not retained", latest)
+	}
+	if _, ok := cache.entries[fallback]; !ok {
+		t.Fatalf("fallback %q was not retained", fallback)
+	}
+	if _, ok := cache.entries[oldest]; ok {
+		t.Fatalf("obsolete primary %q was retained", oldest)
+	}
+	if aliases := cache.entries[fallback].aliases; len(aliases) != 2 {
+		t.Fatalf("fallback alias group = %#v, want exactly two active identifiers", aliases)
+	}
+}
+
 func TestSessionAffinitySelector_MultiModelSession(t *testing.T) {
 	t.Parallel()
 
@@ -1312,5 +1535,250 @@ func TestSessionAffinitySelector_Concurrent(t *testing.T) {
 	case err := <-errCh:
 		t.Fatalf("concurrent Pick() error = %v", err)
 	default:
+	}
+}
+
+func TestExtractSessionIDNativeSignals(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		headers http.Header
+		payload string
+		want    string
+	}{
+		{
+			name:    "claude code header",
+			headers: http.Header{"X-Claude-Code-Session-Id": []string{"claude-session"}},
+			want:    "claude:claude-session",
+		},
+		{
+			name:    "lowercase claude code header",
+			headers: http.Header{"x-claude-code-session-id": []string{"lowercase-session"}},
+			want:    "claude:lowercase-session",
+		},
+		{
+			name:    "codex hyphen header",
+			headers: http.Header{"Session-Id": []string{"codex-session"}},
+			want:    "codex:codex-session",
+		},
+		{
+			name:    "codex underscore header",
+			headers: http.Header{"Session_id": []string{"legacy-codex-session"}},
+			want:    "codex:legacy-codex-session",
+		},
+		{
+			name:    "open code session affinity",
+			headers: http.Header{"X-Session-Affinity": []string{"ses_opencode"}},
+			want:    "affinity:ses_opencode",
+		},
+		{
+			name:    "prompt cache key",
+			payload: `{"prompt_cache_key":"prompt-session"}`,
+			want:    "pck:prompt-session",
+		},
+		{
+			name:    "responses conversation object",
+			payload: `{"conversation":{"id":"conv-object"}}`,
+			want:    "conv:conv-object",
+		},
+		{
+			name:    "responses conversation string",
+			payload: `{"conversation":"conv-string"}`,
+			want:    "conv:conv-string",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ExtractSessionID(tt.headers, []byte(tt.payload), nil); got != tt.want {
+				t.Fatalf("ExtractSessionID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractSessionIDNativeSignalPriority(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		headers http.Header
+		payload string
+		want    string
+	}{
+		{
+			name: "claude header beats metadata",
+			headers: http.Header{
+				"X-Claude-Code-Session-Id": []string{"header-session"},
+			},
+			payload: `{"metadata":{"user_id":"user_hash_account__session_22222222-2222-4222-8222-222222222222"}}`,
+			want:    "claude:header-session",
+		},
+		{
+			name: "claude metadata beats codex header",
+			headers: http.Header{
+				"Session-Id": []string{"codex-session"},
+			},
+			payload: `{"metadata":{"user_id":"user_hash_account__session_22222222-2222-4222-8222-222222222222"}}`,
+			want:    "claude:22222222-2222-4222-8222-222222222222",
+		},
+		{
+			name: "codex header beats x session id and prompt key",
+			headers: http.Header{
+				"Session-Id":   []string{"codex-session"},
+				"X-Session-Id": []string{"generic-session"},
+			},
+			payload: `{"prompt_cache_key":"prompt-session"}`,
+			want:    "codex:codex-session",
+		},
+		{
+			name: "x session id beats affinity",
+			headers: http.Header{
+				"X-Session-Id":       []string{"generic-session"},
+				"X-Session-Affinity": []string{"affinity-session"},
+			},
+			want: "header:generic-session",
+		},
+		{
+			name:    "prompt cache key beats conversation id",
+			payload: `{"conversation":{"id":"conversation-session"},"prompt_cache_key":"shared-cache-bucket"}`,
+			want:    "pck:shared-cache-bucket",
+		},
+		{
+			name: "client request id beats body fallbacks",
+			headers: http.Header{
+				"X-Client-Request-Id": []string{"client-session"},
+			},
+			payload: `{"prompt_cache_key":"prompt-session","conversation":{"id":"conversation-session"}}`,
+			want:    "clientreq:client-session",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ExtractSessionID(tt.headers, []byte(tt.payload), nil); got != tt.want {
+				t.Fatalf("ExtractSessionID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractSessionIDRejectsInvalidExplicitSignals(t *testing.T) {
+	t.Parallel()
+	tooLong := strings.Repeat("a", 257)
+	tests := []struct {
+		name    string
+		headers http.Header
+		payload string
+		want    string
+	}{
+		{
+			name:    "whitespace",
+			headers: http.Header{"X-Claude-Code-Session-Id": []string{"   "}},
+			want:    "",
+		},
+		{
+			name:    "newline",
+			headers: http.Header{"X-Session-Id": []string{"bad\nsession"}},
+			want:    "",
+		},
+		{
+			name:    "control character",
+			headers: http.Header{"Session-Id": []string{"bad\x00session"}},
+			want:    "",
+		},
+		{
+			name:    "too long",
+			headers: http.Header{"X-Client-Request-Id": []string{tooLong}},
+			want:    "",
+		},
+		{
+			name: "invalid stronger signal falls through",
+			headers: http.Header{
+				"X-Claude-Code-Session-Id": []string{"bad\nsession"},
+				"Session-Id":               []string{"valid-codex"},
+			},
+			want: "codex:valid-codex",
+		},
+		{
+			name:    "invalid prompt key falls through to conversation",
+			payload: `{"prompt_cache_key":"   ","conversation":{"id":"valid-conversation"}}`,
+			want:    "conv:valid-conversation",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ExtractSessionID(tt.headers, []byte(tt.payload), nil); got != tt.want {
+				t.Fatalf("ExtractSessionID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractSessionIDClaudeMetadataParsesBeforeBoundingSessionID(t *testing.T) {
+	t.Parallel()
+	const sessionID = "11111111-1111-4111-8111-111111111111"
+	metadata := map[string]string{
+		"device_id":         strings.Repeat("d", 64),
+		"account_uuid":      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		"session_id":        sessionID,
+		"organization_uuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+		"email":             "user@example.com",
+	}
+
+	for _, tt := range []struct {
+		name   string
+		encode func(any) ([]byte, error)
+	}{
+		{name: "rich compact json", encode: json.Marshal},
+		{name: "pretty printed json", encode: func(v any) ([]byte, error) { return json.MarshalIndent(v, "", "  ") }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			userID, errMarshal := tt.encode(metadata)
+			if errMarshal != nil {
+				t.Fatalf("marshal metadata: %v", errMarshal)
+			}
+			payload, errPayload := json.Marshal(map[string]any{
+				"metadata": map[string]string{"user_id": string(userID)},
+			})
+			if errPayload != nil {
+				t.Fatalf("marshal payload: %v", errPayload)
+			}
+			if got := ExtractSessionID(nil, payload, nil); got != "claude:"+sessionID {
+				t.Fatalf("ExtractSessionID() = %q, want %q", got, "claude:"+sessionID)
+			}
+		})
+	}
+}
+
+func TestSessionAffinitySelectorUsesRequestPayloadWhenOriginalRequestMissing(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	request := cliproxyexecutor.Request{
+		Model:   "gpt-test",
+		Payload: []byte(`{"conversation":{"id":"request-only-conversation"},"input":"hello"}`),
+	}
+	_, opts := cliproxysession.Enrich(request, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	})
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+
+	first, errFirst := selector.Pick(context.Background(), "openai", request.Model, opts, auths)
+	if errFirst != nil {
+		t.Fatalf("first Pick() error = %v", errFirst)
+	}
+	second, errSecond := selector.Pick(context.Background(), "openai", request.Model, opts, auths)
+	if errSecond != nil {
+		t.Fatalf("second Pick() error = %v", errSecond)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("request-only conversation changed auth from %q to %q", first.ID, second.ID)
 	}
 }

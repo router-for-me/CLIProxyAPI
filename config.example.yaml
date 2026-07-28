@@ -169,6 +169,11 @@ transient-error-cooldown-seconds: 0
 # "auto" behavior (cloak only non-Claude-Code clients).
 disable-claude-cloak-mode: false
 
+# Claude Code compatibility settings.
+claude-code:
+  # When true, return original model IDs in Anthropic model list responses instead of cloaked IDs.
+  disable-cloaking-model-list: false
+
 # disable-image-generation supports: false (default), true, "chat", or "passthrough".
 # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
@@ -197,9 +202,9 @@ quota-exceeded:
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
   # Enable universal session-sticky routing for all clients.
-  # Session IDs are extracted from: metadata.user_id (Claude Code session format),
-  # X-Session-ID, Session_id (Codex), X-Client-Request-Id (PI), conversation_id,
-  # or first few messages hash.
+  # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
+  # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
+  # execution or derived session identity, and the existing first-message hash fallback.
   # Automatic failover is always enabled when bound auth becomes unavailable.
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h

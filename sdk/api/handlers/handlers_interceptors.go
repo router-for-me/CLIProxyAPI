@@ -3,7 +3,11 @@ package handlers
 import (
 	"net/http"
 	"sync"
+	"time"
 
+	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"golang.org/x/net/context"
@@ -30,6 +34,112 @@ type streamInterceptorDetector interface {
 
 type requestInterceptorDetector interface {
 	HasRequestInterceptors() bool
+}
+
+type requestLifecycleHost interface {
+	CompleteRequest(context.Context, pluginapi.RequestCompletion)
+}
+
+type requestLifecycleSkipHost interface {
+	CompleteRequestExcept(context.Context, pluginapi.RequestCompletion, string)
+}
+
+type requestLifecycleTracker struct {
+	once         sync.Once
+	ctx          context.Context
+	host         PluginInterceptorHost
+	skipPluginID string
+	completion   pluginapi.RequestCompletion
+}
+
+func (h *BaseAPIHandler) newRequestLifecycleTracker(ctx context.Context, sourceFormat, model, requestedModel string, stream bool, metadata map[string]any, skipPluginID string) *requestLifecycleTracker {
+	requestID := uuid.NewString()
+	traceID := logging.GetRequestID(ctx)
+	return &requestLifecycleTracker{
+		ctx:          ctx,
+		host:         h.interceptorHost(),
+		skipPluginID: skipPluginID,
+		completion: pluginapi.RequestCompletion{
+			RequestID:      requestID,
+			TraceID:        traceID,
+			SourceFormat:   sourceFormat,
+			Model:          model,
+			RequestedModel: requestedModel,
+			Stream:         stream,
+			StartedAt:      time.Now(),
+			Metadata:       metadata,
+		},
+	}
+}
+
+func (t *requestLifecycleTracker) requestID() string {
+	if t == nil {
+		return ""
+	}
+	return t.completion.RequestID
+}
+
+func (t *requestLifecycleTracker) complete(outcome pluginapi.RequestCompletionOutcome, statusCode int, err error) {
+	if t == nil {
+		return
+	}
+	t.once.Do(func() {
+		completion := t.completion
+		completion.Outcome = outcome
+		completion.StatusCode = statusCode
+		completion.CompletedAt = time.Now()
+		if err != nil {
+			completion.Error = err.Error()
+		}
+		if t.skipPluginID != "" {
+			if host, ok := t.host.(requestLifecycleSkipHost); ok {
+				host.CompleteRequestExcept(t.ctx, completion, t.skipPluginID)
+				return
+			}
+		}
+		if host, ok := t.host.(requestLifecycleHost); ok {
+			host.CompleteRequest(t.ctx, completion)
+		}
+	})
+}
+
+func (t *requestLifecycleTracker) completeError(ctx context.Context, msg *interfaces.ErrorMessage) {
+	outcome := pluginapi.RequestCompletionFailed
+	if msg != nil && msg.DirectResponse {
+		outcome = pluginapi.RequestCompletionRejected
+	} else if ctx != nil && ctx.Err() != nil {
+		outcome = pluginapi.RequestCompletionCanceled
+	}
+	statusCode := 0
+	var err error
+	if msg != nil {
+		statusCode = msg.StatusCode
+		err = msg.Error
+	}
+	if outcome == pluginapi.RequestCompletionCanceled {
+		statusCode = 0
+	}
+	t.complete(outcome, statusCode, err)
+}
+
+func normalizedTerminationStatus(statusCode int) int {
+	if statusCode < http.StatusOK || statusCode > 599 {
+		return http.StatusForbidden
+	}
+	return statusCode
+}
+
+func requestTerminationError(resp pluginapi.RequestInterceptResponse) *interfaces.ErrorMessage {
+	return directTerminationError(resp.StatusCode, resp.ResponseHeaders, resp.ResponseBody)
+}
+
+func directTerminationError(statusCode int, headers http.Header, body []byte) *interfaces.ErrorMessage {
+	return &interfaces.ErrorMessage{
+		StatusCode:     normalizedTerminationStatus(statusCode),
+		DirectResponse: true,
+		Body:           cloneBytes(body),
+		Headers:        cloneHeader(headers),
+	}
 }
 
 func cloneHeader(src http.Header) http.Header {
@@ -294,12 +404,14 @@ func interceptStreamChunk(ctx context.Context, host PluginInterceptorHost, req p
 	return host.InterceptStreamChunk(ctx, req)
 }
 
-func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context, handlerType, requestedModel string, req coreexecutor.Request, opts coreexecutor.Options, skipPluginID string) (coreexecutor.Request, coreexecutor.Options) {
+func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context, handlerType, requestedModel, requestID string, req coreexecutor.Request, opts coreexecutor.Options, skipPluginID string) (coreexecutor.Request, coreexecutor.Options, *interfaces.ErrorMessage) {
 	host := h.interceptorHost()
 	if host == nil {
-		return req, opts
+		return req, opts, nil
 	}
 	resp := interceptRequestBeforeAuth(ctx, host, pluginapi.RequestInterceptRequest{
+		RequestID:      requestID,
+		TraceID:        logging.GetRequestID(ctx),
 		SourceFormat:   handlerType,
 		Model:          req.Model,
 		RequestedModel: requestedModel,
@@ -313,15 +425,18 @@ func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context,
 		req.Payload = cloneBytes(resp.Body)
 		opts.OriginalRequest = cloneBytes(resp.Body)
 	}
-	return req, opts
+	if resp.Terminate {
+		return req, opts, requestTerminationError(resp)
+	}
+	return req, opts, nil
 }
 
-func (h *BaseAPIHandler) requestAfterAuthInterceptor(capture *requestAfterAuthCapture, skipPluginID string) coreexecutor.RequestAfterAuthInterceptor {
+func (h *BaseAPIHandler) requestAfterAuthInterceptor(capture *requestAfterAuthCapture, requestID, skipPluginID string) coreexecutor.RequestAfterAuthInterceptor {
 	if !requestInterceptorsEnabled(h.interceptorHost()) {
 		return nil
 	}
 	return func(ctx context.Context, req coreexecutor.RequestAfterAuthInterceptRequest) coreexecutor.RequestAfterAuthInterceptResponse {
-		resp := h.applyRequestInterceptorsAfterAuth(ctx, req, skipPluginID)
+		resp := h.applyRequestInterceptorsAfterAuth(ctx, req, requestID, skipPluginID)
 		if capture != nil {
 			capture.record(req, resp)
 		}
@@ -329,12 +444,14 @@ func (h *BaseAPIHandler) requestAfterAuthInterceptor(capture *requestAfterAuthCa
 	}
 }
 
-func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, req coreexecutor.RequestAfterAuthInterceptRequest, skipPluginID string) coreexecutor.RequestAfterAuthInterceptResponse {
+func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, req coreexecutor.RequestAfterAuthInterceptRequest, requestID, skipPluginID string) coreexecutor.RequestAfterAuthInterceptResponse {
 	host := h.interceptorHost()
 	if !requestInterceptorsEnabled(host) {
 		return coreexecutor.RequestAfterAuthInterceptResponse{}
 	}
 	resp := interceptRequestAfterAuth(ctx, host, pluginapi.RequestInterceptRequest{
+		RequestID:      requestID,
+		TraceID:        logging.GetRequestID(ctx),
 		SourceFormat:   req.SourceFormat.String(),
 		ToFormat:       req.ToFormat.String(),
 		Model:          req.Model,
@@ -345,18 +462,23 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, 
 		Metadata:       req.Metadata,
 	}, skipPluginID)
 	return coreexecutor.RequestAfterAuthInterceptResponse{
-		Headers:      resp.Headers,
-		Body:         resp.Body,
-		ClearHeaders: resp.ClearHeaders,
+		Headers:         resp.Headers,
+		Body:            resp.Body,
+		ClearHeaders:    resp.ClearHeaders,
+		Terminate:       resp.Terminate,
+		StatusCode:      normalizedTerminationStatus(resp.StatusCode),
+		ResponseHeaders: resp.ResponseHeaders,
+		ResponseBody:    resp.ResponseBody,
 	}
 }
 
-func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, handlerType, normalizedModel, requestedModel string, opts coreexecutor.Options, rawResponseHeaders, responseHeaders http.Header, originalRequest, requestBody, body []byte, statusCode int, skipPluginID string) ([]byte, http.Header) {
+func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestID, handlerType, normalizedModel, requestedModel string, opts coreexecutor.Options, rawResponseHeaders, responseHeaders http.Header, originalRequest, requestBody, body []byte, statusCode int, skipPluginID string) ([]byte, http.Header) {
 	host := h.interceptorHost()
 	if host == nil {
 		return body, responseHeaders
 	}
 	resp := interceptResponse(ctx, host, pluginapi.ResponseInterceptRequest{
+		RequestID:       requestID,
 		SourceFormat:    handlerType,
 		Model:           normalizedModel,
 		RequestedModel:  requestedModel,

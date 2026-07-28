@@ -27,13 +27,14 @@ var (
 )
 
 var codexClientAllowedReasoningLevels = map[string]struct{}{
-	"none":   {},
-	"low":    {},
-	"medium": {},
-	"high":   {},
-	"xhigh":  {},
-	"max":    {},
-	"ultra":  {},
+	"none":    {},
+	"minimal": {},
+	"low":     {},
+	"medium":  {},
+	"high":    {},
+	"xhigh":   {},
+	"max":     {},
+	"ultra":   {},
 }
 
 // BuildResponse builds a Codex client model response from available models.
@@ -392,6 +393,8 @@ func codexClientReasoningDescription(level string) string {
 	switch level {
 	case "none":
 		return "No reasoning"
+	case "minimal":
+		return "Fastest responses with minimal reasoning"
 	case "low":
 		return "Fast responses with lighter reasoning"
 	case "medium":
