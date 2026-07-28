@@ -1,30 +1,37 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
-  getUsageTotals, getUsageTimeSeries, getUsageTop, getUsageFilterOptions,
+  getUsageEvents, getUsageFilterOptions, getUsageTotals,
 } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import {
-  Spinner, ErrorBanner, EmptyState,
+  ErrorBanner, EmptyState,
 } from '../components/Primitives.jsx';
-import { Sparkline, BarChart, MultiBarChart } from '../components/Charts.jsx';
 import { useToast } from '../components/Toast.jsx';
 import {
-  PRESETS, presetToRange, toUTCFromTZ,
+  PRESETS, presetToRange, toUTCFromTZ, EVENTS_PAGE_SIZE,
   TIMEZONES, loadTimezone, saveTimezone,
-  ChartSkeleton,
-  FilterSelect,
+  FilterSelect, ChartSkeleton,
+  EventsTableBody, EventDetailModal,
 } from './usageShared.jsx';
 
+// RecentEventsPage renders the events stream (usage_events table) as a
+// first-class sibling to Usage Stats and Errors. It was split out of the Usage
+// Stats page — where it used to live as a "Recent events" card at the bottom —
+// so operators can page through and search the event log without scrolling
+// past the aggregate KPIs/charts. The filter / preset / timezone / Request ID
+// search chrome is shared with Usage Stats and Errors so the same time window
+// and provider/key/model filters behave identically across the three pages.
+
 const AUTO_REFRESH_INTERVAL_MS = 60 * 1000;
-const AUTOREFRESH_STORAGE = 'nixllm.dashboard.usageAutorefresh';
+const AUTOREFRESH_STORAGE = 'nixllm.dashboard.eventsAutorefresh';
 
 function readAutoRefresh() {
   try { return localStorage.getItem(AUTOREFRESH_STORAGE) !== '0'; }
   catch { return true; }
 }
 
-export default function UsageStatsPage() {
+export default function RecentEventsPage() {
   const toast = useToast();
   const [presetIdx, setPresetIdx] = useState(3); // "Last 24h" default
   const [filter, setFilter] = useState({
@@ -40,10 +47,9 @@ export default function UsageStatsPage() {
     interval: 'hour',
   });
   const [autoRefresh, setAutoRefresh] = useState(() => readAutoRefresh());
-  // Selected display timezone. Defaults to Asia/Jakarta (see usageShared) and
-  // persists across reloads + both Usage Stats and Errors pages. The server
-  // always receives UTC from/to; this only affects how wall-clock columns and
-  // the custom-range datetime-local inputs are interpreted/displayed.
+  // Selected display timezone (shared with Usage Stats and Errors via
+  // localStorage). The server always receives UTC from/to; this only affects
+  // how wall-clock columns and the custom-range inputs are displayed.
   const [timezone, setTimezone] = useState(() => loadTimezone());
 
   function changeTimezone(tz) {
@@ -71,35 +77,37 @@ export default function UsageStatsPage() {
     to: rangeParams.to,
   }), [filter.api_key_id, filter.provider, filter.model, filter.request_id, rangeParams.from, rangeParams.to]);
 
+  // Totals power the KPI strip (event count + failure rate for this window).
+  // Same totals endpoint Usage Stats uses, scoped to the same filter so the
+  // two pages agree on what "this window" means.
   const totals = useAsync(() => getUsageTotals(baseFilter), [JSON.stringify(baseFilter)]);
-  const ts = useAsync(() => getUsageTimeSeries(baseFilter, rangeParams.interval), [JSON.stringify(baseFilter), rangeParams.interval]);
-  const topModels = useAsync(() => getUsageTop({ dimension: 'model', metric: 'cost_usd', limit: 10, ...baseFilter }), [JSON.stringify(baseFilter)]);
-  const topKeys = useAsync(() => getUsageTop({ dimension: 'api_key_id', metric: 'request_count', limit: 10, ...baseFilter }), [JSON.stringify(baseFilter)]);
-  const topProviders = useAsync(() => getUsageTop({ dimension: 'provider', metric: 'request_count', limit: 10, ...baseFilter }), [JSON.stringify(baseFilter)]);
-
-  // Filter dropdown options. Refetched whenever the time range changes so the
-  // operator sees only values that actually appear in the window.
   const filterOptions = useAsync(
     () => getUsageFilterOptions(baseFilter),
     [JSON.stringify({ from: baseFilter.from, to: baseFilter.to })],
   );
 
+  const [eventsPage, setEventsPage] = useState(1);
+  const events = useAsync(
+    () => getUsageEvents({ ...baseFilter, page: eventsPage, page_size: EVENTS_PAGE_SIZE, include: 'cost_breakdown' }),
+    [JSON.stringify(baseFilter), eventsPage],
+  );
+  // Reset the events pager back to page 1 whenever the filter changes so the
+  // operator doesn't end up staring at an out-of-range page on a new window.
+  useEffect(() => { setEventsPage(1); }, [JSON.stringify(baseFilter)]);
+
+  const [selectedEventId, setSelectedEventId] = useState(null);
+
   const reloadAll = useCallback(() => {
     totals.reload();
-    ts.reload();
-    topModels.reload();
-    topKeys.reload();
-    topProviders.reload();
     filterOptions.reload();
-  }, [totals, ts, topModels, topKeys, topProviders, filterOptions]);
+    events.reload();
+  }, [totals, filterOptions, events]);
 
-  // Auto-refresh: re-fetch every metric every 60s while the page is visible
-  // and the toggle is on. Mirrors the Models Catalog auto-refresh pattern.
   useAutoRefresh(reloadAll, AUTO_REFRESH_INTERVAL_MS, autoRefresh);
 
   function handleRefresh() {
     reloadAll();
-    toast.info('Stats refreshed');
+    toast.info('Events refreshed');
   }
 
   function toggleAutoRefresh() {
@@ -114,29 +122,20 @@ export default function UsageStatsPage() {
     setFilter((f) => ({ ...f, ...partial }));
   }
 
-  const tsPoints = ts.data?.points || [];
-  const tsData = useMemo(() => tsPoints.map((p) => ({
-    label: p.bucket,
-    value: p.request_count,
-    a: p.input_tokens,
-    b: p.output_tokens,
-    cost: p.cost_usd,
-  })), [tsPoints]);
-
-  const totalTokens = totals.data?.totals?.total_tokens || 0;
+  const eventCount = totals.data?.totals?.request_count || 0;
+  const failedCount = totals.data?.totals?.failed_count || 0;
   const failureRate = totals.data?.failure_rate ?? 0;
-  const reqCount = totals.data?.totals?.request_count || 0;
 
   return (
     <>
       <div className="main__header">
         <div>
-          <h1 className="main__title">Usage Statistics</h1>
+          <h1 className="main__title">Recent Events</h1>
           <div className="main__subtitle">
-            Aggregate request volume, tokens, cost, and per-key / per-model
-            leaderboards scoped by dropdown-driven filters from the PG
-            usage_events table. Per-request drill-down is on the Recent Events
-            page.
+            Per-request records from the usage_events table, scoped to the same
+            time window and provider/key/model filters as Usage Stats. Drill
+            into a row to see the full token breakdown, latency, and triage
+            fields.
           </div>
         </div>
         <div className="row gap-sm">
@@ -261,171 +260,44 @@ export default function UsageStatsPage() {
       {/* KPI cards */}
       <div className="stats-grid">
         <div className="stat-card">
-          <div className="stat-card__label">Total Requests</div>
-          <div className="stat-card__value">{reqCount.toLocaleString()}</div>
-          <div className="stat-card__hint">
-            {(totals.data?.totals?.failed_count || 0).toLocaleString()} failed ({failureRate.toFixed(1)}%)
-          </div>
+          <div className="stat-card__label">Requests in Window</div>
+          <div className="stat-card__value">{eventCount.toLocaleString()}</div>
+          <div className="stat-card__hint">across the current window filter</div>
         </div>
         <div className="stat-card">
-          <div className="stat-card__label">Total Tokens</div>
-          <div className="stat-card__value">{totalTokens.toLocaleString()}</div>
-          <div className="stat-card__hint">
-            in {(totals.data?.totals?.input_tokens || 0).toLocaleString()} · out {(totals.data?.totals?.output_tokens || 0).toLocaleString()}
-          </div>
+          <div className="stat-card__label">Failed</div>
+          <div className="stat-card__value">{failedCount.toLocaleString()}</div>
+          <div className="stat-card__hint">{failureRate.toFixed(1)}% of window</div>
         </div>
         <div className="stat-card">
           <div className="stat-card__label">Total Cost</div>
           <div className="stat-card__value">${(totals.data?.totals?.cost_usd || 0).toFixed(4)}</div>
           <div className="stat-card__hint">
-            avg ${reqCount > 0 ? ((totals.data?.totals?.cost_usd || 0) / reqCount).toFixed(4) : '0.0000'}/req
+            avg ${eventCount > 0 ? ((totals.data?.totals?.cost_usd || 0) / eventCount).toFixed(4) : '0.0000'}/req
           </div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-card__label">Active Models</div>
-          <div className="stat-card__value">{String(topModels.data?.entries?.length || 0)}</div>
-          <div className="stat-card__hint">{topProviders.data?.entries?.length || 0} providers</div>
         </div>
       </div>
 
       {totals.error && <ErrorBanner error={totals.error} onRetry={totals.reload} />}
 
-      {/* Time-series charts */}
-      <div className="grid grid--2" style={{ marginTop: 16 }}>
-        <div className="card">
-          <div className="row row--between" style={{ marginBottom: 12 }}>
-            <h3 className="card__title" style={{ margin: 0 }}>Request volume</h3>
-            <span className="dim" style={{ fontSize: 12 }}>{rangeParams.interval}</span>
-          </div>
-          {ts.loading && <ChartSkeleton />}
-          {!ts.loading && tsData.length > 0 && (
-            <BarChart data={tsData} />
-          )}
-          {!ts.loading && tsData.length === 0 && (
-            <EmptyState title="No data for this window" />
-          )}
-        </div>
-        <div className="card">
-          <div className="row row--between" style={{ marginBottom: 12 }}>
-            <h3 className="card__title" style={{ margin: 0 }}>Token usage</h3>
-            <span className="row gap-sm" style={{ fontSize: 11 }}>
-              <span className="tokbar__legend-dot" style={{ background: 'var(--accent)' }} /> input
-              <span className="tokbar__legend-dot" style={{ background: 'var(--warning)', marginLeft: 6 }} /> output
-            </span>
-          </div>
-          {ts.loading && <ChartSkeleton />}
-          {!ts.loading && tsData.length > 0 && (
-            <MultiBarChart data={tsData} />
-          )}
-          {!ts.loading && tsData.length === 0 && (
-            <EmptyState title="No data for this window" />
-          )}
-        </div>
-      </div>
-
-      <div className="card">
+      {/* Events table */}
+      <div className="card" style={{ marginTop: 16 }}>
         <div className="row row--between" style={{ marginBottom: 12 }}>
-          <h3 className="card__title" style={{ margin: 0 }}>Cost trend</h3>
-          <span className="dim" style={{ fontSize: 12 }}>{rangeParams.interval}</span>
+          <h3 className="card__title" style={{ margin: 0 }}>Recent events</h3>
         </div>
-        {ts.loading && <ChartSkeleton />}
-        {!ts.loading && tsData.length > 0 && (
-          <Sparkline values={tsData.map((d) => d.cost)} />
-        )}
-        {!ts.loading && tsData.length === 0 && (
-          <EmptyState title="No cost data for this window" />
-        )}
-      </div>
-
-      {/* Leaderboards */}
-      <div className="grid grid--3" style={{ marginTop: 16 }}>
-        <LeaderboardCard
-          title="Top models by cost"
-          entries={topModels.data?.entries}
-          loading={topModels.loading}
-          error={topModels.error}
-          onReload={topModels.reload}
-          metric="cost_usd"
-        />
-        <LeaderboardCard
-          title="Top API keys by requests"
-          entries={topKeys.data?.entries}
-          loading={topKeys.loading}
-          error={topKeys.error}
-          onReload={topKeys.reload}
-          metric="request_count"
-        />
-        <LeaderboardCard
-          title="Top providers"
-          entries={topProviders.data?.entries}
-          loading={topProviders.loading}
-          error={topProviders.error}
-          onReload={topProviders.reload}
-          metric="request_count"
+        <EventsTableBody
+          events={events}
+          page={eventsPage}
+          pageSize={EVENTS_PAGE_SIZE}
+          onPage={setEventsPage}
+          onRowClick={setSelectedEventId}
+          timezone={timezone}
         />
       </div>
 
-      {/* The per-request event log now lives on its own Recent Events page
-          (sidebar: Analysis → Recent Events). Failed attempts are on the
-          Errors page. */}
+      {selectedEventId != null && (
+        <EventDetailModal id={selectedEventId} timezone={timezone} onClose={() => setSelectedEventId(null)} />
+      )}
     </>
   );
-}
-
-function LeaderboardCard({ title, entries, loading, error, onReload, metric }) {
-  const fmt = (v) => {
-    if (metric === 'cost_usd') return `$${Number(v).toFixed(4)}`;
-    return Number(v).toLocaleString();
-  };
-  const max = useMemo(() => {
-    if (!entries || entries.length === 0) return 1;
-    return Math.max(...entries.map((e) => e[metric === 'cost_usd' ? 'cost_usd' : metric]), 1);
-  }, [entries, metric]);
-  const valueKey = metric === 'cost_usd' ? 'cost_usd' : metric;
-  return (
-    <div className="card" style={{ padding: 0 }}>
-      <div className="row row--between" style={{ padding: '14px 16px 8px' }}>
-        <h3 className="card__title" style={{ margin: 0 }}>{title}</h3>
-        <button onClick={onReload} style={{ padding: '3px 8px', fontSize: 12 }} title="Reload">↻</button>
-      </div>
-      {loading && <Spinner label="Loading…" />}
-      {error && <ErrorBanner error={error} />}
-      {!loading && !error && entries && entries.length === 0 && (
-        <EmptyState title="No data" />
-      )}
-      {!loading && !error && entries && entries.length > 0 && (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Key</th>
-              <th style={{ textAlign: 'right' }}>{metricLabel(metric)}</th>
-              <th style={{ width: '40%' }}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {entries.map((e, i) => (
-              <tr key={`${e.key}-${i}`}>
-                <td className="mono">{e.key || '—'}</td>
-                <td className="mono" style={{ textAlign: 'right' }}>{fmt(e[valueKey])}</td>
-                <td>
-                  <div className="lb-bar">
-                    <div
-                      className="lb-bar__fill"
-                      style={{ width: `${(e[valueKey] / max * 100)}%` }}
-                    />
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </div>
-  );
-}
-
-function metricLabel(metric) {
-  if (metric === 'cost_usd') return 'Cost (USD)';
-  if (metric === 'total_tokens') return 'Tokens';
-  return 'Requests';
 }

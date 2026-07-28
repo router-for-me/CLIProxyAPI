@@ -1,8 +1,18 @@
-// usageShared.jsx — components and helpers shared between the Usage Stats page
-// (events-only) and the Errors page (failed-attempt drill-down). Lifted out of
-// UsageStatsPage.jsx when Errors was promoted from a tab into its own sidebar
-// menu item so the two pages can render identical token/cost breakdowns, presets,
-// filter selects, and detail rows without duplication.
+import React, { useMemo } from 'react';
+import { getUsageEvent } from '../api/client.js';
+import { useAsync } from '../hooks/useAsync.js';
+import {
+  Spinner, ErrorBanner, EmptyState, Modal,
+} from '../components/Primitives.jsx';
+import Pager from '../components/Pager.jsx';
+
+// usageShared.jsx — components and helpers shared between the Usage Stats page,
+// the Recent Events page (split out of Usage Stats), and the Errors page
+// (failed-attempt drill-down). Lifted out of UsageStatsPage.jsx when Errors was
+// promoted from a tab into its own sidebar menu item, and again when Recent
+// Events was promoted to its own page so the two surfaces could render identical
+// token/cost breakdowns, presets, filter selects, and detail rows without
+// duplication.
 
 // Preset time windows the dashboard offers at the top of the page. Each
 // preset computes from/to in UTC using relative offsets from now.
@@ -505,5 +515,151 @@ export function UsageToolbar({
         </div>
       )}
     </div>
+  );
+}
+
+// EventsTableBody renders the table + pager only (no card). Used by the
+// Recent Events page, which wraps it in a single card. Failed-attempt rows
+// have their own ErrorsTableBody on the Errors page.
+export function EventsTableBody({ events, page, pageSize, onPage, onRowClick, timezone }) {
+  const total = events.data?.total || 0;
+  const rows = events.data?.events || [];
+  const totalPages = total === 0 ? 1 : Math.ceil(total / pageSize);
+  return (
+    <>
+      {events.loading && (
+        <div style={{ overflowX: 'auto' }}>
+          <table className="table" style={{ tableLayout: 'fixed' }}>
+            <thead>
+              <tr>
+                <th>Time ({timezone})</th>
+                <th>Request ID</th>
+                <th>Key / Alias</th>
+                <th>Provider Official</th>
+                <th>Model Alias</th>
+                <th style={{ minWidth: 260 }}>Token breakdown</th>
+                <th style={{ textAlign: 'right' }}>Cost</th>
+                <th style={{ textAlign: 'right' }}>Latency</th>
+                <th style={{ textAlign: 'right' }}>TTFT</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Array.from({ length: 4 }).map((_, i) => (
+                <tr key={i} className="skeleton-row">
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                  <td><span className="skeleton-line" /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {events.error && <ErrorBanner error={events.error} />}
+      {!events.loading && !events.error && rows.length === 0 && (
+        <EmptyState title="No events for this window" />
+      )}
+      {!events.loading && !events.error && rows.length > 0 && (
+        <>
+          <div style={{ overflowX: 'auto' }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Time ({timezone})</th>
+                  <th>Request ID</th>
+                  <th>Key / Alias</th>
+                  <th>Provider Official</th>
+                  <th>Model Alias</th>
+                  <th style={{ minWidth: 260 }}>Token breakdown</th>
+                  <th style={{ textAlign: 'right' }}>Cost</th>
+                  <th style={{ textAlign: 'right' }}>Latency</th>
+                  <th style={{ textAlign: 'right' }}>TTFT</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((e) => (
+                  <tr
+                    key={String(e.id)}
+                    className="row-link"
+                    onClick={() => onRowClick(e.id)}
+                  >
+                    <td className="mono" style={{ whiteSpace: 'nowrap' }} title={e.requested_at ? new Date(e.requested_at).toISOString() : ''}>
+                      {e.requested_at ? formatInTZ(e.requested_at, timezone) : '—'}
+                    </td>
+                    <td className="mono" style={{ whiteSpace: 'nowrap' }}>{e.request_id || '—'}</td>
+                    <td className="mono">{e.key_alias || e.api_key_id || '—'}</td>
+                    <td>{e.official_provider || e.provider || '—'}</td>
+                    <td className="mono">{e.alias || e.model || '—'}</td>
+                    <td>
+                      <CompactTokenBreakdown e={e} />
+                    </td>
+                    <td className="mono" style={{ textAlign: 'right' }}>${(e.cost_usd || 0).toFixed(4)}</td>
+                    <td className="mono" style={{ textAlign: 'right' }}>{e.latency_ms ? `${e.latency_ms} ms` : '—'}</td>
+                    <td className="mono" style={{ textAlign: 'right' }}>{e.ttft_ms ? `${e.ttft_ms} ms` : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <Pager
+            page={page}
+            totalPages={totalPages}
+            total={total}
+            pageSize={pageSize}
+            onPageChange={onPage}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
+// EventDetailModal fetches and renders a single usage event. The sealed
+// api_key_principal is intentionally never shown; the operator sees the
+// non-secret key_alias and the other fields needed for triage.
+export function EventDetailModal({ id, timezone, onClose }) {
+  const detail = useAsync(() => getUsageEvent(id), [id]);
+  const e = detail.data?.event;
+  return (
+    <Modal title={`Event #${id}`} onClose={onClose} size="lg">
+      {detail.loading && <Spinner label="Loading…" />}
+      {detail.error && <ErrorBanner error={detail.error} />}
+      {!detail.loading && !detail.error && e && (
+        <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+          <DetailRow label={`Time (${tzAbbreviation(e.requested_at, timezone)})`} value={e.requested_at ? formatInTZ(e.requested_at, timezone) : '—'} mono />
+          <DetailRow label="Time (UTC)" value={e.requested_at ? new Date(e.requested_at).toISOString() : '—'} mono />
+          <DetailRow label="Request ID" value={e.request_id || '—'} mono />
+          <DetailRow label="API Key ID" value={e.api_key_id || '—'} mono />
+          <DetailRow label="Key Alias" value={e.key_alias || '—'} mono />
+          <DetailRow label="Provider Official" value={e.official_provider || e.provider || '—'} />
+          <DetailRow label="Provider (internal)" value={e.provider || '—'} mono />
+          <DetailRow label="Model Alias" value={e.alias || e.model || '—'} mono />
+          <DetailRow label="Model (resolved)" value={e.model || '—'} mono />
+          <DetailRow label="Executor" value={e.executor_type || '—'} />
+          <DetailRow label="Auth Type" value={e.auth_type || '—'} />
+          <DetailRow label="Source" value={e.source || '—'} />
+          <DetailRow label="Reasoning Effort" value={e.reasoning_effort || '—'} />
+          <DetailRow label="Service Tier" value={e.service_tier || '—'} />
+          <DetailRow label="Response Service Tier" value={e.response_service_tier || '—'} />
+          <TokenBreakdownCard e={e} />
+          <DetailRow label="Cost (USD)" value={`$${(e.cost_usd || 0).toFixed(4)}`} mono />
+          <DetailRow label="Latency" value={e.latency_ms ? `${e.latency_ms} ms` : '—'} mono />
+          <DetailRow label="TTFT" value={e.ttft_ms ? `${e.ttft_ms} ms` : '—'} mono />
+          <DetailRow label="Failed" value={e.failed ? 'yes' : 'no'} mono />
+          <DetailRow label="Fail Status" value={e.fail_status_code ? String(e.fail_status_code) : '—'} mono />
+          <DetailRow label="Generate" value={e.generate ? 'true' : 'false'} mono />
+          <DetailRow label="Endpoint" value={e.endpoint || '—'} mono />
+          <DetailRow label="Client IP" value={e.client_ip || '—'} mono />
+          <DetailRow label="Forwarded For" value={e.forwarded_for || '—'} mono />
+        </div>
+      )}
+      {!detail.loading && !detail.error && !e && <EmptyState title="Event not found" />}
+    </Modal>
   );
 }

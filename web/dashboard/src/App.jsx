@@ -8,6 +8,7 @@ import LoginPage from './pages/LoginPage.jsx';
 import ApiKeysPage from './pages/ApiKeysPage.jsx';
 import ApiKeyDetailPage from './pages/ApiKeyDetailPage.jsx';
 import UsageStatsPage from './pages/UsageStatsPage.jsx';
+import RecentEventsPage from './pages/RecentEventsPage.jsx';
 import ErrorsPage from './pages/ErrorsPage.jsx';
 import InternalUsersPage from './pages/InternalUsersPage.jsx';
 import InternalUserDetailPage from './pages/InternalUserDetailPage.jsx';
@@ -160,8 +161,9 @@ export default function App() {
             <Route path="/login" element={<Navigate to="/" replace />} />
             <Route path="/" element={<ApiKeysPage />} />
             <Route path="/api-keys/:id" element={<ApiKeyDetailPage />} />
-            <Route path="/usage" element={<UsageStatsPage />} />
-            <Route path="/errors" element={<ErrorsPage />} />
+  <Route path="/usage" element={<UsageStatsPage />} />
+  <Route path="/recent-events" element={<RecentEventsPage />} />
+  <Route path="/errors" element={<ErrorsPage />} />
             <Route path="/cooldown-providers" element={<CooldownProvidersPage />} />
             <Route path="/internal-users" element={<InternalUsersPage />} />
             <Route path="/internal-users/:id" element={<InternalUserDetailPage />} />

@@ -100,12 +100,14 @@ export default function Sidebar({
 }
 
 // NAV_GROUPS — three logical sections. "Overview" groups the operate-the-service
-// items; "Analysis" groups the read-only observability surfaces — Usage Stats
-// and Errors. Errors was split out of the Usage Stats tab into its own page so
-// operators can triage failures without losing the events view, and lives
-// next to Usage Stats in the sidebar so the two pages share a context.
-// "System" holds settings. Order matches the prior flat list so muscle memory
-// transfers. Sign out is footer-only and not duplicated here.
+// items; "Analysis" groups the read-only observability surfaces — Usage Stats,
+// Recent Events, and Errors. Errors was split out of the Usage Stats tab into
+// its own page so operators can triage failures without losing the events
+// view; Recent Events was in turn split out of the Usage Stats page so the
+// event log can be paged/searched independently of the aggregate KPIs and
+// charts. All three sit next to each other in the sidebar so the pages share
+// a context. "System" holds settings. Order matches the prior flat list so
+// muscle memory transfers. Sign out is footer-only and not duplicated here.
 const NAV_GROUPS = [
   {
     label: 'Overview',
@@ -125,6 +127,7 @@ const NAV_GROUPS = [
     label: 'Analysis',
     items: [
       { to: '/usage', label: 'Usage Stats', icon: 'chart' },
+      { to: '/recent-events', label: 'Recent Events', icon: 'list' },
       { to: '/errors', label: 'Errors', icon: 'bug' },
       { to: '/cooldown-providers', label: 'Cooldown Providers', icon: 'snow' },
     ],
@@ -175,6 +178,7 @@ const ICON_MAP = {
   shield: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><path d="M8 1l6 2v5c0 3.5-2.5 6.5-6 7.5-3.5-1-6-4-6-7.5V3l6-2z" /><path d="M5.5 8l1.8 1.8L10.5 6.5" strokeLinecap="round" /></svg>,
   code: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6 4L2 8l4 4M10 4l4 4-4 4" /></svg>,
   bug: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M4 8V6a4 4 0 0 1 8 0v2" /><path d="M3 8h10" /><path d="M4 8v3a3 3 0 0 0 3 3h2a3 3 0 0 0 3-3V8" /><path d="M2 6l2 1M14 6l-2 1M2 11l2-1M14 11l-2-1M6 2.5L5 1M10 2.5L11 1" /></svg>,
+  list: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 4h9M5 8h9M5 12h9" /><circle cx="2" cy="4" r="1" fill="currentColor" stroke="none" /><circle cx="2" cy="8" r="1" fill="currentColor" stroke="none" /><circle cx="2" cy="12" r="1" fill="currentColor" stroke="none" /></svg>,
   cpa: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><rect x="2" y="2" width="5" height="5" rx="1" /><rect x="9" y="2" width="5" height="5" rx="1" /><rect x="2" y="9" width="5" height="5" rx="1" /><rect x="9" y="9" width="5" height="5" rx="1" /></svg>,
   layers: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round"><path d="M8 1l6 3-6 3-6-3 6-3zM2 8l6 3 6-3M2 11l6 3 6-3" /></svg>,
   gear: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="2" /><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3" strokeLinecap="round" /></svg>,
