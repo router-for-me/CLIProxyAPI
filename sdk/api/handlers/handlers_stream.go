@@ -201,6 +201,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
 	setGenerateMetadata(reqMeta, rawJSON)
+	setRouteStrategyMetadata(ctx, reqMeta)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil

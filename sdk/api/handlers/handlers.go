@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -218,6 +219,25 @@ func addAuthSelectionModelMetadata(meta map[string]any, model string) {
 		return
 	}
 	meta[coreexecutor.AuthSelectionModelMetadataKey] = model
+}
+
+// setRouteStrategyMetadata carries the per-model routing strategy resolved by
+// the policy middleware (priority/failover) into the conductor's options
+// metadata. When no strategy is stashed on the context, the global
+// routing.strategy applies unchanged (no key is set).
+func setRouteStrategyMetadata(ctx context.Context, meta map[string]any) {
+	if meta == nil {
+		return
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return
+	}
+	strategy := middleware.RouteStrategyFor(ginCtx)
+	if strategy == "" {
+		return
+	}
+	meta[coreexecutor.RouteStrategyMetadataKey] = strategy
 }
 
 func setReasoningEffortMetadata(meta map[string]any, handlerType, model string, rawJSON []byte) {

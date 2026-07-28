@@ -58,6 +58,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
 	setGenerateMetadata(reqMeta, rawJSON)
+	setRouteStrategyMetadata(ctx, reqMeta)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -126,6 +127,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
 	setGenerateMetadata(reqMeta, rawJSON)
+	setRouteStrategyMetadata(ctx, reqMeta)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
