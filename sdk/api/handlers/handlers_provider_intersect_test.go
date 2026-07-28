@@ -2,7 +2,68 @@ package handlers
 
 import (
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 )
+
+func TestOrderProvidersByPriority(t *testing.T) {
+	cases := []struct {
+		name       string
+		providers  []string
+		priorities []store.ProviderPriority
+		want       []string
+	}{
+		{
+			name:       "descending_priority_orders_primary_first",
+			providers:  []string{"opencode", "cometapi", "semutssh"},
+			priorities: []store.ProviderPriority{{Provider: "opencode", Priority: 10}, {Provider: "semutssh", Priority: 5}, {Provider: "cometapi", Priority: 1}},
+			want:       []string{"opencode", "semutssh", "cometapi"},
+		},
+		{
+			name:       "unlisted_defaults_to_zero_so_stays_last",
+			providers:  []string{"opencode", "cometapi"},
+			priorities: []store.ProviderPriority{{Provider: "cometapi", Priority: 7}},
+			want:       []string{"cometapi", "opencode"},
+		},
+		{
+			name:       "same_priority_preserves_registry_order",
+			providers:  []string{"opencode", "cometapi", "semutssh"},
+			priorities: []store.ProviderPriority{{Provider: "opencode", Priority: 5}, {Provider: "semutssh", Priority: 5}},
+			want:       []string{"opencode", "semutssh", "cometapi"},
+		},
+		{
+			name:       "case_insensitive_provider_match",
+			providers:  []string{"OpenCode", "CometAPI"},
+			priorities: []store.ProviderPriority{{Provider: "opencode", Priority: 1}, {Provider: "cometapi", Priority: 9}},
+			want:       []string{"CometAPI", "OpenCode"},
+		},
+		{
+			name:       "no_priorities_returns_input_unchanged",
+			providers:  []string{"opencode", "cometapi"},
+			priorities: nil,
+			want:       []string{"opencode", "cometapi"},
+		},
+		{
+			name:       "single_provider_returns_unchanged",
+			providers:  []string{"opencode"},
+			priorities: []store.ProviderPriority{{Provider: "opencode", Priority: 99}},
+			want:       []string{"opencode"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := orderProvidersByPriority(tc.providers, tc.priorities)
+			if len(got) != len(tc.want) {
+				t.Fatalf("orderProvidersByPriority = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("orderProvidersByPriority[%d] = %q, want %q (got=%v)", i, got[i], tc.want[i], got)
+				}
+			}
+		})
+	}
+}
 
 func TestIntersectProviders(t *testing.T) {
 	cases := []struct {

@@ -3,12 +3,14 @@ package handlers
 import (
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -155,12 +157,12 @@ func (h *BaseAPIHandler) providersForExecution(ctx context.Context, modelName, o
 	return h.getRequestDetailsWithOptions(ctx, modelName, allowImageModel)
 }
 
-// policyRoutesForModel reads the per-API-key model routes stashed by the policy
-// middleware into the gin context (embedded in ctx) and returns the pinned
-// upstream providers for modelID, or nil when no route is configured. The
-// registry-derived provider list is intersected with this set so requests are
-// confined to the pinned providers (no failover outside the set).
-func policyRoutesForModel(ctx context.Context, modelID string) []string {
+// policyRouteForModel reads the per-API-key model routes stashed by the policy
+// middleware into the gin context (embedded in ctx) and returns the matched
+// route entry (model + providers + optional strategy/priorities), or nil when
+// no route is configured for modelID. The registry-derived provider list is
+// intersected with route.Providers so requests are confined to the pinned set.
+func policyRouteForModel(ctx context.Context, modelID string) *store.ModelRoute {
 	if ctx == nil {
 		return nil
 	}
@@ -168,7 +170,69 @@ func policyRoutesForModel(ctx context.Context, modelID string) []string {
 	if !ok || ginCtx == nil {
 		return nil
 	}
-	return middleware.RoutesForModel(ginCtx, modelID)
+	return middleware.RouteForModel(ginCtx, modelID)
+}
+
+// policyRoutesForModel returns only the Providers slice of the matched route,
+// for callers that do not need the strategy/priorities. Kept for backward
+// compatibility with the prior signature.
+func policyRoutesForModel(ctx context.Context, modelID string) []string {
+	if r := policyRouteForModel(ctx, modelID); r != nil {
+		return r.Providers
+	}
+	return nil
+}
+
+// orderProvidersByPriority reorders providers in descending priority order.
+// Providers not listed in priorities default to priority 0. The original
+// (registry) order is preserved among providers sharing the same priority,
+// keeping precedence stable.
+func orderProvidersByPriority(providers []string, priorities []store.ProviderPriority) []string {
+	if len(providers) <= 1 || len(priorities) == 0 {
+		return providers
+	}
+	weight := make(map[string]int, len(priorities))
+	for _, pr := range priorities {
+		weight[strings.ToLower(strings.TrimSpace(pr.Provider))] = pr.Priority
+	}
+	indexed := make([]struct {
+		key      string
+		priority int
+		pos      int
+	}, len(providers))
+	for i, p := range providers {
+		indexed[i] = struct {
+			key      string
+			priority int
+			pos      int
+		}{key: strings.ToLower(strings.TrimSpace(p)), priority: weight[strings.ToLower(strings.TrimSpace(p))], pos: i}
+	}
+	sort.SliceStable(indexed, func(i, j int) bool {
+		if indexed[i].priority != indexed[j].priority {
+			return indexed[i].priority > indexed[j].priority
+		}
+		return indexed[i].pos < indexed[j].pos
+	})
+	out := make([]string, len(providers))
+	for i, e := range indexed {
+		out[i] = providers[e.pos]
+	}
+	return out
+}
+
+// stashRouteStrategy records the per-model routing strategy on the gin context
+// embedded in ctx so the execution handler can transfer it into the conductor
+// options metadata. A no-op when ctx has no gin context (e.g. programmatic
+// calls) — the global routing.strategy then applies unchanged.
+func stashRouteStrategy(ctx context.Context, strategy string) {
+	if ctx == nil {
+		return
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return
+	}
+	middleware.StashRouteStrategy(ginCtx, strategy)
 }
 
 // intersectProviders returns the subset of providers that appear (case-
@@ -255,15 +319,25 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(ctx context.Context, model
 	// subset of upstream providers, confine the candidate list to that subset.
 	// There is no failover to registry providers outside the pinned set; an
 	// empty intersection (no pinned provider serves the model) is a hard 503.
-	if pinned := policyRoutesForModel(ctx, baseModel); len(pinned) > 0 {
-		filtered := intersectProviders(providers, pinned)
+	// When the route carries a strategy ("priority" or "failover"), reorder the
+	// providers by descending priority and stash the strategy so the conductor
+	// pins credential selection to the primary provider (priority) or relies on
+	// its cross-provider failover loop (failover). An empty strategy inherits
+	// the global routing.strategy unchanged.
+	if route := policyRouteForModel(ctx, baseModel); route != nil {
+		filtered := intersectProviders(providers, route.Providers)
 		if len(filtered) == 0 {
 			return nil, "", &interfaces.ErrorMessage{
 				StatusCode: http.StatusServiceUnavailable,
-				Error:      fmt.Errorf("no available upstream for model %s on allowed providers %v", modelName, pinned),
+				Error:      fmt.Errorf("no available upstream for model %s on allowed providers %v", modelName, route.Providers),
 			}
 		}
 		providers = filtered
+		strategy := strings.ToLower(strings.TrimSpace(route.Strategy))
+		if strategy == "priority" || strategy == "failover" {
+			providers = orderProvidersByPriority(providers, route.Priorities)
+			stashRouteStrategy(ctx, strategy)
+		}
 	}
 
 	// The thinking suffix is preserved in the model name itself, so no
