@@ -32,7 +32,14 @@ export function groupToForm(group) {
     allowed_models: Array.isArray(group.allowed_models) ? [...group.allowed_models] : [],
     blocked_models: Array.isArray(group.blocked_models) ? [...group.blocked_models] : [],
     model_routes: Array.isArray(group.model_routes)
-      ? group.model_routes.map((r) => ({ model: r.model || '', providers: Array.isArray(r.providers) ? [...r.providers] : [] }))
+      ? group.model_routes.map((r) => ({
+          model: r.model || '',
+          providers: Array.isArray(r.providers) ? [...r.providers] : [],
+          strategy: r.strategy || '',
+          priorities: Array.isArray(r.priorities)
+            ? r.priorities.map((pr) => ({ provider: pr.provider || '', priority: Number(pr.priority) || 0 }))
+            : [],
+        }))
       : [],
     metadata: group.metadata ? JSON.stringify(group.metadata, null, 2) : '{}',
   };
@@ -46,7 +53,18 @@ export function formToGroup(form) {
     blocked_models: dedupe(listFromField(form.blocked_models)),
     model_routes: (Array.isArray(form.model_routes) ? form.model_routes : [])
       .filter((r) => r && r.model && !r.model.endsWith('*') && form.allowed_models.includes(r.model) && Array.isArray(r.providers) && r.providers.length > 0)
-      .map((r) => ({ model: r.model, providers: dedupe(r.providers) })),
+      .map((r) => {
+        const out = { model: r.model, providers: dedupe(r.providers) };
+        const strategy = String(r.strategy || '').trim();
+        if (strategy === 'priority' || strategy === 'failover') {
+          out.strategy = strategy;
+          const priorities = (Array.isArray(r.priorities) ? r.priorities : [])
+            .filter((pr) => pr && pr.provider && out.providers.includes(pr.provider))
+            .map((pr) => ({ provider: pr.provider, priority: Number(pr.priority) || 0 }));
+          if (priorities.length > 0) out.priorities = priorities;
+        }
+        return out;
+      }),
     metadata: parseMetadata(form.metadata),
   };
 }

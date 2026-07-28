@@ -46,7 +46,14 @@ export function policyToForm(policy) {
     allowed_models: Array.isArray(policy.allowed_models) ? [...policy.allowed_models] : [],
     blocked_models: Array.isArray(policy.blocked_models) ? [...policy.blocked_models] : [],
     model_routes: Array.isArray(policy.model_routes)
-      ? policy.model_routes.map((r) => ({ model: r.model || '', providers: Array.isArray(r.providers) ? [...r.providers] : [] }))
+      ? policy.model_routes.map((r) => ({
+          model: r.model || '',
+          providers: Array.isArray(r.providers) ? [...r.providers] : [],
+          strategy: r.strategy || '',
+          priorities: Array.isArray(r.priorities)
+            ? r.priorities.map((pr) => ({ provider: pr.provider || '', priority: Number(pr.priority) || 0 }))
+            : [],
+        }))
       : [],
     model_group_id: policy.model_group_id ?? '',
     allowed_ips: Array.isArray(policy.allowed_ips) ? [...policy.allowed_ips] : [],
@@ -74,7 +81,18 @@ export function formToPolicy(form, apiKeyId) {
       ? []
       : (Array.isArray(form.model_routes) ? form.model_routes : [])
           .filter((r) => r && r.model && !r.model.endsWith('*') && form.allowed_models.includes(r.model) && Array.isArray(r.providers) && r.providers.length > 0)
-          .map((r) => ({ model: r.model, providers: dedupe(r.providers) })),
+          .map((r) => {
+            const out = { model: r.model, providers: dedupe(r.providers) };
+            const strategy = String(r.strategy || '').trim();
+            if (strategy === 'priority' || strategy === 'failover') {
+              out.strategy = strategy;
+              const priorities = (Array.isArray(r.priorities) ? r.priorities : [])
+                .filter((pr) => pr && pr.provider && out.providers.includes(pr.provider))
+                .map((pr) => ({ provider: pr.provider, priority: Number(pr.priority) || 0 }));
+              if (priorities.length > 0) out.priorities = priorities;
+            }
+            return out;
+          }),
     allowed_ips: dedupe(listFromField(form.allowed_ips)),
     blocked_ips: dedupe(listFromField(form.blocked_ips)),
   };
