@@ -116,6 +116,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/force-model-prefix", s.mgmt.PutForceModelPrefix)
 		mgmt.PATCH("/force-model-prefix", s.mgmt.PutForceModelPrefix)
 
+		mgmt.GET("/branding", s.mgmt.GetBranding)
+		mgmt.PUT("/branding", s.mgmt.PutBranding)
+		mgmt.PATCH("/branding", s.mgmt.PutBranding)
+
 		mgmt.GET("/routing/strategy", s.mgmt.GetRoutingStrategy)
 		mgmt.PUT("/routing/strategy", s.mgmt.PutRoutingStrategy)
 		mgmt.PATCH("/routing/strategy", s.mgmt.PutRoutingStrategy)

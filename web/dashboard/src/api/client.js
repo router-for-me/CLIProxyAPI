@@ -838,6 +838,23 @@ export async function getCpaLatestVersion() {
   return cpaFetch('/latest-version');
 }
 
+// --- Branding (root GET / HTML page) ----------------------------------------
+//
+// Branding customizes the HTML page served at GET /. When all four fields are
+// empty, the server returns the legacy JSON root response. logo-url is only
+// rendered server-side when its scheme is http(s). putBranding uses full
+// replace semantics (PUT /branding); PATCH routes to the same handler.
+export async function getBranding() {
+  return cpaFetch('/branding');
+}
+
+export async function putBranding(branding) {
+  return cpaFetch('/branding', {
+    method: 'PUT',
+    body: JSON.stringify({ branding }),
+  });
+}
+
 // --- Auth-files (provider accounts) ----------------------------------------
 
 export async function listAuthFiles() {

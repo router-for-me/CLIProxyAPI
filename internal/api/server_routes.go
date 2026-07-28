@@ -119,14 +119,22 @@ func (s *Server) setupRoutes() {
 
 	// Root endpoint
 	s.engine.GET("/", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "CLI Proxy API Server",
-			"endpoints": []string{
-				"POST /v1/chat/completions",
-				"POST /v1/completions",
-				"GET /v1/models",
-			},
-		})
+		// When no branding field is set, return the legacy JSON envelope so
+		// default installs keep working. Once an operator configures any
+		// branding field via /v0/management/branding, GET / renders the HTML
+		// branding page instead.
+		if s.cfg == nil || !hasBranding(s.cfg.Branding) {
+			c.JSON(http.StatusOK, gin.H{
+				"message": "CLI Proxy API Server",
+				"endpoints": []string{
+					"POST /v1/chat/completions",
+					"POST /v1/completions",
+					"GET /v1/models",
+				},
+			})
+			return
+		}
+		renderBrandingPage(c, s.cfg.Branding)
 	})
 
 	// OAuth callback endpoints (reuse main server port)

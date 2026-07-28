@@ -16,6 +16,7 @@ import ModelGroupDetailPage from './pages/ModelGroupDetailPage.jsx';
 import ModelsCatalogPage from './pages/ModelsCatalogPage.jsx';
 import ErrorMessagesPage from './pages/ErrorMessagesPage.jsx';
 import SettingsPage from './pages/SettingsPage.jsx';
+import BrandingPage from './pages/BrandingPage.jsx';
 import ApiTokensPage from './pages/ApiTokensPage.jsx';
 import ApiTokenDetailPage from './pages/ApiTokenDetailPage.jsx';
 import DeveloperPage from './pages/DeveloperPage.jsx';
@@ -173,6 +174,7 @@ export default function App() {
             <Route path="/developer" element={<DeveloperPage />} />
             <Route path="/upstream-providers" element={<UpstreamProvidersPage />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/branding" element={<BrandingPage />} />
             <Route path="/manage-cpa" element={<ManageCpaLayout />}>
               <Route index element={<OverviewTab />} />
               <Route path="providers" element={<ProvidersTab />} />

@@ -169,6 +169,84 @@ type PprofConfig struct {
 	Addr string `yaml:"addr" json:"addr"`
 }
 
+// Branding customizes the HTML page served at GET /.
+// When all fields are empty, the legacy JSON root response is returned instead.
+// LogoURL is rendered as an <img> only when its scheme is http or https.
+// Social URLs (Threads/WhatsApp/Telegram) render as clickable icon links in
+// the footer when they parse as http(s).
+type Branding struct {
+	// Title is the heading line shown on the root page.
+	Title string `yaml:"title" json:"title"`
+	// Message is the descriptive body text shown under the title.
+	Message string `yaml:"message" json:"message"`
+	// LogoURL is an optional http(s) URL to a logo image rendered above the title.
+	LogoURL string `yaml:"logo-url" json:"logo-url"`
+	// Footer is a small muted line shown at the bottom of the page (e.g. contact).
+	Footer string `yaml:"footer" json:"footer"`
+	// ThreadsURL is an optional http(s) URL rendered as a Threads icon link in the footer.
+	ThreadsURL string `yaml:"threads-url" json:"threads-url"`
+	// WhatsAppURL is an optional http(s) URL rendered as a WhatsApp icon link in the footer.
+	WhatsAppURL string `yaml:"whatsapp-url" json:"whatsapp-url"`
+	// TelegramURL is an optional http(s) URL rendered as a Telegram icon link in the footer.
+	TelegramURL string `yaml:"telegram-url" json:"telegram-url"`
+
+	// BackgroundColor overrides the page background. Hex format #rgb or #rrggbb.
+	// Empty/invalid falls back to the built-in default (#0b0f14).
+	BackgroundColor string `yaml:"background-color" json:"background-color"`
+	// TitleColor overrides the heading color. Empty/invalid falls back to #5eead4.
+	TitleColor string `yaml:"title-color" json:"title-color"`
+	// MessageColor overrides the body text color. Empty/invalid falls back to #c9d4e0.
+	MessageColor string `yaml:"message-color" json:"message-color"`
+	// FooterColor overrides the footer text and social icon color. Empty/invalid
+	// falls back to #6b7785.
+	FooterColor string `yaml:"footer-color" json:"footer-color"`
+}
+
+// LogoURLSafe returns LogoURL when it parses as http or https, else "".
+// Used by the HTML renderer so a non-http(s) logo value is dropped rather
+// than emitted into the rendered <img> tag.
+func (b Branding) LogoURLSafe() string { return safeSchemeURL(b.LogoURL) }
+
+// SocialLinks returns the (label, url) pairs currently set on the branding,
+// after the same http(s) scheme guard applied to LogoURL. Used by the HTML
+// renderer to populate the footer icon row.
+func (b Branding) SocialLinks() []struct {
+	Label, URL, Key string
+} {
+	out := make([]struct {
+		Label, URL, Key string
+	}, 0, 3)
+	if u := safeSchemeURL(b.ThreadsURL); u != "" {
+		out = append(out, struct{ Label, URL, Key string }{"Threads", u, "threads"})
+	}
+	if u := safeSchemeURL(b.WhatsAppURL); u != "" {
+		out = append(out, struct{ Label, URL, Key string }{"WhatsApp", u, "whatsapp"})
+	}
+	if u := safeSchemeURL(b.TelegramURL); u != "" {
+		out = append(out, struct{ Label, URL, Key string }{"Telegram", u, "telegram"})
+	}
+	return out
+}
+
+// safeSchemeURL returns trimmed url when it parses as http or https, else "".
+// Mirrors the logo scheme guard so non-http(s) values can never be emitted
+// into the rendered HTML page as href attributes.
+func safeSchemeURL(raw string) string {
+	trimmed := trimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := urlParse(trimmed)
+	if err != nil {
+		return ""
+	}
+	scheme := toLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return ""
+	}
+	return trimmed
+}
+
 // RemoteManagement holds management API configuration under 'remote-management'.
 type RemoteManagement struct {
 	// AllowRemote toggles remote (non-localhost) access to management API.

@@ -117,6 +117,26 @@ plugins:
 # When true, disable high-overhead request logging and HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
 
+# Branding customizes the HTML page served at GET /.
+# When all fields are empty, the legacy JSON root response is returned (default).
+# logo-url is rendered as an <img> only when its scheme is http or https.
+# branding:
+#   title: "Acme LLM Gateway"
+#   message: "Authorized access only."
+#   logo-url: "https://example.com/logo.png"
+#   footer: "admin@example.com"
+#   # Social links rendered as inline icons in the footer.
+#   # Only http(s) URLs are honored; other schemes are ignored.
+#   threads-url: "https://threads.net/@acme"
+#   whatsapp-url: "https://wa.me/15551234"
+#   telegram-url: "https://t.me/acme"
+#   # Optional color overrides. Hex format #rgb or #rrggbb.
+#   # Empty/invalid values fall back to the built-in defaults shown below.
+#   background-color: "#0b0f14"   # page background (default)
+#   title-color: "#5eead4"        # heading + social hover (default accent)
+#   message-color: "#c9d4e0"      # body text (default)
+#   footer-color: "#6b7785"       # footer text + social icons (default)
+
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
 

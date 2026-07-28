@@ -326,3 +326,32 @@ func (h *Handler) DeleteProxyURL(c *gin.Context) {
 	h.cfg.ProxyURL = ""
 	h.persist(c)
 }
+
+// Branding customizes the HTML page served at GET /.
+// Both PUT and PATCH use the same full-replace semantics (mirrors PutDebug /
+// PutRoutingStrategy): the dashboard submits the entire branding object.
+func (h *Handler) GetBranding(c *gin.Context) {
+	c.JSON(200, gin.H{"branding": h.cfg.Branding})
+}
+func (h *Handler) PutBranding(c *gin.Context) {
+	var body struct {
+		Branding config.Branding `json:"branding"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body", "message": err.Error()})
+		return
+	}
+	body.Branding.Title = strings.TrimSpace(body.Branding.Title)
+	body.Branding.Message = strings.TrimSpace(body.Branding.Message)
+	body.Branding.LogoURL = strings.TrimSpace(body.Branding.LogoURL)
+	body.Branding.Footer = strings.TrimSpace(body.Branding.Footer)
+	body.Branding.ThreadsURL = strings.TrimSpace(body.Branding.ThreadsURL)
+	body.Branding.WhatsAppURL = strings.TrimSpace(body.Branding.WhatsAppURL)
+	body.Branding.TelegramURL = strings.TrimSpace(body.Branding.TelegramURL)
+	body.Branding.BackgroundColor = strings.TrimSpace(body.Branding.BackgroundColor)
+	body.Branding.TitleColor = strings.TrimSpace(body.Branding.TitleColor)
+	body.Branding.MessageColor = strings.TrimSpace(body.Branding.MessageColor)
+	body.Branding.FooterColor = strings.TrimSpace(body.Branding.FooterColor)
+	h.cfg.Branding = body.Branding
+	h.persist(c)
+}

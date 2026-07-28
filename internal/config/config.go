@@ -43,6 +43,10 @@ type Config struct {
 	// CommercialMode disables high-overhead request logging and HTTP middleware features to minimize per-request memory usage.
 	CommercialMode bool `yaml:"commercial-mode" json:"commercial-mode"`
 
+	// Branding customizes the HTML page served at GET / when any field is set.
+	// When all fields are empty, the legacy JSON root response is returned.
+	Branding Branding `yaml:"branding" json:"branding"`
+
 	// LoggingToFile controls whether application logs are written to rotating files or stdout.
 	LoggingToFile bool `yaml:"logging-to-file" json:"logging-to-file"`
 
