@@ -48,6 +48,23 @@ func TestClaudeErrorExtractsClaudeStyleUpstreamJSON(t *testing.T) {
 	}
 }
 
+func TestClaudeErrorExtractsNormalizedUpstreamJSON(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusServiceUnavailable,
+		Error:      errors.New(`{"type":"error","error":{"type":"overloaded_error","message":"[upstream_capacity_unavailable] Model claude-sonnet-5 reached eBay Claude Gateway"}}`),
+	}
+
+	got := handler.toClaudeError(msg)
+
+	if got.Error.Type != "overloaded_error" {
+		t.Fatalf("error.type = %q, want overloaded_error", got.Error.Type)
+	}
+	if got.Error.Message != "[upstream_capacity_unavailable] Model claude-sonnet-5 reached eBay Claude Gateway" {
+		t.Fatalf("error.message = %q", got.Error.Message)
+	}
+}
+
 func TestWriteClaudeErrorResponseUsesClaudeEnvelope(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

@@ -57,7 +57,11 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 
 	// Clarify the most common alias confusion between Anthropic route names and internal provider keys.
 	if strings.Contains(","+providerText+",", ",claude,") {
-		detail += "; check Claude auth/key session and cooldown state via /v0/management/auth-files"
+		if code == "auth_unavailable" {
+			detail += "; configured Claude upstream routes may be cooling down after recent upstream failures, disabled, or missing; inspect /v0/management/auth-files"
+		} else {
+			detail += "; check Claude auth/key session and cooldown state via /v0/management/auth-files"
+		}
 	}
 
 	status := authErr.HTTPStatus

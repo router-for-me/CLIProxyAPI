@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +28,35 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+type claudeExecutorRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f claudeExecutorRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type claudeExecutorErrReadCloser struct {
+	data []byte
+	err  error
+}
+
+func (r *claudeExecutorErrReadCloser) Read(p []byte) (int, error) {
+	if len(r.data) > 0 {
+		n := copy(p, r.data)
+		r.data = r.data[n:]
+		return n, nil
+	}
+	if r.err != nil {
+		err := r.err
+		r.err = nil
+		return 0, err
+	}
+	return 0, io.EOF
+}
+
+func (r *claudeExecutorErrReadCloser) Close() error {
+	return nil
+}
 
 func resetClaudeDeviceProfileCache() {
 	helps.ResetClaudeDeviceProfileCache()
@@ -1289,6 +1319,178 @@ func TestClaudeExecutor_ExecuteStreamDirectPassthroughEmitsCompleteSSEEvents(t *
 	}
 }
 
+func TestClaudeExecutor_ExecuteStreamDirectRequiresMessageStopData(t *testing.T) {
+	upstreamStream := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-3-5-sonnet-20241022"}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":2,"output_tokens":1}}`,
+		``,
+		`event: message_stop`,
+		``,
+	}, "\n")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(upstreamStream))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var gotErr error
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			gotErr = chunk.Err
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("stream error = nil, want missing message_stop data error")
+	}
+	if !strings.Contains(gotErr.Error(), "message_stop") {
+		t.Fatalf("stream error = %q, want message_stop", gotErr.Error())
+	}
+}
+
+func TestClaudeExecutor_ExecuteStreamTranslatedRequiresMessageStopData(t *testing.T) {
+	upstreamStream := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-3-5-sonnet-20241022"}}`,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":2,"output_tokens":1}}`,
+		`event: message_stop`,
+		``,
+	}, "\n")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(upstreamStream))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: []byte(`{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var gotErr error
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			gotErr = chunk.Err
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("stream error = nil, want missing message_stop data error")
+	}
+	if !strings.Contains(gotErr.Error(), "message_stop") {
+		t.Fatalf("stream error = %q, want message_stop", gotErr.Error())
+	}
+}
+
+func TestClaudeExecutor_ExecuteStreamDirectIgnoresReadErrorAfterMessageStopData(t *testing.T) {
+	upstreamStream := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-sonnet-5"}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":2,"output_tokens":1}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", claudeExecutorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       &claudeExecutorErrReadCloser{data: []byte(upstreamStream), err: io.ErrUnexpectedEOF},
+			Request:    req,
+		}, nil
+	}))
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": "https://hubgptgatewaysvc3.stratus.qa.ebay.com/gateway/v1/ebay",
+	}}
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error after message_stop: %v", chunk.Err)
+		}
+	}
+}
+
+func TestClaudeExecutor_ExecuteStreamTranslatedIgnoresReadErrorAfterMessageStopData(t *testing.T) {
+	upstreamStream := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-sonnet-5"}}`,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":2,"output_tokens":1}}`,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", claudeExecutorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       &claudeExecutorErrReadCloser{data: []byte(upstreamStream), err: io.ErrUnexpectedEOF},
+			Request:    req,
+		}, nil
+	}))
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": "https://hubgptgatewaysvc3.stratus.qa.ebay.com/gateway/v1/ebay",
+	}}
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: []byte(`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error after message_stop: %v", chunk.Err)
+		}
+	}
+}
+
 func TestClaudeExecutor_CountTokensExcludesInvalidOpenAIThinking(t *testing.T) {
 	executor := NewClaudeExecutor(&config.Config{})
 	countTokens := func(payload []byte) int64 {
@@ -1574,6 +1776,37 @@ func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsClaudeErrorEvent(t *testing
 	}
 }
 
+func TestClaudeExecutor_EbayExecuteOpenAINonStreamClassifiesSSEOverloadedError(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", claudeExecutorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(`data: {"type":"error","error":{"type":"overloaded_error","message":"upstream overloaded"}}` + "\n")),
+			Request:    req,
+		}, nil
+	}))
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": "https://hubgptgatewaysvc3.stratus.qa.ebay.com/gateway/v1/ebay",
+	}}
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: []byte(`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err == nil {
+		t.Fatal("Execute error = nil, want overloaded SSE error")
+	}
+	assertStatusErr(t, err, http.StatusServiceUnavailable)
+	if got := gjson.Get(err.Error(), "error.type").String(); got != "overloaded_error" {
+		t.Fatalf("error.type = %q, want overloaded_error; err=%s", got, err.Error())
+	}
+	if message := gjson.Get(err.Error(), "error.message").String(); !strings.Contains(message, "[upstream_capacity_unavailable]") || !strings.Contains(message, "upstream overloaded") {
+		t.Fatalf("message = %q, want capacity unavailable with upstream detail", message)
+	}
+}
+
 func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsIncompleteClaudeStream(t *testing.T) {
 	body := strings.Join([]string{
 		`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-3-5-sonnet-20241022"}}`,
@@ -1588,6 +1821,28 @@ func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsIncompleteClaudeStream(t *t
 	assertStatusErr(t, err, http.StatusBadGateway)
 	if !strings.Contains(err.Error(), "ended before message completion") {
 		t.Fatalf("Execute error = %q, want incomplete stream error", err.Error())
+	}
+}
+
+func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsEventOnlyMessageStop(t *testing.T) {
+	body := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-3-5-sonnet-20241022"}}`,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":2,"output_tokens":1}}`,
+		`event: message_stop`,
+		``,
+	}, "\n")
+
+	_, err := executeOpenAIChatCompletionThroughClaude(t, body)
+	if err == nil {
+		t.Fatal("Execute error = nil, want missing message_stop data error")
+	}
+	assertStatusErr(t, err, http.StatusBadGateway)
+	if !strings.Contains(err.Error(), "message_stop") {
+		t.Fatalf("Execute error = %q, want message_stop", err.Error())
 	}
 }
 
@@ -1619,6 +1874,27 @@ func TestClaudeExecutor_ExecuteOpenAINonStreamConvertsValidClaudeStream(t *testi
 	}
 	if got := gjson.GetBytes(resp.Payload, "usage.total_tokens").Int(); got != 3 {
 		t.Fatalf("usage.total_tokens = %d, want 3", got)
+	}
+}
+
+func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsMissingMessageStop(t *testing.T) {
+	body := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-3-5-sonnet-20241022"}}`,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":2,"output_tokens":1}}`,
+		``,
+	}, "\n")
+
+	_, err := executeOpenAIChatCompletionThroughClaude(t, body)
+	if err == nil {
+		t.Fatal("Execute error = nil, want missing message_stop error")
+	}
+	assertStatusErr(t, err, http.StatusBadGateway)
+	if !strings.Contains(err.Error(), "message_stop") {
+		t.Fatalf("Execute error = %q, want message_stop", err.Error())
 	}
 }
 
@@ -1655,6 +1931,462 @@ func assertStatusErr(t *testing.T, err error, want int) {
 	}
 	if got := status.StatusCode(); got != want {
 		t.Fatalf("StatusCode() = %d, want %d", got, want)
+	}
+}
+
+func TestClaudeExecutor_EbayGatewayHostMatch(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{name: "stratus gateway", url: "https://hubgptgatewaysvc3.stratus.qa.ebay.com/gateway/v1/ebay", want: true},
+		{name: "vip gateway", url: "https://hubgptgatewaysvc.vip.qa.ebay.com/gateway/v1/ebay", want: true},
+		{name: "root gateway", url: "https://hubgptgateway.ebay.com", want: true},
+		{name: "anthropic", url: "https://api.anthropic.com", want: false},
+		{name: "lookalike prefix", url: "https://api.hubgptgateway.ebay.com.evil.example", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isEbayClaudeGatewayBaseURL(tc.url); got != tc.want {
+				t.Fatalf("isEbayClaudeGatewayBaseURL(%q) = %v, want %v", tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClaudeExecutor_NormalizesEbayGatewayHTTP5xx(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", claudeExecutorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if got := req.URL.Hostname(); got != "hubgptgatewaysvc3.stratus.qa.ebay.com" {
+			t.Fatalf("hostname = %q, want eBay gateway", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"type":"overloaded_error","message":"capacity exhausted","api_key":"sk-secret"}}`)),
+			Request:    req,
+		}, nil
+	}))
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": "https://hubgptgatewaysvc3.stratus.qa.ebay.com/gateway/v1/ebay",
+	}}
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err == nil {
+		t.Fatal("Execute error = nil, want normalized eBay 5xx")
+	}
+	assertStatusErr(t, err, http.StatusServiceUnavailable)
+	if got := gjson.Get(err.Error(), "error.type").String(); got != "overloaded_error" {
+		t.Fatalf("error.type = %q, want overloaded_error; err=%s", got, err.Error())
+	}
+	message := gjson.Get(err.Error(), "error.message").String()
+	for _, want := range []string{"[upstream_capacity_unavailable]", "claude-sonnet-5", "CLIProxyAPI accepted the request locally", "capacity exhausted"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("message missing %q: %s", want, message)
+		}
+	}
+	if strings.Contains(message, "sk-secret") || strings.Contains(message, "api_key") {
+		t.Fatalf("message leaked secret detail: %s", message)
+	}
+}
+
+func TestClaudeExecutor_EbayGatewayHTTP5xxDecodeFailureNormalizesCapacity(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", claudeExecutorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Header:     http.Header{"Content-Encoding": []string{"gzip"}},
+			Body:       io.NopCloser(strings.NewReader("not-a-valid-gzip-stream")),
+			Request:    req,
+		}, nil
+	}))
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": "https://hubgptgatewaysvc3.stratus.qa.ebay.com/gateway/v1/ebay",
+	}}
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err == nil {
+		t.Fatal("Execute error = nil, want normalized decode failure")
+	}
+	assertStatusErr(t, err, http.StatusServiceUnavailable)
+	if got := gjson.Get(err.Error(), "error.type").String(); got != "overloaded_error" {
+		t.Fatalf("error.type = %q, want overloaded_error; err=%s", got, err.Error())
+	}
+	if message := gjson.Get(err.Error(), "error.message").String(); !strings.Contains(message, "[upstream_capacity_unavailable]") || !strings.Contains(message, "failed to decode error response body") {
+		t.Fatalf("message = %q, want capacity message with decode detail", message)
+	}
+}
+
+func TestClaudeExecutor_EbayGatewayHTTP5xxReadFailureNormalizesCapacity(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", claudeExecutorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Header:     http.Header{},
+			Body:       &claudeExecutorErrReadCloser{data: []byte("body-prefix"), err: errors.New("upstream body read reset")},
+			Request:    req,
+		}, nil
+	}))
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": "https://hubgptgatewaysvc3.stratus.qa.ebay.com/gateway/v1/ebay",
+	}}
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err == nil {
+		t.Fatal("Execute error = nil, want normalized read failure")
+	}
+	assertStatusErr(t, err, http.StatusServiceUnavailable)
+	if got := gjson.Get(err.Error(), "error.type").String(); got != "overloaded_error" {
+		t.Fatalf("error.type = %q, want overloaded_error; err=%s", got, err.Error())
+	}
+	if message := gjson.Get(err.Error(), "error.message").String(); !strings.Contains(message, "[upstream_capacity_unavailable]") || !strings.Contains(message, "failed to read error response body") {
+		t.Fatalf("message = %q, want capacity message with read detail", message)
+	}
+}
+
+func TestClaudeExecutor_EbayGatewayTimeoutAndTransportClassification(t *testing.T) {
+	if errOut := normalizeClaudeUpstreamTransportError("claude-sonnet-5", context.Canceled); !errors.Is(errOut, context.Canceled) {
+		t.Fatalf("context.Canceled normalized to %v, want original cancellation", errOut)
+	}
+
+	timeoutErr := normalizeClaudeUpstreamTransportError("claude-sonnet-5", context.DeadlineExceeded)
+	assertStatusErr(t, timeoutErr, http.StatusGatewayTimeout)
+	if got := gjson.Get(timeoutErr.Error(), "error.type").String(); got != "timeout_error" {
+		t.Fatalf("timeout error.type = %q, want timeout_error; err=%s", got, timeoutErr.Error())
+	}
+	if message := gjson.Get(timeoutErr.Error(), "error.message").String(); !strings.HasPrefix(message, "[upstream_timeout]") {
+		t.Fatalf("timeout message = %q, want upstream_timeout prefix", message)
+	}
+
+	for _, errIn := range []error{
+		io.ErrUnexpectedEOF,
+		errors.New("stream error: stream ID 35; NO_ERROR; received from peer"),
+		errors.New("socket hang up"),
+	} {
+		errOut := normalizeClaudeUpstreamTransportError("claude-sonnet-5", errIn)
+		assertStatusErr(t, errOut, http.StatusBadGateway)
+		if got := gjson.Get(errOut.Error(), "error.type").String(); got != "api_error" {
+			t.Fatalf("transport error.type = %q, want api_error; err=%s", got, errOut.Error())
+		}
+		if message := gjson.Get(errOut.Error(), "error.message").String(); !strings.HasPrefix(message, "[upstream_connection_failed]") {
+			t.Fatalf("transport message = %q, want upstream_connection_failed prefix", message)
+		}
+	}
+}
+
+func TestClaudeExecutor_EbayExecuteReturnsContextCanceledUnwrapped(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", claudeExecutorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, context.Canceled
+	}))
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": "https://hubgptgatewaysvc3.stratus.qa.ebay.com/gateway/v1/ebay",
+	}}
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Execute error = %v, want context.Canceled", err)
+	}
+	if strings.Contains(err.Error(), "upstream_connection_failed") {
+		t.Fatalf("context cancellation should not be normalized: %v", err)
+	}
+}
+
+func TestClaudeExecutor_EbayExecuteBodyReadCanceledUnwrapped(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", claudeExecutorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       &claudeExecutorErrReadCloser{data: []byte("body-prefix"), err: context.Canceled},
+			Request:    req,
+		}, nil
+	}))
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": "https://hubgptgatewaysvc3.stratus.qa.ebay.com/gateway/v1/ebay",
+	}}
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Execute error = %v, want context.Canceled", err)
+	}
+}
+
+func TestClaudeExecutor_EbayExecuteStreamReturnsContextCanceledUnwrapped(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", claudeExecutorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, context.Canceled
+	}))
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": "https://hubgptgatewaysvc3.stratus.qa.ebay.com/gateway/v1/ebay",
+	}}
+
+	_, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ExecuteStream error = %v, want context.Canceled", err)
+	}
+	if strings.Contains(err.Error(), "upstream_connection_failed") {
+		t.Fatalf("context cancellation should not be normalized: %v", err)
+	}
+}
+
+func TestClaudeExecutor_EbayExecuteStreamScannerCanceledEndsSilently(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", claudeExecutorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       &claudeExecutorErrReadCloser{data: []byte("event: message_start\n"), err: context.Canceled},
+			Request:    req,
+		}, nil
+	}))
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": "https://hubgptgatewaysvc3.stratus.qa.ebay.com/gateway/v1/ebay",
+	}}
+
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("ExecuteStream error = %v, want nil initial error", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream chunk error for context cancellation: %v", chunk.Err)
+		}
+	}
+}
+
+func TestClaudeExecutor_EbayGatewayPreservesValidation4xx(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", claudeExecutorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"type":"invalid_request_error","message":"bad input"}}`)),
+			Request:    req,
+		}, nil
+	}))
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": "https://hubgptgatewaysvc3.stratus.qa.ebay.com/gateway/v1/ebay",
+	}}
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err == nil {
+		t.Fatal("Execute error = nil, want 400")
+	}
+	assertStatusErr(t, err, http.StatusBadRequest)
+	if !strings.Contains(err.Error(), "invalid_request_error") {
+		t.Fatalf("error = %q, want original upstream 4xx body", err.Error())
+	}
+	if strings.Contains(err.Error(), "upstream_capacity_unavailable") {
+		t.Fatalf("4xx should not be normalized: %s", err.Error())
+	}
+}
+
+func TestClaudeExecutor_NonEbayGatewayPreservesHTTP5xx(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "plain upstream failure", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err == nil {
+		t.Fatal("Execute error = nil, want 502")
+	}
+	assertStatusErr(t, err, http.StatusBadGateway)
+	if strings.Contains(err.Error(), "upstream_capacity_unavailable") {
+		t.Fatalf("non-eBay 5xx should not be normalized: %s", err.Error())
+	}
+}
+
+func TestClaudeExecutor_EbayStreamMissingMessageStopReturnsInterruptedError(t *testing.T) {
+	upstreamStream := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-sonnet-5"}}`,
+		``,
+	}, "\n")
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", claudeExecutorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(upstreamStream)),
+			Request:    req,
+		}, nil
+	}))
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": "https://hubgptgatewaysvc3.stratus.qa.ebay.com/gateway/v1/ebay",
+	}}
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var gotPayload bool
+	var gotErr error
+	for chunk := range result.Chunks {
+		if len(chunk.Payload) > 0 {
+			gotPayload = true
+		}
+		if chunk.Err != nil {
+			gotErr = chunk.Err
+		}
+	}
+	if !gotPayload {
+		t.Fatal("expected first upstream event to be delivered before interruption")
+	}
+	if gotErr == nil {
+		t.Fatal("stream error = nil, want missing message_stop")
+	}
+	assertStatusErr(t, gotErr, http.StatusBadGateway)
+	if got := gjson.Get(gotErr.Error(), "error.type").String(); got != "api_error" {
+		t.Fatalf("error.type = %q, want api_error; err=%s", got, gotErr.Error())
+	}
+	message := gjson.Get(gotErr.Error(), "error.message").String()
+	for _, want := range []string{"[upstream_stream_interrupted]", "Partial output was already delivered", "cannot safely replay"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("message missing %q: %s", want, message)
+		}
+	}
+}
+
+func TestClaudeExecutor_EbayGatewayNormalizesSystemRoleAndAssistantPrefill(t *testing.T) {
+	var seenBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", claudeExecutorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body, errRead := io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		seenBody = bytes.Clone(body)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"msg_1","type":"message","model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)),
+			Request:    req,
+		}, nil
+	}))
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": "https://hubgptgatewaysvc3.stratus.qa.ebay.com/gateway/v1/ebay",
+	}}
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model: "claude-sonnet-5",
+		Payload: []byte(`{"messages":[` +
+			`{"role":"system","content":"Mid rule"},` +
+			`{"role":"user","content":"hi"},` +
+			`{"role":"assistant","content":[{"type":"text","text":"prefill"}]}` +
+			`]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body")
+	}
+	if gjson.GetBytes(seenBody, `messages.#(role=="system")`).Exists() {
+		t.Fatalf("system role message should be moved before upstream: %s", seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.#").Int(); got != 3 {
+		t.Fatalf("messages count = %d, want 3: %s", got, seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.0.content.0.text").String(); got != "Mid rule" {
+		t.Fatalf("messages.0.content.0.text = %q, want Mid rule: %s", got, seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.0.content.1.text").String(); got != "hi" {
+		t.Fatalf("messages.0.content.1.text = %q, want hi: %s", got, seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.1.role").String(); got != "assistant" {
+		t.Fatalf("messages.1.role = %q, want assistant: %s", got, seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.1.content.0.text").String(); got != "prefill" {
+		t.Fatalf("assistant prefill text = %q, want prefill: %s", got, seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.2.role").String(); got != "user" {
+		t.Fatalf("messages.2.role = %q, want user: %s", got, seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.2.content.0.text").String(); got != "Continue the preceding assistant response without repeating it." {
+		t.Fatalf("continuation text = %q: %s", got, seenBody)
+	}
+}
+
+func TestNormalizeClaudeAssistantPrefill_AppendsContinuationUser(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"text","text":"compact context"}]}]}`)
+
+	out := normalizeClaudeAssistantPrefill(payload)
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+		t.Fatalf("messages count = %d, want 3: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.1.role").String(); got != "assistant" {
+		t.Fatalf("messages.1.role = %q, want assistant: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.text").String(); got != "compact context" {
+		t.Fatalf("assistant prefill text = %q, want compact context: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.2.role").String(); got != "user" {
+		t.Fatalf("messages.2.role = %q, want user: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.text").String(); got != "Continue the preceding assistant response without repeating it." {
+		t.Fatalf("continuation text = %q: %s", got, out)
+	}
+}
+
+func TestNormalizeClaudeAssistantPrefill_LeavesToolUseTailUnchanged(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]}]}`)
+
+	out := normalizeClaudeAssistantPrefill(payload)
+
+	if !bytes.Equal(out, payload) {
+		t.Fatalf("tool_use assistant tail should remain unchanged.\noriginal: %s\ngot:      %s", payload, out)
 	}
 }
 

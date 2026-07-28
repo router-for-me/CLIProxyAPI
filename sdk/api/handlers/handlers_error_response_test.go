@@ -189,6 +189,24 @@ func TestEnrichAuthSelectionError_DefaultsTo503WithContext(t *testing.T) {
 	}
 }
 
+func TestEnrichAuthSelectionError_ClaudeUnavailableMentionsRouteCooldown(t *testing.T) {
+	in := &coreauth.Error{Code: "auth_unavailable", Message: "no auth available"}
+	out := enrichAuthSelectionError(in, []string{"claude"}, "claude-sonnet-5")
+
+	var got *coreauth.Error
+	if !errors.As(out, &got) || got == nil {
+		t.Fatalf("expected coreauth.Error, got %T", out)
+	}
+	for _, want := range []string{"configured Claude upstream routes", "cooling down after recent upstream failures", "/v0/management/auth-files"} {
+		if !strings.Contains(got.Message, want) {
+			t.Fatalf("message missing %q: %q", want, got.Message)
+		}
+	}
+	if strings.Contains(got.Message, "check Claude auth/key") {
+		t.Fatalf("auth_unavailable should not lead with auth/key hint: %q", got.Message)
+	}
+}
+
 func TestEnrichAuthSelectionError_PreservesExplicitStatus(t *testing.T) {
 	in := &coreauth.Error{Code: "auth_unavailable", Message: "no auth available", HTTPStatus: http.StatusTooManyRequests}
 	out := enrichAuthSelectionError(in, []string{"gemini"}, "gemini-2.5-pro")
