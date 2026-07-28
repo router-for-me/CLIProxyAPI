@@ -126,6 +126,7 @@ type UsageStore struct {
 	windowsTable       string
 	pricingTable       string
 	internalUsersTable string
+	modelsCatalogTable string
 	// sealer encrypts api_key_principal at rest. nil when no passphrase was
 	// configured (writes stay plaintext; reads tolerate plaintext rows).
 	sealer *Sealer
@@ -152,6 +153,7 @@ func NewUsageStore(parent *PostgresStore) *UsageStore {
 		windowsTable:       parent.UsageWindowsTable(),
 		pricingTable:       parent.ModelPricingTable(),
 		internalUsersTable: parent.InternalUsersTable(),
+		modelsCatalogTable: parent.ModelsTable(),
 		sealer:             sealer,
 	}
 }
@@ -950,9 +952,12 @@ type UsageEventRow struct {
 	RequestedAt    time.Time      `json:"requested_at"`
 }
 
-// eventRowSelectColumns is the column list used by both SelectEvents and
-// GetEvent. The api_key_principal column is intentionally not projected;
-// KeyAlias is resolved via the api_keys LEFT JOIN.
+// eventRowSelectColumns lists the columns projected by SelectEvents and
+// GetEvent, in the order scanEventRow expects. KeyAlias is resolved via the
+// api_keys LEFT JOIN. OfficialProvider is resolved via LEFT JOINs on
+// models_catalog — see eventJoin for the resolution precedence. Rows that
+// have no matching catalog row at all get an empty value here and are left
+// to the best-effort registry resolver in the management layer.
 const eventRowSelectColumns = `
 	e.id, e.request_id, e.api_key_id,
 	COALESCE(NULLIF(k.key_alias, ''), k.name, '') AS key_alias,
@@ -963,11 +968,42 @@ const eventRowSelectColumns = `
 	e.input_tokens, e.output_tokens, e.reasoning_tokens,
 	e.cached_tokens, e.cache_creation_tokens, e.total_tokens, e.cost_usd,
 	e.latency_ms, e.ttft_ms, e.failed, e.fail_status_code, e.generate,
-	e.requested_at
+	e.requested_at,
+	COALESCE(mcAlias.official_provider, mcModel.official_provider, mcCompat.official_provider, '') AS official_provider
 `
 
+// eventJoin builds the FROM clause shared by SelectEvents and GetEvent. It
+// joins api_keys (for the non-secret KeyAlias) and models_catalog three times
+// to resolve official_provider deterministically from the persisted catalog,
+// independent of the in-memory registry connection state:
+//
+//  1. mcAlias — (catalog id = COALESCE(event alias, event model),
+//     catalog provider ILIKE event provider). Most built-in providers (claude,
+//     gemini, antigravity, ...) persist catalog rows keyed by the alias / model
+//     id with provider = OwnedBy == the internal provider key, so this exact
+//     match is the common case. Using COALESCE(alias, model) handles "thinking"
+//     model variants (e.model = "claude-opus-4-6-thinking") whose catalog row
+//     is keyed by the alias "claude-opus-4-6".
+//  2. mcModel — falls back to matching the raw event model id directly (for
+//     rows where the alias differs but only the model id has a catalog row).
+//  3. mcCompat — strips the "openai-compatible-" prefix from the internal key
+//     and matches ILIKE against the catalog provider column. OpenAI-compatible
+//     catalog rows are keyed by the compat name (e.g. "SemutSSH", "opencode"),
+//     never the internal "openai-compatible-*" key, so this third arm resolves
+//     events for OpenAI-compatible upstreams — including ones that have since
+//     been deleted (the catalog row survives key deletion, so we still surface
+//     the operator-edited official_provider rather than the internal key).
+//
+// Provider matching is LOWER()/LOWER() so capitalisation differences between
+// the internal key / compat name and the catalog row never break resolution.
+// All three arms seek the (id, provider) primary key, so the join stays an
+// index lookup with no row amplification.
 func (s *UsageStore) eventJoin() string {
-	return s.eventsTable + " e LEFT JOIN " + s.apiKeysTable + " k ON k.id = e.api_key_id"
+	catalog := s.modelsCatalogTable
+	return s.eventsTable + " e LEFT JOIN " + s.apiKeysTable + " k ON k.id = e.api_key_id" +
+		" LEFT JOIN " + catalog + " mcAlias ON mcAlias.id = COALESCE(NULLIF(e.alias, ''), e.model) AND LOWER(mcAlias.provider) = LOWER(e.provider)" +
+		" LEFT JOIN " + catalog + " mcModel ON mcModel.id = e.model AND LOWER(mcModel.provider) = LOWER(e.provider)" +
+		" LEFT JOIN " + catalog + " mcCompat ON mcCompat.id = COALESCE(NULLIF(e.alias, ''), e.model) AND LOWER(mcCompat.provider) = LOWER(REPLACE(e.provider, 'openai-compatible-', ''))"
 }
 
 // scanEventRow scans one row from the column order defined above. Shared by
@@ -989,6 +1025,7 @@ func scanEventRow(scanner interface {
 		&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens,
 		&r.CacheCreationTokens, &r.TotalTokens, &r.CostUSD, &r.LatencyMs, &r.TTFTMs,
 		&r.Failed, &r.FailStatusCode, &r.Generate, &r.RequestedAt,
+		&r.OfficialProvider,
 	); err != nil {
 		return UsageEventRow{}, err
 	}

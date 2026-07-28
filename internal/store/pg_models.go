@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // StoredModel mirrors a row in models_catalog. It is a store-level type rather
@@ -159,9 +161,24 @@ func (s *ModelsStore) upsertBatch(ctx context.Context, models []StoredModel, pro
 	}
 	b.WriteString(`
 		ON CONFLICT (id, provider) DO UPDATE SET
-			official_provider = COALESCE(NULLIF(EXCLUDED.official_provider, ''), `)
-	b.WriteString(s.modelsTable)
-	b.WriteString(`.official_provider),
+			official_provider = `)
+	// official_provider is an operator-facing correction field (e.g. mapping
+	// the internal "antigravity" key to "anthropic"). Auto-syncs derive it
+	// verbatim from OwnedBy, so blindly writing EXCLUDED.official_provider
+	// would clobber an operator edit every time the upstream re-registers.
+	// Preserve the persisted value on the auto-sync path (protectUserDefined);
+	// only the dashboard PUT path (protectUserDefined=false) overwrites it,
+	// using COALESCE(NULLIF(...)) so an empty body value keeps the existing
+	// value intact.
+	if protectUserDefined {
+		b.WriteString(s.modelsTable)
+		b.WriteString(`.official_provider,`)
+	} else {
+		b.WriteString(`COALESCE(NULLIF(EXCLUDED.official_provider, ''), `)
+		b.WriteString(s.modelsTable)
+		b.WriteString(`.official_provider),`)
+	}
+	b.WriteString(`
 			object = EXCLUDED.object,
 			created = EXCLUDED.created,
 			owned_by = EXCLUDED.owned_by,
@@ -833,6 +850,80 @@ func (s *ModelsStore) DeleteByProvider(ctx context.Context, provider string) (in
 		return 0, fmt.Errorf("postgres store: delete models rows affected: %w", err)
 	}
 	return n, nil
+}
+
+// RenameProvider relocates every models_catalog row whose provider column equals
+// oldProvider onto newProvider, in place. It is used by the upstream-providers
+// editor when an operator renames a provider's name/identifier (e.g. "opencode"
+// → "oc-openai"): catalog rows persist with provider = OwnedBy (set verbatim
+// from the upstream name), so a rename must repoint the column or the old name
+// lingers as a phantom entry in the Models Catalog / Provider Official picker.
+//
+// ownerBy mirrors how the catalog is seeded (Provider == OwnedBy), so the
+// owned_by column is repointed in lockstep; official_provider is repointed only
+// when it still carries the old provider string (i.e. the auto-sync placeholder
+// that mirrors OwnedBy). Operator-edited official_provider values that differ
+// from the old name are preserved untouched.
+//
+// PK-collision handling: a row keyed (id, newProvider) may already exist if the
+// same model id is shared across two compat providers, or (more commonly) if the
+// operator is renaming onto a name that already carried catalog rows from a
+// prior sync. In that case the new-key row is treated as the source of truth —
+// the colliding old-key rows are dropped because their ids are already
+// represented under the target key — and the old-name rows that don't collide
+// are simply repointed onto the new key. All of this runs in a single
+// transaction so a partial rename never survives an error.
+func (s *ModelsStore) RenameProvider(ctx context.Context, oldProvider, newProvider string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: models store not initialized")
+	}
+	oldProvider = strings.TrimSpace(oldProvider)
+	newProvider = strings.TrimSpace(newProvider)
+	if oldProvider == "" || newProvider == "" || oldProvider == newProvider {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("postgres store: rename provider begin: %w", err)
+	}
+	defer func() {
+		if tx == nil {
+			return
+		}
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			log.WithError(err).WithField("old", oldProvider).WithField("new", newProvider).
+				Warn("postgres store: rename provider rollback failed")
+		}
+	}()
+
+	// Drop old-key rows that already exist under the new key (same id), so the
+	// subsequent UPDATE can't hit a (id, provider) PK violation. The new-key row
+	// already represents that model id under the target provider.
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+		`DELETE FROM %s WHERE provider = $1 AND id IN (SELECT id FROM %s WHERE provider = $2)`,
+		s.modelsTable, s.modelsTable,
+	), oldProvider, newProvider); err != nil {
+		return fmt.Errorf("postgres store: rename provider drop colliding: %w", err)
+	}
+
+	// Repoint the remaining old-key rows onto the new key.
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE %s SET
+			provider = $1,
+			owned_by = COALESCE(NULLIF(owned_by, ''), $1),
+			official_provider = CASE WHEN official_provider = $2 THEN $1 ELSE official_provider END,
+			updated_at = NOW()
+		WHERE provider = $2`,
+		s.modelsTable,
+	), newProvider, oldProvider); err != nil {
+		return fmt.Errorf("postgres store: rename provider update: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("postgres store: rename provider commit: %w", err)
+	}
+	tx = nil
+	return nil
 }
 
 // UpsertOne inserts or updates a single model row. Use this for ad-hoc edits

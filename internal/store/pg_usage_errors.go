@@ -112,7 +112,9 @@ const usageErrorColumnList = `
 
 // errorRowSelectColumns is the column list used by SelectErrors and GetError.
 // The api_key_principal column is intentionally not projected; KeyAlias is
-// resolved via the api_keys LEFT JOIN — mirroring eventRowSelectColumns.
+// resolved via the api_keys LEFT JOIN. OfficialProvider is resolved via the
+// same three-arm models_catalog LEFT JOIN described on eventJoin, mirroring
+// the events path so the two surfaces agree on official_provider.
 const errorRowSelectColumns = `
 	e.id, e.request_id, e.api_key_id,
 	COALESCE(NULLIF(k.key_alias, ''), k.name, '') AS key_alias,
@@ -123,11 +125,19 @@ const errorRowSelectColumns = `
 	e.input_tokens, e.output_tokens, e.reasoning_tokens,
 	e.cached_tokens, e.cache_creation_tokens, e.total_tokens, e.cost_usd,
 	e.latency_ms, e.ttft_ms, e.fail_status_code, e.error_message, e.generate,
-	e.requested_at
+	e.requested_at,
+	COALESCE(mcAlias.official_provider, mcModel.official_provider, mcCompat.official_provider, '') AS official_provider
 `
 
+// errorJoin mirrors eventJoin: see the documented resolution precedence there.
+// Failed-attempt rows share the same provider/alias/model columns as events,
+// so the three-arm catalog JOIN resolves official_provider identically.
 func (s *UsageStore) errorJoin() string {
-	return s.errorsTable + " e LEFT JOIN " + s.apiKeysTable + " k ON k.id = e.api_key_id"
+	catalog := s.modelsCatalogTable
+	return s.errorsTable + " e LEFT JOIN " + s.apiKeysTable + " k ON k.id = e.api_key_id" +
+		" LEFT JOIN " + catalog + " mcAlias ON mcAlias.id = COALESCE(NULLIF(e.alias, ''), e.model) AND LOWER(mcAlias.provider) = LOWER(e.provider)" +
+		" LEFT JOIN " + catalog + " mcModel ON mcModel.id = e.model AND LOWER(mcModel.provider) = LOWER(e.provider)" +
+		" LEFT JOIN " + catalog + " mcCompat ON mcCompat.id = COALESCE(NULLIF(e.alias, ''), e.model) AND LOWER(mcCompat.provider) = LOWER(REPLACE(e.provider, 'openai-compatible-', ''))"
 }
 
 // scanErrorRow scans one row from the column order defined above. Shared by
@@ -150,6 +160,7 @@ func scanErrorRow(scanner interface {
 		&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens,
 		&r.CacheCreationTokens, &r.TotalTokens, &r.CostUSD, &r.LatencyMs, &r.TTFTMs,
 		&r.FailStatusCode, &r.ErrorMessage, &r.Generate, &r.RequestedAt,
+		&r.OfficialProvider,
 	); err != nil {
 		return UsageErrorRow{}, err
 	}

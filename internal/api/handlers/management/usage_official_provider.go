@@ -40,11 +40,17 @@ func (h *Handler) resolveOfficialProvider(ctx context.Context, providerKey, mode
 }
 
 // FillOfficialProvider populates the OfficialProvider field on every
-// UsageEventRow in place, best-effort. The per-row catalog lookup is
-// deduplicated per (provider, model) so a page of 25 events for the same model
-// costs a single round-trip — mirroring FillCostBreakdown's caching. No-op when
-// the resolver is nil (file-only deployments or no PG backend); rows then keep
-// an empty OfficialProvider and the dashboard falls back to the raw provider.
+// UsageEventRow in place, best-effort. Rows already carry a value resolved
+// atomically by the models_catalog LEFT JOIN in SelectEvents (the preferred
+// path: deterministic, snapshot-consistent with the row, and independent of
+// the in-memory registry connection state). This fallback only runs for rows
+// that the JOIN left empty (e.g. OpenAI-compatible providers whose catalog
+// row is keyed by the compat name, not the internal "openai-compatible-*"
+// key) — there it consults the registry to derive the catalog coordinate.
+// The per-row catalog lookup is deduplicated per (provider, model) so a page
+// of 25 events for the same model costs a single round-trip. No-op when the
+// resolver is nil (file-only deployments or no PG backend); rows then keep an
+// empty OfficialProvider and the dashboard falls back to the raw provider.
 func (h *Handler) FillOfficialProvider(ctx context.Context, rows []store.UsageEventRow) {
 	if h == nil || len(rows) == 0 {
 		return
