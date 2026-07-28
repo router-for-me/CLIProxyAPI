@@ -783,8 +783,49 @@ func removeToolChoiceFromPayload(payload []byte, toolChoicePath string, toolType
 				return updated
 			}
 		}
+		return payload
+	}
+	// Responses API allowed_tools form:
+	//   {"type":"allowed_tools","tools":[{"type":"image_generation"}, ...]}
+	// Prune matching nested tool entries; drop the whole tool_choice if nothing remains.
+	if strings.EqualFold(choiceType, "allowed_tools") {
+		return pruneAllowedToolsChoice(payload, toolChoicePath, choice, toolType)
 	}
 	return payload
+}
+
+func pruneAllowedToolsChoice(payload []byte, toolChoicePath string, choice gjson.Result, toolType string) []byte {
+	tools := choice.Get("tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return payload
+	}
+	toolItems := tools.Array()
+	filtered := make([][]byte, 0, len(toolItems))
+	removed := false
+	for _, tool := range toolItems {
+		if strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), toolType) ||
+			strings.EqualFold(strings.TrimSpace(tool.Get("name").String()), toolType) {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, []byte(tool.Raw))
+	}
+	if !removed {
+		return payload
+	}
+	if len(filtered) == 0 {
+		updated, errDel := sjson.DeleteBytes(payload, toolChoicePath)
+		if errDel == nil {
+			return updated
+		}
+		return payload
+	}
+	toolsPath := toolChoicePath + ".tools"
+	updated, errSet := sjson.SetRawBytes(payload, toolsPath, JoinRawJSONArray(filtered))
+	if errSet != nil {
+		return payload
+	}
+	return updated
 }
 
 func removeToolTypeFromToolsArray(payload []byte, toolsPath string, toolType string) []byte {
