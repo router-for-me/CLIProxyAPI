@@ -89,6 +89,9 @@ type Service struct {
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
 
+	// cooldownStateStore persists runtime cooldown state when enabled.
+	cooldownStateStore coreauth.CooldownStateStore
+
 	// pluginHost owns dynamic plugin lifecycle and runtime capability adapters.
 	pluginHost *pluginhost.Host
 

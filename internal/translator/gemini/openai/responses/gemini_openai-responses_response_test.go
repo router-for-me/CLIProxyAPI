@@ -789,35 +789,64 @@ func TestConvertGeminiResponseToOpenAIResponses_LateThoughtSignatureIsImmutable(
 	}
 }
 
-func TestConvertGeminiResponseToOpenAIResponses_DoneFlushesUnsignedReasoningWithoutCompletion(t *testing.T) {
+func TestConvertGeminiResponseToOpenAIResponses_DoneFinalizesStartedStreamExactlyOnce(t *testing.T) {
 	var param any
-	var out [][]byte
-	out = append(out, ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"unsigned thought","thought":true}]}}],"responseId":"done-flush"}}`), &param)...)
-	out = append(out, ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte("[DONE]"), &param)...)
-	var addedSignature string
+	ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"unsigned thought","thought":true}]}}],"responseId":"done-finalize"}}`), &param)
+	out := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte("[DONE]"), &param)
+
 	var deltas []string
-	doneCount := 0
+	outputDoneCount := 0
 	completedCount := 0
 	for _, chunk := range out {
 		event, data := parseSSEEvent(t, chunk)
 		switch event {
-		case "response.output_item.added":
-			if data.Get("item.type").String() == "reasoning" {
-				addedSignature = data.Get("item.encrypted_content").String()
-			}
 		case "response.reasoning_summary_text.delta":
 			deltas = append(deltas, data.Get("delta").String())
 		case "response.output_item.done":
-			doneCount++
+			outputDoneCount++
 		case "response.completed":
 			completedCount++
 		}
 	}
-	if addedSignature != "" || strings.Join(deltas, "") != "unsigned thought" || doneCount != 0 || completedCount != 0 {
-		t.Fatalf("DONE flush malformed: added=%q deltas=%q done=%d completed=%d", addedSignature, deltas, doneCount, completedCount)
+	if strings.Join(deltas, "") != "unsigned thought" || outputDoneCount != 1 || completedCount != 1 {
+		t.Fatalf("DONE finalization malformed: deltas=%q output_done=%d completed=%d", deltas, outputDoneCount, completedCount)
 	}
 	if duplicate := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte("[DONE]"), &param); len(duplicate) != 0 {
 		t.Fatalf("duplicate DONE emitted %d events", len(duplicate))
+	}
+}
+
+func TestConvertGeminiResponseToOpenAIResponses_FinishReasonThenDoneDoesNotDuplicateCompletion(t *testing.T) {
+	var param any
+	out := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"responseId":"finish-then-done"}}`), &param)
+
+	completedCount := 0
+	for _, chunk := range out {
+		event, _ := parseSSEEvent(t, chunk)
+		if event == "response.completed" {
+			completedCount++
+		}
+	}
+	if completedCount != 1 {
+		t.Fatalf("finish reason emitted %d completion events", completedCount)
+	}
+	if duplicate := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte("data: [DONE]"), &param); len(duplicate) != 0 {
+		t.Fatalf("DONE after finish reason emitted %d events", len(duplicate))
+	}
+	if late := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(`{"candidates":[{"content":{"parts":[{"text":"late"}]}}]}`), &param); len(late) != 0 {
+		t.Fatalf("input after completion emitted %d events", len(late))
+	}
+}
+
+func TestConvertGeminiResponseToOpenAIResponses_BareDoneBeforeStartEmitsNothing(t *testing.T) {
+	var param any
+	out := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte("data: [DONE]"), &param)
+	if len(out) != 0 {
+		t.Fatalf("bare DONE emitted %d events", len(out))
+	}
+	st := param.(*geminiToResponsesState)
+	if st.Started || st.Completed {
+		t.Fatalf("bare DONE changed stream state: started=%t completed=%t", st.Started, st.Completed)
 	}
 }
 

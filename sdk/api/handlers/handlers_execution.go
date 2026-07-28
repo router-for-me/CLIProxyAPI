@@ -1,11 +1,13 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"golang.org/x/net/context"
 )
@@ -67,6 +69,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		Payload: payload,
 	}
 	afterAuthCapture := &requestAfterAuthCapture{}
+	lifecycle := h.newRequestLifecycleTracker(ctx, entryProtocol, normalizedModel, originalRequestedModel, false, reqMeta, execOptions.SkipInterceptorPluginID)
 	opts := coreexecutor.Options{
 		Stream:                      false,
 		Alt:                         alt,
@@ -75,31 +78,27 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		ResponseFormat:              sdktranslator.FromString(responseProtocol),
 		Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
 		Query:                       modelExecutionQuery(ctx, execOptions.Query),
-		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, execOptions.SkipInterceptorPluginID),
+		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
 	}
 	opts.Metadata = reqMeta
-	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	var interceptErr *interfaces.ErrorMessage
+	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
+	if interceptErr != nil {
+		lifecycle.completeError(ctx, interceptErr)
+		return nil, nil, interceptErr
+	}
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		errMsg := executionErrorMessage(err)
+		lifecycle.completeError(ctx, errMsg)
+		return nil, nil, errMsg
 	}
 	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
-	body, responseHeaders := h.applyResponseInterceptors(ctx, responseProtocol, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
+	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), responseProtocol, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
+	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
 }
 
@@ -135,6 +134,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 		Payload: payload,
 	}
 	afterAuthCapture := &requestAfterAuthCapture{}
+	lifecycle := h.newRequestLifecycleTracker(ctx, handlerType, normalizedModel, originalRequestedModel, false, reqMeta, execOptions.SkipInterceptorPluginID)
 	opts := coreexecutor.Options{
 		Stream:                      false,
 		Alt:                         alt,
@@ -142,31 +142,27 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 		SourceFormat:                sdktranslator.FromString(handlerType),
 		Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
 		Query:                       modelExecutionQuery(ctx, execOptions.Query),
-		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, execOptions.SkipInterceptorPluginID),
+		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
 	}
 	opts.Metadata = reqMeta
-	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	var interceptErr *interfaces.ErrorMessage
+	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
+	if interceptErr != nil {
+		lifecycle.completeError(ctx, interceptErr)
+		return nil, nil, interceptErr
+	}
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		errMsg := executionErrorMessage(err)
+		lifecycle.completeError(ctx, errMsg)
+		return nil, nil, errMsg
 	}
 	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
-	body, responseHeaders := h.applyResponseInterceptors(ctx, handlerType, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
+	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), handlerType, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
+	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
 }
 
@@ -179,15 +175,28 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("plugin executor host is unavailable")}
 	}
 	req, opts := h.pluginExecutorRequest(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, false, execOptions)
-	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
-	req, opts = h.applyRequestInterceptorsAfterPluginExecutorRoute(ctx, host, executorPluginID, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	lifecycle := h.newRequestLifecycleTracker(ctx, entryProtocol, modelName, originalRequestedModel, false, opts.Metadata, execOptions.SkipInterceptorPluginID)
+	var interceptErr *interfaces.ErrorMessage
+	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
+	if interceptErr != nil {
+		lifecycle.completeError(ctx, interceptErr)
+		return nil, nil, interceptErr
+	}
+	req, opts, interceptErr = h.applyRequestInterceptorsAfterPluginExecutorRoute(ctx, host, executorPluginID, entryProtocol, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
+	if interceptErr != nil {
+		lifecycle.completeError(ctx, interceptErr)
+		return nil, nil, interceptErr
+	}
 	resp, errExecute := host.ExecutePluginExecutor(ctx, executorPluginID, req, opts)
 	if errExecute != nil {
-		return nil, nil, executionErrorMessage(errExecute)
+		errMsg := executionErrorMessage(errExecute)
+		lifecycle.completeError(ctx, errMsg)
+		return nil, nil, errMsg
 	}
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
-	body, responseHeaders := h.applyResponseInterceptors(ctx, responseProtocol, modelName, originalRequestedModel, opts, rawResponseHeaders, responseHeaders, opts.OriginalRequest, req.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
+	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), responseProtocol, modelName, originalRequestedModel, opts, rawResponseHeaders, responseHeaders, opts.OriginalRequest, req.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
+	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
 }
 
@@ -200,15 +209,28 @@ func (h *BaseAPIHandler) countWithPluginExecutor(ctx context.Context, handlerTyp
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("plugin executor host is unavailable")}
 	}
 	req, opts := h.pluginExecutorRequest(ctx, handlerType, handlerType, modelName, originalRequestedModel, rawJSON, alt, false, execOptions)
-	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
-	req, opts = h.applyRequestInterceptorsAfterPluginExecutorRoute(ctx, host, executorPluginID, handlerType, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	lifecycle := h.newRequestLifecycleTracker(ctx, handlerType, modelName, originalRequestedModel, false, opts.Metadata, execOptions.SkipInterceptorPluginID)
+	var interceptErr *interfaces.ErrorMessage
+	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
+	if interceptErr != nil {
+		lifecycle.completeError(ctx, interceptErr)
+		return nil, nil, interceptErr
+	}
+	req, opts, interceptErr = h.applyRequestInterceptorsAfterPluginExecutorRoute(ctx, host, executorPluginID, handlerType, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
+	if interceptErr != nil {
+		lifecycle.completeError(ctx, interceptErr)
+		return nil, nil, interceptErr
+	}
 	resp, errCount := host.CountPluginExecutor(ctx, executorPluginID, req, opts)
 	if errCount != nil {
-		return nil, nil, executionErrorMessage(errCount)
+		errMsg := executionErrorMessage(errCount)
+		lifecycle.completeError(ctx, errMsg)
+		return nil, nil, errMsg
 	}
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
-	body, responseHeaders := h.applyResponseInterceptors(ctx, handlerType, modelName, originalRequestedModel, opts, rawResponseHeaders, responseHeaders, opts.OriginalRequest, req.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
+	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), handlerType, modelName, originalRequestedModel, opts, rawResponseHeaders, responseHeaders, opts.OriginalRequest, req.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
+	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
 }
 
@@ -238,9 +260,9 @@ func (h *BaseAPIHandler) pluginExecutorRequest(ctx context.Context, entryProtoco
 	return req, opts
 }
 
-func (h *BaseAPIHandler) applyRequestInterceptorsAfterPluginExecutorRoute(ctx context.Context, host PluginExecutorHost, executorPluginID, entryProtocol, originalRequestedModel string, req coreexecutor.Request, opts coreexecutor.Options, skipPluginID string) (coreexecutor.Request, coreexecutor.Options) {
+func (h *BaseAPIHandler) applyRequestInterceptorsAfterPluginExecutorRoute(ctx context.Context, host PluginExecutorHost, executorPluginID, entryProtocol, originalRequestedModel, requestID string, req coreexecutor.Request, opts coreexecutor.Options, skipPluginID string) (coreexecutor.Request, coreexecutor.Options, *interfaces.ErrorMessage) {
 	if !requestInterceptorsEnabled(h.interceptorHost()) {
-		return req, opts
+		return req, opts, nil
 	}
 	toFormat := sdktranslator.FromString(entryProtocol)
 	if resolver, ok := host.(pluginExecutorFormatResolver); ok && resolver != nil {
@@ -257,16 +279,29 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterPluginExecutorRoute(ctx co
 		Headers:        cloneHeader(opts.Headers),
 		Body:           cloneBytes(req.Payload),
 		Metadata:       opts.Metadata,
-	}, skipPluginID)
+	}, requestID, skipPluginID)
 	opts.Headers = mergeRequestInterceptorHeaders(opts.Headers, resp.Headers, resp.ClearHeaders)
 	if len(resp.Body) > 0 {
 		req.Payload = cloneBytes(resp.Body)
 		opts.OriginalRequest = cloneBytes(resp.Body)
 	}
-	return req, opts
+	if resp.Terminate {
+		return req, opts, directTerminationError(resp.StatusCode, resp.ResponseHeaders, resp.ResponseBody)
+	}
+	return req, opts, nil
 }
 
 func executionErrorMessage(err error) *interfaces.ErrorMessage {
+	var terminated *coreexecutor.RequestTerminatedError
+	if errors.As(err, &terminated) && terminated != nil {
+		return &interfaces.ErrorMessage{
+			StatusCode:     normalizedTerminationStatus(terminated.StatusCode()),
+			Error:          err,
+			DirectResponse: true,
+			Body:           terminated.ResponseBody(),
+			Headers:        terminated.ResponseHeaders(),
+		}
+	}
 	status := http.StatusInternalServerError
 	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
 		if code := se.StatusCode(); code > 0 {

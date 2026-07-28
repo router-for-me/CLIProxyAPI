@@ -118,6 +118,12 @@ type CodexHeaderDefaults struct {
 	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
 }
 
+// XAIConfig configures provider-wide xAI request behavior.
+type XAIConfig struct {
+	// InjectXSearch injects xAI's native x_search tool when the request does not declare it.
+	InjectXSearch bool `yaml:"inject-x-search" json:"inject-x-search"`
+}
+
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
@@ -201,9 +207,9 @@ type RoutingConfig struct {
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
-	// Session IDs are extracted from multiple sources:
-	// metadata.user_id (Claude Code session format), X-Session-ID, Session_id (Codex),
-	// X-Client-Request-Id (PI), metadata.user_id, conversation_id, or message hash.
+	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
+	// followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
+	// execution or derived session identity, and the existing message-content hash fallback.
 	// Automatic failover is always enabled when bound auth becomes unavailable.
 	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
 

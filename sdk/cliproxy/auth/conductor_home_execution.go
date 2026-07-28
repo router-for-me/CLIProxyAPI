@@ -90,7 +90,13 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			}
 			execOpts := opts
 			execOpts.ExecutionLifecycle = selection
-			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			var errIntercept error
+			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			if errIntercept != nil {
+				releaseAttempt()
+				selection.End("request_intercepted")
+				return cliproxyexecutor.Response{}, errIntercept
+			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				releaseAttempt()
 				selection.End("attempt_canceled")
