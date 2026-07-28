@@ -3,8 +3,7 @@
 # Builds (optional) and starts:
 #   - cli-proxy-api
 #   - log-uploader
-#
-# log-qa is optional (compose profile "log-qa") and is NOT started by default.
+#   - log-qa
 
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
@@ -28,17 +27,11 @@ function Start-Services {
     param(
         [string]$Mode
     )
-    $services = @("cli-proxy-api", "log-uploader")
+    $services = @("cli-proxy-api", "log-uploader", "log-qa")
     if ($Mode -eq "prebuilt") {
         docker compose up -d --remove-orphans --no-build @services
     } else {
         docker compose up -d --remove-orphans --pull never @services
-    }
-    $running = docker ps --filter "name=cli-proxy-api-log-qa" --format "{{.Names}}" 2>$null
-    if ($running -match "cli-proxy-api-log-qa") {
-        Write-Host "[prep] stopping existing log-qa container (disabled by default)"
-        docker stop cli-proxy-api-log-qa | Out-Null
-        docker update --restart=no cli-proxy-api-log-qa 2>$null | Out-Null
     }
 }
 
@@ -56,7 +49,7 @@ if (-not (Test-Path ".env")) {
     Write-Host "[prep] created empty .env"
 }
 
-New-Item -ItemType Directory -Force -Path "logs","auths" | Out-Null
+New-Item -ItemType Directory -Force -Path "logs","auths","logs\keys","logs\log-qa" | Out-Null
 
 Write-Host "Please select an option:"
 Write-Host "1) Run using Pre-built Image (Recommended)"
@@ -68,11 +61,12 @@ function Show-Status {
     Write-Host "========================================"
     Write-Host "  Deploy complete"
     Write-Host "========================================"
-    Write-Host "Services started: cli-proxy-api, log-uploader"
-    Write-Host "Services not started: log-qa (optional)"
+    Write-Host "Services started: cli-proxy-api, log-uploader, log-qa"
     Write-Host "Management UI: http://<server-ip>:8317/management.html"
-    Write-Host "Start log-qa later: docker compose --profile log-qa up -d log-qa"
+    Write-Host "Log QA panel:  Management → LOG QA"
     Write-Host "QA reports:    .\logs\log-qa\reports\"
+    Write-Host "One-shot QA:   docker compose exec log-qa ./log-qa -config /CLIProxyAPI/log-qa.yaml -once"
+    Write-Host "Note: if prebuilt image lacks ./log-qa, use option 2 (source build)."
     Write-Host ""
     docker compose ps
 }
@@ -80,7 +74,7 @@ function Show-Status {
 switch ($choice) {
     "1" {
         Write-Host "--- Running with Pre-built Image ---"
-        Write-Host "Note: starts cli-proxy-api + log-uploader only (log-qa profile off)."
+        Write-Host "Note: starts cli-proxy-api + log-uploader + log-qa."
         Start-Services -Mode prebuilt
         Show-Status
     }
@@ -99,7 +93,7 @@ switch ($choice) {
         $env:DOCKER_BUILDKIT = "1"
 
         docker compose build --build-arg VERSION=$VERSION --build-arg COMMIT=$COMMIT --build-arg BUILD_DATE=$BUILD_DATE
-        Write-Host "Starting cli-proxy-api + log-uploader (log-qa not started)..."
+        Write-Host "Starting cli-proxy-api + log-uploader + log-qa..."
         Start-Services -Mode local
         Show-Status
     }

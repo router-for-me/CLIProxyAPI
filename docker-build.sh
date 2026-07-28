@@ -5,9 +5,7 @@
 # Builds (optional) and starts:
 #   - cli-proxy-api      (proxy + Management UI)
 #   - log-uploader       (hourly archive upload to TOS)
-#
-# log-qa is optional (compose profile "log-qa") and is NOT started by default,
-# so it does not compete with log-uploader for CPU/disk during backlog drain.
+#   - log-qa             (read-only QA for unuploaded request logs)
 #
 
 set -euo pipefail
@@ -64,7 +62,7 @@ fi
 
 # plugins/ is bind-mounted into the API container so store-installed
 # plugin binaries survive container recreate.
-mkdir -p logs auths plugins
+mkdir -p logs auths plugins logs/keys logs/log-qa
 
 echo
 echo "Please select an option:"
@@ -74,18 +72,11 @@ read -r -p "Enter choice [1-2]: " choice
 
 start_services() {
   local mode="$1"
-  # Explicit service list: do not start log-qa (compose profile "log-qa").
-  local services=(cli-proxy-api log-uploader)
+  local services=(cli-proxy-api log-uploader log-qa)
   if [[ "${mode}" == "prebuilt" ]]; then
     docker compose up -d --remove-orphans --no-build "${services[@]}"
   else
     docker compose up -d --remove-orphans --pull never "${services[@]}"
-  fi
-  # If an older deploy left log-qa running, stop it so it does not keep using CPU/IO.
-  if docker ps --filter "name=cli-proxy-api-log-qa" --format "{{.Names}}" 2>/dev/null | grep -q "cli-proxy-api-log-qa"; then
-    echo "[prep] stopping existing log-qa container (disabled by default)"
-    docker stop cli-proxy-api-log-qa >/dev/null || true
-    docker update --restart=no cli-proxy-api-log-qa >/dev/null 2>&1 || true
   fi
 }
 
@@ -97,28 +88,27 @@ print_status() {
   echo "Services started:"
   echo "  - cli-proxy-api         proxy + Management UI"
   echo "  - log-uploader          hourly upload to TOS"
-  echo "Services not started:"
-  echo "  - log-qa                optional; start only when needed"
+  echo "  - log-qa                unuploaded log QA (Management LOG QA panel)"
   echo
   echo "Useful commands:"
   echo "  docker compose ps"
   echo "  docker compose logs -f log-uploader"
+  echo "  docker compose logs -f log-qa"
   echo "  docker compose logs -f cli-proxy-api"
   echo
-  echo "Start log-qa later (optional):"
-  echo "  docker compose --profile log-qa up -d log-qa"
-  echo "  docker compose --profile log-qa logs -f log-qa"
-  echo "  docker compose --profile log-qa stop log-qa"
+  echo "One-shot QA:"
+  echo "  docker compose exec log-qa ./log-qa -config /CLIProxyAPI/log-qa.yaml -once"
   echo
   echo "Management UI:  http://<server-ip>:8317/management.html"
-  echo "Log QA panel:   only has data after log-qa has been run"
-  echo
+  echo "Log QA panel:   Management → LOG QA"
   echo "QA reports dir (host): ./logs/log-qa/reports/"
   echo "Plugins dir (host):    ./plugins  (mounted at /CLIProxyAPI/plugins)"
-  echo "One-shot QA (no daemon): docker compose run --rm --profile log-qa log-qa ./log-qa -config /CLIProxyAPI/log-qa.yaml -once"
   echo
   echo "Plugins: set plugins.enabled=true and plugins.configs.<id>.enabled=true in config.yaml,"
   echo "         then install/update the plugin from Management after deploy."
+  echo
+  echo "Note: if prebuilt image lacks ./log-qa binary, use option 2 (source build)"
+  echo "      or rebuild the image so Dockerfile includes log-qa."
   echo
   docker compose ps
 }
@@ -126,7 +116,7 @@ print_status() {
 case "$choice" in
   1)
     echo "--- Running with Pre-built Image ---"
-    echo "Note: starts cli-proxy-api + log-uploader only (log-qa profile off)."
+    echo "Note: starts cli-proxy-api + log-uploader + log-qa."
     start_services prebuilt
     print_status
     ;;
@@ -152,7 +142,7 @@ case "$choice" in
       --build-arg COMMIT="${COMMIT}" \
       --build-arg BUILD_DATE="${BUILD_DATE}"
 
-    echo "Starting cli-proxy-api + log-uploader (log-qa not started)..."
+    echo "Starting cli-proxy-api + log-uploader + log-qa..."
     start_services local
     print_status
     ;;
