@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 
+	internalsse "github.com/router-for-me/CLIProxyAPI/v7/internal/sse"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -74,14 +75,14 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 	if len(r.pendingBuf) > 0 {
 		combined := make([]byte, 0, len(r.pendingBuf)+1+len(chunk))
 		combined = append(combined, r.pendingBuf...)
-		if combined[len(combined)-1] != '\n' {
+		if combined[len(combined)-1] != '\n' && bytes.HasPrefix(bytes.TrimSpace(r.pendingBuf), []byte("event:")) && bytes.HasPrefix(bytes.TrimSpace(chunk), []byte("data:")) {
 			combined = append(combined, '\n')
 		}
 		combined = append(combined, chunk...)
 		chunk = combined
 		r.pendingBuf = nil
 	}
-	chunk = normalizeGluedSSEEvents(chunk)
+	chunk = internalsse.NormalizeGluedFrames(chunk)
 
 	if len(chunk) > maxPendingBufSize {
 		return chunk
@@ -204,54 +205,7 @@ func extractSSEDataLine(line []byte) (prefix []byte, jsonData []byte, ok bool) {
 }
 
 func normalizeGluedSSEEvents(chunk []byte) []byte {
-	if len(chunk) == 0 {
-		return chunk
-	}
-	// Antigravity/Gemini translators emit event frames without trailing blank lines.
-	// When multiple frames are buffered back-to-back they can glue as "...}event:...".
-	// Only split when the bytes before the glue close a valid SSE data JSON object.
-	chunk = safeReplaceGlued(chunk, []byte("}event:"), []byte("}\n\nevent:"))
-	chunk = safeReplaceGlued(chunk, []byte("}\r\nevent:"), []byte("}\r\n\r\nevent:"))
-	// Codex executor emits one "data: {json}" chunk per SSE line without trailing newlines.
-	// Buffered chunks can glue as "...}data:...".
-	chunk = safeReplaceGlued(chunk, []byte("}data:"), []byte("}\ndata:"))
-	chunk = safeReplaceGlued(chunk, []byte("}\r\ndata:"), []byte("}\r\ndata:"))
-	return chunk
-}
-
-func safeReplaceGlued(chunk []byte, old, new []byte) []byte {
-	if len(old) == 0 || len(chunk) == 0 {
-		return chunk
-	}
-	if !bytes.Contains(chunk, old) {
-		return chunk
-	}
-	var result []byte
-	remaining := chunk
-	for {
-		idx := bytes.Index(remaining, old)
-		if idx == -1 {
-			result = append(result, remaining...)
-			break
-		}
-		lineStart := bytes.LastIndexByte(remaining[:idx], '\n')
-		var part []byte
-		if lineStart == -1 {
-			part = remaining[:idx+1]
-		} else {
-			part = remaining[lineStart+1 : idx+1]
-		}
-		_, jsonData, ok := extractSSEDataLine(part)
-		if ok && len(jsonData) > 0 && gjson.ValidBytes(jsonData) {
-			result = append(result, remaining[:idx]...)
-			result = append(result, new...)
-			remaining = remaining[idx+len(old):]
-			continue
-		}
-		result = append(result, remaining[:idx+len(old)]...)
-		remaining = remaining[idx+len(old):]
-	}
-	return result
+	return internalsse.NormalizeGluedFrames(chunk)
 }
 
 // Finish flushes any buffered partial SSE data at the end of a stream.
@@ -263,7 +217,7 @@ func (r *StreamRewriter) Finish() []byte {
 	copy(buf, r.pendingBuf)
 	buf[len(r.pendingBuf)] = '\n'
 	buf[len(r.pendingBuf)+1] = '\n'
-	buf = normalizeGluedSSEEvents(buf)
+	buf = internalsse.NormalizeGluedFrames(buf)
 	r.pendingBuf = nil
 	out := r.RewriteChunk(buf)
 	if len(r.pendingBuf) > 0 {

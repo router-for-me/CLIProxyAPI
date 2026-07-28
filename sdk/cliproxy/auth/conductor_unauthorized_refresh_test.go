@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -156,6 +157,37 @@ func newUnauthorizedRefreshFixture(t *testing.T, refreshFail bool) (*Manager, *u
 	}
 
 	return m, executor, primary, backup, model
+}
+
+func TestManager_ExecuteStreamRecoveryRefreshesUnauthorizedWithoutChargingBudget(t *testing.T) {
+	m, executor, primary, backup, model := newUnauthorizedRefreshFixture(t, false)
+	result, err := m.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true, StreamRecovery: cliproxyexecutor.StreamRecoveryPolicy{
+		Attempts:       1,
+		MaxBufferBytes: 1024,
+		MaxRetryWindow: time.Second,
+		MaxConcurrent:  1,
+		InitialBackoff: time.Nanosecond,
+		MaxBackoff:     time.Nanosecond,
+	}})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream error: %v", chunk.Err)
+		}
+	}
+	if got := executor.RefreshCalls(); got != 1 {
+		t.Fatalf("Refresh calls = %d, want 1", got)
+	}
+	if got := executor.StreamCalls(); len(got) != 2 || got[0] != primary.ID || got[1] != primary.ID {
+		t.Fatalf("Stream calls = %v, want refreshed primary twice", got)
+	}
+	for _, id := range executor.StreamCalls() {
+		if id == backup.ID {
+			t.Fatalf("backup auth used during refresh recovery")
+		}
+	}
 }
 
 func TestManager_Execute_UnauthorizedRefreshesCurrentAuthBeforeFallback(t *testing.T) {

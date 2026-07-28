@@ -93,6 +93,15 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.NonStreamKeepAliveInterval != newCfg.NonStreamKeepAliveInterval {
 		changes = append(changes, fmt.Sprintf("nonstream-keepalive-interval: %d -> %d", oldCfg.NonStreamKeepAliveInterval, newCfg.NonStreamKeepAliveInterval))
 	}
+	if oldCfg.Streaming.KeepAliveSeconds != newCfg.Streaming.KeepAliveSeconds {
+		changes = append(changes, fmt.Sprintf("streaming.keepalive-seconds: %d -> %d", oldCfg.Streaming.KeepAliveSeconds, newCfg.Streaming.KeepAliveSeconds))
+	}
+	if oldCfg.Streaming.BootstrapRetries != newCfg.Streaming.BootstrapRetries {
+		changes = append(changes, fmt.Sprintf("streaming.bootstrap-retries: %d -> %d", oldCfg.Streaming.BootstrapRetries, newCfg.Streaming.BootstrapRetries))
+	}
+	if !reflect.DeepEqual(oldCfg.Streaming.Recovery, newCfg.Streaming.Recovery) {
+		changes = append(changes, "streaming.recovery: updated")
+	}
 
 	// Quota-exceeded behavior
 	if oldCfg.QuotaExceeded.SwitchProject != newCfg.QuotaExceeded.SwitchProject {

@@ -275,6 +275,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
 		Query:                       modelExecutionQuery(ctx, execOptions.Query),
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
+		StreamRecovery:              StreamRecoveryPolicy(h.Cfg),
 	}
 	opts.Metadata = reqMeta
 	var interceptErr *interfaces.ErrorMessage
@@ -431,62 +432,10 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 	}
 
-	bootstrapEligible := func(err error) bool {
-		status := statusFromError(err)
-		if status == 0 {
-			return true
-		}
-		switch status {
-		case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
-			http.StatusRequestTimeout, http.StatusTooManyRequests:
-			return true
-		default:
-			return status >= http.StatusInternalServerError
-		}
-	}
-
-	maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
-	if h.AuthManager.HomeEnabled() {
-		maxBootstrapRetries = 0
-	}
-	for bootstrapRetries := 0; !streamCanceledBeforeRead; {
-		readInitialStreamChunks()
-		if streamCanceledBeforeRead || bootstrapErr != nil || bootstrapStreamErr == nil {
-			break
-		}
-		if bootstrapRetries >= maxBootstrapRetries || !bootstrapEligible(bootstrapStreamErr) {
-			bootstrapErr = executionErrorMessage(bootstrapStreamErr)
-			break
-		}
-		bootstrapRetries++
-		retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
-		if retryErr != nil {
-			originalBootstrapErr := executionErrorMessage(bootstrapStreamErr)
-			if isAuthSelectionUnavailable(retryErr) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {
-				bootstrapErr = originalBootstrapErr
-			} else {
-				bootstrapErr = executionErrorMessage(enrichAuthSelectionError(retryErr, providers, normalizedModel))
-			}
-			break
-		}
-		if retryResult == nil {
-			bootstrapErr = executionErrorMessage(fmt.Errorf("auth manager returned nil stream"))
-			break
-		}
-		rawStreamHeaders = cloneHeader(retryResult.Headers)
-		baseStreamHeaders = cloneHeader(retryResult.Headers)
-		streamHeaderInitialized = false
-		streamClosedBeforeRead = false
-		bootstrapStreamErr = nil
-		bootstrapPayload = nil
-		bootstrapChunkIndex = 0
-		bootstrapHistoryChunks = nil
-		chunks = retryResult.Chunks
-		if chunks == nil {
-			closed := make(chan coreexecutor.StreamChunk)
-			close(closed)
-			chunks = closed
-		}
+	readInitialStreamChunks()
+	if bootstrapStreamErr != nil {
+		bootstrapStreamErr = enrichAuthSelectionError(bootstrapStreamErr, providers, normalizedModel)
+		bootstrapErr = executionErrorMessage(bootstrapStreamErr)
 	}
 
 	upstreamHeaders := downstreamHeadersAfterInterceptors(baseStreamHeaders, rawStreamHeaders, passthroughHeadersEnabled)
