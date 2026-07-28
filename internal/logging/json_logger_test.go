@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 )
@@ -623,6 +624,38 @@ func TestJSONRequestLoggingEncodesInvalidUTF8Losslessly(t *testing.T) {
 	}
 	if entry.Response.BodyRaw != want || entry.Response.BodyEncoding != "base64" {
 		t.Fatalf("response = %q encoding=%q", entry.Response.BodyRaw, entry.Response.BodyEncoding)
+	}
+}
+
+func TestJSONRequestLoggingEncodesJSONLikeInvalidUTF8Losslessly(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := NewFileRequestLoggerWithFormat(true, tempDir, "", 10, "json")
+	payload := []byte{'"', 0xff, '"'}
+	if !json.Valid(payload) {
+		t.Fatalf("test payload must exercise json.Valid with invalid UTF-8")
+	}
+	err := logger.LogRequest(
+		"/v1/chat/completions", "POST", nil, payload, 200, nil, payload,
+		nil, payload, payload, nil, nil, "req-json-binary-123", time.Now(), time.Time{},
+	)
+	if err != nil {
+		t.Fatalf("LogRequest failed: %v", err)
+	}
+
+	data := readOnlyLogFile(t, tempDir)
+	if !utf8.Valid(data) || !json.Valid(data) {
+		t.Fatalf("log entry is not valid UTF-8 JSON: %q", data)
+	}
+	var entry struct {
+		RequestBodyRaw      string `json:"request_body_raw"`
+		RequestBodyEncoding string `json:"request_body_encoding"`
+	}
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("unmarshal JSON log: %v", err)
+	}
+	want := base64.StdEncoding.EncodeToString(payload)
+	if entry.RequestBodyRaw != want || entry.RequestBodyEncoding != "base64" {
+		t.Fatalf("request body = %q encoding=%q", entry.RequestBodyRaw, entry.RequestBodyEncoding)
 	}
 }
 

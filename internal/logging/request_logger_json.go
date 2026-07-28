@@ -217,13 +217,13 @@ func setJSONPayload(payload []byte, structured *json.RawMessage, raw, encoding *
 	if len(payload) == 0 {
 		return
 	}
-	if json.Valid(payload) {
-		*structured = json.RawMessage(payload)
-		return
-	}
 	if !utf8.Valid(payload) {
 		*raw = base64.StdEncoding.EncodeToString(payload)
 		*encoding = "base64"
+		return
+	}
+	if json.Valid(payload) {
+		*structured = json.RawMessage(payload)
 		return
 	}
 	*raw = string(payload)
