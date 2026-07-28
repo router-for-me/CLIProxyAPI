@@ -448,6 +448,16 @@ func codexAuthImageGenerationDisabledErr(auth *cliproxyauth.Auth) error {
 	}
 }
 
+// stripCodexImageGenerationIfDisabled strips image_generation tools/tool_choice when this
+// credential has opted out. Unlike applyCodexImageGenerationPolicy it never injects tools,
+// so it is safe for paths such as /responses/compact that must not auto-add hosted tools.
+func stripCodexImageGenerationIfDisabled(auth *cliproxyauth.Auth, body []byte) []byte {
+	if auth == nil || !auth.DisableImageGenerationOverride() {
+		return body
+	}
+	return helps.StripImageGenerationTools(body)
+}
+
 func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth, headers http.Header) []byte {
 	if isCodexResponsesLiteRequest(body, headers) {
 		return body

@@ -422,3 +422,19 @@ func TestExecuteOpenAIImageStream_PerAuthDisableFailsFast(t *testing.T) {
 		t.Fatalf("got err=%v status, want 403", err)
 	}
 }
+
+func TestStripCodexImageGenerationIfDisabled(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"image_generation"},{"type":"function","name":"f1"}],"tool_choice":{"type":"image_generation"}}`)
+	if got := stripCodexImageGenerationIfDisabled(nil, body); string(got) != string(body) {
+		t.Fatalf("nil auth must leave body unchanged")
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"disable_image_generation": true}}
+	got := stripCodexImageGenerationIfDisabled(auth, body)
+	tools := gjson.GetBytes(got, "tools")
+	if !tools.IsArray() || len(tools.Array()) != 1 || tools.Array()[0].Get("type").String() != "function" {
+		t.Fatalf("expected only function tool remaining, got %s", tools.Raw)
+	}
+	if gjson.GetBytes(got, "tool_choice").Exists() {
+		t.Fatalf("expected tool_choice removed, got %s", gjson.GetBytes(got, "tool_choice").Raw)
+	}
+}
