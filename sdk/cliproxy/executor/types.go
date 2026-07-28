@@ -18,6 +18,11 @@ const RequestPathMetadataKey = "request_path"
 // DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
 const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 
+// RouteStrategyMetadataKey carries the per-model routing strategy override
+// ("priority" or "failover") resolved from the matched ModelRoute. An empty
+// value (or absence) means the configured global routing.strategy applies.
+const RouteStrategyMetadataKey = "route_strategy"
+
 // AuthSelectionModelMetadataKey overrides the model used only for auth selection.
 const AuthSelectionModelMetadataKey = "auth_selection_model"
 
