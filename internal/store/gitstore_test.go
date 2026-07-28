@@ -211,7 +211,6 @@ func TestEnsureRepositoryResetsToRemoteDefaultWhenBranchUnset(t *testing.T) {
 	)
 
 	baseDir := filepath.Join(root, "workspace", "auths")
-	// First store pins to develop and prepares local workspace
 	storePinned := NewGitTokenStore(remoteDir, "", "", "develop")
 	storePinned.SetBaseDir(baseDir)
 	if err := storePinned.EnsureRepository(); err != nil {
@@ -219,16 +218,13 @@ func TestEnsureRepositoryResetsToRemoteDefaultWhenBranchUnset(t *testing.T) {
 	}
 	assertRepositoryBranchAndContents(t, filepath.Join(root, "workspace"), "develop", "remote develop branch\n")
 
-	// Second store has branch unset and should reset local workspace to remote default (master)
 	storeDefault := NewGitTokenStore(remoteDir, "", "", "")
 	storeDefault.SetBaseDir(baseDir)
 	if err := storeDefault.EnsureRepository(); err != nil {
 		t.Fatalf("EnsureRepository default: %v", err)
 	}
-	// Local HEAD should now follow remote default (master)
 	assertRepositoryHeadBranch(t, filepath.Join(root, "workspace"), "master")
 
-	// Make a local change and push using the store with branch unset; push should update remote master
 	workspaceDir := filepath.Join(root, "workspace")
 	if err := os.WriteFile(filepath.Join(workspaceDir, "branch.txt"), []byte("local master update\n"), 0o600); err != nil {
 		t.Fatalf("write local master marker: %v", err)
@@ -306,7 +302,6 @@ func TestGitTokenStoreWatcherRemovalNoOpsAfterExplicitDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	// Management deletes unlink the file before invoking Store.Delete.
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("pre-remove explicit auth: %v", err)
 	}
