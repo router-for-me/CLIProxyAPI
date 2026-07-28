@@ -983,6 +983,39 @@ func isFreeCodexAuth(auth *Auth) bool {
 	return strings.EqualFold(strings.TrimSpace(auth.Attributes["plan_type"]), "free")
 }
 
+// routeStrategyFromMetadata maps the per-model routing strategy carried in
+// execution metadata to the scheduler strategy. "priority" pins to the
+// highest-priority provider (fill-first); "failover" enables round-robin
+// across providers with the existing inner-loop failover on error. Any other
+// value (including absence) yields schedulerStrategyCurrent, which means the
+// configured global routing.strategy applies unchanged.
+func routeStrategyFromMetadata(meta map[string]any) schedulerStrategy {
+	if len(meta) == 0 {
+		return schedulerStrategyCurrent
+	}
+	raw, ok := meta[cliproxyexecutor.RouteStrategyMetadataKey]
+	if !ok || raw == nil {
+		return schedulerStrategyCurrent
+	}
+	var strategy string
+	switch val := raw.(type) {
+	case string:
+		strategy = strings.TrimSpace(val)
+	case []byte:
+		strategy = strings.TrimSpace(string(val))
+	default:
+		return schedulerStrategyCurrent
+	}
+	switch strings.ToLower(strategy) {
+	case "priority":
+		return schedulerStrategyFillFirst
+	case "failover":
+		return schedulerStrategyRoundRobin
+	default:
+		return schedulerStrategyCurrent
+	}
+}
+
 func publishSelectedAuthMetadata(meta map[string]any, auth *Auth) {
 	if len(meta) == 0 || auth == nil {
 		return

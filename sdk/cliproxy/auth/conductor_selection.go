@@ -1398,11 +1398,16 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	}
 
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	// Per-model routing strategy (priority/failover) overrides the global
+	// scheduler strategy for this request only. The override is honored solely
+	// on the builtin scheduler fast path; plugin-scheduler deployments keep
+	// their global strategy (documented). schedulerStrategyCurrent = inherit.
+	routeStrategy := routeStrategyFromMetadata(opts.Metadata)
 	for {
-		selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+		selected, providerKey, errPick := m.scheduler.pickMixedWithStrategy(ctx, eligibleProviders, model, opts, tried, routeStrategy)
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 			m.syncScheduler()
-			selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+			selected, providerKey, errPick = m.scheduler.pickMixedWithStrategy(ctx, eligibleProviders, model, opts, tried, routeStrategy)
 		}
 		if errPick != nil {
 			return nil, nil, "", errPick
