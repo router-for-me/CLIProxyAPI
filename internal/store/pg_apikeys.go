@@ -36,6 +36,11 @@ const SecretPrefix = "sk-"
 // ErrAPIKeyNotFound is returned when no API key matches the supplied identifier.
 var ErrAPIKeyNotFound = errors.New("postgres store: api key not found")
 
+// ErrInvalidSecret is returned when a caller-supplied secret fails validation
+// (e.g. too short). It lets HTTP handlers map secret-validation failures to
+// 400 responses rather than the default 500.
+var ErrInvalidSecret = errors.New("postgres store: invalid api key secret")
+
 // APIKey mirrors a row in the api_keys table. The plaintext secret is never
 // persisted: only KeyHash (SHA-256) is stored. KeyPrefix exposes the first
 // characters of the secret for display in management UIs. KeyAlias is an
@@ -249,7 +254,7 @@ func (s *APIKeyStore) Create(ctx context.Context, name string, alias string, sec
 
 func validateSecret(secret string) error {
 	if len(secret) < 16 {
-		return fmt.Errorf("postgres store: api key secret too short (min 16 chars)")
+		return fmt.Errorf("%w: api key secret too short (min 16 chars)", ErrInvalidSecret)
 	}
 	return nil
 }
@@ -790,12 +795,25 @@ func (s *APIKeyStore) UpdateUserID(ctx context.Context, id, userID string) error
 
 // Regenerate issues a new secret for the given key ID. The key ID, policy,
 // metadata, and lifecycle status are preserved; only the hash changes.
-func (s *APIKeyStore) Regenerate(ctx context.Context, id string) (string, error) {
+//
+// When secret is empty a fresh secret is auto-generated via GenerateSecret
+// (the historical behavior). When secret is non-empty it is validated with
+// validateSecret and used verbatim — this lets callers rotate to a chosen
+// custom string. As with Create, uniqueness of the secret is the caller's
+// responsibility: no collision pre-check is performed, only the SHA-256 hash
+// is persisted, and a duplicate custom secret will silently shadow the row
+// that LookupByHash resolves first.
+func (s *APIKeyStore) Regenerate(ctx context.Context, id, secret string) (string, error) {
 	if s == nil || s.db == nil {
 		return "", fmt.Errorf("postgres store: api key store not initialized")
 	}
-	secret, err := GenerateSecret()
-	if err != nil {
+	if secret == "" {
+		var err error
+		secret, err = GenerateSecret()
+		if err != nil {
+			return "", err
+		}
+	} else if err := validateSecret(secret); err != nil {
 		return "", err
 	}
 	hash := HashSecret(secret)

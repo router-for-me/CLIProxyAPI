@@ -258,6 +258,8 @@ function CreateKeyModal({ onClose, onCreated }) {
   const [search, setSearch] = useState('');
   const [userId, setUserId] = useState('');
   const [expiresAt, setExpiresAt] = useState('');
+  const [customSecretOn, setCustomSecretOn] = useState(false);
+  const [customSecret, setCustomSecret] = useState('');
   const [attachPolicy, setAttachPolicy] = useState(false);
   const [policyForm, setPolicyForm] = useState(null);
   const [submitting, setSubmitting] = useState(false);
@@ -290,6 +292,14 @@ function CreateKeyModal({ onClose, onCreated }) {
       setError('Please select an Internal User owner. The LiteLLM workflow requires every key to belong to a user.');
       return;
     }
+    // When a custom secret is enabled it must be at least 16 chars. The
+    // server enforces the same minimum, but guarding client-side avoids a
+    // round-trip and gives immediate inline feedback.
+    const secret = customSecretOn ? customSecret.trim() : '';
+    if (customSecretOn && secret.length < 16) {
+      setError('Custom secret must be at least 16 characters.');
+      return;
+    }
     setSubmitting(true);
     setError('');
     try {
@@ -306,6 +316,7 @@ function CreateKeyModal({ onClose, onCreated }) {
       }
       const result = await createAPIKey({
         name,
+        secret: secret || undefined,
         user_id: userId,
         expires_at: expiresAt ? new Date(expiresAt).toISOString() : null,
         policy,
@@ -432,6 +443,41 @@ function CreateKeyModal({ onClose, onCreated }) {
             disabled={submitting}
           />
           <div className="form__hint">Leave empty for a key that never expires.</div>
+        </div>
+
+        <div className="form__row" style={{ marginTop: 8 }}>
+          <label className="row gap-sm" style={{ cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={customSecretOn}
+              onChange={(e) => {
+                setCustomSecretOn(e.target.checked);
+                if (!e.target.checked) setCustomSecret('');
+              }}
+              style={{ width: 'auto' }}
+            />
+            <span className="form__label" style={{ margin: 0 }}>
+              Use a custom secret string (instead of auto-generating)
+            </span>
+          </label>
+          <div className="form__hint">
+            Optional. When off, the server generates an opaque{' '}
+            <code className="mono">sk-…</code> secret. When on, supply your own
+            string (min 16 characters); only its SHA-256 hash is stored, and
+            it must be unique to this deployment.
+          </div>
+          {customSecretOn && (
+            <input
+              type="text"
+              value={customSecret}
+              onChange={(e) => setCustomSecret(e.target.value)}
+              placeholder="e.g. sk-my-team-rotate-key-0123456789"
+              disabled={submitting}
+              style={{ width: '100%', marginTop: 8 }}
+              minLength={16}
+              required={customSecretOn}
+            />
+          )}
         </div>
 
         <div className="form__row" style={{ marginTop: 8 }}>

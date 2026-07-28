@@ -267,8 +267,9 @@ func TestAPIKeyCreateLookupAndGetLifecycle(t *testing.T) {
 	apiKeys.TouchLastUsed(ctx, key.ID)
 
 	// Regenerate should produce a new secret and invalidate hash-based lookup
-	// of the old secret while preserving the key ID.
-	newSecret, err := apiKeys.Regenerate(ctx, key.ID)
+	// of the old secret while preserving the key ID. Passing an empty secret
+	// triggers the auto-generate path (the historical behavior).
+	newSecret, err := apiKeys.Regenerate(ctx, key.ID, "")
 	if err != nil {
 		t.Fatalf("Regenerate: %v", err)
 	}
@@ -280,6 +281,24 @@ func TestAPIKeyCreateLookupAndGetLifecycle(t *testing.T) {
 	}
 	if _, _, err := apiKeys.LookupByHash(ctx, HashSecret(newSecret)); err != nil {
 		t.Fatalf("LookupByHash with new secret should succeed; got %v", err)
+	}
+
+	// Regenerate with a custom secret should use it verbatim (after passing
+	// validation), rotate the hash/prefix accordingly, and reject too-short
+	// values via ErrInvalidSecret.
+	const customSecret = "sk-custom-rotate-key-0123456789"
+	customNew, err := apiKeys.Regenerate(ctx, key.ID, customSecret)
+	if err != nil {
+		t.Fatalf("Regenerate custom: %v", err)
+	}
+	if customNew != customSecret {
+		t.Fatalf("Regenerate custom returned %q; want %q", customNew, customSecret)
+	}
+	if _, _, err := apiKeys.LookupByHash(ctx, HashSecret(customSecret)); err != nil {
+		t.Fatalf("LookupByHash with custom secret should succeed; got %v", err)
+	}
+	if _, err := apiKeys.Regenerate(ctx, key.ID, "short"); !errors.Is(err, ErrInvalidSecret) {
+		t.Fatalf("Regenerate with short secret should return ErrInvalidSecret; got %v", err)
 	}
 
 	// Delete the key.

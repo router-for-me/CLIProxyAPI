@@ -94,6 +94,14 @@ type pgKeyResponse struct {
 	Policy *store.Policy `json:"policy,omitempty"`
 }
 
+// pgRegenerateKeyRequest is the optional JSON body for POST
+// /api-keys-pg/:id/regenerate. When the body is absent (or secret is empty)
+// the server auto-generates a fresh secret; when secret is supplied it is
+// used verbatim after passing the same min-length validation as Create.
+type pgRegenerateKeyRequest struct {
+	Secret string `json:"secret,omitempty"` // optional; auto-generated when empty
+}
+
 // pgListKeysResponse returns all keys (without hashes or plaintext secrets).
 type pgListKeysResponse struct {
 	Keys []*store.APIKey `json:"api_keys"`
@@ -238,8 +246,19 @@ func (h *Handler) CreatePGAPIKey(c *gin.Context) {
 			return
 		}
 	}
-	key, secret, err := apiKeys.Create(c.Request.Context(), req.Name, req.Alias, req.Secret, req.ExpiresAt, req.Metadata, req.Policy)
+	// Trim caller-supplied secrets so accidental surrounding whitespace does
+	// not sneak into the hash (and break auth at request time). An empty
+	// trimmed value falls through to server-side auto-generation.
+	createSecret := strings.TrimSpace(req.Secret)
+	key, secret, err := apiKeys.Create(c.Request.Context(), req.Name, req.Alias, createSecret, req.ExpiresAt, req.Metadata, req.Policy)
 	if err != nil {
+		// A caller-supplied secret that fails validation is a client error,
+		// not an internal failure. Map it to 400 so the dashboard can surface
+		// the message rather than reporting a server fault.
+		if errors.Is(err, store.ErrInvalidSecret) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": err.Error()}})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
 	}
@@ -540,14 +559,35 @@ func (h *Handler) PutPGAPIKeyPolicy(c *gin.Context) {
 }
 
 // RegeneratePGAPIKey handles POST /v0/management/api-keys-pg/:id/regenerate.
+//
+// The request body is optional. When omitted (or when secret is empty) the
+// server auto-generates a fresh secret — preserving the historical no-body
+// behavior. When a JSON body with a non-empty "secret" is supplied, it is
+// validated (min 16 chars) and used verbatim so callers can rotate to a
+// chosen custom string. A validation failure yields 400 rather than 500.
 func (h *Handler) RegeneratePGAPIKey(c *gin.Context) {
 	apiKeys, _, _, policySvc, ok := h.requirePG(c)
 	if !ok {
 		return
 	}
 	id := c.Param("id")
-	secret, err := apiKeys.Regenerate(c.Request.Context(), id)
+	var secret string
+	// Only bind JSON when a body is actually present so bare POSTs (no
+	// Content-Length / empty body) keep working as auto-generate.
+	if c.Request.ContentLength > 0 {
+		var req pgRegenerateKeyRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": err.Error()}})
+			return
+		}
+		secret = strings.TrimSpace(req.Secret)
+	}
+	newSecret, err := apiKeys.Regenerate(c.Request.Context(), id, secret)
 	if err != nil {
+		if errors.Is(err, store.ErrInvalidSecret) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": err.Error()}})
+			return
+		}
 		h.translateKeyError(c, err)
 		return
 	}
@@ -556,7 +596,7 @@ func (h *Handler) RegeneratePGAPIKey(c *gin.Context) {
 	if svc := *policySvc; svc != nil {
 		svc.InvalidateAll()
 	}
-	c.JSON(http.StatusOK, gin.H{"id": id, "secret": secret})
+	c.JSON(http.StatusOK, gin.H{"id": id, "secret": newSecret})
 }
 
 // DeletePGAPIKey handles DELETE /v0/management/api-keys-pg/:id.

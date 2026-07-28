@@ -192,9 +192,14 @@ export async function putAPIKeyPolicy(id, policy) {
   });
 }
 
-export async function regenerateAPIKey(id) {
+// regenerateAPIKey issues a new secret for an existing API key. The old
+// secret stops working immediately; the key ID, policy, and metadata are
+// preserved. Pass an optional custom secret string (min 16 chars) to rotate
+// to a chosen value; omit/empty to let the server auto-generate one.
+export async function regenerateAPIKey(id, secret) {
   return fetchJSON(`/api-keys-pg/${encodeURIComponent(id)}/regenerate`, {
     method: 'POST',
+    body: JSON.stringify(secret ? { secret } : {}),
   });
 }
 

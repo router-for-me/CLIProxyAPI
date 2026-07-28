@@ -565,12 +565,20 @@ function RegenerateModal({ apiKeyId, keyName, onClose, onDone }) {
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
   const [secretCopied, setSecretCopied] = useState(false);
+  const [customSecret, setCustomSecret] = useState('');
 
   async function handleRegen() {
+    const secret = customSecret.trim();
+    // Guard client-side to match the server's min-16 validation; an empty
+    // value means "let the server auto-generate", which is always allowed.
+    if (secret && secret.length < 16) {
+      setError('Custom secret must be at least 16 characters (or leave empty to auto-generate).');
+      return;
+    }
     setSubmitting(true);
     setError('');
     try {
-      const r = await regenerateAPIKey(apiKeyId);
+      const r = await regenerateAPIKey(apiKeyId, secret || undefined);
       setResult(r);
       toast.success(`Secret regenerated for "${keyName}"`);
     } catch (err) {
@@ -615,6 +623,23 @@ function RegenerateModal({ apiKeyId, keyName, onClose, onDone }) {
             This will issue a new secret for the key. The old secret stops working
             immediately; the key ID, policy, and metadata are preserved.
           </p>
+          <div className="form__row" style={{ marginTop: 8 }}>
+            <label className="form__label" htmlFor="regen-secret">
+              New custom secret (optional)
+            </label>
+            <input
+              id="regen-secret" type="text" value={customSecret}
+              onChange={(e) => setCustomSecret(e.target.value)}
+              placeholder="Leave empty to auto-generate"
+              disabled={submitting}
+              style={{ width: '100%' }}
+              minLength={16}
+            />
+            <div className="form__hint">
+              Supplying a string rotates to that exact value (min 16 chars). Only
+              its SHA-256 hash is stored, and it must be unique to this deployment.
+            </div>
+          </div>
           <div className="form__actions">
             <button onClick={onClose} disabled={submitting}>Cancel</button>
             <button className="danger" onClick={handleRegen} disabled={submitting}>

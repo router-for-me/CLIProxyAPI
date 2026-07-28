@@ -199,17 +199,18 @@ export const sections = [
         params: [
           { name: 'name', in: 'body', type: 'string', required: false, default: 'unnamed', description: 'Human label.' },
           { name: 'alias', in: 'body', type: 'string', required: false, default: '', description: 'Non-secret alias for usage-stats filtering.' },
-          { name: 'secret', in: 'body', type: 'string', required: false, default: '', description: 'Custom secret (min 16 chars). Auto-generated when empty.' },
+          { name: 'secret', in: 'body', type: 'string', required: false, default: '', description: 'Optional custom secret string. When empty the server auto-generates an opaque sk-… value; when supplied it is used verbatim after validation (min 16 chars). Choose a value unique to this deployment — no collision pre-check is performed. Only its SHA-256 hash is persisted (in key_hash); the display key_prefix is derived from the first body chars (a leading sk- marker is stripped).' },
           { name: 'user_id', in: 'body', type: 'string', required: true, default: '', description: 'Owning Internal User id.' },
           { name: 'expires_at', in: 'body', type: 'string', required: false, default: 'null', description: 'RFC3339 expiry timestamp.' },
           { name: 'metadata', in: 'body', type: 'object', required: false, default: '{}', description: 'Arbitrary JSON metadata.' },
           { name: 'policy', in: 'body', type: 'object', required: false, default: 'null', description: 'Per-key Policy (see PUT /:id/policy). May include policy.model_group_id to attach a reusable Model Group at creation time — the group then becomes the source of truth for allowed/blocked/routes (entity fields ignored at enforcement time). May also include allowed_ips / blocked_ips to restrict the key to specific source IP addresses / CIDR ranges.' },
         ],
-        examplePayload: `{\n  "name": "prod-app",\n  "user_id": "u-abc123",\n  "expires_at": "2026-12-31T23:59:59Z",\n  "policy": {\n    "rpm_limit": 100,\n    "allowed_models": ["gpt-4o"],\n    "model_group_id": "g-abc123",\n    "allowed_ips": ["10.0.0.0/8"],\n    "blocked_ips": ["203.0.113.0/24"]\n  }\n}`,
-        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/api-keys-pg" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"name":"prod-app","user_id":"u-abc123"}'`,
+        examplePayload: `{\n  "name": "prod-app",\n  "secret": "sk-my-team-rotate-key-0123456789",\n  "user_id": "u-abc123",\n  "expires_at": "2026-12-31T23:59:59Z",\n  "policy": {\n    "rpm_limit": 100,\n    "allowed_models": ["gpt-4o"],\n    "model_group_id": "g-abc123",\n    "allowed_ips": ["10.0.0.0/8"],\n    "blocked_ips": ["203.0.113.0/24"]\n  }\n}`,
+        exampleCurl: `# Auto-generate the secret (recommended)\ncurl -s -X POST "${'{API_BASE}'}/api-keys-pg" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"name":"prod-app","user_id":"u-abc123"}'\n\n# Or supply your own custom secret string (min 16 chars)\ncurl -s -X POST "${'{API_BASE}'}/api-keys-pg" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"name":"prod-app","secret":"sk-my-team-rotate-key-0123456789","user_id":"u-abc123"}'`,
         responses: [
           { status: 201, label: 'Created', body: `{"id":"k-def1","name":"prod-app","key_prefix":"sk-abcd","status":"active","user_id":"u-abc123","secret":"sk-xxxxxxxxxxxxxxxx","policy":{...}}` },
           { status: 400, label: 'Missing user_id', body: `{"error":{"type":"invalid_request","message":"user_id is required: every API key must be owned by an Internal User"}}` },
+          { status: 400, label: 'Invalid secret', body: `{"error":{"type":"invalid_request","message":"postgres store: invalid api key secret: api key secret too short (min 16 chars)"}}` },
           { status: 400, label: 'Invalid IP pattern', body: `{"error":{"type":"invalid_request","message":"allowed_ips: invalid IP pattern: not-an-ip"}}` },
           { status: 404, label: 'Owner not found', body: `{"error":{"type":"not_found","message":"internal user not found: create the user before assigning keys to it"}}` },
         ],
@@ -263,12 +264,16 @@ export const sections = [
         ],
       },
       {
-        method: 'POST', path: '/api-keys-pg/:id/regenerate', summary: 'Issue a new secret. The old secret stops working immediately; ID/policy/metadata preserved.',
-        params: [{ name: 'id', in: 'path', type: 'string', required: true, default: '', description: 'Key id.' }],
-        examplePayload: null,
-        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/api-keys-pg/k-def1/regenerate" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
+        method: 'POST', path: '/api-keys-pg/:id/regenerate', summary: 'Issue a new secret — auto-generate one, or rotate to a custom string. The old secret stops working immediately; ID/policy/metadata preserved.',
+        params: [
+          { name: 'id', in: 'path', type: 'string', required: true, default: '', description: 'Key id.' },
+          { name: 'secret', in: 'body', type: 'string', required: false, default: '', description: 'Optional custom secret to rotate to. When the body is omitted (or secret is empty) the server auto-generates a fresh opaque sk-… secret; when supplied it is used verbatim after validation (min 16 chars). Choose a value unique to this deployment — no collision pre-check is performed. Only the SHA-256 hash is persisted (key_hash) and the display prefix is rotated to match.' },
+        ],
+        examplePayload: `{"secret":"sk-my-custom-rotate-key-0123456789"}`,
+        exampleCurl: `# Auto-generate a new secret (no body)\ncurl -s -X POST "${'{API_BASE}'}/api-keys-pg/k-def1/regenerate" \\\n  -H "Authorization: Bearer $MGMT_SECRET"\n\n# Or rotate to a custom secret string (min 16 chars)\ncurl -s -X POST "${'{API_BASE}'}/api-keys-pg/k-def1/regenerate" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"secret":"sk-my-custom-rotate-key-0123456789"}'`,
         responses: [
           { status: 200, label: 'OK', body: `{"id":"k-def1","secret":"sk-xxxxxxxxxxxxxxxx"}` },
+          { status: 400, label: 'Invalid secret', body: `{"error":{"type":"invalid_request","message":"postgres store: invalid api key secret: api key secret too short (min 16 chars)"}}` },
         ],
       },
       {
