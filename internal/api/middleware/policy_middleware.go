@@ -41,6 +41,11 @@ const (
 	// per API key. Absent when the service is inactive, no policy is attached,
 	// or both lists are empty — handlers treat absence as "list everything".
 	CtxPolicyAllowedModels = "policy.allowed_models"
+	// CtxPolicyRouteStrategy carries the per-model routing strategy ("priority"
+	// or "failover") resolved for the current request, set by the handler after
+	// matching the requested model against the stashed route table. Absent or
+	// empty means "inherit the global routing.strategy".
+	CtxPolicyRouteStrategy = "policy.route_strategy"
 )
 
 // PolicyMiddleware returns a Gin middleware that delegates to the supplied
@@ -155,13 +160,13 @@ func PolicyMiddleware(svc policy.PolicyService) gin.HandlerFunc {
 	}
 }
 
-// RoutesForModel returns the pinned upstream providers for modelID from the gin
-// context, where PolicyMiddleware stashed the principal's model_routes. Returns
-// nil when no policy/service is active, no routes are configured, or no route
-// matches modelID. A nil result means "use the registry default provider set".
+// RouteForModel returns the matched model route from the gin context, where
+// PolicyMiddleware stashed the principal's model_routes. Returns nil when no
+// policy/service is active, no routes are configured, or no route matches
+// modelID. A nil result means "use the registry default provider set".
 // The match is case-insensitive on the model id (routes are keyed on the bare
 // model id, without thinking suffix).
-func RoutesForModel(c *gin.Context, modelID string) []string {
+func RouteForModel(c *gin.Context, modelID string) *store.ModelRoute {
 	if c == nil || modelID == "" {
 		return nil
 	}
@@ -174,15 +179,56 @@ func RoutesForModel(c *gin.Context, modelID string) []string {
 		return nil
 	}
 	target := strings.ToLower(strings.TrimSpace(modelID))
-	for _, r := range routes {
+	for i := range routes {
+		r := &routes[i]
 		if strings.ToLower(strings.TrimSpace(r.Model)) == target {
 			if len(r.Providers) == 0 {
 				return nil
 			}
-			return r.Providers
+			return r
 		}
 	}
 	return nil
+}
+
+// RoutesForModel returns the pinned upstream providers for modelID from the gin
+// context. It is a convenience wrapper around RouteForModel kept for callers
+// that only need the Providers slice. Returns nil when no route matches.
+func RoutesForModel(c *gin.Context, modelID string) []string {
+	if r := RouteForModel(c, modelID); r != nil {
+		return r.Providers
+	}
+	return nil
+}
+
+// StashRouteStrategy records the per-model routing strategy on the gin context
+// so the execution handler can transfer it into the conductor's options
+// metadata. An empty strategy clears any previously stashed value so the
+// global routing.strategy applies unchanged.
+func StashRouteStrategy(c *gin.Context, strategy string) {
+	if c == nil {
+		return
+	}
+	strategy = strings.ToLower(strings.TrimSpace(strategy))
+	if strategy == "" {
+		c.Set(CtxPolicyRouteStrategy, "")
+		return
+	}
+	c.Set(CtxPolicyRouteStrategy, strategy)
+}
+
+// RouteStrategyFor returns the per-model routing strategy stashed on the gin
+// context by StashRouteStrategy, or "" when none is set.
+func RouteStrategyFor(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	raw, ok := c.Get(CtxPolicyRouteStrategy)
+	if !ok || raw == nil {
+		return ""
+	}
+	s, _ := raw.(string)
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 // ModelListsFor returns the resolved allowed/blocked model lists stashed by
