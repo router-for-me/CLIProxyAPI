@@ -85,11 +85,11 @@ claude-profile() {
       ;;
     claude)
       export ANTHROPIC_MODEL="claude-sonnet-5"
-      export ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-4.6"
+      export ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-5"
       export ANTHROPIC_DEFAULT_SONNET_MODEL="claude-sonnet-5"
-      export ANTHROPIC_DEFAULT_HAIKU_MODEL="claude-fable-5"
+      export ANTHROPIC_DEFAULT_HAIKU_MODEL="claude-sonnet-5"
       export ANTHROPIC_DEFAULT_FABLE_MODEL="claude-fable-5"
-      export ANTHROPIC_SMALL_FAST_MODEL="claude-fable-5"
+      export ANTHROPIC_SMALL_FAST_MODEL="claude-sonnet-5"
       export CLAUDE_CODE_SUBAGENT_MODEL="claude-sonnet-5"
       ;;
     kimi)
@@ -102,13 +102,13 @@ claude-profile() {
       export CLAUDE_CODE_SUBAGENT_MODEL="kimi-k2.7-code"
       ;;
     mixed)
-      export ANTHROPIC_MODEL="claude-sonnet-5"
-      export ANTHROPIC_DEFAULT_OPUS_MODEL="gpt-5.5"
-      export ANTHROPIC_DEFAULT_SONNET_MODEL="claude-sonnet-5"
-      export ANTHROPIC_DEFAULT_HAIKU_MODEL="kimi-k2.7-code"
-      export ANTHROPIC_DEFAULT_FABLE_MODEL="kimi-k2.7-code"
+      export ANTHROPIC_MODEL="kimi-k2.7-code"
+      export ANTHROPIC_DEFAULT_OPUS_MODEL="gpt-5.6-sol(high)"
+      export ANTHROPIC_DEFAULT_SONNET_MODEL="claude-opus-5"
+      export ANTHROPIC_DEFAULT_HAIKU_MODEL="claude-fable-5"
+      export ANTHROPIC_DEFAULT_FABLE_MODEL="gpt-5.6-sol(medium)"
       export ANTHROPIC_SMALL_FAST_MODEL="kimi-k2.7-code"
-      export CLAUDE_CODE_SUBAGENT_MODEL="gpt-5.5"
+      export CLAUDE_CODE_SUBAGENT_MODEL="gpt-5.6-luna(max)"
       ;;
   esac
 
