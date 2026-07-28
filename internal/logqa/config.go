@@ -50,12 +50,15 @@ type ScanConfig struct {
 }
 
 type RulesConfig struct {
-	MinPromptRounds          int  `yaml:"min-prompt-rounds"`
-	RequireToolCall          bool `yaml:"require-tool-call"`
-	RejectDuplicateAssistant bool `yaml:"reject-duplicate-assistant"`
-	ExcludeIDEContext        bool `yaml:"exclude-ide-context"`
-	ExcludeEnvContext        bool `yaml:"exclude-env-context"`
-	ExcludeTitleSummary      bool `yaml:"exclude-title-summary"`
+	MinPromptRounds            int  `yaml:"min-prompt-rounds"`
+	RequireToolCall            bool `yaml:"require-tool-call"`
+	RequireSessionID           bool `yaml:"require-session-id"`
+	RequireEndsWithoutToolCall bool `yaml:"require-ends-without-tool-call"`
+	RejectUnpairedToolCalls    bool `yaml:"reject-unpaired-tool-calls"`
+	RejectDuplicateAssistant   bool `yaml:"reject-duplicate-assistant"`
+	ExcludeIDEContext          bool `yaml:"exclude-ide-context"`
+	ExcludeEnvContext          bool `yaml:"exclude-env-context"`
+	ExcludeTitleSummary        bool `yaml:"exclude-title-summary"`
 }
 
 type AggregationConfig struct {
@@ -146,8 +149,13 @@ func applyDefaults(cfg *Config) {
 	}
 	// Rule toggles default to the recommended production values.
 	// Example YAML and tests should set them explicitly when they need false.
-	if !cfg.Rules.RequireToolCall && !cfg.Rules.RejectDuplicateAssistant && !cfg.Rules.ExcludeIDEContext && !cfg.Rules.ExcludeEnvContext && !cfg.Rules.ExcludeTitleSummary {
+	if !cfg.Rules.RequireToolCall && !cfg.Rules.RequireSessionID && !cfg.Rules.RequireEndsWithoutToolCall &&
+		!cfg.Rules.RejectUnpairedToolCalls && !cfg.Rules.RejectDuplicateAssistant &&
+		!cfg.Rules.ExcludeIDEContext && !cfg.Rules.ExcludeEnvContext && !cfg.Rules.ExcludeTitleSummary {
 		cfg.Rules.RequireToolCall = true
+		cfg.Rules.RequireSessionID = true
+		cfg.Rules.RequireEndsWithoutToolCall = true
+		cfg.Rules.RejectUnpairedToolCalls = true
 		cfg.Rules.RejectDuplicateAssistant = true
 		cfg.Rules.ExcludeIDEContext = true
 		cfg.Rules.ExcludeEnvContext = true

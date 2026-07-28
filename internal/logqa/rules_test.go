@@ -35,7 +35,11 @@ func TestScoreInputExcludesIDEAndEnvCountsTools(t *testing.T) {
 	if m.DupAssistant != 1 {
 		t.Fatalf("dup assistant groups = %d, want 1", m.DupAssistant)
 	}
-	ok, reasons := EvaluateSession(m.PromptRounds, m.ToolCalls, m.DupAssistant, rules)
+	ok, reasons := EvaluateSession(m.PromptRounds, m.ToolCalls, m.DupAssistant, rules, evaluateExtras{
+		HasRealSessionID: true,
+		ResponseParsed:   true,
+		LastResponseType: "message",
+	})
 	if ok {
 		t.Fatalf("expected fail, reasons=%v", reasons)
 	}
@@ -48,7 +52,11 @@ func TestEvaluateSessionPass(t *testing.T) {
 		RequireToolCall:          true,
 		RejectDuplicateAssistant: true,
 	}
-	ok, reasons := EvaluateSession(4, 2, 0, rules)
+	ok, reasons := EvaluateSession(4, 2, 0, rules, evaluateExtras{
+		HasRealSessionID: true,
+		ResponseParsed:   true,
+		LastResponseType: "message",
+	})
 	if !ok {
 		t.Fatalf("expected pass, reasons=%v", reasons)
 	}
@@ -58,9 +66,9 @@ func TestAggregateSessionsMaxInputSnapshot(t *testing.T) {
 	t.Parallel()
 	rules := RulesConfig{MinPromptRounds: 4, RequireToolCall: true, RejectDuplicateAssistant: true}
 	requests := []RequestRecord{
-		{SessionID: "s1", ThreadID: "t1", SourceFile: "a/1.log", InputLen: 10, PromptRounds: 1, ToolCalls: 5},
-		{SessionID: "s1", ThreadID: "t1", SourceFile: "a/2.log", InputLen: 50, PromptRounds: 4, ToolCalls: 8},
-		{SessionID: "s2", ThreadID: "t2", SourceFile: "b/1.log", InputLen: 3, PromptRounds: 1, ToolCalls: 0},
+		{SessionID: "s1", ThreadID: "t1", SourceFile: "a/1.log", InputLen: 10, PromptRounds: 1, ToolCalls: 5, HasRealSessionID: true, ResponseParsed: true, LastResponseType: "message"},
+		{SessionID: "s1", ThreadID: "t1", SourceFile: "a/2.log", InputLen: 50, PromptRounds: 4, ToolCalls: 8, HasRealSessionID: true, ResponseParsed: true, LastResponseType: "message"},
+		{SessionID: "s2", ThreadID: "t2", SourceFile: "b/1.log", InputLen: 3, PromptRounds: 1, ToolCalls: 0, HasRealSessionID: true, ResponseParsed: true, LastResponseType: "message"},
 	}
 	sessions := AggregateSessions(requests, rules)
 	if len(sessions) != 2 {
@@ -85,11 +93,13 @@ func TestPickSnapshotSkipsCompactionWhenNormalExists(t *testing.T) {
 		{
 			SessionID: "sess-compact", ThreadID: "t1", SourceFile: "k/normal.log",
 			RequestKind: "turn", InputLen: 40, PromptRounds: 5, ToolCalls: 10,
+			HasRealSessionID: true, ResponseParsed: true, LastResponseType: "message",
 		},
 		{
 			// Compaction is longer (typical) but must not win snapshot selection.
 			SessionID: "sess-compact", ThreadID: "t1", SourceFile: "k/compact.log",
 			RequestKind: "compaction", InputLen: 900, PromptRounds: 0, ToolCalls: 592,
+			HasRealSessionID: true, ResponseParsed: true, LastResponseType: "message",
 		},
 	}
 	sessions := AggregateSessions(requests, rules)

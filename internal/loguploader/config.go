@@ -13,15 +13,36 @@ import (
 
 // Config defines the standalone log uploader service.
 type Config struct {
-	LogsRoot  string          `yaml:"logs-root"`
-	WorkDir   string          `yaml:"work-dir"`
-	Timezone  string          `yaml:"timezone"`
-	Schedule  ScheduleConfig  `yaml:"schedule"`
-	Upload    UploadConfig    `yaml:"upload"`
-	Retention RetentionConfig `yaml:"retention"`
+	LogsRoot    string            `yaml:"logs-root"`
+	WorkDir     string            `yaml:"work-dir"`
+	Timezone    string            `yaml:"timezone"`
+	Schedule    ScheduleConfig    `yaml:"schedule"`
+	Upload      UploadConfig      `yaml:"upload"`
+	Retention   RetentionConfig   `yaml:"retention"`
+	SessionGate SessionGateConfig `yaml:"session-gate"`
 	// Models is retained for backward-compatible config parsing.
 	// Deprecated: Hourly archives always use the fixed archive name label.
 	Models map[string]string `yaml:"model-aliases"`
+}
+
+// SessionGateConfig filters which settled request logs may enter an upload batch.
+// When disabled, the uploader behaves as before (all settled logs are eligible).
+type SessionGateConfig struct {
+	Enabled                    bool          `yaml:"enabled"`
+	MinPromptRounds            int           `yaml:"min-prompt-rounds"`
+	RequireToolCall            bool          `yaml:"require-tool-call"`
+	RequireSessionID           bool          `yaml:"require-session-id"`
+	RequireEndsWithoutToolCall bool          `yaml:"require-ends-without-tool-call"`
+	RejectUnpairedToolCalls    bool          `yaml:"reject-unpaired-tool-calls"`
+	ExcludeTitleSummary        bool          `yaml:"exclude-title-summary"`
+	ExcludeIDEContext          bool          `yaml:"exclude-ide-context"`
+	ExcludeEnvContext          bool          `yaml:"exclude-env-context"`
+	MaxHoldAge                 time.Duration `yaml:"-"`
+	MaxHoldAgeRaw              string        `yaml:"max-hold-age"`
+	MaxAbsoluteAge             time.Duration `yaml:"-"`
+	MaxAbsoluteAgeRaw          string        `yaml:"max-absolute-age"`
+	// DeferredPackaging is always eligibility-hour in MVP (kept for config clarity).
+	DeferredPackaging string `yaml:"deferred-packaging"`
 }
 
 type ScheduleConfig struct {
@@ -120,6 +141,35 @@ func applyConfigDefaults(cfg *Config) {
 	if strings.TrimSpace(cfg.Upload.SessionTokenEnv) == "" {
 		cfg.Upload.SessionTokenEnv = "VOLC_TOS_SESSION_TOKEN"
 	}
+	applySessionGateDefaults(&cfg.SessionGate)
+}
+
+func applySessionGateDefaults(gate *SessionGateConfig) {
+	if gate.MinPromptRounds <= 0 {
+		gate.MinPromptRounds = 4
+	}
+	if strings.TrimSpace(gate.MaxHoldAgeRaw) == "" {
+		gate.MaxHoldAgeRaw = "48h"
+	}
+	if strings.TrimSpace(gate.MaxAbsoluteAgeRaw) == "" {
+		gate.MaxAbsoluteAgeRaw = "168h"
+	}
+	if strings.TrimSpace(gate.DeferredPackaging) == "" {
+		gate.DeferredPackaging = "eligibility-hour"
+	}
+	// Recommended production toggles when every flag is still zero (omitted in YAML).
+	// Explicit false requires at least one true flag elsewhere, or set after LoadConfig.
+	// Example YAML always sets each flag explicitly.
+	if !gate.RequireToolCall && !gate.RequireSessionID && !gate.RequireEndsWithoutToolCall &&
+		!gate.RejectUnpairedToolCalls && !gate.ExcludeTitleSummary && !gate.ExcludeIDEContext && !gate.ExcludeEnvContext {
+		gate.RequireToolCall = true
+		gate.RequireSessionID = true
+		gate.RequireEndsWithoutToolCall = true
+		gate.RejectUnpairedToolCalls = true
+		gate.ExcludeTitleSummary = true
+		gate.ExcludeIDEContext = true
+		gate.ExcludeEnvContext = true
+	}
 }
 
 func (cfg *Config) Validate() error {
@@ -147,6 +197,11 @@ func (cfg *Config) Validate() error {
 	if _, errLocation := time.LoadLocation(cfg.Timezone); errLocation != nil {
 		return fmt.Errorf("invalid timezone %q: %w", cfg.Timezone, errLocation)
 	}
+
+	if errGate := cfg.SessionGate.validate(); errGate != nil {
+		return errGate
+	}
+
 	if !cfg.Upload.Enabled {
 		return nil
 	}
@@ -158,6 +213,37 @@ func (cfg *Config) Validate() error {
 	}
 	if strings.TrimSpace(cfg.Upload.Bucket) == "" {
 		return fmt.Errorf("upload.bucket is required")
+	}
+	return nil
+}
+
+func (gate *SessionGateConfig) validate() error {
+	if strings.TrimSpace(gate.MaxHoldAgeRaw) == "" {
+		gate.MaxHoldAgeRaw = "48h"
+	}
+	holdAge, errHold := time.ParseDuration(gate.MaxHoldAgeRaw)
+	if errHold != nil || holdAge <= 0 {
+		return fmt.Errorf("invalid session-gate.max-hold-age %q", gate.MaxHoldAgeRaw)
+	}
+	gate.MaxHoldAge = holdAge
+
+	if strings.TrimSpace(gate.MaxAbsoluteAgeRaw) == "" {
+		gate.MaxAbsoluteAgeRaw = "168h"
+	}
+	absAge, errAbs := time.ParseDuration(gate.MaxAbsoluteAgeRaw)
+	if errAbs != nil || absAge <= 0 {
+		return fmt.Errorf("invalid session-gate.max-absolute-age %q", gate.MaxAbsoluteAgeRaw)
+	}
+	gate.MaxAbsoluteAge = absAge
+
+	if gate.MinPromptRounds <= 0 {
+		gate.MinPromptRounds = 4
+	}
+	switch strings.TrimSpace(gate.DeferredPackaging) {
+	case "", "eligibility-hour":
+		gate.DeferredPackaging = "eligibility-hour"
+	default:
+		return fmt.Errorf("invalid session-gate.deferred-packaging %q (only eligibility-hour is supported)", gate.DeferredPackaging)
 	}
 	return nil
 }

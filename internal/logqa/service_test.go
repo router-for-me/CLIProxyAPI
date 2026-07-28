@@ -34,12 +34,17 @@ X-Codex-Turn-Metadata: {"session_id":"sess-1","thread_id":"thr-1","request_kind"
   {"type":"message","role":"user","content":"q2"},
   {"type":"message","role":"user","content":"q3"},
   {"type":"message","role":"user","content":"q4"},
-  {"type":"custom_tool_call","name":"exec","arguments":"{}"},
+  {"type":"custom_tool_call","call_id":"call-1","name":"exec","arguments":"{}"},
+  {"type":"custom_tool_call_output","call_id":"call-1","output":"ok"},
   {"type":"message","role":"assistant","content":"done"}
 ]}
 
 === RESPONSE ===
-ok
+Status: 200
+Content-Type: text/event-stream
+
+event: response.completed
+data: {"type":"response.completed","response":{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}}
 `
 	logPath := filepath.Join(keyDir, "sample.log")
 	if err := os.WriteFile(logPath, []byte(body), 0o600); err != nil {
@@ -67,12 +72,15 @@ ok
 			MaxFileSize:        0,
 		},
 		Rules: RulesConfig{
-			MinPromptRounds:          4,
-			RequireToolCall:          true,
-			RejectDuplicateAssistant: true,
-			ExcludeIDEContext:        true,
-			ExcludeEnvContext:        true,
-			ExcludeTitleSummary:      true,
+			MinPromptRounds:            4,
+			RequireToolCall:            true,
+			RequireSessionID:           true,
+			RequireEndsWithoutToolCall: true,
+			RejectUnpairedToolCalls:    true,
+			RejectDuplicateAssistant:   true,
+			ExcludeIDEContext:          true,
+			ExcludeEnvContext:          true,
+			ExcludeTitleSummary:        true,
 		},
 		Aggregation: AggregationConfig{Key: "session_id", Snapshot: "max_input_len"},
 		Report:      ReportConfig{KeepRuns: 5},

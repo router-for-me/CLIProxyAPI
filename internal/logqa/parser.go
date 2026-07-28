@@ -70,21 +70,109 @@ func parseLogFile(logsRoot, path string, info os.FileInfo, location *time.Locati
 	rec.PromptRounds = metrics.PromptRounds
 	rec.ToolCalls = metrics.ToolCalls
 	rec.DupAssistant = metrics.DupAssistant
+	rec.UnpairedToolCalls = metrics.UnpairedToolCalls
 	rec.SamplePrompts = metrics.SamplePrompts
 	rec.AssistantTexts = metrics.AssistantTexts
+	if lastType, ok := lastResponseOutputType(text); ok {
+		rec.LastResponseType = lastType
+		rec.ResponseParsed = true
+	}
 	if title, source := resolveRequestTitle(rec.RequestKind, input, text); title != "" {
 		rec.Title = title
 		rec.TitleSource = source
 	}
 
+	// Preserve whether a real session_id existed before synthetic fallback for display keys.
+	rec.HasRealSessionID = rec.SessionID != ""
 	if rec.SessionID == "" {
 		if rec.ThreadID != "" {
+			// Thread-only ids still lack a real session_id for upload gate rule 2.
 			rec.SessionID = rec.ThreadID
 		} else {
 			rec.SessionID = "unknown:" + relative
 		}
 	}
 	return rec, nil
+}
+
+// lastResponseOutputType recovers the last completed output item type from RESPONSE/SSE.
+func lastResponseOutputType(logText string) (string, bool) {
+	sections := []string{
+		extractSection(logText, "API RESPONSE 1"),
+		extractSection(logText, "API RESPONSE"),
+		extractSection(logText, "RESPONSE"),
+	}
+	var lastType string
+	found := false
+	for _, section := range sections {
+		if strings.TrimSpace(section) == "" {
+			continue
+		}
+		for _, line := range strings.Split(section, "\n") {
+			payload := sseJSONPayload(line)
+			if payload == "" {
+				continue
+			}
+			var obj map[string]any
+			if err := json.Unmarshal([]byte(payload), &obj); err != nil {
+				continue
+			}
+			switch stringField(obj, "type") {
+			case "response.output_item.done":
+				if item, ok := obj["item"].(map[string]any); ok {
+					if t := stringField(item, "type"); t != "" {
+						lastType = t
+						found = true
+					}
+				}
+			case "response.completed":
+				if t := lastTypeFromCompletedResponse(obj); t != "" {
+					lastType = t
+					found = true
+				}
+			}
+		}
+		if !found {
+			if body, err := decodeJSONObject(section); err == nil {
+				if t := lastTypeFromCompletedResponse(body); t != "" {
+					lastType = t
+					found = true
+				}
+			}
+		}
+	}
+	return lastType, found
+}
+
+func lastTypeFromCompletedResponse(obj map[string]any) string {
+	if resp, ok := obj["response"].(map[string]any); ok {
+		if output, ok := resp["output"].([]any); ok && len(output) > 0 {
+			if item, ok := output[len(output)-1].(map[string]any); ok {
+				return stringField(item, "type")
+			}
+		}
+		return ""
+	}
+	if output, ok := obj["output"].([]any); ok && len(output) > 0 {
+		if item, ok := output[len(output)-1].(map[string]any); ok {
+			return stringField(item, "type")
+		}
+	}
+	return ""
+}
+
+func sseJSONPayload(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(line), "data:") {
+		line = strings.TrimSpace(line[5:])
+	}
+	if line == "" || line == "[DONE]" || !strings.HasPrefix(line, "{") {
+		return ""
+	}
+	return line
 }
 
 func fingerprint(relative string, size int64, modTime time.Time) string {

@@ -31,6 +31,11 @@ rules:
   # Effective user prompts must be >= this value (plan: >3 means 4).
   min-prompt-rounds: 4
   require-tool-call: true
+  # Align with log-uploader session-gate upload rules.
+  require-session-id: true
+  require-ends-without-tool-call: true
+  reject-unpaired-tool-calls: true
+  # Display-only (not an uploader gate): flag identical assistant text repeats.
   reject-duplicate-assistant: true
   exclude-ide-context: true
   exclude-env-context: true

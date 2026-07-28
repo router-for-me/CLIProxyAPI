@@ -38,7 +38,32 @@ func AggregateSessions(requests []RequestRecord, rules RulesConfig) []SessionRec
 	for _, sid := range order {
 		g := groups[sid]
 		snapshot := pickSnapshot(g.requests)
-		ok, reasons := EvaluateSession(snapshot.PromptRounds, snapshot.ToolCalls, snapshot.DupAssistant, rules)
+		latest := pickLatestNonTitleRequest(g.requests)
+		toolCalls := snapshot.ToolCalls
+		unpaired := snapshot.UnpairedToolCalls
+		hasRealSession := false
+		for _, r := range g.requests {
+			if r.ToolCalls > toolCalls {
+				toolCalls = r.ToolCalls
+			}
+			if r.UnpairedToolCalls {
+				unpaired = true
+			}
+			if r.HasRealSessionID {
+				hasRealSession = true
+			}
+		}
+		// Synthetic aggregation keys (unknown:path / orphan) never count as real session ids.
+		if strings.HasPrefix(sid, "unknown:") {
+			hasRealSession = false
+		}
+		extras := evaluateExtras{
+			HasRealSessionID:  hasRealSession,
+			UnpairedToolCalls: unpaired,
+			ResponseParsed:    latest.ResponseParsed,
+			LastResponseType:  latest.LastResponseType,
+		}
+		ok, reasons := EvaluateSession(snapshot.PromptRounds, toolCalls, snapshot.DupAssistant, rules, extras)
 
 		threadSet := map[string]struct{}{}
 		keySet := map[string]struct{}{}
@@ -69,17 +94,26 @@ func AggregateSessions(requests []RequestRecord, rules RulesConfig) []SessionRec
 		sort.Strings(files)
 		title, titleSource := pickSessionTitle(g.requests)
 
+		eligibility := "hold"
+		if ok {
+			eligibility = "eligible"
+		} else if !hasRealSession {
+			eligibility = "orphan"
+		}
+
 		sessions = append(sessions, SessionRecord{
-			SessionID:          sid,
-			Title:              title,
-			TitleSource:        titleSource,
-			ThreadIDs:          threads,
-			KeyNames:           keys,
-			PromptRounds:       snapshot.PromptRounds,
+			SessionID:    sid,
+			Title:        title,
+			TitleSource:  titleSource,
+			ThreadIDs:    threads,
+			KeyNames:     keys,
+			PromptRounds: snapshot.PromptRounds,
+			// Report snapshot tool count (max_input view); evaluation used max across files.
 			ToolCalls:          snapshot.ToolCalls,
 			DupAssistantGroups: snapshot.DupAssistant,
 			OK:                 ok,
 			FailReasons:        reasons,
+			UploadEligibility:  eligibility,
 			FirstTS:            firstTS,
 			LastTS:             lastTS,
 			SourceFiles:        files,
@@ -139,6 +173,38 @@ func isCompactionRequestKind(requestKind string) bool {
 	return strings.Contains(rk, "compact")
 }
 
+func isTitleOrSummaryRequestKind(requestKind string) bool {
+	rk := strings.ToLower(strings.TrimSpace(requestKind))
+	return strings.Contains(rk, "title") || strings.Contains(rk, "summary")
+}
+
+// pickLatestNonTitleRequest selects the newest non-title/non-compact turn for rule 3 (RESPONSE tail).
+func pickLatestNonTitleRequest(requests []RequestRecord) RequestRecord {
+	if len(requests) == 0 {
+		return RequestRecord{}
+	}
+	var best RequestRecord
+	found := false
+	for _, r := range requests {
+		if isTitleOrSummaryRequestKind(r.RequestKind) || isCompactionRequestKind(r.RequestKind) {
+			continue
+		}
+		if !found || r.Timestamp.After(best.Timestamp) || (r.Timestamp.Equal(best.Timestamp) && r.ModTime.After(best.ModTime)) {
+			best = r
+			found = true
+		}
+	}
+	if !found {
+		best = requests[0]
+		for _, r := range requests[1:] {
+			if r.Timestamp.After(best.Timestamp) || (r.Timestamp.Equal(best.Timestamp) && r.ModTime.After(best.ModTime)) {
+				best = r
+			}
+		}
+	}
+	return best
+}
+
 func sortedKeys(set map[string]struct{}) []string {
 	out := make([]string, 0, len(set))
 	for k := range set {
@@ -153,6 +219,10 @@ func summarizeSessions(sessions []SessionRecord) (total, pass, fail int, hist ma
 		"prompt_rounds":       0,
 		"no_tool_call":        0,
 		"duplicate_assistant": 0,
+		"empty_session_id":    0,
+		"ends_with_tool_call": 0,
+		"unpaired_tool_calls": 0,
+		"response_unparsed":   0,
 	}
 	total = len(sessions)
 	for _, s := range sessions {
@@ -169,6 +239,14 @@ func summarizeSessions(sessions []SessionRecord) (total, pass, fail int, hist ma
 				hist["no_tool_call"]++
 			case hasPrefix(reason, "duplicate_assistant"):
 				hist["duplicate_assistant"]++
+			case reason == "empty_session_id":
+				hist["empty_session_id"]++
+			case reason == "ends_with_tool_call":
+				hist["ends_with_tool_call"]++
+			case reason == "unpaired_tool_calls":
+				hist["unpaired_tool_calls"]++
+			case reason == "response_unparsed":
+				hist["response_unparsed"]++
 			}
 		}
 	}

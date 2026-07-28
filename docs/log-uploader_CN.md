@@ -4,6 +4,22 @@
 
 正常情况下，每个有日志的完整小时只产生一个文件名标签为 `codex56sol` 的归档。`codex56sol` 只是固定的归档命名标签，不表示模型筛选：归档仍合并该小时内全部 `key_name` 和全部模型。每个原始 `.log` 对应 JSONL 中的一行，行内仍保留真实的 `key_name` 和 `model`，因此可以在同一个归档中按用户或模型检索。转换过程不会在磁盘上生成一份完整的未压缩 JSONL 临时文件。
 
+## 0. Session 门禁（可选）
+
+`session-gate` 在打包上传前按 **session_id** 做质量过滤（默认 `enabled: false`，灰度后再打开）。
+
+五条规则（全部满足才上传）：
+
+1. 有效提问轮次 ≥ `min-prompt-rounds`（默认 4，即 >3；排除 title/summary/compact 等）
+2. `session_id` 非空
+3. 会话最后一轮 RESPONSE 不以 tool_call 结尾
+4. 工具 `call_id` 的 call/output 成对
+5. 全链路至少一次工具调用
+
+不满足的会话 **Hold** 在本地（log-qa 仍可扫描展示）；达标后整 session 再上传。  
+迟传使用 **eligibility-hour**：并入最晚文件所属、已 settle 且未 seal 的小时正常单包，**不做 residual 补包**。  
+Hold 超过 `max-hold-age`（默认 48h 无新活动）或 `max-absolute-age`（默认 7d）后本地删除，永不上传。
+
 ## 1. 创建配置
 
 从示例复制一份本地配置：

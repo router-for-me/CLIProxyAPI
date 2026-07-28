@@ -40,7 +40,9 @@ type uploadState struct {
 	Objects       map[string]uploadedObject `json:"objects"`
 	Hours         map[string]uploadedHour   `json:"hours"`
 	PreparedHours map[string]preparedHour   `json:"prepared_hours"`
-	dirty         bool                      `json:"-"`
+	// SessionGate tracks hold metadata for the upload session filter (optional).
+	SessionGate *sessionGateStore `json:"session_gate,omitempty"`
+	dirty       bool              `json:"-"`
 }
 
 type uploadTarget struct {
@@ -353,6 +355,28 @@ func (s *Service) runOnce(ctx context.Context, dryRun bool) error {
 		log.WithField("scan_duration", s.now().Sub(scanStart).String()).Debug("no settled request logs are ready for upload")
 		log.WithField("total_duration", s.now().Sub(runStart).String()).Info("log uploader run completed (no work)")
 		return errors.Join(runErrors...)
+	}
+
+	// Session gate: only PASS sessions enter the upload batch; HOLD stay on disk.
+	if s.cfg.SessionGate.Enabled {
+		filtered, _, errGate := s.applySessionGate(sources, &state, dryRun)
+		if errGate != nil {
+			return errGate
+		}
+		if !dryRun && state.dirty {
+			if errSave := s.saveState(state); errSave != nil {
+				return errSave
+			}
+		}
+		sources = filtered
+		if len(sources) == 0 {
+			log.WithFields(log.Fields{
+				"scan_duration": s.now().Sub(scanStart).String(),
+				"gate_enabled":  true,
+			}).Info("session gate held all settled logs; nothing to upload this run")
+			log.WithField("total_duration", s.now().Sub(runStart).String()).Info("log uploader run completed (no ready sessions)")
+			return errors.Join(runErrors...)
+		}
 	}
 
 	groups := groupSources(sources)

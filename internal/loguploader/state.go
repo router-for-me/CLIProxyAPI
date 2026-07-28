@@ -87,6 +87,10 @@ func (s *Service) validateUploadState(state *uploadState) error {
 		state.PreparedHours = make(map[string]preparedHour)
 		state.dirty = true
 	}
+	if state.SessionGate != nil && state.SessionGate.Sessions == nil {
+		state.SessionGate.Sessions = make(map[string]sessionHoldRecord)
+		state.dirty = true
+	}
 
 	// Migrate legacy hour keys (without provider suffix) to the new format.
 	for hourKey, hour := range state.Hours {

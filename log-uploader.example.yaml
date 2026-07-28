@@ -38,3 +38,26 @@ retention:
   delete-source-after-upload: true
   # Remove the generated .jsonl.zst after a successful upload to avoid local disk growth.
   keep-local-archives: false
+
+# Session-level quality gate before upload. When disabled, every settled .log is eligible.
+# Enable after dry-run validation. Unqualified sessions stay on disk (Hold) until rules pass
+# or max-hold-age / max-absolute-age expires (then local delete, never upload).
+session-gate:
+  enabled: false
+  # Effective user prompts must be >= this value (plan: rounds > 3 means 4).
+  min-prompt-rounds: 4
+  require-tool-call: true
+  require-session-id: true
+  # Last non-title RESPONSE must not end with a tool_call item.
+  require-ends-without-tool-call: true
+  # function_call / *_output pairs must match by call_id.
+  reject-unpaired-tool-calls: true
+  exclude-title-summary: true
+  exclude-ide-context: true
+  exclude-env-context: true
+  # Drop held sessions with no new activity for this long.
+  max-hold-age: 48h
+  # Absolute cap from first_seen even if activity continues but never passes.
+  max-absolute-age: 168h
+  # Delayed sessions rebucket into a settled unsealed hour (not residual packages).
+  deferred-packaging: eligibility-hour

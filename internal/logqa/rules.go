@@ -33,6 +33,23 @@ var (
 		"image_generation_call":   {},
 	}
 
+	toolCallTypes = map[string]struct{}{
+		"function_call":         {},
+		"custom_tool_call":      {},
+		"computer_call":         {},
+		"web_search_call":       {},
+		"file_search_call":      {},
+		"code_interpreter_call": {},
+		"mcp_call":              {},
+		"image_generation_call": {},
+	}
+
+	toolOutputTypes = map[string]struct{}{
+		"function_call_output":    {},
+		"custom_tool_call_output": {},
+		"computer_call_output":    {},
+	}
+
 	toolNames = map[string]struct{}{
 		"exec":        {},
 		"shell":       {},
@@ -46,16 +63,20 @@ var (
 )
 
 type inputMetrics struct {
-	PromptRounds   int
-	ToolCalls      int
-	DupAssistant   int
-	SamplePrompts  []string
-	AssistantTexts []string
+	PromptRounds      int
+	ToolCalls         int
+	DupAssistant      int
+	UnpairedToolCalls bool
+	SamplePrompts     []string
+	AssistantTexts    []string
 }
 
 func scoreInput(input []any, requestKind string, rules RulesConfig) inputMetrics {
 	var m inputMetrics
 	assistantCounts := make(map[string]int)
+	calls := make(map[string]struct{})
+	outputs := make(map[string]struct{})
+	emptyCallOrOutput := false
 	for _, rawItem := range input {
 		item, ok := rawItem.(map[string]any)
 		if !ok {
@@ -70,6 +91,23 @@ func scoreInput(input []any, requestKind string, rules RulesConfig) inputMetrics
 			m.ToolCalls++
 		} else if _, isToolName := toolNames[name]; isToolName {
 			m.ToolCalls++
+		}
+
+		if _, isCall := toolCallTypes[typeName]; isCall {
+			callID := strings.TrimSpace(stringField(item, "call_id"))
+			if callID == "" {
+				emptyCallOrOutput = true
+			} else {
+				calls[callID] = struct{}{}
+			}
+		}
+		if _, isOut := toolOutputTypes[typeName]; isOut {
+			callID := strings.TrimSpace(stringField(item, "call_id"))
+			if callID == "" {
+				emptyCallOrOutput = true
+			} else {
+				outputs[callID] = struct{}{}
+			}
 		}
 
 		if isRealUserPrompt(typeName, role, text, requestKind, rules) {
@@ -91,7 +129,29 @@ func scoreInput(input []any, requestKind string, rules RulesConfig) inputMetrics
 			m.DupAssistant++
 		}
 	}
+	m.UnpairedToolCalls = emptyCallOrOutput
+	if !m.UnpairedToolCalls {
+		for id := range calls {
+			if _, ok := outputs[id]; !ok {
+				m.UnpairedToolCalls = true
+				break
+			}
+		}
+	}
+	if !m.UnpairedToolCalls {
+		for id := range outputs {
+			if _, ok := calls[id]; !ok {
+				m.UnpairedToolCalls = true
+				break
+			}
+		}
+	}
 	return m
+}
+
+func isToolCallType(typeName string) bool {
+	_, ok := toolCallTypes[strings.ToLower(strings.TrimSpace(typeName))]
+	return ok
 }
 
 func isRealUserPrompt(typeName, role, text, requestKind string, rules RulesConfig) bool {
@@ -187,18 +247,39 @@ func truncate(s string, n int) string {
 	return s[:n]
 }
 
-// EvaluateSession applies the three delivery rules to a session snapshot.
-func EvaluateSession(promptRounds, toolCalls, dupAssistant int, rules RulesConfig) (ok bool, reasons []string) {
+// EvaluateSession applies delivery rules to a session snapshot.
+// Extra flags cover upload-gate alignment: empty session_id, unpaired tools, RESPONSE tail.
+func EvaluateSession(promptRounds, toolCalls, dupAssistant int, rules RulesConfig, extras evaluateExtras) (ok bool, reasons []string) {
+	if rules.RequireSessionID && !extras.HasRealSessionID {
+		reasons = append(reasons, "empty_session_id")
+	}
 	if promptRounds < rules.MinPromptRounds {
 		reasons = append(reasons, fmt.Sprintf("prompt_rounds=%d<%d", promptRounds, rules.MinPromptRounds))
 	}
 	if rules.RequireToolCall && toolCalls < 1 {
 		reasons = append(reasons, "no_tool_call")
 	}
+	if rules.RejectUnpairedToolCalls && extras.UnpairedToolCalls {
+		reasons = append(reasons, "unpaired_tool_calls")
+	}
+	if rules.RequireEndsWithoutToolCall {
+		if !extras.ResponseParsed {
+			reasons = append(reasons, "response_unparsed")
+		} else if isToolCallType(extras.LastResponseType) {
+			reasons = append(reasons, "ends_with_tool_call")
+		}
+	}
 	if rules.RejectDuplicateAssistant && dupAssistant > 0 {
 		reasons = append(reasons, fmt.Sprintf("duplicate_assistant_groups=%d", dupAssistant))
 	}
 	return len(reasons) == 0, reasons
+}
+
+type evaluateExtras struct {
+	HasRealSessionID  bool
+	UnpairedToolCalls bool
+	ResponseParsed    bool
+	LastResponseType  string
 }
 
 func min(a, b int) int {

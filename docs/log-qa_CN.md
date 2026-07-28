@@ -55,12 +55,17 @@ go build -o bin/log-qa ./cmd/log-qa
 2. 在剩余请求中取 **input 最长**，其次 **时间最晚**
 3. 若 session **只剩** compaction 日志（普通 turn 已被 uploader 删掉），则回退用最长的 compaction 作快照
 
-对该快照再判定：
+对该快照再判定（与 log-uploader `session-gate` 对齐，另加展示项）：
 
 1. **有效 user prompt 数 ≥ min-prompt-rounds（默认 4）**  
    排除 title/summary、IDE context、`environment_context`
-2. **至少 1 次工具调用**（`function_call` / `custom_tool_call` 等）
-3. **无完全相同的 assistant 文本重复**
+2. **session_id 非空**（真实 session，非 path 伪造）
+3. **至少 1 次工具调用**（`function_call` / `custom_tool_call` 等）
+4. **工具 call/output 按 call_id 成对**
+5. **最新非 title 轮 RESPONSE 不以 tool_call 结尾**
+6. **无完全相同的 assistant 文本重复**（仅 QA 展示；uploader 门禁不含此项）
+
+报告字段 `upload_eligibility`：`eligible` / `hold` / `orphan`，便于对照「为何尚未上传」。
 
 同一 session 下的 subagent thread **会合并**进同一条样本。
 
