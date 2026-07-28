@@ -908,11 +908,17 @@ func (s *UsageStore) SelectTotals(ctx context.Context, filter UsageFilter) (Usag
 // api_key_principal with the non-secret KeyAlias (resolved via a LEFT JOIN
 // on api_keys). The raw principal is never returned to API callers.
 type UsageEventRow struct {
-	ID                  int64   `json:"id"`
-	RequestID           string  `json:"request_id,omitempty"`
-	APIKeyID            string  `json:"api_key_id,omitempty"`
-	KeyAlias            string  `json:"key_alias,omitempty"`
-	Provider            string  `json:"provider"`
+	ID        int64  `json:"id"`
+	RequestID string `json:"request_id,omitempty"`
+	APIKeyID  string `json:"api_key_id,omitempty"`
+	KeyAlias  string `json:"key_alias,omitempty"`
+	Provider  string `json:"provider"`
+	// OfficialProvider is the official_provider label resolved from the models
+	// catalog for this row's (provider key, model); populated best-effort by
+	// the management layer's FillOfficialProvider. Empty when no catalog row
+	// matches (file-only deployments, unknown model) — callers should fall back
+	// to Provider. Never persisted in usage_events itself.
+	OfficialProvider    string  `json:"official_provider,omitempty"`
 	ExecutorType        string  `json:"executor_type,omitempty"`
 	Model               string  `json:"model"`
 	Alias               string  `json:"alias,omitempty"`

@@ -151,6 +151,8 @@ func (h *Handler) GetInternalUserEvents(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
 	}
+	// Best-effort official_provider resolution; never blocks the listing.
+	h.FillOfficialProvider(c.Request.Context(), rows)
 	if c.Query("include") == "cost_breakdown" {
 		if err := usage.FillCostBreakdown(c.Request.Context(), rows); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})

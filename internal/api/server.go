@@ -243,6 +243,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.mgmt.SetModelGroupStore(handles.ModelGroups)
 		// Surface persisted official_provider values in auth-selection errors.
 		s.handlers.SetModelsCatalogStore(store.NewModelsCatalogResolver(handles.Models))
+		// Surface official_provider on Usage Stats / Errors rows so the
+		// dashboard can show "Provider Official" (e.g. "anthropic") instead of
+		// the raw internal provider key (e.g. "claude").
+		s.mgmt.SetModelsCatalogResolver(store.NewModelsCatalogResolver(handles.Models))
 	}
 	// Wire the /v1/models invoker so the management endpoint
 	// POST /v0/management/models-catalog/sync-from-v1 can probe the live

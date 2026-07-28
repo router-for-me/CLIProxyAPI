@@ -76,6 +76,13 @@ type Handler struct {
 	pgUsers   *store.UserStore
 	pgSync    *registry.PGSync
 	policySvc policy.PolicyService
+	// modelsCatalogResolver resolves an internal provider key (e.g. "claude",
+	// "openai-compatible-opencode") to the official_provider label persisted in
+	// the models catalog (e.g. "anthropic", "opencode"). Used to surface
+	// "Provider Official" on Usage Stats / Errors rows. nil when no PG backend
+	// is configured — FillOfficialProvider then no-ops and rows keep an empty
+	// official_provider, which the dashboard falls back to the raw provider.
+	modelsCatalogResolver *store.ModelsCatalogResolverImpl
 
 	// pgMgmtTokens stores management API tokens that gate access to the
 	// /v0/management REST surface (per-token policy + audit log). nil when PG
@@ -283,6 +290,20 @@ func (h *Handler) SetModelGroupStore(groups *store.ModelGroupStore) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pgModelGroups = groups
+}
+
+// SetModelsCatalogResolver wires the resolver that translates an internal
+// provider key into the official_provider label persisted in the models
+// catalog. nil (file-only deployments) disables the best-effort
+// FillOfficialProvider pass on Usage Stats / Errors rows; the dashboard then
+// falls back to the raw provider value.
+func (h *Handler) SetModelsCatalogResolver(r *store.ModelsCatalogResolverImpl) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.modelsCatalogResolver = r
 }
 
 // SetErrorMessagesStore wires the PG-backed store for operator-customized

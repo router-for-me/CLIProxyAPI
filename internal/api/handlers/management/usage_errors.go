@@ -44,6 +44,8 @@ func (h *Handler) GetUsageErrors(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": err.Error()}})
 		return
 	}
+	// Best-effort official_provider resolution; never blocks the listing.
+	h.FillOfficialProviderErrors(c.Request.Context(), rows)
 	if wantsCostBreakdown(c.Query("include")) {
 		// Best-effort: a missing/errored pricing lookup should not block the
 		// errors listing. Mirrors the events listing behavior.
@@ -83,6 +85,8 @@ func (h *Handler) GetUsageError(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
 	}
+	// Best-effort official_provider resolution for the single-row detail modal.
+	h.FillOfficialProviderErrors(c.Request.Context(), []store.UsageErrorRow{errRow})
 	// Best-effort: a missing pricing row leaves the breakdown zero-valued but
 	// present, so the dashboard can show "no price set" rather than hiding the
 	// section. Mirrors GetUsageEvent.
