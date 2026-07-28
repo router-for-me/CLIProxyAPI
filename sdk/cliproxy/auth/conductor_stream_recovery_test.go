@@ -12,8 +12,8 @@ import (
 )
 
 type recoverySequenceExecutor struct {
-	mu       sync.Mutex
-	attempts [][]cliproxyexecutor.StreamChunk
+	mu               sync.Mutex
+	attempts         [][]cliproxyexecutor.StreamChunk
 	calls            int
 	authIDs          []string
 	recoveryContexts []bool
@@ -26,10 +26,11 @@ func (e *recoverySequenceExecutor) Execute(context.Context, *Auth, cliproxyexecu
 	return cliproxyexecutor.Response{}, nil
 }
 
-func (e *recoverySequenceExecutor) ExecuteStream(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (e *recoverySequenceExecutor) ExecuteStream(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	e.mu.Lock()
 	call := e.calls
 	e.calls++
+	e.recoveryContexts = append(e.recoveryContexts, streamRecoveryFromContext(ctx) != nil)
 	if auth != nil {
 		e.authIDs = append(e.authIDs, auth.ID)
 	}
@@ -287,11 +288,14 @@ func TestRecoverySlotHeldUntilBufferedResultDrained(t *testing.T) {
 }
 
 func TestRecoveryOverflowHoldsSlotThroughRetainedPrefixAndOverflowChunk(t *testing.T) {
-	executor := &recoverySequenceExecutor{attempts: [][]cliproxyexecutor.StreamChunk{{
-		{Payload: []byte("abc"), Commitment: cliproxyexecutor.StreamCommitmentProvisional},
-		{Payload: []byte("def"), Commitment: cliproxyexecutor.StreamCommitmentSemantic},
-		{Payload: []byte("tail"), Commitment: cliproxyexecutor.StreamCommitmentTerminal},
-	}}}
+	executor := &recoverySequenceExecutor{attempts: [][]cliproxyexecutor.StreamChunk{
+		{
+			{Payload: []byte("abc"), Commitment: cliproxyexecutor.StreamCommitmentProvisional},
+			{Payload: []byte("def"), Commitment: cliproxyexecutor.StreamCommitmentSemantic},
+			{Payload: []byte("tail"), Commitment: cliproxyexecutor.StreamCommitmentTerminal},
+		},
+		{{Payload: []byte("second"), Commitment: cliproxyexecutor.StreamCommitmentUnknown}},
+	}}
 	manager := NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
 	auth := &Auth{ID: "overflow-slot-auth", Provider: "codex", Status: StatusActive}
@@ -302,14 +306,28 @@ func TestRecoveryOverflowHoldsSlotThroughRetainedPrefixAndOverflowChunk(t *testi
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
 	manager.RefreshSchedulerEntry(auth.ID)
 
-	result, err := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "overflow-slot-model"}, cliproxyexecutor.Options{Stream: true, StreamRecovery: cliproxyexecutor.StreamRecoveryPolicy{
-		Attempts: 1, MaxBufferBytes: 5, MaxRetryWindow: time.Second, MaxConcurrent: 1, InitialBackoff: time.Nanosecond, MaxBackoff: time.Nanosecond,
-	}})
+	policy := cliproxyexecutor.StreamRecoveryPolicy{Attempts: 1, MaxBufferBytes: 5, MaxRetryWindow: time.Second, MaxConcurrent: 1, InitialBackoff: time.Nanosecond, MaxBackoff: time.Nanosecond}
+	result, err := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "overflow-slot-model"}, cliproxyexecutor.Options{Stream: true, StreamRecovery: policy})
 	if err != nil {
 		t.Fatalf("ExecuteStream: %v", err)
 	}
 	if got := manager.recoveryInFlight.Load(); got != 1 {
 		t.Fatalf("recovery slots = %d before prefix drain, want 1", got)
+	}
+	second, err := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "overflow-slot-model"}, cliproxyexecutor.Options{Stream: true, StreamRecovery: policy})
+	if err != nil {
+		t.Fatalf("second ExecuteStream: %v", err)
+	}
+	for range second.Chunks {
+	}
+	executor.mu.Lock()
+	recoveryContexts := append([]bool(nil), executor.recoveryContexts...)
+	executor.mu.Unlock()
+	if len(recoveryContexts) != 2 || !recoveryContexts[0] || recoveryContexts[1] {
+		t.Fatalf("recovery contexts = %v, want [true false] while overflow slot is held", recoveryContexts)
+	}
+	if got := manager.recoveryInFlight.Load(); got != 1 {
+		t.Fatalf("recovery slots = %d after gated second request, want 1", got)
 	}
 	if chunk := <-result.Chunks; string(chunk.Payload) != "abc" {
 		t.Fatalf("prefix chunk = %q, want abc", chunk.Payload)
