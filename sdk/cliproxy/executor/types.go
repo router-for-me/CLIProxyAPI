@@ -44,6 +44,10 @@ const (
 	SelectedAuthIndexCallbackMetadataKey = "selected_auth_index_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
+	// DerivedSessionIDMetadataKey stores a stable session identity inferred from request context.
+	DerivedSessionIDMetadataKey = "derived_session_id"
+	// CallerScopeMetadataKey isolates inferred session identities between downstream callers.
+	CallerScopeMetadataKey = "caller_scope"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.
@@ -89,6 +93,49 @@ type RequestAfterAuthInterceptResponse struct {
 	Body []byte
 	// ClearHeaders explicitly removes current request headers before Headers is applied.
 	ClearHeaders []string
+	// Terminate prevents the selected executor from receiving the request.
+	Terminate bool
+	// StatusCode is the downstream HTTP status used when Terminate is true.
+	StatusCode int
+	// ResponseHeaders contains downstream response headers used when Terminate is true.
+	ResponseHeaders http.Header
+	// ResponseBody contains the downstream response body used when Terminate is true.
+	ResponseBody []byte
+}
+
+// RequestTerminatedError carries a plugin-defined downstream response without executing upstream.
+type RequestTerminatedError struct {
+	HTTPStatus int
+	Header     http.Header
+	Body       []byte
+}
+
+func (e *RequestTerminatedError) Error() string {
+	return "request terminated by plugin"
+}
+
+// StatusCode returns the plugin-defined downstream HTTP status.
+func (e *RequestTerminatedError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.HTTPStatus
+}
+
+// ResponseHeaders returns a copy of the plugin-defined downstream headers.
+func (e *RequestTerminatedError) ResponseHeaders() http.Header {
+	if e == nil {
+		return nil
+	}
+	return e.Header.Clone()
+}
+
+// ResponseBody returns a copy of the plugin-defined downstream body.
+func (e *RequestTerminatedError) ResponseBody() []byte {
+	if e == nil {
+		return nil
+	}
+	return append([]byte(nil), e.Body...)
 }
 
 // Options controls execution behavior for both streaming and non-streaming calls.
@@ -112,6 +159,8 @@ type Options struct {
 	Metadata map[string]any
 	// RequestAfterAuthInterceptor runs after credential selection and before executor translation.
 	RequestAfterAuthInterceptor RequestAfterAuthInterceptor
+	// ExecutionLifecycle owns Home-dispatched execution resources. Executors must not add it to request metadata.
+	ExecutionLifecycle ExecutionLifecycle
 }
 
 // ResponseFormatOrSource returns the response target format for an execution.

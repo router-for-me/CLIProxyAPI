@@ -382,6 +382,57 @@ func TestConvertOpenAIRequestToClaude_PreservesToolCacheControl(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_NormalizesRootToolSchemaUnions(t *testing.T) {
+	inputJSON := `{
+		"model":"claude-sonnet-4-5",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[
+			{
+				"type":"function",
+				"function":{
+					"name":"without_type",
+					"parameters":{
+						"anyOf":[
+							{"type":"object","properties":{"a":{"type":"string"}}},
+							{"type":"object","properties":{"b":{"type":"string"}}}
+						]
+					}
+				}
+			},
+			{
+				"type":"function",
+				"function":{
+					"name":"constraint_union",
+					"parametersJsonSchema":{
+						"type":"object",
+						"properties":{"a":{"type":"string"},"b":{"type":"string"}},
+						"anyOf":[{"required":["a"]},{"required":["b"]}]
+					}
+				}
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	root := gjson.ParseBytes(result)
+
+	for _, toolName := range []string{"without_type", "constraint_union"} {
+		schema := root.Get(`tools.#(name=="` + toolName + `").input_schema`)
+		if got := schema.Get("type").String(); got != "object" {
+			t.Fatalf("%s input_schema.type = %q, want object. Output: %s", toolName, got, result)
+		}
+		if schema.Get("anyOf").Exists() {
+			t.Fatalf("%s input_schema should not contain root anyOf. Output: %s", toolName, result)
+		}
+		if !schema.Get("properties.a").Exists() || !schema.Get("properties.b").Exists() {
+			t.Fatalf("%s input_schema should contain properties a and b. Output: %s", toolName, result)
+		}
+		if schema.Get("required").Exists() {
+			t.Fatalf("%s input_schema should not merge alternative required fields. Output: %s", toolName, result)
+		}
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_PartCacheControlWinsOverMessageLevel(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",

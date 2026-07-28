@@ -81,6 +81,9 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		}
 	}
 
+	// Map OpenAI response_format to Gemini structured output settings.
+	out = applyOpenAIResponseFormatToGemini(out, rawJSON)
+
 	// Map OpenAI modalities -> Gemini generationConfig.responseModalities
 	// e.g. "modalities": ["image", "text"] -> ["IMAGE", "TEXT"]
 	if mods := gjson.GetBytes(rawJSON, "modalities"); mods.Exists() && mods.IsArray() {
@@ -476,4 +479,26 @@ func openAIInputAudioMimeType(audioFormat string) string {
 	default:
 		return "audio/" + audioFormat
 	}
+}
+
+// applyOpenAIResponseFormatToGemini maps OpenAI Chat Completions structured output settings to Gemini.
+// Response schemas pass through unchanged because the tool schema cleaner removes supported response fields.
+func applyOpenAIResponseFormatToGemini(out []byte, rawJSON []byte) []byte {
+	responseFormat := gjson.GetBytes(rawJSON, "response_format")
+	if !responseFormat.Exists() {
+		return out
+	}
+
+	switch strings.ToLower(strings.TrimSpace(responseFormat.Get("type").String())) {
+	case "json_object":
+		out, _ = sjson.SetBytes(out, "generationConfig.responseMimeType", "application/json")
+	case "json_schema":
+		out, _ = sjson.SetBytes(out, "generationConfig.responseMimeType", "application/json")
+		out, _ = sjson.DeleteBytes(out, "generationConfig.responseSchema")
+		if schema := responseFormat.Get("json_schema.schema"); schema.Exists() {
+			out, _ = sjson.SetRawBytes(out, "generationConfig.responseJsonSchema", []byte(schema.Raw))
+		}
+	}
+
+	return out
 }

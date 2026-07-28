@@ -50,10 +50,6 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
 	}
 
-	if parallelToolCalls := root.Get("parallel_tool_calls"); parallelToolCalls.Exists() {
-		out, _ = sjson.SetBytes(out, "parallel_tool_calls", parallelToolCalls.Bool())
-	}
-
 	// Convert instructions to system message
 	if instructions := root.Get("instructions"); instructions.Exists() {
 		systemMessage := []byte(`{"role":"system","content":""}`)
@@ -330,6 +326,12 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 	if len(chatCompletionsTools) > 0 {
 		out, _ = sjson.SetBytes(out, "tools", chatCompletionsTools)
+		if parallelToolCalls := root.Get("parallel_tool_calls"); parallelToolCalls.Exists() {
+			out, _ = sjson.SetBytes(out, "parallel_tool_calls", parallelToolCalls.Bool())
+		}
+		if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
+		}
 	}
 
 	if reasoningEffort := root.Get("reasoning.effort"); reasoningEffort.Exists() {
@@ -337,11 +339,6 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		if effort != "" {
 			out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 		}
-	}
-
-	// Convert tool_choice if present
-	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
 	}
 
 	return out

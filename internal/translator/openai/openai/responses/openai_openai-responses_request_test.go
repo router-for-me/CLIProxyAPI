@@ -363,6 +363,13 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesStructure
 		"input": [
 			{"role":"user","content":"Run command."}
 		],
+		"tools": [
+			{
+				"type": "function",
+				"name": "run_command",
+				"parameters": {"type": "object"}
+			}
+		],
 		"tool_choice": {
 			"type": "function",
 			"function": {
@@ -380,6 +387,62 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesStructure
 	}
 	if got := gjson.GetBytes(out, "tool_choice.function.name").String(); got != "run_command" {
 		t.Fatalf("tool_choice.function.name = %q, want run_command; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_OmitsToolSettingsWithoutTools(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{
+			name: "empty tools",
+			raw: []byte(`{
+				"input": [{"role":"user","content":"say ok"}],
+				"tools": [],
+				"tool_choice": "auto",
+				"parallel_tool_calls": false
+			}`),
+		},
+		{
+			name: "unconvertible tools",
+			raw: []byte(`{
+				"tools": [{"type":"unsupported"}],
+				"tool_choice": "auto",
+				"parallel_tool_calls": false
+			}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("grok-4.5", tt.raw, false)
+
+			for _, field := range []string{"tools", "tool_choice", "parallel_tool_calls"} {
+				if got := gjson.GetBytes(out, field); got.Exists() {
+					t.Fatalf("%s should be omitted without tools; output=%s", field, out)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesParallelToolCallsWithTools(t *testing.T) {
+	raw := []byte(`{
+		"tools": [
+			{
+				"type": "function",
+				"name": "run_command",
+				"parameters": {"type": "object"}
+			}
+		],
+		"parallel_tool_calls": false
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("grok-4.5", raw, false)
+
+	if got := gjson.GetBytes(out, "parallel_tool_calls"); !got.Exists() || got.Bool() {
+		t.Fatalf("parallel_tool_calls = %v, want false; output=%s", got.Value(), out)
 	}
 }
 
