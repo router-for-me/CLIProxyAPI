@@ -93,6 +93,16 @@ func recoverableFailureRetryAfter(now time.Time, disableCooling bool) time.Time 
 	return nextTransientErrorRetryAfter(now)
 }
 
+func transientFailureRetryAfter(now time.Time, retryAfter *time.Duration, disableCooling bool) time.Time {
+	if disableCooling {
+		return time.Time{}
+	}
+	if retryAfter != nil && *retryAfter >= 0 {
+		return now.Add(*retryAfter)
+	}
+	return nextTransientErrorRetryAfter(now)
+}
+
 // SetConfig updates the runtime config snapshot used by request-time helpers.
 // Callers should provide the latest config on reload so per-credential alias mapping stays in sync.
 func (m *Manager) SetConfig(cfg *internalconfig.Config) {
@@ -827,7 +837,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								setModelQuota = true
 							}
 						case 408, 500, 502, 503, 504:
-							state.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
+							state.NextRetryAfter = transientFailureRetryAfter(now, result.RetryAfter, disableCooling)
 							state.Unavailable = !state.NextRetryAfter.IsZero()
 						default:
 							state.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
@@ -1655,7 +1665,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.NextRetryAfter = next
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
-		auth.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
+		auth.NextRetryAfter = transientFailureRetryAfter(now, retryAfter, disableCooling)
 		auth.Unavailable = !auth.NextRetryAfter.IsZero()
 	default:
 		if auth.StatusMessage == "" {
