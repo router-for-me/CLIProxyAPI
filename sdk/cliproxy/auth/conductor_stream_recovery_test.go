@@ -14,9 +14,10 @@ import (
 type recoverySequenceExecutor struct {
 	mu       sync.Mutex
 	attempts [][]cliproxyexecutor.StreamChunk
-	calls    int
-	authIDs  []string
-	notify   chan int
+	calls            int
+	authIDs          []string
+	recoveryContexts []bool
+	notify           chan int
 }
 
 func (e *recoverySequenceExecutor) Identifier() string { return "codex" }
@@ -282,6 +283,56 @@ func TestRecoverySlotHeldUntilBufferedResultDrained(t *testing.T) {
 	}
 	if got := manager.recoveryInFlight.Load(); got != 0 {
 		t.Fatalf("recovery slots = %d, want 0 after drain", got)
+	}
+}
+
+func TestRecoveryOverflowHoldsSlotThroughRetainedPrefixAndOverflowChunk(t *testing.T) {
+	executor := &recoverySequenceExecutor{attempts: [][]cliproxyexecutor.StreamChunk{{
+		{Payload: []byte("abc"), Commitment: cliproxyexecutor.StreamCommitmentProvisional},
+		{Payload: []byte("def"), Commitment: cliproxyexecutor.StreamCommitmentSemantic},
+		{Payload: []byte("tail"), Commitment: cliproxyexecutor.StreamCommitmentTerminal},
+	}}}
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &Auth{ID: "overflow-slot-auth", Provider: "codex", Status: StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "overflow-slot-model"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	manager.RefreshSchedulerEntry(auth.ID)
+
+	result, err := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "overflow-slot-model"}, cliproxyexecutor.Options{Stream: true, StreamRecovery: cliproxyexecutor.StreamRecoveryPolicy{
+		Attempts: 1, MaxBufferBytes: 5, MaxRetryWindow: time.Second, MaxConcurrent: 1, InitialBackoff: time.Nanosecond, MaxBackoff: time.Nanosecond,
+	}})
+	if err != nil {
+		t.Fatalf("ExecuteStream: %v", err)
+	}
+	if got := manager.recoveryInFlight.Load(); got != 1 {
+		t.Fatalf("recovery slots = %d before prefix drain, want 1", got)
+	}
+	if chunk := <-result.Chunks; string(chunk.Payload) != "abc" {
+		t.Fatalf("prefix chunk = %q, want abc", chunk.Payload)
+	}
+	if got := manager.recoveryInFlight.Load(); got != 1 {
+		t.Fatalf("recovery slots = %d before overflow chunk, want 1", got)
+	}
+	if chunk := <-result.Chunks; string(chunk.Payload) != "def" {
+		t.Fatalf("overflow chunk = %q, want def", chunk.Payload)
+	}
+	deadline := time.Now().Add(time.Second)
+	for manager.recoveryInFlight.Load() != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := manager.recoveryInFlight.Load(); got != 0 {
+		t.Fatalf("recovery slots = %d after overflow prefix drain, want 0", got)
+	}
+	var tail string
+	for chunk := range result.Chunks {
+		tail += string(chunk.Payload)
+	}
+	if tail != "tail" {
+		t.Fatalf("ordinary tail = %q, want tail", tail)
 	}
 }
 

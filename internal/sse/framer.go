@@ -4,9 +4,8 @@ package sse
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"io"
-
-	"github.com/tidwall/gjson"
 )
 
 // LineScanner scans SSE fields and separates safely glued JSON data frames.
@@ -51,57 +50,116 @@ func (s *LineScanner) Bytes() []byte { return s.current }
 func (s *LineScanner) Err() error { return s.scanner.Err() }
 
 // NormalizeGluedFrames safely separates adjacent SSE fields when the preceding
-// data field contains complete JSON. It iterates so three or more glued frames
-// are normalized without splitting marker-like text inside JSON strings.
+// data field contains complete JSON. It scans each data value once so inputs
+// containing many glued frames are processed linearly.
 func NormalizeGluedFrames(chunk []byte) []byte {
 	if len(chunk) == 0 {
 		return chunk
 	}
-	for {
-		normalized := normalizeGluedPass(chunk)
-		if bytes.Equal(normalized, chunk) {
-			return normalized
+
+	var out []byte
+	cursor := 0
+	changed := false
+	for cursor < len(chunk) {
+		dataStart := nextDataFieldStart(chunk, cursor)
+		if dataStart < 0 {
+			if !changed {
+				return chunk
+			}
+			out = append(out, chunk[cursor:]...)
+			break
 		}
-		chunk = normalized
+		out = append(out, chunk[cursor:dataStart]...)
+
+		jsonStart := dataStart + len("data:")
+		for jsonStart < len(chunk) && (chunk[jsonStart] == ' ' || chunk[jsonStart] == '\t') {
+			jsonStart++
+		}
+		jsonEnd, ok := completeJSONValueEnd(chunk, jsonStart)
+		if !ok {
+			if !changed {
+				return chunk
+			}
+			out = append(out, chunk[dataStart:]...)
+			break
+		}
+		out = append(out, chunk[dataStart:jsonEnd]...)
+		cursor = jsonEnd
+
+		switch {
+		case bytes.HasPrefix(chunk[cursor:], []byte("data:")):
+			out = append(out, '\n')
+			changed = true
+		case bytes.HasPrefix(chunk[cursor:], []byte("event:")):
+			out = append(out, '\n', '\n')
+			changed = true
+		case bytes.HasPrefix(chunk[cursor:], []byte("\r\ndata:")):
+			out = append(out, '\r', '\n')
+			cursor += 2
+		case bytes.HasPrefix(chunk[cursor:], []byte("\r\nevent:")):
+			out = append(out, '\r', '\n', '\r', '\n')
+			cursor += 2
+			changed = true
+		default:
+			if cursor < len(chunk) {
+				out = append(out, chunk[cursor])
+				cursor++
+			}
+		}
 	}
+	if !changed {
+		return chunk
+	}
+	return out
 }
 
-func normalizeGluedPass(chunk []byte) []byte {
-	chunk = safeReplaceGlued(chunk, []byte("}event:"), []byte("}\n\nevent:"))
-	chunk = safeReplaceGlued(chunk, []byte("}\r\nevent:"), []byte("}\r\n\r\nevent:"))
-	chunk = safeReplaceGlued(chunk, []byte("}data:"), []byte("}\ndata:"))
-	chunk = safeReplaceGlued(chunk, []byte("}\r\ndata:"), []byte("}\r\ndata:"))
-	return chunk
+func nextDataFieldStart(chunk []byte, from int) int {
+	if from < len(chunk) && bytes.HasPrefix(chunk[from:], []byte("data:")) {
+		return from
+	}
+	if relative := bytes.Index(chunk[from:], []byte("\ndata:")); relative >= 0 {
+		return from + relative + 1
+	}
+	return -1
 }
 
-func safeReplaceGlued(chunk, old, replacement []byte) []byte {
-	for searchFrom := 0; searchFrom < len(chunk); {
-		relative := bytes.Index(chunk[searchFrom:], old)
-		if relative < 0 {
-			return chunk
+func completeJSONValueEnd(data []byte, start int) (int, bool) {
+	if start >= len(data) || (data[start] != '{' && data[start] != '[') {
+		return 0, false
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(data); i++ {
+		current := data[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			switch current {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
 		}
-		idx := searchFrom + relative
-		lineStart := bytes.LastIndexByte(chunk[:idx], '\n') + 1
-		part := bytes.TrimSuffix(chunk[lineStart:idx+1], []byte("\r"))
-		jsonData, ok := extractData(part)
-		if ok && len(jsonData) > 0 && gjson.ValidBytes(jsonData) {
-			out := make([]byte, 0, len(chunk)-len(old)+len(replacement))
-			out = append(out, chunk[:idx]...)
-			out = append(out, replacement...)
-			out = append(out, chunk[idx+len(old):]...)
-			return out
+		switch current {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+			if depth == 0 {
+				end := i + 1
+				return end, json.Valid(data[start:end])
+			}
+			if depth < 0 {
+				return 0, false
+			}
 		}
-		searchFrom = idx + len(old)
 	}
-	return chunk
-}
-
-func extractData(line []byte) ([]byte, bool) {
-	if data, ok := bytes.CutPrefix(line, []byte("data: ")); ok {
-		return data, true
-	}
-	if data, ok := bytes.CutPrefix(line, []byte("data:")); ok {
-		return data, true
-	}
-	return nil, false
+	return 0, false
 }

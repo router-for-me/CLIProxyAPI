@@ -20,12 +20,13 @@ import (
 type streamRecoveryContextKey struct{}
 
 type streamRecoveryState struct {
-	policy         cliproxyexecutor.StreamRecoveryPolicy
-	started        time.Time
-	remaining      int
-	releaseOnce    sync.Once
-	release        func()
-	holdUntilDrain bool
+	policy                     cliproxyexecutor.StreamRecoveryPolicy
+	started                    time.Time
+	remaining                  int
+	releaseOnce                sync.Once
+	release                    func()
+	holdUntilDrain             bool
+	releaseAfterFirstRemaining bool
 }
 
 func (s *streamRecoveryState) releaseSlot() {
@@ -330,6 +331,8 @@ func (m *Manager) executeStreamWithRecovery(ctx context.Context, executor Provid
 			buffered, remaining, terminal, failOpenReason, errStream = collectRecoveryAttempt(ctx, streamResult, state.policy.MaxBufferBytes)
 			if errStream == nil {
 				if failOpenReason != "" {
+					state.holdUntilDrain = true
+					state.releaseAfterFirstRemaining = true
 					log.WithFields(log.Fields{"provider": provider, "model": model, "attempt": attempt, "reason": failOpenReason, "buffered_bytes": bufferedStreamBytes(buffered), "elapsed": time.Since(state.started)}).Debug("stream recovery failed open to ordinary streaming")
 					return streamResult, buffered, remaining, nil
 				}
@@ -359,10 +362,10 @@ func (m *Manager) executeStreamWithRecovery(ctx context.Context, executor Provid
 }
 
 func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult, ephemeralResult bool) *cliproxyexecutor.StreamResult {
-	return m.wrapStreamResultWithDone(ctx, auth, provider, resultModel, headers, buffered, remaining, aliasResult, ephemeralResult, nil)
+	return m.wrapStreamResultWithDone(ctx, auth, provider, resultModel, headers, buffered, remaining, aliasResult, ephemeralResult, nil, false)
 }
 
-func (m *Manager) wrapStreamResultWithDone(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult, ephemeralResult bool, done func()) *cliproxyexecutor.StreamResult {
+func (m *Manager) wrapStreamResultWithDone(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult, ephemeralResult bool, done func(), releaseAfterFirstRemaining bool) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -427,10 +430,15 @@ func (m *Manager) wrapStreamResultWithDone(ctx context.Context, auth *Auth, prov
 				return
 			}
 		}
+		remainingIndex := 0
 		for chunk := range remaining {
 			if ok := emit(chunk); !ok {
 				discardStreamChunks(remaining)
 				return
+			}
+			remainingIndex++
+			if releaseAfterFirstRemaining && remainingIndex == 1 && done != nil {
+				done()
 			}
 		}
 		if tail := finishForceMappedStreamChunks(rewriter); len(tail) > 0 {
@@ -493,7 +501,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				continue
 			}
 			if recoveryState.holdUntilDrain {
-				return m.wrapStreamResultWithDone(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, aliasResult, ephemeralResult, recoveryState.releaseSlot), nil
+				return m.wrapStreamResultWithDone(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, aliasResult, ephemeralResult, recoveryState.releaseSlot, recoveryState.releaseAfterFirstRemaining), nil
 			}
 			return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, aliasResult, ephemeralResult), nil
 		}

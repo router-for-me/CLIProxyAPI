@@ -1,7 +1,9 @@
 package sse
 
 import (
+	"bytes"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -51,6 +53,38 @@ func TestNormalizeGluedFramesSkipsInStringEventMarkerThenSplitsRealBoundary(t *t
 	want := "data: {\"text\":\"literal }event: marker\",\"n\":1}\n\nevent: response.completed"
 	if got := string(NormalizeGluedFrames(input)); got != want {
 		t.Fatalf("normalized = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeGluedFramesManyFrames(t *testing.T) {
+	const frameCount = 5000
+	var input strings.Builder
+	for i := 0; i < frameCount; i++ {
+		input.WriteString(`data: {"n":`)
+		input.WriteString(strconv.Itoa(i))
+		input.WriteByte('}')
+	}
+	got := NormalizeGluedFrames([]byte(input.String()))
+	if count := bytes.Count(got, []byte("\ndata:")); count != frameCount-1 {
+		t.Fatalf("normalized boundaries = %d, want %d", count, frameCount-1)
+	}
+	if !bytes.HasSuffix(got, []byte(`data: {"n":4999}`)) {
+		t.Fatalf("normalized output lost final frame")
+	}
+}
+
+func BenchmarkNormalizeGluedFramesMany(b *testing.B) {
+	var input strings.Builder
+	for i := 0; i < 1000; i++ {
+		input.WriteString(`data: {"n":`)
+		input.WriteString(strconv.Itoa(i))
+		input.WriteByte('}')
+	}
+	payload := []byte(input.String())
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	for i := 0; i < b.N; i++ {
+		_ = NormalizeGluedFrames(payload)
 	}
 }
 
