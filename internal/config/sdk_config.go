@@ -4,6 +4,11 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import (
+	"fmt"
+	"strings"
+)
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
@@ -51,6 +56,11 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// CodexBuckets maps bucket names to the client API keys assigned to them.
+	// A mapped key only uses codex credentials whose auth file carries the same
+	// top-level "bucket" value; unmapped keys only use unbucketed credentials.
+	CodexBuckets map[string]CodexBucket `yaml:"codex-buckets" json:"codex-buckets"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
@@ -67,6 +77,51 @@ type SDKConfig struct {
 type ClaudeCodeConfig struct {
 	// DisableCloakingModelList disables model ID cloaking in Anthropic model list responses.
 	DisableCloakingModelList bool `yaml:"disable-cloaking-model-list" json:"disable-cloaking-model-list"`
+}
+
+// CodexBucket groups client API keys allowed to use codex credentials tagged
+// with the bucket's name.
+type CodexBucket struct {
+	// APIKeys lists the client API keys mapped to this bucket.
+	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+}
+
+// CodexBucketForAPIKey returns the bucket name the client API key is mapped
+// to, or the empty string when the key is unmapped.
+func (c *SDKConfig) CodexBucketForAPIKey(apiKey string) string {
+	if c == nil || apiKey == "" {
+		return ""
+	}
+	for name, bucket := range c.CodexBuckets {
+		for _, key := range bucket.APIKeys {
+			if key == apiKey {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// ValidateCodexBuckets rejects configurations that map one client API key
+// into more than one bucket.
+func (c *SDKConfig) ValidateCodexBuckets() error {
+	if c == nil {
+		return nil
+	}
+	seen := make(map[string]string)
+	for name, bucket := range c.CodexBuckets {
+		for _, key := range bucket.APIKeys {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			if prev, ok := seen[key]; ok && prev != name {
+				return fmt.Errorf("codex-buckets: an api key is mapped to both bucket %q and bucket %q", prev, name)
+			}
+			seen[key] = name
+		}
+	}
+	return nil
 }
 
 // StreamingConfig holds server streaming behavior configuration.
