@@ -591,6 +591,85 @@ func TestExecuteStreamWithAuthManager_CancelDuringSynchronousBootstrap(t *testin
 	}
 }
 
+func TestExecuteStreamWithAuthManager_TTFTTimeoutCancelsSilentStream(t *testing.T) {
+	canceled := make(chan struct{})
+	executor := &bootstrapStreamExecutor{stream: func(ctx context.Context, _ int) (*coreexecutor.StreamResult, error) {
+		chunks := make(chan coreexecutor.StreamChunk)
+		go func() {
+			<-ctx.Done()
+			close(canceled)
+			time.Sleep(10 * time.Millisecond)
+			close(chunks)
+		}()
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}}
+	handler, _ := registerBootstrapExecutor(t, executor)
+	handler.Cfg.Streaming.BootstrapRetries = 0
+	handler.Cfg.Streaming.TTFTTimeoutSeconds = 1
+
+	startedAt := time.Now()
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "bootstrap-model", []byte(`{"model":"bootstrap-model"}`), "")
+	if elapsed := time.Since(startedAt); elapsed > 3*time.Second {
+		t.Fatalf("TTFT timeout returned after %v, want no more than 3s", elapsed)
+	}
+	if dataChan != nil {
+		t.Fatalf("data channel = %#v, want nil on TTFT timeout", dataChan)
+	}
+
+	var gotErr *interfaces.ErrorMessage
+	for msg := range errChan {
+		if msg != nil {
+			gotErr = msg
+		}
+	}
+	if gotErr == nil || gotErr.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("TTFT error = %+v, want status %d", gotErr, http.StatusGatewayTimeout)
+	}
+	var timeoutErr *streamingTTFTTimeoutError
+	if !errors.As(gotErr.Error, &timeoutErr) {
+		t.Fatalf("TTFT error type = %T, want *streamingTTFTTimeoutError", gotErr.Error)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("TTFT timeout did not cancel the upstream stream context")
+	}
+	if executor.Calls() != 1 {
+		t.Fatalf("stream attempts = %d, want 1", executor.Calls())
+	}
+}
+
+func TestExecuteStreamWithAuthManager_TTFTTimeoutCoversExecutorDispatch(t *testing.T) {
+	canceled := make(chan struct{})
+	var canceledOnce sync.Once
+	executor := &bootstrapStreamExecutor{stream: func(ctx context.Context, _ int) (*coreexecutor.StreamResult, error) {
+		<-ctx.Done()
+		canceledOnce.Do(func() { close(canceled) })
+		return nil, ctx.Err()
+	}}
+	handler, _ := registerBootstrapExecutor(t, executor)
+	handler.Cfg.Streaming.BootstrapRetries = 0
+	handler.Cfg.Streaming.TTFTTimeoutSeconds = 1
+
+	startedAt := time.Now()
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "bootstrap-model", []byte(`{"model":"bootstrap-model"}`), "")
+	if elapsed := time.Since(startedAt); elapsed > 3*time.Second {
+		t.Fatalf("executor TTFT timeout returned after %v, want no more than 3s", elapsed)
+	}
+	if dataChan != nil {
+		t.Fatalf("data channel = %#v, want nil on executor timeout", dataChan)
+	}
+	gotErr := <-errChan
+	if gotErr == nil || gotErr.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("executor TTFT error = %+v, want status %d", gotErr, http.StatusGatewayTimeout)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("executor TTFT timeout did not cancel the dispatch context")
+	}
+}
+
 func TestExecuteStreamWithAuthManager_EmptyClosedStream(t *testing.T) {
 	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, _ int) (*coreexecutor.StreamResult, error) {
 		chunks := make(chan coreexecutor.StreamChunk)
