@@ -138,7 +138,7 @@ export default function ModelRouteConfigSection({ model, route, onChange }) {
     return pr ? Number(pr.priority) || 0 : 0;
   }
 
-  const { ranks, ordered } = computeRanks(selected, priorityFor);
+  const { ranks } = computeRanks(selected, priorityFor);
 
   const hasTieConflict =
     strategyActive &&
@@ -208,50 +208,6 @@ export default function ModelRouteConfigSection({ model, route, onChange }) {
         </div>
       </div>
 
-      <div className="model-routes__providers">
-        {loading && <span className="muted">Loading providers…</span>}
-        {!loading && choices.length === 0 && liveLoadedAndEmpty && catalogEmpty && (
-          <span className="muted">No live providers serve this model, and no upstream providers are configured.</span>
-        )}
-        {!loading && choices.length === 0 && liveLoadedAndEmpty && !catalogEmpty && (
-          <span className="muted">No live providers serve this model; pin to a configured upstream below.</span>
-        )}
-        {choices.map((p) => {
-          const on = selected.includes(p);
-          const isLive = liveLoaded && liveProviders.includes(p);
-          const priority = on ? priorityFor(p) : 0;
-          const rank = on ? ranks[p] : -1;
-          return (
-            <div className={`chip-pri ${on ? 'chip-pri--on' : ''}`} key={p}>
-              <button
-                type="button"
-                className={`chip ${on ? 'chip--selected' : ''} mono`}
-                onClick={() => toggleProvider(p)}
-                title={`${p}\n${isLive ? 'Live provider (currently serving this model)' : 'Configured upstream (no live auth right now)'}${on && strategyActive ? `\nRank ${rank + 1} · priority ${priority}` : ''}`}
-              >
-                {on && strategyActive && rank >= 0 && (
-                  <span className="chip__rank" aria-hidden="true">{rankGlyph(rank)}</span>
-                )}
-                <span className="chip__label">{p}{isLive ? '' : ' *'}</span>
-              </button>
-              {on && strategyActive && (
-                <label className="chip-pri__field" title={`Priority for ${p} (higher = primary)`}>
-                  <span className="chip-pri__hash" aria-hidden="true">P</span>
-                  <input
-                    type="number"
-                    className="chip-pri__input"
-                    value={priority}
-                    min={0}
-                    step={1}
-                    onChange={(e) => setPriority(p, parseInt(e.target.value, 10) || 0)}
-                  />
-                </label>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
       {strategyActive && hasTieConflict && (
         <div className="model-routes__warning" role="status">
           <span className="model-routes__warningicon" aria-hidden="true">⚠</span>
@@ -259,21 +215,90 @@ export default function ModelRouteConfigSection({ model, route, onChange }) {
         </div>
       )}
 
-      {strategyActive && ordered.length > 1 && !hasTieConflict && (
-        <div className="model-routes__order mono" title="Providers will be tried in this order">
-          <span className="model-routes__orderlabel">try order</span>
-          {ordered.map((p, i) => (
-            <React.Fragment key={p}>
-              {i > 0 && <span className="model-routes__arrow">→</span>}
-              <span className="model-routes__orderitem">
-                <span className="model-routes__orderrank">{rankGlyph(i)}</span>
-                {p}
-                {priorityFor(p) !== 0 ? <span className="model-routes__ordernum">·p{priorityFor(p)}</span> : null}
-              </span>
-            </React.Fragment>
-          ))}
-        </div>
-      )}
+      <div className="model-routes__tablewrap">
+        <table className="table table--dense model-routes__table">
+          <thead>
+            <tr>
+              <th scope="col">Provider</th>
+              <th scope="col">Status</th>
+              {strategyActive && <th scope="col" className="sgl-num">Priority</th>}
+              {strategyActive && <th scope="col" className="sgl-num">Rank</th>}
+              <th scope="col" className="model-routes__col-toggle">
+                <span className="sr-only">Toggle pin</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && (
+              <tr><td colSpan={strategyActive ? 5 : 3} className="muted">Loading providers…</td></tr>
+            )}
+            {!loading && choices.length === 0 && liveLoadedAndEmpty && catalogEmpty && (
+              <tr><td colSpan={strategyActive ? 5 : 3} className="muted">
+                No live providers serve this model, and no upstream providers are configured.
+              </td></tr>
+            )}
+            {!loading && choices.length === 0 && liveLoadedAndEmpty && !catalogEmpty && (
+              <tr><td colSpan={strategyActive ? 5 : 3} className="muted">
+                No live providers serve this model; pin to a configured upstream below.
+              </td></tr>
+            )}
+            {choices.map((p) => {
+              const on = selected.includes(p);
+              const isLive = liveLoaded && liveProviders.includes(p);
+              const priority = on ? priorityFor(p) : 0;
+              const rank = on ? ranks[p] : -1;
+              return (
+                <tr
+                  key={p}
+                  className={`row-link ${on ? 'row--selected' : ''}`}
+                  onClick={() => toggleProvider(p)}
+                  title={`${p}\n${isLive ? 'Live provider (currently serving this model)' : 'Configured upstream (no live auth right now)'}${on && strategyActive ? `\nRank ${rank + 1} · priority ${priority}` : ''}`}
+                >
+                  <td className="mono">{p}{isLive ? '' : ' *'}</td>
+                  <td>
+                    <span className={`live-dot ${isLive ? 'live-dot--on' : 'live-dot--off'}`} aria-hidden="true" />
+                    <span className="muted">{isLive ? 'live' : 'config'}</span>
+                  </td>
+                  {strategyActive && (
+                    <td className="sgl-num">
+                      {on ? (
+                        <input
+                          type="number"
+                          className="prio-input"
+                          value={priority}
+                          min={0}
+                          step={1}
+                          aria-label={`Priority for ${p} (higher = primary)`}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => setPriority(p, parseInt(e.target.value, 10) || 0)}
+                        />
+                      ) : (
+                        <span className="dim">—</span>
+                      )}
+                    </td>
+                  )}
+                  {strategyActive && (
+                    <td className="sgl-num mono">
+                      {on && rank >= 0 ? rankGlyph(rank) : <span className="dim">—</span>}
+                    </td>
+                  )}
+                  <td className="model-routes__col-toggle">
+                    <button
+                      type="button"
+                      className="row-actions__btn"
+                      aria-pressed={on}
+                      onClick={(e) => { e.stopPropagation(); toggleProvider(p); }}
+                      aria-label={on ? `Unpin ${p}` : `Pin ${p}`}
+                    >
+                      {on ? 'Pinned' : 'Pin'}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
 
       <div className="model-routes__strategy">
         <div className="seg" role="group" aria-label={`Routing strategy for ${model}`}>

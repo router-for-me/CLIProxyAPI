@@ -961,13 +961,13 @@ ul.list-bare li { padding: 4px 0; }
 
 .model-routes__card {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr;
   grid-template-areas:
-    "head   strategy"
-    "providers strategy"
-    "order  strategy"
-    "warning strategy";
-  gap: 6px 14px;
+    "head"
+    "strategy"
+    "warning"
+    "providers";
+  gap: 8px;
   align-items: start;
   padding: 10px 12px;
   border: 1px solid var(--border-strong);
@@ -1019,36 +1019,74 @@ ul.list-bare li { padding: 4px 0; }
 .model-routes__pill--muted { color: var(--text-muted); }
 .model-routes__pill--priority { color: var(--accent); border-color: rgba(94, 234, 212, 0.45); background: var(--accent-dim); }
 .model-routes__pill--failover { color: #7da2f3; border-color: rgba(125, 162, 243, 0.45); background: rgba(125, 162, 243, 0.12); }
-.model-routes__providers {
-  grid-area: providers;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  align-items: center;
+/* Per-model routing providers table (replaces the chip grid). The cardwraps
+ * the table; the table provides its own row chrome, so it has no outer
+ * border and fills the providers grid area. One row per provider; pinned
+ * rows reuse .row--selected for the accent tint and .row-link for the
+ * whole-row click affordance (.row-actions__btn is the keyboard path). */
+.model-routes__tablewrap { overflow-x: auto; grid-area: providers; }
+.model-routes__table {
+  width: 100%;
+  border: none;
+  font-size: 12px;
 }
-
-/* Try-order preview. */
-.model-routes__order {
-  grid-area: order;
-  font-size: 11px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  padding-top: 6px;
-  border-top: 1px dashed rgba(255, 255, 255, 0.05);
+.model-routes__table th,
+.model-routes__table td {
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
 }
-.model-routes__orderlabel {
-  color: var(--text-dim);
+.model-routes__table thead th {
+  font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  font-size: 10px;
-  margin-right: 4px;
+  color: var(--text-muted);
+  font-weight: 500;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-strong);
+  white-space: nowrap;
+  background: transparent;
 }
-.model-routes__arrow { color: var(--text-dim); }
-.model-routes__orderitem { color: var(--text-muted); display: inline-flex; align-items: center; gap: 3px; }
-.model-routes__orderrank { color: var(--accent); font-size: 11px; }
-.model-routes__ordernum { color: var(--text-dim); font-size: 10px; }
+.model-routes__table tbody td { padding: 7px 8px; }
+.model-routes__table tbody tr:last-child td { border-bottom: none; }
+.model-routes__table tbody tr.row-link { cursor: pointer; }
+.model-routes__table tbody tr:not(.row--selected):hover { background: var(--bg-elevated); }
+/* Toggle column — right-aligned, narrow. */
+.model-routes__col-toggle { width: 1%; white-space: nowrap; padding-right: 4px; }
+.model-routes__table .row-actions__btn { padding: 3px 10px; font-size: 11px; }
+
+/* Compact priority input (Priority column). Standalone, non-chip. */
+.prio-input {
+  width: 48px;
+  padding: 3px 4px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+}
+.prio-input:focus,
+.prio-input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+/* Hide number spinners on the compact priority input. */
+.prio-input::-webkit-outer-spin-button,
+.prio-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.prio-input { -moz-appearance: textfield; }
+
+/* Screen-reader-only content (visually hidden, available to AT). */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 /* Conflict warning. */
 .model-routes__warning {
@@ -1072,7 +1110,6 @@ ul.list-bare li { padding: 4px 0; }
   flex-direction: column;
   gap: 4px;
   align-items: stretch;
-  min-width: 190px;
 }
 .model-routes__strategyblurb {
   font-size: 10.5px;
@@ -1108,62 +1145,8 @@ ul.list-bare li { padding: 4px 0; }
 }
 .seg__btn--active:hover { color: var(--bg); background: var(--accent-hover); }
 
-/* Chip + rank + priority cluster. */
-.chip-pri {
-  display: inline-flex;
-  align-items: stretch;
-}
-.chip-pri--on { /* selected cluster */ }
-.chip .chip__rank {
-  font-size: 10px;
-  margin-right: 4px;
-  opacity: 0.85;
-  line-height: 1;
-}
-.chip .chip__label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 22ch;
-  white-space: nowrap;
-}
-.chip-pri__field {
-  display: inline-flex;
-  align-items: center;
-  margin-left: -1px;
-  background: var(--accent);
-  border: 1px solid var(--accent);
-  border-top-right-radius: 12px;
-  border-bottom-right-radius: 12px;
-  padding: 1px 4px 1px 2px;
-}
-.chip-pri__hash {
-  font-size: 9px;
-  font-weight: 700;
-  color: var(--bg);
-  opacity: 0.7;
-  padding: 0 2px;
-  user-select: none;
-}
-.chip-pri__input {
-  width: 34px;
-  border: none;
-  background: transparent;
-  color: var(--bg);
-  font-size: 11px;
-  font-family: var(--mono);
-  text-align: center;
-  padding: 0;
-  height: 18px;
-  outline: none;
-  -moz-appearance: textfield;
-}
-.chip-pri__input::-webkit-outer-spin-button,
-.chip-pri__input::-webkit-inner-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
-}
-.chip-pri__input:focus { box-shadow: inset 0 0 0 1px var(--bg); border-radius: 2px; }
-.chip-pri__input:focus-visible { outline: 2px solid var(--bg); outline-offset: -2px; }
+/* Priority + rank cluster styling is now provided by .prio-input on the
+ * providers table; the fused chip-pri cluster is no longer rendered. */
 .model-routes__hint { grid-column: 2; font-size: 11px; }
 
 /* Hover/focus states for the chips themselves. */
@@ -1174,16 +1157,6 @@ ul.list-bare li { padding: 4px 0; }
 }
 
 @media (max-width: 720px) {
-  .model-routes__card {
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      "head"
-      "providers"
-      "warning"
-      "order"
-      "strategy";
-  }
-  .model-routes__strategy { min-width: 0; }
   .model-routes__toolbar { flex-direction: column; align-items: stretch; }
   .model-routes__stats { justify-content: center; }
 }

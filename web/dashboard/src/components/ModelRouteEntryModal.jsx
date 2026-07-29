@@ -17,11 +17,14 @@ import ModelRouteConfigSection from './ModelRouteConfigSection.jsx';
 //   initial        — existing route entry when editing; null/undefined = add.
 //   onCancel       — close without saving.
 //   onSave         — commit the draft.
+// A cap is "set" only when it's a finite number > 0. Null, undefined, '',
+// 0, and negatives all mean "unlimited / not set" (they never carry through to
+// the payload — see formToGroup in ModelGroupForm). Mirror numToStr so the
+// Edit modal never re-materializes a stray 0 from a backend default-zero cap.
 function numOrEmpty(v) {
-  if (v === null || v === undefined) return '';
-  if (typeof v === 'number') return Number.isFinite(v) ? String(v) : '';
+  if (v === null || v === undefined || v === '') return '';
   const n = Number(v);
-  return Number.isFinite(n) ? String(n) : '';
+  return Number.isFinite(n) && n > 0 ? String(n) : '';
 }
 
 export default function ModelRouteEntryModal({ existingModels = [], initial = null, onCancel, onSave }) {
