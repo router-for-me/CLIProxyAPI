@@ -314,3 +314,52 @@ func TestConvertOpenAIRequestToAntigravityMapsToolChoiceModes(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertOpenAIRequestToAntigravityMapsResponseFormatJSONObject(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.6-flash-high",
+		"response_format": {"type": "json_object"},
+		"messages": [{"role": "user", "content": "hi"}]
+	}`
+
+	result := ConvertOpenAIRequestToAntigravity("gemini-3.6-flash-high", []byte(inputJSON), false)
+	if got := gjson.GetBytes(result, "request.generationConfig.responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json. Output: %s", got, result)
+	}
+	if gjson.GetBytes(result, "request.generationConfig.responseSchema").Exists() {
+		t.Fatalf("responseSchema should be absent for json_object. Output: %s", result)
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravityMapsResponseFormatJSONSchema(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.6-flash-high",
+		"response_format": {
+			"type": "json_schema",
+			"json_schema": {
+				"name": "verdict",
+				"schema": {
+					"type": "object",
+					"properties": {"score": {"type": "integer"}},
+					"required": ["score"]
+				}
+			}
+		},
+		"messages": [{"role": "user", "content": "hi"}]
+	}`
+
+	result := ConvertOpenAIRequestToAntigravity("gemini-3.6-flash-high", []byte(inputJSON), false)
+	if got := gjson.GetBytes(result, "request.generationConfig.responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json. Output: %s", got, result)
+	}
+	schema := gjson.GetBytes(result, "request.generationConfig.responseSchema")
+	if !schema.Exists() {
+		t.Fatalf("responseSchema missing. Output: %s", result)
+	}
+	if got := schema.Get("properties.score.type").String(); got != "integer" {
+		t.Fatalf("responseSchema.properties.score.type = %q, want integer. Output: %s", got, result)
+	}
+	if gjson.GetBytes(result, "request.generationConfig.responseJsonSchema").Exists() {
+		t.Fatalf("responseJsonSchema must not be emitted (upstream ignores it). Output: %s", result)
+	}
+}
