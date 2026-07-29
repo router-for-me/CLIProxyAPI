@@ -87,19 +87,34 @@ type CodexBucket struct {
 }
 
 // CodexBucketForAPIKey returns the bucket name the client API key is mapped
-// to, or the empty string when the key is unmapped.
+// to, or the empty string when the key is unmapped. Configured keys are
+// trimmed before comparison (matching ValidateCodexBuckets); apiKey is
+// compared as-is since it comes directly from the caller's request.
 func (c *SDKConfig) CodexBucketForAPIKey(apiKey string) string {
 	if c == nil || apiKey == "" {
 		return ""
 	}
 	for name, bucket := range c.CodexBuckets {
 		for _, key := range bucket.APIKeys {
-			if key == apiKey {
+			if strings.TrimSpace(key) == apiKey {
 				return name
 			}
 		}
 	}
 	return ""
+}
+
+// CodexBucketForContextValue resolves the codex bucket for a raw context
+// value (typically a gin "userApiKey" context entry) by formatting it and
+// delegating to CodexBucketForAPIKey. It exists so every call site that
+// reads the client API key out of request context (handlers, codex-only
+// side channels) shares one lookup implementation instead of re-deriving
+// it. Returns "" when v is nil or the key is unmapped.
+func (c *SDKConfig) CodexBucketForContextValue(v any) string {
+	if c == nil || v == nil {
+		return ""
+	}
+	return c.CodexBucketForAPIKey(fmt.Sprint(v))
 }
 
 // ValidateCodexBuckets rejects configurations that map one client API key
@@ -110,6 +125,9 @@ func (c *SDKConfig) ValidateCodexBuckets() error {
 	}
 	seen := make(map[string]string)
 	for name, bucket := range c.CodexBuckets {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("codex-buckets: bucket name must not be empty or whitespace")
+		}
 		for _, key := range bucket.APIKeys {
 			key = strings.TrimSpace(key)
 			if key == "" {
