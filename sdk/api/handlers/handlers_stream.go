@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -12,6 +13,87 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"golang.org/x/net/context"
 )
+
+type streamingTTFTTimeoutError struct {
+	timeout time.Duration
+}
+
+func (e *streamingTTFTTimeoutError) Error() string {
+	return fmt.Sprintf("upstream produced no streaming payload within %s", e.timeout)
+}
+
+func (*streamingTTFTTimeoutError) StatusCode() int {
+	return http.StatusGatewayTimeout
+}
+
+type streamExecutionAttempt struct {
+	result *coreexecutor.StreamResult
+	cancel context.CancelFunc
+	timer  *time.Timer
+}
+
+func (a *streamExecutionAttempt) disarmTTFT() {
+	stopStreamingTTFTTimer(a.timer)
+	a.timer = nil
+}
+
+func (a *streamExecutionAttempt) release() {
+	a.disarmTTFT()
+	if a.cancel != nil {
+		a.cancel()
+		a.cancel = nil
+	}
+}
+
+type streamExecutionResult struct {
+	result *coreexecutor.StreamResult
+	err    error
+}
+
+func executeStreamAttempt(ctx context.Context, timeout time.Duration, execute func(context.Context) (*coreexecutor.StreamResult, error)) (streamExecutionAttempt, error, bool) {
+	if timeout <= 0 {
+		result, err := execute(ctx)
+		return streamExecutionAttempt{result: result}, err, false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	attemptCtx, cancel := context.WithCancel(ctx)
+	timer := time.NewTimer(timeout)
+	resultChan := make(chan streamExecutionResult, 1)
+	go func() {
+		result, err := execute(attemptCtx)
+		resultChan <- streamExecutionResult{result: result, err: err}
+	}()
+
+	select {
+	case result := <-resultChan:
+		if result.err != nil {
+			stopStreamingTTFTTimer(timer)
+			cancel()
+			return streamExecutionAttempt{}, result.err, false
+		}
+		return streamExecutionAttempt{result: result.result, cancel: cancel, timer: timer}, nil, false
+	case <-timer.C:
+		cancel()
+		return streamExecutionAttempt{}, &streamingTTFTTimeoutError{timeout: timeout}, false
+	case <-ctx.Done():
+		stopStreamingTTFTTimer(timer)
+		cancel()
+		return streamExecutionAttempt{}, ctx.Err(), true
+	}
+}
+
+func stopStreamingTTFTTimer(timer *time.Timer) {
+	if timer == nil || timer.Stop() {
+		return
+	}
+	select {
+	case <-timer.C:
+	default:
+	}
+}
 
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
 // This path is the only supported execution route.
@@ -325,7 +407,18 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		close(errChan)
 		return nil, nil, errChan
 	}
-	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+	ttftTimeout := StreamingTTFTTimeout(h.Cfg)
+	executeAttempt := func() (streamExecutionAttempt, error, bool) {
+		return executeStreamAttempt(ctx, ttftTimeout, func(attemptCtx context.Context) (*coreexecutor.StreamResult, error) {
+			return h.AuthManager.ExecuteStream(attemptCtx, providers, req, opts)
+		})
+	}
+	attempt, err, streamCanceledBeforeExecute := executeAttempt()
+	if streamCanceledBeforeExecute {
+		lifecycle.complete(pluginapi.RequestCompletionCanceled, 0, err)
+		return nil, nil, nil
+	}
+	streamResult := attempt.result
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		errMsg := executionErrorMessage(err)
@@ -336,6 +429,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return nil, nil, errChan
 	}
 	if streamResult == nil {
+		attempt.release()
 		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("auth manager returned nil stream")}
 		lifecycle.completeError(ctx, errMsg)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -456,33 +550,47 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	var bootstrapErr *interfaces.ErrorMessage
 	readInitialStreamChunks := func() {
 		for {
+			var done <-chan struct{}
+			if ctx != nil {
+				done = ctx.Done()
+			}
+			var ttftExpired <-chan time.Time
+			if attempt.timer != nil {
+				ttftExpired = attempt.timer.C
+			}
+
 			var chunk coreexecutor.StreamChunk
 			var ok bool
-			if ctx != nil {
-				select {
-				case <-ctx.Done():
-					streamCanceledBeforeRead = true
-					return
-				case chunk, ok = <-chunks:
-				}
-			} else {
-				chunk, ok = <-chunks
+			select {
+			case <-done:
+				streamCanceledBeforeRead = true
+				attempt.release()
+				return
+			case <-ttftExpired:
+				bootstrapStreamErr = &streamingTTFTTimeoutError{timeout: ttftTimeout}
+				attempt.release()
+				return
+			case chunk, ok = <-chunks:
 			}
 			if !ok {
 				streamClosedBeforeRead = true
+				attempt.release()
 				applyStreamHeaderInit()
 				return
 			}
 			if chunk.Err != nil {
 				bootstrapStreamErr = chunk.Err
+				attempt.release()
 				return
 			}
 			if len(chunk.Payload) == 0 {
 				continue
 			}
+			attempt.disarmTTFT()
 			payload, deliverable, errMsg := transformStreamPayload(chunk.Payload, &bootstrapChunkIndex, bootstrapHistoryChunks)
 			if errMsg != nil {
 				bootstrapErr = errMsg
+				attempt.release()
 				return
 			}
 			if !deliverable {
@@ -521,7 +629,11 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			break
 		}
 		bootstrapRetries++
-		retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+		retryAttempt, retryErr, retryCanceled := executeAttempt()
+		if retryCanceled {
+			streamCanceledBeforeRead = true
+			break
+		}
 		if retryErr != nil {
 			originalBootstrapErr := executionErrorMessage(bootstrapStreamErr)
 			if isAuthSelectionUnavailable(retryErr) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {
@@ -531,10 +643,13 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			}
 			break
 		}
+		retryResult := retryAttempt.result
 		if retryResult == nil {
+			retryAttempt.release()
 			bootstrapErr = executionErrorMessage(fmt.Errorf("auth manager returned nil stream"))
 			break
 		}
+		attempt = retryAttempt
 		rawStreamHeaders = cloneHeader(retryResult.Headers)
 		baseStreamHeaders = cloneHeader(retryResult.Headers)
 		streamHeaderInitialized = false
@@ -562,6 +677,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	errChan := make(chan *interfaces.ErrorMessage, 1)
 
 	go func() {
+		defer attempt.release()
 		completionOutcome := pluginapi.RequestCompletionSucceeded
 		completionStatus := http.StatusOK
 		var completionErr error

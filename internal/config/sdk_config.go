@@ -79,4 +79,9 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+
+	// TTFTTimeoutSeconds limits how long a streaming attempt may wait for its first non-empty payload.
+	// The timeout starts before executor dispatch so it also covers response-header stalls.
+	// <= 0 disables the timeout. Default is 0.
+	TTFTTimeoutSeconds int `yaml:"ttft-timeout-seconds,omitempty" json:"ttft-timeout-seconds,omitempty"`
 }
