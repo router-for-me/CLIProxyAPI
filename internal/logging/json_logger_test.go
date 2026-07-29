@@ -693,6 +693,38 @@ func TestJSONRequestLoggingEncodesInvalidUTF8WebsocketTimelines(t *testing.T) {
 	}
 }
 
+func TestJSONRequestLoggingCompactsStructuredPayloadsForNDJSON(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := NewFileRequestLoggerWithFormat(true, tempDir, "", 10, "json")
+	payload := []byte("{\n  \"message\": \"hello\",\n  \"items\": [1, 2]\n}")
+	err := logger.LogRequest(
+		"/v1/chat/completions", "POST", nil, payload, 200, nil, payload,
+		nil, payload, payload, nil, nil, "req-pretty-json-123", time.Now(), time.Time{},
+	)
+	if err != nil {
+		t.Fatalf("LogRequest failed: %v", err)
+	}
+
+	data := readOnlyLogFile(t, tempDir)
+	if bytes.Count(data, []byte("\n")) != 1 || data[len(data)-1] != '\n' {
+		t.Fatalf("NDJSON entry must occupy exactly one physical line: %q", data)
+	}
+	var entry jsonLogPayload
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("unmarshal JSON log: %v", err)
+	}
+	want := `{"message":"hello","items":[1,2]}`
+	if string(entry.RequestBody) != want {
+		t.Fatalf("request body = %s, want %s", entry.RequestBody, want)
+	}
+	if string(entry.APIRequest) != want || string(entry.APIResponse) != want {
+		t.Fatalf("upstream payloads were not compacted: request=%s response=%s", entry.APIRequest, entry.APIResponse)
+	}
+	if entry.Response == nil || string(entry.Response.Body) != want {
+		t.Fatalf("response body was not compacted: %#v", entry.Response)
+	}
+}
+
 func TestJSONStreamingRequestLoggingMarksQueueDropsTruncated(t *testing.T) {
 	writer := &FileStreamingLogWriter{chunkChan: make(chan []byte, 1), format: "json"}
 	writer.chunkChan <- []byte("queued")
