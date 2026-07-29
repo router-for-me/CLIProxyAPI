@@ -310,7 +310,7 @@ func (h *BaseAPIHandler) applyModelRouter(ctx context.Context, handlerType, mode
 	if host == nil || !modelRoutersEnabled(host, execOptions.SkipRouterPluginID) {
 		return decision
 	}
-	meta := requestExecutionMetadata(ctx)
+	meta := requestExecutionMetadata(ctx, h.Cfg)
 	meta[coreexecutor.RequestedModelMetadataKey] = modelName
 	addModelExecutionSourceMetadata(meta, execOptions.InternalSource)
 	resp, ok := routeModel(ctx, host, pluginapi.ModelRouteRequest{

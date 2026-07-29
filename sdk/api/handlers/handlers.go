@@ -152,7 +152,7 @@ func PassthroughHeadersEnabled(cfg *config.SDKConfig) bool {
 	return cfg != nil && cfg.PassthroughHeaders
 }
 
-func requestExecutionMetadata(ctx context.Context) map[string]any {
+func requestExecutionMetadata(ctx context.Context, cfg *config.SDKConfig) map[string]any {
 	// Idempotency-Key is an optional client-supplied header used to correlate retries.
 	// Only include it if the client explicitly provides it.
 	key := ""
@@ -196,6 +196,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if disallowFreeAuthFromContext(ctx) {
 		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
 	}
+	if bucket := requestCodexBucket(ginCtx, cfg); bucket != "" {
+		meta[coreexecutor.CodexBucketMetadataKey] = bucket
+	}
 	return meta
 }
 
@@ -219,6 +222,17 @@ func requestCallerScope(ginCtx *gin.Context) string {
 		return ""
 	}
 	return coresession.CallerScope(fmt.Sprint(value))
+}
+
+func requestCodexBucket(ginCtx *gin.Context, cfg *config.SDKConfig) string {
+	if ginCtx == nil || cfg == nil {
+		return ""
+	}
+	value, exists := ginCtx.Get("userApiKey")
+	if !exists || value == nil {
+		return ""
+	}
+	return cfg.CodexBucketForAPIKey(fmt.Sprint(value))
 }
 
 func addAuthSelectionModelMetadata(meta map[string]any, model string) {
