@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -230,13 +232,36 @@ func antigravityReasoningReplayResolveContentIndex(payload []byte, cached int) i
 	return -1
 }
 
+// logAntigravityReasoningReplayDegraded reports that a replay-state operation
+// failed and the request continued without it. A Home that predates the CAS
+// command fails every call, and the Home client already warns once about that,
+// so those are logged at debug level to avoid one warning per request.
+func logAntigravityReasoningReplayDegraded(scope antigravityReasoningReplayScope, stage string, err error) {
+	if err == nil {
+		return
+	}
+	if errors.Is(err, homekv.ErrCompareAndSwapUnsupported) {
+		log.Debugf("antigravity executor: reasoning replay %s unavailable on this Home (session=%s): %v",
+			stage, antigravityReplayLogKey(scope.sessionKey), err)
+		return
+	}
+	log.Warnf("antigravity executor: reasoning replay %s failed; continuing without replay (session=%s): %v",
+		stage, antigravityReplayLogKey(scope.sessionKey), err)
+}
+
 func prepareAntigravityGeminiReasoningReplayPayload(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, payload []byte) ([]byte, antigravityReasoningReplayScope, error) {
 	if !antigravityUsesReasoningReplayCache(modelName) {
 		return payload, antigravityReasoningReplayScope{}, nil
 	}
 	updated, scope, replayApplied, errReplay := applyAntigravityReasoningReplayCache(ctx, modelName, req, opts, payload)
 	if errReplay != nil {
-		return payload, scope, errReplay
+		// Replay state is an optimization, not a correctness requirement: a ledger
+		// miss is already a tolerated outcome below. Failing the request here would
+		// surface as an untyped executor error, which MarkResult treats as a
+		// credential fault and uses to mark every candidate credential unavailable.
+		// Degrade to "no replay this turn" instead.
+		logAntigravityReasoningReplayDegraded(scope, "read", errReplay)
+		updated = payload
 	}
 	updated = normalizeAntigravityGeminiFunctionResponseRoles(updated)
 	if antigravityPayloadHasClaudeToolProvenanceID(updated) {
@@ -255,7 +280,9 @@ func prepareAntigravityGeminiReasoningReplayPayload(ctx context.Context, modelNa
 		originalPairingValid := internalsignature.ValidateGeminiFunctionCallPairing(payload) == nil
 		if replayApplied && originalPairingValid && scope.valid() {
 			if _, errDelete := internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(ctx, scope.modelName, scope.sessionKey, scope.cacheSnapshot); errDelete != nil {
-				return payload, scope, errDelete
+				// Invalidation is best-effort cleanup. Returning it here would replace
+				// the pairing diagnosis below with an untyped error.
+				logAntigravityReasoningReplayDegraded(scope, "invalidate", errDelete)
 			}
 		}
 		return payload, scope, statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("antigravity executor: invalid Gemini function call history: %v", errPairing)}

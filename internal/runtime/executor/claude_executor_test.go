@@ -1622,6 +1622,105 @@ func TestClaudeExecutor_ExecuteOpenAINonStreamConvertsValidClaudeStream(t *testi
 	}
 }
 
+func TestClaudeExecutor_ExecuteTransportMatchesResponseFormat(t *testing.T) {
+	const model = "claude-3-5-sonnet-20241022"
+	streamResponse := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-3-5-sonnet-20241022"}}`,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":2,"output_tokens":1}}`,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+	jsonResponse := `{"id":"msg_123","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":2,"output_tokens":1}}`
+
+	tests := []struct {
+		name           string
+		sourceFormat   sdktranslator.Format
+		responseFormat sdktranslator.Format
+		wantStream     bool
+	}{
+		{name: "OpenAI to OpenAI uses SSE", sourceFormat: sdktranslator.FormatOpenAI, responseFormat: sdktranslator.FormatOpenAI, wantStream: true},
+		{name: "OpenAI to Claude uses JSON", sourceFormat: sdktranslator.FormatOpenAI, responseFormat: sdktranslator.FormatClaude, wantStream: false},
+		{name: "Claude to OpenAI uses SSE", sourceFormat: sdktranslator.FormatClaude, responseFormat: sdktranslator.FormatOpenAI, wantStream: true},
+		{name: "Claude to Claude uses JSON", sourceFormat: sdktranslator.FormatClaude, responseFormat: sdktranslator.FormatClaude, wantStream: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var seenBody []byte
+			var seenHeaders http.Header
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seenBody, _ = io.ReadAll(r.Body)
+				seenHeaders = r.Header.Clone()
+				if tt.wantStream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = w.Write([]byte(streamResponse))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(jsonResponse))
+			}))
+			defer server.Close()
+
+			executor := NewClaudeExecutor(&config.Config{
+				Payload: config.PayloadConfig{
+					Override: []config.PayloadRule{{
+						Models: []config.PayloadModelRule{{Name: model, Protocol: "claude"}},
+						Params: map[string]any{"stream": !tt.wantStream},
+					}},
+				},
+			})
+			attributes := map[string]string{
+				"api_key":  "key-123",
+				"base_url": server.URL,
+			}
+			if tt.wantStream {
+				attributes["header:Accept"] = "application/json"
+				attributes["header:Accept-Encoding"] = "gzip, deflate, br, zstd"
+			}
+			auth := &cliproxyauth.Auth{Attributes: attributes}
+			payload := []byte(`{"model":"claude-3-5-sonnet-20241022","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+
+			_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   model,
+				Payload: payload,
+			}, cliproxyexecutor.Options{
+				SourceFormat:   tt.sourceFormat,
+				ResponseFormat: tt.responseFormat,
+				Headers: http.Header{
+					"Anthropic-Beta": []string{"client-beta"},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Execute error: %v", err)
+			}
+			stream := gjson.GetBytes(seenBody, "stream")
+			if !stream.Exists() || stream.Bool() != tt.wantStream {
+				t.Fatalf("upstream stream = %s, want %t; body=%s", stream.Raw, tt.wantStream, string(seenBody))
+			}
+			wantAccept := "application/json"
+			wantEncoding := "gzip, deflate, br, zstd"
+			if tt.wantStream {
+				wantAccept = "text/event-stream"
+				wantEncoding = "identity"
+			}
+			if got := seenHeaders.Get("Accept"); got != wantAccept {
+				t.Fatalf("Accept = %q, want %q", got, wantAccept)
+			}
+			if got := seenHeaders.Get("Accept-Encoding"); got != wantEncoding {
+				t.Fatalf("Accept-Encoding = %q, want %q", got, wantEncoding)
+			}
+			if got := seenHeaders.Get("Anthropic-Beta"); !strings.Contains(got, "client-beta") {
+				t.Fatalf("Anthropic-Beta = %q, want client beta preserved", got)
+			}
+		})
+	}
+}
+
 func executeOpenAIChatCompletionThroughClaude(t *testing.T, upstreamBody string) (cliproxyexecutor.Response, error) {
 	t.Helper()
 

@@ -293,6 +293,8 @@ nonstream-keepalive-interval: 0
 #       - name: "gemini-2.5-flash" # upstream model name
 #         alias: "gemini-flash"    # client alias mapped to the upstream model
 #         display-name: "Gemini Flash" # optional catalog display name
+#         thinking:                  # optional: exact thinking capability for this configured model
+#           levels: ["high", "medium", "low", "none", "auto"]
 #     excluded-models:
 #       - "gemini-2.5-pro"     # exclude specific models from this provider (exact match)
 #       - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
@@ -316,6 +318,8 @@ nonstream-keepalive-interval: 0
 #     models:
 #       - name: "gemini-2.5-flash" # upstream model name
 #         alias: "native-gemini-flash" # client alias mapped to the upstream model
+#         thinking:                  # optional: exact thinking capability for this configured model
+#           levels: ["high", "medium", "low", "none", "auto"]
 #     excluded-models:
 #       - "gemini-2.5-pro"
 
@@ -335,6 +339,8 @@ nonstream-keepalive-interval: 0
 #         alias: "codex-latest" # client alias mapped to the upstream model
 #         display-name: "Codex Latest" # optional catalog display name
 #         force-mapping: true    # optional: rewrite response model fields back to the alias
+#         thinking:              # optional: exact thinking capability for this configured model
+#           levels: ["xhigh", "high", "medium", "low"]
 #     excluded-models:
 #       - "gpt-5.1"         # exclude specific models (exact match)
 #       - "gpt-5-*"         # wildcard matching prefix (e.g. gpt-5-medium, gpt-5-codex)
@@ -359,6 +365,8 @@ nonstream-keepalive-interval: 0
 #         alias: "grok-latest"   # client alias mapped to the upstream model
 #         display-name: "Grok Latest" # optional catalog display name
 #         force-mapping: true     # optional: rewrite response model fields back to the alias
+#         thinking:               # optional: exact thinking capability for this configured model
+#           levels: ["xhigh", "high", "medium", "low"]
 #     excluded-models:
 #       - "grok-4.1"             # exclude specific models (exact match)
 #       - "grok-3-*"             # wildcard matching prefix
@@ -380,6 +388,8 @@ nonstream-keepalive-interval: 0
 #         alias: "claude-sonnet-latest"      # client alias mapped to the upstream model
 #         display-name: "Claude Sonnet"      # optional catalog display name
 #         force-mapping: true                 # optional: rewrite response model fields back to the alias
+#         thinking:                           # optional: exact thinking capability for this configured model
+#           levels: ["max", "xhigh", "high", "medium", "low", "minimal", "none", "auto"]
 #     excluded-models:
 #       - "claude-opus-4-5-20251101" # exclude specific models (exact match)
 #       - "claude-3-*"               # wildcard matching prefix (e.g. claude-3-7-sonnet-20250219)
@@ -476,6 +486,8 @@ nonstream-keepalive-interval: 0
 #       - name: "gemini-2.5-flash"                # upstream model name
 #         alias: "vertex-flash"                   # client-visible alias
 #         display-name: "Vertex Flash"            # optional catalog display name
+#         thinking:                                # optional: exact thinking capability for this configured model
+#           levels: ["high", "medium", "low", "none", "auto"]
 #       - name: "gemini-2.5-pro"
 #         alias: "vertex-pro"
 #     excluded-models:                            # optional: models to exclude from listing
