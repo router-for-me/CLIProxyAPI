@@ -355,6 +355,14 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 				coreexecutor.ExecutionSessionMetadataKey: callID,
 			},
 		}
+		// Eligibility filtering (authSelectionEligibility.allows) still runs
+		// against the pinned auth ID: a bucketed auth would otherwise be
+		// rejected as "unmapped" here even though it was the exact credential
+		// codex-bucket-aware selection chose in Handle(). Re-derive the same
+		// bucket so this reselection matches the initial one.
+		if bucket := h.codexBucketForContext(c); bucket != "" {
+			selectionOpts.Metadata[coreexecutor.CodexBucketMetadataKey] = bucket
+		}
 		selection, selected, errSelect = h.selectOAuth(ctx, session.model, selectionOpts)
 	}
 	if errSelect != nil {

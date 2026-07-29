@@ -200,6 +200,9 @@ func (h *Handler) Handle(c *gin.Context) {
 		Headers:         c.Request.Header.Clone(),
 		OriginalRequest: body,
 	}
+	if bucket := h.codexBucketForContext(c); bucket != "" {
+		selectionOpts.Metadata = map[string]any{coreexecutor.CodexBucketMetadataKey: bucket}
+	}
 	selection, selected, errSelect := h.selectOAuth(ctx, model, selectionOpts)
 	if errSelect != nil {
 		writeSelectionError(c, errSelect)
@@ -426,6 +429,25 @@ func mediaCredentialName(selected *auth.Auth, authIndex string) string {
 		}
 	}
 	return strings.TrimSpace(authIndex)
+}
+
+// codexBucketForContext resolves the codex bucket for the client API key
+// authenticated on this request, or "" when unmapped. This mirrors the
+// primary request pipeline's requestCodexBucket (sdk/api/handlers/handlers.go)
+// so the Codex Live WebRTC side channel, which selects auth outside that
+// pipeline, still honors codex-buckets routing. Called from both Handle's
+// initial selection and HandleSideband's pinned reselection (sideband.go),
+// since eligibility filtering re-checks the bucket on every selection,
+// including pinned-auth-ID reselects.
+func (h *Handler) codexBucketForContext(c *gin.Context) string {
+	if h == nil || h.cfg == nil || c == nil {
+		return ""
+	}
+	value, exists := c.Get("userApiKey")
+	if !exists {
+		return ""
+	}
+	return h.cfg.CodexBucketForContextValue(value)
 }
 
 func (h *Handler) selectOAuth(ctx context.Context, model string, opts coreexecutor.Options) (*auth.HomeDispatchSelection, *auth.Auth, error) {
