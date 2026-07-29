@@ -263,6 +263,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/models-catalog/entry/:id/:provider", s.mgmt.GetModelEntry)
 		mgmt.PUT("/models-catalog/entry/:id/:provider", s.mgmt.PutModelEntry)
 		mgmt.DELETE("/models-catalog/entry/:id/:provider", s.mgmt.DeleteModelEntry)
+		// Global Model management: one operator edit fans out to every
+		// catalog row sharing the same model id (across providers), plus the
+		// (already global) pricing row keyed by model id.
+		mgmt.GET("/models-catalog/global/:id", s.mgmt.GetGlobalModel)
+		mgmt.PUT("/models-catalog/global/:id", s.mgmt.PutGlobalModel)
 
 		// Operator-managed external pricing catalogs (LiteLLM-format JSON
 		// URLs / uploaded files). Surface as suggestions in the dashboard's

@@ -989,6 +989,174 @@ func (s *ModelsStore) SelectOne(ctx context.Context, id, provider string) (*Stor
 	return &m, nil
 }
 
+// GlobalModelPatch carries the operator-settable attributes of a model that
+// the "Global edit" surface can apply to every catalog row sharing the same
+// model id (across providers). Pointer fields are nil when the caller did
+// not ask to change that attribute — UpdateByID skips nil entries so an
+// omitted field is never nullified. Pricing is intentionally NOT part of the
+// patch because model_pricing is keyed by model id only (already global); it
+// is handled separately by UsageStore.UpsertPricing.
+type GlobalModelPatch struct {
+	OfficialProvider    *string   // = official_provider
+	DisplayName         *string   // = display_name
+	Description         *string   // = description
+	ContextLength       *int      // = context_length
+	MaxCompletionTokens *int      // = max_completion_tokens
+	InputTokenLimit     *int      // = input_token_limit
+	OutputTokenLimit    *int      // = output_token_limit
+	InputModalities     *[]string // = input_modalities (full replace)
+	OutputModalities    *[]string // = output_modalities (full replace)
+}
+
+// UpdateByID applies the non-nil fields of patch to every models_catalog row
+// whose id matches case-insensitively (LOWER(id) = LOWER($1)). This is the
+// store-level primitive backing the "Global Model management" feature: one
+// operator edit fans out to all providers that serve the same model id, so
+// pricing/attribute maintenance does not require editing each (id, provider)
+// row individually. Returns the number of rows updated.
+//
+// Unlike the auto-sync upsert path, this update is authoritative: it targets
+// all rows regardless of the user_defined flag, mirroring the dashboard's
+// explicit PutModelEntry (protectUserDefined=false) semantics. The lowercase
+// id match matches how live availability is keyed (see liveAvailableIDsSet).
+func (s *ModelsStore) UpdateByID(ctx context.Context, id string, patch GlobalModelPatch) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("postgres store: models store not initialized")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return 0, fmt.Errorf("postgres store: update by id requires non-empty id")
+	}
+
+	setParts := make([]string, 0, 10)
+	args := make([]any, 0, 10)
+	add := func(column string, value any) {
+		args = append(args, value)
+		setParts = append(setParts, fmt.Sprintf("%s = $%d", column, len(args)))
+	}
+	if patch.OfficialProvider != nil {
+		add("official_provider", *patch.OfficialProvider)
+	}
+	if patch.DisplayName != nil {
+		add("display_name", *patch.DisplayName)
+	}
+	if patch.Description != nil {
+		add("description", *patch.Description)
+	}
+	if patch.ContextLength != nil {
+		add("context_length", *patch.ContextLength)
+	}
+	if patch.MaxCompletionTokens != nil {
+		add("max_completion_tokens", *patch.MaxCompletionTokens)
+	}
+	if patch.InputTokenLimit != nil {
+		add("input_token_limit", *patch.InputTokenLimit)
+	}
+	if patch.OutputTokenLimit != nil {
+		add("output_token_limit", *patch.OutputTokenLimit)
+	}
+	if patch.InputModalities != nil {
+		add("input_modalities", marshalJSONBArray(*patch.InputModalities))
+	}
+	if patch.OutputModalities != nil {
+		add("output_modalities", marshalJSONBArray(*patch.OutputModalities))
+	}
+	if len(setParts) == 0 {
+		// Nothing to change — no rows affected, no error.
+		return 0, nil
+	}
+	setParts = append(setParts, "updated_at = NOW()")
+
+	// Bind the id filter last so placeholder numbering stays contiguous.
+	args = append(args, id)
+	query := fmt.Sprintf(`UPDATE %s SET %s WHERE LOWER(id) = LOWER($%d)`,
+		s.modelsTable, strings.Join(setParts, ", "), len(args))
+	res, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("postgres store: update by id: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("postgres store: update by id rows affected: %w", err)
+	}
+	return n, nil
+}
+
+// marshalJSONBArray renders a []string as a JSON array string suitable for a
+// jsonb column. nil/empty yields an empty JSON array "[]" (matching the
+// decodeStringArray round-trip) so an explicit global set of "no modalities"
+// is stored rather than NULL.
+func marshalJSONBArray(values []string) any {
+	if len(values) == 0 {
+		return "[]"
+	}
+	raw, err := json.Marshal(values)
+	if err != nil {
+		return "[]"
+	}
+	return string(raw)
+}
+
+// SelectByIDAllProviders returns every catalog row that shares the given model
+// id (case-insensitive), ordered by provider. Used by the Global Model editor
+// to preview which providers will be affected by a global edit and to seed the
+// canonical attribute form from a representative row. Returns an empty (non-nil)
+// slice when no row matches (the model id is unknown to the catalog).
+func (s *ModelsStore) SelectByIDAllProviders(ctx context.Context, id string) ([]StoredModel, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: models store not initialized")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, fmt.Errorf("postgres store: select by id requires non-empty id")
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT id, provider, official_provider, object, created, owned_by, type, display_name,
+		       name, version, description, input_token_limit, output_token_limit,
+		       supported_generation_methods, context_length, max_completion_tokens,
+		       supported_parameters, input_modalities, output_modalities,
+		       supports_web_search, thinking_config, override_header, user_defined,
+		       updated_at
+		FROM %s WHERE LOWER(id) = LOWER($1)
+		ORDER BY provider
+	`, s.modelsTable), id)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: select by id all providers: %w", err)
+	}
+	defer rows.Close()
+	out := make([]StoredModel, 0, 4)
+	for rows.Next() {
+		var (
+			m          StoredModel
+			genMethods []byte
+			params     []byte
+			inputMod   []byte
+			outputMod  []byte
+			thinking   []byte
+			override   []byte
+		)
+		if err = rows.Scan(&m.ID, &m.Provider, &m.OfficialProvider, &m.Object, &m.Created, &m.OwnedBy,
+			&m.Type, &m.DisplayName, &m.Name, &m.Version, &m.Description,
+			&m.InputTokenLimit, &m.OutputTokenLimit, &genMethods, &m.ContextLength,
+			&m.MaxCompletionTokens, &params, &inputMod, &outputMod,
+			&m.SupportsWebSearch, &thinking, &override, &m.UserDefined, &m.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("postgres store: scan model row (by id): %w", err)
+		}
+		m.SupportedGenerationMethods = decodeStringArray(genMethods)
+		m.SupportedParameters = decodeStringArray(params)
+		m.InputModalities = decodeStringArray(inputMod)
+		m.OutputModalities = decodeStringArray(outputMod)
+		if len(thinking) > 0 && string(thinking) != "null" {
+			_ = json.Unmarshal(thinking, &m.Thinking)
+		}
+		if len(override) > 0 && string(override) != "null" {
+			_ = json.Unmarshal(override, &m.OverrideHeader)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // OfficialProviderByModelAndProvider returns the official_provider column for
 // the (id, provider) row in the models catalog. The provider argument is the
 // catalog's provider column value (the model owner, e.g. "anthropic" or

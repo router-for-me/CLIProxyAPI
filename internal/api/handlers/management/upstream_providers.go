@@ -215,6 +215,11 @@ func (h *Handler) CreateUpstreamProvider(c *gin.Context) {
 		h.upstreamProviderErrorResponse(c, err)
 		return
 	}
+	// Mirror the provider's model definitions into models_catalog
+	// synchronously so the Models Catalog reflects the new models
+	// immediately, rather than after the async config-reload → registry →
+	// PGSync hops. Best-effort: a catalog sync miss never blocks the save.
+	h.syncCatalogFromUpstreamProviders(c.Request.Context())
 	h.applyUpstreamProviders(c.Request.Context())
 	c.JSON(http.StatusCreated, toUpstreamProviderResponse(*created))
 }
@@ -286,6 +291,12 @@ func (h *Handler) UpdateUpstreamProvider(c *gin.Context) {
 		}
 	}
 
+	// Mirror the provider's (possibly renamed) model definitions into
+	// models_catalog synchronously so the Models Catalog reflects the
+	// updated models immediately, rather than after the async config-reload
+	// → registry → PGSync hops. Best-effort: a catalog sync miss never
+	// blocks the save.
+	h.syncCatalogFromUpstreamProviders(c.Request.Context())
 	h.applyUpstreamProviders(c.Request.Context())
 	c.JSON(http.StatusOK, toUpstreamProviderResponse(*updated))
 }

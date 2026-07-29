@@ -591,6 +591,28 @@ export async function getModelProviders(id) {
   return fetchJSON(`/models-catalog/providers-for-model?id=${encodeURIComponent(id)}`);
 }
 
+// getGlobalModel returns the merged Global Model view for one model id: the
+// canonical attributes (seeded from the first catalog row, ordered by
+// provider), every catalog row that shares the id (across providers) so the
+// editor can preview who will be affected, and the existing pricing (already
+// global per model id). 404 when no catalog row matches the id.
+export async function getGlobalModel(id) {
+  return fetchJSON(`/models-catalog/global/${enc(id)}`);
+}
+
+// putGlobalModel fans an operator edit out to every catalog row sharing the
+// given model id. `body.attributes` (when present) applies only the non-nil
+// fields to all matching rows (omitted fields are left untouched);
+// `body.pricing` (when present) writes the global model_pricing row. Either
+// or both may be supplied. Returns { model_id, rows_updated, pricing_set }.
+export async function putGlobalModel(id, body) {
+  return fetchJSON(`/models-catalog/global/${enc(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+}
+
+
 export async function putModelPricing(id, pricing) {
   return fetchJSON(`/models-catalog/${encodeURIComponent(id)}/pricing`, {
     method: 'PUT',

@@ -11,6 +11,7 @@ import Pager from '../components/Pager.jsx';
 import SyncPricingModal from '../components/SyncPricingModal.jsx';
 import PricingSourcesModal from '../components/PricingSourcesModal.jsx';
 import ModelEntryModal from '../components/ModelEntryModal.jsx';
+import GlobalModelModal from '../components/GlobalModelModal.jsx';
 
 const DEFAULT_PAGE_SIZE = 25;
 // Suppress the redundant sync if the last sync happened within this window.
@@ -49,6 +50,7 @@ export default function ModelsCatalogPage() {
   const [officialProvider, setOfficialProvider] = useState('');
   const [availableOnly, setAvailableOnly] = useState(true);
   const [staleFilter, setStaleFilter] = useState('live'); // 'live' | 'stale' | 'all'
+  const [distinctIds, setDistinctIds] = useState(false); // one row per model id (Global Models view)
   const [query, setQuery] = useState('');
   const [sortKey, setSortKey] = useState('id');
   const [sortAsc, setSortAsc] = useState(true);
@@ -61,6 +63,7 @@ export default function ModelsCatalogPage() {
   const [showPricingSources, setShowPricingSources] = useState(false);
   const [editingModel, setEditingModel] = useState(null); // null | {mode, initial}
   const [showCreateModel, setShowCreateModel] = useState(false);
+  const [globalModelId, setGlobalModelId] = useState(null); // null | model id for GlobalModelModal
   const [syncStatus, setSyncStatus] = useState(null);
   const [summary, setSummary] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
@@ -91,9 +94,9 @@ export default function ModelsCatalogPage() {
   } = useAsync(
     () => listModelsCatalog({
       page, pageSize: DEFAULT_PAGE_SIZE, provider, officialProvider,
-      availableOnly: effectiveAvailableOnly, q: debouncedQuery, sort: sortParam,
+      availableOnly: effectiveAvailableOnly, distinctIds, q: debouncedQuery, sort: sortParam,
     }),
-    [page, provider, officialProvider, effectiveAvailableOnly, debouncedQuery, sortParam],
+    [page, provider, officialProvider, effectiveAvailableOnly, distinctIds, debouncedQuery, sortParam],
   );
   const { data: statusData, reload: reloadStatus } = useAsync(() => getModelsCatalogSyncStatus(), []);
   const { data: summaryData, reload: reloadSummary } = useAsync(() => getModelsCatalogSummary(), []);
@@ -221,6 +224,13 @@ export default function ModelsCatalogPage() {
           </button>
           <button onClick={() => setShowPricingSync(true)}>Sync pricing…</button>
           <button onClick={() => setShowPricingSources(true)}>Pricing sources…</button>
+          <button
+            className={distinctIds ? 'primary' : ''}
+            onClick={() => { setDistinctIds((v) => !v); setPage(1); }}
+            title="Show one row per model id and enable Global edit per model"
+          >
+            {distinctIds ? 'Global Models (per ID) ✓' : 'Global Models (per ID)'}
+          </button>
           <button onClick={() => setShowCreateModel(true)}>+ Add model</button>
         </div>
       </div>
@@ -367,6 +377,7 @@ export default function ModelsCatalogPage() {
                       cur === `${m.id}|${m.provider}` ? null : `${m.id}|${m.provider}`,
                     )}
                     onEdit={() => setEditingModel({ mode: 'edit', initial: m })}
+                    onGlobalEdit={(mid) => setGlobalModelId(mid)}
                   />
                 ))}
               </tbody>
@@ -415,11 +426,18 @@ export default function ModelsCatalogPage() {
           onDeleted={() => { setEditingModel(null); reload(); reloadSummary(); }}
         />
       )}
+      {globalModelId && (
+        <GlobalModelModal
+          modelId={globalModelId}
+          onClose={() => setGlobalModelId(null)}
+          onSaved={() => { setGlobalModelId(null); reload(); reloadSummary(); }}
+        />
+      )}
     </>
   );
 }
 
-function ModelRow({ model, liveIDs, density, expanded, onToggleExpand, onEdit }) {
+function ModelRow({ model, liveIDs, density, expanded, onToggleExpand, onEdit, onGlobalEdit }) {
   const isLive = liveIDs ? !!liveIDs[String(model.id || '').toLowerCase()] : true;
   return (
     <>
@@ -441,6 +459,7 @@ function ModelRow({ model, liveIDs, density, expanded, onToggleExpand, onEdit })
         <td onClick={(e) => e.stopPropagation()}>
           <div className="row-actions">
             <button className="row-actions__btn--primary" onClick={onEdit}>Edit</button>
+            <button onClick={() => onGlobalEdit?.(model.id)}>Global edit</button>
             <PricingButton modelId={model.id} />
           </div>
         </td>
