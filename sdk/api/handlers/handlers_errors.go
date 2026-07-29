@@ -25,6 +25,15 @@ func statusFromError(err error) int {
 	return 0
 }
 
+func isAuthSelectionUnavailable(err error) bool {
+	var authErr *coreauth.Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return false
+	}
+	code := strings.TrimSpace(authErr.Code)
+	return code == "auth_not_found" || code == "auth_unavailable"
+}
+
 func enrichAuthSelectionError(err error, providers []string, model string) error {
 	if err == nil {
 		return nil
