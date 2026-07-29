@@ -122,6 +122,26 @@ PackyCode provides special discounts for our software users: register using <a h
 
 ## Getting Started
 
+### Homebrew quick start (macOS)
+
+```bash
+brew update
+brew install cliproxyapi
+```
+
+The Homebrew binary is `cliproxyapi`. By default it reads `config.yaml` from the current working directory, so for a Homebrew install keep your config at:
+
+- Apple Silicon: `/opt/homebrew/etc/cliproxyapi/config.yaml`
+- Intel: `/usr/local/etc/cliproxyapi/config.yaml`
+
+A safe pattern is to keep the real config in a writable location and point `--config` or a symlink at it.
+
+```bash
+cliproxyapi --config /opt/homebrew/etc/cliproxyapi/config.yaml
+```
+
+`management.html` is served by the built-in management UI. Set `remote-management.secret-key` in the config before using the Management API; a plaintext value is accepted and hashed on startup, but leaving it empty disables `/v0/management` entirely.
+
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
 ## Management API

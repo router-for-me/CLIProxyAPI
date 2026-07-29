@@ -122,6 +122,26 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 
 ## 新手入门
 
+### macOS Homebrew 快速开始
+
+```bash
+brew update
+brew install cliproxyapi
+```
+
+Homebrew 安装后的二进制名称是 `cliproxyapi`。默认会从当前工作目录读取 `config.yaml`，因此 Homebrew 安装时建议将配置文件放在以下位置之一：
+
+- Apple Silicon：`/opt/homebrew/etc/cliproxyapi/config.yaml`
+- Intel：`/usr/local/etc/cliproxyapi/config.yaml`
+
+推荐把真实配置保存在可写位置，再通过 `--config` 或符号链接指向它。
+
+```bash
+cliproxyapi --config /opt/homebrew/etc/cliproxyapi/config.yaml
+```
+
+`management.html` 是内置管理界面。使用 Management API 前请先在配置中设置 `remote-management.secret-key`；该值可先填明文，启动时会自动 hash。若留空，则 `/v0/management` 会直接禁用（404）。
+
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
 ## 管理 API 文档
