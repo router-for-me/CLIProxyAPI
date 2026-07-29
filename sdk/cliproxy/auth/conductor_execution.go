@@ -1002,6 +1002,20 @@ func disallowFreeAuthFromMetadata(meta map[string]any) bool {
 	}
 }
 
+func codexBucketFromMetadata(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, ok := meta[cliproxyexecutor.CodexBucketMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	if value, okString := raw.(string); okString {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
 func isFreeCodexAuth(auth *Auth) bool {
 	if auth == nil || auth.Attributes == nil {
 		return false
