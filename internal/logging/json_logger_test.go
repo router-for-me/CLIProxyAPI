@@ -659,6 +659,40 @@ func TestJSONRequestLoggingEncodesJSONLikeInvalidUTF8Losslessly(t *testing.T) {
 	}
 }
 
+func TestJSONRequestLoggingEncodesInvalidUTF8WebsocketTimelines(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := NewFileRequestLoggerWithFormat(true, tempDir, "", 10, "json")
+	timeline := []byte{0xff, 0x00, 0xfe}
+	err := logger.LogRequest(
+		"/v1/responses", "GET", map[string][]string{"Upgrade": {"websocket"}}, nil, 101, nil, nil,
+		timeline, nil, nil, timeline, nil, "req-ws-binary-123", time.Now(), time.Time{},
+	)
+	if err != nil {
+		t.Fatalf("LogRequest failed: %v", err)
+	}
+
+	data := readOnlyLogFile(t, tempDir)
+	if !utf8.Valid(data) || !json.Valid(data) {
+		t.Fatalf("log entry is not valid UTF-8 JSON: %q", data)
+	}
+	var entry struct {
+		WebsocketTimelineRaw         string `json:"websocket_timeline_raw"`
+		WebsocketTimelineEncoding    string `json:"websocket_timeline_encoding"`
+		APIWebsocketTimelineRaw      string `json:"api_websocket_timeline_raw"`
+		APIWebsocketTimelineEncoding string `json:"api_websocket_timeline_encoding"`
+	}
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("unmarshal JSON log: %v", err)
+	}
+	want := base64.StdEncoding.EncodeToString(timeline)
+	if entry.WebsocketTimelineRaw != want || entry.WebsocketTimelineEncoding != "base64" {
+		t.Fatalf("downstream timeline = %q encoding=%q", entry.WebsocketTimelineRaw, entry.WebsocketTimelineEncoding)
+	}
+	if entry.APIWebsocketTimelineRaw != want || entry.APIWebsocketTimelineEncoding != "base64" {
+		t.Fatalf("upstream timeline = %q encoding=%q", entry.APIWebsocketTimelineRaw, entry.APIWebsocketTimelineEncoding)
+	}
+}
+
 func TestJSONStreamingRequestLoggingMarksQueueDropsTruncated(t *testing.T) {
 	writer := &FileStreamingLogWriter{chunkChan: make(chan []byte, 1), format: "json"}
 	writer.chunkChan <- []byte("queued")

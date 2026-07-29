@@ -46,8 +46,10 @@ type jsonLogPayload struct {
 	APIResponseErrors             []jsonLogError      `json:"api_response_errors,omitempty"`
 	APIResponseTimestamp          string              `json:"api_response_timestamp,omitempty"`
 	APIWebsocketTimelineRaw       string              `json:"api_websocket_timeline_raw,omitempty"`
+	APIWebsocketTimelineEncoding  string              `json:"api_websocket_timeline_encoding,omitempty"`
 	APIWebsocketTimelineTruncated bool                `json:"api_websocket_timeline_truncated,omitempty"`
 	WebsocketTimelineRaw          string              `json:"websocket_timeline_raw,omitempty"`
+	WebsocketTimelineEncoding     string              `json:"websocket_timeline_encoding,omitempty"`
 	WebsocketTimelineTruncated    bool                `json:"websocket_timeline_truncated,omitempty"`
 }
 
@@ -174,14 +176,14 @@ func (l *FileRequestLogger) writeJSONLog(
 	if errMerge != nil {
 		return fmt.Errorf("read JSON API websocket timeline: %w", errMerge)
 	}
-	entry.APIWebsocketTimelineRaw = string(apiTimeline)
+	setJSONRawPayload(apiTimeline, &entry.APIWebsocketTimelineRaw, &entry.APIWebsocketTimelineEncoding)
 	entry.APIWebsocketTimelineTruncated = truncated
 
 	downstreamTimeline, truncated, errMerge := mergeJSONSectionLimited(websocketTimelineSource, websocketTimeline, maxJSONFileBackedSectionBytes)
 	if errMerge != nil {
 		return fmt.Errorf("read JSON websocket timeline: %w", errMerge)
 	}
-	entry.WebsocketTimelineRaw = string(downstreamTimeline)
+	setJSONRawPayload(downstreamTimeline, &entry.WebsocketTimelineRaw, &entry.WebsocketTimelineEncoding)
 	entry.WebsocketTimelineTruncated = truncated
 
 	responseEntry := &jsonLogResponse{Status: statusCode, Headers: maskHeaders(responseHeaders)}
@@ -224,6 +226,18 @@ func setJSONPayload(payload []byte, structured *json.RawMessage, raw, encoding *
 	}
 	if json.Valid(payload) {
 		*structured = json.RawMessage(payload)
+		return
+	}
+	*raw = string(payload)
+}
+
+func setJSONRawPayload(payload []byte, raw, encoding *string) {
+	if len(payload) == 0 {
+		return
+	}
+	if !utf8.Valid(payload) {
+		*raw = base64.StdEncoding.EncodeToString(payload)
+		*encoding = "base64"
 		return
 	}
 	*raw = string(payload)
