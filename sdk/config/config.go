@@ -28,6 +28,7 @@ type ClaudeKey = internalconfig.ClaudeKey
 type VertexCompatKey = internalconfig.VertexCompatKey
 type VertexCompatModel = internalconfig.VertexCompatModel
 type OpenAICompatibility = internalconfig.OpenAICompatibility
+type OpenAICompatibilityAzure = internalconfig.OpenAICompatibilityAzure
 type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
 

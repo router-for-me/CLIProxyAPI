@@ -4,11 +4,58 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
+
+func TestOpenAICompatAzureManagementRoundTrip(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	h := NewHandler(&config.Config{OpenAICompatibility: []config.OpenAICompatibility{{
+		Name:    "azure",
+		BaseURL: "https://resource.openai.azure.com",
+		Azure: &config.OpenAICompatibilityAzure{
+			Deployment: "old-deployment",
+			APIVersion: "2024-10-21",
+		},
+	}}}, writeTestConfigFile(t), nil)
+
+	patchRec := httptest.NewRecorder()
+	patchCtx, _ := gin.CreateTestContext(patchRec)
+	patchCtx.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/openai-compatibility", strings.NewReader(`{
+		"name":"azure",
+		"value":{"azure":{"deployment":" new-deployment ","api-version":" 2025-04-01-preview "}}
+	}`))
+	patchCtx.Request.Header.Set("Content-Type", "application/json")
+	h.PatchOpenAICompat(patchCtx)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, body = %s", patchRec.Code, patchRec.Body.String())
+	}
+
+	getRec := httptest.NewRecorder()
+	getCtx, _ := gin.CreateTestContext(getRec)
+	getCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/openai-compatibility", nil)
+	h.GetOpenAICompat(getCtx)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, body = %s", getRec.Code, getRec.Body.String())
+	}
+	var body struct {
+		OpenAICompatibility []config.OpenAICompatibility `json:"openai-compatibility"`
+	}
+	if err := json.Unmarshal(getRec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode GET response: %v", err)
+	}
+	if len(body.OpenAICompatibility) != 1 || body.OpenAICompatibility[0].Azure == nil {
+		t.Fatalf("azure management response = %#v", body.OpenAICompatibility)
+	}
+	azure := body.OpenAICompatibility[0].Azure
+	if azure.Deployment != "new-deployment" || azure.APIVersion != "2025-04-01-preview" {
+		t.Fatalf("azure = %#v", azure)
+	}
+}
 
 func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")

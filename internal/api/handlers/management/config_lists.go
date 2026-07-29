@@ -706,6 +706,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Disabled       *bool                               `json:"disabled"`
 		DisableCooling *bool                               `json:"disable-cooling"`
 		BaseURL        *string                             `json:"base-url"`
+		Azure          *config.OpenAICompatibilityAzure    `json:"azure"`
 		APIKeyEntries  *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
 		Models         *[]config.OpenAICompatibilityModel  `json:"models"`
 		Headers        *map[string]string                  `json:"headers"`
@@ -762,6 +763,12 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 			return
 		}
 		entry.BaseURL = trimmed
+	}
+	if body.Value.Azure != nil {
+		entry.Azure = &config.OpenAICompatibilityAzure{
+			Deployment: strings.TrimSpace(body.Value.Azure.Deployment),
+			APIVersion: strings.TrimSpace(body.Value.Azure.APIVersion),
+		}
 	}
 	if body.Value.APIKeyEntries != nil {
 		for keyIndex := range *body.Value.APIKeyEntries {
@@ -1550,6 +1557,10 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	}
 	// Trim base-url; empty base-url indicates provider should be removed by sanitization
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	if entry.Azure != nil {
+		entry.Azure.Deployment = strings.TrimSpace(entry.Azure.Deployment)
+		entry.Azure.APIVersion = strings.TrimSpace(entry.Azure.APIVersion)
+	}
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {

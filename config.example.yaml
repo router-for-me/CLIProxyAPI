@@ -471,6 +471,19 @@ nonstream-keepalive-interval: 0
 #         alias: "claude-opus-4.66"
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
+#
+#   # Azure OpenAI uses a deployment path, api-version query parameter, and api-key header.
+#   # The client-facing alias, upstream request model, and Azure deployment may differ.
+#   - name: "azure-openai"
+#     base-url: "https://example-resource.openai.azure.com"
+#     azure:
+#       deployment: "production-gpt-5"      # Azure deployment name (URL-escaped in requests)
+#       api-version: "2025-04-01-preview"
+#     api-key-entries:
+#       - api-key: "${AZURE_OPENAI_API_KEY}"
+#     models:
+#       - name: "gpt-5"
+#         alias: "azure-gpt-5"
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:

@@ -113,6 +113,10 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		if e.Azure != nil {
+			e.Azure.Deployment = strings.TrimSpace(e.Azure.Deployment)
+			e.Azure.APIVersion = strings.TrimSpace(e.Azure.APIVersion)
+		}
 		e.Headers = NormalizeHeaders(e.Headers)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
