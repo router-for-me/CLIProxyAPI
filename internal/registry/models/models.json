@@ -2830,5 +2830,113 @@
       "context_length": 200000,
       "max_completion_tokens": 32768
     }
+  ],
+  "qwen": [
+    {
+      "id": "qwen3.7-max",
+      "object": "model",
+      "created": 1752000000,
+      "owned_by": "alibaba",
+      "type": "qwen",
+      "display_name": "Qwen3.7 Max",
+      "description": "Qwen3.7 flagship model for agentic coding and complex reasoning",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "qwen3-max",
+      "object": "model",
+      "created": 1750000000,
+      "owned_by": "alibaba",
+      "type": "qwen",
+      "display_name": "Qwen3 Max",
+      "description": "Qwen3 flagship model with hybrid thinking support",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "qwen3-coder-plus",
+      "object": "model",
+      "created": 1750000000,
+      "owned_by": "alibaba",
+      "type": "qwen",
+      "display_name": "Qwen3 Coder Plus",
+      "description": "Qwen3 coding-optimized model",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "qwen3-coder-next",
+      "object": "model",
+      "created": 1752000000,
+      "owned_by": "alibaba",
+      "type": "qwen",
+      "display_name": "Qwen3 Coder Next",
+      "description": "Qwen3 next-generation coding model",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "qwen-plus",
+      "object": "model",
+      "created": 1750000000,
+      "owned_by": "alibaba",
+      "type": "qwen",
+      "display_name": "Qwen Plus",
+      "description": "Qwen balanced performance-cost model",
+      "context_length": 131072,
+      "max_completion_tokens": 16384,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "qwen-turbo",
+      "object": "model",
+      "created": 1750000000,
+      "owned_by": "alibaba",
+      "type": "qwen",
+      "display_name": "Qwen Turbo",
+      "description": "Qwen fast and cost-effective model",
+      "context_length": 131072,
+      "max_completion_tokens": 16384
+    }
   ]
 }

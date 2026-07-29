@@ -112,6 +112,9 @@ type Config struct {
 	// XAIKey defines xAI API key configurations using the same structure as Codex API keys.
 	XAIKey []XAIKey `yaml:"xai-api-key" json:"xai-api-key"`
 
+	// QwenKey defines Qwen/DashScope API key configurations using the same structure as Codex API keys.
+	QwenKey []QwenKey `yaml:"qwen-api-key" json:"qwen-api-key"`
+
 	// XAI configures provider-wide xAI request behavior.
 	XAI XAIConfig `yaml:"xai" json:"xai"`
 

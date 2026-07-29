@@ -455,6 +455,12 @@ type XAIKey = CodexKey
 // XAIModel uses the Codex model mapping structure for xAI models.
 type XAIModel = CodexModel
 
+// QwenKey uses the Codex API key structure for native Qwen/DashScope execution.
+type QwenKey = CodexKey
+
+// QwenModel uses the Codex model mapping structure for Qwen models.
+type QwenModel = CodexModel
+
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
 type GeminiKey struct {

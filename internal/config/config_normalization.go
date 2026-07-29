@@ -141,6 +141,15 @@ func (cfg *Config) SanitizeXAIKeys() {
 	cfg.XAIKey = sanitizeCodexKeyEntries(cfg.XAIKey)
 }
 
+// SanitizeQwenKeys removes Qwen API key entries with empty API keys.
+// It applies the same normalization rules as codex-api-key.
+func (cfg *Config) SanitizeQwenKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.QwenKey = sanitizeCodexKeyEntries(cfg.QwenKey)
+}
+
 func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 	if len(entries) == 0 {
 		return entries
