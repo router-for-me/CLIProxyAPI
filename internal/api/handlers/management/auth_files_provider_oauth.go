@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
+	qwenauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qwen"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
@@ -698,6 +699,102 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 	if userCode := strings.TrimSpace(deviceFlow.UserCode); userCode != "" {
 		response["user_code"] = userCode
 	}
+	if deviceFlow.ExpiresIn > 0 {
+		response["expires_in"] = deviceFlow.ExpiresIn
+	}
+	c.JSON(200, response)
+}
+
+// RequestQwenToken initiates the Qianwen OAuth device flow for usage/quota access.
+// The resulting credential (provider "qianwen") is used only for querying account
+// usage and quota, not for model inference.
+func (h *Handler) RequestQwenToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	state := fmt.Sprintf("qwn-%d", time.Now().UnixNano())
+	qwenAuth := qwenauth.NewQwenAuth(h.cfg)
+
+	deviceFlow, errStartDeviceFlow := qwenAuth.StartDeviceFlow(ctx)
+	if errStartDeviceFlow != nil {
+		log.Errorf("Failed to start Qianwen device flow: %v", errStartDeviceFlow)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+		return
+	}
+	authURL := deviceFlow.VerificationURL
+
+	RegisterOAuthSession(state, "qianwen")
+
+	go func() {
+		pollCtx, cancelPoll := context.WithCancel(ctx)
+		defer cancelPoll()
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "qianwen")
+
+		authBundle, errWaitForAuthorization := qwenAuth.WaitForAuthorization(pollCtx, deviceFlow)
+		if errWaitForAuthorization != nil {
+			if !IsOAuthSessionPending(state, "qianwen") {
+				return
+			}
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization))
+			return
+		}
+		if !IsOAuthSessionPending(state, "qianwen") {
+			return
+		}
+
+		tokenStorage := qwenAuth.CreateTokenStorage(authBundle)
+
+		metadata := map[string]any{
+			"type":         "qianwen",
+			"access_token": authBundle.TokenData.AccessToken,
+			"token_type":   "Bearer",
+			"timestamp":    time.Now().UnixMilli(),
+		}
+		if strings.TrimSpace(authBundle.TokenData.RefreshToken) != "" {
+			metadata["refresh_token"] = authBundle.TokenData.RefreshToken
+		}
+		if strings.TrimSpace(authBundle.TokenData.ExpiresAt) != "" {
+			metadata["expired"] = authBundle.TokenData.ExpiresAt
+		}
+		if strings.TrimSpace(authBundle.DeviceID) != "" {
+			metadata["device_id"] = strings.TrimSpace(authBundle.DeviceID)
+		}
+		if strings.TrimSpace(authBundle.TokenData.Email) != "" {
+			metadata["email"] = strings.TrimSpace(authBundle.TokenData.Email)
+		}
+		if strings.TrimSpace(authBundle.TokenData.AliyunID) != "" {
+			metadata["aliyun_id"] = strings.TrimSpace(authBundle.TokenData.AliyunID)
+		}
+
+		fileName := fmt.Sprintf("qianwen-%d.json", time.Now().UnixMilli())
+		label := "Qianwen User"
+		if email := strings.TrimSpace(authBundle.TokenData.Email); email != "" {
+			label = email
+		} else if aliyunID := strings.TrimSpace(authBundle.TokenData.AliyunID); aliyunID != "" {
+			label = aliyunID
+		}
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "qianwen",
+			FileName: fileName,
+			Label:    label,
+			Storage:  tokenStorage,
+			Metadata: metadata,
+		}
+		if errGuard := guardOAuthSessionPendingForSave(state, "qianwen"); errGuard != nil {
+			return
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save Qianwen authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+		log.Infof("Qianwen authentication successful, token saved to %s", savedPath)
+		CompleteOAuthSession(state)
+	}()
+
+	response := gin.H{"status": "ok", "url": authURL, "state": state, "flow": "device"}
 	if deviceFlow.ExpiresIn > 0 {
 		response["expires_in"] = deviceFlow.ExpiresIn
 	}
