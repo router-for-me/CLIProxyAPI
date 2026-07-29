@@ -217,8 +217,8 @@ attemptLoop:
 					}
 				}
 				if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, bodyBytes); errClear != nil {
-					err = errClear
-					return resp, err
+					// Report the upstream failure rather than the cleanup failure.
+					logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
 				}
 				err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 				return resp, err
@@ -452,8 +452,8 @@ attemptLoop:
 					}
 				}
 				if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, bodyBytes); errClear != nil {
-					err = errClear
-					return resp, err
+					// Report the upstream failure rather than the cleanup failure.
+					logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
 				}
 				err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 				return resp, err

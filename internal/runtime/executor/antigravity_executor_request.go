@@ -173,24 +173,33 @@ func sanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySchema b
 		payloadStr = renamed
 	}
 
-	clean := util.CleanJSONSchemaForGemini
+	toolSchemaCleaner := util.CleanJSONSchemaForGemini
 	if useAntigravitySchema {
-		clean = util.CleanJSONSchemaForAntigravity
+		toolSchemaCleaner = util.CleanJSONSchemaForAntigravity
 	}
+	responseSchemaCleaner := util.CleanJSONSchemaForAntigravityResponse
 
-	for _, schemaPath := range antigravitySchemaPaths(payloadStr) {
+	cleanNestedToolSchema := func(schemaRaw string) string {
+		return cleanNestedSchema(toolSchemaCleaner, schemaRaw)
+	}
+	payloadStr = cleanAntigravitySchemasAtPaths(payloadStr, antigravityDeclarationSchemaPaths(payloadStr), cleanNestedToolSchema)
+	payloadStr = cleanAntigravitySchemasAtPaths(payloadStr, antigravityGenerationSchemaPaths(payloadStr), responseSchemaCleaner)
+	return payloadStr
+}
+
+func cleanAntigravitySchemasAtPaths(payloadStr string, schemaPaths []string, clean func(string) string) string {
+	for _, schemaPath := range schemaPaths {
 		schema := gjson.Get(payloadStr, schemaPath)
 		if !schema.Exists() {
 			continue
 		}
-		updated, errSet := sjson.SetRawBytes([]byte(payloadStr), schemaPath, []byte(cleanNestedSchema(clean, schema.Raw)))
+		updated, errSet := sjson.SetRawBytes([]byte(payloadStr), schemaPath, []byte(clean(schema.Raw)))
 		if errSet != nil {
 			log.Debugf("antigravity: failed to write cleaned schema at %s: %v", schemaPath, errSet)
 			continue
 		}
 		payloadStr = string(updated)
 	}
-
 	return payloadStr
 }
 
@@ -241,7 +250,12 @@ func antigravityFunctionDeclarationPaths(payloadStr string) []string {
 // A function declaration may carry a schema for its parameters and for its result, so all of
 // them must be cleaned; anything omitted here reaches the upstream API uncleaned.
 func antigravitySchemaPaths(payloadStr string) []string {
-	paths := make([]string, 0, 12)
+	paths := antigravityDeclarationSchemaPaths(payloadStr)
+	return append(paths, antigravityGenerationSchemaPaths(payloadStr)...)
+}
+
+func antigravityDeclarationSchemaPaths(payloadStr string) []string {
+	paths := make([]string, 0, 8)
 	for _, base := range antigravityFunctionDeclarationPaths(payloadStr) {
 		for _, key := range antigravityDeclarationSchemaKeys {
 			if gjson.Get(payloadStr, base+"."+key).IsObject() {
@@ -249,11 +263,16 @@ func antigravitySchemaPaths(payloadStr string) []string {
 			}
 		}
 	}
+	return paths
+}
+
+func antigravityGenerationSchemaPaths(payloadStr string) []string {
+	paths := make([]string, 0, len(antigravityGenerationConfigContainers)*len(antigravityGenerationSchemaKeys))
 	for _, container := range antigravityGenerationConfigContainers {
 		for _, key := range antigravityGenerationSchemaKeys {
-			p := container + "." + key
-			if gjson.Get(payloadStr, p).IsObject() {
-				paths = append(paths, p)
+			path := container + "." + key
+			if gjson.Get(payloadStr, path).IsObject() {
+				paths = append(paths, path)
 			}
 		}
 	}

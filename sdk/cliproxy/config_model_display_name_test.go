@@ -68,31 +68,20 @@ func TestBuildConfigModelsDisplayName(t *testing.T) {
 	}
 }
 
-func TestBuildCodexConfigModelsPreservesBuiltinDisplayNames(t *testing.T) {
-	models := buildCodexConfigModels(&config.CodexKey{Models: []config.CodexModel{
-		{Name: "gpt-image-1.5", DisplayName: "Configured Image 1.5"},
-		{Name: "gpt-image-2", DisplayName: "Configured Image 2"},
-	}})
+func TestBuildCodexConfigModelsOnlyIncludesConfiguredModels(t *testing.T) {
+	models := buildCodexConfigModels(&config.CodexKey{Models: []config.CodexModel{{
+		Name: "upstream-codex", Alias: "configured-codex",
+	}}})
 
-	wantDisplayNames := map[string]string{
-		"gpt-image-1.5": "Configured Image 1.5",
-		"gpt-image-2":   "Configured Image 2",
+	if len(models) != 1 {
+		t.Fatalf("model count = %d, want 1", len(models))
 	}
-	for _, model := range models {
-		wantDisplayName, ok := wantDisplayNames[model.ID]
-		if !ok {
-			continue
-		}
-		if model.DisplayName != wantDisplayName {
-			t.Errorf("%s DisplayName = %q, want %q", model.ID, model.DisplayName, wantDisplayName)
-		}
-		if model.Object != "model" || model.OwnedBy != "openai" || model.Type != "openai" || model.Created != 1704067200 || model.Version != model.ID || model.UserDefined {
-			t.Errorf("%s builtin metadata was not preserved: %#v", model.ID, model)
-		}
-		delete(wantDisplayNames, model.ID)
+	if models[0].ID != "configured-codex" {
+		t.Fatalf("model ID = %q, want configured-codex", models[0].ID)
 	}
-	for modelID := range wantDisplayNames {
-		t.Errorf("missing builtin model %s", modelID)
+
+	if models := buildCodexConfigModels(&config.CodexKey{}); len(models) != 0 {
+		t.Fatalf("model count without configuration = %d, want 0", len(models))
 	}
 }
 

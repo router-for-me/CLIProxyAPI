@@ -24,44 +24,67 @@ const placeholderReasonDescription = "Brief explanation of why you are calling t
 // and replacements such as "enum" and "type" are fabricated. That regression reached production
 // once already; scope every call site to the schema itself.
 
-// CleanJSONSchemaForAntigravity transforms a JSON schema to be compatible with Antigravity API.
+type jsonSchemaCleanOptions struct {
+	addPlaceholder       bool
+	removeGeminiMetadata bool
+	flattenUnions        bool
+	forceEnumStringType  bool
+}
+
+// CleanJSONSchemaForAntigravity transforms a tool schema to be compatible with Antigravity API.
 // It handles unsupported keywords, type flattening, and schema simplification while preserving
-// semantic information as description hints.
+// semantic information as description hints and adding placeholders required by VALIDATED mode.
 func CleanJSONSchemaForAntigravity(jsonStr string) string {
-	return cleanJSONSchema(jsonStr, true)
+	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{
+		addPlaceholder:      true,
+		flattenUnions:       true,
+		forceEnumStringType: true,
+	})
+}
+
+// CleanJSONSchemaForAntigravityResponse transforms a response schema without applying tool-only
+// compatibility rewrites that would alter the client's structured output contract.
+func CleanJSONSchemaForAntigravityResponse(jsonStr string) string {
+	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{})
 }
 
 // CleanJSONSchemaForGemini transforms a JSON schema to be compatible with Gemini tool calling.
 // It removes unsupported keywords and simplifies schemas, without adding empty-schema placeholders.
 func CleanJSONSchemaForGemini(jsonStr string) string {
-	return cleanJSONSchema(jsonStr, false)
+	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{
+		removeGeminiMetadata: true,
+		flattenUnions:        true,
+		forceEnumStringType:  true,
+	})
 }
 
 // cleanJSONSchema performs the core cleaning operations on the JSON schema.
-func cleanJSONSchema(jsonStr string, addPlaceholder bool) string {
+func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	// Phase 1: Convert and add hints
 	jsonStr = convertRefsToHints(jsonStr)
 	jsonStr = convertConstToEnum(jsonStr)
-	jsonStr = convertEnumValuesToStrings(jsonStr)
+	jsonStr = convertEnumValuesToStrings(jsonStr, options.forceEnumStringType)
 	jsonStr = addEnumHints(jsonStr)
 	jsonStr = addAdditionalPropertiesHints(jsonStr)
 	jsonStr = moveConstraintsToDescription(jsonStr)
 
 	// Phase 2: Flatten complex structures
 	jsonStr = mergeAllOf(jsonStr)
-	jsonStr = flattenAnyOfOneOf(jsonStr)
+	if options.flattenUnions {
+		jsonStr = flattenAnyOfOneOf(jsonStr)
+	}
 	jsonStr = flattenTypeArrays(jsonStr)
 
 	// Phase 3: Cleanup
 	jsonStr = removeUnsupportedKeywords(jsonStr)
-	if !addPlaceholder {
+	if options.removeGeminiMetadata {
 		// Gemini schema cleanup: remove nullable/title and placeholder-only fields.
 		jsonStr = removeKeywords(jsonStr, []string{"nullable", "title"})
 		jsonStr = removePlaceholderFields(jsonStr)
 	}
 	jsonStr = cleanupRequiredFields(jsonStr)
 	// Phase 4: Add placeholder for empty object schemas (Claude VALIDATED mode requirement)
-	if addPlaceholder {
+	if options.addPlaceholder {
 		jsonStr = addEmptySchemaPlaceholder(jsonStr)
 	}
 
@@ -195,9 +218,10 @@ func convertConstToEnum(jsonStr string) string {
 	return jsonStr
 }
 
-// convertEnumValuesToStrings ensures all enum values are strings and the schema type is set to string.
-// Gemini API requires enum values to be of type string, not numbers or booleans.
-func convertEnumValuesToStrings(jsonStr string) string {
+// convertEnumValuesToStrings ensures all enum values use the string representation required by
+// Gemini's proto schema. Tool schemas also require a string type, while response schemas preserve
+// their declared type because the upstream decoder uses it to select the emitted JSON value type.
+func convertEnumValuesToStrings(jsonStr string, forceStringType bool) string {
 	for _, p := range findPaths(jsonStr, "enum") {
 		arr := gjson.Get(jsonStr, p)
 		if !arr.IsArray() {
@@ -209,13 +233,13 @@ func convertEnumValuesToStrings(jsonStr string) string {
 			stringVals = append(stringVals, item.String())
 		}
 
-		// Always update enum values to strings and set type to "string"
-		// This ensures compatibility with Antigravity Gemini which only allows enum for STRING type
 		updated, _ := sjson.SetBytes([]byte(jsonStr), p, stringVals)
 		jsonStr = string(updated)
-		parentPath := trimSuffix(p, ".enum")
-		updated, _ = sjson.SetBytes([]byte(jsonStr), joinPath(parentPath, "type"), "string")
-		jsonStr = string(updated)
+		if forceStringType {
+			parentPath := trimSuffix(p, ".enum")
+			updated, _ = sjson.SetBytes([]byte(jsonStr), joinPath(parentPath, "type"), "string")
+			jsonStr = string(updated)
+		}
 	}
 	return jsonStr
 }

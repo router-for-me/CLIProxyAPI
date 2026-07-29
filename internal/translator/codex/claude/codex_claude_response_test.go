@@ -879,7 +879,7 @@ func TestConvertCodexResponseToClaude_StreamUnresolvedPendingFunctionCallDoesNot
 		t.Fatalf("stop_reason = %q, want end_turn. Outputs=%q", gotReason, outputs)
 	}
 	params, ok := param.(*ConvertCodexResponseToClaudeParams)
-	if !ok || len(params.PendingFunctionCalls) != 0 || params.LastPendingFunctionCallKey != "" {
+	if !ok || len(params.FunctionCalls) != 0 || len(params.FunctionCallQueue) != 0 || params.LastFunctionCall != nil {
 		t.Fatalf("pending function calls were not cleared: %#v", param)
 	}
 }
