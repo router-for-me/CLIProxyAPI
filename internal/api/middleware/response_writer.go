@@ -354,14 +354,23 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 			}
 		}
 		apiWebsocketTimeline := w.extractAPIWebsocketTimeline(c)
-		var errMerge error
-		apiWebsocketTimeline, errMerge = mergeFileBodySource(apiWebsocketTimeline, apiWebsocketTimelineSource)
-		if errMerge != nil {
-			cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource)
-			return errMerge
-		}
 		if len(apiWebsocketTimeline) > 0 {
 			_ = w.streamWriter.WriteAPIWebsocketTimeline(apiWebsocketTimeline)
+		}
+		if sourceWriter, ok := w.streamWriter.(interface {
+			WriteAPIWebsocketTimelineSource(*logging.FileBodySource) error
+		}); ok && apiWebsocketTimelineSource != nil && apiWebsocketTimelineSource.HasPayload() {
+			_ = sourceWriter.WriteAPIWebsocketTimelineSource(apiWebsocketTimelineSource)
+		} else {
+			var errMerge error
+			apiWebsocketTimeline, errMerge = mergeFileBodySource(nil, apiWebsocketTimelineSource)
+			if errMerge != nil {
+				cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource)
+				return errMerge
+			}
+			if len(apiWebsocketTimeline) > 0 {
+				_ = w.streamWriter.WriteAPIWebsocketTimeline(apiWebsocketTimeline)
+			}
 		}
 		if err := w.streamWriter.Close(); err != nil {
 			w.streamWriter = nil

@@ -485,19 +485,25 @@ func TestFileRequestLogger_HomeEnabled_BoundsStreamingJSONUpstreamSources(t *tes
 	sourceWriter, ok := streamWriter.(interface {
 		WriteAPIRequestSource(*FileBodySource) error
 		WriteAPIResponseSource(*FileBodySource) error
+		WriteAPIWebsocketTimelineSource(*FileBodySource) error
 	})
 	if !ok {
 		t.Fatalf("Home streaming writer does not implement source interface")
 	}
 	requestSource := newLargeFileBodySource(t, tempDir, "home-api-request")
 	responseSource := newLargeFileBodySource(t, tempDir, "home-api-response")
+	timelineSource := newLargeFileBodySource(t, tempDir, "home-api-websocket-timeline")
 	requestPaths := requestSource.Paths()
 	responsePaths := responseSource.Paths()
+	timelinePaths := timelineSource.Paths()
 	if err := sourceWriter.WriteAPIRequestSource(requestSource); err != nil {
 		t.Fatalf("WriteAPIRequestSource: %v", err)
 	}
 	if err := sourceWriter.WriteAPIResponseSource(responseSource); err != nil {
 		t.Fatalf("WriteAPIResponseSource: %v", err)
+	}
+	if err := sourceWriter.WriteAPIWebsocketTimelineSource(timelineSource); err != nil {
+		t.Fatalf("WriteAPIWebsocketTimelineSource: %v", err)
 	}
 	if err := streamWriter.Close(); err != nil {
 		t.Fatalf("Close error: %v", err)
@@ -516,7 +522,11 @@ func TestFileRequestLogger_HomeEnabled_BoundsStreamingJSONUpstreamSources(t *tes
 	if !entry.APIRequestTruncated || !entry.APIResponseTruncated {
 		t.Fatalf("upstream truncation markers: request=%v response=%v", entry.APIRequestTruncated, entry.APIResponseTruncated)
 	}
-	assertFileBodySourceCleaned(t, append(requestPaths, responsePaths...))
+	if !entry.APIWebsocketTimelineTruncated {
+		t.Fatal("api websocket timeline was not marked truncated")
+	}
+	paths := append(requestPaths, responsePaths...)
+	assertFileBodySourceCleaned(t, append(paths, timelinePaths...))
 }
 
 func TestFileRequestLogger_HomeEnabled_DoesNotTruncateStreamingTextBodies(t *testing.T) {

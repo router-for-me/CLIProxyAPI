@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -227,18 +226,8 @@ func TestJSONRequestLoggingSerializesErrorsAndMasksAddonHeaders(t *testing.T) {
 func TestJSONRequestLoggingPreservesDecompressionError(t *testing.T) {
 	tempDir := t.TempDir()
 	logger := NewFileRequestLoggerWithFormat(true, tempDir, "", 10, "json")
-	err := logger.writeNonStreamingLog(
-		io.Discard, "/v1/chat/completions", "POST", nil, []byte(`{"model":"gpt-4"}`), "", false,
-		nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		200, map[string][]string{"Content-Encoding": {"gzip"}}, []byte("not-gzip"),
-		errors.New("gzip: invalid header"), time.Now(), time.Time{},
-	)
-	if err != nil {
-		t.Fatalf("writeNonStreamingLog failed: %v", err)
-	}
-
 	var buf bytes.Buffer
-	err = logger.writeNonStreamingLog(
+	err := logger.writeNonStreamingLog(
 		&buf, "/v1/chat/completions", "POST", nil, []byte(`{"model":"gpt-4"}`), "", false,
 		nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		200, map[string][]string{"Content-Encoding": {"gzip"}}, []byte("not-gzip"),
@@ -725,92 +714,31 @@ func TestJSONRequestLoggingCompactsStructuredPayloadsForNDJSON(t *testing.T) {
 	}
 }
 
-func TestJSONFileBodySourcesCapWhileSpooling(t *testing.T) {
-	logger := NewFileRequestLoggerWithFormat(true, t.TempDir(), "", 10, "json")
-	payload := bytes.Repeat([]byte("x"), maxJSONFileBackedSectionBytes+1024)
-	for _, prefix := range []string{"api-request", "api-response", "websocket-timeline", "api-websocket-timeline"} {
-		t.Run(prefix, func(t *testing.T) {
-			source, err := logger.NewFileBodySource(prefix)
+func TestLimitedFileBodySourceWrites(t *testing.T) {
+	for _, appendPayload := range []struct {
+		name string
+		fn   func(*FileBodySource, []byte) error
+	}{
+		{name: "bytes", fn: (*FileBodySource).AppendBytes},
+		{name: "part", fn: (*FileBodySource).AppendPart},
+	} {
+		t.Run(appendPayload.name, func(t *testing.T) {
+			source, err := newLimitedFileBodySourceInDir(t.TempDir(), appendPayload.name, 32)
 			if err != nil {
-				t.Fatalf("NewFileBodySource failed: %v", err)
+				t.Fatalf("newLimitedFileBodySourceInDir failed: %v", err)
 			}
 			defer source.Cleanup()
-			if err := source.AppendBytes(payload); err != nil {
-				t.Fatalf("AppendBytes failed: %v", err)
+			if err := appendPayload.fn(source, bytes.Repeat([]byte("x"), 64)); err != nil {
+				t.Fatalf("append failed: %v", err)
 			}
-			if !source.Truncated() {
-				t.Fatal("source was not marked truncated")
-			}
-			paths := source.Paths()
-			if len(paths) != 1 {
-				t.Fatalf("source paths = %d, want 1", len(paths))
-			}
-			info, err := os.Stat(paths[0])
+			data, err := source.Bytes()
 			if err != nil {
-				t.Fatalf("stat source: %v", err)
+				t.Fatalf("read source: %v", err)
 			}
-			if info.Size() != maxJSONFileBackedSectionBytes {
-				t.Fatalf("source size = %d, want %d", info.Size(), maxJSONFileBackedSectionBytes)
+			if len(data) != 32 || !source.Truncated() {
+				t.Fatalf("source length=%d truncated=%v", len(data), source.Truncated())
 			}
 		})
-	}
-
-	source, err := logger.NewFileBodySource("api-request")
-	if err != nil {
-		t.Fatalf("NewFileBodySource failed: %v", err)
-	}
-	defer source.Cleanup()
-	if err := source.AppendBytes(payload); err != nil {
-		t.Fatalf("AppendBytes failed: %v", err)
-	}
-	var buf bytes.Buffer
-	if err := logger.writeJSONLog(&buf, "/v1/responses", "POST", nil, nil, "", false, 200, nil, nil, "", false, nil, nil, source, nil, nil, nil, nil, nil, nil, nil, time.Now(), time.Time{}, "http", "http"); err != nil {
-		t.Fatalf("writeJSONLog failed: %v", err)
-	}
-	var entry jsonLogPayload
-	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
-		t.Fatalf("unmarshal JSON log: %v", err)
-	}
-	if !entry.APIRequestTruncated {
-		t.Fatal("api_request_truncated = false, want true")
-	}
-}
-
-func TestJSONWebsocketTimelineSourceCapsAppendPartWhileSpooling(t *testing.T) {
-	logger := NewFileRequestLoggerWithFormat(true, t.TempDir(), "", 10, "json")
-	source, err := logger.NewFileBodySource("api-websocket-timeline")
-	if err != nil {
-		t.Fatalf("NewFileBodySource failed: %v", err)
-	}
-	defer source.Cleanup()
-
-	part := bytes.Repeat([]byte("frame"), 1024)
-	for !source.Truncated() {
-		if err := source.AppendPart(part); err != nil {
-			t.Fatalf("AppendPart failed: %v", err)
-		}
-	}
-	var total int64
-	for _, path := range source.Paths() {
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("stat source part: %v", err)
-		}
-		total += info.Size()
-	}
-	if total != maxJSONFileBackedSectionBytes {
-		t.Fatalf("source size = %d, want %d", total, maxJSONFileBackedSectionBytes)
-	}
-
-	data, truncated, err := mergeJSONSectionLimited(source, nil, maxJSONFileBackedSectionBytes)
-	if err != nil {
-		t.Fatalf("mergeJSONSectionLimited failed: %v", err)
-	}
-	if !truncated {
-		t.Fatal("merged source was not marked truncated")
-	}
-	if len(data) != maxJSONFileBackedSectionBytes {
-		t.Fatalf("merged source size = %d, want %d", len(data), maxJSONFileBackedSectionBytes)
 	}
 }
 
@@ -951,6 +879,42 @@ func TestJSONStreamingRequestLoggingCapsRequestBody(t *testing.T) {
 	}
 	if len(entry.RequestBodyRaw) > maxJSONFileBackedSectionBytes {
 		t.Fatalf("request body length = %d, limit = %d", len(entry.RequestBodyRaw), maxJSONFileBackedSectionBytes)
+	}
+}
+
+func TestJSONStreamingRequestLoggingPreservesWebsocketSourceTruncation(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := NewFileRequestLoggerWithFormat(true, tempDir, "", 10, "json")
+	streamWriter, err := logger.LogStreamingRequest("/v1/responses", "POST", nil, nil, "req-stream-ws-source-123")
+	if err != nil {
+		t.Fatalf("LogStreamingRequest failed: %v", err)
+	}
+	source, err := newLimitedFileBodySourceInDir(tempDir, "api-websocket-timeline", 32)
+	if err != nil {
+		t.Fatalf("newLimitedFileBodySourceInDir failed: %v", err)
+	}
+	if err := source.AppendBytes(bytes.Repeat([]byte("x"), 64)); err != nil {
+		t.Fatalf("AppendBytes failed: %v", err)
+	}
+	sourceWriter, ok := streamWriter.(interface {
+		WriteAPIWebsocketTimelineSource(*FileBodySource) error
+	})
+	if !ok {
+		t.Fatalf("writer type %T does not accept websocket timeline sources", streamWriter)
+	}
+	if err := sourceWriter.WriteAPIWebsocketTimelineSource(source); err != nil {
+		t.Fatalf("WriteAPIWebsocketTimelineSource failed: %v", err)
+	}
+	if err := streamWriter.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	var entry jsonLogPayload
+	if err := json.Unmarshal(readOnlyLogFile(t, tempDir), &entry); err != nil {
+		t.Fatalf("unmarshal JSON log: %v", err)
+	}
+	if !entry.APIWebsocketTimelineTruncated {
+		t.Fatal("api_websocket_timeline_truncated = false, want true")
 	}
 }
 

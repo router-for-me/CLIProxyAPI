@@ -142,12 +142,24 @@ func TestFinalizeStreamingWritesAPIWebsocketTimeline(t *testing.T) {
 	}
 
 	c.Set("API_WEBSOCKET_TIMELINE", []byte("Timestamp: 2026-04-01T12:00:00Z\nEvent: api.websocket.request\n{}"))
+	source, err := logging.NewFileBodySourceInDir(t.TempDir(), "api-websocket-timeline")
+	if err != nil {
+		t.Fatalf("NewFileBodySourceInDir failed: %v", err)
+	}
+	defer source.Cleanup()
+	if err := source.AppendPart([]byte("source timeline")); err != nil {
+		t.Fatalf("AppendPart failed: %v", err)
+	}
+	c.Set(logging.APIWebsocketTimelineSourceContextKey, source)
 
 	if err := wrapper.Finalize(c); err != nil {
 		t.Fatalf("Finalize error: %v", err)
 	}
 	if string(streamWriter.apiWebsocketTimeline) != "Timestamp: 2026-04-01T12:00:00Z\nEvent: api.websocket.request\n{}" {
 		t.Fatalf("stream writer websocket timeline = %q", string(streamWriter.apiWebsocketTimeline))
+	}
+	if streamWriter.apiWebsocketTimelineSource != source {
+		t.Fatal("stream writer did not receive websocket timeline source")
 	}
 	if !streamWriter.closed {
 		t.Fatal("expected stream writer to be closed")
@@ -171,9 +183,10 @@ func (l *testRequestLogger) IsEnabled() bool {
 }
 
 type testStreamingLogWriter struct {
-	apiWebsocketTimeline []byte
-	closed               bool
-	truncated            bool
+	apiWebsocketTimeline       []byte
+	apiWebsocketTimelineSource *logging.FileBodySource
+	closed                     bool
+	truncated                  bool
 }
 
 func (w *testStreamingLogWriter) WriteChunkAsync([]byte) {}
@@ -194,6 +207,11 @@ func (w *testStreamingLogWriter) WriteAPIResponse([]byte) error {
 
 func (w *testStreamingLogWriter) WriteAPIWebsocketTimeline(apiWebsocketTimeline []byte) error {
 	w.apiWebsocketTimeline = bytes.Clone(apiWebsocketTimeline)
+	return nil
+}
+
+func (w *testStreamingLogWriter) WriteAPIWebsocketTimelineSource(source *logging.FileBodySource) error {
+	w.apiWebsocketTimelineSource = source
 	return nil
 }
 

@@ -93,20 +93,21 @@ type homeStreamingLogWriter struct {
 	chunkChan chan []byte
 	doneChan  chan struct{}
 
-	responseStatus        int
-	statusWritten         bool
-	responseHeaders       map[string][]string
-	responseBody          bytes.Buffer
-	responseBodyTruncated atomic.Bool
-	apiRequest            []byte
-	apiRequestSource      *FileBodySource
-	apiResponse           []byte
-	apiResponseSource     *FileBodySource
-	apiWebsocketTime      []byte
-	requestID             string
-	apiResponseTS         time.Time
-	firstChunkTS          time.Time
-	format                string
+	responseStatus             int
+	statusWritten              bool
+	responseHeaders            map[string][]string
+	responseBody               bytes.Buffer
+	responseBodyTruncated      atomic.Bool
+	apiRequest                 []byte
+	apiRequestSource           *FileBodySource
+	apiResponse                []byte
+	apiResponseSource          *FileBodySource
+	apiWebsocketTime           []byte
+	apiWebsocketTimelineSource *FileBodySource
+	requestID                  string
+	apiResponseTS              time.Time
+	firstChunkTS               time.Time
+	format                     string
 }
 
 func newHomeStreamingLogWriter(url, method string, headers map[string][]string, body []byte, requestID, format string) *homeStreamingLogWriter {
@@ -233,6 +234,14 @@ func (w *homeStreamingLogWriter) WriteAPIWebsocketTimeline(apiWebsocketTimeline 
 	return nil
 }
 
+func (w *homeStreamingLogWriter) WriteAPIWebsocketTimelineSource(source *FileBodySource) error {
+	if source == nil || !source.HasPayload() {
+		return nil
+	}
+	w.apiWebsocketTimelineSource = source
+	return nil
+}
+
 func (w *homeStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
 	if w == nil {
 		return
@@ -248,7 +257,7 @@ func (w *homeStreamingLogWriter) Close() error {
 		return nil
 	}
 
-	defer cleanupFileBodySources(w.apiRequestSource, w.apiResponseSource)
+	defer cleanupFileBodySources(w.apiRequestSource, w.apiResponseSource, w.apiWebsocketTimelineSource)
 
 	client := currentHomeRequestLogClient()
 	if client == nil || !client.HeartbeatOK() {
@@ -264,10 +273,10 @@ func (w *homeStreamingLogWriter) Close() error {
 	responsePayload := w.responseBody.Bytes()
 
 	var buf bytes.Buffer
-	upstreamTransport := inferUpstreamTransport(w.apiRequest, w.apiRequestSource, w.apiResponse, w.apiResponseSource, w.apiWebsocketTime, nil, nil)
+	upstreamTransport := inferUpstreamTransport(w.apiRequest, w.apiRequestSource, w.apiResponse, w.apiResponseSource, w.apiWebsocketTime, w.apiWebsocketTimelineSource, nil)
 	if w.format == "json" {
 		logger := NewFileRequestLoggerWithFormat(true, "", "", 0, "json")
-		if errWrite := logger.writeJSONLog(&buf, w.url, w.method, w.requestHeaders, w.requestBody, "", w.requestBodyTruncated, w.responseStatus, w.responseHeaders, responsePayload, "", w.responseBodyTruncated.Load(), nil, w.apiRequest, w.apiRequestSource, w.apiResponse, w.apiResponseSource, nil, nil, nil, w.apiWebsocketTime, nil, w.timestamp, w.apiResponseTS, "http", upstreamTransport); errWrite != nil {
+		if errWrite := logger.writeJSONLog(&buf, w.url, w.method, w.requestHeaders, w.requestBody, "", w.requestBodyTruncated, w.responseStatus, w.responseHeaders, responsePayload, "", w.responseBodyTruncated.Load(), nil, w.apiRequest, w.apiRequestSource, w.apiResponse, w.apiResponseSource, nil, nil, nil, w.apiWebsocketTime, w.apiWebsocketTimelineSource, w.timestamp, w.apiResponseTS, "http", upstreamTransport); errWrite != nil {
 			return errWrite
 		}
 	} else {
