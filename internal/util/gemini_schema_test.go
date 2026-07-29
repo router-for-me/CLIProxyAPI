@@ -733,6 +733,37 @@ func TestCleanJSONSchemaForAntigravity_EmptySchemaWithDescription(t *testing.T) 
 	}
 }
 
+func TestCleanJSONSchemaForAntigravityResponseDoesNotAddToolPlaceholders(t *testing.T) {
+	bare := gjson.Parse(CleanJSONSchemaForAntigravityResponse(`{"type":"object"}`))
+	if bare.Get("properties.reason").Exists() || bare.Get("required").Exists() {
+		t.Fatalf("bare response schema gained tool placeholders: %s", bare.Raw)
+	}
+
+	input := `{
+		"type":"object",
+		"title":"Response",
+		"nullable":true,
+		"properties":{
+			"empty":{"type":"object"},
+			"optional":{"type":"object","properties":{"value":{"type":"string"}}}
+		}
+	}`
+	result := gjson.Parse(CleanJSONSchemaForAntigravityResponse(input))
+	for _, path := range []string{
+		"properties.empty.properties.reason",
+		"properties.empty.required",
+		"properties.optional.properties._",
+		"properties.optional.required",
+	} {
+		if result.Get(path).Exists() {
+			t.Errorf("response schema gained tool-only field %s: %s", path, result.Raw)
+		}
+	}
+	if result.Get("title").String() != "Response" || !result.Get("nullable").Bool() {
+		t.Errorf("Antigravity response metadata was removed: %s", result.Raw)
+	}
+}
+
 // ============================================================================
 // Format field handling (ad-hoc patch removal)
 // ============================================================================
