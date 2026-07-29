@@ -47,6 +47,9 @@ api-keys:
 # accounts tagged with that bucket name; keys not listed anywhere only use
 # untagged codex accounts. A key may appear in at most one bucket.
 # Non-codex providers are unaffected.
+# Bucket names are case-sensitive.
+# When Home control-plane dispatch mode is enabled, bucket filtering is not
+# enforced (selection happens remotely).
 # codex-buckets:
 #   team-a:
 #     api-keys:
