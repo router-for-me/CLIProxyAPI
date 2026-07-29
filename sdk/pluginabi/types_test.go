@@ -48,6 +48,9 @@ func TestMethodNamesAreStable(t *testing.T) {
 	if MethodResponseInterceptStreamChunk != "response.intercept_stream_chunk" {
 		t.Fatalf("MethodResponseInterceptStreamChunk = %q", MethodResponseInterceptStreamChunk)
 	}
+	if MethodHostBuildInfo != "host.build_info" {
+		t.Fatalf("MethodHostBuildInfo = %q", MethodHostBuildInfo)
+	}
 	if MethodHostHTTPDo != "host.http.do" {
 		t.Fatalf("MethodHostHTTPDo = %q", MethodHostHTTPDo)
 	}

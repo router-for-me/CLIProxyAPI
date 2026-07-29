@@ -596,6 +596,14 @@ type HostHTTPClient interface {
 	DoStream(context.Context, HTTPRequest) (HTTPStreamResponse, error)
 }
 
+// HostBuildInfo identifies the running CLIProxyAPI build.
+type HostBuildInfo struct {
+	// Version is the authoritative host version for plugin compatibility decisions.
+	Version string `json:"version"`
+	// Commit is the optional source commit for diagnostics only.
+	Commit string `json:"commit,omitempty"`
+}
+
 // HostModelExecutionRequest describes a model execution request issued through the host.
 type HostModelExecutionRequest struct {
 	// EntryProtocol is the inbound client protocol format.

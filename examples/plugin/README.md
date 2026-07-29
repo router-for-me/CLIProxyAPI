@@ -29,6 +29,21 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 
 Most standard capability examples contain `go/`, `c/`, and `rust/` subdirectories. Specialized examples may provide only the implementation language they need.
 
+## Host Build Info Callback
+
+Native plugins can call `host.build_info` with no request body to identify the running CPA build. The callback returns the standard RPC envelope with this result:
+
+```json
+{
+  "version": "v7.2.105",
+  "commit": "90c2ff90de39908d145be413ee1346fd5a8b7a55"
+}
+```
+
+`version` is the authoritative value for compatibility decisions. `commit` is optional and intended only for diagnostics. Plugins should cache the result and use their conservative compatibility path when the callback is unavailable or the version is invalid; older CPA builds report the callback as unsupported.
+
+Go plugins can use `pluginabi.MethodHostBuildInfo` for the method name and decode the result as `pluginapi.HostBuildInfo`. This callback is additive and does not change the native ABI or registration schema version.
+
 ## Codex Service Tier
 
 `codex-service-tier` declares the request normalization capability. When `fast` is `true`, it sets `service_tier` to `priority` for requests where `req.ToFormat` is `codex` and `req.Model` is `gpt-5.5`.

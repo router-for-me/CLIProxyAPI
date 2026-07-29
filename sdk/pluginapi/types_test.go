@@ -319,6 +319,25 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 	}
 }
 
+func TestHostBuildInfoJSONContract(t *testing.T) {
+	info := HostBuildInfo{Version: "v7.2.105", Commit: "90c2ff90"}
+	raw, errMarshal := json.Marshal(info)
+	if errMarshal != nil {
+		t.Fatalf("marshal HostBuildInfo: %v", errMarshal)
+	}
+	if string(raw) != `{"version":"v7.2.105","commit":"90c2ff90"}` {
+		t.Fatalf("HostBuildInfo JSON = %s", raw)
+	}
+
+	withoutCommit, errMarshal := json.Marshal(HostBuildInfo{Version: "dev"})
+	if errMarshal != nil {
+		t.Fatalf("marshal HostBuildInfo without commit: %v", errMarshal)
+	}
+	if string(withoutCommit) != `{"version":"dev"}` {
+		t.Fatalf("HostBuildInfo JSON without commit = %s", withoutCommit)
+	}
+}
+
 func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
 	request := SchedulerPickRequest{
 		Plugin:    Metadata{Name: "scheduler-plugin"},

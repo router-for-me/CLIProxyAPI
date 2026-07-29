@@ -62,6 +62,7 @@ const (
 	MethodManagementRegister = "management.register"
 	MethodManagementHandle   = "management.handle"
 
+	MethodHostBuildInfo          = "host.build_info"
 	MethodHostHTTPDo             = "host.http.do"
 	MethodHostHTTPDoStream       = "host.http.do_stream"
 	MethodHostHTTPStreamRead     = "host.http.stream_read"

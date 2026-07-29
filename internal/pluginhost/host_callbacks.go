@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -97,6 +98,11 @@ func hostCallbackPluginIDFromContext(ctx context.Context) string {
 
 func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte) ([]byte, error) {
 	switch method {
+	case pluginabi.MethodHostBuildInfo:
+		return marshalRPCResult(pluginapi.HostBuildInfo{
+			Version: buildinfo.Version,
+			Commit:  buildinfo.Commit,
+		})
 	case pluginabi.MethodHostModelExecute:
 		return h.callHostModelExecute(ctx, request)
 	case pluginabi.MethodHostModelExecuteStream:

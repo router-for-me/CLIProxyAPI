@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -32,6 +33,28 @@ func (e *fakeHostModelExecutor) ExecuteModel(ctx context.Context, req handlers.M
 
 func (e *fakeHostModelExecutor) ExecuteModelStream(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
 	return e.executeModelStream(ctx, req)
+}
+
+func TestHostBuildInfoCallbackReturnsRunningBuild(t *testing.T) {
+	previousVersion, previousCommit := buildinfo.Version, buildinfo.Commit
+	buildinfo.Version = "v7.2.105-test"
+	buildinfo.Commit = "90c2ff90-test"
+	t.Cleanup(func() {
+		buildinfo.Version = previousVersion
+		buildinfo.Commit = previousCommit
+	})
+
+	rawResp, errCall := New().callFromPlugin(context.Background(), pluginabi.MethodHostBuildInfo, nil)
+	if errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+	info, errDecode := decodeRPCEnvelope[pluginapi.HostBuildInfo](rawResp)
+	if errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+	if info.Version != buildinfo.Version || info.Commit != buildinfo.Commit {
+		t.Fatalf("build info = %#v, want version %q commit %q", info, buildinfo.Version, buildinfo.Commit)
+	}
 }
 
 func TestHostHTTPDoCallbackUsesHostHTTPClient(t *testing.T) {
