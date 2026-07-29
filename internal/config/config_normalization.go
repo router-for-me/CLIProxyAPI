@@ -142,12 +142,12 @@ func (cfg *Config) SanitizeXAIKeys() {
 }
 
 // SanitizeQwenKeys removes Qwen API key entries with empty API keys.
-// It applies the same normalization rules as codex-api-key.
+// Unlike Codex/xAI, Qwen has a default base URL so base-url is optional.
 func (cfg *Config) SanitizeQwenKeys() {
 	if cfg == nil {
 		return
 	}
-	cfg.QwenKey = sanitizeCodexKeyEntries(cfg.QwenKey)
+	cfg.QwenKey = sanitizeQwenKeyEntries(cfg.QwenKey)
 }
 
 func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
@@ -162,6 +162,27 @@ func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
 		if e.BaseURL == "" {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// sanitizeQwenKeyEntries normalizes Qwen key entries, filtering on API key
+// instead of base URL since Qwen has a built-in default endpoint.
+func sanitizeQwenKeyEntries(entries []QwenKey) []QwenKey {
+	if len(entries) == 0 {
+		return entries
+	}
+	out := make([]QwenKey, 0, len(entries))
+	for i := range entries {
+		e := entries[i]
+		e.Prefix = normalizeModelPrefix(e.Prefix)
+		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.Headers = NormalizeHeaders(e.Headers)
+		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
+		if strings.TrimSpace(e.APIKey) == "" {
 			continue
 		}
 		out = append(out, e)

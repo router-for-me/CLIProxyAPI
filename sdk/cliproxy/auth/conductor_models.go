@@ -366,6 +366,10 @@ func (m *Manager) resolveAPIKeyModelAliasWithResult(auth *Auth, requestedModel s
 		if entry := resolveXAIAPIKeyConfig(cfg, auth); entry != nil {
 			models = asModelAliasEntries(entry.Models)
 		}
+	case "qwen":
+		if entry := resolveQwenAPIKeyConfig(cfg, auth); entry != nil {
+			models = asModelAliasEntries(entry.Models)
+		}
 	case "vertex":
 		if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
 			models = asModelAliasEntries(entry.Models)
@@ -490,6 +494,10 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			}
 		case "xai":
 			if entry := resolveXAIAPIKeyConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
+		case "qwen":
+			if entry := resolveQwenAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
 		case "vertex":
@@ -619,6 +627,8 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 		upstreamModel = resolveUpstreamModelForCodexAPIKey(cfg, auth, requestedModel)
 	case "xai":
 		upstreamModel = resolveUpstreamModelForXAIAPIKey(cfg, auth, requestedModel)
+	case "qwen":
+		upstreamModel = resolveUpstreamModelForQwenAPIKey(cfg, auth, requestedModel)
 	case "vertex":
 		upstreamModel = resolveUpstreamModelForVertexAPIKey(cfg, auth, requestedModel)
 	default:
@@ -712,6 +722,13 @@ func resolveXAIAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalcon
 	return resolveAPIKeyConfig(cfg.XAIKey, auth)
 }
 
+func resolveQwenAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.QwenKey {
+	if cfg == nil {
+		return nil
+	}
+	return resolveAPIKeyConfig(cfg.QwenKey, auth)
+}
+
 func resolveVertexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.VertexCompatKey {
 	if cfg == nil {
 		return nil
@@ -753,6 +770,14 @@ func resolveUpstreamModelForCodexAPIKey(cfg *internalconfig.Config, auth *Auth, 
 
 func resolveUpstreamModelForXAIAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveXAIAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelForQwenAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveQwenAPIKeyConfig(cfg, auth)
 	if entry == nil {
 		return ""
 	}

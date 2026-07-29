@@ -2833,6 +2833,25 @@
   ],
   "qwen": [
     {
+      "id": "qwen3.8-max-preview",
+      "object": "model",
+      "created": 1753000000,
+      "owned_by": "alibaba",
+      "type": "qwen",
+      "display_name": "Qwen3.8 Max Preview",
+      "description": "Qwen3.8 flagship preview with enhanced agentic and reasoning capabilities",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
       "id": "qwen3.7-max",
       "object": "model",
       "created": 1752000000,
@@ -2842,6 +2861,63 @@
       "description": "Qwen3.7 flagship model for agentic coding and complex reasoning",
       "context_length": 131072,
       "max_completion_tokens": 32768,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "qwen3.7-plus",
+      "object": "model",
+      "created": 1752000000,
+      "owned_by": "alibaba",
+      "type": "qwen",
+      "display_name": "Qwen3.7 Plus",
+      "description": "Qwen3.7 balanced performance-cost model",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "qwen3.6-plus",
+      "object": "model",
+      "created": 1750000000,
+      "owned_by": "alibaba",
+      "type": "qwen",
+      "display_name": "Qwen3.6 Plus",
+      "description": "Qwen3.6 balanced model with hybrid thinking support",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "qwen3.6-flash",
+      "object": "model",
+      "created": 1750000000,
+      "owned_by": "alibaba",
+      "type": "qwen",
+      "display_name": "Qwen3.6 Flash",
+      "description": "Qwen3.6 fast and cost-effective model",
+      "context_length": 131072,
+      "max_completion_tokens": 16384,
       "thinking": {
         "zero_allowed": true,
         "levels": [

@@ -374,6 +374,9 @@ nonstream-keepalive-interval: 0
 #     prefix: "qwen" # optional: require calls like "qwen/qwen3-max" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://dashscope.aliyuncs.com/compatible-mode/v1" # optional: defaults to DashScope
+#     # Token Plan endpoints (subscription-based, different quota rules):
+#     # base-url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"   # CN token plan
+#     # base-url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1" # International token plan
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override

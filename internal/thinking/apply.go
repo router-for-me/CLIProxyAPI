@@ -422,6 +422,8 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 		return extractCodexConfig(body)
 	case "kimi":
 		return extractKimiConfig(body)
+	case "qwen":
+		return extractQwenConfig(body)
 	default:
 		return ThinkingConfig{}
 	}
@@ -720,6 +722,23 @@ func extractKimiConfig(body []byte) ThinkingConfig {
 		return ThinkingConfig{}
 	}
 
+	return extractOpenAIConfig(body)
+}
+
+// extractQwenConfig extracts thinking configuration for Qwen/DashScope models.
+//
+// Qwen accepts both enable_thinking (native boolean) and reasoning_effort
+// (OpenAI-compatible input). Native enable_thinking takes priority.
+func extractQwenConfig(body []byte) ThinkingConfig {
+	// Native Qwen format: enable_thinking boolean
+	if v := gjson.GetBytes(body, "enable_thinking"); v.Exists() {
+		if v.Bool() {
+			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+		}
+		return ThinkingConfig{Mode: ModeNone, Budget: 0}
+	}
+
+	// OpenAI-compatible input: reasoning_effort
 	return extractOpenAIConfig(body)
 }
 
