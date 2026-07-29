@@ -302,9 +302,9 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		selected, err = s.handlers.AuthManager.SelectAuthByKind(ctx, "codex", selectionModel, auth.AuthKindOAuth, selectionOpts)
 	}
 	if err != nil {
-		status := http.StatusServiceUnavailable
-		if statusError, ok := err.(interface{ StatusCode() int }); ok && statusError.StatusCode() > 0 {
-			status = statusError.StatusCode()
+		status := coreexecutor.StatusCodeFromError(err)
+		if status == 0 {
+			status = http.StatusServiceUnavailable
 		}
 		for _, value := range auth.SafeResponseHeaders(err).Values("Retry-After") {
 			c.Writer.Header().Add("Retry-After", value)
@@ -381,7 +381,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		if selection != nil {
 			selection.End("attempt_canceled")
 		}
-		c.JSON(http.StatusRequestTimeout, gin.H{"error": errCtx.Error()})
+		c.JSON(coreexecutor.StatusCodeFromError(errCtx), gin.H{"error": errCtx.Error()})
 		return
 	}
 	resp, err := s.handlers.AuthManager.HttpRequest(ctx, selected, req)
@@ -390,7 +390,11 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 			selection.End("request_failed")
 		}
 		helps.RecordAPIResponseError(ctx, s.cfg, err)
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		status := coreexecutor.StatusCodeFromError(err)
+		if status == 0 {
+			status = http.StatusBadGateway
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 	closeResponseBody := func() error {
@@ -414,7 +418,11 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 	upstreamBody, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, s.cfg, err)
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to read Codex search response"})
+		status := coreexecutor.StatusCodeFromError(err)
+		if status == 0 {
+			status = http.StatusBadGateway
+		}
+		c.JSON(status, gin.H{"error": "Failed to read Codex search response"})
 		return
 	}
 	helps.AppendAPIResponseChunk(ctx, s.cfg, upstreamBody)

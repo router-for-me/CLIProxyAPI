@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -10,6 +11,24 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
+
+func TestFailFromErrorsClassifiesContextErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{name: "canceled", err: fmt.Errorf("Post upstream: %w", context.Canceled), wantStatus: 499},
+		{name: "deadline exceeded", err: fmt.Errorf("Post upstream: %w", context.DeadlineExceeded), wantStatus: http.StatusGatewayTimeout},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := failFromErrors(test.err).StatusCode; got != test.wantStatus {
+				t.Fatalf("failFromErrors() status = %d, want %d", got, test.wantStatus)
+			}
+		})
+	}
+}
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	data := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":6,"total_tokens":16,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)

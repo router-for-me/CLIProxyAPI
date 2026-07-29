@@ -1107,17 +1107,7 @@ func errorString(err error) string {
 }
 
 func statusCodeFromError(err error) int {
-	if err == nil {
-		return 0
-	}
-	type statusCoder interface {
-		StatusCode() int
-	}
-	var sc statusCoder
-	if errors.As(err, &sc) && sc != nil {
-		return sc.StatusCode()
-	}
-	return 0
+	return cliproxyexecutor.StatusCodeFromError(err)
 }
 
 func isRequestScopedError(err error) bool {
@@ -1142,7 +1132,8 @@ func resultErrorFromError(err error) *Error {
 	if resultErr.HTTPStatus == 0 {
 		resultErr.HTTPStatus = statusCodeFromError(err)
 	}
-	if isRequestScopedError(err) || isRequestInvalidError(err) {
+	_, contextError := cliproxyexecutor.ContextErrorStatus(err)
+	if contextError || isRequestScopedError(err) || isRequestInvalidError(err) {
 		resultErr.Code = requestScopedErrorCode
 	}
 	return resultErr

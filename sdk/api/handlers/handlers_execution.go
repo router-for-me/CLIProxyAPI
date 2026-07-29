@@ -302,11 +302,9 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
 			Headers:        terminated.ResponseHeaders(),
 		}
 	}
-	status := http.StatusInternalServerError
-	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-		if code := se.StatusCode(); code > 0 {
-			status = code
-		}
+	status := coreexecutor.StatusCodeFromError(err)
+	if status == 0 {
+		status = http.StatusInternalServerError
 	}
 	var addon http.Header
 	if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {

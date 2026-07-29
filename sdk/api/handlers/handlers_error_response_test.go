@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -164,6 +166,32 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 	}
 	if got := recorder.Header().Get("Access-Control-Expose-Headers"); got != "x-cpa-trace-id" {
 		t.Fatalf("Access-Control-Expose-Headers = %q, want CPA value", got)
+	}
+}
+
+type wrappedStatusError struct {
+	status int
+}
+
+func (e wrappedStatusError) Error() string   { return http.StatusText(e.status) }
+func (e wrappedStatusError) StatusCode() int { return e.status }
+
+func TestExecutionErrorMessageClassifiesContextErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{name: "canceled", err: fmt.Errorf("upstream request: %w", context.Canceled), wantStatus: 499},
+		{name: "deadline exceeded", err: fmt.Errorf("upstream request: %w", context.DeadlineExceeded), wantStatus: http.StatusGatewayTimeout},
+		{name: "custom status takes precedence", err: fmt.Errorf("upstream request: %w", wrappedStatusError{status: http.StatusTeapot}), wantStatus: http.StatusTeapot},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := executionErrorMessage(test.err).StatusCode; got != test.wantStatus {
+				t.Fatalf("executionErrorMessage() status = %d, want %d", got, test.wantStatus)
+			}
+		})
 	}
 }
 
