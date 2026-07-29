@@ -53,6 +53,11 @@ func StripThinkingConfig(body []byte, provider string) []byte {
 			"reasoning_effort",
 			"thinking",
 		}
+	case "qwen":
+		paths = []string{
+			"reasoning_effort",
+			"enable_thinking",
+		}
 	case "codex", "xai":
 		paths = []string{"reasoning.effort"}
 	default:
