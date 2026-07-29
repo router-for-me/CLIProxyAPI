@@ -531,14 +531,18 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 // It extracts session ID from multiple sources and maintains session-to-auth
 // mappings with automatic failover when the bound auth becomes unavailable.
 type SessionAffinitySelector struct {
-	fallback Selector
-	cache    *SessionCache
+	fallback    Selector
+	cache       *SessionCache
+	maxRequests int
+	rules       []SessionAffinityRuleLimit
 }
 
 // SessionAffinityConfig configures the session affinity selector.
 type SessionAffinityConfig struct {
-	Fallback Selector
-	TTL      time.Duration
+	Fallback    Selector
+	TTL         time.Duration
+	MaxRequests int // <=0 unlimited; overridden by Rules when matched
+	Rules       []SessionAffinityRuleLimit
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -558,8 +562,10 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		cfg.TTL = time.Hour
 	}
 	return &SessionAffinitySelector{
-		fallback: cfg.Fallback,
-		cache:    NewSessionCache(cfg.TTL),
+		fallback:    cfg.Fallback,
+		cache:       NewSessionCache(cfg.TTL),
+		maxRequests: normalizeSessionAffinityMaxRequests(cfg.MaxRequests),
+		rules:       CompileSessionAffinityRules(cfg.Rules),
 	}
 }
 
@@ -588,6 +594,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return nil, err
 	}
 
+	maxRequests := resolveSessionAffinityMaxRequests(s.maxRequests, s.rules, provider, model)
 	cacheKey := provider + "::" + primaryID + "::" + model
 	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
@@ -600,31 +607,45 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 		s.cache.Set(cacheKey, authID)
 	}
-
-	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
-		for _, auth := range available {
-			if auth.ID == cachedAuthID {
-				bind(auth.ID)
-				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-				return auth, nil
-			}
+	rebind := func(reason string) (*Auth, error) {
+		s.cache.InvalidateAliasGroup(cacheKey)
+		if fallbackKey != "" {
+			s.cache.InvalidateAliasGroup(fallbackKey)
 		}
-		// Cached auth not available, reselect via fallback selector for even distribution
-		auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
-		if err != nil {
-			return nil, err
+		auth, errPick := s.fallback.Pick(ctx, provider, model, opts, auths)
+		if errPick != nil {
+			return nil, errPick
 		}
 		bind(auth.ID)
-		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		entry.Infof("session-affinity: %s | session=%s auth=%s provider=%s model=%s", reason, truncateSessionID(primaryID), auth.ID, provider, model)
 		return auth, nil
 	}
 
+	if cachedAuthID, hits, ok := s.cache.GetAndRefreshWithHits(cacheKey); ok {
+		if sessionAffinityMaxRequestsExceeded(maxRequests, hits) {
+			return rebind(fmt.Sprintf("max-requests reached (hits=%d max=%d), rebinding", hits, maxRequests))
+		}
+		for _, auth := range available {
+			if auth.ID == cachedAuthID {
+				if fallbackKey != "" {
+					bind(auth.ID)
+				}
+				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s hits=%d", truncateSessionID(primaryID), auth.ID, provider, model, hits)
+				return auth, nil
+			}
+		}
+		return rebind("cache hit but auth unavailable, reselected")
+	}
+
 	if fallbackKey != "" {
-		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
+		if cachedAuthID, hits, ok := s.cache.GetAndRefreshWithHits(fallbackKey); ok {
+			if sessionAffinityMaxRequestsExceeded(maxRequests, hits) {
+				return rebind(fmt.Sprintf("max-requests reached via fallback (hits=%d max=%d), rebinding", hits, maxRequests))
+			}
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
 					bind(auth.ID)
-					entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+					entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s hits=%d", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model, hits)
 					return auth, nil
 				}
 			}

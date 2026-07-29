@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,15 +26,19 @@ type configCommit struct {
 }
 
 type routingRuntimeState struct {
-	strategy           string
-	sessionAffinity    bool
-	sessionAffinityTTL time.Duration
+	strategy                   string
+	sessionAffinity            bool
+	sessionAffinityTTL         time.Duration
+	sessionAffinityMaxRequests int
+	sessionAffinityRulesKey    string
+	sessionAffinityRules       []coreauth.SessionAffinityRuleLimit
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	state := routingRuntimeState{
-		strategy:           "round-robin",
-		sessionAffinityTTL: time.Hour,
+		strategy:                   "round-robin",
+		sessionAffinityTTL:         time.Hour,
+		sessionAffinityMaxRequests: -1,
 	}
 	if cfg == nil {
 		return state
@@ -51,7 +56,44 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 			state.sessionAffinityTTL = parsed
 		}
 	}
+	if cfg.Routing.SessionAffinityMaxRequests > 0 {
+		state.sessionAffinityMaxRequests = cfg.Routing.SessionAffinityMaxRequests
+	} else {
+		state.sessionAffinityMaxRequests = -1
+	}
+	if len(cfg.Routing.SessionAffinityRules) > 0 {
+		raw := make([]coreauth.SessionAffinityRuleLimit, 0, len(cfg.Routing.SessionAffinityRules))
+		for _, rule := range cfg.Routing.SessionAffinityRules {
+			raw = append(raw, coreauth.SessionAffinityRuleLimit{
+				Provider:    rule.Provider,
+				Model:       rule.Model,
+				MaxRequests: rule.MaxRequests,
+			})
+		}
+		rules := coreauth.CompileSessionAffinityRules(raw)
+		state.sessionAffinityRules = rules
+		var keyBuilder strings.Builder
+		for i, rule := range rules {
+			if i > 0 {
+				keyBuilder.WriteByte('|')
+			}
+			keyBuilder.WriteString(rule.Provider)
+			keyBuilder.WriteByte('/')
+			keyBuilder.WriteString(rule.Model)
+			keyBuilder.WriteByte('=')
+			keyBuilder.WriteString(strconv.Itoa(rule.MaxRequests))
+		}
+		state.sessionAffinityRulesKey = keyBuilder.String()
+	}
 	return state
+}
+
+func routingRuntimeStateEqual(left, right routingRuntimeState) bool {
+	return left.strategy == right.strategy &&
+		left.sessionAffinity == right.sessionAffinity &&
+		left.sessionAffinityTTL == right.sessionAffinityTTL &&
+		left.sessionAffinityMaxRequests == right.sessionAffinityMaxRequests &&
+		left.sessionAffinityRulesKey == right.sessionAffinityRulesKey
 }
 
 func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
@@ -66,8 +108,10 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 	}
 	if state.sessionAffinity {
 		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
-			Fallback: selector,
-			TTL:      state.sessionAffinityTTL,
+			Fallback:    selector,
+			TTL:         state.sessionAffinityTTL,
+			MaxRequests: state.sessionAffinityMaxRequests,
+			Rules:       state.sessionAffinityRules,
 		})
 	}
 	return selector
@@ -203,7 +247,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 		return false
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
-	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
+	if s.appliedRoutingState == nil || !routingRuntimeStateEqual(*s.appliedRoutingState, routingState) {
 		s.coreManager.SetSelector(newRoutingSelector(routingState))
 		s.appliedRoutingState = &routingState
 	}

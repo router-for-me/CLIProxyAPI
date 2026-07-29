@@ -216,6 +216,29 @@ type RoutingConfig struct {
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+
+	// SessionAffinityMaxRequests caps sticky picks per session→auth binding (global default).
+	// Values <= 0 mean unlimited (-1 recommended). Model/provider overrides live in SessionAffinityRules.
+	// Only effective when SessionAffinity is true. With strategy fill-first, rebind still picks the
+	// first available auth, so max-requests rarely rotates credentials unless the current one is unavailable.
+	SessionAffinityMaxRequests int `yaml:"session-affinity-max-requests,omitempty" json:"session-affinity-max-requests,omitempty"`
+
+	// SessionAffinityRules optionally override max-requests (and later affinity knobs) per model/provider.
+	// More specific matches win: provider+model > model-only > provider-only > global default.
+	SessionAffinityRules []SessionAffinityRule `yaml:"session-affinity-rules,omitempty" json:"session-affinity-rules,omitempty"`
+}
+
+// SessionAffinityRule overrides session-affinity limits for matching traffic.
+// At least one of Provider or Model should be set; empty rules are ignored.
+type SessionAffinityRule struct {
+	// Provider matches the execution provider (case-insensitive), e.g. "xai".
+	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"`
+
+	// Model matches the client-visible model name after thinking-suffix stripping (case-insensitive).
+	Model string `yaml:"model,omitempty" json:"model,omitempty"`
+
+	// MaxRequests caps sticky picks for matching traffic. Values <= 0 mean unlimited.
+	MaxRequests int `yaml:"max-requests,omitempty" json:"max-requests,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
