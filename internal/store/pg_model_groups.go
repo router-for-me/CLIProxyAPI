@@ -38,15 +38,26 @@ var ErrModelGroupInUse = errors.New("postgres store: model group is still attach
 // trailing '*' wildcards. ModelRoutes is validated so every routed model is
 // in AllowedModels (see validateModelRoutesFor).
 type ModelGroup struct {
-	ID            string         `json:"id"`
-	Name          string         `json:"name"`
-	Description   string         `json:"description,omitempty"`
-	AllowedModels []string       `json:"allowed_models,omitempty"`
-	BlockedModels []string       `json:"blocked_models,omitempty"`
-	ModelRoutes   []ModelRoute   `json:"model_routes,omitempty"`
-	Metadata      map[string]any `json:"metadata,omitempty"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
+	ID            string       `json:"id"`
+	Name          string       `json:"name"`
+	Description   string       `json:"description,omitempty"`
+	AllowedModels []string     `json:"allowed_models,omitempty"`
+	BlockedModels []string     `json:"blocked_models,omitempty"`
+	ModelRoutes   []ModelRoute `json:"model_routes,omitempty"`
+	// ModelRPMLimits caps requests-per-minute per concrete model for keys
+	// attached to this group. Keys are model IDs (lowercased at enforcement
+	// time); a missing key = unlimited. Persisted in the model_rpm_limits
+	// JSONB column; kept consistent with ModelRoutes[].RPMLimit by the
+	// management handler (the routes carry the authoritative per-model row).
+	ModelRPMLimits map[string]int `json:"model_rpm_limits,omitempty"`
+	// ModelBudgetLimits caps the total lifetime USD spend per concrete model
+	// for keys attached to this group. Enforced against SUM(cost_usd) on the
+	// key's usage_events rows for the model. Persisted in the
+	// model_budget_limits JSONB column.
+	ModelBudgetLimits map[string]float64 `json:"model_budget_limits,omitempty"`
+	Metadata          map[string]any     `json:"metadata,omitempty"`
+	CreatedAt         time.Time          `json:"created_at"`
+	UpdatedAt         time.Time          `json:"updated_at"`
 }
 
 // ModelGroupStore provides CRUD and attachment operations for model groups.
@@ -103,6 +114,12 @@ func (s *ModelGroupStore) Create(ctx context.Context, group ModelGroup) (ModelGr
 	if group.ModelRoutes == nil {
 		group.ModelRoutes = []ModelRoute{}
 	}
+	if group.ModelRPMLimits == nil {
+		group.ModelRPMLimits = map[string]int{}
+	}
+	if group.ModelBudgetLimits == nil {
+		group.ModelBudgetLimits = map[string]float64{}
+	}
 	if group.Metadata == nil {
 		group.Metadata = map[string]any{}
 	}
@@ -110,14 +127,17 @@ func (s *ModelGroupStore) Create(ctx context.Context, group ModelGroup) (ModelGr
 	allowedJSON, _ := json.Marshal(normalizeStringSlice(group.AllowedModels))
 	blockedJSON, _ := json.Marshal(normalizeStringSlice(group.BlockedModels))
 	routesJSON, _ := json.Marshal(normalizeModelRoutes(group.ModelRoutes))
+	rpmJSON, _ := json.Marshal(normalizeModelRPMMap(group.ModelRPMLimits))
+	budgetJSON, _ := json.Marshal(normalizeModelBudgetMap(group.ModelBudgetLimits))
 	metaJSON, _ := json.Marshal(group.Metadata)
 
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, name, description, allowed_models, blocked_models, model_routes, metadata)
-		VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb)
+		INSERT INTO %s (id, name, description, allowed_models, blocked_models, model_routes, model_rpm_limits, model_budget_limits, metadata)
+		VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
 	`, s.groupsTable),
 		group.ID, group.Name, nullableString(group.Description),
-		string(allowedJSON), string(blockedJSON), string(routesJSON), string(metaJSON),
+		string(allowedJSON), string(blockedJSON), string(routesJSON),
+		string(rpmJSON), string(budgetJSON), string(metaJSON),
 	); err != nil {
 		if isUniqueViolation(err) {
 			return ModelGroup{}, ErrModelGroupNameTaken
@@ -134,7 +154,8 @@ func (s *ModelGroupStore) Get(ctx context.Context, id string) (ModelGroup, error
 	}
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT id, name, COALESCE(description, ''),
-		       allowed_models, blocked_models, model_routes, metadata,
+		       allowed_models, blocked_models, model_routes,
+		       model_rpm_limits, model_budget_limits, metadata,
 		       created_at, updated_at
 		FROM %s WHERE id = $1
 	`, s.groupsTable), id)
@@ -158,7 +179,8 @@ func (s *ModelGroupStore) GetByName(ctx context.Context, name string) (ModelGrou
 	}
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT id, name, COALESCE(description, ''),
-		       allowed_models, blocked_models, model_routes, metadata,
+		       allowed_models, blocked_models, model_routes,
+		       model_rpm_limits, model_budget_limits, metadata,
 		       created_at, updated_at
 		FROM %s WHERE name = $1
 	`, s.groupsTable), name)
@@ -219,7 +241,8 @@ func (s *ModelGroupStore) ListPaged(ctx context.Context, f ModelGroupListFilter)
 	args = append(args, f.PageSize, (f.Page-1)*f.PageSize)
 	query := fmt.Sprintf(`
 		SELECT id, name, COALESCE(description, ''),
-		       allowed_models, blocked_models, model_routes, metadata,
+		       allowed_models, blocked_models, model_routes,
+		       model_rpm_limits, model_budget_limits, metadata,
 		       created_at, updated_at
 		FROM %s g%s
 		ORDER BY %s %s
@@ -247,12 +270,14 @@ func (s *ModelGroupStore) ListPaged(ctx context.Context, f ModelGroupListFilter)
 // zero value). ModelGroupID here is the value applied to the api_key_policies
 // and internal_users columns; this struct itself does not carry it.
 type ModelGroupUpdate struct {
-	Name          *string
-	Description   *string
-	AllowedModels *[]string
-	BlockedModels *[]string
-	ModelRoutes   *[]ModelRoute
-	Metadata      *map[string]any
+	Name              *string
+	Description       *string
+	AllowedModels     *[]string
+	BlockedModels     *[]string
+	ModelRoutes       *[]ModelRoute
+	ModelRPMLimits    *map[string]int
+	ModelBudgetLimits *map[string]float64
+	Metadata          *map[string]any
 }
 
 // Update applies a partial update to a model group. Name uniqueness is
@@ -310,6 +335,22 @@ func (s *ModelGroupStore) Update(ctx context.Context, id string, upd ModelGroupU
 			`UPDATE %s SET model_routes = $1::jsonb, updated_at = NOW() WHERE id = $2`, s.groupsTable,
 		), string(routes), id); err != nil {
 			return fmt.Errorf("postgres store: update model group model_routes: %w", err)
+		}
+	}
+	if upd.ModelRPMLimits != nil {
+		rpm, _ := json.Marshal(normalizeModelRPMMap(*upd.ModelRPMLimits))
+		if _, err = tx.ExecContext(ctx, fmt.Sprintf(
+			`UPDATE %s SET model_rpm_limits = $1::jsonb, updated_at = NOW() WHERE id = $2`, s.groupsTable,
+		), string(rpm), id); err != nil {
+			return fmt.Errorf("postgres store: update model group model_rpm_limits: %w", err)
+		}
+	}
+	if upd.ModelBudgetLimits != nil {
+		budget, _ := json.Marshal(normalizeModelBudgetMap(*upd.ModelBudgetLimits))
+		if _, err = tx.ExecContext(ctx, fmt.Sprintf(
+			`UPDATE %s SET model_budget_limits = $1::jsonb, updated_at = NOW() WHERE id = $2`, s.groupsTable,
+		), string(budget), id); err != nil {
+			return fmt.Errorf("postgres store: update model group model_budget_limits: %w", err)
 		}
 	}
 	if upd.Metadata != nil {
@@ -461,7 +502,7 @@ func (s *ModelGroupStore) ListAttachments(ctx context.Context, groupID string) (
 	return out, rows.Err()
 }
 
-// scanModelGroup scans the 9-column model_groups row shape shared by Get /
+// scanModelGroup scans the 11-column model_groups row shape shared by Get /
 // GetByName / ListPaged. Accepts both *sql.Row and *sql.Rows via the rowScanner
 // interface so a single helper covers single-row and multi-row reads.
 func scanModelGroup(row rowScanner) (ModelGroup, error) {
@@ -470,11 +511,14 @@ func scanModelGroup(row rowScanner) (ModelGroup, error) {
 		allowedJSON  []byte
 		blockedJSON  []byte
 		routesJSON   []byte
+		rpmJSON      []byte
+		budgetJSON   []byte
 		metadataJSON []byte
 		description  sql.NullString
 	)
 	if err := row.Scan(&g.ID, &g.Name, &description,
-		&allowedJSON, &blockedJSON, &routesJSON, &metadataJSON,
+		&allowedJSON, &blockedJSON, &routesJSON,
+		&rpmJSON, &budgetJSON, &metadataJSON,
 		&g.CreatedAt, &g.UpdatedAt); err != nil {
 		return ModelGroup{}, err
 	}
@@ -482,6 +526,12 @@ func scanModelGroup(row rowScanner) (ModelGroup, error) {
 	g.AllowedModels = decodeStringArray(allowedJSON)
 	g.BlockedModels = decodeStringArray(blockedJSON)
 	g.ModelRoutes = decodeModelRoutes(routesJSON)
+	g.ModelRPMLimits = decodeStringIntMap(rpmJSON)
+	g.ModelBudgetLimits = decodeStringFloatMap(budgetJSON)
+	// Project the persisted cap maps back onto the route entries so API
+	// responses carry rpm_limit / max_budget_usd on each model_routes row
+	// (the operator-facing per-model row shape the dashboard edits).
+	g.ModelRoutes = attachCapsToRoutes(g.ModelRoutes, g.ModelRPMLimits, g.ModelBudgetLimits)
 	if len(metadataJSON) > 0 {
 		_ = json.Unmarshal(metadataJSON, &g.Metadata)
 	}
@@ -491,9 +541,125 @@ func scanModelGroup(row rowScanner) (ModelGroup, error) {
 	return g, nil
 }
 
+// attachCapsToRoutes returns routes with rpm_limit / max_budget_usd filled
+// from the persisted per-model cap maps. Route fields already set win (the
+// store normalizes caps into the maps on write, so this only matters for
+// rows written before the cap columns existed). It also appends cap-only
+// models (caps without a provider pin) as route rows with an empty provider
+// list so the dashboard still shows and can edit them; those rows are
+// filtered back out by the handler validation which only enforces provider
+// rules on rows with providers.
+func attachCapsToRoutes(routes []ModelRoute, rpm map[string]int, budget map[string]float64) []ModelRoute {
+	if len(rpm) == 0 && len(budget) == 0 {
+		return routes
+	}
+	out := make([]ModelRoute, 0, len(routes)+2)
+	seen := make(map[string]struct{}, len(routes))
+	for _, r := range routes {
+		seen[r.Model] = struct{}{}
+		if r.RPMLimit == nil {
+			if v, ok := rpm[r.Model]; ok && v > 0 {
+				vv := v
+				r.RPMLimit = &vv
+			}
+		}
+		if r.MaxBudgetUSD == nil {
+			if v, ok := budget[r.Model]; ok && v > 0 {
+				vv := v
+				r.MaxBudgetUSD = &vv
+			}
+		}
+		out = append(out, r)
+	}
+	// Cap-only models (no provider pin): surface them as route rows so the
+	// dashboard edits caps in one place. Providers stay empty.
+	for model, v := range rpm {
+		if v <= 0 {
+			continue
+		}
+		if _, ok := seen[model]; ok {
+			continue
+		}
+		seen[model] = struct{}{}
+		row := ModelRoute{Model: model, Providers: []string{}}
+		vv := v
+		row.RPMLimit = &vv
+		if b, ok := budget[model]; ok && b > 0 {
+			bb := b
+			row.MaxBudgetUSD = &bb
+		}
+		out = append(out, row)
+	}
+	for model, v := range budget {
+		if v <= 0 {
+			continue
+		}
+		if _, ok := seen[model]; ok {
+			continue
+		}
+		seen[model] = struct{}{}
+		row := ModelRoute{Model: model, Providers: []string{}}
+		vv := v
+		row.MaxBudgetUSD = &vv
+		out = append(out, row)
+	}
+	return out
+}
+
 // rowScanner is the subset of *sql.Row / *sql.Rows used by scanModelGroup.
 type rowScanner interface {
 	Scan(dest ...any) error
+}
+
+// decodeStringIntMap unmarshals a { model: rpm } jsonb column. Returns an
+// empty (non-nil) map when the column is empty/null so callers can rely on
+// map reads without nil checks.
+func decodeStringIntMap(raw []byte) map[string]int {
+	out := map[string]int{}
+	if len(raw) == 0 {
+		return out
+	}
+	_ = json.Unmarshal(raw, &out)
+	return out
+}
+
+// decodeStringFloatMap unmarshals a { model: usd } jsonb column. Returns an
+// empty (non-nil) map when the column is empty/null.
+func decodeStringFloatMap(raw []byte) map[string]float64 {
+	out := map[string]float64{}
+	if len(raw) == 0 {
+		return out
+	}
+	_ = json.Unmarshal(raw, &out)
+	return out
+}
+
+// normalizeModelRPMMap trims model ids and drops entries with non-positive
+// limits (non-positive = unlimited, so persisting them is noise).
+func normalizeModelRPMMap(in map[string]int) map[string]int {
+	out := map[string]int{}
+	for k, v := range in {
+		k = strings.TrimSpace(k)
+		if k == "" || v <= 0 {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// normalizeModelBudgetMap trims model ids and drops entries with
+// non-positive limits (non-positive = unlimited).
+func normalizeModelBudgetMap(in map[string]float64) map[string]float64 {
+	out := map[string]float64{}
+	for k, v := range in {
+		k = strings.TrimSpace(k)
+		if k == "" || v <= 0 {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func groupSortColumn(sortBy string) (string, error) {

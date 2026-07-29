@@ -310,6 +310,30 @@ func itoa(n int) string {
 // created on first use; subsequent calls add delta values. Window boundaries
 // must be pre-computed by the caller (the policy service does this via the
 // Clock helper).
+// ModelSpendForKey returns the total lifetime cost_usd a single API key has
+// accrued for one model, summed on the fly from usage_events. Used by the
+// policy service to enforce per-model max-budget caps on group-attached keys
+// (mirrors the per-user GetModelSpend aggregation pattern). A missing model
+// row returns 0, not an error. Failed requests still carry cost_usd when the
+// upstream billed us, so they count toward the cap.
+func (s *UsageStore) ModelSpendForKey(ctx context.Context, apiKeyID, model string) (float64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	if apiKeyID == "" || model == "" {
+		return 0, fmt.Errorf("postgres store: ModelSpendForKey requires api_key_id and model")
+	}
+	var total float64
+	if err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT COALESCE(SUM(cost_usd), 0)
+		FROM %s
+		WHERE api_key_id = $1 AND model = $2
+	`, s.eventsTable), apiKeyID, model).Scan(&total); err != nil {
+		return 0, fmt.Errorf("postgres store: select per-model spend for key: %w", err)
+	}
+	return total, nil
+}
+
 func (s *UsageStore) UpsertWindow(ctx context.Context, apiKeyID, windowType string, windowStart, windowEnd time.Time, deltaReq, deltaTokens int64, deltaCost float64) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("postgres store: usage store not initialized")

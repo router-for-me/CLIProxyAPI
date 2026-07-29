@@ -57,6 +57,7 @@ type service struct {
 	userRPMWindow    *slidingWindow
 	userHourlyWindow *slidingWindow
 	userTPMWindow    *slidingWindow
+	modelRPMWindow   *slidingWindow
 	parallel         *parallelLimiter
 
 	stop chan struct{}
@@ -80,6 +81,7 @@ func NewService(apiKeys *store.APIKeyStore, usage *store.UsageStore, cfg Service
 		userRPMWindow:    newSlidingWindow(),
 		userHourlyWindow: newSlidingWindow(),
 		userTPMWindow:    newSlidingWindow(),
+		modelRPMWindow:   newSlidingWindow(),
 		parallel:         newParallelLimiter(),
 		stop:             make(chan struct{}),
 		done:             make(chan struct{}),
@@ -150,6 +152,9 @@ func (s *service) Start(ctx context.Context) error {
 				}
 				if s.userTPMWindow != nil {
 					s.userTPMWindow.Cleanup(s.cfg.WindowRetention)
+				}
+				if s.modelRPMWindow != nil {
+					s.modelRPMWindow.Cleanup(s.cfg.WindowRetention)
 				}
 				if s.parallel != nil {
 					s.parallel.Compact()
@@ -239,6 +244,13 @@ func (s *service) Check(ctx context.Context, principal, model string) (Decision,
 					StatusCode: 429,
 				}, nil
 			}
+		}
+		// Per-model caps from the attached model group (RPM via an in-memory
+		// sliding window keyed by principal+model; budget via an on-the-fly
+		// SUM over usage_events). Only meaningful when a group is attached;
+		// without one both maps are empty and this is a no-op.
+		if decision, denied := s.checkModelCaps(ctx, snap, principal, model); denied {
+			return decision, nil
 		}
 		// Budget caps are checked against the persisted usage_windows row.
 		if decision, denied := s.checkBudget(ctx, snap.APIKey.ID, snap.Policy, snap.APIKey.CreatedAt); denied {
@@ -365,6 +377,58 @@ func (s *service) ResolvedIPLists(ctx context.Context, principal string) (allowe
 		return nil, nil
 	}
 	return snap.Policy.AllowedIPs, snap.Policy.BlockedIPs
+}
+
+// checkModelCaps returns (decision, denied=true) when the requested model is
+// under an RPM or budget cap coming from the attached model group. Model
+// lookups are case-insensitive exact matches (caps only target concrete model
+// ids; wildcards are not cap-able). RPM is enforced by the in-memory
+// modelRPMWindow keyed by principal+"|"+lower(model). Budget is read on the
+// fly from usage_events (SUM(cost_usd) for this key+model); the query runs
+// only when a budget cap exists for the requested model, so the hot path for
+// uncapped models stays allocation-free. Fail-open on lookup errors.
+func (s *service) checkModelCaps(ctx context.Context, snap APIKeySnapshot, principal, model string) (Decision, bool) {
+	p := snap.Policy
+	if p == nil || model == "" {
+		return Decision{}, false
+	}
+	ml := strings.ToLower(model)
+	if len(p.ModelRPMLimits) > 0 {
+		for capModel, rpm := range p.ModelRPMLimits {
+			if rpm <= 0 || strings.ToLower(capModel) != ml {
+				continue
+			}
+			if !s.modelRPMWindow.AllowAndIncrement(principal+"|"+ml, rpm, time.Minute) {
+				return Decision{
+					Allow:      false,
+					Reason:     fmt.Sprintf("per-model rate limit exceeded: %d requests per minute for %q", rpm, capModel),
+					StatusCode: 429,
+				}, true
+			}
+			break
+		}
+	}
+	if len(p.ModelBudgetLimits) > 0 {
+		for capModel, budget := range p.ModelBudgetLimits {
+			if budget <= 0 || strings.ToLower(capModel) != ml {
+				continue
+			}
+			spent, err := s.usage.ModelSpendForKey(ctx, snap.APIKey.ID, capModel)
+			if err != nil {
+				log.WithError(err).WithField("model", capModel).Debug("policy: per-model spend lookup failed; fail-open")
+				break
+			}
+			if spent >= budget {
+				return Decision{
+					Allow:      false,
+					Reason:     fmt.Sprintf("per-model budget exceeded: %.2f USD spent of %.2f USD limit for %q", spent, budget, capModel),
+					StatusCode: 402,
+				}, true
+			}
+			break
+		}
+	}
+	return Decision{}, false
 }
 
 // checkBudget returns (decision, denied=true) when any budget cap has been
@@ -510,6 +574,11 @@ func (s *service) InvalidateKey(_ context.Context, principal string) error {
 	if s.userTPMWindow != nil {
 		s.userTPMWindow.Forget(principal)
 	}
+	if s.modelRPMWindow != nil {
+		// Per-model counters are keyed principal|model; ForgetPrefix clears
+		// every model bucket for this principal in one sweep.
+		s.modelRPMWindow.ForgetPrefix(principal + "|")
+	}
 	if s.parallel != nil {
 		s.parallel.Forget(principal)
 	}
@@ -531,6 +600,9 @@ func (s *service) InvalidateAll() {
 	}
 	if s.userTPMWindow != nil {
 		s.userTPMWindow.Reset()
+	}
+	if s.modelRPMWindow != nil {
+		s.modelRPMWindow.Reset()
 	}
 	if s.parallel != nil {
 		s.parallel.Reset()
@@ -587,6 +659,8 @@ func (s *service) snapshot(ctx context.Context, principal string) (APIKeySnapsho
 			pCopy.AllowedModels = g.AllowedModels
 			pCopy.BlockedModels = g.BlockedModels
 			pCopy.ModelRoutes = g.ModelRoutes
+			pCopy.ModelRPMLimits = g.ModelRPMLimits
+			pCopy.ModelBudgetLimits = g.ModelBudgetLimits
 			snap.Policy = &pCopy
 		} else if !errors.Is(errGroup, store.ErrModelGroupNotFound) {
 			log.WithError(errGroup).WithField("model_group_id", *snap.Policy.ModelGroupID).

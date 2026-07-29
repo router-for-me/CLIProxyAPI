@@ -302,6 +302,7 @@ export const sections = [
       '(b) by setting policy.model_group_id on POST /api-keys-pg or PUT /api-keys-pg/:id/policy, or by passing model_group_id on PATCH /api-keys-pg/:id. ' +
       'When attached, the group becomes the source of truth for that key\'s allowed/blocked lists and per-model routes at enforcement time — the key\'s own fields are overridden. ' +
       'Model groups attach ONLY to API-key policies (not to Internal Users). ' +
+      'Per-model caps live on model_routes entries: rpm_limit (requests/min per model, HTTP 429) and max_budget_usd (total lifetime spend per model, computed from usage_events, HTTP 402). ' +
       'All routes return 503 when the PG store is not configured.',
     endpoints: [
       {
@@ -316,7 +317,7 @@ export const sections = [
         examplePayload: null,
         exampleCurl: `curl -s "${'{API_BASE}'}/model-groups?page=1&page_size=25&search=gpt" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
         responses: [
-          { status: 200, label: 'OK', body: `{\n  "groups": [\n    {\n      "id": "g-abc123",\n      "name": "gpt-only",\n      "description": "GPT family + gpt-4o pinned to openai oauth",\n      "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n      "blocked_models": [],\n      "model_routes": [\n        { "model": "gpt-4o", "providers": ["openai"] }\n      ],\n      "metadata": {},\n      "created_at": "2026-07-22T09:00:00Z",\n      "updated_at": "2026-07-22T09:05:00Z"\n    }\n  ],\n  "page": 1,\n  "page_size": 25,\n  "total": 1,\n  "total_pages": 1\n}` },
+          { status: 200, label: 'OK', body: `{\n  "groups": [\n    {\n      "id": "g-abc123",\n      "name": "gpt-only",\n      "description": "GPT family + gpt-4o pinned to openai oauth",\n      "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n      "blocked_models": [],\n      "model_routes": [\n        { "model": "gpt-4o", "providers": ["openai"], "rpm_limit": 60, "max_budget_usd": 25.00 }\n      ],\n      "model_rpm_limits": { "gpt-4o": 60 },\n      "model_budget_limits": { "gpt-4o": 25.00 },\n      "metadata": {},\n      "created_at": "2026-07-22T09:00:00Z",\n      "updated_at": "2026-07-22T09:05:00Z"\n    }\n  ],\n  "page": 1,\n  "page_size": 25,\n  "total": 1,\n  "total_pages": 1\n}` },
           { status: 503, label: 'PG store not configured', body: `{"error":{"type":"pg_store_not_configured","message":"..."}}` },
         ],
       },
@@ -327,13 +328,13 @@ export const sections = [
           { name: 'description', in: 'body', type: 'string', required: false, default: '', description: 'Free-form description.' },
           { name: 'allowed_models', in: 'body', type: 'string[]', required: false, default: '[]', description: 'Allow-list (empty = all allowed). Supports trailing-\'*\' wildcards.' },
           { name: 'blocked_models', in: 'body', type: 'string[]', required: false, default: '[]', description: 'Deny-list. Takes precedence over allowed.' },
-          { name: 'model_routes', in: 'body', type: 'object[]', required: false, default: '[]', description: 'Per-concrete-model upstream provider pinning. Each entry: { model, providers: string[] }. model must be in allowed_models; wildcard models cannot be routed.' },
+          { name: 'model_routes', in: 'body', type: 'object[]', required: false, default: '[]', description: 'Per-concrete-model upstream provider pinning + caps. Each entry: { model, providers: string[], strategy?, priorities?, rpm_limit?, max_budget_usd? }. model must be in allowed_models; wildcard models cannot be routed or carry caps. rpm_limit caps requests/min (429 on breach); max_budget_usd caps total lifetime USD spend for that model on attached keys, computed from usage_events (402 on breach). A cap-only entry may omit providers.' },
           { name: 'metadata', in: 'body', type: 'object', required: false, default: '{}', description: 'Arbitrary JSON metadata.' },
         ],
-        examplePayload: `{\n  "name": "gpt-only",\n  "description": "GPT family + gpt-4o pinned to openai oauth",\n  "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n  "model_routes": [\n    { "model": "gpt-4o", "providers": ["openai"] }\n  ]\n}`,
-        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/model-groups" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "name": "gpt-only",\n    "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n    "model_routes": [{ "model": "gpt-4o", "providers": ["openai"] }]\n  }'`,
+        examplePayload: `{\n  "name": "gpt-only",\n  "description": "GPT family + gpt-4o pinned to openai oauth with per-model caps",\n  "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n  "model_routes": [\n    { "model": "gpt-4o", "providers": ["openai"], "rpm_limit": 60, "max_budget_usd": 25.00 }\n  ]\n}`,
+        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/model-groups" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "name": "gpt-only",\n    "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n    "model_routes": [{ "model": "gpt-4o", "providers": ["openai"], "rpm_limit": 60, "max_budget_usd": 25.00 }]\n  }'`,
         responses: [
-          { status: 201, label: 'Created', body: `{"id":"g-abc123","name":"gpt-only","allowed_models":["gpt-4o","gpt-4o-mini","gpt-4*"],"model_routes":[{"model":"gpt-4o","providers":["openai"]}],"created_at":"2026-07-22T09:00:00Z","updated_at":"2026-07-22T09:00:00Z"}` },
+          { status: 201, label: 'Created', body: `{"id":"g-abc123","name":"gpt-only","allowed_models":["gpt-4o","gpt-4o-mini","gpt-4*"],"model_routes":[{"model":"gpt-4o","providers":["openai"],"rpm_limit":60,"max_budget_usd":25}],"model_rpm_limits":{"gpt-4o":60},"model_budget_limits":{"gpt-4o":25},"created_at":"2026-07-22T09:00:00Z","updated_at":"2026-07-22T09:00:00Z"}` },
           { status: 400, label: 'Invalid request (name missing / route out of allowed)', body: `{"error":{"type":"invalid_request","message":"postgres store: model group name is required"}}` },
           { status: 409, label: 'Name taken', body: `{"error":{"type":"conflict","message":"model group name already taken"}}` },
         ],
@@ -344,7 +345,7 @@ export const sections = [
         examplePayload: null,
         exampleCurl: `curl -s "${'{API_BASE}'}/model-groups/g-abc123" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
         responses: [
-          { status: 200, label: 'OK', body: `{\n  "group": {\n    "id": "g-abc123",\n    "name": "gpt-only",\n    "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n    "blocked_models": [],\n    "model_routes": [{ "model": "gpt-4o", "providers": ["openai"] }],\n    "metadata": {},\n    "created_at": "2026-07-22T09:00:00Z",\n    "updated_at": "2026-07-22T09:05:00Z"\n  },\n  "attachments": [\n    {\n      "entity_id": "k-def1",\n      "entity_label": "prod-app",\n      "entity_user_id": "u-abc123",\n      "entity_user_alias": "alice",\n      "entity_user_email": "alice@example.com"\n    }\n  ]\n}` },
+          { status: 200, label: 'OK', body: `{\n  "group": {\n    "id": "g-abc123",\n    "name": "gpt-only",\n    "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n    "blocked_models": [],\n    "model_routes": [{ "model": "gpt-4o", "providers": ["openai"], "rpm_limit": 60, "max_budget_usd": 25.00 }],\n    "model_rpm_limits": { "gpt-4o": 60 },\n    "model_budget_limits": { "gpt-4o": 25.00 },\n    "metadata": {},\n    "created_at": "2026-07-22T09:00:00Z",\n    "updated_at": "2026-07-22T09:05:00Z"\n  },\n  "attachments": [\n    {\n      "entity_id": "k-def1",\n      "entity_label": "prod-app",\n      "entity_user_id": "u-abc123",\n      "entity_user_alias": "alice",\n      "entity_user_email": "alice@example.com"\n    }\n  ]\n}` },
           { status: 404, label: 'Not found', body: `{"error":{"type":"not_found","message":"model group not found"}}` },
         ],
       },

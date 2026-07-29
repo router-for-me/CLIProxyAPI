@@ -1129,6 +1129,18 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	`, modelGroupsTable)); err != nil {
 		return fmt.Errorf("postgres store: create model_groups table: %w", err)
 	}
+	// Per-model RPM and budget caps for group-attached keys. Keyed by model id
+	// (lowercased at enforcement). Idempotent backfill.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS model_rpm_limits JSONB NOT NULL DEFAULT '{}'::jsonb`, modelGroupsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter model_groups add model_rpm_limits: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS model_budget_limits JSONB NOT NULL DEFAULT '{}'::jsonb`, modelGroupsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter model_groups add model_budget_limits: %w", err)
+	}
 	// Backfill model_group_id on api_key_policies (1:1 nullable attachment to
 	// a model group). When set, the group's allowed/blocked lists and routes
 	// override the policy's own values at enforcement time. Idempotent.

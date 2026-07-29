@@ -176,6 +176,34 @@ func TestNormalizeModelRoutesStrategy(t *testing.T) {
 			t.Errorf("want 2 deduped providers; got %v", got[0].Providers)
 		}
 	})
+	t.Run("keeps cap-only routes without providers", func(t *testing.T) {
+		rpm := 60
+		got := normalizeModelRoutes([]ModelRoute{{
+			Model:    "gpt-4o",
+			RPMLimit: &rpm,
+		}})
+		if len(got) != 1 {
+			t.Fatalf("want 1 cap-only route preserved; got %d", len(got))
+		}
+		if got[0].RPMLimit == nil || *got[0].RPMLimit != 60 {
+			t.Errorf("rpm_limit lost: %+v", got[0])
+		}
+	})
+	t.Run("preserves rpm and budget alongside providers", func(t *testing.T) {
+		rpm, budget := 120, 42.5
+		got := normalizeModelRoutes([]ModelRoute{{
+			Model:        "gpt-4o",
+			Providers:    []string{"openai"},
+			RPMLimit:     &rpm,
+			MaxBudgetUSD: &budget,
+		}})
+		if len(got) != 1 || got[0].RPMLimit == nil || *got[0].RPMLimit != 120 {
+			t.Fatalf("rpm_limit lost: %+v", got)
+		}
+		if got[0].MaxBudgetUSD == nil || *got[0].MaxBudgetUSD != 42.5 {
+			t.Errorf("max_budget_usd lost: %+v", got[0])
+		}
+	})
 }
 
 func TestAPIKeyCreateLookupAndGetLifecycle(t *testing.T) {

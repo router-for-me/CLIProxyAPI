@@ -2,12 +2,14 @@ package management
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 )
 
@@ -62,6 +64,60 @@ type updateModelGroupRequest struct {
 	BlockedModels *[]string           `json:"blocked_models"`
 	ModelRoutes   *[]store.ModelRoute `json:"model_routes"`
 	Metadata      *map[string]any     `json:"metadata"`
+}
+
+// deriveModelCaps extracts the per-model RPM and budget cap maps from the
+// route list. The ModelRoute entries are the operator-facing source of truth
+// (they travel through the API); the persisted maps are derived columns that
+// let the enforcement path look up a cap keyed by model without scanning the
+// route slice. Entries with nil / non-positive caps are skipped (unlimited).
+func deriveModelCaps(routes []store.ModelRoute) (map[string]int, map[string]float64) {
+	rpm := map[string]int{}
+	budget := map[string]float64{}
+	for _, r := range routes {
+		model := strings.TrimSpace(r.Model)
+		if model == "" {
+			continue
+		}
+		if r.RPMLimit != nil && *r.RPMLimit > 0 {
+			rpm[model] = *r.RPMLimit
+		}
+		if r.MaxBudgetUSD != nil && *r.MaxBudgetUSD > 0 {
+			budget[model] = *r.MaxBudgetUSD
+		}
+	}
+	return rpm, budget
+}
+
+// validateModelCapsFor ensures every per-model cap targets a concrete model
+// covered by the allowed list (wildcard entries cannot carry a cap because
+// enforcement matching is per requested model id), and that values are
+// positive. Returns a human-readable message, or "" when valid.
+func validateModelCapsFor(allowedModels []string, routes []store.ModelRoute) string {
+	for _, r := range routes {
+		model := strings.TrimSpace(r.Model)
+		if model == "" {
+			continue
+		}
+		hasRPM := r.RPMLimit != nil && *r.RPMLimit != 0
+		hasBudget := r.MaxBudgetUSD != nil && *r.MaxBudgetUSD != 0
+		if !hasRPM && !hasBudget {
+			continue
+		}
+		if strings.HasSuffix(model, "*") {
+			return fmt.Sprintf("model_routes: per-model RPM/budget caps are not supported on wildcard model %q", model)
+		}
+		if !policy.ModelCoveredByAllowed(allowedModels, model) {
+			return fmt.Sprintf("model_routes: per-model RPM/budget cap target %q is not in allowed_models", model)
+		}
+		if r.RPMLimit != nil && *r.RPMLimit < 0 {
+			return fmt.Sprintf("model_routes: rpm_limit for %q must be positive (omit for unlimited)", model)
+		}
+		if r.MaxBudgetUSD != nil && *r.MaxBudgetUSD < 0 {
+			return fmt.Sprintf("model_routes: max_budget_usd for %q must be positive (omit for unlimited)", model)
+		}
+	}
+	return ""
 }
 
 // attachModelGroupRequest is the JSON body for POST /model-groups/:id/attach
@@ -137,13 +193,20 @@ func (h *Handler) CreateModelGroup(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": msg}})
 		return
 	}
+	if msg := validateModelCapsFor(req.AllowedModels, req.ModelRoutes); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": msg}})
+		return
+	}
+	rpmLimits, budgetLimits := deriveModelCaps(req.ModelRoutes)
 	g := store.ModelGroup{
-		Name:          req.Name,
-		Description:   req.Description,
-		AllowedModels: req.AllowedModels,
-		BlockedModels: req.BlockedModels,
-		ModelRoutes:   req.ModelRoutes,
-		Metadata:      req.Metadata,
+		Name:              req.Name,
+		Description:       req.Description,
+		AllowedModels:     req.AllowedModels,
+		BlockedModels:     req.BlockedModels,
+		ModelRoutes:       req.ModelRoutes,
+		ModelRPMLimits:    rpmLimits,
+		ModelBudgetLimits: budgetLimits,
+		Metadata:          req.Metadata,
 	}
 	created, err := groups.Create(c.Request.Context(), g)
 	if err != nil {
@@ -205,6 +268,10 @@ func (h *Handler) UpdateModelGroup(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": msg}})
 		return
 	}
+	if msg := validateModelCapsFor(allowedForValidation, routesForValidation); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": msg}})
+		return
+	}
 	upd := store.ModelGroupUpdate{
 		Name:          req.Name,
 		Description:   req.Description,
@@ -212,6 +279,11 @@ func (h *Handler) UpdateModelGroup(c *gin.Context) {
 		BlockedModels: req.BlockedModels,
 		ModelRoutes:   req.ModelRoutes,
 		Metadata:      req.Metadata,
+	}
+	if req.ModelRoutes != nil {
+		rpmLimits, budgetLimits := deriveModelCaps(*req.ModelRoutes)
+		upd.ModelRPMLimits = &rpmLimits
+		upd.ModelBudgetLimits = &budgetLimits
 	}
 	if err := groups.Update(c.Request.Context(), id, upd); err != nil {
 		h.translateModelGroupError(c, err)

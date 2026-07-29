@@ -90,6 +90,13 @@ type Policy struct {
 	// the group's routes. Empty/nil = no group attached (entity fields apply
 	// as before). Nullable; validated for existence at attach time.
 	ModelGroupID *string `json:"model_group_id,omitempty"`
+	// ModelRPMLimits / ModelBudgetLimits carry the attached model group's
+	// per-model caps when (and only when) a model group is attached. They are
+	// populated by the policy service's group-override snapshot path and are
+	// never persisted on the policy row itself (they surface via the group).
+	// Keyed by model id. A missing key = unlimited.
+	ModelRPMLimits    map[string]int     `json:"model_rpm_limits,omitempty"`
+	ModelBudgetLimits map[string]float64 `json:"model_budget_limits,omitempty"`
 	// AllowedIPs / BlockedIPs restrict which source IP addresses may use the
 	// API key. Entries are single IPs ("10.0.0.5") or CIDR ranges
 	// ("10.0.0.0/8", "2001:db8::/32"). BlockedIPs takes precedence: a match
@@ -120,6 +127,16 @@ type ModelRoute struct {
 	Providers  []string           `json:"providers"`
 	Strategy   string             `json:"strategy,omitempty"`
 	Priorities []ProviderPriority `json:"priorities,omitempty"`
+	// RPMLimit optionally caps requests-per-minute for this model when the
+	// route belongs to a model group (group-attached policy). nil or <= 0
+	// means unlimited for this model. Enforced by the policy service via an
+	// in-memory per-(key, model) sliding window.
+	RPMLimit *int `json:"rpm_limit,omitempty"`
+	// MaxBudgetUSD optionally caps the total lifetime spend for this model
+	// when the route belongs to a model group (group-attached policy).
+	// nil or <= 0 means unlimited. Enforced against the SUM(cost_usd) of
+	// the key's usage_events rows for this model (HTTP 402 once exceeded).
+	MaxBudgetUSD *float64 `json:"max_budget_usd,omitempty"`
 }
 
 // ProviderPriority assigns a priority weight to a single provider within a
@@ -627,11 +644,13 @@ func normalizeStringSlice(values []string) []string {
 	return out
 }
 
-// normalizeModelRoutes drops routes with an empty model or no providers and
-// trims whitespace. It returns a non-nil slice (empty when input is empty) so
-// the persisted jsonb column is [] rather than NULL. Strategy is normalized
-// (lowercased, trimmed); Priorities entries referencing providers not in the
-// route's allowlist are dropped so persisted priorities stay consistent.
+// normalizeModelRoutes trims whitespace and drops routes with an empty model.
+// Routes that carry only per-model caps (no pinned providers) are kept — they
+// are how a model group persists RPM/budget caps without pinning a provider.
+// It returns a non-nil slice (empty when input is empty) so the persisted
+// jsonb column is [] rather than NULL. Strategy is normalized (lowercased,
+// trimmed); Priorities entries referencing providers not in the route's
+// allowlist are dropped so persisted priorities stay consistent.
 func normalizeModelRoutes(routes []ModelRoute) []ModelRoute {
 	if len(routes) == 0 {
 		return []ModelRoute{}
@@ -656,7 +675,8 @@ func normalizeModelRoutes(routes []ModelRoute) []ModelRoute {
 			providerSet[key] = struct{}{}
 			providers = append(providers, p)
 		}
-		if len(providers) == 0 {
+		hasCaps := (r.RPMLimit != nil && *r.RPMLimit > 0) || (r.MaxBudgetUSD != nil && *r.MaxBudgetUSD > 0)
+		if len(providers) == 0 && !hasCaps {
 			continue
 		}
 		strategy := strings.ToLower(strings.TrimSpace(r.Strategy))
@@ -672,10 +692,12 @@ func normalizeModelRoutes(routes []ModelRoute) []ModelRoute {
 			priorities = append(priorities, ProviderPriority{Provider: provider, Priority: pr.Priority})
 		}
 		out = append(out, ModelRoute{
-			Model:      model,
-			Providers:  providers,
-			Strategy:   strategy,
-			Priorities: priorities,
+			Model:        model,
+			Providers:    providers,
+			Strategy:     strategy,
+			Priorities:   priorities,
+			RPMLimit:     r.RPMLimit,
+			MaxBudgetUSD: r.MaxBudgetUSD,
 		})
 	}
 	return out

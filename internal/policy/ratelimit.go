@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -117,6 +118,23 @@ func (w *slidingWindow) Forget(key string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	delete(w.counters, key)
+}
+
+// ForgetPrefix drops every counter whose key starts with prefix. Used for
+// per-model RPM counters keyed "principal|model": invalidating a principal
+// must clear all of its model buckets, which individual Forget calls cannot
+// reach since the model suffix varies.
+func (w *slidingWindow) ForgetPrefix(prefix string) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for key := range w.counters {
+		if strings.HasPrefix(key, prefix) {
+			delete(w.counters, key)
+		}
+	}
 }
 
 // Reset drops every counter. Used by InvalidateAll.

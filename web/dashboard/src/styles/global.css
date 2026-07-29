@@ -2780,6 +2780,52 @@ button.ghost:hover:not(:disabled) {
   line-height: 1.6;
 }
 
+/* Model Group allowed-models table (ModelGroupForm). Combined routing + caps
+   row editor: strategy pill mirrors the model-routes card accent so the
+   visual state reads the same as the PolicyForm editor. */
+.sgl-table th,
+.sgl-table td { vertical-align: middle; }
+.sgl-table td { padding: 9px 12px; }
+.sgl-num { text-align: right; font-variant-numeric: tabular-nums; }
+.sgl-strat {
+  display: inline-block;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  white-space: nowrap;
+}
+.sgl-strat--default { color: var(--text-muted); }
+.sgl-strat--priority { color: var(--accent); border-color: rgba(94, 234, 212, 0.45); background: var(--accent-dim); }
+.sgl-strat--failover { color: #7da2f3; border-color: rgba(125, 162, 243, 0.45); background: rgba(125, 162, 243, 0.12); }
+
+/* Row action buttons shared with the list pages (ModelGroups/InternalUsers
+   pattern). Small, low-emphasis; danger variant surfaces on hover. */
+.row-actions__btn {
+  padding: 3px 8px;
+  font-size: 11px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.12s ease;
+}
+.row-actions__btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: var(--bg-elevated);
+}
+.row-actions__btn--danger { color: var(--danger); }
+.row-actions__btn--danger:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--danger-dim);
+}
+
 /* model-access-source — the Entity-settings | Model-Group segmented switch in
    the policy forms. The seg-group is inline-flex by default; in a form__row we
    want it to sit on its own line with the hint below it. */

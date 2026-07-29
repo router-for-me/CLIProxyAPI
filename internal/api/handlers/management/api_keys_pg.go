@@ -462,7 +462,7 @@ func validateModelRoutesFor(allowedModels []string, routes []store.ModelRoute) s
 		if model == "" {
 			return "model_routes: entry with empty model is not allowed"
 		}
-		if len(r.Providers) == 0 {
+		if len(r.Providers) == 0 && r.Strategy == "" && r.RPMLimit == nil && r.MaxBudgetUSD == nil {
 			return fmt.Sprintf("model_routes: route for %q must list at least one provider", model)
 		}
 		strategy := strings.ToLower(strings.TrimSpace(r.Strategy))
