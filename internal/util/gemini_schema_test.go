@@ -901,6 +901,41 @@ func TestCleanJSONSchemaForAntigravity_BooleanEnumToString(t *testing.T) {
 	}
 }
 
+func TestCleanJSONSchemaForAntigravity_RemovesNullAndEmptyEnumValues(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"todos": {
+				"type": "array",
+				"items": {
+					"type": "object",
+					"properties": {
+						"status": {"type": ["string", "null"], "enum": ["pending", "in_progress", "completed", "cancelled", null, ""]}
+					}
+				}
+			},
+			"capability_mode": {"type": ["string", "null"], "enum": ["read-only", "read-write", "execute", "all", null]}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	for _, path := range []string{
+		"properties.todos.items.properties.status.enum",
+		"properties.capability_mode.enum",
+	} {
+		values := gjson.Get(result, path).Array()
+		if len(values) != 4 {
+			t.Fatalf("%s contains %d values, want 4: %s", path, len(values), result)
+		}
+		for _, value := range values {
+			if value.Type != gjson.String || value.String() == "" {
+				t.Fatalf("%s contains invalid enum value %q: %s", path, value.Raw, result)
+			}
+		}
+	}
+}
+
 func TestCleanJSONSchemaForGemini_RemovesGeminiUnsupportedMetadataFields(t *testing.T) {
 	input := `{
 		"$schema": "http://json-schema.org/draft-07/schema#",
