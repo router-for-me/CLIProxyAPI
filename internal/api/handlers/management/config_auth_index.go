@@ -28,6 +28,11 @@ type xaiKeyWithAuthIndex struct {
 	AuthIndex string `json:"auth-index,omitempty"`
 }
 
+type qwenKeyWithAuthIndex struct {
+	config.QwenKey
+	AuthIndex string `json:"auth-index,omitempty"`
+}
+
 type vertexCompatKeyWithAuthIndex struct {
 	config.VertexCompatKey
 	AuthIndex string `json:"auth-index,omitempty"`
@@ -222,6 +227,35 @@ func (h *Handler) xaiKeysWithAuthIndex() []xaiKeyWithAuthIndex {
 		}
 		out[i] = xaiKeyWithAuthIndex{
 			XAIKey:    entry,
+			AuthIndex: authIndex,
+		}
+	}
+	return out
+}
+
+func (h *Handler) qwenKeysWithAuthIndex() []qwenKeyWithAuthIndex {
+	if h == nil {
+		return nil
+	}
+	liveIndexByID := h.liveAuthIndexByID()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return nil
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	out := make([]qwenKeyWithAuthIndex, len(h.cfg.QwenKey))
+	for i := range h.cfg.QwenKey {
+		entry := h.cfg.QwenKey[i]
+		authIndex := ""
+		if key := strings.TrimSpace(entry.APIKey); key != "" {
+			id, _ := idGen.Next("qwen:apikey", key, entry.BaseURL)
+			authIndex = liveIndexByID[id]
+		}
+		out[i] = qwenKeyWithAuthIndex{
+			QwenKey:   entry,
 			AuthIndex: authIndex,
 		}
 	}
