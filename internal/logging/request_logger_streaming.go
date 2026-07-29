@@ -319,7 +319,7 @@ func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
 	if errWrite := writeRequestInfoWithBody(logFile, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.timestamp, "http", upstreamTransport, true); errWrite != nil {
 		return errWrite
 	}
-	if errWrite := writeAPISection(logFile, "=== API WEBSOCKET TIMELINE ===\n", "=== API WEBSOCKET TIMELINE", w.apiWebsocketTimeline, time.Time{}); errWrite != nil {
+	if errWrite := writeAPISectionWithSource(logFile, "=== API WEBSOCKET TIMELINE ===\n", "=== API WEBSOCKET TIMELINE", w.apiWebsocketTimeline, w.apiWebsocketTimelineSource, time.Time{}); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writePreformattedAPISectionWithSource(logFile, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, w.apiRequestSource, time.Time{}); errWrite != nil {

@@ -283,7 +283,7 @@ func (w *homeStreamingLogWriter) Close() error {
 		if errWrite := writeRequestInfoWithBody(&buf, w.url, w.method, w.requestHeaders, w.requestBody, "", w.timestamp, "http", upstreamTransport, true); errWrite != nil {
 			return errWrite
 		}
-		if errWrite := writeAPISection(&buf, "=== API WEBSOCKET TIMELINE ===\n", "=== API WEBSOCKET TIMELINE", w.apiWebsocketTime, time.Time{}); errWrite != nil {
+		if errWrite := writeAPISectionWithSource(&buf, "=== API WEBSOCKET TIMELINE ===\n", "=== API WEBSOCKET TIMELINE", w.apiWebsocketTime, w.apiWebsocketTimelineSource, time.Time{}); errWrite != nil {
 			return errWrite
 		}
 		if errWrite := writePreformattedAPISectionWithSource(&buf, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, w.apiRequestSource, time.Time{}); errWrite != nil {

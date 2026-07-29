@@ -941,6 +941,37 @@ func TestRequestLogFormatSnapshotSurvivesReload(t *testing.T) {
 	}
 }
 
+func TestTextStreamingRequestLoggingIncludesWebsocketTimelineSource(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := NewFileRequestLoggerWithFormat(true, tempDir, "", 10, "text")
+	streamWriter, err := logger.LogStreamingRequest("/v1/responses", "POST", nil, nil, "req-text-ws-source-123")
+	if err != nil {
+		t.Fatalf("LogStreamingRequest failed: %v", err)
+	}
+	source, err := NewFileBodySourceInDir(tempDir, "api-websocket-timeline")
+	if err != nil {
+		t.Fatalf("NewFileBodySourceInDir failed: %v", err)
+	}
+	if err := source.AppendPart([]byte("source-backed websocket timeline")); err != nil {
+		t.Fatalf("AppendPart failed: %v", err)
+	}
+	sourceWriter, ok := streamWriter.(interface {
+		WriteAPIWebsocketTimelineSource(*FileBodySource) error
+	})
+	if !ok {
+		t.Fatalf("writer type %T does not accept websocket timeline sources", streamWriter)
+	}
+	if err := sourceWriter.WriteAPIWebsocketTimelineSource(source); err != nil {
+		t.Fatalf("WriteAPIWebsocketTimelineSource failed: %v", err)
+	}
+	if err := streamWriter.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	if data := readOnlyLogFile(t, tempDir); !bytes.Contains(data, []byte("source-backed websocket timeline")) {
+		t.Fatalf("text log omitted source-backed websocket timeline: %q", data)
+	}
+}
+
 func TestJSONStreamingRequestLoggingPropagatesMissingRequestBodyFile(t *testing.T) {
 	tempDir := t.TempDir()
 	logger := NewFileRequestLoggerWithFormat(true, tempDir, "", 10, "json")

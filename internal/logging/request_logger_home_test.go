@@ -547,6 +547,22 @@ func TestFileRequestLogger_HomeEnabled_DoesNotTruncateStreamingTextBodies(t *tes
 		t.Fatalf("LogStreamingRequest error: %v", err)
 	}
 	writer.WriteChunkAsync(responseBody)
+	timelineSource, err := NewFileBodySourceInDir(t.TempDir(), "home-text-api-websocket-timeline")
+	if err != nil {
+		t.Fatalf("NewFileBodySourceInDir failed: %v", err)
+	}
+	if err := timelineSource.AppendPart([]byte("source-backed websocket timeline")); err != nil {
+		t.Fatalf("AppendPart failed: %v", err)
+	}
+	sourceWriter, ok := writer.(interface {
+		WriteAPIWebsocketTimelineSource(*FileBodySource) error
+	})
+	if !ok {
+		t.Fatalf("writer type %T does not accept websocket timeline sources", writer)
+	}
+	if err := sourceWriter.WriteAPIWebsocketTimelineSource(timelineSource); err != nil {
+		t.Fatalf("WriteAPIWebsocketTimelineSource failed: %v", err)
+	}
 	if err := writer.Close(); err != nil {
 		t.Fatalf("Close error: %v", err)
 	}
@@ -562,6 +578,9 @@ func TestFileRequestLogger_HomeEnabled_DoesNotTruncateStreamingTextBodies(t *tes
 	}
 	if !strings.Contains(envelope.RequestLog, string(responseBody[len(responseBody)-1024:])) {
 		t.Fatalf("text Home log truncated response body")
+	}
+	if !strings.Contains(envelope.RequestLog, "source-backed websocket timeline") {
+		t.Fatal("Home text log omitted source-backed websocket timeline")
 	}
 }
 
