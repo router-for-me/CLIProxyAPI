@@ -383,3 +383,78 @@ func TestStreamingTool_StopReasonMixedSuppressedAndValid(t *testing.T) {
 		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
 	}
 }
+
+func TestConvertOpenAIResponseToClaude_StreamReasoningFields(t *testing.T) {
+	tests := []struct {
+		name  string
+		chunk string
+	}{
+		{
+			name:  "reasoning",
+			chunk: `{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning":"think step by step"},"finish_reason":null}]}`,
+		},
+		{
+			name:  "reasoning_content",
+			chunk: `{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"think step by step"},"finish_reason":null}]}`,
+		},
+		{
+			name:  "reasoning_content preferred",
+			chunk: `{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"think step by step","reasoning":"do not use"},"finish_reason":null}]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			events := runStream(t, streamReq,
+				tt.chunk,
+				`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			)
+
+			var thinking string
+			for _, event := range events {
+				if event.Type == "content_block_delta" && gjson.Get(event.Payload, "delta.type").String() == "thinking_delta" {
+					thinking += gjson.Get(event.Payload, "delta.thinking").String()
+				}
+			}
+			if thinking != "think step by step" {
+				t.Fatalf("thinking = %q, want %q (events=%+v)", thinking, "think step by step", events)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponseToClaudeNonStream_ReasoningFields(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "reasoning",
+			raw:  `{"id":"c1","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"answer","reasoning":"think step by step"},"finish_reason":"stop"}]}`,
+		},
+		{
+			name: "reasoning_content",
+			raw:  `{"id":"c1","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"answer","reasoning_content":"think step by step"},"finish_reason":"stop"}]}`,
+		},
+		{
+			name: "reasoning_content preferred",
+			raw:  `{"id":"c1","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"answer","reasoning_content":"think step by step","reasoning":"do not use"},"finish_reason":"stop"}]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "m", nil, nil, []byte(tt.raw), nil)
+
+			var thinking string
+			for _, block := range gjson.GetBytes(out, "content").Array() {
+				if block.Get("type").String() == "thinking" {
+					thinking += block.Get("thinking").String()
+				}
+			}
+			if thinking != "think step by step" {
+				t.Fatalf("thinking = %q, want %q (output=%s)", thinking, "think step by step", out)
+			}
+		})
+	}
+}
