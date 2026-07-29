@@ -654,18 +654,37 @@ func streamBootstrapPayloadCommitsResponse(responseProtocol string, payload []by
 		return false
 	}
 	if json.Valid(trimmed) {
-		return true
+		return openAIResponsesPayloadCommitsResponse(trimmed)
 	}
 	for _, line := range bytes.Split(payload, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if !bytes.HasPrefix(line, []byte("data:")) {
 			continue
 		}
-		if len(bytes.TrimSpace(line[5:])) > 0 {
+		data := bytes.TrimSpace(line[5:])
+		if len(data) == 0 {
+			continue
+		}
+		if bytes.Equal(data, []byte("[DONE]")) || openAIResponsesPayloadCommitsResponse(data) {
 			return true
 		}
 	}
 	return false
+}
+
+func openAIResponsesPayloadCommitsResponse(payload []byte) bool {
+	var event struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return true
+	}
+	switch event.Type {
+	case "response.queued", "response.created", "response.in_progress":
+		return false
+	default:
+		return true
+	}
 }
 
 func validateSSEDataJSON(chunk []byte) error {

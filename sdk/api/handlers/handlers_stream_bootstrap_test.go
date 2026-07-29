@@ -555,17 +555,47 @@ func TestExecuteStreamWithAuthManager_RetriesAfterDroppedBootstrapPayload(t *tes
 	}
 }
 
-func TestExecuteStreamWithAuthManager_RetriesAfterOpenAIResponsesEventPrefixOnly(t *testing.T) {
+func TestStreamBootstrapPayloadCommitsResponse_OpenAIResponsesLifecycle(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    bool
+	}{
+		{name: "event prefix only", payload: "event: response.created", want: false},
+		{name: "queued raw JSON", payload: `{"type":"response.queued"}`, want: false},
+		{name: "created SSE data", payload: `data: {"type":"response.created"}`, want: false},
+		{name: "in progress SSE data", payload: `data: {"type":"response.in_progress"}`, want: false},
+		{name: "output delta", payload: `data: {"type":"response.output_text.delta","delta":"hello"}`, want: true},
+		{name: "completed", payload: `data: {"type":"response.completed"}`, want: true},
+		{name: "failed", payload: `data: {"type":"response.failed"}`, want: true},
+		{name: "done marker", payload: "data: [DONE]", want: true},
+		{name: "unknown event", payload: `data: {"type":"response.future_event"}`, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := streamBootstrapPayloadCommitsResponse("openai-response", []byte(test.payload)); got != test.want {
+				t.Fatalf("streamBootstrapPayloadCommitsResponse() = %t, want %t", got, test.want)
+			}
+		})
+	}
+	if !streamBootstrapPayloadCommitsResponse("openai", []byte("event: response.created")) {
+		t.Fatal("non-Responses protocols must retain first-payload commitment")
+	}
+}
+
+func TestExecuteStreamWithAuthManager_RetriesAfterOpenAIResponsesProvisionalLifecycleFrame(t *testing.T) {
 	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, call int) (*coreexecutor.StreamResult, error) {
-		chunks := make(chan coreexecutor.StreamChunk, 3)
+		chunks := make(chan coreexecutor.StreamChunk, 4)
 		chunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.created")}
 		if call == 1 {
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp-1","status":"in_progress"}}`)}
 			chunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{
 				Code:       "upstream_closed",
 				Message:    "stream closed before response.completed",
 				HTTPStatus: http.StatusRequestTimeout,
 			}}
 		} else {
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp-2","status":"in_progress"}}`)}
 			chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed","response":{"id":"resp-2","output":[]}}`)}
 		}
 		close(chunks)
@@ -591,10 +621,11 @@ func TestExecuteStreamWithAuthManager_RetriesAfterOpenAIResponsesEventPrefixOnly
 		}
 	}
 	if executor.Calls() != 2 {
-		t.Fatalf("stream attempts = %d, want retry after prefix-only failure", executor.Calls())
+		t.Fatalf("stream attempts = %d, want retry after provisional lifecycle failure", executor.Calls())
 	}
 	want := []string{
 		"event: response.created",
+		`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp-2","status":"in_progress"}}`,
 		`data: {"type":"response.completed","response":{"id":"resp-2","output":[]}}`,
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
