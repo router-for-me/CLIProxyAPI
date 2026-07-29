@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
@@ -409,10 +410,52 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return nil, nil, errChan
 	}
 	ttftTimeout := StreamingTTFTTimeout(h.Cfg)
+	excludedAuthIDs := make(map[string]struct{})
+	if configured, _ := opts.Metadata[coreexecutor.ExcludedAuthIDsMetadataKey].(map[string]struct{}); configured != nil {
+		for authID := range configured {
+			excludedAuthIDs[authID] = struct{}{}
+		}
+	}
+	lastSelectedAuthID := ""
 	executeAttempt := func() (streamExecutionAttempt, error, bool) {
-		return executeStreamAttempt(ctx, ttftTimeout, func(attemptCtx context.Context) (*coreexecutor.StreamResult, error) {
-			return h.AuthManager.ExecuteStream(attemptCtx, providers, req, opts)
+		attemptMetadata := make(map[string]any, len(opts.Metadata)+2)
+		for key, value := range opts.Metadata {
+			attemptMetadata[key] = value
+		}
+		attemptExcludedAuthIDs := make(map[string]struct{}, len(excludedAuthIDs))
+		for authID := range excludedAuthIDs {
+			attemptExcludedAuthIDs[authID] = struct{}{}
+		}
+		attemptMetadata[coreexecutor.ExcludedAuthIDsMetadataKey] = attemptExcludedAuthIDs
+		selectedCallback, _ := attemptMetadata[coreexecutor.SelectedAuthCallbackMetadataKey].(func(string))
+		var selectedAuthID atomic.Value
+		selectedAuthID.Store("")
+		attemptMetadata[coreexecutor.SelectedAuthCallbackMetadataKey] = func(authID string) {
+			selectedAuthID.Store(authID)
+			if selectedCallback != nil {
+				selectedCallback(authID)
+			}
+		}
+		attemptOpts := opts
+		attemptOpts.Metadata = attemptMetadata
+		attempt, err, canceled := executeStreamAttempt(ctx, ttftTimeout, func(attemptCtx context.Context) (*coreexecutor.StreamResult, error) {
+			return h.AuthManager.ExecuteStream(attemptCtx, providers, req, attemptOpts)
 		})
+		lastSelectedAuthID, _ = selectedAuthID.Load().(string)
+		if err == nil {
+			if selectedCallback == nil {
+				delete(attemptMetadata, coreexecutor.SelectedAuthCallbackMetadataKey)
+			} else {
+				attemptMetadata[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
+			}
+			opts.Metadata = attemptMetadata
+		}
+		return attempt, err, canceled
+	}
+	excludeSelectedAuth := func() {
+		if lastSelectedAuthID != "" {
+			excludedAuthIDs[lastSelectedAuthID] = struct{}{}
+		}
 	}
 	maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
 	if h.AuthManager.HomeEnabled() {
@@ -425,6 +468,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		if !errors.As(err, &timeoutErr) {
 			break
 		}
+		excludeSelectedAuth()
 		bootstrapRetries++
 		attempt, err, streamCanceledBeforeExecute = executeAttempt()
 	}
@@ -634,48 +678,62 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		if streamCanceledBeforeRead || bootstrapErr != nil || bootstrapStreamErr == nil {
 			break
 		}
-		if bootstrapRetries >= maxBootstrapRetries || !bootstrapEligible(bootstrapStreamErr) {
-			bootstrapErr = executionErrorMessage(bootstrapStreamErr)
-			break
-		}
-		bootstrapRetries++
-		retryAttempt, retryErr, retryCanceled := executeAttempt()
-		if retryCanceled {
-			streamCanceledBeforeRead = true
-			break
-		}
-		if retryErr != nil {
-			originalBootstrapErr := executionErrorMessage(bootstrapStreamErr)
-			if isAuthSelectionUnavailable(retryErr) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {
-				bootstrapErr = originalBootstrapErr
-			} else {
-				bootstrapErr = executionErrorMessage(enrichAuthSelectionError(retryErr, providers, normalizedModel))
+		for {
+			if bootstrapRetries >= maxBootstrapRetries || !bootstrapEligible(bootstrapStreamErr) {
+				bootstrapErr = executionErrorMessage(bootstrapStreamErr)
+				break
+			}
+			bootstrapRetries++
+			retryAttempt, retryErr, retryCanceled := executeAttempt()
+			if retryCanceled {
+				streamCanceledBeforeRead = true
+				break
+			}
+			if retryErr != nil {
+				var timeoutErr *streamingTTFTTimeoutError
+				if errors.As(retryErr, &timeoutErr) {
+					excludeSelectedAuth()
+					bootstrapStreamErr = retryErr
+					if bootstrapRetries < maxBootstrapRetries {
+						continue
+					}
+				}
+				originalBootstrapErr := executionErrorMessage(bootstrapStreamErr)
+				if isAuthSelectionUnavailable(retryErr) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {
+					bootstrapErr = originalBootstrapErr
+				} else {
+					bootstrapErr = executionErrorMessage(enrichAuthSelectionError(retryErr, providers, normalizedModel))
+				}
+				break
+			}
+			retryResult := retryAttempt.result
+			if retryResult == nil {
+				retryAttempt.release()
+				bootstrapErr = executionErrorMessage(fmt.Errorf("auth manager returned nil stream"))
+				break
+			}
+			attempt = retryAttempt
+			rawStreamHeaders = cloneHeader(retryResult.Headers)
+			baseStreamHeaders = cloneHeader(retryResult.Headers)
+			streamHeaderInitialized = false
+			streamClosedBeforeRead = false
+			if responseSSEValidator != nil {
+				responseSSEValidator = &sseJSONValidationState{}
+			}
+			bootstrapStreamErr = nil
+			bootstrapPayload = nil
+			bootstrapChunkIndex = 0
+			bootstrapHistoryChunks = nil
+			chunks = retryResult.Chunks
+			if chunks == nil {
+				closed := make(chan coreexecutor.StreamChunk)
+				close(closed)
+				chunks = closed
 			}
 			break
 		}
-		retryResult := retryAttempt.result
-		if retryResult == nil {
-			retryAttempt.release()
-			bootstrapErr = executionErrorMessage(fmt.Errorf("auth manager returned nil stream"))
+		if streamCanceledBeforeRead || bootstrapErr != nil {
 			break
-		}
-		attempt = retryAttempt
-		rawStreamHeaders = cloneHeader(retryResult.Headers)
-		baseStreamHeaders = cloneHeader(retryResult.Headers)
-		streamHeaderInitialized = false
-		streamClosedBeforeRead = false
-		bootstrapStreamErr = nil
-		bootstrapPayload = nil
-		bootstrapChunkIndex = 0
-		bootstrapHistoryChunks = nil
-		if responseSSEValidator != nil {
-			responseSSEValidator = &sseJSONValidationState{}
-		}
-		chunks = retryResult.Chunks
-		if chunks == nil {
-			closed := make(chan coreexecutor.StreamChunk)
-			close(closed)
-			chunks = closed
 		}
 	}
 
