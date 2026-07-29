@@ -592,25 +592,25 @@ func TestExecuteStreamWithAuthManager_CancelDuringSynchronousBootstrap(t *testin
 }
 
 func TestExecuteStreamWithAuthManager_TTFTTimeoutCancelsSilentStream(t *testing.T) {
-	canceled := make(chan struct{})
+	canceled := make(chan struct{}, 2)
 	executor := &bootstrapStreamExecutor{stream: func(ctx context.Context, _ int) (*coreexecutor.StreamResult, error) {
 		chunks := make(chan coreexecutor.StreamChunk)
 		go func() {
 			<-ctx.Done()
-			close(canceled)
+			canceled <- struct{}{}
 			time.Sleep(10 * time.Millisecond)
 			close(chunks)
 		}()
 		return &coreexecutor.StreamResult{Chunks: chunks}, nil
 	}}
 	handler, _ := registerBootstrapExecutor(t, executor)
-	handler.Cfg.Streaming.BootstrapRetries = 0
+	handler.Cfg.Streaming.BootstrapRetries = 1
 	handler.Cfg.Streaming.TTFTTimeoutSeconds = 1
 
 	startedAt := time.Now()
 	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "bootstrap-model", []byte(`{"model":"bootstrap-model"}`), "")
-	if elapsed := time.Since(startedAt); elapsed > 3*time.Second {
-		t.Fatalf("TTFT timeout returned after %v, want no more than 3s", elapsed)
+	if elapsed := time.Since(startedAt); elapsed > 4*time.Second {
+		t.Fatalf("TTFT timeout returned after %v, want no more than 4s", elapsed)
 	}
 	if dataChan != nil {
 		t.Fatalf("data channel = %#v, want nil on TTFT timeout", dataChan)
@@ -629,13 +629,15 @@ func TestExecuteStreamWithAuthManager_TTFTTimeoutCancelsSilentStream(t *testing.
 	if !errors.As(gotErr.Error, &timeoutErr) {
 		t.Fatalf("TTFT error type = %T, want *streamingTTFTTimeoutError", gotErr.Error)
 	}
-	select {
-	case <-canceled:
-	case <-time.After(time.Second):
-		t.Fatal("TTFT timeout did not cancel the upstream stream context")
+	for range 2 {
+		select {
+		case <-canceled:
+		case <-time.After(time.Second):
+			t.Fatal("TTFT timeout did not cancel every upstream stream context")
+		}
 	}
-	if executor.Calls() != 1 {
-		t.Fatalf("stream attempts = %d, want 1", executor.Calls())
+	if executor.Calls() != 2 {
+		t.Fatalf("stream attempts = %d, want 2", executor.Calls())
 	}
 }
 

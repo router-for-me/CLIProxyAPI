@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -374,7 +375,20 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			return h.AuthManager.ExecuteStream(attemptCtx, providers, req, opts)
 		})
 	}
+	maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
+	if h.AuthManager.HomeEnabled() {
+		maxBootstrapRetries = 0
+	}
+	bootstrapRetries := 0
 	attempt, err, streamCanceledBeforeExecute := executeAttempt()
+	for err != nil && !streamCanceledBeforeExecute && bootstrapRetries < maxBootstrapRetries {
+		var timeoutErr *streamingTTFTTimeoutError
+		if !errors.As(err, &timeoutErr) {
+			break
+		}
+		bootstrapRetries++
+		attempt, err, streamCanceledBeforeExecute = executeAttempt()
+	}
 	if streamCanceledBeforeExecute {
 		lifecycle.complete(pluginapi.RequestCompletionCanceled, 0, err)
 		return nil, nil, nil
@@ -553,11 +567,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 	}
 
-	maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
-	if h.AuthManager.HomeEnabled() {
-		maxBootstrapRetries = 0
-	}
-	for bootstrapRetries := 0; !streamCanceledBeforeRead; {
+	for !streamCanceledBeforeRead {
 		readInitialStreamChunks()
 		if streamCanceledBeforeRead || bootstrapErr != nil || bootstrapStreamErr == nil {
 			break
