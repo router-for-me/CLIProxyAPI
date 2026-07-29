@@ -105,6 +105,21 @@ func geminiClaudeCarrierMatchesAdjacent(blocks []gjson.Result, index int, direct
 	return false
 }
 
+func geminiClaudeUnsignedThoughtHasFollowingPreviousCarrier(blocks []gjson.Result, index int) bool {
+	if index+2 >= len(blocks) {
+		return false
+	}
+	targetKind := geminiClaudeSemanticTargetKind(blocks[index+1])
+	carrier := blocks[index+2]
+	if targetKind == "" || carrier.Get("type").String() != "thinking" || strings.TrimSpace(carrier.Get("thinking").String()) != "" {
+		return false
+	}
+	_, direction, carrierTargetKind, marked, ok := decodeGeminiClaudeCarrierSignature(carrier.Get("signature").String())
+	return marked && ok && direction == geminiClaudeCarrierPrevious &&
+		(carrierTargetKind == geminiClaudeCarrierAny || carrierTargetKind == targetKind) &&
+		geminiClaudeCarrierMatchesAdjacent(blocks, index+2, direction, carrierTargetKind)
+}
+
 // StripEmptySignatureThinkingBlocks removes thinking blocks whose signatures
 // are empty or not valid Claude thinking signatures. These usually come from
 // proxy-generated responses where no real Claude signature exists.
@@ -138,7 +153,9 @@ func StripInvalidGeminiSignatureThinkingBlocks(payload []byte) []byte {
 			if block.Get("type").String() == "thinking" {
 				rawSignature := strings.TrimSpace(block.Get("signature").String())
 				thinkingText := strings.TrimSpace(block.Get("thinking").String())
-				if rawSignature == "" && thinkingText != "" && (pendingCarrierTargetKind == geminiClaudeCarrierAny || pendingCarrierTargetKind == geminiClaudeCarrierText) {
+				hasPendingTextCarrier := pendingCarrierTargetKind == geminiClaudeCarrierAny || pendingCarrierTargetKind == geminiClaudeCarrierText
+				hasFollowingCarrier := geminiClaudeUnsignedThoughtHasFollowingPreviousCarrier(contentBlocks, blockIndex)
+				if rawSignature == "" && thinkingText != "" && (hasPendingTextCarrier || hasFollowingCarrier) {
 					pendingCarrierTargetKind = ""
 					contentItems = append(contentItems, []byte(block.Raw))
 					continue

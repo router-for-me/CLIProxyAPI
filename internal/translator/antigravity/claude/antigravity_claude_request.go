@@ -436,10 +436,11 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						// Skip unsigned thinking blocks instead of converting them to text.
 						isUnsigned := !hasResolvedThinkingSignature(modelName, signature)
 
-						// If unsigned, skip entirely (don't convert to text)
-						// Claude requires assistant messages to start with thinking blocks when thinking is enabled
-						// Converting to text would break this requirement
-						if isUnsigned {
+						// If unsigned, skip entirely (don't convert to text), unless a tagged
+						// trailing carrier binds the following native semantic part.
+						// Claude requires assistant messages to start with thinking blocks when thinking is enabled.
+						// Converting other unsigned thinking to text would break this requirement.
+						if isUnsigned && !geminiClaudeUnsignedThoughtHasFollowingPreviousCarrier(contentResults, j) {
 							logDroppedAntigravityThinkingSignature(modelName, i, j, thinkingText, signatureResult)
 							enableThoughtTranslate = false
 							continue

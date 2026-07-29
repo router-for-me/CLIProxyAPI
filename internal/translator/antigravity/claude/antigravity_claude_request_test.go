@@ -112,6 +112,30 @@ func assertSignatureDebugDoesNotLeak(t *testing.T, hook *test.Hook, forbidden st
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_PreservesUnsignedThoughtBeforePreviousCarrier(t *testing.T) {
+	validSignature := testGeminiEPrefixSignature(t)
+	previousText := encodeGeminiClaudeCarrierSignature(validSignature, geminiClaudeCarrierPrevious, geminiClaudeCarrierText)
+	input := []byte(`{"model":"gemini-3.1-pro-preview","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"hidden reasoning"},{"type":"text","text":"visible answer"},{"type":"thinking","thinking":"","signature":"` + previousText + `"}]},{"role":"user","content":[{"type":"text","text":"continue"}]}]}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3.1-pro-preview", input, false)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("part count = %d, want thought and visible text; output=%s", len(parts), output)
+	}
+	if got := parts[0].Get("text").String(); got != "hidden reasoning" || !parts[0].Get("thought").Bool() {
+		t.Fatalf("thought part was not preserved: %s", output)
+	}
+	if parts[0].Get("thoughtSignature").Exists() {
+		t.Fatalf("thought part should remain unsigned: %s", output)
+	}
+	if got := parts[1].Get("text").String(); got != "visible answer" {
+		t.Fatalf("visible text = %q, want visible answer; output=%s", got, output)
+	}
+	if got := parts[1].Get("thoughtSignature").String(); got != validSignature {
+		t.Fatalf("visible text signature = %q, want %q; output=%s", got, validSignature, output)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_StripsClaudeCodeAttribution(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "claude-sonnet-4-5",

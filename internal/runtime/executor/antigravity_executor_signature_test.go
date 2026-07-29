@@ -327,6 +327,25 @@ func TestAntigravityExecutor_GeminiTargetPreservesGeminiThinkingCarrier(t *testi
 	}
 }
 
+func TestAntigravityExecutor_GeminiTargetPreservesUnsignedThoughtBeforePreviousCarrier(t *testing.T) {
+	inner := protowire.AppendTag(nil, 1, protowire.BytesType)
+	inner = protowire.AppendBytes(inner, []byte{0x01, 0x0c, 0x39, 0xd6, 0xc7, 0x34})
+	encoded := protowire.AppendTag(nil, 2, protowire.BytesType)
+	encoded = protowire.AppendBytes(encoded, inner)
+	validSignature := base64.StdEncoding.EncodeToString(encoded)
+	carrier := "cpa-gemini-carrier-v1:previous:text:" + base64.RawStdEncoding.EncodeToString([]byte(validSignature))
+	payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"hidden reasoning"},{"type":"text","text":"visible answer"},{"type":"thinking","thinking":"","signature":"` + carrier + `"}]}]}`)
+
+	output, err := validateAntigravityRequestSignatures(context.Background(), "gemini-3.1-pro-preview", sdktranslator.FormatClaude, payload)
+	if err != nil {
+		t.Fatalf("validateAntigravityRequestSignatures() error = %v", err)
+	}
+	content := gjson.GetBytes(output, "messages.0.content").Array()
+	if len(content) != 3 || content[0].Get("thinking").String() != "hidden reasoning" || content[2].Get("signature").String() != carrier {
+		t.Fatalf("unsigned thought and previous carrier were not preserved: %s", output)
+	}
+}
+
 func TestAntigravityExecutor_StrictBypassStripsInvalidSignature(t *testing.T) {
 	previousCache := cache.SignatureCacheEnabled()
 	previousStrict := cache.SignatureBypassStrictMode()

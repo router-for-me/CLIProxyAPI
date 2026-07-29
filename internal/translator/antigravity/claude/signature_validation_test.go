@@ -37,6 +37,24 @@ func TestStripInvalidGeminiSignatureThinkingBlocksPreservesMarkedNonEmptyThinkin
 	}
 }
 
+func TestStripInvalidGeminiSignatureThinkingBlocksPreservesUnsignedThoughtBeforePreviousCarrier(t *testing.T) {
+	validSignature := testGeminiEPrefixSignature(t)
+	previousText := encodeGeminiClaudeCarrierSignature(validSignature, geminiClaudeCarrierPrevious, geminiClaudeCarrierText)
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"hidden reasoning"},{"type":"text","text":"visible answer"},{"type":"thinking","thinking":"","signature":"` + previousText + `"}]}]}`)
+
+	out := StripInvalidGeminiSignatureThinkingBlocks(input)
+	content := gjson.GetBytes(out, "messages.0.content").Array()
+	if len(content) != 3 {
+		t.Fatalf("content count = %d, want unsigned thought, text, and previous carrier; output=%s", len(content), out)
+	}
+	if got := content[0].Get("thinking").String(); got != "hidden reasoning" {
+		t.Fatalf("thinking text = %q, want hidden reasoning; output=%s", got, out)
+	}
+	if got := content[2].Get("signature").String(); got != previousText {
+		t.Fatalf("carrier signature = %q, want %q; output=%s", got, previousText, out)
+	}
+}
+
 func TestStripInvalidGeminiSignatureThinkingBlocksDropsMismatchedDirectionalThinking(t *testing.T) {
 	validSignature := testGeminiEPrefixSignature(t)
 	nextFunction := encodeGeminiClaudeCarrierSignature(validSignature, geminiClaudeCarrierNext, geminiClaudeCarrierFunction)
