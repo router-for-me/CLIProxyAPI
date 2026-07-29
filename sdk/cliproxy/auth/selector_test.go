@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -59,6 +60,217 @@ func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
 		}
 		if got.ID != id {
 			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, id)
+		}
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_DistributesAndSkipsNonPositiveWeights(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "a", Attributes: map[string]string{AttributeWeight: "5"}},
+		{ID: "b", Attributes: map[string]string{AttributeWeight: "3"}},
+		{ID: "c", Attributes: map[string]string{AttributeWeight: "2"}},
+		{ID: "disabled-by-weight", Attributes: map[string]string{AttributeWeight: "0"}},
+	}
+
+	counts := make(map[string]int)
+	for index := 0; index < 100; index++ {
+		got, errPick := selector.Pick(context.Background(), "gemini", "model", cliproxyexecutor.Options{}, auths)
+		if errPick != nil {
+			t.Fatalf("Pick() #%d error = %v", index, errPick)
+		}
+		counts[got.ID]++
+	}
+	want := map[string]int{"a": 50, "b": 30, "c": 20}
+	for authID, wantCount := range want {
+		if counts[authID] != wantCount {
+			t.Fatalf("auth %q picks = %d, want %d", authID, counts[authID], wantCount)
+		}
+	}
+	if counts["disabled-by-weight"] != 0 {
+		t.Fatalf("non-positive weight auth picks = %d, want 0", counts["disabled-by-weight"])
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_ResetsCreditsWhenWeightsChange(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	authA := &Auth{ID: "a", Attributes: map[string]string{AttributeWeight: "1000000"}}
+	authB := &Auth{ID: "b", Attributes: map[string]string{AttributeWeight: "1"}}
+	auths := []*Auth{authA, authB}
+	for index := 0; index < 1000; index++ {
+		if _, errPick := selector.Pick(context.Background(), "gemini", "model", cliproxyexecutor.Options{}, auths); errPick != nil {
+			t.Fatalf("warmup Pick() #%d error = %v", index, errPick)
+		}
+	}
+
+	authA.Attributes[AttributeWeight] = "1"
+	counts := make(map[string]int)
+	for index := 0; index < 20; index++ {
+		got, errPick := selector.Pick(context.Background(), "gemini", "model", cliproxyexecutor.Options{}, auths)
+		if errPick != nil {
+			t.Fatalf("Pick() after weight change #%d error = %v", index, errPick)
+		}
+		counts[got.ID]++
+	}
+	if counts["a"] != 10 || counts["b"] != 10 {
+		t.Fatalf("picks after weight change = %#v, want a:b=10:10", counts)
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_RebalancesWhenHighestWeightUnavailable(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "a", Disabled: true, Attributes: map[string]string{AttributeWeight: "5"}},
+		{ID: "b", Attributes: map[string]string{AttributeWeight: "3"}},
+		{ID: "c", Attributes: map[string]string{AttributeWeight: "2"}},
+	}
+	counts := make(map[string]int)
+	for index := 0; index < 100; index++ {
+		got, errPick := selector.Pick(context.Background(), "gemini", "model", cliproxyexecutor.Options{}, auths)
+		if errPick != nil {
+			t.Fatalf("Pick() #%d error = %v", index, errPick)
+		}
+		counts[got.ID]++
+	}
+	if counts["a"] != 0 || counts["b"] != 60 || counts["c"] != 40 {
+		t.Fatalf("weighted failover counts = %#v, want b:c=60:40 with a skipped", counts)
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_SkipsUnavailableAndQuotaExceededWithoutRecovery(t *testing.T) {
+	t.Parallel()
+
+	model := "test-model"
+	selector := &WeightedRoundRobinSelector{}
+	auths := []*Auth{
+		{
+			ID: "model-unavailable",
+			ModelStates: map[string]*ModelState{
+				model: {Unavailable: true},
+			},
+		},
+		{ID: "quota-exceeded", Quota: QuotaState{Exceeded: true}},
+		{ID: "available"},
+	}
+
+	gotModel, errModel := selector.Pick(context.Background(), "gemini", model, cliproxyexecutor.Options{}, auths)
+	if errModel != nil || gotModel == nil || gotModel.ID != "available" {
+		t.Fatalf("model Pick() = %#v, %v; want available", gotModel, errModel)
+	}
+	for index := 0; index < 4; index++ {
+		gotAuth, errAuth := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+		if errAuth != nil || gotAuth == nil {
+			t.Fatalf("auth Pick() #%d = %#v, %v; want available auth", index, gotAuth, errAuth)
+		}
+		if gotAuth.ID == "quota-exceeded" {
+			t.Fatalf("auth Pick() #%d selected quota-exceeded credential", index)
+		}
+	}
+}
+
+func TestAuthWeight_MetadataFallbackAndAttributePrecedence(t *testing.T) {
+	t.Parallel()
+
+	if got := authWeight(&Auth{Metadata: map[string]any{AttributeWeight: float64(7)}}); got != 7 {
+		t.Fatalf("authWeight(metadata) = %d, want 7", got)
+	}
+	if got := authWeight(&Auth{
+		Attributes: map[string]string{AttributeWeight: "3"},
+		Metadata:   map[string]any{AttributeWeight: float64(7)},
+	}); got != 3 {
+		t.Fatalf("authWeight(attribute and metadata) = %d, want attribute weight 3", got)
+	}
+}
+
+func TestAuthWeight_InvalidAndOverflowValuesAreExcluded(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{"1.5", "1000001", "9223372036854775807", "9223372036854775808"} {
+		auth := &Auth{Attributes: map[string]string{AttributeWeight: raw}}
+		if got := authWeight(auth); got != 0 {
+			t.Fatalf("authWeight(%q) = %d, want 0", raw, got)
+		}
+	}
+	if got := authWeight(&Auth{Metadata: map[string]any{AttributeWeight: 1.5}}); got != 0 {
+		t.Fatalf("authWeight(invalid metadata) = %d, want 0", got)
+	}
+	if got := authWeight(&Auth{Attributes: map[string]string{AttributeWeight: "-1"}}); got != 0 {
+		t.Fatalf("authWeight(-1) = %d, want 0", got)
+	}
+}
+
+func TestPickSmoothWeightedAuth_SaturatesCorruptState(t *testing.T) {
+	t.Parallel()
+
+	current := map[string]int64{"a": math.MaxInt64, "b": math.MinInt64}
+	picked := pickSmoothWeightedAuth([]*Auth{{ID: "a"}, {ID: "b"}}, current)
+	if picked == nil {
+		t.Fatal("pickSmoothWeightedAuth() returned nil")
+	}
+	if current["a"] != math.MaxInt64-2 || current["b"] != math.MinInt64+1 {
+		t.Fatalf("current state = %#v, want saturated arithmetic", current)
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_RecoveredAuthReturnsWithoutAccumulatedCredit(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	authA := &Auth{ID: "a", Attributes: map[string]string{AttributeWeight: "5"}}
+	authB := &Auth{ID: "b", Attributes: map[string]string{AttributeWeight: "1"}}
+	auths := []*Auth{authA, authB}
+
+	for index := 0; index < 6; index++ {
+		if _, errPick := selector.Pick(context.Background(), "gemini", "model", cliproxyexecutor.Options{}, auths); errPick != nil {
+			t.Fatalf("warmup Pick() #%d error = %v", index, errPick)
+		}
+	}
+	authA.Unavailable = true
+	authA.NextRetryAfter = time.Now().Add(time.Hour)
+	for index := 0; index < 6; index++ {
+		got, errPick := selector.Pick(context.Background(), "gemini", "model", cliproxyexecutor.Options{}, auths)
+		if errPick != nil || got == nil || got.ID != "b" {
+			t.Fatalf("unavailable Pick() #%d = %#v, %v; want b", index, got, errPick)
+		}
+	}
+	authA.Unavailable = false
+	authA.NextRetryAfter = time.Time{}
+
+	counts := make(map[string]int)
+	for index := 0; index < 6; index++ {
+		got, errPick := selector.Pick(context.Background(), "gemini", "model", cliproxyexecutor.Options{}, auths)
+		if errPick != nil {
+			t.Fatalf("recovered Pick() #%d error = %v", index, errPick)
+		}
+		counts[got.ID]++
+	}
+	if counts["a"] != 5 || counts["b"] != 1 {
+		t.Fatalf("recovered picks = %#v, want a:b=5:1", counts)
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_DefaultWeightIsOne(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	auths := []*Auth{{ID: "a"}, {ID: "b"}, {ID: "c"}}
+	counts := make(map[string]int)
+	for index := 0; index < 30; index++ {
+		got, errPick := selector.Pick(context.Background(), "gemini", "model", cliproxyexecutor.Options{}, auths)
+		if errPick != nil {
+			t.Fatalf("Pick() #%d error = %v", index, errPick)
+		}
+		counts[got.ID]++
+	}
+	for _, authID := range []string{"a", "b", "c"} {
+		if counts[authID] != 10 {
+			t.Fatalf("auth %q picks = %d, want 10", authID, counts[authID])
 		}
 	}
 }
@@ -285,7 +497,7 @@ func TestSelectorPick_AllCooldownReturnsModelCooldownError(t *testing.T) {
 	})
 }
 
-func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testing.T) {
+func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsBlocked(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -304,14 +516,45 @@ func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testin
 	}
 
 	blocked, reason, next := isAuthBlockedForModel(auth, model, now)
-	if blocked {
-		t.Fatalf("blocked = true, want false")
+	if !blocked {
+		t.Fatalf("blocked = false, want true")
 	}
-	if reason != blockReasonNone {
-		t.Fatalf("reason = %v, want %v", reason, blockReasonNone)
+	if reason != blockReasonOther {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonOther)
 	}
 	if !next.IsZero() {
 		t.Fatalf("next = %v, want zero", next)
+	}
+}
+
+func TestIsAuthBlockedForModel_AuthQuotaExceededWithoutRecoveryIsBlocked(t *testing.T) {
+	t.Parallel()
+
+	auth := &Auth{ID: "a", Quota: QuotaState{Exceeded: true}}
+	for _, model := range []string{"", "test-model"} {
+		blocked, reason, next := isAuthBlockedForModel(auth, model, time.Now())
+		if !blocked || reason != blockReasonOther || !next.IsZero() {
+			t.Fatalf("isAuthBlockedForModel(%q) = %v, %v, %v; want true, other, zero", model, blocked, reason, next)
+		}
+	}
+}
+
+func TestIsAuthBlockedForModel_ExpiredRecoveryIsAvailable(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := &Auth{
+		ID:             "a",
+		Unavailable:    true,
+		NextRetryAfter: now.Add(-time.Minute),
+		Quota: QuotaState{
+			Exceeded:      true,
+			NextRecoverAt: now.Add(-time.Second),
+		},
+	}
+	blocked, reason, next := isAuthBlockedForModel(auth, "", now)
+	if blocked || reason != blockReasonNone || !next.IsZero() {
+		t.Fatalf("isAuthBlockedForModel() = %v, %v, %v; want false, none, zero", blocked, reason, next)
 	}
 }
 
@@ -496,6 +739,75 @@ func TestSessionAffinitySelector_SameSessionSameAuth(t *testing.T) {
 		if got.ID != first.ID {
 			t.Fatalf("Pick() #%d auth.ID = %q, want %q (same session should pick same auth)", i, got.ID, first.ID)
 		}
+	}
+}
+
+func TestSessionAffinitySelector_WeightedBindingRebindsAfterWeightBecomesZero(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelector(&WeightedRoundRobinSelector{})
+	defer selector.Stop()
+
+	authA := &Auth{ID: "auth-a", Attributes: map[string]string{AttributeWeight: "1"}}
+	authB := &Auth{ID: "auth-b", Attributes: map[string]string{AttributeWeight: "1"}}
+	auths := []*Auth{authA, authB}
+	opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_weight-change"}}`)}
+
+	first, errFirst := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+	if errFirst != nil {
+		t.Fatalf("first Pick() error = %v", errFirst)
+	}
+	if first.ID != authA.ID {
+		t.Fatalf("first Pick() auth.ID = %q, want %q", first.ID, authA.ID)
+	}
+
+	authA.Attributes[AttributeWeight] = "0"
+	second, errSecond := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+	if errSecond != nil {
+		t.Fatalf("Pick() after weight update error = %v", errSecond)
+	}
+	if second.ID != authB.ID {
+		t.Fatalf("Pick() after weight update auth.ID = %q, want %q", second.ID, authB.ID)
+	}
+
+	authA.Attributes[AttributeWeight] = "10"
+	third, errThird := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+	if errThird != nil {
+		t.Fatalf("Pick() after rebind error = %v", errThird)
+	}
+	if third.ID != authB.ID {
+		t.Fatalf("Pick() after rebind auth.ID = %q, want sticky auth %q", third.ID, authB.ID)
+	}
+}
+
+func TestSessionAffinitySelector_WeightedNewSessionsResetAfterWeightChange(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelector(&WeightedRoundRobinSelector{})
+	defer selector.Stop()
+	authA := &Auth{ID: "auth-a", Attributes: map[string]string{AttributeWeight: "1000000"}}
+	authB := &Auth{ID: "auth-b", Attributes: map[string]string{AttributeWeight: "1"}}
+	auths := []*Auth{authA, authB}
+	pickSession := func(index int) *Auth {
+		t.Helper()
+		opts := cliproxyexecutor.Options{OriginalRequest: []byte(fmt.Sprintf(`{"session_id":"session-%d"}`, index))}
+		picked, errPick := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+		if errPick != nil {
+			t.Fatalf("Pick(session-%d) error = %v", index, errPick)
+		}
+		return picked
+	}
+	for index := 0; index < 1000; index++ {
+		pickSession(index)
+	}
+
+	authA.Attributes[AttributeWeight] = "1"
+	counts := make(map[string]int)
+	for index := 1000; index < 1020; index++ {
+		counts[pickSession(index).ID]++
+	}
+	if counts[authA.ID] != 10 || counts[authB.ID] != 10 {
+		t.Fatalf("new session picks after weight change = %#v, want 10 each", counts)
 	}
 }
 

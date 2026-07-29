@@ -200,7 +200,10 @@ quota-exceeded:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), fill-first
+  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
+  # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
+  # Non-positive weights exclude the credential while this strategy is active.
+  # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
   # Enable universal session-sticky routing for all clients.
   # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
   # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
@@ -278,6 +281,7 @@ nonstream-keepalive-interval: 0
 # Gemini API keys
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"
+#     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test" # optional: require calls like "test/gemini-3-pro-preview" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://generativelanguage.googleapis.com"
@@ -301,6 +305,7 @@ nonstream-keepalive-interval: 0
 # send Gemini generateContent/streamGenerateContent requests when the client enters through the interactions API.
 # interactions-api-key:
 #   - api-key: "AIzaSy...03"
+#     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "native" # optional: require calls like "native/gemini-3-pro-preview" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://generativelanguage.googleapis.com"
@@ -317,6 +322,7 @@ nonstream-keepalive-interval: 0
 # Codex API keys
 # codex-api-key:
 #   - api-key: "sk-atSM..."
+#     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
@@ -339,6 +345,7 @@ nonstream-keepalive-interval: 0
 # Uses the native xAI executor, including its Responses namespace-tool handling.
 # xai-api-key:
 #   - api-key: "xai-..."
+#     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "xai" # optional: require calls like "xai/grok-4.5" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://api.x.ai/v1" # xAI-compatible Responses API endpoint
@@ -360,6 +367,7 @@ nonstream-keepalive-interval: 0
 # claude-api-key:
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
 #   - api-key: "sk-atSM..."
+#     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
@@ -429,6 +437,7 @@ nonstream-keepalive-interval: 0
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:
 #       - api-key: "sk-or-v1-...b780"
+#         weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #         # proxy-url: "direct" # optional: explicit direct connect for this credential
 #       - api-key: "sk-or-v1-...b781" # without proxy-url
@@ -456,6 +465,7 @@ nonstream-keepalive-interval: 0
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
 #   - api-key: "vk-123..."                        # x-goog-api-key header
+#     weight: 5                                    # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test"                              # optional: require calls like "test/vertex-pro" to target this credential
 #     base-url: "https://example.com/api"         # optional, e.g. https://zenmux.ai/api; falls back to Google Vertex when omitted
 #     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override

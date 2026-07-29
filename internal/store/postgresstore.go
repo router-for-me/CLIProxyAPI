@@ -211,6 +211,9 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 	if auth == nil {
 		return "", fmt.Errorf("postgres store: auth is nil")
 	}
+	if errWeight := cliproxyauth.ValidateAuthWeight(auth); errWeight != nil {
+		return "", fmt.Errorf("postgres store: %w", errWeight)
+	}
 
 	path, err := s.resolveAuthPath(auth)
 	if err != nil {
@@ -317,6 +320,10 @@ func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 		metadata := make(map[string]any)
 		if err = json.Unmarshal([]byte(payload), &metadata); err != nil {
 			log.WithError(err).Warnf("postgres store: skipping auth %s with invalid json", id)
+			continue
+		}
+		if errWeight := cliproxyauth.ValidateAuthWeight(&cliproxyauth.Auth{Metadata: metadata}); errWeight != nil {
+			log.WithError(errWeight).Warnf("postgres store: skipping auth %s with invalid weight", id)
 			continue
 		}
 		provider := strings.TrimSpace(valueAsString(metadata["type"]))

@@ -19,6 +19,7 @@ const (
 	AttributeRuntimeOnly   = "runtime_only"
 	AttributeSource        = "source"
 	AttributeSourceBackend = "source_backend"
+	AttributeWeight        = "weight"
 )
 
 // AuthKind returns the credential kind using explicit metadata first and legacy

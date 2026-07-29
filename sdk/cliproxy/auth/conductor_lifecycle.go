@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -68,6 +69,9 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil {
 		return nil, nil
 	}
+	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
+		return nil, fmt.Errorf("register auth: %w", errWeight)
+	}
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
@@ -100,6 +104,9 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
+	}
+	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
+		return nil, fmt.Errorf("update auth: %w", errWeight)
 	}
 	m.mu.Lock()
 	existing, ok := m.auths[auth.ID]
@@ -222,6 +229,9 @@ func (m *Manager) Load(ctx context.Context) error {
 		if auth == nil || auth.ID == "" {
 			continue
 		}
+		if errWeight := ValidateAuthWeight(auth); errWeight != nil {
+			continue
+		}
 		auth.EnsureIndex()
 		m.auths[auth.ID] = auth.Clone()
 	}
@@ -238,6 +248,9 @@ func (m *Manager) Load(ctx context.Context) error {
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if m.store == nil || auth == nil {
 		return nil
+	}
+	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
+		return fmt.Errorf("persist auth: %w", errWeight)
 	}
 	if shouldSkipPersist(ctx) {
 		return nil
