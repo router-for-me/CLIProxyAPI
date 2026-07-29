@@ -70,11 +70,11 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		if config.Level == thinking.LevelNone {
 			return applyDisabledThinking(body)
 		}
-		return applyEnabledThinking(body)
+		return applyEnabledThinking(body, string(config.Level))
 	case thinking.ModeNone:
 		// Respect clamped fallback level for models that cannot disable thinking.
 		if config.Level != "" && config.Level != thinking.LevelNone {
-			return applyEnabledThinking(body)
+			return applyEnabledThinking(body, string(config.Level))
 		}
 		return applyDisabledThinking(body)
 	case thinking.ModeBudget:
@@ -85,10 +85,10 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		if level == string(thinking.LevelNone) {
 			return applyDisabledThinking(body)
 		}
-		return applyEnabledThinking(body)
+		return applyEnabledThinking(body, level)
 	case thinking.ModeAuto:
 		// Auto mode: enable thinking and let the model decide intensity.
-		return applyEnabledThinking(body)
+		return applyEnabledThinking(body, "")
 	default:
 		return body, nil
 	}
@@ -108,14 +108,14 @@ func applyCompatibleQwen(body []byte, config thinking.ThinkingConfig) ([]byte, e
 		if config.Level == thinking.LevelNone {
 			return applyDisabledThinking(body)
 		}
-		return applyEnabledThinking(body)
+		return applyEnabledThinking(body, string(config.Level))
 	case thinking.ModeNone:
 		if config.Level == "" || config.Level == thinking.LevelNone {
 			return applyDisabledThinking(body)
 		}
-		return applyEnabledThinking(body)
+		return applyEnabledThinking(body, string(config.Level))
 	case thinking.ModeAuto:
-		return applyEnabledThinking(body)
+		return applyEnabledThinking(body, "")
 	case thinking.ModeBudget:
 		level, ok := thinking.ConvertBudgetToLevel(config.Budget)
 		if !ok {
@@ -124,22 +124,45 @@ func applyCompatibleQwen(body []byte, config thinking.ThinkingConfig) ([]byte, e
 		if level == string(thinking.LevelNone) {
 			return applyDisabledThinking(body)
 		}
-		return applyEnabledThinking(body)
+		return applyEnabledThinking(body, level)
 	default:
 		return body, nil
 	}
 }
 
-func applyEnabledThinking(body []byte) ([]byte, error) {
-	result, errDelete := sjson.DeleteBytes(body, "reasoning_effort")
-	if errDelete != nil {
-		return body, fmt.Errorf("qwen thinking: failed to clear reasoning_effort: %w", errDelete)
-	}
-	result, errSet := sjson.SetBytes(result, "enable_thinking", true)
+// applyEnabledThinking enables thinking and, when a concrete intensity level is
+// provided, also emits reasoning_effort so newer Qwen models (qwen3.7+) honor the
+// requested intensity instead of collapsing every level to a bare enable flag.
+func applyEnabledThinking(body []byte, level string) ([]byte, error) {
+	result, errSet := sjson.SetBytes(body, "enable_thinking", true)
 	if errSet != nil {
 		return body, fmt.Errorf("qwen thinking: failed to set enable_thinking: %w", errSet)
 	}
+	if isQwenIntensityLevel(level) {
+		result, errSet = sjson.SetBytes(result, "reasoning_effort", level)
+		if errSet != nil {
+			return body, fmt.Errorf("qwen thinking: failed to set reasoning_effort: %w", errSet)
+		}
+		return result, nil
+	}
+	// No concrete intensity: drop any stale reasoning_effort so the model decides.
+	if gjson.GetBytes(result, "reasoning_effort").Exists() {
+		if deleted, errDel := sjson.DeleteBytes(result, "reasoning_effort"); errDel == nil {
+			result = deleted
+		}
+	}
 	return result, nil
+}
+
+// isQwenIntensityLevel reports whether a level maps to a concrete reasoning_effort
+// value understood by newer Qwen models.
+func isQwenIntensityLevel(level string) bool {
+	switch level {
+	case string(thinking.LevelLow), string(thinking.LevelMedium), string(thinking.LevelHigh):
+		return true
+	default:
+		return false
+	}
 }
 
 func applyDisabledThinking(body []byte) ([]byte, error) {

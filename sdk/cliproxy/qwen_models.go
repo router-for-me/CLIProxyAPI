@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -18,7 +17,6 @@ const (
 	// qwenDefaultModelBaseURL is the default DashScope OpenAI-compatible endpoint
 	// used for model discovery when an auth has no explicit base_url.
 	qwenDefaultModelBaseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-	qwenModelsFetchTimeout  = 20 * time.Second
 )
 
 // qwenModelsResponse is the OpenAI-compatible /models listing returned by DashScope.
@@ -51,15 +49,16 @@ func (s *Service) fetchQwenModelsForAuth(ctx context.Context, auth *coreauth.Aut
 		baseURL = qwenDefaultModelBaseURL
 	}
 
-	fetchCtx, cancel := context.WithTimeout(ctx, qwenModelsFetchTimeout)
-	defer cancel()
-
-	client := &http.Client{Timeout: qwenModelsFetchTimeout}
+	// Model discovery uses the caller's context without an added timeout, matching
+	// normal upstream execution (repo policy permits timeouts only for credential
+	// acquisition). A slow /models endpoint must not silently drop to the static
+	// catalog after a fixed deadline.
+	client := &http.Client{}
 	if transport, _, errProxy := proxyutil.BuildHTTPTransport(qwenModelFetchProxyURL(s, auth)); errProxy == nil && transport != nil {
 		client.Transport = transport
 	}
 
-	req, errReq := http.NewRequestWithContext(fetchCtx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/models", nil)
+	req, errReq := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/models", nil)
 	if errReq != nil {
 		log.Debugf("qwen model fetch: build request: %v", errReq)
 		return nil
@@ -180,13 +179,15 @@ func isQwenNonTextModel(modelID string) bool {
 }
 
 // qwenModelSupportsThinking applies a heuristic for hybrid-thinking Qwen text models.
-// Qwen3.x and newer chat models support enable_thinking; legacy/turbo models do not.
+// Qwen3.x and newer chat models support enable_thinking; legacy/turbo models do not,
+// so turbo is deliberately excluded to match the static catalog (qwen-turbo has no
+// thinking support) and avoid advertising reasoning the upstream will reject.
 func qwenModelSupportsThinking(modelID string) bool {
 	lower := strings.ToLower(modelID)
 	if strings.HasPrefix(lower, "qwen3") {
 		return true
 	}
-	thinkingFamilies := []string{"-max", "-plus", "-flash", "-coder", "-turbo"}
+	thinkingFamilies := []string{"-max", "-plus", "-flash", "-coder"}
 	for _, family := range thinkingFamilies {
 		if strings.Contains(lower, family) && strings.HasPrefix(lower, "qwen") {
 			return true

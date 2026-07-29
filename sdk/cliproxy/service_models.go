@@ -159,7 +159,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		}
 		if entry := s.resolveConfigQwenKey(a); entry != nil {
 			if len(entry.Models) > 0 {
-				models = buildQwenConfigModels(entry)
+				models = mergeQwenConfigModels(models, entry)
 			}
 			if authKind == "apikey" {
 				excluded = entry.ExcludedModels
@@ -485,7 +485,46 @@ func (s *Service) resolveConfigQwenKey(auth *coreauth.Auth) *config.QwenKey {
 	if s == nil || s.cfg == nil {
 		return nil
 	}
-	return resolveConfigCodexStyleKey(auth, s.cfg.QwenKey)
+	return resolveConfigQwenStyleKey(auth, s.cfg.QwenKey)
+}
+
+// resolveConfigQwenStyleKey matches a Qwen config entry for an auth. Unlike the
+// generic codex-style resolver, a blank config base-url is NOT treated as a
+// wildcard when the auth carries an explicit base_url: an exact base-url match is
+// preferred, and the blank-default entry is only used for blank-base auths. This
+// keeps a key configured for both the default DashScope endpoint and a custom
+// (e.g. token-plan) endpoint from resolving to the wrong entry's models.
+func resolveConfigQwenStyleKey(auth *coreauth.Auth, entries []config.QwenKey) *config.QwenKey {
+	if auth == nil {
+		return nil
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	var blankBaseMatch *config.QwenKey
+	for i := range entries {
+		entry := &entries[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrKey != "" && !strings.EqualFold(cfgKey, attrKey) {
+			continue
+		}
+		if cfgBase == "" {
+			if blankBaseMatch == nil {
+				blankBaseMatch = entry
+			}
+			continue
+		}
+		if attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	if attrBase == "" {
+		return blankBaseMatch
+	}
+	return nil
 }
 
 func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey) *config.CodexKey {
@@ -795,6 +834,35 @@ func buildQwenConfigModels(entry *config.QwenKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "alibaba", "qwen")
+}
+
+// mergeQwenConfigModels appends configured alias models into the discovered /
+// built-in catalog instead of replacing it, so aliasing one model does not stop
+// the credential from advertising the remaining built-in models.
+func mergeQwenConfigModels(base []*ModelInfo, entry *config.QwenKey) []*ModelInfo {
+	configured := buildQwenConfigModels(entry)
+	if len(configured) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base)+len(configured))
+	for _, m := range base {
+		if m != nil {
+			seen[strings.ToLower(strings.TrimSpace(m.ID))] = struct{}{}
+		}
+	}
+	out := append([]*ModelInfo(nil), base...)
+	for _, m := range configured {
+		if m == nil {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(m.ID))
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, m)
+	}
+	return out
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
