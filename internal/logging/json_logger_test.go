@@ -776,6 +776,44 @@ func TestJSONFileBodySourcesCapWhileSpooling(t *testing.T) {
 	}
 }
 
+func TestJSONWebsocketTimelineSourceCapsAppendPartWhileSpooling(t *testing.T) {
+	logger := NewFileRequestLoggerWithFormat(true, t.TempDir(), "", 10, "json")
+	source, err := logger.NewFileBodySource("api-websocket-timeline")
+	if err != nil {
+		t.Fatalf("NewFileBodySource failed: %v", err)
+	}
+	defer source.Cleanup()
+
+	part := bytes.Repeat([]byte("frame"), 1024)
+	for !source.Truncated() {
+		if err := source.AppendPart(part); err != nil {
+			t.Fatalf("AppendPart failed: %v", err)
+		}
+	}
+	var total int64
+	for _, path := range source.Paths() {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat source part: %v", err)
+		}
+		total += info.Size()
+	}
+	if total != maxJSONFileBackedSectionBytes {
+		t.Fatalf("source size = %d, want %d", total, maxJSONFileBackedSectionBytes)
+	}
+
+	data, truncated, err := mergeJSONSectionLimited(source, nil, maxJSONFileBackedSectionBytes)
+	if err != nil {
+		t.Fatalf("mergeJSONSectionLimited failed: %v", err)
+	}
+	if !truncated {
+		t.Fatal("merged source was not marked truncated")
+	}
+	if len(data) != maxJSONFileBackedSectionBytes {
+		t.Fatalf("merged source size = %d, want %d", len(data), maxJSONFileBackedSectionBytes)
+	}
+}
+
 func TestJSONStreamingRequestLoggingMarksQueueDropsTruncated(t *testing.T) {
 	writer := &FileStreamingLogWriter{chunkChan: make(chan []byte, 1), format: "json"}
 	writer.chunkChan <- []byte("queued")

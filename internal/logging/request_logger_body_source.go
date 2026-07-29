@@ -103,11 +103,42 @@ func (s *FileBodySource) AppendPart(data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
-	file, errCreate := s.CreatePart("part")
+	if !bytes.HasSuffix(data, []byte("\n")) {
+		data = append(bytes.Clone(data), '\n')
+	}
+	return s.appendPartBytes(data)
+}
+
+func (s *FileBodySource) appendPartBytes(data []byte) error {
+	if s == nil {
+		return fmt.Errorf("file body source is nil")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cleaned {
+		return fmt.Errorf("file body source has been cleaned")
+	}
+	if s.maxBytes > 0 {
+		remaining := s.maxBytes - s.bytesWritten
+		if remaining <= 0 {
+			s.truncated = true
+			return nil
+		}
+		if len(data) > remaining {
+			data = data[:remaining]
+			s.truncated = true
+		}
+	}
+	if errMkdir := os.MkdirAll(s.dir, 0755); errMkdir != nil {
+		return errMkdir
+	}
+	file, errCreate := os.CreateTemp(s.dir, "part-*.tmp")
 	if errCreate != nil {
 		return errCreate
 	}
-	writeErr := writeLogPart(file, data, false)
+	s.paths = append(s.paths, file.Name())
+	written, writeErr := file.Write(data)
+	s.bytesWritten += written
 	if errClose := file.Close(); errClose != nil {
 		if writeErr == nil {
 			writeErr = errClose
