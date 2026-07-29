@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 const MaxGPTReasoningSignatureLen = 32 * 1024 * 1024
@@ -29,11 +30,16 @@ func InspectGPTReasoningSignature(rawSignature string) (*GPTReasoningSignatureIn
 	if len(sig) > MaxGPTReasoningSignatureLen {
 		return nil, fmt.Errorf("GPT reasoning signature exceeds maximum length (%d bytes)", MaxGPTReasoningSignatureLen)
 	}
-	if index, r, ok := firstInvalidGPTReasoningSignatureChar(sig); ok {
-		return nil, fmt.Errorf("invalid GPT reasoning signature: contains non-base64url character U+%04X at byte %d", r, index)
-	}
+	// The literal prefix is the cheapest discriminator and rejects every other
+	// provider's envelope outright, so it runs before the full charset scan.
+	// Probing this validator is on the hot path for signatures of every provider,
+	// and scanning a multi-kilobyte payload only to reject it on five bytes was
+	// pure waste.
 	if !strings.HasPrefix(sig, "gAAAA") {
 		return nil, fmt.Errorf("invalid GPT reasoning signature: expected gAAAA prefix")
+	}
+	if index, r, ok := firstInvalidGPTReasoningSignatureChar(sig); ok {
+		return nil, fmt.Errorf("invalid GPT reasoning signature: contains non-base64url character U+%04X at byte %d", r, index)
 	}
 
 	decoded, err := decodeGPTReasoningSignature(sig)
@@ -68,14 +74,17 @@ func decodeGPTReasoningSignature(sig string) ([]byte, error) {
 	return nil, fmt.Errorf("invalid GPT reasoning signature: base64url decode failed")
 }
 
+// gptReasoningSignatureCharSet is the base64url alphabet, padding included.
+var gptReasoningSignatureCharSet = base64AlphabetSet("-_=")
+
+// firstInvalidGPTReasoningSignatureChar scans bytes against a lookup table for the
+// same reason as its Grok counterpart: every legal character is ASCII, and a
+// comparison chain mispredicts on nearly every byte of a multi-kilobyte reasoning
+// blob. The offending rune is decoded only for the error message.
 func firstInvalidGPTReasoningSignatureChar(sig string) (int, rune, bool) {
-	for index, r := range sig {
-		switch {
-		case r >= 'A' && r <= 'Z':
-		case r >= 'a' && r <= 'z':
-		case r >= '0' && r <= '9':
-		case r == '-' || r == '_' || r == '=':
-		default:
+	for index := 0; index < len(sig); index++ {
+		if !gptReasoningSignatureCharSet[sig[index]] {
+			r, _ := utf8.DecodeRuneInString(sig[index:])
 			return index, r, true
 		}
 	}

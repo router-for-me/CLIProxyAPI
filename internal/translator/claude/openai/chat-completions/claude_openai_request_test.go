@@ -44,6 +44,70 @@ func TestConvertOpenAIRequestToClaude_SanitizesToolCallIDsForClaude(t *testing.T
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_GroupsConsecutiveParallelToolResults(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role": "user", "content": "Use both tools."},
+			{
+				"role": "assistant",
+				"content": "",
+				"tool_calls": [
+					{"id": "call_1", "type": "function", "function": {"name": "tool_a", "arguments": "{}"}},
+					{"id": "call_2", "type": "function", "function": {"name": "tool_b", "arguments": "{}"}}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_1",
+				"content": "one",
+				"cache_control": {"type": "ephemeral"}
+			},
+			{"role": "tool", "tool_call_id": "call_2", "content": "two"},
+			{"role": "assistant", "content": "Done."}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 4 {
+		t.Fatalf("Expected 4 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[2].Get("role").String(); got != "user" {
+		t.Fatalf("Expected grouped tool result role %q, got %q", "user", got)
+	}
+	toolResults := messages[2].Get("content").Array()
+	if len(toolResults) != 2 {
+		t.Fatalf("Expected 2 grouped tool results, got %d. Content: %s", len(toolResults), messages[2].Get("content").Raw)
+	}
+	wants := []struct {
+		id      string
+		content string
+	}{
+		{id: "call_1", content: "one"},
+		{id: "call_2", content: "two"},
+	}
+	for i, want := range wants {
+		if got := toolResults[i].Get("type").String(); got != "tool_result" {
+			t.Fatalf("tool result %d type = %q, want tool_result", i, got)
+		}
+		if got := toolResults[i].Get("tool_use_id").String(); got != want.id {
+			t.Fatalf("tool result %d tool_use_id = %q, want %q", i, got, want.id)
+		}
+		if got := toolResults[i].Get("content").String(); got != want.content {
+			t.Fatalf("tool result %d content = %q, want %q", i, got, want.content)
+		}
+	}
+	if got := toolResults[0].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("first tool result cache_control.type = %q, want ephemeral", got)
+	}
+	if got := messages[3].Get("content.0.text").String(); got != "Done." {
+		t.Fatalf("following assistant message text = %q, want Done.", got)
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_DropsTemperature(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",
@@ -379,6 +443,57 @@ func TestConvertOpenAIRequestToClaude_PreservesToolCacheControl(t *testing.T) {
 	}
 	if got := resultJSON.Get("tools.0.name").String(); got != "lookup" {
 		t.Fatalf("tools.0.name = %q, want lookup", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_NormalizesRootToolSchemaUnions(t *testing.T) {
+	inputJSON := `{
+		"model":"claude-sonnet-4-5",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[
+			{
+				"type":"function",
+				"function":{
+					"name":"without_type",
+					"parameters":{
+						"anyOf":[
+							{"type":"object","properties":{"a":{"type":"string"}}},
+							{"type":"object","properties":{"b":{"type":"string"}}}
+						]
+					}
+				}
+			},
+			{
+				"type":"function",
+				"function":{
+					"name":"constraint_union",
+					"parametersJsonSchema":{
+						"type":"object",
+						"properties":{"a":{"type":"string"},"b":{"type":"string"}},
+						"anyOf":[{"required":["a"]},{"required":["b"]}]
+					}
+				}
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	root := gjson.ParseBytes(result)
+
+	for _, toolName := range []string{"without_type", "constraint_union"} {
+		schema := root.Get(`tools.#(name=="` + toolName + `").input_schema`)
+		if got := schema.Get("type").String(); got != "object" {
+			t.Fatalf("%s input_schema.type = %q, want object. Output: %s", toolName, got, result)
+		}
+		if schema.Get("anyOf").Exists() {
+			t.Fatalf("%s input_schema should not contain root anyOf. Output: %s", toolName, result)
+		}
+		if !schema.Get("properties.a").Exists() || !schema.Get("properties.b").Exists() {
+			t.Fatalf("%s input_schema should contain properties a and b. Output: %s", toolName, result)
+		}
+		if schema.Get("required").Exists() {
+			t.Fatalf("%s input_schema should not merge alternative required fields. Output: %s", toolName, result)
+		}
 	}
 }
 

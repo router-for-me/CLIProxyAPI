@@ -90,18 +90,18 @@ func TestInspectGrokEncryptedContent_RejectsGeminiThoughtSignatureEnvelope(t *te
 	}
 }
 
-func TestInspectGrokEncryptedContent_RejectsGemini25Field1Envelope(t *testing.T) {
+// TestInspectGrokEncryptedContent_RetiredGemini25Field1Envelope covers the
+// retired Gemini 2.5 envelope. It is no longer a known Gemini envelope, so the
+// Gemini fast-reject no longer fires for it and it falls to the residual class
+// like any other opaque payload. Recorded here so the change is deliberate rather
+// than an accident of the Gemini validator being narrowed.
+func TestInspectGrokEncryptedContent_RetiredGemini25Field1Envelope(t *testing.T) {
 	sample := testGemini25Field1ThoughtSignatureEnvelope()
-	if !IsValidGeminiThoughtSignature(sample, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true}) {
-		t.Fatal("fixture should be a known Gemini field-1 thoughtSignature")
+	if IsValidGeminiThoughtSignature(sample, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true}) {
+		t.Fatal("fixture should no longer be a known Gemini thoughtSignature")
 	}
-
-	_, err := InspectGrokEncryptedContent(sample)
-	if err == nil {
-		t.Fatal("expected Gemini field-1 thoughtSignature envelope to be rejected")
-	}
-	if !strings.Contains(err.Error(), "Gemini") {
-		t.Fatalf("error = %q, want Gemini fast-reject detail", err.Error())
+	if _, err := InspectGrokEncryptedContent(sample); err != nil {
+		t.Fatalf("retired envelope should reach the residual transport check, got %v", err)
 	}
 }
 
@@ -135,6 +135,72 @@ func TestInspectGrokEncryptedContent_RejectsAntigravityClaudeThinkingSignature(t
 	}
 	if !strings.Contains(err.Error(), "Claude") {
 		t.Fatalf("error = %q, want Claude fast-reject detail", err.Error())
+	}
+}
+
+// TestInspectGrokEncryptedContent_RejectsClaudeCAISSignature covers the CAIS
+// envelope emitted by the newest Claude Code models. CAIS payloads are
+// high-entropy standard base64 and drop their padding whenever the decoded
+// length is a multiple of 3, so neither the padding gate nor the classic Claude
+// strict check excludes them on their own.
+func TestInspectGrokEncryptedContent_RejectsClaudeCAISSignature(t *testing.T) {
+	cases := []struct {
+		name   string
+		sample string
+	}{
+		{name: "synthetic unpadded", sample: testUnpaddedClaudeCAISSignature()},
+		{name: "observed fable-5", sample: observedFable5Sample},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if strings.Contains(tc.sample, "=") {
+				t.Fatal("fixture must be unpadded so it reaches the Claude CAIS check")
+			}
+			if !IsValidClaudeCAISSignature(tc.sample) {
+				t.Fatal("fixture should be a valid Claude CAIS signature")
+			}
+			if IsValidClaudeThinkingSignature(tc.sample, ClaudeSignatureValidationOptions{Strict: true}) {
+				t.Fatal("CAIS fixture must not also pass classic Claude validation")
+			}
+
+			_, err := InspectGrokEncryptedContent(tc.sample)
+			if err == nil {
+				t.Fatal("expected Claude CAIS signature to be rejected")
+			}
+			if !strings.Contains(err.Error(), "CAIS") {
+				t.Fatalf("error = %q, want Claude CAIS fast-reject detail", err.Error())
+			}
+		})
+	}
+}
+
+// TestInspectGrokEncryptedContent_RejectsProviderCachePrefix keeps provenance
+// envelopes out of the residual class. A prefixed value belongs to whichever
+// provider the prefix names, and must never be replayed to xAI verbatim.
+func TestInspectGrokEncryptedContent_RejectsProviderCachePrefix(t *testing.T) {
+	for _, prefix := range []string{"claude#", "anthropic#", "gemini#", "openai#", "codex#"} {
+		sample := prefix + testUnpaddedClaudeCAISSignature()
+		if _, err := InspectGrokEncryptedContent(sample); err == nil {
+			t.Fatalf("%s prefixed payload should be rejected", prefix)
+		}
+	}
+}
+
+// TestInspectGrokEncryptedContent_ThresholdMargins documents that neither
+// threshold sits on observed data. The shortest observed native payload is 50
+// decoded bytes and the lowest observed entropy ratio is 0.892, so both limits
+// keep headroom for future models rather than fitting the current corpus exactly.
+func TestInspectGrokEncryptedContent_ThresholdMargins(t *testing.T) {
+	const shortestObservedDecodedLen = 50
+	const lowestObservedEntropyRatio = 0.892
+
+	if MinGrokEncryptedContentDecodedLen >= shortestObservedDecodedLen {
+		t.Fatalf("MinGrokEncryptedContentDecodedLen = %d, want below the shortest observed payload (%d) so a shorter future payload is not silently dropped",
+			MinGrokEncryptedContentDecodedLen, shortestObservedDecodedLen)
+	}
+	if MinGrokEncryptedContentEntropyRatio >= lowestObservedEntropyRatio {
+		t.Fatalf("MinGrokEncryptedContentEntropyRatio = %.3f, want below the lowest observed ratio (%.3f)",
+			MinGrokEncryptedContentEntropyRatio, lowestObservedEntropyRatio)
 	}
 }
 
@@ -208,6 +274,20 @@ func testGemini25Field1ThoughtSignatureEnvelope() string {
 
 func testUnpaddedClaudeThinkingSignature() string {
 	return testClaudeThinkingSignatureWithOpaqueLen(35)
+}
+
+// testUnpaddedClaudeCAISSignature builds a CAIS signature whose base64 form
+// carries no "=" padding, which is the shape that used to slip past the Grok
+// unpadded-base64 gate. The model text length is varied because padding depends
+// on the encoded payload length.
+func testUnpaddedClaudeCAISSignature() string {
+	for suffix := 0; suffix < 8; suffix++ {
+		parts := defaultClaudeCAISParts("claude-opus-5" + strings.Repeat("x", suffix))
+		if sample := parts.encode(); !strings.Contains(sample, "=") {
+			return sample
+		}
+	}
+	panic("could not build an unpadded Claude CAIS fixture")
 }
 
 func testUnpaddedAntigravityClaudeThinkingSignature() string {

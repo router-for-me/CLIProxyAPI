@@ -16,6 +16,7 @@ import (
 	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/client"
+	gitindex "github.com/go-git/go-git/v6/plumbing/format/index"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
@@ -264,6 +265,9 @@ func (s *GitTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string
 	if auth == nil {
 		return "", fmt.Errorf("auth filestore: auth is nil")
 	}
+	if errWeight := cliproxyauth.ValidateAuthWeight(auth); errWeight != nil {
+		return "", fmt.Errorf("auth filestore: %w", errWeight)
+	}
 
 	path, err := s.resolveAuthPath(auth)
 	if err != nil {
@@ -406,15 +410,13 @@ func (s *GitTokenStore) Delete(_ context.Context, id string) error {
 	if err = os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("auth filestore: delete failed: %w", err)
 	}
-	if err == nil {
-		rel, errRel := s.relativeToRepo(path)
-		if errRel != nil {
-			return errRel
-		}
-		messageID := id
-		if errCommit := s.commitAndPushLocked(fmt.Sprintf("Delete auth %s", messageID), rel); errCommit != nil {
-			return errCommit
-		}
+	rel, errRel := s.relativeToRepo(path)
+	if errRel != nil {
+		return errRel
+	}
+	messageID := id
+	if errCommit := s.commitAndPushLocked(fmt.Sprintf("Delete auth %s", messageID), rel); errCommit != nil {
+		return errCommit
 	}
 	return nil
 }
@@ -451,7 +453,63 @@ func (s *GitTokenStore) PersistAuthFiles(_ context.Context, message string, path
 	if strings.TrimSpace(message) == "" {
 		message = "Sync watcher updates"
 	}
+	if handled, errGuard := s.guardWatcherAuthRemovalLocked(message, filtered); handled || errGuard != nil {
+		return errGuard
+	}
 	return s.commitAndPushLocked(message, filtered...)
+}
+
+func (s *GitTokenStore) guardWatcherAuthRemovalLocked(message string, relPaths []string) (bool, error) {
+	if !strings.HasPrefix(strings.TrimSpace(message), "Remove auth ") {
+		return false, nil
+	}
+	repoDir := s.repoDirSnapshot()
+	if repoDir == "" {
+		return true, fmt.Errorf("git token store: repository path not configured")
+	}
+	repo, errOpen := git.PlainOpen(repoDir)
+	if errOpen != nil {
+		return true, fmt.Errorf("git token store: open repo for watcher removal guard: %w", errOpen)
+	}
+	head, errHead := repo.Head()
+	if errHead != nil {
+		if errors.Is(errHead, plumbing.ErrReferenceNotFound) {
+			return true, nil
+		}
+		return true, fmt.Errorf("git token store: inspect head for watcher removal guard: %w", errHead)
+	}
+	commit, errCommit := repo.CommitObject(head.Hash())
+	if errCommit != nil {
+		return true, fmt.Errorf("git token store: inspect commit for watcher removal guard: %w", errCommit)
+	}
+	tree, errTree := commit.Tree()
+	if errTree != nil {
+		return true, fmt.Errorf("git token store: inspect tree for watcher removal guard: %w", errTree)
+	}
+
+	hasExistingPath := false
+	for _, rel := range relPaths {
+		cleanRel := filepath.ToSlash(filepath.Clean(rel))
+		worktreePath := filepath.Join(repoDir, filepath.FromSlash(cleanRel))
+		if _, errStat := os.Stat(worktreePath); errStat == nil {
+			hasExistingPath = true
+			continue
+		} else if !errors.Is(errStat, fs.ErrNotExist) {
+			return true, fmt.Errorf("git token store: stat watcher removal path %s: %w", cleanRel, errStat)
+		}
+
+		if _, errFile := tree.File(cleanRel); errFile == nil {
+			return true, fmt.Errorf("git token store: refusing watcher-originated removal of tracked auth %s; use an explicit delete", cleanRel)
+		} else if !errors.Is(errFile, object.ErrFileNotFound) {
+			return true, fmt.Errorf("git token store: inspect watcher removal path %s: %w", cleanRel, errFile)
+		}
+	}
+	if hasExistingPath {
+		return false, nil
+	}
+	// Explicit GitTokenStore.Delete already removed the path from HEAD. The
+	// subsequent filesystem watcher event is therefore redundant and safe to ignore.
+	return true, nil
 }
 
 func (s *GitTokenStore) resolveDeletePath(id string) (string, error) {
@@ -476,6 +534,9 @@ func (s *GitTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, 
 	metadata := make(map[string]any)
 	if err = json.Unmarshal(data, &metadata); err != nil {
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
+	}
+	if errWeight := cliproxyauth.ValidateAuthWeight(&cliproxyauth.Auth{Metadata: metadata}); errWeight != nil {
+		return nil, errWeight
 	}
 	provider, _ := metadata["type"].(string)
 	if provider == "" {
@@ -838,8 +899,14 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 			continue
 		}
 		if _, err = worktree.Add(rel); err != nil {
+			if errors.Is(err, gitindex.ErrEntryNotFound) {
+				continue
+			}
 			if errors.Is(err, os.ErrNotExist) {
-				if _, errRemove := worktree.Remove(rel); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
+				if _, errRemove := worktree.Remove(rel); errRemove != nil {
+					if errors.Is(errRemove, os.ErrNotExist) || errors.Is(errRemove, gitindex.ErrEntryNotFound) {
+						continue
+					}
 					return fmt.Errorf("git token store: remove %s: %w", rel, errRemove)
 				}
 			} else {
@@ -883,20 +950,32 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 	} else if errRewrite := s.rewriteHeadAsSingleCommit(repo, headRef.Name(), commitHash, message, signature); errRewrite != nil {
 		return errRewrite
 	}
+	return s.pushRepositoryLocked(repo, repoDir)
+}
+
+func (s *GitTokenStore) pushRepositoryLocked(repo *git.Repository, repoDir string) error {
+	if repo == nil {
+		return fmt.Errorf("git token store: repository is nil")
+	}
+	headRef, errHead := repo.Head()
+	if errHead != nil {
+		if errors.Is(errHead, plumbing.ErrReferenceNotFound) {
+			return nil
+		}
+		return fmt.Errorf("git token store: get head for push: %w", errHead)
+	}
 	pushOpts := &git.PushOptions{ClientOptions: s.gitClientOptions(), Force: true}
 	if s.branch != "" {
 		pushOpts.RefSpecs = []config.RefSpec{config.RefSpec("refs/heads/" + s.branch + ":refs/heads/" + s.branch)}
 	} else {
 		// When branch is unset, pin push to the currently checked-out branch.
-		if headRef, err := repo.Head(); err == nil {
-			pushOpts.RefSpecs = []config.RefSpec{config.RefSpec(headRef.Name().String() + ":" + headRef.Name().String())}
-		}
+		pushOpts.RefSpecs = []config.RefSpec{config.RefSpec(headRef.Name().String() + ":" + headRef.Name().String())}
 	}
-	if err = repo.Push(pushOpts); err != nil {
-		if errors.Is(err, git.NoErrAlreadyUpToDate) {
+	if errPush := repo.Push(pushOpts); errPush != nil {
+		if errors.Is(errPush, git.NoErrAlreadyUpToDate) {
 			return nil
 		}
-		return fmt.Errorf("git token store: push: %w", err)
+		return fmt.Errorf("git token store: push: %w", errPush)
 	}
 	s.maybeRunGC(repoDir)
 	return nil

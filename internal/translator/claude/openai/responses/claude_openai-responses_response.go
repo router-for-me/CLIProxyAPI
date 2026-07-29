@@ -34,15 +34,30 @@ type claudeToResponsesState struct {
 	TextBuf            strings.Builder
 	CurrentTextBuf     strings.Builder
 	MessageAnnotations []any
+	MessageItems       []claudeResponsesMessageItem
 	// reasoning state
 	ReasoningActive    bool
 	ReasoningItemID    string
 	ReasoningBuf       strings.Builder
 	ReasoningSignature string
-	ReasoningPartAdded bool
 	ReasoningIndex     int
+	ReasoningItems     []claudeResponsesReasoningItem
 	// usage aggregation
 	Usage claudeResponsesUsageTokens
+}
+
+type claudeResponsesMessageItem struct {
+	ID          string
+	OutputIndex int
+	Text        string
+	Annotations []any
+}
+
+type claudeResponsesReasoningItem struct {
+	ID          string
+	OutputIndex int
+	Text        string
+	Signature   string
 }
 
 type claudeResponsesUsageTokens struct {
@@ -183,10 +198,20 @@ func (st *claudeToResponsesState) finalizeAssistantMessage(nextSeq func() int) [
 	}
 	out = append(out, emitEvent("response.output_item.done", final))
 
+	st.MessageItems = append(st.MessageItems, claudeResponsesMessageItem{
+		ID:          st.CurrentMsgID,
+		OutputIndex: outputIndex,
+		Text:        fullText,
+		Annotations: append([]any(nil), st.MessageAnnotations...),
+	})
 	st.InTextBlock = false
 	st.MessageOpen = false
 	st.ContentPartOpen = false
+	st.CurrentMsgID = ""
+	st.MessageOutputIndex = -1
+	st.TextBuf.Reset()
 	st.CurrentTextBuf.Reset()
+	st.MessageAnnotations = nil
 	return out
 }
 
@@ -224,6 +249,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.TextBuf.Reset()
 			st.CurrentTextBuf.Reset()
 			st.MessageAnnotations = nil
+			st.MessageItems = nil
 			st.ReasoningBuf.Reset()
 			st.ReasoningActive = false
 			st.NextOutputIndex = 0
@@ -237,7 +263,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.ReasoningItemID = ""
 			st.ReasoningSignature = ""
 			st.ReasoningIndex = -1
-			st.ReasoningPartAdded = false
+			st.ReasoningItems = nil
 			st.FuncArgsBuf = make(map[int]*strings.Builder)
 			st.FuncNames = make(map[int]string)
 			st.FuncCallIDs = make(map[int]string)
@@ -268,7 +294,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.InTextBlock = true
 			outputIndex := st.messageOutputIndex()
 			if st.CurrentMsgID == "" {
-				st.CurrentMsgID = fmt.Sprintf("msg_%s_0", st.ResponseID)
+				st.CurrentMsgID = fmt.Sprintf("msg_%s_%d", st.ResponseID, len(st.MessageItems))
 			}
 			if !st.MessageOpen {
 				item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"in_progress","content":[],"role":"assistant"}}`)
@@ -306,6 +332,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.FuncCallIDs[idx] = st.CurrentFCID
 			st.FuncNames[idx] = name
 		} else if typ == "thinking" {
+			out = append(out, st.finalizeAssistantMessage(nextSeq)...)
 			// start reasoning item
 			st.ReasoningActive = true
 			st.ReasoningIndex = st.allocateOutputIndex()
@@ -327,7 +354,6 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			part, _ = sjson.SetBytes(part, "item_id", st.ReasoningItemID)
 			part, _ = sjson.SetBytes(part, "output_index", st.ReasoningIndex)
 			out = append(out, emitEvent("response.reasoning_summary_part.added", part))
-			st.ReasoningPartAdded = true
 		}
 	case "content_block_delta":
 		d := root.Get("delta")
@@ -436,14 +462,21 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			itemDone, _ = sjson.SetBytes(itemDone, "item.id", st.ReasoningItemID)
 			itemDone, _ = sjson.SetBytes(itemDone, "output_index", st.ReasoningIndex)
 			itemDone, _ = sjson.SetBytes(itemDone, "item.encrypted_content", st.ReasoningSignature)
-			if full != "" {
-				summary := []byte(`{"type":"summary_text","text":""}`)
-				summary, _ = sjson.SetBytes(summary, "text", full)
-				itemDone, _ = sjson.SetRawBytes(itemDone, "item.summary.-1", summary)
-			}
+			summary := []byte(`{"type":"summary_text","text":""}`)
+			summary, _ = sjson.SetBytes(summary, "text", full)
+			itemDone, _ = sjson.SetRawBytes(itemDone, "item.summary.-1", summary)
 			out = append(out, emitEvent("response.output_item.done", itemDone))
+			st.ReasoningItems = append(st.ReasoningItems, claudeResponsesReasoningItem{
+				ID:          st.ReasoningItemID,
+				OutputIndex: st.ReasoningIndex,
+				Text:        full,
+				Signature:   st.ReasoningSignature,
+			})
 			st.ReasoningActive = false
-			st.ReasoningPartAdded = false
+			st.ReasoningItemID = ""
+			st.ReasoningBuf.Reset()
+			st.ReasoningSignature = ""
+			st.ReasoningIndex = -1
 		}
 		return noSSEOutput(out)
 	case "message_delta":
@@ -525,27 +558,25 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 
 		// Build response.output from aggregated state
 		outputsWrapper := []byte(`{"arr":[]}`)
-		// reasoning item (if any)
-		if st.ReasoningBuf.Len() > 0 || st.ReasoningPartAdded || st.ReasoningSignature != "" {
+		// reasoning items
+		for _, reasoning := range st.ReasoningItems {
 			item := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[]}`)
-			item, _ = sjson.SetBytes(item, "id", st.ReasoningItemID)
-			item, _ = sjson.SetBytes(item, "encrypted_content", st.ReasoningSignature)
-			if st.ReasoningBuf.Len() > 0 {
-				summary := []byte(`{"type":"summary_text","text":""}`)
-				summary, _ = sjson.SetBytes(summary, "text", st.ReasoningBuf.String())
-				item, _ = sjson.SetRawBytes(item, "summary.-1", summary)
-			}
-			outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, fmt.Sprintf("arr.%d", st.ReasoningIndex), item)
+			item, _ = sjson.SetBytes(item, "id", reasoning.ID)
+			item, _ = sjson.SetBytes(item, "encrypted_content", reasoning.Signature)
+			summary := []byte(`{"type":"summary_text","text":""}`)
+			summary, _ = sjson.SetBytes(summary, "text", reasoning.Text)
+			item, _ = sjson.SetRawBytes(item, "summary.-1", summary)
+			outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, fmt.Sprintf("arr.%d", reasoning.OutputIndex), item)
 		}
-		// assistant message item (if any text)
-		if st.TextBuf.Len() > 0 || st.InTextBlock || st.CurrentMsgID != "" {
+		// assistant message items
+		for _, message := range st.MessageItems {
 			item := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
-			item, _ = sjson.SetBytes(item, "id", st.CurrentMsgID)
-			item, _ = sjson.SetBytes(item, "content.0.text", st.TextBuf.String())
-			if len(st.MessageAnnotations) > 0 {
-				item, _ = sjson.SetBytes(item, "content.0.annotations", st.MessageAnnotations)
+			item, _ = sjson.SetBytes(item, "id", message.ID)
+			item, _ = sjson.SetBytes(item, "content.0.text", message.Text)
+			if len(message.Annotations) > 0 {
+				item, _ = sjson.SetBytes(item, "content.0.annotations", message.Annotations)
 			}
-			outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, fmt.Sprintf("arr.%d", st.MessageOutputIndex), item)
+			outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, fmt.Sprintf("arr.%d", message.OutputIndex), item)
 		}
 		// function_call items (in ascending index order for determinism)
 		if len(st.FuncArgsBuf) > 0 {
@@ -563,8 +594,8 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				}
 			}
 			for _, idx := range idxs {
-				args := ""
-				if b := st.FuncArgsBuf[idx]; b != nil {
+				args := "{}"
+				if b := st.FuncArgsBuf[idx]; b != nil && b.Len() > 0 {
 					args = b.String()
 				}
 				callID := st.FuncCallIDs[idx]
@@ -584,10 +615,11 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			completed, _ = sjson.SetRawBytes(completed, "response.output", []byte(gjson.GetBytes(outputsWrapper, "arr").Raw))
 		}
 
-		reasoningTokens := int64(0)
-		if st.ReasoningBuf.Len() > 0 {
-			reasoningTokens = int64(st.ReasoningBuf.Len() / 4)
+		reasoningLength := 0
+		for _, reasoning := range st.ReasoningItems {
+			reasoningLength += len(reasoning.Text)
 		}
+		reasoningTokens := int64(reasoningLength / 4)
 		usagePresent := st.Usage.HasUsage || reasoningTokens > 0
 		if usagePresent {
 			inputTokens, outputTokens, totalTokens, cachedTokens := st.Usage.OpenAIResponsesUsage()
@@ -868,10 +900,18 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 
 	// Usage
 	inputTokens, outputTokens, totalTokens, cachedTokens := usageTokens.OpenAIResponsesUsage()
-	out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
-	out, _ = sjson.SetBytes(out, "usage.input_tokens_details.cached_tokens", cachedTokens)
-	out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
-	out, _ = sjson.SetBytes(out, "usage.total_tokens", totalTokens)
+	if inputTokens != 0 {
+		out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
+	}
+	if cachedTokens != 0 {
+		out, _ = sjson.SetBytes(out, "usage.input_tokens_details.cached_tokens", cachedTokens)
+	}
+	if outputTokens != 0 {
+		out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
+	}
+	if totalTokens != 0 {
+		out, _ = sjson.SetBytes(out, "usage.total_tokens", totalTokens)
+	}
 	if reasoningBuf.Len() > 0 {
 		// Rough estimate similar to chat completions
 		reasoningTokens := int64(len(reasoningBuf.String()) / 4)
