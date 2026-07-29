@@ -300,11 +300,41 @@ func TestAttachRequestLogSourcesUsesLoggerLogsDir(t *testing.T) {
 	}
 }
 
+func TestAttachRequestLogSourcesIncludesUpstreamWebsocketTimelineForHTTP(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	logger := logging.NewFileRequestLoggerWithFormat(true, t.TempDir(), "", 0, "json")
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{}`))
+
+	attachRequestLogSources(c, logger, true)
+	defer cleanupFileBodySourcesFromContext(c)
+
+	value, exists := c.Get(logging.APIWebsocketTimelineSourceContextKey)
+	if !exists {
+		t.Fatal("expected upstream websocket timeline source for ordinary HTTP request")
+	}
+	source, ok := value.(*logging.FileBodySource)
+	if !ok || source == nil {
+		t.Fatalf("source type = %T", value)
+	}
+	payload := bytes.Repeat([]byte("frame"), (8<<20)/5+1)
+	if err := source.AppendPart(payload); err != nil {
+		t.Fatalf("AppendPart failed: %v", err)
+	}
+	if !source.Truncated() {
+		t.Fatal("upstream websocket timeline source is not bounded")
+	}
+}
+
 func cleanupFileBodySourcesFromContext(c *gin.Context) {
 	if c == nil {
 		return
 	}
 	for _, key := range []string{
+		logging.APIRequestSourceContextKey,
+		logging.APIResponseSourceContextKey,
 		logging.WebsocketTimelineSourceContextKey,
 		logging.APIWebsocketTimelineSourceContextKey,
 	} {
