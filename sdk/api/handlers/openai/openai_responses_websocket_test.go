@@ -2472,6 +2472,24 @@ func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
 	}
 }
 
+func TestResponsesWebsocketTimelineUsesBoundedJSONSource(t *testing.T) {
+	logger := requestlogging.NewFileRequestLoggerWithFormat(true, t.TempDir(), "", 0, "json")
+	source, err := logger.NewFileBodySource("websocket-timeline")
+	if err != nil {
+		t.Fatalf("NewFileBodySource failed: %v", err)
+	}
+	defer source.Cleanup()
+	timeline := newWebsocketTimelineLog(true, source)
+	timeline.BeginRequest()
+	payload := bytes.Repeat([]byte("x"), 64<<10)
+	for !source.Truncated() {
+		timeline.Append("response.output_text.delta", payload, time.Now())
+	}
+	if !source.Truncated() {
+		t.Fatal("downstream websocket timeline source is not bounded")
+	}
+}
+
 func TestResponsesWebsocketMirrorsUpstreamMessageTooBigDisconnect(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
