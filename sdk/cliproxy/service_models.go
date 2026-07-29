@@ -153,7 +153,10 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		}
 		models = applyExcludedModels(models, excluded)
 	case "qwen":
-		models = registry.GetQwenModels()
+		models = s.fetchQwenModelsForAuth(ctx, a)
+		if len(models) == 0 {
+			models = registry.GetQwenModels()
+		}
 		if entry := s.resolveConfigQwenKey(a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildQwenConfigModels(entry)
