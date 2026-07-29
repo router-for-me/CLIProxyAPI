@@ -481,6 +481,11 @@ func TestMapModelToKiro_MapsClaudeOpus47Variants(t *testing.T) {
 			expected: "gpt-5.6-terra",
 		},
 		{
+			name:     "canonical gpt version remains unchanged",
+			model:    "gpt-5.6-terra",
+			expected: "gpt-5.6-terra",
+		},
+		{
 			name:     "gpt version with trailing codename (sol)",
 			model:    "kiro-gpt-5-6-sol",
 			expected: "gpt-5.6-sol",
@@ -496,13 +501,28 @@ func TestMapModelToKiro_MapsClaudeOpus47Variants(t *testing.T) {
 			expected: "kimi-k2.7-code",
 		},
 		{
+			name:     "canonical kimi version remains unchanged",
+			model:    "kimi-k2.7-code",
+			expected: "kimi-k2.7-code",
+		},
+		{
 			name:     "deepseek versioned",
 			model:    "kiro-deepseek-3-2",
 			expected: "deepseek-3.2",
 		},
 		{
+			name:     "canonical deepseek version remains unchanged",
+			model:    "deepseek-3.2",
+			expected: "deepseek-3.2",
+		},
+		{
 			name:     "grok version keeps trailing build segment",
 			model:    "kiro-grok-4-20-0309-reasoning",
+			expected: "grok-4.20-0309-reasoning",
+		},
+		{
+			name:     "canonical grok version remains unchanged",
+			model:    "grok-4.20-0309-reasoning",
 			expected: "grok-4.20-0309-reasoning",
 		},
 		{
@@ -520,12 +540,21 @@ func TestMapModelToKiro_MapsClaudeOpus47Variants(t *testing.T) {
 			model:    "kiro-future-model-9",
 			expected: "future-model-9",
 		},
+		{
+			name:     "unknown date-like numeric ID passes through unchanged",
+			model:    "kiro-model-2024-05-preview",
+			expected: "model-2024-05-preview",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := executor.mapModelToKiro(tt.model); got != tt.expected {
+			got := executor.mapModelToKiro(tt.model)
+			if got != tt.expected {
 				t.Fatalf("mapModelToKiro(%q) = %q, want %q", tt.model, got, tt.expected)
+			}
+			if normalizedAgain := executor.mapModelToKiro(got); normalizedAgain != got {
+				t.Fatalf("mapModelToKiro() is not idempotent: first = %q, second = %q", got, normalizedAgain)
 			}
 		})
 	}

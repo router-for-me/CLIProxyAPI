@@ -1516,20 +1516,17 @@ func getEffectiveProfileArnWithWarning(auth *cliproxyauth.Auth, profileArn strin
 
 // mapModelToKiro maps external model names to Kiro backend model IDs.
 //
-// It accepts any of the surface forms clients use and returns the ID that
-// Kiro's API expects. The transformation is algorithmic so new models added
-// by Kiro (e.g. glm-5, deepseek-3.2, future releases) route correctly
-// without code changes:
+// It accepts the supported surface forms clients use and returns the ID that
+// Kiro's API expects:
 //
 //  1. Trim surrounding whitespace and lowercase.
 //  2. Strip the leading "kiro-" or "amazonq-" prefix if present.
 //  3. Strip the trailing "-agentic" suffix (agentic variants share the
 //     underlying backend ID; the agentic behavior is applied separately
 //     via determineAgenticMode).
-//  4. Normalize the version segment from dashes to dots — e.g.
-//     "claude-sonnet-4-5" → "claude-sonnet-4.5", "minimax-m2-1" →
-//     "minimax-m2.1". Only the last "-<digit>" pair is rewritten so
-//     identifiers like "qwen3-coder-next" pass through unchanged.
+//  4. Normalize version separators for known aliases derived from canonical
+//     model IDs — e.g. "claude-sonnet-4-5" → "claude-sonnet-4.5" and
+//     "gpt-5-6-terra" → "gpt-5.6-terra".
 //  5. Map a few historical dated aliases (e.g. "claude-sonnet-4-5-20250929")
 //     back to their canonical version.
 //
@@ -1559,9 +1556,8 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 	//    canonical version. Only handles the common 8-digit date suffix.
 	m = trimKiroDateSuffix(m)
 
-	// 4. Normalize final version segment: last "-<digit>" pair becomes "."
-	//    e.g. "claude-sonnet-4-5" → "claude-sonnet-4.5", but "qwen3-coder-next"
-	//    is left alone because the final segment isn't a digit.
+	// 4. Normalize only known hyphenated aliases. Broad digit-based rewriting
+	//    would corrupt canonical or unrelated numeric IDs.
 	m = normalizeKiroVersion(m)
 
 	if m != original {
@@ -1585,30 +1581,30 @@ func trimKiroDateSuffix(s string) string {
 	return s[:len(s)-9]
 }
 
-// normalizeKiroVersion converts the version separator from a dash to a dot.
-// The version separator is the FIRST dash that sits directly between two
-// digits (i.e. "<digit>-<digit>"), since that is how Kiro encodes the
-// "major.minor" version in its backend IDs. For example:
-//   - "claude-sonnet-4-5"   → "claude-sonnet-4.5"
-//   - "claude-opus-4-7"     → "claude-opus-4.7"
-//   - "gpt-5-6-terra"       → "gpt-5.6-terra" (version sits mid-identifier)
-//   - "minimax-m2-1"        → "minimax-m2.1" (the "m2" retains its digit)
-//   - "kimi-k2-7-code"      → "kimi-k2.7-code"
-//   - "qwen3-coder-next"    → "qwen3-coder-next" (no digit-dash-digit pair)
-//   - "glm-5"               → "glm-5" (single digit segment; left alone)
-//   - "claude-sonnet-5"     → "claude-sonnet-5" (dash is letter-digit)
-//
-// Only the first such dash is rewritten so that trailing build/date segments
-// like "grok-4-20-0309" collapse to "grok-4.20-0309" rather than eating the
-// "-0309" separator too.
+var kiroVersionAliases = [...]struct {
+	hyphenated string
+	canonical  string
+}{
+	{"claude-sonnet-4-5", "claude-sonnet-4.5"},
+	{"claude-opus-4-7", "claude-opus-4.7"},
+	{"minimax-m2-5", "minimax-m2.5"},
+	{"gpt-5-6", "gpt-5.6"},
+	{"kimi-k2-7", "kimi-k2.7"},
+	{"deepseek-3-2", "deepseek-3.2"},
+	{"grok-4-20", "grok-4.20"},
+}
+
+// normalizeKiroVersion reverses the hyphenated version aliases generated for
+// known canonical Kiro model families. Matching the full alias prefix keeps
+// suffixes such as "-terra" and "-0309-reasoning", while canonical dotted IDs
+// and unknown numeric IDs pass through unchanged.
 func normalizeKiroVersion(s string) string {
-	for i := 1; i < len(s)-1; i++ {
-		if s[i] != '-' {
-			continue
+	for _, alias := range kiroVersionAliases {
+		if s == alias.hyphenated {
+			return alias.canonical
 		}
-		prev, next := s[i-1], s[i+1]
-		if prev >= '0' && prev <= '9' && next >= '0' && next <= '9' {
-			return s[:i] + "." + s[i+1:]
+		if strings.HasPrefix(s, alias.hyphenated+"-") {
+			return alias.canonical + s[len(alias.hyphenated):]
 		}
 	}
 	return s
