@@ -455,9 +455,10 @@ func TestExecuteStreamWithAuthManager_ResolvesBootstrapRetryHeadersBeforeReturn(
 }
 
 type bootstrapStreamExecutor struct {
-	mu     sync.Mutex
-	calls  int
-	stream func(context.Context, int) (*coreexecutor.StreamResult, error)
+	mu            sync.Mutex
+	calls         int
+	stream        func(context.Context, int) (*coreexecutor.StreamResult, error)
+	streamForAuth func(context.Context, *coreauth.Auth, int) (*coreexecutor.StreamResult, error)
 }
 
 func (*bootstrapStreamExecutor) Identifier() string { return "bootstrap-test" }
@@ -466,11 +467,14 @@ func (e *bootstrapStreamExecutor) Execute(context.Context, *coreauth.Auth, coree
 	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
 }
 
-func (e *bootstrapStreamExecutor) ExecuteStream(ctx context.Context, _ *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+func (e *bootstrapStreamExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	e.mu.Lock()
 	e.calls++
 	call := e.calls
 	e.mu.Unlock()
+	if e.streamForAuth != nil {
+		return e.streamForAuth(ctx, auth, call)
+	}
 	return e.stream(ctx, call)
 }
 
@@ -638,6 +642,72 @@ func TestExecuteStreamWithAuthManager_TTFTTimeoutCancelsSilentStream(t *testing.
 	}
 	if executor.Calls() != 2 {
 		t.Fatalf("stream attempts = %d, want 2", executor.Calls())
+	}
+}
+
+func TestExecuteStreamWithAuthManager_RetriesTTFTWithNextCredentials(t *testing.T) {
+	var attemptsMu sync.Mutex
+	var attempts []string
+	executor := &bootstrapStreamExecutor{streamForAuth: func(ctx context.Context, auth *coreauth.Auth, _ int) (*coreexecutor.StreamResult, error) {
+		attemptsMu.Lock()
+		attempts = append(attempts, auth.ID)
+		attemptsMu.Unlock()
+		switch auth.ID {
+		case "auth-a":
+			chunks := make(chan coreexecutor.StreamChunk, 2)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("drop")}
+			chunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"}}
+			close(chunks)
+			return &coreexecutor.StreamResult{Chunks: chunks}, nil
+		case "auth-b":
+			chunks := make(chan coreexecutor.StreamChunk)
+			go func() {
+				<-ctx.Done()
+				close(chunks)
+			}()
+			return &coreexecutor.StreamResult{Chunks: chunks}, nil
+		default:
+			chunks := make(chan coreexecutor.StreamChunk, 1)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("ok")}
+			close(chunks)
+			return &coreexecutor.StreamResult{Chunks: chunks}, nil
+		}
+	}}
+	manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
+	manager.RegisterExecutor(executor)
+	for _, authID := range []string{"auth-a", "auth-b", "auth-c"} {
+		auth := &coreauth.Auth{ID: authID, Provider: executor.Identifier(), Status: coreauth.StatusActive}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("manager.Register(%s): %v", authID, errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(authID, auth.Provider, []*registry.ModelInfo{{ID: "bootstrap-model"}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+	}
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{
+		BootstrapRetries:   2,
+		TTFTTimeoutSeconds: 1,
+	}}, manager)
+	handler.SetPluginHost(&handlerInterceptorTestHost{interceptStreamChunk: func(_ context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+		return pluginapi.StreamChunkInterceptResponse{Body: cloneBytes(req.Body), DropChunk: string(req.Body) == "drop"}
+	}})
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "bootstrap-model", []byte(`{"model":"bootstrap-model"}`), "")
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	if string(got) != "ok" {
+		t.Fatalf("stream payload = %q, want ok", got)
+	}
+	attemptsMu.Lock()
+	defer attemptsMu.Unlock()
+	if gotAttempts := strings.Join(attempts, ","); gotAttempts != "auth-a,auth-b,auth-c" {
+		t.Fatalf("auth attempts = %q, want auth-a,auth-b,auth-c", gotAttempts)
 	}
 }
 

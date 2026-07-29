@@ -519,7 +519,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
-	tried := make(map[string]struct{})
+	tried := excludedAuthIDsFromMetadata(opts.Metadata)
 	attempted := make(map[string]struct{})
 	var lastErr error
 	for {
@@ -986,6 +986,20 @@ func pinnedAuthIDFromMetadata(meta map[string]any) string {
 	default:
 		return ""
 	}
+}
+
+func excludedAuthIDsFromMetadata(meta map[string]any) map[string]struct{} {
+	tried := make(map[string]struct{})
+	if len(meta) == 0 {
+		return tried
+	}
+	excluded, _ := meta[cliproxyexecutor.ExcludedAuthIDsMetadataKey].(map[string]struct{})
+	for authID := range excluded {
+		if authID = strings.TrimSpace(authID); authID != "" {
+			tried[authID] = struct{}{}
+		}
+	}
+	return tried
 }
 
 func disallowFreeAuthFromMetadata(meta map[string]any) bool {
