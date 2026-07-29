@@ -240,5 +240,8 @@ func (l *FileRequestLogger) NewFileBodySource(prefix string) (*FileBodySource, e
 	if errEnsure := l.ensureLogsDir(); errEnsure != nil {
 		return nil, errEnsure
 	}
+	if l.currentFormat() == "json" && strings.EqualFold(strings.TrimSpace(prefix), "api-request") {
+		return newLimitedFileBodySourceInDir(l.logsDir, prefix, maxJSONFileBackedSectionBytes)
+	}
 	return NewFileBodySourceInDir(l.logsDir, prefix)
 }

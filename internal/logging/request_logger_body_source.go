@@ -13,10 +13,22 @@ import (
 
 // FileBodySource stores large log sections as ordered temp-file parts.
 type FileBodySource struct {
-	mu      sync.Mutex
-	dir     string
-	paths   []string
-	cleaned bool
+	mu           sync.Mutex
+	dir          string
+	paths        []string
+	cleaned      bool
+	maxBytes     int
+	bytesWritten int
+	truncated    bool
+}
+
+func newLimitedFileBodySourceInDir(baseDir, prefix string, maxBytes int) (*FileBodySource, error) {
+	source, err := NewFileBodySourceInDir(baseDir, prefix)
+	if err != nil {
+		return nil, err
+	}
+	source.maxBytes = maxBytes
+	return source, nil
 }
 
 // NewFileBodySourceInDir creates a temp-backed source under baseDir.
@@ -117,6 +129,17 @@ func (s *FileBodySource) AppendBytes(data []byte) error {
 	if s.cleaned {
 		return fmt.Errorf("file body source has been cleaned")
 	}
+	if s.maxBytes > 0 {
+		remaining := s.maxBytes - s.bytesWritten
+		if remaining <= 0 {
+			s.truncated = true
+			return nil
+		}
+		if len(data) > remaining {
+			data = data[:remaining]
+			s.truncated = true
+		}
+	}
 	if errMkdir := os.MkdirAll(s.dir, 0755); errMkdir != nil {
 		return errMkdir
 	}
@@ -135,13 +158,24 @@ func (s *FileBodySource) AppendBytes(data []byte) error {
 		return errOpen
 	}
 
-	_, writeErr := file.Write(data)
+	written, writeErr := file.Write(data)
+	s.bytesWritten += written
 	if errClose := file.Close(); errClose != nil {
 		if writeErr == nil {
 			writeErr = errClose
 		}
 	}
 	return writeErr
+}
+
+// Truncated reports whether the source dropped bytes because of its write limit.
+func (s *FileBodySource) Truncated() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.truncated
 }
 
 // HasPayload reports whether any detail parts were recorded.

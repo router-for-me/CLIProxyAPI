@@ -725,6 +725,45 @@ func TestJSONRequestLoggingCompactsStructuredPayloadsForNDJSON(t *testing.T) {
 	}
 }
 
+func TestJSONAPIRequestSourceCapsWhileSpooling(t *testing.T) {
+	logger := NewFileRequestLoggerWithFormat(true, t.TempDir(), "", 10, "json")
+	source, err := logger.NewFileBodySource("api-request")
+	if err != nil {
+		t.Fatalf("NewFileBodySource failed: %v", err)
+	}
+	defer source.Cleanup()
+	payload := bytes.Repeat([]byte("x"), maxJSONFileBackedSectionBytes+1024)
+	if err := source.AppendBytes(payload); err != nil {
+		t.Fatalf("AppendBytes failed: %v", err)
+	}
+	if !source.Truncated() {
+		t.Fatal("source was not marked truncated")
+	}
+	paths := source.Paths()
+	if len(paths) != 1 {
+		t.Fatalf("source paths = %d, want 1", len(paths))
+	}
+	info, err := os.Stat(paths[0])
+	if err != nil {
+		t.Fatalf("stat source: %v", err)
+	}
+	if info.Size() != maxJSONFileBackedSectionBytes {
+		t.Fatalf("source size = %d, want %d", info.Size(), maxJSONFileBackedSectionBytes)
+	}
+
+	var buf bytes.Buffer
+	if err := logger.writeJSONLog(&buf, "/v1/responses", "POST", nil, nil, "", false, 200, nil, nil, "", false, nil, nil, source, nil, nil, nil, nil, nil, nil, nil, time.Now(), time.Time{}, "http", "http"); err != nil {
+		t.Fatalf("writeJSONLog failed: %v", err)
+	}
+	var entry jsonLogPayload
+	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
+		t.Fatalf("unmarshal JSON log: %v", err)
+	}
+	if !entry.APIRequestTruncated {
+		t.Fatal("api_request_truncated = false, want true")
+	}
+}
+
 func TestJSONStreamingRequestLoggingMarksQueueDropsTruncated(t *testing.T) {
 	writer := &FileStreamingLogWriter{chunkChan: make(chan []byte, 1), format: "json"}
 	writer.chunkChan <- []byte("queued")

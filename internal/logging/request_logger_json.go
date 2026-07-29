@@ -285,6 +285,7 @@ func (w *limitedJSONLogWriter) Write(payload []byte) (int, error) {
 
 func mergeJSONSectionLimited(source *FileBodySource, inline []byte, limit int) ([]byte, bool, error) {
 	writer := &limitedJSONLogWriter{limit: limit}
+	truncated := source != nil && source.Truncated()
 	if source != nil && source.HasPayload() {
 		if errWrite := source.WriteTo(writer); errWrite != nil {
 			if errors.Is(errWrite, errJSONLogSectionLimit) {
@@ -301,5 +302,5 @@ func mergeJSONSectionLimited(source *FileBodySource, inline []byte, limit int) (
 			return nil, false, errWrite
 		}
 	}
-	return writer.buffer.Bytes(), false, nil
+	return writer.buffer.Bytes(), truncated, nil
 }
