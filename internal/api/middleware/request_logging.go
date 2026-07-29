@@ -57,6 +57,10 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			c.Next()
 			return
 		}
+		if formatter, ok := logger.(interface{ RequestLogFormat() string }); ok {
+			requestInfo.LogFormat = formatter.RequestLogFormat()
+			c.Set(requestLogFormatContextKey, requestInfo.LogFormat)
+		}
 
 		// Create response writer wrapper
 		wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
@@ -80,6 +84,10 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 
 type fileBodySourceFactory interface {
 	NewFileBodySource(prefix string) (*logging.FileBodySource, error)
+}
+
+type formattedFileBodySourceFactory interface {
+	NewFileBodySourceWithFormat(prefix, format string) (*logging.FileBodySource, error)
 }
 
 type deferredRequestBodyCapture struct {
@@ -251,21 +259,44 @@ func attachRequestLogSources(c *gin.Context, logger logging.RequestLogger, logge
 	if !ok || factory == nil {
 		return
 	}
-	if source, errSource := factory.NewFileBodySource("api-request"); errSource == nil {
+	newSource := factory.NewFileBodySource
+	if formattedFactory, ok := logger.(formattedFileBodySourceFactory); ok {
+		format := requestLogFormatFromContext(c)
+		if format == "" {
+			if formatter, ok := logger.(interface{ RequestLogFormat() string }); ok {
+				format = formatter.RequestLogFormat()
+			}
+		}
+		newSource = func(prefix string) (*logging.FileBodySource, error) {
+			return formattedFactory.NewFileBodySourceWithFormat(prefix, format)
+		}
+	}
+	if source, errSource := newSource("api-request"); errSource == nil {
 		c.Set(logging.APIRequestSourceContextKey, source)
 	}
-	if source, errSource := factory.NewFileBodySource("api-response"); errSource == nil {
+	if source, errSource := newSource("api-response"); errSource == nil {
 		c.Set(logging.APIResponseSourceContextKey, source)
 	}
-	if source, errSource := factory.NewFileBodySource("api-websocket-timeline"); errSource == nil {
+	if source, errSource := newSource("api-websocket-timeline"); errSource == nil {
 		c.Set(logging.APIWebsocketTimelineSourceContextKey, source)
 	}
 	if !isResponsesWebsocketUpgrade(c.Request) {
 		return
 	}
-	if source, errSource := factory.NewFileBodySource("websocket-timeline"); errSource == nil {
+	if source, errSource := newSource("websocket-timeline"); errSource == nil {
 		c.Set(logging.WebsocketTimelineSourceContextKey, source)
 	}
+}
+
+const requestLogFormatContextKey = "REQUEST_LOG_FORMAT"
+
+func requestLogFormatFromContext(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	value, _ := c.Get(requestLogFormatContextKey)
+	format, _ := value.(string)
+	return format
 }
 
 func shouldSkipMethodForRequestLogging(req *http.Request) bool {

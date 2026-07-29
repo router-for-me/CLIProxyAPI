@@ -117,7 +117,11 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 	}
 	filePath := filepath.Join(l.logsDir, filename)
 
-	requestBodyPath, requestBodyTruncated, errTemp := l.writeRequestBodyTempFile(body)
+	format := requestLogFormatFromSources(apiRequestSource, apiResponseSource, websocketTimelineSource, apiWebsocketTimelineSource)
+	if format == "" {
+		format = l.currentFormat()
+	}
+	requestBodyPath, requestBodyTruncated, errTemp := l.writeRequestBodyTempFile(body, format)
 	if errTemp != nil {
 		log.WithError(errTemp).Warn("failed to create request body temp file, falling back to direct write")
 	}
@@ -196,6 +200,12 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 //   - StreamingLogWriter: A writer for streaming response chunks
 //   - error: An error if logging initialization fails, nil otherwise
 func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (StreamingLogWriter, error) {
+	return l.LogStreamingRequestWithFormat(url, method, headers, body, requestID, l.currentFormat())
+}
+
+// LogStreamingRequestWithFormat starts streaming logging with a per-request format snapshot.
+func (l *FileRequestLogger) LogStreamingRequestWithFormat(url, method string, headers map[string][]string, body []byte, requestID, format string) (StreamingLogWriter, error) {
+	format = normalizeRequestLogFormat(format)
 	if !l.enabled {
 		return &NoOpStreamingLogWriter{}, nil
 	}
@@ -205,7 +215,7 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 		if client == nil || !client.HeartbeatOK() {
 			return &NoOpStreamingLogWriter{}, nil
 		}
-		return newHomeStreamingLogWriter(url, method, headers, body, requestID, l.currentFormat()), nil
+		return newHomeStreamingLogWriter(url, method, headers, body, requestID, format), nil
 	}
 
 	// Ensure logs directory exists
@@ -224,7 +234,7 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 		requestHeaders[key] = headerValues
 	}
 
-	requestBodyPath, requestBodyTruncated, errTemp := l.writeRequestBodyTempFile(body)
+	requestBodyPath, requestBodyTruncated, errTemp := l.writeRequestBodyTempFile(body, format)
 	if errTemp != nil {
 		return nil, fmt.Errorf("failed to create request body temp file: %w", errTemp)
 	}
@@ -250,7 +260,7 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 		chunkChan:            make(chan []byte, 100), // Buffered channel for async writes
 		closeChan:            make(chan struct{}),
 		errorChan:            make(chan error, 1),
-		format:               l.currentFormat(),
+		format:               format,
 	}
 
 	// Start async writer goroutine
@@ -397,13 +407,13 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 	return nil
 }
 
-func (l *FileRequestLogger) writeRequestBodyTempFile(body []byte) (string, bool, error) {
+func (l *FileRequestLogger) writeRequestBodyTempFile(body []byte, format string) (string, bool, error) {
 	tmpFile, errCreate := os.CreateTemp(l.logsDir, "request-body-*.tmp")
 	if errCreate != nil {
 		return "", false, errCreate
 	}
 	tmpPath := tmpFile.Name()
-	truncated := l.currentFormat() == "json" && len(body) > maxJSONFileBackedSectionBytes
+	truncated := normalizeRequestLogFormat(format) == "json" && len(body) > maxJSONFileBackedSectionBytes
 	if truncated {
 		body = body[:maxJSONFileBackedSectionBytes]
 	}

@@ -210,6 +210,11 @@ func (l *FileRequestLogger) currentFormat() string {
 	return "text"
 }
 
+// RequestLogFormat returns the normalized format used for newly started requests.
+func (l *FileRequestLogger) RequestLogFormat() string {
+	return l.currentFormat()
+}
+
 // IsEnabled returns whether request logging is currently enabled.
 //
 // Returns:
@@ -234,16 +239,30 @@ func (l *FileRequestLogger) SetErrorLogsMaxFiles(maxFiles int) {
 
 // NewFileBodySource creates a temp-backed source under the request log directory.
 func (l *FileRequestLogger) NewFileBodySource(prefix string) (*FileBodySource, error) {
+	return l.NewFileBodySourceWithFormat(prefix, l.currentFormat())
+}
+
+// NewFileBodySourceWithFormat creates a source using a per-request format snapshot.
+func (l *FileRequestLogger) NewFileBodySourceWithFormat(prefix, format string) (*FileBodySource, error) {
 	if l == nil {
 		return nil, fmt.Errorf("file request logger is nil")
 	}
 	if errEnsure := l.ensureLogsDir(); errEnsure != nil {
 		return nil, errEnsure
 	}
-	if l.currentFormat() == "json" && jsonFileBodySourceLimited(prefix) {
-		return newLimitedFileBodySourceInDir(l.logsDir, prefix, maxJSONFileBackedSectionBytes)
+	format = normalizeRequestLogFormat(format)
+	if format == "json" && jsonFileBodySourceLimited(prefix) {
+		source, err := newLimitedFileBodySourceInDir(l.logsDir, prefix, maxJSONFileBackedSectionBytes)
+		if source != nil {
+			source.format = format
+		}
+		return source, err
 	}
-	return NewFileBodySourceInDir(l.logsDir, prefix)
+	source, err := NewFileBodySourceInDir(l.logsDir, prefix)
+	if source != nil {
+		source.format = format
+	}
+	return source, err
 }
 
 func jsonFileBodySourceLimited(prefix string) bool {

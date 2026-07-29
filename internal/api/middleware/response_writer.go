@@ -28,6 +28,7 @@ type RequestInfo struct {
 	RequestID           string                      // RequestID is the unique identifier for the request.
 	Timestamp           time.Time                   // Timestamp is when the request was received.
 	deferredBodyCapture *deferredRequestBodyCapture // deferredBodyCapture spools large error-only request bodies.
+	LogFormat           string
 }
 
 // ResponseWriterWrapper wraps the standard gin.ResponseWriter to intercept and log response data.
@@ -170,13 +171,15 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 
 	// If streaming, initialize streaming log writer
 	if w.isStreaming && w.logger.IsEnabled() {
-		streamWriter, err := w.logger.LogStreamingRequest(
-			w.requestInfo.URL,
-			w.requestInfo.Method,
-			w.requestInfo.Headers,
-			w.requestInfo.Body,
-			w.requestInfo.RequestID,
-		)
+		var streamWriter logging.StreamingLogWriter
+		var err error
+		if loggerWithFormat, ok := w.logger.(interface {
+			LogStreamingRequestWithFormat(string, string, map[string][]string, []byte, string, string) (logging.StreamingLogWriter, error)
+		}); ok {
+			streamWriter, err = loggerWithFormat.LogStreamingRequestWithFormat(w.requestInfo.URL, w.requestInfo.Method, w.requestInfo.Headers, w.requestInfo.Body, w.requestInfo.RequestID, w.requestInfo.LogFormat)
+		} else {
+			streamWriter, err = w.logger.LogStreamingRequest(w.requestInfo.URL, w.requestInfo.Method, w.requestInfo.Headers, w.requestInfo.Body, w.requestInfo.RequestID)
+		}
 		if err == nil {
 			w.streamWriter = streamWriter
 			w.chunkChannel = make(chan []byte, 100) // Buffered channel for async writes

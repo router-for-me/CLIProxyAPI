@@ -48,7 +48,11 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	isWebsocketTranscript := hasSectionPayload(websocketTimeline) || hasFileBodySourcePayload(websocketTimelineSource)
 	downstreamTransport := inferDownstreamTransport(requestHeaders, websocketTimeline, websocketTimelineSource)
 	upstreamTransport := inferUpstreamTransport(apiRequest, apiRequestSource, apiResponse, apiResponseSource, apiWebsocketTimeline, apiWebsocketTimelineSource, apiResponseErrors)
-	if l.currentFormat() == "json" {
+	format := requestLogFormatFromSources(apiRequestSource, apiResponseSource, websocketTimelineSource, apiWebsocketTimelineSource)
+	if format == "" {
+		format = l.currentFormat()
+	}
+	if format == "json" {
 		return l.writeJSONLog(w, url, method, requestHeaders, requestBody, requestBodyPath, requestBodyTruncated, statusCode, responseHeaders, response, "", false, decompressErr, apiRequest, apiRequestSource, apiResponse, apiResponseSource, apiResponseErrors, websocketTimeline, websocketTimelineSource, apiWebsocketTimeline, apiWebsocketTimelineSource, requestTimestamp, apiResponseTimestamp, downstreamTransport, upstreamTransport)
 	}
 	if errWrite := writeRequestInfoWithBody(w, url, method, requestHeaders, requestBody, requestBodyPath, requestTimestamp, downstreamTransport, upstreamTransport, !isWebsocketTranscript); errWrite != nil {
@@ -76,6 +80,15 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 		return nil
 	}
 	return writeResponseSection(w, statusCode, true, responseHeaders, bytes.NewReader(response), decompressErr, true)
+}
+
+func requestLogFormatFromSources(sources ...*FileBodySource) string {
+	for _, source := range sources {
+		if format := source.Format(); format != "" {
+			return format
+		}
+	}
+	return ""
 }
 
 func writeRequestInfoWithBody(

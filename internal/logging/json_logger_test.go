@@ -745,7 +745,7 @@ func TestLimitedFileBodySourceWrites(t *testing.T) {
 func TestJSONRequestBodyTempFileCapsWhileSpooling(t *testing.T) {
 	logger := NewFileRequestLoggerWithFormat(true, t.TempDir(), "", 10, "json")
 	payload := bytes.Repeat([]byte("x"), maxJSONFileBackedSectionBytes+1024)
-	path, truncated, err := logger.writeRequestBodyTempFile(payload)
+	path, truncated, err := logger.writeRequestBodyTempFile(payload, "json")
 	if err != nil {
 		t.Fatalf("writeRequestBodyTempFile failed: %v", err)
 	}
@@ -915,6 +915,29 @@ func TestJSONStreamingRequestLoggingPreservesWebsocketSourceTruncation(t *testin
 	}
 	if !entry.APIWebsocketTimelineTruncated {
 		t.Fatal("api_websocket_timeline_truncated = false, want true")
+	}
+}
+
+func TestRequestLogFormatSnapshotSurvivesReload(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := NewFileRequestLoggerWithFormat(true, tempDir, "", 10, "json")
+	source, err := logger.NewFileBodySourceWithFormat("api-request", "json")
+	if err != nil {
+		t.Fatalf("NewFileBodySourceWithFormat failed: %v", err)
+	}
+	if err := source.AppendBytes([]byte(`{"model":"gpt-5"}`)); err != nil {
+		t.Fatalf("AppendBytes failed: %v", err)
+	}
+	logger.SetFormat("text")
+	if err := logger.LogRequestWithOptionsAndAllSources(
+		"/v1/responses", "POST", nil, nil, 200, nil, nil,
+		nil, nil, nil, source, nil, nil, nil, nil, nil, false,
+		"req-format-snapshot-123", time.Now(), time.Time{},
+	); err != nil {
+		t.Fatalf("LogRequestWithOptionsAndAllSources failed: %v", err)
+	}
+	if data := readOnlyLogFile(t, tempDir); !json.Valid(data) {
+		t.Fatalf("request finalized with reloaded text format: %q", data)
 	}
 }
 

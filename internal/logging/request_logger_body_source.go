@@ -20,6 +20,17 @@ type FileBodySource struct {
 	maxBytes     int
 	bytesWritten int
 	truncated    bool
+	format       string
+}
+
+// Format returns the request-log format captured when the source was created.
+func (s *FileBodySource) Format() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.format
 }
 
 func newLimitedFileBodySourceInDir(baseDir, prefix string, maxBytes int) (*FileBodySource, error) {
