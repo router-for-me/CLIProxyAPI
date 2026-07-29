@@ -82,6 +82,7 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 			requestHeaders,
 			body,
 			"",
+			false,
 			websocketTimeline,
 			websocketTimelineSource,
 			apiRequest,
@@ -116,7 +117,7 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 	}
 	filePath := filepath.Join(l.logsDir, filename)
 
-	requestBodyPath, errTemp := l.writeRequestBodyTempFile(body)
+	requestBodyPath, requestBodyTruncated, errTemp := l.writeRequestBodyTempFile(body)
 	if errTemp != nil {
 		log.WithError(errTemp).Warn("failed to create request body temp file, falling back to direct write")
 	}
@@ -146,6 +147,7 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 		requestHeaders,
 		body,
 		requestBodyPath,
+		requestBodyTruncated,
 		websocketTimeline,
 		websocketTimelineSource,
 		apiRequest,
@@ -222,7 +224,7 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 		requestHeaders[key] = headerValues
 	}
 
-	requestBodyPath, errTemp := l.writeRequestBodyTempFile(body)
+	requestBodyPath, requestBodyTruncated, errTemp := l.writeRequestBodyTempFile(body)
 	if errTemp != nil {
 		return nil, fmt.Errorf("failed to create request body temp file: %w", errTemp)
 	}
@@ -236,18 +238,19 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 
 	// Create streaming writer
 	writer := &FileStreamingLogWriter{
-		logFilePath:      filePath,
-		url:              url,
-		method:           method,
-		timestamp:        time.Now(),
-		requestHeaders:   requestHeaders,
-		requestBodyPath:  requestBodyPath,
-		responseBodyPath: responseBodyPath,
-		responseBodyFile: responseBodyFile,
-		chunkChan:        make(chan []byte, 100), // Buffered channel for async writes
-		closeChan:        make(chan struct{}),
-		errorChan:        make(chan error, 1),
-		format:           l.currentFormat(),
+		logFilePath:          filePath,
+		url:                  url,
+		method:               method,
+		timestamp:            time.Now(),
+		requestHeaders:       requestHeaders,
+		requestBodyPath:      requestBodyPath,
+		requestBodyTruncated: requestBodyTruncated,
+		responseBodyPath:     responseBodyPath,
+		responseBodyFile:     responseBodyFile,
+		chunkChan:            make(chan []byte, 100), // Buffered channel for async writes
+		closeChan:            make(chan struct{}),
+		errorChan:            make(chan error, 1),
+		format:               l.currentFormat(),
 	}
 
 	// Start async writer goroutine
@@ -394,21 +397,25 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 	return nil
 }
 
-func (l *FileRequestLogger) writeRequestBodyTempFile(body []byte) (string, error) {
+func (l *FileRequestLogger) writeRequestBodyTempFile(body []byte) (string, bool, error) {
 	tmpFile, errCreate := os.CreateTemp(l.logsDir, "request-body-*.tmp")
 	if errCreate != nil {
-		return "", errCreate
+		return "", false, errCreate
 	}
 	tmpPath := tmpFile.Name()
+	truncated := l.currentFormat() == "json" && len(body) > maxJSONFileBackedSectionBytes
+	if truncated {
+		body = body[:maxJSONFileBackedSectionBytes]
+	}
 
 	if _, errCopy := io.Copy(tmpFile, bytes.NewReader(body)); errCopy != nil {
 		_ = tmpFile.Close()
 		_ = os.Remove(tmpPath)
-		return "", errCopy
+		return "", false, errCopy
 	}
 	if errClose := tmpFile.Close(); errClose != nil {
 		_ = os.Remove(tmpPath)
-		return "", errClose
+		return "", false, errClose
 	}
-	return tmpPath, nil
+	return tmpPath, truncated, nil
 }

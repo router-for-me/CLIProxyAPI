@@ -228,7 +228,7 @@ func TestJSONRequestLoggingPreservesDecompressionError(t *testing.T) {
 	tempDir := t.TempDir()
 	logger := NewFileRequestLoggerWithFormat(true, tempDir, "", 10, "json")
 	err := logger.writeNonStreamingLog(
-		io.Discard, "/v1/chat/completions", "POST", nil, []byte(`{"model":"gpt-4"}`), "",
+		io.Discard, "/v1/chat/completions", "POST", nil, []byte(`{"model":"gpt-4"}`), "", false,
 		nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		200, map[string][]string{"Content-Encoding": {"gzip"}}, []byte("not-gzip"),
 		errors.New("gzip: invalid header"), time.Now(), time.Time{},
@@ -239,7 +239,7 @@ func TestJSONRequestLoggingPreservesDecompressionError(t *testing.T) {
 
 	var buf bytes.Buffer
 	err = logger.writeNonStreamingLog(
-		&buf, "/v1/chat/completions", "POST", nil, []byte(`{"model":"gpt-4"}`), "",
+		&buf, "/v1/chat/completions", "POST", nil, []byte(`{"model":"gpt-4"}`), "", false,
 		nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		200, map[string][]string{"Content-Encoding": {"gzip"}}, []byte("not-gzip"),
 		errors.New("gzip: invalid header"), time.Now(), time.Time{},
@@ -811,6 +811,38 @@ func TestJSONWebsocketTimelineSourceCapsAppendPartWhileSpooling(t *testing.T) {
 	}
 	if len(data) != maxJSONFileBackedSectionBytes {
 		t.Fatalf("merged source size = %d, want %d", len(data), maxJSONFileBackedSectionBytes)
+	}
+}
+
+func TestJSONRequestBodyTempFileCapsWhileSpooling(t *testing.T) {
+	logger := NewFileRequestLoggerWithFormat(true, t.TempDir(), "", 10, "json")
+	payload := bytes.Repeat([]byte("x"), maxJSONFileBackedSectionBytes+1024)
+	path, truncated, err := logger.writeRequestBodyTempFile(payload)
+	if err != nil {
+		t.Fatalf("writeRequestBodyTempFile failed: %v", err)
+	}
+	defer os.Remove(path)
+	if !truncated {
+		t.Fatal("request body temp file was not marked truncated")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat request body temp file: %v", err)
+	}
+	if info.Size() != maxJSONFileBackedSectionBytes {
+		t.Fatalf("request body temp file size = %d, want %d", info.Size(), maxJSONFileBackedSectionBytes)
+	}
+
+	var buf bytes.Buffer
+	if err := logger.writeJSONLog(&buf, "/v1/responses", "POST", nil, nil, path, truncated, 200, nil, nil, "", false, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, time.Now(), time.Time{}, "http", "http"); err != nil {
+		t.Fatalf("writeJSONLog failed: %v", err)
+	}
+	var entry jsonLogPayload
+	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
+		t.Fatalf("unmarshal JSON log: %v", err)
+	}
+	if !entry.RequestBodyTruncated {
+		t.Fatal("request_body_truncated = false, want true")
 	}
 }
 

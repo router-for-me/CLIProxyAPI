@@ -25,6 +25,7 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	requestHeaders map[string][]string,
 	requestBody []byte,
 	requestBodyPath string,
+	requestBodyTruncated bool,
 	websocketTimeline []byte,
 	websocketTimelineSource *FileBodySource,
 	apiRequest []byte,
@@ -48,7 +49,7 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	downstreamTransport := inferDownstreamTransport(requestHeaders, websocketTimeline, websocketTimelineSource)
 	upstreamTransport := inferUpstreamTransport(apiRequest, apiRequestSource, apiResponse, apiResponseSource, apiWebsocketTimeline, apiWebsocketTimelineSource, apiResponseErrors)
 	if l.currentFormat() == "json" {
-		return l.writeJSONLog(w, url, method, requestHeaders, requestBody, requestBodyPath, false, statusCode, responseHeaders, response, "", false, decompressErr, apiRequest, apiRequestSource, apiResponse, apiResponseSource, apiResponseErrors, websocketTimeline, websocketTimelineSource, apiWebsocketTimeline, apiWebsocketTimelineSource, requestTimestamp, apiResponseTimestamp, downstreamTransport, upstreamTransport)
+		return l.writeJSONLog(w, url, method, requestHeaders, requestBody, requestBodyPath, requestBodyTruncated, statusCode, responseHeaders, response, "", false, decompressErr, apiRequest, apiRequestSource, apiResponse, apiResponseSource, apiResponseErrors, websocketTimeline, websocketTimelineSource, apiWebsocketTimeline, apiWebsocketTimelineSource, requestTimestamp, apiResponseTimestamp, downstreamTransport, upstreamTransport)
 	}
 	if errWrite := writeRequestInfoWithBody(w, url, method, requestHeaders, requestBody, requestBodyPath, requestTimestamp, downstreamTransport, upstreamTransport, !isWebsocketTranscript); errWrite != nil {
 		return errWrite

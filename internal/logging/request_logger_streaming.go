@@ -30,7 +30,8 @@ type FileStreamingLogWriter struct {
 	requestHeaders map[string][]string
 
 	// requestBodyPath is a temporary file path holding the request body.
-	requestBodyPath string
+	requestBodyPath      string
+	requestBodyTruncated bool
 
 	// responseBodyPath is a temporary file path holding the streaming response body.
 	responseBodyPath string
@@ -301,7 +302,7 @@ func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
 	upstreamTransport := inferUpstreamTransport(w.apiRequest, w.apiRequestSource, w.apiResponse, w.apiResponseSource, w.apiWebsocketTimeline, nil, nil)
 	if w.format == "json" {
 		logger := NewFileRequestLoggerWithFormat(true, "", "", 0, "json")
-		return logger.writeJSONLog(logFile, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, false, w.responseStatus, w.responseHeaders, nil, w.responseBodyPath, w.responseBodyTruncated.Load(), nil, w.apiRequest, w.apiRequestSource, w.apiResponse, w.apiResponseSource, nil, nil, nil, w.apiWebsocketTimeline, nil, w.timestamp, w.apiResponseTimestamp, "http", upstreamTransport)
+		return logger.writeJSONLog(logFile, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.requestBodyTruncated, w.responseStatus, w.responseHeaders, nil, w.responseBodyPath, w.responseBodyTruncated.Load(), nil, w.apiRequest, w.apiRequestSource, w.apiResponse, w.apiResponseSource, nil, nil, nil, w.apiWebsocketTimeline, nil, w.timestamp, w.apiResponseTimestamp, "http", upstreamTransport)
 	}
 
 	if errWrite := writeRequestInfoWithBody(logFile, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.timestamp, "http", upstreamTransport, true); errWrite != nil {
