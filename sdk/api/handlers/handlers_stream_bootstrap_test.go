@@ -676,6 +676,60 @@ func TestExecuteStreamWithAuthManager_BoundsOpenAIResponsesPrefixBuffer(t *testi
 	}
 }
 
+func TestExecuteStreamWithAuthManager_ReturnsAfterAvailableOpenAIResponsesProvisionalPrefix(t *testing.T) {
+	chunks := make(chan coreexecutor.StreamChunk, 3)
+	chunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.created")}
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`)}
+	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, _ int) (*coreexecutor.StreamResult, error) {
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}}
+	handler, _ := registerBootstrapExecutor(t, executor)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type streamResult struct {
+		data <-chan []byte
+		errs <-chan *interfaces.ErrorMessage
+	}
+	results := make(chan streamResult, 1)
+	go func() {
+		dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(
+			ctx,
+			"openai-response",
+			"bootstrap-model",
+			[]byte(`{"model":"bootstrap-model","input":"hello"}`),
+			"",
+		)
+		results <- streamResult{data: dataChan, errs: errChan}
+	}()
+
+	var result streamResult
+	select {
+	case result = <-results:
+	case <-time.After(time.Second):
+		cancel()
+		<-results
+		t.Fatal("provisional Responses prefix kept bootstrap blocked waiting for another upstream chunk")
+	}
+
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed","response":{"id":"resp-1","output":[]}}`)}
+	close(chunks)
+	var got []string
+	for chunk := range result.data {
+		got = append(got, string(chunk))
+	}
+	for range result.errs {
+	}
+	want := []string{
+		"event: response.created",
+		`data: {"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`,
+		`data: {"type":"response.completed","response":{"id":"resp-1","output":[]}}`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("forwarded chunks = %#v, want complete delayed stream %#v", got, want)
+	}
+}
+
 func TestExecuteStreamWithAuthManager_CancelDuringSynchronousBootstrap(t *testing.T) {
 	started := make(chan struct{})
 	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, _ int) (*coreexecutor.StreamResult, error) {
