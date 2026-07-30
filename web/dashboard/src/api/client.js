@@ -353,6 +353,77 @@ export async function clearUpstreamSyncLog() {
   return fetchJSON('/upstream-sync-log', { method: 'DELETE' });
 }
 
+// --- Model Health (Analysis → Model Health) --------------------------------
+//
+// Records the outcome of periodic per-model inference probes (status, response
+// time, tokens-per-second) for every live Global Model id, plus the operator
+// settings (enabled, interval_seconds, excluded_models, max_tokens). Sourced
+// from the model_health + model_health_log + model_health_settings PG tables;
+// 503 when PG is not configured. A curated subsurface is exposed publicly via
+// GET /v0/model-health/uptime (no auth — see model_health_public.go).
+
+// Latest health snapshot for every model + current settings + last sweep time.
+// Returns { snapshots, settings, last_run_at, last_run_summary }.
+export async function getModelHealth() {
+  return fetchJSON('/model-health');
+}
+
+// Paged model health history for the Analysis → Model Health trend table.
+// params: { model_id, status, success ('true'|'false'), from, to, page, page_size }.
+// Returns { events: [...], total, page, page_size }.
+export async function getModelHealthLog(params = {}) {
+  const qs = new URLSearchParams();
+  if (params.model_id) qs.set('model_id', params.model_id);
+  if (params.status) qs.set('status', params.status);
+  if (params.success) qs.set('success', params.success);
+  if (params.from) qs.set('from', params.from);
+  if (params.to) qs.set('to', params.to);
+  if (params.page) qs.set('page', params.page);
+  if (params.page_size) qs.set('page_size', params.page_size);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return fetchJSON(`/model-health/log${suffix}`);
+}
+
+// A single model health-check history row (full error_message unsealed
+// server-side).
+export async function getModelHealthLogEntry(id) {
+  return fetchJSON(`/model-health/log/${id}`);
+}
+
+// Operator-initiated manual clear of all model_health_log rows. Returns
+// { status, deleted }. Latest snapshots are preserved.
+export async function clearModelHealthLog() {
+  return fetchJSON('/model-health/log', { method: 'DELETE' });
+}
+
+// Distinct model_id values present in the model health log, for the filter
+// dropdown. Returns { models: [...] }.
+export async function getModelHealthModels() {
+  return fetchJSON('/model-health/models');
+}
+
+// Singleton operator settings for the model health sweep.
+// Returns { settings: { enabled, interval_seconds, excluded_models, max_tokens, updated_at } }.
+export async function getModelHealthSettings() {
+  return fetchJSON('/model-health/settings');
+}
+
+// Update the sweep settings. body: { enabled?, interval_seconds?, excluded_models?, max_tokens? }.
+// Partial updates merge on top of the current settings. interval_seconds is
+// clamped server-side to a 5-minute floor. Returns the persisted settings.
+export async function putModelHealthSettings(body) {
+  return fetchJSON('/model-health/settings', {
+    method: 'PUT',
+    body: JSON.stringify(body || {}),
+  });
+}
+
+// Trigger an immediate background sweep (returns 202 Accepted immediately).
+// Returns { status, message, last_run_at, last_run_summary }.
+export async function runModelHealthCheckNow() {
+  return fetchJSON('/model-health/run', { method: 'POST' });
+}
+
 // Distinct { api_keys: [{id, alias}], providers, models } observed in the
 // filter window. Used by the dashboard to populate dropdown filter menus so
 // the operator never types a free-text value (which is impossible against
