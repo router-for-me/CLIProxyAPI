@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -11,10 +12,74 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"github.com/tidwall/gjson"
 )
+
+type responsesBootstrapTestExecutor struct {
+	chunks <-chan coreexecutor.StreamChunk
+	mu     sync.Mutex
+	calls  int
+}
+
+func (e *responsesBootstrapTestExecutor) Identifier() string { return "responses-bootstrap-test" }
+
+func (e *responsesBootstrapTestExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *responsesBootstrapTestExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.calls++
+	e.mu.Unlock()
+	return &coreexecutor.StreamResult{
+		Headers: http.Header{"X-Upstream-Attempt": {"1"}},
+		Chunks:  e.chunks,
+	}, nil
+}
+
+func (e *responsesBootstrapTestExecutor) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
+func (e *responsesBootstrapTestExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *responsesBootstrapTestExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *responsesBootstrapTestExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+type responsesBootstrapInterceptorHost struct{}
+
+func (*responsesBootstrapInterceptorHost) InterceptRequestBeforeAuth(_ context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+	return pluginapi.RequestInterceptResponse{Headers: req.Headers, Body: req.Body}
+}
+
+func (*responsesBootstrapInterceptorHost) InterceptRequestAfterAuth(_ context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+	return pluginapi.RequestInterceptResponse{Headers: req.Headers, Body: req.Body}
+}
+
+func (*responsesBootstrapInterceptorHost) InterceptResponse(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+	return pluginapi.ResponseInterceptResponse{Headers: req.ResponseHeaders, Body: req.Body}
+}
+
+func (*responsesBootstrapInterceptorHost) InterceptStreamChunk(_ context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+	headers := req.ResponseHeaders.Clone()
+	headers.Set("X-Stream-Interceptor", "active")
+	return pluginapi.StreamChunkInterceptResponse{Headers: headers, Body: req.Body}
+}
 
 func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *httptest.ResponseRecorder, *gin.Context, http.Flusher) {
 	t.Helper()
@@ -46,6 +111,26 @@ func (w *signalingResponseWriter) Flush() {
 	w.once.Do(func() { close(w.flushed) })
 }
 
+func newResponsesBootstrapEndpointHandler(t *testing.T, cfg *sdkconfig.SDKConfig, chunks <-chan coreexecutor.StreamChunk) (*OpenAIResponsesAPIHandler, *responsesBootstrapTestExecutor) {
+	t.Helper()
+	const model = "responses-bootstrap-endpoint-model"
+	manager := coreauth.NewManager(nil, nil, nil)
+	executor := &responsesBootstrapTestExecutor{chunks: chunks}
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:       "responses-bootstrap-endpoint-auth",
+		Provider: executor.Identifier(),
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "responses-bootstrap@example.com"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register(): %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	return NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(cfg, manager)), executor
+}
+
 func TestForwardResponsesStreamSeparatesDataOnlySSEChunks(t *testing.T) {
 	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
 
@@ -74,6 +159,97 @@ func TestForwardResponsesStreamSeparatesDataOnlySSEChunks(t *testing.T) {
 	}
 }
 
+func TestResponsesBootstrapCommitStartsKeepAliveWithObservableHeaders(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        *sdkconfig.SDKConfig
+		pluginHost handlers.PluginInterceptorHost
+		header     string
+		value      string
+	}{
+		{
+			name:   "passthrough headers",
+			cfg:    &sdkconfig.SDKConfig{PassthroughHeaders: true, Streaming: sdkconfig.StreamingConfig{BootstrapRetries: 1}},
+			header: "X-Upstream-Attempt",
+			value:  "1",
+		},
+		{
+			name:       "stream interceptor headers",
+			cfg:        &sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{BootstrapRetries: 1}},
+			pluginHost: &responsesBootstrapInterceptorHost{},
+			header:     "X-Stream-Interceptor",
+			value:      "active",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			chunks := make(chan coreexecutor.StreamChunk, 3)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.created")}
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`)}
+			h, executor := newResponsesBootstrapEndpointHandler(t, test.cfg, chunks)
+			if test.pluginHost != nil {
+				h.SetPluginHost(test.pluginHost)
+			}
+
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			writer := &signalingResponseWriter{ResponseWriter: c.Writer, flushed: make(chan struct{})}
+			c.Writer = writer
+
+			data, errs, committer := h.ExecuteStreamWithAuthManagerBootstrapCommit(
+				context.Background(),
+				h.HandlerType(),
+				"responses-bootstrap-endpoint-model",
+				[]byte(`{"model":"responses-bootstrap-endpoint-model","input":"hello"}`),
+				"",
+			)
+			go func() {
+				<-writer.flushed
+				chunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{
+					Code:       "upstream_closed",
+					Message:    "stream failed after heartbeat commit",
+					HTTPStatus: http.StatusRequestTimeout,
+				}}
+				close(chunks)
+			}()
+
+			var canceled error
+			h.forwardInitialResponsesStream(
+				c,
+				writer,
+				func(err error) { canceled = err },
+				data,
+				errs,
+				committer.Commit,
+				committer.Headers,
+				&responsesSSEFramer{},
+				10*time.Millisecond,
+			)
+
+			if canceled == nil || !strings.Contains(canceled.Error(), "stream failed after heartbeat commit") {
+				t.Fatalf("stream cancel error = %v, want post-commit upstream failure", canceled)
+			}
+			if got := recorder.Header().Get(test.header); got != test.value {
+				t.Fatalf("%s = %q, want %q", test.header, got, test.value)
+			}
+			body := recorder.Body.String()
+			keepAliveIndex := strings.Index(body, ": keep-alive\n\n")
+			createdIndex := strings.Index(body, "event: response.created")
+			if keepAliveIndex < 0 || createdIndex < 0 || keepAliveIndex >= createdIndex {
+				t.Fatalf("expected keep-alive before provisional Responses prefix, got %q", body)
+			}
+			if !strings.Contains(body, "event: error") || !strings.Contains(body, `"type":"error"`) {
+				t.Fatalf("expected post-commit Responses SSE error, got %q", body)
+			}
+			if executor.Calls() != 1 {
+				t.Fatalf("stream attempts = %d, want no redispatch after heartbeat commit", executor.Calls())
+			}
+		})
+	}
+}
+
 func TestForwardInitialResponsesStreamEmitsKeepAliveBeforeFirstData(t *testing.T) {
 	h, recorder, c, _ := newResponsesStreamTestHandler(t)
 	writer := &signalingResponseWriter{ResponseWriter: c.Writer, flushed: make(chan struct{})}
@@ -95,7 +271,8 @@ func TestForwardInitialResponsesStreamEmitsKeepAliveBeforeFirstData(t *testing.T
 		func(err error) { canceled = err },
 		data,
 		errs,
-		nil,
+		func() http.Header { return nil },
+		func() http.Header { return nil },
 		&responsesSSEFramer{},
 		10*time.Millisecond,
 	)
@@ -138,7 +315,8 @@ func TestForwardInitialResponsesStreamUsesSSEErrorAfterKeepAlive(t *testing.T) {
 		func(err error) { canceled = err },
 		data,
 		errs,
-		nil,
+		func() http.Header { return nil },
+		func() http.Header { return nil },
 		&responsesSSEFramer{},
 		10*time.Millisecond,
 	)
@@ -157,6 +335,41 @@ func TestForwardInitialResponsesStreamUsesSSEErrorAfterKeepAlive(t *testing.T) {
 	}
 	if strings.Contains(body, `"error":{`) {
 		t.Fatalf("unexpected non-streaming JSON error after committed keep-alive: %q", body)
+	}
+}
+
+func TestForwardInitialResponsesStreamPrefersPendingErrorWhenDataCloses(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+	data := make(chan []byte)
+	close(data)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+	errs <- &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadGateway,
+		Error:      errors.New("bootstrap failed before commit"),
+	}
+	close(errs)
+
+	var canceled error
+	h.forwardInitialResponsesStream(
+		c,
+		flusher,
+		func(err error) { canceled = err },
+		data,
+		errs,
+		func() http.Header { return nil },
+		func() http.Header { return nil },
+		&responsesSSEFramer{},
+		0,
+	)
+
+	if canceled == nil || canceled.Error() != "bootstrap failed before commit" {
+		t.Fatalf("cancel error = %v, want pending bootstrap failure", canceled)
+	}
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "bootstrap failed before commit") {
+		t.Fatalf("expected JSON bootstrap error, got %q", recorder.Body.String())
 	}
 }
 

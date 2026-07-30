@@ -486,7 +486,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	// New core execution path
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	dataChan, errChan, bootstrapCommitter := h.ExecuteStreamWithAuthManagerBootstrapCommit(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 
 	framer := &responsesSSEFramer{}
 	h.forwardInitialResponsesStream(
@@ -495,7 +495,8 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		func(err error) { cliCancel(err) },
 		dataChan,
 		errChan,
-		upstreamHeaders,
+		func() http.Header { return bootstrapCommitter.CommitContext(c.Request.Context()) },
+		bootstrapCommitter.Headers,
 		framer,
 		handlers.StreamingKeepAliveInterval(h.Cfg),
 	)
@@ -507,7 +508,8 @@ func (h *OpenAIResponsesAPIHandler) forwardInitialResponsesStream(
 	cancel func(error),
 	dataChan <-chan []byte,
 	errChan <-chan *interfaces.ErrorMessage,
-	upstreamHeaders http.Header,
+	commitHeaders func() http.Header,
+	selectedHeaders func() http.Header,
 	framer *responsesSSEFramer,
 	keepAliveInterval time.Duration,
 ) {
@@ -544,6 +546,9 @@ func (h *OpenAIResponsesAPIHandler) forwardInitialResponsesStream(
 				continue
 			}
 			// Upstream failed immediately. Return proper error status and JSON.
+			if selectedHeaders != nil {
+				handlers.WriteUpstreamHeaders(c.Writer.Header(), selectedHeaders())
+			}
 			h.WriteErrorResponse(c, errMsg)
 			if errMsg != nil {
 				cancel(errMsg.Error)
@@ -552,7 +557,21 @@ func (h *OpenAIResponsesAPIHandler) forwardInitialResponsesStream(
 			}
 			return
 		case chunk, ok := <-dataChan:
+			var upstreamHeaders http.Header
+			if selectedHeaders != nil {
+				upstreamHeaders = selectedHeaders()
+			}
 			if !ok {
+				select {
+				case errMsg, okErr := <-errChan:
+					if okErr && errMsg != nil {
+						handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+						h.WriteErrorResponse(c, errMsg)
+						cancel(errMsg.Error)
+						return
+					}
+				default:
+				}
 				// Stream closed without data? Send headers and done.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
@@ -575,6 +594,14 @@ func (h *OpenAIResponsesAPIHandler) forwardInitialResponsesStream(
 			h.forwardResponsesStream(c, flusher, cancel, dataChan, errChan, framer)
 			return
 		case <-keepAliveC:
+			var upstreamHeaders http.Header
+			if commitHeaders != nil {
+				upstreamHeaders = commitHeaders()
+			}
+			if err := c.Request.Context().Err(); err != nil {
+				cancel(err)
+				return
+			}
 			setSSEHeaders()
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 			_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
