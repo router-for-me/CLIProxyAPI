@@ -59,14 +59,23 @@ func streamRecoveryFromContext(ctx context.Context) *streamRecoveryState {
 	return state
 }
 
+func streamRecoveryEnabled(policy cliproxyexecutor.StreamRecoveryPolicy) bool {
+	return policy.Attempts > 0 || (policy.Enabled && policy.MaxRetryWindow > 0)
+}
+
 func (s *streamRecoveryState) canRetry() bool {
-	if s == nil || s.remaining <= 0 {
+	if s == nil || !streamRecoveryEnabled(s.policy) {
 		return false
 	}
 	if s.policy.MaxRetryWindow > 0 && time.Since(s.started) >= s.policy.MaxRetryWindow {
 		return false
 	}
-	s.remaining--
+	if s.policy.Attempts > 0 {
+		if s.remaining <= 0 {
+			return false
+		}
+		s.remaining--
+	}
 	return true
 }
 
@@ -544,7 +553,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			continue
 		}
 
-		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks, execOpts.StreamRecovery.Attempts <= 0 && execOpts.StreamRecovery.BootstrapRetries > 0)
+		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks, !streamRecoveryEnabled(execOpts.StreamRecovery) && execOpts.StreamRecovery.BootstrapRetries > 0)
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				discardStreamChunks(streamResult.Chunks)
@@ -564,7 +573,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 						streamResult = &cliproxyexecutor.StreamResult{}
 					} else {
 						streamResult = retryStream
-						buffered, closed, bootstrapErr = readStreamBootstrap(ctx, streamResult.Chunks, execOpts.StreamRecovery.Attempts <= 0 && execOpts.StreamRecovery.BootstrapRetries > 0)
+						buffered, closed, bootstrapErr = readStreamBootstrap(ctx, streamResult.Chunks, !streamRecoveryEnabled(execOpts.StreamRecovery) && execOpts.StreamRecovery.BootstrapRetries > 0)
 					}
 				}
 			}

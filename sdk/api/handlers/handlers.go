@@ -156,6 +156,7 @@ func StreamRecoveryPolicy(cfg *config.SDKConfig) coreexecutor.StreamRecoveryPoli
 	recovery := streaming.Recovery
 	return coreexecutor.StreamRecoveryPolicy{
 		BootstrapRetries: StreamingBootstrapRetries(cfg),
+		Enabled:          recovery.Enabled,
 		Attempts:         recovery.Attempts,
 		MaxBufferBytes:   recovery.MaxBufferBytes,
 		MaxRetryWindow:   time.Duration(recovery.MaxRetryWindowSeconds) * time.Second,

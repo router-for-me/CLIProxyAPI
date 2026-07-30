@@ -86,19 +86,20 @@ type StreamingConfig struct {
 
 // StreamingRecoveryConfig bounds full-stream transparent recovery.
 type StreamingRecoveryConfig struct {
-	Attempts                   int `yaml:"attempts,omitempty" json:"attempts,omitempty"`
-	MaxBufferBytes             int `yaml:"max-buffer-bytes,omitempty" json:"max-buffer-bytes,omitempty"`
-	MaxRetryWindowSeconds      int `yaml:"max-retry-window-seconds,omitempty" json:"max-retry-window-seconds,omitempty"`
-	MaxConcurrent              int `yaml:"max-concurrent,omitempty" json:"max-concurrent,omitempty"`
-	InitialBackoffMilliseconds int `yaml:"initial-backoff-milliseconds,omitempty" json:"initial-backoff-milliseconds,omitempty"`
-	MaxBackoffMilliseconds     int `yaml:"max-backoff-milliseconds,omitempty" json:"max-backoff-milliseconds,omitempty"`
+	Enabled                    bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Attempts                   int  `yaml:"attempts,omitempty" json:"attempts,omitempty"`
+	MaxBufferBytes             int  `yaml:"max-buffer-bytes,omitempty" json:"max-buffer-bytes,omitempty"`
+	MaxRetryWindowSeconds      int  `yaml:"max-retry-window-seconds,omitempty" json:"max-retry-window-seconds,omitempty"`
+	MaxConcurrent              int  `yaml:"max-concurrent,omitempty" json:"max-concurrent,omitempty"`
+	InitialBackoffMilliseconds int  `yaml:"initial-backoff-milliseconds,omitempty" json:"initial-backoff-milliseconds,omitempty"`
+	MaxBackoffMilliseconds     int  `yaml:"max-backoff-milliseconds,omitempty" json:"max-backoff-milliseconds,omitempty"`
 }
 
 const (
 	defaultStreamingRecoveryMaxBufferBytes             = 8 << 20
 	maxStreamingRecoveryMaxBufferBytes                 = 64 << 20
 	defaultStreamingRecoveryMaxRetryWindowSeconds      = 20
-	maxStreamingRecoveryMaxRetryWindowSeconds          = 300
+	maxStreamingRecoveryMaxRetryWindowSeconds          = 3600
 	defaultStreamingRecoveryMaxConcurrent              = 16
 	maxStreamingRecoveryMaxConcurrent                  = 1024
 	defaultStreamingRecoveryInitialBackoffMilliseconds = 250
@@ -116,9 +117,12 @@ func (c *StreamingConfig) NormalizeStreamingConfig() {
 		c.BootstrapRetries = 0
 	}
 	r := &c.Recovery
-	if r.Attempts <= 0 {
+	if !r.Enabled && r.Attempts <= 0 {
 		r.Attempts = 0
 		return
+	}
+	if r.Attempts < 0 {
+		r.Attempts = 0
 	}
 	if r.Attempts > maxStreamingRecoveryAttempts {
 		r.Attempts = maxStreamingRecoveryAttempts

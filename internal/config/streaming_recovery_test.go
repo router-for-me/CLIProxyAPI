@@ -13,6 +13,20 @@ func TestParseConfigBytesStreamingRecoveryDefaults(t *testing.T) {
 	}
 }
 
+func TestParseConfigBytesStreamingRecoveryDurationOnly(t *testing.T) {
+	cfg, err := ParseConfigBytes([]byte("streaming:\n  recovery:\n    enabled: true\n    attempts: 0\n    max-retry-window-seconds: 600\n"))
+	if err != nil {
+		t.Fatalf("ParseConfigBytes error: %v", err)
+	}
+	r := cfg.Streaming.Recovery
+	if !r.Enabled || r.Attempts != 0 || r.MaxRetryWindowSeconds != 600 {
+		t.Fatalf("unexpected duration-only recovery: %+v", r)
+	}
+	if r.MaxBufferBytes != 8<<20 || r.MaxConcurrent != 16 || r.InitialBackoffMilliseconds != 250 || r.MaxBackoffMilliseconds != 2000 {
+		t.Fatalf("duration-only defaults not applied: %+v", r)
+	}
+}
+
 func TestParseConfigBytesStreamingRecoveryDisabledPreservesZeroValues(t *testing.T) {
 	cfg, err := ParseConfigBytes([]byte("streaming:\n  bootstrap-retries: -1\n  recovery:\n    attempts: 0\n"))
 	if err != nil {
@@ -32,7 +46,7 @@ func TestParseConfigBytesStreamingRecoveryNormalizesBounds(t *testing.T) {
 		t.Fatalf("ParseConfigBytes error: %v", err)
 	}
 	r := cfg.Streaming.Recovery
-	if r.Attempts != 10 || r.MaxBufferBytes != 64<<20 || r.MaxRetryWindowSeconds != 300 || r.MaxConcurrent != 1024 || r.InitialBackoffMilliseconds != 30000 {
+	if r.Attempts != 10 || r.MaxBufferBytes != 64<<20 || r.MaxRetryWindowSeconds != 3600 || r.MaxConcurrent != 1024 || r.InitialBackoffMilliseconds != 30000 {
 		t.Fatalf("hard bounds not applied: %+v", r)
 	}
 	if r.MaxBackoffMilliseconds != r.InitialBackoffMilliseconds {

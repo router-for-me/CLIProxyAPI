@@ -170,7 +170,10 @@ type Options struct {
 type StreamRecoveryPolicy struct {
 	// BootstrapRetries preserves legacy retries before semantic stream commitment.
 	BootstrapRetries int
-	// Attempts is the number of additional full-stream attempts.
+	// Enabled allows duration-only recovery when Attempts is zero.
+	Enabled bool
+	// Attempts is the number of additional full-stream attempts. Zero means no
+	// attempt limit when Enabled is true.
 	Attempts int
 	// MaxBufferBytes bounds retained translated output before recovery fails open.
 	MaxBufferBytes int
