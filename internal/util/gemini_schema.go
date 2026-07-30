@@ -474,6 +474,7 @@ func removeUnsupportedKeywords(jsonStr string) string {
 		"$schema", "$defs", "definitions", "const", "$ref", "$id", "additionalProperties",
 		"propertyNames", "patternProperties", // Gemini doesn't support these schema keywords
 		"$comment", "enumDescriptions", "enumTitles", "prefill", "deprecated", // Schema metadata fields unsupported by Gemini
+		"encrypted", // Client-side encryption marker (Codex multi-agent v2); not a JSON Schema keyword, Gemini rejects it
 	)
 
 	deletePaths := make([]string, 0)
