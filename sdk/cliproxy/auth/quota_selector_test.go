@@ -176,3 +176,44 @@ func TestParseQuotaUsage(t *testing.T) {
 		t.Fatalf("scoped[opus] = %v, want 97", got)
 	}
 }
+
+func TestQuotaAwareSelector_StalePollTargetsExpire(t *testing.T) {
+	t.Parallel()
+
+	selector := newTestQuotaSelector(3)
+	current := time.Now()
+	selector.now = func() time.Time { return current }
+
+	kept := &Auth{ID: "kept", Provider: "claude", Metadata: map[string]any{"access_token": "tok-kept"}}
+	removed := &Auth{ID: "removed", Provider: "claude", Metadata: map[string]any{"access_token": "tok-removed"}}
+
+	selector.updatePollTargets([]*Auth{kept, removed})
+	selector.setQuota("removed", quotaSnapshot{session: 10, weeklyAll: 10, scoped: map[string]float64{}})
+
+	// The removed credential stops appearing in Pick's auth slice; within the
+	// expiry window it must still be polled (cooldown windows filter auths
+	// temporarily).
+	current = current.Add(quotaTargetExpiry / 2)
+	selector.updatePollTargets([]*Auth{kept})
+	selector.mu.RLock()
+	_, stillThere := selector.targets["removed"]
+	selector.mu.RUnlock()
+	if !stillThere {
+		t.Fatalf("target dropped before quotaTargetExpiry elapsed")
+	}
+
+	// Past the expiry window the target and its cached quota must both go.
+	current = current.Add(quotaTargetExpiry)
+	selector.updatePollTargets([]*Auth{kept})
+	selector.mu.RLock()
+	_, targetLeft := selector.targets["removed"]
+	_, quotaLeft := selector.quotas["removed"]
+	keptTarget, keptThere := selector.targets["kept"]
+	selector.mu.RUnlock()
+	if targetLeft || quotaLeft {
+		t.Fatalf("stale target/quota not expired: target=%v quota=%v", targetLeft, quotaLeft)
+	}
+	if !keptThere || keptTarget.token != "tok-kept" {
+		t.Fatalf("active target must survive expiry sweep")
+	}
+}

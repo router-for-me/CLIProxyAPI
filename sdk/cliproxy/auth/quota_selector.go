@@ -21,8 +21,12 @@ const (
 	// Retry-After: 0 at 4 accounts x 60s from one IP), and quota percentages
 	// move slowly. Poll gently and tolerate a couple of missed cycles before
 	// treating a snapshot as unknown.
-	quotaRefreshInterval    = 5 * time.Minute
-	quotaStaleAfter         = 30 * time.Minute
+	quotaRefreshInterval = 5 * time.Minute
+	quotaStaleAfter      = 30 * time.Minute
+	// quotaFetchTimeout bounds each background poll via a stop-cancellable
+	// request context (not an http.Client timeout): it keeps a wedged poll
+	// from stalling the refresh loop, and Stop() aborts in-flight requests.
+	// Never on a request path — background credential-quota polling only.
 	quotaFetchTimeout       = 15 * time.Second
 	quotaExhaustedThreshold = 95.0
 
@@ -43,6 +47,13 @@ const (
 	// quotaPollSpacing staggers per-account fetches inside one poll cycle;
 	// the endpoint rate-limits bursts from a single IP.
 	quotaPollSpacing = 3 * time.Second
+
+	// quotaTargetExpiry drops poll targets whose auth has not been offered to
+	// Pick recently (credential removed or token rotated out). Long enough to
+	// ride out cooldown windows where an auth is temporarily filtered from the
+	// candidate slice, short enough that deleted credentials stop consuming
+	// the shared usage-endpoint allowance after a few cycles.
+	quotaTargetExpiry = 15 * time.Minute
 )
 
 // quotaSnapshot captures the last known usage percentages for one auth.
@@ -56,9 +67,13 @@ type quotaSnapshot struct {
 }
 
 // quotaPollTarget is the minimal auth info the background poller needs.
+// lastSeen records when the auth was last offered to Pick, so targets whose
+// credential was removed or rotated out age out instead of being polled
+// forever.
 type quotaPollTarget struct {
-	id    string
-	token string
+	id       string
+	token    string
+	lastSeen time.Time
 }
 
 // QuotaAwareSelector picks auths proportionally to their remaining Anthropic
@@ -90,14 +105,11 @@ type QuotaAwareSelector struct {
 // poller starts lazily on the first Pick and stops via Stop.
 func NewQuotaAwareSelector() *QuotaAwareSelector {
 	return &QuotaAwareSelector{
-		fallback: &RoundRobinSelector{},
-		quotas:   make(map[string]quotaSnapshot),
-		targets:  make(map[string]quotaPollTarget),
-		stopCh:   make(chan struct{}),
-		// This client only fetches credential quota metadata on a background
-		// goroutine, never on a request path, so a bounded timeout is safe and
-		// keeps a wedged poll from stalling the refresh loop indefinitely.
-		httpClient: &http.Client{Timeout: quotaFetchTimeout},
+		fallback:   &RoundRobinSelector{},
+		quotas:     make(map[string]quotaSnapshot),
+		targets:    make(map[string]quotaPollTarget),
+		stopCh:     make(chan struct{}),
+		httpClient: &http.Client{},
 		randFloat:  rand.Float64,
 		now:        time.Now,
 	}
@@ -243,8 +255,12 @@ func (q quotaSnapshot) weeklyUsed(model string) (float64, bool) {
 }
 
 // updatePollTargets records the claude auths (and their bearer tokens) the
-// background poller should query. Called from Pick; cheap map upkeep only.
+// background poller should query, and drops targets whose auth has not been
+// seen for quotaTargetExpiry (credential removed or token rotated out) so the
+// poller does not spend the shared usage-endpoint allowance on dead
+// credentials. Called from Pick; cheap map upkeep only.
 func (s *QuotaAwareSelector) updatePollTargets(auths []*Auth) {
+	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, auth := range auths {
@@ -258,7 +274,13 @@ func (s *QuotaAwareSelector) updatePollTargets(auths []*Auth) {
 		if token == "" {
 			continue
 		}
-		s.targets[auth.ID] = quotaPollTarget{id: auth.ID, token: token}
+		s.targets[auth.ID] = quotaPollTarget{id: auth.ID, token: token, lastSeen: now}
+	}
+	for id, target := range s.targets {
+		if now.Sub(target.lastSeen) > quotaTargetExpiry {
+			delete(s.targets, id)
+			delete(s.quotas, id)
+		}
 	}
 }
 
@@ -349,7 +371,21 @@ func (s *QuotaAwareSelector) refreshAll() time.Duration {
 }
 
 func (s *QuotaAwareSelector) fetchQuota(token string) (quotaSnapshot, int, error) {
-	req, errRequest := http.NewRequest(http.MethodGet, quotaUsageEndpoint, nil)
+	// Bound each poll with a context derived from stopCh rather than an
+	// http.Client timeout (per the repo's no-new-network-timeouts rule): the
+	// deadline keeps a wedged poll from stalling the refresh loop, and Stop()
+	// cancels an in-flight request immediately on shutdown or selector swap.
+	// This never runs on a request path — background quota polling only.
+	ctx, cancel := context.WithDeadline(context.Background(), s.now().Add(quotaFetchTimeout))
+	defer cancel()
+	go func() {
+		select {
+		case <-s.stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, quotaUsageEndpoint, nil)
 	if errRequest != nil {
 		return quotaSnapshot{}, 0, errRequest
 	}
