@@ -683,10 +683,13 @@ func truncateSessionID(id string) string {
 	return id[:8] + "..."
 }
 
-// Stop releases resources held by the selector.
+// Stop releases resources held by the selector and its fallback.
 func (s *SessionAffinitySelector) Stop() {
 	if s.cache != nil {
 		s.cache.Stop()
+	}
+	if stoppable, ok := s.fallback.(StoppableSelector); ok {
+		stoppable.Stop()
 	}
 }
 
