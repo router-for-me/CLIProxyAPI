@@ -678,11 +678,13 @@ function SettingsModal({ settings, modelOptions, saving, toast, onClose, onSave 
 }
 
 // LogEntryModal fetches and shows a single model_health_log row, including the
-// full (unsealed) error_message that is truncated in the table view.
+// full (unsealed) error_message, prompt_message, and completion text.
 function LogEntryModal({ id, tz, onClose }) {
   const entry = useAsync(() => getModelHealthLogEntry(id), [id]);
+  const [showPrompt, setShowPrompt] = useState(false);
+  const [showCompletion, setShowCompletion] = useState(false);
   return (
-    <Modal title="Health check detail" onClose={onClose} size="md">
+    <Modal title="Health check detail" onClose={onClose} size="lg">
       {entry.loading && <Spinner />}
       <ErrorBanner error={entry.error} />
       {entry.data && (
@@ -694,7 +696,16 @@ function LogEntryModal({ id, tz, onClose }) {
           <DetailRow label="Tokens/sec" value={entry.data.tokens_per_second != null ? entry.data.tokens_per_second.toFixed(1) : '—'} mono />
           <DetailRow label="Tokens (in/out)" value={`${entry.data.prompt_tokens || 0}/${entry.data.completion_tokens || 0}`} mono />
           <DetailRow label="Provider" value={entry.data.provider || '—'} mono />
+
+          <div className="filter-label" style={{ marginTop: 12, marginBottom: 4 }}>Upstream provider</div>
+          <div className="row gap-sm" style={{ flexWrap: 'wrap', fontSize: 12 }}>
+            <DetailRow label="Provider" value={entry.data.upstream_provider || '—'} mono />
+            <DetailRow label="Auth ID" value={entry.data.upstream_auth_id || '—'} mono />
+            <DetailRow label="Resolved model" value={entry.data.upstream_model || '—'} mono />
+          </div>
+
           <DetailRow label="Checked" value={entry.data.checked_at ? formatInTz(entry.data.checked_at, tz) : '—'} mono />
+
           {entry.data.error_message && (
             <div style={{ marginTop: 12 }}>
               <div className="filter-label">Error message</div>
@@ -703,9 +714,49 @@ function LogEntryModal({ id, tz, onClose }) {
               </pre>
             </div>
           )}
+
+          {entry.data.prompt_message != null && entry.data.prompt_message !== '' && (
+            <CollapsibleTextBlock
+              label="Prompt message"
+              text={entry.data.prompt_message}
+              open={showPrompt}
+              onToggle={() => setShowPrompt((v) => !v)}
+            />
+          )}
+          {entry.data.completion != null && entry.data.completion !== '' && (
+            <CollapsibleTextBlock
+              label="Completion"
+              text={entry.data.completion}
+              open={showCompletion}
+              onToggle={() => setShowCompletion((v) => !v)}
+            />
+          )}
         </div>
       )}
     </Modal>
+  );
+}
+
+// CollapsibleTextBlock renders a labelled, collapsible block of recorded text
+// (prompt_message / completion). Defaults to collapsed since the content can
+// be long; the toggle keeps the detail modal scannable until the operator
+// wants the verbatim text.
+function CollapsibleTextBlock({ label, text, open, onToggle }) {
+  return (
+    <div style={{ marginTop: 12 }}>
+      <button
+        onClick={onToggle}
+        style={{ padding: '2px 8px', fontSize: 12, marginBottom: 4 }}
+        aria-expanded={open}
+      >
+        {open ? '▾' : '▸'} {label}
+      </button>
+      {open && (
+        <pre className="mono" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: 'var(--bg-elevated)', padding: 8, borderRadius: 6, fontSize: 12, marginTop: 0 }}>
+          {text}
+        </pre>
+      )}
+    </div>
   );
 }
 

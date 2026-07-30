@@ -1189,6 +1189,10 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	// (one row per model). Updated in place on every sweep. Surfaced on the
 	// Analysis → Model Health page and through the public
 	// /v0/model-health/uptime endpoint.
+	// prompt_message/completion carry the actual request/response text of the
+	// last probe (AES-GCM-sealed at rest; see ModelHealthStore).
+	// upstream_provider/upstream_auth_id/upstream_model record which credential
+	// and resolved model served the probe.
 	modelHealthTable := s.fullTableName(s.cfg.ModelHealthTable)
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s (
@@ -1201,6 +1205,11 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			completion_tokens INTEGER NOT NULL DEFAULT 0,
 			error_message     TEXT,
 			provider          TEXT,
+			prompt_message    TEXT,
+			completion        TEXT,
+			upstream_provider TEXT,
+			upstream_auth_id  TEXT,
+			upstream_model    TEXT,
 			checked_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			PRIMARY KEY (model_id)
 		)
@@ -1212,11 +1221,19 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: create model_health status index: %w", err)
 	}
+	// Backfill the prompt/completion/upstream columns on older schemas.
+	for _, col := range []string{"prompt_message", "completion", "upstream_provider", "upstream_auth_id", "upstream_model"} {
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+			`ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s TEXT`, modelHealthTable, col,
+		)); err != nil {
+			return fmt.Errorf("postgres store: alter model_health add %s: %w", col, err)
+		}
+	}
 
 	// model_health_log stores the append-only history of model health checks
 	// (one row per check per model) used by the dashboard's trend views. The
-	// error_message column is AES-GCM-sealed at rest when UsageEncryptionKey
-	// is configured. Auto-swept to a 30-day retention.
+	// error_message, prompt_message, and completion columns are AES-GCM-sealed
+	// at rest when UsageEncryptionKey is configured. Auto-swept to retention.
 	modelHealthLogTable := s.fullTableName(s.cfg.ModelHealthLogTable)
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s (
@@ -1230,6 +1247,11 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			completion_tokens INTEGER NOT NULL DEFAULT 0,
 			error_message     TEXT,
 			provider          TEXT,
+			prompt_message    TEXT,
+			completion        TEXT,
+			upstream_provider TEXT,
+			upstream_auth_id  TEXT,
+			upstream_model    TEXT,
 			checked_at        TIMESTAMPTZ NOT NULL
 		)
 	`, modelHealthLogTable)); err != nil {
@@ -1244,6 +1266,14 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_model_health_log_time ON %s(checked_at DESC)`, modelHealthLogTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: create model_health_log time index: %w", err)
+	}
+	// Backfill the prompt/completion/upstream columns on older schemas.
+	for _, col := range []string{"prompt_message", "completion", "upstream_provider", "upstream_auth_id", "upstream_model"} {
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+			`ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s TEXT`, modelHealthLogTable, col,
+		)); err != nil {
+			return fmt.Errorf("postgres store: alter model_health_log add %s: %w", col, err)
+		}
 	}
 
 	// model_health_settings stores the singleton operator configuration row

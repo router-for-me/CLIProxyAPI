@@ -75,26 +75,49 @@ const MinModelHealthInterval = 5 * time.Minute
 // can reject an over-cap value with a clear 400 before reaching the store.
 const MaxModelHealthTokens = 1024
 
+// maxModelHealthPromptBytes caps the stored prompt_message text so a single
+// verbose probe request cannot bloat the snapshot/history rows unbounded. The
+// final sealing happens in the store; truncation is applied first.
+const maxModelHealthPromptBytes = 8 * 1024
+
+// maxModelHealthCompletionBytes caps the stored completion text (the model's
+// generated content) — symmetric to maxModelHealthPromptBytes.
+const maxModelHealthCompletionBytes = 8 * 1024
+
 // ModelHealthRow mirrors a row in the model_health snapshot table (one row per
 // model id) and, with an ID, a row in the model_health_log history table. It
 // records the outcome of a single health-check probe: which model was probed,
 // whether it succeeded, the response time, the measured tokens-per-second, the
-// token usage, and the error message (if any).
+// token usage, the error message (if any), the actual prompt/completion text,
+// and the upstream provider that served the probe.
 //
-// The ErrorMessage column is AES-GCM-sealed at rest when
-// PGSTORE_ENCRYPTION_KEY is configured (see Sealer); otherwise it is
+// ErrorMessage, PromptMessage, and Completion are AES-GCM-sealed at rest when
+// PGSTORE_ENCRYPTION_KEY is configured (see Sealer); otherwise they are
 // persisted in plaintext (legacy rows remain readable, forward-encrypting).
 type ModelHealthRow struct {
-	ID               int64     `json:"id,omitempty"`
-	ModelID          string    `json:"model_id"`
-	Status           string    `json:"status"`
-	Success          bool      `json:"success"`
-	ResponseTimeMs   int64     `json:"response_time_ms"`
-	TokensPerSecond  *float64  `json:"tokens_per_second,omitempty"`
-	PromptTokens     int       `json:"prompt_tokens"`
-	CompletionTokens int       `json:"completion_tokens"`
-	ErrorMessage     string    `json:"error_message,omitempty"`
-	Provider         string    `json:"provider,omitempty"`
+	ID               int64    `json:"id,omitempty"`
+	ModelID          string   `json:"model_id"`
+	Status           string   `json:"status"`
+	Success          bool     `json:"success"`
+	ResponseTimeMs   int64    `json:"response_time_ms"`
+	TokensPerSecond  *float64 `json:"tokens_per_second,omitempty"`
+	PromptTokens     int      `json:"prompt_tokens"`
+	CompletionTokens int      `json:"completion_tokens"`
+	ErrorMessage     string   `json:"error_message,omitempty"`
+	Provider         string   `json:"provider,omitempty"`
+	// PromptMessage is the actual probe prompt text (truncated to
+	// maxModelHealthPromptBytes). Sealed at rest.
+	PromptMessage string `json:"prompt_message,omitempty"`
+	// Completion is the model-generated completion text extracted from the
+	// probe response (truncated to maxModelHealthCompletionBytes). Sealed.
+	Completion string `json:"completion,omitempty"`
+	// UpstreamProvider, UpstreamAuthID, UpstreamModel record which upstream
+	// credential served the probe and the translated model it used — i.e. the
+	// detail behind the "provider" summary field. Surfaced in the detail modal
+	// so an operator can correlate a health outcome to a specific credential.
+	UpstreamProvider string    `json:"upstream_provider,omitempty"`
+	UpstreamAuthID   string    `json:"upstream_auth_id,omitempty"`
+	UpstreamModel    string    `json:"upstream_model,omitempty"`
 	CheckedAt        time.Time `json:"checked_at"`
 }
 
@@ -179,21 +202,56 @@ func (s *ModelHealthStore) SetSealer(sealer *Sealer) {
 // sealErrorMessage seals an error message when a Sealer is enabled, truncating
 // to maxAuditBodyBytes first to bound row size. Returns the value to persist.
 func (s *ModelHealthStore) sealErrorMessage(errMsg string) string {
-	errMsg = truncateAuditBody(errMsg)
-	if s.sealer != nil && s.sealer.Enabled() && errMsg != "" {
-		if sealed, errSeal := s.sealer.Seal(errMsg); errSeal == nil {
+	return s.sealText(truncateAuditBody(errMsg), "error_message")
+}
+
+// sealPrompt seals the probe prompt text, truncating to maxModelHealthPromptBytes
+// first to bound row size. Mirrors sealErrorMessage.
+func (s *ModelHealthStore) sealPrompt(text string) string {
+	return s.sealText(truncateTo(text, maxModelHealthPromptBytes), "prompt_message")
+}
+
+// sealCompletion seals the probe completion text, truncating to
+// maxModelHealthCompletionBytes first to bound row size.
+func (s *ModelHealthStore) sealCompletion(text string) string {
+	return s.sealText(truncateTo(text, maxModelHealthCompletionBytes), "completion")
+}
+
+// sealText is the shared seal-or-plaintext helper for a single string column.
+// label names the column in debug logs so a failed seal is attributable.
+func (s *ModelHealthStore) sealText(value, label string) string {
+	if value == "" {
+		return ""
+	}
+	if s.sealer != nil && s.sealer.Enabled() {
+		if sealed, errSeal := s.sealer.Seal(value); errSeal == nil {
 			return sealed
 		} else {
-			log.WithError(errSeal).Debug("postgres store: seal model_health error_message failed; storing plaintext")
+			log.WithError(errSeal).Debug("postgres store: seal model_health " + label + " failed; storing plaintext")
 		}
 	}
-	return errMsg
+	return value
+}
+
+// unsealText unseals a persisted sealed column when a Sealer is configured;
+// legacy plaintext rows pass through unchanged.
+func (s *ModelHealthStore) unsealText(value string) string {
+	return unsealAuditBody(s.sealer, value)
 }
 
 // unsealErrorMessage unseals a persisted error message when a Sealer is
 // configured; legacy plaintext rows pass through unchanged.
 func (s *ModelHealthStore) unsealErrorMessage(errMsg string) string {
 	return unsealAuditBody(s.sealer, errMsg)
+}
+
+// truncateTo bounds a string to maxBytes, appending an ellipsis marker when
+// truncation occurred. Used for prompt/completion columns before sealing.
+func truncateTo(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	return s[:maxBytes] + "…[truncated]"
 }
 
 // nullableTPS converts a *float64 tokens-per-second into the value/nil pair
@@ -218,9 +276,11 @@ func (s *ModelHealthStore) UpsertSnapshot(ctx context.Context, r ModelHealthRow)
 		r.CheckedAt = time.Now().UTC()
 	}
 	errMsg := s.sealErrorMessage(r.ErrorMessage)
+	prompt := s.sealPrompt(r.PromptMessage)
+	completion := s.sealCompletion(r.Completion)
 	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (model_id, status, success, response_time_ms, tokens_per_second, prompt_tokens, completion_tokens, error_message, provider, checked_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO %s (model_id, status, success, response_time_ms, tokens_per_second, prompt_tokens, completion_tokens, error_message, provider, prompt_message, completion, upstream_provider, upstream_auth_id, upstream_model, checked_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		ON CONFLICT (model_id) DO UPDATE SET
 			status            = EXCLUDED.status,
 			success           = EXCLUDED.success,
@@ -230,11 +290,19 @@ func (s *ModelHealthStore) UpsertSnapshot(ctx context.Context, r ModelHealthRow)
 			completion_tokens = EXCLUDED.completion_tokens,
 			error_message     = EXCLUDED.error_message,
 			provider          = EXCLUDED.provider,
+			prompt_message    = EXCLUDED.prompt_message,
+			completion        = EXCLUDED.completion,
+			upstream_provider = EXCLUDED.upstream_provider,
+			upstream_auth_id  = EXCLUDED.upstream_auth_id,
+			upstream_model    = EXCLUDED.upstream_model,
 			checked_at        = EXCLUDED.checked_at
 	`, s.healthTable),
 		r.ModelID, r.Status, r.Success, r.ResponseTimeMs,
 		nullableTPS(r.TokensPerSecond), r.PromptTokens, r.CompletionTokens,
-		nullableString(errMsg), nullableString(r.Provider), r.CheckedAt,
+		nullableString(errMsg), nullableString(r.Provider),
+		nullableString(prompt), nullableString(completion),
+		nullableString(r.UpstreamProvider), nullableString(r.UpstreamAuthID),
+		nullableString(r.UpstreamModel), r.CheckedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("postgres store: upsert model_health snapshot: %w", err)
@@ -242,10 +310,11 @@ func (s *ModelHealthStore) UpsertSnapshot(ctx context.Context, r ModelHealthRow)
 	return nil
 }
 
-// InsertLog appends one history row. ErrorMessage is sealed at rest when a
-// Sealer is configured and truncated to maxAuditBodyBytes before sealing. The
-// call is fire-and-forget from the probe runner; errors are surfaced so the
-// runner can log them without blocking the sweep.
+// InsertLog appends one history row. ErrorMessage, PromptMessage, and
+// Completion are sealed at rest when a Sealer is configured and truncated to
+// their byte caps before sealing. The call is fire-and-forget from the probe
+// runner; errors are surfaced so the runner can log them without blocking the
+// sweep.
 func (s *ModelHealthStore) InsertLog(ctx context.Context, r ModelHealthRow) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("postgres store: model health store not initialized")
@@ -254,13 +323,18 @@ func (s *ModelHealthStore) InsertLog(ctx context.Context, r ModelHealthRow) erro
 		r.CheckedAt = time.Now().UTC()
 	}
 	errMsg := s.sealErrorMessage(r.ErrorMessage)
+	prompt := s.sealPrompt(r.PromptMessage)
+	completion := s.sealCompletion(r.Completion)
 	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (model_id, status, success, response_time_ms, tokens_per_second, prompt_tokens, completion_tokens, error_message, provider, checked_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO %s (model_id, status, success, response_time_ms, tokens_per_second, prompt_tokens, completion_tokens, error_message, provider, prompt_message, completion, upstream_provider, upstream_auth_id, upstream_model, checked_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 	`, s.logTable),
 		r.ModelID, r.Status, r.Success, r.ResponseTimeMs,
 		nullableTPS(r.TokensPerSecond), r.PromptTokens, r.CompletionTokens,
-		nullableString(errMsg), nullableString(r.Provider), r.CheckedAt,
+		nullableString(errMsg), nullableString(r.Provider),
+		nullableString(prompt), nullableString(completion),
+		nullableString(r.UpstreamProvider), nullableString(r.UpstreamAuthID),
+		nullableString(r.UpstreamModel), r.CheckedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("postgres store: insert model_health_log: %w", err)
@@ -280,22 +354,27 @@ func (s *ModelHealthStore) RecordResult(ctx context.Context, r ModelHealthRow) e
 
 // scanModelHealthRow scans one model_health / model_health_log row into a
 // ModelHealthRow. The shared column order matches both SELECT lists used here.
-// errorMessage is unsealed.
+// errorMessage, prompt_message, and completion are unsealed.
 func (s *ModelHealthStore) scanModelHealthRow(scan func(dest ...any) error, includeID bool) (ModelHealthRow, error) {
 	var (
-		r        ModelHealthRow
-		errMsg   sql.NullString
-		provider sql.NullString
-		tps      sql.NullFloat64
+		r             ModelHealthRow
+		errMsg        sql.NullString
+		provider      sql.NullString
+		prompt        sql.NullString
+		completion    sql.NullString
+		upstreamProv  sql.NullString
+		upstreamAuth  sql.NullString
+		upstreamModel sql.NullString
+		tps           sql.NullFloat64
 	)
 	var id sql.NullInt64
 	if includeID {
-		if err := scan(&id, &r.ModelID, &r.Status, &r.Success, &r.ResponseTimeMs, &tps, &r.PromptTokens, &r.CompletionTokens, &errMsg, &provider, &r.CheckedAt); err != nil {
+		if err := scan(&id, &r.ModelID, &r.Status, &r.Success, &r.ResponseTimeMs, &tps, &r.PromptTokens, &r.CompletionTokens, &errMsg, &provider, &prompt, &completion, &upstreamProv, &upstreamAuth, &upstreamModel, &r.CheckedAt); err != nil {
 			return r, err
 		}
 		r.ID = id.Int64
 	} else {
-		if err := scan(&r.ModelID, &r.Status, &r.Success, &r.ResponseTimeMs, &tps, &r.PromptTokens, &r.CompletionTokens, &errMsg, &provider, &r.CheckedAt); err != nil {
+		if err := scan(&r.ModelID, &r.Status, &r.Success, &r.ResponseTimeMs, &tps, &r.PromptTokens, &r.CompletionTokens, &errMsg, &provider, &prompt, &completion, &upstreamProv, &upstreamAuth, &upstreamModel, &r.CheckedAt); err != nil {
 			return r, err
 		}
 	}
@@ -305,6 +384,11 @@ func (s *ModelHealthStore) scanModelHealthRow(scan func(dest ...any) error, incl
 	}
 	r.ErrorMessage = s.unsealErrorMessage(errMsg.String)
 	r.Provider = provider.String
+	r.PromptMessage = s.unsealText(prompt.String)
+	r.Completion = s.unsealText(completion.String)
+	r.UpstreamProvider = upstreamProv.String
+	r.UpstreamAuthID = upstreamAuth.String
+	r.UpstreamModel = upstreamModel.String
 	return r, nil
 }
 
@@ -316,7 +400,7 @@ func (s *ModelHealthStore) ListSnapshots(ctx context.Context) ([]ModelHealthRow,
 		return nil, fmt.Errorf("postgres store: model health store not initialized")
 	}
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT model_id, status, success, response_time_ms, tokens_per_second, prompt_tokens, completion_tokens, error_message, provider, checked_at
+		SELECT model_id, status, success, response_time_ms, tokens_per_second, prompt_tokens, completion_tokens, error_message, provider, prompt_message, completion, upstream_provider, upstream_auth_id, upstream_model, checked_at
 		FROM %s ORDER BY model_id ASC
 	`, s.healthTable))
 	if err != nil {
@@ -395,7 +479,7 @@ func (s *ModelHealthStore) ListLogPaged(ctx context.Context, f ModelHealthLogFil
 	listArgs := append([]any{}, args...)
 	listArgs = append(listArgs, pageSize, (page-1)*pageSize)
 	listQuery := fmt.Sprintf(`
-		SELECT id, model_id, status, success, response_time_ms, tokens_per_second, prompt_tokens, completion_tokens, error_message, provider, checked_at
+		SELECT id, model_id, status, success, response_time_ms, tokens_per_second, prompt_tokens, completion_tokens, error_message, provider, prompt_message, completion, upstream_provider, upstream_auth_id, upstream_model, checked_at
 		FROM %s%s
 		ORDER BY checked_at DESC
 		LIMIT $%d OFFSET $%d
@@ -436,7 +520,7 @@ func (s *ModelHealthStore) GetLogEntry(ctx context.Context, id int64) (*ModelHea
 		return nil, fmt.Errorf("postgres store: model health store not initialized")
 	}
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT id, model_id, status, success, response_time_ms, tokens_per_second, prompt_tokens, completion_tokens, error_message, provider, checked_at
+		SELECT id, model_id, status, success, response_time_ms, tokens_per_second, prompt_tokens, completion_tokens, error_message, provider, prompt_message, completion, upstream_provider, upstream_auth_id, upstream_model, checked_at
 		FROM %s WHERE id = $1
 	`, s.logTable), id)
 	r, err := s.scanModelHealthRow(row.Scan, true)

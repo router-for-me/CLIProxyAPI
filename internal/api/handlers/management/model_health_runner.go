@@ -188,9 +188,13 @@ func (h *Handler) probeModel(ctx context.Context, modelID string, maxTokens int)
 		return row
 	}
 
+	// The fixed probe prompt surfaced verbatim in the recorded detail row. Kept
+	// small + deterministic so the stored prompt_message is cheap to seal and
+	// an operator can tell at a glance what the probe asked.
+	const probePromptMessage = "ping"
 	payload := []byte(fmt.Sprintf(
-		`{"model":%q,"messages":[{"role":"user","content":"ping"}],"max_tokens":%d,"stream":false}`,
-		modelID, maxTokens,
+		`{"model":%q,"messages":[{"role":"user","content":%q}],"max_tokens":%d,"stream":false}`,
+		modelID, probePromptMessage, maxTokens,
 	))
 
 	var lastErr error
@@ -205,12 +209,19 @@ func (h *Handler) probeModel(ctx context.Context, modelID string, maxTokens int)
 			Payload: payload,
 			Format:  sdktranslator.Format(""), // empty = the manager infers from SourceFormat/registry
 		}
+		// Capture which upstream auth the scheduler picked for this probe via
+		// the selected-auth callback so the recorded detail row attributes the
+		// outcome to a specific credential (not just the provider key).
+		selectedAuthID := ""
 		opts := cliproxyexecutor.Options{
 			Stream:       false,
 			SourceFormat: sdktranslator.FromString("openai"),
 			Metadata: map[string]any{
 				cliproxyexecutor.RequestedModelMetadataKey: modelID,
 			},
+		}
+		opts.Metadata[cliproxyexecutor.SelectedAuthCallbackMetadataKey] = func(authID string) {
+			selectedAuthID = authID
 		}
 		start := time.Now()
 		resp, err := h.authManager.Execute(probeCtx, []string{provider}, req, opts)
@@ -222,13 +233,24 @@ func (h *Handler) probeModel(ctx context.Context, modelID string, maxTokens int)
 		}
 		row.Provider = provider
 		row.ResponseTimeMs = elapsed.Milliseconds()
-		prompt, completion := parseOpenAIUsage(resp.Payload)
-		row.PromptTokens = prompt
-		row.CompletionTokens = completion
-		if elapsed > 0 && completion > 0 {
-			tps := float64(completion) / elapsed.Seconds()
+		promptTokens, completionTokens := parseOpenAIUsage(resp.Payload)
+		row.PromptTokens = promptTokens
+		row.CompletionTokens = completionTokens
+		if elapsed > 0 && completionTokens > 0 {
+			tps := float64(completionTokens) / elapsed.Seconds()
 			row.TokensPerSecond = &tps
 		}
+		// Record the actual probe prompt + the model-generated completion text
+		// so an operator auditing a check can see exactly what was asked and
+		// answered. Both are truncated + sealed at rest by the store.
+		row.PromptMessage = probePromptMessage
+		row.Completion = extractOpenAICompletionText(resp.Payload)
+		// Upstream detail: provider + the selected auth id + the resolved
+		// upstream model (recorded by the manager into opts.Metadata after
+		// execution; falls back to the requested model when unavailable).
+		row.UpstreamProvider = provider
+		row.UpstreamAuthID = selectedAuthID
+		row.UpstreamModel = extractUpstreamModel(opts.Metadata, modelID)
 		row.Status = classifyModelHealth(row.ResponseTimeMs, row.TokensPerSecond)
 		row.Success = true
 		return row
@@ -284,6 +306,51 @@ func truncateForHealthLog(s string) string {
 		return s[:max] + "…[truncated]"
 	}
 	return s
+}
+
+// extractOpenAICompletionText pulls the generated assistant content out of an
+// OpenAI-compatible chat-completion response body. Concatenates each choice's
+// message.content (a real response may carry multiple choices; the health
+// probe uses max_tokens so completion is usually a few tokens). Returns "" when
+// the body has no choices/content (e.g. a provider that omits content for tiny
+// completions); the caller treats that as "completion text not available".
+func extractOpenAICompletionText(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	choices := gjson.GetBytes(payload, "choices")
+	if !choices.IsArray() {
+		return ""
+	}
+	var b strings.Builder
+	choices.ForEach(func(_, choice gjson.Result) bool {
+		if v := choice.Get("message.content"); v.Exists() && v.Type == gjson.String {
+			if b.Len() > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(v.String())
+		}
+		return true
+	})
+	return b.String()
+}
+
+// extractUpstreamModel reads the upstream/translated model that the auth
+// manager resolved for the probe from the execution metadata, falling back to
+// the original requested model when the manager did not record one. The
+// manager sets SelectedAuthMetadataKey (+ the selected-auth callback); the
+// resolved upstream model is reflected back through opts.Metadata under the
+// requested-model key after execution completes.
+func extractUpstreamModel(meta map[string]any, fallback string) string {
+	if meta == nil {
+		return fallback
+	}
+	if v, ok := meta[cliproxyexecutor.RequestedModelMetadataKey]; ok {
+		if s, okStr := v.(string); okStr && s != "" {
+			return s
+		}
+	}
+	return fallback
 }
 
 // StartModelHealthSweep launches a background goroutine that periodically
