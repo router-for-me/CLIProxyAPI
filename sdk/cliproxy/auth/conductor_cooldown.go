@@ -94,7 +94,7 @@ func recoverableFailureRetryAfter(now time.Time, disableCooling bool) time.Time 
 }
 
 func transientFailureRetryAfter(now time.Time, retryAfter *time.Duration, disableCooling bool) time.Time {
-	if disableCooling {
+	if disableCooling || transientErrorCooldownSeconds.Load() < 0 {
 		return time.Time{}
 	}
 	if retryAfter != nil && *retryAfter >= 0 {

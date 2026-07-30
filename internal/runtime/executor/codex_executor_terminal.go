@@ -282,6 +282,10 @@ func parseRetryAfterHeader(value string, now time.Time) *time.Duration {
 		if seconds < 0 {
 			return nil
 		}
+		const maxRetryAfterSeconds = int64(time.Duration(1<<63-1) / time.Second)
+		if seconds > maxRetryAfterSeconds {
+			return nil
+		}
 		delay := time.Duration(seconds) * time.Second
 		return &delay
 	}

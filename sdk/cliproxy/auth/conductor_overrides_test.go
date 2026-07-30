@@ -856,6 +856,7 @@ func TestManager_MarkResult_TransientErrorCooldownDisabled(t *testing.T) {
 	})
 
 	m := NewManager(nil, nil, nil)
+	retryAfter := 2 * time.Minute
 
 	modelAuth := &Auth{
 		ID:       "auth-transient-model-disabled",
@@ -867,11 +868,12 @@ func TestManager_MarkResult_TransientErrorCooldownDisabled(t *testing.T) {
 
 	model := "test-model-transient-disabled"
 	m.MarkResult(context.Background(), Result{
-		AuthID:   modelAuth.ID,
-		Provider: modelAuth.Provider,
-		Model:    model,
-		Success:  false,
-		Error:    &Error{HTTPStatus: http.StatusBadGateway, Message: "bad gateway"},
+		AuthID:     modelAuth.ID,
+		Provider:   modelAuth.Provider,
+		Model:      model,
+		Success:    false,
+		Error:      &Error{HTTPStatus: http.StatusBadGateway, Message: "bad gateway"},
+		RetryAfter: &retryAfter,
 	})
 
 	updatedModelAuth, okModelAuth := m.GetByID(modelAuth.ID)
@@ -895,10 +897,11 @@ func TestManager_MarkResult_TransientErrorCooldownDisabled(t *testing.T) {
 	}
 
 	m.MarkResult(context.Background(), Result{
-		AuthID:   authLevelAuth.ID,
-		Provider: authLevelAuth.Provider,
-		Success:  false,
-		Error:    &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "unavailable"},
+		AuthID:     authLevelAuth.ID,
+		Provider:   authLevelAuth.Provider,
+		Success:    false,
+		Error:      &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "unavailable"},
+		RetryAfter: &retryAfter,
 	})
 
 	updatedAuthLevel, okAuthLevel := m.GetByID(authLevelAuth.ID)

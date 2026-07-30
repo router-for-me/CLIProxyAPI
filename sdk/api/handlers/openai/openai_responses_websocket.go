@@ -436,7 +436,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if errMsg != nil {
 			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 			markAPIResponseTimestamp(c)
-			errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
+			errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg, handlers.PassthroughHeadersEnabled(h.Cfg))
 			log.Infof(
 				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
 				passthroughSessionID,

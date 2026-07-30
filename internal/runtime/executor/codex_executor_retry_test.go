@@ -100,6 +100,18 @@ func TestNewCodexStatusErrWithHeadersPreservesRetryMetadata(t *testing.T) {
 		}
 	})
 
+	t.Run("overflowing delta seconds", func(t *testing.T) {
+		err := newCodexStatusErrWithHeaders(
+			http.StatusServiceUnavailable,
+			[]byte(`{"error":{"type":"server_error"}}`),
+			http.Header{"Retry-After": {"9999999999"}},
+		)
+
+		if retryAfter := err.RetryAfter(); retryAfter != nil {
+			t.Fatalf("RetryAfter() = %v, want nil for overflowing delta seconds", *retryAfter)
+		}
+	})
+
 	t.Run("body retry metadata wins", func(t *testing.T) {
 		err := newCodexStatusErrWithHeaders(
 			http.StatusTooManyRequests,

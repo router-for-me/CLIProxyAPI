@@ -74,7 +74,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					}
 					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, websocket.ErrCloseSent
 				}
-				errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
+				errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg, handlers.PassthroughHeadersEnabled(h.Cfg))
 				log.Infof(
 					"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
 					sessionID,
@@ -108,7 +108,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					}
 					h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 					markAPIResponseTimestamp(c)
-					errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
+					errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg, handlers.PassthroughHeadersEnabled(h.Cfg))
 					log.Infof(
 						"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
 						sessionID,
@@ -478,7 +478,7 @@ func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {
 	return payloads
 }
 
-func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, errMsg *interfaces.ErrorMessage) ([]byte, error) {
+func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage, passthroughHeaders bool) ([]byte, error) {
 	status := http.StatusInternalServerError
 	errText := http.StatusText(status)
 	if errMsg != nil {
@@ -503,7 +503,7 @@ func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLo
 		return nil, errSet
 	}
 
-	if errMsg != nil && errMsg.Addon != nil {
+	if passthroughHeaders && errMsg != nil && errMsg.Addon != nil {
 		headers := []byte(`{}`)
 		hasHeaders := false
 		for key, values := range errMsg.Addon {
@@ -548,5 +548,13 @@ func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLo
 		}
 	}
 
+	return payload, nil
+}
+
+func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, errMsg *interfaces.ErrorMessage, passthroughHeaders bool) ([]byte, error) {
+	payload, err := buildResponsesWebsocketErrorPayload(errMsg, passthroughHeaders)
+	if err != nil {
+		return nil, err
+	}
 	return payload, writeResponsesWebsocketPayload(writer, wsTimelineLog, payload, time.Now())
 }
