@@ -95,6 +95,19 @@ func (h *Handler) GetPublicModelHealthUptime(c *gin.Context) {
 		})
 		return
 	}
+	// Hide operator-excluded models from the public status too, mirroring the
+	// authenticated latest-status endpoint. Excluded models are not probed, so
+	// their last snapshot grows stale; surfacing a stale "operational" on a
+	// public status page would misrepresent actual health. GetSettings is
+	// non-fatal: on error an empty exclusion set makes the filter a no-op (the
+	// same behavior the endpoint had before exclusion was read-aware), which is
+	// preferable to failing a public uptime monitor.
+	settings, errSet := s.GetSettings(c.Request.Context())
+	if errSet != nil {
+		log.WithError(errSet).Warn("model-health/uptime: load settings failed; showing all snapshot models")
+		settings = store.ModelHealthSettings{Enabled: true, ExcludedModels: []string{}, MaxTokens: 1, IntervalSeconds: 900}
+	}
+	rows = store.FilterExcludedSnapshots(rows, settings.ExcludedModels)
 	models := make([]PublicModelHealthModel, 0, len(rows))
 	for _, r := range rows {
 		checkedAt := ""

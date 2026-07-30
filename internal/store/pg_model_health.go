@@ -425,6 +425,74 @@ func (s *ModelHealthStore) ListSnapshots(ctx context.Context) ([]ModelHealthRow,
 	return out, nil
 }
 
+// FilterExcludedSnapshots returns a new slice holding only the rows whose
+// model_id is not in the excluded set. Matching is case-insensitive and each
+// excluded entry is trimmed (mirroring how the probe runner applies the same
+// list at write time), so a model excluded as "GPT-4" hides a snapshot stored
+// as "gpt-4". Input order is preserved (ListSnapshots returns rows ordered by
+// model_id ASC, so the filtered result stays sorted).
+//
+// Used on the read path (the dashboard latest-status endpoint and the public
+// uptime endpoint) so an excluded model id never appears in the latest status,
+// never counts toward the KPI / rollup aggregates, and a stale checked_at is
+// not surfaced once the operator has excluded the model. Exclusion at write
+// time (the probe runner) only stops new snapshots being written; this filter
+// is what hides the last-recorded row.
+func FilterExcludedSnapshots(rows []ModelHealthRow, excluded []string) []ModelHealthRow {
+	if len(excluded) == 0 {
+		return rows
+	}
+	set := make(map[string]struct{}, len(excluded))
+	for _, m := range excluded {
+		if v := strings.TrimSpace(m); v != "" {
+			set[strings.ToLower(v)] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		return rows
+	}
+	out := make([]ModelHealthRow, 0, len(rows))
+	for _, r := range rows {
+		if _, skip := set[strings.ToLower(r.ModelID)]; skip {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// DeleteSnapshotsByModels removes the latest-snapshot rows (in model_health,
+// not the model_health_log history) for each model id, matching
+// case-insensitively. Used when an operator excludes models in Settings so the
+// now-stale snapshot row does not linger invisibly in the table (the sweep
+// stops writing it). Returns the number of rows deleted; 0 (nil) when models is
+// empty. Mirrors ClearLog / PurgeLogBefore in shape.
+func (s *ModelHealthStore) DeleteSnapshotsByModels(ctx context.Context, models []string) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("postgres store: model health store not initialized")
+	}
+	// Normalize + lowercase so the lower(model_id) = ANY($1) predicate matches
+	// regardless of how the id was originally stored.
+	normalized := make([]string, 0, len(models))
+	for _, m := range models {
+		if v := strings.TrimSpace(m); v != "" {
+			normalized = append(normalized, strings.ToLower(v))
+		}
+	}
+	if len(normalized) == 0 {
+		return 0, nil
+	}
+	res, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`DELETE FROM %s WHERE lower(model_id) = ANY($1)`, s.healthTable),
+		normalized,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("postgres store: delete model_health snapshots: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // ListLogPaged returns a page of model_health_log entries plus the total row
 // count matching the filter. ErrorMessage is unsealed when a Sealer is
 // configured; legacy plaintext rows pass through unchanged.

@@ -39,10 +39,14 @@ func (h *Handler) requireModelHealth(c *gin.Context) (*store.ModelHealthStore, b
 
 // GetModelHealth handles GET /v0/management/model-health.
 //
-// Returns the latest health-check snapshot for every model id plus the current
-// operator settings and the most recent sweep timestamp. Surfaced on the
-// dashboard under Analysis → Model Health. Returns 503 when the PG store is not
-// configured.
+// Returns the latest health-check snapshot for every (non-excluded) model id
+// plus the current operator settings and the most recent sweep timestamp.
+// Snapshots for model ids in settings.excluded_models are filtered out at read
+// time (exclusion is also enforced at write time by the sweep, but read-time
+// filtering hides the last-recorded row too) so an excluded model never
+// appears in the latest-status table or counts toward the dashboard KPIs.
+// Surfaced on the dashboard under Analysis → Model Health. Returns 503 when the
+// PG store is not configured.
 func (h *Handler) GetModelHealth(c *gin.Context) {
 	s, ok := h.requireModelHealth(c)
 	if !ok {
@@ -64,6 +68,9 @@ func (h *Handler) GetModelHealth(c *gin.Context) {
 		log.WithError(err).Warn("model-health: load settings failed")
 		settings = store.ModelHealthSettings{Enabled: true, ExcludedModels: []string{}, MaxTokens: 1, IntervalSeconds: 900}
 	}
+	// Drop excluded models from the latest status. On the settings-load error
+	// fallback above ExcludedModels is empty, so this is a no-op there.
+	snapshots = store.FilterExcludedSnapshots(snapshots, settings.ExcludedModels)
 	lastRunAt, lastRunSummary := ModelHealthLastRun()
 	c.JSON(http.StatusOK, gin.H{
 		"snapshots":        snapshots,
@@ -266,6 +273,11 @@ func (h *Handler) PutModelHealthSettings(c *gin.Context) {
 	if err != nil {
 		current = store.ModelHealthSettings{Enabled: true, ExcludedModels: []string{}, MaxTokens: 1, IntervalSeconds: 900}
 	}
+	// oldExcluded is the live exclusion set before this update so the purge
+	// step below only deletes snapshot rows for models that are newly excluded
+	// (a model already excluded has no live row to remove). Captured before
+	// current.ExcludedModels is overwritten by the PATCH body.
+	oldExcluded := append([]string(nil), current.ExcludedModels...)
 	if body.Enabled != nil {
 		current.Enabled = *body.Enabled
 	}
@@ -324,7 +336,56 @@ func (h *Handler) PutModelHealthSettings(c *gin.Context) {
 		}})
 		return
 	}
+	// Purge the latest-snapshot rows for models that are newly excluded so the
+	// now-stale row (which the sweep will no longer refresh) does not linger
+	// invisibly in model_health. Read-time filtering already hides excluded
+	// models from both endpoints, so this is a tidiness step, not a correctness
+	// gate: a failure here is logged but does not undo the settings save. Only
+	// models absent from oldExcluded are targeted (already-excluded models have
+	// no live row to delete). Skipped entirely when this PATCH did not touch
+	// excluded_models (newlyExcluded is empty).
+	if newlyExcluded := newlyExcludedModels(oldExcluded, persisted.ExcludedModels); len(newlyExcluded) > 0 {
+		deleted, errDel := s.DeleteSnapshotsByModels(c.Request.Context(), newlyExcluded)
+		if errDel != nil {
+			log.WithError(errDel).Warn("model-health: purge newly-excluded snapshots failed")
+		} else if deleted > 0 {
+			log.WithField("deleted", deleted).WithField("newly_excluded", newlyExcluded).
+				Debug("model-health: purged snapshots for newly-excluded models")
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"settings": persisted})
+}
+
+// newlyExcludedModels returns the persisted (new) excluded model ids that were
+// not in the old set, compared case-insensitively and after trimming. The
+// returned values are the (trimmed) new-form spellings so they match the
+// model_health.model_id column via DeleteSnapshotsByModels' lower() match. Used
+// by PutModelHealthSettings to purge snapshot rows only for models that became
+// excluded in this update.
+func newlyExcludedModels(oldExcluded, newExcluded []string) []string {
+	if len(newExcluded) == 0 {
+		return nil
+	}
+	prev := make(map[string]struct{}, len(oldExcluded))
+	for _, m := range oldExcluded {
+		if v := strings.TrimSpace(m); v != "" {
+			prev[strings.ToLower(v)] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(newExcluded))
+	for _, m := range newExcluded {
+		v := strings.TrimSpace(m)
+		if v == "" {
+			continue
+		}
+		if _, exists := prev[strings.ToLower(v)]; exists {
+			continue
+		}
+		// Track so a duplicate within newExcluded is only reported once.
+		prev[strings.ToLower(v)] = struct{}{}
+		out = append(out, v)
+	}
+	return out
 }
 
 // RunModelHealthCheckNow handles POST /v0/management/model-health/run.
