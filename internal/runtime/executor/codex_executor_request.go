@@ -88,6 +88,7 @@ type codexIdentityConfuseState struct {
 	originalPromptCacheKey string
 	promptCacheKey         string
 	turnIDs                []codexIdentityReplacement
+	application            codexApplicationIdentity
 }
 
 type codexIdentityReplacement struct {
@@ -144,6 +145,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	if identityState.promptCacheKey != "" {
 		cache.ID = identityState.promptCacheKey
 	}
+	rawJSON, identityState.application = applyCodexOfficialApplicationIdentity(e.cfg, auth, url, rawJSON)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
 	if err != nil {
 		return nil, nil, codexIdentityConfuseState{}, err
@@ -181,27 +183,24 @@ func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, 
 }
 
 func applyCodexIdentityConfuseHeaders(headers http.Header, state *codexIdentityConfuseState) {
-	if headers == nil {
+	if headers == nil || state == nil {
 		return
 	}
-	if state == nil || !state.enabled {
-		return
+	if state.enabled {
+		if rawTurnMetadata := strings.TrimSpace(headers.Get("X-Codex-Turn-Metadata")); rawTurnMetadata != "" {
+			headers.Set("X-Codex-Turn-Metadata", applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata, state))
+		}
+		if state.promptCacheKey != "" {
+			setCodexSessionHeaderCasePreserved(headers, "Session-Id", state.promptCacheKey)
+			if headerValueCaseInsensitive(headers, "Conversation_id") != "" {
+				setHeaderCasePreserved(headers, "Conversation_id", state.promptCacheKey)
+			}
+			headers.Set("X-Client-Request-Id", state.promptCacheKey)
+			headers.Set("Thread-Id", state.promptCacheKey)
+			headers.Set("X-Codex-Window-Id", state.promptCacheKey+":0")
+		}
 	}
-
-	if rawTurnMetadata := strings.TrimSpace(headers.Get("X-Codex-Turn-Metadata")); rawTurnMetadata != "" {
-		headers.Set("X-Codex-Turn-Metadata", applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata, state))
-	}
-	if state.promptCacheKey == "" {
-		return
-	}
-
-	setCodexSessionHeaderCasePreserved(headers, "Session-Id", state.promptCacheKey)
-	if headerValueCaseInsensitive(headers, "Conversation_id") != "" {
-		setHeaderCasePreserved(headers, "Conversation_id", state.promptCacheKey)
-	}
-	headers.Set("X-Client-Request-Id", state.promptCacheKey)
-	headers.Set("Thread-Id", state.promptCacheKey)
-	headers.Set("X-Codex-Window-Id", state.promptCacheKey+":0")
+	applyCodexOfficialApplicationIdentityHeaders(headers, &state.application)
 }
 
 func applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata string, state *codexIdentityConfuseState) string {
