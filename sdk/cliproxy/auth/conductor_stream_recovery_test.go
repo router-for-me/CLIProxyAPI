@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 type recoverySequenceExecutor struct {
 	mu               sync.Mutex
 	attempts         [][]cliproxyexecutor.StreamChunk
+	directErrors     []error
 	calls            int
 	authIDs          []string
 	recoveryContexts []bool
@@ -34,11 +36,21 @@ func (e *recoverySequenceExecutor) ExecuteStream(ctx context.Context, auth *Auth
 	if auth != nil {
 		e.authIDs = append(e.authIDs, auth.ID)
 	}
-	attempt := append([]cliproxyexecutor.StreamChunk(nil), e.attempts[call]...)
+	var attempt []cliproxyexecutor.StreamChunk
+	if call < len(e.attempts) {
+		attempt = append(attempt, e.attempts[call]...)
+	}
+	var directErr error
+	if call < len(e.directErrors) {
+		directErr = e.directErrors[call]
+	}
 	notify := e.notify
 	e.mu.Unlock()
 	if notify != nil {
 		notify <- call + 1
+	}
+	if directErr != nil {
+		return nil, directErr
 	}
 	chunks := make(chan cliproxyexecutor.StreamChunk, len(attempt))
 	for _, chunk := range attempt {
@@ -98,6 +110,97 @@ func TestExecuteStreamWithRecoveryDiscardsFailedAttempt(t *testing.T) {
 	}
 	if got != "winning-startwinning-textwinning-stop" {
 		t.Fatalf("winning payload = %q", got)
+	}
+}
+
+func TestManagerExecuteStreamRecoveryRetriesSynchronousTransientStatuses(t *testing.T) {
+	for _, status := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			executor := &recoverySequenceExecutor{
+				attempts: [][]cliproxyexecutor.StreamChunk{
+					nil,
+					{{Payload: []byte("winning"), Commitment: cliproxyexecutor.StreamCommitmentTerminal}},
+				},
+				directErrors: []error{
+					&Error{Code: "server_is_overloaded", Message: "temporary upstream capacity", HTTPStatus: status},
+					nil,
+				},
+			}
+			manager := NewManager(nil, nil, nil)
+			manager.RegisterExecutor(executor)
+			authID := "synchronous-recovery-auth-" + strconv.Itoa(status)
+			model := "synchronous-recovery-model-" + strconv.Itoa(status)
+			auth := &Auth{ID: authID, Provider: "codex", Status: StatusActive}
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+			manager.RefreshSchedulerEntry(auth.ID)
+
+			result, errExecute := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true, StreamRecovery: cliproxyexecutor.StreamRecoveryPolicy{
+				Attempts: 1, MaxBufferBytes: 1024, MaxRetryWindow: time.Second, MaxConcurrent: 1, InitialBackoff: time.Nanosecond, MaxBackoff: time.Nanosecond,
+			}})
+			if errExecute != nil {
+				t.Fatalf("ExecuteStream: %v", errExecute)
+			}
+			var payload string
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("stream error: %v", chunk.Err)
+				}
+				payload += string(chunk.Payload)
+			}
+			if payload != "winning" {
+				t.Fatalf("payload = %q, want winning", payload)
+			}
+			if got := result.Headers.Get("X-Attempt"); got != "2" {
+				t.Fatalf("winning header = %q, want 2", got)
+			}
+			if executor.calls != 2 {
+				t.Fatalf("calls = %d, want 2", executor.calls)
+			}
+			if len(executor.authIDs) != 2 || executor.authIDs[0] != authID || executor.authIDs[1] != authID {
+				t.Fatalf("auth attempts = %v, want %q twice", executor.authIDs, authID)
+			}
+			updated, ok := manager.GetByID(authID)
+			if !ok {
+				t.Fatal("auth missing")
+			}
+			if updated.Unavailable || updated.Status != StatusActive || updated.Failed != 0 {
+				t.Fatalf("recovered direct error changed auth availability: %+v", updated)
+			}
+		})
+	}
+}
+
+func TestExecuteStreamWithRecoveryPreservesSynchronousErrorOnExhaustion(t *testing.T) {
+	firstErr := &Error{Code: "server_is_overloaded", Message: "first temporary overload", HTTPStatus: http.StatusBadGateway}
+	finalErr := &Error{Code: "server_is_overloaded", Message: "final structured overload", HTTPStatus: http.StatusServiceUnavailable}
+	executor := &recoverySequenceExecutor{
+		attempts:     make([][]cliproxyexecutor.StreamChunk, 2),
+		directErrors: []error{firstErr, finalErr},
+	}
+	policy := cliproxyexecutor.StreamRecoveryPolicy{
+		Attempts:       1,
+		MaxBufferBytes: 1024,
+		MaxRetryWindow: time.Second,
+		InitialBackoff: time.Nanosecond,
+		MaxBackoff:     time.Nanosecond,
+	}
+	ctx := context.WithValue(context.Background(), streamRecoveryContextKey{}, &streamRecoveryState{policy: policy, started: time.Now(), remaining: 1})
+	result, buffered, remaining, errRecovery := (&Manager{}).executeStreamWithRecovery(ctx, executor, &Auth{}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, "codex", "gpt-test")
+	if errRecovery != finalErr {
+		t.Fatalf("error = %v, want final structured error %v", errRecovery, finalErr)
+	}
+	if result != nil || buffered != nil || remaining != nil {
+		t.Fatalf("exhausted direct error returned stream state: result=%v buffered=%v remaining=%v", result, buffered, remaining)
+	}
+	if statusCodeFromError(errRecovery) != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", statusCodeFromError(errRecovery))
+	}
+	if executor.calls != 2 {
+		t.Fatalf("calls = %d, want 2", executor.calls)
 	}
 }
 
