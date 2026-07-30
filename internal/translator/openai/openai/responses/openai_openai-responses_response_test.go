@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func parseOpenAIResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Result) {
@@ -443,6 +444,57 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ToolCallCompleted
 	}
 	if got := completed.Get("response.output.1.arguments").String(); !strings.Contains(got, "北京") {
 		t.Fatalf("response function call arguments = %q, want Beijing argument", got)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_StreamingRoundTripKeepsCombinedAssistantTurn(t *testing.T) {
+	in := []string{
+		`data: {"id":"resp_round_trip","object":"chat.completion.chunk","created":1,"model":"kimi-k3","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"inspect the next step","content":null},"finish_reason":null}]}`,
+		`data: {"id":"resp_round_trip","object":"chat.completion.chunk","created":1,"model":"kimi-k3","choices":[{"index":0,"delta":{"role":"assistant","content":"Step 1 completed; continue to step 2."},"finish_reason":null}]}`,
+		`data: {"id":"resp_round_trip","object":"chat.completion.chunk","created":1,"model":"kimi-k3","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec_command","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_round_trip","object":"chat.completion.chunk","created":1,"model":"kimi-k3","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":\"printf step-2\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+		`data: [DONE]`,
+	}
+	request := []byte(`{"model":"kimi-k3","reasoning":{"effort":"max"}}`)
+
+	var param any
+	var completed gjson.Result
+	for _, line := range in {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "kimi-k3", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			if event == "response.completed" {
+				completed = data
+			}
+		}
+	}
+	if !completed.Exists() {
+		t.Fatal("expected response.completed event")
+	}
+
+	nextRequest := []byte(`{"model":"kimi-k3","input":[]}`)
+	var err error
+	nextRequest, err = sjson.SetRawBytes(nextRequest, "input", []byte(completed.Get("response.output").Raw))
+	if err != nil {
+		t.Fatalf("set Responses output history: %v", err)
+	}
+	nextRequest, err = sjson.SetRawBytes(nextRequest, "input.-1", []byte(`{"type":"function_call_output","call_id":"call_1","output":"step-2"}`))
+	if err != nil {
+		t.Fatalf("append function call output: %v", err)
+	}
+
+	roundTripped := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", nextRequest, true)
+	if got := gjson.GetBytes(roundTripped, "messages.#").Int(); got != 2 {
+		t.Fatalf("messages count after streaming round-trip = %d, want 2; output=%s", got, roundTripped)
+	}
+	assistant := gjson.GetBytes(roundTripped, "messages.0")
+	if got := assistant.Get("content.0.text").String(); got != "Step 1 completed; continue to step 2." {
+		t.Fatalf("assistant content = %q; output=%s", got, roundTripped)
+	}
+	if got := assistant.Get("reasoning_content").String(); got != "inspect the next step" {
+		t.Fatalf("assistant reasoning_content = %q; output=%s", got, roundTripped)
+	}
+	if got := assistant.Get("tool_calls.0.id").String(); got != "call_1" {
+		t.Fatalf("assistant tool call id = %q; output=%s", got, roundTripped)
 	}
 }
 

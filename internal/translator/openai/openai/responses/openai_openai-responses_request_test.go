@@ -333,6 +333,123 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_AttachesReasoningT
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MergesAssistantTextAndToolCalls(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{
+				"type": "reasoning",
+				"id": "rs_tool",
+				"summary": [{"type": "summary_text", "text": "tool reasoning"}]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [{"type": "output_text", "text": "I will inspect the next step."}]
+			},
+			{"type":"function_call","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", raw, true)
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+		t.Fatalf("messages count = %d, want 2; output=%s", got, out)
+	}
+	assistant := gjson.GetBytes(out, "messages.0")
+	if got := assistant.Get("content.0.text").String(); got != "I will inspect the next step." {
+		t.Fatalf("assistant content = %q; output=%s", got, out)
+	}
+	if got := assistant.Get("reasoning_content").String(); got != "tool reasoning" {
+		t.Fatalf("assistant reasoning_content = %q; output=%s", got, out)
+	}
+	if got := assistant.Get("tool_calls.0.id").String(); got != "call_1" {
+		t.Fatalf("assistant tool call id = %q, want call_1; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.1.tool_call_id").String(); got != "call_1" {
+		t.Fatalf("tool message call id = %q, want call_1; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DeduplicatesReasoningWhenMergingAssistantTextAndToolCalls(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{
+				"type":"message",
+				"role":"assistant",
+				"content":"I will inspect the file.",
+				"reasoning_content":"same reasoning"
+			},
+			{
+				"type":"function_call",
+				"call_id":"call_1",
+				"name":"exec_command",
+				"arguments":"{\"cmd\":\"pwd\"}",
+				"reasoning_content":"same reasoning"
+			},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", raw, true)
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+		t.Fatalf("messages count = %d, want 2; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "same reasoning" {
+		t.Fatalf("assistant reasoning_content = %q, want one copy; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesDistinctReasoningWhenMergingAssistantTextAndToolCalls(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{
+				"type":"message",
+				"role":"assistant",
+				"content":"I will inspect the file.",
+				"reasoning_content":"message reasoning"
+			},
+			{
+				"type":"function_call",
+				"call_id":"call_1",
+				"name":"exec_command",
+				"arguments":"{\"cmd\":\"pwd\"}",
+				"reasoning_content":"tool reasoning"
+			},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", raw, true)
+
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "message reasoning\n\ntool reasoning" {
+		t.Fatalf("assistant reasoning_content = %q; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DoesNotMergeToolCallsAcrossUserBoundary(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"message","role":"assistant","content":"First answer."},
+			{"type":"message","role":"user","content":"New turn."},
+			{"type":"function_call","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", raw, true)
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+		t.Fatalf("messages count = %d, want 3; output=%s", got, out)
+	}
+	if gjson.GetBytes(out, "messages.0.tool_calls").Exists() {
+		t.Fatalf("tool calls crossed the user boundary; output=%s", out)
+	}
+	if got := gjson.GetBytes(out, "messages.2.tool_calls.0.id").String(); got != "call_1" {
+		t.Fatalf("new assistant tool call id = %q; output=%s", got, out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_KeepsReasoningBeforeUserMessage(t *testing.T) {
 	raw := []byte(`{
 		"input": [

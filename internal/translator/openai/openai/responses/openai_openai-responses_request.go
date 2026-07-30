@@ -84,16 +84,36 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			pendingReasoningContent = ""
 			return reasoningContent
 		}
+		appendPendingReasoningContent := func(reasoningContent string) {
+			pendingReasoningContent = mergeOpenAIResponsesReasoningContent(pendingReasoningContent, reasoningContent)
+		}
 		flushPendingToolCalls := func() {
 			if len(pendingToolCalls) == 0 {
 				return
 			}
-			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
-			assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
-			if reasoningContent := takePendingReasoningContent(); reasoningContent != "" {
-				assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)
+			reasoningContent := takePendingReasoningContent()
+			mergedIntoPreviousAssistant := false
+			if len(messages) > 0 {
+				lastIndex := len(messages) - 1
+				lastMessage := gjson.ParseBytes(messages[lastIndex])
+				if lastMessage.Get("role").String() == "assistant" && !lastMessage.Get("tool_calls").Exists() {
+					assistantMessage, _ := sjson.SetBytes(messages[lastIndex], "tool_calls", pendingToolCalls)
+					mergedReasoning := mergeOpenAIResponsesReasoningContent(lastMessage.Get("reasoning_content").String(), reasoningContent)
+					if mergedReasoning != "" {
+						assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", mergedReasoning)
+					}
+					messages[lastIndex] = assistantMessage
+					mergedIntoPreviousAssistant = true
+				}
 			}
-			appendMessage(assistantMessage)
+			if !mergedIntoPreviousAssistant {
+				assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
+				assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
+				if reasoningContent != "" {
+					assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)
+				}
+				appendMessage(assistantMessage)
+			}
 			for _, id := range pendingToolCallIDs {
 				if strings.TrimSpace(id) == "" {
 					continue
@@ -189,12 +209,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 				if role == "assistant" {
-					reasoningContent := item.Get("reasoning_content").String()
-					if reasoningContent == "" {
-						reasoningContent = takePendingReasoningContent()
-					} else {
-						pendingReasoningContent = ""
-					}
+					reasoningContent := mergeOpenAIResponsesReasoningContent(
+						takePendingReasoningContent(),
+						item.Get("reasoning_content").String(),
+					)
 					if reasoningContent != "" {
 						message, _ = sjson.SetBytes(message, "reasoning_content", reasoningContent)
 					}
@@ -203,14 +221,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				appendRegularMessage(message)
 
 			case "reasoning":
-				reasoningContent := collectOpenAIResponsesReasoningContent(item)
-				if pendingReasoningContent == "" {
-					pendingReasoningContent = reasoningContent
-				} else {
-					pendingReasoningContent += reasoningContent
-				}
+				appendPendingReasoningContent(collectOpenAIResponsesReasoningContent(item))
 
 			case "function_call":
+				appendPendingReasoningContent(item.Get("reasoning_content").String())
 				// Buffer consecutive function calls and emit them as one assistant message.
 				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 
@@ -257,6 +271,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 			case "custom_tool_call":
+				appendPendingReasoningContent(item.Get("reasoning_content").String())
 				// Codex freeform tool call replay: wrap the raw input so it
 				// matches the {"input": string} function shape used when
 				// converting custom tool definitions.
@@ -489,4 +504,23 @@ func collectOpenAIResponsesReasoningContent(item gjson.Result) string {
 		return "[reasoning unavailable]"
 	}
 	return reasoningText.String()
+}
+
+func mergeOpenAIResponsesReasoningContent(existing, incoming string) string {
+	existingTrimmed := strings.TrimSpace(existing)
+	incomingTrimmed := strings.TrimSpace(incoming)
+	switch {
+	case existingTrimmed == "":
+		return incoming
+	case incomingTrimmed == "":
+		return existing
+	case existingTrimmed == "[reasoning unavailable]":
+		return incoming
+	case incomingTrimmed == "[reasoning unavailable]":
+		return existing
+	case existingTrimmed == incomingTrimmed:
+		return existing
+	default:
+		return existing + "\n\n" + incoming
+	}
 }
