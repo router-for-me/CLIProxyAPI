@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "source_revision": "483559cc758353c83733b2b34629dbf885a99207",
+  "version": "0.146.0",
+  "originator": "codex_cli_rs",
+  "user_agent_template": "{originator}/{version} (Mac OS 26.5.2; arm64) Apple_Terminal/470 (codex-tui; {version})",
+  "websocket_beta": "responses_websockets=2026-02-06",
+  "headers": {
+    "installation_id": "x-codex-installation-id",
+    "turn_state": "x-codex-turn-state",
+    "turn_metadata": "x-codex-turn-metadata",
+    "parent_thread_id": "x-codex-parent-thread-id",
+    "window_id": "x-codex-window-id",
+    "subagent": "x-openai-subagent",
+    "timing_metrics": "x-responsesapi-include-timing-metrics",
+    "client_request_id": "x-client-request-id",
+    "session_id": "session_id",
+    "thread_id": "thread_id"
+  },
+  "metadata_keys": {
+    "installation_id": "installation_id",
+    "session_id": "session_id",
+    "thread_id": "thread_id",
+    "turn_id": "turn_id",
+    "window_id": "window_id",
+    "request_kind": "request_kind",
+    "turn_started_at_unix_ms": "turn_started_at_unix_ms",
+    "parent_thread_id": "parent_thread_id",
+    "parent_turn_id": "parent_turn_id",
+    "subagent_kind": "subagent_kind"
+  }
+}
