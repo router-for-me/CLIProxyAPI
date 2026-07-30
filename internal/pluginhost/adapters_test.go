@@ -904,6 +904,23 @@ func TestRegisterExecutorsPrunesStaleProviderAfterMigration(t *testing.T) {
 	}
 }
 
+func TestOwnsExecutorDistinguishesHostAdapters(t *testing.T) {
+	host := New()
+	owned := &executorAdapter{host: host}
+	foreign := &executorAdapter{host: New()}
+	external := &fakeProviderExecutor{provider: "provider-a"}
+
+	if !host.OwnsExecutor(owned) {
+		t.Fatal("host did not recognize its executor adapter")
+	}
+	if host.OwnsExecutor(foreign) {
+		t.Fatal("host claimed another host's executor adapter")
+	}
+	if host.OwnsExecutor(external) {
+		t.Fatal("host claimed an externally owned executor")
+	}
+}
+
 func TestRegisterExecutorsDoesNotUnregisterStaleProviderOwnedExternally(t *testing.T) {
 	manager := newFakeExecutorManager()
 	exec := &fakeExecutor{identifier: "fallback-provider"}

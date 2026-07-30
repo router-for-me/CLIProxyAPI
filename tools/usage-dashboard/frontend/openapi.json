@@ -1,0 +1,699 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "CLIProxyAPI Usage Dashboard",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/aliases": {
+      "get": {
+        "summary": "List Aliases",
+        "description": "Return all key aliases.",
+        "operationId": "list_aliases_api_v1_aliases_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Upsert Alias",
+        "description": "Create or update a key alias.",
+        "operationId": "upsert_alias_api_v1_aliases_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AliasBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/aliases/{account_hash}": {
+      "delete": {
+        "summary": "Delete Alias",
+        "description": "Delete a key alias by account_hash.",
+        "operationId": "delete_alias_api_v1_aliases__account_hash__delete",
+        "parameters": [
+          {
+            "name": "account_hash",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Account Hash"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "summary": "Health",
+        "description": "Health check — returns live collector state from storage.",
+        "operationId": "health_api_v1_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/check": {
+      "get": {
+        "summary": "Auth Check",
+        "description": "Check whether authentication is required and whether the current request is valid.",
+        "operationId": "auth_check_api_v1_auth_check_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "summary": "Legacy Health",
+        "description": "Legacy health endpoint — returns ok and db_path.",
+        "operationId": "legacy_health_api_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/summary": {
+      "get": {
+        "summary": "Summary",
+        "description": "Aggregate usage summary: totals, accounts, models, hours, cost.",
+        "operationId": "summary_api_v1_summary_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SummaryResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/summary": {
+      "get": {
+        "summary": "Legacy Summary",
+        "description": "Legacy endpoint — query_summary with clamped limit.",
+        "operationId": "legacy_summary_api_summary_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/timeseries": {
+      "get": {
+        "summary": "Timeseries",
+        "description": "Time-bucketed usage series grouped by model, provider, day, or hour.",
+        "operationId": "timeseries_api_v1_timeseries_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/models": {
+      "get": {
+        "summary": "Models",
+        "description": "Aggregate usage by model with pricing status.",
+        "operationId": "models_api_v1_models_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/accounts": {
+      "get": {
+        "summary": "Accounts",
+        "description": "Distinct accounts in range, ordered by volume.",
+        "operationId": "accounts_api_v1_accounts_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/requests": {
+      "get": {
+        "summary": "Requests",
+        "description": "Paginated usage event list with cursor-based pagination.",
+        "operationId": "requests_api_v1_requests_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/requests": {
+      "get": {
+        "summary": "Legacy Requests",
+        "description": "Legacy endpoint — query_requests with clamped limit.",
+        "operationId": "legacy_requests_api_requests_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/errors": {
+      "get": {
+        "summary": "Errors",
+        "description": "Aggregate failed requests by fail_status x model.",
+        "operationId": "errors_api_v1_errors_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/providers": {
+      "get": {
+        "summary": "Providers",
+        "description": "Aggregate usage by provider with token and cost data.",
+        "operationId": "providers_api_v1_providers_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/endpoints": {
+      "get": {
+        "summary": "Endpoints",
+        "description": "Aggregate usage by endpoint.",
+        "operationId": "endpoints_api_v1_endpoints_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/prices": {
+      "get": {
+        "summary": "Prices",
+        "description": "List pricing intervals, marking the one effective at current UTC time.",
+        "operationId": "prices_api_v1_prices_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/export": {
+      "get": {
+        "summary": "Export",
+        "operationId": "export_api_v1_export_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AccountSummary": {
+        "properties": {
+          "account": {
+            "type": "string",
+            "title": "Account"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "total_tokens": {
+            "type": "integer",
+            "title": "Total Tokens"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "title": "Input Tokens"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "title": "Output Tokens"
+          },
+          "reasoning_tokens": {
+            "type": "integer",
+            "title": "Reasoning Tokens"
+          },
+          "failed": {
+            "type": "integer",
+            "title": "Failed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "account",
+          "requests",
+          "total_tokens",
+          "input_tokens",
+          "output_tokens",
+          "reasoning_tokens",
+          "failed"
+        ],
+        "title": "AccountSummary"
+      },
+      "AliasBody": {
+        "properties": {
+          "account_hash": {
+            "type": "string",
+            "title": "Account Hash"
+          },
+          "alias": {
+            "type": "string",
+            "title": "Alias"
+          }
+        },
+        "type": "object",
+        "required": [
+          "account_hash",
+          "alias"
+        ],
+        "title": "AliasBody"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HourSummary": {
+        "properties": {
+          "hour": {
+            "type": "string",
+            "title": "Hour"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "total_tokens": {
+            "type": "integer",
+            "title": "Total Tokens"
+          },
+          "failed": {
+            "type": "integer",
+            "title": "Failed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "hour",
+          "requests",
+          "total_tokens",
+          "failed"
+        ],
+        "title": "HourSummary"
+      },
+      "ModelSummary": {
+        "properties": {
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "total_tokens": {
+            "type": "integer",
+            "title": "Total Tokens"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "title": "Input Tokens"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "title": "Output Tokens"
+          },
+          "reasoning_tokens": {
+            "type": "integer",
+            "title": "Reasoning Tokens"
+          },
+          "cached_tokens": {
+            "type": "integer",
+            "title": "Cached Tokens"
+          },
+          "estimated_cost": {
+            "type": "number",
+            "title": "Estimated Cost"
+          },
+          "priced": {
+            "type": "boolean",
+            "title": "Priced"
+          },
+          "unpriced_requests": {
+            "type": "integer",
+            "title": "Unpriced Requests"
+          }
+        },
+        "type": "object",
+        "required": [
+          "model",
+          "requests",
+          "total_tokens",
+          "input_tokens",
+          "output_tokens",
+          "reasoning_tokens",
+          "cached_tokens",
+          "estimated_cost",
+          "priced",
+          "unpriced_requests"
+        ],
+        "title": "ModelSummary"
+      },
+      "SummaryResponse": {
+        "properties": {
+          "range": {
+            "type": "string",
+            "title": "Range"
+          },
+          "models_filter": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Models Filter"
+          },
+          "accounts_filter": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Accounts Filter"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/SummaryStats"
+          },
+          "accounts": {
+            "items": {
+              "$ref": "#/components/schemas/AccountSummary"
+            },
+            "type": "array",
+            "title": "Accounts"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelSummary"
+            },
+            "type": "array",
+            "title": "Models"
+          },
+          "hours": {
+            "items": {
+              "$ref": "#/components/schemas/HourSummary"
+            },
+            "type": "array",
+            "title": "Hours"
+          },
+          "price_coverage": {
+            "type": "string",
+            "title": "Price Coverage"
+          }
+        },
+        "type": "object",
+        "required": [
+          "range",
+          "models_filter",
+          "accounts_filter",
+          "summary",
+          "accounts",
+          "models",
+          "hours",
+          "price_coverage"
+        ],
+        "title": "SummaryResponse"
+      },
+      "SummaryStats": {
+        "properties": {
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "total_tokens": {
+            "type": "integer",
+            "title": "Total Tokens"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "title": "Input Tokens"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "title": "Output Tokens"
+          },
+          "reasoning_tokens": {
+            "type": "integer",
+            "title": "Reasoning Tokens"
+          },
+          "cached_tokens": {
+            "type": "integer",
+            "title": "Cached Tokens"
+          },
+          "cache_read_tokens": {
+            "type": "integer",
+            "title": "Cache Read Tokens"
+          },
+          "cache_creation_tokens": {
+            "type": "integer",
+            "title": "Cache Creation Tokens"
+          },
+          "failed": {
+            "type": "integer",
+            "title": "Failed"
+          },
+          "success_latency_ms": {
+            "type": "integer",
+            "title": "Success Latency Ms"
+          },
+          "success_requests": {
+            "type": "integer",
+            "title": "Success Requests"
+          },
+          "success_ttft_ms": {
+            "type": "integer",
+            "title": "Success Ttft Ms"
+          },
+          "estimated_cost": {
+            "type": "number",
+            "title": "Estimated Cost"
+          },
+          "estimated_cost_currency": {
+            "type": "string",
+            "title": "Estimated Cost Currency"
+          }
+        },
+        "type": "object",
+        "required": [
+          "requests",
+          "total_tokens",
+          "input_tokens",
+          "output_tokens",
+          "reasoning_tokens",
+          "cached_tokens",
+          "cache_read_tokens",
+          "cache_creation_tokens",
+          "failed",
+          "success_latency_ms",
+          "success_requests",
+          "success_ttft_ms",
+          "estimated_cost",
+          "estimated_cost_currency"
+        ],
+        "title": "SummaryStats"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

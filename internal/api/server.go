@@ -6,190 +6,33 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/access"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/gemini"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"gopkg.in/yaml.v3"
 )
-
-const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
-
-var corsExposedResponseHeaders = []string{
-	"X-CPA-VERSION",
-	"X-CPA-COMMIT",
-	"X-CPA-BUILD-DATE",
-	"X-CPA-SUPPORT-PLUGIN",
-	"X-CPA-HOME-VERSION",
-	"X-CPA-HOME-BUILD-DATE",
-	"X-SERVER-VERSION",
-	"X-SERVER-BUILD-DATE",
-}
-
-var corsExposedResponseHeadersJoined = strings.Join(corsExposedResponseHeaders, ", ")
-
-const (
-	exampleAPIKeyManagementPath = "/management.html"
-	exampleAPIKeyManagementURL  = "/management.html?safe-mode=configure"
-)
-
-type serverOptionConfig struct {
-	extraMiddleware       []gin.HandlerFunc
-	engineConfigurator    func(*gin.Engine)
-	routerConfigurator    func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
-	requestLoggerFactory  func(*config.Config, string) logging.RequestLogger
-	localPassword         string
-	keepAliveEnabled      bool
-	keepAliveTimeout      time.Duration
-	keepAliveOnTimeout    func()
-	postAuthHook          auth.PostAuthHook
-	postAuthPersistHook   auth.PostAuthHook
-	pluginHost            *pluginhost.Host
-	configReloadHook      func(context.Context, *config.Config)
-	exampleAPIKeySafeMode bool
-}
-
-// ServerOption customises HTTP server construction.
-type ServerOption func(*serverOptionConfig)
-
-func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
-	configDir := filepath.Dir(configPath)
-	logsDir := logging.ResolveLogDirectory(cfg)
-	logger := logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
-	logger.SetHomeEnabled(cfg != nil && cfg.Home.Enabled)
-	return logger
-}
-
-func effectiveSDKConfig(cfg *config.Config) *config.SDKConfig {
-	if cfg == nil {
-		return nil
-	}
-	sdkCfg := cfg.SDKConfig
-	if cfg.CommercialMode {
-		sdkCfg.RequestLog = false
-	}
-	return &sdkCfg
-}
-
-// WithMiddleware appends additional Gin middleware during server construction.
-func WithMiddleware(mw ...gin.HandlerFunc) ServerOption {
-	return func(cfg *serverOptionConfig) {
-		cfg.extraMiddleware = append(cfg.extraMiddleware, mw...)
-	}
-}
-
-// WithEngineConfigurator allows callers to mutate the Gin engine prior to middleware setup.
-func WithEngineConfigurator(fn func(*gin.Engine)) ServerOption {
-	return func(cfg *serverOptionConfig) {
-		cfg.engineConfigurator = fn
-	}
-}
-
-// WithRouterConfigurator appends a callback after default routes are registered.
-func WithRouterConfigurator(fn func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)) ServerOption {
-	return func(cfg *serverOptionConfig) {
-		cfg.routerConfigurator = fn
-	}
-}
-
-// WithLocalManagementPassword stores a runtime-only management password accepted for localhost requests.
-func WithLocalManagementPassword(password string) ServerOption {
-	return func(cfg *serverOptionConfig) {
-		cfg.localPassword = password
-	}
-}
-
-// WithKeepAliveEndpoint enables a keep-alive endpoint with the provided timeout and callback.
-func WithKeepAliveEndpoint(timeout time.Duration, onTimeout func()) ServerOption {
-	return func(cfg *serverOptionConfig) {
-		if timeout <= 0 || onTimeout == nil {
-			return
-		}
-		cfg.keepAliveEnabled = true
-		cfg.keepAliveTimeout = timeout
-		cfg.keepAliveOnTimeout = onTimeout
-	}
-}
-
-// WithRequestLoggerFactory customises request logger creation.
-func WithRequestLoggerFactory(factory func(*config.Config, string) logging.RequestLogger) ServerOption {
-	return func(cfg *serverOptionConfig) {
-		cfg.requestLoggerFactory = factory
-	}
-}
-
-// WithPostAuthHook registers a hook to be called after auth record creation.
-func WithPostAuthHook(hook auth.PostAuthHook) ServerOption {
-	return func(cfg *serverOptionConfig) {
-		cfg.postAuthHook = hook
-	}
-}
-
-// WithPostAuthPersistHook registers a hook to be called after auth persistence.
-func WithPostAuthPersistHook(hook auth.PostAuthHook) ServerOption {
-	return func(cfg *serverOptionConfig) {
-		cfg.postAuthPersistHook = hook
-	}
-}
-
-// WithPluginHost registers dynamic plugin HTTP adapters with the server.
-func WithPluginHost(host *pluginhost.Host) ServerOption {
-	return func(cfg *serverOptionConfig) {
-		cfg.pluginHost = host
-	}
-}
-
-// WithConfigReloadHook registers a callback used after management saves config changes.
-func WithConfigReloadHook(hook func(context.Context, *config.Config)) ServerOption {
-	return func(cfg *serverOptionConfig) {
-		cfg.configReloadHook = hook
-	}
-}
-
-// WithExampleAPIKeySafeMode blocks proxy API endpoints while template API keys remain configured.
-func WithExampleAPIKeySafeMode() ServerOption {
-	return func(cfg *serverOptionConfig) {
-		cfg.exampleAPIKeySafeMode = true
-	}
-}
 
 // Server represents the main API server.
 // It encapsulates the Gin engine, HTTP server, handlers, and configuration.
@@ -207,7 +50,8 @@ type Server struct {
 	muxHTTPListener *muxListener
 
 	// handlers contains the API handlers for processing requests.
-	handlers *handlers.BaseAPIHandler
+	handlers         *handlers.BaseAPIHandler
+	codexLiveHandler *codexlive.Handler
 
 	// cfg holds the current server configuration.
 	cfg *config.Config
@@ -292,6 +136,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Add middleware
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
+	engine.Use(logging.CPATraceIDMiddleware())
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
 	}
@@ -1679,7 +1524,6 @@ func homeModelInt64Value(model map[string]any, keys ...string) int64 {
 	}
 	return 0
 }
-
 // Start begins listening for and serving HTTP or HTTPS requests.
 // It's a blocking call and will only return on an unrecoverable error.
 //
@@ -1812,291 +1656,14 @@ func (s *Server) Stop(ctx context.Context) error {
 	}
 
 	// Shutdown the HTTP server.
-	if err := s.server.Shutdown(ctx); err != nil {
-		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
+	errShutdown := s.server.Shutdown(ctx)
+	if s.codexLiveHandler != nil {
+		s.codexLiveHandler.Close()
+	}
+	if errShutdown != nil {
+		return fmt.Errorf("failed to shutdown HTTP server: %v", errShutdown)
 	}
 
 	log.Debug("API server stopped")
 	return nil
-}
-
-// corsMiddleware returns a Gin middleware handler that adds CORS headers
-// to every response, allowing cross-origin requests.
-//
-// Returns:
-//   - gin.HandlerFunc: The CORS middleware handler
-func corsMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "*")
-		c.Header("Access-Control-Expose-Headers", corsExposedResponseHeadersJoined)
-
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(http.StatusNoContent)
-			return
-		}
-
-		c.Next()
-	}
-}
-
-func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) bool {
-	if s == nil || s.accessManager == nil || newCfg == nil {
-		return false
-	}
-	if _, err := access.ApplyAccessProviders(s.accessManager, oldCfg, newCfg); err != nil {
-		return false
-	}
-	return true
-}
-
-// UpdateClients updates the server's client list and configuration.
-// This method is called when the configuration or authentication tokens change.
-//
-// Parameters:
-//   - clients: The new slice of AI service clients
-//   - cfg: The new application configuration
-func (s *Server) UpdateClients(cfg *config.Config) {
-	// Reconstruct old config from YAML snapshot to avoid reference sharing issues
-	var oldCfg *config.Config
-	if len(s.oldConfigYaml) > 0 {
-		_ = yaml.Unmarshal(s.oldConfigYaml, &oldCfg)
-	}
-
-	// Update request logger enabled state if it has changed
-	previousRequestLog := false
-	if oldCfg != nil {
-		previousRequestLog = oldCfg.RequestLog
-	}
-	if s.requestLogger != nil && (oldCfg == nil || previousRequestLog != cfg.RequestLog) {
-		if s.loggerToggle != nil {
-			s.loggerToggle(cfg.RequestLog)
-		} else if toggler, ok := s.requestLogger.(interface{ SetEnabled(bool) }); ok {
-			toggler.SetEnabled(cfg.RequestLog)
-		}
-	}
-
-	if oldCfg == nil || oldCfg.Home.Enabled != cfg.Home.Enabled {
-		if setter, ok := s.requestLogger.(interface{ SetHomeEnabled(bool) }); ok {
-			setter.SetHomeEnabled(cfg.Home.Enabled)
-		}
-	}
-
-	if oldCfg == nil || oldCfg.LoggingToFile != cfg.LoggingToFile || oldCfg.LogsMaxTotalSizeMB != cfg.LogsMaxTotalSizeMB {
-		if err := logging.ConfigureLogOutput(cfg); err != nil {
-			log.Errorf("failed to reconfigure log output: %v", err)
-		}
-	}
-
-	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
-		redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
-	}
-
-	if oldCfg == nil || oldCfg.RedisUsageQueueRetentionSeconds != cfg.RedisUsageQueueRetentionSeconds {
-		redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
-	}
-
-	if s.requestLogger != nil && (oldCfg == nil || oldCfg.ErrorLogsMaxFiles != cfg.ErrorLogsMaxFiles) {
-		if setter, ok := s.requestLogger.(interface{ SetErrorLogsMaxFiles(int) }); ok {
-			setter.SetErrorLogsMaxFiles(cfg.ErrorLogsMaxFiles)
-		}
-	}
-
-	if oldCfg == nil || oldCfg.DisableCooling != cfg.DisableCooling {
-		auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
-	}
-	if oldCfg == nil || oldCfg.TransientErrorCooldownSeconds != cfg.TransientErrorCooldownSeconds {
-		auth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
-	}
-
-	if oldCfg != nil && oldCfg.DisableImageGeneration != cfg.DisableImageGeneration {
-		log.Infof("disable-image-generation updated: %v -> %v", oldCfg.DisableImageGeneration, cfg.DisableImageGeneration)
-	}
-
-	applySignatureCacheConfig(oldCfg, cfg)
-
-	if s.handlers != nil && s.handlers.AuthManager != nil {
-		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
-	}
-
-	// Update log level dynamically when debug flag changes
-	if oldCfg == nil || oldCfg.Debug != cfg.Debug {
-		util.SetLogLevel(cfg)
-	}
-
-	prevSecretEmpty := true
-	if oldCfg != nil {
-		prevSecretEmpty = oldCfg.RemoteManagement.SecretKey == ""
-	}
-	newSecretEmpty := cfg.RemoteManagement.SecretKey == ""
-	if s.envManagementSecret {
-		s.registerManagementRoutes()
-		if s.managementRoutesEnabled.CompareAndSwap(false, true) {
-			log.Info("management routes enabled via MANAGEMENT_PASSWORD")
-		} else {
-			s.managementRoutesEnabled.Store(true)
-		}
-	} else {
-		switch {
-		case prevSecretEmpty && !newSecretEmpty:
-			s.registerManagementRoutes()
-			if s.managementRoutesEnabled.CompareAndSwap(false, true) {
-				log.Info("management routes enabled after secret key update")
-			} else {
-				s.managementRoutesEnabled.Store(true)
-			}
-		case !prevSecretEmpty && newSecretEmpty:
-			if s.managementRoutesEnabled.CompareAndSwap(true, false) {
-				log.Info("management routes disabled after secret key removal")
-			} else {
-				s.managementRoutesEnabled.Store(false)
-			}
-		default:
-			s.managementRoutesEnabled.Store(!newSecretEmpty)
-		}
-	}
-	redisqueue.SetEnabled(s.managementRoutesEnabled.Load() || (cfg != nil && cfg.Home.Enabled))
-
-	exampleAPIKeySafeModeRequired := s.exampleAPIKeySafeModeRequired(cfg)
-	if exampleAPIKeySafeModeRequired {
-		s.exampleAPIKeySafeModeActive.Store(true)
-	}
-	accessConfigApplied := s.applyAccessConfig(oldCfg, cfg)
-	if accessConfigApplied || exampleAPIKeySafeModeRequired {
-		s.exampleAPIKeySafeModeActive.Store(exampleAPIKeySafeModeRequired)
-	}
-	s.cfg = cfg
-	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
-	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
-		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
-	}
-	managementasset.SetCurrentConfig(cfg)
-	// Save YAML snapshot for next comparison
-	s.oldConfigYaml, _ = yaml.Marshal(cfg)
-
-	s.handlers.UpdateClients(effectiveSDKConfig(cfg))
-	s.handlers.SetPluginHost(s.pluginHost)
-	if s.pluginHost != nil {
-		s.pluginHost.SetModelExecutor(s.handlers)
-		s.pluginHost.SetAuthManager(s.handlers.AuthManager)
-	}
-
-	if s.mgmt != nil {
-		s.mgmt.SetConfig(cfg)
-		s.mgmt.SetAuthManager(s.handlers.AuthManager)
-		s.mgmt.SetPluginHost(s.pluginHost)
-	}
-	s.refreshPluginManagementRoutes()
-
-	// Count client sources from configuration and auth store.
-	authEntries := 0
-	if cfg != nil && !cfg.Home.Enabled {
-		tokenStore := sdkAuth.GetTokenStore()
-		if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok {
-			dirSetter.SetBaseDir(cfg.AuthDir)
-		}
-		authEntries = util.CountAuthFiles(context.Background(), tokenStore)
-	}
-	geminiAPIKeyCount := len(cfg.GeminiKey)
-	interactionsAPIKeyCount := len(cfg.InteractionsKey)
-	claudeAPIKeyCount := len(cfg.ClaudeKey)
-	codexAPIKeyCount := len(cfg.CodexKey)
-	xaiAPIKeyCount := len(cfg.XAIKey)
-	vertexAICompatCount := len(cfg.VertexCompatAPIKey)
-	openAICompatCount := 0
-	for i := range cfg.OpenAICompatibility {
-		entry := cfg.OpenAICompatibility[i]
-		if entry.Disabled {
-			continue
-		}
-		openAICompatCount += len(entry.APIKeyEntries)
-	}
-
-	total := authEntries + geminiAPIKeyCount + interactionsAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + vertexAICompatCount + openAICompatCount
-	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Interactions API keys + %d Claude API keys + %d Codex keys + %d xAI keys + %d Vertex-compat + %d OpenAI-compat)\n",
-		total,
-		authEntries,
-		geminiAPIKeyCount,
-		interactionsAPIKeyCount,
-		claudeAPIKeyCount,
-		codexAPIKeyCount,
-		xaiAPIKeyCount,
-		vertexAICompatCount,
-		openAICompatCount,
-	)
-}
-
-func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
-	if s == nil {
-		return
-	}
-	s.wsAuthChanged = fn
-}
-
-// (management handlers moved to internal/api/handlers/management)
-
-// AuthMiddleware returns a Gin middleware handler that authenticates requests
-// using the configured authentication providers. When no providers are available,
-// it allows all requests (legacy behaviour).
-func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if manager == nil {
-			c.Next()
-			return
-		}
-
-		result, err := manager.Authenticate(c.Request.Context(), c.Request)
-		if err == nil {
-			if result != nil {
-				c.Set("userApiKey", result.Principal)
-				c.Set("accessProvider", result.Provider)
-				if len(result.Metadata) > 0 {
-					c.Set("accessMetadata", result.Metadata)
-				}
-			}
-			c.Next()
-			return
-		}
-
-		statusCode := err.HTTPStatusCode()
-		if statusCode >= http.StatusInternalServerError {
-			log.Errorf("authentication middleware error: %v", err)
-		}
-		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
-	}
-}
-
-func configuredSignatureCacheEnabled(cfg *config.Config) bool {
-	if cfg != nil && cfg.AntigravitySignatureCacheEnabled != nil {
-		return *cfg.AntigravitySignatureCacheEnabled
-	}
-	return true
-}
-
-func applySignatureCacheConfig(oldCfg, cfg *config.Config) {
-	newVal := configuredSignatureCacheEnabled(cfg)
-	newStrict := configuredSignatureBypassStrict(cfg)
-	if oldCfg == nil {
-		cache.SetSignatureCacheEnabled(newVal)
-		cache.SetSignatureBypassStrictMode(newStrict)
-		return
-	}
-
-	oldVal := configuredSignatureCacheEnabled(oldCfg)
-	if oldVal != newVal {
-		cache.SetSignatureCacheEnabled(newVal)
-	}
-
-	oldStrict := configuredSignatureBypassStrict(oldCfg)
-	if oldStrict != newStrict {
-		cache.SetSignatureBypassStrictMode(newStrict)
-	}
-}
-
-func configuredSignatureBypassStrict(cfg *config.Config) bool {
-	if cfg != nil && cfg.AntigravitySignatureBypassStrict != nil {
-		return *cfg.AntigravitySignatureBypassStrict
-	}
-	return false
 }

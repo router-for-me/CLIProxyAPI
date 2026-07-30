@@ -1,10 +1,11 @@
 """SQLite storage: connection lifecycle, schema, migrations, collector state."""
 import contextlib
+import json
 import sqlite3
 
 from . import config as cfg_mod
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _TARGET_COLUMNS = (
     "id INTEGER PRIMARY KEY AUTOINCREMENT",
@@ -40,11 +41,7 @@ _COLUMN_NAMES = tuple(c.split()[0] for c in _TARGET_COLUMNS)
 
 @contextlib.contextmanager
 def db_connect(cfg):
-    """Yield a configured SQLite connection and CLOSE it on exit.
-
-    Unlike the sqlite3 default context manager (which only commits/rolls back),
-    this guarantees the connection and its file descriptors are released.
-    """
+    """Yield a configured SQLite connection and CLOSE it on exit."""
     cfg_mod.ensure_dirs(cfg)
     conn = sqlite3.connect(cfg_mod.db_path_for(cfg))
     conn.row_factory = sqlite3.Row
@@ -78,11 +75,8 @@ def _ensure_schema_meta(conn):
 
 def _current_version(conn):
     row = conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
-    if row and row["value"] is not None:
-        try:
-            return int(row["value"])
-        except ValueError:
-            return 0
+    if row:
+        return int(row["value"])
     return 0
 
 
@@ -94,8 +88,7 @@ def current_version(cfg):
 
 def _set_version(conn, version):
     conn.execute(
-        "INSERT INTO schema_meta(key, value) VALUES('version', ?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', ?)",
         (str(version),),
     )
 
@@ -104,58 +97,44 @@ def _exec_ddl(conn, statement):
     """Run one DDL statement, tolerating 'already exists' / 'duplicate column'."""
     try:
         conn.execute(statement)
-    except sqlite3.OperationalError as exc:
-        msg = str(exc).lower()
-        if "duplicate column" in msg or "already exists" in msg:
+    except sqlite3.OperationalError as e:
+        msg = str(e).lower()
+        if "already exists" in msg or "duplicate column" in msg:
             return
         raise
 
 
 def _migrate_v1(conn):
     """Fresh schema: create usage_events with all target columns and indexes."""
-    cols = ",\n  ".join(_TARGET_COLUMNS)
-    _exec_ddl(conn, f"CREATE TABLE IF NOT EXISTS usage_events (\n  {cols}\n)")
-    for idx, target in (
-        ("idx_usage_ts", "usage_events(ts_epoch)"),
-        ("idx_usage_date", "usage_events(utc_date)"),
-        ("idx_usage_model_ts", "usage_events(model, ts_epoch)"),
-        ("idx_usage_provider_ts", "usage_events(provider, ts_epoch)"),
-    ):
-        _exec_ddl(conn, f"CREATE INDEX IF NOT EXISTS {idx} ON {target}")
+    _exec_ddl(conn, f"CREATE TABLE IF NOT EXISTS usage_events (\n    {',\n    '.join(_TARGET_COLUMNS)}\n)")
+    indexes = [
+        ("idx_events_ts", "usage_events", "ts_epoch"),
+        ("idx_events_model", "usage_events", "model"),
+        ("idx_events_account", "usage_events", "account_hash"),
+        ("idx_events_date", "usage_events", "utc_date"),
+        ("idx_events_hour", "usage_events", "utc_hour"),
+        ("idx_events_failed", "usage_events", "failed"),
+        ("idx_events_hour_model", "usage_events", "utc_hour, model"),
+    ]
+    for idx, tbl, cols in indexes:
+        _exec_ddl(conn, f"CREATE INDEX IF NOT EXISTS {idx} ON {tbl}({cols})")
     _ensure_schema_meta(conn)
 
 
 def _migrate_v2(conn):
     """Add extended token/dimension columns (safe on fresh DBs via IF NOT EXISTS)."""
-    for stmt in (
-        "ALTER TABLE usage_events ADD COLUMN cache_read_tokens INTEGER DEFAULT 0",
-        "ALTER TABLE usage_events ADD COLUMN cache_creation_tokens INTEGER DEFAULT 0",
-        "ALTER TABLE usage_events ADD COLUMN ttft_ms INTEGER DEFAULT 0",
-        "ALTER TABLE usage_events ADD COLUMN alias TEXT",
-        "ALTER TABLE usage_events ADD COLUMN executor_type TEXT",
-        "ALTER TABLE usage_events ADD COLUMN service_tier TEXT",
-        "ALTER TABLE usage_events ADD COLUMN reasoning_effort TEXT",
-        "ALTER TABLE usage_events ADD COLUMN fail_status INTEGER DEFAULT 0",
-    ):
-        _exec_ddl(conn, stmt)
+    _exec_ddl(conn, "ALTER TABLE usage_events ADD COLUMN cache_read_tokens INTEGER DEFAULT 0")
+    _exec_ddl(conn, "ALTER TABLE usage_events ADD COLUMN cache_creation_tokens INTEGER DEFAULT 0")
+    _exec_ddl(conn, "ALTER TABLE usage_events ADD COLUMN ttft_ms INTEGER DEFAULT 0")
+    _exec_ddl(conn, "ALTER TABLE usage_events ADD COLUMN auth_type TEXT")
+    _exec_ddl(conn, "ALTER TABLE usage_events ADD COLUMN executor_type TEXT")
+    _exec_ddl(conn, "ALTER TABLE usage_events ADD COLUMN service_tier TEXT")
+    _exec_ddl(conn, "ALTER TABLE usage_events ADD COLUMN reasoning_effort TEXT")
+    _exec_ddl(conn, "ALTER TABLE usage_events ADD COLUMN alias TEXT")
 
 
 def _migrate_v3(conn):
-    """Reconcile legacy v1/v2 databases to the target schema.
-
-    Backfills UTC buckets and stable account hashes from legacy data, then
-    rebuilds the table WITHOUT legacy credential-bearing columns.
-    On fresh DBs there is nothing to reconcile.
-    """
-    if not _has_table(conn, "usage_events"):
-        return
-    for name, decl in zip(_COLUMN_NAMES, _TARGET_COLUMNS):
-        if not _has_column(conn, "usage_events", name):
-            _exec_ddl(conn, f"ALTER TABLE usage_events ADD COLUMN {decl}")
-    legacy_cols = ("local_date", "local_hour", "source", "auth_index", "api_key_hash", "raw_json")
-    has_legacy = any(_has_column(conn, "usage_events", c) for c in legacy_cols)
-    if not has_legacy:
-        return
+    """Reconcile legacy v1/v2 databases to the target schema."""
     _backfill_utc(conn)
     _backfill_account_hash(conn)
     _rebuild_without_legacy(conn)
@@ -163,10 +142,11 @@ def _migrate_v3(conn):
 
 def _backfill_utc(conn):
     from .collector import parse_rfc3339
-
-    rows = conn.execute("SELECT id, timestamp FROM usage_events WHERE utc_date IS NULL").fetchall()
-    for row in rows:
-        ts = parse_rfc3339(row["timestamp"])
+    for row in conn.execute("SELECT id, timestamp FROM usage_events WHERE utc_date IS NULL OR utc_date = ''"):
+        try:
+            ts = parse_rfc3339(row["timestamp"])
+        except Exception:
+            continue
         conn.execute(
             "UPDATE usage_events SET utc_date=?, utc_hour=? WHERE id=?",
             (ts.strftime("%Y-%m-%d"), ts.strftime("%Y-%m-%d %H:00"), row["id"]),
@@ -174,50 +154,49 @@ def _backfill_utc(conn):
 
 
 def _backfill_account_hash(conn):
-    """Set account_hash from legacy source/auth_index using a STABLE sha256 digest."""
+    """Set account_hash from legacy source/auth_index using a STABLE sha256 digest.
+    Tolerates missing columns (fresh DB schema)."""
+    if not _has_column(conn, "usage_events", "source"):
+        return
     import hashlib
-
-    rows = conn.execute(
-        """SELECT id, source, auth_index, api_key_hash FROM usage_events
-           WHERE account_hash IS NULL"""
-    ).fetchall()
-    for row in rows:
-        ident = None
-        if row["source"]:
-            ident = str(row["source"])
-        elif row["auth_index"]:
-            ident = "idx:" + str(row["auth_index"])
-        elif row["api_key_hash"]:
-            ident = str(row["api_key_hash"])
-        if ident:
-            digest = "sha256:" + hashlib.sha256(ident.encode()).hexdigest()[:12]
-            conn.execute("UPDATE usage_events SET account_hash=? WHERE id=?", (digest, row["id"]))
+    for row in conn.execute(
+        "SELECT id, source, auth_index FROM usage_events WHERE account_hash IS NULL OR account_hash = ''"
+    ):
+        raw = json.dumps({"source": row["source"], "auth_index": row["auth_index"]}, sort_keys=True)
+        digest = "sha256:" + hashlib.sha256(raw.encode()).hexdigest()[:12]
+        conn.execute("UPDATE usage_events SET account_hash=? WHERE id=?", (digest, row["id"]))
 
 
 def _rebuild_without_legacy(conn):
     """Rebuild usage_events keeping only target columns. Uses individual
-    execute() calls (NOT executescript, which auto-commits and breaks the
-    outer transaction)."""
-    present = {r[1] for r in conn.execute("PRAGMA table_info(usage_events)")}
-    keep = [c for c in _COLUMN_NAMES if c in present]
-    cols_def = ",\n  ".join(_TARGET_COLUMNS)
-    conn.execute(f"CREATE TABLE usage_events_new (\n  {cols_def}\n)")
-    conn.execute(
-        f"INSERT INTO usage_events_new ({', '.join(_COLUMN_NAMES)}) "
-        f"SELECT {', '.join(keep)} FROM usage_events"
-    )
-    conn.execute("DROP TABLE usage_events")
-    conn.execute("ALTER TABLE usage_events_new RENAME TO usage_events")
-    for idx, target in (
-        ("idx_usage_ts", "usage_events(ts_epoch)"),
-        ("idx_usage_date", "usage_events(utc_date)"),
-        ("idx_usage_model_ts", "usage_events(model, ts_epoch)"),
-        ("idx_usage_provider_ts", "usage_events(provider, ts_epoch)"),
-    ):
-        _exec_ddl(conn, f"CREATE INDEX IF NOT EXISTS {idx} ON {target}")
+    ALTER TABLE DROP COLUMN statements (SQLite 3.35+) for each legacy column."""
+    legacy = {"source", "auth_index", "response_body"}
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(usage_events)")}
+    for col in existing - set(_COLUMN_NAMES):
+        if col in legacy:
+            _exec_ddl(conn, f"ALTER TABLE usage_events DROP COLUMN {col}")
+    indexes = [
+        ("idx_events_ts", "usage_events", "ts_epoch"),
+        ("idx_events_model", "usage_events", "model"),
+        ("idx_events_account", "usage_events", "account_hash"),
+        ("idx_events_date", "usage_events", "utc_date"),
+        ("idx_events_hour", "usage_events", "utc_hour"),
+        ("idx_events_failed", "usage_events", "failed"),
+        ("idx_events_hour_model", "usage_events", "utc_hour, model"),
+    ]
+    for idx, tbl, cols in indexes:
+        _exec_ddl(conn, f"CREATE INDEX IF NOT EXISTS {idx} ON {tbl}({cols})")
 
 
-MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3]
+def _migrate_v4(conn):
+    """Add key_aliases table for human-readable account aliases."""
+    _exec_ddl(conn, """CREATE TABLE IF NOT EXISTS key_aliases (
+        account_hash TEXT PRIMARY KEY,
+        alias TEXT NOT NULL
+    )""")
+
+
+MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4]
 
 
 def run_migrations(cfg):
@@ -247,9 +226,41 @@ def init_schema(cfg):
     return run_migrations(cfg)
 
 
+# --- key aliases CRUD --------------------------------------------------------
+
+
+def get_aliases(cfg):
+    """Return all key aliases as list of dicts."""
+    with db_connect(cfg) as conn:
+        rows = conn.execute(
+            "SELECT account_hash, alias FROM key_aliases ORDER BY alias"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def upsert_alias(cfg, account_hash, alias):
+    """Create or update a key alias."""
+    with db_connect(cfg) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO key_aliases(account_hash, alias) VALUES (?, ?)",
+            (account_hash, alias),
+        )
+
+
+def delete_alias(cfg, account_hash):
+    """Delete a key alias by account_hash."""
+    with db_connect(cfg) as conn:
+        conn.execute(
+            "DELETE FROM key_aliases WHERE account_hash = ?",
+            (account_hash,),
+        )
+
+
 # --- collector state persistence (cross-process health) -------------------
 
+
 _STATE_KEYS = (
+    "last_poll_at",
     "last_poll_ok",
     "last_poll_epoch",
     "last_poll_error",
@@ -269,6 +280,7 @@ def load_state(cfg):
         _ensure_state_table(conn)
         rows = conn.execute("SELECT key, value FROM collector_state").fetchall()
     state = {
+        "last_poll_at": "",
         "last_poll_ok": False,
         "last_poll_epoch": 0.0,
         "last_poll_error": "",
@@ -301,11 +313,10 @@ def save_state(cfg, state):
                 continue
             val = state[key]
             if isinstance(val, bool):
-                sval = "1" if val else "0"
+                val = "1" if val else "0"
             else:
-                sval = str(val)
+                val = str(val)
             conn.execute(
-                "INSERT INTO collector_state(key, value) VALUES(?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, sval),
+                "INSERT OR REPLACE INTO collector_state(key, value) VALUES(?, ?)",
+                (key, val),
             )

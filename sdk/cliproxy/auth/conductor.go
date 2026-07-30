@@ -1,35 +1,15 @@
 package auth
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"math/rand/v2"
 	"net/http"
-	"path/filepath"
-	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/sjson"
 )
 
 // ProviderExecutor defines the contract required by Manager to execute provider calls.
@@ -60,101 +40,6 @@ type RequestAuthPreparer interface {
 // ExecutionSessionCloser allows executors to release per-session runtime resources.
 type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
-}
-
-const (
-	homeAuthCountMetadataKey = "__cliproxy_home_auth_count"
-	// CloseAllExecutionSessionsID asks an executor to release all active execution sessions.
-	// Executors that do not support this marker may ignore it.
-	CloseAllExecutionSessionsID = "__all_execution_sessions__"
-)
-
-// RefreshEvaluator allows runtime state to override refresh decisions.
-type RefreshEvaluator interface {
-	ShouldRefresh(now time.Time, auth *Auth) bool
-}
-
-const (
-	refreshCheckInterval  = 5 * time.Second
-	refreshMaxConcurrency = 16
-	refreshPendingBackoff = time.Minute
-	refreshFailureBackoff = 5 * time.Minute
-	// refreshIneffectiveBackoff throttles refresh attempts when an executor returns
-	// success but the auth still evaluates as needing refresh (e.g. token expiry
-	// wasn't updated). Without this guard, the auto-refresh loop can tight-loop and
-	// burn CPU at idle.
-	refreshIneffectiveBackoff = 30 * time.Second
-	quotaBackoffBase          = time.Second
-	quotaBackoffMax           = 30 * time.Minute
-	transientErrorCooldown    = time.Minute
-)
-
-var quotaCooldownDisabled atomic.Bool
-var transientErrorCooldownSeconds atomic.Int64
-
-// SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
-func SetQuotaCooldownDisabled(disable bool) {
-	quotaCooldownDisabled.Store(disable)
-}
-
-// SetTransientErrorCooldownSeconds configures cooldowns for 408/500/502/503/504.
-// 0 keeps the legacy default; negative values disable transient error cooldowns.
-func SetTransientErrorCooldownSeconds(seconds int) {
-	transientErrorCooldownSeconds.Store(int64(seconds))
-}
-
-func quotaCooldownDisabledForAuth(auth *Auth) bool {
-	return quotaCooldownDisabledForAuthWithConfig(auth, nil)
-}
-
-func quotaCooldownDisabledForAuthWithConfig(auth *Auth, cfg *internalconfig.Config) bool {
-	if auth != nil {
-		if override, ok := auth.DisableCoolingOverride(); ok {
-			return override
-		}
-		if providerCoolingDisabledForAuth(auth, cfg) {
-			return true
-		}
-	}
-	if cfg != nil && cfg.DisableCooling {
-		return true
-	}
-	return quotaCooldownDisabled.Load()
-}
-
-func providerCoolingDisabledForAuth(auth *Auth, cfg *internalconfig.Config) bool {
-	if auth == nil || cfg == nil {
-		return false
-	}
-	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
-	if provider == "" {
-		return false
-	}
-	providerKey := ""
-	compatName := ""
-	if auth.Attributes != nil {
-		providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
-		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
-	}
-	if providerKey == "" && compatName == "" && provider != "openai-compatibility" {
-		return false
-	}
-	if providerKey == "" {
-		providerKey = provider
-	}
-	entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, provider)
-	return entry != nil && entry.DisableCooling
-}
-
-func nextTransientErrorRetryAfter(now time.Time) time.Time {
-	seconds := transientErrorCooldownSeconds.Load()
-	if seconds < 0 {
-		return time.Time{}
-	}
-	if seconds == 0 {
-		return now.Add(transientErrorCooldown)
-	}
-	return now.Add(time.Duration(seconds) * time.Second)
 }
 
 // Result captures execution outcome used to adjust auth state.
@@ -217,21 +102,30 @@ func (NoopHook) OnResult(context.Context, Result) {}
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
-	store         Store
-	cooldownStore CooldownStateStore
-	executors     map[string]ProviderExecutor
-	selector      Selector
-	hook          Hook
-	mu            sync.RWMutex
-	auths         map[string]*Auth
-	scheduler     *authScheduler
+	store                     Store
+	cooldownStore             CooldownStateStore
+	pendingCooldownStateStore CooldownStateStore
+	executors                 map[string]ProviderExecutor
+	selector                  Selector
+	hook                      Hook
+	mu                        sync.RWMutex
+	configCooldownMu          sync.Mutex
+	auths                     map[string]*Auth
+	scheduler                 *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
-	// homeRuntimeAuths caches auths returned by Home so websocket sessions can
-	// reuse an established upstream credential without dispatching every turn.
+	// homeRuntimeAuths retains legacy session auth lookups for non-execution callers.
 	homeRuntimeAuths map[string]map[string]*Auth
+	// homeRuntimeAuthOwners prevents a stale selection from clearing a replacement auth.
+	homeRuntimeAuthOwners map[string]map[string]*HomeDispatchSelection
+	// homeSessionSelections owns retained Home selections for websocket sessions.
+	homeSessionSelections map[string]map[homeSessionSelectionKey]*HomeDispatchSelection
+	homeSessionLocks      sync.Map
+	homeSessionAliases    homeSessionAliasCache
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
-	providerOffsets map[string]int
+	providerOffsets             map[string]int
+	homeDispatchBundle          atomic.Pointer[HomeDispatchBundle]
+	homeInFlightPublisherConfig atomic.Pointer[HomeInFlightPublisherConfig]
 
 	// Retry controls request retry behavior.
 	requestRetry        atomic.Int32
@@ -241,9 +135,8 @@ type Manager struct {
 	// oauthModelAlias stores global OAuth model alias mappings (alias -> upstream name) keyed by channel.
 	oauthModelAlias atomic.Value
 
-	// apiKeyModelAlias caches resolved model alias mappings for API-key auths.
-	// Keyed by auth.ID, value is alias(lower) -> upstream model (including suffix).
-	apiKeyModelAlias atomic.Value
+	// apiKeyModelRouting atomically publishes per-auth aliases and configured capabilities.
+	apiKeyModelRouting atomic.Value
 
 	// modelPoolOffsets tracks per-auth alias pool rotation state.
 	modelPoolOffsets map[string]int
@@ -274,18 +167,24 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:            store,
-		executors:        make(map[string]ProviderExecutor),
-		selector:         selector,
-		hook:             hook,
-		auths:            make(map[string]*Auth),
-		homeRuntimeAuths: make(map[string]map[string]*Auth),
-		providerOffsets:  make(map[string]int),
-		modelPoolOffsets: make(map[string]int),
+		store:                 store,
+		executors:             make(map[string]ProviderExecutor),
+		selector:              selector,
+		hook:                  hook,
+		auths:                 make(map[string]*Auth),
+		homeRuntimeAuths:      make(map[string]map[string]*Auth),
+		homeRuntimeAuthOwners: make(map[string]map[string]*HomeDispatchSelection),
+		homeSessionSelections: make(map[string]map[homeSessionSelectionKey]*HomeDispatchSelection),
+		providerOffsets:       make(map[string]int),
+		modelPoolOffsets:      make(map[string]int),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
-	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
+	manager.apiKeyModelRouting.Store(&apiKeyModelRoutingSnapshot{config: &internalconfig.Config{}})
+	defaultInFlightConfig, errInFlightConfig := HomeInFlightPublisherConfigFromConfig(internalconfig.DefaultCredentialInFlightConfig())
+	if errInFlightConfig == nil {
+		manager.ApplyHomeInFlightPublisherConfig(defaultInFlightConfig)
+	}
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
 }

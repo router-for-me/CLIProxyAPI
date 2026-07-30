@@ -12,7 +12,7 @@ DEFAULT_CONFIG = {
     "poll_interval_seconds": 2,
     "batch_size": 100,
     "dashboard_host": "127.0.0.1",
-    "dashboard_port": 8320,
+    "dashboard_port": 8321,
     "dashboard_token": "",
     "quota_enabled": False,
     "quota_refresh_seconds": 300,

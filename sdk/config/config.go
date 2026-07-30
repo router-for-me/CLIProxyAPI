@@ -16,6 +16,7 @@ type APIKeyList = internalconfig.APIKeyList
 func FromStringKeys(keys []string) APIKeyList { return internalconfig.FromStringKeys(keys) }
 
 type StreamingConfig = internalconfig.StreamingConfig
+type ClaudeCodeConfig = internalconfig.ClaudeCodeConfig
 type TLSConfig = internalconfig.TLSConfig
 type RemoteManagement = internalconfig.RemoteManagement
 type OAuthModelAlias = internalconfig.OAuthModelAlias

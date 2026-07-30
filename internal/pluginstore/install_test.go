@@ -403,6 +403,35 @@ func TestDownloadAssetUsesAPIURLWhenAuthMatchesArtifact(t *testing.T) {
 	}
 }
 
+func TestDownloadAssetUsesAPIURLWhenResolvedAuthMatchesArtifact(t *testing.T) {
+	apiURL := "https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/assets/1"
+	client := Client{
+		HTTPClient: authCheckingHTTPDoer{
+			url:           apiURL,
+			wantAuth:      "Bearer temporary-token",
+			responseBytes: []byte("artifact-data"),
+		},
+		ResolvedAuth: []ResolvedAuthConfig{{
+			Match:   "https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/",
+			ApplyTo: []string{RequestKindArtifact},
+			Type:    AuthTypeGitHubToken,
+			Token:   Secret("temporary-token"),
+		}},
+	}
+
+	data, errDownload := client.DownloadAsset(context.Background(), ReleaseAsset{
+		Name:               "sample-provider_0.2.0_darwin_arm64.zip",
+		APIURL:             apiURL,
+		BrowserDownloadURL: "https://downloads.example/sample-provider.zip",
+	})
+	if errDownload != nil {
+		t.Fatalf("DownloadAsset() error = %v", errDownload)
+	}
+	if string(data) != "artifact-data" {
+		t.Fatalf("DownloadAsset() = %q, want artifact-data", data)
+	}
+}
+
 func TestDownloadAssetUsesBrowserDownloadURLWithUnrelatedAuth(t *testing.T) {
 	t.Setenv("PLUGIN_STORE_TOKEN", "secret-token")
 	browserURL := "https://downloads.example/sample-provider.zip"

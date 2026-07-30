@@ -87,7 +87,7 @@ def account_clause(accounts):
     if not accounts:
         return "", []
     placeholders = ",".join("?" for _ in accounts)
-    return f" AND COALESCE(account_hash,'unknown') IN ({placeholders})", list(accounts)
+    return f" AND COALESCE(usage_events.account_hash,'unknown') IN ({placeholders})", list(accounts)
 
 
 def _filters(qs):
@@ -134,14 +134,16 @@ def query_summary(cfg, qs):
             params,
         ).fetchone()
         account_rows = conn.execute(
-            f"""SELECT COALESCE(account_hash,'unknown') account, COUNT(*) requests,
-                       COALESCE(SUM(total_tokens),0) total_tokens,
-                       COALESCE(SUM(input_tokens),0) input_tokens,
-                       COALESCE(SUM(output_tokens),0) output_tokens,
-                       COALESCE(SUM(reasoning_tokens),0) reasoning_tokens,
-                       COALESCE(SUM(failed),0) failed
-                FROM usage_events {where}
-                GROUP BY account ORDER BY total_tokens DESC""",
+            f"""SELECT COALESCE(ka.alias, SUBSTR(COALESCE(usage_events.account_hash,'unknown'),1,12)) account,
+                       COUNT(*) requests,
+                       COALESCE(SUM(usage_events.total_tokens),0) total_tokens,
+                       COALESCE(SUM(usage_events.input_tokens),0) input_tokens,
+                       COALESCE(SUM(usage_events.output_tokens),0) output_tokens,
+                       COALESCE(SUM(usage_events.reasoning_tokens),0) reasoning_tokens,
+                       COALESCE(SUM(usage_events.failed),0) failed
+                FROM usage_events LEFT JOIN key_aliases ka ON usage_events.account_hash = ka.account_hash
+                {where}
+                GROUP BY usage_events.account_hash ORDER BY total_tokens DESC""",
             params,
         ).fetchall()
         model_rows = conn.execute(
@@ -244,10 +246,12 @@ def query_accounts(cfg, qs):
     discover_params = [start, end] + mparams
     with st.db_connect(cfg) as conn:
         rows = conn.execute(
-            f"""SELECT COALESCE(account_hash,'unknown') account, COUNT(*) requests,
-                       COALESCE(SUM(total_tokens),0) total_tokens
-                FROM usage_events {discover_where}
-                GROUP BY account ORDER BY total_tokens DESC""",
+            f"""SELECT COALESCE(ka.alias, SUBSTR(COALESCE(usage_events.account_hash,'unknown'),1,12)) account,
+                       COUNT(*) requests,
+                       COALESCE(SUM(usage_events.total_tokens),0) total_tokens
+                FROM usage_events LEFT JOIN key_aliases ka ON usage_events.account_hash = ka.account_hash
+                {discover_where}
+                GROUP BY usage_events.account_hash ORDER BY total_tokens DESC""",
             discover_params,
         ).fetchall()
     return {"accounts": [dict(r) for r in rows], "accounts_filter": accounts}
@@ -277,7 +281,7 @@ def query_errors(cfg, qs):
     errors = []
     for r in rows:
         d = dict(r)
-        d["percent"] = round(d["count"] / denom * 100, 1)
+        d["percentage"] = round(d["count"] / denom * 100, 1)
         errors.append(d)
     return {
         "errors": errors,
@@ -327,39 +331,52 @@ def query_prices(cfg, qs=None):
     return {"currency": currency, "models": models_out}
 
 
-def query_requests(cfg, qs):
+def query_requests(cfg, qs, no_limit=False):
     start, end, models, accounts, where, params, err = _filters(qs)
     if err:
         _raise(err)
-    limit = max_limit(cfg, _first(qs, "limit"))
-    cursor = _first(qs, "cursor")
-    if cursor:
-        try:
-            decoded = base64.urlsafe_b64decode(cursor.encode()).decode()
-            cur_ts, cur_id = decoded.rsplit(",", 1)
-            where += " AND (ts_epoch, id) < (?, ?)"
-            params = list(params) + [float(cur_ts), int(cur_id)]
-        except Exception:
-            _raise("invalid cursor")
-    where += " ORDER BY ts_epoch DESC, id DESC LIMIT ?"
-    params = list(params) + [limit + 1]
+    if no_limit:
+        limit = None
+        cursor = None
+        order_clause = " ORDER BY ts_epoch DESC, id DESC"
+    else:
+        limit = max_limit(cfg, _first(qs, "limit"))
+        cursor = _first(qs, "cursor")
+        if cursor:
+            try:
+                decoded = base64.urlsafe_b64decode(cursor.encode()).decode()
+                cur_ts, cur_id = decoded.rsplit(",", 1)
+                where += " AND (ts_epoch, id) < (?, ?)"
+                params = list(params) + [float(cur_ts), int(cur_id)]
+            except Exception:
+                _raise("invalid cursor")
+        params = list(params) + [limit + 1]
+        order_clause = " ORDER BY ts_epoch DESC, id DESC LIMIT ?"
+    where += order_clause
     with st.db_connect(cfg) as conn:
         rows = conn.execute(
-            f"""SELECT id, timestamp, account_hash, model, alias, provider, endpoint,
-                       failed, fail_status, latency_ms, ttft_ms,
-                       input_tokens, output_tokens, reasoning_tokens, cached_tokens,
-                       cache_read_tokens, cache_creation_tokens, total_tokens, request_id
-                FROM usage_events {where}""",
+            f"""SELECT usage_events.id, usage_events.timestamp, usage_events.account_hash,
+                       usage_events.model, usage_events.alias, usage_events.provider,
+                       usage_events.endpoint, usage_events.failed, usage_events.fail_status,
+                       usage_events.latency_ms, usage_events.ttft_ms,
+                       usage_events.input_tokens, usage_events.output_tokens,
+                       usage_events.reasoning_tokens, usage_events.cached_tokens,
+                       usage_events.cache_read_tokens, usage_events.cache_creation_tokens,
+                       usage_events.total_tokens, usage_events.request_id,
+                       ka.alias AS key_alias
+                FROM usage_events LEFT JOIN key_aliases ka ON usage_events.account_hash = ka.account_hash
+                {where}""",
             params,
         ).fetchall()
     items = [dict(r) for r in rows[:limit]]
     for item in items:
         ts = parse_rfc3339(item["timestamp"])
         item["local_time"] = ts.astimezone(cfg_mod.LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
-        item["account"] = item.get("account_hash") or "unknown"
+        key_alias = item.pop("key_alias", None)
+        item["account"] = key_alias or (item.get("account_hash") or "unknown")[:12]
         item.pop("account_hash", None)
     next_cursor = None
-    if len(rows) > limit and items:
+    if limit is not None and len(rows) > limit and items:
         last = items[-1]
         raw = f"{parse_rfc3339(last['timestamp']).timestamp()},{last['id']}"
         next_cursor = base64.urlsafe_b64encode(raw.encode()).decode()
@@ -372,3 +389,66 @@ def query_requests(cfg, qs):
         "models_filter": models,
         "accounts_filter": accounts,
     }
+
+
+def query_providers(cfg, qs):
+    """Aggregate usage by provider with token and cost data."""
+    start, end, models, accounts, where, params, err = _filters(qs)
+    if err:
+        _raise(err)
+    with st.db_connect(cfg) as conn:
+        rows = conn.execute(
+            f"""SELECT provider, id, ts_epoch, model,
+                       input_tokens, output_tokens, reasoning_tokens,
+                       cached_tokens, total_tokens
+                FROM usage_events {where}""",
+            params,
+        ).fetchall()
+    pricing = pr.load_pricing(cfg)
+    by_provider = {}
+    for row in rows:
+        prov = row["provider"] or "unknown"
+        agg = by_provider.setdefault(prov, {
+            "provider": prov, "requests": 0, "total_tokens": 0,
+            "input_tokens": 0, "output_tokens": 0,
+            "reasoning_tokens": 0, "cached_tokens": 0,
+            "estimated_cost": 0.0,
+        })
+        agg["requests"] += 1
+        agg["total_tokens"] += row["total_tokens"] or 0
+        agg["input_tokens"] += row["input_tokens"] or 0
+        agg["output_tokens"] += row["output_tokens"] or 0
+        agg["reasoning_tokens"] += row["reasoning_tokens"] or 0
+        agg["cached_tokens"] += row["cached_tokens"] or 0
+        model = row["model"] or "unknown"
+        ts = row["ts_epoch"] or 0.0
+        iv = pr.price_for(pricing, model, float(ts))
+        if iv:
+            cost = (
+                (row["input_tokens"] or 0) * float(iv.get("input_per_million", 0)) / 1_000_000
+                + (row["output_tokens"] or 0) * float(iv.get("output_per_million", 0)) / 1_000_000
+                + (row["cached_tokens"] or 0) * float(iv.get("cached_input_per_million", 0)) / 1_000_000
+                + (row["reasoning_tokens"] or 0) * float(iv.get("reasoning_per_million", 0)) / 1_000_000
+            )
+            agg["estimated_cost"] += cost
+    providers_out = sorted(by_provider.values(), key=lambda x: x["total_tokens"], reverse=True)
+    for p in providers_out:
+        p["estimated_cost"] = round(p["estimated_cost"], 6)
+    return {"providers": providers_out, "accounts_filter": accounts}
+
+
+def query_endpoints(cfg, qs):
+    """Aggregate usage by endpoint."""
+    start, end, models, accounts, where, params, err = _filters(qs)
+    if err:
+        _raise(err)
+    with st.db_connect(cfg) as conn:
+        rows = conn.execute(
+            f"""SELECT COALESCE(endpoint,'unknown') endpoint,
+                       COUNT(*) requests,
+                       COALESCE(SUM(total_tokens),0) total_tokens
+                FROM usage_events {where}
+                GROUP BY endpoint ORDER BY total_tokens DESC""",
+            params,
+        ).fetchall()
+    return {"endpoints": [dict(r) for r in rows], "accounts_filter": accounts}

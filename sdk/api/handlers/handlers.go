@@ -6,27 +6,24 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"net"
 	"net/http"
-	"net/url"
 	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
+	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"golang.org/x/net/context"
 )
@@ -60,106 +57,6 @@ const (
 	maxStreamInterceptorHistoryChunks = 64
 	maxStreamInterceptorHistoryBytes  = 1 << 20
 )
-
-type pinnedAuthContextKey struct{}
-type selectedAuthCallbackContextKey struct{}
-type executionSessionContextKey struct{}
-type disallowFreeAuthContextKey struct{}
-
-// PluginInterceptorHost applies plugin interceptors around handler execution.
-type PluginInterceptorHost interface {
-	InterceptRequestBeforeAuth(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
-	InterceptRequestAfterAuth(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
-	InterceptResponse(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse
-	InterceptStreamChunk(context.Context, pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse
-}
-
-type pluginInterceptorSkipHost interface {
-	InterceptRequestBeforeAuthExcept(context.Context, pluginapi.RequestInterceptRequest, string) pluginapi.RequestInterceptResponse
-	InterceptRequestAfterAuthExcept(context.Context, pluginapi.RequestInterceptRequest, string) pluginapi.RequestInterceptResponse
-	InterceptResponseExcept(context.Context, pluginapi.ResponseInterceptRequest, string) pluginapi.ResponseInterceptResponse
-	InterceptStreamChunkExcept(context.Context, pluginapi.StreamChunkInterceptRequest, string) pluginapi.StreamChunkInterceptResponse
-}
-
-type streamInterceptorDetector interface {
-	HasStreamInterceptors() bool
-}
-
-type requestInterceptorDetector interface {
-	HasRequestInterceptors() bool
-}
-
-// PluginModelRouterHost routes matching requests to a plugin executor, the router's own executor,
-// or a built-in provider before model-to-provider resolution and auth selection.
-type PluginModelRouterHost interface {
-	RouteModel(context.Context, pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool)
-}
-
-// PluginExecutorHost executes a routed request with a specific plugin executor.
-type PluginExecutorHost interface {
-	ExecutePluginExecutor(context.Context, string, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error)
-	ExecutePluginExecutorStream(context.Context, string, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error)
-	CountPluginExecutor(context.Context, string, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error)
-}
-
-type pluginExecutorFormatResolver interface {
-	PluginExecutorRequestToFormat(string, coreexecutor.Request, coreexecutor.Options) sdktranslator.Format
-}
-
-type pluginModelRouterSkipHost interface {
-	RouteModelExcept(context.Context, pluginapi.ModelRouteRequest, string) (pluginapi.ModelRouteResponse, bool)
-}
-
-type modelRouterDetector interface {
-	HasModelRouters() bool
-}
-
-type modelRouterSkipDetector interface {
-	HasModelRoutersExcept(string) bool
-}
-
-// WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
-func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
-	authID = strings.TrimSpace(authID)
-	if authID == "" {
-		return ctx
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, pinnedAuthContextKey{}, authID)
-}
-
-// WithSelectedAuthIDCallback returns a child context that receives the selected auth ID.
-func WithSelectedAuthIDCallback(ctx context.Context, callback func(string)) context.Context {
-	if callback == nil {
-		return ctx
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, selectedAuthCallbackContextKey{}, callback)
-}
-
-// WithExecutionSessionID returns a child context tagged with a long-lived execution session ID.
-func WithExecutionSessionID(ctx context.Context, sessionID string) context.Context {
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return ctx
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, executionSessionContextKey{}, sessionID)
-}
-
-// WithDisallowFreeAuth returns a child context that requests skipping known free-tier credentials.
-func WithDisallowFreeAuth(ctx context.Context) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, disallowFreeAuthContextKey{}, true)
-}
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
 // If errText is already valid JSON, it is returned as-is to preserve upstream error payloads.
@@ -260,8 +157,10 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Only include it if the client explicitly provides it.
 	key := ""
 	requestPath := ""
+	var ginCtx *gin.Context
 	if ctx != nil {
-		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		if requestGinCtx, ok := ctx.Value("gin").(*gin.Context); ok && requestGinCtx != nil && requestGinCtx.Request != nil {
+			ginCtx = requestGinCtx
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
 			requestPath = strings.TrimSpace(ginCtx.FullPath())
 			if requestPath == "" && ginCtx.Request.URL != nil {
@@ -283,13 +182,43 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
 		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
 	}
+	if ginCtx != nil && !websocket.IsWebSocketUpgrade(ginCtx.Request) {
+		if traceCallback := logging.GinCPATraceIDCallback(ginCtx); traceCallback != nil {
+			meta[coreexecutor.SelectedAuthIndexCallbackMetadataKey] = traceCallback
+		}
+	}
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
+	}
+	if callerScope := requestCallerScope(ginCtx); callerScope != "" {
+		meta[coreexecutor.CallerScopeMetadataKey] = callerScope
 	}
 	if disallowFreeAuthFromContext(ctx) {
 		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
 	}
 	return meta
+}
+
+func requestClientIP(request *http.Request) string {
+	if request == nil {
+		return ""
+	}
+	remoteAddr := strings.TrimSpace(request.RemoteAddr)
+	if host, _, errSplit := net.SplitHostPort(remoteAddr); errSplit == nil {
+		return strings.TrimSpace(host)
+	}
+	return remoteAddr
+}
+
+func requestCallerScope(ginCtx *gin.Context) string {
+	if ginCtx == nil {
+		return ""
+	}
+	value, exists := ginCtx.Get("userApiKey")
+	if !exists || value == nil {
+		return ""
+	}
+	return coresession.CallerScope(fmt.Sprint(value))
 }
 
 func addAuthSelectionModelMetadata(meta map[string]any, model string) {
@@ -640,6 +569,13 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	if endpoint != "" {
 		newCtx = logging.WithEndpoint(newCtx, endpoint)
+	}
+	if c != nil && c.Request != nil {
+		newCtx = logging.WithClientRequestMetadata(newCtx, logging.ClientRequestMetadata{
+			ClientIP:      requestClientIP(c.Request),
+			XForwardedFor: strings.TrimSpace(strings.Join(c.Request.Header.Values("X-Forwarded-For"), ", ")),
+			UserAgent:     strings.TrimSpace(c.Request.UserAgent()),
+		})
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)
 	newCtx = logging.WithResponseHeadersHolder(newCtx)
@@ -2333,7 +2269,6 @@ func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *inter
 		}
 	}
 }
-
 // APIHandlerCancelFunc is a function type for canceling an API handler's context.
 // It can optionally accept parameters, which are used for logging the response.
 type APIHandlerCancelFunc func(params ...interface{})

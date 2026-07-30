@@ -162,7 +162,20 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 //	// Without suffix - uses body config
 //	result, err := thinking.ApplyThinking(body, "gemini-2.5-pro", "gemini", "gemini", "gemini")
 func ApplyThinking(body []byte, model string, fromFormat string, toFormat string, providerKey string) ([]byte, error) {
+	return applyThinking(body, nil, model, fromFormat, toFormat, providerKey, nil, false)
+}
+
+// ApplyThinkingWithModelInfo applies thinking with the exact configured model
+// definition selected for an API-key execution attempt.
+func ApplyThinkingWithModelInfo(body, sourceBody []byte, model string, fromFormat string, toFormat string, providerKey string, modelInfo *registry.ModelInfo) ([]byte, error) {
+	return applyThinking(body, sourceBody, model, fromFormat, toFormat, providerKey, modelInfo, true)
+}
+
+func applyThinking(body, sourceBody []byte, model string, fromFormat string, toFormat string, providerKey string, resolvedModelInfo *registry.ModelInfo, modelInfoResolved bool) ([]byte, error) {
 	providerFormat := strings.ToLower(strings.TrimSpace(toFormat))
+	if modelInfoResolved && providerFormat == "openai-response" {
+		providerFormat = "codex"
+	}
 	providerKey = strings.ToLower(strings.TrimSpace(providerKey))
 	if providerKey == "" {
 		providerKey = providerFormat
@@ -185,7 +198,10 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	suffixResult := ParseSuffix(model)
 	baseModel := suffixResult.ModelName
 	// Use provider-specific lookup to handle capability differences across providers.
-	modelInfo := registry.LookupModelInfo(baseModel, providerKey)
+	modelInfo := resolvedModelInfo
+	if !modelInfoResolved {
+		modelInfo = registry.LookupModelInfo(baseModel, providerKey)
+	}
 
 	// 3. Model capability check
 	// Unknown models are treated as user-defined so thinking config can still be applied.
@@ -221,7 +237,12 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 			"level":    config.Level,
 		}).Debug("thinking: config from model suffix |")
 	} else {
-		config = extractThinkingConfig(body, providerFormat)
+		if modelInfoResolved && len(sourceBody) > 0 {
+			config = extractSourceThinkingConfig(sourceBody, fromFormat)
+		}
+		if !hasThinkingConfig(config) {
+			config = extractThinkingConfig(body, providerFormat)
+		}
 		if hasThinkingConfig(config) {
 			log.WithFields(log.Fields{
 				"provider": providerFormat,
@@ -239,6 +260,9 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 			"model":    modelInfo.ID,
 		}).Debug("thinking: no config found, passthrough |")
 		return body, nil
+	}
+	if modelInfoResolved && config.Mode == ModeLevel && modelInfo != nil && modelInfo.Thinking != nil && shouldMapConfiguredHighIntent(fromFormat, providerFormat, modelInfo) {
+		config.Level = mapConfiguredHighIntent(config.Level, modelInfo)
 	}
 
 	// 5. Validate and normalize configuration
@@ -274,6 +298,49 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 
 	// 6. Apply configuration using provider-specific applier
 	return applier.Apply(body, *validated, modelInfo)
+}
+
+func shouldMapConfiguredHighIntent(fromFormat, toFormat string, modelInfo *registry.ModelInfo) bool {
+	fromFormat = strings.ToLower(strings.TrimSpace(fromFormat))
+	toFormat = strings.ToLower(strings.TrimSpace(toFormat))
+	if fromFormat != toFormat {
+		return true
+	}
+	if modelInfo == nil {
+		return false
+	}
+	modelType := strings.ToLower(strings.TrimSpace(modelInfo.Type))
+	return modelType != "" && !isSameProviderFamily(toFormat, modelType)
+}
+
+func mapConfiguredHighIntent(level ThinkingLevel, modelInfo *registry.ModelInfo) ThinkingLevel {
+	if modelInfo == nil || modelInfo.Thinking == nil || len(modelInfo.Thinking.Levels) == 0 {
+		return level
+	}
+	level = ThinkingLevel(strings.ToLower(strings.TrimSpace(string(level))))
+	var candidates []ThinkingLevel
+	switch level {
+	case LevelXHigh:
+		candidates = []ThinkingLevel{LevelXHigh, LevelMax, LevelHigh}
+	case LevelMax:
+		candidates = []ThinkingLevel{LevelMax, LevelXHigh, LevelHigh}
+	default:
+		return level
+	}
+	for _, candidate := range candidates {
+		if isLevelSupported(string(candidate), modelInfo.Thinking.Levels) {
+			return candidate
+		}
+	}
+	return level
+}
+
+func extractSourceThinkingConfig(body []byte, provider string) ThinkingConfig {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "openai-response" {
+		return extractCodexConfig(body)
+	}
+	return extractThinkingConfig(body, provider)
 }
 
 // parseSuffixToConfig converts a raw suffix string to ThinkingConfig.
@@ -421,8 +488,7 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 	case "codex", "xai":
 		return extractCodexConfig(body)
 	case "kimi":
-		// Kimi uses OpenAI-compatible reasoning_effort format
-		return extractOpenAIConfig(body)
+		return extractKimiConfig(body)
 	default:
 		return ThinkingConfig{}
 	}
@@ -678,6 +744,50 @@ func extractOpenAIConfig(body []byte) ThinkingConfig {
 	}
 
 	return ThinkingConfig{}
+}
+
+// extractKimiConfig extracts Kimi's native thinking object while retaining
+// reasoning_effort as a legacy input fallback.
+//
+// Native fields take precedence over reasoning_effort. In particular,
+// thinking.type="enabled" without an explicit effort means "use the upstream
+// default" and therefore returns an empty config so ApplyThinking preserves the
+// request unchanged instead of interpreting it as CPA's ModeAuto.
+func extractKimiConfig(body []byte) ThinkingConfig {
+	thinkingType := gjson.GetBytes(body, "thinking.type")
+	if thinkingType.Exists() {
+		switch strings.ToLower(strings.TrimSpace(thinkingType.String())) {
+		case "disabled":
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		case "enabled":
+			if !gjson.GetBytes(body, "thinking.effort").Exists() {
+				return ThinkingConfig{}
+			}
+		}
+	}
+
+	if effort := gjson.GetBytes(body, "thinking.effort"); effort.Exists() {
+		value := strings.ToLower(strings.TrimSpace(effort.String()))
+		switch value {
+		case "":
+			return ThinkingConfig{}
+		case "none":
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		case "auto":
+			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+		default:
+			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+		}
+	}
+
+	// An explicit native thinking object without an effort should be left for
+	// the Kimi upstream to interpret and must not be overridden by the legacy
+	// field.
+	if thinkingType.Exists() {
+		return ThinkingConfig{}
+	}
+
+	return extractOpenAIConfig(body)
 }
 
 // extractCodexConfig extracts thinking configuration from Codex format request body.

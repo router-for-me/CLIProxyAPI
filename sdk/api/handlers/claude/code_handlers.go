@@ -14,15 +14,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -138,7 +137,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 // back into the original model name used for routing and upstream requests.
 func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 	modelName := gjson.GetBytes(rawJSON, "model").String()
-	resolved := util.ResolveClaudeModelIDPrefix(modelName)
+	resolved := claudemodels.ResolveClaudeModelIDPrefix(modelName)
 	if resolved == modelName {
 		return rawJSON
 	}
@@ -419,9 +418,28 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 	if msg != nil && msg.StatusCode > 0 {
 		status = msg.StatusCode
 	}
+	if msg != nil && msg.DirectResponse {
+		for key, values := range handlers.FilterUpstreamHeaders(msg.Headers) {
+			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) {
+				continue
+			}
+			c.Writer.Header().Del(key)
+			for _, value := range values {
+				c.Writer.Header().Add(key, value)
+			}
+		}
+		body := bytes.Clone(msg.Body)
+		appendClaudeAPIResponse(c, body)
+		if !c.Writer.Written() && c.Writer.Header().Get("Content-Type") == "" {
+			c.Writer.Header().Set("Content-Type", "application/json")
+		}
+		c.Status(status)
+		_, _ = c.Writer.Write(body)
+		return
+	}
 	if msg != nil && msg.Addon != nil && handlers.PassthroughHeadersEnabled(h.Cfg) {
 		for key, values := range msg.Addon {
-			if len(values) == 0 {
+			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) {
 				continue
 			}
 			c.Writer.Header().Del(key)
