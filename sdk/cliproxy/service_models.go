@@ -117,10 +117,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case "codex":
 		if authKind == "apikey" {
 			if entry := s.resolveConfigCodexKey(a); entry != nil {
-				models = registry.GetCodexProModels()
-				if len(entry.Models) > 0 {
-					models = buildCodexConfigModels(entry)
-				}
+				models = buildCodexConfigModels(entry)
 				excluded = entry.ExcludedModels
 			}
 			models = applyExcludedModels(models, excluded)
@@ -806,6 +803,9 @@ func buildXAIConfigModels(entry *config.XAIKey) []*ModelInfo {
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 	if entry == nil {
 		return nil
+	}
+	if len(entry.Models) == 0 {
+		return registry.GetCodexProModels()
 	}
 
 	models := buildConfigModels(entry.Models, "openai", "openai")

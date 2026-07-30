@@ -19,24 +19,28 @@ func TestRegisterModelsForAuthCodexAPIKeyModels(t *testing.T) {
 
 	excludedModelID := defaultModels[0].ID
 	tests := []struct {
-		name    string
-		entry   config.CodexKey
-		wantIDs map[string]struct{}
+		name        string
+		entry       config.CodexKey
+		wantIDs     map[string]struct{}
+		wantPresent []string
+		wantAbsent  []string
 	}{
 		{
-			name:    "defaults without configuration",
-			entry:   config.CodexKey{APIKey: "default-key"},
-			wantIDs: codexModelIDSet(defaultModels),
+			name:        "defaults without explicit models",
+			entry:       config.CodexKey{APIKey: "default-key"},
+			wantIDs:     codexModelIDSet(defaultModels),
+			wantPresent: []string{"gpt-image-1.5", "gpt-image-2"},
 		},
 		{
-			name: "explicit configuration replaces defaults",
+			name: "only explicitly configured models",
 			entry: config.CodexKey{
 				APIKey: "configured-key",
 				Models: []internalconfig.CodexModel{{
 					Name: "upstream-codex", Alias: "configured-codex",
 				}},
 			},
-			wantIDs: map[string]struct{}{"configured-codex": {}},
+			wantIDs:    map[string]struct{}{"configured-codex": {}},
+			wantAbsent: []string{"gpt-image-1.5", "gpt-image-2"},
 		},
 		{
 			name: "exclusions apply to defaults",
@@ -76,6 +80,16 @@ func TestRegisterModelsForAuthCodexAPIKeyModels(t *testing.T) {
 			for modelID := range testCase.wantIDs {
 				if _, ok := gotIDs[modelID]; !ok {
 					t.Errorf("missing registered model %q", modelID)
+				}
+			}
+			for _, modelID := range testCase.wantPresent {
+				if _, ok := gotIDs[modelID]; !ok {
+					t.Errorf("missing required registered model %q", modelID)
+				}
+			}
+			for _, modelID := range testCase.wantAbsent {
+				if _, ok := gotIDs[modelID]; ok {
+					t.Errorf("unexpected registered model %q", modelID)
 				}
 			}
 		})
@@ -177,11 +191,90 @@ func TestRegisterModelsForAuthCodexAPIKeyDefaultRequiresConfigMatch(t *testing.T
 	}
 }
 
+func TestRegisterConfigAPIKeyAuthsCodexModelModes(t *testing.T) {
+	defaultIDs := codexModelIDSet(internalregistry.GetCodexProModels())
+	tests := []struct {
+		name       string
+		models     []internalconfig.CodexModel
+		wantIDs    map[string]struct{}
+		wantImages bool
+	}{
+		{
+			name:       "empty models uses defaults with images",
+			wantIDs:    defaultIDs,
+			wantImages: true,
+		},
+		{
+			name: "configured models replace defaults",
+			models: []internalconfig.CodexModel{{
+				Name: "runtime-upstream", Alias: "runtime-configured",
+			}},
+			wantIDs: map[string]struct{}{"runtime-configured": {}},
+		},
+	}
+
+	for index := range tests {
+		testCase := tests[index]
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := &config.Config{CodexKey: []config.CodexKey{{
+				APIKey: fmt.Sprintf("runtime-key-%d", index),
+				Models: testCase.models,
+			}}}
+			manager := coreauth.NewManager(nil, nil, nil)
+			service := &Service{cfg: cfg, coreManager: manager}
+			service.registerConfigAPIKeyAuths(context.Background(), cfg)
+
+			auths := manager.List()
+			modelRegistry := internalregistry.GetGlobalRegistry()
+			for _, auth := range auths {
+				if auth != nil {
+					authID := auth.ID
+					t.Cleanup(func() { modelRegistry.UnregisterClient(authID) })
+				}
+			}
+			if len(auths) != 1 {
+				t.Fatalf("runtime auth count = %d, want 1", len(auths))
+			}
+
+			registeredIDs := codexModelIDSet(modelRegistry.GetModelsForClient(auths[0].ID))
+			if len(registeredIDs) != len(testCase.wantIDs) {
+				t.Fatalf("registered model IDs = %#v, want %#v", registeredIDs, testCase.wantIDs)
+			}
+			for modelID := range testCase.wantIDs {
+				if _, ok := registeredIDs[modelID]; !ok {
+					t.Errorf("missing registered model %q", modelID)
+				}
+			}
+			for _, modelID := range []string{"gpt-image-1.5", "gpt-image-2"} {
+				_, registered := registeredIDs[modelID]
+				if registered != testCase.wantImages {
+					t.Errorf("registered model %q = %t, want %t", modelID, registered, testCase.wantImages)
+				}
+				if testCase.wantImages {
+					if _, available := openAIModelIDSet(modelRegistry.GetAvailableModels("openai"))[modelID]; !available {
+						t.Errorf("/v1/models source is missing %q", modelID)
+					}
+				}
+			}
+		})
+	}
+}
+
 func codexModelIDSet(models []*internalregistry.ModelInfo) map[string]struct{} {
 	ids := make(map[string]struct{}, len(models))
 	for _, model := range models {
 		if model != nil && model.ID != "" {
 			ids[model.ID] = struct{}{}
+		}
+	}
+	return ids
+}
+
+func openAIModelIDSet(models []map[string]any) map[string]struct{} {
+	ids := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if modelID, ok := model["id"].(string); ok && modelID != "" {
+			ids[modelID] = struct{}{}
 		}
 	}
 	return ids
