@@ -982,8 +982,12 @@ type UsageEventRow struct {
 // models_catalog — see eventJoin for the resolution precedence. Rows that
 // have no matching catalog row at all get an empty value here and are left
 // to the best-effort registry resolver in the management layer.
+// api_key_id is COALESCE'd to '' because it is nullable on usage_events
+// (the flusher records only api_key_principal when no api_keys row can be
+// resolved), and it is scanned into a plain string in scanEventRow — a raw
+// NULL would fail the scan.
 const eventRowSelectColumns = `
-	e.id, e.request_id, e.api_key_id,
+	e.id, e.request_id, COALESCE(e.api_key_id, ''),
 	COALESCE(NULLIF(k.key_alias, ''), k.name, '') AS key_alias,
 	e.provider, e.executor_type, e.model, e.alias, e.endpoint,
 	e.client_ip, e.forwarded_for,

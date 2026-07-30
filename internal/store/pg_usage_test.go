@@ -195,6 +195,54 @@ func TestUsageStoreIntegrationSmoke(t *testing.T) {
 	_ = secret // not used here
 }
 
+func TestUsageStoreSelectEventsNullAPIKeyID(t *testing.T) {
+	// Regression: the flusher records only api_key_principal when no
+	// api_keys row can be resolved, persisting NULL in api_key_id. The
+	// event/errors SELECT path projects that column into a plain string,
+	// so a NULL previously failed the scan ("converting NULL to string is
+	// unsupported"). COALESCE(e.api_key_id, '') must surface it as "".
+	store := newTestPostgresStore(t, "usage_null_apikey")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+
+	event := UsageEvent{
+		// APIKeyID intentionally empty -> persisted as NULL.
+		Provider:     "anthropic",
+		Model:        "test-model",
+		InputTokens:  42,
+		OutputTokens: 7,
+		RequestedAt:  now(),
+	}
+	if err := us.InsertEvent(ctx, event); err != nil {
+		t.Fatalf("InsertEvent: %v", err)
+	}
+
+	rows, _, err := us.SelectEvents(ctx, UsageFilter{}, 1, 25)
+	if err != nil {
+		t.Fatalf("SelectEvents: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("SelectEvents returned %d rows; want 1", len(rows))
+	}
+	if rows[0].APIKeyID != "" {
+		t.Errorf("APIKeyID = %q; want empty for NULL api_key_id", rows[0].APIKeyID)
+	}
+	if rows[0].Model != "test-model" {
+		t.Errorf("Model = %q; want test-model", rows[0].Model)
+	}
+	if rows[0].InputTokens != 42 {
+		t.Errorf("InputTokens = %d; want 42", rows[0].InputTokens)
+	}
+
+	got, err := us.GetEvent(ctx, rows[0].ID)
+	if err != nil {
+		t.Fatalf("GetEvent: %v", err)
+	}
+	if got.APIKeyID != "" {
+		t.Errorf("GetEvent APIKeyID = %q; want empty for NULL api_key_id", got.APIKeyID)
+	}
+}
+
 func TestUsageStoreBatchInsert(t *testing.T) {
 	store := newTestPostgresStore(t, "usage_test2")
 	ctx := cancelableTestCtx(t)

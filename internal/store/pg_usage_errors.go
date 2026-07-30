@@ -115,8 +115,11 @@ const usageErrorColumnList = `
 // resolved via the api_keys LEFT JOIN. OfficialProvider is resolved via the
 // same three-arm models_catalog LEFT JOIN described on eventJoin, mirroring
 // the events path so the two surfaces agree on official_provider.
+// api_key_id is COALESCE'd to '' because it is nullable on usage_errors
+// (see eventRowSelectColumns in pg_usage.go for the rationale) and is
+// scanned into a plain string in scanErrorRow.
 const errorRowSelectColumns = `
-	e.id, e.request_id, e.api_key_id,
+	e.id, e.request_id, COALESCE(e.api_key_id, ''),
 	COALESCE(NULLIF(k.key_alias, ''), k.name, '') AS key_alias,
 	e.provider, e.executor_type, e.model, e.alias, e.route_model, e.endpoint,
 	e.client_ip, e.forwarded_for,
