@@ -760,14 +760,24 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 		}
 		return wait, true
 	}
-	if status != http.StatusTooManyRequests {
+	if status != http.StatusTooManyRequests && status != statusOverloaded {
 		return 0, false
 	}
 	if !m.retryAllowed(attempt, providers) {
 		return 0, false
 	}
+	// Anthropic's 529 overloaded_error and its OAuth 429s carry no Retry-After.
+	// Fall back to a short fixed wait so the request rolls over to another
+	// credential instead of failing on the first attempt.
 	retryAfter := retryAfterFromError(err)
-	if retryAfter == nil || *retryAfter <= 0 || *retryAfter > maxWait {
+	if retryAfter == nil || *retryAfter <= 0 {
+		wait = defaultRetryWaitWithoutRetryAfter
+		if wait > maxWait {
+			wait = maxWait
+		}
+		return wait, true
+	}
+	if *retryAfter > maxWait {
 		return 0, false
 	}
 	return *retryAfter, true

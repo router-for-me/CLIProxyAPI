@@ -17,6 +17,17 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
+// statusOverloaded is the non-standard HTTP status Anthropic returns for
+// overloaded_error. net/http has no constant for it.
+const statusOverloaded = 529
+
+// defaultRetryWaitWithoutRetryAfter is the wait applied to a retryable upstream
+// rejection that carries no usable Retry-After header. Anthropic's OAuth 429 and
+// 529 responses omit both Retry-After and the anthropic-ratelimit-* headers, so
+// without a default the request would fail on its first attempt instead of
+// rolling over to another credential.
+const defaultRetryWaitWithoutRetryAfter = 2 * time.Second
+
 var quotaCooldownDisabled atomic.Bool
 
 var transientErrorCooldownSeconds atomic.Int64
@@ -828,7 +839,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								shouldSuspendModel = true
 								setModelQuota = true
 							}
-						case 408, 500, 502, 503, 504:
+						case 408, 500, 502, 503, 504, statusOverloaded:
 							state.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
 							state.Unavailable = !state.NextRetryAfter.IsZero()
 						default:
@@ -1655,7 +1666,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
-	case 408, 500, 502, 503, 504:
+	case 408, 500, 502, 503, 504, statusOverloaded:
 		auth.StatusMessage = "transient upstream error"
 		auth.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
 		auth.Unavailable = !auth.NextRetryAfter.IsZero()
