@@ -98,9 +98,13 @@ func GetCodexFingerprintProfile() CodexFingerprintProfile {
 
 // GetCodexFingerprintProfileSnapshot returns the current profile and revision.
 func GetCodexFingerprintProfileSnapshot() (CodexFingerprintProfile, uint64) {
-	codexFingerprintCatalogStore.mu.RLock()
-	defer codexFingerprintCatalogStore.mu.RUnlock()
-	return codexFingerprintCatalogStore.profile, codexFingerprintCatalogStore.revision
+	return codexFingerprintCatalogStore.snapshot()
+}
+
+func (store *codexFingerprintProfileStore) snapshot() (CodexFingerprintProfile, uint64) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	return store.profile, store.revision
 }
 
 func loadCodexFingerprintProfileFromBytes(data []byte, source string) (bool, error) {
