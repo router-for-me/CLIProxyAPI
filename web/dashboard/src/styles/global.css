@@ -2032,6 +2032,48 @@ tr:focus-within .row-actions {
   white-space: nowrap;
 }
 
+/* Cost derivation table — shown beneath the cost breakdown bar in the event
+   detail modal. One row per token segment: tokens × rate ($/1M) → cost. Kept
+   compact to fit the modal's full-width detail-row__block. */
+.costder {
+  width: 100%;
+  margin-top: 10px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.costder th,
+.costder td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.costder th {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  font-weight: 500;
+  text-align: left;
+}
+.costder td:first-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.costder__sum td {
+  font-weight: 600;
+  border-top: 1px solid var(--border);
+  border-bottom: none;
+}
+.costder__nopricing {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
 /* Chart loading skeleton — fills the chart area instead of a centered spinner. */
 .chart-skeleton {
   display: flex;

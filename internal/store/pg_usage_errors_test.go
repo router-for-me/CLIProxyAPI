@@ -297,6 +297,18 @@ func TestFillCostBreakdownErrors(t *testing.T) {
 	if !approxEqual(row.CostBreakdown.Sum(), ComputeCost(pricing, 1_000_000, 1_000_000, 0, 0, 0)) {
 		t.Errorf("breakdown sum = %v; want %v", row.CostBreakdown.Sum(), ComputeCost(pricing, 1_000_000, 1_000_000, 0, 0, 0))
 	}
+	// AppliedPricing must be populated alongside CostBreakdown so the dashboard
+	// can render the tokens × rate → cost derivation; the rates must match the
+	// row that produced the breakdown.
+	if row.AppliedPricing == nil {
+		t.Fatalf("expected AppliedPricing to be populated; got nil")
+	}
+	if row.AppliedPricing.ID != pricing.ID {
+		t.Errorf("AppliedPricing.ID = %q; want %q", row.AppliedPricing.ID, pricing.ID)
+	}
+	if !approxEqual(row.AppliedPricing.InputPer1M, pricing.InputPer1M) || !approxEqual(row.AppliedPricing.OutputPer1M, pricing.OutputPer1M) {
+		t.Errorf("AppliedPricing = %+v; want rates %+v", row.AppliedPricing, pricing)
+	}
 
 	// nil store must return nil (no panic).
 	var nilStore *UsageStore

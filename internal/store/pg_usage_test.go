@@ -76,6 +76,66 @@ func TestSegmentCostsSumEqualsComputeCost(t *testing.T) {
 	}
 }
 
+// TestFillCostBreakdown guards that FillCostBreakdown populates CostBreakdown
+// and AppliedPricing in lockstep on UsageEventRow. AppliedPricing exposes the
+// resolved unit rates so the dashboard's event detail modal can render a
+// tokens × rate → cost derivation; it must mirror the rates that produced the
+// breakdown. A missing pricing row leaves AppliedPricing present-but-all-zero
+// so the dashboard can show "no pricing configured" rather than reading as free.
+func TestFillCostBreakdown(t *testing.T) {
+	store := newTestPostgresStore(t, "usage_fill_breakdown")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+
+	pricing := Pricing{ID: "fill-priced", InputPer1M: 5.0, OutputPer1M: 15.0, ReasoningPer1M: 10.0}
+	if err := us.UpsertPricing(ctx, pricing); err != nil {
+		t.Fatalf("UpsertPricing: %v", err)
+	}
+	row := UsageEventRow{
+		Model:           "fill-priced",
+		InputTokens:     1_000_000,
+		OutputTokens:    500_000,
+		ReasoningTokens: 100_000,
+	}
+	if err := us.FillCostBreakdown(ctx, []UsageEventRow{row}); err != nil {
+		t.Fatalf("FillCostBreakdown: %v", err)
+	}
+	if row.CostBreakdown == nil {
+		t.Fatalf("expected CostBreakdown to be populated; got nil")
+	}
+	if !approxEqual(row.CostBreakdown.Sum(), ComputeCost(pricing, row.InputTokens, row.OutputTokens, row.ReasoningTokens, 0, 0)) {
+		t.Errorf("breakdown sum = %v; want %v", row.CostBreakdown.Sum(), ComputeCost(pricing, row.InputTokens, row.OutputTokens, row.ReasoningTokens, 0, 0))
+	}
+	if row.AppliedPricing == nil {
+		t.Fatalf("expected AppliedPricing to be populated; got nil")
+	}
+	if row.AppliedPricing.ID != pricing.ID {
+		t.Errorf("AppliedPricing.ID = %q; want %q", row.AppliedPricing.ID, pricing.ID)
+	}
+	if !approxEqual(row.AppliedPricing.InputPer1M, pricing.InputPer1M) || !approxEqual(row.AppliedPricing.OutputPer1M, pricing.OutputPer1M) {
+		t.Errorf("AppliedPricing = %+v; want rates %+v", row.AppliedPricing, pricing)
+	}
+
+	// A missing pricing row yields a present-but-all-zero AppliedPricing so the
+	// dashboard can show "no pricing configured" (HasRates() == false).
+	missing := UsageEventRow{Model: "fill-unpriced", InputTokens: 1_000_000}
+	if err := us.FillCostBreakdown(ctx, []UsageEventRow{missing}); err != nil {
+		t.Fatalf("FillCostBreakdown (unpriced): %v", err)
+	}
+	if missing.AppliedPricing == nil {
+		t.Fatalf("expected AppliedPricing to be present-but-zero for an unpriced model; got nil")
+	}
+	if missing.AppliedPricing.HasRates() {
+		t.Errorf("unpriced model AppliedPricing.HasRates() = true; want false: %+v", missing.AppliedPricing)
+	}
+
+	// nil store must return nil (no panic).
+	var nilStore *UsageStore
+	if err := nilStore.FillCostBreakdown(ctx, []UsageEventRow{row}); err != nil {
+		t.Fatalf("nil store FillCostBreakdown = %v; want nil", err)
+	}
+}
+
 func TestAggregateGroupClause(t *testing.T) {
 	cases := []struct {
 		groupBy   string

@@ -51,11 +51,11 @@ export function presetToRange(preset) {
 // SegmentCosts: cached_tokens → cached_read, cache_creation_tokens →
 // cache_creation (cache-write surcharge).
 export const TOKEN_SEGMENTS = [
-  { key: 'input_tokens', costKey: 'input', label: 'Input', short: 'in', color: 'var(--accent)' },
-  { key: 'cached_tokens', costKey: 'cached_read', label: 'Cached', short: 'cch', color: 'var(--success)' },
-  { key: 'cache_creation_tokens', costKey: 'cache_creation', label: 'Cache write', short: 'ccw', color: '#38bdf8' },
-  { key: 'output_tokens', costKey: 'output', label: 'Output', short: 'out', color: 'var(--warning)' },
-  { key: 'reasoning_tokens', costKey: 'reasoning', label: 'Reasoning', short: 're', color: '#a78bfa' },
+  { key: 'input_tokens', costKey: 'input', rateKey: 'input_per_1m_usd', label: 'Input', short: 'in', color: 'var(--accent)' },
+  { key: 'cached_tokens', costKey: 'cached_read', rateKey: 'cached_read_per_1m_usd', label: 'Cached', short: 'cch', color: 'var(--success)' },
+  { key: 'cache_creation_tokens', costKey: 'cache_creation', rateKey: 'cached_input_per_1m_usd', label: 'Cache write', short: 'ccw', color: '#38bdf8' },
+  { key: 'output_tokens', costKey: 'output', rateKey: 'output_per_1m_usd', label: 'Output', short: 'out', color: 'var(--warning)' },
+  { key: 'reasoning_tokens', costKey: 'reasoning', rateKey: 'reasoning_per_1m_usd', label: 'Reasoning', short: 're', color: '#a78bfa' },
 ];
 
 export function tokenSegments(e) {
@@ -83,6 +83,28 @@ export function fmtUSDCompact(v) {
   if (!v || v <= 0) return '0';
   if (v < 0.01) return v.toFixed(6);
   return v.toFixed(4);
+}
+
+// fmtRate renders a unit price (USD per 1,000,000 tokens) for the cost
+// derivation table. Zero is shown as "$0" so "free" and "rate not set" both
+// read cleanly; the no-pricing banner distinguishes the latter.
+export function fmtRate(v) {
+  if (!v || v <= 0) return '$0';
+  return `$${v.toFixed(4)}`;
+}
+
+// pricingHasRates mirrors Go's Pricing.HasRates so the card can tell a
+// genuinely-zero (free) breakdown from a missing-pricing row (all rates 0,
+// cost 0). The applied_pricing payload is present-but-all-zero in the
+// missing case, so the dashboard shows a "no pricing configured" banner
+// instead of conflating it with free.
+export function pricingHasRates(p) {
+  if (!p) return false;
+  return Number(p.input_per_1m_usd || 0) > 0
+    || Number(p.output_per_1m_usd || 0) > 0
+    || Number(p.reasoning_per_1m_usd || 0) > 0
+    || Number(p.cached_input_per_1m_usd || 0) > 0
+    || Number(p.cached_read_per_1m_usd || 0) > 0;
 }
 
 export function toUTC(localValue) {
@@ -331,7 +353,11 @@ export function CompactTokenBreakdown({ e }) {
 // detail modal: stacked bar + legend with values, percentages, and the
 // persisted total for reconciliation. When the event carries a
 // cost_breakdown (always present on the single-event endpoint), a second bar
-// attributes dollar cost to the same slices with a parallel legend.
+// attributes dollar cost to the same slices with a parallel legend, and a
+// per-segment derivation table (tokens × rate → cost) surfaces the unit rates
+// that produced it via applied_pricing. When applied_pricing is present but
+// all-zero (no pricing row matched the model/alias), a banner makes that
+// explicit so "no pricing configured" is distinguishable from "free".
 export function TokenBreakdownCard({ e }) {
   const segs = tokenSegments(e);
   const sum = segs.reduce((a, s) => a + s.value, 0);
@@ -341,6 +367,22 @@ export function TokenBreakdownCard({ e }) {
   const cSegs = costSegments(e);
   const cSum = cSegs.reduce((a, s) => a + s.value, 0);
   const hasCost = Boolean(e.cost_breakdown);
+  // applied_pricing carries the unit rates that produced the breakdown, so the
+  // card can render a per-segment tokens × rate → cost derivation. Present-but-
+  // all-zero when no pricing row matched the model/alias — the banner below
+  // surfaces that as "no pricing configured" rather than reading as "free".
+  const pricing = e.applied_pricing;
+  const hasRates = pricingHasRates(pricing);
+  // Derivation rows zip the token counts, resolved rates, and per-segment
+  // dollar costs. Built from TOKEN_SEGMENTS so the order/coloring matches the
+  // stacked bars above exactly.
+  const derRows = hasCost && pricing
+    ? cSegs.map((s) => ({
+        ...s,
+        tokens: Number(e[s.key] || 0),
+        rate: Number(pricing[s.rateKey] || 0),
+      }))
+    : [];
 
   return (
     <div className="detail-row__block">
@@ -381,6 +423,45 @@ export function TokenBreakdownCard({ e }) {
               {Math.abs(cSum - (e.cost_usd || 0)) > 1e-9 ? ` (different by ${fmtUSD(cSum - (e.cost_usd || 0))})` : ''}
             </span>
           </div>
+
+          {derRows.length > 0 && (
+            <table className="costder">
+              <thead>
+                <tr>
+                  <th>Segment</th>
+                  <th style={{ textAlign: 'right' }}>Tokens</th>
+                  <th style={{ textAlign: 'right' }}>Rate ($/1M)</th>
+                  <th style={{ textAlign: 'right' }}>Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {derRows.map((r) => (
+                  <tr key={r.key}>
+                    <td>
+                      <LegendDot color={r.color} />
+                      <span>{r.label}</span>
+                    </td>
+                    <td className="mono" style={{ textAlign: 'right' }}>{r.tokens.toLocaleString()}</td>
+                    <td className="mono" style={{ textAlign: 'right' }}>{fmtRate(r.rate)}</td>
+                    <td className="mono" style={{ textAlign: 'right' }}>{fmtUSD(r.value)}</td>
+                  </tr>
+                ))}
+                <tr className="costder__sum">
+                  <td>Total</td>
+                  <td className="mono" style={{ textAlign: 'right' }}>{total.toLocaleString()}</td>
+                  <td />
+                  <td className="mono" style={{ textAlign: 'right' }}>{fmtUSD(e.cost_usd || 0)}</td>
+                </tr>
+              </tbody>
+            </table>
+          )}
+
+          {pricing && !hasRates && (
+            <div className="costder__nopricing">
+              No pricing configured for <span className="mono">{e.alias || e.model}</span> — cost is $0.
+              Set rates in Model Catalog → Pricing to attribute dollars.
+            </div>
+          )}
         </>
       )}
     </div>

@@ -1011,13 +1011,20 @@ type UsageEventRow struct {
 	// (include=cost_breakdown on the events endpoints). It attributes
 	// cost_usd to each token kind using the model's pricing row. Stays nil
 	// otherwise so existing API consumers see no payload change.
-	CostBreakdown  *CostBreakdown `json:"cost_breakdown,omitempty"`
-	LatencyMs      int64          `json:"latency_ms,omitempty"`
-	TTFTMs         int64          `json:"ttft_ms,omitempty"`
-	Failed         bool           `json:"failed"`
-	FailStatusCode int            `json:"fail_status_code,omitempty"`
-	Generate       bool           `json:"generate,omitempty"`
-	RequestedAt    time.Time      `json:"requested_at"`
+	CostBreakdown *CostBreakdown `json:"cost_breakdown,omitempty"`
+	// AppliedPricing is the resolved pricing row (unit rates) that produced
+	// CostBreakdown. Populated alongside CostBreakdown so the dashboard can
+	// render a tokens × rate → cost derivation. Present-but-all-zero when no
+	// pricing row matched (i.e. "no pricing configured"), mirroring
+	// CostBreakdown's missing-row semantics. Stays nil when CostBreakdown is
+	// not requested so the list endpoint's payload is unchanged.
+	AppliedPricing *Pricing  `json:"applied_pricing,omitempty"`
+	LatencyMs      int64     `json:"latency_ms,omitempty"`
+	TTFTMs         int64     `json:"ttft_ms,omitempty"`
+	Failed         bool      `json:"failed"`
+	FailStatusCode int       `json:"fail_status_code,omitempty"`
+	Generate       bool      `json:"generate,omitempty"`
+	RequestedAt    time.Time `json:"requested_at"`
 }
 
 // eventRowSelectColumns lists the columns projected by SelectEvents and
@@ -1209,21 +1216,25 @@ func (s *UsageStore) FillCostBreakdown(ctx context.Context, rows []UsageEventRow
 	if s == nil || s.db == nil || len(rows) == 0 {
 		return nil
 	}
-	cache := make(map[string]Pricing, len(rows))
+	cache := make(map[string]*Pricing, len(rows))
 	for i := range rows {
 		r := &rows[i]
 		key := r.Model + "\x00" + r.Alias
 		p, ok := cache[key]
 		if !ok {
-			var err error
-			p, err = s.ResolvePricing(ctx, r.Model, r.Alias)
+			resolved, err := s.ResolvePricing(ctx, r.Model, r.Alias)
 			if err != nil {
 				return fmt.Errorf("postgres store: fill cost breakdown: %w", err)
 			}
+			p = &resolved
 			cache[key] = p
 		}
-		b := SegmentCosts(p, r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.CacheCreationTokens)
+		b := SegmentCosts(*p, r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.CacheCreationTokens)
 		r.CostBreakdown = &b
+		// AppliedPricing mirrors CostBreakdown's present-but-all-zero semantics
+		// for a missing pricing row so the dashboard can show "no pricing
+		// configured" rather than conflating it with "free".
+		r.AppliedPricing = p
 	}
 	return nil
 }

@@ -89,13 +89,17 @@ type UsageErrorRow struct {
 	// CostBreakdown is populated only when the caller asks for it
 	// (include=cost_breakdown on the errors endpoints). Mirrors the
 	// UsageEventRow breakdown so the dashboard can reuse the same card.
-	CostBreakdown  *CostBreakdown `json:"cost_breakdown,omitempty"`
-	LatencyMs      int64          `json:"latency_ms,omitempty"`
-	TTFTMs         int64          `json:"ttft_ms,omitempty"`
-	FailStatusCode int            `json:"fail_status_code,omitempty"`
-	ErrorMessage   string         `json:"error_message"`
-	Generate       bool           `json:"generate,omitempty"`
-	RequestedAt    time.Time      `json:"requested_at"`
+	CostBreakdown *CostBreakdown `json:"cost_breakdown,omitempty"`
+	// AppliedPricing mirrors UsageEventRow.AppliedPricing: the resolved unit
+	// rates that produced CostBreakdown, populated alongside it so the dashboard
+	// can render a tokens × rate → cost derivation for failed attempts too.
+	AppliedPricing *Pricing  `json:"applied_pricing,omitempty"`
+	LatencyMs      int64     `json:"latency_ms,omitempty"`
+	TTFTMs         int64     `json:"ttft_ms,omitempty"`
+	FailStatusCode int       `json:"fail_status_code,omitempty"`
+	ErrorMessage   string    `json:"error_message"`
+	Generate       bool      `json:"generate,omitempty"`
+	RequestedAt    time.Time `json:"requested_at"`
 }
 
 // usageErrorColumnList is the canonical column list for INSERT statements.
@@ -361,21 +365,25 @@ func (s *UsageStore) FillCostBreakdownErrors(ctx context.Context, rows []UsageEr
 	if s == nil || s.db == nil || len(rows) == 0 {
 		return nil
 	}
-	cache := make(map[string]Pricing, len(rows))
+	cache := make(map[string]*Pricing, len(rows))
 	for i := range rows {
 		r := &rows[i]
 		key := r.Model + "\x00" + r.Alias
 		p, ok := cache[key]
 		if !ok {
-			var err error
-			p, err = s.ResolvePricing(ctx, r.Model, r.Alias)
+			resolved, err := s.ResolvePricing(ctx, r.Model, r.Alias)
 			if err != nil {
 				return fmt.Errorf("postgres store: fill cost breakdown for errors: %w", err)
 			}
+			p = &resolved
 			cache[key] = p
 		}
-		b := SegmentCosts(p, r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.CacheCreationTokens)
+		b := SegmentCosts(*p, r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.CacheCreationTokens)
 		r.CostBreakdown = &b
+		// AppliedPricing mirrors FillCostBreakdown's present-but-all-zero
+		// missing-row behavior so the dashboard renders the same derivation
+		// card for failed attempts.
+		r.AppliedPricing = p
 	}
 	return nil
 }
