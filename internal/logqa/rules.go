@@ -275,6 +275,43 @@ func EvaluateSession(promptRounds, toolCalls, dupAssistant int, rules RulesConfi
 	return len(reasons) == 0, reasons
 }
 
+// ComputeUploadEligibility mirrors log-uploader session-gate outcomes:
+// eligible / hold / orphan. QA-only reasons (duplicate assistant) do not cause hold.
+func ComputeUploadEligibility(sessionID string, hasRealSessionID bool, failReasons []string) string {
+	if strings.HasPrefix(sessionID, "unknown:") {
+		return "orphan"
+	}
+	real := hasRealSessionID
+	for _, reason := range failReasons {
+		if reason == "empty_session_id" {
+			real = false
+			break
+		}
+	}
+	if !real {
+		return "orphan"
+	}
+	for _, reason := range failReasons {
+		if isUploadGateFailReason(reason) {
+			return "hold"
+		}
+	}
+	return "eligible"
+}
+
+// isUploadGateFailReason reports whether a QA fail reason also blocks uploader session-gate.
+// duplicate_assistant is display-only in log-qa and is not part of session-gate.
+func isUploadGateFailReason(reason string) bool {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return false
+	}
+	if strings.HasPrefix(reason, "duplicate_assistant") {
+		return false
+	}
+	return true
+}
+
 type evaluateExtras struct {
 	HasRealSessionID  bool
 	UnpairedToolCalls bool

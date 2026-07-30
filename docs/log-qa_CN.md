@@ -65,9 +65,20 @@ go build -o bin/log-qa ./cmd/log-qa
 5. **最新非 title 轮 RESPONSE 不以 tool_call 结尾**
 6. **无完全相同的 assistant 文本重复**（仅 QA 展示；uploader 门禁不含此项）
 
-报告字段 `upload_eligibility`：`eligible` / `hold` / `orphan`，便于对照「为何尚未上传」。
+报告字段 `upload_eligibility`：`eligible` / `hold` / `orphan`，便于对照「为何尚未上传」。  
+计算时与 uploader `session-gate` 对齐：**助手回复重复**只影响质检「通过/失败」，**不**把会话标为 Hold。
 
 同一 session 下的 subagent thread **会合并**进同一条样本。
+
+Management 表格「上传」列显示：
+
+| 值 | 含义 |
+|----|------|
+| **Hold** | 对照 session-gate：预计暂不上传 |
+| **可上传** | 对照 session-gate：预计可打包上传 |
+| **无 Session** | 无真实 `session_id`（orphan） |
+
+可按「全部上传状态 / Hold / 可上传 / 无 Session」筛选。该列为规则推算，**不是**实时读取 uploader `state.json`；权威 Hold 列表仍以 uploader 的 `session_gate.sessions` 为准。
 
 面板上「失败会话数（按原因）」里的数字是**该原因失败的会话个数**，不是轮次阈值。  
 例如「有效提问轮次不足：8 个」= 有 8 个 session 未达到 ≥4 轮，**不是**“不足 8 轮就失败”。

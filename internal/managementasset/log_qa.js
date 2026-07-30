@@ -230,6 +230,7 @@
       '.cpa-lqa-table th,.cpa-lqa-table td{border-bottom:1px solid var(--border-color,#d8dee9);padding:8px 6px;text-align:left;vertical-align:top}',
       '.cpa-lqa-table th{color:var(--text-secondary,#64748b);font-weight:650}',
       '.cpa-lqa-fail{color:#b91c1c}.cpa-lqa-pass{color:#047857}',
+      '.cpa-lqa-hold{color:#b45309;font-weight:650}.cpa-lqa-eligible{color:#047857;font-weight:650}.cpa-lqa-orphan{color:#64748b;font-weight:650}',
       '.cpa-lqa-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;word-break:break-all}',
       '.cpa-lqa-title-cell{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:default}',
       '.cpa-lqa-time{white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--text-secondary,#64748b)}',
@@ -261,7 +262,7 @@
       element(
         'p',
         'cpa-lqa-subtitle',
-        '本地未上传请求日志质检（不拦截上传）'
+        '本地未上传请求日志质检（不拦截上传）。「上传」列对照 session-gate：Hold / 可上传 / 无 Session'
       )
     );
     var actions = element('div', 'cpa-lqa-actions');
@@ -307,6 +308,7 @@
       refresh: refresh,
       runNow: runNow,
       statusFilter: 'fail',
+      eligibilityFilter: 'all',
       reasonFilter: '',
       query: '',
       runId: '',
@@ -538,6 +540,32 @@
     }
   }
 
+  function eligibilityLabel(code) {
+    switch (String(code || '').toLowerCase()) {
+      case 'eligible':
+        return '可上传';
+      case 'hold':
+        return 'Hold';
+      case 'orphan':
+        return '无 Session';
+      default:
+        return code || '-';
+    }
+  }
+
+  function eligibilityClass(code) {
+    switch (String(code || '').toLowerCase()) {
+      case 'eligible':
+        return 'cpa-lqa-eligible';
+      case 'hold':
+        return 'cpa-lqa-hold';
+      case 'orphan':
+        return 'cpa-lqa-orphan';
+      default:
+        return '';
+    }
+  }
+
   function formatFailReasons(reasons) {
     if (!reasons || !reasons.length) {
       return '';
@@ -663,6 +691,7 @@
         'p',
         'cpa-lqa-note',
         '仅检查本地尚未上传的 .log 文件。已上传或已删除的日志不会纳入。质检不会拦截或修改上传服务。' +
+          '「上传」列对照 session-gate（Hold / 可上传 / 无 Session）；「助手回复重复」只影响质检状态，不标为 Hold。' +
           '判定标准：有效提问轮次默认需 ≥ 4（非「不足 8 轮」）；下方数字是失败会话个数，不是轮次阈值。' +
           '历史批次保存在 work-dir/reports（默认最多 48 轮），可用下方「历史批次」切换查看。'
       )
@@ -742,6 +771,25 @@
       ui.statusFilter = statusSelect.value;
       loadData();
     });
+    var eligibilitySelect = document.createElement('select');
+    ;[
+      ['all', '全部上传状态'],
+      ['hold', 'Hold'],
+      ['eligible', '可上传'],
+      ['orphan', '无 Session'],
+    ].forEach(function (pair) {
+      var opt = document.createElement('option');
+      opt.value = pair[0];
+      opt.textContent = pair[1];
+      if (pair[0] === (ui.eligibilityFilter || 'all')) {
+        opt.selected = true;
+      }
+      eligibilitySelect.appendChild(opt);
+    });
+    eligibilitySelect.addEventListener('change', function () {
+      ui.eligibilityFilter = eligibilitySelect.value;
+      loadData();
+    });
     var reasonSelect = document.createElement('select');
     ;[
       ['', '全部原因'],
@@ -770,6 +818,7 @@
       loadData();
     });
     filters.appendChild(statusSelect);
+    filters.appendChild(eligibilitySelect);
     filters.appendChild(reasonSelect);
     filters.appendChild(search);
     ui.content.appendChild(filters);
@@ -777,7 +826,7 @@
     var table = element('table', 'cpa-lqa-table');
     var thead = document.createElement('thead');
     var headRow = document.createElement('tr');
-    ;['状态', '会话 ID', '标题', '开始时间', '提问轮次', '工具调用', '重复回复', '失败原因', 'Key', '操作'].forEach(function (h) {
+    ;['状态', '上传', '会话 ID', '标题', '开始时间', '提问轮次', '工具调用', '重复回复', '失败原因', 'Key', '操作'].forEach(function (h) {
       headRow.appendChild(element('th', '', h));
     });
     thead.appendChild(headRow);
@@ -787,13 +836,25 @@
     if (!sessions.length) {
       var emptyRow = document.createElement('tr');
       var td = element('td', '', '当前筛选条件下无会话');
-      td.colSpan = 10;
+      td.colSpan = 11;
       emptyRow.appendChild(td);
       tbody.appendChild(emptyRow);
     }
     sessions.forEach(function (row) {
       var tr = document.createElement('tr');
       tr.appendChild(element('td', row.ok ? 'cpa-lqa-pass' : 'cpa-lqa-fail', row.ok ? '通过' : '失败'));
+      var eligibility = row.upload_eligibility || '';
+      var eligibilityCell = element('td', eligibilityClass(eligibility), eligibilityLabel(eligibility));
+      if (eligibility === 'eligible' && !row.ok) {
+        eligibilityCell.title = '质检未通过（如助手回复重复），但不阻挡 session-gate 上传';
+      } else if (eligibility === 'hold') {
+        eligibilityCell.title = '对照 session-gate：预计 Hold，暂不上传';
+      } else if (eligibility === 'orphan') {
+        eligibilityCell.title = '无真实 session_id，按 orphan 处理';
+      } else if (eligibility === 'eligible') {
+        eligibilityCell.title = '对照 session-gate：预计可上传';
+      }
+      tr.appendChild(eligibilityCell);
       tr.appendChild(element('td', 'cpa-lqa-mono', row.session_id || ''));
 
       var titleText = row.title || '-';
@@ -919,6 +980,9 @@
       '?status=' +
       encodeURIComponent(ui.statusFilter || 'fail') +
       '&limit=50' +
+      (ui.eligibilityFilter && ui.eligibilityFilter !== 'all'
+        ? '&eligibility=' + encodeURIComponent(ui.eligibilityFilter)
+        : '') +
       (ui.reasonFilter ? '&reason=' + encodeURIComponent(ui.reasonFilter) : '') +
       (ui.query ? '&q=' + encodeURIComponent(ui.query) : '') +
       (runQuery ? '&' + runQuery : '');

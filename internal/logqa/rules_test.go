@@ -62,6 +62,34 @@ func TestEvaluateSessionPass(t *testing.T) {
 	}
 }
 
+func TestComputeUploadEligibility(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		sid     string
+		real    bool
+		reasons []string
+		want    string
+	}{
+		{name: "pass", sid: "s1", real: true, reasons: nil, want: "eligible"},
+		{name: "dup only still eligible", sid: "s1", real: true, reasons: []string{"duplicate_assistant_groups=3"}, want: "eligible"},
+		{name: "prompt hold", sid: "s1", real: true, reasons: []string{"prompt_rounds=1<4"}, want: "hold"},
+		{name: "dup plus tool hold", sid: "s1", real: true, reasons: []string{"no_tool_call", "duplicate_assistant_groups=1"}, want: "hold"},
+		{name: "empty session", sid: "s1", real: false, reasons: []string{"empty_session_id"}, want: "orphan"},
+		{name: "unknown path", sid: "unknown:a/b.log", real: false, reasons: []string{"prompt_rounds=0<4"}, want: "orphan"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ComputeUploadEligibility(tc.sid, tc.real, tc.reasons)
+			if got != tc.want {
+				t.Fatalf("eligibility=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestAggregateSessionsMaxInputSnapshot(t *testing.T) {
 	t.Parallel()
 	rules := RulesConfig{MinPromptRounds: 4, RequireToolCall: true, RejectDuplicateAssistant: true}

@@ -419,6 +419,7 @@ func (h *Handler) GetLogQASessions(c *gin.Context) {
 	}
 
 	statusFilter := strings.ToLower(strings.TrimSpace(c.DefaultQuery("status", "all")))
+	eligibilityFilter := strings.ToLower(strings.TrimSpace(c.Query("eligibility")))
 	reasonFilter := strings.TrimSpace(c.Query("reason"))
 	q := strings.ToLower(strings.TrimSpace(c.Query("q")))
 	limit := logQADefaultLimit
@@ -466,10 +467,15 @@ func (h *Handler) GetLogQASessions(c *gin.Context) {
 		if err := json.Unmarshal(line, &rec); err != nil {
 			continue
 		}
+		// Recompute so older reports (eligibility tied to overall ok) match session-gate.
+		rec.UploadEligibility = logqa.ComputeUploadEligibility(rec.SessionID, sessionHasRealID(rec), rec.FailReasons)
 		if statusFilter == "pass" && !rec.OK {
 			continue
 		}
 		if statusFilter == "fail" && rec.OK {
+			continue
+		}
+		if eligibilityFilter != "" && eligibilityFilter != "all" && rec.UploadEligibility != eligibilityFilter {
 			continue
 		}
 		if reasonFilter != "" && !sessionHasReason(rec, reasonFilter) {
@@ -492,6 +498,18 @@ func (h *Handler) GetLogQASessions(c *gin.Context) {
 		"limit":      limit,
 		"offset":     offset,
 	})
+}
+
+func sessionHasRealID(rec logqa.SessionRecord) bool {
+	if strings.TrimSpace(rec.SessionID) == "" || strings.HasPrefix(rec.SessionID, "unknown:") {
+		return false
+	}
+	for _, reason := range rec.FailReasons {
+		if reason == "empty_session_id" {
+			return false
+		}
+	}
+	return true
 }
 
 func sessionHasReason(rec logqa.SessionRecord, reason string) bool {

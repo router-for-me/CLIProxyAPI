@@ -94,12 +94,7 @@ func AggregateSessions(requests []RequestRecord, rules RulesConfig) []SessionRec
 		sort.Strings(files)
 		title, titleSource := pickSessionTitle(g.requests)
 
-		eligibility := "hold"
-		if ok {
-			eligibility = "eligible"
-		} else if !hasRealSession {
-			eligibility = "orphan"
-		}
+		eligibility := ComputeUploadEligibility(sid, hasRealSession, reasons)
 
 		sessions = append(sessions, SessionRecord{
 			SessionID:    sid,
