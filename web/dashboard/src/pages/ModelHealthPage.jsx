@@ -141,6 +141,28 @@ export default function ModelHealthPage() {
     }
   }
 
+  // Toggle the scheduled sweep on/off. Sends a partial PATCH so only `enabled`
+  // changes — the rest of the settings are untouched server-side. The snapshot
+  // response carries `settings`, so reloading it after a successful toggle
+  // keeps the header chip + the Settings modal's "Sweep enabled" checkbox in
+  // sync without a separate fetch. An in-flight sweep (if one is running) is
+  // allowed to finish gracefully: the sweep loop checks `enabled` per model,
+  // so turning it off halts further ticks but never cuts a probe mid-flight.
+  const [enabledPending, setEnabledPending] = useState(false);
+  async function toggleEnabled() {
+    const next = !settings.enabled;
+    setEnabledPending(true);
+    try {
+      await putModelHealthSettings({ enabled: next });
+      await snapshot.reload();
+      toast.success(next ? 'Model health sweep enabled' : 'Model health sweep stopped');
+    } catch (err) {
+      toast.error(err?.message || 'Failed to toggle model health sweep');
+    } finally {
+      setEnabledPending(false);
+    }
+  }
+
   async function handleClearLog() {
     if (!window.confirm('Clear all model health history rows? Latest snapshots are preserved. This cannot be undone.')) return;
     setClearing(true);
@@ -194,6 +216,22 @@ export default function ModelHealthPage() {
           </div>
         </div>
         <div className="row gap-sm">
+          <button
+            className={`autorefresh-chip ${settings.enabled ? '' : 'autorefresh-chip--off'}`}
+            onClick={toggleEnabled}
+            disabled={enabledPending}
+            title={
+              enabledPending
+                ? 'Updating…'
+                : settings.enabled
+                  ? 'Sweep is running on a schedule — click to stop'
+                  : 'Sweep is stopped — click to enable'
+            }
+            aria-pressed={settings.enabled}
+          >
+            <span className="autorefresh-chip__dot" />
+            {settings.enabled ? 'Running' : 'Stopped'}
+          </button>
           <button
             className={`autorefresh-chip ${autoRefresh ? '' : 'autorefresh-chip--off'}`}
             onClick={toggleAutoRefresh}
