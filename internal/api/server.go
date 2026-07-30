@@ -242,6 +242,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.mgmt.SetUpstreamProvidersStore(handles.UpstreamProviders)
 		s.mgmt.SetModelGroupStore(handles.ModelGroups)
 		s.mgmt.SetSyncLogStore(handles.SyncLog)
+		// Wire the PG-backed model health store (Analysis → Model Health page
+		// + the public /v0/model-health/uptime endpoint). The retention sweep
+		// for the history table is launched inside the setter; the probe sweep
+		// is started separately below so it only runs after the auth manager is
+		// attached (it needs live auths to probe against). nil-safe.
+		s.mgmt.SetModelHealthStore(handles.ModelHealth)
+		s.mgmt.StartModelHealthSweep()
 		// Attach the refresh-outcome sink so every OAuth/auth token refresh is
 		// persisted to upstream_sync_log. No-op when PG is not configured
 		// (SyncLogSink returns nil, SetRefreshSink detaches). Re-attached on

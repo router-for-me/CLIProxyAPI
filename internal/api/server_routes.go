@@ -51,6 +51,16 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/healthz", healthzHandler)
 	s.engine.HEAD("/healthz", healthzHandler)
 
+	// Public, unauthenticated model health uptime view (curated per-model
+	// status + rollup). Mounted on the root engine like /healthz so no
+	// management token is required — operators can publish a status page or
+	// feed an external uptime monitor. Degrades to status "unknown" + empty
+	// model list when PG is not configured (never 5xx). No-op mount when the
+	// management handler is absent (Home mode / no secret configured).
+	if s.mgmt != nil {
+		s.engine.GET("/v0/model-health/uptime", s.mgmt.GetPublicModelHealthUptime)
+	}
+
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)

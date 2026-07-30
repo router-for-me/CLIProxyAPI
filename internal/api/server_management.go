@@ -300,6 +300,22 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/upstream-sync-log/:id", s.mgmt.GetSyncLog)
 		mgmt.DELETE("/upstream-sync-log", s.mgmt.ClearSyncLog)
 
+		// Model Health Check: periodically probes each live (Global) model id
+		// with a tiny inference request and records status + response time +
+		// tokens-per-second. Surfaced on the dashboard under Analysis → Model
+		// Health; the public /v0/model-health/uptime view is mounted on the
+		// root engine (server_routes.go) so it needs no management token.
+		// Returns 503 when the PG store is not configured.
+		mgmt.GET("/model-health", s.mgmt.GetModelHealth)
+		mgmt.GET("/model-health/models", s.mgmt.ListModelHealthModels)
+		mgmt.GET("/model-health/settings", s.mgmt.GetModelHealthSettings)
+		mgmt.PUT("/model-health/settings", s.mgmt.PutModelHealthSettings)
+		mgmt.PATCH("/model-health/settings", s.mgmt.PutModelHealthSettings)
+		mgmt.POST("/model-health/run", s.mgmt.RunModelHealthCheckNow)
+		mgmt.GET("/model-health/log", s.mgmt.ListModelHealthLog)
+		mgmt.DELETE("/model-health/log", s.mgmt.ClearModelHealthLog)
+		mgmt.GET("/model-health/log/:id", s.mgmt.GetModelHealthLogEntry)
+
 		// Reusable Model Group templates (allowed-models grant lists +
 		// per-model upstream routing) attachable to API-key policies and
 		// internal users. Return 503 when the PG store is not configured.

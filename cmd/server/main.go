@@ -644,6 +644,7 @@ func main() {
 		pgMgmtTokens = store.NewManagementTokenStore(pgStoreInst)
 		pgSyncLog = store.NewSyncLogStore(pgStoreInst)
 		pgModelGroups = store.NewModelGroupStore(pgStoreInst)
+		pgModelHealth := store.NewModelHealthStore(pgStoreInst)
 		pgSyncAdapter = registry.NewPGSync(store.NewPGModelsAdapter(pgModelsStore))
 		policySvc = policy.NewService(pgAPIKeyStore, pgUsageStore, policy.ServiceConfig{})
 		// Attach the user store so per-user budget/RPM enforcement is
@@ -738,6 +739,7 @@ func main() {
 			UpstreamProviders: pgUpstreamProviders,
 			SyncLog:           pgSyncLog,
 			ModelGroups:       pgModelGroups,
+			ModelHealth:       pgModelHealth,
 		}))
 	}
 

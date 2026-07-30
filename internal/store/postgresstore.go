@@ -45,6 +45,9 @@ const (
 	defaultUpstreamProviderEntriesTable  = "upstream_provider_api_key_entries"
 	defaultUpstreamSyncLogTable          = "upstream_sync_log"
 	defaultModelGroupsTable              = "model_groups"
+	defaultModelHealthTable              = "model_health"
+	defaultModelHealthLogTable           = "model_health_log"
+	defaultModelHealthSettingsTable      = "model_health_settings"
 )
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
@@ -143,6 +146,20 @@ type PostgresStoreConfig struct {
 	// group's allowed/blocked lists (and, for API-key policies, routes) are
 	// the source of truth, overriding the entity's own fields.
 	ModelGroupsTable string
+
+	// ModelHealthTable stores the latest health-check snapshot for each model
+	// id (one row per model). Updated in place on every sweep; surfaced on the
+	// Analysis → Model Health page and through the public
+	// /v0/model-health/uptime endpoint.
+	ModelHealthTable string
+	// ModelHealthLogTable stores the append-only history of model health checks
+	// (one row per check per model) used by the dashboard's trend views. Auto-
+	// swept to a 30-day retention.
+	ModelHealthLogTable string
+	// ModelHealthSettingsTable stores the singleton operator configuration row
+	// (enabled, interval_seconds, excluded_models, max_tokens) for the model
+	// health check sweep.
+	ModelHealthSettingsTable string
 
 	// UsageEncryptionKey is the passphrase used to derive an AES-256-GCM
 	// key for sealing sensitive columns (api_key_principal in usage_events)
@@ -243,6 +260,15 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.ModelGroupsTable == "" {
 		cfg.ModelGroupsTable = defaultModelGroupsTable
+	}
+	if cfg.ModelHealthTable == "" {
+		cfg.ModelHealthTable = defaultModelHealthTable
+	}
+	if cfg.ModelHealthLogTable == "" {
+		cfg.ModelHealthLogTable = defaultModelHealthLogTable
+	}
+	if cfg.ModelHealthSettingsTable == "" {
+		cfg.ModelHealthSettingsTable = defaultModelHealthSettingsTable
 	}
 
 	spoolRoot := strings.TrimSpace(cfg.SpoolDir)
@@ -1158,6 +1184,110 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: create api_key_policies model_group_id index: %w", err)
 	}
+
+	// model_health stores the latest health-check snapshot for each model id
+	// (one row per model). Updated in place on every sweep. Surfaced on the
+	// Analysis → Model Health page and through the public
+	// /v0/model-health/uptime endpoint.
+	modelHealthTable := s.fullTableName(s.cfg.ModelHealthTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			model_id          TEXT NOT NULL,
+			status            TEXT NOT NULL,
+			success           BOOLEAN NOT NULL DEFAULT FALSE,
+			response_time_ms  BIGINT NOT NULL DEFAULT 0,
+			tokens_per_second REAL,
+			prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+			completion_tokens INTEGER NOT NULL DEFAULT 0,
+			error_message     TEXT,
+			provider          TEXT,
+			checked_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (model_id)
+		)
+	`, modelHealthTable)); err != nil {
+		return fmt.Errorf("postgres store: create model_health table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_model_health_status ON %s(status)`, modelHealthTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create model_health status index: %w", err)
+	}
+
+	// model_health_log stores the append-only history of model health checks
+	// (one row per check per model) used by the dashboard's trend views. The
+	// error_message column is AES-GCM-sealed at rest when UsageEncryptionKey
+	// is configured. Auto-swept to a 30-day retention.
+	modelHealthLogTable := s.fullTableName(s.cfg.ModelHealthLogTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id                BIGSERIAL PRIMARY KEY,
+			model_id          TEXT NOT NULL,
+			status            TEXT NOT NULL,
+			success           BOOLEAN NOT NULL DEFAULT FALSE,
+			response_time_ms  BIGINT NOT NULL DEFAULT 0,
+			tokens_per_second REAL,
+			prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+			completion_tokens INTEGER NOT NULL DEFAULT 0,
+			error_message     TEXT,
+			provider          TEXT,
+			checked_at        TIMESTAMPTZ NOT NULL
+		)
+	`, modelHealthLogTable)); err != nil {
+		return fmt.Errorf("postgres store: create model_health_log table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_model_health_log_model_time ON %s(model_id, checked_at DESC)`, modelHealthLogTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create model_health_log model_time index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_model_health_log_time ON %s(checked_at DESC)`, modelHealthLogTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create model_health_log time index: %w", err)
+	}
+
+	// model_health_settings stores the singleton operator configuration row
+	// (enabled, interval_seconds, excluded_models, max_tokens, retention_days,
+	// max_log_rows) for the model health check sweep. The CHECK constraint
+	// guarantees only the id=1 row.
+	modelHealthSettingsTable := s.fullTableName(s.cfg.ModelHealthSettingsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id               INTEGER PRIMARY KEY DEFAULT 1,
+			enabled          BOOLEAN NOT NULL DEFAULT TRUE,
+			interval_seconds INTEGER NOT NULL DEFAULT 900,
+			excluded_models  JSONB NOT NULL DEFAULT '[]'::jsonb,
+			max_tokens       INTEGER NOT NULL DEFAULT 1,
+			retention_days   INTEGER NOT NULL DEFAULT 30,
+			max_log_rows     INTEGER NOT NULL DEFAULT 1000,
+			updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT model_health_settings_singleton CHECK (id = 1)
+		)
+	`, modelHealthSettingsTable)); err != nil {
+		return fmt.Errorf("postgres store: create model_health_settings table: %w", err)
+	}
+	// Idempotently backfill the retention columns for databases running an
+	// older schema (CREATE TABLE IF NOT EXISTS does not add new columns to
+	// existing tables). Ignore the error when the columns already exist.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS retention_days INTEGER NOT NULL DEFAULT 30`,
+		modelHealthSettingsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter model_health_settings add retention_days: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS max_log_rows INTEGER NOT NULL DEFAULT 1000`,
+		modelHealthSettingsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter model_health_settings add max_log_rows: %w", err)
+	}
+	// Seed the singleton row so GetSettings always finds a row. ON CONFLICT
+	// keeps existing customizations on re-runs of EnsureSchema.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`INSERT INTO %s (id) VALUES (1) ON CONFLICT (id) DO NOTHING`, modelHealthSettingsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: seed model_health_settings singleton: %w", err)
+	}
 	return nil
 }
 
@@ -1413,6 +1543,33 @@ func (s *PostgresStore) ModelGroupsTable() string {
 		return quoteIdentifier(defaultModelGroupsTable)
 	}
 	return s.fullTableName(s.cfg.ModelGroupsTable)
+}
+
+// ModelHealthTable returns the fully-qualified name of the model_health table
+// (latest health-check snapshot per model id).
+func (s *PostgresStore) ModelHealthTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultModelHealthTable)
+	}
+	return s.fullTableName(s.cfg.ModelHealthTable)
+}
+
+// ModelHealthLogTable returns the fully-qualified name of the model_health_log
+// table (append-only history of model health checks).
+func (s *PostgresStore) ModelHealthLogTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultModelHealthLogTable)
+	}
+	return s.fullTableName(s.cfg.ModelHealthLogTable)
+}
+
+// ModelHealthSettingsTable returns the fully-qualified name of the
+// model_health_settings table (singleton operator configuration for the sweep).
+func (s *PostgresStore) ModelHealthSettingsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultModelHealthSettingsTable)
+	}
+	return s.fullTableName(s.cfg.ModelHealthSettingsTable)
 }
 
 // Save persists authentication metadata to disk and PostgreSQL.

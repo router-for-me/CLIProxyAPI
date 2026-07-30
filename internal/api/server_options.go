@@ -77,6 +77,12 @@ type PgStoreHandles struct {
 	// (allowed-models grant lists + per-model upstream routing). nil when PG
 	// is not configured — the /model-groups routes return 503 in that case.
 	ModelGroups *store.ModelGroupStore
+	// ModelHealth is the PG-backed store for model health-check snapshots +
+	// history + operator settings (Analysis → Model Health page + the public
+	// /v0/model-health/uptime endpoint). nil when PG is not configured — the
+	// /model-health routes return 503 and the public uptime endpoint degrades
+	// to an empty response.
+	ModelHealth *store.ModelHealthStore
 }
 
 // ServerOption customises HTTP server construction.

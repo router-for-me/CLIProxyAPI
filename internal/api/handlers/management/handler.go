@@ -106,6 +106,13 @@ type Handler struct {
 	// routes return 503 in that case.
 	pgModelGroups *store.ModelGroupStore
 
+	// pgModelHealth stores the model health-check snapshots + history +
+	// operator settings (Analysis → Model Health page + the public
+	// /v0/model-health/uptime endpoint). nil when PG is not configured — the
+	// /model-health routes return 503 in that case (the public uptime
+	// endpoint degrades gracefully to an empty response instead).
+	pgModelHealth *store.ModelHealthStore
+
 	// v1ModelsHandler is the http.Handler that serves GET /v1/models. It is
 	// wired by api.Server after route setup so the management handler can
 	// trigger an in-process sync into models_catalog without a network
@@ -343,6 +350,24 @@ func (h *Handler) SetModelGroupStore(groups *store.ModelGroupStore) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pgModelGroups = groups
+}
+
+// SetModelHealthStore wires the PG-backed store for model health-check
+// snapshots, history, and operator settings (Analysis → Model Health page +
+// the public /v0/model-health/uptime endpoint). When nil, the
+// /v0/management/model-health routes return 503 and the public uptime
+// endpoint degrades to an empty response. The probe sweep is started
+// separately via StartModelHealthSweep (called from server.go wiring) so it
+// only runs on PG-configured deployments; retention sweep for the history
+// table is launched here since it has no Handler dependency.
+func (h *Handler) SetModelHealthStore(s *store.ModelHealthStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.pgModelHealth = s
+	h.mu.Unlock()
+	store.StartModelHealthRetentionSweep(s) // nil-safe
 }
 
 // SetModelsCatalogResolver wires the resolver that translates an internal
