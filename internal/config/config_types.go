@@ -136,6 +136,8 @@ type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
 	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
+	// DisableFingerprintAutoSync disables refreshing the Codex application profile from official sources.
+	DisableFingerprintAutoSync bool `yaml:"disable-fingerprint-auto-sync" json:"disable-fingerprint-auto-sync"`
 	// OptimizeMultiAgentV2 optimizes official Codex multi-agent requests.
 	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.

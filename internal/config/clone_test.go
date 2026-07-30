@@ -61,6 +61,9 @@ func TestCloneForRuntimeDeepCopiesConfig(t *testing.T) {
 	if clone.OpenAICompatibility[0].Models[0].Thinking.Levels[0] != "low" {
 		t.Fatalf("clone thinking level = %q, want low", clone.OpenAICompatibility[0].Models[0].Thinking.Levels[0])
 	}
+	if !clone.Codex.DisableFingerprintAutoSync {
+		t.Fatal("clone.Codex.DisableFingerprintAutoSync = false, want true")
+	}
 	if got := clone.Payload.Default[0].Params["object"].(map[string]any)["key"]; got != "value" {
 		t.Fatalf("clone payload object key = %#v, want value", got)
 	}
@@ -142,6 +145,9 @@ func sampleCloneRuntimeConfig() *Config {
 		},
 		AntigravitySignatureCacheEnabled: &cacheStrict,
 		AntigravitySignatureBypassStrict: &bypassStrict,
+		Codex: CodexConfig{
+			DisableFingerprintAutoSync: true,
+		},
 		GeminiKey: []GeminiKey{{
 			APIKey:         "gemini-key",
 			Models:         []GeminiModel{{Name: "gemini-upstream", Alias: "gemini-upstream-alias"}},

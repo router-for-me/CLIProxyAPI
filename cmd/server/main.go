@@ -677,7 +677,7 @@ func main() {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
 				misc.StartAntigravityVersionUpdater(context.Background())
-				startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
+				startModelCatalogUpdaters(localModel, cfg.Home.Enabled, cfg.Codex.DisableFingerprintAutoSync)
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
 				log.AddHook(hook)
@@ -751,7 +751,7 @@ func main() {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
-			startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
+			startModelCatalogUpdaters(localModel, cfg.Home.Enabled, cfg.Codex.DisableFingerprintAutoSync)
 			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
 		}
 	}
@@ -760,15 +760,18 @@ func main() {
 // modelCatalogUpdaterPlan decides which remote model catalogs should refresh.
 // Codex client templates still refresh under Home mode because the model list
 // comes from Home IDs while template metadata stays edge-local.
-func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCodexClient bool) {
+func modelCatalogUpdaterPlan(localModel, homeEnabled, disableFingerprint bool) (startModels, startCodexClient, startFingerprint bool) {
 	if localModel {
-		return false, false
+		return false, false, !disableFingerprint
 	}
-	return !homeEnabled, true
+	return !homeEnabled, true, !disableFingerprint
 }
 
-func startModelCatalogUpdaters(localModel, homeEnabled bool) {
-	startModels, startCodexClient := modelCatalogUpdaterPlan(localModel, homeEnabled)
+func startModelCatalogUpdaters(localModel, homeEnabled, disableFingerprint bool) {
+	startModels, startCodexClient, startFingerprint := modelCatalogUpdaterPlan(localModel, homeEnabled, disableFingerprint)
+	if startFingerprint {
+		registry.StartCodexFingerprintUpdater(context.Background())
+	}
 	if startCodexClient {
 		registry.StartCodexClientModelsUpdater(context.Background())
 	}
