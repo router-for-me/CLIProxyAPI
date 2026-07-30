@@ -83,8 +83,8 @@ func TestCodexApplicationIdentityProjectsCanonicalMetadata(t *testing.T) {
 	if got := headerValueCaseInsensitive(headers, profile.Headers.SessionID); got != first.sessionID {
 		t.Fatalf("session header = %q, want %q", got, first.sessionID)
 	}
-	if got := headers.Get(profile.Headers.ClientRequestID); got != first.threadID {
-		t.Fatalf("client request header = %q, want %q", got, first.threadID)
+	if got := headers.Get(profile.Headers.ClientRequestID); got != "" {
+		t.Fatalf("HTTP client request header = %q, want empty", got)
 	}
 	if got := headers.Get(profile.Headers.TurnMetadata); got != turnMetadataRaw {
 		t.Fatalf("turn metadata header differs from client_metadata: %q != %q", got, turnMetadataRaw)
@@ -178,6 +178,9 @@ func TestApplyCodexWebsocketFingerprintUsesProfile(t *testing.T) {
 	}
 	if got := headers.Get("Version"); got != profile.Version {
 		t.Fatalf("Version = %q, want %q", got, profile.Version)
+	}
+	if got := headers.Get(profile.Headers.ClientRequestID); got != identity.threadID {
+		t.Fatalf("websocket client request header = %q, want %q", got, identity.threadID)
 	}
 }
 

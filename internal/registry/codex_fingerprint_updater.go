@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ type codexFingerprintSourceSet struct {
 	DefaultClientURL     string
 	ClientURL            string
 	ResponsesMetadataURL string
+	RequestHeadersURL    string
 	CommitURL            string
 }
 
@@ -33,6 +35,7 @@ var codexFingerprintSources = codexFingerprintSourceSet{
 	DefaultClientURL:     "https://raw.githubusercontent.com/openai/codex/main/codex-rs/login/src/auth/default_client.rs",
 	ClientURL:            "https://raw.githubusercontent.com/openai/codex/main/codex-rs/core/src/client.rs",
 	ResponsesMetadataURL: "https://raw.githubusercontent.com/openai/codex/main/codex-rs/core/src/responses_metadata.rs",
+	RequestHeadersURL:    "https://raw.githubusercontent.com/openai/codex/main/codex-rs/codex-api/src/requests/headers.rs",
 	CommitURL:            "https://api.github.com/repos/openai/codex/commits/main",
 }
 
@@ -90,6 +93,21 @@ func fetchCodexFingerprintProfile(
 	if client == nil {
 		client = &http.Client{Timeout: codexFingerprintFetchTimeout}
 	}
+
+	commitPayload, errFetch := fetchCodexFingerprintSource(ctx, client, sources.CommitURL, "commit source")
+	if errFetch != nil {
+		return CodexFingerprintProfile{}, errFetch
+	}
+	var commit map[string]any
+	if errJSON := json.Unmarshal(commitPayload, &commit); errJSON != nil {
+		return CodexFingerprintProfile{}, fmt.Errorf("decode Codex commit source: %w", errJSON)
+	}
+	sourceRevision, _ := commit["sha"].(string)
+	sourceRevision = strings.TrimSpace(sourceRevision)
+	if sourceRevision == "" {
+		return CodexFingerprintProfile{}, fmt.Errorf("Codex commit source is missing sha")
+	}
+	sources = pinCodexFingerprintSourcesToRevision(sources, sourceRevision)
 
 	distTags, errFetch := fetchCodexFingerprintSource(ctx, client, sources.DistTagsURL, "NPM dist-tags")
 	if errFetch != nil {
@@ -187,18 +205,17 @@ func fetchCodexFingerprintProfile(
 		metadataValues[name] = value
 	}
 
-	commitPayload, errFetch := fetchCodexFingerprintSource(ctx, client, sources.CommitURL, "commit source")
+	requestHeadersSource, errFetch := fetchCodexFingerprintSource(ctx, client, sources.RequestHeadersURL, "request headers source")
 	if errFetch != nil {
 		return CodexFingerprintProfile{}, errFetch
 	}
-	var commit map[string]any
-	if errJSON := json.Unmarshal(commitPayload, &commit); errJSON != nil {
-		return CodexFingerprintProfile{}, fmt.Errorf("decode Codex commit source: %w", errJSON)
+	sessionHeader, errHeader := extractRustSessionHeader(requestHeadersSource, "session_id")
+	if errHeader != nil {
+		return CodexFingerprintProfile{}, errHeader
 	}
-	sourceRevision, _ := commit["sha"].(string)
-	sourceRevision = strings.TrimSpace(sourceRevision)
-	if sourceRevision == "" {
-		return CodexFingerprintProfile{}, fmt.Errorf("Codex commit source is missing sha")
+	threadHeader, errHeader := extractRustSessionHeader(requestHeadersSource, "thread_id")
+	if errHeader != nil {
+		return CodexFingerprintProfile{}, errHeader
 	}
 
 	candidate := base
@@ -215,8 +232,8 @@ func fetchCodexFingerprintProfile(
 		Subagent:        subagentHeader,
 		TimingMetrics:   timingHeader,
 		ClientRequestID: "x-client-request-id",
-		SessionID:       metadataValues["SESSION_ID_KEY"],
-		ThreadID:        metadataValues["THREAD_ID_KEY"],
+		SessionID:       sessionHeader,
+		ThreadID:        threadHeader,
 	}
 	candidate.MetadataKeys = CodexFingerprintMetadataKeys{
 		InstallationID:      metadataValues["INSTALLATION_ID_KEY"],
@@ -276,4 +293,40 @@ func extractRustStringConstant(source []byte, name string) (string, error) {
 		return "", fmt.Errorf("official Codex source constant %s is empty", name)
 	}
 	return value, nil
+}
+
+func extractRustSessionHeader(source []byte, variable string) (string, error) {
+	pattern := "(?s)if\\s+let\\s+Some\\(id\\)\\s*=\\s*" + regexp.QuoteMeta(variable) +
+		"\\s*\\{.*?insert_header\\(\\s*&mut\\s+headers\\s*,\\s*\"([^\"]+)\"\\s*,\\s*&id\\s*\\)"
+	matches := regexp.MustCompile(pattern).FindSubmatch(source)
+	if len(matches) != 2 {
+		return "", fmt.Errorf("official Codex request headers source is missing %s", variable)
+	}
+	value := strings.TrimSpace(string(matches[1]))
+	if value == "" {
+		return "", fmt.Errorf("official Codex request header for %s is empty", variable)
+	}
+	return value, nil
+}
+
+func pinCodexFingerprintSourcesToRevision(sources codexFingerprintSourceSet, revision string) codexFingerprintSourceSet {
+	sources.DefaultClientURL = pinCodexFingerprintSourceURL(sources.DefaultClientURL, revision)
+	sources.ClientURL = pinCodexFingerprintSourceURL(sources.ClientURL, revision)
+	sources.ResponsesMetadataURL = pinCodexFingerprintSourceURL(sources.ResponsesMetadataURL, revision)
+	sources.RequestHeadersURL = pinCodexFingerprintSourceURL(sources.RequestHeadersURL, revision)
+	return sources
+}
+
+func pinCodexFingerprintSourceURL(sourceURL, revision string) string {
+	parsed, errParse := url.Parse(strings.TrimSpace(sourceURL))
+	if errParse != nil || !strings.EqualFold(parsed.Hostname(), "raw.githubusercontent.com") {
+		return sourceURL
+	}
+	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
+	if len(parts) < 4 || parts[0] != "openai" || parts[1] != "codex" || parts[2] != "main" {
+		return sourceURL
+	}
+	parts[2] = strings.TrimSpace(revision)
+	parsed.Path = "/" + strings.Join(parts, "/")
+	return parsed.String()
 }

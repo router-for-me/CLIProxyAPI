@@ -37,6 +37,9 @@ func TestCodexFingerprintUpdaterBuildsCompleteProfile(t *testing.T) {
 	if profile.Headers.ParentThreadID != "x-codex-parent-thread-id" {
 		t.Fatalf("parent thread header = %q", profile.Headers.ParentThreadID)
 	}
+	if profile.Headers.SessionID != "session-id" || profile.Headers.ThreadID != "thread-id" {
+		t.Fatalf("session/thread headers = %q/%q", profile.Headers.SessionID, profile.Headers.ThreadID)
+	}
 	if profile.MetadataKeys.TurnStartedAtUnixMS != "turn_started_at_unix_ms" {
 		t.Fatalf("turn start metadata key = %q", profile.MetadataKeys.TurnStartedAtUnixMS)
 	}
@@ -109,12 +112,40 @@ func TestCodexFingerprintUpdaterUnchangedProfileKeepsRevision(t *testing.T) {
 	}
 }
 
+func TestPinCodexFingerprintSourcesToRevision(t *testing.T) {
+	t.Parallel()
+
+	sources := codexFingerprintSourceSet{
+		DefaultClientURL:     "https://raw.githubusercontent.com/openai/codex/main/codex-rs/login/src/auth/default_client.rs",
+		ClientURL:            "https://raw.githubusercontent.com/openai/codex/main/codex-rs/core/src/client.rs",
+		ResponsesMetadataURL: "https://raw.githubusercontent.com/openai/codex/main/codex-rs/core/src/responses_metadata.rs",
+		RequestHeadersURL:    "https://raw.githubusercontent.com/openai/codex/main/codex-rs/codex-api/src/requests/headers.rs",
+		DistTagsURL:          "https://registry.npmjs.org/-/package/@openai%2Fcodex/dist-tags",
+	}
+
+	pinned := pinCodexFingerprintSourcesToRevision(sources, "0123456789abcdef")
+	for name, sourceURL := range map[string]string{
+		"default client":     pinned.DefaultClientURL,
+		"client":             pinned.ClientURL,
+		"responses metadata": pinned.ResponsesMetadataURL,
+		"request headers":    pinned.RequestHeadersURL,
+	} {
+		if !strings.Contains(sourceURL, "/openai/codex/0123456789abcdef/") {
+			t.Fatalf("%s URL was not pinned: %s", name, sourceURL)
+		}
+	}
+	if pinned.DistTagsURL != sources.DistTagsURL {
+		t.Fatalf("NPM URL changed: %s", pinned.DistTagsURL)
+	}
+}
+
 func codexFingerprintFixtureSources(baseURL string) codexFingerprintSourceSet {
 	return codexFingerprintSourceSet{
 		DistTagsURL:          baseURL + "/npm",
 		DefaultClientURL:     baseURL + "/default-client",
 		ClientURL:            baseURL + "/client",
 		ResponsesMetadataURL: baseURL + "/responses-metadata",
+		RequestHeadersURL:    baseURL + "/request-headers",
 		CommitURL:            baseURL + "/commit",
 	}
 }
@@ -159,6 +190,18 @@ pub(crate) const TURN_STARTED_AT_UNIX_MS_KEY: &str = "turn_started_at_unix_ms";
 pub(crate) const PARENT_THREAD_ID_KEY: &str = "parent_thread_id";
 pub(crate) const PARENT_TURN_ID_KEY: &str = "parent_turn_id";
 pub(crate) const SUBAGENT_KIND_KEY: &str = "subagent_kind";`)
+		case "/request-headers":
+			fmt.Fprint(w, `
+pub fn build_session_headers(session_id: Option<String>, thread_id: Option<String>) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Some(id) = session_id {
+        insert_header(&mut headers, "session-id", &id);
+    }
+    if let Some(id) = thread_id {
+        insert_header(&mut headers, "thread-id", &id);
+    }
+    headers
+}`)
 		case "/commit":
 			fmt.Fprint(w, `{"sha":"0123456789abcdef0123456789abcdef01234567"}`)
 		case "/missing-originator":

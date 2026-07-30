@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "source_revision": "483559cc758353c83733b2b34629dbf885a99207",
+  "source_revision": "ba42e6866cef4baed7ad92c73e6be8cd42e49d8b",
   "version": "0.146.0",
   "originator": "codex_cli_rs",
   "user_agent_template": "{originator}/{version} (Mac OS 26.5.2; arm64) Apple_Terminal/470 (codex-tui; {version})",
@@ -14,8 +14,8 @@
     "subagent": "x-openai-subagent",
     "timing_metrics": "x-responsesapi-include-timing-metrics",
     "client_request_id": "x-client-request-id",
-    "session_id": "session_id",
-    "thread_id": "thread_id"
+    "session_id": "session-id",
+    "thread_id": "thread-id"
   },
   "metadata_keys": {
     "installation_id": "installation_id",
