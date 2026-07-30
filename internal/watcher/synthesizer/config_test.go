@@ -260,6 +260,9 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 	if auths[0].Attributes["api_key"] != "sk-ant-api-xxx" {
 		t.Errorf("expected api_key sk-ant-api-xxx, got %s", auths[0].Attributes["api_key"])
 	}
+	if auths[0].Attributes["config_index"] != "0" {
+		t.Errorf("expected config_index 0, got %s", auths[0].Attributes["config_index"])
+	}
 	if _, ok := auths[0].Attributes["models_hash"]; !ok {
 		t.Error("expected models_hash in attributes")
 	}
@@ -540,6 +543,9 @@ func TestConfigSynthesizer_OpenAICompat_UsesNamespacedProviderKey(t *testing.T) 
 	}
 	if auth.Attributes["compat_name"] != "kimi" {
 		t.Fatalf("compat_name = %q, want kimi", auth.Attributes["compat_name"])
+	}
+	if auth.Attributes["config_index"] != "0" {
+		t.Fatalf("config_index = %q, want 0", auth.Attributes["config_index"])
 	}
 }
 

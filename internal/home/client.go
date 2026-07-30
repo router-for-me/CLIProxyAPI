@@ -94,7 +94,23 @@ var (
 	ErrModelsNotFound        = errors.New("home models not found")
 	ErrPluginSyncUnsupported = errors.New("home plugin sync is unsupported")
 	ErrDispatchFenced        = errors.New("home auth dispatch is fenced")
+	// ErrCompareAndSwapUnsupported reports that this Home predates the CAS command.
+	ErrCompareAndSwapUnsupported = errors.New("home compare-and-swap is unsupported")
 )
+
+// isHomeCommandUnsupported reports whether Home rejected a command it does not
+// implement. It mirrors isHomeAppLogUnsupported in internal/logging; the two are
+// kept separate so the packages stay decoupled.
+func isHomeCommandUnsupported(err error) bool {
+	for err != nil {
+		message := strings.ToLower(strings.TrimSpace(err.Error()))
+		if strings.Contains(message, "unknown command") || strings.Contains(message, "unsupported command") {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
+}
 
 // IsMembershipTakeoverUnavailableError reports whether Home cannot preserve the previous membership state.
 func IsMembershipTakeoverUnavailableError(err error) bool {
@@ -177,6 +193,13 @@ type Client struct {
 	heartbeatOK       atomic.Bool
 	dispatchFenced    atomic.Bool
 	ambiguousDispatch atomic.Bool
+	// casUnsupported latches when Home does not implement the CAS command.
+	// It is deliberately NOT carried across NewLifetime: CAS support is a
+	// property of the Home deployment, so re-probing once per client lifetime
+	// lets a Home upgrade take effect on the next reconnect instead of
+	// requiring a CPA restart. The probe costs one round trip that returns an
+	// error without performing any write.
+	casUnsupported    atomic.Bool
 	recoveryState     atomic.Uint32
 	instanceID        string
 	legacyMembership  bool
@@ -1033,35 +1056,44 @@ func (c *Client) KVSetNX(ctx context.Context, key string, value []byte, ttl time
 }
 
 // KVCompareAndSwap atomically replaces a value only when its current state matches the expected state.
+//
+// It uses Home's dedicated CAS command:
+//
+//	CAS <key> <expected-exists 0|1> <expected-value> <new-value> [PX <ttl-ms>]
+//
+// Omitting PX stores the value without a TTL. Home replies integer 1 when the
+// swap happened and integer 0 when the state did not match. Deployments that
+// predate CAS reject the command, which latches ErrCompareAndSwapUnsupported for
+// this client lifetime so later calls skip the round trip.
 func (c *Client) KVCompareAndSwap(ctx context.Context, key string, expected []byte, expectedExists bool, value []byte, ttl time.Duration) (bool, error) {
+	if c == nil {
+		return false, ErrNotConnected
+	}
+	if c.casUnsupported.Load() {
+		return false, ErrCompareAndSwapUnsupported
+	}
 	cmd, errClient := c.commandClient()
 	if errClient != nil {
 		return false, errClient
 	}
-	const script = `
-local current = redis.call("GET", KEYS[1])
-if ARGV[1] == "1" then
-  if not current or current ~= ARGV[2] then
-    return 0
-  end
-elseif current then
-  return 0
-end
-local ttl = tonumber(ARGV[4])
-if ttl and ttl > 0 then
-  redis.call("SET", KEYS[1], ARGV[3], "PX", ttl)
-else
-  redis.call("SET", KEYS[1], ARGV[3])
-end
-return 1
-`
 	expectedFlag := "0"
 	if expectedExists {
 		expectedFlag = "1"
 	}
-	result, errEval := cmd.Eval(ctx, script, []string{key}, expectedFlag, expected, value, durationCeil(ttl, time.Millisecond)).Int64()
-	if errEval != nil {
-		return false, errEval
+	args := make([]any, 0, 7)
+	args = append(args, "CAS", key, expectedFlag, expected, value)
+	if milliseconds := durationCeil(ttl, time.Millisecond); milliseconds > 0 {
+		args = append(args, "PX", milliseconds)
+	}
+	result, errCAS := cmd.Do(ctx, args...).Int64()
+	if errCAS != nil {
+		if isHomeCommandUnsupported(errCAS) {
+			if c.casUnsupported.CompareAndSwap(false, true) {
+				log.Warnf("home kv: this Home does not implement the CAS command; Antigravity and Codex reasoning replay are disabled until Home is upgraded")
+			}
+			return false, ErrCompareAndSwapUnsupported
+		}
+		return false, errCAS
 	}
 	return result == 1, nil
 }

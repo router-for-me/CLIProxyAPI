@@ -314,3 +314,75 @@ func TestConvertOpenAIRequestToAntigravityMapsToolChoiceModes(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertOpenAIRequestToAntigravityMapsResponseFormatJSONObject(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"user","content":"hi"}],
+		"generationConfig":{
+			"responseSchema":{"type":"string","description":"stale"},
+			"responseJsonSchema":{"type":"string"},
+			"response_schema":{"type":"string"},
+			"response_json_schema":{"type":"string"}
+		},
+		"response_format":{"type":"json_object"}
+	}`)
+
+	out := ConvertOpenAIRequestToAntigravity("gemini-3.6-flash-high", inputJSON, false)
+	if got := gjson.GetBytes(out, "request.generationConfig.responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json. Output: %s", got, out)
+	}
+	if gjson.GetBytes(out, "request.generationConfig.responseSchema").Exists() {
+		t.Fatalf("responseSchema should not be set for json_object. Output: %s", out)
+	}
+	assertNoResponseSchemaAliases(t, out)
+}
+
+func TestConvertOpenAIRequestToAntigravityMapsResponseFormatJSONSchema(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"user","content":"hi"}],
+		"generationConfig":{
+			"responseSchema":{"type":"string","description":"stale"},
+			"responseJsonSchema":{"type":"string"},
+			"response_schema":{"type":"string"},
+			"response_json_schema":{"type":"string"}
+		},
+		"response_format":{
+			"type":"json_schema",
+			"json_schema":{
+				"name":"verdict",
+				"schema":{
+					"type":"object",
+					"properties":{"score":{"type":"integer"}},
+					"required":["score"]
+				}
+			}
+		}
+	}`)
+
+	out := ConvertOpenAIRequestToAntigravity("gemini-3.6-flash-high", inputJSON, false)
+	if got := gjson.GetBytes(out, "request.generationConfig.responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json. Output: %s", got, out)
+	}
+	schema := gjson.GetBytes(out, "request.generationConfig.responseSchema")
+	if !schema.Exists() {
+		t.Fatalf("responseSchema missing. Output: %s", out)
+	}
+	if got := schema.Get("properties.score.type").String(); got != "integer" {
+		t.Fatalf("responseSchema.properties.score.type = %q, want integer. Output: %s", got, out)
+	}
+	if schema.Get("description").Exists() {
+		t.Fatalf("stale responseSchema survived. Output: %s", out)
+	}
+	assertNoResponseSchemaAliases(t, out)
+}
+
+func assertNoResponseSchemaAliases(t *testing.T, out []byte) {
+	t.Helper()
+	for _, schemaKey := range []string{"responseJsonSchema", "response_schema", "response_json_schema"} {
+		if gjson.GetBytes(out, "request.generationConfig."+schemaKey).Exists() {
+			t.Errorf("stale %s survived response_format mapping. Output: %s", schemaKey, out)
+		}
+	}
+}
