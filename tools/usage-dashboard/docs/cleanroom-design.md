@@ -1,11 +1,28 @@
-# Usage Dashboard Clean-Room Design
+# Usage Dashboard Clean-Room Design (SUPERSEDED)
 
 **Date**: 2026-07-17
-**Status**: Draft → Implementation
+**Status**: Draft → Implementation → **Superseded 2026-07-27 by ADR 0001**
+**ADRs that supersede this document**:
+- [ADR 0001](adr/0001-rewrite-on-fastapi-react-ts.md) — rewrite on FastAPI + React + TypeScript
+- [ADR 0002](adr/0002-sqlmodel-handwritten-migrations.md) — SQLModel + v4 migrations
+- [ADR 0003](adr/0003-split-state-tanstack-zustand.md) — TanStack Query + Zustand state
+- [ADR 0004](adr/0004-single-process-asyncio-collector.md) — single-process uvicorn + asyncio collector
+- [ADR 0005](adr/0005-openapi-typescript-contract.md) — OpenAPI-generated TypeScript contract
+- [ADR 0006](adr/0006-vite-dist-fastapi-mount.md) — Vite dist mounted by FastAPI StaticFiles
 
-## Motivation
+> The clean-room constraint was lifted when the dashboard was rewritten on
+> FastAPI + React (see `adr/0001-rewrite-on-fastapi-react-ts.md`). This file
+> is retained as a historical explanation of the v1-v4 implementation's
+> origin, and has no normative force for the rewrite. All module descriptions,
+> data flow diagrams, deployment instructions, and testing references in this
+> document refer to the **legacy** implementation and are **not** current.
+> See `docs/deployment.md` for current deployment instructions and `README.md`
+> for the current architecture.
 
-The original `tools/usage-dashboard` was adapted from an upstream project that did not ship a license. To avoid redistribution risk, the implementation is rewritten from documented behavior without access to the original source.
+## Motivation (historical)
+
+The original `tools/usage-dashboard` was adapted from an upstream project that did not ship a license. To avoid redistribution risk, the implementation was rewritten from documented behavior without access to the original source.
+
 
 ## Compatibility
 

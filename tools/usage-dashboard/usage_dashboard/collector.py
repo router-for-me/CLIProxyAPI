@@ -1,18 +1,25 @@
-"""CPA management-queue collector: HTTP poll, normalize, insert, health."""
+"""Async collector: httpx + asyncio.Task. Also exposes sync helpers
+and sync insert_usage/fetch_usage_batch for backward compatibility."""
+import asyncio
+import contextlib
 import datetime as dt
+import fcntl
 import hashlib
 import json
+import logging
 import os
 import sqlite3
-import sys
-import threading
-import time
-import urllib.error
 import urllib.request
-
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import httpx
+from sqlmodel import Session, create_engine
 from . import config as cfg_mod
 from . import storage as st
+from .models import UsageEvent
 
+log = logging.getLogger(__name__)
+_utc = timezone.utc
 _UTC = dt.timezone.utc
 
 INSERT_COLUMNS = (
@@ -24,7 +31,6 @@ INSERT_COLUMNS = (
 
 
 def parse_rfc3339(value):
-    """Parse RFC 3339 strictly. Empty/None -> now. Invalid -> ValueError."""
     if not value:
         return dt.datetime.now(_UTC)
     text = str(value).replace("Z", "+00:00")
@@ -32,23 +38,6 @@ def parse_rfc3339(value):
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=_UTC)
     return parsed.astimezone(_UTC)
-
-
-def fetch_usage_batch(cfg, count):
-    """Fetch one batch of usage records from CPA over HTTP. Destructive pop."""
-    base = (cfg.get("cliproxy_base_url") or "").rstrip("/")
-    url = f"{base}/v0/management/usage-queue?count={int(count)}"
-    req = urllib.request.Request(url)
-    key = cfg.get("management_key") or ""
-    if not key:
-        raise RuntimeError("management_key is required (config or CLIPROXY_MANAGEMENT_KEY)")
-    req.add_header("Authorization", f"Bearer {key}")
-    req.add_header("Accept", "application/json")
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        data = json.loads(resp.read().decode("utf-8", "replace"))
-    if not isinstance(data, list):
-        return []
-    return [item for item in data if item]
 
 
 def _event_key(payload):
@@ -60,12 +49,6 @@ def _event_key(payload):
 
 
 def _account_hash(payload):
-    """Stable non-reversible account id for dashboard grouping.
-
-    Prefer the client-facing CPA proxy API key (`api_key` in the usage queue).
-    Fall back to upstream credential source / auth_index only when api_key is
-    missing (older records or non-key auth paths).
-    """
     for key in ("api_key", "source", "auth_index"):
         val = payload.get(key)
         if val is None:
@@ -84,7 +67,6 @@ def _safe_int(value):
 
 
 def normalize_record(payload):
-    """Map a CPA usage record to analytics columns, dropping all sensitive fields."""
     raw_text = payload.get("_raw_text")
     if raw_text is None:
         raw_text = json.dumps(payload, sort_keys=True, ensure_ascii=False)
@@ -126,9 +108,41 @@ def normalize_record(payload):
     }
 
 
+def _iso(epoch):
+    if not epoch:
+        return None
+    return dt.datetime.fromtimestamp(epoch, _UTC).isoformat()
+
+
+def _redact_error(text):
+    if not text:
+        return ""
+    redacted = text
+    idx = redacted.find("Bearer ")
+    if idx >= 0:
+        redacted = redacted[: idx + len("Bearer ")] + "***"
+    return redacted[:300]
+
+
+def fetch_usage_batch(cfg, count):
+    """Sync fetch — kept for backward compatibility with tests."""
+    base = (cfg.get("cliproxy_base_url") or "").rstrip("/")
+    url = f"{base}/v0/management/usage-queue?count={int(count)}"
+    req = urllib.request.Request(url)
+    key = cfg.get("management_key") or ""
+    if not key:
+        raise RuntimeError("management_key is required")
+    req.add_header("Authorization", f"Bearer {key}")
+    req.add_header("Accept", "application/json")
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = json.loads(resp.read().decode("utf-8", "replace"))
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if item]
+
+
 def insert_usage(cfg, items):
-    """Insert normalized records, isolating malformed records per-item.
-    Returns (inserted, duplicates, errors)."""
+    """Sync insert — kept for backward compatibility with tests."""
     inserted = 0
     duplicates = 0
     errors = 0
@@ -164,204 +178,130 @@ def insert_usage(cfg, items):
     return inserted, duplicates, errors
 
 
-def _iso(epoch):
-    if not epoch:
-        return None
-    return dt.datetime.fromtimestamp(epoch, _UTC).isoformat()
+@dataclass
+class CollectorHealth:
+    last_poll_at: str | None = None
+    last_poll_ok: bool = True
+    last_poll_error: str | None = None
+    inserted: int = 0
+    duplicates: int = 0
+    errors: int = 0
+    dropped: int = 0
+
+    def to_state_dict(self) -> dict:
+        d = asdict(self)
+        d["last_poll_at"] = d["last_poll_at"] or ""
+        d["last_poll_ok"] = "1" if d["last_poll_ok"] else "0"
+        d["last_poll_error"] = d["last_poll_error"] or ""
+        return {k: str(v) for k, v in d.items()}
 
 
-class CollectorState:
-    """In-memory + persisted collector health, shared with the serve process."""
-
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.last_poll_ok = False
-        self.last_poll_epoch = 0.0
-        self.last_poll_error = ""
-        self.last_commit_epoch = 0.0
-        self.last_usage_ts = 0.0
-        self.total_inserted = 0
-        self.schema_version = 0
-        self.dropped_count = 0
-
-    def snapshot(self, cfg):
-        with self.lock:
-            stale_secs = float(cfg.get("health_stale_seconds") or 300)
-            stale = self.last_poll_epoch and (time.time() - self.last_poll_epoch > stale_secs)
-            return {
-                "ok": bool(self.last_poll_ok and not stale),
-                "degraded": bool(stale or (self.last_poll_epoch and not self.last_poll_ok)),
-                "last_poll_ok": self.last_poll_ok,
-                "last_poll_at": _iso(self.last_poll_epoch),
-                "last_poll_error": self.last_poll_error or None,
-                "last_commit_at": _iso(self.last_commit_epoch),
-                "last_usage_timestamp": _iso(self.last_usage_ts),
-                "total_inserted": self.total_inserted,
-                "dropped_count": self.dropped_count,
-                "schema_version": self.schema_version or st.SCHEMA_VERSION,
-                "db_path": cfg_mod.db_path_for(cfg),
-            }
-
-    def persist(self, cfg):
-        st.save_state(cfg, {
-            "last_poll_ok": self.last_poll_ok,
-            "last_poll_epoch": self.last_poll_epoch,
-            "last_poll_error": self.last_poll_error,
-            "last_commit_epoch": self.last_commit_epoch,
-            "last_usage_ts": self.last_usage_ts,
-            "total_inserted": self.total_inserted,
-            "schema_version": self.schema_version or st.SCHEMA_VERSION,
-        })
-
-    def restore(self, cfg):
-        loaded = st.load_state(cfg)
-        with self.lock:
-            for k, v in loaded.items():
-                setattr(self, k, v)
+async def async_fetch_usage_batch(cfg, count):
+    url = f"{cfg['cliproxy_base_url']}/v0/management/usage-queue"
+    headers = {"Authorization": f"Bearer {cfg['management_key']}"}
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url, headers=headers, params={"count": count})
+        resp.raise_for_status()
+        data = resp.json()
+    # Upstream may return a bare list of records or {"items": [...]}.
+    if isinstance(data, dict):
+        items = data.get("items") or []
+    elif isinstance(data, list):
+        items = data
+    else:
+        items = []
+    return [i for i in items if i]
 
 
-COLLECTOR_STATE = CollectorState()
+async def async_insert_usage(cfg, items):
+    inserted = duplicates = errors = 0
+    engine = create_engine(f"sqlite:///{cfg_mod.db_path_for(cfg)}")
+    with Session(engine) as session:
+        for payload in items:
+            try:
+                if isinstance(payload, dict):
+                    normalized = normalize_record(payload)
+                    event = UsageEvent(**normalized)
+                    session.add(event)
+                    session.commit()
+                    inserted += 1
+                else:
+                    errors += 1
+            except Exception as exc:
+                session.rollback()
+                msg = str(exc).lower()
+                if "unique" in msg:
+                    duplicates += 1
+                else:
+                    errors += 1
+                    log.warning("skipping malformed record: %s", exc)
+    engine.dispose()
+    return inserted, duplicates, errors
 
 
-def snapshot(cfg):
-    """Return health snapshot, merging in-memory with persisted state."""
-    mem = COLLECTOR_STATE.snapshot(cfg)
-    if COLLECTOR_STATE.last_poll_epoch == 0.0:
-        persisted = st.load_state(cfg)
-        stale_secs = float(cfg.get("health_stale_seconds") or 300)
-        stale = persisted["last_poll_epoch"] and (time.time() - persisted["last_poll_epoch"] > stale_secs)
-        return {
-            "ok": bool(persisted["last_poll_ok"] and not stale),
-            "degraded": bool(stale or (persisted["last_poll_epoch"] and not persisted["last_poll_ok"])),
-            "last_poll_ok": persisted["last_poll_ok"],
-            "last_poll_at": _iso(persisted["last_poll_epoch"]),
-            "last_poll_error": persisted["last_poll_error"] or None,
-            "last_commit_at": _iso(persisted["last_commit_epoch"]),
-            "last_usage_timestamp": _iso(persisted["last_usage_ts"]),
-            "total_inserted": persisted["total_inserted"],
-            "dropped_count": persisted.get("dropped_count", 0),
-            "schema_version": persisted["schema_version"] or st.SCHEMA_VERSION,
-            "db_path": cfg_mod.db_path_for(cfg),
-        }
-    return mem
-
-
-def _redact_error(text):
-    if not text:
-        return ""
-    redacted = text
-    idx = redacted.find("Bearer ")
-    if idx >= 0:
-        redacted = redacted[: idx + len("Bearer ")] + "***"
-    return redacted[:300]
-
-
-def collect_once(cfg):
-    """Drain the queue until empty. Updates and persists collector state.
-    If parsing errors occur, health is marked degraded."""
-    batch = max(1, int(cfg.get("batch_size") or 100))
-    total_inserted = 0
-    total_errors = 0
-    last_ts = 0.0
+async def collect_once(cfg) -> CollectorHealth:
+    health = CollectorHealth()
     try:
-        while True:
-            items = fetch_usage_batch(cfg, batch)
-            if not items:
-                break
-            inserted, _dup, errs = insert_usage(cfg, items)
-            total_inserted += inserted
-            total_errors += errs
-            for item in items:
-                try:
-                    if isinstance(item, (bytes, bytearray)):
-                        parsed = json.loads(item.decode("utf-8", "replace"))
-                    elif isinstance(item, str):
-                        parsed = json.loads(item)
-                    elif isinstance(item, dict):
-                        parsed = item
-                    else:
-                        continue
-                    ts = parse_rfc3339(parsed.get("timestamp") if isinstance(parsed, dict) else None)
-                    last_ts = max(last_ts, ts.timestamp())
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    continue
-            if len(items) < batch:
-                break
-        now = time.time()
-        ok = total_errors == 0
-        with COLLECTOR_STATE.lock:
-            COLLECTOR_STATE.last_poll_ok = ok
-            COLLECTOR_STATE.last_poll_error = "" if ok else f"{total_errors} record(s) dropped during ingest"
-            COLLECTOR_STATE.last_poll_epoch = now
-            COLLECTOR_STATE.last_commit_epoch = now
-            COLLECTOR_STATE.dropped_count = total_errors
-            if last_ts:
-                COLLECTOR_STATE.last_usage_ts = last_ts
-            COLLECTOR_STATE.total_inserted += total_inserted
-        COLLECTOR_STATE.persist(cfg)
-        return total_inserted
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, RuntimeError, ValueError) as exc:
-        with COLLECTOR_STATE.lock:
-            COLLECTOR_STATE.last_poll_ok = False
-            COLLECTOR_STATE.last_poll_error = _redact_error(str(exc))
-            COLLECTOR_STATE.last_poll_epoch = time.time()
-            COLLECTOR_STATE.dropped_count = total_errors
-        COLLECTOR_STATE.persist(cfg)
+        items = await async_fetch_usage_batch(cfg, int(cfg.get("batch_size") or 100))
+        inserted, duplicates, errors = await async_insert_usage(cfg, items)
+        health.inserted = inserted
+        health.duplicates = duplicates
+        health.errors = errors
+        health.last_poll_ok = errors == 0
+        health.last_poll_at = datetime.now(_utc).isoformat()
+    except Exception as exc:
+        health.last_poll_ok = False
+        health.last_poll_error = _redact_error(str(exc))
+        health.last_poll_at = datetime.now(_utc).isoformat()
+        log.error("collector poll failed: %s", exc)
         raise
+    finally:
+        st.save_state(cfg, health.to_state_dict())
+    return health
 
 
-def collect_forever(cfg, stop_event=None):
-    interval = max(1, float(cfg.get("poll_interval_seconds") or 2))
+async def collect_forever(cfg, stop_event=None):
+    interval = max(1.0, float(cfg.get("poll_interval_seconds") or 2))
     while True:
-        if stop_event is not None and stop_event.is_set():
+        if stop_event and stop_event.is_set():
             return
         try:
-            inserted = collect_once(cfg)
-            if inserted:
-                print(f"inserted {inserted} usage events", flush=True)
-        except Exception as exc:  # noqa: BLE001 - collector must stay alive
-            print(f"collector error: {_redact_error(str(exc))}", file=sys.stderr, flush=True)
-        if stop_event is not None:
-            if stop_event.wait(interval):
-                return
+            await collect_once(cfg)
+        except Exception:
+            pass  # already persisted in finally
+        if stop_event:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
         else:
-            time.sleep(interval)
+            await asyncio.sleep(interval)
 
 
-class CollectorLock:
-    """Exclusive fcntl lock to prevent two collectors draining one queue."""
+class AsyncCollectorLock:
+    """fcntl-based exclusive lock — same lockfile as legacy CollectorLock."""
 
     def __init__(self, cfg):
         self.path = os.path.join(cfg_mod.data_dir_for(cfg), "collector.lock")
-        self._fd = None
+        self.fd = None
 
-    def acquire(self):
-        import fcntl
-
-        fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+    @contextlib.asynccontextmanager
+    async def __aenter__(self):
+        cfg_mod.ensure_dirs({"data_dir": os.path.dirname(self.path)})
+        self.fd = open(self.path, "w")
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            os.close(fd)
-            raise SystemExit(
-                "Another collector already owns this database "
-                f"({self.path}). Only one collector may run per data directory."
-            )
-        self._fd = fd
+            fcntl.flock(self.fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            self.fd.close()
+            self.fd = None
+            raise RuntimeError("another collector already holds the lock") from None
+        yield self
 
-    def release(self):
-        import fcntl
-
-        if self._fd is not None:
-            try:
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
-            finally:
-                os.close(self._fd)
-                self._fd = None
-
-    def __enter__(self):
-        self.acquire()
-        return self
-
-    def __exit__(self, *exc):
-        self.release()
+    async def __aexit__(self, exc_type, exc, tb):
+        if self.fd is None:
+            return
+        try:
+            fcntl.flock(self.fd.fileno(), fcntl.LOCK_UN)
+        finally:
+            self.fd.close()
+            self.fd = None

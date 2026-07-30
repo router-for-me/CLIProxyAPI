@@ -260,6 +260,7 @@ def delete_alias(cfg, account_hash):
 
 
 _STATE_KEYS = (
+    "last_poll_at",
     "last_poll_ok",
     "last_poll_epoch",
     "last_poll_error",
@@ -279,6 +280,7 @@ def load_state(cfg):
         _ensure_state_table(conn)
         rows = conn.execute("SELECT key, value FROM collector_state").fetchall()
     state = {
+        "last_poll_at": "",
         "last_poll_ok": False,
         "last_poll_epoch": 0.0,
         "last_poll_error": "",

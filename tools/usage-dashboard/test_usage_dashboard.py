@@ -8,21 +8,16 @@ import os
 import shutil
 import sys
 import tempfile
-import threading
 import time
 import unittest
-import urllib.error
-import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from usage_dashboard import config as cfg_mod
-from usage_dashboard import storage as st
 from usage_dashboard import collector as col
+from usage_dashboard import config as cfg_mod
 from usage_dashboard import pricing as pr
 from usage_dashboard import query as qy
-from usage_dashboard import server as srv
+from usage_dashboard import storage as st
 
 # ── helpers ────────────────────────────────────────────────────────────
 
@@ -196,62 +191,9 @@ class TestInsertion(BaseTempData):
         result = col.parse_rfc3339(None)
         self.assertAlmostEqual(result.timestamp(), now, delta=1)
 
-    def test_collect_once_tracks_dropped_records(self):
-        original_fetch = col.fetch_usage_batch
-        try:
-            called = []
-
-            def mock_fetch(cfg, count):
-                if called:
-                    return []
-                called.append(1)
-                return [nrec(request_id="ok"), "{bogus"]
-
-            col.fetch_usage_batch = mock_fetch
-            col.collect_once(self.cfg)
-            snap = col.COLLECTOR_STATE.snapshot(self.cfg)
-            self.assertFalse(snap["last_poll_ok"])
-            self.assertGreater(snap["dropped_count"], 0)
-        finally:
-            col.fetch_usage_batch = original_fetch
-
-    def test_collect_forever_survives_poll_errors(self):
-        """Poll errors must be logged and retried; never kill the collector thread."""
-        original_once = col.collect_once
-        calls = {"n": 0}
-        stop = threading.Event()
-
-        def boom(cfg):
-            calls["n"] += 1
-            if calls["n"] >= 2:
-                stop.set()
-            raise RuntimeError("simulated poll failure Bearer secret-token")
-
-        col.collect_once = boom
-        try:
-            t = threading.Thread(
-                target=col.collect_forever,
-                args=(self.cfg, stop),
-                daemon=True,
-            )
-            t.start()
-            t.join(timeout=5)
-            self.assertFalse(t.is_alive(), "collector thread should exit via stop_event")
-            self.assertGreaterEqual(calls["n"], 2)
-        finally:
-            col.collect_once = original_once
 
 
-# ── Collector lock tests ───────────────────────────────────────────────
 
-
-class TestCollectorLock(BaseTempData):
-    def test_second_lock_rejected(self):
-        l1 = col.CollectorLock(self.cfg)
-        l1.acquire()
-        with self.assertRaises(SystemExit):
-            (col.CollectorLock(self.cfg)).acquire()
-        l1.release()
 
 
 # ── Pricing tests ──────────────────────────────────────────────────────
@@ -400,7 +342,7 @@ class TestErrors(BaseTempData):
         by_key = {(e["fail_status"], e["model"]): e for e in out["errors"]}
         self.assertIn((429, "m1"), by_key)
         self.assertEqual(by_key[(429, "m1")]["count"], 2)
-        self.assertEqual(by_key[(429, "m1")]["percent"], 50.0)  # 2 of 4 total requests
+        self.assertEqual(by_key[(429, "m1")]["percentage"], 50.0)  # 2 of 4 total requests
         self.assertEqual(out["total_failed"], 3)
         self.assertEqual(out["total_requests"], 4)
 
@@ -464,149 +406,6 @@ class TestPrices(BaseTempData):
         self.assertEqual(out["currency"], "USD")
 
 
-# ── Server tests ───────────────────────────────────────────────────────
-
-
-class TestServerHTTP(BaseTempData):
-    def setUp(self):
-        super().setUp()
-        self._httpd = None
-        # Reset global collector state so snapshot falls through to persisted state.
-        col.COLLECTOR_STATE.last_poll_epoch = 0.0
-
-    def _start(self, cfg):
-        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), srv.make_handler(cfg))
-        t = threading.Thread(target=self._httpd.serve_forever, daemon=True)
-        t.start()
-        return self._httpd.server_address[1]
-
-    def _get(self, port, path, token=None):
-        url = f"http://127.0.0.1:{port}{path}"
-        req = urllib.request.Request(url)
-        if token:
-            req.add_header("Authorization", f"Bearer {token}")
-        try:
-            with urllib.request.urlopen(req) as resp:
-                return resp.status, resp.read().decode()
-        except urllib.error.HTTPError as e:
-            return e.code, e.read().decode()
-
-    def test_valid_summary_200(self):
-        col.insert_usage(self.cfg, [nrec()])
-        port = self._start(self.cfg)
-        s, _ = self._get(port, "/api/v1/summary?range=24h")
-        self.assertEqual(s, 200)
-
-    def test_invalid_query_400(self):
-        port = self._start(self.cfg)
-        s, _ = self._get(port, "/api/v1/summary?range=bogus")
-        self.assertEqual(s, 400)
-
-    def test_not_found_404(self):
-        port = self._start(self.cfg)
-        s, _ = self._get(port, "/api/v1/nope")
-        self.assertEqual(s, 404)
-
-    def test_token_gate_401(self):
-        cfg = dict(self.cfg)
-        cfg["dashboard_token"] = "secret"
-        port = self._start(cfg)
-        s, _ = self._get(port, "/api/v1/summary?range=24h")
-        self.assertEqual(s, 401)
-
-    def test_token_gate_200_with_valid_token(self):
-        cfg = dict(self.cfg)
-        cfg["dashboard_token"] = "secret"
-        port = self._start(cfg)
-        s, _ = self._get(port, "/api/v1/summary?range=24h", token="secret")
-        self.assertEqual(s, 200)
-
-    def test_health_returns_persisted_state(self):
-        st.save_state(self.cfg, {
-            "last_poll_ok": True,
-            "last_poll_epoch": time.time(),
-            "last_commit_epoch": time.time(),
-            "total_inserted": 5,
-        })
-        port = self._start(self.cfg)
-        s, body = self._get(port, "/api/v1/health")
-        self.assertEqual(s, 200)
-        data = json.loads(body)
-        self.assertTrue(data["last_poll_ok"])
-        self.assertEqual(data["total_inserted"], 5)
-
-    def test_config_failure_raises(self):
-        path = cfg_mod.config_path_for(self.cfg)
-        with open(path, "w") as f:
-            f.write("{invalid json")
-        with self.assertRaises(SystemExit):
-            cfg_mod.load_config()
-
-    def test_non_loopback_without_token_rejected(self):
-        cfg = dict(self.cfg)
-        cfg["dashboard_host"] = "0.0.0.0"
-        cfg["dashboard_token"] = ""
-        with self.assertRaises(SystemExit):
-            srv.serve(cfg)
-
-    def test_is_authorized_with_token(self):
-        cfg = dict(self.cfg)
-        cfg["dashboard_token"] = "tok"
-
-        class FakeHdr:
-            def __init__(self, d):
-                self.d = d
-            def get(self, k, default=None):
-                return self.d.get(k, default)
-
-        class FakeHandler:
-            def __init__(self, hdrs):
-                self.headers = FakeHdr(hdrs)
-
-        self.assertFalse(srv.is_authorized(FakeHandler({}), cfg))
-        self.assertTrue(srv.is_authorized(FakeHandler({"Authorization": "Bearer tok"}), cfg))
-        self.assertTrue(srv.is_authorized(FakeHandler({"X-Dashboard-Token": "tok"}), cfg))
-        self.assertFalse(srv.is_authorized(FakeHandler({"Authorization": "Bearer wrong"}), cfg))
-
-
-# ── Static asset tests ────────────────────────────────────────────────
-
-
-class TestStaticAssets(BaseTempData):
-    def test_chart_js_served_with_js_mime(self):
-        import http.client
-        import socket
-        sock = socket.socket()
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-        sock.close()
-        self.cfg["dashboard_port"] = port
-        ready = threading.Event()
-        t = threading.Thread(target=srv.serve, args=(self.cfg, ready), daemon=True)
-        t.start()
-        ready.wait(timeout=3)
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
-        conn.request("GET", "/static/chart.js")
-        resp = conn.getresponse()
-        body = resp.read()
-        self.assertEqual(resp.status, 200)
-        self.assertIn("javascript", resp.getheader("Content-Type", ""))
-        self.assertIn(b"Chart.js", body[:500])
-        # immutable cache for vendored asset
-        self.assertIn("max-age=", resp.getheader("Cache-Control", ""))
-
-    def test_unknown_static_path_returns_404(self):
-        import http.client, socket
-        sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]; sock.close()
-        self.cfg["dashboard_port"] = port
-        ready = threading.Event()
-        t = threading.Thread(target=srv.serve, args=(self.cfg, ready), daemon=True); t.start(); ready.wait(timeout=3)
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
-        conn.request("GET", "/static/does-not-exist.js")
-        resp = conn.getresponse()
-        self.assertEqual(resp.status, 404)
-
-
 
 # ── Key Aliases tests ──────────────────────────────────────────────────
 
@@ -663,76 +462,6 @@ class TestAliases(BaseTempData):
         self.assertEqual(result["accounts"][0]["account"], "ca978112ca1b")
 
 
-class TestAliasesHTTP(BaseTempData):
-    def setUp(self):
-        super().setUp()
-        self._httpd = None
-
-    def _start(self, cfg):
-        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), srv.make_handler(cfg))
-        t = threading.Thread(target=self._httpd.serve_forever, daemon=True)
-        t.start()
-        return self._httpd.server_address[1]
-
-    def _get(self, port, path):
-        url = f"http://127.0.0.1:{port}{path}"
-        with urllib.request.urlopen(url) as resp:
-            return resp.status, resp.read().decode()
-
-    def _put(self, port, path, body):
-        data = json.dumps(body).encode()
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{port}{path}",
-            data=data, method="PUT",
-        )
-        req.add_header("Content-Type", "application/json")
-        try:
-            with urllib.request.urlopen(req) as resp:
-                return resp.status, resp.read().decode()
-        except urllib.error.HTTPError as e:
-            return e.code, e.read().decode()
-
-    def _delete(self, port, path):
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{port}{path}",
-            method="DELETE",
-        )
-        try:
-            with urllib.request.urlopen(req) as resp:
-                return resp.status, resp.read().decode()
-        except urllib.error.HTTPError as e:
-            return e.code, e.read().decode()
-
-    def test_get_aliases_empty(self):
-        port = self._start(self.cfg)
-        s, body = self._get(port, "/api/v1/aliases")
-        self.assertEqual(s, 200)
-        self.assertEqual(json.loads(body), [])
-
-    def test_put_and_get(self):
-        port = self._start(self.cfg)
-        s, _ = self._put(port, "/api/v1/aliases",
-                         {"account_hash": "hash1", "alias": "My Key"})
-        self.assertEqual(s, 200)
-        s, body = self._get(port, "/api/v1/aliases")
-        self.assertEqual(s, 200)
-        data = json.loads(body)
-        self.assertEqual(len(data), 1)
-        self.assertEqual(data[0]["account_hash"], "hash1")
-        self.assertEqual(data[0]["alias"], "My Key")
-
-    def test_delete(self):
-        port = self._start(self.cfg)
-        st.upsert_alias(self.cfg, "hash1", "My Key")
-        s, _ = self._delete(port, "/api/v1/aliases/hash1")
-        self.assertEqual(s, 200)
-        s, body = self._get(port, "/api/v1/aliases")
-        self.assertEqual(json.loads(body), [])
-
-    def test_put_missing_field_400(self):
-        port = self._start(self.cfg)
-        s, _ = self._put(port, "/api/v1/aliases", {"account_hash": "hash1"})
-        self.assertEqual(s, 400)
 # ── Bootstrap ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

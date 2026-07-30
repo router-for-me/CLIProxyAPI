@@ -281,7 +281,7 @@ def query_errors(cfg, qs):
     errors = []
     for r in rows:
         d = dict(r)
-        d["percent"] = round(d["count"] / denom * 100, 1)
+        d["percentage"] = round(d["count"] / denom * 100, 1)
         errors.append(d)
     return {
         "errors": errors,

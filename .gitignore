@@ -52,6 +52,58 @@ GEMINI.md
 _bmad/*
 _bmad-output/*
 
+# AI Agent IDE config directories
+.amazonq/
+.augment/
+.bob/
+.cline/
+.clinerules/
+.codebuddy/
+.codegraph/
+.continue/
+.cospec/
+.crush/
+.cursor/
+.factory/
+.forge/
+.github/prompts/
+.github/skills/
+.iflow/
+.junie/
+.kilocode/
+.kimi/
+.kiro/
+.lingma/
+.pi/
+.playwright-mcp/
+.qoder/
+.qwen/
+.roo/
+.trae/
+.vibe/
+.windsurf/
+.zcode/
+
+# Python cache
+__pycache__/
+.ruff_cache/
+
+# Config backups
+config.yaml.bak*
+
+# Test results
+test-results/
+
+# Skill files
+codex-auth-to-cpa.skill
+mimo-tts.skill
+
+# Miscellaneous
+restart.sh
+usage-dashboard-*.png
+test_codex.txt
+offset.yaml
+
 # macOS
 .DS_Store
 ._*

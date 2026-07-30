@@ -4,7 +4,12 @@ version = "0.1.0"
 description = "CLIProxyAPI usage statistics sidecar"
 requires-python = ">=3.10"
 dependencies = [
+    "aiosqlite>=0.22.1",
+    "fastapi>=0.140.0",
+    "httpx>=0.28.1",
+    "pytest-asyncio>=1.4.0",
     "sqlmodel>=0.0.22",
+    "uvicorn[standard]>=0.51.0",
 ]
 
 [project.optional-dependencies]

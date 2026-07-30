@@ -1,0 +1,28 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+
+@theme inline {
+  --font-sans: "Geist Variable", sans-serif;
+  --font-heading: var(--font-sans);
+
+  --color-background: hsl(222 22% 7%);
+  --color-foreground: hsl(210 20% 92%);
+  --color-card: hsl(222 18% 11%);
+  --color-card-foreground: hsl(210 20% 92%);
+  --color-primary: hsl(187 92% 58%);
+  --color-primary-foreground: hsl(222 22% 7%);
+  --color-muted: hsl(217 14% 16%);
+  --color-muted-foreground: hsl(215 14% 60%);
+  --color-border: hsl(215 14% 22%);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-2 outline-transparent outline-offset-2;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+  }
+}
