@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -46,6 +48,28 @@ func TestAntigravityReasoningReplayAccumulatorMultiToolSSEChunks(t *testing.T) {
 	}
 	if got := gjson.GetBytes(items[0], "thoughtSignature").String(); got != "sig-first" {
 		t.Fatalf("first sig = %q", got)
+	}
+}
+
+func TestPrepareAntigravityGeminiReasoningReplayPayloadToleratesHomeKVFailure(t *testing.T) {
+	// An enabled Home client with no heartbeat makes CurrentKVClient report home
+	// mode with an error, which is how every Home-side KV failure reaches the
+	// replay cache — including the "unknown command 'cas'" case from an older
+	// Home. The request must proceed without replay rather than fail, because a
+	// bare executor error would make MarkResult mark the credential unavailable.
+	homekv.SetCurrent(homekv.New(config.HomeConfig{Enabled: true}))
+	t.Cleanup(func() { homekv.SetCurrent(nil) })
+
+	payload := []byte(`{"sessionId":"kv-failure","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)
+	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), "gemini-3-flash-agent", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload)
+	if errPrepare != nil {
+		t.Fatalf("prepare error = %v, want nil so the request proceeds without replay", errPrepare)
+	}
+	if len(out) == 0 {
+		t.Fatal("prepare returned an empty payload")
+	}
+	if got := gjson.GetBytes(out, "sessionId").String(); got != "kv-failure" {
+		t.Fatalf("payload sessionId = %q, want kv-failure", got)
 	}
 }
 

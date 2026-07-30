@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,7 +13,11 @@ import (
 )
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
-	if m == nil {
+	return lookupAPIKeyUpstreamModel(m.loadAPIKeyModelRouting(), authID, requestedModel)
+}
+
+func lookupAPIKeyUpstreamModel(routing *apiKeyModelRoutingSnapshot, authID, requestedModel string) string {
+	if routing == nil {
 		return ""
 	}
 	authID = strings.TrimSpace(authID)
@@ -23,23 +28,21 @@ func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) strin
 	if requestedModel == "" {
 		return ""
 	}
-	table, _ := m.apiKeyModelAlias.Load().(apiKeyModelAliasTable)
-	if table == nil {
-		return ""
-	}
-	byAlias := table[authID]
+	byAlias := routing.aliases[authID]
 	if len(byAlias) == 0 {
 		return ""
 	}
-	key := strings.ToLower(thinking.ParseSuffix(requestedModel).ModelName)
-	if key == "" {
-		key = strings.ToLower(requestedModel)
+	keys := []string{strings.ToLower(requestedModel)}
+	baseKey := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(requestedModel).ModelName))
+	if baseKey != "" && baseKey != keys[0] {
+		keys = append(keys, baseKey)
 	}
-	resolved := strings.TrimSpace(byAlias[key])
-	if resolved == "" {
-		return ""
+	for _, key := range keys {
+		if resolved := strings.TrimSpace(byAlias[key]); resolved != "" {
+			return preserveRequestedModelSuffix(requestedModel, resolved)
+		}
 	}
-	return preserveRequestedModelSuffix(requestedModel, resolved)
+	return ""
 }
 
 func isAPIKeyAuth(auth *Auth) bool {
@@ -49,8 +52,8 @@ func isAPIKeyAuth(auth *Auth) bool {
 	return auth.AuthKind() == AuthKindAPIKey
 }
 
-func isOpenAICompatAPIKeyAuth(auth *Auth) bool {
-	if !isAPIKeyAuth(auth) {
+func isConfiguredOpenAICompatAuth(auth *Auth) bool {
+	if !isConfiguredModelRoutingAuth(auth) {
 		return false
 	}
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
@@ -126,14 +129,17 @@ func rotateStrings(values []string, offset int) []string {
 }
 
 func (m *Manager) resolveOpenAICompatUpstreamModelPool(auth *Auth, requestedModel string) []string {
-	if m == nil || !isOpenAICompatAPIKeyAuth(auth) {
+	return resolveOpenAICompatUpstreamModelPool(m.loadAPIKeyModelRouting().config, auth, requestedModel)
+}
+
+func resolveOpenAICompatUpstreamModelPool(cfg *internalconfig.Config, auth *Auth, requestedModel string) []string {
+	if !isConfiguredOpenAICompatAuth(auth) {
 		return nil
 	}
 	requestedModel = strings.TrimSpace(requestedModel)
 	if requestedModel == "" {
 		return nil
 	}
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	}
@@ -143,7 +149,7 @@ func (m *Manager) resolveOpenAICompatUpstreamModelPool(auth *Auth, requestedMode
 		providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
 		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
 	}
-	entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider)
+	entry := resolveOpenAICompatConfigForAuth(cfg, auth, providerKey, compatName)
 	if entry == nil {
 		return nil
 	}
@@ -244,14 +250,15 @@ func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string) ([]stri
 	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled
 }
 
-func (m *Manager) preparedExecutionModelsWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult) {
-	candidates, pooled, aliasResult := m.executionModelCandidatesWithAlias(auth, routeModel)
-	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled, aliasResult
+func (m *Manager) preparedExecutionModelsWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
+	candidates, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
+	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled, aliasResult, routing
 }
 
-func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult) {
+func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
+	routing := m.loadAPIKeyModelRouting()
 	requestedModel := rewriteModelForAuth(routeModel, auth)
-	aliasResult := m.resolveExecutionAliasResultForRequested(auth, requestedModel)
+	aliasResult := m.resolveExecutionAliasResultForRequestedWithRouting(routing, auth, requestedModel)
 	if aliasResult.ForceMapping && auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes[homeForceMappingAttributeKey]), "true") {
 		aliasResult.OriginalAlias = strings.TrimSpace(routeModel)
 	}
@@ -264,7 +271,7 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 		}
 	}
 	if len(candidates) == 0 {
-		if pool := m.resolveOpenAICompatUpstreamModelPool(auth, upstreamModel); len(pool) > 0 {
+		if pool := resolveOpenAICompatUpstreamModelPool(routing.config, auth, upstreamModel); len(pool) > 0 {
 			if len(pool) == 1 {
 				candidates = pool
 			} else {
@@ -272,7 +279,7 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 				candidates = rotateStrings(pool, offset)
 			}
 		} else {
-			resolved := m.applyAPIKeyModelAlias(auth, upstreamModel)
+			resolved := m.applyAPIKeyModelAliasWithRouting(routing, auth, upstreamModel)
 			if strings.TrimSpace(resolved) == "" {
 				resolved = upstreamModel
 			}
@@ -280,7 +287,7 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 		}
 	}
 	pooled := len(candidates) > 1
-	return candidates, pooled, aliasResult
+	return candidates, pooled, aliasResult, routing
 }
 
 func (m *Manager) resolveExecutionAliasResult(auth *Auth, routeModel string) OAuthModelAliasResult {
@@ -289,11 +296,15 @@ func (m *Manager) resolveExecutionAliasResult(auth *Auth, routeModel string) OAu
 }
 
 func (m *Manager) resolveExecutionAliasResultForRequested(auth *Auth, requestedModel string) OAuthModelAliasResult {
+	return m.resolveExecutionAliasResultForRequestedWithRouting(m.loadAPIKeyModelRouting(), auth, requestedModel)
+}
+
+func (m *Manager) resolveExecutionAliasResultForRequestedWithRouting(routing *apiKeyModelRoutingSnapshot, auth *Auth, requestedModel string) OAuthModelAliasResult {
 	if result := homeForceMappingAliasResult(auth, requestedModel); result.ForceMapping {
 		return result
 	}
-	if auth != nil && auth.AuthKind() == AuthKindAPIKey {
-		return m.resolveAPIKeyModelAliasWithResult(auth, requestedModel)
+	if isConfiguredModelRoutingAuth(auth) {
+		return resolveAPIKeyModelAliasWithResult(routing.config, auth, requestedModel)
 	}
 	return m.applyOAuthModelAliasWithResult(auth, requestedModel)
 }
@@ -320,7 +331,7 @@ func homeForceMappingAliasResult(auth *Auth, requestedModel string) OAuthModelAl
 }
 
 func executionAliasPoolModel(auth *Auth, requestedModel string, aliasResult OAuthModelAliasResult) string {
-	if auth != nil && auth.AuthKind() == AuthKindAPIKey {
+	if isConfiguredModelRoutingAuth(auth) {
 		if strings.TrimSpace(requestedModel) != "" {
 			return requestedModel
 		}
@@ -332,16 +343,34 @@ func executionAliasPoolModel(auth *Auth, requestedModel string, aliasResult OAut
 }
 
 func (m *Manager) resolveAPIKeyModelAliasWithResult(auth *Auth, requestedModel string) OAuthModelAliasResult {
-	if m == nil || auth == nil {
+	return resolveAPIKeyModelAliasWithResult(m.loadAPIKeyModelRouting().config, auth, requestedModel)
+}
+
+func resolveAPIKeyModelAliasWithResult(cfg *internalconfig.Config, auth *Auth, requestedModel string) OAuthModelAliasResult {
+	if auth == nil {
 		return OAuthModelAliasResult{}
 	}
 	requestedModel = strings.TrimSpace(requestedModel)
 	if requestedModel == "" {
 		return OAuthModelAliasResult{}
 	}
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
+	}
+	models := configuredModelAliasEntries(cfg, auth)
+	if len(models) == 0 {
+		return OAuthModelAliasResult{UpstreamModel: requestedModel}
+	}
+	result := resolveModelAliasResultFromConfigModels(requestedModel, models)
+	if strings.TrimSpace(result.UpstreamModel) == "" {
+		return OAuthModelAliasResult{UpstreamModel: requestedModel}
+	}
+	return result
+}
+
+func configuredModelAliasEntries(cfg *internalconfig.Config, auth *Auth) []modelAliasEntry {
+	if cfg == nil || auth == nil {
+		return nil
 	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	var models []modelAliasEntry
@@ -378,17 +407,46 @@ func (m *Manager) resolveAPIKeyModelAliasWithResult(auth *Auth, requestedModel s
 			compatName = strings.TrimSpace(auth.Attributes["compat_name"])
 		}
 		if compatName != "" || strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
-			if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider); entry != nil {
+			if entry := resolveOpenAICompatConfigForAuth(cfg, auth, providerKey, compatName); entry != nil {
 				models = asModelAliasEntries(entry.Models)
 			}
 		}
 	}
-	if len(models) == 0 {
-		return OAuthModelAliasResult{UpstreamModel: requestedModel}
+	return models
+}
+
+func resolveModelAliasResultForUpstream(cfg *internalconfig.Config, auth *Auth, requestedModel, upstreamModel string) OAuthModelAliasResult {
+	requestedModel = strings.TrimSpace(requestedModel)
+	upstreamModel = strings.TrimSpace(upstreamModel)
+	if requestedModel == "" || upstreamModel == "" {
+		return OAuthModelAliasResult{}
 	}
-	result := resolveModelAliasResultFromConfigModels(requestedModel, models)
+	requestResult := thinking.ParseSuffix(requestedModel)
+	models := configuredModelAliasEntries(cfg, auth)
+	filtered := make([]modelAliasEntry, 0, 1)
+	for _, model := range models {
+		name := strings.TrimSpace(model.GetName())
+		if name != "" && strings.EqualFold(preserveResolvedModelSuffix(name, requestResult), upstreamModel) {
+			filtered = append(filtered, model)
+		}
+	}
+	if len(filtered) == 0 {
+		return OAuthModelAliasResult{}
+	}
+	return resolveModelAliasResultFromConfigModels(requestedModel, filtered)
+}
+
+func resolveAttemptAliasResult(routing *apiKeyModelRoutingSnapshot, auth *Auth, routeModel, upstreamModel string, fallback OAuthModelAliasResult) OAuthModelAliasResult {
+	if routing == nil || !isConfiguredModelRoutingAuth(auth) {
+		return fallback
+	}
+	requestedModel := rewriteModelForAuth(routeModel, auth)
+	result := resolveModelAliasResultForUpstream(routing.config, auth, requestedModel, upstreamModel)
 	if strings.TrimSpace(result.UpstreamModel) == "" {
-		return OAuthModelAliasResult{UpstreamModel: requestedModel}
+		return fallback
+	}
+	if result.ForceMapping && fallback.ForceMapping && strings.TrimSpace(fallback.OriginalAlias) != "" {
+		result.OriginalAlias = fallback.OriginalAlias
 	}
 	return result
 }
@@ -435,12 +493,12 @@ func (m *Manager) rebuildAPIKeyModelAliasFromRuntimeConfig() {
 	if m == nil {
 		return
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasLocked(cfg)
 }
 
@@ -458,6 +516,7 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 	}
 
 	out := make(apiKeyModelAliasTable)
+	capabilities := make(apiKeyModelCapabilityTable)
 	for _, auth := range m.auths {
 		if auth == nil {
 			continue
@@ -465,7 +524,7 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 		if strings.TrimSpace(auth.ID) == "" {
 			continue
 		}
-		if auth.AuthKind() != AuthKindAPIKey {
+		if !isConfiguredModelRoutingAuth(auth) {
 			continue
 		}
 
@@ -505,7 +564,7 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 				compatName = strings.TrimSpace(auth.Attributes["compat_name"])
 			}
 			if compatName != "" || strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
-				if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider); entry != nil {
+				if entry := resolveOpenAICompatConfigForAuth(cfg, auth, providerKey, compatName); entry != nil {
 					compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 				}
 			}
@@ -514,9 +573,16 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 		if len(byAlias) > 0 {
 			out[auth.ID] = byAlias
 		}
+		if byCapability := compileAPIKeyModelCapabilitiesForAuth(cfg, auth); len(byCapability) > 0 {
+			capabilities[auth.ID] = byCapability
+		}
 	}
 
-	m.apiKeyModelAlias.Store(out)
+	m.apiKeyModelRouting.Store(&apiKeyModelRoutingSnapshot{
+		config:       cfg,
+		aliases:      out,
+		capabilities: capabilities,
+	})
 }
 
 func compileAPIKeyModelAliasForModels[T interface {
@@ -526,42 +592,27 @@ func compileAPIKeyModelAliasForModels[T interface {
 	if out == nil {
 		return
 	}
+	add := func(key, name string) {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			return
+		}
+		if _, exists := out[key]; !exists {
+			out[key] = name
+		}
+	}
 	for i := range models {
 		alias := strings.TrimSpace(models[i].GetAlias())
 		name := strings.TrimSpace(models[i].GetName())
 		if alias == "" || name == "" {
 			continue
 		}
-		aliasKey := strings.ToLower(thinking.ParseSuffix(alias).ModelName)
-		if aliasKey == "" {
-			aliasKey = strings.ToLower(alias)
-		}
-		// Config priority: first alias wins.
-		if _, exists := out[aliasKey]; exists {
-			continue
-		}
-		out[aliasKey] = name
-		// Also allow direct lookup by upstream name (case-insensitive), so lookups on already-upstream
-		// models remain a cheap no-op.
-		nameKey := strings.ToLower(thinking.ParseSuffix(name).ModelName)
-		if nameKey == "" {
-			nameKey = strings.ToLower(name)
-		}
-		if nameKey != "" {
-			if _, exists := out[nameKey]; !exists {
-				out[nameKey] = name
-			}
-		}
-		// Preserve config suffix priority by seeding a base-name lookup when name already has suffix.
-		nameResult := thinking.ParseSuffix(name)
-		if nameResult.HasSuffix {
-			baseKey := strings.ToLower(strings.TrimSpace(nameResult.ModelName))
-			if baseKey != "" {
-				if _, exists := out[baseKey]; !exists {
-					out[baseKey] = name
-				}
-			}
-		}
+		// Exact suffix routes are retained alongside first-entry base fallbacks.
+		add(alias, name)
+		add(thinking.ParseSuffix(alias).ModelName, name)
+		// Direct upstream requests use the same exact-first lookup behavior.
+		add(name, name)
+		add(thinking.ParseSuffix(name).ModelName, name)
 	}
 }
 
@@ -581,7 +632,11 @@ func rewriteModelForAuth(model string, auth *Auth) string {
 }
 
 func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) string {
-	if m == nil || auth == nil {
+	return m.applyAPIKeyModelAliasWithRouting(m.loadAPIKeyModelRouting(), auth, requestedModel)
+}
+
+func (m *Manager) applyAPIKeyModelAliasWithRouting(routing *apiKeyModelRoutingSnapshot, auth *Auth, requestedModel string) string {
+	if auth == nil {
 		return requestedModel
 	}
 
@@ -595,13 +650,12 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 	}
 
 	// Fast path: lookup per-auth mapping table (keyed by auth.ID).
-	if resolved := m.lookupAPIKeyUpstreamModel(auth.ID, requestedModel); resolved != "" {
+	if resolved := lookupAPIKeyUpstreamModel(routing, auth.ID, requestedModel); resolved != "" {
 		return resolved
 	}
 
-	// Slow path: scan config for the matching credential entry and resolve alias.
-	// This acts as a safety net if mappings are stale or auth.ID is missing.
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	// Slow path: scan the same config snapshot used to compile the alias table.
+	cfg := routing.config
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	}
@@ -636,6 +690,8 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 type APIKeyConfigEntry interface {
 	GetAPIKey() string
 	GetBaseURL() string
+	GetPrefix() string
+	GetProxyURL() string
 }
 
 func resolveAPIKeyConfig[T APIKeyConfigEntry](entries []T, auth *Auth) *T {
@@ -644,33 +700,40 @@ func resolveAPIKeyConfig[T APIKeyConfigEntry](entries []T, auth *Auth) *T {
 	}
 	attrKey, attrBase := "", ""
 	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrKey = strings.TrimSpace(auth.Attributes[AttributeAPIKey])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range entries {
-		entry := &entries[i]
-		cfgKey := strings.TrimSpace((*entry).GetAPIKey())
-		cfgBase := strings.TrimSpace((*entry).GetBaseURL())
+	matchesCredentials := func(entry T) bool {
+		cfgKey := strings.TrimSpace(entry.GetAPIKey())
+		cfgBase := strings.TrimSpace(entry.GetBaseURL())
 		if attrKey != "" && attrBase != "" {
-			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
+			return strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase)
 		}
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
+		if attrKey != "" {
+			return strings.EqualFold(cfgKey, attrKey) && (cfgBase == "" || strings.EqualFold(cfgBase, attrBase))
 		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
+		return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
+	}
+	if auth.AuthSourceKind() == AuthSourceConfig && auth.Attributes != nil {
+		if index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[AttributeConfigIndex])); errIndex == nil && index >= 0 && index < len(entries) && matchesCredentials(entries[index]) {
+			return &entries[index]
+		}
+	}
+	for i := range entries {
+		entry := entries[i]
+		if matchesCredentials(entry) && strings.EqualFold(strings.TrimSpace(entry.GetPrefix()), strings.TrimSpace(auth.Prefix)) && strings.EqualFold(strings.TrimSpace(entry.GetProxyURL()), strings.TrimSpace(auth.ProxyURL)) {
+			return &entries[i]
+		}
+	}
+	for i := range entries {
+		if matchesCredentials(entries[i]) {
+			return &entries[i]
 		}
 	}
 	if attrKey != "" {
 		for i := range entries {
-			entry := &entries[i]
-			if strings.EqualFold(strings.TrimSpace((*entry).GetAPIKey()), attrKey) {
-				return entry
+			if strings.EqualFold(strings.TrimSpace(entries[i].GetAPIKey()), attrKey) {
+				return &entries[i]
 			}
 		}
 	}
@@ -777,7 +840,7 @@ func resolveUpstreamModelForOpenAICompatAPIKey(cfg *internalconfig.Config, auth 
 	if compatName == "" && !strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
 		return ""
 	}
-	entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider)
+	entry := resolveOpenAICompatConfigForAuth(cfg, auth, providerKey, compatName)
 	if entry == nil {
 		return ""
 	}
@@ -785,6 +848,22 @@ func resolveUpstreamModelForOpenAICompatAPIKey(cfg *internalconfig.Config, auth 
 }
 
 type apiKeyModelAliasTable map[string]map[string]string
+
+func resolveOpenAICompatConfigForAuth(cfg *internalconfig.Config, auth *Auth, providerKey, compatName string) *internalconfig.OpenAICompatibility {
+	if cfg == nil {
+		return nil
+	}
+	if auth != nil && auth.AuthSourceKind() == AuthSourceConfig && auth.Attributes != nil {
+		if index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[AttributeConfigIndex])); errIndex == nil && index >= 0 && index < len(cfg.OpenAICompatibility) && !cfg.OpenAICompatibility[index].Disabled {
+			return &cfg.OpenAICompatibility[index]
+		}
+	}
+	authProvider := ""
+	if auth != nil {
+		authProvider = auth.Provider
+	}
+	return resolveOpenAICompatConfig(cfg, providerKey, compatName, authProvider)
+}
 
 func resolveOpenAICompatConfig(cfg *internalconfig.Config, providerKey, compatName, authProvider string) *internalconfig.OpenAICompatibility {
 	if cfg == nil {
