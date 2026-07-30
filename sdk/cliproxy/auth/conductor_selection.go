@@ -54,6 +54,7 @@ type requiredAuthKindContextKey struct{}
 type authSelectionEligibility struct {
 	requiredKind     string
 	disallowFreeAuth bool
+	codexBucket      string
 }
 
 func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
@@ -61,7 +62,10 @@ func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Cont
 }
 
 func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecutor.Options) authSelectionEligibility {
-	eligibility := authSelectionEligibility{disallowFreeAuth: disallowFreeAuthFromMetadata(opts.Metadata)}
+	eligibility := authSelectionEligibility{
+		disallowFreeAuth: disallowFreeAuthFromMetadata(opts.Metadata),
+		codexBucket:      codexBucketFromMetadata(opts.Metadata),
+	}
 	if ctx != nil {
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 	}
@@ -75,7 +79,13 @@ func (e authSelectionEligibility) allows(auth *Auth) bool {
 	if e.requiredKind != "" && auth.AuthKind() != e.requiredKind {
 		return false
 	}
-	return !e.disallowFreeAuth || !isFreeCodexAuth(auth)
+	if e.disallowFreeAuth && isFreeCodexAuth(auth) {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") && authBucket(auth) != e.codexBucket {
+		return false
+	}
+	return true
 }
 
 func (m *Manager) syncSchedulerFromSnapshot(auths []*Auth) {

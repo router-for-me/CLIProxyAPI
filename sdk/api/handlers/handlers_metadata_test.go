@@ -41,7 +41,7 @@ func TestGetContextWithCancelCapturesClientRequestMetadata(t *testing.T) {
 func TestRequestExecutionMetadataIncludesExecutionSessionWithoutIdempotencyKey(t *testing.T) {
 	ctx := WithExecutionSessionID(context.Background(), "session-1")
 
-	meta := requestExecutionMetadata(ctx)
+	meta := requestExecutionMetadata(ctx, nil)
 	if got := meta[coreexecutor.ExecutionSessionMetadataKey]; got != "session-1" {
 		t.Fatalf("ExecutionSessionMetadataKey = %v, want %q", got, "session-1")
 	}
@@ -57,7 +57,7 @@ func TestRequestExecutionMetadataIncludesHashedCallerScope(t *testing.T) {
 	ginCtx.Set("userApiKey", "downstream-secret")
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
 
-	meta := requestExecutionMetadata(ctx)
+	meta := requestExecutionMetadata(ctx, nil)
 	got, _ := meta[coreexecutor.CallerScopeMetadataKey].(string)
 	want := coresession.CallerScope("downstream-secret")
 	if got != want {
@@ -79,7 +79,7 @@ func TestRequestExecutionMetadataTraceCallbackWebsocketDetection(t *testing.T) {
 		logging.SetGinRequestID(ginCtx, "1234abcd")
 		ctx := context.WithValue(context.Background(), "gin", ginCtx)
 
-		meta := requestExecutionMetadata(ctx)
+		meta := requestExecutionMetadata(ctx, nil)
 
 		if _, exists := meta[coreexecutor.SelectedAuthIndexCallbackMetadataKey]; exists {
 			t.Fatal("unexpected selected auth index callback for websocket upgrade")
@@ -93,7 +93,7 @@ func TestRequestExecutionMetadataTraceCallbackWebsocketDetection(t *testing.T) {
 		logging.SetGinRequestID(ginCtx, "1234abcd")
 		ctx := context.WithValue(context.Background(), "gin", ginCtx)
 
-		meta := requestExecutionMetadata(ctx)
+		meta := requestExecutionMetadata(ctx, nil)
 
 		if _, exists := meta[coreexecutor.SelectedAuthIndexCallbackMetadataKey]; !exists {
 			t.Fatal("missing selected auth index callback for ordinary HTTP request")
@@ -180,5 +180,37 @@ func TestSetGenerateMetadataHonorsExplicitFalse(t *testing.T) {
 
 	if got := meta[coreexecutor.GenerateMetadataKey]; got != false {
 		t.Fatalf("GenerateMetadataKey = %v, want false", got)
+	}
+}
+
+func TestRequestExecutionMetadataIncludesCodexBucket(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ginCtx.Set("userApiKey", "sk-team-a")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	cfg := &config.SDKConfig{CodexBuckets: map[string]config.CodexBucket{
+		"team-a": {APIKeys: []string{"sk-team-a"}},
+	}}
+
+	meta := requestExecutionMetadata(ctx, cfg)
+	if got, _ := meta[coreexecutor.CodexBucketMetadataKey].(string); got != "team-a" {
+		t.Fatalf("CodexBucketMetadataKey = %q, want team-a", got)
+	}
+}
+
+func TestRequestExecutionMetadataOmitsCodexBucketForUnmappedKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ginCtx.Set("userApiKey", "sk-unmapped")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	cfg := &config.SDKConfig{CodexBuckets: map[string]config.CodexBucket{
+		"team-a": {APIKeys: []string{"sk-team-a"}},
+	}}
+
+	meta := requestExecutionMetadata(ctx, cfg)
+	if _, ok := meta[coreexecutor.CodexBucketMetadataKey]; ok {
+		t.Fatal("unmapped key must not publish a codex bucket")
 	}
 }

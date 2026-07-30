@@ -4,6 +4,11 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import (
+	"fmt"
+	"strings"
+)
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
@@ -51,6 +56,11 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// CodexBuckets maps bucket names to the client API keys assigned to them.
+	// A mapped key only uses codex credentials whose auth file carries the same
+	// top-level "bucket" value; unmapped keys only use unbucketed credentials.
+	CodexBuckets map[string]CodexBucket `yaml:"codex-buckets" json:"codex-buckets"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
@@ -67,6 +77,69 @@ type SDKConfig struct {
 type ClaudeCodeConfig struct {
 	// DisableCloakingModelList disables model ID cloaking in Anthropic model list responses.
 	DisableCloakingModelList bool `yaml:"disable-cloaking-model-list" json:"disable-cloaking-model-list"`
+}
+
+// CodexBucket groups client API keys allowed to use codex credentials tagged
+// with the bucket's name.
+type CodexBucket struct {
+	// APIKeys lists the client API keys mapped to this bucket.
+	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+}
+
+// CodexBucketForAPIKey returns the bucket name the client API key is mapped
+// to, or the empty string when the key is unmapped. Configured keys are
+// trimmed before comparison (matching ValidateCodexBuckets); apiKey is
+// compared as-is since it comes directly from the caller's request.
+func (c *SDKConfig) CodexBucketForAPIKey(apiKey string) string {
+	if c == nil || apiKey == "" {
+		return ""
+	}
+	for name, bucket := range c.CodexBuckets {
+		for _, key := range bucket.APIKeys {
+			if strings.TrimSpace(key) == apiKey {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// CodexBucketForContextValue resolves the codex bucket for a raw context
+// value (typically a gin "userApiKey" context entry) by formatting it and
+// delegating to CodexBucketForAPIKey. It exists so every call site that
+// reads the client API key out of request context (handlers, codex-only
+// side channels) shares one lookup implementation instead of re-deriving
+// it. Returns "" when v is nil or the key is unmapped.
+func (c *SDKConfig) CodexBucketForContextValue(v any) string {
+	if c == nil || v == nil {
+		return ""
+	}
+	return c.CodexBucketForAPIKey(fmt.Sprint(v))
+}
+
+// ValidateCodexBuckets rejects configurations that map one client API key
+// into more than one bucket.
+func (c *SDKConfig) ValidateCodexBuckets() error {
+	if c == nil {
+		return nil
+	}
+	seen := make(map[string]string)
+	for name, bucket := range c.CodexBuckets {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("codex-buckets: bucket name must not be empty or whitespace")
+		}
+		for _, key := range bucket.APIKeys {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			if prev, ok := seen[key]; ok && prev != name {
+				return fmt.Errorf("codex-buckets: an api key is mapped to both bucket %q and bucket %q", prev, name)
+			}
+			seen[key] = name
+		}
+	}
+	return nil
 }
 
 // StreamingConfig holds server streaming behavior configuration.

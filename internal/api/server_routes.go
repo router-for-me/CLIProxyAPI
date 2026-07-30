@@ -257,6 +257,22 @@ func homeSelectionAttemptContext(ctx context.Context, selection *auth.HomeDispat
 	return selection.AttemptContext(ctx)
 }
 
+// codexBucketForContext resolves the codex bucket for the client API key
+// authenticated on this request, or "" when unmapped. This mirrors the
+// primary request pipeline's requestCodexBucket (sdk/api/handlers/handlers.go)
+// so codex-only side channels that bypass that pipeline (e.g. the Codex
+// Alpha Search endpoint below) still honor codex-buckets routing.
+func (s *Server) codexBucketForContext(c *gin.Context) string {
+	if s == nil || s.cfg == nil || c == nil {
+		return ""
+	}
+	value, exists := c.Get("userApiKey")
+	if !exists {
+		return ""
+	}
+	return s.cfg.CodexBucketForContextValue(value)
+}
+
 // codexAlphaSearch forwards the standalone search endpoint used by current
 // Codex clients. Unlike /responses, this payload is already in Codex search
 // format and must not pass through a protocol translator.
@@ -291,6 +307,9 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		return
 	}
 	selectionOpts := coreexecutor.Options{Headers: selectionHeaders, OriginalRequest: body}
+	if bucket := s.codexBucketForContext(c); bucket != "" {
+		selectionOpts.Metadata = map[string]any{coreexecutor.CodexBucketMetadataKey: bucket}
+	}
 	var selection *auth.HomeDispatchSelection
 	var selected *auth.Auth
 	if s.handlers.AuthManager.HomeEnabled() {

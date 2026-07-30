@@ -41,6 +41,23 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Optional: restrict client API keys to named groups ("buckets") of codex accounts.
+# Tag a codex account by adding a top-level "bucket" field to its auth JSON file,
+# e.g. { "bucket": "team-a", ... }. Keys listed under a bucket only use codex
+# accounts tagged with that bucket name; keys not listed anywhere only use
+# untagged codex accounts. A key may appear in at most one bucket.
+# Non-codex providers are unaffected.
+# Bucket names are case-sensitive.
+# When Home control-plane dispatch mode is enabled, bucket filtering is not
+# enforced (selection happens remotely).
+# codex-buckets:
+#   team-a:
+#     api-keys:
+#       - "sk-xxx"
+#   team-b:
+#     api-keys:
+#       - "sk-yyy"
+
 # Enable debug logging
 debug: false
 

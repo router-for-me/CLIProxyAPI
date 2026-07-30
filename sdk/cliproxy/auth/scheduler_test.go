@@ -844,6 +844,72 @@ func TestManagerSelectAuthByKindReturnsErrorWhenUnavailable(t *testing.T) {
 	}
 }
 
+// TestManagerSelectAuthByKindCodexBucketRestrictsToSameBucket exercises the
+// full handler-to-scheduler seam: Options.Metadata[CodexBucketMetadataKey] ->
+// authSelectionEligibilityForRequest -> allows(). It asserts that a request
+// carrying codex_bucket metadata only ever selects codex auths tagged with
+// that same bucket, never the unbucketed default pool or another bucket.
+func TestManagerSelectAuthByKindCodexBucketRestrictsToSameBucket(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	for _, candidate := range []*Auth{
+		{ID: "team-a-1", Provider: "codex", Metadata: map[string]any{"access_token": "token-a1", AttributeBucket: "team-a"}},
+		{ID: "team-a-2", Provider: "codex", Metadata: map[string]any{"access_token": "token-a2", AttributeBucket: "team-a"}},
+		{ID: "team-b-1", Provider: "codex", Metadata: map[string]any{"access_token": "token-b1", AttributeBucket: "team-b"}},
+		{ID: "default-1", Provider: "codex", Metadata: map[string]any{"access_token": "token-default"}},
+	} {
+		if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", candidate.ID, errRegister)
+		}
+	}
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.CodexBucketMetadataKey: "team-a"}}
+	counts := make(map[string]int)
+	for index := 0; index < 20; index++ {
+		selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", AuthKindOAuth, opts)
+		if errSelect != nil {
+			t.Fatalf("SelectAuthByKind() #%d error = %v", index, errSelect)
+		}
+		if selected == nil || (selected.ID != "team-a-1" && selected.ID != "team-a-2") {
+			t.Fatalf("SelectAuthByKind() #%d picked %#v, want a team-a auth only", index, selected)
+		}
+		counts[selected.ID]++
+	}
+	if counts["team-a-1"] == 0 || counts["team-a-2"] == 0 {
+		t.Fatalf("expected round-robin across both team-a auths, got %#v", counts)
+	}
+	if counts["team-b-1"] != 0 || counts["default-1"] != 0 {
+		t.Fatalf("cross-bucket or default-pool auth was selected, got %#v", counts)
+	}
+}
+
+// TestManagerSelectAuthByKindCodexBucketExhaustedReturnsNotFound covers spec
+// requirement 2 (strict isolation): when the requested bucket has no
+// available codex auth, selection must return the existing "no available
+// credentials" style error rather than borrowing an out-of-bucket auth.
+func TestManagerSelectAuthByKindCodexBucketExhaustedReturnsNotFound(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	for _, candidate := range []*Auth{
+		{ID: "team-b-1", Provider: "codex", Metadata: map[string]any{"access_token": "token-b1", AttributeBucket: "team-b"}},
+		{ID: "default-1", Provider: "codex", Metadata: map[string]any{"access_token": "token-default"}},
+	} {
+		if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", candidate.ID, errRegister)
+		}
+	}
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.CodexBucketMetadataKey: "team-a"}}
+	selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", AuthKindOAuth, opts)
+	if selected != nil {
+		t.Fatalf("SelectAuthByKind() auth = %#v, want nil (no cross-bucket borrowing)", selected)
+	}
+	var authErr *Error
+	if !errors.As(errSelect, &authErr) || authErr.Code != "auth_not_found" {
+		t.Fatalf("SelectAuthByKind() error = %#v, want auth_not_found", errSelect)
+	}
+}
+
 func TestManagerSelectAuthByKindRejectsInvalidKind(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", "certificate", cliproxyexecutor.Options{})
