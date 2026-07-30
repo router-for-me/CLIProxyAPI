@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -56,6 +57,8 @@ func (r *Registry) SetPluginHooks(hooks PluginHooks) {
 // "model" field is still updated to match the resolved model name so that
 // client-side prefixes (e.g. "copilot/gpt-5-mini") are not leaked upstream.
 func (r *Registry) TranslateRequest(from, to Format, model string, rawJSON []byte, stream bool) []byte {
+	summaryConfig := thinking.ExtractSummaryConfig(rawJSON, from.String())
+
 	r.mu.RLock()
 	var fn RequestTransform
 	if byTarget, ok := r.requests[from]; ok {
@@ -85,7 +88,10 @@ func (r *Registry) TranslateRequest(from, to Format, model string, rawJSON []byt
 			}
 		}
 	}
-	return body
+	if summaryConfig.Mode == thinking.SummaryUnspecified {
+		return thinking.ClearSummaryConfig(body, to.String())
+	}
+	return thinking.ApplySummaryConfigForModel(body, to.String(), model, summaryConfig)
 }
 
 // HasRequestTransformer indicates whether a request translator exists.

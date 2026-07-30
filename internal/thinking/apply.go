@@ -165,6 +165,12 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	return applyThinking(body, nil, model, fromFormat, toFormat, providerKey, nil, false)
 }
 
+// ApplyThinkingWithSource applies thinking while preserving summary visibility
+// intent extracted from the original client payload before translation.
+func ApplyThinkingWithSource(body, sourceBody []byte, model string, fromFormat string, toFormat string, providerKey string) ([]byte, error) {
+	return applyThinking(body, sourceBody, model, fromFormat, toFormat, providerKey, nil, false)
+}
+
 // ApplyThinkingWithModelInfo applies thinking with the exact configured model
 // definition selected for an API-key execution attempt.
 func ApplyThinkingWithModelInfo(body, sourceBody []byte, model string, fromFormat string, toFormat string, providerKey string, modelInfo *registry.ModelInfo) ([]byte, error) {
@@ -183,6 +189,10 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 	fromFormat = strings.ToLower(strings.TrimSpace(fromFormat))
 	if fromFormat == "" {
 		fromFormat = providerFormat
+	}
+	summaryConfig := ExtractSummaryConfig(body, providerFormat)
+	if len(sourceBody) > 0 {
+		summaryConfig = ExtractSummaryConfig(sourceBody, fromFormat)
 	}
 	// 1. Route check: Get provider applier
 	applier := GetProviderApplier(providerFormat)
@@ -207,11 +217,11 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 	// Unknown models are treated as user-defined so thinking config can still be applied.
 	// The upstream service is responsible for validating the configuration.
 	if IsUserDefinedModel(modelInfo) {
-		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, suffixResult)
+		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, suffixResult, summaryConfig)
 	}
 	if modelInfo.Thinking == nil {
 		config := extractThinkingConfig(body, providerFormat)
-		if hasThinkingConfig(config) {
+		if hasThinkingConfig(config) || summaryConfig.Mode != SummaryUnspecified {
 			log.WithFields(log.Fields{
 				"model":    baseModel,
 				"provider": providerFormat,
@@ -296,8 +306,13 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 		"level":    validated.Level,
 	}).Debug("thinking: processed config to apply |")
 
-	// 6. Apply configuration using provider-specific applier
-	return applier.Apply(body, *validated, modelInfo)
+	// 6. Apply configuration using provider-specific applier, then restore the
+	// source summary intent after suffix processing.
+	applied, err := applier.Apply(body, *validated, modelInfo)
+	if err != nil {
+		return applied, err
+	}
+	return ApplySummaryConfigForModel(applied, providerFormat, baseModel, summaryConfig), nil
 }
 
 func shouldMapConfiguredHighIntent(fromFormat, toFormat string, modelInfo *registry.ModelInfo) bool {
@@ -386,7 +401,7 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 
 // applyUserDefinedModel applies thinking configuration for user-defined models
 // without ThinkingSupport validation.
-func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromFormat, toFormat string, suffixResult SuffixResult) ([]byte, error) {
+func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromFormat, toFormat string, suffixResult SuffixResult, summaryConfig SummaryConfig) ([]byte, error) {
 	// Get model ID for logging
 	modelID := ""
 	if modelInfo != nil {
@@ -447,7 +462,11 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 		"budget":   config.Budget,
 		"level":    config.Level,
 	}).Debug("thinking: processed config to apply |")
-	return applier.Apply(body, config, modelInfo)
+	applied, err := applier.Apply(body, config, modelInfo)
+	if err != nil {
+		return applied, err
+	}
+	return ApplySummaryConfigForModel(applied, toFormat, modelID, summaryConfig), nil
 }
 
 func normalizeUserDefinedConfig(config ThinkingConfig, fromFormat, toFormat string) ThinkingConfig {

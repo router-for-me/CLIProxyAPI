@@ -34,11 +34,11 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	result := stripInteractionsThinkingFields(body)
 	switch config.Mode {
 	case thinking.ModeLevel:
-		return applyInteractionsLevel(result, body, string(config.Level), modelInfo, "auto"), nil
+		return applyInteractionsLevel(result, body, string(config.Level), modelInfo), nil
 	case thinking.ModeBudget:
-		return applyInteractionsBudget(result, body, config.Budget, modelInfo, "auto"), nil
+		return applyInteractionsBudget(result, body, config.Budget, modelInfo), nil
 	case thinking.ModeAuto:
-		return setInteractionsThinkingSummaries(result, body, "auto"), nil
+		return setInteractionsThinkingSummaries(result, body), nil
 	case thinking.ModeNone:
 		return applyInteractionsNone(result, body, config, modelInfo), nil
 	default:
@@ -46,38 +46,38 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	}
 }
 
-func applyInteractionsBudget(result, original []byte, budget int, modelInfo *registry.ModelInfo, summariesFallback string) []byte {
+func applyInteractionsBudget(result, original []byte, budget int, modelInfo *registry.ModelInfo) []byte {
 	level, ok := thinking.ConvertBudgetToLevel(budget)
 	if !ok {
-		return result
+		return setInteractionsThinkingSummaries(result, original)
 	}
 	switch level {
-	case string(thinking.LevelNone):
-		return setInteractionsThinkingSummaries(result, original, "none")
-	case string(thinking.LevelAuto):
-		return setInteractionsThinkingSummaries(result, original, "auto")
+	case string(thinking.LevelNone), string(thinking.LevelAuto):
+		// Thinking amount and summary visibility are independent. Interactions has
+		// no wire-level "none" thinking level, so preserve only explicit summary
+		// intent and otherwise let the target model use its documented default.
+		return setInteractionsThinkingSummaries(result, original)
 	default:
-		return applyInteractionsLevel(result, original, level, modelInfo, summariesFallback)
+		return applyInteractionsLevel(result, original, level, modelInfo)
 	}
 }
 
-func applyInteractionsLevel(result, original []byte, level string, modelInfo *registry.ModelInfo, summariesFallback string) []byte {
+func applyInteractionsLevel(result, original []byte, level string, modelInfo *registry.ModelInfo) []byte {
 	level = normalizeInteractionsLevel(level, modelInfo)
-	if level == "" {
-		return result
+	if level != "" {
+		result, _ = sjson.SetBytes(result, "generation_config.thinking_level", level)
 	}
-	result, _ = sjson.SetBytes(result, "generation_config.thinking_level", level)
-	return setInteractionsThinkingSummaries(result, original, summariesFallback)
+	return setInteractionsThinkingSummaries(result, original)
 }
 
 func applyInteractionsNone(result, original []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) []byte {
 	if config.Level != "" {
-		result = applyInteractionsLevel(result, original, string(config.Level), modelInfo, "none")
-	} else if config.Budget > 0 {
-		result = applyInteractionsBudget(result, original, config.Budget, modelInfo, "none")
+		return applyInteractionsLevel(result, original, string(config.Level), modelInfo)
 	}
-	result, _ = sjson.SetBytes(result, "generation_config.thinking_summaries", "none")
-	return result
+	if config.Budget > 0 {
+		return applyInteractionsBudget(result, original, config.Budget, modelInfo)
+	}
+	return setInteractionsThinkingSummaries(result, original)
 }
 
 func stripInteractionsThinkingFields(body []byte) []byte {
@@ -104,7 +104,7 @@ func stripInteractionsThinkingFields(body []byte) []byte {
 	return result
 }
 
-func setInteractionsThinkingSummaries(result, original []byte, fallback string) []byte {
+func setInteractionsThinkingSummaries(result, original []byte) []byte {
 	if value, okValue := originalInteractionsThinkingSummaries(original); okValue {
 		result, _ = sjson.SetBytes(result, "generation_config.thinking_summaries", value)
 		return result
@@ -112,16 +112,9 @@ func setInteractionsThinkingSummaries(result, original []byte, fallback string) 
 	if includeThoughts, okValue := originalInteractionsIncludeThoughts(original); okValue {
 		value := "none"
 		if includeThoughts {
-			value = fallback
-			if value == "" {
-				value = "auto"
-			}
+			value = "auto"
 		}
 		result, _ = sjson.SetBytes(result, "generation_config.thinking_summaries", value)
-		return result
-	}
-	if fallback != "" {
-		result, _ = sjson.SetBytes(result, "generation_config.thinking_summaries", fallback)
 	}
 	return result
 }
@@ -132,8 +125,12 @@ func originalInteractionsThinkingSummaries(body []byte) (string, bool) {
 		"generation_config.thinkingSummaries",
 	} {
 		value := gjson.GetBytes(body, path)
-		if value.Exists() && value.Type == gjson.String {
-			return strings.ToLower(strings.TrimSpace(value.String())), true
+		if value.Type != gjson.String {
+			continue
+		}
+		switch normalized := strings.ToLower(strings.TrimSpace(value.String())); normalized {
+		case "auto", "none":
+			return normalized, true
 		}
 	}
 	return "", false
@@ -146,9 +143,11 @@ func originalInteractionsIncludeThoughts(body []byte) (bool, bool) {
 		"generation_config.thinkingConfig.include_thoughts",
 		"generation_config.thinkingConfig.includeThoughts",
 	} {
-		value := gjson.GetBytes(body, path)
-		if value.Exists() {
-			return value.Bool(), true
+		switch value := gjson.GetBytes(body, path); value.Type {
+		case gjson.True:
+			return true, true
+		case gjson.False:
+			return false, true
 		}
 	}
 	return false, false
