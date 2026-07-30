@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -67,6 +68,41 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	gotKey2 := gjson.GetBytes(body2, "prompt_cache_key").String()
 	if gotKey2 != expectedKey {
 		t.Fatalf("prompt_cache_key (second call) = %q, want %q", gotKey2, expectedKey)
+	}
+}
+
+func TestCodexOfficialFingerprintCacheHelperIntegration(t *testing.T) {
+	executor := &CodexExecutor{cfg: &config.Config{}}
+	auth := &cliproxyauth.Auth{
+		ID:       "oauth-cache-integration",
+		Metadata: map[string]any{"access_token": "oauth-token"},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol",
+		Payload: []byte(`{"prompt_cache_key":"cache-integration-session"}`),
+	}
+	httpReq, body, identityState, err := executor.cacheHelper(
+		context.Background(),
+		sdktranslator.FormatOpenAIResponse,
+		"https://chatgpt.com/backend-api/codex/responses",
+		auth,
+		req,
+		req.Payload,
+		req.Payload,
+	)
+	if err != nil {
+		t.Fatalf("cacheHelper() error = %v", err)
+	}
+	if !identityState.application.enabled {
+		t.Fatal("cacheHelper() did not assemble official application identity")
+	}
+	profile := registry.GetCodexFingerprintProfile()
+	if got := gjson.GetBytes(body, "client_metadata."+profile.Headers.InstallationID).String(); got == "" {
+		t.Fatal("cacheHelper() body is missing installation identity")
+	}
+	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
+	if got := httpReq.Header.Get(profile.Headers.WindowID); got != identityState.application.windowID {
+		t.Fatalf("window header = %q, want %q", got, identityState.application.windowID)
 	}
 }
 
