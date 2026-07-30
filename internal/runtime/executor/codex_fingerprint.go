@@ -94,7 +94,10 @@ func applyCodexOfficialApplicationIdentity(
 	if parentThreadID == "" {
 		parentThreadID, _ = turnMetadata[profile.MetadataKeys.ParentThreadID].(string)
 	}
-	parentTurnID, _ := turnMetadata[profile.MetadataKeys.ParentTurnID].(string)
+	parentTurnID := clientMetadataString(body, profile.MetadataKeys.ParentTurnID)
+	if parentTurnID == "" {
+		parentTurnID, _ = turnMetadata[profile.MetadataKeys.ParentTurnID].(string)
+	}
 	subagentKind := clientMetadataString(body, profile.Headers.Subagent)
 	if subagentKind == "" {
 		subagentKind, _ = turnMetadata[profile.MetadataKeys.SubagentKind].(string)
@@ -131,6 +134,15 @@ func applyCodexOfficialApplicationIdentity(
 	body = setCodexClientMetadataString(body, profile.MetadataKeys.TurnID, turnID)
 	body = setCodexClientMetadataString(body, profile.Headers.WindowID, windowID)
 	body = setCodexClientMetadataString(body, profile.Headers.TurnMetadata, turnMetadataJSON)
+	if parentThreadID != "" {
+		body = setCodexClientMetadataString(body, profile.Headers.ParentThreadID, parentThreadID)
+	}
+	if parentTurnID != "" {
+		body = setCodexClientMetadataString(body, profile.MetadataKeys.ParentTurnID, parentTurnID)
+	}
+	if subagentKind != "" {
+		body = setCodexClientMetadataString(body, profile.Headers.Subagent, subagentKind)
+	}
 
 	return body, codexApplicationIdentity{
 		enabled:          true,

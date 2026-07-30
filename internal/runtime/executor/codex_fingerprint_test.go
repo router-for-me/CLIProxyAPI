@@ -3,6 +3,7 @@ package executor
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"testing"
 
 	"github.com/google/uuid"
@@ -23,6 +24,7 @@ func TestCodexApplicationIdentityProjectsCanonicalMetadata(t *testing.T) {
 		"client_metadata":{
 			"custom-key":"preserved",
 			"x-codex-parent-thread-id":"parent-thread-a",
+			"parent_turn_id":"parent-turn-a",
 			"x-openai-subagent":"collab_spawn"
 		}
 	}`)
@@ -68,6 +70,7 @@ func TestCodexApplicationIdentityProjectsCanonicalMetadata(t *testing.T) {
 		profile.MetadataKeys.WindowID:       first.windowID,
 		profile.MetadataKeys.RequestKind:    "turn",
 		profile.MetadataKeys.ParentThreadID: "parent-thread-a",
+		profile.MetadataKeys.ParentTurnID:   "parent-turn-a",
 		profile.MetadataKeys.SubagentKind:   "collab_spawn",
 	} {
 		if got, _ := turnMetadata[key].(string); got != want {
@@ -105,6 +108,29 @@ func TestCodexApplicationIdentityProjectsCanonicalMetadata(t *testing.T) {
 	}
 	if second.turnID == first.turnID {
 		t.Fatalf("turn ID was reused: %q", second.turnID)
+	}
+}
+
+func TestCodexApplicationIdentityProjectsCanonicalParentMetadata(t *testing.T) {
+	profile := registry.GetCodexFingerprintProfile()
+	rawMetadata := `{"parent_thread_id":"parent-thread-b","parent_turn_id":"parent-turn-b","subagent_kind":"review"}`
+	body, identity := applyCodexOfficialApplicationIdentity(
+		&config.Config{},
+		&cliproxyauth.Auth{ID: "oauth-parent-projection", Metadata: map[string]any{"access_token": "oauth-token"}},
+		"https://chatgpt.com/backend-api/codex/responses",
+		[]byte(`{"prompt_cache_key":"parent-session","client_metadata":{"`+profile.Headers.TurnMetadata+`":`+strconv.Quote(rawMetadata)+`}}`),
+	)
+	if !identity.enabled {
+		t.Fatal("application identity is disabled")
+	}
+	if got := gjson.GetBytes(body, "client_metadata."+profile.Headers.ParentThreadID).String(); got != "parent-thread-b" {
+		t.Fatalf("parent thread projection = %q", got)
+	}
+	if got := gjson.GetBytes(body, "client_metadata."+profile.MetadataKeys.ParentTurnID).String(); got != "parent-turn-b" {
+		t.Fatalf("parent turn projection = %q", got)
+	}
+	if got := gjson.GetBytes(body, "client_metadata."+profile.Headers.Subagent).String(); got != "review" {
+		t.Fatalf("subagent projection = %q", got)
 	}
 }
 
