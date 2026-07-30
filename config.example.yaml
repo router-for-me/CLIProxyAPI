@@ -225,6 +225,9 @@ codex:
   identity-confuse: false
   # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
   disable-codex-cloaking: false
+  # Disable startup and hourly synchronization of the Codex application fingerprint
+  # from the official OpenAI Codex NPM package and source repository.
+  disable-fingerprint-auto-sync: false
   # When true, optimize Codex Desktop, codex-tui, and codex_cli_rs requests for multi-agent v2.
   # This refreshes Codex spawn_agent model details, removes message parameter encryption,
   # normalizes encrypted agent_message content for Codex, and converts agent_message input

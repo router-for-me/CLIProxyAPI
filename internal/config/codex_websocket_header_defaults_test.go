@@ -41,6 +41,7 @@ func TestLoadConfigOptional_CodexIdentityConfuse(t *testing.T) {
 codex:
   identity-confuse: true
   disable-codex-cloaking: true
+  disable-fingerprint-auto-sync: true
   optimize-multi-agent-v2: true
 `)
 	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
@@ -57,6 +58,9 @@ codex:
 	}
 	if !cfg.Codex.DisableCodexCloaking {
 		t.Fatal("DisableCodexCloaking = false, want true")
+	}
+	if !cfg.Codex.DisableFingerprintAutoSync {
+		t.Fatal("DisableFingerprintAutoSync = false, want true")
 	}
 	if !cfg.Codex.OptimizeMultiAgentV2 {
 		t.Fatalf("OptimizeMultiAgentV2 = false, want true")

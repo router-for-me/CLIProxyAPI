@@ -90,11 +90,13 @@ func TestShouldEnableExampleAPIKeySafeMode(t *testing.T) {
 
 func TestModelCatalogUpdaterPlan(t *testing.T) {
 	tests := []struct {
-		name            string
-		localModel      bool
-		homeEnabled     bool
-		wantModels      bool
-		wantCodexClient bool
+		name               string
+		localModel         bool
+		homeEnabled        bool
+		disableFingerprint bool
+		wantModels         bool
+		wantCodexClient    bool
+		wantFingerprint    bool
 	}{
 		{
 			name:            "normal CPA refreshes both catalogs",
@@ -102,6 +104,7 @@ func TestModelCatalogUpdaterPlan(t *testing.T) {
 			homeEnabled:     false,
 			wantModels:      true,
 			wantCodexClient: true,
+			wantFingerprint: true,
 		},
 		{
 			name:            "home mode keeps models.json local and refreshes codex templates",
@@ -109,6 +112,7 @@ func TestModelCatalogUpdaterPlan(t *testing.T) {
 			homeEnabled:     true,
 			wantModels:      false,
 			wantCodexClient: true,
+			wantFingerprint: true,
 		},
 		{
 			name:            "local-model disables both remote catalogs",
@@ -116,6 +120,7 @@ func TestModelCatalogUpdaterPlan(t *testing.T) {
 			homeEnabled:     false,
 			wantModels:      false,
 			wantCodexClient: false,
+			wantFingerprint: true,
 		},
 		{
 			name:            "local-model disables both remote catalogs even under home",
@@ -123,14 +128,24 @@ func TestModelCatalogUpdaterPlan(t *testing.T) {
 			homeEnabled:     true,
 			wantModels:      false,
 			wantCodexClient: false,
+			wantFingerprint: true,
+		},
+		{
+			name:               "fingerprint sync can be disabled independently",
+			disableFingerprint: true,
+			wantModels:         true,
+			wantCodexClient:    true,
+			wantFingerprint:    false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotModels, gotCodex := modelCatalogUpdaterPlan(tt.localModel, tt.homeEnabled)
-			if gotModels != tt.wantModels || gotCodex != tt.wantCodexClient {
-				t.Fatalf("modelCatalogUpdaterPlan(%v, %v) = (%v, %v), want (%v, %v)",
-					tt.localModel, tt.homeEnabled, gotModels, gotCodex, tt.wantModels, tt.wantCodexClient)
+			gotModels, gotCodex, gotFingerprint := modelCatalogUpdaterPlan(tt.localModel, tt.homeEnabled, tt.disableFingerprint)
+			if gotModels != tt.wantModels || gotCodex != tt.wantCodexClient || gotFingerprint != tt.wantFingerprint {
+				t.Fatalf("modelCatalogUpdaterPlan(%v, %v, %v) = (%v, %v, %v), want (%v, %v, %v)",
+					tt.localModel, tt.homeEnabled, tt.disableFingerprint,
+					gotModels, gotCodex, gotFingerprint,
+					tt.wantModels, tt.wantCodexClient, tt.wantFingerprint)
 			}
 		})
 	}
