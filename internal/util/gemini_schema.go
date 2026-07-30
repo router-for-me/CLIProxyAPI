@@ -218,9 +218,15 @@ func convertConstToEnum(jsonStr string) string {
 	return jsonStr
 }
 
-// convertEnumValuesToStrings ensures all enum values use the string representation required by
-// Gemini's proto schema. Tool schemas also require a string type, while response schemas preserve
-// their declared type because the upstream decoder uses it to select the emitted JSON value type.
+// convertEnumValuesToStrings ensures all enum values use the non-empty string representation
+// required by Gemini's proto schema. Tool schemas also require a string type, while response
+// schemas preserve their declared type because the upstream decoder uses it to select the emitted
+// JSON value type.
+//
+// JSON Schema permits null (and occasionally empty strings) in enum arrays for optional values,
+// but Gemini only accepts non-empty strings. gjson.Result.String() renders null as "", which
+// Gemini rejects with "enum[n]: cannot be empty". Skip those entries; if nothing valid remains,
+// delete the enum keyword instead of emitting an empty array.
 func convertEnumValuesToStrings(jsonStr string, forceStringType bool) string {
 	for _, p := range findPaths(jsonStr, "enum") {
 		arr := gjson.Get(jsonStr, p)
@@ -230,7 +236,16 @@ func convertEnumValuesToStrings(jsonStr string, forceStringType bool) string {
 
 		var stringVals []string
 		for _, item := range arr.Array() {
+			// Null and empty entries become invalid Gemini enum values after stringification.
+			if item.Type == gjson.Null || item.String() == "" {
+				continue
+			}
 			stringVals = append(stringVals, item.String())
+		}
+
+		if len(stringVals) == 0 {
+			jsonStr, _ = sjson.Delete(jsonStr, p)
+			continue
 		}
 
 		updated, _ := sjson.SetBytes([]byte(jsonStr), p, stringVals)
