@@ -54,6 +54,13 @@ const (
 	// candidate slice, short enough that deleted credentials stop consuming
 	// the shared usage-endpoint allowance after a few cycles.
 	quotaTargetExpiry = 15 * time.Minute
+
+	// Claude Code fingerprint for usage polls, mirroring the executor's
+	// defaults in internal/runtime/executor/helps/claude_device_profile.go
+	// (not importable here: import cycle). Keep in sync when those bump.
+	quotaPollUserAgent        = "claude-cli/2.1.63 (external, cli)"
+	quotaPollStainlessPackage = "0.74.0"
+	quotaPollStainlessRuntime = "v24.3.0"
 )
 
 // quotaSnapshot captures the last known usage percentages for one auth.
@@ -392,6 +399,17 @@ func (s *QuotaAwareSelector) fetchQuota(token string) (quotaSnapshot, int, error
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
 	req.Header.Set("anthropic-version", "2023-06-01")
+	// Fingerprint as Claude Code like the executor's OAuth request path does —
+	// the usage endpoint aggressively rate-limits generic clients (Go's
+	// default User-Agent draws immediate 429s). Values mirror the executor's
+	// defaults (internal/runtime/executor/helps/claude_device_profile.go);
+	// that package cannot be imported here without an import cycle.
+	req.Header.Set("User-Agent", quotaPollUserAgent)
+	req.Header.Set("X-App", "cli")
+	req.Header.Set("X-Stainless-Package-Version", quotaPollStainlessPackage)
+	req.Header.Set("X-Stainless-Runtime", "node")
+	req.Header.Set("X-Stainless-Runtime-Version", quotaPollStainlessRuntime)
+	req.Header.Set("X-Stainless-Lang", "js")
 
 	resp, errDo := s.httpClient.Do(req)
 	if errDo != nil {
