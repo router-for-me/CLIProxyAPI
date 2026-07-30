@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
@@ -487,19 +488,54 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 
+	framer := &responsesSSEFramer{}
+	h.forwardInitialResponsesStream(
+		c,
+		flusher,
+		func(err error) { cliCancel(err) },
+		dataChan,
+		errChan,
+		upstreamHeaders,
+		framer,
+		handlers.StreamingKeepAliveInterval(h.Cfg),
+	)
+}
+
+func (h *OpenAIResponsesAPIHandler) forwardInitialResponsesStream(
+	c *gin.Context,
+	flusher http.Flusher,
+	cancel func(error),
+	dataChan <-chan []byte,
+	errChan <-chan *interfaces.ErrorMessage,
+	upstreamHeaders http.Header,
+	framer *responsesSSEFramer,
+	keepAliveInterval time.Duration,
+) {
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
-	framer := &responsesSSEFramer{}
+	var keepAlive *time.Ticker
+	var keepAliveC <-chan time.Time
+	if keepAliveInterval > 0 {
+		keepAlive = time.NewTicker(keepAliveInterval)
+		keepAliveC = keepAlive.C
+	}
+	stopKeepAlive := func() {
+		if keepAlive != nil {
+			keepAlive.Stop()
+			keepAlive = nil
+			keepAliveC = nil
+		}
+	}
+	defer stopKeepAlive()
 
-	// Peek at the first chunk
 	for {
 		select {
 		case <-c.Request.Context().Done():
-			cliCancel(c.Request.Context().Err())
+			cancel(c.Request.Context().Err())
 			return
 		case errMsg, ok := <-errChan:
 			if !ok {
@@ -510,9 +546,9 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			// Upstream failed immediately. Return proper error status and JSON.
 			h.WriteErrorResponse(c, errMsg)
 			if errMsg != nil {
-				cliCancel(errMsg.Error)
+				cancel(errMsg.Error)
 			} else {
-				cliCancel(nil)
+				cancel(nil)
 			}
 			return
 		case chunk, ok := <-dataChan:
@@ -522,7 +558,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 				_, _ = c.Writer.Write([]byte("\n"))
 				flusher.Flush()
-				cliCancel(nil)
+				cancel(nil)
 				return
 			}
 
@@ -535,7 +571,16 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			flusher.Flush()
 
 			// Continue
-			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
+			stopKeepAlive()
+			h.forwardResponsesStream(c, flusher, cancel, dataChan, errChan, framer)
+			return
+		case <-keepAliveC:
+			setSSEHeaders()
+			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+			flusher.Flush()
+			stopKeepAlive()
+			h.forwardResponsesStream(c, flusher, cancel, dataChan, errChan, framer)
 			return
 		}
 	}

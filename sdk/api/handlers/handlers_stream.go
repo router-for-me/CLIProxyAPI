@@ -401,12 +401,17 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	var bootstrapStreamErr error
 	var bootstrapErr *interfaces.ErrorMessage
 	bootstrapPaused := false
+	// A heartbeat may commit HTTP headers before an asynchronous retry finishes.
+	// Keep bootstrap synchronous whenever the selected attempt can change headers.
+	canPauseBootstrap := responseProtocol == "openai-response" &&
+		!passthroughHeadersEnabled &&
+		!streamInterceptorsActive
 	readInitialStreamChunks := func(blockAfterPrefix bool) {
 		bootstrapPaused = false
 		for {
 			var chunk coreexecutor.StreamChunk
 			var ok bool
-			if !blockAfterPrefix && responseProtocol == "openai-response" && len(bootstrapPayloads) > 0 {
+			if !blockAfterPrefix && canPauseBootstrap && len(bootstrapPayloads) > 0 {
 				if ctx != nil {
 					select {
 					case <-ctx.Done():

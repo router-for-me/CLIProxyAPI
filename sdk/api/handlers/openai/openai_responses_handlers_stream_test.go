@@ -1,10 +1,13 @@
 package openai
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
@@ -32,6 +35,17 @@ func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *h
 	return h, recorder, c, flusher
 }
 
+type signalingResponseWriter struct {
+	gin.ResponseWriter
+	flushed chan struct{}
+	once    sync.Once
+}
+
+func (w *signalingResponseWriter) Flush() {
+	w.ResponseWriter.Flush()
+	w.once.Do(func() { close(w.flushed) })
+}
+
 func TestForwardResponsesStreamSeparatesDataOnlySSEChunks(t *testing.T) {
 	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
 
@@ -57,6 +71,92 @@ func TestForwardResponsesStreamSeparatesDataOnlySSEChunks(t *testing.T) {
 	expectedPart2 := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[{\"type\":\"function_call\",\"arguments\":\"{}\"}]}}"
 	if parts[1] != expectedPart2 {
 		t.Errorf("unexpected second event.\nGot: %q\nWant: %q", parts[1], expectedPart2)
+	}
+}
+
+func TestForwardInitialResponsesStreamEmitsKeepAliveBeforeFirstData(t *testing.T) {
+	h, recorder, c, _ := newResponsesStreamTestHandler(t)
+	writer := &signalingResponseWriter{ResponseWriter: c.Writer, flushed: make(chan struct{})}
+	c.Writer = writer
+
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage)
+	go func() {
+		<-writer.flushed
+		data <- []byte(`data: {"type":"response.completed","response":{"id":"resp-1","output":[]}}`)
+		close(data)
+		close(errs)
+	}()
+
+	var canceled error
+	h.forwardInitialResponsesStream(
+		c,
+		writer,
+		func(err error) { canceled = err },
+		data,
+		errs,
+		nil,
+		&responsesSSEFramer{},
+		10*time.Millisecond,
+	)
+
+	if canceled != nil {
+		t.Fatalf("stream canceled with error: %v", canceled)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("content type = %q, want text/event-stream", got)
+	}
+	body := recorder.Body.String()
+	keepAliveIndex := strings.Index(body, ": keep-alive\n\n")
+	dataIndex := strings.Index(body, "data: {")
+	if keepAliveIndex < 0 || dataIndex < 0 || keepAliveIndex >= dataIndex {
+		t.Fatalf("expected keep-alive before delayed first data chunk, got %q", body)
+	}
+}
+
+func TestForwardInitialResponsesStreamUsesSSEErrorAfterKeepAlive(t *testing.T) {
+	h, recorder, c, _ := newResponsesStreamTestHandler(t)
+	writer := &signalingResponseWriter{ResponseWriter: c.Writer, flushed: make(chan struct{})}
+	c.Writer = writer
+
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage)
+	go func() {
+		<-writer.flushed
+		errs <- &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadGateway,
+			Error:      errors.New("upstream failed after bootstrap"),
+		}
+		close(data)
+		close(errs)
+	}()
+
+	var canceled error
+	h.forwardInitialResponsesStream(
+		c,
+		writer,
+		func(err error) { canceled = err },
+		data,
+		errs,
+		nil,
+		&responsesSSEFramer{},
+		10*time.Millisecond,
+	)
+
+	if canceled == nil || canceled.Error() != "upstream failed after bootstrap" {
+		t.Fatalf("cancel error = %v, want upstream bootstrap failure", canceled)
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want committed streaming status 200", recorder.Code)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, ": keep-alive\n\n") ||
+		!strings.Contains(body, "event: error") ||
+		!strings.Contains(body, `"type":"error"`) {
+		t.Fatalf("expected keep-alive followed by Responses SSE error, got %q", body)
+	}
+	if strings.Contains(body, `"error":{`) {
+		t.Fatalf("unexpected non-streaming JSON error after committed keep-alive: %q", body)
 	}
 }
 
