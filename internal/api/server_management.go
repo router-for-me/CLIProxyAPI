@@ -726,13 +726,8 @@ func injectCodexFreeRefreshPatch(html []byte, codexRefreshToken string) []byte {
   }
 
   function isAuthRoute() {
-    var rawLocationText = (window.location.hash || "") + " " + (window.location.pathname || "") + " " + (window.location.search || "");
-    var locationText = normalizeRouteText(rawLocationText);
-    var routeTokens = ["auth files", "/auth", "认证文件", "凭证"];
-    for (var i = 0; i < routeTokens.length; i++) {
-      if (routeHasToken(locationText, normalizeRouteText(routeTokens[i]))) return true;
-    }
-    return activeAuthRouteFromNavigation() || !!findAuthSection();
+    var hash = normalizeRouteText(window.location.hash || "");
+    return routeHasToken(hash, "auth files") || routeHasToken(hash, "/auth") || routeHasToken(hash, "认证文件") || routeHasToken(hash, "凭证");
   }
 
   function activeAuthRouteFromNavigation() {
@@ -1269,8 +1264,7 @@ func injectCodexFreeRefreshPatch(html []byte, codexRefreshToken string) []byte {
     if (!isAuthRoute()) { removeInjectedUI(); return; }
     if (document.getElementById("codex-free-refresh-btn")) return;
 
-    var section = findAuthSection();
-    var target = section || document.body;
+    var target = document.querySelector("main") || document.querySelector("[role='main']") || document.querySelector("[class*='content']") || document.body;
     if (!target) return;
 
     var wrapper = document.createElement("div");
@@ -1402,13 +1396,8 @@ func injectXAIRefreshPatch(html []byte, xaiRefreshToken string) []byte {
   }
 
   function isAuthRoute() {
-    var rawLocationText = (window.location.hash || "") + " " + (window.location.pathname || "") + " " + (window.location.search || "");
-    var locationText = normalizeRouteText(rawLocationText);
-    var routeTokens = ["auth files", "/auth", "认证文件", "凭证"];
-    for (var i = 0; i < routeTokens.length; i++) {
-      if (routeHasToken(locationText, normalizeRouteText(routeTokens[i]))) return true;
-    }
-    return activeAuthRouteFromNavigation() || !!findAuthSection();
+    var hash = normalizeRouteText(window.location.hash || "");
+    return routeHasToken(hash, "auth files") || routeHasToken(hash, "/auth") || routeHasToken(hash, "认证文件") || routeHasToken(hash, "凭证");
   }
 
   function activeAuthRouteFromNavigation() {
@@ -1991,8 +1980,7 @@ func injectXAIRefreshPatch(html []byte, xaiRefreshToken string) []byte {
     if (!isAuthRoute()) { removeInjectedUI(); return; }
     if (document.getElementById("xai-free-refresh-btn")) return;
 
-    var section = findAuthSection();
-    var target = section || document.body;
+    var target = document.querySelector("main") || document.querySelector("[role='main']") || document.querySelector("[class*='content']") || document.body;
     if (!target) return;
 
     var wrapper = document.createElement("div");
