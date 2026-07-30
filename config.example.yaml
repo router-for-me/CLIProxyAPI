@@ -212,6 +212,11 @@ routing:
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
+  # How the session identity used for affinity is derived. Default: "default".
+  # "content-hash" folds a hash of the first message contents into Claude Code
+  # session IDs, so subagents sharing a parent session_id but carrying different
+  # prompts bind to distinct credentials while each conversation stays pinned.
+  session-id-mode: "default" # default, content-hash
 
 # Codex provider behavior.
 codex:

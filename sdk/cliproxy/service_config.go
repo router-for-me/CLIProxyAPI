@@ -28,6 +28,7 @@ type routingRuntimeState struct {
 	strategy           string
 	sessionAffinity    bool
 	sessionAffinityTTL time.Duration
+	sessionIDMode      string
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -51,6 +52,10 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 			state.sessionAffinityTTL = parsed
 		}
 	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Routing.SessionIDMode)) {
+	case coreauth.SessionIDModeContentHash:
+		state.sessionIDMode = coreauth.SessionIDModeContentHash
+	}
 	return state
 }
 
@@ -66,8 +71,9 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 	}
 	if state.sessionAffinity {
 		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
-			Fallback: selector,
-			TTL:      state.sessionAffinityTTL,
+			Fallback:      selector,
+			TTL:           state.sessionAffinityTTL,
+			SessionIDMode: state.sessionIDMode,
 		})
 	}
 	return selector
