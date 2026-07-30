@@ -163,7 +163,9 @@ func applyCodexOfficialApplicationIdentityHeaders(headers http.Header, identity 
 	}
 	setCodexSessionHeaderCasePreserved(headers, profile.Headers.SessionID, identity.sessionID)
 	setHeaderCasePreserved(headers, profile.Headers.ThreadID, identity.threadID)
-	headers.Set(profile.Headers.ClientRequestID, identity.threadID)
+	if identity.websocket {
+		headers.Set(profile.Headers.ClientRequestID, identity.threadID)
+	}
 	headers.Set(profile.Headers.WindowID, identity.windowID)
 	headers.Set(profile.Headers.TurnMetadata, identity.turnMetadataJSON)
 	if identity.requestKind == "compaction" {

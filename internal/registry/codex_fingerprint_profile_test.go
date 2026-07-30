@@ -19,6 +19,9 @@ func TestCodexFingerprintProfileEmbeddedFallback(t *testing.T) {
 	if profile.Headers.InstallationID != "x-codex-installation-id" {
 		t.Fatalf("installation header = %q", profile.Headers.InstallationID)
 	}
+	if profile.Headers.SessionID != "session-id" || profile.Headers.ThreadID != "thread-id" {
+		t.Fatalf("session/thread headers = %q/%q", profile.Headers.SessionID, profile.Headers.ThreadID)
+	}
 	if profile.MetadataKeys.RequestKind != "request_kind" {
 		t.Fatalf("request kind metadata key = %q", profile.MetadataKeys.RequestKind)
 	}
@@ -94,8 +97,8 @@ func validTestCodexFingerprintProfile() CodexFingerprintProfile {
 			Subagent:        "x-openai-subagent",
 			TimingMetrics:   "x-responsesapi-include-timing-metrics",
 			ClientRequestID: "x-client-request-id",
-			SessionID:       "session_id",
-			ThreadID:        "thread_id",
+			SessionID:       "session-id",
+			ThreadID:        "thread-id",
 		},
 		MetadataKeys: CodexFingerprintMetadataKeys{
 			InstallationID:      "installation_id",
