@@ -160,6 +160,76 @@ func TestSessionAffinitySelector_ModelRuleOverridesGlobal(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelector_MixedRouteHonorsProviderRule(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback:    &RoundRobinSelector{},
+		TTL:         time.Minute,
+		MaxRequests: -1,
+		Rules: []SessionAffinityRuleLimit{
+			{Provider: "xai", MaxRequests: 1},
+		},
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a", Provider: "xai"},
+		{ID: "auth-b", Provider: "xai"},
+	}
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_mixed-xai-0000-0000-0000-000000000005"}}`),
+	}
+
+	first, err := selector.Pick(context.Background(), "mixed", "grok-4.5", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick #1 error = %v", err)
+	}
+	second, err := selector.Pick(context.Background(), "mixed", "grok-4.5", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick #2 error = %v", err)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("mixed route should honor provider:xai max-requests=1 and rebind, still got %q", second.ID)
+	}
+}
+
+func TestSessionAffinitySelector_MixedRouteIgnoresOtherProviderRule(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback:    &RoundRobinSelector{},
+		TTL:         time.Minute,
+		MaxRequests: -1,
+		Rules: []SessionAffinityRuleLimit{
+			{Provider: "claude", MaxRequests: 1},
+		},
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a", Provider: "xai"},
+		{ID: "auth-b", Provider: "xai"},
+	}
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_mixed-other-0000-0000-0000-000000000006"}}`),
+	}
+
+	first, err := selector.Pick(context.Background(), "mixed", "grok-4.5", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick #1 error = %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		got, errPick := selector.Pick(context.Background(), "mixed", "grok-4.5", opts, auths)
+		if errPick != nil {
+			t.Fatalf("Pick #%d error = %v", i+2, errPick)
+		}
+		if got.ID != first.ID {
+			t.Fatalf("mixed route bound to xai must ignore claude provider rule, got %q want sticky %q", got.ID, first.ID)
+		}
+	}
+}
+
 func TestSessionCache_GetAndRefreshWithHitsIncrements(t *testing.T) {
 	t.Parallel()
 

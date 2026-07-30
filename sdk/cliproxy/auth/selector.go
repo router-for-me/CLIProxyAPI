@@ -594,7 +594,6 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return nil, err
 	}
 
-	maxRequests := resolveSessionAffinityMaxRequests(s.maxRequests, s.rules, provider, model)
 	cacheKey := provider + "::" + primaryID + "::" + model
 	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
@@ -620,13 +619,17 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		entry.Infof("session-affinity: %s | session=%s auth=%s provider=%s model=%s", reason, truncateSessionID(primaryID), auth.ID, provider, model)
 		return auth, nil
 	}
+	maxRequestsFor := func(auth *Auth) int {
+		return s.resolveMaxRequests(provider, model, auth)
+	}
 
 	if cachedAuthID, hits, ok := s.cache.GetAndRefreshWithHits(cacheKey); ok {
-		if sessionAffinityMaxRequestsExceeded(maxRequests, hits) {
-			return rebind(fmt.Sprintf("max-requests reached (hits=%d max=%d), rebinding", hits, maxRequests))
-		}
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
+				maxRequests := maxRequestsFor(auth)
+				if sessionAffinityMaxRequestsExceeded(maxRequests, hits) {
+					return rebind(fmt.Sprintf("max-requests reached (hits=%d max=%d), rebinding", hits, maxRequests))
+				}
 				if fallbackKey != "" {
 					bind(auth.ID)
 				}
@@ -639,11 +642,12 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 
 	if fallbackKey != "" {
 		if cachedAuthID, hits, ok := s.cache.GetAndRefreshWithHits(fallbackKey); ok {
-			if sessionAffinityMaxRequestsExceeded(maxRequests, hits) {
-				return rebind(fmt.Sprintf("max-requests reached via fallback (hits=%d max=%d), rebinding", hits, maxRequests))
-			}
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
+					maxRequests := maxRequestsFor(auth)
+					if sessionAffinityMaxRequestsExceeded(maxRequests, hits) {
+						return rebind(fmt.Sprintf("max-requests reached via fallback (hits=%d max=%d), rebinding", hits, maxRequests))
+					}
 					bind(auth.ID)
 					entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s hits=%d", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model, hits)
 					return auth, nil
@@ -659,6 +663,19 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	bind(auth.ID)
 	entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	return auth, nil
+}
+
+// resolveMaxRequests picks the effective max-requests for this pick.
+// When the routing key is "mixed", rules are matched against the bound auth's
+// execution provider (e.g. "xai") so provider-specific overrides are not skipped.
+func (s *SessionAffinitySelector) resolveMaxRequests(provider, model string, auth *Auth) int {
+	ruleProvider := provider
+	if strings.EqualFold(strings.TrimSpace(provider), "mixed") && auth != nil {
+		if key := executorKeyFromAuth(auth); key != "" {
+			ruleProvider = key
+		}
+	}
+	return resolveSessionAffinityMaxRequests(s.maxRequests, s.rules, ruleProvider, model)
 }
 
 func selectorLogEntry(ctx context.Context) *log.Entry {
