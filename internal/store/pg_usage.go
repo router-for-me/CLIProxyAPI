@@ -587,6 +587,50 @@ func (s *UsageStore) GetPricing(ctx context.Context, id string) (Pricing, error)
 	return p, nil
 }
 
+// HasRates reports whether the pricing row carries at least one non-zero
+// rate. GetPricing returns an all-zero Pricing for both a missing row and an
+// explicitly all-zero row, so this is the discriminator callers use to decide
+// whether to fall back to an alias (see ResolvePricing).
+func (p Pricing) HasRates() bool {
+	return p.InputPer1M > 0 ||
+		p.OutputPer1M > 0 ||
+		p.CachedInputPer1M > 0 ||
+		p.CachedReadPer1M > 0 ||
+		p.ReasoningPer1M > 0
+}
+
+// ResolvePricing looks up the pricing row for model, falling back to alias
+// when the model's row has no usable rate. Pricing rows are keyed by the
+// client-facing/alias model id (the models_catalog id that /v1/models lists),
+// but usage records carry the resolved upstream model as Model (e.g.
+// "glm-5.2-flex") and the client-requested name as Alias (e.g. "glm-5.2").
+// Looking up the resolved model alone misses when the row was authored under
+// the alias, silently yielding cost=0. The alias fallback closes that gap.
+//
+// Semantics:
+//   - model's row has a rate → returned as-is.
+//   - model's row is all-zero (missing or free) and alias differs → alias's
+//     row is tried; if it has a rate it wins, otherwise the original zero row
+//     is returned (unchanged "missing pricing ⇒ 0" behavior).
+//
+// Safe to call on a nil store (returns zero Pricing, no error).
+func (s *UsageStore) ResolvePricing(ctx context.Context, model, alias string) (Pricing, error) {
+	if s == nil || s.db == nil {
+		return Pricing{}, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	p, err := s.GetPricing(ctx, model)
+	if err != nil {
+		return Pricing{}, err
+	}
+	if p.HasRates() || alias == "" || alias == model {
+		return p, nil
+	}
+	if pa, errAlias := s.GetPricing(ctx, alias); errAlias == nil && pa.HasRates() {
+		return pa, nil
+	}
+	return p, nil
+}
+
 // UpsertPricing inserts or replaces the pricing row for the given model id.
 // Used by the model_pricing management endpoint.
 func (s *UsageStore) UpsertPricing(ctx context.Context, p Pricing) error {
@@ -982,7 +1026,7 @@ type UsageEventRow struct {
 // models_catalog — see eventJoin for the resolution precedence. Rows that
 // have no matching catalog row at all get an empty value here and are left
 // to the best-effort registry resolver in the management layer.
-// api_key_id is COALESCE'd to '' because it is nullable on usage_events
+// api_key_id is COALESCE'd to ” because it is nullable on usage_events
 // (the flusher records only api_key_principal when no api_keys row can be
 // resolved), and it is scanned into a plain string in scanEventRow — a raw
 // NULL would fail the scan.
@@ -1155,6 +1199,12 @@ var ErrUsageEventNotFound = errors.New("postgres store: usage event not found")
 // not requested" (nil pointer). The pricing lookup is deduplicated per model
 // id, so a page of 25 events for the same model costs a single GetPricing
 // round-trip. Safe to call on a nil store — returns nil immediately.
+//
+// Pricing is resolved via ResolvePricing(r.Model, r.Alias) so events whose row
+// is keyed by the client-facing alias (not the resolved upstream model) still
+// get a non-zero breakdown. The cache key is the (model, alias) pair so two
+// events sharing a resolved model but differing in alias can't reuse a wrong
+// alias's resolved row.
 func (s *UsageStore) FillCostBreakdown(ctx context.Context, rows []UsageEventRow) error {
 	if s == nil || s.db == nil || len(rows) == 0 {
 		return nil
@@ -1162,14 +1212,15 @@ func (s *UsageStore) FillCostBreakdown(ctx context.Context, rows []UsageEventRow
 	cache := make(map[string]Pricing, len(rows))
 	for i := range rows {
 		r := &rows[i]
-		p, ok := cache[r.Model]
+		key := r.Model + "\x00" + r.Alias
+		p, ok := cache[key]
 		if !ok {
 			var err error
-			p, err = s.GetPricing(ctx, r.Model)
+			p, err = s.ResolvePricing(ctx, r.Model, r.Alias)
 			if err != nil {
 				return fmt.Errorf("postgres store: fill cost breakdown: %w", err)
 			}
-			cache[r.Model] = p
+			cache[key] = p
 		}
 		b := SegmentCosts(p, r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.CacheCreationTokens)
 		r.CostBreakdown = &b

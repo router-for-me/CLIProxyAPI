@@ -406,7 +406,7 @@ func (r *recordingService) Active() bool { return true }
 func (r *recordingService) Check(_ context.Context, _, _ string) (Decision, error) {
 	return Decision{Allow: true}, nil
 }
-func (r *recordingService) Consume(_ context.Context, _, _ string, tokens TokenCounts) error {
+func (r *recordingService) Consume(_ context.Context, _, _, _ string, tokens TokenCounts) error {
 	r.got = tokens
 	r.calls++
 	return nil

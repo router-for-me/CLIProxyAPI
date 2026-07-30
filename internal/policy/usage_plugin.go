@@ -64,7 +64,7 @@ func (p *usagePlugin) HandleUsage(ctx context.Context, record coreusage.Record) 
 	}
 	consumeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_ = p.svc.Consume(consumeCtx, principal, model, tokens)
+	_ = p.svc.Consume(consumeCtx, principal, model, record.Alias, tokens)
 }
 
 // Compile-time assertion that *usagePlugin satisfies coreusage.Plugin.

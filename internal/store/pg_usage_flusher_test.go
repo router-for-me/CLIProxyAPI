@@ -63,6 +63,62 @@ func TestUsageFlusherHandleUsageQueuesRecord(t *testing.T) {
 	}
 }
 
+// TestUsageFlusherFallsBackToAliasPricing reproduces the reported cost=0 for
+// glm-5.2: pricing rows are keyed by the client-facing alias (glm-5.2), but
+// usage records carry the resolved upstream model as Model (glm-5.2-flex).
+// Before the fix, GetPricing("glm-5.2-flex") missed and cost stayed 0.
+// ResolvePricing must fall back to record.Alias so the alias-keyed row wins.
+//
+// Asserts on the cost_usd persisted to the event row (what the dashboard's
+// Recent Events shows), filtered by the resolved model — the exact reported
+// symptom.
+func TestUsageFlusherFallsBackToAliasPricing(t *testing.T) {
+	store := newTestPostgresStore(t, "flusher_alias_pricing")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+	flusher := NewUsageFlusher(us, nil, FlusherConfig{QueueCap: 10, FlushInterval: time.Hour, FlushBatchSize: 5})
+	if err := flusher.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(flusher.Stop)
+
+	// Pricing authored under the client-facing alias glm-5.2, NOT the
+	// resolved upstream glm-5.2-flex. This is how the catalog sync keys rows.
+	if err := us.UpsertPricing(ctx, Pricing{ID: "glm-5.2", InputPer1M: 1.0, OutputPer1M: 2.0}); err != nil {
+		t.Fatalf("UpsertPricing: %v", err)
+	}
+
+	// Record carries the resolved upstream model (glm-5.2-flex) as Model and
+	// the client-requested name (glm-5.2) as Alias — the real glm-5.2 shape.
+	flusher.HandleUsage(ctx, coreusage.Record{
+		Provider: "zai", Model: "glm-5.2-flex", Alias: "glm-5.2",
+		AuthType: "apikey", Source: "test2",
+		RequestedAt: time.Now().UTC(),
+		Detail: coreusage.Detail{
+			InputTokens: 2_000_000, OutputTokens: 2_000_000,
+			TotalTokens: 4_000_000,
+		},
+	})
+	flusher.Stop()
+
+	rows, _, err := us.SelectEvents(ctx, UsageFilter{Model: "glm-5.2-flex"}, 1, 25)
+	if err != nil {
+		t.Fatalf("SelectEvents: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 event for glm-5.2-flex; got %d", len(rows))
+	}
+	// 2M input @ $1/M + 2M output @ $2/M = 2 + 4 = 6. Before the fix this
+	// was 0 because GetPricing("glm-5.2-flex") missed.
+	if rows[0].CostUSD < 5.99 || rows[0].CostUSD > 6.01 {
+		t.Errorf("cost_usd = %v; want ~6.0 (alias fallback to glm-5.2 pricing)", rows[0].CostUSD)
+	}
+	// Alias must be persisted so the breakdown resolver can fall back too.
+	if rows[0].Alias != "glm-5.2" {
+		t.Errorf("alias = %q; want glm-5.2", rows[0].Alias)
+	}
+}
+
 func TestUsageFlusherDropsOnFullQueue(t *testing.T) {
 	// Use a zero-cap queue via direct construction — we cannot pass cap=0
 	// because NewUsageFlusher falls back to defaults. Instead, set cap=1

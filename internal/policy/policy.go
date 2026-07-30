@@ -131,7 +131,11 @@ type PolicyService interface {
 
 	// Consume records tokens + cost against the budget windows. Called from
 	// the usage plugin sink after the upstream response has been parsed.
-	Consume(ctx context.Context, principal, model string, tokens TokenCounts) error
+	// model is the resolved upstream model (e.g. "glm-5.2-flex"); alias is the
+	// client-requested model name (e.g. "glm-5.2"). Pricing rows are keyed by
+	// the alias-facing catalog id, so Consume resolves cost via the alias
+	// fallback when the resolved model has no pricing row.
+	Consume(ctx context.Context, principal, model, alias string, tokens TokenCounts) error
 
 	// InvalidateKey drops the cached snapshot for the supplied principal.
 	// Called by management handlers after a policy/key mutation so the next

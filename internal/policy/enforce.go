@@ -487,8 +487,10 @@ func (s *service) windowSpent(ctx context.Context, apiKeyID, windowType string, 
 
 // Consume records the supplied tokens+cost against every applicable budget
 // window. The principal is resolved to an api_key_id via the cache (or a
-// fresh lookup if the entry has expired).
-func (s *service) Consume(ctx context.Context, principal, model string, tokens TokenCounts) error {
+// fresh lookup if the entry has expired). alias is the client-requested
+// model name, used as a pricing fallback when the resolved model has no row
+// (see UsageStore.ResolvePricing).
+func (s *service) Consume(ctx context.Context, principal, model, alias string, tokens TokenCounts) error {
 	if !s.Active() || principal == "" {
 		return nil
 	}
@@ -506,11 +508,14 @@ func (s *service) Consume(ctx context.Context, principal, model string, tokens T
 	// Resolve cost when the caller did not supply one. The usage plugin path
 	// passes Cost=0 (it does not have access to the pricing table); computing
 	// it here keeps budget enforcement accurate and the dashboard's
-	// usage-windows cost_usd up to date. Missing pricing ⇒ 0 (same behavior as
-	// ComputeCost), which is safe because checkBudget guards on cap > 0.
+	// usage-windows cost_usd up to date. ResolvePricing falls back to alias
+	// when the resolved model's row has no rate, so budget windows stay
+	// accurate even when pricing is keyed by the alias-facing catalog id.
+	// Missing pricing ⇒ 0 (same behavior as ComputeCost), which is safe
+	// because checkBudget guards on cap > 0.
 	cost := tokens.Cost
 	if cost == 0 && model != "" {
-		if pricing, err := s.usage.GetPricing(ctx, model); err == nil {
+		if pricing, err := s.usage.ResolvePricing(ctx, model, alias); err == nil {
 			cost = computeCostFromTokens(pricing, tokens)
 		}
 	}

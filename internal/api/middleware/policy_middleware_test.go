@@ -41,7 +41,7 @@ func (m *mockPolicyService) Check(_ context.Context, principal, model string) (p
 	return m.checkDecision, nil
 }
 
-func (m *mockPolicyService) Consume(_ context.Context, principal, model string, tokens policy.TokenCounts) error {
+func (m *mockPolicyService) Consume(_ context.Context, principal, model, _ string, tokens policy.TokenCounts) error {
 	m.lastPrincipal = principal
 	m.lastModel = model
 	tc := tokens

@@ -120,6 +120,32 @@ func approxEqual(a, b float64) bool {
 	return d < 1e-6
 }
 
+// TestPricingHasRates guards the discriminator ResolvePricing uses to decide
+// whether to fall back to the alias: a missing row and an explicitly all-zero
+// row both surface as an all-zero Pricing (GetPricing returns zero on miss),
+// so HasRates must report false for both and true for any single non-zero
+// rate. Pure function — no DB.
+func TestPricingHasRates(t *testing.T) {
+	if (Pricing{}).HasRates() {
+		t.Errorf("zero Pricing HasRates = true; want false")
+	}
+	if (Pricing{ID: "m"}).HasRates() {
+		t.Errorf("missing-row Pricing HasRates = true; want false")
+	}
+	cases := []Pricing{
+		{InputPer1M: 0.001},
+		{OutputPer1M: 0.001},
+		{CachedInputPer1M: 0.001},
+		{CachedReadPer1M: 0.001},
+		{ReasoningPer1M: 0.001},
+	}
+	for i, p := range cases {
+		if !p.HasRates() {
+			t.Errorf("case %d: HasRates = false; want true for %+v", i, p)
+		}
+	}
+}
+
 func TestUsageStoreIntegrationSmoke(t *testing.T) {
 	store := newTestPostgresStore(t, "usage_test")
 	ctx := cancelableTestCtx(t)

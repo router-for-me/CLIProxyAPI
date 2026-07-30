@@ -291,13 +291,13 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 		}
 	}
 	// Resolve cost via pricing row; missing pricing → 0 (no revenue lost).
+	// ResolvePricing falls back to record.Alias when the resolved model has
+	// no rate, so events whose pricing row is keyed by the client-facing
+	// alias (e.g. glm-5.2) rather than the resolved upstream model
+	// (e.g. glm-5.2-flex) still get a non-zero cost.
 	var cost float64
 	if us := f.store; us != nil {
-		if pricing, err := us.GetPricing(ctx, model); err == nil {
-			// Use CacheReadTokens when the provider populates it (Anthropic
-			// distinguishes cache-creation vs cache-read tokens). Fall back
-			// to CachedTokens for providers like OpenAI that only emit one
-			// cache counter, treated as cache-read by convention.
+		if pricing, err := us.ResolvePricing(ctx, model, record.Alias); err == nil {
 			cacheRead := record.Detail.CacheReadTokens
 			if cacheRead == 0 {
 				cacheRead = record.Detail.CachedTokens
@@ -371,9 +371,11 @@ func (f *UsageFlusher) toError(ctx context.Context, record coreusage.Record) (Us
 	// have partial token counts (e.g. only input tokens billed before the
 	// upstream errored mid-stream), but we still attribute whatever the
 	// executor observed so the dashboard can surface the partial cost.
+	// ResolvePricing falls back to record.Alias when the resolved model has
+	// no rate (see toEvent).
 	var cost float64
 	if us := f.store; us != nil {
-		if pricing, err := us.GetPricing(ctx, model); err == nil {
+		if pricing, err := us.ResolvePricing(ctx, model, record.Alias); err == nil {
 			cacheRead := record.Detail.CacheReadTokens
 			if cacheRead == 0 {
 				cacheRead = record.Detail.CachedTokens

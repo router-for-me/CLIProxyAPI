@@ -115,7 +115,7 @@ const usageErrorColumnList = `
 // resolved via the api_keys LEFT JOIN. OfficialProvider is resolved via the
 // same three-arm models_catalog LEFT JOIN described on eventJoin, mirroring
 // the events path so the two surfaces agree on official_provider.
-// api_key_id is COALESCE'd to '' because it is nullable on usage_errors
+// api_key_id is COALESCE'd to ” because it is nullable on usage_errors
 // (see eventRowSelectColumns in pg_usage.go for the rationale) and is
 // scanned into a plain string in scanErrorRow.
 const errorRowSelectColumns = `
@@ -354,6 +354,9 @@ var ErrUsageErrorNotFound = errors.New("postgres store: usage error not found")
 // FillCostBreakdownErrors populates the CostBreakdown field on every error row
 // by looking up the model's pricing row, mirroring FillCostBreakdown for
 // events. Safe to call on a nil store — returns nil immediately.
+//
+// Pricing is resolved via ResolvePricing(r.Model, r.Alias) (alias fallback);
+// the cache key is the (model, alias) pair, mirroring FillCostBreakdown.
 func (s *UsageStore) FillCostBreakdownErrors(ctx context.Context, rows []UsageErrorRow) error {
 	if s == nil || s.db == nil || len(rows) == 0 {
 		return nil
@@ -361,14 +364,15 @@ func (s *UsageStore) FillCostBreakdownErrors(ctx context.Context, rows []UsageEr
 	cache := make(map[string]Pricing, len(rows))
 	for i := range rows {
 		r := &rows[i]
-		p, ok := cache[r.Model]
+		key := r.Model + "\x00" + r.Alias
+		p, ok := cache[key]
 		if !ok {
 			var err error
-			p, err = s.GetPricing(ctx, r.Model)
+			p, err = s.ResolvePricing(ctx, r.Model, r.Alias)
 			if err != nil {
 				return fmt.Errorf("postgres store: fill cost breakdown for errors: %w", err)
 			}
-			cache[r.Model] = p
+			cache[key] = p
 		}
 		b := SegmentCosts(p, r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.CacheCreationTokens)
 		r.CostBreakdown = &b
