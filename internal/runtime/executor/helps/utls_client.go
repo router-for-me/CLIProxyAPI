@@ -405,3 +405,82 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	}
 	return client
 }
+
+// NewUTLSWebsocketDialContext creates a TLS dial function that uses a Chrome
+// ClientHello while keeping WebSocket traffic on HTTP/1.1.
+func NewUTLSWebsocketDialContext(proxyURL string) (func(context.Context, string, string) (net.Conn, error), error) {
+	return newUTLSWebsocketDialContext(proxyURL, nil)
+}
+
+func newUTLSWebsocketDialContext(proxyURL string, tlsConfig *tls.Config) (func(context.Context, string, string) (net.Conn, error), error) {
+	baseDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
+	if errBuild != nil {
+		return nil, fmt.Errorf("build websocket proxy dialer: %w", errBuild)
+	}
+	if mode == proxyutil.ModeInherit || baseDialer == nil {
+		baseDialer = proxy.Direct
+	}
+	contextDialer, ok := baseDialer.(proxy.ContextDialer)
+	if !ok {
+		return nil, fmt.Errorf("websocket proxy dialer does not support context cancellation")
+	}
+
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		rawConn, errDial := contextDialer.DialContext(ctx, network, addr)
+		if errDial != nil {
+			return nil, errDial
+		}
+
+		configForConn := &tls.Config{}
+		if tlsConfig != nil {
+			configForConn = tlsConfig.Clone()
+		}
+		host, _, errSplit := net.SplitHostPort(addr)
+		if errSplit != nil {
+			host = addr
+		}
+		configForConn.ServerName = host
+
+		spec, errSpec := codexChromeWebsocketClientHelloSpec()
+		if errSpec != nil {
+			_ = rawConn.Close()
+			return nil, fmt.Errorf("build Chrome websocket ClientHello: %w", errSpec)
+		}
+		tlsConn := tls.UClient(rawConn, configForConn, tls.HelloCustom)
+		if errPreset := tlsConn.ApplyPreset(&spec); errPreset != nil {
+			_ = rawConn.Close()
+			return nil, fmt.Errorf("apply Chrome websocket ClientHello: %w", errPreset)
+		}
+		if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+			_ = rawConn.Close()
+			return nil, fmt.Errorf("Chrome websocket TLS handshake: %w", errHandshake)
+		}
+		return tlsConn, nil
+	}, nil
+}
+
+func codexChromeWebsocketClientHelloSpec() (tls.ClientHelloSpec, error) {
+	spec, errSpec := tls.UTLSIdToSpec(tls.HelloChrome_Auto)
+	if errSpec != nil {
+		return tls.ClientHelloSpec{}, errSpec
+	}
+
+	extensions := make([]tls.TLSExtension, 0, len(spec.Extensions))
+	for _, extension := range spec.Extensions {
+		switch typed := extension.(type) {
+		case *tls.ALPNExtension:
+			typed.AlpnProtocols = []string{"http/1.1"}
+			extensions = append(extensions, typed)
+		case *tls.ApplicationSettingsExtension, *tls.ApplicationSettingsExtensionNew:
+			// ALPS is specific to HTTP/2 or HTTP/3 and conflicts with an HTTP/1.1 upgrade.
+			continue
+		default:
+			extensions = append(extensions, extension)
+		}
+	}
+	spec.Extensions = extensions
+	return spec, nil
+}

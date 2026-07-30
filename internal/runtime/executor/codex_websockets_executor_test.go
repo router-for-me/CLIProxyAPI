@@ -1783,6 +1783,74 @@ func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 	}
 }
 
+func TestNewCodexWebsocketDialerUsesUTLSOnlyForOfficialOAuth(t *testing.T) {
+	t.Parallel()
+
+	official := newCodexWebsocketDialer(
+		&config.Config{},
+		&cliproxyauth.Auth{ID: "oauth-account", Provider: "codex"},
+		"wss://chatgpt.com/backend-api/codex/responses",
+	)
+	if official.NetDialTLSContext == nil {
+		t.Fatal("official OAuth websocket dialer did not install uTLS")
+	}
+	if official.Proxy != nil {
+		t.Fatal("official OAuth websocket proxy must be handled before the uTLS handshake")
+	}
+
+	for _, tc := range []struct {
+		name string
+		auth *cliproxyauth.Auth
+		url  string
+	}{
+		{
+			name: "api key",
+			auth: &cliproxyauth.Auth{ID: "key-account", Provider: "codex", Attributes: map[string]string{"api_key": "sk-test"}},
+			url:  "wss://chatgpt.com/backend-api/codex/responses",
+		},
+		{
+			name: "custom gateway",
+			auth: &cliproxyauth.Auth{ID: "custom-account", Provider: "codex", Attributes: map[string]string{"base_url": "https://gateway.example.com"}},
+			url:  "wss://gateway.example.com/responses",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dialer := newCodexWebsocketDialer(&config.Config{}, tc.auth, tc.url)
+			if dialer.NetDialTLSContext != nil {
+				t.Fatal("non-official websocket dialer unexpectedly installed uTLS")
+			}
+		})
+	}
+}
+
+func TestCodexWebsocketProxySettingUsesAccountThenGlobalProxy(t *testing.T) {
+	t.Parallel()
+
+	got, err := codexWebsocketProxySetting(
+		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global.example.com:8080"}},
+		&cliproxyauth.Auth{ProxyURL: "socks5://account.example.com:1080"},
+		"wss://chatgpt.com/backend-api/codex/responses",
+	)
+	if err != nil {
+		t.Fatalf("codexWebsocketProxySetting returned error: %v", err)
+	}
+	if want := "socks5://account.example.com:1080"; got != want {
+		t.Fatalf("proxy = %q, want account proxy %q", got, want)
+	}
+
+	got, err = codexWebsocketProxySetting(
+		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global.example.com:8080"}},
+		&cliproxyauth.Auth{},
+		"wss://chatgpt.com/backend-api/codex/responses",
+	)
+	if err != nil {
+		t.Fatalf("codexWebsocketProxySetting returned error: %v", err)
+	}
+	if want := "http://global.example.com:8080"; got != want {
+		t.Fatalf("proxy = %q, want global proxy %q", got, want)
+	}
+}
+
 func TestCodexWebsocketUpgradeRequiredDoesNotFallbackToHTTPWithLifecycle(t *testing.T) {
 	var httpFallbackCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
