@@ -32,6 +32,7 @@ type codexApplicationIdentity struct {
 	parentTurnID     string
 	subagentKind     string
 	turnMetadataJSON string
+	websocket        bool
 }
 
 type codexApplicationWindowEntry struct {
@@ -145,6 +146,7 @@ func applyCodexOfficialApplicationIdentity(
 		parentTurnID:     parentTurnID,
 		subagentKind:     subagentKind,
 		turnMetadataJSON: turnMetadataJSON,
+		websocket:        codexApplicationIsWebsocket(requestURL),
 	}
 }
 
@@ -153,6 +155,12 @@ func applyCodexOfficialApplicationIdentityHeaders(headers http.Header, identity 
 		return
 	}
 	profile := identity.profile
+	headers.Set("User-Agent", profile.UserAgent())
+	headers.Set("Originator", profile.Originator)
+	headers.Set("Version", profile.Version)
+	if identity.websocket {
+		headers.Set("OpenAI-Beta", profile.WebsocketBeta)
+	}
 	setCodexSessionHeaderCasePreserved(headers, profile.Headers.SessionID, identity.sessionID)
 	setHeaderCasePreserved(headers, profile.Headers.ThreadID, identity.threadID)
 	headers.Set(profile.Headers.ClientRequestID, identity.threadID)
@@ -167,6 +175,11 @@ func applyCodexOfficialApplicationIdentityHeaders(headers http.Header, identity 
 	if identity.subagentKind != "" {
 		headers.Set(profile.Headers.Subagent, identity.subagentKind)
 	}
+}
+
+func codexApplicationIsWebsocket(requestURL string) bool {
+	parsed, errParse := url.Parse(strings.TrimSpace(requestURL))
+	return errParse == nil && strings.EqualFold(parsed.Scheme, "wss")
 }
 
 func codexOfficialFingerprintScope(cfg *config.Config, auth *cliproxyauth.Auth, requestURL string) bool {

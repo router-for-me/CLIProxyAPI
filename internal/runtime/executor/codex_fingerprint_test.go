@@ -132,6 +132,55 @@ func TestCodexApplicationIdentityMarksCompaction(t *testing.T) {
 	}
 }
 
+func TestApplyCodexOfficialFingerprintHeadersUsesProfile(t *testing.T) {
+	cfg := &config.Config{}
+	auth := &cliproxyauth.Auth{ID: "oauth-software-profile", Metadata: map[string]any{"access_token": "oauth-token"}}
+	_, identity := applyCodexOfficialApplicationIdentity(
+		cfg,
+		auth,
+		"https://chatgpt.com/backend-api/codex/responses",
+		[]byte(`{"prompt_cache_key":"software-profile-session"}`),
+	)
+	headers := http.Header{
+		"User-Agent": {"stale-client/0.1.0"},
+		"Originator": {"stale-client"},
+		"Version":    {"0.1.0"},
+	}
+	applyCodexOfficialApplicationIdentityHeaders(headers, &identity)
+
+	profile := registry.GetCodexFingerprintProfile()
+	if got := headers.Get("User-Agent"); got != profile.UserAgent() {
+		t.Fatalf("User-Agent = %q, want %q", got, profile.UserAgent())
+	}
+	if got := headers.Get("Originator"); got != profile.Originator {
+		t.Fatalf("Originator = %q, want %q", got, profile.Originator)
+	}
+	if got := headers.Get("Version"); got != profile.Version {
+		t.Fatalf("Version = %q, want %q", got, profile.Version)
+	}
+}
+
+func TestApplyCodexWebsocketFingerprintUsesProfile(t *testing.T) {
+	cfg := &config.Config{}
+	auth := &cliproxyauth.Auth{ID: "oauth-ws-profile", Metadata: map[string]any{"access_token": "oauth-token"}}
+	_, identity := applyCodexOfficialApplicationIdentity(
+		cfg,
+		auth,
+		"wss://chatgpt.com/backend-api/codex/responses",
+		[]byte(`{"prompt_cache_key":"ws-profile-session"}`),
+	)
+	headers := http.Header{"OpenAI-Beta": {"responses_websockets=2000-01-01"}}
+	applyCodexOfficialApplicationIdentityHeaders(headers, &identity)
+
+	profile := registry.GetCodexFingerprintProfile()
+	if got := headers.Get("OpenAI-Beta"); got != profile.WebsocketBeta {
+		t.Fatalf("OpenAI-Beta = %q, want %q", got, profile.WebsocketBeta)
+	}
+	if got := headers.Get("Version"); got != profile.Version {
+		t.Fatalf("Version = %q, want %q", got, profile.Version)
+	}
+}
+
 func TestCodexOfficialFingerprintScopeBypassesExcludedRequests(t *testing.T) {
 	tests := []struct {
 		name       string
