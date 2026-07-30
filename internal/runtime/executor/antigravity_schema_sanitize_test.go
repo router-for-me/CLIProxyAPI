@@ -314,7 +314,7 @@ func TestSanitizeAntigravityRequestSchemasPreservesResponseUnionAndEnumType(t *t
 	}
 }
 
-func TestAntigravityBuildRequestKeepsJSONObjectSchemaPlaceholderFree(t *testing.T) {
+func TestAntigravityBuildRequestKeepsJSONObjectMimeOnly(t *testing.T) {
 	input := []byte(`{"model":"gemini-3.1-pro-low","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_object"}}`)
 	translated := antigravitychat.ConvertOpenAIRequestToAntigravity("gemini-3.1-pro-low", input, false)
 	body := buildRequestBodyFromRawPayload(t, "gemini-3.1-pro-low", translated)
@@ -323,12 +323,12 @@ func TestAntigravityBuildRequestKeepsJSONObjectSchemaPlaceholderFree(t *testing.
 		t.Fatal(errMarshal)
 	}
 
-	schema := gjson.GetBytes(encoded, "request.generationConfig.responseSchema")
-	if got := schema.Get("type").String(); got != "object" {
-		t.Fatalf("responseSchema.type = %q, want object: %s", got, encoded)
+	generationConfig := gjson.GetBytes(encoded, "request.generationConfig")
+	if got := generationConfig.Get("responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json: %s", got, encoded)
 	}
-	if schema.Get("properties.reason").Exists() || schema.Get("required").Exists() {
-		t.Fatalf("json_object schema gained tool placeholders: %s", schema.Raw)
+	if generationConfig.Get("responseSchema").Exists() {
+		t.Fatalf("responseSchema should not be set for json_object: %s", encoded)
 	}
 }
 

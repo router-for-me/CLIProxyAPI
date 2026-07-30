@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
 func TestBuildConfigModelsDisplayName(t *testing.T) {
@@ -68,20 +69,32 @@ func TestBuildConfigModelsDisplayName(t *testing.T) {
 	}
 }
 
-func TestBuildCodexConfigModelsOnlyIncludesConfiguredModels(t *testing.T) {
-	models := buildCodexConfigModels(&config.CodexKey{Models: []config.CodexModel{{
+func TestBuildCodexConfigModelsSelectsDefaultsOrConfiguredModels(t *testing.T) {
+	configured := buildCodexConfigModels(&config.CodexKey{Models: []config.CodexModel{{
 		Name: "upstream-codex", Alias: "configured-codex",
 	}}})
-
-	if len(models) != 1 {
-		t.Fatalf("model count = %d, want 1", len(models))
+	if len(configured) != 1 {
+		t.Fatalf("configured model count = %d, want 1", len(configured))
 	}
-	if models[0].ID != "configured-codex" {
-		t.Fatalf("model ID = %q, want configured-codex", models[0].ID)
+	if configured[0].ID != "configured-codex" {
+		t.Fatalf("configured model ID = %q, want configured-codex", configured[0].ID)
 	}
 
-	if models := buildCodexConfigModels(&config.CodexKey{}); len(models) != 0 {
-		t.Fatalf("model count without configuration = %d, want 0", len(models))
+	defaults := buildCodexConfigModels(&config.CodexKey{})
+	wantDefaults := registry.GetCodexProModels()
+	if len(defaults) != len(wantDefaults) {
+		t.Fatalf("default model count = %d, want %d", len(defaults), len(wantDefaults))
+	}
+	defaultIDs := make(map[string]struct{}, len(defaults))
+	for _, model := range defaults {
+		if model != nil {
+			defaultIDs[model.ID] = struct{}{}
+		}
+	}
+	for _, modelID := range []string{"gpt-image-1.5", "gpt-image-2"} {
+		if _, ok := defaultIDs[modelID]; !ok {
+			t.Errorf("missing default model %q", modelID)
+		}
 	}
 }
 

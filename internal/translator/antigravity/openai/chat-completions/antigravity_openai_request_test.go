@@ -332,12 +332,8 @@ func TestConvertOpenAIRequestToAntigravityMapsResponseFormatJSONObject(t *testin
 	if got := gjson.GetBytes(out, "request.generationConfig.responseMimeType").String(); got != "application/json" {
 		t.Fatalf("responseMimeType = %q, want application/json. Output: %s", got, out)
 	}
-	schema := gjson.GetBytes(out, "request.generationConfig.responseSchema")
-	if got := schema.Get("type").String(); got != "object" {
-		t.Fatalf("responseSchema.type = %q, want object. Output: %s", got, out)
-	}
-	if schema.Get("description").Exists() {
-		t.Fatalf("stale responseSchema survived. Output: %s", out)
+	if gjson.GetBytes(out, "request.generationConfig.responseSchema").Exists() {
+		t.Fatalf("responseSchema should not be set for json_object. Output: %s", out)
 	}
 	assertNoResponseSchemaAliases(t, out)
 }

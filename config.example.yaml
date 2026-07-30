@@ -220,6 +220,8 @@ codex:
   # Some superstitious users believe request tracking identifiers can be used
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
+  # Disable forcing the official Codex User-Agent and Originator headers on HTTP requests.
+  disable-codex-cloaking: false
   # When true, optimize Codex Desktop and codex-tui requests for multi-agent v2.
   # This refreshes Codex spawn_agent model details, removes message parameter encryption,
   # normalizes encrypted agent_message content for Codex, and converts agent_message input

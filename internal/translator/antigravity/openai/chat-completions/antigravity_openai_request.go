@@ -82,10 +82,10 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				out, _ = sjson.DeleteBytes(out, "request.generationConfig."+schemaKey)
 			}
 			out, _ = sjson.SetBytes(out, "request.generationConfig.responseMimeType", "application/json")
-			if responseFormatType == "json_object" {
-				out, _ = sjson.SetRawBytes(out, "request.generationConfig.responseSchema", []byte(`{"type":"object"}`))
-			} else if schema := responseFormat.Get("json_schema.schema"); schema.Exists() {
-				out, _ = sjson.SetRawBytes(out, "request.generationConfig.responseSchema", []byte(schema.Raw))
+			if responseFormatType == "json_schema" {
+				if schema := responseFormat.Get("json_schema.schema"); schema.Exists() {
+					out, _ = sjson.SetRawBytes(out, "request.generationConfig.responseSchema", []byte(schema.Raw))
+				}
 			}
 		}
 	}

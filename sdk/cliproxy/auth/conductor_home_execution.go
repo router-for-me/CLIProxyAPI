@@ -81,6 +81,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			lastErr = errPrepare
 			continue
 		}
+		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(preparedAuth, routeModel, upstreamModel, pooled)
 			execReq := req
@@ -107,10 +108,23 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			}
 			var response cliproxyexecutor.Response
 			var errExecute error
-			if countTokens {
-				response, errExecute = selection.Executor.CountTokens(execCtx, preparedAuth, execReq, execOpts)
-			} else {
-				response, errExecute = selection.Executor.Execute(execCtx, preparedAuth, execReq, execOpts)
+			execute := func() (cliproxyexecutor.Response, error) {
+				if countTokens {
+					return selection.Executor.CountTokens(execCtx, preparedAuth, execReq, execOpts)
+				}
+				return selection.Executor.Execute(execCtx, preparedAuth, execReq, execOpts)
+			}
+			response, errExecute = execute()
+			if errExecute != nil {
+				if refreshed, okRefresh, errRefresh := m.tryRefreshExecutionAuthAfterUnauthorized(execCtx, selection.Executor, preparedAuth, errExecute, didRefreshOnUnauthorized, true); errRefresh != nil {
+					errExecute = errRefresh
+				} else if okRefresh {
+					preparedAuth = refreshed
+					m.replaceHomeSelectionAuth(selection, preparedAuth)
+					didRefreshOnUnauthorized = true
+					publishSelectedAuthMetadata(opts.Metadata, preparedAuth)
+					response, errExecute = execute()
+				}
 			}
 			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, Success: errExecute == nil}
 			if errExecute == nil {
