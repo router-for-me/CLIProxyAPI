@@ -28,7 +28,7 @@ const (
 )
 
 func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *cliproxyauth.Auth, wsURL string, headers http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
-	dialer := newProxyAwareWebsocketDialer(e.cfg, auth)
+	dialer := newCodexWebsocketDialer(e.cfg, auth, wsURL)
 	dialer.HandshakeTimeout = codexResponsesWebsocketHandshakeTO
 	dialer.EnableCompression = true
 	if ctx == nil {
@@ -42,6 +42,63 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
 		conn.EnableWriteCompression(false)
 	}
 	return conn, closer, resp, err
+}
+
+func newCodexWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth, wsURL string) *websocket.Dialer {
+	dialer := newProxyAwareWebsocketDialer(cfg, auth)
+	if !codexOfficialFingerprintScope(cfg, auth, wsURL) {
+		return dialer
+	}
+
+	proxyURL, errProxy := codexWebsocketProxySetting(cfg, auth, wsURL)
+	if errProxy != nil {
+		log.Errorf("codex websockets executor: resolve fingerprint proxy failed: %v", errProxy)
+		return dialer
+	}
+	dialTLSContext, errDialer := helps.NewUTLSWebsocketDialContext(proxyURL)
+	if errDialer != nil {
+		log.Errorf("codex websockets executor: create fingerprint TLS dialer failed: %v", errDialer)
+		return dialer
+	}
+
+	// The TLS dialer owns direct/proxy tunnel creation so the Chrome ClientHello
+	// is sent only after the tunnel reaches the Codex endpoint.
+	dialer.Proxy = nil
+	dialer.NetDialTLSContext = dialTLSContext
+	return dialer
+}
+
+func codexWebsocketProxySetting(cfg *config.Config, auth *cliproxyauth.Auth, wsURL string) (string, error) {
+	proxyURL := ""
+	if auth != nil {
+		proxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+	if proxyURL == "" && cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+	if proxyURL != "" {
+		return proxyURL, nil
+	}
+
+	target, errParse := url.Parse(strings.TrimSpace(wsURL))
+	if errParse != nil {
+		return "", errParse
+	}
+	switch strings.ToLower(target.Scheme) {
+	case "wss":
+		target.Scheme = "https"
+	case "ws":
+		target.Scheme = "http"
+	}
+	req := &http.Request{URL: target}
+	environmentProxy, errEnvironment := http.ProxyFromEnvironment(req)
+	if errEnvironment != nil {
+		return "", errEnvironment
+	}
+	if environmentProxy == nil {
+		return "direct", nil
+	}
+	return environmentProxy.String(), nil
 }
 
 func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
