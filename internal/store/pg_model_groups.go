@@ -55,6 +55,20 @@ type ModelGroup struct {
 	// key's usage_events rows for the model. Persisted in the
 	// model_budget_limits JSONB column.
 	ModelBudgetLimits map[string]float64 `json:"model_budget_limits,omitempty"`
+	// DiscountPct is the group-level default discount percentage (0-100)
+	// applied to the computed cost_usd of every request made by keys attached
+	// to this group. A value of 20 means each event's cost is billed at 80% of
+	// the model pricing (cost *= (1 - 20/100)). nil/0 = no discount. Persisted
+	// as the discount_pct NUMERIC(5,2) column. Per-model discounts (see
+	// ModelDiscountPcts) take precedence over this default when both are set.
+	DiscountPct *float64 `json:"discount_pct,omitempty"`
+	// ModelDiscountPcts carries per-model discount percentages that override
+	// the group-level DiscountPct for the listed models. Keys are model ids
+	// (lowercased at enforcement); a missing key falls back to DiscountPct.
+	// Persisted in the model_discount_pcts JSONB column; kept consistent with
+	// ModelRoutes[].DiscountPct by the management handler (the routes carry
+	// the authoritative per-model row), mirroring the cap-maps pattern.
+	ModelDiscountPcts map[string]float64 `json:"model_discount_pcts,omitempty"`
 	Metadata          map[string]any     `json:"metadata,omitempty"`
 	CreatedAt         time.Time          `json:"created_at"`
 	UpdatedAt         time.Time          `json:"updated_at"`
@@ -120,24 +134,33 @@ func (s *ModelGroupStore) Create(ctx context.Context, group ModelGroup) (ModelGr
 	if group.ModelBudgetLimits == nil {
 		group.ModelBudgetLimits = map[string]float64{}
 	}
+	if group.ModelDiscountPcts == nil {
+		group.ModelDiscountPcts = map[string]float64{}
+	}
 	if group.Metadata == nil {
 		group.Metadata = map[string]any{}
 	}
+	// Normalize the group-level discount: clamp to [0,100]; drop (set to nil)
+	// when absent/zero so it is omitted from the JSON response and treated as
+	// "no discount" at enforcement time.
+	group.DiscountPct = normalizeDiscountPct(group.DiscountPct)
 
 	allowedJSON, _ := json.Marshal(normalizeStringSlice(group.AllowedModels))
 	blockedJSON, _ := json.Marshal(normalizeStringSlice(group.BlockedModels))
 	routesJSON, _ := json.Marshal(normalizeModelRoutes(group.ModelRoutes))
 	rpmJSON, _ := json.Marshal(normalizeModelRPMMap(group.ModelRPMLimits))
 	budgetJSON, _ := json.Marshal(normalizeModelBudgetMap(group.ModelBudgetLimits))
+	discountJSON, _ := json.Marshal(normalizeModelDiscountMap(group.ModelDiscountPcts))
 	metaJSON, _ := json.Marshal(group.Metadata)
 
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, name, description, allowed_models, blocked_models, model_routes, model_rpm_limits, model_budget_limits, metadata)
-		VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
+		INSERT INTO %s (id, name, description, allowed_models, blocked_models, model_routes, model_rpm_limits, model_budget_limits, discount_pct, model_discount_pcts, metadata)
+		VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10::jsonb, $11::jsonb)
 	`, s.groupsTable),
 		group.ID, group.Name, nullableString(group.Description),
 		string(allowedJSON), string(blockedJSON), string(routesJSON),
-		string(rpmJSON), string(budgetJSON), string(metaJSON),
+		string(rpmJSON), string(budgetJSON),
+		nullableFloat64Ptr(group.DiscountPct), string(discountJSON), string(metaJSON),
 	); err != nil {
 		if isUniqueViolation(err) {
 			return ModelGroup{}, ErrModelGroupNameTaken
@@ -155,7 +178,9 @@ func (s *ModelGroupStore) Get(ctx context.Context, id string) (ModelGroup, error
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT id, name, COALESCE(description, ''),
 		       allowed_models, blocked_models, model_routes,
-		       model_rpm_limits, model_budget_limits, metadata,
+		       model_rpm_limits, model_budget_limits,
+		       discount_pct, model_discount_pcts,
+		       metadata,
 		       created_at, updated_at
 		FROM %s WHERE id = $1
 	`, s.groupsTable), id)
@@ -180,7 +205,9 @@ func (s *ModelGroupStore) GetByName(ctx context.Context, name string) (ModelGrou
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT id, name, COALESCE(description, ''),
 		       allowed_models, blocked_models, model_routes,
-		       model_rpm_limits, model_budget_limits, metadata,
+		       model_rpm_limits, model_budget_limits,
+		       discount_pct, model_discount_pcts,
+		       metadata,
 		       created_at, updated_at
 		FROM %s WHERE name = $1
 	`, s.groupsTable), name)
@@ -242,7 +269,9 @@ func (s *ModelGroupStore) ListPaged(ctx context.Context, f ModelGroupListFilter)
 	query := fmt.Sprintf(`
 		SELECT id, name, COALESCE(description, ''),
 		       allowed_models, blocked_models, model_routes,
-		       model_rpm_limits, model_budget_limits, metadata,
+		       model_rpm_limits, model_budget_limits,
+		       discount_pct, model_discount_pcts,
+		       metadata,
 		       created_at, updated_at
 		FROM %s g%s
 		ORDER BY %s %s
@@ -277,6 +306,8 @@ type ModelGroupUpdate struct {
 	ModelRoutes       *[]ModelRoute
 	ModelRPMLimits    *map[string]int
 	ModelBudgetLimits *map[string]float64
+	DiscountPct       *float64
+	ModelDiscountPcts *map[string]float64
 	Metadata          *map[string]any
 }
 
@@ -351,6 +382,22 @@ func (s *ModelGroupStore) Update(ctx context.Context, id string, upd ModelGroupU
 			`UPDATE %s SET model_budget_limits = $1::jsonb, updated_at = NOW() WHERE id = $2`, s.groupsTable,
 		), string(budget), id); err != nil {
 			return fmt.Errorf("postgres store: update model group model_budget_limits: %w", err)
+		}
+	}
+	if upd.DiscountPct != nil {
+		nv := normalizeDiscountPct(upd.DiscountPct)
+		if _, err = tx.ExecContext(ctx, fmt.Sprintf(
+			`UPDATE %s SET discount_pct = $1, updated_at = NOW() WHERE id = $2`, s.groupsTable,
+		), nullableFloat64Ptr(nv), id); err != nil {
+			return fmt.Errorf("postgres store: update model group discount_pct: %w", err)
+		}
+	}
+	if upd.ModelDiscountPcts != nil {
+		discount, _ := json.Marshal(normalizeModelDiscountMap(*upd.ModelDiscountPcts))
+		if _, err = tx.ExecContext(ctx, fmt.Sprintf(
+			`UPDATE %s SET model_discount_pcts = $1::jsonb, updated_at = NOW() WHERE id = $2`, s.groupsTable,
+		), string(discount), id); err != nil {
+			return fmt.Errorf("postgres store: update model group model_discount_pcts: %w", err)
 		}
 	}
 	if upd.Metadata != nil {
@@ -502,7 +549,7 @@ func (s *ModelGroupStore) ListAttachments(ctx context.Context, groupID string) (
 	return out, rows.Err()
 }
 
-// scanModelGroup scans the 11-column model_groups row shape shared by Get /
+// scanModelGroup scans the 13-column model_groups row shape shared by Get /
 // GetByName / ListPaged. Accepts both *sql.Row and *sql.Rows via the rowScanner
 // interface so a single helper covers single-row and multi-row reads.
 func scanModelGroup(row rowScanner) (ModelGroup, error) {
@@ -513,12 +560,15 @@ func scanModelGroup(row rowScanner) (ModelGroup, error) {
 		routesJSON   []byte
 		rpmJSON      []byte
 		budgetJSON   []byte
+		discountJSON []byte
 		metadataJSON []byte
 		description  sql.NullString
+		discountPct  sql.NullFloat64
 	)
 	if err := row.Scan(&g.ID, &g.Name, &description,
 		&allowedJSON, &blockedJSON, &routesJSON,
-		&rpmJSON, &budgetJSON, &metadataJSON,
+		&rpmJSON, &budgetJSON,
+		&discountPct, &discountJSON, &metadataJSON,
 		&g.CreatedAt, &g.UpdatedAt); err != nil {
 		return ModelGroup{}, err
 	}
@@ -528,10 +578,15 @@ func scanModelGroup(row rowScanner) (ModelGroup, error) {
 	g.ModelRoutes = decodeModelRoutes(routesJSON)
 	g.ModelRPMLimits = decodeStringIntMap(rpmJSON)
 	g.ModelBudgetLimits = decodeStringFloatMap(budgetJSON)
+	if discountPct.Valid && discountPct.Float64 > 0 {
+		v := discountPct.Float64
+		g.DiscountPct = &v
+	}
+	g.ModelDiscountPcts = decodeStringFloatMap(discountJSON)
 	// Project the persisted cap maps back onto the route entries so API
 	// responses carry rpm_limit / max_budget_usd on each model_routes row
 	// (the operator-facing per-model row shape the dashboard edits).
-	g.ModelRoutes = attachCapsToRoutes(g.ModelRoutes, g.ModelRPMLimits, g.ModelBudgetLimits)
+	g.ModelRoutes = attachCapsToRoutes(g.ModelRoutes, g.ModelRPMLimits, g.ModelBudgetLimits, g.ModelDiscountPcts)
 	if len(metadataJSON) > 0 {
 		_ = json.Unmarshal(metadataJSON, &g.Metadata)
 	}
@@ -541,16 +596,16 @@ func scanModelGroup(row rowScanner) (ModelGroup, error) {
 	return g, nil
 }
 
-// attachCapsToRoutes returns routes with rpm_limit / max_budget_usd filled
-// from the persisted per-model cap maps. Route fields already set win (the
-// store normalizes caps into the maps on write, so this only matters for
-// rows written before the cap columns existed). It also appends cap-only
-// models (caps without a provider pin) as route rows with an empty provider
-// list so the dashboard still shows and can edit them; those rows are
-// filtered back out by the handler validation which only enforces provider
-// rules on rows with providers.
-func attachCapsToRoutes(routes []ModelRoute, rpm map[string]int, budget map[string]float64) []ModelRoute {
-	if len(rpm) == 0 && len(budget) == 0 {
+// attachCapsToRoutes returns routes with rpm_limit / max_budget_usd /
+// discount_pct filled from the persisted per-model cap/discount maps. Route
+// fields already set win (the store normalizes caps into the maps on write,
+// so this only matters for rows written before the cap columns existed). It
+// also appends cap-only / discount-only models (caps without a provider pin)
+// as route rows with an empty provider list so the dashboard still shows and
+// can edit them; those rows are filtered back out by the handler validation
+// which only enforces provider rules on rows with providers.
+func attachCapsToRoutes(routes []ModelRoute, rpm map[string]int, budget, discount map[string]float64) []ModelRoute {
+	if len(rpm) == 0 && len(budget) == 0 && len(discount) == 0 {
 		return routes
 	}
 	out := make([]ModelRoute, 0, len(routes)+2)
@@ -569,10 +624,16 @@ func attachCapsToRoutes(routes []ModelRoute, rpm map[string]int, budget map[stri
 				r.MaxBudgetUSD = &vv
 			}
 		}
+		if r.DiscountPct == nil {
+			if v, ok := discount[r.Model]; ok && v > 0 {
+				vv := v
+				r.DiscountPct = &vv
+			}
+		}
 		out = append(out, r)
 	}
-	// Cap-only models (no provider pin): surface them as route rows so the
-	// dashboard edits caps in one place. Providers stay empty.
+	// Cap/discount-only models (no provider pin): surface them as route rows
+	// so the dashboard edits caps in one place. Providers stay empty.
 	for model, v := range rpm {
 		if v <= 0 {
 			continue
@@ -588,6 +649,10 @@ func attachCapsToRoutes(routes []ModelRoute, rpm map[string]int, budget map[stri
 			bb := b
 			row.MaxBudgetUSD = &bb
 		}
+		if d, ok := discount[model]; ok && d > 0 {
+			dd := d
+			row.DiscountPct = &dd
+		}
 		out = append(out, row)
 	}
 	for model, v := range budget {
@@ -601,6 +666,23 @@ func attachCapsToRoutes(routes []ModelRoute, rpm map[string]int, budget map[stri
 		row := ModelRoute{Model: model, Providers: []string{}}
 		vv := v
 		row.MaxBudgetUSD = &vv
+		if d, ok := discount[model]; ok && d > 0 {
+			dd := d
+			row.DiscountPct = &dd
+		}
+		out = append(out, row)
+	}
+	for model, v := range discount {
+		if v <= 0 {
+			continue
+		}
+		if _, ok := seen[model]; ok {
+			continue
+		}
+		seen[model] = struct{}{}
+		row := ModelRoute{Model: model, Providers: []string{}}
+		vv := v
+		row.DiscountPct = &vv
 		out = append(out, row)
 	}
 	return out
@@ -660,6 +742,56 @@ func normalizeModelBudgetMap(in map[string]float64) map[string]float64 {
 		out[k] = v
 	}
 	return out
+}
+
+// normalizeModelDiscountMap trims model ids and clamps/drops discount
+// percentages outside the valid [0,100] range. A discount of 0 means "no
+// discount" and is dropped (mirrors the cap maps' non-positive = unlimited /
+// no-op convention) so persisted maps only carry meaningful overrides.
+func normalizeModelDiscountMap(in map[string]float64) map[string]float64 {
+	out := map[string]float64{}
+	for k, v := range in {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		if v <= 0 {
+			continue
+		}
+		if v > 100 {
+			v = 100
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// normalizeDiscountPct clamps a group-level discount percentage to the valid
+// range and returns nil when the value is absent/zero (nil propagates as
+// "no discount" through JSON and the enforcement path). Callers pass a
+// pointer so a 0 can be distinguished from "unchanged" in the update flow.
+func normalizeDiscountPct(v *float64) *float64 {
+	if v == nil {
+		return nil
+	}
+	val := *v
+	if val <= 0 {
+		return nil
+	}
+	if val > 100 {
+		val = 100
+	}
+	return &val
+}
+
+// nullableFloat64Ptr converts a *float64 into the value sql driver nullable
+// representation used for NUMERIC columns: nil pointer → NULL, non-nil → the
+// dereferenced float. Mirrors nullableString for the scalar discount column.
+func nullableFloat64Ptr(v *float64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
 }
 
 func groupSortColumn(sortBy string) (string, error) {

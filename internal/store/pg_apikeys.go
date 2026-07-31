@@ -97,6 +97,15 @@ type Policy struct {
 	// Keyed by model id. A missing key = unlimited.
 	ModelRPMLimits    map[string]int     `json:"model_rpm_limits,omitempty"`
 	ModelBudgetLimits map[string]float64 `json:"model_budget_limits,omitempty"`
+	// DiscountPct / ModelDiscountPcts carry the attached model group's
+	// discount when (and only when) a model group is attached. DiscountPct is
+	// the group-level default; ModelDiscountPcts is the per-model override map
+	// keyed by model id (a present key takes precedence over the default).
+	// Populated by the group-override snapshot path; never persisted on the
+	// policy row. Applied to cost_usd at the flusher (events) and in Consume
+	// (budget windows) so both stay in sync.
+	DiscountPct       *float64           `json:"discount_pct,omitempty"`
+	ModelDiscountPcts map[string]float64 `json:"model_discount_pcts,omitempty"`
 	// AllowedIPs / BlockedIPs restrict which source IP addresses may use the
 	// API key. Entries are single IPs ("10.0.0.5") or CIDR ranges
 	// ("10.0.0.0/8", "2001:db8::/32"). BlockedIPs takes precedence: a match
@@ -137,6 +146,11 @@ type ModelRoute struct {
 	// nil or <= 0 means unlimited. Enforced against the SUM(cost_usd) of
 	// the key's usage_events rows for this model (HTTP 402 once exceeded).
 	MaxBudgetUSD *float64 `json:"max_budget_usd,omitempty"`
+	// DiscountPct optionally applies a discount percentage (0-100) to the
+	// computed cost_usd of requests for this model when the route belongs to a
+	// model group. nil or <= 0 means no discount (full price). Takes
+	// precedence over the group-level DiscountPct default when set.
+	DiscountPct *float64 `json:"discount_pct,omitempty"`
 }
 
 // ProviderPriority assigns a priority weight to a single provider within a
@@ -675,7 +689,8 @@ func normalizeModelRoutes(routes []ModelRoute) []ModelRoute {
 			providerSet[key] = struct{}{}
 			providers = append(providers, p)
 		}
-		hasCaps := (r.RPMLimit != nil && *r.RPMLimit > 0) || (r.MaxBudgetUSD != nil && *r.MaxBudgetUSD > 0)
+		hasCaps := (r.RPMLimit != nil && *r.RPMLimit > 0) || (r.MaxBudgetUSD != nil && *r.MaxBudgetUSD > 0) ||
+			(r.DiscountPct != nil && *r.DiscountPct > 0)
 		if len(providers) == 0 && !hasCaps {
 			continue
 		}
@@ -698,6 +713,7 @@ func normalizeModelRoutes(routes []ModelRoute) []ModelRoute {
 			Priorities:   priorities,
 			RPMLimit:     r.RPMLimit,
 			MaxBudgetUSD: r.MaxBudgetUSD,
+			DiscountPct:  r.DiscountPct,
 		})
 	}
 	return out

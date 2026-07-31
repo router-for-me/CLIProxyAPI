@@ -550,6 +550,15 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: create usage_events user_id index: %w", err)
 	}
+	// Backfill the discount_pct column on usage_events. Stamped by the usage
+	// flusher with the resolved model-group discount percentage (0-100; 0/NULL
+	// = none) so the historical cost derivation stays accurate even after a
+	// group's discount is later changed. Idempotent.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS discount_pct NUMERIC(5,2) NOT NULL DEFAULT 0`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter usage_events add discount_pct: %w", err)
+	}
 
 	// usage_errors mirrors usage_events but holds only failed attempts. It is
 	// populated by the usage flusher whenever record.Failed is true. Kept
@@ -651,6 +660,14 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS forwarded_for TEXT`, usageErrorsTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: add usage_errors.forwarded_for column: %w", err)
+	}
+	// Backfill discount_pct on usage_errors so the failed-attempts mirror table
+	// carries the same resolved-group discount column as usage_events. Stamped
+	// by the usage flusher. Idempotent.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS discount_pct NUMERIC(5,2) NOT NULL DEFAULT 0`, usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter usage_errors add discount_pct: %w", err)
 	}
 
 	usageWindowsTable := s.fullTableName(s.cfg.UsageWindowsTable)
@@ -1166,6 +1183,20 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS model_budget_limits JSONB NOT NULL DEFAULT '{}'::jsonb`, modelGroupsTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: alter model_groups add model_budget_limits: %w", err)
+	}
+	// Group-level default discount percentage (0-100) and per-model discount
+	// overrides. Applied to the computed cost_usd of requests made by keys
+	// attached to this group. Nil/0 discount_pct = no discount; a per-model
+	// entry takes precedence over the group default. Idempotent backfill.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS discount_pct NUMERIC(5,2)`, modelGroupsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter model_groups add discount_pct: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS model_discount_pcts JSONB NOT NULL DEFAULT '{}'::jsonb`, modelGroupsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter model_groups add model_discount_pcts: %w", err)
 	}
 	// Backfill model_group_id on api_key_policies (1:1 nullable attachment to
 	// a model group). When set, the group's allowed/blocked lists and routes
