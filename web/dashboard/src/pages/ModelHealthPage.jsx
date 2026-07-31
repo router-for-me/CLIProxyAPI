@@ -8,6 +8,7 @@ import {
   getModelHealthSettings,
   putModelHealthSettings,
   runModelHealthCheckNow,
+  runModelHealthProbe,
 } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
@@ -79,6 +80,16 @@ export default function ModelHealthPage() {
   // a newer last_run_at).
   const [runPending, setRunPending] = useState(false);
 
+  // Per-model "Check now" state: the set of model ids currently being probed
+  // synchronously via POST /model-health/probe/:model. A Set (rather than a
+  // single pending id) so an operator can check several models in quick
+  // succession; each row shows its own spinner + disabled button until its
+  // probe resolves. The backend de-duplicates a duplicate click on the same
+  // row (409 probe_in_flight) — this state mirrors that client-side so the
+  // button is disabled while a request is in flight even without the round
+  // trip.
+  const [probingModels, setProbingModels] = useState(() => new Set());
+
   const filterKey = JSON.stringify({ modelFilter, statusFilter });
   const modelsReq = useAsync(() => getModelHealthModels(), []);
 
@@ -138,6 +149,43 @@ export default function ModelHealthPage() {
     } catch (err) {
       setRunPending(false);
       toast.error(err?.message || 'Failed to trigger health check');
+    }
+  }
+
+  // Probe a single model id synchronously (the per-row "Check now" action).
+  // The backend blocks until the probe completes (~1s) and returns the
+  // recorded row, so we reload the snapshot immediately on success to reflect
+  // the new status / response time / checked_at for that model. A duplicate
+  // click is rejected by the backend (409 probe_in_flight) and surfaced as a
+  // non-blocking info toast rather than the generic error tone.
+  async function handleCheckModel(modelID) {
+    if (!modelID || probingModels.has(modelID)) return;
+    setProbingModels((cur) => {
+      const next = new Set(cur);
+      next.add(modelID);
+      return next;
+    });
+    try {
+      await runModelHealthProbe(modelID);
+      // Snapshot carries the latest status row for this model; reload it so
+      // the row updates inline without waiting for the 15s autorefresh.
+      snapshot.reload();
+      toast.success(`Probe complete for ${modelID}`);
+    } catch (err) {
+      // 409 = a probe for this model was already in flight (double-click or a
+      // concurrent sweep on the same id); surface as info rather than error.
+      const status = err?.status;
+      if (status === 409) {
+        toast.info(err?.message || `A check for ${modelID} is already running`);
+      } else {
+        toast.error(err?.message || `Failed to probe ${modelID}`);
+      }
+    } finally {
+      setProbingModels((cur) => {
+        const next = new Set(cur);
+        next.delete(modelID);
+        return next;
+      });
     }
   }
 
@@ -301,6 +349,8 @@ export default function ModelHealthPage() {
           error={snapshot.error}
           rows={snapshots}
           tz={tz}
+          onCheck={handleCheckModel}
+          probingModels={probingModels}
         />
       </div>
 
@@ -394,13 +444,15 @@ export default function ModelHealthPage() {
 
 // SnapshotTableBody renders the latest per-model health status. Headers are
 // always shown (even when empty) so the table shape stays stable across polls.
-function SnapshotTableBody({ loading, error, rows, tz }) {
+// The trailing Actions column carries the per-row "Check now" button that
+// triggers a synchronous single-model probe (POST /model-health/probe/:model).
+function SnapshotTableBody({ loading, error, rows, tz, onCheck, probingModels }) {
   if (loading) {
     return (
-      <TableShell cols={7}>
+      <TableShell cols={8} actions>
         {Array.from({ length: 4 }).map((_, i) => (
           <tr key={i} className="skeleton-row">
-            {Array.from({ length: 7 }).map((__, j) => (
+            {Array.from({ length: 8 }).map((__, j) => (
               <td key={j}><span className="skeleton-line" /></td>
             ))}
           </tr>
@@ -410,27 +462,41 @@ function SnapshotTableBody({ loading, error, rows, tz }) {
   }
   if (error) return <ErrorBanner error={error} />;
   return (
-    <TableShell cols={7}>
+    <TableShell cols={8} actions>
       {rows.length === 0 && (
         <tr>
-          <td colSpan={7} style={{ textAlign: 'center', padding: '24px 8px' }}>
+          <td colSpan={8} style={{ textAlign: 'center', padding: '24px 8px' }}>
             No probes recorded yet. Click <strong>Run check now</strong> or wait for the next scheduled sweep.
           </td>
         </tr>
       )}
-      {rows.map((r, i) => (
-        <tr key={`${r.model_id}|${i}`}>
-          <td className="mono">{r.model_id || '—'}</td>
-          <td><HealthStatusBadge status={r.status} /></td>
-          <td className="mono">{r.tokens_per_second != null ? r.tokens_per_second.toFixed(1) : '—'}</td>
-          <td className="mono">{r.response_time_ms ? r.response_time_ms.toLocaleString() + 'ms' : '—'}</td>
-          <td className="mono">{r.prompt_tokens || 0}/{r.completion_tokens || 0}</td>
-          <td className="mono">{r.provider || '—'}</td>
-          <td className="mono" title={r.checked_at ? formatInTz(r.checked_at, tz) : ''}>
-            {r.checked_at ? formatInTz(r.checked_at, tz) : '—'}
-          </td>
-        </tr>
-      ))}
+      {rows.map((r, i) => {
+        const id = r.model_id || '';
+        const probing = !!id && probingModels.has(id);
+        return (
+          <tr key={`${id}|${i}`}>
+            <td className="mono">{id || '—'}</td>
+            <td><HealthStatusBadge status={r.status} /></td>
+            <td className="mono">{r.tokens_per_second != null ? r.tokens_per_second.toFixed(1) : '—'}</td>
+            <td className="mono">{r.response_time_ms ? r.response_time_ms.toLocaleString() + 'ms' : '—'}</td>
+            <td className="mono">{r.prompt_tokens || 0}/{r.completion_tokens || 0}</td>
+            <td className="mono">{r.provider || '—'}</td>
+            <td className="mono" title={r.checked_at ? formatInTz(r.checked_at, tz) : ''}>
+              {r.checked_at ? formatInTz(r.checked_at, tz) : '—'}
+            </td>
+            <td>
+              <button
+                className="ghost"
+                onClick={() => onCheck?.(id)}
+                disabled={!id || probing}
+                title={probing ? `Checking ${id}…` : `Probe ${id} now`}
+              >
+                {probing ? 'Checking…' : 'Check now'}
+              </button>
+            </td>
+          </tr>
+        );
+      })}
     </TableShell>
   );
 }
@@ -478,7 +544,7 @@ function HistoryTableBody({ loading, error, events, tz, onRowClick }) {
   );
 }
 
-function TableShell({ children, cols, clickable }) {
+function TableShell({ children, cols, clickable, actions }) {
   return (
     <div style={{ overflowX: 'auto' }}>
       <table className={`table${clickable ? ' table--clickable' : ''}`}>
@@ -491,6 +557,7 @@ function TableShell({ children, cols, clickable }) {
             <th>Tokens (in/out)</th>
             <th>Provider</th>
             <th>Checked</th>
+            {actions && <th style={{ textAlign: 'right' }}>Actions</th>}
           </tr>
         </thead>
         <tbody>{children}</tbody>

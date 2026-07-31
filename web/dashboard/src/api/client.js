@@ -450,6 +450,17 @@ export async function runModelHealthCheckNow() {
   return fetchJSON('/model-health/run', { method: 'POST' });
 }
 
+// Probe a single model id synchronously (the per-row "Check now" action on the
+// Latest Status table). Blocks until the probe completes (~1s) and returns the
+// recorded row so the UI can update the row inline without waiting for the 15s
+// snapshot poll. Returns { row }. A duplicate in-flight probe is rejected with
+// 409 probe_in_flight. modelID is URL-encoded so model ids containing dots /
+// slashes route correctly to the :model param.
+export async function runModelHealthProbe(modelID) {
+  const encoded = encodeURIComponent(String(modelID || ''));
+  return fetchJSON(`/model-health/probe/${encoded}`, { method: 'POST' });
+}
+
 // Distinct { api_keys: [{id, alias}], providers, models } observed in the
 // filter window. Used by the dashboard to populate dropdown filter menus so
 // the operator never types a free-text value (which is impossible against

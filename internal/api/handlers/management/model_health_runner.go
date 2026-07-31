@@ -36,6 +36,44 @@ const modelHealthSlowTPS = 1.0
 // a long sweep (many models) plus a "Run now" click does not double up.
 var modelHealthSweepRunning sync.Mutex
 
+// modelHealthProbeInflight de-duplicates concurrent per-model probes triggered
+// via POST /model-health/probe/:model so a rapid double-click (or a refresh
+// racing a click) does not fire two probes for the same model id at once. It is
+// independent of modelHealthSweepRunning: a per-model probe is allowed to run
+// alongside an in-flight sweep (the sweep probes each model sequentially and
+// the two simply both record a result; last writer wins the snapshot). Only a
+// second per-model probe for the SAME id is rejected (409). Keyed by the
+// lowercased, trimmed model id.
+var (
+	modelHealthProbeMu       sync.Mutex
+	modelHealthProbeInflight = make(map[string]struct{})
+)
+
+// tryAcquireModelProbe marks modelID as having an in-flight per-model probe.
+// Returns false when one is already running for that id (or the id is empty).
+// Always paired with a matching releaseModelProbe via defer.
+func tryAcquireModelProbe(modelID string) bool {
+	key := strings.ToLower(strings.TrimSpace(modelID))
+	if key == "" {
+		return false
+	}
+	modelHealthProbeMu.Lock()
+	defer modelHealthProbeMu.Unlock()
+	if _, ok := modelHealthProbeInflight[key]; ok {
+		return false
+	}
+	modelHealthProbeInflight[key] = struct{}{}
+	return true
+}
+
+// releaseModelProbe clears the in-flight marker set by tryAcquireModelProbe.
+func releaseModelProbe(modelID string) {
+	key := strings.ToLower(strings.TrimSpace(modelID))
+	modelHealthProbeMu.Lock()
+	delete(modelHealthProbeInflight, key)
+	modelHealthProbeMu.Unlock()
+}
+
 // modelHealthLastRunAt records when the most recent sweep completed. Surfaced
 // via GET /v0/management/model-health so the dashboard can show "last checked
 // N ago" without paging the log. Guarded by modelHealthLastRunMu.
@@ -139,6 +177,49 @@ func (h *Handler) runHealthChecks(ctx context.Context) {
 		successCount+degradedCount+failCount, successCount, degradedCount, failCount, skippedCount)
 	recordModelHealthRun(time.Now(), summary)
 	log.WithField("elapsed", time.Since(started).String()).WithField("summary", summary).Debug("model health: sweep completed")
+}
+
+// ProbeSingleModel runs one synchronous health probe for a single model id and
+// persists the outcome, returning the recorded ModelHealthRow. It is the
+// backend for POST /v0/management/model-health/probe/:model (operator "Check
+// now" per row on the Latest Status table).
+//
+// Unlike runHealthChecks it intentionally ignores the excluded_models set: a
+// per-row check is an explicit operator action, so it should probe even a
+// model that has been excluded from the scheduled sweep (the result row is
+// still written and surfaced via GET /model-health, mirroring the read-time
+// filter that hides excluded models — so an excluded model re-checked this way
+// is visible again until the next snapshot for it is overwritten). The sweep
+// itself still skips excluded models; this only affects the manual probe.
+//
+// A per-id in-flight guard (tryAcquireModelProbe) prevents two concurrent
+// probes for the same model id (e.g. a double-click racing a refresh) from
+// both spending upstream quota; the second is rejected with an error the
+// handler maps to 409 Conflict. The probe uses settings.MaxTokens (read fresh
+// so an operator's change applies immediately) and the same bounded-time
+// probe + persist contexts as the scheduled sweep.
+func (h *Handler) ProbeSingleModel(ctx context.Context, modelID string) (store.ModelHealthRow, error) {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return store.ModelHealthRow{}, fmt.Errorf("model id is required")
+	}
+	mhs, settings, ok := h.modelHealthProbeContext(ctx)
+	if !ok {
+		return store.ModelHealthRow{}, fmt.Errorf("model health is not enabled (PostgreSQL store is not configured)")
+	}
+	if !tryAcquireModelProbe(modelID) {
+		return store.ModelHealthRow{}, fmt.Errorf("a check for model %q is already in progress", modelID)
+	}
+	defer releaseModelProbe(modelID)
+
+	row := h.probeModel(ctx, modelID, settings.MaxTokens)
+	persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := mhs.RecordResult(persistCtx, row); err != nil {
+		log.WithError(err).WithField("model", modelID).Debug("model health: record result failed")
+		return row, fmt.Errorf("record result failed: %w", err)
+	}
+	return row, nil
 }
 
 // modelHealthProbeContext resolves the store + current settings, returning

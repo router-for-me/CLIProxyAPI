@@ -321,6 +321,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/model-health/settings", s.mgmt.PutModelHealthSettings)
 		mgmt.PATCH("/model-health/settings", s.mgmt.PutModelHealthSettings)
 		mgmt.POST("/model-health/run", s.mgmt.RunModelHealthCheckNow)
+		// Probe a single model id synchronously (the per-row "Check now" action
+		// on the Latest Status table). Ignores the excluded_models set so an
+		// operator can re-check a model the scheduled sweep skips.
+		mgmt.POST("/model-health/probe/:model", s.mgmt.RunModelHealthProbe)
 		mgmt.GET("/model-health/log", s.mgmt.ListModelHealthLog)
 		mgmt.DELETE("/model-health/log", s.mgmt.ClearModelHealthLog)
 		mgmt.GET("/model-health/log/:id", s.mgmt.GetModelHealthLogEntry)

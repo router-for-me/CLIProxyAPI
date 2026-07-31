@@ -412,3 +412,56 @@ func (h *Handler) RunModelHealthCheckNow(c *gin.Context) {
 		"last_run_summary": prevSummary,
 	})
 }
+
+// RunModelHealthProbe handles POST /v0/management/model-health/probe/:model.
+//
+// Runs one synchronous health probe for a single model id (the operator "Check
+// now" action on a Latest Status row) and returns the recorded row. Unlike the
+// async full sweep (POST /model-health/run), this blocks until the probe
+// completes because a single tiny inference request is fast (typically <1s) and
+// the dashboard can update the row inline once the call resolves — no 15s poll.
+//
+// The probe respects the live operator settings (max_tokens, read fresh) but
+// deliberately ignores the excluded_models list: an explicit per-row check is
+// allowed to re-probe a model the scheduled sweep skips (ProbeSingleModel).
+// A second concurrent probe for the same model id is rejected with 409 (the
+// in-flight guard prevents a double-click from spending quota twice). Errors
+// that mention an in-flight check mirror the "already in progress" message as
+// 409 to distinguish them from upstream probe failures (still 200 + the row,
+// which carries status=unavailable + error_message).
+func (h *Handler) RunModelHealthProbe(c *gin.Context) {
+	if _, ok := h.requireModelHealth(c); !ok {
+		return
+	}
+	modelID := strings.TrimSpace(c.Param("model"))
+	if modelID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"type": "invalid_request", "message": "model id is required",
+		}})
+		return
+	}
+	// Bound the probe so a hung upstream does not pin the request (mirrors the
+	// sweep's modelHealthProbeTimeout). The probe itself enforces a per-call
+	// timeout internally; this bounds the wait room around it.
+	probeCtx, cancel := context.WithTimeout(c.Request.Context(), modelHealthProbeTimeout+5*time.Second)
+	defer cancel()
+	row, err := h.ProbeSingleModel(probeCtx, modelID)
+	if err != nil {
+		// Distinguish an in-flight collision (409) from real failures (500).
+		// ProbeSingleModel returns a wrapped "already in progress" error for a
+		// duplicate; surface that as 409 so the UI can show a helpful message.
+		if strings.Contains(err.Error(), "already in progress") {
+			c.JSON(http.StatusConflict, gin.H{"error": gin.H{
+				"type": "probe_in_flight", "message": err.Error(),
+			}})
+			return
+		}
+		// A persist failure still surfaces a 500: the probe ran but the result
+		// could not be recorded, which the operator should see explicitly.
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+			"type": "internal_error", "message": err.Error(),
+		}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"row": row})
+}
