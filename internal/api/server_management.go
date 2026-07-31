@@ -238,6 +238,15 @@ func (s *Server) registerManagementRoutes() {
 		// existing POST /v0/management/reset-quota route with auth_index.
 		mgmt.GET("/cooldown-providers", s.mgmt.GetCooldownProviders)
 
+		// Live view of the in-memory session→auth affinity cache. Read-only
+		// snapshot plus a per-session revoke escape hatch for sessions pinned
+		// to a stuck/erroring auth that the lazy failover has not yet
+		// migrated. Sourced from the auth manager's active selector (per-
+		// process, not persisted). Reports affinity_enabled=false when
+		// routing.session-affinity is disabled.
+		mgmt.GET("/session-affinity", s.mgmt.GetSessionAffinity)
+		mgmt.POST("/session-affinity/revoke", s.mgmt.RevokeSessionAffinity)
+
 		// Operator-customizable error response text, keyed by HTTP status code.
 		// The preview route is POST because it accepts a candidate body to
 		// render (GET would conflict with the "/:code" pattern and has no

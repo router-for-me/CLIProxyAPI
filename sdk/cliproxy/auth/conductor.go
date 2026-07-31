@@ -79,6 +79,20 @@ type StoppableSelector interface {
 	Stop()
 }
 
+// SessionAffinityView is an optional interface implemented by selectors that
+// pin requests to a credential by session (currently SessionAffinitySelector).
+// Management endpoints use it to enumerate live bindings and revoke a stuck
+// session without restarting the process. Selectors that don't do session
+// pinning (plain RoundRobinSelector / FillFirstSelector when affinity is
+// disabled) simply don't satisfy it — Manager.SessionAffinityEnabled then
+// reports false and the dashboard shows the "affinity disabled" state.
+type SessionAffinityView interface {
+	Selector
+	Snapshot() []SessionAffinityBinding
+	InvalidateSession(sessionID string)
+	InvalidateAuth(authID string)
+}
+
 // Hook captures lifecycle callbacks for observing auth changes.
 type Hook interface {
 	// OnAuthRegistered fires when a new auth is registered.

@@ -25,6 +25,7 @@ import UpstreamProvidersPage from './pages/UpstreamProvidersPage.jsx';
 import UpstreamSyncLogPage from './pages/UpstreamSyncLogPage.jsx';
 import ModelHealthPage from './pages/ModelHealthPage.jsx';
 import CooldownProvidersPage from './pages/CooldownProvidersPage.jsx';
+import SessionAffinityPage from './pages/SessionAffinityPage.jsx';
 import ManageCpaLayout from './pages/manage-cpa/ManageCpaLayout.jsx';
 import OverviewTab from './pages/manage-cpa/OverviewTab.jsx';
 import ProvidersTab from './pages/manage-cpa/ProvidersTab.jsx';
@@ -167,6 +168,7 @@ export default function App() {
   <Route path="/recent-events" element={<RecentEventsPage />} />
   <Route path="/errors" element={<ErrorsPage />} />
             <Route path="/cooldown-providers" element={<CooldownProvidersPage />} />
+            <Route path="/session-affinity" element={<SessionAffinityPage />} />
             <Route path="/upstream-sync-log" element={<UpstreamSyncLogPage />} />
             <Route path="/model-health" element={<ModelHealthPage />} />
             <Route path="/internal-users" element={<InternalUsersPage />} />

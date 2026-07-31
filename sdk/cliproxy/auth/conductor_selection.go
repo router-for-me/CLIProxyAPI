@@ -213,6 +213,56 @@ func (m *Manager) Selector() Selector {
 	return m.selector
 }
 
+// SessionAffinityEnabled reports whether the active selector pins requests to
+// credentials by session (i.e. it implements SessionAffinityView). Returns
+// false when routing.session-affinity is disabled and the selector is a plain
+// round-robin / fill-first. Management surfaces use this to render the
+// "affinity disabled" state instead of an empty binding list.
+func (m *Manager) SessionAffinityEnabled() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	_, ok := m.selector.(SessionAffinityView)
+	m.mu.RUnlock()
+	return ok
+}
+
+// SessionAffinitySnapshot returns the live session→auth bindings, or nil when
+// session affinity is not in use. The returned slice is a stable copy; callers
+// may iterate it without holding the manager lock.
+func (m *Manager) SessionAffinitySnapshot() []SessionAffinityBinding {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	view, ok := m.selector.(SessionAffinityView)
+	m.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	return view.Snapshot()
+}
+
+// InvalidateSessionAffinityBinding drops every binding keyed by the given
+// session ID. No-op (returns false) when session affinity is disabled, so
+// callers can distinguish "feature off" from "session not found". Used by the
+// management revoke endpoint to manually unpin a session whose requests keep
+// erroring against a stuck/auth-unavailable credential.
+func (m *Manager) InvalidateSessionAffinityBinding(sessionID string) bool {
+	if m == nil || sessionID == "" {
+		return false
+	}
+	m.mu.RLock()
+	view, ok := m.selector.(SessionAffinityView)
+	m.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	view.InvalidateSession(sessionID)
+	return true
+}
+
 // SetStore swaps the underlying persistence store.
 func (m *Manager) SetStore(store Store) {
 	m.mu.Lock()

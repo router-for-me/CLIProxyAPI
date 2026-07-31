@@ -315,6 +315,32 @@ export async function resetCooldownProvider(authIndex) {
   });
 }
 
+// --- Session Affinity (Analysis → Session Affinity) -----------------------
+//
+// Live session→auth bindings held by the in-memory affinity cache (the sticky-
+// routing layer). Per-process and not persisted — a restart drops every
+// binding. When routing.session-affinity is disabled the response carries
+// affinity_enabled: false and no records; the page renders a banner instead
+// of an empty binding list. Returns { affinity_enabled, records: [...] }
+// where each row groups the per-model bindings of one sessionID and carries
+// the pinned auth's runtime Index so the operator can match it against the
+// Cooldown Providers page.
+export async function getSessionAffinity() {
+  return fetchJSON('/session-affinity');
+}
+
+// Manual escape hatch: drops every binding keyed by the given session ID so
+// the next request in that session re-selects a healthy credential via
+// round-robin. Used when a session is pinned to a stuck/erroring auth that
+// the lazy failover has not yet migrated away. Returns the remaining total
+// binding count so the page can reflect the post-revoke state immediately.
+export async function revokeSessionAffinity(sessionID) {
+  return fetchJSON('/session-affinity/revoke', {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sessionID }),
+  });
+}
+
 // --- Upstream Sync Log (Analysis → Upstream Providers) ---------------------
 //
 // Records the outcome of every upstream OAuth/auth token refresh performed by

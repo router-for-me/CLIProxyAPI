@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -9,6 +11,17 @@ import (
 type sessionEntry struct {
 	authID    string
 	expiresAt time.Time
+}
+
+// SessionAffinityBinding is a safe, anonymized projection of one cache entry.
+// The in-memory cache key is "provider::sessionID::model"; the dashboard does
+// not need that internal format, so Snapshot splits it back into fields.
+type SessionAffinityBinding struct {
+	Provider  string
+	SessionID string
+	Model     string
+	AuthID    string
+	ExpiresAt time.Time
 }
 
 // SessionCache provides TTL-based session to auth mapping with automatic cleanup.
@@ -118,6 +131,25 @@ func (c *SessionCache) InvalidateAuth(authID string) {
 	c.mu.Unlock()
 }
 
+// invalidateSessionID removes every binding whose session-ID component matches
+// the given sessionID. Because the cache key is composite
+// "provider::sessionID::model", one logical session may span several entries
+// (different providers/models for the same conversation). Dropping by the
+// sessionID part revokes the whole session in one call, which is the
+// operator-facing "revoke session" semantics.
+func (c *SessionCache) invalidateSessionID(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	c.mu.Lock()
+	for key := range c.entries {
+		if _, sid, _ := splitAffinityKeyLocked(key); sid == sessionID {
+			delete(c.entries, key)
+		}
+	}
+	c.mu.Unlock()
+}
+
 // Stop terminates the background cleanup goroutine.
 func (c *SessionCache) Stop() {
 	select {
@@ -149,4 +181,74 @@ func (c *SessionCache) cleanup() {
 		}
 	}
 	c.mu.Unlock()
+}
+
+// affinityKeySeparator is the delimiter used to build the composite cache key
+// "provider::sessionID::model" in SessionAffinitySelector.Pick. Splitting it
+// back here lets Snapshot expose structured fields to the dashboard.
+const affinityKeySeparator = "::"
+
+// Snapshot returns a stable, anonymized view of the live bindings, skipping
+// expired entries. The returned slice is sorted by provider, session ID, then
+// model so callers see deterministic ordering across polls. Callers must not
+// mutate the returned structs' fields expecting to affect cache state — the
+// only supported mutation paths are Invalidate / InvalidateAuth / Set.
+func (c *SessionCache) Snapshot() []SessionAffinityBinding {
+	if c == nil {
+		return nil
+	}
+	now := time.Now()
+	type pending struct {
+		provider, sessionID, model, authID string
+		expiresAt                          time.Time
+	}
+	out := make([]SessionAffinityBinding, 0, len(c.entries))
+	c.mu.RLock()
+	for key, entry := range c.entries {
+		if now.After(entry.expiresAt) {
+			continue // expired; cleaned lazily on access
+		}
+		provider, sessionID, model := splitAffinityKeyLocked(key)
+		out = append(out, SessionAffinityBinding{
+			Provider:  provider,
+			SessionID: sessionID,
+			Model:     model,
+			AuthID:    entry.authID,
+			ExpiresAt: entry.expiresAt,
+		})
+	}
+	c.mu.RUnlock()
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Provider != out[j].Provider {
+			return out[i].Provider < out[j].Provider
+		}
+		if out[i].SessionID != out[j].SessionID {
+			return out[i].SessionID < out[j].SessionID
+		}
+		return out[i].Model < out[j].Model
+	})
+	return out
+}
+
+// splitAffinityKeyLocked splits a composite cache key
+// "provider::sessionID::model" back into its three parts. Session IDs and
+// models are validated upstream to never contain the "::" sequence, so a
+// SplitN with limit 3 reproduces the original triple exactly even when one
+// field is empty (e.g. an empty model leaves a trailing "::model" is not
+// possible; empties are preserved positionally). Unparseable keys fall back to
+// returning the whole key as the session ID so the binding is still visible
+// rather than silently dropped.
+func splitAffinityKeyLocked(key string) (provider, sessionID, model string) {
+	parts := strings.SplitN(key, affinityKeySeparator, 3)
+	switch len(parts) {
+	case 3:
+		return parts[0], parts[1], parts[2]
+	case 2:
+		return parts[0], parts[1], ""
+	case 1:
+		return "", parts[0], ""
+	default:
+		return "", key, ""
+	}
 }

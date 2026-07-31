@@ -503,6 +503,31 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 	}
 }
 
+// Snapshot returns the live session→auth bindings for observability.
+// Used by the management surface to list and revoke pinned sessions.
+// Returns nil when session affinity is not actually in use.
+func (s *SessionAffinitySelector) Snapshot() []SessionAffinityBinding {
+	if s == nil || s.cache == nil {
+		return nil
+	}
+	return s.cache.Snapshot()
+}
+
+// InvalidateSession drops every binding keyed by the given session ID. Because
+// the cache key is "provider::sessionID::model", one session may have several
+// bindings across models/providers; this revokes all of them so the next
+// request in that session re-selects a healthy account via the fallback
+// selector. This is the operator-triggered manual revoke path.
+func (s *SessionAffinitySelector) InvalidateSession(sessionID string) {
+	if s == nil || s.cache == nil || sessionID == "" {
+		return
+	}
+	// A single session ID can have multiple cache keys (one per
+	// provider+model combination), so we drop entries whose sessionID part
+	// matches rather than the exact key, mirroring InvalidateAuth's sweep.
+	s.cache.invalidateSessionID(sessionID)
+}
+
 // ExtractSessionID extracts session identifier from multiple sources.
 // Priority order:
 //  1. metadata.user_id containing a Claude Code session

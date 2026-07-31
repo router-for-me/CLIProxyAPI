@@ -130,6 +130,7 @@ const NAV_GROUPS = [
       { to: '/recent-events', label: 'Recent Events', icon: 'list' },
       { to: '/errors', label: 'Errors', icon: 'bug' },
       { to: '/cooldown-providers', label: 'Cooldown Providers', icon: 'snow' },
+      { to: '/session-affinity', label: 'Session Affinity', icon: 'link' },
       { to: '/upstream-sync-log', label: 'Upstream Providers', icon: 'layers' },
       { to: '/model-health', label: 'Model Health', icon: 'pulse' },
     ],
@@ -186,5 +187,6 @@ const ICON_MAP = {
   gear: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="2" /><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3" strokeLinecap="round" /></svg>,
   tag: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2 8V3a1 1 0 0 1 1-1h5l6 6-6 6-6-6z" /><circle cx="5" cy="5" r="1" fill="currentColor" stroke="none" /></svg>,
   snow: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M8 1v14M1 8h14M3 3l10 10M13 3L3 13M8 3L6 1M8 3l2-2M8 13l-2 2M8 13l2 2M3 8L1 6M3 8l-2 2M13 8l2-2M13 8l2 2" /></svg>,
+  link: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6.5 9.5a2.5 2.5 0 0 0 3.5 0l2-2a2.5 2.5 0 0 0-3.5-3.5l-1 1" /><path d="M9.5 6.5a2.5 2.5 0 0 0-3.5 0l-2 2a2.5 2.5 0 0 0 3.5 3.5l1-1" /></svg>,
   pulse: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 8h3l1.5-4 3 9 2-6 1 1h3.5" /></svg>,
 };
