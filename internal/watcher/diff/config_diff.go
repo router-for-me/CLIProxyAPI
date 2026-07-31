@@ -108,6 +108,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.Codex.IdentityConfuse != newCfg.Codex.IdentityConfuse {
 		changes = append(changes, fmt.Sprintf("codex.identity-confuse: %t -> %t", oldCfg.Codex.IdentityConfuse, newCfg.Codex.IdentityConfuse))
 	}
+	if oldCfg.Codex.DisableCodexCloaking != newCfg.Codex.DisableCodexCloaking {
+		changes = append(changes, fmt.Sprintf("codex.disable-codex-cloaking: %t -> %t", oldCfg.Codex.DisableCodexCloaking, newCfg.Codex.DisableCodexCloaking))
+	}
 	if oldCfg.Codex.OptimizeMultiAgentV2 != newCfg.Codex.OptimizeMultiAgentV2 {
 		changes = append(changes, fmt.Sprintf("codex.optimize-multi-agent-v2: %t -> %t", oldCfg.Codex.OptimizeMultiAgentV2, newCfg.Codex.OptimizeMultiAgentV2))
 	}
