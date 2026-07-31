@@ -359,3 +359,50 @@ func TestUsageStoreBatchInsert(t *testing.T) {
 		t.Fatalf("aggregate = %+v; want 5", aggs)
 	}
 }
+
+func TestUsageStoreSelectTopNullDimensionKey(t *testing.T) {
+	// Regression: SelectTop projects a nullable dimension column (e.g.
+	// e.api_key_id) directly into TopEntry.Key (a plain string). When the
+	// underlying column is NULL — as happens when the flusher persists an
+	// event with no resolvable api_keys row — the scan failed with
+	// "converting NULL to string is unsupported". COALESCE(<dimCol>, '') must
+	// surface it as an empty key instead.
+	store := newTestPostgresStore(t, "usage_top_null_key")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+
+	// APIKeyID intentionally empty -> persisted as NULL.
+	event := UsageEvent{
+		Provider:     "anthropic",
+		Model:        "test-model",
+		InputTokens:  42,
+		OutputTokens: 7,
+		RequestedAt:  now(),
+	}
+	if err := us.InsertEvent(ctx, event); err != nil {
+		t.Fatalf("InsertEvent: %v", err)
+	}
+
+	// Grouping by api_key_id / "key" dimension resolves dimCol to e.api_key_id,
+	// which is NULL here. "model" is exercised too to ensure the COALESCE
+	// wrapper composes with the GROUP BY/ORDER BY clauses.
+	for _, dim := range []string{"api_key_id", "key", "model"} {
+		top, err := us.SelectTop(ctx, UsageFilter{}, dim, "request_count", 10)
+		if err != nil {
+			t.Fatalf("SelectTop(dim=%q): %v", dim, err)
+		}
+		if len(top) != 1 {
+			t.Fatalf("SelectTop(dim=%q) returned %d rows; want 1", dim, len(top))
+		}
+		var wantKey string
+		if dim == "model" {
+			wantKey = "test-model"
+		}
+		if top[0].Key != wantKey {
+			t.Errorf("SelectTop(dim=%q) Key = %q; want %q", dim, top[0].Key, wantKey)
+		}
+		if top[0].RequestCount != 1 {
+			t.Errorf("SelectTop(dim=%q) RequestCount = %d; want 1", dim, top[0].RequestCount)
+		}
+	}
+}

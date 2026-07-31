@@ -590,9 +590,9 @@ func (s *UsageStore) SelectErrorTop(ctx context.Context, filter UsageFilter, dim
 		limit = 500
 	}
 	var b strings.Builder
-	b.WriteString("SELECT ")
+	b.WriteString("SELECT COALESCE(")
 	b.WriteString(dimCol)
-	b.WriteString(` AS key,
+	b.WriteString(`, '') AS key,
 		COUNT(*) AS request_count,
 		COUNT(*) AS failed_count,
 		0 AS input_tokens, 0 AS output_tokens, 0 AS reasoning_tokens,

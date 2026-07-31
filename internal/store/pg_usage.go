@@ -899,9 +899,9 @@ func (s *UsageStore) SelectTop(ctx context.Context, filter UsageFilter, dimensio
 		return nil, err
 	}
 	var b strings.Builder
-	b.WriteString("SELECT ")
+	b.WriteString("SELECT COALESCE(")
 	b.WriteString(dimCol)
-	b.WriteString(` AS key,
+	b.WriteString(`, '') AS key,
 		COUNT(*) AS request_count,
 		0 AS failed_count,
 		COALESCE(SUM(input_tokens), 0) AS input_tokens,

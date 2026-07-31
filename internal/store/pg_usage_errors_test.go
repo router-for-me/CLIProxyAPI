@@ -474,3 +474,50 @@ func TestUsageRequestIDFilter(t *testing.T) {
 		t.Errorf("events miss = total=%d rows=%d; want 0", noneTotal, len(noneRows))
 	}
 }
+
+func TestUsageStoreSelectErrorTopNullDimensionKey(t *testing.T) {
+	// Regression: SelectErrorTop projects a nullable dimension column (e.g.
+	// e.api_key_id) directly into TopEntry.Key (a plain string). When the
+	// underlying column is NULL, the scan failed with
+	// "converting NULL to string is unsupported". COALESCE(<dimCol>, '') must
+	// surface it as an empty key instead.
+	store := newTestPostgresStore(t, "usage_error_top_null_key")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+
+	// APIKeyID intentionally empty -> persisted as NULL.
+	e := UsageError{
+		RequestID:      "req-err-null",
+		Provider:       "anthropic",
+		Model:          "claude-error",
+		FailStatusCode: 429,
+		ErrorMessage:   "rate limited",
+		RequestedAt:    now(),
+	}
+	if err := us.InsertError(ctx, e); err != nil {
+		t.Fatalf("InsertError: %v", err)
+	}
+
+	// Grouping by api_key_id / "key" resolves dimCol to e.api_key_id, which is
+	// NULL here. "model" is exercised too to ensure the COALESCE wrapper
+	// composes with the GROUP BY/ORDER BY clauses.
+	for _, dim := range []string{"api_key_id", "key", "model"} {
+		top, err := us.SelectErrorTop(ctx, UsageFilter{}, dim, 10)
+		if err != nil {
+			t.Fatalf("SelectErrorTop(dim=%q): %v", dim, err)
+		}
+		if len(top) != 1 {
+			t.Fatalf("SelectErrorTop(dim=%q) returned %d rows; want 1", dim, len(top))
+		}
+		var wantKey string
+		if dim == "model" {
+			wantKey = "claude-error"
+		}
+		if top[0].Key != wantKey {
+			t.Errorf("SelectErrorTop(dim=%q) Key = %q; want %q", dim, top[0].Key, wantKey)
+		}
+		if top[0].FailedCount != 1 {
+			t.Errorf("SelectErrorTop(dim=%q) FailedCount = %d; want 1", dim, top[0].FailedCount)
+		}
+	}
+}
