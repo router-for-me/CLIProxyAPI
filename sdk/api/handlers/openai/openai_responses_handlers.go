@@ -107,6 +107,8 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 	}
 
 	switch gjson.GetBytes(payload, "type").String() {
+	case "keepalive":
+		return []byte(": keep-alive\n\n")
 	case "response.output_item.done":
 		f.recordOutputItem(payload)
 	case "response.completed":
