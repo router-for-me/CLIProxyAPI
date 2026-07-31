@@ -48,6 +48,7 @@ type openAICompatibilityWithAuthIndex struct {
 	Models         []config.OpenAICompatibilityModel        `json:"models,omitempty"`
 	Headers        map[string]string                        `json:"headers,omitempty"`
 	DisableCooling bool                                     `json:"disable-cooling,omitempty"`
+	PromptCacheKey bool                                     `json:"prompt-cache-key,omitempty"`
 	AuthIndex      string                                   `json:"auth-index,omitempty"`
 }
 
@@ -286,6 +287,7 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 			Models:         entry.Models,
 			Headers:        entry.Headers,
 			DisableCooling: entry.DisableCooling,
+			PromptCacheKey: entry.PromptCacheKey,
 			AuthIndex:      "",
 		}
 		if len(entry.APIKeyEntries) == 0 {
