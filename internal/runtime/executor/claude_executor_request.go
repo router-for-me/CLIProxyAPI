@@ -78,27 +78,6 @@ func normalizeClaudeSamplingForUpstream(body []byte) []byte {
 	return body
 }
 
-// ensureClaudeThinkingDisplay defaults thinking.display to "summarized" when thinking
-// is active and the client did not set display. Without this, Claude backends that
-// enable redact-thinking return signature-only thinking blocks (empty thinking text).
-// Explicit client values such as "omitted" are preserved.
-func ensureClaudeThinkingDisplay(body []byte) []byte {
-	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
-	switch thinkingType {
-	case "enabled", "adaptive", "auto":
-	default:
-		return body
-	}
-	if display := strings.TrimSpace(gjson.GetBytes(body, "thinking.display").String()); display != "" {
-		return body
-	}
-	out, err := sjson.SetBytes(body, "thinking.display", "summarized")
-	if err != nil {
-		return body
-	}
-	return out
-}
-
 type compositeReadCloser struct {
 	io.Reader
 	closers []func() error

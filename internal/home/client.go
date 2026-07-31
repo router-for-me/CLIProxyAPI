@@ -1327,7 +1327,7 @@ func isAmbiguousIssuedRPopAuthError(err error) bool {
 	return !errors.As(err, &redisErr)
 }
 
-func (c *Client) GetRefreshAuth(ctx context.Context, authIndex string, lastRefreshedAt time.Time, accessTokenSHA256 string) ([]byte, error) {
+func (c *Client) GetRefreshAuth(ctx context.Context, authIndex string) ([]byte, error) {
 	cmd, errClient := c.commandClient()
 	if errClient != nil {
 		return nil, errClient
@@ -1340,10 +1340,6 @@ func (c *Client) GetRefreshAuth(ctx context.Context, authIndex string, lastRefre
 		Type:      "refresh",
 		AuthIndex: authIndex,
 	}
-	if !lastRefreshedAt.IsZero() {
-		req.LastRefreshedAt = lastRefreshedAt.UTC().Format(time.RFC3339Nano)
-	}
-	req.ObservedAccessTokenSHA256 = strings.TrimSpace(accessTokenSHA256)
 	keyBytes, err := json.Marshal(&req)
 	if err != nil {
 		return nil, err

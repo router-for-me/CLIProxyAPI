@@ -377,47 +377,8 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 	return resumed
 }
 
-// tryRefreshExecutionAuthAfterUnauthorized refreshes OAuth credentials once for
-// either a local auth or an ephemeral Home dispatch auth.
-func (m *Manager) tryRefreshExecutionAuthAfterUnauthorized(ctx context.Context, executor ProviderExecutor, auth *Auth, execErr error, alreadyTried bool, homeDispatch bool) (*Auth, bool, error) {
-	if !homeDispatch {
-		refreshed, ok := m.tryRefreshAfterUnauthorized(ctx, auth, execErr, alreadyTried)
-		return refreshed, ok, nil
-	}
-	if m == nil || executor == nil || auth == nil || alreadyTried || execErr == nil {
-		return auth, false, nil
-	}
-	if !isUnauthorizedError(execErr) || auth.AuthKind() != AuthKindOAuth {
-		return auth, false, nil
-	}
-
-	log.Debugf("unauthorized Home response for %s (%s), refreshing credentials before redispatch", auth.Provider, auth.ID)
-	target := auth.Clone()
-	updated, errRefresh := executor.Refresh(ctx, target)
-	if errRefresh != nil {
-		log.Debugf("Home credential refresh before redispatch failed for %s (%s): %v", auth.Provider, auth.ID, errRefresh)
-		return auth, false, errRefresh
-	}
-	if updated == nil {
-		updated = target
-	}
-	if updated.ID == "" {
-		updated.ID = auth.ID
-	}
-	if updated.Index == "" {
-		updated.Index = auth.Index
-	}
-	if updated.Provider == "" {
-		updated.Provider = auth.Provider
-	}
-	if updated.Runtime == nil {
-		updated.Runtime = auth.Runtime
-	}
-	return updated, true, nil
-}
-
-// tryRefreshAfterUnauthorized refreshes local OAuth credentials once after a
-// 401 so the current auth can be retried before fallback/suspend.
+// tryRefreshAfterUnauthorized refreshes OAuth credentials once after a 401 so the
+// current auth can be retried before fallback/suspend.
 func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, execErr error, alreadyTried bool) (*Auth, bool) {
 	if m == nil || auth == nil || alreadyTried || execErr == nil {
 		return auth, false

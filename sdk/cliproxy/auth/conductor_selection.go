@@ -1087,15 +1087,14 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
 			return nil, errSelection
 		}
 		providerMatches := strings.TrimSpace(provider) == "" || strings.EqualFold(strings.TrimSpace(selection.Provider), strings.TrimSpace(provider))
-		selectionAuth := selection.CloneAuth()
-		kindMatches := selectionAuth != nil && selectionAuth.AuthKind() == requiredKind
+		kindMatches := selection.Auth != nil && selection.Auth.AuthKind() == requiredKind
 		if providerMatches && kindMatches {
 			return selection, nil
 		}
 
 		authID := ""
-		if selectionAuth != nil {
-			authID = strings.TrimSpace(selectionAuth.ID)
+		if selection.Auth != nil {
+			authID = strings.TrimSpace(selection.Auth.ID)
 		}
 		reason := "auth_kind_mismatch"
 		if !providerMatches {
