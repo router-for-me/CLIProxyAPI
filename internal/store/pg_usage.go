@@ -51,16 +51,21 @@ type UsageEvent struct {
 	// DiscountPct is the resolved model-group discount percentage (0-100)
 	// applied to CostUSD when the requesting key's policy attaches to a model
 	// group carrying a discount. The stored CostUSD is the post-discount value;
-	// DiscountPct lets the dashboard re-derive the pre-discount cost for the
-	// derivation table. 0 = no discount applied. Persisted column, stamped by
-	// the usage flusher at write time.
-	DiscountPct    float64   `json:"discount_pct,omitempty"`
-	LatencyMs      int64     `json:"latency_ms,omitempty"`
-	TTFTMs         int64     `json:"ttft_ms,omitempty"`
-	Failed         bool      `json:"failed"`
-	FailStatusCode int       `json:"fail_status_code,omitempty"`
-	Generate       bool      `json:"generate,omitempty"`
-	RequestedAt    time.Time `json:"requested_at"`
+	// OriginalCostUSD (below) is the pre-discount figure stamped alongside.
+	// 0 = no discount applied. Persisted column, stamped at write time.
+	DiscountPct float64 `json:"discount_pct,omitempty"`
+	// OriginalCostUSD is the pre-discount cost (before the model-group
+	// discount was multiplied in). Stamped at flush time alongside DiscountPct
+	// so the read-side never re-derives it (which would drift if the pricing
+	// row changed between flush and read). Equals CostUSD when no discount was
+	// applied. Persisted column.
+	OriginalCostUSD float64   `json:"original_cost_usd,omitempty"`
+	LatencyMs       int64     `json:"latency_ms,omitempty"`
+	TTFTMs          int64     `json:"ttft_ms,omitempty"`
+	Failed          bool      `json:"failed"`
+	FailStatusCode  int       `json:"fail_status_code,omitempty"`
+	Generate        bool      `json:"generate,omitempty"`
+	RequestedAt     time.Time `json:"requested_at"`
 }
 
 // Pricing captures per-model unit prices in USD per 1,000,000 tokens. A zero
@@ -199,7 +204,7 @@ const usageEventColumnList = `
 	request_id, api_key_id, api_key_principal, user_id, provider, executor_type, model,
 	alias, endpoint, client_ip, forwarded_for, auth_type, source, reasoning_effort, service_tier,
 	response_service_tier, input_tokens, output_tokens, reasoning_tokens,
-	cached_tokens, cache_creation_tokens, total_tokens, cost_usd, discount_pct, latency_ms,
+	cached_tokens, cache_creation_tokens, total_tokens, cost_usd, discount_pct, original_cost_usd, latency_ms,
 	ttft_ms, failed, fail_status_code, generate, requested_at
 `
 
@@ -222,8 +227,8 @@ func (s *UsageStore) InsertEvent(ctx context.Context, e UsageEvent) error {
 	}
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (%s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-			$25, $26, $27, $28, $29, $30)
+			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
+			$26, $27, $28, $29, $30, $31)
 	`, s.eventsTable, usageEventColumnList),
 		e.RequestID, nullableString(e.APIKeyID), nullableString(principal),
 		nullableString(e.UserID),
@@ -232,7 +237,7 @@ func (s *UsageStore) InsertEvent(ctx context.Context, e UsageEvent) error {
 		e.AuthType,
 		e.Source, e.ReasoningEffort, e.ServiceTier, e.ResponseServiceTier,
 		e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens,
-		e.CacheCreationTokens, e.TotalTokens, e.CostUSD, e.DiscountPct, e.LatencyMs, e.TTFTMs,
+		e.CacheCreationTokens, e.TotalTokens, e.CostUSD, e.DiscountPct, e.OriginalCostUSD, e.LatencyMs, e.TTFTMs,
 		e.Failed, e.FailStatusCode, e.Generate, e.RequestedAt,
 	)
 	if err != nil {
@@ -257,18 +262,18 @@ func (s *UsageStore) BatchInsertEvents(ctx context.Context, events []UsageEvent)
 	b.WriteString(" (")
 	b.WriteString(usageEventColumnList)
 	b.WriteString(") VALUES ")
-	args := make([]any, 0, len(events)*30)
+	args := make([]any, 0, len(events)*31)
 	for i, ev := range events {
 		if i > 0 {
 			b.WriteByte(',')
 		}
 		b.WriteByte('(')
-		for j := 1; j <= 30; j++ {
+		for j := 1; j <= 31; j++ {
 			if j > 1 {
 				b.WriteByte(',')
 			}
 			b.WriteByte('$')
-			b.WriteString(itoa(i*30 + j))
+			b.WriteString(itoa(i*31 + j))
 		}
 		b.WriteByte(')')
 		if ev.RequestedAt.IsZero() {
@@ -288,7 +293,7 @@ func (s *UsageStore) BatchInsertEvents(ctx context.Context, events []UsageEvent)
 			ev.AuthType,
 			ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
 			ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
-			ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.LatencyMs, ev.TTFTMs,
+			ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.OriginalCostUSD, ev.LatencyMs, ev.TTFTMs,
 			ev.Failed, ev.FailStatusCode, ev.Generate, ev.RequestedAt)
 	}
 	if _, err := s.db.ExecContext(ctx, b.String(), args...); err != nil {
@@ -1016,13 +1021,13 @@ type UsageEventRow struct {
 	CostUSD             float64 `json:"cost_usd"`
 	// DiscountPct is the resolved model-group discount percentage (0-100) that
 	// was applied to CostUSD at flush time. 0 = no discount. Populated from the
-	// persisted usage_events.discount_pct column. OriginalCostUSD (below) is
-	// re-derived on read so the dashboard can show the pre-discount figure.
+	// persisted usage_events.discount_pct column.
 	DiscountPct float64 `json:"discount_pct,omitempty"`
-	// OriginalCostUSD is the pre-discount cost, re-derived on read as
-	// CostUSD / (1 - DiscountPct/100) when DiscountPct > 0. Populated alongside
-	// CostBreakdown by FillCostBreakdown so the event detail can render a
-	// "before discount" total. Stays 0 when no discount was applied.
+	// OriginalCostUSD is the pre-discount cost (before the model-group
+	// discount was multiplied in), persisted at flush time alongside
+	// DiscountPct so the dashboard shows an authoritative "was $X" figure
+	// (never re-derived on read, so immune to pricing drift). Equals CostUSD
+	// when no discount was applied.
 	OriginalCostUSD float64 `json:"original_cost_usd,omitempty"`
 	// CostBreakdown is populated only when the caller asks for it
 	// (include=cost_breakdown on the events endpoints). It attributes
@@ -1064,6 +1069,7 @@ const eventRowSelectColumns = `
 	e.input_tokens, e.output_tokens, e.reasoning_tokens,
 	e.cached_tokens, e.cache_creation_tokens, e.total_tokens, e.cost_usd,
 	e.discount_pct,
+	e.original_cost_usd,
 	e.latency_ms, e.ttft_ms, e.failed, e.fail_status_code, e.generate,
 	e.requested_at,
 	COALESCE(mcAlias.official_provider, mcModel.official_provider, mcCompat.official_provider, '') AS official_provider
@@ -1120,7 +1126,7 @@ func scanEventRow(scanner interface {
 		&r.AuthType,
 		&r.Source, &r.ReasoningEffort, &r.ServiceTier, &r.ResponseServiceTier,
 		&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens,
-		&r.CacheCreationTokens, &r.TotalTokens, &r.CostUSD, &r.DiscountPct, &r.LatencyMs, &r.TTFTMs,
+		&r.CacheCreationTokens, &r.TotalTokens, &r.CostUSD, &r.DiscountPct, &r.OriginalCostUSD, &r.LatencyMs, &r.TTFTMs,
 		&r.Failed, &r.FailStatusCode, &r.Generate, &r.RequestedAt,
 		&r.OfficialProvider,
 	); err != nil {
@@ -1249,24 +1255,13 @@ func (s *UsageStore) FillCostBreakdown(ctx context.Context, rows []UsageEventRow
 		}
 		b := SegmentCosts(*p, r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.CacheCreationTokens)
 		r.CostBreakdown = &b
-		// OriginalCostUSD is the pre-discount cost. We derive it directly from
-		// the persisted cost_usd and discount_pct (both stamped together at
-		// flush time) rather than from SegmentCosts, so the figure is always
-		// exact and immune to the pricing row having changed/been removed
-		// between flush and read (SegmentCosts would otherwise return 0 when
-		// the pricing row is gone, even though cost_usd is non-zero). 0 when
-		// no discount was applied (omitted from JSON via omitempty).
-		if r.DiscountPct > 0 && r.DiscountPct < 100 {
-			r.OriginalCostUSD = r.CostUSD / (1 - r.DiscountPct/100)
-		} else if r.DiscountPct >= 100 {
-			// A 100% discount zeroes cost_usd; the pre-discount figure is
-			// unrecoverable from it, so fall back to the segment sum (which is
-			// the pre-discount cost when the pricing row is still present).
-			r.OriginalCostUSD = b.Sum()
-		}
 		// AppliedPricing mirrors CostBreakdown's present-but-all-zero semantics
 		// for a missing pricing row so the dashboard can show "no pricing
 		// configured" rather than conflating it with "free".
+		// Note: OriginalCostUSD is read straight from the persisted
+		// usage_events.original_cost_usd column (stamped at flush time) — no
+		// re-derivation here, so it is immune to the pricing row drifting
+		// between flush and read.
 		r.AppliedPricing = p
 	}
 	return nil

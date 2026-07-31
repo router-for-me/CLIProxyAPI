@@ -45,13 +45,17 @@ type UsageError struct {
 	CostUSD             float64 `json:"cost_usd"`
 	// DiscountPct mirrors UsageEvent.DiscountPct: the resolved model-group
 	// discount percentage applied to CostUSD at flush time. 0 = no discount.
-	DiscountPct    float64   `json:"discount_pct,omitempty"`
-	LatencyMs      int64     `json:"latency_ms,omitempty"`
-	TTFTMs         int64     `json:"ttft_ms,omitempty"`
-	FailStatusCode int       `json:"fail_status_code,omitempty"`
-	ErrorMessage   string    `json:"error_message,omitempty"`
-	Generate       bool      `json:"generate,omitempty"`
-	RequestedAt    time.Time `json:"requested_at"`
+	DiscountPct float64 `json:"discount_pct,omitempty"`
+	// OriginalCostUSD is the pre-discount cost stamped at flush time alongside
+	// DiscountPct (mirrors UsageEvent). Equals CostUSD when no discount was
+	// applied. Persisted column.
+	OriginalCostUSD float64   `json:"original_cost_usd,omitempty"`
+	LatencyMs       int64     `json:"latency_ms,omitempty"`
+	TTFTMs          int64     `json:"ttft_ms,omitempty"`
+	FailStatusCode  int       `json:"fail_status_code,omitempty"`
+	ErrorMessage    string    `json:"error_message,omitempty"`
+	Generate        bool      `json:"generate,omitempty"`
+	RequestedAt     time.Time `json:"requested_at"`
 }
 
 // UsageErrorRow is the dashboard-friendly projection of a single usage_errors
@@ -92,10 +96,10 @@ type UsageErrorRow struct {
 	// DiscountPct mirrors UsageEventRow.DiscountPct: the resolved model-group
 	// discount percentage applied to CostUSD at flush time. 0 = no discount.
 	DiscountPct float64 `json:"discount_pct,omitempty"`
-	// OriginalCostUSD mirrors UsageEventRow.OriginalCostUSD: the pre-discount
-	// cost re-derived on read as CostUSD / (1 - DiscountPct/100) when a
-	// discount was applied. Populated alongside CostBreakdown so the dashboard
-	// can render a "before discount" total on failed-attempt detail too.
+	// OriginalCostUSD is the pre-discount cost, persisted at flush time
+	// alongside DiscountPct (mirrors UsageEventRow), so the dashboard shows
+	// an authoritative "was $X" for failed attempts too. Equals CostUSD when
+	// no discount was applied.
 	OriginalCostUSD float64 `json:"original_cost_usd,omitempty"`
 	// CostBreakdown is populated only when the caller asks for it
 	// (include=cost_breakdown on the errors endpoints). Mirrors the
@@ -121,7 +125,7 @@ const usageErrorColumnList = `
 	request_id, api_key_id, api_key_principal, user_id, provider, executor_type, model,
 	alias, route_model, endpoint, client_ip, forwarded_for, auth_type, source, reasoning_effort,
 	service_tier, response_service_tier, input_tokens, output_tokens, reasoning_tokens,
-	cached_tokens, cache_creation_tokens, total_tokens, cost_usd, discount_pct, latency_ms,
+	cached_tokens, cache_creation_tokens, total_tokens, cost_usd, discount_pct, original_cost_usd, latency_ms,
 	ttft_ms, fail_status_code, error_message, generate, requested_at
 `
 
@@ -143,6 +147,7 @@ const errorRowSelectColumns = `
 	e.input_tokens, e.output_tokens, e.reasoning_tokens,
 	e.cached_tokens, e.cache_creation_tokens, e.total_tokens, e.cost_usd,
 	e.discount_pct,
+	e.original_cost_usd,
 	e.latency_ms, e.ttft_ms, e.fail_status_code, e.error_message, e.generate,
 	e.requested_at,
 	COALESCE(mcAlias.official_provider, mcModel.official_provider, mcCompat.official_provider, '') AS official_provider
@@ -177,7 +182,7 @@ func scanErrorRow(scanner interface {
 		&r.AuthType,
 		&r.Source, &r.ReasoningEffort, &r.ServiceTier, &r.ResponseServiceTier,
 		&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens,
-		&r.CacheCreationTokens, &r.TotalTokens, &r.CostUSD, &r.DiscountPct, &r.LatencyMs, &r.TTFTMs,
+		&r.CacheCreationTokens, &r.TotalTokens, &r.CostUSD, &r.DiscountPct, &r.OriginalCostUSD, &r.LatencyMs, &r.TTFTMs,
 		&r.FailStatusCode, &r.ErrorMessage, &r.Generate, &r.RequestedAt,
 		&r.OfficialProvider,
 	); err != nil {
@@ -212,8 +217,8 @@ func (s *UsageStore) InsertError(ctx context.Context, e UsageError) error {
 	}
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (%s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-			$25, $26, $27, $28, $29, $30, $31)
+			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
+			$26, $27, $28, $29, $30, $31, $32)
 	`, s.errorsTable, usageErrorColumnList),
 		e.RequestID, nullableString(e.APIKeyID), nullableString(principal),
 		nullableString(e.UserID),
@@ -222,7 +227,7 @@ func (s *UsageStore) InsertError(ctx context.Context, e UsageError) error {
 		e.AuthType,
 		e.Source, e.ReasoningEffort, e.ServiceTier, e.ResponseServiceTier,
 		e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens,
-		e.CacheCreationTokens, e.TotalTokens, e.CostUSD, e.DiscountPct, e.LatencyMs, e.TTFTMs,
+		e.CacheCreationTokens, e.TotalTokens, e.CostUSD, e.DiscountPct, e.OriginalCostUSD, e.LatencyMs, e.TTFTMs,
 		e.FailStatusCode, e.ErrorMessage, e.Generate, e.RequestedAt,
 	)
 	if err != nil {
@@ -247,18 +252,18 @@ func (s *UsageStore) BatchInsertErrors(ctx context.Context, errors []UsageError)
 	b.WriteString(" (")
 	b.WriteString(usageErrorColumnList)
 	b.WriteString(") VALUES ")
-	args := make([]any, 0, len(errors)*31)
+	args := make([]any, 0, len(errors)*32)
 	for i, ev := range errors {
 		if i > 0 {
 			b.WriteByte(',')
 		}
 		b.WriteByte('(')
-		for j := 1; j <= 31; j++ {
+		for j := 1; j <= 32; j++ {
 			if j > 1 {
 				b.WriteByte(',')
 			}
 			b.WriteByte('$')
-			b.WriteString(itoa(i*31 + j))
+			b.WriteString(itoa(i*32 + j))
 		}
 		b.WriteByte(')')
 		if ev.RequestedAt.IsZero() {
@@ -276,7 +281,7 @@ func (s *UsageStore) BatchInsertErrors(ctx context.Context, errors []UsageError)
 			ev.AuthType,
 			ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
 			ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
-			ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.LatencyMs, ev.TTFTMs,
+			ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.OriginalCostUSD, ev.LatencyMs, ev.TTFTMs,
 			ev.FailStatusCode, ev.ErrorMessage, ev.Generate, ev.RequestedAt)
 	}
 	if _, err := s.db.ExecContext(ctx, b.String(), args...); err != nil {
@@ -392,19 +397,12 @@ func (s *UsageStore) FillCostBreakdownErrors(ctx context.Context, rows []UsageEr
 		}
 		b := SegmentCosts(*p, r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.CacheCreationTokens)
 		r.CostBreakdown = &b
-		// OriginalCostUSD is the pre-discount cost. Derived from the persisted
-		// cost_usd and discount_pct (both stamped together at flush time) rather
-		// than SegmentCosts, so the figure is always exact even when the pricing
-		// row has changed/been removed between flush and read. Mirrors
-		// FillCostBreakdown. 0 (omitted) when no discount was applied.
-		if r.DiscountPct > 0 && r.DiscountPct < 100 {
-			r.OriginalCostUSD = r.CostUSD / (1 - r.DiscountPct/100)
-		} else if r.DiscountPct >= 100 {
-			r.OriginalCostUSD = b.Sum()
-		}
 		// AppliedPricing mirrors FillCostBreakdown's present-but-all-zero
 		// missing-row behavior so the dashboard renders the same derivation
 		// card for failed attempts.
+		// Note: OriginalCostUSD is read straight from the persisted
+		// usage_errors.original_cost_usd column (stamped at flush time) — no
+		// re-derivation here.
 		r.AppliedPricing = p
 	}
 	return nil

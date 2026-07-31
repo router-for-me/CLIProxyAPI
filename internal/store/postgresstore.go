@@ -559,6 +559,17 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: alter usage_events add discount_pct: %w", err)
 	}
+	// original_cost_usd is the pre-discount cost (before the model-group
+	// discount was applied), stamped at flush time alongside discount_pct. We
+	// persist it rather than re-deriving it at read time so the dashboard's
+	// "was $X" figure is always authoritative and immune to the pricing row
+	// (or the cost_computation order) drifting between flush and read. Equals
+	// cost_usd when no discount was applied. Idempotent backfill.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS original_cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter usage_events add original_cost_usd: %w", err)
+	}
 
 	// usage_errors mirrors usage_events but holds only failed attempts. It is
 	// populated by the usage flusher whenever record.Failed is true. Kept
@@ -668,6 +679,14 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS discount_pct NUMERIC(5,2) NOT NULL DEFAULT 0`, usageErrorsTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: alter usage_errors add discount_pct: %w", err)
+	}
+	// original_cost_usd mirrors usage_events: the pre-discount cost stamped at
+	// flush time, persisted so the failed-attempt detail shows the same
+	// authoritative "was $X" figure. Idempotent.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS original_cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0`, usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter usage_errors add original_cost_usd: %w", err)
 	}
 
 	usageWindowsTable := s.fullTableName(s.cfg.UsageWindowsTable)

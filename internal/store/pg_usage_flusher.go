@@ -323,6 +323,11 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 				record.Detail.ReasoningTokens, record.Detail.CacheCreationTokens, cacheRead)
 		}
 	}
+	// originalCost is the pre-discount figure (tokens × rate), persisted
+	// alongside discount_pct so the dashboard's "was $X" is always
+	// authoritative rather than re-derived at read time. Equals cost when no
+	// discount applies.
+	originalCost := cost
 	if discountPct > 0 {
 		cost *= (1 - discountPct/100)
 	}
@@ -349,6 +354,7 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 		TotalTokens:         total,
 		CostUSD:             cost,
 		DiscountPct:         discountPct,
+		OriginalCostUSD:     originalCost,
 		LatencyMs:           record.Latency.Milliseconds(),
 		TTFTMs:              record.TTFT.Milliseconds(),
 		Failed:              false, // success path; failed attempts go to usage_errors
@@ -408,6 +414,9 @@ func (f *UsageFlusher) toError(ctx context.Context, record coreusage.Record) (Us
 				record.Detail.ReasoningTokens, record.Detail.CacheCreationTokens, cacheRead)
 		}
 	}
+	// originalCost is the pre-discount figure, persisted alongside discount_pct
+	// so the failed-attempt detail shows the same authoritative "was $X".
+	originalCost := cost
 	if discountPct > 0 {
 		cost *= (1 - discountPct/100)
 	}
@@ -439,6 +448,7 @@ func (f *UsageFlusher) toError(ctx context.Context, record coreusage.Record) (Us
 		TotalTokens:         total,
 		CostUSD:             cost,
 		DiscountPct:         discountPct,
+		OriginalCostUSD:     originalCost,
 		LatencyMs:           record.Latency.Milliseconds(),
 		TTFTMs:              record.TTFT.Milliseconds(),
 		FailStatusCode:      failStatus,

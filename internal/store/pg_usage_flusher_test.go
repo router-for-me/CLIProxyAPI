@@ -173,20 +173,19 @@ func TestUsageFlusherAppliesModelGroupDiscount(t *testing.T) {
 		t.Fatalf("expected 1 event; got %d", len(rows))
 	}
 	row := rows[0]
-	// Pre-discount = $3; with 20% off → $2.4.
+	// Pre-discount = $3; with 20% off → $2.4 (post-discount stored as cost_usd).
 	if row.CostUSD < 2.39 || row.CostUSD > 2.41 {
 		t.Errorf("cost_usd = %v; want ~2.4 (3.0 × 0.8)", row.CostUSD)
 	}
 	if row.DiscountPct < 19.99 || row.DiscountPct > 20.01 {
 		t.Errorf("discount_pct = %v; want 20", row.DiscountPct)
 	}
-	// FillCostBreakdown re-derives the pre-discount cost so the dashboard can
-	// show "before discount".
-	if err := us.FillCostBreakdown(ctx, rows); err != nil {
-		t.Fatalf("FillCostBreakdown: %v", err)
-	}
-	if rows[0].OriginalCostUSD < 2.99 || rows[0].OriginalCostUSD > 3.01 {
-		t.Errorf("original_cost_usd = %v; want ~3.0", rows[0].OriginalCostUSD)
+	// original_cost_usd is the pre-discount figure, stamped persistently at
+	// flush time (NOT re-derived on read). Must equal the pre-discount cost
+	// (3.0) so the dashboard's "was $X" reads correctly even before
+	// FillCostBreakdown runs.
+	if row.OriginalCostUSD < 2.99 || row.OriginalCostUSD > 3.01 {
+		t.Errorf("original_cost_usd = %v; want ~3.0 (persisted at flush, pre-discount)", row.OriginalCostUSD)
 	}
 }
 
@@ -253,6 +252,10 @@ func TestUsageFlusherAppliesPerModelDiscountCaseInsensitive(t *testing.T) {
 	}
 	if row.DiscountPct < 24.99 || row.DiscountPct > 25.01 {
 		t.Errorf("discount_pct = %v; want 25", row.DiscountPct)
+	}
+	// original_cost_usd is stamped at flush (pre-discount = $3).
+	if row.OriginalCostUSD < 2.99 || row.OriginalCostUSD > 3.01 {
+		t.Errorf("original_cost_usd = %v; want ~3.0 (persisted at flush, pre-discount)", row.OriginalCostUSD)
 	}
 }
 
