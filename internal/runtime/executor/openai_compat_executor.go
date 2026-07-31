@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -22,6 +23,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -122,6 +124,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated = e.applyCompatPromptCacheKey(ctx, auth, baseModel, req, opts, translated)
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
@@ -323,6 +326,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated = e.applyCompatPromptCacheKey(ctx, auth, baseModel, req, opts, translated)
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
@@ -743,6 +747,50 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
 	}
 	return
+}
+
+func (e *OpenAICompatExecutor) applyCompatPromptCacheKey(ctx context.Context, auth *cliproxyauth.Auth, baseModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) []byte {
+	compat := e.resolveCompatConfig(auth)
+	if compat == nil || !compat.PromptCacheKey {
+		return body
+	}
+	// Restore a caller key that translation dropped (e.g. openai-response -> chat); it wins over derivation.
+	originalPayload := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = opts.OriginalRequest
+	}
+	callerKey := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
+	if callerKey == "" {
+		callerKey = strings.TrimSpace(gjson.GetBytes(originalPayload, "prompt_cache_key").String())
+	}
+	if callerKey != "" {
+		return helps.SetStringIfDifferent(body, "prompt_cache_key", callerKey)
+	}
+	sessionID, errResolve := e.resolveCompatComposerSessionID(ctx, baseModel, req, opts)
+	if errResolve != nil || sessionID == "" {
+		return body
+	}
+	return helps.SetStringIfDifferent(body, "prompt_cache_key", sessionID)
+}
+
+func (e *OpenAICompatExecutor) resolveCompatComposerSessionID(ctx context.Context, baseModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (string, error) {
+	if value := metadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
+		return value, nil
+	}
+	if value := metadataString(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
+		return value, nil
+	}
+	if derived := helps.DerivedSessionUUID(e.provider, opts.Metadata, req.Metadata); derived != "" {
+		return derived, nil
+	}
+	cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, baseModel, req.Payload, opts.Headers)
+	if errCache != nil {
+		return "", errCache
+	}
+	if ok {
+		return cached.ID, nil
+	}
+	return uuid.NewString(), nil
 }
 
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {

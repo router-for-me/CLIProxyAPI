@@ -580,6 +580,10 @@ type OpenAICompatibility struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// PromptCacheKey, when true, injects an upstream prompt_cache_key (opt-in):
+	// a caller-supplied key wins, otherwise one is derived from the client session.
+	PromptCacheKey bool `yaml:"prompt-cache-key,omitempty" json:"prompt-cache-key,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.

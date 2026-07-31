@@ -446,6 +446,7 @@ nonstream-keepalive-interval: 0
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
+#     prompt-cache-key: false # optional: inject an upstream prompt_cache_key; a caller key wins, else derive one from the client session
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:
