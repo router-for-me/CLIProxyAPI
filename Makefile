@@ -58,7 +58,7 @@ PG_PORT    ?= 5433
 PG_CONTAINER := cliproxy-pg-test
 
 # --- Phony targets -----------------------------------------------------------
-.PHONY: help all build run dev-up dev-down fmt vet tidy test test-unit test-pg test-pg-only \
+.PHONY: help all build run dev-up dev-down logs logs-api logs-dash fmt vet tidy test test-unit test-pg test-pg-only \
         test-cover cover-html pg-up pg-down pg-reset pg-shell \
         dash-install dash-dev dash-build dash-preview dash-embed \
         clean verify check-deps
@@ -101,6 +101,37 @@ dev-down: ## Stop the API and dashboard by finding listener PIDs from recorded p
 		fi; \
 	done
 	@rm -f $(DEV_PORT_FILE)
+
+# --- Logs ---------------------------------------------------------------------
+# Follow the dev services' output. `make logs` tails both the API (run.log) and
+# the dashboard (dash-dev.log) written by `make dev-up`. Falls back to a
+# helpful message when no log file exists yet, so a bare `make logs` before
+# `make dev-up` reads cleanly instead of erroring.
+logs: ## Follow API + dashboard dev logs (tail -F both run.log and dash-dev.log).
+	@for f in $(RUN_LOG) $(DASH_LOG); do \
+		if [[ ! -f $$f ]]; then \
+			echo "Log file not found: $$f  (run \`make dev-up\` first)"; \
+		fi; \
+	done
+	@if [[ -f $(RUN_LOG) || -f $(DASH_LOG) ]]; then \
+		tail -F -n 50 $(RUN_LOG) $(DASH_LOG); \
+	else \
+		echo "No dev logs yet. Start the services with: make dev-up"; \
+	fi
+
+logs-api: ## Follow only the API dev log (run.log).
+	@if [[ -f $(RUN_LOG) ]]; then \
+		tail -F -n 50 $(RUN_LOG); \
+	else \
+		echo "Log file not found: $(RUN_LOG)  (run \`make dev-up\` first)"; exit 1; \
+	fi
+
+logs-dash: ## Follow only the dashboard dev log (dash-dev.log).
+	@if [[ -f $(DASH_LOG) ]]; then \
+		tail -F -n 50 $(DASH_LOG); \
+	else \
+		echo "Log file not found: $(DASH_LOG)  (run \`make dev-up\` first)"; exit 1; \
+	fi
 
 # --- Formatting & hygiene ----------------------------------------------------
 fmt: ## Apply gofmt to the entire module.
