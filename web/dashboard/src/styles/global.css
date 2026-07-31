@@ -1222,6 +1222,15 @@ ul.list-bare li { padding: 4px 0; }
   color: var(--warning);
 }
 
+/* ModelIdCombobox dropdown — fixed-position overlay (position/size are set
+   inline from getBoundingClientRect). It renders via position:fixed so it can
+   escape the modal body's scroll clipping and open upward when there isn't
+   enough room below the input. */
+.model-id-combobox__dropdown {
+  right: auto;
+  z-index: 200; /* above modal backdrop + content */
+}
+
 /* Tabs (sub-navigation, e.g. inside /manage-cpa) ----------------------- */
 
 .tabs {

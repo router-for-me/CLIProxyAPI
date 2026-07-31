@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Modal } from './Primitives.jsx';
 import ModelRouteConfigSection from './ModelRouteConfigSection.jsx';
+import ModelIdCombobox from './ModelIdCombobox.jsx';
 
 // ModelRouteEntryModal — single-model editor for a ModelGroup's combined
 // "Allowed models & routing" table. Covers the complete per-model workflow:
@@ -79,10 +80,10 @@ export default function ModelRouteEntryModal({ existingModels = [], initial = nu
           <div className="mono" style={{ padding: '6px 0' }}>{initial.model}</div>
         ) : (
           <>
-            <input
-              type="text"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
+            <ModelIdCombobox
+              value={trimmedModel}
+              onChange={setModel}
+              existingModels={existingModels}
               placeholder="e.g. gpt-4o"
               autoFocus
             />
