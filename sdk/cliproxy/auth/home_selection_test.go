@@ -42,6 +42,70 @@ func TestHomeDispatchSelectionOwnsScopeOutsideAuth(t *testing.T) {
 	}
 }
 
+func TestHomeDispatchSelectionReplaceAuthPreservesRoutingAttributes(t *testing.T) {
+	selection := &HomeDispatchSelection{Auth: &Auth{
+		ID:       "cred-1",
+		Provider: "codex",
+		Attributes: map[string]string{
+			homeUpstreamModelAttributeKey: "gpt-5-upstream",
+			homeForceMappingAttributeKey:  "true",
+			homeOriginalAliasAttributeKey: "team/gpt-5",
+		},
+		Metadata: map[string]any{"access_token": "old"},
+	}}
+
+	selection.ReplaceAuth(&Auth{
+		ID:         "cred-1",
+		Provider:   "codex",
+		Attributes: map[string]string{AttributeAuthKind: AuthKindOAuth},
+		Metadata:   map[string]any{"access_token": "fresh"},
+	})
+
+	updated := selection.CloneAuth()
+	if updated == nil || updated.Metadata["access_token"] != "fresh" {
+		t.Fatalf("updated auth = %#v", updated)
+	}
+	if updated.Attributes[homeUpstreamModelAttributeKey] != "gpt-5-upstream" || updated.Attributes[homeForceMappingAttributeKey] != "true" || updated.Attributes[homeOriginalAliasAttributeKey] != "team/gpt-5" {
+		t.Fatalf("routing attributes were not preserved: %#v", updated.Attributes)
+	}
+}
+
+func TestHomeDispatchSelectionReplaceAuthConcurrentClone(t *testing.T) {
+	selection := &HomeDispatchSelection{Auth: &Auth{ID: "cred-1", Metadata: map[string]any{"access_token": "old"}}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 1000; i++ {
+			selection.ReplaceAuth(&Auth{ID: "cred-1", Metadata: map[string]any{"access_token": "fresh"}})
+		}
+	}()
+	for i := 0; i < 1000; i++ {
+		if auth := selection.CloneAuth(); auth == nil || auth.ID != "cred-1" {
+			t.Fatalf("CloneAuth() = %#v", auth)
+		}
+	}
+	<-done
+}
+
+func TestReplaceHomeSelectionAuthUpdatesRetainedRuntimeAuth(t *testing.T) {
+	selection := &HomeDispatchSelection{Auth: &Auth{ID: "cred-1", Provider: "codex", Metadata: map[string]any{"access_token": "old"}}}
+	manager := &Manager{
+		homeRuntimeAuths: map[string]map[string]*Auth{
+			"session-1": {"cred-1": selection.Auth.Clone()},
+		},
+		homeRuntimeAuthOwners: map[string]map[string]*HomeDispatchSelection{
+			"session-1": {"cred-1": selection},
+		},
+	}
+
+	manager.replaceHomeSelectionAuth(selection, &Auth{ID: "cred-1", Provider: "codex", Metadata: map[string]any{"access_token": "fresh"}})
+
+	retained := manager.homeRuntimeAuths["session-1"]["cred-1"]
+	if retained == nil || retained.Metadata["access_token"] != "fresh" {
+		t.Fatalf("retained runtime auth = %#v, want fresh token", retained)
+	}
+}
+
 func TestHomeDispatchSelectionDrainsResourcesAddedDuringEnd(t *testing.T) {
 	registry := executionregistry.New()
 	pending, errBegin := registry.BeginDispatch()

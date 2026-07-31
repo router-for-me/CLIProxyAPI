@@ -431,14 +431,18 @@ func (m *Manager) endHomeSelectionBeforeRedispatch(ctx context.Context, selectio
 }
 
 func (m *Manager) retainHomeWebsocketSelection(ctx context.Context, opts cliproxyexecutor.Options, model string, selection *HomeDispatchSelection) bool {
-	if m == nil || selection == nil || !selection.Retained() || !cliproxyexecutor.DownstreamWebsocket(ctx) || selection.Auth == nil {
+	if m == nil || selection == nil || !selection.Retained() || !cliproxyexecutor.DownstreamWebsocket(ctx) {
+		return false
+	}
+	selectionAuth := selection.CloneAuth()
+	if selectionAuth == nil {
 		return false
 	}
 	sessionID := homeExecutionSessionIDFromMetadata(opts.Metadata)
-	credentialID := strings.TrimSpace(selection.Auth.ID)
+	credentialID := strings.TrimSpace(selectionAuth.ID)
 	routeModel, validRouteModel := validCanonicalHomeConcurrencyModelKey(model)
 	if selection.accountedModel == "" {
-		selection.accountedModel, _ = m.predictedHomeConcurrencyModel(selection.Auth, model)
+		selection.accountedModel, _ = m.predictedHomeConcurrencyModel(selectionAuth, model)
 	}
 	if sessionID == "" || credentialID == "" || !validRouteModel || selection.accountedModel == "" {
 		return false
@@ -457,7 +461,7 @@ func (m *Manager) retainHomeWebsocketSelection(ctx context.Context, opts cliprox
 	previous := selections[key]
 	selections[key] = selection
 	m.mu.Unlock()
-	m.rememberHomeRuntimeAuth(sessionID, selection.Auth)
+	m.rememberHomeRuntimeAuth(sessionID, selectionAuth)
 	if previous != nil && previous != selection {
 		previous.End("target_replaced")
 	}
@@ -533,11 +537,15 @@ func (m *Manager) clearHomeRuntimeAuthsForSessionLocked(sessionID string) {
 }
 
 func (m *Manager) bindHomeSelectionRuntimeAuth(ctx context.Context, opts cliproxyexecutor.Options, selection *HomeDispatchSelection) error {
-	if m == nil || selection == nil || !cliproxyexecutor.DownstreamWebsocket(ctx) || selection.Auth == nil || !authWebsocketsEnabled(selection.Auth) {
+	if m == nil || selection == nil || !cliproxyexecutor.DownstreamWebsocket(ctx) {
+		return nil
+	}
+	selectionAuth := selection.CloneAuth()
+	if selectionAuth == nil || !authWebsocketsEnabled(selectionAuth) {
 		return nil
 	}
 	sessionID := homeExecutionSessionIDFromMetadata(opts.Metadata)
-	authID := strings.TrimSpace(selection.Auth.ID)
+	authID := strings.TrimSpace(selectionAuth.ID)
 	if sessionID == "" || authID == "" || !selection.runtimeAuthBound.CompareAndSwap(false, true) {
 		return nil
 	}
@@ -554,11 +562,15 @@ func (m *Manager) bindHomeSelectionRuntimeAuth(ctx context.Context, opts cliprox
 }
 
 func (m *Manager) rememberHomeSelectionRuntimeAuth(sessionID string, selection *HomeDispatchSelection) {
-	if m == nil || selection == nil || selection.Auth == nil {
+	if m == nil || selection == nil {
+		return
+	}
+	selectionAuth := selection.CloneAuth()
+	if selectionAuth == nil {
 		return
 	}
 	sessionID = strings.TrimSpace(sessionID)
-	authID := strings.TrimSpace(selection.Auth.ID)
+	authID := strings.TrimSpace(selectionAuth.ID)
 	if sessionID == "" || authID == "" {
 		return
 	}
@@ -575,8 +587,30 @@ func (m *Manager) rememberHomeSelectionRuntimeAuth(sessionID string, selection *
 	if m.homeRuntimeAuthOwners[sessionID] == nil {
 		m.homeRuntimeAuthOwners[sessionID] = make(map[string]*HomeDispatchSelection)
 	}
-	m.homeRuntimeAuths[sessionID][authID] = selection.Auth.Clone()
+	m.homeRuntimeAuths[sessionID][authID] = selectionAuth
 	m.homeRuntimeAuthOwners[sessionID][authID] = selection
+	m.mu.Unlock()
+}
+
+func (m *Manager) replaceHomeSelectionAuth(selection *HomeDispatchSelection, auth *Auth) {
+	if m == nil || selection == nil || auth == nil {
+		return
+	}
+	m.mu.Lock()
+	selection.ReplaceAuth(auth)
+	updated := selection.CloneAuth()
+	if updated == nil {
+		m.mu.Unlock()
+		return
+	}
+	for sessionID, owners := range m.homeRuntimeAuthOwners {
+		for authID, owner := range owners {
+			if owner != selection || m.homeRuntimeAuths[sessionID] == nil {
+				continue
+			}
+			m.homeRuntimeAuths[sessionID][authID] = updated.Clone()
+		}
+	}
 	m.mu.Unlock()
 }
 
@@ -665,7 +699,8 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	if errSelection != nil {
 		return nil, nil, "", errSelection
 	}
-	if selection.Auth == nil || homeAuthAlreadyTried(tried, selection.Auth.ID) {
+	selectionAuth := selection.CloneAuth()
+	if selectionAuth == nil || homeAuthAlreadyTried(tried, selectionAuth.ID) {
 		selection.End("repeated_auth")
 		return nil, nil, "", repeatedHomeAuthError()
 	}
