@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"strconv"
 	"strings"
 	"time"
 
@@ -796,6 +797,13 @@ func (e *OpenAICompatExecutor) resolveCompatComposerSessionID(ctx context.Contex
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {
 	if auth == nil || e.cfg == nil {
 		return nil
+	}
+	// Config-synthesized auths carry config_index to disambiguate OpenAI-compatibility
+	// entries that share a name; honor it so we never match the wrong entry.
+	if auth.AuthSourceKind() == cliproxyauth.AuthSourceConfig && auth.Attributes != nil {
+		if index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeConfigIndex])); errIndex == nil && index >= 0 && index < len(e.cfg.OpenAICompatibility) && !e.cfg.OpenAICompatibility[index].Disabled {
+			return &e.cfg.OpenAICompatibility[index]
+		}
 	}
 	candidates := make([]string, 0, 3)
 	if auth.Attributes != nil {
