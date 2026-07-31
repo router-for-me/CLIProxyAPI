@@ -46,10 +46,16 @@ func writeResponsesSSEChunk(w io.Writer, chunk []byte) {
 }
 
 type responsesSSEFramer struct {
-	pending              []byte
-	outputItems          map[int][]byte
-	outputOrder          []int
-	unindexedOutputItems [][]byte
+	pending               []byte
+	outputItems           map[int][]byte
+	outputOrder           []int
+	unindexedOutputItems  [][]byte
+	responseID            string
+	responseObject        []byte
+	requestJSON           []byte
+	lastSequenceNumber    int
+	hasLastSequenceNumber bool
+	terminalEventSeen     bool
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
@@ -106,16 +112,49 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 		return frame
 	}
 
-	switch gjson.GetBytes(payload, "type").String() {
+	eventType := gjson.GetBytes(payload, "type").String()
+	f.recordResponseMetadata(payload, eventType)
+
+	switch eventType {
 	case "response.output_item.done":
 		f.recordOutputItem(payload)
 	case "response.completed":
+		f.terminalEventSeen = true
 		repaired := f.repairCompletedPayload(payload)
 		if !bytes.Equal(repaired, payload) {
 			return responsesSSEFrameWithData(frame, repaired)
 		}
+	case "response.incomplete", "response.failed":
+		f.terminalEventSeen = true
 	}
 	return frame
+}
+
+func (f *responsesSSEFramer) recordResponseMetadata(payload []byte, eventType string) {
+	response := gjson.GetBytes(payload, "response")
+	if response.IsObject() && (len(f.responseObject) == 0 || eventType == "response.created") {
+		f.responseObject = append(f.responseObject[:0], response.Raw...)
+	}
+	if responseID := response.Get("id").String(); responseID != "" {
+		f.responseID = responseID
+	}
+	sequenceNumber := gjson.GetBytes(payload, "sequence_number")
+	if !sequenceNumber.Exists() {
+		return
+	}
+	value := int(sequenceNumber.Int())
+	if !f.hasLastSequenceNumber || value > f.lastSequenceNumber {
+		f.lastSequenceNumber = value
+		f.hasLastSequenceNumber = true
+	}
+}
+
+func (f *responsesSSEFramer) terminalMetadata() (string, int, []byte) {
+	responseObject := f.failedResponseObject()
+	if !f.hasLastSequenceNumber {
+		return f.responseID, 0, responseObject
+	}
+	return f.responseID, f.lastSequenceNumber + 1, responseObject
 }
 
 func responsesSSEDataPayload(frame []byte) ([]byte, bool) {
@@ -178,13 +217,9 @@ func (f *responsesSSEFramer) recordOutputItem(payload []byte) {
 	f.unindexedOutputItems = append(f.unindexedOutputItems, append([]byte(nil), item.Raw...))
 }
 
-func (f *responsesSSEFramer) repairCompletedPayload(payload []byte) []byte {
+func (f *responsesSSEFramer) recordedOutputJSON() []byte {
 	if len(f.outputOrder) == 0 && len(f.unindexedOutputItems) == 0 {
-		return payload
-	}
-	output := gjson.GetBytes(payload, "response.output")
-	if output.Exists() && (!output.IsArray() || len(output.Array()) > 0) {
-		return payload
+		return nil
 	}
 
 	var outputJSON bytes.Buffer
@@ -211,8 +246,169 @@ func (f *responsesSSEFramer) repairCompletedPayload(payload []byte) []byte {
 		written++
 	}
 	outputJSON.WriteByte(']')
+	return outputJSON.Bytes()
+}
 
-	repaired, err := sjson.SetRawBytes(payload, "response.output", outputJSON.Bytes())
+type responsesJSONFieldKind uint8
+
+const (
+	responsesJSONFieldRaw responsesJSONFieldKind = iota
+	responsesJSONFieldBoolean
+	responsesJSONFieldConversation
+)
+
+type responsesJSONFieldPolicy struct {
+	field    string
+	fallback string
+	kind     responsesJSONFieldKind
+}
+
+func applyResponsesJSONFieldPolicy(response, request []byte, policy responsesJSONFieldPolicy) []byte {
+	responseValue := gjson.GetBytes(response, policy.field)
+	switch policy.kind {
+	case responsesJSONFieldBoolean:
+		if responseValue.Type == gjson.True || responseValue.Type == gjson.False {
+			return response
+		}
+	case responsesJSONFieldConversation:
+		conversationID := responseValue.Get("id")
+		if (responseValue.IsObject() && conversationID.Type == gjson.String && conversationID.String() != "") || responseValue.Raw == "null" {
+			return response
+		}
+	default:
+		if responseValue.Exists() {
+			return response
+		}
+	}
+
+	requestValue := gjson.GetBytes(request, policy.field)
+	switch policy.kind {
+	case responsesJSONFieldBoolean:
+		if requestValue.Type == gjson.True || requestValue.Type == gjson.False {
+			updated, err := sjson.SetBytes(response, policy.field, requestValue.Bool())
+			if err == nil {
+				return updated
+			}
+			return response
+		}
+	case responsesJSONFieldConversation:
+		conversationID := ""
+		if requestValue.Type == gjson.String {
+			conversationID = requestValue.String()
+		} else if id := requestValue.Get("id"); requestValue.IsObject() && id.Type == gjson.String {
+			conversationID = id.String()
+		}
+		if conversationID != "" {
+			value := []byte(`{"id":""}`)
+			value, _ = sjson.SetBytes(value, "id", conversationID)
+			updated, err := sjson.SetRawBytes(response, policy.field, value)
+			if err == nil {
+				return updated
+			}
+			return response
+		}
+	default:
+		if requestValue.Exists() {
+			updated, err := sjson.SetRawBytes(response, policy.field, []byte(requestValue.Raw))
+			if err == nil {
+				return updated
+			}
+			return response
+		}
+	}
+
+	if policy.fallback == "" {
+		if policy.kind == responsesJSONFieldConversation && responseValue.Exists() {
+			updated, err := sjson.DeleteBytes(response, policy.field)
+			if err == nil {
+				return updated
+			}
+		}
+		return response
+	}
+	var (
+		updated []byte
+		err     error
+	)
+	if policy.kind == responsesJSONFieldBoolean {
+		updated, err = sjson.SetBytes(response, policy.field, policy.fallback == "true")
+	} else {
+		updated, err = sjson.SetRawBytes(response, policy.field, []byte(policy.fallback))
+	}
+	if err != nil {
+		return response
+	}
+	return updated
+}
+
+func (f *responsesSSEFramer) failedResponseObject() []byte {
+	response := append([]byte(nil), f.responseObject...)
+	if !json.Valid(response) || !gjson.ParseBytes(response).IsObject() {
+		response = []byte("{}")
+	}
+	if f.responseID != "" && !gjson.GetBytes(response, "id").Exists() {
+		if updated, err := sjson.SetBytes(response, "id", f.responseID); err == nil {
+			response = updated
+		}
+	}
+	policies := []responsesJSONFieldPolicy{
+		{field: "created_at", fallback: "0"},
+		{field: "error", fallback: "null"},
+		{field: "incomplete_details", fallback: "null"},
+		{field: "instructions", fallback: "null"},
+		{field: "metadata", fallback: "null"},
+		{field: "model", fallback: `""`},
+		{field: "object", fallback: `"response"`},
+		{field: "output", fallback: "[]"},
+		{field: "parallel_tool_calls", fallback: "true", kind: responsesJSONFieldBoolean},
+		{field: "temperature", fallback: "null"},
+		{field: "tool_choice", fallback: `"auto"`},
+		{field: "tools", fallback: "[]"},
+		{field: "top_p", fallback: "null"},
+		{field: "background", fallback: "false"},
+		{field: "status", fallback: `"failed"`},
+		{field: "text", fallback: `{"format":{"type":"text"}}`},
+		{field: "usage", fallback: "null"},
+		{field: "store", fallback: "true", kind: responsesJSONFieldBoolean},
+		{field: "conversation", kind: responsesJSONFieldConversation},
+		{field: "max_output_tokens"},
+		{field: "max_tool_calls"},
+		{field: "previous_response_id"},
+		{field: "prompt"},
+		{field: "prompt_cache_key"},
+		{field: "prompt_cache_options"},
+		{field: "prompt_cache_retention"},
+		{field: "reasoning"},
+		{field: "safety_identifier"},
+		{field: "service_tier"},
+		{field: "top_logprobs"},
+		{field: "truncation"},
+		{field: "user"},
+	}
+	for _, policy := range policies {
+		response = applyResponsesJSONFieldPolicy(response, f.requestJSON, policy)
+	}
+	if outputJSON := f.recordedOutputJSON(); len(outputJSON) > 0 {
+		output := gjson.GetBytes(response, "output")
+		if !output.Exists() || !output.IsArray() || len(output.Array()) == 0 {
+			if updated, err := sjson.SetRawBytes(response, "output", outputJSON); err == nil {
+				response = updated
+			}
+		}
+	}
+	return response
+}
+
+func (f *responsesSSEFramer) repairCompletedPayload(payload []byte) []byte {
+	outputJSON := f.recordedOutputJSON()
+	if len(outputJSON) == 0 {
+		return payload
+	}
+	output := gjson.GetBytes(payload, "response.output")
+	if output.Exists() && (!output.IsArray() || len(output.Array()) > 0) {
+		return payload
+	}
+	repaired, err := sjson.SetRawBytes(payload, "response.output", outputJSON)
 	if err != nil {
 		return payload
 	}
@@ -493,7 +689,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
-	framer := &responsesSSEFramer{}
+	framer := &responsesSSEFramer{requestJSON: append([]byte(nil), rawJSON...)}
 
 	// Peek at the first chunk
 	for {
@@ -551,7 +747,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			framer.Flush(c.Writer)
-			if errMsg == nil {
+			if errMsg == nil || framer.terminalEventSeen {
 				return
 			}
 			status := http.StatusInternalServerError
@@ -562,8 +758,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 			if errMsg.Error != nil && errMsg.Error.Error() != "" {
 				errText = errMsg.Error.Error()
 			}
-			chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
-			_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
+			responseID, sequenceNumber, responseObject := framer.terminalMetadata()
+			chunk := handlers.BuildOpenAIResponsesFailedStreamChunk(status, errText, responseID, sequenceNumber, responseObject)
+			_, _ = fmt.Fprintf(c.Writer, "\nevent: response.failed\ndata: %s\n\n", string(chunk))
 		},
 		WriteDone: func() {
 			framer.Flush(c.Writer)
