@@ -15,44 +15,76 @@ var gjsonPathKeyReplacer = strings.NewReplacer(".", "\\.", "*", "\\*", "?", "\\?
 
 const placeholderReasonDescription = "Brief explanation of why you are calling this tool"
 
-// CleanJSONSchemaForAntigravity transforms a JSON schema to be compatible with Antigravity API.
+// Pass a single JSON schema to the functions below — never a whole request document.
+//
+// Cleaning walks every node and rewrites keys by name, and schema keywords such as "title",
+// "format", "default" and "const" are also ordinary data keys. Handing these functions a request
+// silently rewrites tool-call arguments inside the conversation history: the guard that protects
+// a key under ".properties" does not apply to argument values, so the keys are deleted outright
+// and replacements such as "enum" and "type" are fabricated. That regression reached production
+// once already; scope every call site to the schema itself.
+
+type jsonSchemaCleanOptions struct {
+	addPlaceholder       bool
+	removeGeminiMetadata bool
+	flattenUnions        bool
+	forceEnumStringType  bool
+}
+
+// CleanJSONSchemaForAntigravity transforms a tool schema to be compatible with Antigravity API.
 // It handles unsupported keywords, type flattening, and schema simplification while preserving
-// semantic information as description hints.
+// semantic information as description hints and adding placeholders required by VALIDATED mode.
 func CleanJSONSchemaForAntigravity(jsonStr string) string {
-	return cleanJSONSchema(jsonStr, true)
+	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{
+		addPlaceholder:      true,
+		flattenUnions:       true,
+		forceEnumStringType: true,
+	})
+}
+
+// CleanJSONSchemaForAntigravityResponse transforms a response schema without applying tool-only
+// compatibility rewrites that would alter the client's structured output contract.
+func CleanJSONSchemaForAntigravityResponse(jsonStr string) string {
+	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{})
 }
 
 // CleanJSONSchemaForGemini transforms a JSON schema to be compatible with Gemini tool calling.
 // It removes unsupported keywords and simplifies schemas, without adding empty-schema placeholders.
 func CleanJSONSchemaForGemini(jsonStr string) string {
-	return cleanJSONSchema(jsonStr, false)
+	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{
+		removeGeminiMetadata: true,
+		flattenUnions:        true,
+		forceEnumStringType:  true,
+	})
 }
 
 // cleanJSONSchema performs the core cleaning operations on the JSON schema.
-func cleanJSONSchema(jsonStr string, addPlaceholder bool) string {
+func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	// Phase 1: Convert and add hints
 	jsonStr = convertRefsToHints(jsonStr)
 	jsonStr = convertConstToEnum(jsonStr)
-	jsonStr = convertEnumValuesToStrings(jsonStr)
+	jsonStr = convertEnumValuesToStrings(jsonStr, options.forceEnumStringType)
 	jsonStr = addEnumHints(jsonStr)
 	jsonStr = addAdditionalPropertiesHints(jsonStr)
 	jsonStr = moveConstraintsToDescription(jsonStr)
 
 	// Phase 2: Flatten complex structures
 	jsonStr = mergeAllOf(jsonStr)
-	jsonStr = flattenAnyOfOneOf(jsonStr)
+	if options.flattenUnions {
+		jsonStr = flattenAnyOfOneOf(jsonStr)
+	}
 	jsonStr = flattenTypeArrays(jsonStr)
 
 	// Phase 3: Cleanup
 	jsonStr = removeUnsupportedKeywords(jsonStr)
-	if !addPlaceholder {
+	if options.removeGeminiMetadata {
 		// Gemini schema cleanup: remove nullable/title and placeholder-only fields.
 		jsonStr = removeKeywords(jsonStr, []string{"nullable", "title"})
 		jsonStr = removePlaceholderFields(jsonStr)
 	}
 	jsonStr = cleanupRequiredFields(jsonStr)
 	// Phase 4: Add placeholder for empty object schemas (Claude VALIDATED mode requirement)
-	if addPlaceholder {
+	if options.addPlaceholder {
 		jsonStr = addEmptySchemaPlaceholder(jsonStr)
 	}
 
@@ -186,9 +218,10 @@ func convertConstToEnum(jsonStr string) string {
 	return jsonStr
 }
 
-// convertEnumValuesToStrings ensures all enum values are strings and the schema type is set to string.
-// Gemini API requires enum values to be of type string, not numbers or booleans.
-func convertEnumValuesToStrings(jsonStr string) string {
+// convertEnumValuesToStrings ensures all enum values use the string representation required by
+// Gemini's proto schema. Tool schemas also require a string type, while response schemas preserve
+// their declared type because the upstream decoder uses it to select the emitted JSON value type.
+func convertEnumValuesToStrings(jsonStr string, forceStringType bool) string {
 	for _, p := range findPaths(jsonStr, "enum") {
 		arr := gjson.Get(jsonStr, p)
 		if !arr.IsArray() {
@@ -200,13 +233,13 @@ func convertEnumValuesToStrings(jsonStr string) string {
 			stringVals = append(stringVals, item.String())
 		}
 
-		// Always update enum values to strings and set type to "string"
-		// This ensures compatibility with Antigravity Gemini which only allows enum for STRING type
 		updated, _ := sjson.SetBytes([]byte(jsonStr), p, stringVals)
 		jsonStr = string(updated)
-		parentPath := trimSuffix(p, ".enum")
-		updated, _ = sjson.SetBytes([]byte(jsonStr), joinPath(parentPath, "type"), "string")
-		jsonStr = string(updated)
+		if forceStringType {
+			parentPath := trimSuffix(p, ".enum")
+			updated, _ = sjson.SetBytes([]byte(jsonStr), joinPath(parentPath, "type"), "string")
+			jsonStr = string(updated)
+		}
 	}
 	return jsonStr
 }
@@ -685,26 +718,37 @@ func descriptionPath(parentPath string) string {
 	return parentPath + ".description"
 }
 
+// mergeHint combines an existing description with a hint. Cleaning is not always a single pass:
+// a schema may be cleaned by a translator and again by an executor, so an already-present hint is
+// kept as-is instead of being appended a second time.
+func mergeHint(existing, hint string) string {
+	if existing == "" {
+		return hint
+	}
+	// A hint added to an empty description is stored bare and later hints are appended after it, so
+	// the bare form may sit alone, lead the description, or appear parenthesised further along.
+	if existing == hint ||
+		strings.HasPrefix(existing, hint+" (") ||
+		strings.Contains(existing, fmt.Sprintf("(%s)", hint)) {
+		return existing
+	}
+	return fmt.Sprintf("%s (%s)", existing, hint)
+}
+
 func appendHint(jsonStr, parentPath, hint string) string {
 	descPath := parentPath + ".description"
 	if parentPath == "" || parentPath == "@this" {
 		descPath = "description"
 	}
-	existing := gjson.Get(jsonStr, descPath).String()
-	if existing != "" {
-		hint = fmt.Sprintf("%s (%s)", existing, hint)
-	}
-	updated, _ := sjson.SetBytes([]byte(jsonStr), descPath, hint)
+	merged := mergeHint(gjson.Get(jsonStr, descPath).String(), hint)
+	updated, _ := sjson.SetBytes([]byte(jsonStr), descPath, merged)
 	jsonStr = string(updated)
 	return jsonStr
 }
 
 func appendHintRaw(jsonRaw, hint string) string {
-	existing := gjson.Get(jsonRaw, "description").String()
-	if existing != "" {
-		hint = fmt.Sprintf("%s (%s)", existing, hint)
-	}
-	updated, _ := sjson.SetBytes([]byte(jsonRaw), "description", hint)
+	merged := mergeHint(gjson.Get(jsonRaw, "description").String(), hint)
+	updated, _ := sjson.SetBytes([]byte(jsonRaw), "description", merged)
 	jsonRaw = string(updated)
 	return jsonRaw
 }

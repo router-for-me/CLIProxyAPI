@@ -35,6 +35,11 @@ type CooldownStateStore interface {
 	Save(context.Context, []CooldownStateRecord) error
 }
 
+// CooldownStateStoreProvider exposes a backend-specific cooldown state store.
+type CooldownStateStoreProvider interface {
+	CooldownStateStore() CooldownStateStore
+}
+
 type cooldownStateFile struct {
 	Version   int                   `json:"version"`
 	AuthID    string                `json:"auth_id,omitempty"`

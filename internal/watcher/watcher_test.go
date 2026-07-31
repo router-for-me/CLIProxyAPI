@@ -181,8 +181,9 @@ func TestReloadConfigIfChanged_TriggersOnChangeAndSkipsUnchanged(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	writeConfig := func(port int, allowRemote bool) {
 		cfg := &config.Config{
-			Port:    port,
-			AuthDir: authDir,
+			Port:               port,
+			AuthDir:            authDir,
+			CredentialInFlight: config.DefaultCredentialInFlightConfig(),
 			RemoteManagement: config.RemoteManagement{
 				AllowRemote: allowRemote,
 			},
@@ -1356,13 +1357,15 @@ func TestReloadConfigFiltersAffectedOAuthProviders(t *testing.T) {
 	}
 
 	oldCfg := &config.Config{
-		AuthDir: authDir,
+		AuthDir:            authDir,
+		CredentialInFlight: config.DefaultCredentialInFlightConfig(),
 		OAuthExcludedModels: map[string][]string{
 			"provider-a": {"m1"},
 		},
 	}
 	newCfg := &config.Config{
-		AuthDir: authDir,
+		AuthDir:            authDir,
+		CredentialInFlight: config.DefaultCredentialInFlightConfig(),
 		OAuthExcludedModels: map[string][]string{
 			"provider-a": {"m2"},
 		},
@@ -1418,12 +1421,14 @@ func TestReloadConfigTriggersCallbackForMaxRetryCredentialsChange(t *testing.T) 
 
 	oldCfg := &config.Config{
 		AuthDir:             authDir,
+		CredentialInFlight:  config.DefaultCredentialInFlightConfig(),
 		MaxRetryCredentials: 0,
 		RequestRetry:        1,
 		MaxRetryInterval:    5,
 	}
 	newCfg := &config.Config{
 		AuthDir:             authDir,
+		CredentialInFlight:  config.DefaultCredentialInFlightConfig(),
 		MaxRetryCredentials: 2,
 		RequestRetry:        1,
 		MaxRetryInterval:    5,
