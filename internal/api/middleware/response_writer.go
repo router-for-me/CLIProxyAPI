@@ -300,6 +300,9 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	apiRequestSource := w.extractAPIRequestSource(c)
 	apiResponseSource := w.extractAPIResponseSource(c)
 	apiWebsocketTimelineSource := w.extractAPIWebsocketTimelineSource(c)
+	if forceLog && apiRequestSource == nil && apiResponseSource == nil && websocketTimelineSource == nil && apiWebsocketTimelineSource == nil {
+		apiRequestSource = w.newRequestLogFormatSource()
+	}
 	if !w.logger.IsEnabled() && !forceLog {
 		cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource, apiWebsocketTimelineSource)
 		return nil
@@ -390,6 +393,21 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		apiRequest = w.extractDeferredAPIRequest(c)
 	}
 	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c), w.extractWebsocketTimeline(c), websocketTimelineSource, apiRequest, apiRequestSource, w.extractAPIResponse(c), apiResponseSource, w.extractAPIWebsocketTimeline(c), apiWebsocketTimelineSource, w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
+}
+
+func (w *ResponseWriterWrapper) newRequestLogFormatSource() *logging.FileBodySource {
+	if w == nil || w.requestInfo == nil || w.requestInfo.LogFormat == "" {
+		return nil
+	}
+	factory, ok := w.logger.(formattedFileBodySourceFactory)
+	if !ok || factory == nil {
+		return nil
+	}
+	source, errSource := factory.NewFileBodySourceWithFormat("request-format", w.requestInfo.LogFormat)
+	if errSource != nil {
+		return nil
+	}
+	return source
 }
 
 func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {

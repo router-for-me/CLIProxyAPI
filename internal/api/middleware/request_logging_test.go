@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -259,6 +260,43 @@ func TestRequestLoggingMiddlewareCapturesLargeErrorRequestAndDeferredAPIRequest(
 	if !bytes.Contains(content, upstreamBody) {
 		t.Fatal("error log does not contain the deferred upstream request body")
 	}
+}
+
+func TestRequestLoggingMiddlewareKeepsErrorLogFormatAcrossReload(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	logsDir := t.TempDir()
+	logger := logging.NewFileRequestLoggerWithFormat(false, logsDir, "", 10, "json")
+	router := gin.New()
+	router.Use(RequestLoggingMiddleware(logger))
+	router.POST("/v1/responses", func(c *gin.Context) {
+		logger.SetFormat("text")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "rejected"})
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	entries, errReadDir := os.ReadDir(logsDir)
+	if errReadDir != nil {
+		t.Fatalf("read logs dir: %v", errReadDir)
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "error-") || !strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		content, errRead := os.ReadFile(logsDir + string(os.PathSeparator) + entry.Name())
+		if errRead != nil {
+			t.Fatalf("read error log: %v", errRead)
+		}
+		if !json.Valid(content) {
+			t.Fatalf("error log used reloaded text format: %q", content)
+		}
+		return
+	}
+	t.Fatal("forced error log was not created")
 }
 
 func TestAttachRequestLogSourcesUsesLoggerLogsDir(t *testing.T) {
