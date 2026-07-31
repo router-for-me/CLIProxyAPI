@@ -744,14 +744,17 @@ func normalizeModelBudgetMap(in map[string]float64) map[string]float64 {
 	return out
 }
 
-// normalizeModelDiscountMap trims model ids and clamps/drops discount
-// percentages outside the valid [0,100] range. A discount of 0 means "no
-// discount" and is dropped (mirrors the cap maps' non-positive = unlimited /
-// no-op convention) so persisted maps only carry meaningful overrides.
+// normalizeModelDiscountMap trims model ids, lowercases them, and clamps/drops
+// discount percentages outside the valid [0,100] range. A discount of 0 means
+// "no discount" and is dropped (mirrors the cap maps' non-positive =
+// unlimited / no-op convention) so persisted maps only carry meaningful
+// overrides. Keys are lowercased so the enforcement path's case-insensitive
+// matcher (and any direct lowercase lookup) always hits — consistent with how
+// ModelRPMLimits/ModelBudgetLimits are matched case-insensitively.
 func normalizeModelDiscountMap(in map[string]float64) map[string]float64 {
 	out := map[string]float64{}
 	for k, v := range in {
-		k = strings.TrimSpace(k)
+		k = strings.ToLower(strings.TrimSpace(k))
 		if k == "" {
 			continue
 		}

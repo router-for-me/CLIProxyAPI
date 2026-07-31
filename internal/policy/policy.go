@@ -56,17 +56,30 @@ func computeCostFromTokens(p store.Pricing, tokens TokenCounts) float64 {
 
 // resolveDiscount returns the discount percentage (0-100) that applies to a
 // request for the given model under the supplied policy. A per-model entry
-// (keyed by the lowercased model id) takes precedence over the group-level
-// default; 0 means "no discount". Returns 0 when the policy is nil or carries
-// no discount, so callers can apply `cost *= (1 - pct/100)` unconditionally.
-// Mirrored by store.ModelGroup resolution so the flusher (events path) and
-// Consume (budget-windows path) apply the identical factor and stay in sync.
+// wins over the group-level default; 0 means "no discount". Returns 0 when
+// the policy is nil or carries no discount, so callers can apply
+// `cost *= (1 - pct/100)` unconditionally.
+//
+// Model matching is case-insensitive (mirrors the per-model RPM/budget cap
+// matcher in enforce.go): the map key and the requested model are both
+// lowercased before comparison, so a per-model discount authored as "GPT-4O"
+// still matches an event whose model is "gpt-4o". The map keys are also
+// normalized to lowercase at storage time (normalizeModelDiscountMap), but
+// the case-insensitive scan here is the robust fallback for legacy rows.
+// Mirrored by store.UsageFlusher.resolveDiscount so the flusher (events
+// path) and Consume (budget-windows path) apply the identical factor.
 func resolveDiscount(p *store.Policy, model string) float64 {
 	if p == nil || model == "" {
 		return 0
 	}
-	if v, ok := p.ModelDiscountPcts[strings.ToLower(model)]; ok && v > 0 {
-		return v
+	ml := strings.ToLower(model)
+	for capModel, v := range p.ModelDiscountPcts {
+		if v <= 0 {
+			continue
+		}
+		if strings.ToLower(capModel) == ml {
+			return v
+		}
 	}
 	if p.DiscountPct != nil && *p.DiscountPct > 0 {
 		return *p.DiscountPct

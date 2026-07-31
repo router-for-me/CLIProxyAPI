@@ -505,6 +505,12 @@ func TestResolveDiscount(t *testing.T) {
 		{name: "per-model keyed lowercase", p: &store.Policy{
 			ModelDiscountPcts: map[string]float64{"gpt-4o": 25},
 		}, model: "GPT-4O", want: 25},
+		{name: "per-model keyed mixed-case matches lowercase model", p: &store.Policy{
+			ModelDiscountPcts: map[string]float64{"GPT-4O": 25},
+		}, model: "gpt-4o", want: 25},
+		{name: "per-model keyed mixed-case matches mixed-case model", p: &store.Policy{
+			ModelDiscountPcts: map[string]float64{"Claude-3-Opus": 15},
+		}, model: "claude-3-opus", want: 15},
 		{name: "per-model for other model falls back to default", p: &store.Policy{
 			DiscountPct: ptrFloat64(10), ModelDiscountPcts: map[string]float64{"gpt-4o": 30},
 		}, model: "claude-3", want: 10},

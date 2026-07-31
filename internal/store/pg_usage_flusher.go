@@ -450,12 +450,16 @@ func (f *UsageFlusher) toError(ctx context.Context, record coreusage.Record) (Us
 
 // resolveDiscount returns the model-group discount percentage (0-100) that
 // applies to a request for model under the supplied policy. It is the
-// flusher-side mirror of policy.resolveDiscount: a per-model override (keyed
-// by the lowercased model id from the group's ModelDiscountPcts) wins over
-// the group-level DiscountPct default; 0 means "no discount". Looking up the
-// group requires the groupsStore; when it (or the policy's ModelGroupID) is
-// nil, no discount is applied. Failures to load the group are best-effort: 0
-// (so a transient PG error never blocks the flush).
+// flusher-side mirror of policy.resolveDiscount: a per-model override wins
+// over the group-level DiscountPct default; 0 means "no discount". Looking
+// up the group requires the groupsStore; when it (or the policy's
+// ModelGroupID) is nil, no discount is applied. Failures to load the group
+// are best-effort: 0 (so a transient PG error never blocks the flush).
+//
+// Model matching is case-insensitive (mirrors the per-model RPM/budget cap
+// matcher in policy.enforce.go): both the map key and the requested model are
+// lowercased before comparison, so a per-model discount authored as "GPT-4O"
+// still matches an event whose model is "gpt-4o".
 func (f *UsageFlusher) resolveDiscount(ctx context.Context, p *Policy, model string) float64 {
 	if p == nil || p.ModelGroupID == nil || *p.ModelGroupID == "" || model == "" {
 		return 0
@@ -467,8 +471,14 @@ func (f *UsageFlusher) resolveDiscount(ctx context.Context, p *Policy, model str
 	if err != nil {
 		return 0
 	}
-	if v, ok := g.ModelDiscountPcts[strings.ToLower(model)]; ok && v > 0 {
-		return v
+	ml := strings.ToLower(model)
+	for capModel, v := range g.ModelDiscountPcts {
+		if v <= 0 {
+			continue
+		}
+		if strings.ToLower(capModel) == ml {
+			return v
+		}
 	}
 	if g.DiscountPct != nil && *g.DiscountPct > 0 {
 		return *g.DiscountPct

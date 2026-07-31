@@ -190,6 +190,72 @@ func TestUsageFlusherAppliesModelGroupDiscount(t *testing.T) {
 	}
 }
 
+// TestUsageFlusherAppliesPerModelDiscountCaseInsensitive guards that a
+// per-model discount authored under a mixed-case model id (e.g. "GPT-4O")
+// still applies to an event whose resolved model is lowercase ("gpt-4o").
+// Before the fix, resolveDiscount did a direct map[strings.ToLower(model)]
+// lookup that missed mixed-case keys, so the discount silently fell back to
+// the group default (or 0) and cost_usd stayed undiscounted.
+func TestUsageFlusherAppliesPerModelDiscountCaseInsensitive(t *testing.T) {
+	store := newTestPostgresStore(t, "flusher_discount_permodel")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+	apiKeys := NewAPIKeyStore(store)
+	groups := NewModelGroupStore(store)
+	flusher := NewUsageFlusher(us, apiKeys, groups, FlusherConfig{QueueCap: 10, FlushInterval: time.Hour, FlushBatchSize: 5})
+	if err := flusher.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(flusher.Stop)
+
+	key, plaintextSecret, err := apiKeys.Create(ctx, "dk2", "", "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Pricing: 1M input @ $1/M + 1M output @ $2/M = $3 pre-discount.
+	if err := us.UpsertPricing(ctx, Pricing{ID: "gpt-4o", InputPer1M: 1.0, OutputPer1M: 2.0}); err != nil {
+		t.Fatalf("UpsertPricing: %v", err)
+	}
+	// Per-model discount authored under a MIXED-CASE key; no group-level
+	// default. The event's resolved model is lowercase "gpt-4o".
+	grp, err := groups.Create(ctx, ModelGroup{
+		Name: "permodel", AllowedModels: []string{"gpt-4o"},
+		ModelDiscountPcts: map[string]float64{"GPT-4O": 25},
+	})
+	if err != nil {
+		t.Fatalf("Create group: %v", err)
+	}
+	if err := apiKeys.UpdatePolicy(ctx, key.ID, Policy{ModelGroupID: &grp.ID}); err != nil {
+		t.Fatalf("UpdatePolicy: %v", err)
+	}
+
+	flusher.HandleUsage(ctx, coreusage.Record{
+		Provider: "test", Model: "gpt-4o", APIKey: plaintextSecret,
+		AuthType: "api_key", Source: "test", RequestedAt: time.Now().UTC(),
+		Detail: coreusage.Detail{
+			InputTokens: 1_000_000, OutputTokens: 1_000_000, TotalTokens: 2_000_000,
+		},
+	})
+	flusher.Stop()
+
+	rows, _, err := us.SelectEvents(ctx, UsageFilter{APIKeyID: key.ID}, 1, 25)
+	if err != nil {
+		t.Fatalf("SelectEvents: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 event; got %d", len(rows))
+	}
+	row := rows[0]
+	// Pre-discount = $3; 25% off → $2.25. Before the fix the mixed-case key
+	// missed and cost stayed at $3 (undiscounted).
+	if row.CostUSD < 2.24 || row.CostUSD > 2.26 {
+		t.Errorf("cost_usd = %v; want ~2.25 (3.0 × 0.75) — per-model discount must apply case-insensitively", row.CostUSD)
+	}
+	if row.DiscountPct < 24.99 || row.DiscountPct > 25.01 {
+		t.Errorf("discount_pct = %v; want 25", row.DiscountPct)
+	}
+}
+
 func TestUsageFlusherDropsOnFullQueue(t *testing.T) {
 	// Use a zero-cap queue via direct construction — we cannot pass cap=0
 	// because NewUsageFlusher falls back to defaults. Instead, set cap=1
