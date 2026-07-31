@@ -10,7 +10,8 @@ import ModelRouteConfigSection from './ModelRouteConfigSection.jsx';
 //
 // Save is uncontrolled-by-parent: the modal owns its draft state and calls
 // onSave(entry) where entry = { model, providers, strategy, priorities,
-// rpm, max_budget } (rpm / max_budget are empty string when unset).
+// rpm, max_budget, discount } (rpm / max_budget / discount are empty string
+// when unset).
 //
 // Props:
 //   existingModels — model ids already on the list (for add-mode dup guard).
@@ -39,6 +40,7 @@ export default function ModelRouteEntryModal({ existingModels = [], initial = nu
   }));
   const [rpm, setRpm] = useState(() => numOrEmpty(initial?.rpm));
   const [maxBudget, setMaxBudget] = useState(() => numOrEmpty(initial?.max_budget));
+  const [discount, setDiscount] = useState(() => numOrEmpty(initial?.discount));
 
   const trimmedModel = (model || '').trim();
   const dup = !editing && trimmedModel !== '' && existingModels.includes(trimmedModel);
@@ -53,6 +55,7 @@ export default function ModelRouteEntryModal({ existingModels = [], initial = nu
       priorities: route.priorities,
       rpm,
       max_budget: maxBudget,
+      discount,
     });
   }
 
@@ -108,7 +111,7 @@ export default function ModelRouteEntryModal({ existingModels = [], initial = nu
             />
           </div>
 
-          <div className="grid grid--2">
+          <div className="grid grid--3">
             <div className="form__row">
               <label className="form__label">RPM limit</label>
               <input
@@ -132,6 +135,19 @@ export default function ModelRouteEntryModal({ existingModels = [], initial = nu
                 placeholder="unlimited"
               />
               <div className="form__hint">Total lifetime spend cap for this model on attached keys (from usage_events). Breach → HTTP 402.</div>
+            </div>
+            <div className="form__row">
+              <label className="form__label">Discount %</label>
+              <input
+                type="number"
+                min="0"
+                max="100"
+                step="1"
+                value={discount}
+                onChange={(e) => setDiscount(e.target.value)}
+                placeholder="none"
+              />
+              <div className="form__hint">Percentage off cost_usd for this model (0–100). Wins over the group default. 20 = billed at 80% of pricing.</div>
             </div>
           </div>
         </>

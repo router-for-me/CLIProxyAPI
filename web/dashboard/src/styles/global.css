@@ -2064,6 +2064,11 @@ tr:focus-within .row-actions {
   border-top: 1px solid var(--border);
   border-bottom: none;
 }
+.costder__discount td {
+  color: var(--success, #34d399);
+  font-weight: 500;
+  border-bottom: none;
+}
 .costder__nopricing {
   margin-top: 8px;
   padding: 6px 10px;
@@ -2815,6 +2820,20 @@ button.ghost:hover:not(:disabled) {
 .sgl-strat--default { color: var(--text-muted); }
 .sgl-strat--priority { color: var(--accent); border-color: rgba(94, 234, 212, 0.45); background: var(--accent-dim); }
 .sgl-strat--failover { color: #7da2f3; border-color: rgba(125, 162, 243, 0.45); background: rgba(125, 162, 243, 0.12); }
+
+/* Per-model pricing chips in the Model Group editor's allowed-models table.
+   Each chip pairs a 1-2 letter segment label with its USD/1M rate. Wraps when
+   the cell narrows so a model with several rate tiers stays legible. */
+.mgf-pricing-cell { min-width: 140px; }
+.mgf-pricing {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 11px;
+  line-height: 1.3;
+}
+.mgf-pricing__seg { display: inline-flex; align-items: baseline; gap: 3px; }
+.mgf-pricing__lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; }
 
 /* Row action buttons shared with the list pages (ModelGroups/InternalUsers
    pattern). Small, low-emphasis; danger variant surfaces on hover. */

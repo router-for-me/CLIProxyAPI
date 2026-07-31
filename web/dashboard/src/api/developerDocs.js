@@ -303,6 +303,7 @@ export const sections = [
       'When attached, the group becomes the source of truth for that key\'s allowed/blocked lists and per-model routes at enforcement time — the key\'s own fields are overridden. ' +
       'Model groups attach ONLY to API-key policies (not to Internal Users). ' +
       'Per-model caps live on model_routes entries: rpm_limit (requests/min per model, HTTP 429) and max_budget_usd (total lifetime spend per model, computed from usage_events, HTTP 402). ' +
+      'Discounts: discount_pct (group-level default, 0-100) and per-model model_routes[].discount_pct reduce the recorded cost_usd (20 = 80% of the model pricing). Per-model overrides win over the group default. ' +
       'All routes return 503 when the PG store is not configured.',
     endpoints: [
       {
@@ -317,7 +318,7 @@ export const sections = [
         examplePayload: null,
         exampleCurl: `curl -s "${'{API_BASE}'}/model-groups?page=1&page_size=25&search=gpt" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
         responses: [
-          { status: 200, label: 'OK', body: `{\n  "groups": [\n    {\n      "id": "g-abc123",\n      "name": "gpt-only",\n      "description": "GPT family + gpt-4o pinned to openai oauth",\n      "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n      "blocked_models": [],\n      "model_routes": [\n        { "model": "gpt-4o", "providers": ["openai"], "rpm_limit": 60, "max_budget_usd": 25.00 }\n      ],\n      "model_rpm_limits": { "gpt-4o": 60 },\n      "model_budget_limits": { "gpt-4o": 25.00 },\n      "metadata": {},\n      "created_at": "2026-07-22T09:00:00Z",\n      "updated_at": "2026-07-22T09:05:00Z"\n    }\n  ],\n  "page": 1,\n  "page_size": 25,\n  "total": 1,\n  "total_pages": 1\n}` },
+          { status: 200, label: 'OK', body: `{\n  "groups": [\n    {\n      "id": "g-abc123",\n      "name": "gpt-only",\n      "description": "GPT family + gpt-4o pinned to openai oauth",\n      "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n      "blocked_models": [],\n      "model_routes": [\n        { "model": "gpt-4o", "providers": ["openai"], "rpm_limit": 60, "max_budget_usd": 25.00, "discount_pct": 10 }\n      ],\n      "model_rpm_limits": { "gpt-4o": 60 },\n      "model_budget_limits": { "gpt-4o": 25.00 },\n      "discount_pct": 10,\n      "model_discount_pcts": { "gpt-4o": 10 },\n      "metadata": {},\n      "created_at": "2026-07-22T09:00:00Z",\n      "updated_at": "2026-07-22T09:05:00Z"\n    }\n  ],\n  "page": 1,\n  "page_size": 25,\n  "total": 1,\n  "total_pages": 1\n}` },
           { status: 503, label: 'PG store not configured', body: `{"error":{"type":"pg_store_not_configured","message":"..."}}` },
         ],
       },
@@ -328,13 +329,14 @@ export const sections = [
           { name: 'description', in: 'body', type: 'string', required: false, default: '', description: 'Free-form description.' },
           { name: 'allowed_models', in: 'body', type: 'string[]', required: false, default: '[]', description: 'Allow-list (empty = all allowed). Supports trailing-\'*\' wildcards.' },
           { name: 'blocked_models', in: 'body', type: 'string[]', required: false, default: '[]', description: 'Deny-list. Takes precedence over allowed.' },
-          { name: 'model_routes', in: 'body', type: 'object[]', required: false, default: '[]', description: 'Per-concrete-model upstream provider pinning + caps. Each entry: { model, providers: string[], strategy?, priorities?, rpm_limit?, max_budget_usd? }. model must be in allowed_models; wildcard models cannot be routed or carry caps. rpm_limit caps requests/min (429 on breach); max_budget_usd caps total lifetime USD spend for that model on attached keys, computed from usage_events (402 on breach). A cap-only entry may omit providers.' },
+          { name: 'model_routes', in: 'body', type: 'object[]', required: false, default: '[]', description: 'Per-concrete-model upstream provider pinning + caps + discounts. Each entry: { model, providers: string[], strategy?, priorities?, rpm_limit?, max_budget_usd?, discount_pct? }. model must be in allowed_models; wildcard models cannot be routed or carry caps/discounts. rpm_limit caps requests/min (429 on breach); max_budget_usd caps total lifetime USD spend for that model on attached keys, computed from usage_events (402 on breach); discount_pct (0-100) reduces cost_usd (per-model wins over the group default). A cap/discount-only entry may omit providers.' },
+          { name: 'discount_pct', in: 'body', type: 'number', required: false, default: 'null', description: 'Group-level default discount percentage (0-100) applied to cost_usd of every request. Per-model discount_pct on model_routes takes precedence. 0/null = no discount.' },
           { name: 'metadata', in: 'body', type: 'object', required: false, default: '{}', description: 'Arbitrary JSON metadata.' },
         ],
-        examplePayload: `{\n  "name": "gpt-only",\n  "description": "GPT family + gpt-4o pinned to openai oauth with per-model caps",\n  "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n  "model_routes": [\n    { "model": "gpt-4o", "providers": ["openai"], "rpm_limit": 60, "max_budget_usd": 25.00 }\n  ]\n}`,
-        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/model-groups" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "name": "gpt-only",\n    "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n    "model_routes": [{ "model": "gpt-4o", "providers": ["openai"], "rpm_limit": 60, "max_budget_usd": 25.00 }]\n  }'`,
+        examplePayload: `{\n  "name": "gpt-only",\n  "description": "GPT family + gpt-4o pinned to openai oauth with per-model caps",\n  "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n  "discount_pct": 10,\n  "model_routes": [\n    { "model": "gpt-4o", "providers": ["openai"], "rpm_limit": 60, "max_budget_usd": 25.00, "discount_pct": 20 }\n  ]\n}`,
+        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/model-groups" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "name": "gpt-only",\n    "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n    "discount_pct": 10,\n    "model_routes": [{ "model": "gpt-4o", "providers": ["openai"], "rpm_limit": 60, "max_budget_usd": 25.00, "discount_pct": 20 }]\n  }'`,
         responses: [
-          { status: 201, label: 'Created', body: `{"id":"g-abc123","name":"gpt-only","allowed_models":["gpt-4o","gpt-4o-mini","gpt-4*"],"model_routes":[{"model":"gpt-4o","providers":["openai"],"rpm_limit":60,"max_budget_usd":25}],"model_rpm_limits":{"gpt-4o":60},"model_budget_limits":{"gpt-4o":25},"created_at":"2026-07-22T09:00:00Z","updated_at":"2026-07-22T09:00:00Z"}` },
+          { status: 201, label: 'Created', body: `{"id":"g-abc123","name":"gpt-only","allowed_models":["gpt-4o","gpt-4o-mini","gpt-4*"],"model_routes":[{"model":"gpt-4o","providers":["openai"],"rpm_limit":60,"max_budget_usd":25,"discount_pct":20}],"model_rpm_limits":{"gpt-4o":60},"model_budget_limits":{"gpt-4o":25},"discount_pct":10,"model_discount_pcts":{"gpt-4o":20},"created_at":"2026-07-22T09:00:00Z","updated_at":"2026-07-22T09:00:00Z"}` },
           { status: 400, label: 'Invalid request (name missing / route out of allowed)', body: `{"error":{"type":"invalid_request","message":"postgres store: model group name is required"}}` },
           { status: 409, label: 'Name taken', body: `{"error":{"type":"conflict","message":"model group name already taken"}}` },
         ],
@@ -345,7 +347,7 @@ export const sections = [
         examplePayload: null,
         exampleCurl: `curl -s "${'{API_BASE}'}/model-groups/g-abc123" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
         responses: [
-          { status: 200, label: 'OK', body: `{\n  "group": {\n    "id": "g-abc123",\n    "name": "gpt-only",\n    "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n    "blocked_models": [],\n    "model_routes": [{ "model": "gpt-4o", "providers": ["openai"], "rpm_limit": 60, "max_budget_usd": 25.00 }],\n    "model_rpm_limits": { "gpt-4o": 60 },\n    "model_budget_limits": { "gpt-4o": 25.00 },\n    "metadata": {},\n    "created_at": "2026-07-22T09:00:00Z",\n    "updated_at": "2026-07-22T09:05:00Z"\n  },\n  "attachments": [\n    {\n      "entity_id": "k-def1",\n      "entity_label": "prod-app",\n      "entity_user_id": "u-abc123",\n      "entity_user_alias": "alice",\n      "entity_user_email": "alice@example.com"\n    }\n  ]\n}` },
+          { status: 200, label: 'OK', body: `{\n  "group": {\n    "id": "g-abc123",\n    "name": "gpt-only",\n    "allowed_models": ["gpt-4o", "gpt-4o-mini", "gpt-4*"],\n    "blocked_models": [],\n    "model_routes": [{ "model": "gpt-4o", "providers": ["openai"], "rpm_limit": 60, "max_budget_usd": 25.00, "discount_pct": 10 }],\n    "model_rpm_limits": { "gpt-4o": 60 },\n    "model_budget_limits": { "gpt-4o": 25.00 },\n    "discount_pct": 10,\n    "model_discount_pcts": { "gpt-4o": 10 },\n    "metadata": {},\n    "created_at": "2026-07-22T09:00:00Z",\n    "updated_at": "2026-07-22T09:05:00Z"\n  },\n  "attachments": [\n    {\n      "entity_id": "k-def1",\n      "entity_label": "prod-app",\n      "entity_user_id": "u-abc123",\n      "entity_user_alias": "alice",\n      "entity_user_email": "alice@example.com"\n    }\n  ]\n}` },
           { status: 404, label: 'Not found', body: `{"error":{"type":"not_found","message":"model group not found"}}` },
         ],
       },
@@ -357,7 +359,8 @@ export const sections = [
           { name: 'description', in: 'body', type: 'string', required: false, default: '', description: 'Description.' },
           { name: 'allowed_models', in: 'body', type: 'string[]', required: false, default: '—', description: 'Replace the allow-list.' },
           { name: 'blocked_models', in: 'body', type: 'string[]', required: false, default: '—', description: 'Replace the deny-list.' },
-          { name: 'model_routes', in: 'body', type: 'object[]', required: false, default: '—', description: 'Replace routes.' },
+          { name: 'model_routes', in: 'body', type: 'object[]', required: false, default: '—', description: 'Replace routes (incl. per-model rpm_limit/max_budget_usd/discount_pct).' },
+          { name: 'discount_pct', in: 'body', type: 'number', required: false, default: '—', description: 'Replace the group-level default discount (0-100). Pass 0 to clear.' },
           { name: 'metadata', in: 'body', type: 'object', required: false, default: '—', description: 'Replace metadata.' },
         ],
         examplePayload: `{"allowed_models":["gpt-4o"]}`,

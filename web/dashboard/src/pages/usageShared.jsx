@@ -373,16 +373,35 @@ export function TokenBreakdownCard({ e }) {
   // surfaces that as "no pricing configured" rather than reading as "free".
   const pricing = e.applied_pricing;
   const hasRates = pricingHasRates(pricing);
+  // Discount: discount_pct is the resolved model-group discount applied to
+  // cost_usd at flush time. original_cost_usd is the pre-discount cost
+  // (tokens × rate); cost_usd is the post-discount value actually billed.
+  // When no discount was applied both stay 0 and the derivation table renders
+  // its plain Total row (unchanged behavior).
+  const discountPct = Number(e.discount_pct || 0);
+  const hasDiscount = discountPct > 0 && Number(e.original_cost_usd || 0) > 0;
+  const discountAmount = hasDiscount
+    ? Number(e.original_cost_usd || 0) - Number(e.cost_usd || 0)
+    : 0;
   // Derivation rows zip the token counts, resolved rates, and per-segment
   // dollar costs. Built from TOKEN_SEGMENTS so the order/coloring matches the
-  // stacked bars above exactly.
-  const derRows = hasCost && pricing
+  // stacked bars above exactly. Only rendered when applied_pricing carries at
+  // least one rate — an all-zero pricing row (deleted/changed since flush)
+  // would show misleading all-zero segment rows, so the discount summary below
+  // (which derives from the persisted cost_usd, not the re-resolved rates)
+  // takes over and the per-segment table is skipped.
+  const derRows = hasCost && pricing && hasRates
     ? cSegs.map((s) => ({
         ...s,
         tokens: Number(e[s.key] || 0),
         rate: Number(pricing[s.rateKey] || 0),
       }))
     : [];
+  // hasSummaryRows is true when we can render either the per-segment
+  // derivation table (derRows > 0) or just the discount summary (when a
+  // discount applies to a row whose pricing has drifted but cost_usd is
+  // still present).
+  const hasSummaryRows = derRows.length > 0 || hasDiscount;
 
   return (
     <div className="detail-row__block">
@@ -420,11 +439,13 @@ export function TokenBreakdownCard({ e }) {
             ))}
             <span className="dim mono tokbar__legend-sum">
               sum {fmtUSD(cSum)} · total {fmtUSD(e.cost_usd || 0)}
-              {Math.abs(cSum - (e.cost_usd || 0)) > 1e-9 ? ` (different by ${fmtUSD(cSum - (e.cost_usd || 0))})` : ''}
+              {hasDiscount
+                ? ` (after ${discountPct}% discount of ${fmtUSD(e.original_cost_usd || 0)})`
+                : (Math.abs(cSum - (e.cost_usd || 0)) > 1e-9 ? ` (different by ${fmtUSD(cSum - (e.cost_usd || 0))})` : '')}
             </span>
           </div>
 
-          {derRows.length > 0 && (
+          {hasSummaryRows && (
             <table className="costder">
               <thead>
                 <tr>
@@ -446,12 +467,35 @@ export function TokenBreakdownCard({ e }) {
                     <td className="mono" style={{ textAlign: 'right' }}>{fmtUSD(r.value)}</td>
                   </tr>
                 ))}
-                <tr className="costder__sum">
-                  <td>Total</td>
-                  <td className="mono" style={{ textAlign: 'right' }}>{total.toLocaleString()}</td>
-                  <td />
-                  <td className="mono" style={{ textAlign: 'right' }}>{fmtUSD(e.cost_usd || 0)}</td>
-                </tr>
+                {hasDiscount ? (
+                  <>
+                    <tr className="costder__sum">
+                      <td>Before discount</td>
+                      <td className="mono" style={{ textAlign: 'right' }}>{total.toLocaleString()}</td>
+                      <td />
+                      <td className="mono" style={{ textAlign: 'right' }}>{fmtUSD(e.original_cost_usd || 0)}</td>
+                    </tr>
+                    <tr className="costder__discount">
+                      <td>Discount</td>
+                      <td />
+                      <td className="mono" style={{ textAlign: 'right' }}>{discountPct}%</td>
+                      <td className="mono" style={{ textAlign: 'right' }}>−{fmtUSD(discountAmount)}</td>
+                    </tr>
+                    <tr className="costder__sum">
+                      <td>Total (after discount)</td>
+                      <td className="mono" style={{ textAlign: 'right' }}>{total.toLocaleString()}</td>
+                      <td />
+                      <td className="mono" style={{ textAlign: 'right' }}>{fmtUSD(e.cost_usd || 0)}</td>
+                    </tr>
+                  </>
+                ) : (
+                  <tr className="costder__sum">
+                    <td>Total</td>
+                    <td className="mono" style={{ textAlign: 'right' }}>{total.toLocaleString()}</td>
+                    <td />
+                    <td className="mono" style={{ textAlign: 'right' }}>{fmtUSD(e.cost_usd || 0)}</td>
+                  </tr>
+                )}
               </tbody>
             </table>
           )}
@@ -730,6 +774,13 @@ export function EventDetailModal({ id, timezone, onClose }) {
           <DetailRow label="Response Service Tier" value={e.response_service_tier || '—'} />
           <TokenBreakdownCard e={e} />
           <DetailRow label="Cost (USD)" value={`$${(e.cost_usd || 0).toFixed(4)}`} mono />
+          {Number(e.discount_pct || 0) > 0 && (
+            <DetailRow
+              label="Discount"
+              value={`${e.discount_pct}% (was $${(e.original_cost_usd || 0).toFixed(4)})`}
+              mono
+            />
+          )}
           <DetailRow label="Latency" value={e.latency_ms ? `${e.latency_ms} ms` : '—'} mono />
           <DetailRow label="TTFT" value={e.ttft_ms ? `${e.ttft_ms} ms` : '—'} mono />
           <DetailRow label="Failed" value={e.failed ? 'yes' : 'no'} mono />
