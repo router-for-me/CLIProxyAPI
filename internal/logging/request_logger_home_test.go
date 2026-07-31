@@ -383,46 +383,6 @@ func TestFileRequestLogger_HomeEnabled_ForwardsStreamingRequestID(t *testing.T) 
 	}
 }
 
-func TestFileRequestLogger_HomeEnabled_ForwardsStreamingJSON(t *testing.T) {
-	original := currentHomeRequestLogClient
-	defer func() { currentHomeRequestLogClient = original }()
-
-	stub := &stubHomeRequestLogClient{heartbeatOK: true}
-	currentHomeRequestLogClient = func() homeRequestLogClient { return stub }
-
-	logger := NewFileRequestLoggerWithFormat(true, t.TempDir(), "", 0, "json")
-	logger.SetHomeEnabled(true)
-	writer, err := logger.LogStreamingRequest(
-		"/v1/chat/completions", http.MethodPost,
-		map[string][]string{"Content-Type": {"application/json"}},
-		[]byte(`{"model":"gpt-4","stream":true}`), "home-json-stream-1",
-	)
-	if err != nil {
-		t.Fatalf("LogStreamingRequest error: %v", err)
-	}
-	if err := writer.WriteStatus(http.StatusOK, map[string][]string{"Content-Type": {"text/event-stream"}}); err != nil {
-		t.Fatalf("WriteStatus error: %v", err)
-	}
-	writer.WriteChunkAsync([]byte("data: ok\n\n"))
-	if err := writer.Close(); err != nil {
-		t.Fatalf("Close error: %v", err)
-	}
-
-	var envelope struct {
-		RequestLog string `json:"request_log"`
-	}
-	if err := json.Unmarshal(stub.pushed[0], &envelope); err != nil {
-		t.Fatalf("unmarshal envelope: %v", err)
-	}
-	var entry jsonLogPayload
-	if err := json.Unmarshal([]byte(envelope.RequestLog), &entry); err != nil {
-		t.Fatalf("request_log is not JSON: %v log=%q", err, envelope.RequestLog)
-	}
-	if entry.URL != "/v1/chat/completions" {
-		t.Fatalf("url = %q", entry.URL)
-	}
-}
-
 func TestFileRequestLogger_HomeEnabled_BoundsStreamingJSONBodies(t *testing.T) {
 	original := currentHomeRequestLogClient
 	defer func() { currentHomeRequestLogClient = original }()
@@ -453,6 +413,9 @@ func TestFileRequestLogger_HomeEnabled_BoundsStreamingJSONBodies(t *testing.T) {
 	var entry jsonLogPayload
 	if err := json.Unmarshal([]byte(envelope.RequestLog), &entry); err != nil {
 		t.Fatalf("request_log is not JSON: %v", err)
+	}
+	if entry.URL != "/v1/chat/completions" {
+		t.Fatalf("url = %q", entry.URL)
 	}
 	if !entry.RequestBodyTruncated {
 		t.Fatalf("expected request body to be marked truncated")

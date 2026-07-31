@@ -106,7 +106,6 @@ type homeStreamingLogWriter struct {
 	apiWebsocketTimelineSource *FileBodySource
 	requestID                  string
 	apiResponseTS              time.Time
-	firstChunkTS               time.Time
 	format                     string
 }
 
@@ -247,7 +246,6 @@ func (w *homeStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
 		return
 	}
 	if !timestamp.IsZero() {
-		w.firstChunkTS = timestamp
 		w.apiResponseTS = timestamp
 	}
 }
@@ -273,10 +271,9 @@ func (w *homeStreamingLogWriter) Close() error {
 	responsePayload := w.responseBody.Bytes()
 
 	var buf bytes.Buffer
-	upstreamTransport := inferUpstreamTransport(w.apiRequest, w.apiRequestSource, w.apiResponse, w.apiResponseSource, w.apiWebsocketTime, w.apiWebsocketTimelineSource, nil)
+	upstreamTransport := inferUpstreamTransport(w.apiRequest, w.apiRequestSource, w.apiResponse, w.apiResponseSource, w.apiWebsocketTime, w.apiWebsocketTimelineSource)
 	if w.format == "json" {
-		logger := NewFileRequestLoggerWithFormat(true, "", "", 0, "json")
-		if errWrite := logger.writeJSONLog(&buf, w.url, w.method, w.requestHeaders, w.requestBody, "", w.requestBodyTruncated, w.responseStatus, w.responseHeaders, responsePayload, "", w.responseBodyTruncated.Load(), nil, w.apiRequest, w.apiRequestSource, w.apiResponse, w.apiResponseSource, nil, nil, nil, w.apiWebsocketTime, w.apiWebsocketTimelineSource, w.timestamp, w.apiResponseTS, "http", upstreamTransport); errWrite != nil {
+		if errWrite := writeJSONLog(&buf, w.url, w.method, w.requestHeaders, w.requestBody, "", w.requestBodyTruncated, w.responseStatus, w.responseHeaders, responsePayload, "", w.responseBodyTruncated.Load(), nil, w.apiRequest, w.apiRequestSource, w.apiResponse, w.apiResponseSource, nil, nil, nil, w.apiWebsocketTime, w.apiWebsocketTimelineSource, w.timestamp, w.apiResponseTS, "http", upstreamTransport); errWrite != nil {
 			return errWrite
 		}
 	} else {

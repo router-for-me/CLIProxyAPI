@@ -126,8 +126,6 @@ func TestJSONStreamingRequestLogging(t *testing.T) {
 	firstChunkTimestamp := time.Date(2026, time.July, 25, 12, 34, 56, 123, time.UTC)
 	writer.SetFirstChunkTimestamp(firstChunkTimestamp)
 
-	time.Sleep(50 * time.Millisecond)
-
 	if err := writer.Close(); err != nil {
 		t.Fatalf("Close failed: %v", err)
 	}
@@ -762,7 +760,7 @@ func TestJSONRequestBodyTempFileCapsWhileSpooling(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := logger.writeJSONLog(&buf, "/v1/responses", "POST", nil, nil, path, truncated, 200, nil, nil, "", false, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, time.Now(), time.Time{}, "http", "http"); err != nil {
+	if err := writeJSONLog(&buf, "/v1/responses", "POST", nil, nil, path, truncated, 200, nil, nil, "", false, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, time.Now(), time.Time{}, "http", "http"); err != nil {
 		t.Fatalf("writeJSONLog failed: %v", err)
 	}
 	var entry jsonLogPayload

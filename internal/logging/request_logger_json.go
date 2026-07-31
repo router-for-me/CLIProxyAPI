@@ -84,7 +84,7 @@ func maskHeaders(headers map[string][]string) map[string][]string {
 	return masked
 }
 
-func (l *FileRequestLogger) writeJSONLog(
+func writeJSONLog(
 	w io.Writer,
 	url, method string,
 	requestHeaders map[string][]string,

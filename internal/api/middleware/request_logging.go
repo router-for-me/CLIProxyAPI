@@ -59,7 +59,6 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		}
 		if formatter, ok := logger.(interface{ RequestLogFormat() string }); ok {
 			requestInfo.LogFormat = formatter.RequestLogFormat()
-			c.Set(requestLogFormatContextKey, requestInfo.LogFormat)
 		}
 
 		// Create response writer wrapper
@@ -68,7 +67,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			wrapper.logOnErrorOnly = true
 		}
 		c.Writer = wrapper
-		attachRequestLogSources(c, logger, loggerEnabled)
+		attachRequestLogSources(c, logger, loggerEnabled, requestInfo.LogFormat)
 		attachDeferredRequestBodyCapture(c.Request, logger, requestInfo, loggerEnabled, captureBody)
 
 		// Process the request
@@ -251,7 +250,7 @@ func (c *deferredRequestBodyCapture) Cleanup() {
 	c.source = nil
 }
 
-func attachRequestLogSources(c *gin.Context, logger logging.RequestLogger, loggerEnabled bool) {
+func attachRequestLogSources(c *gin.Context, logger logging.RequestLogger, loggerEnabled bool, format string) {
 	if c == nil || !loggerEnabled {
 		return
 	}
@@ -261,12 +260,6 @@ func attachRequestLogSources(c *gin.Context, logger logging.RequestLogger, logge
 	}
 	newSource := factory.NewFileBodySource
 	if formattedFactory, ok := logger.(formattedFileBodySourceFactory); ok {
-		format := requestLogFormatFromContext(c)
-		if format == "" {
-			if formatter, ok := logger.(interface{ RequestLogFormat() string }); ok {
-				format = formatter.RequestLogFormat()
-			}
-		}
 		newSource = func(prefix string) (*logging.FileBodySource, error) {
 			return formattedFactory.NewFileBodySourceWithFormat(prefix, format)
 		}
@@ -286,17 +279,6 @@ func attachRequestLogSources(c *gin.Context, logger logging.RequestLogger, logge
 	if source, errSource := newSource("websocket-timeline"); errSource == nil {
 		c.Set(logging.WebsocketTimelineSourceContextKey, source)
 	}
-}
-
-const requestLogFormatContextKey = "REQUEST_LOG_FORMAT"
-
-func requestLogFormatFromContext(c *gin.Context) string {
-	if c == nil {
-		return ""
-	}
-	value, _ := c.Get(requestLogFormatContextKey)
-	format, _ := value.(string)
-	return format
 }
 
 func shouldSkipMethodForRequestLogging(req *http.Request) bool {

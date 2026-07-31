@@ -2482,7 +2482,7 @@ func TestResponsesWebsocketTimelineUsesBoundedJSONSource(t *testing.T) {
 	timeline := newWebsocketTimelineLog(true, source)
 	timeline.BeginRequest()
 	payload := bytes.Repeat([]byte("x"), 64<<10)
-	for !source.Truncated() {
+	for range 130 {
 		timeline.Append("response.output_text.delta", payload, time.Now())
 	}
 	if !source.Truncated() {

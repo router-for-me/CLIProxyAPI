@@ -3,7 +3,6 @@ package openai
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -146,19 +145,6 @@ func (l *websocketTimelineLog) closeCurrentPart() {
 	}
 	l.currentPartHasLog = false
 	l.currentPartNeedsNewline = false
-}
-
-func writeWebsocketTimelinePart(w io.Writer, data []byte, prependNewline bool) error {
-	if w == nil || len(data) == 0 {
-		return nil
-	}
-	if prependNewline {
-		if _, errWrite := io.WriteString(w, "\n"); errWrite != nil {
-			return errWrite
-		}
-	}
-	_, errWrite := w.Write(data)
-	return errWrite
 }
 
 func writeWebsocketTimelineBuilder(builder *strings.Builder, data []byte) {

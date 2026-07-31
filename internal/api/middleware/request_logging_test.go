@@ -309,7 +309,7 @@ func TestAttachRequestLogSourcesUsesLoggerLogsDir(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodGet, "/backend-api/codex/responses", nil)
 	c.Request.Header.Set("Upgrade", "websocket")
 
-	attachRequestLogSources(c, logger, true)
+	attachRequestLogSources(c, logger, true, "json")
 	defer cleanupFileBodySourcesFromContext(c)
 
 	for _, key := range []string{
@@ -346,7 +346,7 @@ func TestAttachRequestLogSourcesIncludesUpstreamWebsocketTimelineForHTTP(t *test
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{}`))
 
-	attachRequestLogSources(c, logger, true)
+	attachRequestLogSources(c, logger, true, "json")
 	defer cleanupFileBodySourcesFromContext(c)
 
 	value, exists := c.Get(logging.APIWebsocketTimelineSourceContextKey)
@@ -372,9 +372,7 @@ func TestRequestLogSourcesKeepFormatSnapshotAcrossReload(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{}`))
-	c.Set(requestLogFormatContextKey, "json")
-
-	attachRequestLogSources(c, logger, true)
+	attachRequestLogSources(c, logger, true, "json")
 	defer cleanupFileBodySourcesFromContext(c)
 	logger.SetFormat("text")
 

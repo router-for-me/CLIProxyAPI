@@ -47,13 +47,13 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	}
 	isWebsocketTranscript := hasSectionPayload(websocketTimeline) || hasFileBodySourcePayload(websocketTimelineSource)
 	downstreamTransport := inferDownstreamTransport(requestHeaders, websocketTimeline, websocketTimelineSource)
-	upstreamTransport := inferUpstreamTransport(apiRequest, apiRequestSource, apiResponse, apiResponseSource, apiWebsocketTimeline, apiWebsocketTimelineSource, apiResponseErrors)
+	upstreamTransport := inferUpstreamTransport(apiRequest, apiRequestSource, apiResponse, apiResponseSource, apiWebsocketTimeline, apiWebsocketTimelineSource)
 	format := requestLogFormatFromSources(apiRequestSource, apiResponseSource, websocketTimelineSource, apiWebsocketTimelineSource)
 	if format == "" {
 		format = l.currentFormat()
 	}
 	if format == "json" {
-		return l.writeJSONLog(w, url, method, requestHeaders, requestBody, requestBodyPath, requestBodyTruncated, statusCode, responseHeaders, response, "", false, decompressErr, apiRequest, apiRequestSource, apiResponse, apiResponseSource, apiResponseErrors, websocketTimeline, websocketTimelineSource, apiWebsocketTimeline, apiWebsocketTimelineSource, requestTimestamp, apiResponseTimestamp, downstreamTransport, upstreamTransport)
+		return writeJSONLog(w, url, method, requestHeaders, requestBody, requestBodyPath, requestBodyTruncated, statusCode, responseHeaders, response, "", false, decompressErr, apiRequest, apiRequestSource, apiResponse, apiResponseSource, apiResponseErrors, websocketTimeline, websocketTimelineSource, apiWebsocketTimeline, apiWebsocketTimelineSource, requestTimestamp, apiResponseTimestamp, downstreamTransport, upstreamTransport)
 	}
 	if errWrite := writeRequestInfoWithBody(w, url, method, requestHeaders, requestBody, requestBodyPath, requestTimestamp, downstreamTransport, upstreamTransport, !isWebsocketTranscript); errWrite != nil {
 		return errWrite
@@ -246,7 +246,7 @@ func inferDownstreamTransport(headers map[string][]string, websocketTimeline []b
 	return "http"
 }
 
-func inferUpstreamTransport(apiRequest []byte, apiRequestSource *FileBodySource, apiResponse []byte, apiResponseSource *FileBodySource, apiWebsocketTimeline []byte, apiWebsocketTimelineSource *FileBodySource, _ []*interfaces.ErrorMessage) string {
+func inferUpstreamTransport(apiRequest []byte, apiRequestSource *FileBodySource, apiResponse []byte, apiResponseSource *FileBodySource, apiWebsocketTimeline []byte, apiWebsocketTimelineSource *FileBodySource) string {
 	hasHTTP := hasSectionPayload(apiRequest) || hasFileBodySourcePayload(apiRequestSource) || hasSectionPayload(apiResponse) || hasFileBodySourcePayload(apiResponseSource)
 	hasWS := hasSectionPayload(apiWebsocketTimeline) || hasFileBodySourcePayload(apiWebsocketTimelineSource)
 	switch {
@@ -466,7 +466,7 @@ func (l *FileRequestLogger) formatLogContent(url, method string, headers map[str
 	var content strings.Builder
 	isWebsocketTranscript := hasSectionPayload(websocketTimeline)
 	downstreamTransport := inferDownstreamTransport(headers, websocketTimeline, nil)
-	upstreamTransport := inferUpstreamTransport(apiRequest, nil, apiResponse, nil, apiWebsocketTimeline, nil, apiResponseErrors)
+	upstreamTransport := inferUpstreamTransport(apiRequest, nil, apiResponse, nil, apiWebsocketTimeline, nil)
 
 	// Request info
 	content.WriteString(l.formatRequestInfo(url, method, headers, body, downstreamTransport, upstreamTransport, !isWebsocketTranscript))
