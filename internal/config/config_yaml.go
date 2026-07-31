@@ -337,6 +337,8 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 			return node.Value == DefaultPanelGitHubRepository
 		case "plugins.dir":
 			return node.Value == "plugins"
+		case "request-log-format":
+			return node.Value == "text"
 		case "routing.strategy":
 			return node.Value == "round-robin"
 		}

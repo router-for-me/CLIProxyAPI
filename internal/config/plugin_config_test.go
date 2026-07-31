@@ -206,6 +206,26 @@ func TestSaveConfigPreserveComments_PrunesDefaultPluginsDir(t *testing.T) {
 	}
 }
 
+func TestSaveConfigPreserveComments_PrunesDefaultRequestLogFormat(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if errWrite := os.WriteFile(configPath, []byte("debug: true\n"), 0o600); errWrite != nil {
+		t.Fatalf("os.WriteFile() error = %v", errWrite)
+	}
+
+	cfg := &Config{Debug: true, RequestLogFormat: "text"}
+	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
+		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	}
+
+	data, errRead := os.ReadFile(configPath)
+	if errRead != nil {
+		t.Fatalf("os.ReadFile() error = %v", errRead)
+	}
+	if strings.Contains(string(data), "request-log-format:") {
+		t.Fatalf("saved config contains default request log format:\n%s", data)
+	}
+}
+
 func TestParseConfigBytes_PluginInstanceRawYAML(t *testing.T) {
 	cfg, errParse := ParseConfigBytes([]byte(`
 plugins:
