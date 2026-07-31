@@ -485,3 +485,36 @@ func TestUsagePluginNoopWhenInactive(t *testing.T) {
 		t.Fatalf("expected one Consume call for active service; got %d", rec.calls)
 	}
 }
+
+func ptrFloat64(v float64) *float64 { return &v }
+
+func TestResolveDiscount(t *testing.T) {
+	cases := []struct {
+		name  string
+		p     *store.Policy
+		model string
+		want  float64
+	}{
+		{name: "nil policy", p: nil, model: "gpt-4o", want: 0},
+		{name: "empty model", p: &store.Policy{DiscountPct: ptrFloat64(10)}, model: "", want: 0},
+		{name: "no discount set", p: &store.Policy{}, model: "gpt-4o", want: 0},
+		{name: "group default only", p: &store.Policy{DiscountPct: ptrFloat64(20)}, model: "gpt-4o", want: 20},
+		{name: "per-model wins over default", p: &store.Policy{
+			DiscountPct: ptrFloat64(10), ModelDiscountPcts: map[string]float64{"gpt-4o": 30},
+		}, model: "gpt-4o", want: 30},
+		{name: "per-model keyed lowercase", p: &store.Policy{
+			ModelDiscountPcts: map[string]float64{"gpt-4o": 25},
+		}, model: "GPT-4O", want: 25},
+		{name: "per-model for other model falls back to default", p: &store.Policy{
+			DiscountPct: ptrFloat64(10), ModelDiscountPcts: map[string]float64{"gpt-4o": 30},
+		}, model: "claude-3", want: 10},
+		{name: "zero group default yields no discount", p: &store.Policy{DiscountPct: ptrFloat64(0)}, model: "gpt-4o", want: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveDiscount(tc.p, tc.model); got != tc.want {
+				t.Fatalf("resolveDiscount(%+v, %q) = %v, want %v", tc.p, tc.model, got, tc.want)
+			}
+		})
+	}
+}

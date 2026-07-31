@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -53,6 +54,11 @@ type UsageFlusher struct {
 	// its principal. Optional: when nil, api_key_id is left empty and only
 	// api_key_principal is persisted.
 	apiKeyStore *APIKeyStore
+	// groupsStore resolves the model-group discount percentage for a record
+	// from its resolved api_key policy's model_group_id. Optional: when nil,
+	// no discount is applied (cost_usd stays at the full pricing-rate value).
+	// Used only at flush time so the hot path does not carry policy context.
+	groupsStore *ModelGroupStore
 
 	dropCounter  atomic.Int64
 	flushCounter atomic.Int64
@@ -60,7 +66,9 @@ type UsageFlusher struct {
 
 // NewUsageFlusher constructs a flusher bound to the given usage store. The
 // flusher does not start its background loop until Start(ctx) is invoked.
-func NewUsageFlusher(store *UsageStore, apiKeyStore *APIKeyStore, cfg FlusherConfig) *UsageFlusher {
+// groupsStore (optional) enables model-group discount resolution at flush time;
+// pass nil to skip discount application (file-only deployments).
+func NewUsageFlusher(store *UsageStore, apiKeyStore *APIKeyStore, groupsStore *ModelGroupStore, cfg FlusherConfig) *UsageFlusher {
 	if cfg.QueueCap <= 0 {
 		cfg = DefaultFlusherConfig()
 	}
@@ -74,6 +82,7 @@ func NewUsageFlusher(store *UsageStore, apiKeyStore *APIKeyStore, cfg FlusherCon
 		store:       store,
 		cfg:         cfg,
 		apiKeyStore: apiKeyStore,
+		groupsStore: groupsStore,
 		queue:       make(chan coreusage.Record, cfg.QueueCap),
 		stop:        make(chan struct{}),
 		stopped:     make(chan struct{}),
@@ -280,16 +289,24 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 	principal := record.APIKey
 	apiKeyID := ""
 	userID := ""
+	var policy *Policy // resolved alongside apiKeyID for discount lookups
 	if f.apiKeyStore != nil && principal != "" {
 		// Resolve api_key_id (and the owning internal user id) via the hashed
 		// secret. Lookup failures (legacy file-only keys) leave the ids empty
 		// but still persist the principal.
 		hash := HashSecret(principal)
-		if key, _, err := f.apiKeyStore.LookupByHash(ctx, hash); err == nil {
+		if key, p, err := f.apiKeyStore.LookupByHash(ctx, hash); err == nil {
 			apiKeyID = key.ID
 			userID = key.UserID
+			policy = p
 		}
 	}
+	// Resolve the model-group discount percentage for this record's model. The
+	// policy's ModelGroupID is one hop away (LookupByHash already populated it);
+	// the group carries the default DiscountPct plus per-model overrides. A
+	// per-model override wins over the group default. 0 = no discount. Kept in
+	// sync with the policy.Consume path so usage_windows and usage_events agree.
+	discountPct := f.resolveDiscount(ctx, policy, model)
 	// Resolve cost via pricing row; missing pricing → 0 (no revenue lost).
 	// ResolvePricing falls back to record.Alias when the resolved model has
 	// no rate, so events whose pricing row is keyed by the client-facing
@@ -305,6 +322,9 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 			cost = ComputeCost(pricing, record.Detail.InputTokens, record.Detail.OutputTokens,
 				record.Detail.ReasoningTokens, record.Detail.CacheCreationTokens, cacheRead)
 		}
+	}
+	if discountPct > 0 {
+		cost *= (1 - discountPct/100)
 	}
 	return UsageEvent{
 		RequestID:           record.RequestID,
@@ -328,6 +348,7 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 		CacheCreationTokens: record.Detail.CacheCreationTokens,
 		TotalTokens:         total,
 		CostUSD:             cost,
+		DiscountPct:         discountPct,
 		LatencyMs:           record.Latency.Milliseconds(),
 		TTFTMs:              record.TTFT.Milliseconds(),
 		Failed:              false, // success path; failed attempts go to usage_errors
@@ -360,13 +381,16 @@ func (f *UsageFlusher) toError(ctx context.Context, record coreusage.Record) (Us
 	principal := record.APIKey
 	apiKeyID := ""
 	userID := ""
+	var policy *Policy // resolved alongside apiKeyID for discount lookups
 	if f.apiKeyStore != nil && principal != "" {
 		hash := HashSecret(principal)
-		if key, _, err := f.apiKeyStore.LookupByHash(ctx, hash); err == nil {
+		if key, p, err := f.apiKeyStore.LookupByHash(ctx, hash); err == nil {
 			apiKeyID = key.ID
 			userID = key.UserID
+			policy = p
 		}
 	}
+	discountPct := f.resolveDiscount(ctx, policy, model)
 	// Resolve cost via pricing row; missing pricing → 0. Failed attempts may
 	// have partial token counts (e.g. only input tokens billed before the
 	// upstream errored mid-stream), but we still attribute whatever the
@@ -383,6 +407,9 @@ func (f *UsageFlusher) toError(ctx context.Context, record coreusage.Record) (Us
 			cost = ComputeCost(pricing, record.Detail.InputTokens, record.Detail.OutputTokens,
 				record.Detail.ReasoningTokens, record.Detail.CacheCreationTokens, cacheRead)
 		}
+	}
+	if discountPct > 0 {
+		cost *= (1 - discountPct/100)
 	}
 	failStatus := record.Fail.StatusCode
 	if !record.Failed {
@@ -411,6 +438,7 @@ func (f *UsageFlusher) toError(ctx context.Context, record coreusage.Record) (Us
 		CacheCreationTokens: record.Detail.CacheCreationTokens,
 		TotalTokens:         total,
 		CostUSD:             cost,
+		DiscountPct:         discountPct,
 		LatencyMs:           record.Latency.Milliseconds(),
 		TTFTMs:              record.TTFT.Milliseconds(),
 		FailStatusCode:      failStatus,
@@ -418,6 +446,34 @@ func (f *UsageFlusher) toError(ctx context.Context, record coreusage.Record) (Us
 		Generate:            generateEnabled(record.Generate),
 		RequestedAt:         now,
 	}, apiKeyID, userID, true
+}
+
+// resolveDiscount returns the model-group discount percentage (0-100) that
+// applies to a request for model under the supplied policy. It is the
+// flusher-side mirror of policy.resolveDiscount: a per-model override (keyed
+// by the lowercased model id from the group's ModelDiscountPcts) wins over
+// the group-level DiscountPct default; 0 means "no discount". Looking up the
+// group requires the groupsStore; when it (or the policy's ModelGroupID) is
+// nil, no discount is applied. Failures to load the group are best-effort: 0
+// (so a transient PG error never blocks the flush).
+func (f *UsageFlusher) resolveDiscount(ctx context.Context, p *Policy, model string) float64 {
+	if p == nil || p.ModelGroupID == nil || *p.ModelGroupID == "" || model == "" {
+		return 0
+	}
+	if f.groupsStore == nil {
+		return 0
+	}
+	g, err := f.groupsStore.Get(ctx, *p.ModelGroupID)
+	if err != nil {
+		return 0
+	}
+	if v, ok := g.ModelDiscountPcts[strings.ToLower(model)]; ok && v > 0 {
+		return v
+	}
+	if g.DiscountPct != nil && *g.DiscountPct > 0 {
+		return *g.DiscountPct
+	}
+	return 0
 }
 
 func generateEnabled(flag *bool) bool {

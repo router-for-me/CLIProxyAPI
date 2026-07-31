@@ -52,7 +52,12 @@ type createModelGroupRequest struct {
 	AllowedModels []string           `json:"allowed_models"`
 	BlockedModels []string           `json:"blocked_models"`
 	ModelRoutes   []store.ModelRoute `json:"model_routes"`
-	Metadata      map[string]any     `json:"metadata"`
+	// DiscountPct is the group-level default discount percentage (0-100)
+	// applied to the computed cost_usd of every request made by keys attached
+	// to this group. 0/nil = no discount. Per-model discounts on ModelRoutes
+	// take precedence over this default when both are set.
+	DiscountPct *float64       `json:"discount_pct"`
+	Metadata    map[string]any `json:"metadata"`
 }
 
 // updateModelGroupRequest supports partial updates. Pointer-typed fields are
@@ -63,17 +68,22 @@ type updateModelGroupRequest struct {
 	AllowedModels *[]string           `json:"allowed_models"`
 	BlockedModels *[]string           `json:"blocked_models"`
 	ModelRoutes   *[]store.ModelRoute `json:"model_routes"`
-	Metadata      *map[string]any     `json:"metadata"`
+	// DiscountPct updates the group-level default discount (0-100). Pass 0 to
+	// clear the discount; nil leaves it unchanged.
+	DiscountPct *float64        `json:"discount_pct"`
+	Metadata    *map[string]any `json:"metadata"`
 }
 
-// deriveModelCaps extracts the per-model RPM and budget cap maps from the
-// route list. The ModelRoute entries are the operator-facing source of truth
-// (they travel through the API); the persisted maps are derived columns that
-// let the enforcement path look up a cap keyed by model without scanning the
-// route slice. Entries with nil / non-positive caps are skipped (unlimited).
-func deriveModelCaps(routes []store.ModelRoute) (map[string]int, map[string]float64) {
+// deriveModelCaps extracts the per-model RPM, budget cap, and discount maps
+// from the route list. The ModelRoute entries are the operator-facing source of
+// truth (they travel through the API); the persisted maps are derived columns
+// that let the enforcement path look up a cap/discount keyed by model without
+// scanning the route slice. Entries with nil / non-positive values are skipped
+// (unlimited / no discount).
+func deriveModelCaps(routes []store.ModelRoute) (map[string]int, map[string]float64, map[string]float64) {
 	rpm := map[string]int{}
 	budget := map[string]float64{}
+	discount := map[string]float64{}
 	for _, r := range routes {
 		model := strings.TrimSpace(r.Model)
 		if model == "" {
@@ -85,14 +95,22 @@ func deriveModelCaps(routes []store.ModelRoute) (map[string]int, map[string]floa
 		if r.MaxBudgetUSD != nil && *r.MaxBudgetUSD > 0 {
 			budget[model] = *r.MaxBudgetUSD
 		}
+		if r.DiscountPct != nil && *r.DiscountPct > 0 {
+			v := *r.DiscountPct
+			if v > 100 {
+				v = 100
+			}
+			discount[model] = v
+		}
 	}
-	return rpm, budget
+	return rpm, budget, discount
 }
 
-// validateModelCapsFor ensures every per-model cap targets a concrete model
-// covered by the allowed list (wildcard entries cannot carry a cap because
-// enforcement matching is per requested model id), and that values are
-// positive. Returns a human-readable message, or "" when valid.
+// validateModelCapsFor ensures every per-model cap and discount targets a
+// concrete model covered by the allowed list (wildcard entries cannot carry a
+// cap/discount because enforcement matching is per requested model id), and
+// that values are positive (and discounts <= 100). Returns a human-readable
+// message, or "" when valid.
 func validateModelCapsFor(allowedModels []string, routes []store.ModelRoute) string {
 	for _, r := range routes {
 		model := strings.TrimSpace(r.Model)
@@ -101,20 +119,24 @@ func validateModelCapsFor(allowedModels []string, routes []store.ModelRoute) str
 		}
 		hasRPM := r.RPMLimit != nil && *r.RPMLimit != 0
 		hasBudget := r.MaxBudgetUSD != nil && *r.MaxBudgetUSD != 0
-		if !hasRPM && !hasBudget {
+		hasDiscount := r.DiscountPct != nil && *r.DiscountPct != 0
+		if !hasRPM && !hasBudget && !hasDiscount {
 			continue
 		}
 		if strings.HasSuffix(model, "*") {
-			return fmt.Sprintf("model_routes: per-model RPM/budget caps are not supported on wildcard model %q", model)
+			return fmt.Sprintf("model_routes: per-model RPM/budget caps and discounts are not supported on wildcard model %q", model)
 		}
 		if !policy.ModelCoveredByAllowed(allowedModels, model) {
-			return fmt.Sprintf("model_routes: per-model RPM/budget cap target %q is not in allowed_models", model)
+			return fmt.Sprintf("model_routes: per-model RPM/budget cap or discount target %q is not in allowed_models", model)
 		}
 		if r.RPMLimit != nil && *r.RPMLimit < 0 {
 			return fmt.Sprintf("model_routes: rpm_limit for %q must be positive (omit for unlimited)", model)
 		}
 		if r.MaxBudgetUSD != nil && *r.MaxBudgetUSD < 0 {
 			return fmt.Sprintf("model_routes: max_budget_usd for %q must be positive (omit for unlimited)", model)
+		}
+		if r.DiscountPct != nil && (*r.DiscountPct < 0 || *r.DiscountPct > 100) {
+			return fmt.Sprintf("model_routes: discount_pct for %q must be between 0 and 100 (omit for no discount)", model)
 		}
 	}
 	return ""
@@ -197,7 +219,11 @@ func (h *Handler) CreateModelGroup(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": msg}})
 		return
 	}
-	rpmLimits, budgetLimits := deriveModelCaps(req.ModelRoutes)
+	if req.DiscountPct != nil && (*req.DiscountPct < 0 || *req.DiscountPct > 100) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": "discount_pct must be between 0 and 100 (omit for no discount)"}})
+		return
+	}
+	rpmLimits, budgetLimits, discountLimits := deriveModelCaps(req.ModelRoutes)
 	g := store.ModelGroup{
 		Name:              req.Name,
 		Description:       req.Description,
@@ -206,6 +232,8 @@ func (h *Handler) CreateModelGroup(c *gin.Context) {
 		ModelRoutes:       req.ModelRoutes,
 		ModelRPMLimits:    rpmLimits,
 		ModelBudgetLimits: budgetLimits,
+		DiscountPct:       req.DiscountPct,
+		ModelDiscountPcts: discountLimits,
 		Metadata:          req.Metadata,
 	}
 	created, err := groups.Create(c.Request.Context(), g)
@@ -272,18 +300,24 @@ func (h *Handler) UpdateModelGroup(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": msg}})
 		return
 	}
+	if req.DiscountPct != nil && (*req.DiscountPct < 0 || *req.DiscountPct > 100) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": "discount_pct must be between 0 and 100 (omit for no discount)"}})
+		return
+	}
 	upd := store.ModelGroupUpdate{
 		Name:          req.Name,
 		Description:   req.Description,
 		AllowedModels: req.AllowedModels,
 		BlockedModels: req.BlockedModels,
 		ModelRoutes:   req.ModelRoutes,
+		DiscountPct:   req.DiscountPct,
 		Metadata:      req.Metadata,
 	}
 	if req.ModelRoutes != nil {
-		rpmLimits, budgetLimits := deriveModelCaps(*req.ModelRoutes)
+		rpmLimits, budgetLimits, discountLimits := deriveModelCaps(*req.ModelRoutes)
 		upd.ModelRPMLimits = &rpmLimits
 		upd.ModelBudgetLimits = &budgetLimits
+		upd.ModelDiscountPcts = &discountLimits
 	}
 	if err := groups.Update(c.Request.Context(), id, upd); err != nil {
 		h.translateModelGroupError(c, err)

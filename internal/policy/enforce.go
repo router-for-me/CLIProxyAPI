@@ -519,6 +519,14 @@ func (s *service) Consume(ctx context.Context, principal, model, alias string, t
 			cost = computeCostFromTokens(pricing, tokens)
 		}
 	}
+	// Apply the attached model group's discount so budget windows and the
+	// per-user spend counter stay in sync with the post-discount cost_usd
+	// persisted on usage_events. Per-model overrides take precedence over the
+	// group-level default. 0 = no discount. Mirrors the discount applied by
+	// the usage flusher on the events path so the two surfaces reconcile.
+	if pct := resolveDiscount(snap.Policy, model); pct > 0 {
+		cost *= (1 - pct/100)
+	}
 	now := time.Now()
 	for _, wt := range []string{store.WindowTypeHourly, store.WindowTypeWeekly, store.WindowTypeMonthly} {
 		start, end := windowFor(wt, snap.APIKey.CreatedAt, now)
@@ -666,6 +674,12 @@ func (s *service) snapshot(ctx context.Context, principal string) (APIKeySnapsho
 			pCopy.ModelRoutes = g.ModelRoutes
 			pCopy.ModelRPMLimits = g.ModelRPMLimits
 			pCopy.ModelBudgetLimits = g.ModelBudgetLimits
+			// Carry the group's discount (group-level default + per-model
+			// overrides) onto the snapshot so Consume applies it when computing
+			// budget-window cost — mirroring how caps surface here. Per-model
+			// overrides take precedence over the default at resolve time.
+			pCopy.DiscountPct = g.DiscountPct
+			pCopy.ModelDiscountPcts = g.ModelDiscountPcts
 			snap.Policy = &pCopy
 		} else if !errors.Is(errGroup, store.ErrModelGroupNotFound) {
 			log.WithError(errGroup).WithField("model_group_id", *snap.Policy.ModelGroupID).
@@ -683,15 +697,17 @@ func (s *service) snapshot(ctx context.Context, principal string) (APIKeySnapsho
 // the model access evaluator can take the package-local type.
 func fromStorePolicy(p store.Policy) Policy {
 	return Policy{
-		APIKeyID:         p.APIKeyID,
-		RPMLimit:         p.RPMLimit,
-		HourlyRateLimit:  p.HourlyRateLimit,
-		BudgetHourlyUSD:  p.BudgetHourlyUSD,
-		BudgetWeeklyUSD:  p.BudgetWeeklyUSD,
-		BudgetMonthlyUSD: p.BudgetMonthlyUSD,
-		AllowedModels:    p.AllowedModels,
-		BlockedModels:    p.BlockedModels,
-		ModelRoutes:      p.ModelRoutes,
+		APIKeyID:          p.APIKeyID,
+		RPMLimit:          p.RPMLimit,
+		HourlyRateLimit:   p.HourlyRateLimit,
+		BudgetHourlyUSD:   p.BudgetHourlyUSD,
+		BudgetWeeklyUSD:   p.BudgetWeeklyUSD,
+		BudgetMonthlyUSD:  p.BudgetMonthlyUSD,
+		AllowedModels:     p.AllowedModels,
+		BlockedModels:     p.BlockedModels,
+		ModelRoutes:       p.ModelRoutes,
+		DiscountPct:       p.DiscountPct,
+		ModelDiscountPcts: p.ModelDiscountPcts,
 	}
 }
 

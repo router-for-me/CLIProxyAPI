@@ -8,6 +8,7 @@ package policy
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
@@ -53,6 +54,26 @@ func computeCostFromTokens(p store.Pricing, tokens TokenCounts) float64 {
 		tokens.Reasoning, tokens.CacheCreation, tokens.Cached)
 }
 
+// resolveDiscount returns the discount percentage (0-100) that applies to a
+// request for the given model under the supplied policy. A per-model entry
+// (keyed by the lowercased model id) takes precedence over the group-level
+// default; 0 means "no discount". Returns 0 when the policy is nil or carries
+// no discount, so callers can apply `cost *= (1 - pct/100)` unconditionally.
+// Mirrored by store.ModelGroup resolution so the flusher (events path) and
+// Consume (budget-windows path) apply the identical factor and stay in sync.
+func resolveDiscount(p *store.Policy, model string) float64 {
+	if p == nil || model == "" {
+		return 0
+	}
+	if v, ok := p.ModelDiscountPcts[strings.ToLower(model)]; ok && v > 0 {
+		return v
+	}
+	if p.DiscountPct != nil && *p.DiscountPct > 0 {
+		return *p.DiscountPct
+	}
+	return 0
+}
+
 // Policy is a store-level policy snapshot cached in memory to avoid a DB
 // round-trip on every request. Mirrors store.Policy but inlined here so the
 // policy package does not need to extend the struct when adding fields.
@@ -68,6 +89,15 @@ type Policy struct {
 	// ModelRoutes optionally pins specific allowed model IDs to a subset of
 	// upstream providers. See store.Policy.ModelRoutes for semantics.
 	ModelRoutes []store.ModelRoute
+	// DiscountPct is the group-level default discount percentage (0-100) when
+	// a model group is attached to this policy. nil/0 = no discount. Applied to
+	// the computed cost in Consume (budget windows) so usage_windows.cost_usd
+	// stays in sync with the post-discount cost_usd persisted on usage_events.
+	DiscountPct *float64
+	// ModelDiscountPcts carries per-model discount overrides (keyed by model id)
+	// that take precedence over DiscountPct. Populated by the group-override
+	// snapshot path; never persisted on the policy row itself.
+	ModelDiscountPcts map[string]float64
 }
 
 // ModelLists carries the resolved AllowedModels / BlockedModels for a

@@ -12,7 +12,7 @@ func TestUsageFlusherHandleUsageQueuesRecord(t *testing.T) {
 	ctx := cancelableTestCtx(t)
 	us := NewUsageStore(store)
 	apiKeys := NewAPIKeyStore(store)
-	flusher := NewUsageFlusher(us, apiKeys, FlusherConfig{QueueCap: 10, FlushInterval: time.Hour, FlushBatchSize: 5})
+	flusher := NewUsageFlusher(us, apiKeys, nil, FlusherConfig{QueueCap: 10, FlushInterval: time.Hour, FlushBatchSize: 5})
 	if err := flusher.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestUsageFlusherFallsBackToAliasPricing(t *testing.T) {
 	store := newTestPostgresStore(t, "flusher_alias_pricing")
 	ctx := cancelableTestCtx(t)
 	us := NewUsageStore(store)
-	flusher := NewUsageFlusher(us, nil, FlusherConfig{QueueCap: 10, FlushInterval: time.Hour, FlushBatchSize: 5})
+	flusher := NewUsageFlusher(us, nil, nil, FlusherConfig{QueueCap: 10, FlushInterval: time.Hour, FlushBatchSize: 5})
 	if err := flusher.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -119,6 +119,77 @@ func TestUsageFlusherFallsBackToAliasPricing(t *testing.T) {
 	}
 }
 
+func TestUsageFlusherAppliesModelGroupDiscount(t *testing.T) {
+	store := newTestPostgresStore(t, "flusher_discount")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+	apiKeys := NewAPIKeyStore(store)
+	groups := NewModelGroupStore(store)
+	flusher := NewUsageFlusher(us, apiKeys, groups, FlusherConfig{QueueCap: 10, FlushInterval: time.Hour, FlushBatchSize: 5})
+	if err := flusher.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(flusher.Stop)
+
+	// Create an API key whose principal the flusher can resolve via LookupByHash.
+	// Create returns the plaintext secret (2nd return); we publish a record
+	// carrying that exact principal so the discount lookup can resolve the
+	// attached model group.
+	key, plaintextSecret, err := apiKeys.Create(ctx, "dk", "", "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Pricing: 1M input @ $1/M + 1M output @ $2/M = $3 pre-discount.
+	if err := us.UpsertPricing(ctx, Pricing{ID: "m", InputPer1M: 1.0, OutputPer1M: 2.0}); err != nil {
+		t.Fatalf("UpsertPricing: %v", err)
+	}
+	// Create a model group with a 20% default discount and attach it to the
+	// key's policy. No per-model override is set, so the group default applies.
+	dpct := 20.0
+	grp, err := groups.Create(ctx, ModelGroup{
+		Name: "discounted", AllowedModels: []string{"m"}, DiscountPct: &dpct,
+	})
+	if err != nil {
+		t.Fatalf("Create group: %v", err)
+	}
+	if err := apiKeys.UpdatePolicy(ctx, key.ID, Policy{ModelGroupID: &grp.ID}); err != nil {
+		t.Fatalf("UpdatePolicy: %v", err)
+	}
+
+	flusher.HandleUsage(ctx, coreusage.Record{
+		Provider: "test", Model: "m", APIKey: plaintextSecret,
+		AuthType: "api_key", Source: "test", RequestedAt: time.Now().UTC(),
+		Detail: coreusage.Detail{
+			InputTokens: 1_000_000, OutputTokens: 1_000_000, TotalTokens: 2_000_000,
+		},
+	})
+	flusher.Stop()
+
+	rows, _, err := us.SelectEvents(ctx, UsageFilter{APIKeyID: key.ID}, 1, 25)
+	if err != nil {
+		t.Fatalf("SelectEvents: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 event; got %d", len(rows))
+	}
+	row := rows[0]
+	// Pre-discount = $3; with 20% off → $2.4.
+	if row.CostUSD < 2.39 || row.CostUSD > 2.41 {
+		t.Errorf("cost_usd = %v; want ~2.4 (3.0 × 0.8)", row.CostUSD)
+	}
+	if row.DiscountPct < 19.99 || row.DiscountPct > 20.01 {
+		t.Errorf("discount_pct = %v; want 20", row.DiscountPct)
+	}
+	// FillCostBreakdown re-derives the pre-discount cost so the dashboard can
+	// show "before discount".
+	if err := us.FillCostBreakdown(ctx, rows); err != nil {
+		t.Fatalf("FillCostBreakdown: %v", err)
+	}
+	if rows[0].OriginalCostUSD < 2.99 || rows[0].OriginalCostUSD > 3.01 {
+		t.Errorf("original_cost_usd = %v; want ~3.0", rows[0].OriginalCostUSD)
+	}
+}
+
 func TestUsageFlusherDropsOnFullQueue(t *testing.T) {
 	// Use a zero-cap queue via direct construction — we cannot pass cap=0
 	// because NewUsageFlusher falls back to defaults. Instead, set cap=1
@@ -126,7 +197,7 @@ func TestUsageFlusherDropsOnFullQueue(t *testing.T) {
 	store := newTestPostgresStore(t, "flusher_test2")
 	ctx := cancelableTestCtx(t)
 	us := NewUsageStore(store)
-	flusher := NewUsageFlusher(us, nil, FlusherConfig{QueueCap: 1, FlushInterval: time.Hour, FlushBatchSize: 1})
+	flusher := NewUsageFlusher(us, nil, nil, FlusherConfig{QueueCap: 1, FlushInterval: time.Hour, FlushBatchSize: 1})
 	if err := flusher.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -145,7 +216,7 @@ func TestUsageFlusherStartTwice(t *testing.T) {
 	store := newTestPostgresStore(t, "flusher_start2")
 	ctx := cancelableTestCtx(t)
 	us := NewUsageStore(store)
-	flusher := NewUsageFlusher(us, nil, DefaultFlusherConfig())
+	flusher := NewUsageFlusher(us, nil, nil, DefaultFlusherConfig())
 	if err := flusher.Start(ctx); err != nil {
 		t.Fatalf("Start (1): %v", err)
 	}

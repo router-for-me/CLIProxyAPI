@@ -673,7 +673,7 @@ func main() {
 		// plugin registration then wires it into the usage manager's fan-out
 		// so HandleUsage invocations actually happen (without this the
 		// flusher goroutine would spin idle forever).
-		usageFlusher = store.NewUsageFlusher(pgUsageStore, pgAPIKeyStore, store.DefaultFlusherConfig())
+		usageFlusher = store.NewUsageFlusher(pgUsageStore, pgAPIKeyStore, pgModelGroups, store.DefaultFlusherConfig())
 		if errFlusherStart := usageFlusher.Start(context.Background()); errFlusherStart != nil {
 			log.Errorf("failed to start PG usage flusher: %v", errFlusherStart)
 		}

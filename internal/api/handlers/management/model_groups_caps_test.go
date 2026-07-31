@@ -89,7 +89,7 @@ func TestDeriveModelCaps(t *testing.T) {
 		{Model: "gpt-4o-mini", Providers: []string{"openai"}}, // no caps
 		{Model: "claude-sonnet", MaxBudgetUSD: budget(5)},     // budget-only
 	}
-	rpmMap, budgetMap := deriveModelCaps(routes)
+	rpmMap, budgetMap, discountMap := deriveModelCaps(routes)
 
 	if len(rpmMap) != 1 || rpmMap["gpt-4o"] != 60 {
 		t.Fatalf("rpm map mismatch: %+v", rpmMap)
@@ -99,5 +99,8 @@ func TestDeriveModelCaps(t *testing.T) {
 	}
 	if _, ok := budgetMap["gpt-4o-mini"]; ok {
 		t.Fatalf("budget map must not contain cap-less models: %+v", budgetMap)
+	}
+	if len(discountMap) != 0 {
+		t.Fatalf("discount map must be empty when no route carries a discount: %+v", discountMap)
 	}
 }
