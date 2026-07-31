@@ -637,8 +637,18 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if !outputNode.Exists() {
 		outputNode = usageNode.Get("output_tokens")
 	}
+	// inputTotal is the raw prompt_tokens the upstream reports, which for
+	// OpenAI-style protocols FOLDS cached tokens into the prompt total. The
+	// persistent InputTokens field is the billable non-cached portion per the
+	// ComputeCost contract (operators pay the discounted cache-read rate for
+	// the cached subset, not the full input rate on top of it), so we subtract
+	// cache_read + cache_creation below once those are known. We keep the raw
+	// inputTotal here because NewSubsetTokenBreakdown expects the inclusive
+	// total to correctly decompose Input into UncachedTokens + CacheRead +
+	// CacheWrite.
+	inputTotal := inputNode.Int()
 	detail := usage.Detail{
-		InputTokens:  inputNode.Int(),
+		InputTokens:  inputTotal,
 		OutputTokens: outputNode.Int(),
 		TotalTokens:  usageNode.Get("total_tokens").Int(),
 	}
@@ -660,6 +670,14 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if cacheCreation.Exists() {
 		detail.CacheCreationTokens = cacheCreation.Int()
 	}
+	// Subtract the cache subsets from the persisted InputTokens so the stored
+	// input_tokens column carries only the freshly-evaluated (uncached)
+	// portion. Without this the cache subset is double-counted: once inside
+	// input_tokens (billed at the full input rate) and once as cached_tokens
+	// (billed at the discounted cache-read rate), inflating cost and the
+	// Token Breakdown sum past total_tokens. TotalTokens stays the inclusive
+	// upstream-provided total.
+	detail.InputTokens = billableUncachedInput(inputTotal, detail.CacheReadTokens, detail.CacheCreationTokens)
 	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
 	if !reasoning.Exists() {
 		reasoning = usageNode.Get("output_tokens_details.reasoning_tokens")
@@ -669,8 +687,13 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	}
 	if hasOpenAIStyleUsageBucketFields(usageNode) {
 		if inputNode.Exists() && outputNode.Exists() {
+			// NewSubsetTokenBreakdown expects the inclusive inputTotal (it
+			// decomposes it into UncachedTokens + CacheRead + CacheWrite), so
+			// pass the raw upstream value here — NOT the truncated
+			// detail.InputTokens, which has already had the cache subsets
+			// subtracted out.
 			detail.TokenBreakdown = usage.NewSubsetTokenBreakdown(
-				detail.InputTokens,
+				inputTotal,
 				detail.CacheReadTokens,
 				detail.CacheCreationTokens,
 				detail.OutputTokens,
@@ -688,8 +711,12 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 			if !outputNode.Exists() {
 				reasoningTokens = 0
 			}
+			partialInputTotal := inputTotal
+			if !inputNode.Exists() {
+				partialInputTotal = detail.InputTokens
+			}
 			detail.TokenBreakdown = usage.NewPartialSubsetTokenBreakdown(
-				detail.InputTokens,
+				partialInputTotal,
 				cacheReadTokens,
 				cacheCreationTokens,
 				detail.OutputTokens,
@@ -794,8 +821,15 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 			return detail
 		}
 	}
+	// Gemini's promptTokenCount folds cached tokens into the prompt total, so
+	// subtract the cache subset from the persisted InputTokens (billable
+	// non-cached portion per the ComputeCost contract) while passing the
+	// inclusive total to the breakdown (it decomposes Input into Uncached +
+	// CacheRead + CacheWrite).
+	inputTotal := detail.InputTokens
+	detail.InputTokens = billableUncachedInput(inputTotal, detail.CacheReadTokens, detail.CacheCreationTokens)
 	detail.TokenBreakdown = usage.NewSeparateReasoningTokenBreakdown(
-		detail.InputTokens,
+		inputTotal,
 		detail.CacheReadTokens,
 		detail.CacheCreationTokens,
 		detail.OutputTokens,
@@ -837,8 +871,14 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 			return detail
 		}
 	}
+	// Same cache-folding assumption as the OpenAI/Gemini parsers: the
+	// upstream's input_tokens includes the cached subset, so subtract it from
+	// the billable InputTokens while passing the inclusive total to the
+	// breakdown.
+	inputTotal := detail.InputTokens
+	detail.InputTokens = billableUncachedInput(inputTotal, detail.CacheReadTokens, detail.CacheCreationTokens)
 	detail.TokenBreakdown = usage.NewSeparateReasoningTokenBreakdown(
-		detail.InputTokens,
+		inputTotal,
 		detail.CacheReadTokens,
 		detail.CacheCreationTokens,
 		detail.OutputTokens,
@@ -846,6 +886,19 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 		detail.TotalTokens,
 	)
 	return detail
+}
+
+// billableUncachedInput returns the non-cached portion of inputTotal that the
+// ComputeCost contract expects to be billed at the full input rate (the cached
+// subset is billed separately at the cache-read/cache-write rates). When the
+// cache subset exceeds inputTotal (malformed payload), it falls back to the
+// raw total so the persisted row never carries a negative InputTokens.
+func billableUncachedInput(inputTotal, cacheRead, cacheWrite int64) int64 {
+	cachedSubset := cacheRead + cacheWrite
+	if cachedSubset <= 0 || cachedSubset > inputTotal {
+		return inputTotal
+	}
+	return inputTotal - cachedSubset
 }
 
 func hasUsageDetail(detail usage.Detail) bool {

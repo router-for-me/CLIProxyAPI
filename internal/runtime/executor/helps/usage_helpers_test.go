@@ -14,8 +14,10 @@ import (
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	data := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":6,"total_tokens":16,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
 	detail := ParseOpenAIUsage(data)
-	if detail.InputTokens != 10 {
-		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 10)
+	// prompt_tokens folds the cached subset in; InputTokens is the billable
+	// non-cached portion per ComputeCost: 10 - 4 (cached) = 6.
+	if detail.InputTokens != 6 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 6)
 	}
 	if detail.OutputTokens != 6 {
 		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 6)
@@ -43,8 +45,9 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 func TestParseOpenAIUsageResponses(t *testing.T) {
 	data := []byte(`{"service_tier":"default","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7},"output_tokens_details":{"reasoning_tokens":9}}}`)
 	detail := ParseOpenAIUsage(data)
-	if detail.InputTokens != 10 {
-		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 10)
+	// input_tokens folds cached: 10 - 7 = 3 billable input tokens.
+	if detail.InputTokens != 3 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 3)
 	}
 	if detail.OutputTokens != 20 {
 		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 20)
@@ -98,8 +101,8 @@ func TestParseCodexUsageIncludesCacheWriteTokens(t *testing.T) {
 	if !ok {
 		t.Fatal("ParseCodexUsage() ok = false, want true")
 	}
-	if detail.InputTokens != 100 {
-		t.Fatalf("input tokens = %d, want 100", detail.InputTokens)
+	if detail.InputTokens != 30 {
+		t.Fatalf("input tokens = %d, want 30 (100 - 30 cached - 40 cache_write)", detail.InputTokens)
 	}
 	if detail.OutputTokens != 20 {
 		t.Fatalf("output tokens = %d, want 20", detail.OutputTokens)
@@ -171,8 +174,8 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	if !ok {
 		t.Fatal("ParseOpenAIStreamUsage() ok = false, want true")
 	}
-	if detail.InputTokens != 8 {
-		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 8)
+	if detail.InputTokens != 5 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 5)
 	}
 	if detail.OutputTokens != 5 {
 		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 5)
@@ -376,8 +379,9 @@ func TestParseGeminiUsageRejectsInvalidToolUseSums(t *testing.T) {
 
 func TestParseInteractionsUsage(t *testing.T) {
 	detail := ParseInteractionsUsage([]byte(`{"usage":{"input_tokens":3,"output_tokens":4,"reasoning_tokens":5,"cached_tokens":2}}`))
-	if detail.InputTokens != 3 {
-		t.Fatalf("input tokens = %d, want 3", detail.InputTokens)
+	// input_tokens folds cached_tokens: 3 - 2 = 1 billable input.
+	if detail.InputTokens != 1 {
+		t.Fatalf("input tokens = %d, want 1", detail.InputTokens)
 	}
 	if detail.OutputTokens != 4 {
 		t.Fatalf("output tokens = %d, want 4", detail.OutputTokens)
@@ -446,8 +450,8 @@ func TestParseInteractionsStreamUsageOfficialMetadata(t *testing.T) {
 	if !ok {
 		t.Fatal("ParseInteractionsStreamUsage() ok = false, want true")
 	}
-	if detail.InputTokens != 2 {
-		t.Fatalf("input tokens = %d, want 2", detail.InputTokens)
+	if detail.InputTokens != 1 {
+		t.Fatalf("input tokens = %d, want 1 (2 total_input - 1 cached)", detail.InputTokens)
 	}
 	if detail.OutputTokens != 6 {
 		t.Fatalf("output tokens = %d, want 6", detail.OutputTokens)
