@@ -705,6 +705,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Prefix         *string                             `json:"prefix"`
 		Disabled       *bool                               `json:"disabled"`
 		DisableCooling *bool                               `json:"disable-cooling"`
+		PromptCacheKey *bool                               `json:"prompt-cache-key"`
 		BaseURL        *string                             `json:"base-url"`
 		APIKeyEntries  *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
 		Models         *[]config.OpenAICompatibilityModel  `json:"models"`
@@ -752,6 +753,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.DisableCooling != nil {
 		entry.DisableCooling = *body.Value.DisableCooling
+	}
+	if body.Value.PromptCacheKey != nil {
+		entry.PromptCacheKey = *body.Value.PromptCacheKey
 	}
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
