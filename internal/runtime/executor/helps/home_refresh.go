@@ -2,14 +2,10 @@ package helps
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
@@ -47,7 +43,7 @@ type homeErrorDetail struct {
 
 type homeRefreshClient interface {
 	HeartbeatOK() bool
-	GetRefreshAuth(ctx context.Context, authIndex string, lastRefreshedAt time.Time, accessTokenSHA256 string) ([]byte, error)
+	GetRefreshAuth(ctx context.Context, authIndex string) ([]byte, error)
 }
 
 var currentHomeRefreshClient = func() homeRefreshClient {
@@ -81,11 +77,8 @@ func RefreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 		return nil, true, homeStatusErr{code: http.StatusBadGateway, msg: "home refresh: auth_index is empty"}
 	}
 
-	raw, err := client.GetRefreshAuth(ctx, authIndex, auth.LastRefreshedAt, authAccessTokenSHA256(auth))
+	raw, err := client.GetRefreshAuth(ctx, authIndex)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, true, err
-		}
 		return nil, true, homeStatusErr{code: http.StatusBadGateway, msg: err.Error()}
 	}
 
@@ -114,43 +107,6 @@ func RefreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 	return updated, true, nil
 }
 
-func authAccessTokenSHA256(auth *cliproxyauth.Auth) string {
-	accessToken := authAccessTokenForFingerprint(auth)
-	if accessToken == "" {
-		return ""
-	}
-	digest := sha256.Sum256([]byte(accessToken))
-	return hex.EncodeToString(digest[:])
-}
-
-func authAccessTokenForFingerprint(auth *cliproxyauth.Auth) string {
-	if auth == nil || auth.Metadata == nil {
-		return ""
-	}
-	for _, key := range []string{"access_token", "accessToken"} {
-		if value, ok := auth.Metadata[key].(string); ok && strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	for _, key := range []string{"token", "Token"} {
-		switch token := auth.Metadata[key].(type) {
-		case map[string]any:
-			for _, tokenKey := range []string{"access_token", "accessToken"} {
-				if value, ok := token[tokenKey].(string); ok && strings.TrimSpace(value) != "" {
-					return strings.TrimSpace(value)
-				}
-			}
-		case map[string]string:
-			for _, tokenKey := range []string{"access_token", "accessToken"} {
-				if value := strings.TrimSpace(token[tokenKey]); value != "" {
-					return value
-				}
-			}
-		}
-	}
-	return ""
-}
-
 func parseHomeRefreshAuth(raw []byte) (*cliproxyauth.Auth, string, error) {
 	var rawObject map[string]json.RawMessage
 	if errUnmarshal := json.Unmarshal(raw, &rawObject); errUnmarshal != nil {
@@ -176,8 +132,6 @@ func statusFromHomeErrorCode(code string) int {
 		return http.StatusUnauthorized
 	case "model_not_found":
 		return http.StatusNotFound
-	case "refresh_temporarily_unavailable", "home_unavailable":
-		return http.StatusServiceUnavailable
 	default:
 		return http.StatusBadGateway
 	}

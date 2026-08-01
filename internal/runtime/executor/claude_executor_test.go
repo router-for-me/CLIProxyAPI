@@ -3110,45 +3110,6 @@ func TestClaudeExecutor_ExecuteOpenAINonStreamRestoresOAuthToolNames(t *testing.
 	}
 }
 
-func TestEnsureClaudeThinkingDisplay_SetsSummarizedWhenMissing(t *testing.T) {
-	payload := []byte(`{"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`)
-	out := ensureClaudeThinkingDisplay(payload)
-
-	if got := gjson.GetBytes(out, "thinking.display").String(); got != "summarized" {
-		t.Fatalf("thinking.display = %q, want summarized", got)
-	}
-	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
-		t.Fatalf("thinking.type = %q, want adaptive", got)
-	}
-}
-
-func TestEnsureClaudeThinkingDisplay_PreservesExplicitValue(t *testing.T) {
-	payload := []byte(`{"thinking":{"type":"enabled","budget_tokens":2048,"display":"omitted"}}`)
-	out := ensureClaudeThinkingDisplay(payload)
-
-	if got := gjson.GetBytes(out, "thinking.display").String(); got != "omitted" {
-		t.Fatalf("thinking.display = %q, want omitted", got)
-	}
-}
-
-func TestEnsureClaudeThinkingDisplay_SkipsWhenThinkingDisabled(t *testing.T) {
-	payload := []byte(`{"thinking":{"type":"disabled"}}`)
-	out := ensureClaudeThinkingDisplay(payload)
-
-	if gjson.GetBytes(out, "thinking.display").Exists() {
-		t.Fatalf("thinking.display should not be set when thinking is disabled: %s", out)
-	}
-}
-
-func TestEnsureClaudeThinkingDisplay_SkipsWhenThinkingMissing(t *testing.T) {
-	payload := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
-	out := ensureClaudeThinkingDisplay(payload)
-
-	if gjson.GetBytes(out, "thinking").Exists() {
-		t.Fatalf("thinking should remain absent: %s", out)
-	}
-}
-
 func TestPrependToFirstUserMessage_KeepsToolResultBlocksFirst(t *testing.T) {
 	// A conversation that opens on an assistant tool_use makes the first user
 	// message a tool_result carrier. Anthropic requires those blocks to stay at

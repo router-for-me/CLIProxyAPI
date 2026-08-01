@@ -28,10 +28,8 @@ type Record struct {
 	APIKey       string
 	AuthID       string
 	AuthIndex    string
-	// AccessTokenSHA256 identifies the OAuth token version without exposing the token.
-	AccessTokenSHA256 string
-	AuthType          string
-	Source            string
+	AuthType     string
+	Source       string
 	// ReasoningEffort stores the translated upstream thinking level for request event logs.
 	ReasoningEffort string
 	// ServiceTier stores the client-requested service tier.

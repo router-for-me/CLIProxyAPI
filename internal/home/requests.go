@@ -18,10 +18,8 @@ type modelsRequest struct {
 }
 
 type refreshRequest struct {
-	Type                      string `json:"type"`
-	AuthIndex                 string `json:"auth_index"`
-	LastRefreshedAt           string `json:"last_refreshed_at,omitempty"`
-	ObservedAccessTokenSHA256 string `json:"access_token_sha256,omitempty"`
+	Type      string `json:"type"`
+	AuthIndex string `json:"auth_index"`
 }
 
 type InFlightFrameKind string
