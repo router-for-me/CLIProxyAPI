@@ -93,6 +93,25 @@ func recoverableFailureRetryAfter(now time.Time, disableCooling bool) time.Time 
 	return nextTransientErrorRetryAfter(now)
 }
 
+// cappedUpstreamRetryAfter bounds a single upstream 429 Retry-After hint to the
+// ceiling the proxy already uses for its own quota backoff (quotaBackoffMax).
+// Upstreams occasionally return multi-day windows (e.g. a weekly ChatGPT quota
+// reset). Honoring them verbatim parks the credential in cooldown long after a
+// manual reset or window rollover made it usable again, and nothing re-probes it
+// before that window expires — so the proxy keeps 429ing until a restart clears
+// the in-memory cooldown. Capping the hint keeps the credential re-probing, so
+// an upstream reset is picked up without a service restart. Hints at or below
+// the ceiling are honored unchanged; non-positive values collapse to zero.
+func cappedUpstreamRetryAfter(retryAfter time.Duration) time.Duration {
+	if retryAfter <= 0 {
+		return 0
+	}
+	if retryAfter > quotaBackoffMax {
+		return quotaBackoffMax
+	}
+	return retryAfter
+}
+
 // SetConfig updates the runtime config snapshot used by request-time helpers.
 // Callers should provide the latest config on reload so per-credential alias mapping stays in sync.
 func (m *Manager) SetConfig(cfg *internalconfig.Config) {
@@ -811,7 +830,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							backoffLevel := state.Quota.BackoffLevel
 							if !disableCooling {
 								if result.RetryAfter != nil {
-									next = now.Add(*result.RetryAfter)
+									next = now.Add(cappedUpstreamRetryAfter(*result.RetryAfter))
 								} else {
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
 								}
@@ -1648,7 +1667,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		var next time.Time
 		if !disableCooling {
 			if retryAfter != nil {
-				next = now.Add(*retryAfter)
+				next = now.Add(cappedUpstreamRetryAfter(*retryAfter))
 			} else {
 				next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
 			}
