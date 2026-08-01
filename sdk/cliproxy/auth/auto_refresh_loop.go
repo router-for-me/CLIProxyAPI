@@ -339,6 +339,14 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 	if auth == nil {
 		return time.Time{}, false
 	}
+	// Skip scheduling refresh for disabled auths. This prevents the
+	// auto-refresh loop from periodically attempting to refresh tokens
+	// for credentials the user has explicitly disabled via the
+	// management panel, which would otherwise produce error logs even
+	// though the auth is correctly excluded from routing.
+	if auth.Disabled || auth.Status == StatusDisabled {
+		return time.Time{}, false
+	}
 	if hasUnauthorizedAuthFailure(auth) {
 		return time.Time{}, false
 	}

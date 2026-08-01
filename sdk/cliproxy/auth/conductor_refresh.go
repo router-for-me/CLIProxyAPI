@@ -115,6 +115,13 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if a == nil {
 		return false
 	}
+	// Skip refresh for disabled auths (Disabled flag or StatusDisabled).
+	// Disabled credentials are excluded from routing, so refreshing their
+	// tokens is wasteful and produces noisy error logs when the upstream
+	// account is no longer valid.
+	if a.Disabled || a.Status == StatusDisabled {
+		return false
+	}
 	if hasUnauthorizedAuthFailure(a) {
 		return false
 	}
