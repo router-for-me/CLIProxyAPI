@@ -180,7 +180,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
 }
 
-func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel, executionModel string, execModels []string, pooled bool, aliasResult OAuthModelAliasResult, allowRetry bool, ephemeralResult bool) (*cliproxyexecutor.StreamResult, error) {
+func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel, executionModel string, execModels []string, pooled bool, aliasResult OAuthModelAliasResult, routing *apiKeyModelRoutingSnapshot, allowRetry bool, ephemeralResult bool) (*cliproxyexecutor.StreamResult, error) {
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
@@ -195,7 +195,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			execReq.Model = executionModel
 		}
 		execOpts := opts
-		execReq, execOpts = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+		var errIntercept error
+		execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+		if errIntercept != nil {
+			return nil, errIntercept
+		}
+		if executionModel == "" {
+			execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, execModel)
+		}
 		if errCtx := ctx.Err(); errCtx != nil {
 			return nil, errCtx
 		}
@@ -300,7 +307,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, aliasResult, ephemeralResult), nil
+		attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, execModel, aliasResult)
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, attemptAliasResult, ephemeralResult), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}

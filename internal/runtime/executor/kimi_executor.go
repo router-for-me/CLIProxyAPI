@@ -113,7 +113,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
 	}
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), "kimi", e.Identifier())
+	body, err = helps.ApplyThinkingWithSourcePayload(body, req.Payload, originalPayloadSource, req.Model, from.String(), "kimi", e.Identifier())
 	if err != nil {
 		return resp, err
 	}
@@ -222,7 +222,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		return nil, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
 	}
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), "kimi", e.Identifier())
+	body, err = helps.ApplyThinkingWithSourcePayload(body, req.Payload, originalPayloadSource, req.Model, from.String(), "kimi", e.Identifier())
 	if err != nil {
 		return nil, err
 	}

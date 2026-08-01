@@ -42,6 +42,47 @@ func TestWriteErrorResponse_AddonHeadersDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestWriteErrorResponseDirectResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	c.Writer.Header().Set("X-Cpa-Trace-Id", "local-trace")
+	c.Writer.Header().Set("Access-Control-Allow-Origin", "https://trusted.example")
+
+	handler := NewBaseAPIHandlers(nil, nil)
+	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode:     http.StatusForbidden,
+		DirectResponse: true,
+		Body:           []byte(`{"error":"blocked"}`),
+		Headers: http.Header{
+			"Content-Type":                {"application/problem+json"},
+			"X-Plugin-Policy":             {"blocked"},
+			"X-Cpa-Trace-Id":              {"plugin-trace"},
+			"Access-Control-Allow-Origin": {"https://untrusted.example"},
+		},
+	})
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+	if got := recorder.Body.String(); got != `{"error":"blocked"}` {
+		t.Fatalf("body = %q", got)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/problem+json" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if got := recorder.Header().Get("X-Plugin-Policy"); got != "blocked" {
+		t.Fatalf("X-Plugin-Policy = %q", got)
+	}
+	if got := recorder.Header().Get("X-Cpa-Trace-Id"); got != "local-trace" {
+		t.Fatalf("X-Cpa-Trace-Id = %q, want local value", got)
+	}
+	if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != "https://trusted.example" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want trusted origin", got)
+	}
+}
+
 func TestInternalConcurrencyBusyWritesRetryAfterWithoutPassthrough(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

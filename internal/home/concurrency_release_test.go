@@ -474,3 +474,32 @@ func TestScopeEndBlocksDrainUntilReleaseSinkFlushesFinalSequence(t *testing.T) {
 		t.Fatalf("final flushed sequence = %d, want 1", got)
 	}
 }
+
+func TestReleaseFlusherSenderReplacementPreservesTicket(t *testing.T) {
+	flusher := newReleaseFlusher(time.Hour, time.Hour, func(context.Context, ConcurrencyReleaseFrame) error {
+		return errors.New("old Home unavailable")
+	})
+	group := executionregistry.ReleaseGroup{CredentialID: "cred-1", Model: "gpt"}
+	ticket := flusher.MarkDirty(group, 1)
+	if ticket == nil {
+		t.Fatal("MarkDirty() ticket = nil")
+	}
+	if failed := flusher.flush(context.Background()); !failed {
+		t.Fatal("old sender release attempt did not fail")
+	}
+
+	flusher.SetSender(func(_ context.Context, frame ConcurrencyReleaseFrame) error {
+		if frame.CredentialID != group.CredentialID || frame.Model != group.Model || frame.ReleaseSeq != 1 {
+			t.Fatalf("replacement sender frame = %#v", frame)
+		}
+		return nil
+	})
+	if failed := flusher.flush(context.Background()); failed {
+		t.Fatal("replacement sender release attempt failed")
+	}
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelWait()
+	if errWait := ticket.Wait(waitCtx); errWait != nil {
+		t.Fatalf("ticket did not survive sender replacement: %v", errWait)
+	}
+}

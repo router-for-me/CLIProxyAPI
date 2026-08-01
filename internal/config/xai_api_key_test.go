@@ -26,6 +26,7 @@ func TestParseConfigBytesXAIAPIKeyMatchesCodexShape(t *testing.T) {
 	cfg, errParse := ParseConfigBytes([]byte(`xai-api-key:
   - api-key: " xai-key "
     priority: 3
+    weight: 5
     prefix: " team-xai "
     base-url: " https://api.x.ai/v1 "
     websockets: true
@@ -55,6 +56,9 @@ func TestParseConfigBytesXAIAPIKeyMatchesCodexShape(t *testing.T) {
 	}
 	if entry.Priority != 3 {
 		t.Fatalf("priority = %d, want 3", entry.Priority)
+	}
+	if entry.Weight == nil || *entry.Weight != 5 {
+		t.Fatalf("weight = %v, want 5", entry.Weight)
 	}
 	if entry.Prefix != "team-xai" {
 		t.Fatalf("prefix = %q, want team-xai", entry.Prefix)

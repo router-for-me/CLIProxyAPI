@@ -1250,7 +1250,7 @@ func TestServiceExplicitReplacementCancelsRunWhenDrainTimesOut(t *testing.T) {
 	scope.End("test cleanup")
 }
 
-func TestServiceReplacesRegistryOnlyAfterNewSubscriptionAck(t *testing.T) {
+func TestServiceKeepsRegistryAcrossHeartbeatFailoverAndExposesOnlyAfterNewACK(t *testing.T) {
 	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
 	if errListen != nil {
 		t.Fatalf("listen: %v", errListen)
@@ -1325,15 +1325,15 @@ func TestServiceReplacesRegistryOnlyAfterNewSubscriptionAck(t *testing.T) {
 
 	close(allowSecondAck)
 	secondRegistry := waitForServiceRegistry(t, service, time.Second)
-	if secondRegistry == firstRegistry {
-		t.Fatal("replacement subscription reused the old registry")
+	if secondRegistry != firstRegistry {
+		t.Fatal("heartbeat failover replaced the execution registry")
 	}
 	if home.Current() == nil {
 		t.Fatal("replacement client was not exposed after the replacement ACK")
 	}
 }
 
-func TestServiceDrainsBeforePreAckRetriesAndExposesOnlyAfterNewAck(t *testing.T) {
+func TestServicePreservesActiveScopeDuringPreACKFailoverRetries(t *testing.T) {
 	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
 	if errListen != nil {
 		t.Fatalf("listen: %v", errListen)
@@ -1393,16 +1393,9 @@ func TestServiceDrainsBeforePreAckRetriesAndExposesOnlyAfterNewAck(t *testing.T)
 	close(loseFirst)
 	select {
 	case <-resourceClosed:
-	case <-time.After(time.Second):
-		t.Fatal("heartbeat loss did not close the active scope resource")
-	}
-	select {
-	case <-preAckAttempts:
-		t.Fatal("pre-ACK retry started before the active scope owner ended")
+		t.Fatal("heartbeat failover drained the active scope")
 	case <-time.After(50 * time.Millisecond):
 	}
-	scope.End("canceled")
-
 	firstPreAck := <-preAckAttempts
 	secondPreAck := <-preAckAttempts
 	if retryDelay := secondPreAck.Sub(firstPreAck); retryDelay < 75*time.Millisecond {
@@ -1423,12 +1416,13 @@ func TestServiceDrainsBeforePreAckRetriesAndExposesOnlyAfterNewAck(t *testing.T)
 
 	close(allowFinalAck)
 	secondRegistry := waitForServiceRegistry(t, service, time.Second)
-	if secondRegistry == firstRegistry || home.Current() == nil {
+	if secondRegistry != firstRegistry || home.Current() == nil {
 		t.Fatal("new Home lifetime was not exposed only after its subscription ACK")
 	}
+	scope.End("completed")
 }
 
-func TestServiceCancelsRunWhenBlockingScopeExceedsDrainBound(t *testing.T) {
+func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
 	if errListen != nil {
 		t.Fatalf("listen: %v", errListen)
@@ -1507,28 +1501,241 @@ func TestServiceCancelsRunWhenBlockingScopeExceedsDrainBound(t *testing.T) {
 	close(loseFirst)
 	select {
 	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("drain did not start closing the blocking scope")
+		t.Fatal("heartbeat failover started draining the blocking scope")
+	case <-time.After(50 * time.Millisecond):
 	}
 	select {
 	case <-secondSubscribe:
-		t.Fatal("new subscription started before the old registry drained")
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(time.Second):
+		t.Fatal("new subscription did not start while the old scope remained active")
 	}
 	service.homeMu.Lock()
 	exposedRegistry := service.homeRegistry
 	service.homeMu.Unlock()
 	if exposedRegistry != nil {
-		t.Fatal("new registry was exposed before the old registry drained")
+		t.Fatal("registry was exposed before the replacement ACK")
+	}
+	close(allowSecondAck)
+	if nextRegistry := waitForServiceRegistry(t, service, time.Second); nextRegistry != registry {
+		t.Fatal("heartbeat failover replaced the registry containing the active scope")
 	}
 	select {
 	case <-serviceCtx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("service run was not canceled after drain timeout")
+		t.Fatal("heartbeat failover canceled the service run")
+	case <-time.After(50 * time.Millisecond):
 	}
 
 	close(release)
 	scope.End("test cleanup")
+}
+
+func TestServiceShutdownDrainsDetachedRegistryDuringRetry(t *testing.T) {
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen: %v", errListen)
+	}
+	firstAck := make(chan struct{})
+	loseFirst := make(chan struct{})
+	secondSubscribe := make(chan struct{})
+	var secondSubscribeOnce sync.Once
+	allowSecondAck := make(chan struct{})
+	stop := make(chan struct{})
+	var subscriptionMu sync.Mutex
+	subscriptions := 0
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		for {
+			conn, errAccept := listener.Accept()
+			if errAccept != nil {
+				return
+			}
+			go serveRegistryTestHomeConnection(conn, &subscriptionMu, &subscriptions, firstAck, loseFirst, secondSubscribe, &secondSubscribeOnce, allowSecondAck, stop)
+		}
+	}()
+	t.Cleanup(func() {
+		close(stop)
+		_ = listener.Close()
+		<-serverDone
+		home.ClearCurrent()
+	})
+
+	service := newRegistryTestService(t, listener)
+	serviceCtx, cancelService := context.WithCancel(context.Background())
+	t.Cleanup(cancelService)
+	service.homeMu.Lock()
+	service.runCancel = cancelService
+	service.homeMu.Unlock()
+	service.startHomeSubscriber(serviceCtx)
+
+	select {
+	case <-firstAck:
+	case <-time.After(time.Second):
+		t.Fatal("first subscription was not acknowledged")
+	}
+	registry := waitForServiceRegistry(t, service, time.Second)
+	pendingRetry, errBegin := registry.BeginDispatch()
+	if errBegin != nil {
+		t.Fatal(errBegin)
+	}
+	pendingScope, errBegin := registry.BeginDispatch()
+	if errBegin != nil {
+		t.Fatal(errBegin)
+	}
+	scope, errInstall := registry.Install(pendingScope, executionregistry.ScopeSpec{})
+	if errInstall != nil {
+		t.Fatal(errInstall)
+	}
+	resourceClosed := make(chan struct{})
+	if errBind := scope.Bind(func() error {
+		close(resourceClosed)
+		go scope.End("shutdown")
+		return nil
+	}); errBind != nil {
+		t.Fatal(errBind)
+	}
+	t.Cleanup(func() {
+		pendingRetry.End()
+		scope.End("test cleanup")
+	})
+
+	service.homeMu.Lock()
+	client := service.homeClient
+	service.homeMu.Unlock()
+	if client == nil {
+		t.Fatal("ready Home client is unavailable")
+	}
+	close(loseFirst)
+	deadline := time.After(time.Second)
+	for {
+		errRelease := client.PushConcurrencyRelease(context.Background(), home.ConcurrencyReleaseFrame{CredentialID: "cred-a", Model: "model-a", ReleaseSeq: 1})
+		if errors.Is(errRelease, home.ErrDispatchFenced) {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("subscriber retry did not close the previous Home client")
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- service.Shutdown(context.Background())
+	}()
+	pendingRetry.End()
+
+	select {
+	case <-resourceClosed:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not drain the detached execution registry")
+	}
+	select {
+	case errShutdown := <-shutdownDone:
+		if errShutdown != nil {
+			t.Fatalf("Shutdown() error = %v", errShutdown)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown() did not complete after draining the detached registry")
+	}
+}
+
+func TestServiceAmbiguousDispatchDrainsRegistryBeforeRetry(t *testing.T) {
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen: %v", errListen)
+	}
+	firstAck := make(chan struct{})
+	loseFirst := make(chan struct{})
+	secondSubscribe := make(chan struct{})
+	var secondSubscribeOnce sync.Once
+	allowSecondAck := make(chan struct{})
+	stop := make(chan struct{})
+	var subscriptionMu sync.Mutex
+	subscriptions := 0
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		for {
+			conn, errAccept := listener.Accept()
+			if errAccept != nil {
+				return
+			}
+			go serveRegistryTestHomeConnection(conn, &subscriptionMu, &subscriptions, firstAck, loseFirst, secondSubscribe, &secondSubscribeOnce, allowSecondAck, stop)
+		}
+	}()
+	t.Cleanup(func() {
+		close(stop)
+		_ = listener.Close()
+		<-serverDone
+		home.ClearCurrent()
+	})
+
+	service := newRegistryTestService(t, listener)
+	serviceCtx, cancelService := context.WithCancel(context.Background())
+	t.Cleanup(cancelService)
+	service.homeMu.Lock()
+	service.runCancel = cancelService
+	service.homeMu.Unlock()
+	service.startHomeSubscriber(serviceCtx)
+
+	select {
+	case <-firstAck:
+	case <-time.After(time.Second):
+		t.Fatal("first subscription was not acknowledged")
+	}
+	registry := waitForServiceRegistry(t, service, time.Second)
+	pending, errBegin := registry.BeginDispatch()
+	if errBegin != nil {
+		t.Fatal(errBegin)
+	}
+	scope, errInstall := registry.Install(pending, executionregistry.ScopeSpec{})
+	if errInstall != nil {
+		t.Fatal(errInstall)
+	}
+	resourceClosed := make(chan struct{})
+	if errBind := scope.Bind(func() error {
+		close(resourceClosed)
+		go scope.End("ambiguous dispatch")
+		return nil
+	}); errBind != nil {
+		t.Fatal(errBind)
+	}
+
+	service.homeMu.Lock()
+	client := service.homeClient
+	service.homeMu.Unlock()
+	if client == nil {
+		t.Fatal("ready Home client is unavailable")
+	}
+	client.AbortAmbiguousDispatch()
+	select {
+	case <-resourceClosed:
+	case <-time.After(time.Second):
+		t.Fatal("ambiguous dispatch did not drain the active registry")
+	}
+	select {
+	case <-secondSubscribe:
+	case <-time.After(time.Second):
+		t.Fatal("subscriber did not retry after ambiguous dispatch drain")
+	}
+	service.homeMu.Lock()
+	exposedRegistry := service.homeRegistry
+	service.homeMu.Unlock()
+	if exposedRegistry != nil {
+		t.Fatal("replacement registry was exposed before its subscription ACK")
+	}
+
+	close(allowSecondAck)
+	nextRegistry := waitForServiceRegistry(t, service, time.Second)
+	if nextRegistry == registry {
+		t.Fatal("ambiguous dispatch reused the drained execution registry")
+	}
+	select {
+	case <-serviceCtx.Done():
+		t.Fatal("successful ambiguous dispatch recovery canceled the service run")
+	case <-time.After(50 * time.Millisecond):
+	}
 }
 
 func TestServiceBacksOffAfterRepeatedPreAckFailures(t *testing.T) {
@@ -1585,7 +1792,7 @@ func TestServiceBacksOffAfterRepeatedPreAckFailures(t *testing.T) {
 	}
 }
 
-func TestServiceHeartbeatLossCancelsBlockedConfigFinalizationBeforeDrain(t *testing.T) {
+func TestServiceHeartbeatLossCancelsBlockedConfigFinalizationWithoutDrainingRegistry(t *testing.T) {
 	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
 	if errListen != nil {
 		t.Fatalf("listen: %v", errListen)
@@ -1648,8 +1855,8 @@ func TestServiceHeartbeatLossCancelsBlockedConfigFinalizationBeforeDrain(t *test
 	}
 	select {
 	case <-resourceClosed:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("heartbeat loss did not cancel the worker and drain the active execution")
+		t.Fatal("heartbeat loss drained the active execution")
+	case <-time.After(200 * time.Millisecond):
 	}
 	select {
 	case <-secondConfig:
@@ -1663,6 +1870,7 @@ func TestServiceHeartbeatLossCancelsBlockedConfigFinalizationBeforeDrain(t *test
 	if currentRegistry != nil || currentClient != nil || home.Current() != nil {
 		t.Fatal("heartbeat-lost lifetime left a published Home client or registry")
 	}
+	scope.End("completed")
 }
 
 func TestServiceConfigWorkerFinalizesRapidUpdatesInOrder(t *testing.T) {

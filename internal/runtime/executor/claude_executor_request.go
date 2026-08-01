@@ -78,27 +78,6 @@ func normalizeClaudeSamplingForUpstream(body []byte) []byte {
 	return body
 }
 
-// ensureClaudeThinkingDisplay defaults thinking.display to "summarized" when thinking
-// is active and the client did not set display. Without this, Claude backends that
-// enable redact-thinking return signature-only thinking blocks (empty thinking text).
-// Explicit client values such as "omitted" are preserved.
-func ensureClaudeThinkingDisplay(body []byte) []byte {
-	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
-	switch thinkingType {
-	case "enabled", "adaptive", "auto":
-	default:
-		return body
-	}
-	if display := strings.TrimSpace(gjson.GetBytes(body, "thinking.display").String()); display != "" {
-		return body
-	}
-	out, err := sjson.SetBytes(body, "thinking.display", "summarized")
-	if err != nil {
-		return body
-	}
-	return out
-}
-
 type compositeReadCloser struct {
 	io.Reader
 	closers []func() error
@@ -344,10 +323,10 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
-	// Re-enforce Accept-Encoding: identity after ApplyCustomHeadersFromAttrs, which
-	// may override it with a user-configured value.  Compressed SSE breaks the line
-	// scanner regardless of user preference, so this is non-negotiable for streams.
+	// Re-enforce the SSE transport contract after custom headers. A custom Accept
+	// value can disable event negotiation, while compressed SSE breaks line parsing.
 	if stream {
+		r.Header.Set("Accept", "text/event-stream")
 		r.Header.Set("Accept-Encoding", "identity")
 	}
 	return nil

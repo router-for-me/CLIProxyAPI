@@ -55,10 +55,10 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		if len(systemParts) > 0 {
 			systemInstruction := []byte(`{"role":"user","parts":[]}`)
 			systemInstruction, _ = sjson.SetRawBytes(systemInstruction, "parts", translatorcommon.JoinRawArray(systemParts))
-			out, _ = sjson.SetRawBytes(out, "system_instruction", systemInstruction)
+			out, _ = sjson.SetRawBytes(out, "systemInstruction", systemInstruction)
 		}
 	} else if systemResult.Type == gjson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
-		out, _ = sjson.SetBytes(out, "system_instruction.parts.-1.text", systemResult.String())
+		out, _ = sjson.SetBytes(out, "systemInstruction.parts.-1.text", systemResult.String())
 	}
 
 	// contents
@@ -266,7 +266,6 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
 				budget := int(b.Int())
 				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingBudget", budget)
-				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.includeThoughts", true)
 			}
 		case "adaptive", "auto":
 			// For adaptive thinking:
@@ -290,7 +289,6 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 					out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingLevel", "high")
 				}
 			}
-			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.includeThoughts", true)
 		}
 	}
 	if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() && v.Type == gjson.Number {

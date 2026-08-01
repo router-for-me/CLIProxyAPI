@@ -44,7 +44,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, true)
 	body = helps.SetStringIfDifferent(body, "model", upstreamModel)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
@@ -67,9 +67,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeSamplingForUpstream(body)
-	// Claude OAuth (and this executor's redact-thinking beta) returns signature-only
-	// thinking blocks unless display is set to "summarized".
-	body = ensureClaudeThinkingDisplay(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {

@@ -2,11 +2,14 @@
 package session
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
+	"unicode"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -18,6 +21,8 @@ const (
 	identityPrefix       = "ctx:v1:"
 	instructionRuneLimit = 50
 )
+
+var legacyClaudeSessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
 
 type canonicalRoot struct {
 	Version      string          `json:"version"`
@@ -32,6 +37,41 @@ type canonicalPart struct {
 	Kind  string `json:"kind"`
 	MIME  string `json:"mime,omitempty"`
 	Value string `json:"value"`
+}
+
+// NormalizeExplicitID validates an explicit client-provided session identifier.
+// It preserves opaque printable values while rejecting oversized or control-bearing IDs.
+func NormalizeExplicitID(raw string) string {
+	for _, r := range raw {
+		if unicode.IsControl(r) {
+			return ""
+		}
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len(raw) > 256 {
+		return ""
+	}
+	return raw
+}
+
+// ClaudeMetadataSessionID extracts the explicit Claude Code session from
+// current JSON metadata or the legacy user_id suffix before bounding the
+// surrounding metadata container.
+func ClaudeMetadataSessionID(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	userID := strings.TrimSpace(gjson.GetBytes(payload, "metadata.user_id").String())
+	if userID == "" {
+		return ""
+	}
+	if strings.HasPrefix(userID, "{") {
+		return NormalizeExplicitID(gjson.Get(userID, "session_id").String())
+	}
+	if matches := legacyClaudeSessionPattern.FindStringSubmatch(userID); len(matches) >= 2 {
+		return NormalizeExplicitID(matches[1])
+	}
+	return ""
 }
 
 // CallerScope returns an irreversible namespace for a downstream caller credential.
@@ -56,24 +96,26 @@ func DerivedID(metadata map[string]any) string {
 // Enrich derives a session identity once and places it in both request and option metadata.
 func Enrich(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
 	payload := opts.OriginalRequest
-	if len(payload) == 0 {
-		payload = req.Payload
+	if len(payload) == 0 && len(req.Payload) > 0 {
+		opts.OriginalRequest = bytes.Clone(req.Payload)
+		payload = opts.OriginalRequest
 	}
-	if executionID := firstMetadataString(cliproxyexecutor.ExecutionSessionMetadataKey, opts.Metadata, req.Metadata); executionID != "" {
+	if executionID := firstNormalizedMetadataID(cliproxyexecutor.ExecutionSessionMetadataKey, opts.Metadata, req.Metadata); executionID != "" {
 		req.Metadata = metadataWithValue(metadataWithoutKey(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey), cliproxyexecutor.ExecutionSessionMetadataKey, executionID)
 		opts.Metadata = metadataWithValue(metadataWithoutKey(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey), cliproxyexecutor.ExecutionSessionMetadataKey, executionID)
 		return req, opts
 	}
+	req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
+	opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
 	if hasExplicitSession(opts.Headers, payload) {
 		req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
 		opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
 		return req, opts
 	}
 
-	derivedID := DerivedID(opts.Metadata)
-	if derivedID == "" {
-		derivedID = DerivedID(req.Metadata)
-	}
+	derivedID := firstNormalizedMetadataID(cliproxyexecutor.DerivedSessionIDMetadataKey, opts.Metadata, req.Metadata)
+	req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
+	opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
 	if derivedID == "" {
 		callerScope := metadataString(opts.Metadata, cliproxyexecutor.CallerScopeMetadataKey)
 		if callerScope == "" {
@@ -90,8 +132,8 @@ func Enrich(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (clipro
 }
 
 func hasExplicitSession(headers map[string][]string, payload []byte) bool {
-	for _, header := range []string{"X-Session-ID", "Session-Id", "Session_id", "X-Client-Request-Id"} {
-		if strings.TrimSpace(headerValue(headers, header)) != "" {
+	for _, header := range []string{"X-Claude-Code-Session-Id", "X-Session-ID", "Session-Id", "Session_id", "X-Session-Affinity", "X-Client-Request-Id"} {
+		if NormalizeExplicitID(headerValue(headers, header)) != "" {
 			return true
 		}
 	}
@@ -99,20 +141,35 @@ func hasExplicitSession(headers map[string][]string, payload []byte) bool {
 		return false
 	}
 	root := gjson.ParseBytes(payload)
-	for _, path := range []string{"metadata.user_id", "session_id", "sessionId", "conversation_id", "prompt_cache_key"} {
-		if strings.TrimSpace(root.Get(path).String()) != "" {
+	for _, path := range []string{"session_id", "sessionId", "conversation_id", "prompt_cache_key"} {
+		if NormalizeExplicitID(root.Get(path).String()) != "" {
 			return true
 		}
 	}
-	return false
+	if ClaudeMetadataSessionID(payload) != "" {
+		return true
+	}
+	userID := strings.TrimSpace(root.Get("metadata.user_id").String())
+	if NormalizeExplicitID(userID) != "" {
+		return true
+	}
+	conversation := root.Get("conversation")
+	if NormalizeExplicitID(conversation.Get("id").String()) != "" {
+		return true
+	}
+	return conversation.Type == gjson.String && NormalizeExplicitID(conversation.String()) != ""
 }
 
 func headerValue(headers map[string][]string, name string) string {
 	for key, values := range headers {
-		if !strings.EqualFold(key, name) || len(values) == 0 {
+		if !strings.EqualFold(key, name) {
 			continue
 		}
-		return values[0]
+		for _, value := range values {
+			if normalized := NormalizeExplicitID(value); normalized != "" {
+				return normalized
+			}
+		}
 	}
 	return ""
 }
@@ -466,6 +523,22 @@ func metadataWithoutKey(metadata map[string]any, key string) map[string]any {
 		}
 	}
 	return cloned
+}
+
+func firstNormalizedMetadataID(key string, metadataSets ...map[string]any) string {
+	for _, metadata := range metadataSets {
+		if metadata == nil {
+			continue
+		}
+		raw, ok := metadata[key].(string)
+		if !ok {
+			continue
+		}
+		if normalized := NormalizeExplicitID(raw); normalized != "" {
+			return normalized
+		}
+	}
+	return ""
 }
 
 func firstMetadataString(key string, metadataSets ...map[string]any) string {

@@ -30,6 +30,143 @@ func testClaudeThinkingSignature() string {
 	return base64.StdEncoding.EncodeToString(payload)
 }
 
+// TestBase64AlphabetSet_MatchesEncoderAlphabets pins the charset lookup tables
+// against the encoders they stand in for. A wrong table would silently accept
+// bytes that are not valid base64, or reject a legal payload character.
+func TestBase64AlphabetSet_MatchesEncoderAlphabets(t *testing.T) {
+	cases := []struct {
+		name     string
+		set      [256]bool
+		alphabet string
+	}{
+		{"grok unpadded std", grokEncryptedContentCharSet, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"},
+		{"gpt base64url", gptReasoningSignatureCharSet, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_="},
+	}
+	for _, tc := range cases {
+		allowed := map[byte]bool{}
+		for i := 0; i < len(tc.alphabet); i++ {
+			allowed[tc.alphabet[i]] = true
+		}
+		for c := 0; c < 256; c++ {
+			want := allowed[byte(c)]
+			if got := tc.set[c]; got != want {
+				t.Errorf("%s: byte 0x%02x (%q) accepted=%v, want %v", tc.name, c, string(rune(c)), got, want)
+			}
+		}
+	}
+}
+
+// replaySafeEnvelopeFixtures returns one fixture per self-describing provider
+// envelope that carries replayable state. Every entry must survive the structural
+// pre-filter, because losing one would silently reclassify that provider.
+func replaySafeEnvelopeFixtures() map[string]struct {
+	sig  string
+	want SignatureProvider
+} {
+	return map[string]struct {
+		sig  string
+		want SignatureProvider
+	}{
+		"claude single-layer E":  {testClaudeThinkingSignature(), SignatureProviderClaude},
+		"claude double-layer R":  {testUnpaddedAntigravityClaudeThinkingSignature(), SignatureProviderClaude},
+		"claude CAIS":            {testClaudeCAISSignature("claude-fable-5"), SignatureProviderClaude},
+		"gemini protobuf field2": {testGeminiThoughtSignatureEnvelope(), SignatureProviderGemini},
+		"gpt fernet":             {testGPTReasoningSignature(), SignatureProviderGPT},
+	}
+}
+
+// TestSelfDescribingSignatureFirstChars_CoversEveryKnownEnvelope guards the
+// structural pre-filter. DetectSignatureProviderForBlock skips every provider
+// validator when maybeSelfDescribingSignatureEnvelope returns false, so an
+// envelope missing from selfDescribingSignatureFirstChars would silently fall
+// through to the residual class. Adding a provider envelope without registering
+// its base64 first character fails here.
+func TestSelfDescribingSignatureFirstChars_CoversEveryKnownEnvelope(t *testing.T) {
+	for name, fixture := range replaySafeEnvelopeFixtures() {
+		if !maybeSelfDescribingSignatureEnvelope(fixture.sig) {
+			t.Errorf("%s: first char %q is not in selfDescribingSignatureFirstChars %q; register it or detection will skip this envelope",
+				name, string(fixture.sig[0]), selfDescribingSignatureFirstChars)
+		}
+	}
+
+	// The pre-filter must not be so wide that it stops filtering. Opaque xAI
+	// ciphertext is the shape it exists to reject.
+	for _, sig := range []string{
+		"K1ZAIbzDbO",
+		"jQDLUr+fD8RFP8nbkkfI",
+		"qcgG7jzxH3D6mlVLBBaKXaG3",
+	} {
+		if maybeSelfDescribingSignatureEnvelope(sig) {
+			t.Errorf("opaque ciphertext %q must not look like a self-describing envelope", sig)
+		}
+	}
+}
+
+// TestGeminiASCIIUUIDIsGateIndependent documents why ascii_uuid is excluded from
+// selfDescribingSignatureFirstChars. Its first byte is the first hex character of
+// the UUID, so the base64 first character spreads over several values, and none of
+// them need to be registered: the envelope is never replay-safe, so it resolves to
+// SignatureProviderUnknown either way and Gemini model parts recover it through the
+// bypass sentinel keyed on block kind.
+func TestGeminiASCIIUUIDIsGateIndependent(t *testing.T) {
+	// First hex digit chosen to land on distinct base64 first characters.
+	for _, uuid := range []string{
+		"09743975-4bb0-4936-9e28-d5b0d21bdc48",
+		"49743975-4bb0-4936-9e28-d5b0d21bdc48",
+		"89743975-4bb0-4936-9e28-d5b0d21bdc48",
+		"a9743975-4bb0-4936-9e28-d5b0d21bdc48",
+		"e9743975-4bb0-4936-9e28-d5b0d21bdc48",
+	} {
+		sig := testGeminiThoughtSignature([]byte(uuid))
+		if got := DetectSignatureProvider(sig); got != SignatureProviderUnknown {
+			t.Errorf("uuid %q: DetectSignatureProvider = %q, want %q regardless of the pre-filter",
+				uuid[:8], got, SignatureProviderUnknown)
+		}
+		decision := DecideSignatureCompatibility(SignatureProviderGemini, sig, SignatureBlockKindGeminiFunctionCall)
+		if decision.Action != SignatureActionReplaceWithGeminiBypass {
+			t.Errorf("uuid %q: action = %q, want %q", uuid[:8], decision.Action, SignatureActionReplaceWithGeminiBypass)
+		}
+	}
+}
+
+// TestDetectSignatureProviderForBlock_ClassifiesEveryKnownEnvelope pins the
+// classification of each envelope so a reordering of the validator chain cannot
+// silently reassign one provider's signatures to another.
+func TestDetectSignatureProviderForBlock_ClassifiesEveryKnownEnvelope(t *testing.T) {
+	for name, fixture := range replaySafeEnvelopeFixtures() {
+		if got := DetectSignatureProvider(fixture.sig); got != fixture.want {
+			t.Errorf("%s: DetectSignatureProvider = %q, want %q", name, got, fixture.want)
+		}
+	}
+}
+
+// TestGeminiEnvelopeNeverClaimsClaudeSignatures pins the invariant that keeps
+// Claude and Gemini separable independently of probe order in
+// DetectSignatureProviderForBlock. Gemini validates wire shape only and has no
+// literal marker, so it is the weakest judge; Claude envelopes survive it solely
+// because they carry extra top-level fields beyond the container and therefore
+// fail Gemini's single-record shape. Loosening the Gemini envelope check would
+// make probe order start mattering, and fails here first.
+func TestGeminiEnvelopeNeverClaimsClaudeSignatures(t *testing.T) {
+	for name, sig := range map[string]string{
+		"single-layer E":        testClaudeThinkingSignature(),
+		"single-layer E opaque": testClaudeThinkingSignatureWithOpaqueLen(64),
+		"double-layer R":        testUnpaddedAntigravityClaudeThinkingSignature(),
+		"CAIS synthetic":        testClaudeCAISSignature("claude-opus-5"),
+		"CAIS observed":         observedFable5Sample,
+	} {
+		if isRecognizedGeminiProviderSignature(sig, SignatureBlockKindUnknown) {
+			t.Errorf("claude %s is claimed by the Gemini envelope check; probe order in DetectSignatureProviderForBlock is now load-bearing", name)
+		}
+		if got := DetectSignatureProvider(sig); got != SignatureProviderClaude {
+			t.Errorf("claude %s: DetectSignatureProvider = %q, want %q", name, got, SignatureProviderClaude)
+		}
+		if _, ok := CompatibleSignatureForProvider(SignatureProviderGemini, sig); ok {
+			t.Errorf("claude %s must not be replayable as a Gemini signature", name)
+		}
+	}
+}
+
 func TestDetectSignatureProvider_UsesProviderPrefix(t *testing.T) {
 	claudeSig := "claude#" + testClaudeThinkingSignature()
 	if got := DetectSignatureProvider(claudeSig); got != SignatureProviderClaude {

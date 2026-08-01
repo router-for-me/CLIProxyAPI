@@ -37,11 +37,13 @@
 //     traceable to a prior Gemini model response in the same conversation.
 //   - Opaque-shape tier: for real Gemini signatures, require a non-empty string,
 //     bounded length, successful standard base64 decoding, and a known protobuf
-//     envelope when the caller needs provider compatibility. Observed samples
-//     currently include Gemini 3.x field-2 -> field-1 payloads containing either
-//     versioned opaque state or a provider UUID, plus Gemini 2.5 repeated field-1
-//     payloads. Bare base64 UUID payloads are classified separately and should be
-//     replaced with the bypass sentinel rather than replayed.
+//     envelope when the caller needs provider compatibility. The only known
+//     envelope is the Gemini 3.x field-2 -> field-1 payload, whose body holds
+//     either versioned opaque state or a provider UUID. Gemini 2.5 emitted a
+//     repeated field-1 form; those models are out of scope and their signatures
+//     are no longer a known envelope. Bare base64 UUID payloads are classified
+//     separately and should be replaced with the bypass sentinel rather than
+//     replayed.
 //   - Replay tier: real validation means preserving the exact model part that
 //     came from Gemini, including its thoughtSignature, id/name/function args,
 //     part index, and ordering relative to sibling parallel function calls.
@@ -93,18 +95,22 @@ type GeminiThoughtSignatureValidationOptions struct {
 	// protobuf envelopes observed in Gemini samples. This rejects opaque base64
 	// values such as base64 UUIDs.
 	RequireKnownEnvelope bool
-	// RequireObservedMarker requires the decoded payload to start with 0x12.
-	// Current Gemini 3.x samples show this marker, but Gemini 2.5 samples use a
-	// different protobuf prefix, so this should be used only for narrow Gemini 3
-	// experiments.
+	// RequireObservedMarker requires the decoded payload to start with 0x12. Every
+	// observed Gemini 3.x sample carries this marker, but it is only the outer
+	// protobuf tag, so RequireKnownEnvelope is the stronger check and should be
+	// preferred. This option exists for narrow experiments that want the marker
+	// without the full envelope walk.
 	RequireObservedMarker bool
 }
 
 type GeminiThoughtSignatureEnvelope string
 
 const (
-	GeminiThoughtSignatureEnvelopeUnknown        GeminiThoughtSignatureEnvelope = "unknown"
-	GeminiThoughtSignatureEnvelopeProtobufField1 GeminiThoughtSignatureEnvelope = "protobuf_field_1"
+	GeminiThoughtSignatureEnvelopeUnknown GeminiThoughtSignatureEnvelope = "unknown"
+	// GeminiThoughtSignatureEnvelopeProtobufField2 is the only replay-safe Gemini
+	// envelope. The repeated field-1 form emitted by Gemini 2.5 is no longer
+	// recognized: those models are out of scope, and their signatures now fall
+	// through to the bypass sentinel like any other unknown envelope.
 	GeminiThoughtSignatureEnvelopeProtobufField2 GeminiThoughtSignatureEnvelope = "protobuf_field_2"
 	GeminiThoughtSignatureEnvelopeASCIIUUID      GeminiThoughtSignatureEnvelope = "ascii_uuid"
 )
@@ -168,6 +174,10 @@ func InspectGeminiThoughtSignature(rawSignature string, opts ...GeminiThoughtSig
 	sig := strings.TrimSpace(rawSignature)
 	if sig == "" {
 		return nil, fmt.Errorf("empty Gemini thought signature")
+	}
+
+	if IsValidClaudeCAISSignature(sig) {
+		return nil, fmt.Errorf("invalid Gemini thought signature: detected Claude CAIS signature")
 	}
 
 	if IsGeminiThoughtSignatureBypass(sig) {
@@ -388,19 +398,10 @@ func classifyGeminiThoughtSignatureEnvelope(decoded []byte) (GeminiThoughtSignat
 	if isASCIIUUIDBytes(decoded) {
 		return GeminiThoughtSignatureEnvelopeASCIIUUID, false
 	}
-	switch {
-	case isGeminiField1Envelope(decoded):
-		return GeminiThoughtSignatureEnvelopeProtobufField1, true
-	case isGeminiField2Envelope(decoded):
+	if isGeminiField2Envelope(decoded) {
 		return GeminiThoughtSignatureEnvelopeProtobufField2, true
-	default:
-		return GeminiThoughtSignatureEnvelopeUnknown, false
 	}
-}
-
-func isGeminiField1Envelope(decoded []byte) bool {
-	info, ok := inspectGeminiField1Envelope(decoded)
-	return ok && info.RecordCount > 0
+	return GeminiThoughtSignatureEnvelopeUnknown, false
 }
 
 func isGeminiField2Envelope(decoded []byte) bool {
@@ -409,12 +410,7 @@ func isGeminiField2Envelope(decoded []byte) bool {
 }
 
 func inspectGeminiEnvelope(decoded []byte, envelope GeminiThoughtSignatureEnvelope) (recordCount int, opaquePayloadLen int) {
-	switch envelope {
-	case GeminiThoughtSignatureEnvelopeProtobufField1:
-		if info, ok := inspectGeminiField1Envelope(decoded); ok {
-			return info.RecordCount, info.OpaquePayloadLen
-		}
-	case GeminiThoughtSignatureEnvelopeProtobufField2:
+	if envelope == GeminiThoughtSignatureEnvelopeProtobufField2 {
 		if info, ok := inspectGeminiField2Envelope(decoded); ok {
 			return info.RecordCount, info.OpaquePayloadLen
 		}
@@ -425,26 +421,6 @@ func inspectGeminiEnvelope(decoded []byte, envelope GeminiThoughtSignatureEnvelo
 type geminiEnvelopeInfo struct {
 	RecordCount      int
 	OpaquePayloadLen int
-}
-
-func inspectGeminiField1Envelope(decoded []byte) (geminiEnvelopeInfo, bool) {
-	var info geminiEnvelopeInfo
-	offset := 0
-	for offset < len(decoded) {
-		num, typ, n := protowire.ConsumeTag(decoded[offset:])
-		if n < 0 || num != 1 || typ != protowire.BytesType {
-			return geminiEnvelopeInfo{}, false
-		}
-		offset += n
-		value, n := protowire.ConsumeBytes(decoded[offset:])
-		if n < 0 || !isLikelyGeminiOpaquePayload(value) {
-			return geminiEnvelopeInfo{}, false
-		}
-		info.RecordCount++
-		info.OpaquePayloadLen += len(value)
-		offset += n
-	}
-	return info, offset == len(decoded) && info.RecordCount > 0
 }
 
 func inspectGeminiField2Envelope(decoded []byte) (geminiEnvelopeInfo, bool) {
@@ -490,9 +466,19 @@ func consumeGeminiField2Field1Value(decoded []byte) ([]byte, bool) {
 }
 
 func isLikelyGeminiOpaquePayload(value []byte) bool {
-	// Observed Gemini 2.5 and Gemini 3.x envelopes wrap provider-opaque
-	// payloads that start with an internal version byte 0x01. The bytes after
-	// that are high-entropy provider state and must remain opaque.
+	// The envelope body is a Google Tink primitive output: one prefix-type byte
+	// (0x01 selects the TINK prefix) followed by a four-byte big-endian key id and
+	// then the ciphertext. Only the prefix-type byte is checked here, because it is
+	// a format constant while the key id is key material that Google rotates.
+	// Pinning the key id would reduce false positives to nothing but would reject
+	// every signature the moment a rotation happens, which is the worse failure.
+	// That rotation is observed, not hypothetical: gemini-3.1-flash-lite carries key
+	// id 0x0c39d6c7 in the archived corpus and 0x114d320f in the 2026-07-27 capture,
+	// and the newer id is shared by every Gemini 3.x variant captured that day. The
+	// bytes after the prefix are high-entropy provider state and stay opaque, so this
+	// one format byte is the only anchor available. It leaves a 1/256 false-positive
+	// rate against a caller that reproduces the protobuf envelope but not the key
+	// material; provenance or target scoping, not more byte checks, closes that gap.
 	return len(value) > 0 && value[0] == 0x01
 }
 

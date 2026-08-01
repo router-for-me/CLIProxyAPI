@@ -254,6 +254,126 @@ func TestToolCallOutputWithMultimodalContent(t *testing.T) {
 	}
 }
 
+func TestToolCallOutputWithStringifiedImageContent(t *testing.T) {
+	tests := []struct {
+		name         string
+		content      string
+		imageIndex   int
+		expectedURL  string
+		expectedText string
+		detail       string
+	}{
+		{
+			name:         "Codex input image",
+			content:      `"[{\"type\":\"input_text\",\"text\":\"Captured screenshot.\"},{\"detail\":\"original\",\"image_url\":\"data:image/png;base64,AA==\",\"type\":\"input_image\"}]"`,
+			imageIndex:   1,
+			expectedURL:  "data:image/png;base64,AA==",
+			expectedText: "Captured screenshot.",
+			detail:       "original",
+		},
+		{
+			name:        "OpenAI image URL",
+			content:     `"[{\"type\":\"image_url\",\"image_url\":{\"url\":\"https://example.com/generated.png\",\"detail\":\"high\"}}]"`,
+			imageIndex:  0,
+			expectedURL: "https://example.com/generated.png",
+			detail:      "high",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{
+				"model": "gpt-5.6-sol",
+				"messages": [
+					{"role": "user", "content": "Inspect the screenshot."},
+					{
+						"role": "assistant",
+						"content": null,
+						"tool_calls": [
+							{"id": "call_screenshot", "type": "function", "function": {"name": "view_image", "arguments": "{}"}}
+						]
+					},
+					{
+						"role": "tool",
+						"tool_call_id": "call_screenshot",
+						"content": ` + tt.content + `
+					}
+				],
+				"tools": [
+					{"type": "function", "function": {"name": "view_image", "parameters": {"type": "object", "properties": {}}}}
+				]
+			}`)
+
+			out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+			output := gjson.GetBytes(out, "input.2.output")
+			if !output.IsArray() {
+				t.Fatalf("expected stringified image output to be an array, got: %s", output.Raw)
+			}
+			parts := output.Array()
+			if len(parts) <= tt.imageIndex {
+				t.Fatalf("expected image part at index %d, got: %s", tt.imageIndex, output.Raw)
+			}
+			imagePart := parts[tt.imageIndex]
+			if imagePart.Get("type").String() != "input_image" {
+				t.Fatalf("expected input_image, got: %s", imagePart.Raw)
+			}
+			if imagePart.Get("image_url").String() != tt.expectedURL {
+				t.Fatalf("expected image URL %q, got: %s", tt.expectedURL, imagePart.Raw)
+			}
+			if imagePart.Get("detail").String() != tt.detail {
+				t.Fatalf("expected detail %q, got: %s", tt.detail, imagePart.Raw)
+			}
+			if tt.expectedText != "" && (parts[0].Get("type").String() != "input_text" || parts[0].Get("text").String() != tt.expectedText) {
+				t.Fatalf("expected input_text %q, got: %s", tt.expectedText, parts[0].Raw)
+			}
+		})
+	}
+}
+
+func TestToolCallOutputKeepsNonImageStrings(t *testing.T) {
+	tests := []struct {
+		name           string
+		content        string
+		expectedOutput string
+	}{
+		{name: "plain text", content: `"plain output"`, expectedOutput: "plain output"},
+		{name: "JSON object", content: `"{\"status\":\"ok\"}"`, expectedOutput: `{"status":"ok"}`},
+		{name: "text-only array", content: `"[{\"type\":\"input_text\",\"text\":\"still text\"}]"`, expectedOutput: `[{"type":"input_text","text":"still text"}]`},
+		{name: "invalid image array", content: `"[{\"type\":\"input_image\",\"detail\":\"low\"}]"`, expectedOutput: `[{"type":"input_image","detail":"low"}]`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{
+				"model": "gpt-5.6-sol",
+				"messages": [
+					{"role": "user", "content": "Check tool output."},
+					{
+						"role": "assistant",
+						"content": null,
+						"tool_calls": [
+							{"id": "call_output", "type": "function", "function": {"name": "inspect", "arguments": "{}"}}
+						]
+					},
+					{"role": "tool", "tool_call_id": "call_output", "content": ` + tt.content + `}
+				],
+				"tools": [
+					{"type": "function", "function": {"name": "inspect", "parameters": {"type": "object", "properties": {}}}}
+				]
+			}`)
+
+			out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+			output := gjson.GetBytes(out, "input.2.output")
+			if output.Type != gjson.String {
+				t.Fatalf("expected output to remain a string, got: %s", output.Raw)
+			}
+			if output.String() != tt.expectedOutput {
+				t.Fatalf("expected output %q, got %q", tt.expectedOutput, output.String())
+			}
+		})
+	}
+}
+
 func TestToolCallOutputFallsBackForInvalidStructuredParts(t *testing.T) {
 	input := []byte(`{
 		"model": "gpt-4o",

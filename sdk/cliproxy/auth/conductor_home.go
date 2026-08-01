@@ -509,6 +509,7 @@ func (m *Manager) clearHomeRuntimeAuths() {
 	m.clearHomeRuntimeAuthsLocked()
 	selections := m.takeAllHomeSessionSelectionsLocked()
 	m.mu.Unlock()
+	m.homeSessionAliases.clear()
 	for _, selection := range selections {
 		selection.End("home_disabled")
 	}
@@ -716,7 +717,7 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		return nil, &Error{Code: "home_unavailable", Message: "home execution registry unavailable", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
 	}
 
-	sessionID := ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	sessionID := m.homeDispatchSessionID(opts)
 	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers)
 	raw, errRPop := client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata))
 	if errRPop != nil {
@@ -981,6 +982,9 @@ func hasAntigravityProvider(providers []string) bool {
 }
 
 func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, providers []string) bool {
+	if isRequestTerminatedError(lastErr) {
+		return false
+	}
 	status := statusCodeFromError(lastErr)
 	log.WithFields(log.Fields{
 		"lastErr":   errorString(lastErr),
@@ -1041,7 +1045,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		}
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
-		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(c.auth, routeModel)
+		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(c.auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
@@ -1060,7 +1064,8 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				continue
 			}
 			m.MarkResult(creditsCtx, result)
-			rewriteForceMappedResponse(&resp, aliasResult)
+			attemptAliasResult := resolveAttemptAliasResult(routing, c.auth, routeModel, upstreamModel, aliasResult)
+			rewriteForceMappedResponse(&resp, attemptAliasResult)
 			return resp, true, nil
 		}
 	}
@@ -1095,11 +1100,11 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		}
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
-		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(c.auth, routeModel)
+		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(c.auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
-		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult, true, false)
+		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult, routing, true, false)
 		if errStream != nil {
 			continue
 		}
