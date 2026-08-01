@@ -26,7 +26,7 @@ import (
 )
 
 func TestAuthDispatchRequestIncludesCount(t *testing.T) {
-	req := newAuthDispatchRequest("gpt-5.4", "session-1", http.Header{"Authorization": {"Bearer test"}}, 2)
+	req := newAuthDispatchRequest("gpt-5.4", "session-1", http.Header{"Authorization": {"Bearer test"}}, 2, "")
 
 	raw, err := json.Marshal(&req)
 	if err != nil {
@@ -46,10 +46,28 @@ func TestAuthDispatchRequestIncludesCount(t *testing.T) {
 }
 
 func TestAuthDispatchRequestDefaultsCountToOne(t *testing.T) {
-	req := newAuthDispatchRequest("gpt-5.4", "", nil, 0)
+	req := newAuthDispatchRequest("gpt-5.4", "", nil, 0, "")
 
 	if req.Count != 1 {
 		t.Fatalf("count = %d, want 1", req.Count)
+	}
+	if req.CredentialPolicy != "" {
+		t.Fatalf("credential policy = %q, want empty", req.CredentialPolicy)
+	}
+}
+
+func TestAuthDispatchRequestIncludesCredentialPolicy(t *testing.T) {
+	req := newAuthDispatchRequest("gpt-5.4", "", nil, 1, "codex_alpha_search_v1")
+	raw, errMarshal := json.Marshal(&req)
+	if errMarshal != nil {
+		t.Fatalf("marshal auth dispatch request: %v", errMarshal)
+	}
+	var payload map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal auth dispatch request: %v", errUnmarshal)
+	}
+	if got := payload["credential_policy"]; got != "codex_alpha_search_v1" {
+		t.Fatalf("credential_policy = %#v, want codex_alpha_search_v1", got)
 	}
 }
 

@@ -139,6 +139,9 @@ func (cfg *Config) SanitizeXAIKeys() {
 		return
 	}
 	cfg.XAIKey = sanitizeCodexKeyEntries(cfg.XAIKey)
+	for i := range cfg.XAIKey {
+		cfg.XAIKey[i].AlphaSearch = false
+	}
 }
 
 func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {

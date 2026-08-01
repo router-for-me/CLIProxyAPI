@@ -3,6 +3,7 @@ package responses
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -120,6 +121,140 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DefersMessageUntil
 	}
 	if got := gjson.GetBytes(out, "messages.3.content").String(); got != "next" {
 		t.Fatalf("messages.3.content = %q, want %q", got, "next")
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_UnwrapsStringifiedToolOutputImages(t *testing.T) {
+	tests := []struct {
+		name         string
+		output       string
+		imageIndex   int
+		expectedURL  string
+		expectedText string
+		detail       string
+	}{
+		{
+			name:         "Codex input image",
+			output:       `[{"type":"input_text","text":"Captured screenshot."},{"detail":"original","image_url":"data:image/png;base64,AA==","type":"input_image"}]`,
+			imageIndex:   1,
+			expectedURL:  "data:image/png;base64,AA==",
+			expectedText: "Captured screenshot.",
+			detail:       "high",
+		},
+		{
+			name:        "OpenAI image URL",
+			output:      `[{"type":"image_url","image_url":{"url":"https://example.com/generated.png","detail":"high"}}]`,
+			imageIndex:  0,
+			expectedURL: "https://example.com/generated.png",
+			detail:      "high",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(fmt.Sprintf(`{
+				"input": [
+					{"type":"function_call","call_id":"call_image","name":"view_image","arguments":"{}"},
+					{"type":"function_call_output","call_id":"call_image","output":%q}
+				]
+			}`, tt.output))
+
+			out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", raw, false)
+			content := gjson.GetBytes(out, "messages.1.content")
+			if !content.IsArray() {
+				t.Fatalf("expected tool content array, got %s; output=%s", content.Raw, out)
+			}
+			parts := content.Array()
+			if len(parts) <= tt.imageIndex {
+				t.Fatalf("expected image part at index %d, got %s", tt.imageIndex, content.Raw)
+			}
+			imagePart := parts[tt.imageIndex]
+			if got := imagePart.Get("type").String(); got != "image_url" {
+				t.Fatalf("image type = %q, want image_url; part=%s", got, imagePart.Raw)
+			}
+			if got := imagePart.Get("image_url.url").String(); got != tt.expectedURL {
+				t.Fatalf("image URL = %q, want %q; part=%s", got, tt.expectedURL, imagePart.Raw)
+			}
+			if got := imagePart.Get("image_url.detail").String(); got != tt.detail {
+				t.Fatalf("image detail = %q, want %q; part=%s", got, tt.detail, imagePart.Raw)
+			}
+			if tt.expectedText != "" {
+				if got := parts[0].Get("type").String(); got != "text" {
+					t.Fatalf("text type = %q, want text; part=%s", got, parts[0].Raw)
+				}
+				if got := parts[0].Get("text").String(); got != tt.expectedText {
+					t.Fatalf("text = %q, want %q; part=%s", got, tt.expectedText, parts[0].Raw)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ConvertsStructuredToolOutputImages(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"function_call","call_id":"call_image","name":"view_image","arguments":"{}"},
+			{
+				"type":"function_call_output",
+				"call_id":"call_image",
+				"output":[
+					{"type":"input_text","text":"Captured screenshot."},
+					{"type":"input_image","image_url":"data:image/png;base64,AA==","detail":"original"}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", raw, false)
+	content := gjson.GetBytes(out, "messages.1.content")
+	if !content.IsArray() {
+		t.Fatalf("expected tool content array, got %s; output=%s", content.Raw, out)
+	}
+	if got := content.Get("1.type").String(); got != "image_url" {
+		t.Fatalf("image type = %q, want image_url; output=%s", got, out)
+	}
+	if got := content.Get("1.image_url.url").String(); got != "data:image/png;base64,AA==" {
+		t.Fatalf("image URL = %q, want data URL; output=%s", got, out)
+	}
+	if got := content.Get("1.image_url.detail").String(); got != "high" {
+		t.Fatalf("image detail = %q, want high; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_KeepsNonImageToolOutputStrings(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+	}{
+		{name: "plain text", output: "plain output"},
+		{name: "JSON object", output: `{"status":"ok"}`},
+		{name: "text-only array", output: `[{"type":"input_text","text":"still text"}]`},
+		{name: "invalid image array", output: `[{"type":"input_image","detail":"low"}]`},
+		{name: "image array with trailing text", output: `[{"type":"input_image","image_url":"data:image/png;base64,AA=="}] trailing`},
+		{name: "truncated image array", output: `[{"type":"input_image","image_url":"data:image/png;base64,AA=="}`},
+		{name: "non-string image URL", output: `[{"type":"input_image","image_url":123}]`},
+		{name: "non-string image detail", output: `[{"type":"input_image","image_url":"data:image/png;base64,AA==","detail":123}]`},
+		{name: "non-string text in image array", output: `[{"type":"input_text","text":123},{"type":"input_image","image_url":"data:image/png;base64,AA=="}]`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(fmt.Sprintf(`{
+				"input": [
+					{"type":"function_call","call_id":"call_output","name":"inspect","arguments":"{}"},
+					{"type":"function_call_output","call_id":"call_output","output":%q}
+				]
+			}`, tt.output))
+
+			out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", raw, false)
+			content := gjson.GetBytes(out, "messages.1.content")
+			if content.Type != gjson.String {
+				t.Fatalf("expected tool content string, got %s; output=%s", content.Raw, out)
+			}
+			if got := content.String(); got != tt.output {
+				t.Fatalf("tool content = %q, want %q; output=%s", got, tt.output, out)
+			}
+		})
 	}
 }
 
@@ -446,30 +581,49 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesParallelT
 	}
 }
 
-func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesInputImageDetail(t *testing.T) {
-	raw := []byte(`{
-		"input": [
-			{
-				"role": "user",
-				"content": [
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_NormalizesInputImageDetail(t *testing.T) {
+	tests := []struct {
+		name           string
+		detailJSON     string
+		expectedDetail string
+	}{
+		{name: "standard high", detailJSON: `"high"`, expectedDetail: "high"},
+		{name: "Codex original", detailJSON: `"original"`, expectedDetail: "high"},
+		{name: "unsupported value", detailJSON: `"medium"`},
+		{name: "non-string value", detailJSON: `123`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(fmt.Sprintf(`{
+				"input": [
 					{
-						"type": "input_image",
-						"image_url": "https://example.com/image.png",
-						"detail": "high"
+						"role": "user",
+						"content": [
+							{
+								"type": "input_image",
+								"image_url": "https://example.com/image.png",
+								"detail": %s
+							}
+						]
 					}
 				]
+			}`, tt.detailJSON))
+
+			out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", raw, false)
+			if got := gjson.GetBytes(out, "messages.0.content.0.image_url.url").String(); got != "https://example.com/image.png" {
+				t.Fatalf("image URL = %q, want https://example.com/image.png; output=%s", got, out)
 			}
-		]
-	}`)
-	t.Logf("input json:\n%s", prettyJSONForTest(raw))
-
-	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", raw, false)
-	t.Logf("output json:\n%s", prettyJSONForTest(out))
-
-	if got := gjson.GetBytes(out, "messages.0.content.0.image_url.url").String(); got != "https://example.com/image.png" {
-		t.Fatalf("messages.0.content.0.image_url.url = %q, want https://example.com/image.png; output=%s", got, out)
-	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.image_url.detail").String(); got != "high" {
-		t.Fatalf("messages.0.content.0.image_url.detail = %q, want high; output=%s", got, out)
+			detail := gjson.GetBytes(out, "messages.0.content.0.image_url.detail")
+			if tt.expectedDetail == "" {
+				if detail.Exists() {
+					t.Fatalf("image detail should be omitted, got %q; output=%s", detail.String(), out)
+				}
+				return
+			}
+			if got := detail.String(); got != tt.expectedDetail {
+				t.Fatalf("image detail = %q, want %q; output=%s", got, tt.expectedDetail, out)
+			}
+		})
 	}
 }

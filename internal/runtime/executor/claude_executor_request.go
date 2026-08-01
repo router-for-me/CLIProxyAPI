@@ -24,6 +24,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const claudeFastModeBeta = "fast-mode-2026-02-01"
+
 // extractAndRemoveBetas extracts the "betas" array from the body and removes it.
 // Returns the extracted betas as a string slice and the modified body.
 func extractAndRemoveBetas(body []byte) ([]string, []byte) {
@@ -43,6 +45,19 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	}
 	body, _ = sjson.DeleteBytes(body, "betas")
 	return betas, body
+}
+
+func appendClaudeFastModeBeta(body []byte, betas []string) []string {
+	speed := gjson.GetBytes(body, "speed")
+	if speed.Type != gjson.String || !strings.EqualFold(strings.TrimSpace(speed.String()), "fast") {
+		return betas
+	}
+	for _, beta := range betas {
+		if strings.TrimSpace(beta) == claudeFastModeBeta {
+			return betas
+		}
+	}
+	return append(betas, claudeFastModeBeta)
 }
 
 // disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
@@ -249,6 +264,16 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
+	fastModeBetaRequested := false
+	for _, beta := range extraBetas {
+		if strings.TrimSpace(beta) == claudeFastModeBeta {
+			fastModeBetaRequested = true
+			break
+		}
+	}
+	if !fastModeBetaRequested {
+		baseBetas = strings.Replace(baseBetas, ","+claudeFastModeBeta, "", 1)
+	}
 	if val := strings.TrimSpace(strings.Join(incomingHeaders.Values("Anthropic-Beta"), ",")); val != "" {
 		baseBetas = val
 		if !strings.Contains(val, "oauth") {
