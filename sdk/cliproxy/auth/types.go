@@ -96,6 +96,14 @@ type Auth struct {
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
 
+	// RateLimits caches the most recent provider-specific usage/rate-limit header
+	// snapshot (see rate_limit_headers.go). It is in-memory only and intentionally
+	// not persisted: the values are refreshed on the next live upstream response,
+	// so writing them to storage on every request would churn the credential file
+	// (and, for git/db-backed stores, create a write/commit per request) for data
+	// that is stale as soon as the process restarts anyway.
+	RateLimits map[string]any `json:"-"`
+
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
 }

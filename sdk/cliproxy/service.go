@@ -1776,6 +1776,10 @@ func (s *Service) Run(ctx context.Context) error {
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(context.Background(), interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
+
+		usageInterval := 5 * time.Minute
+		s.coreManager.StartUsageRefresh(context.Background(), usageInterval)
+		log.Infof("core auth usage-refresh prober started (interval=%s)", usageInterval)
 	}
 
 	select {
@@ -1827,6 +1831,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
+			s.coreManager.StopUsageRefresh()
 		}
 		if s.watcher != nil {
 			if err := s.watcher.Stop(); err != nil {

@@ -801,7 +801,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
 			helps.LogWithRequestID(ctx).Warn(msg)
-			return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: msg}
+			return cliproxyexecutor.Response{}, statusErrWithHeaders{
+				statusErr: statusErr{code: resp.StatusCode, msg: msg},
+				headers:   resp.Header.Clone(),
+			}
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
@@ -814,7 +817,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
-		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(b)}
+		return cliproxyexecutor.Response{}, statusErrWithHeaders{
+			statusErr: statusErr{code: resp.StatusCode, msg: string(b)},
+			headers:   resp.Header.Clone(),
+		}
 	}
 	decodedBody, err := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
 	if err != nil {
