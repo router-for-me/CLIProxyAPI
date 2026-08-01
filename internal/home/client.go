@@ -1248,7 +1248,7 @@ func queryToLowerMap(query url.Values) map[string]string {
 	return out
 }
 
-func newAuthDispatchRequest(requestedModel string, sessionID string, headers http.Header, count int) authDispatchRequest {
+func newAuthDispatchRequest(requestedModel string, sessionID string, headers http.Header, count int, credentialPolicy string) authDispatchRequest {
 	if count <= 0 {
 		count = 1
 	}
@@ -1259,10 +1259,20 @@ func newAuthDispatchRequest(requestedModel string, sessionID string, headers htt
 		ConcurrencyProtocol: 1,
 		SessionID:           strings.TrimSpace(sessionID),
 		Headers:             headersToLowerMap(headers),
+		CredentialPolicy:    strings.TrimSpace(credentialPolicy),
 	}
 }
 
 func (c *Client) RPopAuth(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int) ([]byte, error) {
+	return c.rPopAuth(ctx, requestedModel, sessionID, headers, count, "")
+}
+
+// RPopAuthWithPolicy requests a Home credential constrained by the supplied fixed policy.
+func (c *Client) RPopAuthWithPolicy(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int, credentialPolicy string) ([]byte, error) {
+	return c.rPopAuth(ctx, requestedModel, sessionID, headers, count, credentialPolicy)
+}
+
+func (c *Client) rPopAuth(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int, credentialPolicy string) ([]byte, error) {
 	if c == nil || c.dispatchFenced.Load() {
 		return nil, ErrDispatchFenced
 	}
@@ -1276,7 +1286,7 @@ func (c *Client) RPopAuth(ctx context.Context, requestedModel string, sessionID 
 	if requestedModel == "" {
 		return nil, fmt.Errorf("home: requested model is empty")
 	}
-	req := newAuthDispatchRequest(requestedModel, sessionID, headers, count)
+	req := newAuthDispatchRequest(requestedModel, sessionID, headers, count, credentialPolicy)
 	keyBytes, errMarshal := json.Marshal(&req)
 	if errMarshal != nil {
 		return nil, errMarshal
@@ -1327,7 +1337,7 @@ func isAmbiguousIssuedRPopAuthError(err error) bool {
 	return !errors.As(err, &redisErr)
 }
 
-func (c *Client) GetRefreshAuth(ctx context.Context, authIndex string, lastRefreshedAt time.Time, accessTokenSHA256 string) ([]byte, error) {
+func (c *Client) GetRefreshAuth(ctx context.Context, authIndex string) ([]byte, error) {
 	cmd, errClient := c.commandClient()
 	if errClient != nil {
 		return nil, errClient
@@ -1340,10 +1350,6 @@ func (c *Client) GetRefreshAuth(ctx context.Context, authIndex string, lastRefre
 		Type:      "refresh",
 		AuthIndex: authIndex,
 	}
-	if !lastRefreshedAt.IsZero() {
-		req.LastRefreshedAt = lastRefreshedAt.UTC().Format(time.RFC3339Nano)
-	}
-	req.ObservedAccessTokenSHA256 = strings.TrimSpace(accessTokenSHA256)
 	keyBytes, err := json.Marshal(&req)
 	if err != nil {
 		return nil, err

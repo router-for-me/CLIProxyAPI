@@ -70,6 +70,48 @@ func assertClaudeFingerprint(t *testing.T, headers http.Header, userAgent, pkgVe
 	}
 }
 
+func TestApplyClaudeHeaders_FastModeBetaIsConditional(t *testing.T) {
+	const betasWithoutFastMode = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
+	const betasWithFastMode = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
+
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "omitted speed excludes fast mode beta",
+			body: `{"model":"claude-opus-5"}`,
+			want: betasWithoutFastMode,
+		},
+		{
+			name: "fast speed includes fast mode beta in default order",
+			body: `{"model":"claude-opus-5","speed":"fast"}`,
+			want: betasWithFastMode,
+		},
+		{
+			name: "explicit body beta preserves fast mode beta in default order",
+			body: `{"model":"claude-opus-5","betas":["fast-mode-2026-02-01"]}`,
+			want: betasWithFastMode,
+		},
+	}
+
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-fast-mode-beta"}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			extraBetas, body := extractAndRemoveBetas([]byte(tt.body))
+			extraBetas = appendClaudeFastModeBeta(body, extraBetas)
+			req := newClaudeHeaderTestRequest(t, nil)
+			if errApply := applyClaudeHeaders(req, auth, "key-fast-mode-beta", false, extraBetas, nil, nil); errApply != nil {
+				t.Fatalf("applyClaudeHeaders() error = %v", errApply)
+			}
+			if got := req.Header.Get("Anthropic-Beta"); got != tt.want {
+				t.Fatalf("Anthropic-Beta = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 	stabilize := true
@@ -3107,45 +3149,6 @@ func TestClaudeExecutor_ExecuteOpenAINonStreamRestoresOAuthToolNames(t *testing.
 	}
 	if got := gjson.GetBytes(resp.Payload, "choices.0.message.tool_calls.0.function.name").String(); got != "bash" {
 		t.Fatalf("tool_calls.0.function.name = %q, want %q; payload=%s", got, "bash", string(resp.Payload))
-	}
-}
-
-func TestEnsureClaudeThinkingDisplay_SetsSummarizedWhenMissing(t *testing.T) {
-	payload := []byte(`{"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`)
-	out := ensureClaudeThinkingDisplay(payload)
-
-	if got := gjson.GetBytes(out, "thinking.display").String(); got != "summarized" {
-		t.Fatalf("thinking.display = %q, want summarized", got)
-	}
-	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
-		t.Fatalf("thinking.type = %q, want adaptive", got)
-	}
-}
-
-func TestEnsureClaudeThinkingDisplay_PreservesExplicitValue(t *testing.T) {
-	payload := []byte(`{"thinking":{"type":"enabled","budget_tokens":2048,"display":"omitted"}}`)
-	out := ensureClaudeThinkingDisplay(payload)
-
-	if got := gjson.GetBytes(out, "thinking.display").String(); got != "omitted" {
-		t.Fatalf("thinking.display = %q, want omitted", got)
-	}
-}
-
-func TestEnsureClaudeThinkingDisplay_SkipsWhenThinkingDisabled(t *testing.T) {
-	payload := []byte(`{"thinking":{"type":"disabled"}}`)
-	out := ensureClaudeThinkingDisplay(payload)
-
-	if gjson.GetBytes(out, "thinking.display").Exists() {
-		t.Fatalf("thinking.display should not be set when thinking is disabled: %s", out)
-	}
-}
-
-func TestEnsureClaudeThinkingDisplay_SkipsWhenThinkingMissing(t *testing.T) {
-	payload := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
-	out := ensureClaudeThinkingDisplay(payload)
-
-	if gjson.GetBytes(out, "thinking").Exists() {
-		t.Fatalf("thinking should remain absent: %s", out)
 	}
 }
 

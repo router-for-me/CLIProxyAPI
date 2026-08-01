@@ -176,8 +176,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 							imageURL := contentItem.Get("image_url").String()
 							contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 							contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
-							if detail := contentItem.Get("detail"); detail.Exists() {
-								contentPart, _ = sjson.SetBytes(contentPart, "image_url.detail", detail.String())
+							if detail, ok := normalizeChatImageDetail(contentItem.Get("detail")); ok && detail != "" {
+								contentPart, _ = sjson.SetBytes(contentPart, "image_url.detail", detail)
 							}
 							contentItems = append(contentItems, contentPart)
 						}
@@ -245,7 +245,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 				if output := item.Get("output"); output.Exists() {
-					toolMessage, _ = sjson.SetBytes(toolMessage, "content", output.String())
+					toolMessage = setFunctionCallOutputContent(toolMessage, output)
 				}
 
 				appendMessage(toolMessage)
@@ -342,6 +342,136 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	return out
+}
+
+func setFunctionCallOutputContent(toolMessage []byte, output gjson.Result) []byte {
+	structuredContent := output
+	if output.Type == gjson.String {
+		if !gjson.Valid(output.String()) {
+			toolMessage, _ = sjson.SetBytes(toolMessage, "content", output.String())
+			return toolMessage
+		}
+		structuredContent = gjson.Parse(output.String())
+	}
+
+	if hasChatToolOutputImagePart(structuredContent) {
+		contentItems := make([][]byte, 0, len(structuredContent.Array()))
+		for _, item := range structuredContent.Array() {
+			contentItems = append(contentItems, chatToolOutputContentPart(item))
+		}
+		return translatorcommon.SetRawArrayItems(toolMessage, "content", contentItems)
+	}
+
+	toolMessage, _ = sjson.SetBytes(toolMessage, "content", output.String())
+	return toolMessage
+}
+
+func chatToolOutputContentPart(item gjson.Result) []byte {
+	itemType := item.Get("type").String()
+	switch itemType {
+	case "text", "input_text", "output_text":
+		part := []byte(`{"type":"text","text":""}`)
+		part, _ = sjson.SetBytes(part, "text", item.Get("text").String())
+		return part
+	case "image_url", "input_image":
+		imageURL, detail, ok := chatToolOutputImageFields(item)
+		if !ok {
+			return chatToolOutputFallbackPart(item)
+		}
+		part := []byte(`{"type":"image_url","image_url":{"url":""}}`)
+		part, _ = sjson.SetBytes(part, "image_url.url", imageURL)
+		if detail != "" {
+			part, _ = sjson.SetBytes(part, "image_url.detail", detail)
+		}
+		return part
+	default:
+		return chatToolOutputFallbackPart(item)
+	}
+}
+
+func hasChatToolOutputImagePart(content gjson.Result) bool {
+	if !content.IsArray() {
+		return false
+	}
+
+	hasImage := false
+	for _, item := range content.Array() {
+		itemType := item.Get("type")
+		if itemType.Type != gjson.String {
+			continue
+		}
+		switch itemType.String() {
+		case "text", "input_text", "output_text":
+			if item.Get("text").Type != gjson.String {
+				return false
+			}
+		case "image_url", "input_image":
+			if _, _, ok := chatToolOutputImageFields(item); !ok {
+				return false
+			}
+			hasImage = true
+		}
+	}
+	return hasImage
+}
+
+func chatToolOutputImageFields(item gjson.Result) (imageURL, detail string, ok bool) {
+	var imageURLValue gjson.Result
+	var detailValue gjson.Result
+	switch item.Get("type").String() {
+	case "image_url":
+		imageURLValue = item.Get("image_url.url")
+		detailValue = item.Get("image_url.detail")
+	case "input_image":
+		imageURLValue = item.Get("image_url")
+		detailValue = item.Get("detail")
+	default:
+		return "", "", false
+	}
+
+	if imageURLValue.Type != gjson.String {
+		return "", "", false
+	}
+	imageURL = strings.TrimSpace(imageURLValue.String())
+	if imageURL == "" {
+		return "", "", false
+	}
+
+	detail, ok = normalizeChatImageDetail(detailValue)
+	if !ok {
+		return "", "", false
+	}
+	return imageURL, detail, true
+}
+
+func normalizeChatImageDetail(detailValue gjson.Result) (string, bool) {
+	if !detailValue.Exists() {
+		return "", true
+	}
+	if detailValue.Type != gjson.String {
+		return "", false
+	}
+
+	normalizedDetail := strings.ToLower(strings.TrimSpace(detailValue.String()))
+	switch normalizedDetail {
+	case "auto", "low", "high":
+		return normalizedDetail, true
+	case "original":
+		// Chat Completions does not support Codex's original detail value.
+		return "high", true
+	default:
+		return "", true
+	}
+}
+
+func chatToolOutputFallbackPart(item gjson.Result) []byte {
+	text := item.Raw
+	if item.Type == gjson.String || text == "" {
+		text = item.String()
+	}
+	part := []byte(`{"type":"text","text":""}`)
+	part, _ = sjson.SetBytes(part, "text", text)
+	return part
 }
 
 func collectOpenAIResponsesReasoningContent(item gjson.Result) string {
