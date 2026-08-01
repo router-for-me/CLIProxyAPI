@@ -232,6 +232,9 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 		if entry.Websockets {
 			attrs["websockets"] = "true"
 		}
+		if provider == "codex" && entry.AlphaSearch {
+			attrs[coreauth.AttributeCodexAlphaSearch] = "true"
+		}
 		if hash := diff.ComputeCodexModelsHash(entry.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}

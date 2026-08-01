@@ -180,6 +180,10 @@ type homeAuthDispatcher interface {
 	AbortAmbiguousDispatch()
 }
 
+type homeCredentialPolicyDispatcher interface {
+	RPopAuthWithPolicy(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int, credentialPolicy string) ([]byte, error)
+}
+
 var currentHomeDispatcher = func() homeAuthDispatcher {
 	return home.Current()
 }
@@ -719,7 +723,17 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 
 	sessionID := m.homeDispatchSessionID(opts)
 	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers)
-	raw, errRPop := client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata))
+	credentialPolicy := credentialPolicyFromContext(ctx)
+	var raw []byte
+	var errRPop error
+	if credentialPolicy == "" {
+		raw, errRPop = client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata))
+	} else if policyClient, okPolicy := client.(homeCredentialPolicyDispatcher); okPolicy {
+		raw, errRPop = policyClient.RPopAuthWithPolicy(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), credentialPolicy)
+	} else {
+		pending.End()
+		return nil, &Error{Code: "home_unavailable", Message: "home dispatcher does not support credential policies", HTTPStatus: http.StatusServiceUnavailable}
+	}
 	if errRPop != nil {
 		if home.IsAmbiguousDispatchError(errRPop) {
 			client.AbortAmbiguousDispatch()
