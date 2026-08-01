@@ -441,6 +441,15 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		return nil, errors.New("auth or executor not found")
 	}
 
+	// Re-check disabled state here too: the auth may have been disabled
+	// after a refresh was already queued (e.g. while refresh workers were
+	// busy and the job sat in the buffered channel). Without this guard
+	// the worker would still call exec.Refresh on a just-disabled credential,
+	// producing the exact failure logs this fix is meant to suppress.
+	if auth.Disabled || auth.Status == StatusDisabled {
+		return nil, errors.New("auth is disabled, skipping refresh")
+	}
+
 	// Another request may already have refreshed this credential.
 	if failedAccessToken != "" {
 		if currentToken := authAccessToken(auth); currentToken != "" && currentToken != failedAccessToken {
