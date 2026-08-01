@@ -219,6 +219,18 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
+				// A terminal error may already be buffered on errChan: the producer sends it
+				// before closing both channels, so both select cases can be ready here.
+				// Surface the error instead of finalizing a successful stream.
+				if errMsg, okPendingErr := handlers.PendingStreamError(errChan); okPendingErr {
+					h.WriteErrorResponse(c, errMsg)
+					if errMsg != nil {
+						cliCancel(errMsg.Error)
+					} else {
+						cliCancel(nil)
+					}
+					return
+				}
 				// Closed without data
 				if alt == "" {
 					setSSEHeaders()
