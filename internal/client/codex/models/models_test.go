@@ -143,6 +143,67 @@ func TestCodexClientModelsResponse_AppliesDisplayNameToTemplateModel(t *testing.
 	}
 }
 
+func TestCodexClientModelsResponse_ExposesKnownOutputCapacity(t *testing.T) {
+	const (
+		templateModelID    = "gpt-5.5"
+		synthesizedModelID = "output-capacity-synthesized-test"
+		fallbackModelID    = "output-capacity-fallback-test"
+		unknownModelID     = "output-capacity-unknown-test"
+		clientID           = "output-capacity-test-client"
+	)
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(clientID, "openai-compatibility", []*registry.ModelInfo{
+		{
+			ID:                  templateModelID,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  synthesizedModelID,
+			MaxCompletionTokens: 32000,
+		},
+		{
+			ID:               fallbackModelID,
+			OutputTokenLimit: 16000,
+		},
+		{
+			ID: unknownModelID,
+		},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	resp := BuildResponse([]map[string]any{
+		{"id": templateModelID},
+		{"id": synthesizedModelID},
+		{"id": fallbackModelID},
+		{"id": unknownModelID},
+	}, nil, false)
+	models, ok := resp["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
+	}
+
+	bySlug := make(map[string]map[string]any, len(models))
+	for _, model := range models {
+		bySlug[stringModelValue(model, "slug")] = model
+	}
+
+	for modelID, want := range map[string]int{
+		templateModelID:    64000,
+		synthesizedModelID: 32000,
+		fallbackModelID:    16000,
+	} {
+		if got := intModelValue(bySlug[modelID], "max_output_tokens"); got != want {
+			t.Errorf("%s max_output_tokens = %d, want %d", modelID, got, want)
+		}
+	}
+	if _, exists := bySlug[unknownModelID]["max_output_tokens"]; exists {
+		t.Fatalf("unknown capacity must be omitted: %#v", bySlug[unknownModelID])
+	}
+}
+
 func TestCodexClientModelsResponse_DisablesSearchToolForSynthesizedModels(t *testing.T) {
 	resp := BuildResponse([]map[string]any{
 		{"id": "custom-openai-compatible-model"},

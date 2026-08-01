@@ -60,6 +60,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 		if template, ok := templates[id]; ok {
 			entry := cloneCodexClientModelMap(template)
 			applyCodexClientDisplayName(entry, model)
+			applyCodexClientOutputCapacity(entry, id, model)
 			applyCodexClientSearchToolSupport(entry, id, true, providersForModel)
 			sanitizeCodexClientReasoningMetadata(entry)
 			applyCodexClientVisibilityOverride(entry, id)
@@ -69,6 +70,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 
 		entry := cloneCodexClientModelMap(defaultTemplate)
 		applyCodexClientModelMetadata(entry, id, model, optimizeMultiAgentV2)
+		applyCodexClientOutputCapacity(entry, id, model)
 		applyCodexClientSearchToolSupport(entry, id, false, providersForModel)
 		sanitizeCodexClientReasoningMetadata(entry)
 		applyCodexClientVisibilityOverride(entry, id)
@@ -180,6 +182,25 @@ func applyCodexClientDisplayName(entry map[string]any, model map[string]any) {
 	if displayName := stringModelValue(model, "display_name"); displayName != "" {
 		entry["display_name"] = displayName
 	}
+}
+
+func applyCodexClientOutputCapacity(entry map[string]any, id string, model map[string]any) {
+	maxOutputTokens := intModelValue(model, "max_completion_tokens")
+	if maxOutputTokens <= 0 {
+		maxOutputTokens = intModelValue(model, "outputTokenLimit")
+	}
+	if info := registry.LookupModelInfo(id); info != nil {
+		if info.MaxCompletionTokens > 0 {
+			maxOutputTokens = info.MaxCompletionTokens
+		} else if info.OutputTokenLimit > 0 {
+			maxOutputTokens = info.OutputTokenLimit
+		}
+	}
+	if maxOutputTokens > 0 {
+		entry["max_output_tokens"] = maxOutputTokens
+		return
+	}
+	delete(entry, "max_output_tokens")
 }
 
 func applyCodexClientSearchToolSupport(entry map[string]any, id string, templateModel bool, providersForModel ProvidersForModelFunc) {
