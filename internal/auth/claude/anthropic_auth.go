@@ -29,6 +29,10 @@ const (
 
 	claudeRefreshMinBackoff = 5 * time.Second
 	claudeRefreshMaxBackoff = 5 * time.Minute
+
+	// claudeCredentialRequestTimeout bounds a single credential-acquisition exchange
+	// with the OAuth endpoint. It does not apply to upstream API traffic.
+	claudeCredentialRequestTimeout = 60 * time.Second
 )
 
 var (
@@ -340,7 +344,12 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 	}
 
 	result, err, _ := claudeRefreshGroup.Do(refreshToken, func() (interface{}, error) {
-		return o.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken)
+		// The refresh is shared by every waiter, so it must not be cancelled by the
+		// caller that happened to trigger it. Replace the discarded deadline with an
+		// explicit one so a stalled endpoint cannot wedge the refresh indefinitely.
+		refreshCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), claudeCredentialRequestTimeout)
+		defer cancelRefresh()
+		return o.refreshTokensSingleFlight(refreshCtx, refreshToken)
 	})
 	if err != nil {
 		return nil, err

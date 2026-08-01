@@ -26,6 +26,10 @@ const (
 	TokenURL    = "https://auth.openai.com/oauth/token"
 	ClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
 	RedirectURI = "http://localhost:1455/auth/callback"
+
+	// codexCredentialRequestTimeout bounds a single credential-acquisition exchange
+	// with the OAuth endpoint. It does not apply to upstream API traffic.
+	codexCredentialRequestTimeout = 60 * time.Second
 )
 
 // CodexAuth handles the OpenAI OAuth2 authentication flow.
@@ -56,7 +60,9 @@ func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
 	}
 	sdkCfg.ProxyURL = effectiveProxyURL
 	return &CodexAuth{
-		httpClient: util.SetProxy(&sdkCfg, &http.Client{}),
+		// This client is only used for credential acquisition (OAuth token exchange
+		// and refresh), so a request timeout is appropriate here.
+		httpClient: util.SetProxy(&sdkCfg, &http.Client{Timeout: codexCredentialRequestTimeout}),
 	}
 }
 
@@ -195,7 +201,12 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 	}
 
 	result, err, _ := codexRefreshGroup.Do(refreshToken, func() (interface{}, error) {
-		return o.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken)
+		// The refresh is shared by every waiter, so it must not be cancelled by the
+		// caller that happened to trigger it. Replace the discarded deadline with an
+		// explicit one so a stalled endpoint cannot wedge the refresh indefinitely.
+		refreshCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), codexCredentialRequestTimeout)
+		defer cancelRefresh()
+		return o.refreshTokensSingleFlight(refreshCtx, refreshToken)
 	})
 	if err != nil {
 		return nil, err
