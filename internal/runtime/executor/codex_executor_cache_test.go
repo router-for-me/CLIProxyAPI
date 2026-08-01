@@ -70,6 +70,32 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	}
 }
 
+func TestCodexExecutorCacheHelper_UsesDerivedSessionUUID(t *testing.T) {
+	t.Parallel()
+
+	executor := &CodexExecutor{}
+	req := cliproxyexecutor.Request{
+		Model:    "gpt-5.4",
+		Payload:  []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}]}`),
+		Metadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:derived-root"},
+	}
+	expectedKey := helps.DerivedSessionUUID("codex", req.Metadata)
+
+	httpReq, body, _, err := executor.cacheHelper(context.Background(), sdktranslator.FormatOpenAI, "https://example.com/responses", nil, req, req.Payload, []byte(`{"model":"gpt-5.4","stream":true}`))
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != expectedKey {
+		t.Fatalf("prompt_cache_key = %q, want %q", got, expectedKey)
+	}
+	if got := httpReq.Header.Get("Session_id"); got != expectedKey {
+		t.Fatalf("Session_id = %q, want %q", got, expectedKey)
+	}
+	if _, errParse := uuid.Parse(expectedKey); errParse != nil {
+		t.Fatalf("derived prompt cache key %q is not a UUID: %v", expectedKey, errParse)
+	}
+}
+
 func TestCodexExecutorCacheHelper_ClaudeUsesClaudeCodeSessionID(t *testing.T) {
 	executor := &CodexExecutor{}
 	ctx := context.Background()

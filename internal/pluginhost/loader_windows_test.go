@@ -3,14 +3,80 @@
 package pluginhost
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
+
+var testReentrantHostCallback uintptr
+
+func TestDynamicLibraryClientCallSurvivesReentrantCallbackStackGrowth(t *testing.T) {
+	testReentrantHostCallback = syscall.NewCallback(testGrowHostCallbackStack)
+	client := newGuardedPluginClient(&dynamicLibraryClient{api: windowsPluginAPI{
+		call:       syscall.NewCallback(testReentrantPluginCall),
+		freeBuffer: syscall.NewCallback(testReentrantPluginFree),
+	}})
+	t.Cleanup(client.Shutdown)
+
+	got, errCall := client.Call(context.Background(), "model.route", []byte(`{}`))
+	if errCall != nil {
+		t.Fatalf("Call() error = %v", errCall)
+	}
+	want := `{"ok":true,"result":{"Handled":true}}`
+	if string(got) != want {
+		t.Fatalf("Call() response = %q, want %q", got, want)
+	}
+}
+
+func testReentrantPluginCall(_, _, _, responsePtr uintptr) uintptr {
+	if testReentrantHostCallback == 0 || responsePtr == 0 {
+		return 1
+	}
+	_, _, _ = syscall.SyscallN(testReentrantHostCallback)
+
+	raw := []byte(`{"ok":true,"result":{"Handled":true}}`)
+	mem, errAlloc := windows.LocalAlloc(windows.LMEM_FIXED, uint32(len(raw)))
+	if errAlloc != nil || mem == 0 {
+		return 1
+	}
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(mem)), len(raw)), raw)
+	response := (*windowsBuffer)(unsafe.Pointer(responsePtr))
+	response.ptr = mem
+	response.len = uintptr(len(raw))
+	return 0
+}
+
+func testReentrantPluginFree(ptr, _ uintptr) uintptr {
+	if ptr != 0 {
+		_, _ = windows.LocalFree(windows.Handle(ptr))
+	}
+	return 0
+}
+
+func testGrowHostCallbackStack() uintptr {
+	return uintptr(testGrowStack(64))
+}
+
+//go:noinline
+func testGrowStack(depth int) int {
+	var padding [1024]byte
+	for index := range padding {
+		padding[index] = byte(index + depth)
+	}
+	if depth == 0 {
+		return int(padding[0])
+	}
+	return testGrowStack(depth-1) + int(padding[depth%len(padding)])
+}
 
 func TestShadowPluginDirIsProcessScoped(t *testing.T) {
 	dir, errDir := shadowPluginDir()

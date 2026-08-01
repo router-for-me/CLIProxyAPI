@@ -37,8 +37,13 @@ var hopByHopHeaders = map[string]struct{}{
 }
 
 var cpaReservedResponseHeaders = map[string]struct{}{
-	"Access-Control-Expose-Headers": {},
-	"X-Cpa-Trace-Id":                {},
+	"Access-Control-Allow-Credentials": {},
+	"Access-Control-Allow-Headers":     {},
+	"Access-Control-Allow-Methods":     {},
+	"Access-Control-Allow-Origin":      {},
+	"Access-Control-Expose-Headers":    {},
+	"Access-Control-Max-Age":           {},
+	"X-Cpa-Trace-Id":                   {},
 }
 
 // IsCPAReservedResponseHeader reports whether a downstream response header is managed by CPA.

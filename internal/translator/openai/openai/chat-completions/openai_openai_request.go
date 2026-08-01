@@ -3,6 +3,7 @@
 package chat_completions
 
 import (
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -17,6 +18,11 @@ import (
 // Returns:
 //   - []byte: The transformed request data in OpenAI API format
 func ConvertOpenAIRequestToOpenAI(modelName string, inputRawJSON []byte, _ bool) []byte {
+	currentModel := gjson.GetBytes(inputRawJSON, "model")
+	if currentModel.Type == gjson.String && currentModel.String() == modelName {
+		return inputRawJSON
+	}
+
 	// Update the "model" field in the JSON payload with the provided modelName
 	// The sjson.SetBytes function returns a new byte slice with the updated JSON.
 	updatedJSON, err := sjson.SetBytes(inputRawJSON, "model", modelName)
