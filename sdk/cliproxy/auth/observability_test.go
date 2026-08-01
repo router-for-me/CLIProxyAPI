@@ -30,7 +30,7 @@ func TestSessionAffinitySnapshot_WindowFilter(t *testing.T) {
 	opts := cliproxyexecutor.Options{
 		Metadata: map[string]any{
 			cliproxyexecutor.ExecutionSessionMetadataKey: "sess-observe-1",
-			"idempotency_key":                            "idemp-1",
+			"idempotency_key": "idemp-1",
 		},
 	}
 	_, errExec := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{

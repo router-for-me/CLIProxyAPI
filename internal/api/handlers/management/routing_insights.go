@@ -44,7 +44,7 @@ func (h *Handler) GetRoutingInsights(c *gin.Context) {
 	countValues := make([]int, 0, len(authCounts))
 	for authID, count := range authCounts {
 		countItems = append(countItems, gin.H{
-			"auth_id":        authID,
+			"auth_id":         authID,
 			"active_sessions": count,
 		})
 		countValues = append(countValues, count)
