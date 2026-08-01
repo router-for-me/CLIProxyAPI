@@ -156,9 +156,10 @@ proxy-url: ""
 #   (OpenAI-compatible channels use the custom provider name you configured for them).
 # Tip: if unsure, open the credential's .json in auths/ and copy its "type" value verbatim.
 #
-# Coverage: request traffic honors this for every provider. Token refresh currently honors
-# it for claude / codex / kimi / xai (the reverse-engineered channels that need a proxy to
-# refresh); other providers refresh via the global proxy for now.
+# Coverage: request traffic honors this for every provider. OAuth login (token exchange /
+# device flow) also honors proxy-by-provider for claude / codex / antigravity / kimi / xai.
+# Token refresh currently honors it for claude / codex / kimi / xai (the reverse-engineered
+# channels that need a proxy to refresh); other providers refresh via the global proxy for now.
 # proxy-by-provider:
 #   codex: "socks5h://127.0.0.1:1080"
 #   claude: "socks5://user:pass@127.0.0.1:1080"

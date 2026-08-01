@@ -76,7 +76,7 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		}
 	}()
 
-	authSvc := claude.NewClaudeAuth(cfg)
+	authSvc := claude.NewClaudeAuthWithProxyURL(cfg, util.ResolveProxyURL(&cfg.SDKConfig, "claude"))
 
 	authURL, returnedState, err := authSvc.GenerateAuthURL(state, pkceCodes)
 	if err != nil {

@@ -55,8 +55,8 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		return
 	}
 
-	// Initialize Claude auth service
-	anthropicAuth := claude.NewClaudeAuth(h.cfg)
+	// Initialize Claude auth service (honor proxy-by-provider for OAuth token exchange)
+	anthropicAuth := claude.NewClaudeAuthWithProxyURL(h.cfg, util.ResolveProxyURL(&h.cfg.SDKConfig, "claude"))
 
 	// Generate authorization URL (then override redirect_uri to reuse server port)
 	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
@@ -334,7 +334,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 	fmt.Println("Initializing Antigravity authentication...")
 
-	authSvc := antigravity.NewAntigravityAuth(h.cfg, nil)
+	authSvc := antigravity.NewAntigravityAuthWithProxyURL(h.cfg, nil, util.ResolveProxyURL(&h.cfg.SDKConfig, "antigravity"))
 
 	state, errState := misc.GenerateRandomState()
 	if errState != nil {
@@ -502,7 +502,7 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 	fmt.Println("Initializing xAI authentication...")
 
 	state := fmt.Sprintf("xai-%d", time.Now().UnixNano())
-	authSvc := xaiauth.NewXAIAuth(h.cfg)
+	authSvc := xaiauth.NewXAIAuthWithProxyURL(h.cfg, util.ResolveProxyURL(&h.cfg.SDKConfig, "xai"))
 
 	deviceFlow, errStartDeviceFlow := authSvc.StartDeviceFlow(ctx)
 	if errStartDeviceFlow != nil {
@@ -615,8 +615,8 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 	fmt.Println("Initializing Kimi authentication...")
 
 	state := fmt.Sprintf("kmi-%d", time.Now().UnixNano())
-	// Initialize Kimi auth service
-	kimiAuth := kimi.NewKimiAuth(h.cfg)
+	// Initialize Kimi auth service (honor proxy-by-provider for device flow)
+	kimiAuth := kimi.NewKimiAuthWithProxyURL(h.cfg, util.ResolveProxyURL(&h.cfg.SDKConfig, "kimi"))
 
 	// Generate authorization URL
 	deviceFlow, errStartDeviceFlow := kimiAuth.StartDeviceFlow(ctx)

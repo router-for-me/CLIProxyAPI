@@ -80,7 +80,7 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		}
 	}()
 
-	authSvc := codex.NewCodexAuth(cfg)
+	authSvc := codex.NewCodexAuthWithProxyURL(cfg, util.ResolveProxyURL(&cfg.SDKConfig, "codex"))
 
 	authURL, err := authSvc.GenerateAuthURL(state, pkceCodes)
 	if err != nil {

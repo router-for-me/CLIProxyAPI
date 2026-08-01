@@ -9,6 +9,7 @@ import (
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -44,7 +45,7 @@ func (a XAIAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *L
 		opts = &LoginOptions{}
 	}
 
-	authSvc := xaiauth.NewXAIAuth(cfg)
+	authSvc := xaiauth.NewXAIAuthWithProxyURL(cfg, util.ResolveProxyURL(&cfg.SDKConfig, "xai"))
 
 	fmt.Println("Starting xAI authentication...")
 	deviceCode, err := authSvc.StartDeviceFlow(ctx)

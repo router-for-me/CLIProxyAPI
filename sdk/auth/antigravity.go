@@ -48,7 +48,7 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 		callbackPort = opts.CallbackPort
 	}
 
-	authSvc := antigravity.NewAntigravityAuth(cfg, nil)
+	authSvc := antigravity.NewAntigravityAuthWithProxyURL(cfg, nil, util.ResolveProxyURL(&cfg.SDKConfig, "antigravity"))
 
 	state, err := misc.GenerateRandomState()
 	if err != nil {

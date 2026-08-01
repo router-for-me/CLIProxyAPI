@@ -66,7 +66,9 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		ctx = context.Background()
 	}
 
-	httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
+	sdkCfg := cfg.SDKConfig
+	sdkCfg.ProxyURL = util.ResolveProxyURL(&cfg.SDKConfig, "codex")
+	httpClient := util.SetProxy(&sdkCfg, &http.Client{})
 
 	userCodeResp, err := requestCodexDeviceUserCode(ctx, httpClient)
 	if err != nil {
@@ -108,7 +110,7 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		return nil, fmt.Errorf("codex device flow token response missing required fields")
 	}
 
-	authSvc := codex.NewCodexAuth(cfg)
+	authSvc := codex.NewCodexAuthWithProxyURL(cfg, util.ResolveProxyURL(&cfg.SDKConfig, "codex"))
 	authBundle, err := authSvc.ExchangeCodeForTokensWithRedirect(
 		ctx,
 		authCode,

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -29,24 +30,15 @@ func ResolveEffectiveProxy(cfg *config.Config, auth *cliproxyauth.Auth) string {
 		}
 	}
 
-	// Priority 2: per-provider default proxy.
-	if cfg != nil && auth != nil && len(cfg.ProxyByProvider) > 0 {
-		key := strings.ToLower(strings.TrimSpace(auth.Provider))
-		if key != "" {
-			if proxyURL := strings.TrimSpace(cfg.ProxyByProvider[key]); proxyURL != "" {
-				return proxyURL
-			}
-		}
+	provider := ""
+	if auth != nil {
+		provider = auth.Provider
 	}
-
-	// Priority 3: global proxy.
-	if cfg != nil {
-		if proxyURL := strings.TrimSpace(cfg.ProxyURL); proxyURL != "" {
-			return proxyURL
-		}
+	if cfg == nil {
+		return ""
 	}
-
-	return ""
+	// Priority 2-3: proxy-by-provider then global proxy-url.
+	return util.ResolveProxyURL(&cfg.SDKConfig, provider)
 }
 
 // NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:

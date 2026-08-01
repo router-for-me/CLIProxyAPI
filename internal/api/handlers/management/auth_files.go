@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -31,7 +32,13 @@ var (
 	errAuthFileMustBeJSON = errors.New("auth file must be .json")
 	errAuthFileNotFound   = errors.New("auth file not found")
 	errPluginVirtualAuth  = errors.New("plugin virtual auth cannot be modified directly; edit or delete the source auth file")
-	newCodexOAuthService  = func(cfg *config.Config) codexOAuthService { return codex.NewCodexAuth(cfg) }
+	newCodexOAuthService  = func(cfg *config.Config) codexOAuthService {
+		proxyURL := ""
+		if cfg != nil {
+			proxyURL = util.ResolveProxyURL(&cfg.SDKConfig, "codex")
+		}
+		return codex.NewCodexAuthWithProxyURL(cfg, proxyURL)
+	}
 )
 
 func extractLastRefreshTimestamp(meta map[string]any) (time.Time, bool) {

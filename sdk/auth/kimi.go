@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -44,7 +45,7 @@ func (a KimiAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 		opts = &LoginOptions{}
 	}
 
-	authSvc := kimi.NewKimiAuth(cfg)
+	authSvc := kimi.NewKimiAuthWithProxyURL(cfg, util.ResolveProxyURL(&cfg.SDKConfig, "kimi"))
 
 	// Start the device flow
 	fmt.Println("Starting Kimi authentication...")
