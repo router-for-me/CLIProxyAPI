@@ -342,3 +342,23 @@ func replaceOAuthSessionStoreForTest(t *testing.T, store *oauthSessionStore) {
 		oauthSessions = original
 	})
 }
+
+func TestOAuthSessionResultSurvivesStageLifetimeAndCancelledCompletionFails(t *testing.T) {
+	store := newOAuthSessionStore(30 * time.Minute)
+	store.Register("result-state", "codex")
+	if !store.CompleteWithResult("result-state", strings.Repeat("a", 64)) {
+		t.Fatal("pending result was not completed")
+	}
+	session, ok := store.Get("result-state")
+	if !ok || time.Until(session.ExpiresAt) < codexReauthStageTTL-time.Second {
+		t.Fatal("result-bearing session expires before its stage")
+	}
+
+	store.Register("cancelled-state", "codex")
+	if !store.Cancel("cancelled-state") {
+		t.Fatal("session was not cancelled")
+	}
+	if store.CompleteWithResult("cancelled-state", strings.Repeat("b", 64)) {
+		t.Fatal("cancelled session accepted a staged result")
+	}
+}

@@ -1,6 +1,7 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -17,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -236,6 +238,14 @@ func TestCodexReauthStageExpiryIsSingleUseAndRemovesSecretFile(t *testing.T) {
 
 func TestCodexReauthPostEnableVerificationRequiresExactEnabledCodex(t *testing.T) {
 	h, router, target, _ := newCodexReauthTestHandler(t)
+	raw, err := os.ReadFile(target.Attributes["path"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, err := credentialIdentityGeneration(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
 	verified := 0
 	h.verifyCodexReauth = func(_ context.Context, auth *coreauth.Auth) error {
 		verified++
@@ -247,7 +257,7 @@ func TestCodexReauthPostEnableVerificationRequiresExactEnabledCodex(t *testing.T
 	router.POST("/codex-reauth/verify", h.VerifyCodexReauth)
 
 	call := func() *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/codex-reauth/verify", strings.NewReader(`{"auth_index":"`+target.Index+`"}`))
+		req := httptest.NewRequest(http.MethodPost, "/codex-reauth/verify", strings.NewReader(`{"auth_index":"`+target.Index+`","generation":"`+generation+`"}`))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
@@ -269,6 +279,92 @@ func TestCodexReauthPostEnableVerificationRequiresExactEnabledCodex(t *testing.T
 	}
 	if verified != 1 {
 		t.Fatalf("verification calls = %d, want 1", verified)
+	}
+	if err := os.WriteFile(target.Attributes["path"], []byte(`{"type":"codex","account_id":"acct-1","access_token":"newer","disabled":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if w := call(); w.Code != http.StatusConflict {
+		t.Fatalf("changed generation status = %d, want conflict", w.Code)
+	}
+}
+
+func TestCodexReauthVerifyWithoutManagerFailsClosed(t *testing.T) {
+	h, router, target, generation := newCodexReauthTestHandler(t)
+	h.authManager = nil
+	router.POST("/codex-reauth/verify", h.VerifyCodexReauth)
+	req := httptest.NewRequest(http.MethodPost, "/codex-reauth/verify", strings.NewReader(`{"auth_index":"`+target.Index+`","generation":"`+generation+`"}`))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want conflict", w.Code)
+	}
+}
+
+func TestCodexReauthStartRejectsNonFileStoreAndSymlinkEscape(t *testing.T) {
+	h, router, target, generation := newCodexReauthTestHandler(t)
+	router.POST("/codex-auth-url", h.RequestCodexToken)
+	h.tokenStore = &memoryAuthStore{}
+	request := func() int {
+		req := httptest.NewRequest(http.MethodPost, "/codex-auth-url", strings.NewReader(`{"auth_index":"`+target.Index+`","generation":"`+generation+`"}`))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w.Code
+	}
+	if got := request(); got != http.StatusConflict {
+		t.Fatalf("non-file store status = %d, want conflict", got)
+	}
+
+	h.tokenStore = sdkAuth.NewFileTokenStore()
+	escape := t.TempDir()
+	outside := filepath.Join(escape, target.FileName)
+	raw, err := os.ReadFile(target.Attributes["path"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(outside, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(h.cfg.AuthDir, "escape")
+	if err = os.Symlink(escape, link); err != nil {
+		t.Fatal(err)
+	}
+	target.Attributes["path"] = filepath.Join(link, target.FileName)
+	if _, err = h.authManager.Update(coreauth.WithSkipPersist(context.Background()), target); err != nil {
+		t.Fatal(err)
+	}
+	if got := request(); got != http.StatusConflict {
+		t.Fatalf("symlink escape status = %d, want conflict", got)
+	}
+}
+
+func TestCodexReauthAcceptsExactLegacyFilename(t *testing.T) {
+	h, _, target, generation := newCodexReauthTestHandler(t)
+	legacy := codex.CredentialFileName("replacement@example.test", "", "", true)
+	legacyPath := filepath.Join(h.cfg.AuthDir, legacy)
+	if err := os.Rename(target.Attributes["path"], legacyPath); err != nil {
+		t.Fatal(err)
+	}
+	target.FileName, target.Attributes["path"] = legacy, legacyPath
+	bundle := &codex.CodexAuthBundle{TokenData: codex.CodexTokenData{IDToken: "test", AccessToken: "replacement", Email: "replacement@example.test", AccountID: "acct-1"}}
+	spec := codexReauthTarget{AuthID: target.ID, AuthIndex: target.Index, FileName: legacy, Path: legacyPath, Generation: generation, Subject: "acct-1"}
+	if _, err := h.stageCodexReauthCandidate(spec, bundle); err != nil {
+		t.Fatalf("legacy target rejected: %v", err)
+	}
+}
+
+func TestAtomicCredentialReplaceRequiresExpectedGeneration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credential.json")
+	original := []byte(`{"value":"original"}`)
+	newer := []byte(`{"value":"newer"}`)
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicCredentialReplace(path, credentialGeneration([]byte("stale")), newer); err == nil {
+		t.Fatal("stale expected generation replaced the credential")
+	}
+	raw, _ := os.ReadFile(path)
+	if !bytes.Equal(raw, original) {
+		t.Fatal("credential changed after compare failure")
 	}
 }
 

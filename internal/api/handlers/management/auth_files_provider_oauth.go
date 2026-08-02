@@ -309,12 +309,17 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		}
 
 		if reauthTarget != nil {
+			if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
+				return
+			}
 			handle, errStage := h.stageCodexReauthCandidate(*reauthTarget, bundle)
 			if errStage != nil {
 				SetOAuthSessionError(state, "Failed to stage replacement credentials")
 				return
 			}
-			completeOAuthSessionWithResult(state, handle)
+			if !completeOAuthSessionWithResult(state, handle) {
+				h.codexReauthStages.discard(handle)
+			}
 			return
 		}
 

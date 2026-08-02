@@ -154,10 +154,10 @@ func (s *oauthSessionStore) Complete(state string) {
 	s.CompleteWithResult(state, "")
 }
 
-func (s *oauthSessionStore) CompleteWithResult(state, result string) {
+func (s *oauthSessionStore) CompleteWithResult(state, result string) bool {
 	state = strings.TrimSpace(state)
 	if state == "" {
-		return
+		return false
 	}
 	now := time.Now()
 
@@ -167,14 +167,19 @@ func (s *oauthSessionStore) CompleteWithResult(state, result string) {
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
 	if !ok || session.Completed {
-		return
+		return false
 	}
 	session.Status = ""
 	session.Metadata = nil
 	session.Result = strings.TrimSpace(result)
 	session.Completed = true
-	session.ExpiresAt = now.Add(s.completedTTL)
+	retention := s.completedTTL
+	if session.Result != "" && retention < codexReauthStageTTL {
+		retention = codexReauthStageTTL
+	}
+	session.ExpiresAt = now.Add(retention)
 	s.sessions[state] = session
+	return true
 }
 
 func (s *oauthSessionStore) CompleteProvider(provider string, source string) int {
@@ -286,8 +291,8 @@ func SetOAuthSessionError(state, message string) { oauthSessions.SetError(state,
 
 func CompleteOAuthSession(state string) { oauthSessions.Complete(state) }
 
-func completeOAuthSessionWithResult(state, result string) {
-	oauthSessions.CompleteWithResult(state, result)
+func completeOAuthSessionWithResult(state, result string) bool {
+	return oauthSessions.CompleteWithResult(state, result)
 }
 
 func CompleteOAuthSessionsByProvider(provider string) int {

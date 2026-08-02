@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -144,17 +145,26 @@ func (s *codexReauthStageStore) expire(handle string) {
 }
 
 func (s *codexReauthStageStore) take(handle string) (codexReauthStage, bool) {
-	if s == nil {
+	handle = strings.TrimSpace(handle)
+	decoded, err := hex.DecodeString(handle)
+	if s == nil || err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != handle {
 		return codexReauthStage{}, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.purgeLocked(time.Now())
-	stage, ok := s.stages[strings.TrimSpace(handle)]
+	stage, ok := s.stages[handle]
 	if ok {
-		delete(s.stages, strings.TrimSpace(handle))
+		delete(s.stages, handle)
 	}
 	return stage, ok
+}
+
+func (s *codexReauthStageStore) discard(handle string) {
+	stage, ok := s.take(handle)
+	if ok {
+		_ = os.Remove(stage.Path)
+	}
 }
 
 func (s *codexReauthStageStore) removeTarget(fileName string) {
@@ -192,6 +202,19 @@ func randomHex(bytesCount int) (string, error) {
 func credentialGeneration(raw []byte) string {
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
+}
+
+func credentialIdentityGeneration(raw []byte) (string, error) {
+	var document map[string]any
+	if json.Unmarshal(raw, &document) != nil {
+		return "", errCodexReauthConflict
+	}
+	delete(document, "disabled")
+	canonical, err := json.Marshal(document)
+	if err != nil {
+		return "", errCodexReauthConflict
+	}
+	return credentialGeneration(canonical), nil
 }
 
 func readBoundedCredential(path string) ([]byte, error) {
@@ -236,6 +259,9 @@ func (h *Handler) parseCodexReauthTarget(c *gin.Context) (codexReauthTarget, err
 	if req.AuthIndex == "" || len(req.Generation) != sha256.Size*2 {
 		return codexReauthTarget{}, errCodexReauthBadRequest
 	}
+	if _, ok := h.tokenStoreWithBaseDir().(*sdkAuth.FileTokenStore); !ok {
+		return codexReauthTarget{}, errCodexReauthConflict
+	}
 	var target *coreauth.Auth
 	for _, auth := range h.authManager.List() {
 		if auth != nil && lockedAuthIndex(auth) == req.AuthIndex {
@@ -254,11 +280,14 @@ func (h *Handler) parseCodexReauthTarget(c *gin.Context) (codexReauthTarget, err
 	path := strings.TrimSpace(authAttribute(target, coreauth.AttributePath))
 	authDir, err := filepath.Abs(strings.TrimSpace(h.cfg.AuthDir))
 	targetPath, errPath := filepath.Abs(path)
-	rel, errRel := filepath.Rel(authDir, targetPath)
-	if err != nil || errPath != nil || errRel != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	physicalAuthDir, errAuthPhysical := filepath.EvalSymlinks(authDir)
+	physicalTarget, errTargetPhysical := filepath.EvalSymlinks(targetPath)
+	rel, errRel := filepath.Rel(physicalAuthDir, physicalTarget)
+	if err != nil || errPath != nil || errAuthPhysical != nil || errTargetPhysical != nil || errRel != nil ||
+		rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return codexReauthTarget{}, errCodexReauthConflict
 	}
-	path = targetPath
+	path = physicalTarget
 	raw, err := readBoundedCredential(path)
 	if err != nil || credentialGeneration(raw) != req.Generation {
 		return codexReauthTarget{}, errCodexReauthConflict
@@ -304,7 +333,8 @@ func (h *Handler) stageCodexReauthCandidate(target codexReauthTarget, bundle *co
 		plan = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
 	}
 	name := codex.CredentialFileName(storage.Email, plan, hex.EncodeToString(digest[:])[:8], true)
-	if name != target.FileName || filepath.Base(target.Path) != target.FileName {
+	legacyName := codex.CredentialFileName(storage.Email, plan, "", true)
+	if (name != target.FileName && legacyName != target.FileName) || filepath.Base(target.Path) != target.FileName {
 		return "", fmt.Errorf("replacement filename mismatch")
 	}
 	for _, auth := range h.authManager.List() {
@@ -378,7 +408,7 @@ func (h *Handler) AdoptCodexReauth(c *gin.Context) {
 	}
 	decoder := json.NewDecoder(io.LimitReader(c.Request.Body, 4097))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&req) != nil || decoder.Decode(&struct{}{}) != io.EOF || strings.TrimSpace(req.StageHandle) == "" {
+	if h == nil || h.authManager == nil || h.codexReauthStages == nil || decoder.Decode(&req) != nil || decoder.Decode(&struct{}{}) != io.EOF || strings.TrimSpace(req.StageHandle) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid reauth request"})
 		return
 	}
@@ -428,21 +458,27 @@ func (h *Handler) AdoptCodexReauth(c *gin.Context) {
 			return
 		}
 	}
-	if err := atomicCredentialReplace(stage.Target.Path, raw); err != nil {
+	if err := atomicCredentialReplace(stage.Target.Path, stage.Target.Generation, raw); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to adopt replacement credential"})
 		return
 	}
 	if err = h.updateCodexReauth(c.Request.Context(), candidate); err != nil {
-		_ = atomicCredentialReplace(stage.Target.Path, current)
+		_ = atomicCredentialReplace(stage.Target.Path, credentialGeneration(raw), current)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to adopt replacement credential"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "auth_index": stage.Target.AuthIndex, "disabled": true})
+	identityGeneration, err := credentialIdentityGeneration(raw)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to adopt replacement credential"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "auth_index": stage.Target.AuthIndex, "disabled": true, "generation": identityGeneration})
 }
 
 func (h *Handler) VerifyCodexReauth(c *gin.Context) {
 	var req struct {
-		AuthIndex string `json:"auth_index"`
+		AuthIndex  string `json:"auth_index"`
+		Generation string `json:"generation"`
 	}
 	decoder := json.NewDecoder(io.LimitReader(c.Request.Body, 4097))
 	decoder.DisallowUnknownFields()
@@ -451,6 +487,11 @@ func (h *Handler) VerifyCodexReauth(c *gin.Context) {
 		return
 	}
 	req.AuthIndex = strings.TrimSpace(req.AuthIndex)
+	req.Generation = strings.TrimSpace(req.Generation)
+	if h == nil || h.authManager == nil || len(req.Generation) != sha256.Size*2 {
+		c.JSON(http.StatusConflict, gin.H{"error": "reauth target changed"})
+		return
+	}
 	var target *coreauth.Auth
 	for _, auth := range h.authManager.List() {
 		if auth != nil && lockedAuthIndex(auth) == req.AuthIndex {
@@ -465,8 +506,15 @@ func (h *Handler) VerifyCodexReauth(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "reauth target changed"})
 		return
 	}
+	path := strings.TrimSpace(authAttribute(target, coreauth.AttributePath))
+	raw, err := readBoundedCredential(path)
+	identityGeneration, errIdentity := credentialIdentityGeneration(raw)
+	if err != nil || errIdentity != nil || identityGeneration != req.Generation {
+		c.JSON(http.StatusConflict, gin.H{"error": "reauth target changed"})
+		return
+	}
 	verifyCtx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
-	err := h.verifyCodexReauth(verifyCtx, target)
+	err = h.verifyCodexReauth(verifyCtx, target)
 	cancel()
 	if err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": "replacement credential verification failed"})
@@ -475,7 +523,7 @@ func (h *Handler) VerifyCodexReauth(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "auth_index": req.AuthIndex, "disabled": false})
 }
 
-func atomicCredentialReplace(path string, raw []byte) error {
+func atomicCredentialReplace(path, expectedGeneration string, raw []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".codex-reauth-")
 	if err != nil {
@@ -494,6 +542,10 @@ func atomicCredentialReplace(path string, raw []byte) error {
 	}
 	if err != nil {
 		return err
+	}
+	current, err := readBoundedCredential(path)
+	if err != nil || credentialGeneration(current) != expectedGeneration {
+		return errCodexReauthConflict
 	}
 	if err = os.Rename(tmpPath, path); err != nil {
 		return err
