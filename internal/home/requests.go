@@ -9,6 +9,7 @@ type authDispatchRequest struct {
 	ConcurrencyProtocol int               `json:"concurrency_protocol,omitempty"`
 	SessionID           string            `json:"session_id,omitempty"`
 	Headers             map[string]string `json:"headers,omitempty"`
+	CredentialPolicy    string            `json:"credential_policy,omitempty"`
 }
 
 type modelsRequest struct {

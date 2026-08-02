@@ -352,10 +352,15 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
-	if cfg != nil && !cfg.Codex.DisableCodexCloaking {
-		r.Header.Set("User-Agent", codexUserAgent)
-		r.Header.Set("Originator", codexOriginator)
+	applyCodexCloakingHeaders(r.Header, cfg)
+}
+
+func applyCodexCloakingHeaders(headers http.Header, cfg *config.Config) {
+	if headers == nil || cfg == nil || cfg.Codex.DisableCodexCloaking {
+		return
 	}
+	headers.Set("User-Agent", codexUserAgent)
+	headers.Set("Originator", codexOriginator)
 }
 
 func normalizeCodexInstructions(body []byte) []byte {
