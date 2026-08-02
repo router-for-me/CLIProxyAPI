@@ -109,7 +109,7 @@ func ParseSpecialSuffix(rawSuffix string) (mode ThinkingMode, ok bool) {
 // ParseLevelSuffix attempts to parse a raw suffix as a discrete thinking level.
 //
 // This function parses the raw suffix content (from ParseSuffix.RawSuffix) as a level.
-// Only discrete effort levels are valid: minimal, low, medium, high, xhigh, max.
+// Only discrete effort levels are valid: minimal, low, medium, high, xhigh, max, ultra.
 // Level matching is case-insensitive.
 //
 // Special values (none, auto) are NOT handled by this function; use ParseSpecialSuffix
@@ -122,7 +122,7 @@ func ParseSpecialSuffix(rawSuffix string) (mode ThinkingMode, ok bool) {
 //   - "none" -> level="", ok=false (special value, use ParseSpecialSuffix)
 //   - "auto" -> level="", ok=false (special value, use ParseSpecialSuffix)
 //   - "8192" -> level="", ok=false (numeric, use ParseNumericSuffix)
-//   - "ultra" -> level="", ok=false (unknown level)
+//   - "ultra" -> level=LevelUltra, ok=true
 func ParseLevelSuffix(rawSuffix string) (level ThinkingLevel, ok bool) {
 	if rawSuffix == "" {
 		return "", false
@@ -142,6 +142,8 @@ func ParseLevelSuffix(rawSuffix string) (level ThinkingLevel, ok bool) {
 		return LevelXHigh, true
 	case "max":
 		return LevelMax, true
+	case "ultra":
+		return LevelUltra, true
 	default:
 		return "", false
 	}

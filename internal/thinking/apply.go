@@ -375,6 +375,8 @@ func mapConfiguredHighIntent(level ThinkingLevel, modelInfo *registry.ModelInfo)
 		candidates = []ThinkingLevel{LevelXHigh, LevelMax, LevelHigh}
 	case LevelMax:
 		candidates = []ThinkingLevel{LevelMax, LevelXHigh, LevelHigh}
+	case LevelUltra:
+		candidates = []ThinkingLevel{LevelUltra, LevelMax, LevelXHigh, LevelHigh}
 	default:
 		return level
 	}
@@ -398,7 +400,7 @@ func extractSourceThinkingConfig(body []byte, provider string) ThinkingConfig {
 //
 // Parsing priority:
 //  1. Special values: "none" → ModeNone, "auto"/"-1" → ModeAuto
-//  2. Level names: "minimal", "low", "medium", "high", "xhigh" → ModeLevel
+//  2. Level names: "minimal", "low", "medium", "high", "xhigh", "max", "ultra" → ModeLevel
 //  3. Numeric values: positive integers → ModeBudget, 0 → ModeNone
 //
 // If none of the above match, returns empty ThinkingConfig (treated as no config).

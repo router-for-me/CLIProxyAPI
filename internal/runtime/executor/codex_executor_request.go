@@ -146,7 +146,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		cache.ID = identityState.promptCacheKey
 	}
 	rawJSON, identityState.application = applyCodexOfficialApplicationIdentity(e.cfg, auth, url, rawJSON)
-	rawJSON = normalizeCodexUpstreamRequestMetadata(url, rawJSON)
+	rawJSON = normalizeCodexUpstreamRequestMetadata(auth, url, rawJSON)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
 	if err != nil {
 		return nil, nil, codexIdentityConfuseState{}, err
@@ -158,9 +158,10 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 }
 
 // normalizeCodexUpstreamRequestMetadata matches the request shapes used by the
-// official Codex client. Responses requests carry client_metadata but not the
-// public Responses metadata field, while compact requests carry neither.
-func normalizeCodexUpstreamRequestMetadata(requestURL string, body []byte) []byte {
+// official Codex client. Official OAuth turn requests carry client_metadata but
+// not the public Responses metadata field, while other targets and compact
+// requests carry neither.
+func normalizeCodexUpstreamRequestMetadata(auth *cliproxyauth.Auth, requestURL string, body []byte) []byte {
 	if len(body) == 0 {
 		return body
 	}
@@ -168,9 +169,18 @@ func normalizeCodexUpstreamRequestMetadata(requestURL string, body []byte) []byt
 	if updated, errDelete := sjson.DeleteBytes(body, "metadata"); errDelete == nil {
 		body = updated
 	}
-	if codexApplicationRequestKind(requestURL) == "compaction" {
+	requestKind := codexApplicationRequestKind(requestURL)
+	if requestKind == "compaction" || !codexOfficialApplicationTarget(auth, requestURL) {
 		if updated, errDelete := sjson.DeleteBytes(body, "client_metadata"); errDelete == nil {
 			body = updated
+		}
+	}
+	if requestKind == "compaction" {
+		switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "reasoning.effort").String())) {
+		case string(thinking.LevelMax), string(thinking.LevelUltra):
+			if updated, errSet := sjson.SetBytes(body, "reasoning.effort", string(thinking.LevelXHigh)); errSet == nil {
+				body = updated
+			}
 		}
 	}
 	return body

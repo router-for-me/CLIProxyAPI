@@ -237,8 +237,8 @@ func TestCodexWebsocketsExecuteResponsesLiteDoesNotInjectImageGenerationTool(t *
 		if got := gjson.GetBytes(payload, "input.0.type").String(); got != "additional_tools" {
 			t.Fatalf("input.0.type = %q, want additional_tools; payload=%s", got, payload)
 		}
-		if got := gjson.GetBytes(payload, "client_metadata.ws_request_header_x_openai_internal_codex_responses_lite").String(); got != "true" {
-			t.Fatalf("responses-lite metadata = %q, want true; payload=%s", got, payload)
+		if gjson.GetBytes(payload, "client_metadata").Exists() {
+			t.Fatalf("custom websocket payload retained unsupported client_metadata: %s", payload)
 		}
 		if gjson.GetBytes(payload, "metadata").Exists() {
 			t.Fatalf("websocket payload retained unsupported metadata: %s", payload)

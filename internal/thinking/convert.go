@@ -18,7 +18,8 @@ var levelToBudgetMap = map[string]int{
 	"xhigh":   32768,
 	// "max" is used by Claude adaptive thinking effort. We map it to a large budget
 	// and rely on per-model clamping when converting to budget-only providers.
-	"max": 128000,
+	"max":   128000,
+	"ultra": 256000,
 }
 
 // ConvertLevelToBudget converts a thinking level to a budget value.
@@ -35,6 +36,7 @@ var levelToBudgetMap = map[string]int{
 //   - high    → 24576
 //   - xhigh   → 32768
 //   - max     → 128000
+//   - ultra   → 256000
 //
 // Returns:
 //   - budget: The converted budget value
@@ -121,7 +123,7 @@ func MapToClaudeEffort(level string, supportsMax bool) (string, bool) {
 		return "low", true
 	case "low", "medium", "high":
 		return level, true
-	case "xhigh", "max":
+	case "xhigh", "max", "ultra":
 		if supportsMax {
 			return "max", true
 		}

@@ -79,7 +79,7 @@ func TestCodexOfficialFingerprintCacheHelperIntegration(t *testing.T) {
 	}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.6-sol",
-		Payload: []byte(`{"prompt_cache_key":"cache-integration-session","metadata":{"source":"client"},"client_metadata":{"custom-key":"preserved"}}`),
+		Payload: []byte(`{"prompt_cache_key":"cache-integration-session","reasoning":{"effort":"ultra"},"metadata":{"source":"client"},"client_metadata":{"custom-key":"preserved"}}`),
 	}
 	httpReq, body, identityState, err := executor.cacheHelper(
 		context.Background(),
@@ -103,6 +103,9 @@ func TestCodexOfficialFingerprintCacheHelperIntegration(t *testing.T) {
 	if got := gjson.GetBytes(body, "client_metadata.custom-key").String(); got != "preserved" {
 		t.Fatalf("cacheHelper() client_metadata.custom-key = %q, want preserved", got)
 	}
+	if got := gjson.GetBytes(body, "reasoning.effort").String(); got != "ultra" {
+		t.Fatalf("cacheHelper() reasoning.effort = %q, want ultra", got)
+	}
 	if got := gjson.GetBytes(body, "client_metadata."+profile.Headers.InstallationID).String(); got == "" {
 		t.Fatal("cacheHelper() body is missing installation identity")
 	}
@@ -120,7 +123,7 @@ func TestCodexOfficialFingerprintCompactCacheHelperIntegration(t *testing.T) {
 	}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.6-sol",
-		Payload: []byte(`{"prompt_cache_key":"compact-integration-session","metadata":{"source":"client"},"client_metadata":{"custom-key":"drop"}}`),
+		Payload: []byte(`{"prompt_cache_key":"compact-integration-session","reasoning":{"effort":"ultra"},"metadata":{"source":"client"},"client_metadata":{"custom-key":"drop"}}`),
 	}
 	httpReq, body, identityState, err := executor.cacheHelper(
 		context.Background(),
@@ -143,6 +146,9 @@ func TestCodexOfficialFingerprintCompactCacheHelperIntegration(t *testing.T) {
 	if gjson.GetBytes(body, "client_metadata").Exists() {
 		t.Fatalf("compact body retained unsupported client_metadata: %s", body)
 	}
+	if got := gjson.GetBytes(body, "reasoning.effort").String(); got != "xhigh" {
+		t.Fatalf("compact reasoning.effort = %q, want xhigh; body=%s", got, body)
+	}
 
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	profile := registry.GetCodexFingerprintProfile()
@@ -151,6 +157,85 @@ func TestCodexOfficialFingerprintCompactCacheHelperIntegration(t *testing.T) {
 	}
 	if got := httpReq.Header.Get(profile.Headers.TurnMetadata); got != identityState.application.turnMetadataJSON {
 		t.Fatalf("compact turn metadata header = %q, want %q", got, identityState.application.turnMetadataJSON)
+	}
+}
+
+func TestCodexUpstreamMetadataNormalizationByTarget(t *testing.T) {
+	oauth := &cliproxyauth.Auth{
+		ID:       "oauth-normalization",
+		Metadata: map[string]any{"access_token": "oauth-token"},
+	}
+	apiKey := &cliproxyauth.Auth{
+		ID:         "api-key-normalization",
+		Attributes: map[string]string{"api_key": "test-key"},
+	}
+	tests := []struct {
+		name               string
+		auth               *cliproxyauth.Auth
+		url                string
+		effort             string
+		wantEffort         string
+		wantClientMetadata bool
+	}{
+		{
+			name:               "official OAuth turn preserves client metadata and ultra",
+			auth:               oauth,
+			url:                "https://chatgpt.com/backend-api/codex/responses",
+			effort:             "ultra",
+			wantEffort:         "ultra",
+			wantClientMetadata: true,
+		},
+		{
+			name:       "official OAuth compact caps ultra",
+			auth:       oauth,
+			url:        "https://chatgpt.com/backend-api/codex/responses/compact",
+			effort:     "ultra",
+			wantEffort: "xhigh",
+		},
+		{
+			name:       "official OAuth compact caps max",
+			auth:       oauth,
+			url:        "https://chatgpt.com/backend-api/codex/responses/compact",
+			effort:     "max",
+			wantEffort: "xhigh",
+		},
+		{
+			name:       "public API removes client metadata",
+			auth:       apiKey,
+			url:        "https://api.openai.com/v1/responses",
+			effort:     "max",
+			wantEffort: "max",
+		},
+		{
+			name:       "custom upstream removes client metadata",
+			auth:       apiKey,
+			url:        "https://example.com/responses",
+			effort:     "max",
+			wantEffort: "max",
+		},
+		{
+			name:       "API key on official URL removes client metadata",
+			auth:       apiKey,
+			url:        "https://chatgpt.com/backend-api/codex/responses",
+			effort:     "max",
+			wantEffort: "max",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"metadata":{"source":"client"},"client_metadata":{"custom-key":"value"},"reasoning":{"effort":"` + tc.effort + `"}}`)
+			got := normalizeCodexUpstreamRequestMetadata(tc.auth, tc.url, body)
+			if gjson.GetBytes(got, "metadata").Exists() {
+				t.Fatalf("body retained metadata: %s", got)
+			}
+			if exists := gjson.GetBytes(got, "client_metadata").Exists(); exists != tc.wantClientMetadata {
+				t.Fatalf("client_metadata exists = %t, want %t; body=%s", exists, tc.wantClientMetadata, got)
+			}
+			if effort := gjson.GetBytes(got, "reasoning.effort").String(); effort != tc.wantEffort {
+				t.Fatalf("reasoning.effort = %q, want %q; body=%s", effort, tc.wantEffort, got)
+			}
+		})
 	}
 }
 
@@ -272,7 +357,10 @@ func TestCodexExecutorCacheHelper_IdentityConfuseRemapsBodyAndHeaders(t *testing
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
 	executor := &CodexExecutor{cfg: &config.Config{
 		Routing: config.RoutingConfig{Strategy: "fill-first"},
-		Codex:   config.CodexConfig{IdentityConfuse: true},
+		Codex: config.CodexConfig{
+			IdentityConfuse:      true,
+			DisableCodexCloaking: true,
+		},
 	}}
 	auth := &cliproxyauth.Auth{ID: "auth-1", Provider: "codex"}
 	rawJSON := []byte(`{"model":"gpt-5-codex","stream":true,"client_metadata":{"x-codex-turn-metadata":"{\"prompt_cache_key\":\"cache-1\",\"turn_id\":\"turn-1\",\"window_id\":\"cache-1:0\"}","x-codex-window-id":"cache-1:0"}}`)
@@ -280,7 +368,7 @@ func TestCodexExecutorCacheHelper_IdentityConfuseRemapsBodyAndHeaders(t *testing
 		Model:   "gpt-5-codex",
 		Payload: []byte(`{"model":"gpt-5-codex","prompt_cache_key":"cache-1","client_metadata":{"x-codex-installation-id":"install-1"}}`),
 	}
-	url := "https://example.com/responses"
+	url := "https://chatgpt.com/backend-api/codex/responses"
 
 	httpReq, body, identityState, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), url, auth, req, req.Payload, rawJSON)
 	if err != nil {

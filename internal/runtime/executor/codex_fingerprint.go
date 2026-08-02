@@ -203,6 +203,13 @@ func codexOfficialFingerprintScope(cfg *config.Config, auth *cliproxyauth.Auth, 
 	if cfg != nil && cfg.Codex.DisableCodexCloaking {
 		return false
 	}
+	return codexOfficialApplicationTarget(auth, requestURL)
+}
+
+func codexOfficialApplicationTarget(auth *cliproxyauth.Auth, requestURL string) bool {
+	if auth == nil {
+		return false
+	}
 	if auth.Attributes != nil {
 		if strings.TrimSpace(auth.Attributes["api_key"]) != "" ||
 			strings.TrimSpace(auth.Attributes["base_url"]) != "" {
