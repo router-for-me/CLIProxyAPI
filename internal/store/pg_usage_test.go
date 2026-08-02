@@ -136,6 +136,64 @@ func TestFillCostBreakdown(t *testing.T) {
 	}
 }
 
+// TestFillCostBreakdownSliceCopyConvention guards the calling convention the
+// single-row management handlers (GetUsageEvent / GetUsageError) must use when
+// invoking FillCostBreakdown / FillCostBreakdownErrors.
+//
+// Those helpers mutate rows[i] in place via index assignment, so the mutation
+// lands only on the slice's backing-array element — NOT on a local variable
+// that was copied into a slice literal `[]T{localVar}`. Without reassigning
+// `localVar = rows[0]` after the call, the value serialized to the API keeps
+// nil CostBreakdown/AppliedPricing and the dashboard's "Cost breakdown"
+// section silently never renders (it gates on `e.cost_breakdown` being truthy).
+// The list endpoints are unaffected because they pass their own slice variable.
+//
+// This test pins the convention with a stand-in mutator that mirrors
+// FillCostBreakdown's `r := &rows[i]; r.Field = ...` shape, so a future revert
+// to `[]T{event}` (which is tempting because it reads like it should work) is
+// caught here without needing a Postgres integration run. The store-level
+// FillCostBreakdown integration test (TestFillCostBreakdown above) is skipped
+// without PGSTORE_TEST_DSN, so without this guard the bug would regress
+// silently in CI.
+func TestFillCostBreakdownSliceCopyConvention(t *testing.T) {
+	// mutator mirrors FillCostBreakdown's element-wise mutation pattern.
+	mutator := func(rows []UsageEventRow) {
+		for i := range rows {
+			r := &rows[i]
+			b := CostBreakdown{Input: 1.5}
+			r.CostBreakdown = &b
+			p := Pricing{ID: r.Model, InputPer1M: 5.0}
+			r.AppliedPricing = &p
+		}
+	}
+
+	// Anti-pattern (the bug): wrapping a local in a fresh slice literal copies
+	// it; the mutation lands on the copy and the local stays nil.
+	buggy := UsageEventRow{Model: "m", InputTokens: 1_000_000}
+	mutator([]UsageEventRow{buggy})
+	if buggy.CostBreakdown != nil || buggy.AppliedPricing != nil {
+		t.Fatalf("anti-pattern premise wrong: local was populated (CostBreakdown=%v AppliedPricing=%v); "+
+			"test premise needs revisiting", buggy.CostBreakdown, buggy.AppliedPricing)
+	}
+
+	// Required pattern: keep the row in a slice variable, mutate, then reassign.
+	rows := []UsageEventRow{{Model: "m", InputTokens: 1_000_000}}
+	mutator(rows)
+	event := rows[0]
+	if event.CostBreakdown == nil {
+		t.Fatalf("expected CostBreakdown to be populated after reassign; got nil")
+	}
+	if event.AppliedPricing == nil {
+		t.Fatalf("expected AppliedPricing to be populated after reassign; got nil")
+	}
+	if !approxEqual(event.CostBreakdown.Input, 1.5) {
+		t.Errorf("CostBreakdown.Input = %v; want 1.5", event.CostBreakdown.Input)
+	}
+	if event.AppliedPricing.ID != "m" || !approxEqual(event.AppliedPricing.InputPer1M, 5.0) {
+		t.Errorf("AppliedPricing = %+v; want {ID:m InputPer1M:5}", event.AppliedPricing)
+	}
+}
+
 func TestAggregateGroupClause(t *testing.T) {
 	cases := []struct {
 		groupBy   string

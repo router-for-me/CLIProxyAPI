@@ -87,15 +87,26 @@ func (h *Handler) GetUsageEvent(c *gin.Context) {
 		return
 	}
 	// Best-effort official_provider resolution for the single-row detail modal.
-	h.FillOfficialProvider(c.Request.Context(), []store.UsageEventRow{event})
+	//
+	// The fill helpers mutate rows[i] in place via index assignment, which only
+	// lands on their slice element. Pass a local slice that wraps the local
+	// `event` variable and reassign it back, otherwise the mutations attach to
+	// the implicit copy made when the slice literal is constructed and `event`
+	// (the value actually returned below) keeps nil CostBreakdown/AppliedPricing.
+	// Without this reassign the dashboard's "Cost breakdown" branch never
+	// renders because `e.cost_breakdown` is null on the single-event payload
+	// (the list endpoint is unaffected — it passes its own slice variable).
+	rows := []store.UsageEventRow{event}
+	h.FillOfficialProvider(c.Request.Context(), rows)
 	// Best-effort: a missing pricing row leaves the breakdown zero-valued but
 	// present, so the dashboard can show "no price set" rather than hiding
 	// the section. Errors here are logged but not surfaced to the API caller
 	// — the rest of the event payload is still useful.
-	if err := usage.FillCostBreakdown(c.Request.Context(), []store.UsageEventRow{event}); err != nil {
+	if err := usage.FillCostBreakdown(c.Request.Context(), rows); err != nil {
 		// Fall through with the zero-value breakdown; do not fail the request.
 		_ = err
 	}
+	event = rows[0]
 	c.JSON(http.StatusOK, gin.H{"event": event})
 }
 

@@ -86,13 +86,23 @@ func (h *Handler) GetUsageError(c *gin.Context) {
 		return
 	}
 	// Best-effort official_provider resolution for the single-row detail modal.
-	h.FillOfficialProviderErrors(c.Request.Context(), []store.UsageErrorRow{errRow})
+	//
+	// The fill helpers mutate rows[i] in place via index assignment, which only
+	// lands on their slice element. Pass a local slice that wraps the local
+	// `errRow` variable and reassign it back, otherwise the mutations attach to
+	// the implicit copy made when the slice literal is constructed and `errRow`
+	// (the value actually returned below) keeps nil CostBreakdown/AppliedPricing.
+	// Without this reassign the dashboard's "Cost breakdown" branch never
+	// renders on the error detail modal. Mirrors GetUsageEvent.
+	rows := []store.UsageErrorRow{errRow}
+	h.FillOfficialProviderErrors(c.Request.Context(), rows)
 	// Best-effort: a missing pricing row leaves the breakdown zero-valued but
 	// present, so the dashboard can show "no price set" rather than hiding the
 	// section. Mirrors GetUsageEvent.
-	if err := usage.FillCostBreakdownErrors(c.Request.Context(), []store.UsageErrorRow{errRow}); err != nil {
+	if err := usage.FillCostBreakdownErrors(c.Request.Context(), rows); err != nil {
 		_ = err
 	}
+	errRow = rows[0]
 	c.JSON(http.StatusOK, gin.H{"error_event": errRow})
 }
 
