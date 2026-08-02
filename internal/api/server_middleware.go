@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -169,4 +171,99 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		}
 		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
 	}
+}
+
+const studioInferenceSessionContextKey = "studioInferenceSessionID"
+
+// StudioCorrelationMiddleware validates the authenticated Studio integration
+// field before any provider execution starts. Headers from other callers are
+// ignored rather than promoted into usage correlation.
+func StudioCorrelationMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c == nil || c.Request == nil {
+			return
+		}
+		studio := isStudioIntegrationRequest(c)
+		values := c.Request.Header.Values(coreusage.InferenceSessionHeader)
+		if !studio {
+			setRequestCorrelationContext(c, "")
+			c.Next()
+			return
+		}
+		if len(values) > 1 {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "duplicate Studio inference session ID"})
+			return
+		}
+		if len(values) == 0 {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing Studio inference session ID"})
+			return
+		}
+		sessionID, err := coreusage.ParseInferenceSessionID(values[0])
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid Studio inference session ID"})
+			return
+		}
+		c.Set(studioInferenceSessionContextKey, sessionID)
+		setRequestCorrelationContext(c, sessionID)
+		c.Next()
+	}
+}
+
+func setRequestCorrelationContext(c *gin.Context, sessionID string) {
+	if c == nil || c.Request == nil {
+		return
+	}
+	requestCtx := c.Request.Context()
+	if sessionID != "" {
+		requestCtx = coreusage.WithInferenceSessionID(requestCtx, sessionID)
+	} else {
+		requestCtx = coreusage.WithoutInferenceSessionID(requestCtx)
+		if c.Keys != nil {
+			delete(c.Keys, studioInferenceSessionContextKey)
+		}
+	}
+	if traceID, errTrace := coreusage.ParseTraceParent(c.GetHeader(coreusage.TraceParentHeader)); errTrace == nil {
+		requestCtx = coreusage.WithTraceID(requestCtx, traceID)
+	}
+	requestCtx = coreusage.EnsureRequestCorrelation(requestCtx)
+	c.Request = c.Request.WithContext(requestCtx)
+}
+
+func isStudioIntegrationRequest(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	if provider, exists := c.Get("accessProvider"); exists && strings.EqualFold(strings.TrimSpace(formatAccessValue(provider)), "studio") {
+		return true
+	}
+	metadata, exists := c.Get("accessMetadata")
+	if !exists {
+		return false
+	}
+	for _, key := range []string{"integration", "source", "client", "caller"} {
+		if value, ok := accessMetadataValue(metadata, key); ok && strings.EqualFold(strings.TrimSpace(value), "studio") {
+			return true
+		}
+	}
+	return false
+}
+
+func accessMetadataValue(metadata any, key string) (string, bool) {
+	switch values := metadata.(type) {
+	case map[string]string:
+		value, ok := values[key]
+		return formatAccessValue(value), ok
+	case map[string]any:
+		value, ok := values[key]
+		return formatAccessValue(value), ok
+	default:
+		return "", false
+	}
+}
+
+func formatAccessValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprintf("%v", value))
 }

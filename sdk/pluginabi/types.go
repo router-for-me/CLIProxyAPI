@@ -8,6 +8,9 @@ const (
 	// SchemaVersion tracks the RPC JSON contract exchanged at plugin.register.
 	// Version 2 adds request lifecycle completion and active request termination.
 	SchemaVersion uint32 = 2
+	// UsageSchemaVersion tracks the usage.handle payload independently from the
+	// broader plugin registration schema.
+	UsageSchemaVersion uint32 = 1
 )
 
 const (

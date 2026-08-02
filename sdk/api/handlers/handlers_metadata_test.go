@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"golang.org/x/net/context"
 )
@@ -35,6 +36,47 @@ func TestGetContextWithCancelCapturesClientRequestMetadata(t *testing.T) {
 	}
 	if metadata.UserAgent != "test-client/1.0" {
 		t.Fatalf("UserAgent = %q", metadata.UserAgent)
+	}
+}
+
+func TestGetContextWithCancelPropagatesRequestCorrelation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	requestCtx := coreusage.WithInferenceSessionID(request.Context(), "studio-session")
+	requestCtx = coreusage.WithGatewayRequestID(requestCtx, "gateway-request")
+	requestCtx = coreusage.WithTraceID(requestCtx, "4bf92f3577b34da6a3ce929d0e0e4736")
+	ginCtx.Request = request.WithContext(requestCtx)
+
+	handler := &BaseAPIHandler{Cfg: &config.SDKConfig{}}
+	ctx, cancel := handler.GetContextWithCancel(nil, ginCtx, context.Background())
+	defer cancel()
+
+	correlation := coreusage.CorrelationFromContext(ctx)
+	if correlation.InferenceSessionID != "studio-session" || correlation.GatewayRequestID != "gateway-request" || correlation.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Fatalf("correlation = %+v", correlation)
+	}
+}
+
+func TestGetContextWithCancelRequestCorrelationOverridesParent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	requestCtx := coreusage.WithInferenceSessionID(request.Context(), "request-session")
+	requestCtx = coreusage.WithGatewayRequestID(requestCtx, "request-gateway")
+	requestCtx = coreusage.WithTraceID(requestCtx, "4bf92f3577b34da6a3ce929d0e0e4736")
+	ginCtx.Request = request.WithContext(requestCtx)
+
+	parentCtx := coreusage.WithInferenceSessionID(context.Background(), "parent-session")
+	parentCtx = coreusage.WithGatewayRequestID(parentCtx, "parent-gateway")
+	parentCtx = coreusage.WithTraceID(parentCtx, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	handler := &BaseAPIHandler{Cfg: &config.SDKConfig{}}
+	ctx, cancel := handler.GetContextWithCancel(nil, ginCtx, parentCtx)
+	defer cancel()
+
+	correlation := coreusage.CorrelationFromContext(ctx)
+	if correlation.InferenceSessionID != "request-session" || correlation.GatewayRequestID != "request-gateway" || correlation.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Fatalf("request correlation did not override parent: %+v", correlation)
 	}
 }
 

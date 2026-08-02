@@ -259,6 +259,26 @@ func TestUsageQueuePluginAsyncUsesRecordResponseHeaders(t *testing.T) {
 	})
 }
 
+func TestUsageQueuePluginPayloadIncludesCorrelationFields(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := coreusage.WithInferenceSessionID(context.Background(), "studio-session")
+		ctx = coreusage.WithGatewayRequestID(ctx, "gateway-request")
+		ctx = coreusage.WithTraceID(ctx, "4bf92f3577b34da6a3ce929d0e0e4736")
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider: "openai",
+			Model:    "gpt-5.4",
+		})
+
+		payload := popSinglePayload(t)
+		requireStringField(t, payload, "inference_session_id", "studio-session")
+		requireStringField(t, payload, "gateway_request_id", "gateway-request")
+		requireStringField(t, payload, "trace_id", "4bf92f3577b34da6a3ce929d0e0e4736")
+		requireNonEmptyStringField(t, payload, "attempt_id")
+		requireNonEmptyStringField(t, payload, "event_id")
+	})
+}
+
 func TestUsageQueuePluginPayloadIncludesStableFieldsAndFailureAndGinRequestID(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := internallogging.WithRequestID(context.Background(), "gin-request-id")
@@ -433,6 +453,22 @@ func requireStringField(t *testing.T, payload map[string]json.RawMessage, key, w
 	}
 	if got != want {
 		t.Fatalf("%s = %q, want %q", key, got, want)
+	}
+}
+
+func requireNonEmptyStringField(t *testing.T, payload map[string]json.RawMessage, key string) {
+	t.Helper()
+
+	raw, ok := payload[key]
+	if !ok {
+		t.Fatalf("payload missing %q", key)
+	}
+	var got string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal %q: %v", key, err)
+	}
+	if got == "" {
+		t.Fatalf("%s is empty", key)
 	}
 }
 

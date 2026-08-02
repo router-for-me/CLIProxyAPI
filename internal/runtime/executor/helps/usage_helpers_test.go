@@ -588,6 +588,33 @@ func TestNewExecutorUsageReporterIncludesExecutorType(t *testing.T) {
 	}
 }
 
+func TestUsageReporterCarriesStudioCorrelationAcrossRecordModels(t *testing.T) {
+	ctx := usage.WithInferenceSessionID(context.Background(), "studio-session")
+	ctx = usage.WithGatewayRequestID(ctx, "gateway-request")
+	ctx = usage.WithTraceID(ctx, "4bf92f3577b34da6a3ce929d0e0e4736")
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	first := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	second := reporter.buildRecordForModel("gpt-5.4-mini", usage.Detail{TotalTokens: 4}, false, usage.Failure{})
+	for _, record := range []usage.Record{first, second} {
+		if record.InferenceSessionID != "studio-session" {
+			t.Fatalf("inference session ID = %q", record.InferenceSessionID)
+		}
+		if record.GatewayRequestID != "gateway-request" {
+			t.Fatalf("gateway request ID = %q", record.GatewayRequestID)
+		}
+		if record.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
+			t.Fatalf("trace ID = %q", record.TraceID)
+		}
+		if record.AttemptID == "" {
+			t.Fatal("attempt ID is empty")
+		}
+	}
+	if first.AttemptID != second.AttemptID {
+		t.Fatalf("additional model changed attempt ID: %q != %q", first.AttemptID, second.AttemptID)
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesReasoningEffort(t *testing.T) {
 	ctx := usage.WithReasoningEffort(context.Background(), "medium")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)

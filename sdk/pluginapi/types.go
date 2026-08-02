@@ -1323,6 +1323,20 @@ type UsageRecord struct {
 	AuthType string
 	// Source identifies the request source or integration.
 	Source string
+	// UsageSchemaVersion identifies the usage.handle payload schema.
+	UsageSchemaVersion uint32 `json:"usageSchemaVersion,omitempty"`
+	// InferenceSessionID is the Studio-issued logical inference session identity.
+	InferenceSessionID string `json:"inferenceSessionId,omitempty"`
+	// GatewayRequestID identifies the inbound request handled by the gateway.
+	GatewayRequestID string `json:"gatewayRequestId,omitempty"`
+	// ProviderRequestID identifies the provider-assigned request when available.
+	ProviderRequestID string `json:"providerRequestId,omitempty"`
+	// AttemptID identifies one physical provider attempt.
+	AttemptID string `json:"attemptId,omitempty"`
+	// EventID is stable for this terminal usage event across delivery retries.
+	EventID string `json:"eventId,omitempty"`
+	// TraceID is a W3C-compatible distributed trace identifier.
+	TraceID string `json:"traceId,omitempty"`
 	// ReasoningEffort records the requested reasoning effort.
 	ReasoningEffort string
 	// ServiceTier records the requested or reported service tier.
