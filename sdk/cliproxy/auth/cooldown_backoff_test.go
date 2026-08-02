@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -209,6 +210,200 @@ func TestRecoverableUnknownFailuresHaveFiniteCooldown(t *testing.T) {
 				t.Fatal("auth did not automatically recover after retry deadline")
 			}
 		})
+	}
+}
+
+func TestFillFirstConsecutiveFailuresDemoteStickyAuth(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	const (
+		provider  = "gemini"
+		model     = "fill-first-demote-model"
+		authA     = "fill-first-demote-a"
+		authB     = "fill-first-demote-b"
+		threshold = 3
+	)
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(authA, provider, []*registry.ModelInfo{{ID: model}})
+	modelRegistry.RegisterClient(authB, provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(authA)
+		modelRegistry.UnregisterClient(authB)
+	})
+
+	previousTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(-1) // no availability cooldown; demotion alone should move sticky fill
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(previousTransient) })
+
+	selector := &FillFirstSelector{seed: 99}
+	manager := NewManager(nil, selector, nil)
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                "fill-first",
+		FillFirstErrorThreshold: threshold,
+	}})
+	ctx := WithSkipPersist(context.Background())
+	if _, err := manager.Register(ctx, &Auth{ID: authA, Provider: provider}); err != nil {
+		t.Fatalf("register a: %v", err)
+	}
+	if _, err := manager.Register(ctx, &Auth{ID: authB, Provider: provider}); err != nil {
+		t.Fatalf("register b: %v", err)
+	}
+	manager.RefreshSchedulerEntry(authA)
+	manager.RefreshSchedulerEntry(authB)
+
+	first, errPick := manager.scheduler.pickSingle(context.Background(), provider, model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil || first == nil {
+		t.Fatalf("initial pick = %#v, %v", first, errPick)
+	}
+	preferredID := first.ID
+	otherID := authB
+	if preferredID == authB {
+		otherID = authA
+	}
+
+	fail := func(authID string) {
+		manager.MarkResult(context.Background(), Result{
+			AuthID:   authID,
+			Provider: provider,
+			Model:    model,
+			Success:  false,
+			Error:    &Error{Message: "upstream error", HTTPStatus: http.StatusBadGateway},
+		})
+	}
+
+	for i := 0; i < threshold-1; i++ {
+		fail(preferredID)
+		got, errNext := manager.scheduler.pickSingle(context.Background(), provider, model, cliproxyexecutor.Options{}, nil)
+		if errNext != nil || got == nil || got.ID != preferredID {
+			t.Fatalf("before threshold pick #%d = %#v, %v; want still preferred %q", i, got, errNext, preferredID)
+		}
+	}
+
+	fail(preferredID)
+	updated, _ := manager.GetByID(preferredID)
+	if updated == nil || updated.ModelStates[model] == nil || !updated.ModelStates[model].FillFirstDemoted {
+		t.Fatalf("expected demotion after %d failures, state=%#v", threshold, updated)
+	}
+
+	for i := 0; i < 5; i++ {
+		got, errNext := manager.scheduler.pickSingle(context.Background(), provider, model, cliproxyexecutor.Options{}, nil)
+		if errNext != nil || got == nil || got.ID != otherID {
+			t.Fatalf("after demotion pick #%d = %#v, %v; want new sticky auth %q", i, got, errNext, otherID)
+		}
+	}
+
+	// Success on demoted auth clears consecutive failures but keeps demotion.
+	manager.MarkResult(context.Background(), Result{AuthID: preferredID, Provider: provider, Model: model, Success: true})
+	recovered, _ := manager.GetByID(preferredID)
+	if recovered.ModelStates[model].ConsecutiveFailures != 0 {
+		t.Fatalf("expected consecutive failures reset on success")
+	}
+	if !recovered.ModelStates[model].FillFirstDemoted {
+		t.Fatalf("expected demotion to persist after success")
+	}
+	got, errNext := manager.scheduler.pickSingle(context.Background(), provider, model, cliproxyexecutor.Options{}, nil)
+	if errNext != nil || got == nil || got.ID != otherID {
+		t.Fatalf("after success on demoted auth pick = %#v, %v; want still %q", got, errNext, otherID)
+	}
+
+	// ResetQuota re-admits the demoted credential into fill-first preference.
+	if _, _, errReset := manager.ResetQuota(ctx, preferredID); errReset != nil {
+		t.Fatalf("ResetQuota: %v", errReset)
+	}
+	restored, _ := manager.GetByID(preferredID)
+	if restored.ModelStates[model] != nil && restored.ModelStates[model].FillFirstDemoted {
+		t.Fatalf("expected ResetQuota to clear demotion")
+	}
+}
+
+func TestFillFirstMarkResultThinkingSuffixSkipsFailedAuth(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	const (
+		provider      = "gemini"
+		baseModel     = "fill-first-cooldown-model"
+		suffixedModel = "fill-first-cooldown-model(high)"
+		failedAuthID  = "fill-first-failed-auth"
+		goodAuthID    = "fill-first-good-auth"
+	)
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(failedAuthID, provider, []*registry.ModelInfo{{ID: baseModel}})
+	modelRegistry.RegisterClient(goodAuthID, provider, []*registry.ModelInfo{{ID: baseModel}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(failedAuthID)
+		modelRegistry.UnregisterClient(goodAuthID)
+	})
+
+	// Fixed seed so preferred order is deterministic across the test.
+	selector := &FillFirstSelector{seed: 42}
+	manager := NewManager(nil, selector, nil)
+	ctx := WithSkipPersist(context.Background())
+	if _, errRegister := manager.Register(ctx, &Auth{ID: failedAuthID, Provider: provider}); errRegister != nil {
+		t.Fatalf("register failed auth: %v", errRegister)
+	}
+	if _, errRegister := manager.Register(ctx, &Auth{ID: goodAuthID, Provider: provider}); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+	manager.RefreshSchedulerEntry(failedAuthID)
+	manager.RefreshSchedulerEntry(goodAuthID)
+
+	preferredBefore, errPick := manager.scheduler.pickSingle(context.Background(), provider, baseModel, cliproxyexecutor.Options{}, nil)
+	if errPick != nil || preferredBefore == nil {
+		t.Fatalf("initial pick = %#v, %v", preferredBefore, errPick)
+	}
+	failedFirst := preferredBefore.ID == failedAuthID
+	if !failedFirst && preferredBefore.ID != goodAuthID {
+		t.Fatalf("unexpected preferred auth %q", preferredBefore.ID)
+	}
+	targetFailedID := preferredBefore.ID
+	targetGoodID := goodAuthID
+	if targetFailedID == goodAuthID {
+		targetGoodID = failedAuthID
+	}
+
+	// Record failure under a thinking-suffixed model name, matching real request paths.
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   targetFailedID,
+		Provider: provider,
+		Model:    suffixedModel,
+		Success:  false,
+		Error: &Error{
+			Code:       "unauthorized",
+			Message:    "invalid api key",
+			HTTPStatus: http.StatusUnauthorized,
+		},
+	})
+
+	updated, ok := manager.GetByID(targetFailedID)
+	if !ok || updated == nil {
+		t.Fatal("expected failed auth after MarkResult")
+	}
+	if _, hasLegacy := updated.ModelStates[suffixedModel]; hasLegacy {
+		t.Fatalf("expected cooldown state under canonical key %q, still found legacy key", baseModel)
+	}
+	state := updated.ModelStates[baseModel]
+	if state == nil || !state.Unavailable || state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected canonical model cooldown state, got %#v", state)
+	}
+
+	// Fill-first must stick to the healthy credential while the preferred one cools down.
+	for i := 0; i < 5; i++ {
+		got, errNext := manager.scheduler.pickSingle(context.Background(), provider, baseModel, cliproxyexecutor.Options{}, nil)
+		if errNext != nil {
+			t.Fatalf("pick #%d error = %v", i, errNext)
+		}
+		if got == nil || got.ID != targetGoodID {
+			t.Fatalf("pick #%d auth = %#v, want healthy auth %q while failed key cools down", i, got, targetGoodID)
+		}
+		gotSuffix, errSuffix := manager.scheduler.pickSingle(context.Background(), provider, suffixedModel, cliproxyexecutor.Options{}, nil)
+		if errSuffix != nil {
+			t.Fatalf("suffixed pick #%d error = %v", i, errSuffix)
+		}
+		if gotSuffix == nil || gotSuffix.ID != targetGoodID {
+			t.Fatalf("suffixed pick #%d auth = %#v, want healthy auth %q", i, gotSuffix, targetGoodID)
+		}
 	}
 }
 

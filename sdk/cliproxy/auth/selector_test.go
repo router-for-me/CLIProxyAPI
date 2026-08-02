@@ -661,6 +661,69 @@ func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testin
 	}
 }
 
+func TestFillFirstSelectorPick_LegacySuffixedModelStateBlocksBaseModel(t *testing.T) {
+	t.Parallel()
+
+	// Legacy cooldown rows may still be keyed by thinking-suffixed names while
+	// selection/scheduler always query the canonical base model.
+	selector := &FillFirstSelector{seed: 1}
+	now := time.Now()
+	baseModel := "test-model"
+	legacyKey := "test-model(high)"
+
+	preferred := &Auth{
+		ID: "preferred",
+		ModelStates: map[string]*ModelState{
+			legacyKey: {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(30 * time.Minute),
+				Quota:          QuotaState{Exceeded: true, NextRecoverAt: now.Add(30 * time.Minute)},
+			},
+		},
+	}
+	fallback := &Auth{ID: "fallback"}
+
+	got, err := selector.Pick(context.Background(), "gemini", baseModel, cliproxyexecutor.Options{}, []*Auth{preferred, fallback})
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "fallback" {
+		t.Fatalf("Pick() auth = %#v, want fallback while preferred is cooling under legacy key", got)
+	}
+}
+
+func TestIsAuthBlockedForModel_CanonicalAndLegacyKeys(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	next := now.Add(time.Hour)
+	auth := &Auth{
+		ID: "a",
+		ModelStates: map[string]*ModelState{
+			"test-model(high)": {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: next,
+				Quota:          QuotaState{Exceeded: true, NextRecoverAt: next},
+			},
+		},
+	}
+
+	for _, model := range []string{"test-model", "test-model(high)", "test-model(low)"} {
+		blocked, reason, gotNext := isAuthBlockedForModel(auth, model, now)
+		if !blocked {
+			t.Fatalf("isAuthBlockedForModel(%q) blocked = false, want true", model)
+		}
+		if reason != blockReasonCooldown {
+			t.Fatalf("isAuthBlockedForModel(%q) reason = %v, want cooldown", model, reason)
+		}
+		if !gotNext.Equal(next) {
+			t.Fatalf("isAuthBlockedForModel(%q) next = %v, want %v", model, gotNext, next)
+		}
+	}
+}
+
 func TestRoundRobinSelectorPick_ThinkingSuffixSharesCursor(t *testing.T) {
 	t.Parallel()
 

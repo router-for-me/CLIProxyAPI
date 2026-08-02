@@ -202,17 +202,17 @@ func (m *Manager) stateModelForExecution(auth *Auth, routeModel, upstreamModel s
 	if auth != nil && auth.Attributes != nil {
 		if homeModel := strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]); homeModel != "" {
 			if resolved := strings.TrimSpace(upstreamModel); resolved != "" {
-				return resolved
+				return modelStateKey(resolved)
 			}
-			return homeModel
+			return modelStateKey(homeModel)
 		}
 	}
 	stateModel := executionResultModel(routeModel, upstreamModel, pooled)
 	selectionModel := m.selectionModelForAuth(auth, routeModel)
 	if canonicalModelKey(selectionModel) == canonicalModelKey(upstreamModel) && strings.TrimSpace(selectionModel) != "" {
-		return strings.TrimSpace(upstreamModel)
+		return modelStateKey(upstreamModel)
 	}
-	return stateModel
+	return modelStateKey(stateModel)
 }
 
 func executionResultModel(routeModel, upstreamModel string, pooled bool) string {

@@ -454,6 +454,7 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 		models = append(models, modelKey)
 		if state != nil {
 			resetModelState(state, now)
+			clearFillFirstDemotion(state)
 		}
 	}
 	if clearCooldownStateForAuth(auth, now) {
@@ -695,6 +696,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
 		return
 	}
+	// Normalize model keys so cooldown/selection share one namespace. Request-time
+	// thinking suffixes (model(high)) and scheduler shards both reduce to the base
+	// model; storing raw suffixes left failed credentials selectable under fill-first.
+	if result.Model != "" {
+		if key := canonicalModelKey(result.Model); key != "" {
+			result.Model = key
+		}
+	}
 
 	shouldResumeModel := false
 	shouldSuspendModel := false
@@ -743,6 +752,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					state.Unavailable = true
 					state.Status = StatusError
 					state.UpdatedAt = now
+					recordFillFirstFailure(state, m.fillFirstErrorThreshold())
 					if result.Error != nil {
 						state.LastError = cloneError(result.Error)
 						state.StatusMessage = result.Error.Message
@@ -923,32 +933,135 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
 	m.publishErrorEvent(result, authSnapshot)
 }
 
+func modelStateKey(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	if key := canonicalModelKey(model); key != "" {
+		return key
+	}
+	return model
+}
+
 func ensureModelState(auth *Auth, model string) *ModelState {
-	if auth == nil || model == "" {
+	if auth == nil {
+		return nil
+	}
+	key := modelStateKey(model)
+	if key == "" {
 		return nil
 	}
 	if auth.ModelStates == nil {
 		auth.ModelStates = make(map[string]*ModelState)
 	}
-	if state, ok := auth.ModelStates[model]; ok && state != nil {
+	if state, ok := auth.ModelStates[key]; ok && state != nil {
+		return state
+	}
+	// Migrate legacy entries stored under thinking-suffixed aliases of the same model.
+	for existingKey, state := range auth.ModelStates {
+		if state == nil || existingKey == key {
+			continue
+		}
+		if modelStateKey(existingKey) != key {
+			continue
+		}
+		auth.ModelStates[key] = state
+		delete(auth.ModelStates, existingKey)
 		return state
 	}
 	state := &ModelState{Status: StatusActive}
-	auth.ModelStates[model] = state
+	auth.ModelStates[key] = state
 	return state
+}
+
+// lookupModelState resolves per-model runtime state for selection and cooldown checks.
+// It accepts either the canonical model name or a thinking-suffixed alias, and also
+// finds legacy states that were stored under a non-canonical key.
+func lookupModelState(auth *Auth, model string) *ModelState {
+	if auth == nil || len(auth.ModelStates) == 0 {
+		return nil
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+	if state, ok := auth.ModelStates[model]; ok && state != nil {
+		return state
+	}
+	key := modelStateKey(model)
+	if key != "" && key != model {
+		if state, ok := auth.ModelStates[key]; ok && state != nil {
+			return state
+		}
+	}
+	if key == "" {
+		key = model
+	}
+	for existingKey, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		if existingKey == key || modelStateKey(existingKey) == key {
+			return state
+		}
+	}
+	return nil
 }
 
 func resetModelState(state *ModelState, now time.Time) {
 	if state == nil {
 		return
 	}
+	// Preserve fill-first demotion across successful recovery so a flaky preferred
+	// credential does not immediately reclaim sticky fill priority after one success.
+	demoted := state.FillFirstDemoted
 	state.Unavailable = false
 	state.Status = StatusActive
 	state.StatusMessage = ""
 	state.NextRetryAfter = time.Time{}
 	state.LastError = nil
 	state.Quota = QuotaState{}
+	state.ConsecutiveFailures = 0
+	state.FillFirstDemoted = demoted
 	state.UpdatedAt = now
+}
+
+func clearFillFirstDemotion(state *ModelState) {
+	if state == nil {
+		return
+	}
+	state.ConsecutiveFailures = 0
+	state.FillFirstDemoted = false
+}
+
+func (m *Manager) fillFirstErrorThreshold() int {
+	if m == nil {
+		return 0
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return 0
+	}
+	threshold := cfg.Routing.FillFirstErrorThreshold
+	if threshold < 0 {
+		return 0
+	}
+	return threshold
+}
+
+// recordFillFirstFailure bumps consecutive failures and demotes the credential from
+// fill-first sticky preference once the configured threshold is reached.
+func recordFillFirstFailure(state *ModelState, threshold int) {
+	if state == nil || threshold <= 0 {
+		return
+	}
+	if state.ConsecutiveFailures < threshold {
+		state.ConsecutiveFailures++
+	}
+	if state.ConsecutiveFailures >= threshold {
+		state.FillFirstDemoted = true
+	}
 }
 
 func modelStateIsClean(state *ModelState) bool {
@@ -962,6 +1075,9 @@ func modelStateIsClean(state *ModelState) bool {
 		return false
 	}
 	if state.Quota.Exceeded || state.Quota.Reason != "" || !state.Quota.NextRecoverAt.IsZero() || state.Quota.BackoffLevel != 0 {
+		return false
+	}
+	if state.ConsecutiveFailures != 0 || state.FillFirstDemoted {
 		return false
 	}
 	return true

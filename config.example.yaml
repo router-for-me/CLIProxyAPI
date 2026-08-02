@@ -243,6 +243,11 @@ routing:
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
+  # fill-first only: after this many consecutive failures on one credential/model,
+  # demote it from sticky preference and start filling the next healthy credential.
+  # Demoted credentials stay usable as fallback while others cool down.
+  # 0 disables demotion (default). Example: 3
+  fill-first-error-threshold: 0
 
 # Codex provider behavior.
 codex:

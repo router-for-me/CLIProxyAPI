@@ -218,6 +218,13 @@ type RoutingConfig struct {
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+
+	// FillFirstErrorThreshold is the number of consecutive credential/model
+	// failures after which fill-first demotes that credential from sticky
+	// preference and starts filling the next healthy one. 0 disables demotion
+	// (default). Only affects ordering when strategy is fill-first; demoted
+	// credentials remain usable as fallback when healthier ones are cooling.
+	FillFirstErrorThreshold int `yaml:"fill-first-error-threshold,omitempty" json:"fill-first-error-threshold,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

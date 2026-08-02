@@ -75,10 +75,11 @@ type modelScheduler struct {
 
 // scheduledAuth stores the runtime scheduling state for a single auth inside a model shard.
 type scheduledAuth struct {
-	meta        *scheduledAuthMeta
-	auth        *Auth
-	state       scheduledState
-	nextRetryAt time.Time
+	meta             *scheduledAuthMeta
+	auth             *Auth
+	state            scheduledState
+	nextRetryAt      time.Time
+	fillFirstDemoted bool
 }
 
 // readyBucket keeps the ready views for one priority level.
@@ -760,6 +761,7 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	}
 	previousState := entry.state
 	previousNextRetryAt := entry.nextRetryAt
+	previousDemoted := entry.fillFirstDemoted
 	previousPriority := 0
 	previousWebsocketEnabled := false
 	if entry.meta != nil {
@@ -770,6 +772,7 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	entry.meta = meta
 	entry.auth = meta.auth
 	entry.nextRetryAt = time.Time{}
+	entry.fillFirstDemoted = authFillFirstDemoted(meta.auth, m.modelKey)
 	blocked, reason, next := isAuthBlockedForModel(meta.auth, m.modelKey, now)
 	switch {
 	case !blocked:
@@ -784,7 +787,7 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 		entry.nextRetryAt = next
 	}
 
-	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == meta.priority && previousWebsocketEnabled == meta.websocketEnabled {
+	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousDemoted == entry.fillFirstDemoted && previousPriority == meta.priority && previousWebsocketEnabled == meta.websocketEnabled {
 		return
 	}
 	m.rebuildIndexesLocked()
@@ -816,6 +819,7 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 			continue
 		}
 		blocked, reason, next := isAuthBlockedForModel(entry.auth, m.modelKey, now)
+		entry.fillFirstDemoted = authFillFirstDemoted(entry.auth, m.modelKey)
 		switch {
 		case !blocked:
 			entry.state = scheduledStateReady
@@ -1021,12 +1025,20 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		sort.Slice(entries, func(i, j int) bool {
 			switch m.strategy {
 			case schedulerStrategyFillFirst:
-				left := fillFirstShuffleRank(m.fillFirstSeed, entries[i].auth.ID)
-				right := fillFirstShuffleRank(m.fillFirstSeed, entries[j].auth.ID)
-				if left == right {
-					return entries[i].auth.ID < entries[j].auth.ID
+				left := entries[i]
+				right := entries[j]
+				if left == nil || right == nil {
+					return left != nil
 				}
-				return left < right
+				if left.fillFirstDemoted != right.fillFirstDemoted {
+					return !left.fillFirstDemoted
+				}
+				leftRank := fillFirstShuffleRank(m.fillFirstSeed, left.auth.ID)
+				rightRank := fillFirstShuffleRank(m.fillFirstSeed, right.auth.ID)
+				if leftRank == rightRank {
+					return left.auth.ID < right.auth.ID
+				}
+				return leftRank < rightRank
 			default:
 				return entries[i].auth.ID < entries[j].auth.ID
 			}

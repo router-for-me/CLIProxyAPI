@@ -487,14 +487,41 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 	seed := s.shuffleSeed()
 	sort.SliceStable(available, func(i, j int) bool {
-		left := fillFirstShuffleRank(seed, available[i].ID)
-		right := fillFirstShuffleRank(seed, available[j].ID)
-		if left == right {
-			return available[i].ID < available[j].ID
-		}
-		return left < right
+		return lessFillFirstAuth(available[i], available[j], model, seed)
 	})
 	return available[0], nil
+}
+
+// authFillFirstDemoted reports whether fill-first should deprioritize this auth for model.
+func authFillFirstDemoted(auth *Auth, model string) bool {
+	if auth == nil {
+		return false
+	}
+	if state := lookupModelState(auth, model); state != nil {
+		return state.FillFirstDemoted
+	}
+	return false
+}
+
+// lessFillFirstAuth orders credentials for fill-first selection.
+// Non-demoted credentials always rank before demoted ones so consecutive failures
+// can move sticky fill preference onto the next healthy account. Within each group,
+// ordering stays on the process-local shuffle rank.
+func lessFillFirstAuth(left, right *Auth, model string, seed uint64) bool {
+	if left == nil || right == nil {
+		return left != nil
+	}
+	leftDemoted := authFillFirstDemoted(left, model)
+	rightDemoted := authFillFirstDemoted(right, model)
+	if leftDemoted != rightDemoted {
+		return !leftDemoted
+	}
+	leftRank := fillFirstShuffleRank(seed, left.ID)
+	rightRank := fillFirstShuffleRank(seed, right.ID)
+	if leftRank == rightRank {
+		return left.ID < right.ID
+	}
+	return leftRank < rightRank
 }
 
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
@@ -517,14 +544,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
-			state, ok := auth.ModelStates[model]
-			if (!ok || state == nil) && model != "" {
-				baseModel := canonicalModelKey(model)
-				if baseModel != "" && baseModel != model {
-					state, ok = auth.ModelStates[baseModel]
-				}
-			}
-			if ok && state != nil {
+			if state := lookupModelState(auth, model); state != nil {
 				if state.Status == StatusDisabled {
 					return true, blockReasonDisabled, time.Time{}
 				}

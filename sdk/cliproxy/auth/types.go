@@ -190,6 +190,14 @@ type ModelState struct {
 	LastError *Error `json:"last_error,omitempty"`
 	// Quota retains quota information if this model hit rate limits.
 	Quota QuotaState `json:"quota"`
+	// ConsecutiveFailures counts sequential non-request-scoped failures for this model.
+	// Reset to 0 on success. Used by fill-first demotion when the configured threshold is hit.
+	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
+	// FillFirstDemoted marks that fill-first should prefer other credentials first.
+	// Set after ConsecutiveFailures reaches routing.fill-first-error-threshold.
+	// Cleared by ResetQuota / explicit admin recovery; not cleared by a single success
+	// so a flaky preferred key does not immediately reclaim sticky fill priority.
+	FillFirstDemoted bool `json:"fill_first_demoted,omitempty"`
 	// UpdatedAt tracks the last update timestamp for this model state.
 	UpdatedAt time.Time `json:"updated_at"`
 }
