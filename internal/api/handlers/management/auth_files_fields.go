@@ -22,6 +22,8 @@ import (
 
 // PatchAuthFileStatus toggles the disabled state of an auth file
 func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
+	h.authMutationMu.Lock()
+	defer h.authMutationMu.Unlock()
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
@@ -201,6 +203,8 @@ func applyAuthDisabledState(auth *coreauth.Auth, disabled bool) {
 
 // PatchAuthFileFields updates arbitrary metadata fields of an auth file.
 func (h *Handler) PatchAuthFileFields(c *gin.Context) {
+	h.authMutationMu.Lock()
+	defer h.authMutationMu.Unlock()
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
@@ -696,6 +700,8 @@ func (h *Handler) tokenStoreWithBaseDir() coreauth.Store {
 }
 
 func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (string, error) {
+	h.authMutationMu.Lock()
+	defer h.authMutationMu.Unlock()
 	if record == nil {
 		return "", fmt.Errorf("token record is nil")
 	}

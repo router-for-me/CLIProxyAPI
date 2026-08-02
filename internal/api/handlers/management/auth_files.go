@@ -374,6 +374,11 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 		if info, err := os.Stat(path); err == nil {
 			entry["size"] = info.Size()
 			entry["modtime"] = info.ModTime()
+			if strings.EqualFold(auth.Provider, "codex") && (auth.Disabled || auth.Status == coreauth.StatusDisabled) {
+				if raw, errRead := readBoundedCredential(path); errRead == nil {
+					entry["generation"] = credentialGeneration(raw)
+				}
+			}
 		} else if os.IsNotExist(err) {
 			// Hide credentials removed from disk but still lingering in memory.
 			if !runtimeOnly && (auth.Disabled || auth.Status == coreauth.StatusDisabled || strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "removed via management api")) {

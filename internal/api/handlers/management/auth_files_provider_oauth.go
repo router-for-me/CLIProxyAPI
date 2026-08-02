@@ -183,6 +183,15 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 func (h *Handler) RequestCodexToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
+	var reauthTarget *codexReauthTarget
+	if c.Request.Method == http.MethodPost {
+		target, errTarget := h.parseCodexReauthTarget(c)
+		if errTarget != nil {
+			writeCodexReauthError(c, errTarget)
+			return
+		}
+		reauthTarget = &target
+	}
 
 	fmt.Println("Initializing Codex authentication...")
 
@@ -213,7 +222,11 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		return
 	}
 
-	RegisterOAuthSession(state, "codex")
+	if reauthTarget == nil {
+		RegisterOAuthSession(state, "codex")
+	} else {
+		registerOAuthSessionWithMetadata(state, "codex", map[string]any{"mode": "reauth"})
+	}
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
@@ -293,6 +306,16 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 				digest := sha256.Sum256([]byte(accountID))
 				hashAccountID = hex.EncodeToString(digest[:])[:8]
 			}
+		}
+
+		if reauthTarget != nil {
+			handle, errStage := h.stageCodexReauthCandidate(*reauthTarget, bundle)
+			if errStage != nil {
+				SetOAuthSessionError(state, "Failed to stage replacement credentials")
+				return
+			}
+			completeOAuthSessionWithResult(state, handle)
+			return
 		}
 
 		// Create token storage and persist
@@ -758,7 +781,12 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 	if completed {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		session, _ := oauthSessions.Get(state)
+		response := gin.H{"status": "ok"}
+		if session.Result != "" {
+			response["stage_handle"] = session.Result
+		}
+		c.JSON(http.StatusOK, response)
 		return
 	}
 	if status != "" {

@@ -35,6 +35,7 @@ type oauthSession struct {
 	Status    string
 	Source    string
 	Metadata  map[string]any
+	Result    string
 	Completed bool
 	CreatedAt time.Time
 	ExpiresAt time.Time
@@ -71,6 +72,10 @@ func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) {
 }
 
 func (s *oauthSessionStore) Register(state, provider string) {
+	s.RegisterWithMetadata(state, provider, nil)
+}
+
+func (s *oauthSessionStore) RegisterWithMetadata(state, provider string, metadata map[string]any) {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if state == "" || provider == "" {
@@ -86,6 +91,7 @@ func (s *oauthSessionStore) Register(state, provider string) {
 		Provider:  provider,
 		Status:    "",
 		Source:    oauthSessionSourceBuiltin,
+		Metadata:  cloneOAuthSessionMetadata(metadata),
 		CreatedAt: now,
 		ExpiresAt: now.Add(s.ttl),
 	}
@@ -145,6 +151,10 @@ func (s *oauthSessionStore) SetError(state, message string) {
 }
 
 func (s *oauthSessionStore) Complete(state string) {
+	s.CompleteWithResult(state, "")
+}
+
+func (s *oauthSessionStore) CompleteWithResult(state, result string) {
 	state = strings.TrimSpace(state)
 	if state == "" {
 		return
@@ -161,6 +171,7 @@ func (s *oauthSessionStore) Complete(state string) {
 	}
 	session.Status = ""
 	session.Metadata = nil
+	session.Result = strings.TrimSpace(result)
 	session.Completed = true
 	session.ExpiresAt = now.Add(s.completedTTL)
 	s.sessions[state] = session
@@ -263,6 +274,10 @@ var oauthSessions = newOAuthSessionStore(oauthSessionTTL)
 
 func RegisterOAuthSession(state, provider string) { oauthSessions.Register(state, provider) }
 
+func registerOAuthSessionWithMetadata(state, provider string, metadata map[string]any) {
+	oauthSessions.RegisterWithMetadata(state, provider, metadata)
+}
+
 func RegisterPluginOAuthSession(state, provider string, metadata map[string]any) error {
 	return oauthSessions.RegisterPlugin(state, provider, metadata)
 }
@@ -270,6 +285,10 @@ func RegisterPluginOAuthSession(state, provider string, metadata map[string]any)
 func SetOAuthSessionError(state, message string) { oauthSessions.SetError(state, message) }
 
 func CompleteOAuthSession(state string) { oauthSessions.Complete(state) }
+
+func completeOAuthSessionWithResult(state, result string) {
+	oauthSessions.CompleteWithResult(state, result)
+}
 
 func CompleteOAuthSessionsByProvider(provider string) int {
 	return oauthSessions.CompleteProvider(provider, oauthSessionSourceBuiltin)

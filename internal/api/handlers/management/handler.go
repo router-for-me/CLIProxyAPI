@@ -41,6 +41,7 @@ type Handler struct {
 	cfg                     *config.Config
 	configFilePath          string
 	mu                      sync.Mutex
+	authMutationMu          sync.Mutex
 	reloadMu                sync.Mutex
 	reloadGeneration        uint64
 	appliedReloadGeneration uint64
@@ -60,6 +61,8 @@ type Handler struct {
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginReleaseCacheMu    sync.Mutex
 	pluginReleaseCache      map[string]pluginReleaseCacheEntry
+	codexReauthStages       *codexReauthStageStore
+	verifyCodexReauth       func(context.Context, *coreauth.Auth) error
 }
 
 type configReloadSnapshot struct {
@@ -80,7 +83,9 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
+		codexReauthStages:   newCodexReauthStageStore(cfg),
 	}
+	h.verifyCodexReauth = h.verifyCodexCandidate
 	h.startAttemptCleanup()
 	return h
 }
