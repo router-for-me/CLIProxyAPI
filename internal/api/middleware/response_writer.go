@@ -21,12 +21,13 @@ const websocketTimelineOverrideContextKey = "WEBSOCKET_TIMELINE_OVERRIDE"
 
 // RequestInfo holds essential details of an incoming HTTP request for logging purposes.
 type RequestInfo struct {
-	URL       string              // URL is the request URL.
-	Method    string              // Method is the HTTP method (e.g., GET, POST).
-	Headers   map[string][]string // Headers contains the request headers.
-	Body      []byte              // Body is the raw request body.
-	RequestID string              // RequestID is the unique identifier for the request.
-	Timestamp time.Time           // Timestamp is when the request was received.
+	URL                 string                      // URL is the request URL.
+	Method              string                      // Method is the HTTP method (e.g., GET or POST).
+	Headers             map[string][]string         // Headers contains the request headers.
+	Body                []byte                      // Body is the raw request body.
+	RequestID           string                      // RequestID is the unique identifier for the request.
+	Timestamp           time.Time                   // Timestamp is when the request was received.
+	deferredBodyCapture *deferredRequestBodyCapture // deferredBodyCapture spools large error-only request bodies.
 }
 
 // ResponseWriterWrapper wraps the standard gin.ResponseWriter to intercept and log response data.
@@ -258,6 +259,9 @@ func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}) {
 // For non-streaming responses, it logs the complete request and response details,
 // including any API-specific request/response data stored in the Gin context.
 func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
+	if w.requestInfo != nil && w.requestInfo.deferredBodyCapture != nil {
+		defer w.requestInfo.deferredBodyCapture.Cleanup()
+	}
 	if w.logger == nil {
 		return nil
 	}
@@ -361,7 +365,11 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		return nil
 	}
 
-	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c), w.extractWebsocketTimeline(c), websocketTimelineSource, w.extractAPIRequest(c), apiRequestSource, w.extractAPIResponse(c), apiResponseSource, w.extractAPIWebsocketTimeline(c), apiWebsocketTimelineSource, w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
+	apiRequest := w.extractAPIRequest(c)
+	if forceLog && len(apiRequest) == 0 {
+		apiRequest = w.extractDeferredAPIRequest(c)
+	}
+	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c), w.extractWebsocketTimeline(c), websocketTimelineSource, apiRequest, apiRequestSource, w.extractAPIResponse(c), apiResponseSource, w.extractAPIWebsocketTimeline(c), apiWebsocketTimelineSource, w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
 }
 
 func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {
@@ -387,6 +395,28 @@ func (w *ResponseWriterWrapper) extractAPIRequest(c *gin.Context) []byte {
 		return nil
 	}
 	return data
+}
+
+func (w *ResponseWriterWrapper) extractDeferredAPIRequest(c *gin.Context) []byte {
+	if c == nil {
+		return nil
+	}
+	value, exists := c.Get(logging.DeferredAPIRequestContextKey)
+	if !exists {
+		return nil
+	}
+	requests, ok := value.([]logging.DeferredAPIRequest)
+	if !ok || len(requests) == 0 {
+		return nil
+	}
+	var body bytes.Buffer
+	for _, buildRequest := range requests {
+		if buildRequest == nil {
+			continue
+		}
+		body.Write(buildRequest())
+	}
+	return body.Bytes()
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
@@ -440,10 +470,35 @@ func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
 	if body := extractBodyOverride(c, requestBodyOverrideContextKey); len(body) > 0 {
 		return body
 	}
-	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
+	if w.requestInfo == nil {
+		return nil
+	}
+	if len(w.requestInfo.Body) > 0 {
 		return w.requestInfo.Body
 	}
-	return nil
+	if w.requestInfo.deferredBodyCapture == nil {
+		return nil
+	}
+	body, statusMarker, errRead := w.requestInfo.deferredBodyCapture.Bytes()
+	if errRead != nil {
+		log.WithError(errRead).Warn("failed to read deferred request body capture")
+		return nil
+	}
+	encoding := ""
+	for key, values := range w.requestInfo.Headers {
+		if strings.EqualFold(key, "Content-Encoding") && len(values) > 0 {
+			encoding = values[0]
+			break
+		}
+	}
+	body = decodeCapturedRequestBodyForLogWithLimit(body, encoding, maxDeferredErrorRequestBodyBytes)
+	if statusMarker == "" {
+		return body
+	}
+	if len(body) > 0 && !bytes.HasSuffix(body, []byte("\n")) {
+		body = append(body, '\n')
+	}
+	return append(body, statusMarker...)
 }
 
 func (w *ResponseWriterWrapper) extractResponseBody(c *gin.Context) []byte {

@@ -904,6 +904,23 @@ func TestRegisterExecutorsPrunesStaleProviderAfterMigration(t *testing.T) {
 	}
 }
 
+func TestOwnsExecutorDistinguishesHostAdapters(t *testing.T) {
+	host := New()
+	owned := &executorAdapter{host: host}
+	foreign := &executorAdapter{host: New()}
+	external := &fakeProviderExecutor{provider: "provider-a"}
+
+	if !host.OwnsExecutor(owned) {
+		t.Fatal("host did not recognize its executor adapter")
+	}
+	if host.OwnsExecutor(foreign) {
+		t.Fatal("host claimed another host's executor adapter")
+	}
+	if host.OwnsExecutor(external) {
+		t.Fatal("host claimed an externally owned executor")
+	}
+}
+
 func TestRegisterExecutorsDoesNotUnregisterStaleProviderOwnedExternally(t *testing.T) {
 	manager := newFakeExecutorManager()
 	exec := &fakeExecutor{identifier: "fallback-provider"}
@@ -2135,6 +2152,55 @@ func TestUsageAdapterPanicFusesPlugin(t *testing.T) {
 	adapter.HandleUsage(context.Background(), coreusage.Record{Provider: "plugin-provider"})
 	if !host.isPluginFused("usage-panic") {
 		t.Fatal("usage-panic was not fused")
+	}
+}
+
+func TestUsageAdapterNormalizesOmittedGenerateToTrue(t *testing.T) {
+	var gotGenerate bool
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		gotGenerate = record.Generate
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-generate",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-generate",
+	}
+
+	// Legacy callers construct usage.Record without Generate; adapter must publish true.
+	adapter.HandleUsage(context.Background(), coreusage.Record{Provider: "provider", Model: "gpt-5.4"})
+	if !gotGenerate {
+		t.Fatalf("plugin Generate = %v, want true for omitted field", gotGenerate)
+	}
+}
+
+func TestUsageAdapterPreservesExplicitGenerateFalse(t *testing.T) {
+	var gotGenerate bool
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		gotGenerate = record.Generate
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-generate-false",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-generate-false",
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "provider",
+		Model:    "gpt-5.4",
+		Generate: coreusage.GenerateFlag(false),
+	})
+	if gotGenerate {
+		t.Fatalf("plugin Generate = %v, want false", gotGenerate)
 	}
 }
 

@@ -120,6 +120,28 @@
       }
     },
     {
+      "id": "claude-opus-5",
+      "object": "model",
+      "created": 1784038800,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Opus 5",
+      "description": "Latest premium model combining maximum intelligence with practical performance",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
       "id": "claude-sonnet-5",
       "object": "model",
       "created": 1782777600,
@@ -520,6 +542,66 @@
           "high"
         ]
       }
+    },
+    {
+      "id": "gemini-3.5-flash-lite",
+      "object": "model",
+      "created": 1782864000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.5 Flash Lite",
+      "name": "models/gemini-3.5-flash-lite",
+      "version": "3.5",
+      "description": "Gemini 3.5 Flash Lite",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.6-flash",
+      "object": "model",
+      "created": 1782864000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.6 Flash",
+      "name": "models/gemini-3.6-flash",
+      "version": "3.6",
+      "description": "Gemini 3.6 Flash",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
     }
   ],
   "vertex": [
@@ -620,15 +702,15 @@
       }
     },
     {
-      "id": "gemini-3-pro-preview",
+      "id": "gemini-3-pro",
       "object": "model",
       "created": 1737158400,
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3 Pro Preview",
-      "name": "models/gemini-3-pro-preview",
+      "display_name": "Gemini 3 Pro",
+      "name": "models/gemini-3-pro",
       "version": "3.0",
-      "description": "Gemini 3 Pro Preview",
+      "description": "Gemini 3 Pro",
       "inputTokenLimit": 1048576,
       "outputTokenLimit": 65536,
       "supportedGenerationMethods": [
@@ -648,13 +730,13 @@
       }
     },
     {
-      "id": "gemini-3-flash-preview",
+      "id": "gemini-3-flash",
       "object": "model",
       "created": 1765929600,
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3 Flash Preview",
-      "name": "models/gemini-3-flash-preview",
+      "display_name": "Gemini 3 Flash",
+      "name": "models/gemini-3-flash",
       "version": "3.0",
       "description": "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
       "inputTokenLimit": 1048576,
@@ -671,6 +753,35 @@
         "dynamic_allowed": true,
         "levels": [
           "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.1-pro",
+      "object": "model",
+      "created": 1771459200,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.1 Pro",
+      "name": "models/gemini-3.1-pro",
+      "version": "3.1",
+      "description": "Gemini 3.1 Pro",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
           "low",
           "medium",
           "high"
@@ -707,15 +818,15 @@
       }
     },
     {
-      "id": "gemini-3.1-flash-image-preview",
+      "id": "gemini-3.1-flash-image",
       "object": "model",
       "created": 1771459200,
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3.1 Flash Image Preview",
-      "name": "models/gemini-3.1-flash-image-preview",
+      "display_name": "Gemini 3.1 Flash Image",
+      "name": "models/gemini-3.1-flash-image",
       "version": "3.1",
-      "description": "Gemini 3.1 Flash Image Preview",
+      "description": "Gemini 3.1 Flash Image",
       "inputTokenLimit": 1048576,
       "outputTokenLimit": 65536,
       "supportedGenerationMethods": [
@@ -735,13 +846,13 @@
       }
     },
     {
-      "id": "gemini-3.1-flash-lite-preview",
+      "id": "gemini-3.1-flash-lite",
       "object": "model",
       "created": 1776288000,
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3.1 Flash Lite Preview",
-      "name": "models/gemini-3.1-flash-lite-preview",
+      "display_name": "Gemini 3.1 Flash Lite",
+      "name": "models/gemini-3.1-flash-lite",
       "version": "3.1",
       "description": "Our smallest and most cost effective model, built for at scale usage.",
       "inputTokenLimit": 1048576,
@@ -765,15 +876,15 @@
       }
     },
     {
-      "id": "gemini-3-pro-image-preview",
+      "id": "gemini-3-pro-image",
       "object": "model",
       "created": 1737158400,
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3 Pro Image Preview",
-      "name": "models/gemini-3-pro-image-preview",
+      "display_name": "Gemini 3 Pro Image",
+      "name": "models/gemini-3-pro-image",
       "version": "3.0",
-      "description": "Gemini 3 Pro Image Preview",
+      "description": "Gemini 3 Pro Image",
       "inputTokenLimit": 1048576,
       "outputTokenLimit": 65536,
       "supportedGenerationMethods": [
@@ -872,6 +983,66 @@
       "name": "models/gemini-3.5-flash",
       "version": "3.5",
       "description": "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.5-flash-lite",
+      "object": "model",
+      "created": 1782864000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.5 Flash Lite",
+      "name": "models/gemini-3.5-flash-lite",
+      "version": "3.5",
+      "description": "Gemini 3.5 Flash Lite",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.6-flash",
+      "object": "model",
+      "created": 1782864000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.6 Flash",
+      "name": "models/gemini-3.6-flash",
+      "version": "3.6",
+      "description": "Gemini 3.6 Flash",
       "inputTokenLimit": 1048576,
       "outputTokenLimit": 65536,
       "supportedGenerationMethods": [
@@ -1361,6 +1532,66 @@
       "name": "models/gemini-3.5-flash",
       "version": "3.5",
       "description": "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.5-flash-lite",
+      "object": "model",
+      "created": 1782864000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.5 Flash Lite",
+      "name": "models/gemini-3.5-flash-lite",
+      "version": "3.5",
+      "description": "Gemini 3.5 Flash Lite",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.6-flash",
+      "object": "model",
+      "created": 1782864000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.6 Flash",
+      "name": "models/gemini-3.6-flash",
+      "version": "3.6",
+      "description": "Gemini 3.6 Flash",
       "inputTokenLimit": 1048576,
       "outputTokenLimit": 65536,
       "supportedGenerationMethods": [
@@ -2092,13 +2323,9 @@
       "context_length": 131072,
       "max_completion_tokens": 32768,
       "thinking": {
-        "min": 1024,
-        "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true,
         "levels": [
           "low",
-          "medium",
           "high"
         ]
       }
@@ -2114,13 +2341,9 @@
       "context_length": 262144,
       "max_completion_tokens": 32768,
       "thinking": {
-        "min": 1024,
-        "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true,
         "levels": [
           "low",
-          "medium",
           "high"
         ]
       }
@@ -2136,13 +2359,9 @@
       "context_length": 262144,
       "max_completion_tokens": 65536,
       "thinking": {
-        "min": 1024,
-        "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true,
         "levels": [
           "low",
-          "medium",
           "high"
         ]
       }
@@ -2158,13 +2377,9 @@
       "context_length": 262144,
       "max_completion_tokens": 65536,
       "thinking": {
-        "min": 1024,
-        "max": 32000,
         "zero_allowed": false,
-        "dynamic_allowed": true,
         "levels": [
           "low",
-          "medium",
           "high"
         ]
       }
@@ -2180,14 +2395,48 @@
       "context_length": 262144,
       "max_completion_tokens": 65536,
       "thinking": {
-        "min": 1024,
-        "max": 32000,
         "zero_allowed": false,
-        "dynamic_allowed": true,
         "levels": [
           "low",
-          "medium",
           "high"
+        ]
+      }
+    },
+    {
+      "id": "kimi-k3",
+      "object": "model",
+      "created": 1784073600,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K3",
+      "description": "Kimi K3 - Moonshot AI's next-generation flagship model (~2.8T MoE) with multimodal input",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": false,
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "kimi-k3-256k",
+      "object": "model",
+      "created": 1785110400,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K3 256K",
+      "description": "Kimi K3 256K - 256K context version of Kimi K3 delivering the same results within 256K context at reduced quota consumption; supports image input only (no video)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": false,
+        "levels": [
+          "low",
+          "high",
+          "max"
         ]
       }
     }
@@ -2225,6 +2474,28 @@
         "max": 64000,
         "zero_allowed": true,
         "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-3.6-flash-high",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3.6 Flash",
+      "name": "gemini-3.6-flash-high",
+      "description": "Gemini 3.6 Flash (High)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       }
     },
     {

@@ -33,6 +33,10 @@ type PluginLoadInspector interface {
 	PluginRegistered(id string) bool
 }
 
+type contextualPluginUnloader interface {
+	UnloadPluginContext(ctx context.Context, id string) bool
+}
+
 type SyncReport struct {
 	SchemaVersion int                   `json:"schema_version"`
 	TaskID        uint                  `json:"task_id,omitempty"`
@@ -136,9 +140,11 @@ func SyncPlatformWithReport(ctx context.Context, cfg *config.Config, pluginRunti
 		return report, errPlatform
 	}
 	report.Platform = platform
-	root := strings.TrimSpace(cfg.Plugins.Dir)
-	if root == "" {
-		root = "plugins"
+	root, errResolvePluginsDir := config.ResolvePluginsDir(cfg.Plugins.Dir)
+	if errResolvePluginsDir != nil {
+		errPluginsDir := fmt.Errorf("home plugins: %w", errResolvePluginsDir)
+		finishReport(&report, errPluginsDir)
+		return report, errPluginsDir
 	}
 	client := newPluginStoreClient(cfg)
 	var syncErrors []error
@@ -190,6 +196,157 @@ func SyncPlatformWithReport(ctx context.Context, cfg *config.Config, pluginRunti
 	return report, errSync
 }
 
+func SyncResolvedWithReport(ctx context.Context, cfg *config.Config, items []sdkpluginstore.PluginSyncItem, expiresAt time.Time, installedVersions map[string]string, pluginRuntime PluginRuntime) (SyncReport, error) {
+	defer func() {
+		for index := range items {
+			items[index].Clear()
+		}
+	}()
+	platform := NormalizePlatform(CurrentPlatform())
+	report := newSyncReport(platform)
+	if cfg == nil || !cfg.Home.Enabled || !cfg.Plugins.Enabled {
+		finishReport(&report, nil)
+		return report, nil
+	}
+	root, errResolvePluginsDir := config.ResolvePluginsDir(cfg.Plugins.Dir)
+	if errResolvePluginsDir != nil {
+		errPluginsDir := fmt.Errorf("home plugins: %w", errResolvePluginsDir)
+		finishReport(&report, errPluginsDir)
+		return report, errPluginsDir
+	}
+	addInstalledVersionStatuses(&report, cfg, root, installedVersions)
+	var syncErrors []error
+	for index := range items {
+		if !time.Now().UTC().Before(expiresAt) {
+			errExpired := fmt.Errorf("home plugins: plugin sync response expired")
+			syncErrors = append(syncErrors, errExpired)
+			break
+		}
+		item := &items[index]
+		manifest := item.Manifest
+		status := pluginStatusFromManifest(manifest)
+		result, errInstall := installResolvedManifest(ctx, cfg, manifest, item.Auth, expiresAt, root, platform, pluginRuntime)
+		item.Clear()
+		if errInstall != nil {
+			status.InstallStatus = pluginInstallStatusFailed
+			status.Error = errInstall.Error()
+			upsertPluginInstallStatus(&report, status)
+			syncErrors = append(syncErrors, errInstall)
+			continue
+		}
+		status.Path = strings.TrimSpace(result.Path)
+		status.Skipped = result.Skipped
+		status.Overwritten = result.Overwritten
+		if result.Skipped {
+			status.InstallStatus = pluginInstallStatusSkipped
+		} else {
+			status.InstallStatus = pluginInstallStatusInstalled
+		}
+		upsertPluginInstallStatus(&report, status)
+	}
+	errSync := errors.Join(syncErrors...)
+	finishReport(&report, errSync)
+	return report, errSync
+}
+
+func addInstalledVersionStatuses(report *SyncReport, cfg *config.Config, root string, installedVersions map[string]string) {
+	if report == nil || cfg == nil || len(installedVersions) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(cfg.Plugins.Configs))
+	for id := range cfg.Plugins.Configs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		item := cfg.Plugins.Configs[id]
+		if !pluginConfigEnabled(item) {
+			continue
+		}
+		id = strings.TrimSpace(id)
+		version, okVersion := installedVersions[id]
+		if !okVersion {
+			continue
+		}
+		status := PluginInstallStatus{
+			ID:            id,
+			Version:       strings.TrimSpace(version),
+			InstallStatus: pluginInstallStatusSkipped,
+			Skipped:       true,
+		}
+		files, errFiles := pluginFileInfos(root, id)
+		if errFiles == nil {
+			for _, file := range files {
+				if strings.TrimSpace(file.Version) == status.Version {
+					status.Path = strings.TrimSpace(file.Path)
+					break
+				}
+			}
+		}
+		manifest, okManifest, errManifest := storeManifestFromPluginConfig(id, item)
+		if errManifest == nil && okManifest && pluginVersionsEqual(status.Version, manifest.Version) {
+			status.ReleaseTag = strings.TrimSpace(manifest.ReleaseTag)
+			status.Repository = strings.TrimSpace(manifest.Repository)
+			status.InstallType = manifest.InstallType()
+		}
+		report.Plugins = append(report.Plugins, status)
+	}
+}
+
+func pluginVersionsEqual(left string, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == "" || right == "" {
+		return false
+	}
+	return !sdkpluginstore.UpdateAvailable(left, right) && !sdkpluginstore.UpdateAvailable(right, left)
+}
+
+func upsertPluginInstallStatus(report *SyncReport, status PluginInstallStatus) {
+	if report == nil {
+		return
+	}
+	id := strings.TrimSpace(status.ID)
+	for index := range report.Plugins {
+		if strings.TrimSpace(report.Plugins[index].ID) == id {
+			report.Plugins[index] = status
+			return
+		}
+	}
+	report.Plugins = append(report.Plugins, status)
+}
+
+func installResolvedManifest(ctx context.Context, cfg *config.Config, manifest sdkpluginstore.Manifest, auth []sdkpluginstore.ResolvedAuthConfig, expiresAt time.Time, root string, platform Platform, pluginRuntime PluginRuntime) (sdkpluginstore.InstallResult, error) {
+	client := newResolvedPluginStoreClient(cfg, auth, expiresAt)
+	defer client.ClearAuth()
+	return installManifest(ctx, client, manifest, root, platform, pluginRuntime)
+}
+
+func InstalledVersions(cfg *config.Config) (map[string]string, error) {
+	if cfg == nil {
+		return map[string]string{}, nil
+	}
+	root, errResolvePluginsDir := config.ResolvePluginsDir(cfg.Plugins.Dir)
+	if errResolvePluginsDir != nil {
+		return nil, fmt.Errorf("home plugins: %w", errResolvePluginsDir)
+	}
+	versions := make(map[string]string, len(cfg.Plugins.Configs))
+	for id := range cfg.Plugins.Configs {
+		files, errFiles := pluginFileInfos(root, id)
+		if errFiles != nil {
+			return nil, fmt.Errorf("home plugins: discover installed plugin %s: %w", id, errFiles)
+		}
+		if len(files) == 0 {
+			continue
+		}
+		version := strings.TrimSpace(files[0].Version)
+		if version != "" {
+			versions[strings.TrimSpace(id)] = version
+		}
+	}
+	return versions, nil
+}
+
 func installManifest(ctx context.Context, client sdkpluginstore.Client, manifest sdkpluginstore.Manifest, root string, platform Platform, pluginRuntime PluginRuntime) (sdkpluginstore.InstallResult, error) {
 	id := strings.TrimSpace(manifest.ID)
 	if id == "" {
@@ -211,7 +368,9 @@ func installManifest(ctx context.Context, client sdkpluginstore.Client, manifest
 }
 
 func DeleteWithReport(ctx context.Context, cfg *config.Config, pluginRuntime PluginRuntime, taskID uint, pluginID string) SyncReport {
-	_ = ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	platform := CurrentPlatform()
 	report := newSyncReport(platform)
 	report.TaskID = taskID
@@ -219,6 +378,13 @@ func DeleteWithReport(ctx context.Context, cfg *config.Config, pluginRuntime Plu
 	report.Phase = pluginTaskPhaseDelete
 	pluginID = strings.TrimSpace(pluginID)
 	status := PluginInstallStatus{ID: pluginID}
+	if errContext := ctx.Err(); errContext != nil {
+		status.InstallStatus = pluginInstallStatusFailed
+		status.Error = errContext.Error()
+		report.Plugins = append(report.Plugins, status)
+		finishReport(&report, errContext)
+		return report
+	}
 	if cfg == nil {
 		status.InstallStatus = pluginInstallStatusFailed
 		status.Error = "home plugins: config is nil"
@@ -226,11 +392,23 @@ func DeleteWithReport(ctx context.Context, cfg *config.Config, pluginRuntime Plu
 		finishReport(&report, errors.New(status.Error))
 		return report
 	}
-	root := strings.TrimSpace(cfg.Plugins.Dir)
-	if root == "" {
-		root = "plugins"
+	root, errResolvePluginsDir := config.ResolvePluginsDir(cfg.Plugins.Dir)
+	if errResolvePluginsDir != nil {
+		errPluginsDir := fmt.Errorf("home plugins: %w", errResolvePluginsDir)
+		status.InstallStatus = pluginInstallStatusFailed
+		status.Error = errPluginsDir.Error()
+		report.Plugins = append(report.Plugins, status)
+		finishReport(&report, errPluginsDir)
+		return report
 	}
-	path, deleted, errDelete := deletePluginArtifact(root, pluginID, pluginRuntime)
+	if errContext := ctx.Err(); errContext != nil {
+		status.InstallStatus = pluginInstallStatusFailed
+		status.Error = errContext.Error()
+		report.Plugins = append(report.Plugins, status)
+		finishReport(&report, errContext)
+		return report
+	}
+	path, deleted, errDelete := deletePluginArtifact(ctx, root, pluginID, pluginRuntime)
 	status.Path = strings.TrimSpace(path)
 	switch {
 	case errDelete != nil:
@@ -246,7 +424,13 @@ func DeleteWithReport(ctx context.Context, cfg *config.Config, pluginRuntime Plu
 	return report
 }
 
-func deletePluginArtifact(root string, id string, pluginRuntime PluginRuntime) (string, bool, error) {
+func deletePluginArtifact(ctx context.Context, root string, id string, pluginRuntime PluginRuntime) (string, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return "", false, errContext
+	}
 	id = strings.TrimSpace(id)
 	if !validPluginFileID(id) {
 		return "", false, fmt.Errorf("invalid plugin id %q", id)
@@ -255,16 +439,31 @@ func deletePluginArtifact(root string, id string, pluginRuntime PluginRuntime) (
 	if errPaths != nil {
 		return "", false, errPaths
 	}
+	if errContext := ctx.Err(); errContext != nil {
+		return "", false, errContext
+	}
 	if len(paths) == 0 {
 		return "", false, nil
 	}
 	if pluginRuntime != nil && pluginRuntime.PluginBusy(id) {
-		if !pluginRuntime.UnloadPlugin(id) && pluginRuntime.PluginBusy(id) {
+		if errContext := ctx.Err(); errContext != nil {
+			return paths[0], false, errContext
+		}
+		unloaded := false
+		if contextual, ok := pluginRuntime.(contextualPluginUnloader); ok {
+			unloaded = contextual.UnloadPluginContext(ctx, id)
+		} else {
+			unloaded = pluginRuntime.UnloadPlugin(id)
+		}
+		if !unloaded && pluginRuntime.PluginBusy(id) {
 			return paths[0], false, sdkpluginstore.ErrLoadedPluginLocked
 		}
 	}
 	deleted := false
 	for _, path := range paths {
+		if errContext := ctx.Err(); errContext != nil {
+			return paths[0], deleted, errContext
+		}
 		if errRemove := os.Remove(path); errRemove != nil {
 			if errors.Is(errRemove, os.ErrNotExist) {
 				continue
@@ -272,6 +471,9 @@ func deletePluginArtifact(root string, id string, pluginRuntime PluginRuntime) (
 			return paths[0], deleted, errRemove
 		}
 		deleted = true
+		if errContext := ctx.Err(); errContext != nil {
+			return paths[0], deleted, errContext
+		}
 	}
 	return paths[0], deleted, nil
 }
@@ -478,16 +680,22 @@ func MarkLoadResults(report *SyncReport, inspector PluginLoadInspector) error {
 	}
 	report.Phase = pluginTaskPhaseLoad
 	var loadErrors []error
+	preserveSyncError := !report.OK && strings.TrimSpace(report.Error) != ""
+	if preserveSyncError {
+		loadErrors = append(loadErrors, errors.New(report.Error))
+	}
 	for index := range report.Plugins {
 		status := &report.Plugins[index]
 		if status.InstallStatus == pluginInstallStatusFailed {
 			if status.LoadStatus == "" {
 				status.LoadStatus = pluginInstallStatusSkipped
 			}
-			if strings.TrimSpace(status.Error) != "" {
-				loadErrors = append(loadErrors, errors.New(status.Error))
-			} else {
-				loadErrors = append(loadErrors, fmt.Errorf("home plugins: plugin %s install failed", status.ID))
+			if !preserveSyncError {
+				if strings.TrimSpace(status.Error) != "" {
+					loadErrors = append(loadErrors, errors.New(status.Error))
+				} else {
+					loadErrors = append(loadErrors, fmt.Errorf("home plugins: plugin %s install failed", status.ID))
+				}
 			}
 			continue
 		}
@@ -520,6 +728,13 @@ func newSyncReport(platform Platform) SyncReport {
 		Platform:      NormalizePlatform(platform),
 		Plugins:       []PluginInstallStatus{},
 	}
+}
+
+// CompletedSyncReport builds a completed report for outcomes before plugin installation starts.
+func CompletedSyncReport(platform Platform, errSync error) SyncReport {
+	report := newSyncReport(platform)
+	finishReport(&report, errSync)
+	return report
 }
 
 func finishReport(report *SyncReport, errTask error) {
@@ -595,6 +810,14 @@ var newPluginStoreClient = func(cfg *config.Config) sdkpluginstore.Client {
 		storeAuth = cfg.Plugins.StoreAuth
 	}
 	return sdkpluginstore.NewClientWithAuth(client, "", storeAuth)
+}
+
+var newResolvedPluginStoreClient = func(cfg *config.Config, auth []sdkpluginstore.ResolvedAuthConfig, expiresAt time.Time) sdkpluginstore.Client {
+	client := &http.Client{}
+	if cfg != nil && strings.TrimSpace(cfg.ProxyURL) != "" {
+		util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(cfg.ProxyURL)}, client)
+	}
+	return sdkpluginstore.NewClientWithResolvedAuthExpiry(client, "", auth, expiresAt)
 }
 
 func pluginConfigEnabled(item config.PluginInstanceConfig) bool {

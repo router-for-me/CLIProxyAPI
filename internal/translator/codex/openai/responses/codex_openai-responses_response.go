@@ -25,8 +25,9 @@ func ConvertCodexResponseToOpenAIResponses(_ context.Context, _ string, _, _, ra
 // from a non-streaming OpenAI Chat Completions response.
 func ConvertCodexResponseToOpenAIResponsesNonStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
 	rootResult := gjson.ParseBytes(rawJSON)
-	// Verify this is a response.completed event
-	if rootResult.Get("type").String() != "response.completed" {
+	// Verify this is a terminal response event.
+	responseType := rootResult.Get("type").String()
+	if responseType != "response.completed" && responseType != "response.incomplete" {
 		return []byte{}
 	}
 	responseResult := rootResult.Get("response")

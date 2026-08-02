@@ -284,6 +284,38 @@ func TestConvertOpenAIResponsesRequestToClaude_DropsApplyPatchCustomTool(t *test
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_NormalizesRootToolSchemaUnion(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools":[{
+			"type":"function",
+			"name":"lookup",
+			"parameters":{
+				"type":"object",
+				"properties":{"query":{"type":"string"},"id":{"type":"string"}},
+				"oneOf":[{"required":["query"]},{"required":["id"]}]
+			}
+		}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	schema := gjson.GetBytes(out, "tools.0.input_schema")
+
+	if got := schema.Get("type").String(); got != "object" {
+		t.Fatalf("input_schema.type = %q, want object. Output: %s", got, string(out))
+	}
+	if schema.Get("oneOf").Exists() {
+		t.Fatalf("input_schema should not contain root oneOf. Output: %s", string(out))
+	}
+	if !schema.Get("properties.query").Exists() || !schema.Get("properties.id").Exists() {
+		t.Fatalf("input_schema should preserve query and id properties. Output: %s", string(out))
+	}
+	if schema.Get("required").Exists() {
+		t.Fatalf("input_schema should not merge alternative required fields. Output: %s", string(out))
+	}
+}
+
 func testClaudeResponsesThinkingSignature(t *testing.T) (string, string) {
 	t.Helper()
 	channelBlock := []byte{}

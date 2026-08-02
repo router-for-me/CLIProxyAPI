@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 )
 
@@ -124,6 +125,36 @@ func TestNoFinishReasonOnIntermediateChunks(t *testing.T) {
 	fr2 := gjson.GetBytes(result2[0], "choices.0.finish_reason")
 	if fr2.Exists() && fr2.String() != "" && fr2.Type.String() != "Null" {
 		t.Errorf("Expected no finish_reason on intermediate chunk, got: %v", fr2)
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAIIncludesZeroCompletionTokensWhenMissing(t *testing.T) {
+	var param any
+	chunk := []byte(`{"response":{"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58}}}`)
+
+	result := ConvertAntigravityResponseToOpenAI(context.Background(), "model", nil, nil, chunk, &param)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(result))
+	}
+	completionTokens := gjson.GetBytes(result[0], "usage.completion_tokens")
+	if !completionTokens.Exists() || completionTokens.Int() != 0 {
+		t.Fatalf("completion_tokens = %s, want present with value 0. Output: %s", completionTokens.Raw, result[0])
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAINonStreamRestoresDisambiguatedName(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	original := []byte(`{"tools":[
+		{"type":"function","function":{"name":"` + first + `"}},
+		{"type":"function","function":{"name":"` + second + `"}}
+	]}`)
+	mapped := util.SanitizedFunctionNameMap(original)[second]
+	responseJSON := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{}}}]}}]}}`)
+
+	output := ConvertAntigravityResponseToOpenAINonStream(context.Background(), "gemini-3-flash", original, nil, responseJSON, nil)
+	if got := gjson.GetBytes(output, "choices.0.message.tool_calls.0.function.name").String(); got != second {
+		t.Fatalf("function.name = %q, want %q. Output: %s", got, second, output)
 	}
 }
 

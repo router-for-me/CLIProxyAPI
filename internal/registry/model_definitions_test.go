@@ -16,6 +16,25 @@ func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
 	}
 }
 
+func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
+	const releaseID = "gemini-3.1-flash-lite"
+	const previewID = releaseID + "-preview"
+
+	for _, model := range GetGeminiVertexModels() {
+		if model == nil {
+			continue
+		}
+		if model.ID == previewID {
+			t.Fatalf("Vertex model ID = %q, want release ID %q", model.ID, releaseID)
+		}
+		if model.ID == releaseID {
+			return
+		}
+	}
+
+	t.Fatalf("Vertex models do not contain %q", releaseID)
+}
+
 func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 

@@ -33,6 +33,7 @@ type UsageReporter struct {
 	source       string
 	reasoning    string
 	serviceTier  string
+	generate     bool
 	requestedAt  time.Time
 	ttftMu       sync.RWMutex
 	ttft         time.Duration
@@ -71,6 +72,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		authType:    resolveUsageAuthType(auth),
 		reasoning:   usage.ReasoningEffortFromContext(ctx),
 		serviceTier: usage.ServiceTierFromContext(ctx),
+		generate:    usage.GenerateFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -107,7 +109,6 @@ func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format stri
 		return
 	}
 	r.reasoning = thinking.ExtractTranslatedReasoningEffort(payload, format)
-	r.serviceTier = extractServiceTierFromPayload(payload)
 }
 
 func (r *UsageReporter) TrackHTTPClient(client *http.Client) *http.Client {
@@ -176,7 +177,7 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 	if model == "" {
 		return usage.Record{}, false
 	}
-	detail = normalizeUsageDetailTotal(detail)
+	detail = normalizeUsageDetailTotal(detail, r.provider, r.executorType)
 	if !hasNonZeroTokenUsage(detail) {
 		return usage.Record{}, false
 	}
@@ -200,20 +201,14 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	if r == nil {
 		return
 	}
-	detail = normalizeUsageDetailTotal(detail)
+	detail = normalizeUsageDetailTotal(detail, r.provider, r.executorType)
 	r.once.Do(func() {
 		r.publishRecord(ctx, r.buildRecord(detail, failed, fail))
 	})
 }
 
-func normalizeUsageDetailTotal(detail usage.Detail) usage.Detail {
-	if detail.TotalTokens == 0 {
-		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
-		if total > 0 {
-			detail.TotalTokens = total
-		}
-	}
-	return detail
+func normalizeUsageDetailTotal(detail usage.Detail, provider, executorType string) usage.Detail {
+	return usage.EnsureTokenBreakdownForProvider(detail, provider, executorType)
 }
 
 func hasNonZeroTokenUsage(detail usage.Detail) bool {
@@ -223,7 +218,8 @@ func hasNonZeroTokenUsage(detail usage.Detail) bool {
 		detail.CachedTokens != 0 ||
 		detail.CacheReadTokens != 0 ||
 		detail.CacheCreationTokens != 0 ||
-		detail.TotalTokens != 0
+		detail.TotalTokens != 0 ||
+		detail.TokenBreakdown.TotalTokens != 0
 }
 
 // ensurePublished guarantees that a usage record is emitted exactly once.
@@ -250,14 +246,14 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures .
 		fail = failures[0]
 	}
 	if r == nil {
-		return usage.Record{Detail: detail, Failed: failed, Fail: fail}
+		return usage.Record{Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
 	}
 	return r.buildRecordForModel(r.model, detail, failed, fail)
 }
 
 func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, failed bool, fail usage.Failure) usage.Record {
 	if r == nil {
-		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail}
+		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
 	}
 	return usage.Record{
 		Provider:            r.provider,
@@ -271,8 +267,8 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		AuthType:            r.authType,
 		ReasoningEffort:     r.reasoning,
 		ServiceTier:         r.serviceTier,
-		RequestServiceTier:  r.serviceTier,
 		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
+		Generate:            usage.GenerateFlag(r.generate),
 		RequestedAt:         r.requestedAt,
 		Latency:             r.latency(),
 		TTFT:                r.ttftDuration(),
@@ -280,19 +276,6 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Fail:                fail,
 		Detail:              detail,
 	}
-}
-
-func extractServiceTierFromPayload(payload []byte) string {
-	if len(payload) == 0 {
-		return usage.DefaultServiceTier
-	}
-	for _, path := range []string{"service_tier", "request.service_tier", "response.service_tier"} {
-		serviceTier := strings.TrimSpace(gjson.GetBytes(payload, path).String())
-		if serviceTier != "" {
-			return serviceTier
-		}
-	}
-	return usage.DefaultServiceTier
 }
 
 func failFromErrors(errs ...error) usage.Failure {
@@ -568,11 +551,14 @@ func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
 	if !usageNode.Exists() || !usageNode.IsObject() {
 		return false
 	}
+	return usageNode.Get("total_tokens").Exists() || hasOpenAIStyleUsageBucketFields(usageNode)
+}
+
+func hasOpenAIStyleUsageBucketFields(usageNode gjson.Result) bool {
 	return usageNode.Get("prompt_tokens").Exists() ||
 		usageNode.Get("input_tokens").Exists() ||
 		usageNode.Get("completion_tokens").Exists() ||
 		usageNode.Get("output_tokens").Exists() ||
-		usageNode.Get("total_tokens").Exists() ||
 		usageNode.Get("prompt_tokens_details.cached_tokens").Exists() ||
 		usageNode.Get("input_tokens_details.cached_tokens").Exists() ||
 		usageNode.Get("prompt_tokens_details.cache_write_tokens").Exists() ||
@@ -621,6 +607,42 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	}
 	if reasoning.Exists() {
 		detail.ReasoningTokens = reasoning.Int()
+	}
+	if hasOpenAIStyleUsageBucketFields(usageNode) {
+		if inputNode.Exists() && outputNode.Exists() {
+			detail.TokenBreakdown = usage.NewSubsetTokenBreakdown(
+				detail.InputTokens,
+				detail.CacheReadTokens,
+				detail.CacheCreationTokens,
+				detail.OutputTokens,
+				detail.ReasoningTokens,
+				detail.TotalTokens,
+			)
+		} else {
+			cacheReadTokens := detail.CacheReadTokens
+			cacheCreationTokens := detail.CacheCreationTokens
+			if !inputNode.Exists() {
+				cacheReadTokens = 0
+				cacheCreationTokens = 0
+			}
+			reasoningTokens := detail.ReasoningTokens
+			if !outputNode.Exists() {
+				reasoningTokens = 0
+			}
+			detail.TokenBreakdown = usage.NewPartialSubsetTokenBreakdown(
+				detail.InputTokens,
+				cacheReadTokens,
+				cacheCreationTokens,
+				detail.OutputTokens,
+				reasoningTokens,
+				detail.TotalTokens,
+			)
+		}
+	} else {
+		detail.TokenBreakdown = usage.NewUnclassifiedTokenBreakdown(detail.TotalTokens)
+	}
+	if detail.TotalTokens == 0 {
+		detail.TotalTokens = detail.TokenBreakdown.TotalTokens
 	}
 	return detail
 }
@@ -677,29 +699,62 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		detail.CachedTokens = detail.CacheCreationTokens
 	}
 	detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.CacheReadTokens + detail.CacheCreationTokens
+	detail.TokenBreakdown = usage.NewIndependentTokenBreakdown(
+		detail.InputTokens,
+		detail.CacheReadTokens,
+		detail.CacheCreationTokens,
+		detail.OutputTokens,
+		detail.ReasoningTokens,
+		detail.TotalTokens,
+	)
 	return detail
 }
 
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 	cachedTokens := node.Get("cachedContentTokenCount").Int()
+	toolUseTokens := firstExistingUsageNode(node, "toolUsePromptTokenCount", "tool_use_prompt_token_count").Int()
+	inputTokens, okInput := safeUsageTokenSum(node.Get("promptTokenCount").Int(), toolUseTokens)
 	detail := usage.Detail{
-		InputTokens:     node.Get("promptTokenCount").Int(),
+		InputTokens:     inputTokens,
 		OutputTokens:    node.Get("candidatesTokenCount").Int(),
 		ReasoningTokens: node.Get("thoughtsTokenCount").Int(),
 		TotalTokens:     node.Get("totalTokenCount").Int(),
 		CachedTokens:    cachedTokens,
 		CacheReadTokens: cachedTokens,
 	}
-	if detail.TotalTokens == 0 {
-		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+	if !okInput {
+		detail.TokenBreakdown = invalidUsageTokenBreakdown(detail.TotalTokens)
+		return detail
 	}
+	if detail.TotalTokens == 0 {
+		var okTotal bool
+		detail.TotalTokens, okTotal = safeUsageTokenSum(detail.InputTokens, detail.OutputTokens, detail.ReasoningTokens)
+		if !okTotal {
+			detail.TotalTokens = 0
+			detail.TokenBreakdown = invalidUsageTokenBreakdown(0)
+			return detail
+		}
+	}
+	detail.TokenBreakdown = usage.NewSeparateReasoningTokenBreakdown(
+		detail.InputTokens,
+		detail.CacheReadTokens,
+		detail.CacheCreationTokens,
+		detail.OutputTokens,
+		detail.ReasoningTokens,
+		detail.TotalTokens,
+	)
 	return detail
 }
 
 func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 	cacheRead := firstExistingUsageNode(node, "cache_read_tokens", "cacheReadTokens")
+	toolUseTokens := firstExistingUsageNode(node, "tool_use_tokens", "total_tool_use_tokens", "toolUseTokens", "totalToolUseTokens").Int()
+	inputTokens, okInput := safeUsageTokenSum(
+		firstExistingUsageNode(node, "input_tokens", "prompt_tokens", "total_input_tokens").Int(),
+		toolUseTokens,
+	)
 	detail := usage.Detail{
-		InputTokens:         firstExistingUsageNode(node, "input_tokens", "prompt_tokens", "total_input_tokens").Int(),
+		InputTokens:         inputTokens,
 		OutputTokens:        firstExistingUsageNode(node, "output_tokens", "completion_tokens", "total_output_tokens").Int(),
 		ReasoningTokens:     firstExistingUsageNode(node, "reasoning_tokens", "thoughtsTokenCount", "total_thought_tokens").Int(),
 		TotalTokens:         firstExistingUsageNode(node, "total_tokens", "totalTokenCount").Int(),
@@ -707,15 +762,30 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 		CacheReadTokens:     cacheRead.Int(),
 		CacheCreationTokens: firstExistingUsageNode(node, "cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens").Int(),
 	}
+	if !okInput {
+		detail.TokenBreakdown = invalidUsageTokenBreakdown(detail.TotalTokens)
+		return detail
+	}
 	if !cacheRead.Exists() && detail.CachedTokens > 0 {
 		detail.CacheReadTokens = detail.CachedTokens
 	}
 	if detail.TotalTokens == 0 {
-		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CacheCreationTokens
-		if cacheRead.Exists() {
-			detail.TotalTokens += detail.CacheReadTokens
+		var okTotal bool
+		detail.TotalTokens, okTotal = safeUsageTokenSum(detail.InputTokens, detail.OutputTokens, detail.ReasoningTokens)
+		if !okTotal {
+			detail.TotalTokens = 0
+			detail.TokenBreakdown = invalidUsageTokenBreakdown(0)
+			return detail
 		}
 	}
+	detail.TokenBreakdown = usage.NewSeparateReasoningTokenBreakdown(
+		detail.InputTokens,
+		detail.CacheReadTokens,
+		detail.CacheCreationTokens,
+		detail.OutputTokens,
+		detail.ReasoningTokens,
+		detail.TotalTokens,
+	)
 	return detail
 }
 
@@ -805,6 +875,29 @@ func firstExistingUsageNode(root gjson.Result, paths ...string) gjson.Result {
 		}
 	}
 	return gjson.Result{}
+}
+
+func safeUsageTokenSum(values ...int64) (int64, bool) {
+	var total int64
+	for _, value := range values {
+		if value < 0 || total > int64(^uint64(0)>>1)-value {
+			return 0, false
+		}
+		total += value
+	}
+	return total, true
+}
+
+func invalidUsageTokenBreakdown(total int64) usage.TokenBreakdown {
+	if total < 0 {
+		total = 0
+	}
+	return usage.TokenBreakdown{
+		SchemaVersion:      usage.TokenAccountingSchemaVersion,
+		Quality:            usage.TokenAccountingQualityInconsistent,
+		TotalTokens:        total,
+		UnclassifiedTokens: total,
+	}
 }
 
 func ParseAntigravityUsage(data []byte) usage.Detail {

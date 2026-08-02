@@ -522,6 +522,57 @@ func TestPatchPluginConfigMergesAndDeletesFields(t *testing.T) {
 	}
 }
 
+func TestDeletePluginRejectsUnresolvedPluginsDir(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Chdir(workspace)
+
+	literalPluginsDir := filepath.Join(workspace, "~", ".cli-proxy-api", "plugins")
+	targetDir := filepath.Join(literalPluginsDir, runtime.GOOS, runtime.GOARCH)
+	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", targetDir, errMkdir)
+	}
+	target := filepath.Join(targetDir, "sample"+managementPluginExtension(runtime.GOOS))
+	if errWrite := os.WriteFile(target, []byte("library-data"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile(%s) error = %v", target, errWrite)
+	}
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Dir: "~/.cli-proxy-api/plugins",
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample": pluginConfigFromYAML(t, "enabled: false\n"),
+				},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "sample"}}
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/plugins/sample", nil)
+
+	h.DeletePlugin(c)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	var body map[string]any
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatalf("Unmarshal() error = %v; body=%s", errDecode, rec.Body.String())
+	}
+	if body["error"] != "plugin_directory_invalid" {
+		t.Fatalf("error = %#v, want plugin_directory_invalid", body["error"])
+	}
+	if _, errStat := os.Stat(target); errStat != nil {
+		t.Fatalf("literal tilde target stat error = %v, want retained", errStat)
+	}
+	if _, configured := h.cfg.Plugins.Configs["sample"]; !configured {
+		t.Fatal("plugin config removed after directory resolution failure")
+	}
+}
+
 func TestDeletePluginRemovesDiscoveredFileAndConfig(t *testing.T) {
 	t.Parallel()
 

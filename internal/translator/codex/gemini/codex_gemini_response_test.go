@@ -7,6 +7,25 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertCodexResponseToGemini_IncompleteTerminal(t *testing.T) {
+	ctx := context.Background()
+	terminal := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","model":"gpt-5.5","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`)
+
+	var param any
+	streamOut := ConvertCodexResponseToGemini(ctx, "gemini-2.5-pro", nil, nil, append([]byte("data: "), terminal...), &param)
+	if len(streamOut) != 1 {
+		t.Fatalf("expected 1 streaming terminal chunk, got %d", len(streamOut))
+	}
+	if got := gjson.GetBytes(streamOut[0], "candidates.0.finishReason").String(); got != "MAX_TOKENS" {
+		t.Fatalf("stream finishReason = %q, want MAX_TOKENS; payload=%s", got, streamOut[0])
+	}
+
+	nonStreamOut := ConvertCodexResponseToGeminiNonStream(ctx, "gemini-2.5-pro", nil, nil, terminal, nil)
+	if got := gjson.GetBytes(nonStreamOut, "candidates.0.finishReason").String(); got != "MAX_TOKENS" {
+		t.Fatalf("non-stream finishReason = %q, want MAX_TOKENS; payload=%s", got, nonStreamOut)
+	}
+}
+
 func TestConvertCodexResponseToGemini_StreamEmptyOutputUsesOutputItemDoneMessageFallback(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"tools":[]}`)

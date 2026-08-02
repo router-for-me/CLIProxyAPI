@@ -3,6 +3,9 @@ package gemini
 import (
 	"context"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/tidwall/gjson"
 )
 
 func TestRestoreUsageMetadata(t *testing.T) {
@@ -63,6 +66,19 @@ func TestConvertAntigravityResponseToGeminiNonStream(t *testing.T) {
 				t.Errorf("ConvertAntigravityResponseToGeminiNonStream() = %s, want %s", string(result), tt.expected)
 			}
 		})
+	}
+}
+
+func TestConvertAntigravityResponseToGeminiNonStreamRestoresDisambiguatedName(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	original := []byte(`{"tools":[{"functionDeclarations":[{"name":"` + first + `"},{"name":"` + second + `"}]}]}`)
+	mapped := util.SanitizedFunctionNameMap(original)[second]
+	raw := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{}}}]}}]}}`)
+
+	out := ConvertAntigravityResponseToGeminiNonStream(context.Background(), "", original, nil, raw, nil)
+	if got := gjson.GetBytes(out, "candidates.0.content.parts.0.functionCall.name").String(); got != second {
+		t.Fatalf("functionCall.name = %q, want %q. Output: %s", got, second, out)
 	}
 }
 
