@@ -137,6 +137,20 @@ type Config struct {
 	// the auth/OAuth token file). Default false preserves the per-client "auto" behavior.
 	DisableClaudeCloakMode bool `yaml:"disable-claude-cloak-mode" json:"disable-claude-cloak-mode"`
 
+	// CacheControlDefaultTTL promotes default Anthropic prompt-cache breakpoints to the
+	// configured TTL before Claude requests are sent upstream.
+	//
+	// Supported values:
+	//   - "" (default): disabled. cache_control blocks are forwarded exactly as-is.
+	//   - "5m": pin default breakpoints to the standard 5-minute TTL explicitly.
+	//   - "1h": promote default breakpoints to the extended 1-hour TTL.
+	//
+	// Only breakpoints whose cache_control is an object with "type": "ephemeral" and a
+	// missing or "5m" ttl are rewritten. Blocks that already carry another ttl and
+	// malformed cache_control values are left untouched, and no breakpoint is added or
+	// removed. Unsupported values are ignored and keep the feature disabled.
+	CacheControlDefaultTTL string `yaml:"cache-control-default-ttl,omitempty" json:"cache-control-default-ttl,omitempty"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 

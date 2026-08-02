@@ -54,6 +54,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.DisableClaudeCloakMode != newCfg.DisableClaudeCloakMode {
 		changes = append(changes, fmt.Sprintf("disable-claude-cloak-mode: %t -> %t", oldCfg.DisableClaudeCloakMode, newCfg.DisableClaudeCloakMode))
 	}
+	if strings.TrimSpace(oldCfg.CacheControlDefaultTTL) != strings.TrimSpace(newCfg.CacheControlDefaultTTL) {
+		changes = append(changes, fmt.Sprintf("cache-control-default-ttl: %s -> %s", strings.TrimSpace(oldCfg.CacheControlDefaultTTL), strings.TrimSpace(newCfg.CacheControlDefaultTTL)))
+	}
 	if oldCfg.ClaudeCode.DisableCloakingModelList != newCfg.ClaudeCode.DisableCloakingModelList {
 		changes = append(changes, fmt.Sprintf("claude-code.disable-cloaking-model-list: %t -> %t", oldCfg.ClaudeCode.DisableCloakingModelList, newCfg.ClaudeCode.DisableCloakingModelList))
 	}

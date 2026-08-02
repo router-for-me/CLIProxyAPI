@@ -592,6 +592,107 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 	return payload
 }
 
+// claudeCacheControlDefaultTTL resolves the configured default cache_control TTL.
+//
+// An empty string means the promotion step is disabled and request bodies are left
+// byte-identical. Unsupported values are ignored (the feature stays disabled) instead
+// of being forwarded upstream, mirroring how other optional string settings degrade to
+// their safe default.
+func claudeCacheControlDefaultTTL(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.CacheControlDefaultTTL)) {
+	case "5m":
+		return "5m"
+	case "1h":
+		return "1h"
+	default:
+		return ""
+	}
+}
+
+// promoteDefaultCacheControlTTL rewrites default ephemeral cache_control blocks so they
+// use the requested TTL, walking the Anthropic evaluation order: tools → system → messages.
+//
+// A block is eligible when cache_control is an object with "type": "ephemeral" and its
+// ttl is either missing or "5m" (the implicit default). Malformed cache_control values,
+// other block types, and explicit TTLs the proxy does not own are left untouched, and no
+// breakpoint is ever added or removed — enforceCacheControlLimit stays the single
+// authority for the max-4 constraint.
+//
+// It must run after enforceCacheControlLimit and before normalizeCacheControlTTL so the
+// ordering constraint of prompt-caching-scope-2026-01-05 is still applied to the promoted
+// blocks, and before CCH signing so the signature covers the final body.
+func promoteDefaultCacheControlTTL(payload []byte, ttl string) []byte {
+	if ttl == "" || len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+
+	original := payload
+	modified := false
+
+	processBlock := func(path string, obj gjson.Result) {
+		cc := obj.Get("cache_control")
+		if !cc.Exists() || !cc.IsObject() {
+			return
+		}
+		blockType := cc.Get("type")
+		if blockType.Type != gjson.String || blockType.String() != "ephemeral" {
+			return
+		}
+		current := cc.Get("ttl")
+		if current.Exists() && (current.Type != gjson.String || current.String() != "5m") {
+			return
+		}
+		if current.Type == gjson.String && current.String() == ttl {
+			return
+		}
+		updated, errSet := sjson.SetBytes(payload, path+".cache_control.ttl", ttl)
+		if errSet != nil {
+			return
+		}
+		payload = updated
+		modified = true
+	}
+
+	tools := gjson.GetBytes(payload, "tools")
+	if tools.IsArray() {
+		tools.ForEach(func(idx, item gjson.Result) bool {
+			processBlock(fmt.Sprintf("tools.%d", int(idx.Int())), item)
+			return true
+		})
+	}
+
+	system := gjson.GetBytes(payload, "system")
+	if system.IsArray() {
+		system.ForEach(func(idx, item gjson.Result) bool {
+			processBlock(fmt.Sprintf("system.%d", int(idx.Int())), item)
+			return true
+		})
+	}
+
+	messages := gjson.GetBytes(payload, "messages")
+	if messages.IsArray() {
+		messages.ForEach(func(msgIdx, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if !content.IsArray() {
+				return true
+			}
+			content.ForEach(func(itemIdx, item gjson.Result) bool {
+				processBlock(fmt.Sprintf("messages.%d.content.%d", int(msgIdx.Int()), int(itemIdx.Int())), item)
+				return true
+			})
+			return true
+		})
+	}
+
+	if !modified {
+		return original
+	}
+	return payload
+}
+
 // enforceCacheControlLimit removes excess cache_control blocks from a payload
 // so the total does not exceed the Anthropic API limit (currently 4).
 //

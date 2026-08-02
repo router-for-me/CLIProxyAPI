@@ -78,6 +78,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// already sends multiple cache_control blocks.
 	body = enforceCacheControlLimit(body, 4)
 
+	// Promote default ephemeral breakpoints to the configured cache TTL (opt-in, no-op when unset).
+	body = promoteDefaultCacheControlTTL(body, claudeCacheControlDefaultTTL(e.cfg))
+
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
 	body = normalizeCacheControlTTL(body)

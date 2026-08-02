@@ -169,6 +169,13 @@ transient-error-cooldown-seconds: 0
 # "auto" behavior (cloak only non-Claude-Code clients).
 disable-claude-cloak-mode: false
 
+# Default TTL applied to Anthropic prompt-cache breakpoints on Claude requests.
+# Supported values: "5m" or "1h". Unset (default) leaves request bodies untouched.
+# Only cache_control objects with "type": "ephemeral" and a missing or "5m" ttl are
+# rewritten; other TTLs and malformed values are left as-is, and no breakpoint is added
+# or removed. Use "1h" to keep stable prompt prefixes on the extended cache path.
+# cache-control-default-ttl: "1h"
+
 # Claude Code compatibility settings.
 claude-code:
   # When true, return original model IDs in Anthropic model list responses instead of cloaked IDs.
