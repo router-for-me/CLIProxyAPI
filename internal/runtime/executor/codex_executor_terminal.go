@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,8 +30,8 @@ func (codexIncompleteStreamError) IsRequestScoped() bool {
 }
 
 // Streamed Codex responses may emit response.output_item.done events while leaving
-// response.completed.response.output empty. Keep the stream path aligned with the
-// already-patched non-stream path by reconstructing response.output from those items.
+// response.completed.response.output empty, or with item IDs omitted. Keep the stream
+// path aligned with the completed item events, which contain the authoritative items.
 func collectCodexOutputItemDone(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) {
 	itemResult := gjson.GetBytes(eventData, "item")
 	if !itemResult.Exists() || itemResult.Type != gjson.JSON {
@@ -46,9 +47,11 @@ func collectCodexOutputItemDone(eventData []byte, outputItemsByIndex map[int64][
 
 func patchCodexCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) []byte {
 	outputResult := gjson.GetBytes(eventData, "response.output")
-	shouldPatchOutput := (!outputResult.Exists() || !outputResult.IsArray() || len(outputResult.Array()) == 0) && (len(outputItemsByIndex) > 0 || len(outputItemsFallback) > 0)
-	if !shouldPatchOutput {
+	if len(outputItemsByIndex) == 0 && len(outputItemsFallback) == 0 {
 		return eventData
+	}
+	if outputResult.Exists() && outputResult.IsArray() && len(outputResult.Array()) > 0 {
+		return hydrateCodexCompletedOutputIDs(eventData, outputResult.Array(), outputItemsByIndex, outputItemsFallback)
 	}
 
 	indexes := make([]int64, 0, len(outputItemsByIndex))
@@ -89,6 +92,51 @@ func patchCodexCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]
 
 	completedDataPatched, _ := sjson.SetRawBytes(eventData, "response.output", outputArray)
 	return completedDataPatched
+}
+
+// hydrateCodexCompletedOutputIDs fills only missing output item IDs. Some compatible
+// Codex backends omit IDs in response.completed but include them in the matching
+// response.output_item.done event. Leaving populated IDs untouched preserves a
+// backend's final representation whenever it is complete.
+func hydrateCodexCompletedOutputIDs(eventData []byte, outputItems []gjson.Result, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) []byte {
+	patched := eventData
+	for index, outputItem := range outputItems {
+		if strings.TrimSpace(outputItem.Get("id").String()) != "" {
+			continue
+		}
+
+		doneItem := codexCompletedOutputItemDone(index, outputItem, outputItemsByIndex, outputItemsFallback)
+		if len(doneItem) == 0 {
+			continue
+		}
+		id := strings.TrimSpace(gjson.GetBytes(doneItem, "id").String())
+		if id == "" {
+			continue
+		}
+		if updated, err := sjson.SetBytes(patched, "response.output."+strconv.Itoa(index)+".id", id); err == nil {
+			patched = updated
+		}
+	}
+	return patched
+}
+
+func codexCompletedOutputItemDone(index int, outputItem gjson.Result, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) []byte {
+	if item, ok := outputItemsByIndex[int64(index)]; ok {
+		return item
+	}
+
+	outputType := outputItem.Get("type").String()
+	outputCallID := outputItem.Get("call_id").String()
+	for _, item := range outputItemsFallback {
+		if outputType != "" && gjson.GetBytes(item, "type").String() != outputType {
+			continue
+		}
+		if outputCallID != "" && gjson.GetBytes(item, "call_id").String() != outputCallID {
+			continue
+		}
+		return item
+	}
+	return nil
 }
 
 func codexTerminalStreamContextLengthErr(eventData []byte) (statusErr, bool) {
