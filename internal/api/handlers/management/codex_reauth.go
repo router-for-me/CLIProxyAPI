@@ -45,6 +45,7 @@ type codexReauthTarget struct {
 	Path       string
 	Generation string
 	Subject    string
+	ProxyURL   string
 }
 
 type codexReauthStage struct {
@@ -175,7 +176,7 @@ func (s *codexReauthStageStore) removeTarget(fileName string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for handle, stage := range s.stages {
-		if stage.Target.FileName == fileName {
+		if filepath.Base(stage.Target.FileName) == fileName {
 			_ = os.Remove(stage.Path)
 			delete(s.stages, handle)
 		}
@@ -302,10 +303,10 @@ func (h *Handler) parseCodexReauthTarget(c *gin.Context) (codexReauthTarget, err
 	if name == "" {
 		name = filepath.Base(path)
 	}
-	if subject == "" || filepath.Base(path) != name {
+	if subject == "" || filepath.Base(path) != filepath.Base(name) {
 		return codexReauthTarget{}, errCodexReauthConflict
 	}
-	return codexReauthTarget{AuthID: target.ID, AuthIndex: req.AuthIndex, FileName: name, Path: path, Generation: req.Generation, Subject: subject}, nil
+	return codexReauthTarget{AuthID: target.ID, AuthIndex: req.AuthIndex, FileName: name, Path: path, Generation: req.Generation, Subject: subject, ProxyURL: target.ProxyURL}, nil
 }
 
 func writeCodexReauthError(c *gin.Context, err error) {
@@ -323,7 +324,7 @@ func (h *Handler) stageCodexReauthCandidate(target codexReauthTarget, bundle *co
 	if bundle == nil {
 		return "", fmt.Errorf("missing replacement credentials")
 	}
-	storage := newCodexOAuthService(h.cfg).CreateTokenStorage(bundle)
+	storage := newCodexOAuthServiceWithProxy(h.cfg, target.ProxyURL).CreateTokenStorage(bundle)
 	if storage == nil || strings.TrimSpace(storage.AccountID) != target.Subject {
 		return "", fmt.Errorf("replacement subject mismatch")
 	}
@@ -334,7 +335,8 @@ func (h *Handler) stageCodexReauthCandidate(target codexReauthTarget, bundle *co
 	}
 	name := codex.CredentialFileName(storage.Email, plan, hex.EncodeToString(digest[:])[:8], true)
 	legacyName := codex.CredentialFileName(storage.Email, plan, "", true)
-	if (name != target.FileName && legacyName != target.FileName) || filepath.Base(target.Path) != target.FileName {
+	targetBase := filepath.Base(target.FileName)
+	if (name != targetBase && legacyName != targetBase) || filepath.Base(target.Path) != targetBase {
 		return "", fmt.Errorf("replacement filename mismatch")
 	}
 	for _, auth := range h.authManager.List() {

@@ -25,13 +25,16 @@ import (
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 
 var (
-	callbackForwardersMu  sync.Mutex
-	callbackForwarders    = make(map[int]*callbackForwarder)
-	authFileEntryMu       sync.Mutex
-	errAuthFileMustBeJSON = errors.New("auth file must be .json")
-	errAuthFileNotFound   = errors.New("auth file not found")
-	errPluginVirtualAuth  = errors.New("plugin virtual auth cannot be modified directly; edit or delete the source auth file")
-	newCodexOAuthService  = func(cfg *config.Config) codexOAuthService { return codex.NewCodexAuth(cfg) }
+	callbackForwardersMu          sync.Mutex
+	callbackForwarders            = make(map[int]*callbackForwarder)
+	authFileEntryMu               sync.Mutex
+	errAuthFileMustBeJSON         = errors.New("auth file must be .json")
+	errAuthFileNotFound           = errors.New("auth file not found")
+	errPluginVirtualAuth          = errors.New("plugin virtual auth cannot be modified directly; edit or delete the source auth file")
+	newCodexOAuthService          = func(cfg *config.Config) codexOAuthService { return codex.NewCodexAuth(cfg) }
+	newCodexOAuthServiceWithProxy = func(cfg *config.Config, proxyURL string) codexOAuthService {
+		return codex.NewCodexAuthWithProxyURL(cfg, proxyURL)
+	}
 )
 
 func extractLastRefreshTimestamp(meta map[string]any) (time.Time, bool) {

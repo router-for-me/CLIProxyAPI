@@ -352,6 +352,52 @@ func TestCodexReauthAcceptsExactLegacyFilename(t *testing.T) {
 	}
 }
 
+func TestCodexReauthStartAcceptsContainedNestedTarget(t *testing.T) {
+	h, router, target, generation := newCodexReauthTestHandler(t)
+	router.POST("/codex-auth-url", h.RequestCodexToken)
+	nested := filepath.Join(h.cfg.AuthDir, "team")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nestedPath := filepath.Join(nested, filepath.Base(target.FileName))
+	if err := os.Rename(target.Attributes["path"], nestedPath); err != nil {
+		t.Fatal(err)
+	}
+	target.FileName = filepath.Join("team", filepath.Base(target.FileName))
+	target.Attributes["path"] = nestedPath
+	if _, err := h.authManager.Update(coreauth.WithSkipPersist(context.Background()), target); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/codex-auth-url", strings.NewReader(`{"auth_index":"`+target.Index+`","generation":"`+generation+`"}`))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("nested target status = %d; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestCodexReauthStartUsesExactTargetProxy(t *testing.T) {
+	h, router, target, generation := newCodexReauthTestHandler(t)
+	target.ProxyURL = "direct"
+	if _, err := h.authManager.Update(coreauth.WithSkipPersist(context.Background()), target); err != nil {
+		t.Fatal(err)
+	}
+	usedProxy := ""
+	original := newCodexOAuthServiceWithProxy
+	newCodexOAuthServiceWithProxy = func(_ *config.Config, proxyURL string) codexOAuthService {
+		usedProxy = proxyURL
+		return &fakeCodexOAuthService{}
+	}
+	t.Cleanup(func() { newCodexOAuthServiceWithProxy = original })
+	router.POST("/codex-auth-url", h.RequestCodexToken)
+	req := httptest.NewRequest(http.MethodPost, "/codex-auth-url", strings.NewReader(`{"auth_index":"`+target.Index+`","generation":"`+generation+`"}`))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || usedProxy != "direct" {
+		t.Fatalf("status/proxy = %d/%q, want 200/direct", w.Code, usedProxy)
+	}
+}
+
 func TestAtomicCredentialReplaceRequiresExpectedGeneration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "credential.json")
 	original := []byte(`{"value":"original"}`)
@@ -447,7 +493,12 @@ func newCodexReauthTestHandler(t *testing.T) (*Handler, *gin.Engine, *coreauth.A
 	target, _ = manager.GetByID(target.ID)
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
 	original := newCodexOAuthService
+	originalWithProxy := newCodexOAuthServiceWithProxy
 	newCodexOAuthService = func(*config.Config) codexOAuthService { return &fakeCodexOAuthService{} }
-	t.Cleanup(func() { newCodexOAuthService = original })
+	newCodexOAuthServiceWithProxy = func(*config.Config, string) codexOAuthService { return &fakeCodexOAuthService{} }
+	t.Cleanup(func() {
+		newCodexOAuthService = original
+		newCodexOAuthServiceWithProxy = originalWithProxy
+	})
 	return h, gin.New(), target, credentialGeneration(raw)
 }

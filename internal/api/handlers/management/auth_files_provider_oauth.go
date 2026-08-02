@@ -213,6 +213,9 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 	// Initialize Codex auth service
 	openaiAuth := newCodexOAuthService(h.cfg)
+	if reauthTarget != nil {
+		openaiAuth = newCodexOAuthServiceWithProxy(h.cfg, reauthTarget.ProxyURL)
+	}
 
 	// Generate authorization URL
 	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
