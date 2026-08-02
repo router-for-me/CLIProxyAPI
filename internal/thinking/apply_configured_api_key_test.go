@@ -79,16 +79,73 @@ func TestApplyThinkingWithModelInfoMapsResponsesToCodexHighIntent(t *testing.T) 
 	}
 }
 
-func TestApplyThinkingWithModelInfoKeepsSameFamilyValidationStrict(t *testing.T) {
+func TestApplyThinkingWithModelInfoClampsSameFamilyHighIntentDown(t *testing.T) {
+	tests := []struct {
+		name      string
+		source    string
+		supported []string
+		want      string
+	}{
+		{name: "ultra stays ultra", source: "ultra", supported: []string{"high", "xhigh", "max", "ultra"}, want: "ultra"},
+		{name: "ultra falls back to max", source: "ultra", supported: []string{"high", "xhigh", "max"}, want: "max"},
+		{name: "ultra falls back to xhigh", source: "ultra", supported: []string{"high", "xhigh"}, want: "xhigh"},
+		{name: "ultra falls back to high", source: "ultra", supported: []string{"high"}, want: "high"},
+		{name: "max falls back to xhigh", source: "max", supported: []string{"high", "xhigh"}, want: "xhigh"},
+		{name: "max falls back to high", source: "max", supported: []string{"high"}, want: "high"},
+		{name: "xhigh falls back to high", source: "xhigh", supported: []string{"high", "max"}, want: "high"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			modelInfo := &registry.ModelInfo{
+				ID:       "openai-upstream",
+				Type:     "openai",
+				Thinking: &registry.ThinkingSupport{Levels: tc.supported},
+			}
+			body := []byte(`{"reasoning_effort":"` + tc.source + `"}`)
+			out, err := thinking.ApplyThinkingWithModelInfo(body, body, "openai-upstream", "openai", "openai", "openai", modelInfo)
+			if err != nil {
+				t.Fatalf("ApplyThinkingWithModelInfo() error = %v", err)
+			}
+			if got := gjson.GetBytes(out, "reasoning_effort").String(); got != tc.want {
+				t.Fatalf("reasoning_effort = %q, want %q; body=%s", got, tc.want, out)
+			}
+		})
+	}
+}
+
+func TestApplyThinkingWithModelInfoKeepsSameFamilyOrdinaryLevelsStrict(t *testing.T) {
 	modelInfo := &registry.ModelInfo{
 		ID:       "openai-upstream",
 		Type:     "openai",
-		Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		Thinking: &registry.ThinkingSupport{Levels: []string{"low", "high"}},
 	}
-	body := []byte(`{"reasoning_effort":"xhigh"}`)
+	body := []byte(`{"reasoning_effort":"medium"}`)
 	out, err := thinking.ApplyThinkingWithModelInfo(body, body, "openai-upstream", "openai", "openai", "openai", modelInfo)
 	if err == nil {
-		t.Fatalf("ApplyThinkingWithModelInfo() error = nil, want unsupported xhigh error; body=%s", out)
+		t.Fatalf("ApplyThinkingWithModelInfo() error = nil, want unsupported medium error; body=%s", out)
+	}
+}
+
+func TestApplyThinkingWithModelInfoDoesNotDowngradeHighIntentBelowHigh(t *testing.T) {
+	modelInfo := &registry.ModelInfo{
+		ID:       "openai-upstream",
+		Type:     "openai",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium"}},
+	}
+	body := []byte(`{"reasoning_effort":"max"}`)
+	out, err := thinking.ApplyThinkingWithModelInfo(body, body, "openai-upstream", "openai", "openai", "openai", modelInfo)
+	if err == nil {
+		t.Fatalf("ApplyThinkingWithModelInfo() error = nil, want unsupported max error; body=%s", out)
+	}
+}
+
+func TestParseLevelSuffixAcceptsUltra(t *testing.T) {
+	level, ok := thinking.ParseLevelSuffix("ULTRA")
+	if !ok {
+		t.Fatal("ParseLevelSuffix(ULTRA) ok = false, want true")
+	}
+	if level != thinking.LevelUltra {
+		t.Fatalf("ParseLevelSuffix(ULTRA) level = %q, want %q", level, thinking.LevelUltra)
 	}
 }
 

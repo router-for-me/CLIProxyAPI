@@ -75,6 +75,7 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		}
 	}
 	allowClampUnsupported := toHasLevelSupport && (!isSameProviderFamily(fromFormat, toFormat) || modelFamilyMismatch)
+	allowHighIntentDowngrade := toHasLevelSupport && isOpenAIFamily(toFormat) && config.Mode == ModeLevel && isHighIntentLevel(config.Level)
 
 	// strictBudget determines whether to enforce strict budget range validation.
 	// This applies when: (1) config comes from request body (not suffix), (2) source format is known,
@@ -131,7 +132,9 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 
 	if len(support.Levels) > 0 && config.Mode == ModeLevel {
 		if !isLevelSupported(string(config.Level), support.Levels) {
-			if allowClampUnsupported {
+			if allowHighIntentDowngrade {
+				config.Level = clampHighIntentLevelDown(config.Level, modelInfo, toFormat)
+			} else if allowClampUnsupported {
 				config.Level = clampLevel(config.Level, modelInfo, toFormat)
 			}
 			if !isLevelSupported(string(config.Level), support.Levels) {
@@ -237,7 +240,44 @@ func convertAutoToMidRange(config ThinkingConfig, support *registry.ThinkingSupp
 }
 
 // standardLevelOrder defines the canonical ordering of thinking levels from lowest to highest.
-var standardLevelOrder = []ThinkingLevel{LevelMinimal, LevelLow, LevelMedium, LevelHigh, LevelXHigh, LevelMax}
+var standardLevelOrder = []ThinkingLevel{LevelMinimal, LevelLow, LevelMedium, LevelHigh, LevelXHigh, LevelMax, LevelUltra}
+
+func isHighIntentLevel(level ThinkingLevel) bool {
+	switch level {
+	case LevelXHigh, LevelMax, LevelUltra:
+		return true
+	default:
+		return false
+	}
+}
+
+// clampHighIntentLevelDown selects the highest supported level at or below the
+// requested high-intent level. It never upgrades the request.
+func clampHighIntentLevelDown(level ThinkingLevel, modelInfo *registry.ModelInfo, provider string) ThinkingLevel {
+	if modelInfo == nil || modelInfo.Thinking == nil || len(modelInfo.Thinking.Levels) == 0 {
+		return level
+	}
+	requestedIndex := levelIndex(string(level))
+	if requestedIndex == -1 {
+		return level
+	}
+	highIndex := levelIndex(string(LevelHigh))
+	for index := requestedIndex; index >= highIndex; index-- {
+		candidate := standardLevelOrder[index]
+		if isLevelSupported(string(candidate), modelInfo.Thinking.Levels) {
+			if candidate != level {
+				log.WithFields(log.Fields{
+					"provider":       provider,
+					"model":          modelInfo.ID,
+					"original_value": string(level),
+					"clamped_to":     string(candidate),
+				}).Debug("thinking: high-intent level downgraded |")
+			}
+			return candidate
+		}
+	}
+	return level
+}
 
 // clampLevel clamps the given level to the nearest supported level.
 // On tie, prefers the lower level.

@@ -1,6 +1,9 @@
 package registry
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
 	const wantUA = "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)"
@@ -13,6 +16,75 @@ func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
 	}
 	if got := ModelOverrideHeaders("gpt-5.4"); got != nil {
 		t.Fatalf("ModelOverrideHeaders(gpt-5.4) = %#v, want nil", got)
+	}
+}
+
+func TestCodexGPT56ThinkingLevelsMatchOfficialManifest(t *testing.T) {
+	withUltra := []string{"low", "medium", "high", "xhigh", "max", "ultra"}
+	withoutUltra := []string{"low", "medium", "high", "xhigh", "max"}
+	tiers := []struct {
+		name   string
+		models []*ModelInfo
+		want   map[string][]string
+	}{
+		{
+			name:   "free",
+			models: GetCodexFreeModels(),
+			want: map[string][]string{
+				"gpt-5.6-terra": withUltra,
+				"gpt-5.6-luna":  withoutUltra,
+			},
+		},
+		{
+			name:   "team",
+			models: GetCodexTeamModels(),
+			want: map[string][]string{
+				"gpt-5.6-sol":   withUltra,
+				"gpt-5.6-terra": withUltra,
+				"gpt-5.6-luna":  withoutUltra,
+			},
+		},
+		{
+			name:   "plus",
+			models: GetCodexPlusModels(),
+			want: map[string][]string{
+				"gpt-5.6-sol":   withUltra,
+				"gpt-5.6-terra": withUltra,
+				"gpt-5.6-luna":  withoutUltra,
+			},
+		},
+		{
+			name:   "pro",
+			models: GetCodexProModels(),
+			want: map[string][]string{
+				"gpt-5.6-sol":   withUltra,
+				"gpt-5.6-terra": withUltra,
+				"gpt-5.6-luna":  withoutUltra,
+			},
+		},
+	}
+
+	for _, tier := range tiers {
+		t.Run(tier.name, func(t *testing.T) {
+			byID := make(map[string]*ModelInfo, len(tier.models))
+			for _, model := range tier.models {
+				if model != nil {
+					byID[model.ID] = model
+				}
+			}
+			for modelID, wantLevels := range tier.want {
+				model := byID[modelID]
+				if model == nil {
+					t.Fatalf("model %q is missing", modelID)
+				}
+				if model.Thinking == nil {
+					t.Fatalf("model %q thinking support = nil", modelID)
+				}
+				if !slices.Equal(model.Thinking.Levels, wantLevels) {
+					t.Fatalf("model %q thinking levels = %v, want %v", modelID, model.Thinking.Levels, wantLevels)
+				}
+			}
+		})
 	}
 }
 
