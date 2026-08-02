@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	tls "github.com/refraction-networking/utls"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -14,6 +15,11 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
 )
+
+// claudeConnectSetupTimeout bounds connection establishment only: the TLS handshake
+// and the HTTP/2 preface. It is cleared once the connection is ready, so streaming
+// over an established connection remains unbounded.
+const claudeConnectSetupTimeout = 30 * time.Second
 
 // utlsRoundTripper implements http.RoundTripper using utls with Chrome fingerprint
 // to bypass Cloudflare's TLS fingerprinting on Anthropic domains.
@@ -104,6 +110,14 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		return nil, err
 	}
 
+	// Bound setup only. Without this the handshake can block forever against an
+	// endpoint that accepts the connection and then stalls, because this transport
+	// honours neither http.Client.Timeout nor the request context until the HTTP/2
+	// connection exists.
+	if errDeadline := conn.SetDeadline(time.Now().Add(claudeConnectSetupTimeout)); errDeadline != nil {
+		log.Debugf("utls: failed to set connection setup deadline for %s: %v", addr, errDeadline)
+	}
+
 	tlsConfig := &tls.Config{ServerName: host}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
@@ -117,6 +131,12 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	if err != nil {
 		tlsConn.Close()
 		return nil, err
+	}
+
+	// Clear the setup deadline: the connection is pooled and reused for streaming
+	// responses, which must not be time-bounded.
+	if errDeadline := conn.SetDeadline(time.Time{}); errDeadline != nil {
+		log.Debugf("utls: failed to clear connection setup deadline for %s: %v", addr, errDeadline)
 	}
 
 	return h2Conn, nil
@@ -156,7 +176,10 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 // for Anthropic domains by using utls with Chrome fingerprint.
 // It accepts optional SDK configuration for proxy settings.
 func NewAnthropicHttpClient(cfg *config.SDKConfig) *http.Client {
+	// This client is only used for credential acquisition (OAuth token exchange and
+	// refresh), so a request timeout is appropriate here.
 	return &http.Client{
+		Timeout:   claudeCredentialRequestTimeout,
 		Transport: newUtlsRoundTripper(cfg),
 	}
 }
