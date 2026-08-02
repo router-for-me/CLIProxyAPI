@@ -61,6 +61,70 @@ func TestParseCodexRetryAfter(t *testing.T) {
 	})
 }
 
+func TestNewCodexStatusErrWithHeadersPreservesRetryMetadata(t *testing.T) {
+	t.Run("delta seconds", func(t *testing.T) {
+		headers := http.Header{
+			"Retry-After":  {"7"},
+			"X-Request-Id": {"req-test"},
+		}
+		err := newCodexStatusErrWithHeaders(
+			http.StatusServiceUnavailable,
+			[]byte(`{"error":{"type":"server_error","message":"overloaded"}}`),
+			headers,
+		)
+
+		if retryAfter := err.RetryAfter(); retryAfter == nil || *retryAfter != 7*time.Second {
+			t.Fatalf("RetryAfter() = %v, want 7s", retryAfter)
+		}
+		if got := err.Headers().Get("X-Request-Id"); got != "req-test" {
+			t.Fatalf("Headers().Get(X-Request-Id) = %q, want req-test", got)
+		}
+
+		headers.Set("X-Request-Id", "mutated")
+		if got := err.Headers().Get("X-Request-Id"); got != "req-test" {
+			t.Fatalf("stored headers changed with source mutation: %q", got)
+		}
+	})
+
+	t.Run("http date", func(t *testing.T) {
+		retryAt := time.Now().Add(10 * time.Second).UTC().Truncate(time.Second)
+		err := newCodexStatusErrWithHeaders(
+			http.StatusServiceUnavailable,
+			[]byte(`{"error":{"type":"server_error"}}`),
+			http.Header{"Retry-After": {retryAt.Format(http.TimeFormat)}},
+		)
+
+		retryAfter := err.RetryAfter()
+		if retryAfter == nil || *retryAfter < 8*time.Second || *retryAfter > 10*time.Second {
+			t.Fatalf("RetryAfter() = %v, want approximately 10s", retryAfter)
+		}
+	})
+
+	t.Run("overflowing delta seconds", func(t *testing.T) {
+		err := newCodexStatusErrWithHeaders(
+			http.StatusServiceUnavailable,
+			[]byte(`{"error":{"type":"server_error"}}`),
+			http.Header{"Retry-After": {"9999999999"}},
+		)
+
+		if retryAfter := err.RetryAfter(); retryAfter != nil {
+			t.Fatalf("RetryAfter() = %v, want nil for overflowing delta seconds", *retryAfter)
+		}
+	})
+
+	t.Run("body retry metadata wins", func(t *testing.T) {
+		err := newCodexStatusErrWithHeaders(
+			http.StatusTooManyRequests,
+			[]byte(`{"error":{"type":"usage_limit_reached","resets_in_seconds":120}}`),
+			http.Header{"Retry-After": {"7"}},
+		)
+
+		if retryAfter := err.RetryAfter(); retryAfter == nil || *retryAfter != 120*time.Second {
+			t.Fatalf("RetryAfter() = %v, want body-derived 2m", retryAfter)
+		}
+	})
+}
+
 func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
 	body := []byte(`{"error":{"message":"Selected model is at capacity. Please try a different model."}}`)
 

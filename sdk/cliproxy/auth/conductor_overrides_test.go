@@ -788,6 +788,63 @@ func TestManager_MarkResult_TransientErrorCooldownDefault(t *testing.T) {
 	}
 }
 
+func TestManager_MarkResult_TransientErrorCooldownUsesRetryAfter(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(0)
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(prevQuota)
+		transientErrorCooldownSeconds.Store(prevTransient)
+	})
+
+	retryAfter := 2 * time.Minute
+	m := NewManager(nil, nil, nil)
+	modelAuth := &Auth{ID: "auth-transient-retry-after-model", Provider: "codex"}
+	if _, errRegister := m.Register(context.Background(), modelAuth); errRegister != nil {
+		t.Fatalf("register model auth: %v", errRegister)
+	}
+	model := "gpt-retry-after"
+	m.MarkResult(context.Background(), Result{
+		AuthID:     modelAuth.ID,
+		Provider:   modelAuth.Provider,
+		Model:      model,
+		Success:    false,
+		Error:      &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "unavailable"},
+		RetryAfter: &retryAfter,
+	})
+
+	updatedModel, okModel := m.GetByID(modelAuth.ID)
+	if !okModel || updatedModel == nil || updatedModel.ModelStates[model] == nil {
+		t.Fatal("expected model cooldown state")
+	}
+	modelWait := time.Until(updatedModel.ModelStates[model].NextRetryAfter)
+	if modelWait < 115*time.Second || modelWait > 125*time.Second {
+		t.Fatalf("model Retry-After cooldown = %v, want ~2m", modelWait)
+	}
+
+	authLevel := &Auth{ID: "auth-transient-retry-after-auth", Provider: "codex"}
+	if _, errRegister := m.Register(context.Background(), authLevel); errRegister != nil {
+		t.Fatalf("register auth-level auth: %v", errRegister)
+	}
+	m.MarkResult(context.Background(), Result{
+		AuthID:     authLevel.ID,
+		Provider:   authLevel.Provider,
+		Success:    false,
+		Error:      &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "unavailable"},
+		RetryAfter: &retryAfter,
+	})
+
+	updatedAuth, okAuth := m.GetByID(authLevel.ID)
+	if !okAuth || updatedAuth == nil {
+		t.Fatal("expected auth cooldown state")
+	}
+	authWait := time.Until(updatedAuth.NextRetryAfter)
+	if authWait < 115*time.Second || authWait > 125*time.Second {
+		t.Fatalf("auth Retry-After cooldown = %v, want ~2m", authWait)
+	}
+}
+
 func TestManager_MarkResult_TransientErrorCooldownDisabled(t *testing.T) {
 	prevQuota := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
@@ -799,6 +856,7 @@ func TestManager_MarkResult_TransientErrorCooldownDisabled(t *testing.T) {
 	})
 
 	m := NewManager(nil, nil, nil)
+	retryAfter := 2 * time.Minute
 
 	modelAuth := &Auth{
 		ID:       "auth-transient-model-disabled",
@@ -810,11 +868,12 @@ func TestManager_MarkResult_TransientErrorCooldownDisabled(t *testing.T) {
 
 	model := "test-model-transient-disabled"
 	m.MarkResult(context.Background(), Result{
-		AuthID:   modelAuth.ID,
-		Provider: modelAuth.Provider,
-		Model:    model,
-		Success:  false,
-		Error:    &Error{HTTPStatus: http.StatusBadGateway, Message: "bad gateway"},
+		AuthID:     modelAuth.ID,
+		Provider:   modelAuth.Provider,
+		Model:      model,
+		Success:    false,
+		Error:      &Error{HTTPStatus: http.StatusBadGateway, Message: "bad gateway"},
+		RetryAfter: &retryAfter,
 	})
 
 	updatedModelAuth, okModelAuth := m.GetByID(modelAuth.ID)
@@ -838,10 +897,11 @@ func TestManager_MarkResult_TransientErrorCooldownDisabled(t *testing.T) {
 	}
 
 	m.MarkResult(context.Background(), Result{
-		AuthID:   authLevelAuth.ID,
-		Provider: authLevelAuth.Provider,
-		Success:  false,
-		Error:    &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "unavailable"},
+		AuthID:     authLevelAuth.ID,
+		Provider:   authLevelAuth.Provider,
+		Success:    false,
+		Error:      &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "unavailable"},
+		RetryAfter: &retryAfter,
 	})
 
 	updatedAuthLevel, okAuthLevel := m.GetByID(authLevelAuth.ID)

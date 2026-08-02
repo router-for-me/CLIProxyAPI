@@ -18,6 +18,62 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestCodexExecutorHTTPErrorPreservesUpstreamHeaders(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "execute", true: "execute_stream"}[stream], func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "7")
+				w.Header().Set("X-Request-Id", "req-test")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"error":{"type":"server_error","message":"overloaded"}}`))
+			}))
+			defer server.Close()
+
+			executor := NewCodexExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"base_url": server.URL,
+				"api_key":  "test",
+			}}
+			req := cliproxyexecutor.Request{
+				Model:   "gpt-test",
+				Payload: []byte(`{"model":"gpt-test","input":"hello"}`),
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("openai-response"),
+				Stream:       stream,
+			}
+
+			var err error
+			if stream {
+				_, err = executor.ExecuteStream(context.Background(), auth, req, opts)
+			} else {
+				_, err = executor.Execute(context.Background(), auth, req, opts)
+			}
+			if err == nil {
+				t.Fatal("expected upstream 503 error")
+			}
+			if got := statusCodeFromTestError(t, err); got != http.StatusServiceUnavailable {
+				t.Fatalf("status code = %d, want %d", got, http.StatusServiceUnavailable)
+			}
+			retryErr, ok := err.(interface{ RetryAfter() *time.Duration })
+			if !ok {
+				t.Fatalf("error %T does not expose RetryAfter()", err)
+			}
+			if retryAfter := retryErr.RetryAfter(); retryAfter == nil || *retryAfter != 7*time.Second {
+				t.Fatalf("RetryAfter() = %v, want 7s", retryAfter)
+			}
+			headerErr, ok := err.(interface{ Headers() http.Header })
+			if !ok {
+				t.Fatalf("error %T does not expose Headers()", err)
+			}
+			if got := headerErr.Headers().Get("X-Request-Id"); got != "req-test" {
+				t.Fatalf("X-Request-Id = %q, want req-test", got)
+			}
+		})
+	}
+}
+
 func TestCodexExecutorExecute_EmptyStreamCompletionOutputUsesOutputItemDone(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

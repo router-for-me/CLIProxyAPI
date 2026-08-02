@@ -36,6 +36,36 @@ type homeResponsesWebsocketDispatcher struct {
 	calls atomic.Int32
 }
 
+func TestBuildResponsesWebsocketErrorPayloadHonorsHeaderPassthrough(t *testing.T) {
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusServiceUnavailable,
+		Error:      errors.New("upstream unavailable"),
+		Addon: http.Header{
+			"Retry-After":  {"3"},
+			"X-Request-Id": {"req-test"},
+		},
+	}
+
+	withoutHeaders, err := buildResponsesWebsocketErrorPayload(errMsg, false)
+	if err != nil {
+		t.Fatalf("build payload without passthrough: %v", err)
+	}
+	if gjson.GetBytes(withoutHeaders, "headers").Exists() {
+		t.Fatalf("headers should be omitted when passthrough is disabled: %s", withoutHeaders)
+	}
+
+	withHeaders, err := buildResponsesWebsocketErrorPayload(errMsg, true)
+	if err != nil {
+		t.Fatalf("build payload with passthrough: %v", err)
+	}
+	if got := gjson.GetBytes(withHeaders, "headers.Retry-After").String(); got != "3" {
+		t.Fatalf("Retry-After = %q, want 3", got)
+	}
+	if got := gjson.GetBytes(withHeaders, "headers.X-Request-Id").String(); got != "req-test" {
+		t.Fatalf("X-Request-Id = %q, want req-test", got)
+	}
+}
+
 func (*homeResponsesWebsocketDispatcher) HeartbeatOK() bool { return true }
 
 func (d *homeResponsesWebsocketDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {

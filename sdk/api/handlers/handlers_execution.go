@@ -310,9 +310,7 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
 	}
 	var addon http.Header
 	if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-		if hdr := he.Headers(); hdr != nil {
-			addon = hdr.Clone()
-		}
+		addon = FilterUpstreamHeaders(he.Headers())
 	}
 	return &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 }
