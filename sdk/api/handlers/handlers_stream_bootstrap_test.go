@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -513,7 +514,38 @@ func registerBootstrapExecutor(t *testing.T, executor *bootstrapStreamExecutor) 
 	return NewBaseAPIHandlers(&sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{BootstrapRetries: 1}}, manager), manager
 }
 
-func TestExecuteStreamWithAuthManager_RetriesAfterDroppedBootstrapPayload(t *testing.T) {
+func TestExecuteStreamWithAuthManager_BootstrapRetriesAfterProvisionalFailure(t *testing.T) {
+	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, call int) (*coreexecutor.StreamResult, error) {
+		chunks := make(chan coreexecutor.StreamChunk, 2)
+		if call == 1 {
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("provisional"), Commitment: coreexecutor.StreamCommitmentProvisional}
+			chunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{HTTPStatus: http.StatusBadGateway, Message: "temporary"}}
+		} else {
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("ok"), Commitment: coreexecutor.StreamCommitmentSemantic}
+		}
+		close(chunks)
+		return &coreexecutor.StreamResult{Headers: http.Header{"X-Upstream-Attempt": {strconv.Itoa(call)}}, Chunks: chunks}, nil
+	}}
+	handler, _ := registerBootstrapExecutor(t, executor)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "bootstrap-model", []byte(`{"model":"bootstrap-model"}`), "")
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	if string(got) != "ok" {
+		t.Fatalf("payload = %q, want only winning attempt", got)
+	}
+	if executor.Calls() != 2 {
+		t.Fatalf("calls=%d, want retry attempt", executor.Calls())
+	}
+}
+
+func TestExecuteStreamWithAuthManager_DoesNotRetryAfterDroppedCommittedPayload(t *testing.T) {
 	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, call int) (*coreexecutor.StreamResult, error) {
 		chunks := make(chan coreexecutor.StreamChunk, 2)
 		if call == 1 {
@@ -539,19 +571,23 @@ func TestExecuteStreamWithAuthManager_RetriesAfterDroppedBootstrapPayload(t *tes
 	for chunk := range dataChan {
 		got = append(got, chunk...)
 	}
+	var gotErr *interfaces.ErrorMessage
 	for msg := range errChan {
 		if msg != nil {
-			t.Fatalf("unexpected stream error: %+v", msg)
+			gotErr = msg
 		}
 	}
-	if string(got) != "ok" {
-		t.Fatalf("stream payload = %q, want ok", got)
+	if len(got) != 0 {
+		t.Fatalf("stream payload = %q, want empty", got)
 	}
-	if executor.Calls() != 2 {
-		t.Fatalf("stream attempts = %d, want 2", executor.Calls())
+	if gotErr == nil || gotErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("stream error = %+v, want 401", gotErr)
 	}
-	if strings.Join(intercepted, ",") != "drop,ok" {
-		t.Fatalf("intercepted payloads = %v, want [drop ok] without double interception", intercepted)
+	if executor.Calls() != 1 {
+		t.Fatalf("stream attempts = %d, want 1", executor.Calls())
+	}
+	if strings.Join(intercepted, ",") != "drop" {
+		t.Fatalf("intercepted payloads = %v, want [drop]", intercepted)
 	}
 }
 
@@ -676,7 +712,7 @@ func TestExecuteStreamWithAuthManager_HomeBootstrapFailureDoesNotRedispatch(t *t
 	registry.SetReleaseSink(releaseSink.MarkDirty)
 	dispatcher := &handlerAccountedHomeDispatcher{}
 	manager.PublishHomeDispatch(dispatcher, registry, 1)
-	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{BootstrapRetries: 1}}, manager)
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{BootstrapRetries: 1, Recovery: sdkconfig.StreamingRecoveryConfig{Attempts: 1, MaxBufferBytes: 1024, MaxRetryWindowSeconds: 5, MaxConcurrent: 1, InitialBackoffMilliseconds: 1, MaxBackoffMilliseconds: 1}}}, manager)
 	handler.SetPluginHost(&handlerInterceptorTestHost{interceptStreamChunk: func(_ context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
 		return pluginapi.StreamChunkInterceptResponse{Body: cloneBytes(req.Body), DropChunk: string(req.Body) == "drop"}
 	}})

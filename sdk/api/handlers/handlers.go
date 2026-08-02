@@ -146,6 +146,26 @@ func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 	return retries
 }
 
+// StreamRecoveryPolicy returns a request-scoped snapshot of normalized streaming recovery configuration.
+func StreamRecoveryPolicy(cfg *config.SDKConfig) coreexecutor.StreamRecoveryPolicy {
+	if cfg == nil {
+		return coreexecutor.StreamRecoveryPolicy{}
+	}
+	streaming := cfg.Streaming
+	streaming.NormalizeStreamingConfig()
+	recovery := streaming.Recovery
+	return coreexecutor.StreamRecoveryPolicy{
+		BootstrapRetries: StreamingBootstrapRetries(cfg),
+		Enabled:          recovery.Enabled,
+		Attempts:         recovery.Attempts,
+		MaxBufferBytes:   recovery.MaxBufferBytes,
+		MaxRetryWindow:   time.Duration(recovery.MaxRetryWindowSeconds) * time.Second,
+		MaxConcurrent:    recovery.MaxConcurrent,
+		InitialBackoff:   time.Duration(recovery.InitialBackoffMilliseconds) * time.Millisecond,
+		MaxBackoff:       time.Duration(recovery.MaxBackoffMilliseconds) * time.Millisecond,
+	}
+}
+
 // PassthroughHeadersEnabled returns whether upstream response headers should be forwarded to clients.
 // Default is false.
 func PassthroughHeadersEnabled(cfg *config.SDKConfig) bool {

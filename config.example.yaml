@@ -265,10 +265,18 @@ ws-auth: true
 
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
-# Streaming behavior (SSE keep-alives + safe bootstrap retries).
+# Streaming behavior (SSE keep-alives + bounded transparent recovery).
 # streaming:
 #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
-#   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
+#   bootstrap-retries: 1    # Default: 0 (disabled). Ignored while full recovery is enabled.
+#   recovery:
+#     enabled: false                      # Explicit opt-in. attempts > 0 also enables compatibility mode.
+#     attempts: 0                         # Optional additional-attempt cap. 0 means no cap when enabled.
+#     max-buffer-bytes: 8388608           # Fails open to ordinary streaming above this limit.
+#     max-retry-window-seconds: 20        # Retry deadline. Default: 20. Max: 3600.
+#     max-concurrent: 16                  # Saturation fails open without waiting.
+#     initial-backoff-milliseconds: 250
+#     max-backoff-milliseconds: 2000
 
 # Signature cache validation for thinking blocks (Antigravity/Claude).
 # When true (default), cached signatures are preferred and validated.

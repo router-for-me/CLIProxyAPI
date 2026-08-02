@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -108,6 +109,26 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	req, opts = cliproxysession.Enrich(req, opts)
+	if streamRecoveryEnabled(opts.StreamRecovery) && !m.HomeEnabled() {
+		if m.acquireStreamRecovery(opts.StreamRecovery.MaxConcurrent) {
+			state := &streamRecoveryState{
+				policy:    opts.StreamRecovery,
+				started:   time.Now(),
+				remaining: opts.StreamRecovery.Attempts,
+				release: func() {
+					m.recoveryInFlight.Add(-1)
+				},
+			}
+			defer func() {
+				if !state.holdUntilDrain {
+					state.releaseSlot()
+				}
+			}()
+			ctx = context.WithValue(ctx, streamRecoveryContextKey{}, state)
+		} else {
+			logEntryWithRequestID(ctx).WithFields(log.Fields{"provider": strings.Join(providers, ","), "model": req.Model, "reason": "saturated", "buffered_bytes": 0, "elapsed": time.Duration(0), "max_concurrent": opts.StreamRecovery.MaxConcurrent}).Debug("stream recovery saturated; using ordinary streaming")
+		}
+	}
 	if m.HomeEnabled() {
 		if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
 			defer unlockSession()
@@ -121,6 +142,11 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
+	var firstBootstrapErr *streamBootstrapError
+	legacyBootstrapRetries := opts.StreamRecovery.BootstrapRetries
+	if streamRecoveryEnabled(opts.StreamRecovery) {
+		legacyBootstrapRetries = 0
+	}
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	for attempt := 0; ; attempt++ {
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
@@ -131,6 +157,15 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			return nil, errStream
 		}
 		lastErr = errStream
+		var bootstrapErr *streamBootstrapError
+		if errors.As(errStream, &bootstrapErr) && bootstrapErr != nil {
+			if firstBootstrapErr == nil {
+				firstBootstrapErr = bootstrapErr
+			}
+			if attempt < legacyBootstrapRetries {
+				continue
+			}
+		}
 		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, retryModel, maxWait)
 		if !shouldRetry {
 			break
@@ -140,6 +175,13 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 	}
 	if lastErr != nil {
+		if firstBootstrapErr != nil && shouldRetrySchedulerPick(lastErr) {
+			status := statusCodeFromError(firstBootstrapErr.cause)
+			if status == 0 || status >= http.StatusInternalServerError {
+				return streamErrorResult(firstBootstrapErr.Headers(), firstBootstrapErr.cause), nil
+			}
+			return streamErrorResult(nil, lastErr), nil
+		}
 		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if result, ok, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); errCredits != nil {
 				return nil, errCredits

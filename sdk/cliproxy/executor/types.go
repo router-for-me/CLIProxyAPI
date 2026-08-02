@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"time"
 
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
@@ -161,6 +162,29 @@ type Options struct {
 	RequestAfterAuthInterceptor RequestAfterAuthInterceptor
 	// ExecutionLifecycle owns Home-dispatched execution resources. Executors must not add it to request metadata.
 	ExecutionLifecycle ExecutionLifecycle
+	// StreamRecovery is an immutable request-scoped snapshot of streaming retry policy.
+	StreamRecovery StreamRecoveryPolicy
+}
+
+// StreamRecoveryPolicy bounds pre-commit streaming retries.
+type StreamRecoveryPolicy struct {
+	// BootstrapRetries preserves legacy retries before semantic stream commitment.
+	BootstrapRetries int
+	// Enabled allows duration-only recovery when Attempts is zero.
+	Enabled bool
+	// Attempts is the number of additional full-stream attempts. Zero means no
+	// attempt limit when Enabled is true.
+	Attempts int
+	// MaxBufferBytes bounds retained translated output before recovery fails open.
+	MaxBufferBytes int
+	// MaxRetryWindow limits when a new attempt may begin.
+	MaxRetryWindow time.Duration
+	// MaxConcurrent limits simultaneous full-buffer recovery requests.
+	MaxConcurrent int
+	// InitialBackoff is the first retry delay ceiling.
+	InitialBackoff time.Duration
+	// MaxBackoff caps retry delay growth.
+	MaxBackoff time.Duration
 }
 
 // ResponseFormatOrSource returns the response target format for an execution.
@@ -181,12 +205,28 @@ type Response struct {
 	Headers http.Header
 }
 
+// StreamCommitment describes whether a stream chunk commits downstream-visible semantics.
+type StreamCommitment uint8
+
+const (
+	// StreamCommitmentUnknown preserves conservative first-payload behavior for existing executors.
+	StreamCommitmentUnknown StreamCommitment = iota
+	// StreamCommitmentProvisional is administrative framing that may be withheld safely.
+	StreamCommitmentProvisional
+	// StreamCommitmentSemantic contains user-visible content or tool semantics.
+	StreamCommitmentSemantic
+	// StreamCommitmentTerminal completes a valid stream response.
+	StreamCommitmentTerminal
+)
+
 // StreamChunk represents a single streaming payload unit emitted by provider executors.
 type StreamChunk struct {
 	// Payload is the raw provider chunk payload.
 	Payload []byte
 	// Err reports any terminal error encountered while producing chunks.
 	Err error
+	// Commitment classifies downstream commitment. Unknown is conservative for compatibility.
+	Commitment StreamCommitment
 }
 
 // StreamResult wraps the streaming response, providing both the chunk channel

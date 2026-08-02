@@ -79,4 +79,80 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+
+	// Recovery configures opt-in full-stream buffering and transparent transient recovery.
+	Recovery StreamingRecoveryConfig `yaml:"recovery,omitempty" json:"recovery,omitempty"`
+}
+
+// StreamingRecoveryConfig bounds full-stream transparent recovery.
+type StreamingRecoveryConfig struct {
+	Enabled                    bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Attempts                   int  `yaml:"attempts,omitempty" json:"attempts,omitempty"`
+	MaxBufferBytes             int  `yaml:"max-buffer-bytes,omitempty" json:"max-buffer-bytes,omitempty"`
+	MaxRetryWindowSeconds      int  `yaml:"max-retry-window-seconds,omitempty" json:"max-retry-window-seconds,omitempty"`
+	MaxConcurrent              int  `yaml:"max-concurrent,omitempty" json:"max-concurrent,omitempty"`
+	InitialBackoffMilliseconds int  `yaml:"initial-backoff-milliseconds,omitempty" json:"initial-backoff-milliseconds,omitempty"`
+	MaxBackoffMilliseconds     int  `yaml:"max-backoff-milliseconds,omitempty" json:"max-backoff-milliseconds,omitempty"`
+}
+
+const (
+	defaultStreamingRecoveryMaxBufferBytes             = 8 << 20
+	maxStreamingRecoveryMaxBufferBytes                 = 64 << 20
+	defaultStreamingRecoveryMaxRetryWindowSeconds      = 20
+	maxStreamingRecoveryMaxRetryWindowSeconds          = 3600
+	defaultStreamingRecoveryMaxConcurrent              = 16
+	maxStreamingRecoveryMaxConcurrent                  = 1024
+	defaultStreamingRecoveryInitialBackoffMilliseconds = 250
+	defaultStreamingRecoveryMaxBackoffMilliseconds     = 2000
+	maxStreamingRecoveryBackoffMilliseconds            = 30000
+	maxStreamingRecoveryAttempts                       = 10
+)
+
+// NormalizeStreamingConfig applies bounded defaults while leaving recovery opt-in.
+func (c *StreamingConfig) NormalizeStreamingConfig() {
+	if c == nil {
+		return
+	}
+	if c.BootstrapRetries < 0 {
+		c.BootstrapRetries = 0
+	}
+	r := &c.Recovery
+	if !r.Enabled && r.Attempts <= 0 {
+		r.Attempts = 0
+		return
+	}
+	if r.Attempts < 0 {
+		r.Attempts = 0
+	}
+	if r.Attempts > maxStreamingRecoveryAttempts {
+		r.Attempts = maxStreamingRecoveryAttempts
+	}
+	if r.MaxBufferBytes <= 0 {
+		r.MaxBufferBytes = defaultStreamingRecoveryMaxBufferBytes
+	} else if r.MaxBufferBytes > maxStreamingRecoveryMaxBufferBytes {
+		r.MaxBufferBytes = maxStreamingRecoveryMaxBufferBytes
+	}
+	if r.MaxRetryWindowSeconds <= 0 {
+		r.MaxRetryWindowSeconds = defaultStreamingRecoveryMaxRetryWindowSeconds
+	} else if r.MaxRetryWindowSeconds > maxStreamingRecoveryMaxRetryWindowSeconds {
+		r.MaxRetryWindowSeconds = maxStreamingRecoveryMaxRetryWindowSeconds
+	}
+	if r.MaxConcurrent <= 0 {
+		r.MaxConcurrent = defaultStreamingRecoveryMaxConcurrent
+	} else if r.MaxConcurrent > maxStreamingRecoveryMaxConcurrent {
+		r.MaxConcurrent = maxStreamingRecoveryMaxConcurrent
+	}
+	if r.InitialBackoffMilliseconds <= 0 {
+		r.InitialBackoffMilliseconds = defaultStreamingRecoveryInitialBackoffMilliseconds
+	} else if r.InitialBackoffMilliseconds > maxStreamingRecoveryBackoffMilliseconds {
+		r.InitialBackoffMilliseconds = maxStreamingRecoveryBackoffMilliseconds
+	}
+	if r.MaxBackoffMilliseconds <= 0 {
+		r.MaxBackoffMilliseconds = defaultStreamingRecoveryMaxBackoffMilliseconds
+	} else if r.MaxBackoffMilliseconds > maxStreamingRecoveryBackoffMilliseconds {
+		r.MaxBackoffMilliseconds = maxStreamingRecoveryBackoffMilliseconds
+	}
+	if r.MaxBackoffMilliseconds < r.InitialBackoffMilliseconds {
+		r.MaxBackoffMilliseconds = r.InitialBackoffMilliseconds
+	}
 }
