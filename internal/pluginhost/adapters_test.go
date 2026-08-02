@@ -2204,6 +2204,32 @@ func TestUsageAdapterPreservesExplicitGenerateFalse(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterPropagatesCorrelationFields(t *testing.T) {
+	var got pluginapi.UsageRecord
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		got = record
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-correlation",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{host: host, pluginID: "usage-correlation"}
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider:           "provider",
+		InferenceSessionID: "studio-session",
+		GatewayRequestID:   "gateway-request",
+		ProviderRequestID:  "provider-request",
+		AttemptID:          "attempt",
+		EventID:            "event",
+		TraceID:            "4bf92f3577b34da6a3ce929d0e0e4736",
+	})
+	if got.UsageSchemaVersion == 0 || got.InferenceSessionID != "studio-session" || got.GatewayRequestID != "gateway-request" || got.ProviderRequestID != "provider-request" || got.AttemptID != "attempt" || got.EventID != "event" || got.TraceID == "" {
+		t.Fatalf("plugin usage record lost correlation: %+v", got)
+	}
+}
+
 func TestUsageManagerRegisterNamedReplacesWithoutDuplicateDispatch(t *testing.T) {
 	manager := coreusage.NewManager(0)
 	defer manager.Stop()

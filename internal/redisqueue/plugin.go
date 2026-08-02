@@ -24,6 +24,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if !Enabled() || !UsageStatisticsEnabled() {
 		return
 	}
+	record = coreusage.NormalizeRecord(ctx, record)
 
 	timestamp := record.RequestedAt
 	if timestamp.IsZero() {
@@ -108,6 +109,12 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		ExecutorType:        executorType,
 		Model:               modelName,
 		Alias:               aliasName,
+		InferenceSessionID:  record.InferenceSessionID,
+		GatewayRequestID:    record.GatewayRequestID,
+		ProviderRequestID:   record.ProviderRequestID,
+		AttemptID:           record.AttemptID,
+		EventID:             record.EventID,
+		TraceID:             record.TraceID,
 		Endpoint:            resolveEndpoint(ctx),
 		AuthType:            authType,
 		APIKey:              apiKey,
@@ -130,6 +137,12 @@ type queuedUsageDetail struct {
 	ExecutorType        string                   `json:"executor_type"`
 	Model               string                   `json:"model"`
 	Alias               string                   `json:"alias"`
+	InferenceSessionID  string                   `json:"inference_session_id"`
+	GatewayRequestID    string                   `json:"gateway_request_id"`
+	ProviderRequestID   string                   `json:"provider_request_id,omitempty"`
+	AttemptID           string                   `json:"attempt_id,omitempty"`
+	EventID             string                   `json:"event_id"`
+	TraceID             string                   `json:"trace_id"`
 	Endpoint            string                   `json:"endpoint"`
 	AuthType            string                   `json:"auth_type"`
 	APIKey              string                   `json:"api_key"`

@@ -22,24 +22,28 @@ import (
 )
 
 type UsageReporter struct {
-	provider     string
-	executorType string
-	model        string
-	alias        string
-	authID       string
-	authIndex    string
-	authType     string
-	apiKey       string
-	source       string
-	reasoning    string
-	serviceTier  string
-	generate     bool
-	requestedAt  time.Time
-	ttftMu       sync.RWMutex
-	ttft         time.Duration
-	ttftStart    time.Time
-	ttftSet      bool
-	once         sync.Once
+	provider           string
+	executorType       string
+	model              string
+	alias              string
+	authID             string
+	authIndex          string
+	authType           string
+	apiKey             string
+	source             string
+	reasoning          string
+	serviceTier        string
+	generate           bool
+	inferenceSessionID string
+	gatewayRequestID   string
+	traceID            string
+	attemptID          string
+	requestedAt        time.Time
+	ttftMu             sync.RWMutex
+	ttft               time.Duration
+	ttftStart          time.Time
+	ttftSet            bool
+	once               sync.Once
 }
 
 type usageExecutor interface {
@@ -57,22 +61,32 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
+	ctx = usage.EnsureRequestCorrelation(ctx)
 	apiKey := APIKeyFromContext(ctx)
 	alias := usage.RequestedModelAliasFromContext(ctx)
 	if alias == "" {
 		alias = model
 	}
+	correlation := usage.CorrelationFromContext(ctx)
+	attemptID := correlation.AttemptID
+	if attemptID == "" {
+		attemptID = usage.NewAttemptID()
+	}
 	reporter := &UsageReporter{
-		provider:    provider,
-		model:       model,
-		alias:       strings.TrimSpace(alias),
-		requestedAt: time.Now(),
-		apiKey:      apiKey,
-		source:      resolveUsageSource(auth, apiKey),
-		authType:    resolveUsageAuthType(auth),
-		reasoning:   usage.ReasoningEffortFromContext(ctx),
-		serviceTier: usage.ServiceTierFromContext(ctx),
-		generate:    usage.GenerateFromContext(ctx),
+		provider:           provider,
+		model:              model,
+		alias:              strings.TrimSpace(alias),
+		requestedAt:        time.Now(),
+		apiKey:             apiKey,
+		source:             resolveUsageSource(auth, apiKey),
+		authType:           resolveUsageAuthType(auth),
+		reasoning:          usage.ReasoningEffortFromContext(ctx),
+		serviceTier:        usage.ServiceTierFromContext(ctx),
+		generate:           usage.GenerateFromContext(ctx),
+		inferenceSessionID: correlation.InferenceSessionID,
+		gatewayRequestID:   correlation.GatewayRequestID,
+		traceID:            correlation.TraceID,
+		attemptID:          attemptID,
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -237,6 +251,12 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 
 func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) {
 	record.ResponseHeaders = internallogging.GetResponseHeaders(ctx)
+	if record.ProviderRequestID == "" {
+		record.ProviderRequestID = usage.ProviderRequestIDFromContext(ctx)
+	}
+	if record.ProviderRequestID == "" {
+		record.ProviderRequestID = usage.ProviderRequestIDFromHeaders(record.ResponseHeaders)
+	}
 	usage.PublishRecord(ctx, record)
 }
 
@@ -261,6 +281,10 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Model:               model,
 		Alias:               r.alias,
 		Source:              r.source,
+		InferenceSessionID:  r.inferenceSessionID,
+		GatewayRequestID:    r.gatewayRequestID,
+		AttemptID:           r.attemptID,
+		TraceID:             r.traceID,
 		APIKey:              r.apiKey,
 		AuthID:              r.authID,
 		AuthIndex:           r.authIndex,

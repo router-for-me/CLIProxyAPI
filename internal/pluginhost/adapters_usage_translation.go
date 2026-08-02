@@ -10,6 +10,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
@@ -142,22 +143,29 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 		}
 	}()
 	plugin.HandleUsage(ctx, pluginapi.UsageRecord{
-		Provider:        record.Provider,
-		ExecutorType:    record.ExecutorType,
-		Model:           record.Model,
-		Alias:           record.Alias,
-		APIKey:          record.APIKey,
-		AuthID:          record.AuthID,
-		AuthIndex:       record.AuthIndex,
-		AuthType:        record.AuthType,
-		Source:          record.Source,
-		ReasoningEffort: record.ReasoningEffort,
-		ServiceTier:     record.ServiceTier,
-		Generate:        coreusage.GenerateEnabled(record.Generate),
-		RequestedAt:     record.RequestedAt,
-		Latency:         record.Latency,
-		TTFT:            record.TTFT,
-		Failed:          record.Failed,
+		Provider:           record.Provider,
+		ExecutorType:       record.ExecutorType,
+		Model:              record.Model,
+		Alias:              record.Alias,
+		APIKey:             record.APIKey,
+		AuthID:             record.AuthID,
+		AuthIndex:          record.AuthIndex,
+		AuthType:           record.AuthType,
+		Source:             record.Source,
+		UsageSchemaVersion: pluginabi.UsageSchemaVersion,
+		InferenceSessionID: record.InferenceSessionID,
+		GatewayRequestID:   record.GatewayRequestID,
+		ProviderRequestID:  record.ProviderRequestID,
+		AttemptID:          record.AttemptID,
+		EventID:            record.EventID,
+		TraceID:            record.TraceID,
+		ReasoningEffort:    record.ReasoningEffort,
+		ServiceTier:        record.ServiceTier,
+		Generate:           coreusage.GenerateEnabled(record.Generate),
+		RequestedAt:        record.RequestedAt,
+		Latency:            record.Latency,
+		TTFT:               record.TTFT,
+		Failed:             record.Failed,
 		Failure: pluginapi.UsageFailure{
 			StatusCode: record.Fail.StatusCode,
 			Body:       record.Fail.Body,

@@ -30,6 +30,34 @@ var _ StreamChunkInterceptor = (*compileTimePlugin)(nil)
 var _ ThinkingApplier = (*compileTimePlugin)(nil)
 var _ UsagePlugin = (*compileTimePlugin)(nil)
 var _ CommandLinePlugin = (*compileTimePlugin)(nil)
+
+func TestUsageRecordCorrelationJSONUsesStableNames(t *testing.T) {
+	raw, errMarshal := json.Marshal(UsageRecord{
+		UsageSchemaVersion: 1,
+		InferenceSessionID: "studio-session",
+		GatewayRequestID:   "gateway-request",
+		ProviderRequestID:  "provider-request",
+		AttemptID:          "attempt",
+		EventID:            "event",
+		TraceID:            "4bf92f3577b34da6a3ce929d0e0e4736",
+	})
+	if errMarshal != nil {
+		t.Fatalf("json.Marshal() error = %v", errMarshal)
+	}
+	for _, field := range []string{"usageSchemaVersion", "inferenceSessionId", "gatewayRequestId", "providerRequestId", "attemptId", "eventId", "traceId"} {
+		if !strings.Contains(string(raw), `"`+field+`"`) {
+			t.Fatalf("JSON payload missing %q: %s", field, raw)
+		}
+	}
+	var decoded UsageRecord
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+	}
+	if decoded.InferenceSessionID != "studio-session" || decoded.GatewayRequestID != "gateway-request" || decoded.ProviderRequestID != "provider-request" || decoded.AttemptID != "attempt" || decoded.EventID != "event" || decoded.TraceID == "" {
+		t.Fatalf("decoded correlation = %+v", decoded)
+	}
+}
+
 var _ ManagementAPI = (*compileTimePlugin)(nil)
 var _ ManagementHandler = (*compileTimePlugin)(nil)
 

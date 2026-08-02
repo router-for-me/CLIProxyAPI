@@ -410,6 +410,28 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
 		}
 	}
+	if requestCtx != nil {
+		if sessionID := coreusage.InferenceSessionIDFromContext(requestCtx); sessionID != "" {
+			parentCtx = coreusage.WithInferenceSessionID(parentCtx, sessionID)
+		}
+		if gatewayRequestID := coreusage.GatewayRequestIDFromContext(requestCtx); gatewayRequestID != "" {
+			parentCtx = coreusage.WithGatewayRequestID(parentCtx, gatewayRequestID)
+		}
+		if traceID := coreusage.TraceIDFromContext(requestCtx); traceID != "" {
+			parentCtx = coreusage.WithTraceID(parentCtx, traceID)
+		}
+	}
+	if c != nil && c.Request != nil {
+		if value, exists := c.Get("studioInferenceSessionID"); exists {
+			if sessionID, ok := value.(string); ok && coreusage.InferenceSessionIDFromContext(parentCtx) == "" {
+				parentCtx = coreusage.WithInferenceSessionID(parentCtx, sessionID)
+			}
+		}
+		if traceID, errTrace := coreusage.ParseTraceParent(c.GetHeader(coreusage.TraceParentHeader)); errTrace == nil && coreusage.TraceIDFromContext(parentCtx) == "" {
+			parentCtx = coreusage.WithTraceID(parentCtx, traceID)
+		}
+	}
+	parentCtx = coreusage.EnsureRequestCorrelation(parentCtx)
 	newCtx, cancel := context.WithCancel(parentCtx)
 
 	endpoint := ""

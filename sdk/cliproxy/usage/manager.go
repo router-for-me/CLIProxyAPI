@@ -30,6 +30,18 @@ type Record struct {
 	AuthIndex    string
 	AuthType     string
 	Source       string
+	// InferenceSessionID is the Studio-issued logical inference session identity.
+	InferenceSessionID string
+	// GatewayRequestID identifies the inbound request handled by this gateway.
+	GatewayRequestID string
+	// ProviderRequestID identifies the provider-assigned request when available.
+	ProviderRequestID string
+	// AttemptID identifies one physical provider attempt and changes on retries.
+	AttemptID string
+	// EventID is stable for this terminal usage event across delivery retries.
+	EventID string
+	// TraceID is a W3C-compatible distributed trace identifier.
+	TraceID string
 	// ReasoningEffort stores the translated upstream thinking level for request event logs.
 	ReasoningEffort string
 	// ServiceTier stores the client-requested service tier.
@@ -311,6 +323,7 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	if m == nil {
 		return
 	}
+	record = NormalizeRecord(ctx, record)
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
 	m.mu.Lock()
