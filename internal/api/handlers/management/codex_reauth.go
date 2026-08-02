@@ -31,9 +31,10 @@ const (
 )
 
 var (
-	errCodexReauthBadRequest = errors.New("invalid reauth request")
-	errCodexReauthNotFound   = errors.New("reauth target not found")
-	errCodexReauthConflict   = errors.New("reauth target changed")
+	errCodexReauthBadRequest   = errors.New("invalid reauth request")
+	errCodexReauthNotFound     = errors.New("reauth target not found")
+	errCodexReauthConflict     = errors.New("reauth target changed")
+	codexReauthVerificationURL = "https://chatgpt.com/backend-api/codex/models"
 )
 
 type codexReauthTarget struct {
@@ -154,6 +155,21 @@ func (s *codexReauthStageStore) take(handle string) (codexReauthStage, bool) {
 		delete(s.stages, strings.TrimSpace(handle))
 	}
 	return stage, ok
+}
+
+func (s *codexReauthStageStore) removeTarget(fileName string) {
+	if s == nil {
+		return
+	}
+	fileName = filepath.Base(strings.TrimSpace(fileName))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for handle, stage := range s.stages {
+		if stage.Target.FileName == fileName {
+			_ = os.Remove(stage.Path)
+			delete(s.stages, handle)
+		}
+	}
 }
 
 func (s *codexReauthStageStore) purgeLocked(now time.Time) {
@@ -332,7 +348,7 @@ func (h *Handler) stageCodexReauthCandidate(target codexReauthTarget, bundle *co
 }
 
 func (h *Handler) verifyCodexCandidate(ctx context.Context, auth *coreauth.Auth) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://chatgpt.com/backend-api/codex/models", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codexReauthVerificationURL, nil)
 	if err != nil {
 		return err
 	}
@@ -345,7 +361,7 @@ func (h *Handler) verifyCodexCandidate(ctx context.Context, auth *coreauth.Auth)
 		req.Header.Set("Chatgpt-Account-Id", accountID)
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Transport: h.apiCallTransport(auth), Timeout: 20 * time.Second}).Do(req)
 	if err != nil {
 		return err
 	}
@@ -416,12 +432,47 @@ func (h *Handler) AdoptCodexReauth(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to adopt replacement credential"})
 		return
 	}
-	if _, err = h.authManager.Update(coreauth.WithSkipPersist(c.Request.Context()), candidate); err != nil {
+	if err = h.updateCodexReauth(c.Request.Context(), candidate); err != nil {
 		_ = atomicCredentialReplace(stage.Target.Path, current)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to adopt replacement credential"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "auth_index": stage.Target.AuthIndex, "disabled": true})
+}
+
+func (h *Handler) VerifyCodexReauth(c *gin.Context) {
+	var req struct {
+		AuthIndex string `json:"auth_index"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(c.Request.Body, 4097))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&req) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid reauth request"})
+		return
+	}
+	req.AuthIndex = strings.TrimSpace(req.AuthIndex)
+	var target *coreauth.Auth
+	for _, auth := range h.authManager.List() {
+		if auth != nil && lockedAuthIndex(auth) == req.AuthIndex {
+			if target != nil {
+				c.JSON(http.StatusConflict, gin.H{"error": "reauth target changed"})
+				return
+			}
+			target = auth
+		}
+	}
+	if target == nil || !strings.EqualFold(target.Provider, "codex") || target.Disabled || target.Status == coreauth.StatusDisabled || isRuntimeOnlyAuth(target) {
+		c.JSON(http.StatusConflict, gin.H{"error": "reauth target changed"})
+		return
+	}
+	verifyCtx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+	err := h.verifyCodexReauth(verifyCtx, target)
+	cancel()
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "replacement credential verification failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "auth_index": req.AuthIndex, "disabled": false})
 }
 
 func atomicCredentialReplace(path string, raw []byte) error {

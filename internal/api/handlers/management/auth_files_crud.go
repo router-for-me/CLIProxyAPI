@@ -167,6 +167,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 				}
 				deleted++
 				h.removeAuth(ctx, full)
+				h.codexReauthStages.removeTarget(name)
 			}
 		}
 		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
@@ -375,6 +376,7 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 		return filepath.Base(name), http.StatusInternalServerError, errDeleteRecord
 	}
 	h.removeAuthsForPath(ctx, targetPath, targetID)
+	h.codexReauthStages.removeTarget(filepath.Base(name))
 	return filepath.Base(name), http.StatusOK, nil
 }
 

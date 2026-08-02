@@ -63,6 +63,7 @@ type Handler struct {
 	pluginReleaseCache      map[string]pluginReleaseCacheEntry
 	codexReauthStages       *codexReauthStageStore
 	verifyCodexReauth       func(context.Context, *coreauth.Auth) error
+	updateCodexReauth       func(context.Context, *coreauth.Auth) error
 }
 
 type configReloadSnapshot struct {
@@ -86,6 +87,10 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		codexReauthStages:   newCodexReauthStageStore(cfg),
 	}
 	h.verifyCodexReauth = h.verifyCodexCandidate
+	h.updateCodexReauth = func(ctx context.Context, auth *coreauth.Auth) error {
+		_, err := h.authManager.Update(coreauth.WithSkipPersist(ctx), auth)
+		return err
+	}
 	h.startAttemptCleanup()
 	return h
 }

@@ -169,6 +169,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
 		mgmt.POST("/codex-auth-url", s.mgmt.RequestCodexToken)
 		mgmt.POST("/codex-reauth", s.mgmt.AdoptCodexReauth)
+		mgmt.POST("/codex-reauth/verify", s.mgmt.VerifyCodexReauth)
 		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
