@@ -146,6 +146,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		cache.ID = identityState.promptCacheKey
 	}
 	rawJSON, identityState.application = applyCodexOfficialApplicationIdentity(e.cfg, auth, url, rawJSON)
+	rawJSON = normalizeCodexUpstreamRequestMetadata(url, rawJSON)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
 	if err != nil {
 		return nil, nil, codexIdentityConfuseState{}, err
@@ -154,6 +155,25 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		httpReq.Header.Set("Session-Id", cache.ID)
 	}
 	return httpReq, rawJSON, identityState, nil
+}
+
+// normalizeCodexUpstreamRequestMetadata matches the request shapes used by the
+// official Codex client. Responses requests carry client_metadata but not the
+// public Responses metadata field, while compact requests carry neither.
+func normalizeCodexUpstreamRequestMetadata(requestURL string, body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+
+	if updated, errDelete := sjson.DeleteBytes(body, "metadata"); errDelete == nil {
+		body = updated
+	}
+	if codexApplicationRequestKind(requestURL) == "compaction" {
+		if updated, errDelete := sjson.DeleteBytes(body, "client_metadata"); errDelete == nil {
+			body = updated
+		}
+	}
+	return body
 }
 
 func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, userPayload []byte, rawJSON []byte) ([]byte, codexIdentityConfuseState) {

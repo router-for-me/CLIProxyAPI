@@ -79,7 +79,7 @@ func TestCodexOfficialFingerprintCacheHelperIntegration(t *testing.T) {
 	}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.6-sol",
-		Payload: []byte(`{"prompt_cache_key":"cache-integration-session"}`),
+		Payload: []byte(`{"prompt_cache_key":"cache-integration-session","metadata":{"source":"client"},"client_metadata":{"custom-key":"preserved"}}`),
 	}
 	httpReq, body, identityState, err := executor.cacheHelper(
 		context.Background(),
@@ -97,12 +97,60 @@ func TestCodexOfficialFingerprintCacheHelperIntegration(t *testing.T) {
 		t.Fatal("cacheHelper() did not assemble official application identity")
 	}
 	profile := registry.GetCodexFingerprintProfile()
+	if gjson.GetBytes(body, "metadata").Exists() {
+		t.Fatalf("cacheHelper() body retained unsupported metadata: %s", body)
+	}
+	if got := gjson.GetBytes(body, "client_metadata.custom-key").String(); got != "preserved" {
+		t.Fatalf("cacheHelper() client_metadata.custom-key = %q, want preserved", got)
+	}
 	if got := gjson.GetBytes(body, "client_metadata."+profile.Headers.InstallationID).String(); got == "" {
 		t.Fatal("cacheHelper() body is missing installation identity")
 	}
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	if got := httpReq.Header.Get(profile.Headers.WindowID); got != identityState.application.windowID {
 		t.Fatalf("window header = %q, want %q", got, identityState.application.windowID)
+	}
+}
+
+func TestCodexOfficialFingerprintCompactCacheHelperIntegration(t *testing.T) {
+	executor := &CodexExecutor{cfg: &config.Config{}}
+	auth := &cliproxyauth.Auth{
+		ID:       "oauth-compact-integration",
+		Metadata: map[string]any{"access_token": "oauth-token"},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol",
+		Payload: []byte(`{"prompt_cache_key":"compact-integration-session","metadata":{"source":"client"},"client_metadata":{"custom-key":"drop"}}`),
+	}
+	httpReq, body, identityState, err := executor.cacheHelper(
+		context.Background(),
+		sdktranslator.FormatOpenAIResponse,
+		"https://chatgpt.com/backend-api/codex/responses/compact",
+		auth,
+		req,
+		req.Payload,
+		req.Payload,
+	)
+	if err != nil {
+		t.Fatalf("cacheHelper() error = %v", err)
+	}
+	if !identityState.application.enabled {
+		t.Fatal("cacheHelper() did not assemble official compact application identity")
+	}
+	if gjson.GetBytes(body, "metadata").Exists() {
+		t.Fatalf("compact body retained unsupported metadata: %s", body)
+	}
+	if gjson.GetBytes(body, "client_metadata").Exists() {
+		t.Fatalf("compact body retained unsupported client_metadata: %s", body)
+	}
+
+	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
+	profile := registry.GetCodexFingerprintProfile()
+	if got := httpReq.Header.Get(profile.Headers.InstallationID); got != identityState.application.installationID {
+		t.Fatalf("compact installation header = %q, want %q", got, identityState.application.installationID)
+	}
+	if got := httpReq.Header.Get(profile.Headers.TurnMetadata); got != identityState.application.turnMetadataJSON {
+		t.Fatalf("compact turn metadata header = %q, want %q", got, identityState.application.turnMetadataJSON)
 	}
 }
 
