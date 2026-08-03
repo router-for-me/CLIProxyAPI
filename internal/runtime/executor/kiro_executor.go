@@ -1585,8 +1585,14 @@ var kiroVersionAliases = [...]struct {
 	hyphenated string
 	canonical  string
 }{
+	// Claude families
 	{"claude-sonnet-4-5", "claude-sonnet-4.5"},
+	{"claude-sonnet-4-6", "claude-sonnet-4.6"},
+	{"claude-opus-4-5", "claude-opus-4.5"},
 	{"claude-opus-4-7", "claude-opus-4.7"},
+	{"claude-haiku-4-5", "claude-haiku-4.5"},
+	// Other Kiro backend families
+	{"minimax-m2-1", "minimax-m2.1"},
 	{"minimax-m2-5", "minimax-m2.5"},
 	{"gpt-5-6", "gpt-5.6"},
 	{"kimi-k2-7", "kimi-k2.7"},
