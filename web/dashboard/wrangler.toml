@@ -17,7 +17,7 @@
 #
 # After future frontend changes: npm run build && npx wrangler deploy
 
-name = "nixllm-dashboard"
+name = "nixllm"
 main = "worker/proxy.js"
 compatibility_date = "2025-09-01"
 
