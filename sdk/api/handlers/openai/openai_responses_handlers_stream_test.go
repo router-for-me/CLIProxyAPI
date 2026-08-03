@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,52 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
 )
+
+func TestOpenAIChatStreamOwnsExactlyOneDoneMarker(t *testing.T) {
+	newHandler := func(t *testing.T) (*OpenAIAPIHandler, *httptest.ResponseRecorder, *gin.Context, http.Flusher) {
+		t.Helper()
+		gin.SetMode(gin.TestMode)
+		h := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		flusher, ok := c.Writer.(http.Flusher)
+		if !ok {
+			t.Fatal("expected gin writer to implement http.Flusher")
+		}
+		return h, recorder, c, flusher
+	}
+
+	t.Run("clean stream", func(t *testing.T) {
+		h, recorder, c, flusher := newHandler(t)
+		data := make(chan []byte, 1)
+		errs := make(chan *interfaces.ErrorMessage)
+		data <- []byte(`{"id":"chatcmpl-1","choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`)
+		close(data)
+		close(errs)
+		h.handleStreamResult(c, flusher, func(error) {}, data, errs)
+		body := recorder.Body.String()
+		if got := strings.Count(body, "data: [DONE]\n\n"); got != 1 {
+			t.Fatalf("DONE markers = %d, want exactly 1; body=%q", got, body)
+		}
+		if !strings.Contains(body, `"content":"ok"`) {
+			t.Fatalf("stream payload missing before DONE: %q", body)
+		}
+	})
+
+	t.Run("terminal error", func(t *testing.T) {
+		h, recorder, c, flusher := newHandler(t)
+		data := make(chan []byte)
+		errs := make(chan *interfaces.ErrorMessage, 1)
+		errs <- &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errors.New("upstream reset")}
+		close(errs)
+		close(data)
+		h.handleStreamResult(c, flusher, func(error) {}, data, errs)
+		if body := recorder.Body.String(); strings.Contains(body, "[DONE]") {
+			t.Fatalf("terminal error emitted DONE: %q", body)
+		}
+	})
+}
 
 func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *httptest.ResponseRecorder, *gin.Context, http.Flusher) {
 	t.Helper()

@@ -16,7 +16,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	"github.com/google/uuid"
 	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
@@ -470,7 +469,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 		if hasSession && session.stream != nil && session.authID == authID {
 			log.Debugf("cursor: resuming session %s with %d tool results", sessionKey, len(parsed.ToolResults))
-			return e.resumeWithToolResults(ctx, session, parsed, from, to, req, originalPayload, payload, needsTranslate)
+			return e.resumeWithToolResults(ctx, sessionKey, session, parsed, from, to, req, originalPayload, payload, needsTranslate)
 		}
 		if hasSession && session.authID != authID {
 			log.Warnf("cursor: session %s belongs to auth %s, but request is from %s — skipping resume", sessionKey, session.authID, authID)
@@ -569,19 +568,25 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	var outMu sync.Mutex
 	currentOut := chunks
 	currentOutputCtx := ctx
+	closeCurrentOutput := func() {
+		outMu.Lock()
+		if currentOut != nil {
+			close(currentOut)
+			currentOut = nil
+		}
+		outMu.Unlock()
+	}
 
 	emitToOut := func(chunk cliproxyexecutor.StreamChunk) bool {
 		outMu.Lock()
-		out := currentOut
-		outputCtx := currentOutputCtx
-		outMu.Unlock()
-		if out == nil {
+		defer outMu.Unlock()
+		if currentOut == nil {
 			return false
 		}
 		select {
-		case out <- chunk:
+		case currentOut <- chunk:
 			return true
-		case <-outputCtx.Done():
+		case <-currentOutputCtx.Done():
 			return false
 		case <-sessionCtx.Done():
 			return false
@@ -686,17 +691,12 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				sendChunkSwitchable(`{}`, `"tool_calls"`)
 				sendDoneSwitchable()
 
-				// Close current output to end the current HTTP SSE response
-				outMu.Lock()
-				if currentOut != nil {
-					close(currentOut)
-					currentOut = nil
-				}
-				outMu.Unlock()
-
-				// Create new resume output channel, reuse the same toolResultCh
+				// Publish the resumable session before closing the current output.
+				// Channel closure lets the client submit its tool result immediately;
+				// that request must never observe an empty session map and cold-start.
 				resumeOut := make(chan cliproxyexecutor.StreamChunk, 64)
 				log.Debugf("cursor: saving session %s for MCP tool resume (tool=%s)", sessionKey, exec.ToolName)
+				outMu.Lock()
 				e.mu.Lock()
 				e.sessions[sessionKey] = &cursorSession{
 					stream:       stream,
@@ -720,6 +720,15 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				}
 				e.mu.Unlock()
 				resumeOutCh = resumeOut
+
+				// Publish and close under the output lock. An immediate resume can
+				// find the session, but switchOutput cannot replace currentOut until
+				// the original response has been closed.
+				if currentOut != nil {
+					close(currentOut)
+					currentOut = nil
+				}
+				outMu.Unlock()
 
 				// processH2SessionFrames will now block on toolResultCh (inline wait loop)
 				// while continuing to handle KV messages.
@@ -748,24 +757,14 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				// Partial output must never be presented as a successful stop.
 				log.Warnf("cursor: stream error after data sent (auth=%s conv=%s): %v", authID, conversationId, streamErr)
 				emitToOut(cliproxyexecutor.StreamChunk{Err: classifyCursorError(fmt.Errorf("cursor: stream interrupted after partial response: %w", streamErr))})
-				outMu.Lock()
-				if currentOut != nil {
-					close(currentOut)
-					currentOut = nil
-				}
-				outMu.Unlock()
+				closeCurrentOutput()
 				sessionCancel()
 				stream.Close()
 				return
 			} else {
 				log.Warnf("cursor: stream error before data sent (auth=%s conv=%s): %v — signaling retry", authID, conversationId, streamErr)
 				streamErrCh <- streamErr
-				outMu.Lock()
-				if currentOut != nil {
-					close(currentOut)
-					currentOut = nil
-				}
-				outMu.Unlock()
+				closeCurrentOutput()
 				sessionCancel()
 				stream.Close()
 				return
@@ -793,12 +792,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		_ = stopDelta // unused
 
 		// Close whatever output channel is still active
-		outMu.Lock()
-		if currentOut != nil {
-			close(currentOut)
-			currentOut = nil
-		}
-		outMu.Unlock()
+		closeCurrentOutput()
 		sessionCancel()
 		stream.Close()
 	}()
@@ -812,6 +806,14 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	case <-firstChunkSent:
 		// Data started flowing — return stream to client
 		return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+	case <-ctx.Done():
+		// No response was committed, so the request owns teardown. Without this
+		// branch a canceled client can leave ExecuteStream waiting forever while
+		// the detached Cursor session and heartbeat remain alive.
+		closeCurrentOutput()
+		sessionCancel()
+		stream.Close()
+		return nil, ctx.Err()
 	}
 }
 
@@ -822,6 +824,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 // handling KV messages the whole time.
 func (e *CursorExecutor) resumeWithToolResults(
 	ctx context.Context,
+	sessionKey string,
 	session *cursorSession,
 	parsed *parsedOpenAIRequest,
 	from, to sdktranslator.Format,
@@ -831,11 +834,55 @@ func (e *CursorExecutor) resumeWithToolResults(
 ) (*cliproxyexecutor.StreamResult, error) {
 	log.Debugf("cursor: resumeWithToolResults: injecting %d tool results via channel", len(parsed.ToolResults))
 
+	closeSession := func() {
+		if session.cancel != nil {
+			session.cancel()
+		}
+		if session.stream != nil {
+			session.stream.Close()
+		}
+	}
+	restoreSession := func() {
+		restored := false
+		e.mu.Lock()
+		if _, exists := e.sessions[sessionKey]; !exists {
+			e.sessions[sessionKey] = session
+			restored = true
+		}
+		e.mu.Unlock()
+		if !restored {
+			// A concurrent request replaced this session while ownership was in
+			// transit. It is no longer safe to restore, so release its resources.
+			closeSession()
+		}
+	}
 	if session.toolResultCh == nil {
+		closeSession()
 		return nil, fmt.Errorf("cursor: session has no toolResultCh (stale session?)")
 	}
 	if session.resumeOutCh == nil {
+		closeSession()
 		return nil, fmt.Errorf("cursor: session has no resumeOutCh")
+	}
+	if err := ctx.Err(); err != nil {
+		restoreSession()
+		return nil, err
+	}
+	matchedPending := false
+	for _, result := range parsed.ToolResults {
+		for _, pending := range session.pending {
+			if result.ToolCallId == pending.ToolCallId {
+				matchedPending = true
+				break
+			}
+		}
+		if matchedPending {
+			break
+		}
+	}
+	if !matchedPending {
+		restoreSession()
+		return nil, fmt.Errorf("cursor: tool results do not match any pending tool call")
 	}
 
 	log.Debugf("cursor: resumeWithToolResults: switching output to resumeOutCh and injecting results")
@@ -851,6 +898,7 @@ func (e *CursorExecutor) resumeWithToolResults(
 	select {
 	case session.toolResultCh <- parsed.ToolResults:
 	case <-ctx.Done():
+		restoreSession()
 		return nil, ctx.Err()
 	}
 
@@ -1350,7 +1398,10 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 			continue
 		case "tool":
 			p.ToolResults = append(p.ToolResults, toolResultInfo{
-				ToolCallId: normalizeToolCallID(msg.Get("tool_call_id").String()),
+				// Tool result IDs come from the client and must match the exact ID
+				// emitted in the preceding assistant tool call. Re-encoding here
+				// breaks resumed sessions and corrupts otherwise valid opaque IDs.
+				ToolCallId: msg.Get("tool_call_id").String(),
 				Content:    extractTextContent(msg.Get("content")),
 			})
 		case "user":
@@ -1685,15 +1736,10 @@ func jsonString(s string) string {
 }
 
 func normalizeToolCallID(id string) string {
-	var normalized strings.Builder
-	for _, r := range id {
-		if unicode.IsControl(r) || unicode.IsSpace(r) {
-			fmt.Fprintf(&normalized, "_u%04x_", r)
-			continue
-		}
-		normalized.WriteRune(r)
+	if id == "" {
+		return ""
 	}
-	return normalized.String()
+	return "cursor_call_" + base64.RawURLEncoding.EncodeToString([]byte(id))
 }
 
 func decodeMcpArgsToJSON(args map[string][]byte) string {
