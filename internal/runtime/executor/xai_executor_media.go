@@ -42,6 +42,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 	applyXAIHeaders(httpReq, auth, token, false, "")
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), payload)
 
+	helps.PrepareUpstreamForProxy(ctx, e.cfg, auth)
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
@@ -119,6 +120,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 	}
 	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), payload)
 
+	helps.PrepareUpstreamForProxy(ctx, e.cfg, auth)
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)

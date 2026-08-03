@@ -9,6 +9,12 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// WarpRotateURL is the base URL of the host-side Warp LB rotate agent.
+	// When set (e.g. "http://172.24.0.1:8199"), upstream requests may claim a
+	// rotate key, drain one LB, close idle proxy connections, and trigger an
+	// async restart before continuing. Empty disables the feature.
+	WarpRotateURL string `yaml:"warp-rotate-url" json:"warp-rotate-url"`
+
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
 	//
 	// Supported values:

@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LLM 请求日志</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --line: #e6ebf2;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --accent: #2563eb;
+      --ok: #059669;
+      --bad: #dc2626;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: linear-gradient(180deg, #eef3ff 0%, var(--bg) 240px);
+      color: var(--text);
+    }
+    header {
+      padding: 20px 24px 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    h1 { margin: 0; font-size: 22px; font-weight: 700; }
+    .meta { color: var(--muted); font-size: 13px; }
+    .wrap { padding: 0 24px 24px; }
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
+    }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    button {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 8px;
+      padding: 6px 12px;
+      cursor: pointer;
+    }
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      white-space: nowrap;
+      vertical-align: top;
+    }
+    th {
+      background: #fafbfd;
+      color: var(--muted);
+      font-weight: 600;
+      position: sticky;
+      top: 0;
+    }
+    tr:hover td { background: #f8faff; }
+    .ok { color: var(--ok); }
+    .bad { color: var(--bad); }
+    .muted { color: var(--muted); }
+    .detail {
+      display: none;
+      white-space: pre-wrap;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 12px;
+      background: #0b1220;
+      color: #e5e7eb;
+      padding: 12px;
+      border-radius: 8px;
+      margin-top: 6px;
+      max-width: 920px;
+    }
+    .open .detail { display: block; }
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #eef2ff;
+      color: #3730a3;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>LLM 请求日志</h1>
+      <div class="meta">独立页面，不影响原有 management 控制台</div>
+    </div>
+    <div class="meta" id="summary">加载中...</div>
+  </header>
+  <div class="wrap">
+    <div class="panel">
+      <div class="toolbar">
+        <button class="primary" onclick="loadLogs()">刷新</button>
+        <label><input type="checkbox" id="auto" checked /> 自动刷新</label>
+        <span class="meta" id="hint"></span>
+      </div>
+      <div style="overflow:auto; max-height: calc(100vh - 160px);">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>令牌</th>
+              <th>分组</th>
+              <th>类型</th>
+              <th>模型</th>
+              <th>用时/首字</th>
+              <th>提示</th>
+              <th>补全</th>
+              <th>花费</th>
+              <th>出口IP</th>
+              <th>思考强度</th>
+              <th>思考字段</th>
+              <th>详情</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <script>
+    const tbody = document.getElementById('tbody');
+    const summary = document.getElementById('summary');
+    const hint = document.getElementById('hint');
+    let timer = null;
+
+    function esc(value) {
+      return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[ch]));
+    }
+
+    function fmtTime(value) {
+      if (!value) return '-';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return esc(value);
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+    }
+
+    function toggleDetail(btn) {
+      const row = btn.closest('tr');
+      row.classList.toggle('open');
+      btn.textContent = row.classList.contains('open') ? '收起' : '查看';
+    }
+
+    function managementKey() {
+      const params = new URLSearchParams(location.search);
+      const fromQuery = params.get('key') || params.get('token') || '';
+      if (fromQuery) {
+        localStorage.setItem('cpa_management_key', fromQuery);
+        return fromQuery;
+      }
+      return localStorage.getItem('cpa_management_key') || localStorage.getItem('managementKey') || '';
+    }
+
+    async function loadLogs() {
+      try {
+        const headers = { 'Accept': 'application/json' };
+        const key = managementKey();
+        if (key) headers['X-Management-Key'] = key;
+        const response = await fetch('/v0/management/llm-request-logs?limit=200', {
+          headers,
+          credentials: 'same-origin'
+        });
+        if (!response.ok) {
+          summary.textContent = '加载失败 HTTP ' + response.status;
+          return;
+        }
+        const data = await response.json();
+        const items = data.items || [];
+        summary.textContent = `共 ${data.total || items.length} 条`;
+        hint.textContent = '更新于 ' + new Date().toLocaleTimeString();
+        tbody.innerHTML = items.map((item) => {
+          const thinking = item.has_thinking
+            ? `<span class="ok">有 (${esc(item.thinking_len)})</span>`
+            : `<span class="muted">无</span>`;
+          const statusClass = item.failed ? 'bad' : 'ok';
+          const detail = esc(JSON.stringify(item, null, 2));
+          return `<tr>
+            <td>${fmtTime(item.time)}</td>
+            <td>${esc(item.token)}</td>
+            <td><span class="pill">${esc(item.group)}</span></td>
+            <td class="${statusClass}">${esc(item.type)}</td>
+            <td>${esc(item.model)}</td>
+            <td>${esc(item.latency_ms)}ms / ${esc(item.ttft_ms)}ms</td>
+            <td>${esc(item.prompt_tokens)}</td>
+            <td>${esc(item.completion_tokens)}</td>
+            <td>${esc(item.cost)}</td>
+            <td>${esc(item.exit_ip || '-')}<div class="muted">${esc(item.exit_node || '')}</div></td>
+            <td>${esc(item.thinking_level || '-')}</td>
+            <td>${thinking}</td>
+            <td>
+              <button onclick="toggleDetail(this)">查看</button>
+              <div class="detail">${detail}</div>
+            </td>
+          </tr>`;
+        }).join('');
+      } catch (error) {
+        summary.textContent = '加载异常: ' + error.message;
+      }
+    }
+
+    function setupAuto() {
+      if (timer) clearInterval(timer);
+      if (document.getElementById('auto').checked) {
+        timer = setInterval(loadLogs, 5000);
+      }
+    }
+    document.getElementById('auto').addEventListener('change', setupAuto);
+    loadLogs();
+    setupAuto();
+  </script>
+</body>
+</html>

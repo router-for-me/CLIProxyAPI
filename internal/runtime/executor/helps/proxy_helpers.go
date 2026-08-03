@@ -11,20 +11,26 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/warprotate"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
 // proxyHTTPClientPoolSize is the number of reusable *http.Client values kept per
-// cache entry. Keep this in the 5-10 range.
-const proxyHTTPClientPoolSize = 8
+// cache entry. Idle reclaim retains this many ready clients/connections.
+const proxyHTTPClientPoolSize = 3
 
 // proxyHTTPClientPoolMaxEntries caps how many proxy/account pool entries are retained.
-const proxyHTTPClientPoolMaxEntries = 64
+// Zero means unlimited (no hard eviction by count).
+const proxyHTTPClientPoolMaxEntries = 0
+
+// proxyHTTPClientPoolIdleKeep is MaxIdleConnsPerHost for pooled transports, and
+// also how many most-recently-used pool entries to retain when reclaiming idle entries.
+const proxyHTTPClientPoolIdleKeep = 5
 
 // proxyHTTPClientPoolIdleTTL is how long an unused pool entry may stay cached
-// before its idle connections are closed and the entry is evicted.
+// before its idle connections are closed and the entry is considered for eviction.
 const proxyHTTPClientPoolIdleTTL = 5 * time.Minute
 
 type proxyHTTPClientPool struct {
@@ -91,6 +97,9 @@ func (c *proxyHTTPClientCache) reclaimIdle(now time.Time) {
 	defer c.mu.Unlock()
 	cutoff := now.Add(-proxyHTTPClientPoolIdleTTL).UnixNano()
 	for e := c.order.Back(); e != nil; {
+		if c.order.Len() <= proxyHTTPClientPoolIdleKeep {
+			break
+		}
 		prev := e.Prev()
 		pool := e.Value.(*proxyHTTPClientPool)
 		if pool.lastUsed.Load() >= cutoff {
@@ -149,14 +158,16 @@ func (c *proxyHTTPClientCache) getOrCreate(key, proxyURL string, timeout time.Du
 	}
 	el := c.order.PushFront(pool)
 	c.entries[key] = el
-	for c.order.Len() > proxyHTTPClientPoolMaxEntries {
-		oldest := c.order.Back()
-		if oldest == nil {
-			break
+	if proxyHTTPClientPoolMaxEntries > 0 {
+		for c.order.Len() > proxyHTTPClientPoolMaxEntries {
+			oldest := c.order.Back()
+			if oldest == nil {
+				break
+			}
+			oldPool := oldest.Value.(*proxyHTTPClientPool)
+			c.removeElement(oldest)
+			oldPool.closeIdle()
 		}
-		oldPool := oldest.Value.(*proxyHTTPClientPool)
-		c.removeElement(oldest)
-		oldPool.closeIdle()
 	}
 	return pool.get()
 }
@@ -168,12 +179,10 @@ func tuneProxyTransport(transport *http.Transport) {
 	if transport.IdleConnTimeout == 0 || transport.IdleConnTimeout > 30*time.Second {
 		transport.IdleConnTimeout = 30 * time.Second
 	}
-	if transport.MaxIdleConns == 0 || transport.MaxIdleConns < 100 {
-		transport.MaxIdleConns = 100
-	}
-	if transport.MaxIdleConnsPerHost == 0 || transport.MaxIdleConnsPerHost < 32 {
-		transport.MaxIdleConnsPerHost = 32
-	}
+	// Unlimited concurrent connections; idle keep-alive capped at pool size.
+	transport.MaxConnsPerHost = 0
+	transport.MaxIdleConns = 0
+	transport.MaxIdleConnsPerHost = proxyHTTPClientPoolIdleKeep
 }
 
 func resolveUpstreamProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
@@ -219,6 +228,57 @@ func getPooledProxyHTTPClient(proxyURL, accountScope string, timeout time.Durati
 	return sharedProxyHTTPClientCache.getOrCreate(key, proxyURL, timeout)
 }
 
+// CloseIdleProxyConnections closes idle keep-alive connections for the
+// effective proxy of cfg/auth so the next request opens a fresh LB path.
+func CloseIdleProxyConnections(cfg *config.Config, auth *cliproxyauth.Auth) {
+	proxyURL := resolveUpstreamProxyURL(cfg, auth)
+	if proxyURL == "" {
+		sharedProxyHTTPClientCache.closeAllIdle()
+		return
+	}
+	sharedProxyHTTPClientCache.closeIdleForProxy(proxyURL)
+}
+
+func (c *proxyHTTPClientCache) closeIdleForProxy(proxyURL string) {
+	if c == nil || proxyURL == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for e := c.order.Front(); e != nil; e = e.Next() {
+		pool := e.Value.(*proxyHTTPClientPool)
+		if strings.HasPrefix(pool.key, proxyURL+"\x00") {
+			pool.closeIdle()
+		}
+	}
+}
+
+func (c *proxyHTTPClientCache) closeAllIdle() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for e := c.order.Front(); e != nil; e = e.Next() {
+		e.Value.(*proxyHTTPClientPool).closeIdle()
+	}
+}
+
+// PrepareUpstreamForProxy optionally claims a Warp LB rotate key, drains that
+// backend, closes idle proxy connections, and kicks off async restart.
+func PrepareUpstreamForProxy(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) {
+	if cfg == nil {
+		return
+	}
+	base := strings.TrimSpace(cfg.WarpRotateURL)
+	if base == "" {
+		return
+	}
+	warprotate.PrepareBeforeUpstream(ctx, base, func() {
+		CloseIdleProxyConnections(cfg, auth)
+	})
+}
+
 // HTTPUpstreamDo is the unified upstream request helper.
 // It reuses a pooled http.Client/Transport keyed by effective proxy URL and,
 // when an auth-level proxy override is present, by account identity.
@@ -229,6 +289,7 @@ func HTTPUpstreamDo(ctx context.Context, cfg *config.Config, auth *cliproxyauth.
 	if ctx == nil {
 		ctx = req.Context()
 	}
+	PrepareUpstreamForProxy(ctx, cfg, auth)
 	httpReq := req.WithContext(ctx)
 	client := NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
 	return client.Do(httpReq)

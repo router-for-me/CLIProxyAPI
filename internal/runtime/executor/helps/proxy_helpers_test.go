@@ -60,8 +60,11 @@ func TestNewProxyAwareHTTPClientReusesPooledClientsAndTransport(t *testing.T) {
 	if transport.IdleConnTimeout != 30*time.Second {
 		t.Fatalf("IdleConnTimeout = %v, want 30s", transport.IdleConnTimeout)
 	}
-	if transport.MaxIdleConnsPerHost < 32 {
-		t.Fatalf("MaxIdleConnsPerHost = %d, want >= 32", transport.MaxIdleConnsPerHost)
+	if transport.MaxIdleConnsPerHost != proxyHTTPClientPoolIdleKeep {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want %d", transport.MaxIdleConnsPerHost, proxyHTTPClientPoolIdleKeep)
+	}
+	if transport.MaxConnsPerHost != 0 {
+		t.Fatalf("MaxConnsPerHost = %d, want 0 (unlimited)", transport.MaxConnsPerHost)
 	}
 }
 

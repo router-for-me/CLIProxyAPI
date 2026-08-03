@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/llmreqlog"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	log "github.com/sirupsen/logrus"
 )
@@ -59,6 +60,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage-statistics-enabled", s.mgmt.GetUsageStatisticsEnabled)
 		mgmt.PUT("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 		mgmt.PATCH("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
+
+		// Independent LLM request log API (does not replace existing logs UI).
+		mgmt.GET("/llm-request-logs", s.mgmt.GetLLMRequestLogs)
 
 		mgmt.GET("/proxy-url", s.mgmt.GetProxyURL)
 		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)
@@ -279,6 +283,15 @@ func (s *Server) pluginResourceNoRoute(c *gin.Context) {
 		return
 	}
 	c.AbortWithStatus(http.StatusNotFound)
+}
+
+func (s *Server) serveLLMRequestLogsPage(c *gin.Context) {
+	cfg := s.cfg
+	if cfg == nil || cfg.Home.Enabled || cfg.RemoteManagement.DisableControlPanel {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	c.Data(http.StatusOK, "text/html; charset=utf-8", llmreqlog.PageHTML())
 }
 
 func (s *Server) serveManagementControlPanel(c *gin.Context) {

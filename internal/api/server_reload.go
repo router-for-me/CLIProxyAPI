@@ -8,6 +8,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/llmreqlog"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
@@ -172,6 +173,7 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
 	}
 	managementasset.SetCurrentConfig(cfg)
+	llmreqlog.SetProxyURL(cfg.ProxyURL)
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}

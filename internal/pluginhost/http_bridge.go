@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -13,6 +15,48 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
+
+const hostHTTPMaxAttempts = 3
+
+func isTransientHostHTTPError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"service unavailable",
+		"bad gateway",
+		"gateway timeout",
+		"unexpected eof",
+		"connection reset",
+		"connection refused",
+		"broken pipe",
+		"i/o timeout",
+		"tls handshake timeout",
+		"timeout awaiting response headers",
+		"server closed idle connection",
+		"http2: client connection force closed",
+		"http2: client connection lost",
+		"eof",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func closeIdleHTTPClient(client *http.Client) {
+	if client == nil || client.Transport == nil {
+		return
+	}
+	type idleCloser interface {
+		CloseIdleConnections()
+	}
+	if closer, ok := client.Transport.(idleCloser); ok {
+		closer.CloseIdleConnections()
+	}
+}
 
 type hostHTTPClient struct {
 	host     *Host
@@ -117,22 +161,47 @@ func (c *hostHTTPClient) doHTTP(ctx context.Context, req pluginapi.HTTPRequest) 
 	if method == "" {
 		method = http.MethodGet
 	}
-	httpReq, errNewRequest := http.NewRequestWithContext(ctx, method, req.URL, bytes.NewReader(bytes.Clone(req.Body)))
-	if errNewRequest != nil {
-		return nil, cfg, fmt.Errorf("create host http request: %w", errNewRequest)
-	}
-	httpReq.Header = cloneHeader(req.Headers)
-	c.recordHTTPRequest(ctx, cfg, httpReq, req.Body)
+	body := bytes.Clone(req.Body)
+	helps.PrepareUpstreamForProxy(ctx, cfg, c.auth)
 	client := helps.NewProxyAwareHTTPClient(ctx, cfg, c.auth, 0)
 	if client == nil {
 		client = &http.Client{}
 	}
-	resp, errDo := client.Do(httpReq)
-	if errDo != nil {
+
+	var lastErr error
+	for attempt := 1; attempt <= hostHTTPMaxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, cfg, fmt.Errorf("execute host http request: %w", err)
+		}
+		httpReq, errNewRequest := http.NewRequestWithContext(ctx, method, req.URL, bytes.NewReader(body))
+		if errNewRequest != nil {
+			return nil, cfg, fmt.Errorf("create host http request: %w", errNewRequest)
+		}
+		httpReq.Header = cloneHeader(req.Headers)
+		if attempt == 1 {
+			c.recordHTTPRequest(ctx, cfg, httpReq, body)
+		}
+		resp, errDo := client.Do(httpReq)
+		if errDo == nil {
+			return resp, cfg, nil
+		}
+		lastErr = errDo
 		helps.RecordAPIResponseError(ctx, cfg, errDo)
-		return nil, cfg, fmt.Errorf("execute host http request: %w", errDo)
+		closeIdleHTTPClient(client)
+		if attempt >= hostHTTPMaxAttempts || !isTransientHostHTTPError(errDo) {
+			break
+		}
+		backoff := time.Duration(attempt) * 400 * time.Millisecond
+		log.Debugf("pluginhost: host http retry %d/%d after transient error: %v", attempt, hostHTTPMaxAttempts, errDo)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, cfg, fmt.Errorf("execute host http request: %w", ctx.Err())
+		case <-timer.C:
+		}
 	}
-	return resp, cfg, nil
+	return nil, cfg, fmt.Errorf("execute host http request: %w", lastErr)
 }
 
 func (c *hostHTTPClient) recordHTTPRequest(ctx context.Context, cfg *config.Config, req *http.Request, body []byte) {
