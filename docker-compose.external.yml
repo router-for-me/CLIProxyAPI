@@ -56,10 +56,16 @@ services:
       # Lets the container reach the Docker host's PostgreSQL on Linux/WSL2.
       - "host.docker.internal:host-gateway"
     volumes:
+      # Config + auth are files that live on the host and are edited there,
+      # so they stay bind-mounts.
       - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/nixllm/config.yaml
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
-      - ${CLI_PROXY_LOG_PATH:-./logs}:/nixllm/logs
-      - ${CLI_PROXY_PLUGIN_PATH:-./plugins}:/nixllm/plugins
+      # Runtime data persisted as named volumes (survive container recreate).
+      - nixllm-logs:/nixllm/logs
+      - nixllm-plugins:/nixllm/plugins
+      # Local PG backing path kept as a named volume (only used when PGSTORE_DSN's
+      # file-based fallback is active).
+      - nixllm-pgstore:/var/lib/nixllm
     restart: ${NIXLLM_RESTART:-unless-stopped}
     stop_grace_period: ${NIXLLM_STOP_GRACE:-30s}
     logging:
@@ -91,3 +97,11 @@ networks:
   nixllm-net:
     name: ${NIXLLM_NETWORK_NAME:-nixllm-net}
     driver: bridge
+
+volumes:
+  nixllm-logs:
+    name: ${NIXLLM_VOLUME_LOGS:-nixllm-logs}
+  nixllm-plugins:
+    name: ${NIXLLM_VOLUME_PLUGINS:-nixllm-plugins}
+  nixllm-pgstore:
+    name: ${NIXLLM_VOLUME_PGSTORE:-nixllm-pgstore}
