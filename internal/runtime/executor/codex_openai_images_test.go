@@ -105,8 +105,8 @@ func TestCodexExecutorDirectOpenAIImageGenerationUsesImagesEndpoint(t *testing.T
 	if gotClientRequestID != "client-request-1" {
 		t.Fatalf("X-Client-Request-Id = %q, want %q", gotClientRequestID, "client-request-1")
 	}
-	if gotOriginator != "Codex Desktop" {
-		t.Fatalf("Originator = %q, want %q", gotOriginator, "Codex Desktop")
+	if gotOriginator != codexOriginator {
+		t.Fatalf("Originator = %q, want %q", gotOriginator, codexOriginator)
 	}
 	if got := gjson.GetBytes(gotBody, "model").String(); got != "gpt-image-1.5" {
 		t.Fatalf("model = %q, want gpt-image-1.5; body=%s", got, string(gotBody))

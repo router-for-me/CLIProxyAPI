@@ -282,7 +282,7 @@ func (e *GitLabExecutor) nativeGateway(
 	if nativeAuth, ok := buildGitLabOpenAIGatewayAuth(auth, req.Model); ok {
 		nativeReq := req
 		nativeReq.Model = gitLabResolvedModel(auth, req.Model)
-		return NewCodexExecutor(e.cfg), nativeAuth, nativeReq, true
+		return e.newOpenAIGatewayExecutor(), nativeAuth, nativeReq, true
 	}
 	return nil, nil, req, false
 }
@@ -292,9 +292,21 @@ func (e *GitLabExecutor) nativeGatewayHTTP(auth *cliproxyauth.Auth) (cliproxyaut
 		return NewClaudeExecutor(e.cfg), nativeAuth
 	}
 	if nativeAuth, ok := buildGitLabOpenAIGatewayAuth(auth, ""); ok {
-		return NewCodexExecutor(e.cfg), nativeAuth
+		return e.newOpenAIGatewayExecutor(), nativeAuth
 	}
 	return nil, nil
+}
+
+func (e *GitLabExecutor) newOpenAIGatewayExecutor() *CodexExecutor {
+	cfg := &config.Config{}
+	if e != nil && e.cfg != nil {
+		cloned := *e.cfg
+		cfg = &cloned
+	}
+	// GitLab's OpenAI-compatible gateway requires the Duo identity supplied by
+	// its direct-access metadata, not the official Codex client fingerprint.
+	cfg.Codex.DisableCodexCloaking = true
+	return NewCodexExecutor(cfg)
 }
 
 func (e *GitLabExecutor) invokeText(ctx context.Context, auth *cliproxyauth.Auth, prompt gitLabPrompt) (string, error) {

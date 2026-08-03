@@ -2410,6 +2410,25 @@
       "type": "kimi",
       "display_name": "Kimi K3",
       "description": "Kimi K3 - Moonshot AI's next-generation flagship model (~2.8T MoE) with multimodal input",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": false,
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "kimi-k3-256k",
+      "object": "model",
+      "created": 1785110400,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K3 256K",
+      "description": "Kimi K3 256K - 256K context version of Kimi K3 delivering the same results within 256K context at reduced quota consumption; supports image input only (no video)",
       "context_length": 262144,
       "max_completion_tokens": 65536,
       "thinking": {

@@ -242,7 +242,8 @@ func decodeHomeDispatchError(raw []byte) error {
 	case "credential_concurrency_exceeded", "credential_model_concurrency_exceeded":
 		result.HTTPStatus = http.StatusTooManyRequests
 		return newHomeConcurrencyBusyError(result, time.Duration(detail.RetryAfterMS)*time.Millisecond)
-	case "concurrency_protocol_required", "concurrency_tracker_unavailable", "concurrency_node_unavailable":
+	case "auth_not_found", "auth_unavailable", "refresh_temporarily_unavailable", "home_unavailable",
+		"concurrency_protocol_required", "concurrency_tracker_unavailable", "concurrency_node_unavailable":
 		result.HTTPStatus = http.StatusServiceUnavailable
 	}
 	return result

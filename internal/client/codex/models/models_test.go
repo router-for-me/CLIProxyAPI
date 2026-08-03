@@ -308,3 +308,43 @@ func TestApplyCodexClientModelMetadataPreservesMultiAgentVersionWhenDisabled(t *
 		t.Fatalf("enabled multi_agent_version = %#v, want v2", got)
 	}
 }
+
+func TestCodexClientModelsResponseAppliesMaxContextLengthOverride(t *testing.T) {
+	const wantOverride = 1048576
+	const wantDefault = 272000
+
+	resp := BuildResponse([]map[string]any{
+		{"id": "deepseek-v4-flash", "max_context_length": wantOverride},
+		{"id": "deepseek-v4-pro"},
+		{"id": "gpt-5.5", "max_context_length": wantOverride},
+	}, nil, false)
+	models, ok := resp["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
+	}
+
+	bySlug := make(map[string]map[string]any, len(models))
+	for _, model := range models {
+		bySlug[stringModelValue(model, "slug")] = model
+	}
+
+	for _, testCase := range []struct {
+		slug string
+		want int
+	}{
+		{slug: "deepseek-v4-flash", want: wantOverride},
+		{slug: "deepseek-v4-pro", want: wantDefault},
+		{slug: "gpt-5.5", want: wantOverride},
+	} {
+		entry := bySlug[testCase.slug]
+		if entry == nil {
+			t.Fatalf("missing model %q", testCase.slug)
+		}
+		if got := intModelValue(entry, "context_window"); got != testCase.want {
+			t.Errorf("%s context_window = %d, want %d", testCase.slug, got, testCase.want)
+		}
+		if got := intModelValue(entry, "max_context_window"); got != testCase.want {
+			t.Errorf("%s max_context_window = %d, want %d", testCase.slug, got, testCase.want)
+		}
+	}
+}

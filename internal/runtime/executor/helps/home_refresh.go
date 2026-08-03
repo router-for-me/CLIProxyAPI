@@ -3,6 +3,7 @@ package helps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -43,7 +44,7 @@ type homeErrorDetail struct {
 
 type homeRefreshClient interface {
 	HeartbeatOK() bool
-	GetRefreshAuth(ctx context.Context, authIndex string) ([]byte, error)
+	GetRefreshAuth(ctx context.Context, authIndex string, accessTokenSHA256 string) ([]byte, error)
 }
 
 var currentHomeRefreshClient = func() homeRefreshClient {
@@ -77,9 +78,12 @@ func RefreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 		return nil, true, homeStatusErr{code: http.StatusBadGateway, msg: "home refresh: auth_index is empty"}
 	}
 
-	raw, err := client.GetRefreshAuth(ctx, authIndex)
+	raw, err := client.GetRefreshAuth(ctx, authIndex, authAccessTokenSHA256(auth))
 	if err != nil {
-		return nil, true, homeStatusErr{code: http.StatusBadGateway, msg: err.Error()}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, true, err
+		}
+		return nil, true, homeStatusErr{code: http.StatusServiceUnavailable, msg: "home refresh temporarily unavailable"}
 	}
 
 	var env homeErrorEnvelope
@@ -88,16 +92,23 @@ func RefreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 		if code == "" {
 			code = strings.TrimSpace(env.Error.Code)
 		}
-		msg := strings.TrimSpace(env.Error.Message)
-		if msg == "" {
-			msg = "home returned error"
+		statusCode := statusFromHomeErrorCode(code)
+		message := "credential refresh temporarily unavailable"
+		switch statusCode {
+		case http.StatusUnauthorized:
+			message = "credential unauthorized"
+		case http.StatusNotFound:
+			message = "credential refresh target not found"
 		}
-		return nil, true, homeStatusErr{code: statusFromHomeErrorCode(code), msg: msg}
+		return nil, true, homeStatusErr{code: statusCode, msg: message}
 	}
 
 	updated, returnedIndex, errParse := parseHomeRefreshAuth(raw)
 	if errParse != nil {
 		return nil, true, homeStatusErr{code: http.StatusBadGateway, msg: "home returned invalid auth payload"}
+	}
+	if updated.Disabled || updated.Status == cliproxyauth.StatusDisabled {
+		return nil, true, homeStatusErr{code: http.StatusUnauthorized, msg: "credential unauthorized"}
 	}
 	if returnedIndex != "" {
 		authIndex = returnedIndex
@@ -105,6 +116,10 @@ func RefreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 	updated.Index = authIndex
 	updated.EnsureIndex()
 	return updated, true, nil
+}
+
+func authAccessTokenSHA256(auth *cliproxyauth.Auth) string {
+	return cliproxyauth.AccessTokenSHA256(auth)
 }
 
 func parseHomeRefreshAuth(raw []byte) (*cliproxyauth.Auth, string, error) {
@@ -128,11 +143,13 @@ func parseHomeRefreshAuth(raw []byte) (*cliproxyauth.Auth, string, error) {
 
 func statusFromHomeErrorCode(code string) int {
 	switch strings.ToLower(strings.TrimSpace(code)) {
-	case "authentication_error", "unauthorized":
+	case "authentication_error", "unauthorized", "invalid_grant", "refresh_token_expired", "refresh_token_revoked", "refresh_token_reused":
 		return http.StatusUnauthorized
 	case "model_not_found":
 		return http.StatusNotFound
+	case "auth_not_found", "auth_unavailable", "refresh_temporarily_unavailable", "refresh_unsupported", "home_unavailable":
+		return http.StatusServiceUnavailable
 	default:
-		return http.StatusBadGateway
+		return http.StatusServiceUnavailable
 	}
 }
