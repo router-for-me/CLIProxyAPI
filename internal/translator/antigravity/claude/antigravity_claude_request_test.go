@@ -1713,6 +1713,58 @@ func TestConvertClaudeRequestToAntigravity_ToolUse(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_ToolUsePreservesPresentNonObjectInput(t *testing.T) {
+	tests := []struct {
+		name             string
+		inputJSON        string
+		wantArgs         string
+		wantFunctionCall bool
+	}{
+		{name: "plain string", inputJSON: `"plain"`, wantArgs: `"plain"`, wantFunctionCall: true},
+		{name: "array", inputJSON: `[1,"two"]`, wantArgs: `[1,"two"]`, wantFunctionCall: true},
+		{name: "number", inputJSON: `42`, wantArgs: `42`, wantFunctionCall: true},
+		{name: "boolean", inputJSON: `true`, wantArgs: `true`, wantFunctionCall: true},
+		{name: "null", inputJSON: `null`, wantArgs: `{}`, wantFunctionCall: true},
+		{name: "missing", wantFunctionCall: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inputField := ""
+			if tc.inputJSON != "" {
+				inputField = fmt.Sprintf(`,"input":%s`, tc.inputJSON)
+			}
+			inputJSON := []byte(fmt.Sprintf(`{
+				"model": "claude-sonnet-4-5",
+				"messages": [{
+					"role": "assistant",
+					"content": [{
+						"type": "tool_use",
+						"id": "call_123",
+						"name": "run"%s
+					}]
+				}]
+			}`, inputField))
+
+			output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+			part := gjson.GetBytes(output, "request.contents.0.parts.0")
+			functionCall := part.Get("functionCall")
+			if tc.wantFunctionCall {
+				if !functionCall.Exists() {
+					t.Fatalf("functionCall should exist, output: %s", output)
+				}
+				if got := functionCall.Get("args").Raw; got != tc.wantArgs {
+					t.Fatalf("functionCall.args = %q, want %q; output: %s", got, tc.wantArgs, output)
+				}
+				return
+			}
+			if functionCall.Exists() {
+				t.Fatalf("missing input should not create functionCall, output: %s", output)
+			}
+		})
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_ToolUse_DropsInvalidThoughtSignatureOnly(t *testing.T) {
 	hook := newSignatureDebugHook(t)
 	rawSignature := "skip_thought_signature_validator"

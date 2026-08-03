@@ -3,9 +3,11 @@
 package claude
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	tls "github.com/refraction-networking/utls"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -14,6 +16,8 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
 )
+
+type claudeRefreshHandshakeTimeoutContextKey struct{}
 
 // utlsRoundTripper implements http.RoundTripper using utls with Chrome fingerprint
 // to bypass Cloudflare's TLS fingerprinting on Anthropic domains.
@@ -50,7 +54,7 @@ func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 // getOrCreateConnection gets an existing connection or creates a new one.
 // It uses a per-host locking mechanism to prevent multiple goroutines from
 // creating connections to the same host simultaneously.
-func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.ClientConn, error) {
+func (t *utlsRoundTripper) getOrCreateConnection(host, addr string, handshakeTimeout time.Duration) (*http2.ClientConn, error) {
 	t.mu.Lock()
 
 	// Check if connection exists and is usable
@@ -77,7 +81,7 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.Clie
 	t.mu.Unlock()
 
 	// Create connection outside the lock
-	h2Conn, err := t.createConnection(host, addr)
+	h2Conn, err := t.createConnection(host, addr, handshakeTimeout)
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -98,25 +102,38 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.Clie
 // createConnection creates a new HTTP/2 connection with Chrome TLS fingerprint.
 // Chrome's TLS fingerprint is closer to Node.js/OpenSSL (which real Claude Code uses)
 // than Firefox, reducing the mismatch between TLS layer and HTTP headers.
-func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientConn, error) {
-	conn, err := t.dialer.Dial("tcp", addr)
-	if err != nil {
-		return nil, err
+func (t *utlsRoundTripper) createConnection(host, addr string, handshakeTimeout time.Duration) (*http2.ClientConn, error) {
+	conn, errDial := t.dialer.Dial("tcp", addr)
+	if errDial != nil {
+		return nil, errDial
+	}
+
+	if handshakeTimeout > 0 {
+		if errSetDeadline := conn.SetDeadline(time.Now().Add(handshakeTimeout)); errSetDeadline != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("failed to set TLS handshake deadline: %w", errSetDeadline)
+		}
 	}
 
 	tlsConfig := &tls.Config{ServerName: host}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
-	if err := tlsConn.Handshake(); err != nil {
-		conn.Close()
-		return nil, err
+	if errHandshake := tlsConn.Handshake(); errHandshake != nil {
+		_ = conn.Close()
+		return nil, errHandshake
+	}
+	if handshakeTimeout > 0 {
+		if errClearDeadline := conn.SetDeadline(time.Time{}); errClearDeadline != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("failed to clear TLS handshake deadline: %w", errClearDeadline)
+		}
 	}
 
 	tr := &http2.Transport{}
-	h2Conn, err := tr.NewClientConn(tlsConn)
-	if err != nil {
-		tlsConn.Close()
-		return nil, err
+	h2Conn, errClientConn := tr.NewClientConn(tlsConn)
+	if errClientConn != nil {
+		_ = tlsConn.Close()
+		return nil, errClientConn
 	}
 
 	return h2Conn, nil
@@ -133,7 +150,8 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	// Get hostname without port for TLS ServerName
 	hostname := req.URL.Hostname()
 
-	h2Conn, err := t.getOrCreateConnection(hostname, addr)
+	handshakeTimeout, _ := req.Context().Value(claudeRefreshHandshakeTimeoutContextKey{}).(time.Duration)
+	h2Conn, err := t.getOrCreateConnection(hostname, addr, handshakeTimeout)
 	if err != nil {
 		return nil, err
 	}

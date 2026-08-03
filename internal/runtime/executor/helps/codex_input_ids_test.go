@@ -26,6 +26,31 @@ func TestSanitizeCodexInputItemIDsBoundaries(t *testing.T) {
 	}
 }
 
+func TestSanitizeCodexInputItemIDsNormalizesMessageIDs(t *testing.T) {
+	const invalidID = "item_74ec40c883248ebb4885ec84"
+	body := []byte(`{"input":[` +
+		`{"type":"message","id":"` + invalidID + `","role":"user"},` +
+		`{"type":"message","id":"msg-1","role":"assistant"},` +
+		`{"type":"function_call","id":"item_call","call_id":"call-1"}` +
+		`]}`)
+
+	first := SanitizeCodexInputItemIDs(body)
+	second := SanitizeCodexInputItemIDs(body)
+
+	if got := gjson.GetBytes(first, "input.0.id").String(); got != "msg_"+invalidID {
+		t.Fatalf("message ID = %q, want msg-prefixed ID", got)
+	}
+	if got := gjson.GetBytes(first, "input.1.id").String(); got != "msg-1" {
+		t.Fatalf("valid message ID changed: %q", got)
+	}
+	if got := gjson.GetBytes(first, "input.2.id").String(); got != "item_call" {
+		t.Fatalf("non-message ID changed: %q", got)
+	}
+	if string(first) != string(second) {
+		t.Fatalf("message ID normalization is not deterministic: first=%s second=%s", first, second)
+	}
+}
+
 func TestSanitizeCodexInputItemIDsDropsOverlongEncryptedReasoningItem(t *testing.T) {
 	longReasoningID := "rs_" + strings.Repeat("a", 64)
 	shortReasoningID := "rs_" + strings.Repeat("b", 48)

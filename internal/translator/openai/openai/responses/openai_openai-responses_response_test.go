@@ -70,6 +70,15 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompleted
 			totalTokens:    18,
 		},
 		{
+			name: "no finish reason",
+			in: []string{
+				`data: {"id":"resp_no_finish_reason","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}`,
+				`data: [DONE]`,
+			},
+			doneInputIndex: 1,
+			hasUsage:       false,
+		},
+		{
 			// An OpenAI-compatible streams from a buggy server might never send usage, so response.completed should
 			// still wait for [DONE] but omit the usage object entirely.
 			name: "no usage chunk",
