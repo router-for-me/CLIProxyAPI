@@ -432,20 +432,18 @@ func TestShouldEnsureCacheControl(t *testing.T) {
 	tests := []struct {
 		name                string
 		payload             []byte
-		cloaked             bool
 		confirmedClaudeCode bool
 		want                bool
 	}{
 		{name: "confirmed native markerless", payload: markerless, confirmedClaudeCode: true, want: false},
 		{name: "confirmed native with marker", payload: withMarker, confirmedClaudeCode: true, want: false},
-		{name: "cloaked with marker", payload: withMarker, cloaked: true, want: true},
 		{name: "unconfirmed markerless", payload: markerless, want: true},
 		{name: "unconfirmed with marker", payload: withMarker, want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldEnsureCacheControl(tt.payload, tt.cloaked, tt.confirmedClaudeCode); got != tt.want {
+			if got := shouldEnsureCacheControl(tt.payload, tt.confirmedClaudeCode); got != tt.want {
 				t.Fatalf("shouldEnsureCacheControl() = %t, want %t", got, tt.want)
 			}
 		})
@@ -640,11 +638,10 @@ func TestUpgradeClaudeCacheControlTTL(t *testing.T) {
 	})
 }
 
-// End-to-end guard for #4855. Cloaking stamps the first real user block, and the
-// old global `countCacheControls(body) == 0` gate then skipped every remaining
-// section, freezing the rolling breakpoint on messages[0] for the whole
-// conversation. Section-independent ensure has to keep that breakpoint advancing
-// as the history grows, so a reintroduced global short-circuit fails here.
+// End-to-end guard for #4855. Cloaking must finish layout without generating a
+// first-user marker. Once payload rules have run, the shared markerless-request
+// policy installs the system and rolling message breakpoints from the final body,
+// so the message breakpoint advances as the history grows.
 func TestClaudeExecutorCloakedRollingCacheBreakpointAdvances(t *testing.T) {
 	buildConversation := func(exchanges int) []byte {
 		messages := make([]string, 0, exchanges*2)
@@ -690,11 +687,11 @@ func TestClaudeExecutorCloakedRollingCacheBreakpointAdvances(t *testing.T) {
 	if want := int(gjson.GetBytes(longBody, "messages.#").Int()) - 1; longMarked != want {
 		t.Fatalf("rolling breakpoint at message %d, want final message %d: %s", longMarked, want, longBody)
 	}
-	// Cloaking's own first-user marker must still be present alongside it.
-	if !gjson.GetBytes(longBody, "messages.0.content.1.cache_control").Exists() {
-		t.Fatalf("cloak first-user breakpoint lost: %s", longBody)
+	// Cloaking must not leave a second, stale first-user marker behind.
+	if gjson.GetBytes(longBody, "messages.0.content.1.cache_control").Exists() {
+		t.Fatalf("cloak generated a premature first-user breakpoint: %s", longBody)
 	}
-	if total := countCacheControls(longBody); total > 4 {
-		t.Fatalf("cache_control count = %d, want at most 4: %s", total, longBody)
+	if total := countCacheControls(longBody); total != 2 {
+		t.Fatalf("cache_control count = %d, want final system and rolling message only: %s", total, longBody)
 	}
 }

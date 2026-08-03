@@ -82,6 +82,9 @@ func TestCloneForRuntimeDeepCopiesConfig(t *testing.T) {
 	if clone.OpenAICompatibility[0].Models[0].Thinking.Levels[0] != "low" {
 		t.Fatalf("clone thinking level = %q, want low", clone.OpenAICompatibility[0].Models[0].Thinking.Levels[0])
 	}
+	if clone.ClaudeKey[0].Cloak.RelaxedSystemPrompt == nil || !*clone.ClaudeKey[0].Cloak.RelaxedSystemPrompt {
+		t.Fatal("clone relaxed system prompt = false or nil, want true")
+	}
 	if got := clone.Payload.Default[0].Params["object"].(map[string]any)["key"]; got != "value" {
 		t.Fatalf("clone payload object key = %#v, want value", got)
 	}
@@ -127,6 +130,7 @@ func sampleCloneRuntimeConfig() *Config {
 	bypassStrict := false
 	pluginEnabled := false
 	cacheUserID := true
+	relaxedSystemPrompt := true
 
 	return &Config{
 		SDKConfig: SDKConfig{
@@ -181,8 +185,9 @@ func sampleCloneRuntimeConfig() *Config {
 			Headers:        map[string]string{"X-Claude": "one"},
 			ExcludedModels: []string{"claude-hidden"},
 			Cloak: &CloakConfig{
-				SensitiveWords: []string{"secret"},
-				CacheUserID:    &cacheUserID,
+				RelaxedSystemPrompt: &relaxedSystemPrompt,
+				SensitiveWords:      []string{"secret"},
+				CacheUserID:         &cacheUserID,
 			},
 		}},
 		OpenAICompatibility: []OpenAICompatibility{{
@@ -234,6 +239,7 @@ func mutateOriginalConfig(cfg *Config) {
 	cfg.OAuthExcludedModels["codex"][0] = "mutated-hidden-model"
 	cfg.OAuthModelAlias["codex"][0].Alias = "mutated-client-model"
 	cfg.OpenAICompatibility[0].Models[0].Thinking.Levels[0] = "mutated-low"
+	*cfg.ClaudeKey[0].Cloak.RelaxedSystemPrompt = false
 	cfg.Payload.Default[0].Params["object"].(map[string]any)["key"] = "mutated-value"
 	plugin := cfg.Plugins.Configs["sample"]
 	setPluginRawScalar(nil, &plugin.Raw, "mode", "second")
