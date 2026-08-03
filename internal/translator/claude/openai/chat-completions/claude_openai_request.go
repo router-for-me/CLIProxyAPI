@@ -164,9 +164,22 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		messageIndex := 0
-		messages.ForEach(func(_, message gjson.Result) bool {
+		messageCount := len(messages.Array())
+		messages.ForEach(func(index, message gjson.Result) bool {
 			role := message.Get("role").String()
 			contentResult := message.Get("content")
+
+			// Opus 5 rejects assistant-message prefills. Cursor can append a final
+			// plain assistant text turn while continuing an agent loop, so omit only
+			// that terminal prefill. Historical assistant turns and assistant tool
+			// calls remain part of the conversation.
+			if strings.EqualFold(modelName, "claude-opus-5") &&
+				index.Int() == int64(messageCount-1) &&
+				role == "assistant" &&
+				!message.Get("tool_calls").Exists() &&
+				!hasNativeClaudeToolUse(contentResult) {
+				return true
+			}
 
 			switch role {
 			case "system":
@@ -402,6 +415,21 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	}
 
 	return out
+}
+
+func hasNativeClaudeToolUse(content gjson.Result) bool {
+	if !content.IsArray() {
+		return false
+	}
+	hasToolUse := false
+	content.ForEach(func(_, part gjson.Result) bool {
+		if part.Get("type").String() == "tool_use" {
+			hasToolUse = true
+			return false
+		}
+		return true
+	})
+	return hasToolUse
 }
 
 func convertOpenAIContentPartToClaudePart(part gjson.Result) string {

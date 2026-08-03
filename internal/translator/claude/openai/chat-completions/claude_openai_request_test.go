@@ -6,6 +6,103 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertOpenAIRequestToClaude_Opus5StripsTrailingPlainAssistantPrefill(t *testing.T) {
+	inputJSON := `{
+		"model": "cc-opus5(xhigh)",
+		"messages": [
+			{"role": "user", "content": "Implement the plan."},
+			{"role": "assistant", "content": [{"type": "text", "text": "I will continue with the implementation."}]}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-5", []byte(inputJSON), true)
+	messages := gjson.GetBytes(result, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("message count = %d, want 1 after stripping trailing assistant prefill", len(messages))
+	}
+	if got := messages[len(messages)-1].Get("role").String(); got != "user" {
+		t.Fatalf("last role = %q, want user", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_Opus5KeepsTrailingAssistantToolUse(t *testing.T) {
+	inputJSON := `{
+		"model": "cc-opus5(xhigh)",
+		"messages": [
+			{"role": "user", "content": "Inspect the file."},
+			{
+				"role": "assistant",
+				"content": "",
+				"tool_calls": [{
+					"id": "call_1",
+					"type": "function",
+					"function": {"name": "Read", "arguments": "{\"path\":\"README.md\"}"}
+				}]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-5", []byte(inputJSON), true)
+	messages := gjson.GetBytes(result, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("message count = %d, want 2", len(messages))
+	}
+	last := messages[len(messages)-1]
+	if got := last.Get("role").String(); got != "assistant" {
+		t.Fatalf("last role = %q, want assistant", got)
+	}
+	if got := last.Get("content.0.type").String(); got != "tool_use" {
+		t.Fatalf("last content type = %q, want tool_use", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_Opus5KeepsTrailingNativeToolUse(t *testing.T) {
+	inputJSON := `{
+		"model": "cc-opus5(xhigh)",
+		"messages": [
+			{"role": "user", "content": "Inspect the file."},
+			{
+				"role": "assistant",
+				"content": [{
+					"type": "tool_use",
+					"id": "toolu_1",
+					"name": "Read",
+					"input": {"path": "README.md"}
+				}]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-5", []byte(inputJSON), true)
+	messages := gjson.GetBytes(result, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("message count = %d, want 2", len(messages))
+	}
+	last := messages[len(messages)-1]
+	if got := last.Get("content.0.type").String(); got != "tool_use" {
+		t.Fatalf("last content type = %q, want tool_use", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_NonOpus5KeepsTrailingAssistantText(t *testing.T) {
+	inputJSON := `{
+		"model": "cc-sonnet",
+		"messages": [
+			{"role": "user", "content": "Continue."},
+			{"role": "assistant", "content": "Starting now."}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), true)
+	messages := gjson.GetBytes(result, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("message count = %d, want 2", len(messages))
+	}
+	if got := messages[len(messages)-1].Get("role").String(); got != "assistant" {
+		t.Fatalf("last role = %q, want assistant", got)
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_SanitizesToolCallIDsForClaude(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",
