@@ -642,14 +642,60 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 	return kiroTools
 }
 
-// processMessages processes Claude messages and builds Kiro history
+// normalizeInArraySystemMessages rewrites role:"system" entries inside the
+// messages array as user messages, wrapping their text in <system-reminder>
+// tags (the same convention Claude Code uses for system notes inside user
+// turns). The top-level "system" request field is handled separately and is
+// not affected. Claude system content can be either a string or an ordered
+// array of text blocks; joining blocks with newlines preserves their boundaries
+// when Kiro's string-only message representation is built later.
+func normalizeInArraySystemMessages(messages []gjson.Result) []gjson.Result {
+	for i, msg := range messages {
+		if msg.Get("role").String() != "system" {
+			continue
+		}
+
+		var textParts []string
+		content := msg.Get("content")
+		if content.IsArray() {
+			for _, part := range content.Array() {
+				if part.Get("type").String() == "text" {
+					textParts = append(textParts, part.Get("text").String())
+				}
+			}
+		} else if content.Type == gjson.String {
+			textParts = append(textParts, content.String())
+		}
+
+		reminder := "<system-reminder>\n" + strings.Join(textParts, "\n") + "\n</system-reminder>"
+		converted, err := json.Marshal(map[string]interface{}{
+			"role": "user",
+			"content": []map[string]string{
+				{"type": "text", "text": reminder},
+			},
+		})
+		if err != nil {
+			continue
+		}
+		messages[i] = gjson.ParseBytes(converted)
+	}
+	return messages
+}
+
+// processMessages processes Claude messages and builds Kiro history.
 func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHistoryMessage, *KiroUserInputMessage, []KiroToolResult) {
 	var history []KiroHistoryMessage
 	var currentUserMsg *KiroUserInputMessage
 	var currentToolResults []KiroToolResult
 
-	// Merge adjacent messages with the same role
-	messagesArray := kirocommon.MergeAdjacentMessages(messages.Array())
+	// Claude Code's mid-conversation-system beta (mid-conversation-system-2026-04-07)
+	// can place role:"system" messages inside the messages array, including as the
+	// final message. Kiro has no system role, so rewrite them as user messages
+	// before merging. Critically, a trailing system message must still produce a
+	// current user message — otherwise no tool specs are attached to
+	// currentMessage.userInputMessageContext and the model, seeing no tools,
+	// hallucinates text-format tool calls instead of emitting toolUseEvents.
+	messagesArray := kirocommon.MergeAdjacentMessages(normalizeInArraySystemMessages(messages.Array()))
 
 	// FIX: Kiro API requires history to start with a user message.
 	// Some clients (e.g., OpenClaw) send conversations starting with an assistant message,
