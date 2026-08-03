@@ -95,6 +95,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	if resp.Capabilities.ModelRouter {
 		plugin.Capabilities.ModelRouter = adapter
 	}
+	if resp.Capabilities.ModelCatalogFilter {
+		plugin.Capabilities.ModelCatalogFilter = adapter
+	}
 	if resp.Capabilities.Executor {
 		plugin.Capabilities.Executor = rpcProviderExecutor{rpcPluginAdapter: adapter}
 	}
@@ -371,6 +374,10 @@ func (a *rpcPluginAdapter) RouteModel(ctx context.Context, req pluginapi.ModelRo
 		ModelRouteRequest: req,
 		HostCallbackID:    callbackID,
 	})
+}
+
+func (a *rpcPluginAdapter) FilterModelCatalog(ctx context.Context, req pluginapi.ModelCatalogFilterRequest) (pluginapi.ModelCatalogFilterResponse, error) {
+	return callPlugin[pluginapi.ModelCatalogFilterResponse](ctx, a.client, pluginabi.MethodModelCatalogFilter, req)
 }
 
 func callPluginIdentifier(client pluginClient, method string) string {

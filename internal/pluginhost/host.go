@@ -852,6 +852,7 @@ func validPlugin(plugin pluginapi.Plugin) bool {
 		caps.FrontendAuthProvider != nil ||
 		caps.Scheduler != nil ||
 		caps.ModelRouter != nil ||
+		caps.ModelCatalogFilter != nil ||
 		caps.Executor != nil ||
 		caps.RequestTranslator != nil ||
 		caps.RequestNormalizer != nil ||

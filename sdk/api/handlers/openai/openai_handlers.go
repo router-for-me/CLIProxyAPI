@@ -66,6 +66,11 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 
 	// Get all available models
 	allModels := h.Models()
+	allModels, err := h.FilterModelCatalog(c, allModels)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "model catalog unavailable"})
+		return
+	}
 
 	// Filter to only include the 4 required fields: id, object, created, owned_by
 	filteredModels := make([]map[string]any, len(allModels))

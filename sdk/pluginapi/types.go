@@ -82,6 +82,8 @@ type Capabilities struct {
 	// ModelRouter routes matching requests to a plugin executor, the router's own executor,
 	// or a built-in provider before model-to-provider resolution and auth selection.
 	ModelRouter ModelRouter
+	// ModelCatalogFilter filters model-list responses for the authenticated caller.
+	ModelCatalogFilter ModelCatalogFilter
 	// Executor sends requests to an upstream provider or local backend.
 	Executor ProviderExecutor
 	// ExecutorModelScope declares whether Executor serves static models, OAuth auth models, or both.
@@ -469,6 +471,31 @@ type Scheduler interface {
 // or a built-in provider before model-to-provider resolution and auth selection.
 type ModelRouter interface {
 	RouteModel(context.Context, ModelRouteRequest) (ModelRouteResponse, error)
+}
+
+// ModelCatalogFilter filters the models returned by model discovery endpoints.
+// Filters run after frontend authentication and are chained in plugin priority
+// order. A filter must return Handled=false to leave the current list unchanged.
+type ModelCatalogFilter interface {
+	FilterModelCatalog(context.Context, ModelCatalogFilterRequest) (ModelCatalogFilterResponse, error)
+}
+
+// ModelCatalogFilterRequest describes an authenticated model-list request.
+type ModelCatalogFilterRequest struct {
+	Plugin         Metadata
+	PluginID       string
+	Method         string
+	Path           string
+	Headers        http.Header
+	Query          url.Values
+	AccessMetadata map[string]string
+	Models         []map[string]any
+}
+
+// ModelCatalogFilterResponse contains the caller-visible model list.
+type ModelCatalogFilterResponse struct {
+	Handled bool
+	Models  []map[string]any
 }
 
 // SchedulerPickRequest describes the routing context offered to a scheduler plugin.

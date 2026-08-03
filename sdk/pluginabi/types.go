@@ -32,6 +32,8 @@ const (
 	MethodSchedulerPick = "scheduler.pick"
 	// MethodModelRoute asks a router plugin to select a plugin executor for a matching request.
 	MethodModelRoute = "model.route"
+	// MethodModelCatalogFilter asks a plugin to filter an authenticated model list.
+	MethodModelCatalogFilter = "model.catalog_filter"
 
 	MethodExecutorIdentifier    = "executor.identifier"
 	MethodExecutorExecute       = "executor.execute"
