@@ -11,7 +11,7 @@ config.yaml
 .mcp.json
 # Generated content
 bin/*
-logs/*
+/logs
 conv/*
 temp/*
 refs/*

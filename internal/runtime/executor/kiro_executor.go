@@ -1516,20 +1516,17 @@ func getEffectiveProfileArnWithWarning(auth *cliproxyauth.Auth, profileArn strin
 
 // mapModelToKiro maps external model names to Kiro backend model IDs.
 //
-// It accepts any of the surface forms clients use and returns the ID that
-// Kiro's API expects. The transformation is algorithmic so new models added
-// by Kiro (e.g. glm-5, deepseek-3.2, future releases) route correctly
-// without code changes:
+// It accepts the supported surface forms clients use and returns the ID that
+// Kiro's API expects:
 //
 //  1. Trim surrounding whitespace and lowercase.
 //  2. Strip the leading "kiro-" or "amazonq-" prefix if present.
 //  3. Strip the trailing "-agentic" suffix (agentic variants share the
 //     underlying backend ID; the agentic behavior is applied separately
 //     via determineAgenticMode).
-//  4. Normalize the version segment from dashes to dots — e.g.
-//     "claude-sonnet-4-5" → "claude-sonnet-4.5", "minimax-m2-1" →
-//     "minimax-m2.1". Only the last "-<digit>" pair is rewritten so
-//     identifiers like "qwen3-coder-next" pass through unchanged.
+//  4. Normalize version separators for known aliases derived from canonical
+//     model IDs — e.g. "claude-sonnet-4-5" → "claude-sonnet-4.5" and
+//     "gpt-5-6-terra" → "gpt-5.6-terra".
 //  5. Map a few historical dated aliases (e.g. "claude-sonnet-4-5-20250929")
 //     back to their canonical version.
 //
@@ -1559,9 +1556,8 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 	//    canonical version. Only handles the common 8-digit date suffix.
 	m = trimKiroDateSuffix(m)
 
-	// 4. Normalize final version segment: last "-<digit>" pair becomes "."
-	//    e.g. "claude-sonnet-4-5" → "claude-sonnet-4.5", but "qwen3-coder-next"
-	//    is left alone because the final segment isn't a digit.
+	// 4. Normalize only known hyphenated aliases. Broad digit-based rewriting
+	//    would corrupt canonical or unrelated numeric IDs.
 	m = normalizeKiroVersion(m)
 
 	if m != original {
@@ -1585,34 +1581,39 @@ func trimKiroDateSuffix(s string) string {
 	return s[:len(s)-9]
 }
 
-// normalizeKiroVersion converts a trailing "-<digit>" pair to a dot-separated
-// version. For example:
-//   - "claude-sonnet-4-5"   → "claude-sonnet-4.5"
-//   - "claude-opus-4-7"     → "claude-opus-4.7"
-//   - "minimax-m2-1"        → "minimax-m2.1" (the "m2" retains its digit)
-//   - "qwen3-coder-next"    → "qwen3-coder-next" (no trailing digit pair)
-//   - "glm-5"               → "glm-5" (only one digit segment; left alone)
-//
-// The rule: if the last dash-separated segment is all digits AND the
-// second-to-last segment ends with a digit, replace that last dash with a dot.
+var kiroVersionAliases = [...]struct {
+	hyphenated string
+	canonical  string
+}{
+	// Claude families
+	{"claude-sonnet-4-5", "claude-sonnet-4.5"},
+	{"claude-sonnet-4-6", "claude-sonnet-4.6"},
+	{"claude-opus-4-5", "claude-opus-4.5"},
+	{"claude-opus-4-7", "claude-opus-4.7"},
+	{"claude-haiku-4-5", "claude-haiku-4.5"},
+	// Other Kiro backend families
+	{"minimax-m2-1", "minimax-m2.1"},
+	{"minimax-m2-5", "minimax-m2.5"},
+	{"gpt-5-6", "gpt-5.6"},
+	{"kimi-k2-7", "kimi-k2.7"},
+	{"deepseek-3-2", "deepseek-3.2"},
+	{"grok-4-20", "grok-4.20"},
+}
+
+// normalizeKiroVersion reverses the hyphenated version aliases generated for
+// known canonical Kiro model families. Matching the full alias prefix keeps
+// suffixes such as "-terra" and "-0309-reasoning", while canonical dotted IDs
+// and unknown numeric IDs pass through unchanged.
 func normalizeKiroVersion(s string) string {
-	lastDash := strings.LastIndex(s, "-")
-	if lastDash <= 0 || lastDash == len(s)-1 {
-		return s
-	}
-	tail := s[lastDash+1:]
-	for _, r := range tail {
-		if r < '0' || r > '9' {
-			return s
+	for _, alias := range kiroVersionAliases {
+		if s == alias.hyphenated {
+			return alias.canonical
+		}
+		if strings.HasPrefix(s, alias.hyphenated+"-") {
+			return alias.canonical + s[len(alias.hyphenated):]
 		}
 	}
-	// Require the preceding character to be a digit — otherwise we'd rewrite
-	// "glm-5" into "glm.5" which isn't a backend ID Kiro recognizes.
-	prev := s[lastDash-1]
-	if prev < '0' || prev > '9' {
-		return s
-	}
-	return s[:lastDash] + "." + tail
+	return s
 }
 
 // EventStreamError represents an Event Stream processing error
