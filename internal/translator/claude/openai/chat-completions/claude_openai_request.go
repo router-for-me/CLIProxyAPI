@@ -164,20 +164,22 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		messageIndex := 0
-		messageCount := len(messages.Array())
+		messageArray := messages.Array()
+		opus5PrefillStart := len(messageArray)
+		if strings.EqualFold(modelName, "claude-opus-5") {
+			for opus5PrefillStart > 0 && isPlainAssistantPrefill(messageArray[opus5PrefillStart-1]) {
+				opus5PrefillStart--
+			}
+		}
 		messages.ForEach(func(index, message gjson.Result) bool {
 			role := message.Get("role").String()
 			contentResult := message.Get("content")
 
 			// Opus 5 rejects assistant-message prefills. Cursor can append a final
-			// plain assistant text turn while continuing an agent loop, so omit only
-			// that terminal prefill. Historical assistant turns and assistant tool
-			// calls remain part of the conversation.
-			if strings.EqualFold(modelName, "claude-opus-5") &&
-				index.Int() == int64(messageCount-1) &&
-				role == "assistant" &&
-				!message.Get("tool_calls").Exists() &&
-				!hasNativeClaudeToolUse(contentResult) {
+			// run of plain assistant text turns while continuing or resuming an agent
+			// loop, so omit that whole terminal run. Historical assistant turns and
+			// assistant tool calls remain part of the conversation.
+			if index.Int() >= int64(opus5PrefillStart) {
 				return true
 			}
 
@@ -417,19 +419,26 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	return out
 }
 
-func hasNativeClaudeToolUse(content gjson.Result) bool {
-	if !content.IsArray() {
+func isPlainAssistantPrefill(message gjson.Result) bool {
+	if message.Get("role").String() != "assistant" || message.Get("tool_calls").Exists() {
 		return false
 	}
-	hasToolUse := false
+	content := message.Get("content")
+	if content.Type == gjson.String {
+		return content.String() != ""
+	}
+	if !content.IsArray() || len(content.Array()) == 0 {
+		return false
+	}
+	plainText := true
 	content.ForEach(func(_, part gjson.Result) bool {
-		if part.Get("type").String() == "tool_use" {
-			hasToolUse = true
+		if part.Get("type").String() != "text" || part.Get("text").String() == "" {
+			plainText = false
 			return false
 		}
 		return true
 	})
-	return hasToolUse
+	return plainText
 }
 
 func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
