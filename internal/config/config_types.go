@@ -301,6 +301,13 @@ type CloakConfig struct {
 	// - true: strip caller system prompts and keep only the Claude Code billing and identity blocks
 	StrictMode bool `yaml:"strict-mode,omitempty" json:"strict-mode,omitempty"`
 
+	// RelaxedSystemPrompt preserves caller text system blocks in Claude's top-level
+	// system array after the billing and identity blocks, leaves caller messages
+	// untouched by the system-prompt policy, and omits generated current-date
+	// content. Generated cache placement is deferred until after payload rules.
+	// StrictMode takes precedence.
+	RelaxedSystemPrompt *bool `yaml:"relaxed-system-prompt,omitempty" json:"relaxed-system-prompt,omitempty"`
+
 	// SensitiveWords is a list of words to obfuscate with zero-width characters.
 	// This can help bypass certain content filters.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`

@@ -189,6 +189,22 @@ func ReadMetadataString(metadata *map[string]any, key string) string {
 	return value
 }
 
+// ReadMetadataBool reads a bool-valued metadata entry under the metadata lock.
+// The second return value reports whether the key contains a JSON boolean.
+func ReadMetadataBool(metadata *map[string]any, key string) (bool, bool) {
+	if metadata == nil {
+		return false, false
+	}
+	claudeDevicePoolMu.Lock()
+	defer claudeDevicePoolMu.Unlock()
+
+	if *metadata == nil {
+		return false, false
+	}
+	value, ok := (*metadata)[key].(bool)
+	return value, ok
+}
+
 // StoreMetadataString writes a string-valued metadata entry under the metadata
 // lock, initializing the map when needed. Empty values are skipped so callers can
 // forward optional fields without erasing a previously resolved value.

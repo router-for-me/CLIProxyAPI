@@ -256,6 +256,11 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if o.RebuildMidSystemMessage != n.RebuildMidSystemMessage {
 				changes = append(changes, fmt.Sprintf("claude[%d].rebuild-mid-system-message: %t -> %t", i, o.RebuildMidSystemMessage, n.RebuildMidSystemMessage))
 			}
+			oldRelaxedSystemPrompt := relaxedSystemPromptEnabled(o.Cloak)
+			newRelaxedSystemPrompt := relaxedSystemPromptEnabled(n.Cloak)
+			if oldRelaxedSystemPrompt != newRelaxedSystemPrompt {
+				changes = append(changes, fmt.Sprintf("claude[%d].cloak.relaxed-system-prompt: %t -> %t", i, oldRelaxedSystemPrompt, newRelaxedSystemPrompt))
+			}
 			if o.Cloak != nil && n.Cloak != nil {
 				if strings.TrimSpace(o.Cloak.Mode) != strings.TrimSpace(n.Cloak.Mode) {
 					changes = append(changes, fmt.Sprintf("claude[%d].cloak.mode: %s -> %s", i, o.Cloak.Mode, n.Cloak.Mode))
@@ -432,6 +437,10 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	}
 
 	return changes
+}
+
+func relaxedSystemPromptEnabled(cloak *config.CloakConfig) bool {
+	return cloak != nil && cloak.RelaxedSystemPrompt != nil && *cloak.RelaxedSystemPrompt
 }
 
 func trimStrings(in []string) []string {
