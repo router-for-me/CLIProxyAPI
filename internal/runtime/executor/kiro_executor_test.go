@@ -466,6 +466,26 @@ func TestMapModelToKiro_MapsClaudeOpus47Variants(t *testing.T) {
 			expected: "claude-sonnet-4.5",
 		},
 		{
+			name:     "claude opus 4.5 hyphenated alias",
+			model:    "kiro-claude-opus-4-5",
+			expected: "claude-opus-4.5",
+		},
+		{
+			name:     "claude haiku 4.5 hyphenated alias",
+			model:    "kiro-claude-haiku-4-5",
+			expected: "claude-haiku-4.5",
+		},
+		{
+			name:     "claude sonnet 4.6 hyphenated alias",
+			model:    "kiro-claude-sonnet-4-6",
+			expected: "claude-sonnet-4.6",
+		},
+		{
+			name:     "minimax m2.1 hyphenated alias",
+			model:    "kiro-minimax-m2-1",
+			expected: "minimax-m2.1",
+		},
+		{
 			name:     "non-Claude model passes through",
 			model:    "kiro-glm-5",
 			expected: "glm-5",
