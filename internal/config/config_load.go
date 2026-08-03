@@ -147,6 +147,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return nil, errResolvePluginsDir
 	}
 
+	// Normalize named downstream API keys and persistent accounting defaults.
+	cfg.NormalizeAPIKeyProfiles()
+
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 

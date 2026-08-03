@@ -134,7 +134,9 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 ## 使用量统计
 
-自v6.10.0版本以后，CLIProxyAPI及 [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) 项目不再预置数据统计功能，如果有数据统计需求的请使用以下项目：
+CLIProxyAPI 提供默认关闭的按 Key 统计模式，可为下游用户创建具名 Key，设置每周或每月的请求数、Token 与模型访问限额，并通过 SQLite 持久保存汇总数据。配置与限制语义请参见 [按 Key 用量与限额](docs/per-key-usage.md)。
+
+如需计费级分析、费用估算或外部数据库，请使用以下专用项目：
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 
