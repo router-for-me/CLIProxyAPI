@@ -20,14 +20,13 @@ type oaiToResponsesStateReasoning struct {
 	OutputIndex   int
 }
 type oaiToResponsesState struct {
-	Seq               int
-	ResponseID        string
-	Created           int64
-	Started           bool
-	CompletionPending bool
-	CompletedEmitted  bool
-	ReasoningID       string
-	ReasoningIndex    int
+	Seq              int
+	ResponseID       string
+	Created          int64
+	Started          bool
+	CompletedEmitted bool
+	ReasoningID      string
+	ReasoningIndex   int
 	// aggregation buffers for response.output
 	// Per-output message text buffers by index
 	MsgTextBuf   map[int]*strings.Builder
@@ -246,7 +245,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 	}
 	requestForNamespace := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
-		if st.CompletionPending && !st.CompletedEmitted {
+		if st.Started && !st.CompletedEmitted {
 			st.CompletedEmitted = true
 			return [][]byte{buildResponsesCompletedEvent(st, requestForNamespace, func() int { st.Seq++; return st.Seq })}
 		}
@@ -390,7 +389,6 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.TotalTokens = 0
 		st.ReasoningTokens = 0
 		st.UsageSeen = false
-		st.CompletionPending = false
 		st.CompletedEmitted = false
 		// response.created
 		created := []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
@@ -689,7 +687,6 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						st.FuncArgsDone[key] = true
 					}
 				}
-				st.CompletionPending = true
 			}
 
 			return true

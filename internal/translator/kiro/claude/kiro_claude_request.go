@@ -642,33 +642,36 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 	return kiroTools
 }
 
-// processMessages processes Claude messages and builds Kiro history
 // normalizeInArraySystemMessages rewrites role:"system" entries inside the
 // messages array as user messages, wrapping their text in <system-reminder>
 // tags (the same convention Claude Code uses for system notes inside user
 // turns). The top-level "system" request field is handled separately and is
-// not affected. Non-text blocks in a system message are dropped, matching how
-// the Claude API treats system message content as plain text.
+// not affected. Claude system content can be either a string or an ordered
+// array of text blocks; joining blocks with newlines preserves their boundaries
+// when Kiro's string-only message representation is built later.
 func normalizeInArraySystemMessages(messages []gjson.Result) []gjson.Result {
 	for i, msg := range messages {
 		if msg.Get("role").String() != "system" {
 			continue
 		}
-		var text strings.Builder
+
+		var textParts []string
 		content := msg.Get("content")
 		if content.IsArray() {
 			for _, part := range content.Array() {
 				if part.Get("type").String() == "text" {
-					text.WriteString(part.Get("text").String())
+					textParts = append(textParts, part.Get("text").String())
 				}
 			}
-		} else {
-			text.WriteString(content.String())
+		} else if content.Type == gjson.String {
+			textParts = append(textParts, content.String())
 		}
+
+		reminder := "<system-reminder>\n" + strings.Join(textParts, "\n") + "\n</system-reminder>"
 		converted, err := json.Marshal(map[string]interface{}{
 			"role": "user",
 			"content": []map[string]string{
-				{"type": "text", "text": "<system-reminder>\n" + text.String() + "\n</system-reminder>"},
+				{"type": "text", "text": reminder},
 			},
 		})
 		if err != nil {
@@ -679,6 +682,7 @@ func normalizeInArraySystemMessages(messages []gjson.Result) []gjson.Result {
 	return messages
 }
 
+// processMessages processes Claude messages and builds Kiro history.
 func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHistoryMessage, *KiroUserInputMessage, []KiroToolResult) {
 	var history []KiroHistoryMessage
 	var currentUserMsg *KiroUserInputMessage

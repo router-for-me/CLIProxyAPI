@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
@@ -38,6 +39,93 @@ func TestWriteErrorResponse_AddonHeadersDisabledByDefault(t *testing.T) {
 	}
 	if got := recorder.Header().Get("X-Request-Id"); got != "" {
 		t.Fatalf("X-Request-Id should be empty when passthrough is disabled, got %q", got)
+	}
+}
+
+func TestWriteErrorResponseDirectResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	c.Writer.Header().Set("X-Cpa-Trace-Id", "local-trace")
+	c.Writer.Header().Set("Access-Control-Allow-Origin", "https://trusted.example")
+
+	handler := NewBaseAPIHandlers(nil, nil)
+	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode:     http.StatusForbidden,
+		DirectResponse: true,
+		Body:           []byte(`{"error":"blocked"}`),
+		Headers: http.Header{
+			"Content-Type":                {"application/problem+json"},
+			"X-Plugin-Policy":             {"blocked"},
+			"X-Cpa-Trace-Id":              {"plugin-trace"},
+			"Access-Control-Allow-Origin": {"https://untrusted.example"},
+		},
+	})
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+	if got := recorder.Body.String(); got != `{"error":"blocked"}` {
+		t.Fatalf("body = %q", got)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/problem+json" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if got := recorder.Header().Get("X-Plugin-Policy"); got != "blocked" {
+		t.Fatalf("X-Plugin-Policy = %q", got)
+	}
+	if got := recorder.Header().Get("X-Cpa-Trace-Id"); got != "local-trace" {
+		t.Fatalf("X-Cpa-Trace-Id = %q, want local value", got)
+	}
+	if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != "https://trusted.example" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want trusted origin", got)
+	}
+}
+
+func TestInternalConcurrencyBusyWritesRetryAfterWithoutPassthrough(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+
+	handler := NewBaseAPIHandlers(nil, nil)
+	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      coreauth.NewHomeConcurrencyBusyError("busy", 750*time.Millisecond),
+	})
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want 1", got)
+	}
+}
+
+func TestWriteErrorResponseHomeBusyNormalAndStreamHeaders(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "normal", true: "stream"}[stream], func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			if stream {
+				c.Request.Header.Set("Accept", "text/event-stream")
+			}
+
+			handler := NewBaseAPIHandlers(nil, nil)
+			handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+				StatusCode: http.StatusTooManyRequests,
+				Error:      coreauth.NewHomeConcurrencyBusyError("busy", 750*time.Millisecond),
+			})
+			if recorder.Code != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
+			}
+			if got := recorder.Header().Get("Retry-After"); got != "1" {
+				t.Fatalf("Retry-After = %q, want 1", got)
+			}
+		})
 	}
 }
 

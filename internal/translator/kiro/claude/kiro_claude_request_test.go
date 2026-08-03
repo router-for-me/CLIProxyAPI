@@ -118,7 +118,7 @@ func TestBuildKiroPayload_NoToolsNoHistoryToolUse(t *testing.T) {
 // currentMessage.userInputMessageContext.tools.
 func TestBuildKiroPayload_TrailingSystemMessageKeepsTools(t *testing.T) {
 	claudeReq := `{
-		"model": "claude-opus-4-8",
+		"model": "claude-sonnet-4-6",
 		"max_tokens": 1024,
 		"tools": [
 			{"name": "Grep", "description": "search", "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}}}
@@ -129,7 +129,7 @@ func TestBuildKiroPayload_TrailingSystemMessageKeepsTools(t *testing.T) {
 		]
 	}`
 
-	out, _ := BuildKiroPayload([]byte(claudeReq), "claude-opus-4-8", "arn:test", "test", true, false, http.Header{}, nil)
+	out, _ := BuildKiroPayload([]byte(claudeReq), "claude-sonnet-4-6", "arn:test", "test", true, false, http.Header{}, nil)
 	if len(out) == 0 {
 		t.Fatal("expected non-empty payload")
 	}
@@ -151,6 +151,69 @@ func TestBuildKiroPayload_TrailingSystemMessageKeepsTools(t *testing.T) {
 	}
 	if !strings.Contains(content, "<system-reminder>") {
 		t.Fatalf("expected system text wrapped in <system-reminder> tags, got: %q", content)
+	}
+}
+
+func TestBuildKiroPayload_MidConversationSystemStringPreservesOrder(t *testing.T) {
+	claudeReq := `{
+		"model": "claude-sonnet-4-6",
+		"max_tokens": 1024,
+		"messages": [
+			{"role": "user", "content": "first user turn"},
+			{"role": "assistant", "content": "first assistant turn"},
+			{"role": "system", "content": "mid-conversation instruction"},
+			{"role": "user", "content": "final user turn"}
+		]
+	}`
+
+	out, _ := BuildKiroPayload([]byte(claudeReq), "claude-sonnet-4-6", "arn:test", "test", false, true, http.Header{}, nil)
+	history := gjson.GetBytes(out, "conversationState.history").Array()
+	if len(history) != 2 {
+		t.Fatalf("expected user and assistant history entries, got %d: %s", len(history), string(out))
+	}
+	if got := history[0].Get("userInputMessage.content").String(); got != "first user turn" {
+		t.Fatalf("unexpected first history content: %q", got)
+	}
+	if got := history[1].Get("assistantResponseMessage.content").String(); got != "first assistant turn" {
+		t.Fatalf("unexpected second history content: %q", got)
+	}
+
+	current := gjson.GetBytes(out, "conversationState.currentMessage.userInputMessage.content").String()
+	want := "<system-reminder>\nmid-conversation instruction\n</system-reminder>\nfinal user turn"
+	if current != want {
+		t.Fatalf("system and final user content reordered or changed:\nwant %q\n got %q", want, current)
+	}
+}
+
+func TestBuildKiroPayload_MidConversationSystemArrayPreservesBlockOrder(t *testing.T) {
+	claudeReq := `{
+		"model": "claude-sonnet-4-6",
+		"max_tokens": 1024,
+		"messages": [
+			{"role": "user", "content": "before system"},
+			{"role": "system", "content": [
+				{"type": "text", "text": "first system block"},
+				{"type": "text", "text": "second system block"}
+			]},
+			{"role": "assistant", "content": "assistant after system"},
+			{"role": "user", "content": "after assistant"}
+		]
+	}`
+
+	out, _ := BuildKiroPayload([]byte(claudeReq), "claude-sonnet-4-6", "arn:test", "test", false, true, http.Header{}, nil)
+	history := gjson.GetBytes(out, "conversationState.history").Array()
+	if len(history) != 2 {
+		t.Fatalf("expected merged user and assistant history entries, got %d: %s", len(history), string(out))
+	}
+	wantHistory := "before system\n<system-reminder>\nfirst system block\nsecond system block\n</system-reminder>"
+	if got := history[0].Get("userInputMessage.content").String(); got != wantHistory {
+		t.Fatalf("system blocks reordered or changed:\nwant %q\n got %q", wantHistory, got)
+	}
+	if got := history[1].Get("assistantResponseMessage.content").String(); got != "assistant after system" {
+		t.Fatalf("assistant order changed: %q", got)
+	}
+	if got := gjson.GetBytes(out, "conversationState.currentMessage.userInputMessage.content").String(); got != "after assistant" {
+		t.Fatalf("final user order changed: %q", got)
 	}
 }
 

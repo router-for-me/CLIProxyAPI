@@ -195,7 +195,10 @@ func TestSynthesizeAuthFileRejectsRawGeminiBeforePluginDispatch(t *testing.T) {
 				}),
 			}
 
-			auths := SynthesizeAuthFile(ctx, filepath.Join(tempDir, "gemini.json"), tt.raw)
+			auths, errSynthesize := SynthesizeAuthFile(ctx, filepath.Join(tempDir, "gemini.json"), tt.raw)
+			if errSynthesize != nil {
+				t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+			}
 			if len(auths) != 0 {
 				t.Fatalf("SynthesizeAuthFile() len = %d, want no auths for raw Gemini input", len(auths))
 			}
@@ -246,7 +249,10 @@ func TestSynthesizeAuthFileExpandsPluginMultiAuths(t *testing.T) {
 		}),
 	}
 
-	auths := SynthesizeAuthFile(ctx, fullPath, raw)
+	auths, errSynthesize := SynthesizeAuthFile(ctx, fullPath, raw)
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
 	if len(auths) != 2 {
 		t.Fatalf("SynthesizeAuthFile() len = %d, want two plugin auths", len(auths))
 	}
@@ -275,6 +281,30 @@ func TestSynthesizeAuthFileExpandsPluginMultiAuths(t *testing.T) {
 	}
 }
 
+func TestSynthesizeAuthFileSkipsInvalidPluginAuthWeight(t *testing.T) {
+	tempDir := t.TempDir()
+	fullPath := filepath.Join(tempDir, "plugin.json")
+	ctx := &SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: tempDir,
+		Now:     time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC),
+		PluginAuthParser: multiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+			return []*coreauth.Auth{
+				{ID: "invalid", Provider: "plugin", Attributes: map[string]string{coreauth.AttributeWeight: "1.5"}},
+				{ID: "valid", Provider: "plugin", Attributes: map[string]string{coreauth.AttributeWeight: "0"}},
+			}, true, nil
+		}),
+	}
+
+	auths, errSynthesize := SynthesizeAuthFile(ctx, fullPath, []byte(`{"type":"plugin"}`))
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
+	if len(auths) != 1 || auths[0].ID != "valid" {
+		t.Fatalf("SynthesizeAuthFile() auths = %#v, want only valid zero-weight auth", auths)
+	}
+}
+
 func TestSynthesizeAuthFileAppliesSourceDisabledToPluginMultiAuths(t *testing.T) {
 	tempDir := t.TempDir()
 	fullPath := filepath.Join(tempDir, "geminicli.json")
@@ -292,7 +322,10 @@ func TestSynthesizeAuthFileAppliesSourceDisabledToPluginMultiAuths(t *testing.T)
 		}),
 	}
 
-	auths := SynthesizeAuthFile(ctx, fullPath, raw)
+	auths, errSynthesize := SynthesizeAuthFile(ctx, fullPath, raw)
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
 	if len(auths) != 2 {
 		t.Fatalf("SynthesizeAuthFile() len = %d, want two plugin auths", len(auths))
 	}
@@ -320,7 +353,10 @@ func TestSynthesizeAuthFilePluginHandledEmptySuppressesBuiltin(t *testing.T) {
 		}),
 	}
 
-	auths := SynthesizeAuthFile(ctx, fullPath, raw)
+	auths, errSynthesize := SynthesizeAuthFile(ctx, fullPath, raw)
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
 	if len(auths) != 0 {
 		t.Fatalf("SynthesizeAuthFile() len = %d, want plugin-handled empty result", len(auths))
 	}
@@ -549,6 +585,63 @@ func TestFileSynthesizer_Synthesize_PriorityParsing(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_WeightParsing(t *testing.T) {
+	tests := []struct {
+		name   string
+		weight any
+		want   string
+		valid  bool
+	}{
+		{name: "number", weight: 5, want: "5", valid: true},
+		{name: "numeric string", weight: " 3 ", want: "3", valid: true},
+		{name: "zero excludes", weight: 0, want: "0", valid: true},
+		{name: "negative excludes", weight: -5, want: "0", valid: true},
+		{name: "maximum", weight: 1000000, want: "1000000", valid: true},
+		{name: "fraction rejected", weight: 1.5},
+		{name: "above maximum rejected", weight: 1000001},
+		{name: "overflow rejected", weight: "9223372036854775808"},
+		{name: "invalid string", weight: "heavy"},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			data, errMarshal := json.Marshal(map[string]any{"type": "claude", "weight": testCase.weight})
+			if errMarshal != nil {
+				t.Fatalf("json.Marshal() error = %v", errMarshal)
+			}
+			if errWrite := os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644); errWrite != nil {
+				t.Fatalf("WriteFile() error = %v", errWrite)
+			}
+			ctx := &SynthesisContext{
+				Config:      &config.Config{},
+				AuthDir:     tempDir,
+				Now:         time.Now(),
+				IDGenerator: NewStableIDGenerator(),
+			}
+			auths, errSynthesize := NewFileSynthesizer().Synthesize(ctx)
+			if errSynthesize != nil {
+				t.Fatalf("Synthesize() error = %v", errSynthesize)
+			}
+			if !testCase.valid {
+				if len(auths) != 0 {
+					t.Fatalf("auth count = %d, want invalid credential skipped", len(auths))
+				}
+				if _, errDirect := SynthesizeAuthFile(ctx, filepath.Join(tempDir, "auth.json"), data); errDirect == nil {
+					t.Fatal("SynthesizeAuthFile() error = nil, want weight validation error")
+				}
+				return
+			}
+			if len(auths) != 1 {
+				t.Fatalf("auth count = %d, want 1", len(auths))
+			}
+			if gotWeight := auths[0].Attributes[coreauth.AttributeWeight]; gotWeight != testCase.want {
+				t.Fatalf("weight = %q, want %q", gotWeight, testCase.want)
+			}
+		})
+	}
+}
+
 func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
 	tempDir := t.TempDir()
 	authData := map[string]any{
@@ -767,7 +860,10 @@ func TestSynthesizeAuthFileExpandsTrustedGeminiCLIPluginAuth(t *testing.T) {
 		}),
 	}
 
-	auths := SynthesizeAuthFile(ctx, filepath.Join(tempDir, "gemini-cli.json"), data)
+	auths, errSynthesize := SynthesizeAuthFile(ctx, filepath.Join(tempDir, "gemini-cli.json"), data)
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
 	if len(auths) != 3 {
 		t.Fatalf("expected 3 auths (1 primary + 2 virtuals), got %d", len(auths))
 	}
@@ -826,7 +922,10 @@ func TestSynthesizeFileAuths_QoderPreservesModelConfigs(t *testing.T) {
 		Now:         time.Now(),
 		IDGenerator: NewStableIDGenerator(),
 	}
-	auths := SynthesizeAuthFile(ctx, authPath, data)
+	auths, errSynthesize := SynthesizeAuthFile(ctx, authPath, data)
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
 	if len(auths) != 1 {
 		t.Fatalf("expected 1 auth, got %d", len(auths))
 	}
@@ -880,7 +979,10 @@ func TestSynthesizeFileAuths_QoderHandlesMissingModelConfigs(t *testing.T) {
 		Now:         time.Now(),
 		IDGenerator: NewStableIDGenerator(),
 	}
-	auths := SynthesizeAuthFile(ctx, authPath, data)
+	auths, errSynthesize := SynthesizeAuthFile(ctx, authPath, data)
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
 	if len(auths) != 1 {
 		t.Fatalf("expected 1 auth, got %d", len(auths))
 	}

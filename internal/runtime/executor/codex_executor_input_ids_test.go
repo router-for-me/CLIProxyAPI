@@ -15,9 +15,11 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestCodexExecutorExecuteStreamShortensOverlongInputItemIDs(t *testing.T) {
+func TestCodexExecutorExecuteStreamSanitizesOverlongInputItemIDs(t *testing.T) {
+	longReasoningItemID := "rs_" + strings.Repeat("a", 64)
 	longCallItemID := strings.Repeat("grok-call-item-", 6)
 	longOutputItemID := strings.Repeat("grok-output-item-", 6)
+	encryptedContent := validOpenAIResponsesReasoningEncryptedContentForTest()
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, errRead := io.ReadAll(r.Body)
@@ -35,9 +37,10 @@ func TestCodexExecutorExecuteStreamShortensOverlongInputItemIDs(t *testing.T) {
 	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
 		Model: "gpt-5.4",
 		Payload: []byte(`{"model":"gpt-5.4","stream":true,"input":[` +
+			`{"type":"reasoning","id":"` + longReasoningItemID + `","encrypted_content":"` + encryptedContent + `","summary":[]},` +
 			`{"type":"function_call","id":"` + longCallItemID + `","call_id":"call-1","name":"lookup","arguments":"{}"},` +
 			`{"type":"function_call_output","id":"` + longOutputItemID + `","call_id":"call-1","output":"ok"},` +
-			`{"type":"message","id":"msg-1","role":"user","content":"continue"}]}`),
+			`{"type":"message","id":"item_74ec40c883248ebb4885ec84","role":"user","content":"continue"}]}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FromString("openai-response"),
 		Stream:       true,
@@ -46,6 +49,13 @@ func TestCodexExecutorExecuteStreamShortensOverlongInputItemIDs(t *testing.T) {
 		t.Fatalf("ExecuteStream error: %v", err)
 	}
 	for range result.Chunks {
+	}
+
+	if input := gjson.GetBytes(gotBody, "input").Array(); len(input) != 3 {
+		t.Fatalf("upstream input length = %d, want 3: %s", len(input), gotBody)
+	}
+	if gotType := gjson.GetBytes(gotBody, "input.0.type").String(); gotType != "function_call" {
+		t.Fatalf("input.0.type = %q, want function_call: %s", gotType, gotBody)
 	}
 
 	for index, testCase := range []struct {
@@ -66,7 +76,7 @@ func TestCodexExecutorExecuteStreamShortensOverlongInputItemIDs(t *testing.T) {
 	if got := gjson.GetBytes(gotBody, "input.1.call_id").String(); got != "call-1" {
 		t.Fatalf("function call output call_id = %q, want call-1", got)
 	}
-	if got := gjson.GetBytes(gotBody, "input.2.id").String(); got != "msg-1" {
-		t.Fatalf("valid input item ID changed: %q", got)
+	if got := gjson.GetBytes(gotBody, "input.2.id").String(); got != "msg_item_74ec40c883248ebb4885ec84" {
+		t.Fatalf("message input item ID was not normalized: %q", got)
 	}
 }
