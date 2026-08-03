@@ -602,6 +602,15 @@ func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg
 		return
 	}
 	profile := defaultClaudeDeviceProfile(cfg)
+	// Legacy mode predates the stabilized, measured MacOS/arm64 fingerprint.
+	// Preserve an explicit operator override, but otherwise describe the host
+	// actually sending the request instead of leaking the stabilized defaults.
+	if cfg == nil || strings.TrimSpace(cfg.ClaudeHeaderDefaults.OS) == "" {
+		profile.OS = mapStainlessOS()
+	}
+	if cfg == nil || strings.TrimSpace(cfg.ClaudeHeaderDefaults.Arch) == "" {
+		profile.Arch = mapStainlessArch()
+	}
 	miscEnsure := func(name, fallback string, valid func(string) bool) {
 		if current := strings.TrimSpace(r.Header.Get(name)); current != "" && (valid == nil || valid(current)) {
 			return
