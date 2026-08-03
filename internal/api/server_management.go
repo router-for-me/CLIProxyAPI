@@ -371,6 +371,15 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-tokens/:id/policy", s.mgmt.PutAPITokenPolicy)
 		mgmt.POST("/api-tokens/:id/regenerate", s.mgmt.RegenerateAPIToken)
 		mgmt.DELETE("/api-tokens/:id", s.mgmt.DeleteAPIToken)
+
+		// Export / import of the PG-backed data. GET /export dumps the
+		// requested resources (default all) as a portable JSON bundle; POST
+		// /import restores such a bundle, wiping and replacing the selected
+		// resources within a single transaction (destructive for those
+		// categories). Return 503 when the PG store is not configured.
+		mgmt.GET("/export/resources", s.mgmt.ListBackupResources)
+		mgmt.GET("/export", s.mgmt.ExportAllData)
+		mgmt.POST("/import", s.mgmt.ImportAllData)
 	}
 }
 

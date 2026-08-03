@@ -141,6 +141,7 @@ const NAV_GROUPS = [
     items: [
       { to: '/settings', label: 'Settings', icon: 'gear' },
       { to: '/branding', label: 'Branding', icon: 'tag' },
+      { to: '/import-export', label: 'Import / Export', icon: 'transfer' },
     ],
   },
 ];
@@ -191,4 +192,5 @@ const ICON_MAP = {
   snow: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M8 1v14M1 8h14M3 3l10 10M13 3L3 13M8 3L6 1M8 3l2-2M8 13l-2 2M8 13l2 2M3 8L1 6M3 8l-2 2M13 8l2-2M13 8l2 2" /></svg>,
   link: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6.5 9.5a2.5 2.5 0 0 0 3.5 0l2-2a2.5 2.5 0 0 0-3.5-3.5l-1 1" /><path d="M9.5 6.5a2.5 2.5 0 0 0-3.5 0l-2 2a2.5 2.5 0 0 0 3.5 3.5l1-1" /></svg>,
   pulse: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 8h3l1.5-4 3 9 2-6 1 1h3.5" /></svg>,
+  transfer: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2 5h11M9 2l3 3-3 3M14 11H3M7 8l-3 3 3 3" /></svg>,
 };

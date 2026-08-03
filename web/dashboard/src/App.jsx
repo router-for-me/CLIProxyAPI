@@ -29,6 +29,7 @@ import CooldownProvidersPage from './pages/CooldownProvidersPage.jsx';
 import SessionAffinityPage from './pages/SessionAffinityPage.jsx';
 import AlertsPage from './pages/AlertsPage.jsx';
 import DashboardPage from './pages/DashboardPage.jsx';
+import ImportExportPage from './pages/ImportExportPage.jsx';
 import ManageCpaLayout from './pages/manage-cpa/ManageCpaLayout.jsx';
 import OverviewTab from './pages/manage-cpa/OverviewTab.jsx';
 import ProvidersTab from './pages/manage-cpa/ProvidersTab.jsx';
@@ -237,6 +238,7 @@ export default function App() {
             <Route path="/upstream-providers" element={<UpstreamProvidersPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/branding" element={<BrandingPage />} />
+            <Route path="/import-export" element={<ImportExportPage />} />
             <Route path="/manage-cpa" element={<ManageCpaLayout />}>
               <Route index element={<OverviewTab />} />
               <Route path="providers" element={<ProvidersTab />} />

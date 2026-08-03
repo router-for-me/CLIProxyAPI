@@ -89,6 +89,44 @@ button.danger:hover:not(:disabled) {
   background: var(--danger);
   color: var(--bg);
 }
+/* Link-like small buttons used for inline "Select all" / "Select none"
+   controls and other secondary text actions. Inherits accent color and only
+   shows as interactive text. */
+button.linklike {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+button.linklike:hover:not(:disabled) {
+  color: var(--accent);
+  opacity: 0.8;
+}
+/* Vertical checklist of backup categories (Import / Export page). */
+.checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 340px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+}
+.checklist__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.checklist__item:hover {
+  background: var(--bg-elevated);
+}
 
 input, textarea, select {
   font-family: inherit;

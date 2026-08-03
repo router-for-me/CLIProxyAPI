@@ -254,6 +254,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		// is attached (the provider-cooldown detector polls live cooldowns).
 		s.mgmt.SetAlertsStore(handles.Alerts)
 		s.mgmt.StartAlertSweep()
+		// Wire the backup store that powers the /export and /import routes
+		// (dump/restore of the PG tables). No-op when PG is not configured.
+		s.mgmt.SetBackupStore(handles.Backup)
 		// Attach the refresh-outcome sink so every OAuth/auth token refresh is
 		// persisted to upstream_sync_log. No-op when PG is not configured
 		// (SyncLogSink returns nil, SetRefreshSink detaches). Re-attached on

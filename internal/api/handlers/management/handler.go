@@ -149,6 +149,11 @@ type Handler struct {
 	// pgPricingSourcesDir is the local directory backing uploaded catalog
 	// files for source_type=file pricing sources.
 	pgPricingSourcesDir string
+
+	// pgBackup is the underlying Postgres store used for the /export and
+	// /import routes (dump/restore of the PG tables). nil when PG is not
+	// configured — those routes return 503.
+	pgBackup *store.PostgresStore
 }
 
 type configReloadSnapshot struct {
@@ -443,6 +448,17 @@ func (h *Handler) SetPricingSourcesStore(store store.PricingSourceStore, uploadD
 			pricingsource.SetExternalSources(list)
 		}
 	}
+}
+
+// SetBackupStore wires the underlying Postgres store used by the /export and
+// /import routes. nil when PG is not configured — those routes return 503.
+func (h *Handler) SetBackupStore(pg *store.PostgresStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pgBackup = pg
 }
 
 // SetConfig updates the in-memory config reference when the server hot-reloads.

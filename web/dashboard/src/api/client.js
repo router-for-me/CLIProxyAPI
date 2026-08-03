@@ -1719,3 +1719,64 @@ export async function detachModelGroup(groupID, apiKeyId) {
     body: JSON.stringify({ api_key_id: apiKeyId }),
   });
 }
+
+// ---------------------------------------------------------------------------
+// Backup / restore (export & import all data)
+// ---------------------------------------------------------------------------
+
+// listBackupResources returns the canonical ordered list of backup resource
+// categories (e.g. ["api_keys", "internal_users", ...]) supported by the
+// export/import routes.
+export async function listBackupResources() {
+  return fetchJSON('/export/resources');
+}
+
+// exportData downloads the exported bundle for the requested resource
+// categories. resources may be null/empty for "all data". When download is
+// true the browser saves the resulting JSON to a file; otherwise the bundle is
+// returned so callers can inspect it.
+export async function exportData(resources, { download = false } = {}) {
+  const qs = new URLSearchParams();
+  if (resources && resources.length) qs.set('resources', resources.join(','));
+  const path = `/export${qs.toString() ? `?${qs.toString()}` : ''}`;
+
+  const token = getStoredToken();
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+  });
+  if (!res.ok) {
+    let message = res.statusText || 'Request failed';
+    try {
+      const payload = await res.json();
+      message = extractErrorMessage(payload, message);
+    } catch { /* keep default */ }
+    throw new ApiError(message, res.status);
+  }
+  const bundle = await res.json();
+
+  if (download) {
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `nixllm_export_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+  return bundle;
+}
+
+// importData restores the supplied backup bundle. resources optionally limits
+// the import to a subset of categories; null/empty restores every category
+// present in the bundle. Returns the per-resource import report.
+export async function importData(bundle, resources) {
+  const qs = new URLSearchParams();
+  if (resources && resources.length) qs.set('resources', resources.join(','));
+  const path = `/import${qs.toString() ? `?${qs.toString()}` : ''}`;
+  return fetchJSON(path, {
+    method: 'POST',
+    body: JSON.stringify(bundle),
+  });
+}

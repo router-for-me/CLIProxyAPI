@@ -87,6 +87,10 @@ type PgStoreHandles struct {
 	// Alerts). nil when PG is not configured — the /alerts routes return 503
 	// and the detection sweep is a no-op.
 	Alerts *store.AlertStore
+	// Backup is the PG-backed store that powers the /export and /import routes
+	// (dump/restore of the PG tables). nil when PG is not configured — those
+	// routes return 503.
+	Backup *store.PostgresStore
 }
 
 // ServerOption customises HTTP server construction.

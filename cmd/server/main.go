@@ -745,6 +745,7 @@ func main() {
 			ModelGroups:       pgModelGroups,
 			ModelHealth:       pgModelHealth,
 			Alerts:            pgAlerts,
+			Backup:            pgStoreInst,
 		}))
 	}
 
