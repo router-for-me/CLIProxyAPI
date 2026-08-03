@@ -53,6 +53,46 @@ When no bundle is embedded (e.g. running `go run` without first building the
 SPA), the `/dashboard` route returns a short instruction page telling the
 operator to run `npm run dev` instead.
 
+## Quickstart — Cloudflare Workers (frontend-only deploy)
+
+Deploy the built SPA to Cloudflare Workers with a tiny Worker that reverse-
+proxies API requests to a running CLIProxyAPI Go server. The SPA keeps using
+its same-origin relative API base (`/v0/management`) — no CORS, no code
+change to `src/api/client.js`. The Go backend stays where it is (VPS /
+container / localhost reachable from Cloudflare).
+
+```bash
+cd web/dashboard
+npm install
+npm run build
+
+npx wrangler login                       # one-time browser auth
+
+# Set the backend origin as an encrypted production variable.
+# You will be prompted to paste it (e.g. https://api.example.com:8317).
+npx wrangler secret put BACKEND_ORIGIN
+
+npx wrangler deploy
+```
+
+The deployed URL (e.g. `https://nixllm-dashboard.<acct>.workers.dev`) serves
+the SPA. Browser-relative requests to `/v0/*`, `/v1/*`, `/v1beta/*`,
+`/openai/*`, `/backend-api/*`, and `/healthz` are forwarded to
+`BACKEND_ORIGIN`; everything else is served from the Static Assets bundle
+with `index.html` fallback for client-side routes (`/usage`, `/api-keys/:id`,
+...). WebSocket upgrade on `/backend-api/*` is preserved by the proxy.
+
+Local preview against a dev Go server:
+
+```bash
+cp .dev.vars.example .dev.vars           # set BACKEND_ORIGIN=http://127.0.0.1:8317
+npm run cf:dev                          # wrangler dev on http://localhost:8787
+```
+
+Files: `wrangler.toml` (config) and `worker/proxy.js` (proxy). Only the
+frontend is deployed — the Go server, Postgres, OAuth state, in-memory
+registry, and WebSocket relays all remain on the backend origin.
+
 ## Authentication
 
 The dashboard does not maintain its own user store. It reuses the
@@ -97,12 +137,15 @@ fails.
 
 ## Scripts
 
-| Command          | Description                                  |
-|------------------|----------------------------------------------|
-| `npm run dev`    | Start Vite dev server on port 9173.         |
-| `npm run build`  | Build production bundle into `dist/`.        |
-| `npm run preview`| Preview the production build on port 9173.    |
-| `npm run lint`   | (Optional) run ESLint.                       |
+| Command            | Description                                                |
+|--------------------|------------------------------------------------------------|
+| `npm run dev`      | Start Vite dev server on port 9173.                        |
+| `npm run build`    | Build production bundle into `dist/`.                       |
+| `npm run preview`  | Preview the production build on port 9173.                 |
+| `npm run lint`      | (Optional) run ESLint.                                     |
+| `npm run cf:dev`   | Build then `wrangler dev` locally (port 8787).            |
+| `npm run cf:deploy`| Build then `wrangler deploy` to Cloudflare Workers.       |
+| `npm run cf:tail`  | Live tail the deployed Worker's logs.                      |
 
 ## Layout
 
@@ -111,6 +154,10 @@ web/dashboard/
 ├─ index.html                # HTML entry
 ├─ vite.config.js            # dev server + /v0 proxy, port 9173
 ├─ package.json
+├─ wrangler.toml             # Cloudflare Workers config (Static Assets + vars)
+├─ .dev.vars.example         # local wrangler secret template (copy to .dev.vars)
+├─ worker/
+│  └─ proxy.js               # reverse-proxies API paths → BACKEND_ORIGIN
 ├─ public/
 │  └─ favicon.svg
 └─ src/

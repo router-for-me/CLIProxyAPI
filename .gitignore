@@ -66,6 +66,11 @@ _bmad-output/*
 web/dashboard/node_modules/
 web/dashboard/dist/
 
+# Cloudflare Workers local state — .wrangler/ is the wrangler cache and
+# .dev.vars holds local-only secrets (e.g. BACKEND_ORIGIN for `wrangler dev`).
+web/dashboard/.wrangler/
+web/dashboard/.dev.vars
+
 # Operator-supplied LiteLLM reference catalogs dropped into the repo root
 # (e.g. model_prices_and_context_window.json) are intentionally NOT tracked;
 # if an operator wants to import one they must do it through the dashboard's

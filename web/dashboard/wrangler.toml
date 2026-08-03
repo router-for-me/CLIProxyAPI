@@ -1,0 +1,51 @@
+# Cloudflare Workers configuration for the NixLLM dashboard SPA.
+#
+# Deploys the built dashboard (web/dashboard/dist) as Static Assets served by
+# a Worker that also reverse-proxies API requests to the CLIProxyAPI Go
+# backend. This lets the SPA keep its same-origin relative API base
+# (`/v0/management`) without any CORS configuration.
+#
+# First-time setup:
+#   1. npm install
+#   2. npm run build                          # produce dist/
+#   3. npx wrangler login                     # one-time browser auth
+#   4. Set the backend origin (one of):
+#        npx wrangler secret put BACKEND_ORIGIN
+#        # → paste your Go server origin, e.g. https://api.example.com
+#      ...or for local dev, put it in .dev.vars (never committed).
+#   5. npx wrangler deploy
+#
+# After future frontend changes: npm run build && npx wrangler deploy
+
+name = "nixllm-dashboard"
+main = "worker/proxy.js"
+compatibility_date = "2025-09-01"
+
+# Disable Cloudflare's anonymous wrangler telemetry by default. Top-level
+# field (not part of [observability]). The operator can opt back in by
+# removing this line.
+send_metrics = false
+
+# Serve the built SPA from Static Assets. `directory` is relative to this
+# wrangler.toml. `not_found_handling = "single-page-application"` makes every
+# unknown route fall back to /index.html so react-router (BrowserRouter) can
+# resolve client-side routes like /usage or /api-keys/:id.
+# `run_worker_first = true` ensures the worker intercepts API paths before the
+# static handler serves a 404 fallback for them.
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = true
+
+# Default backend origin for `wrangler dev` / staging. Override for
+# production with a secret (`wrangler secret put BACKEND_ORIGIN`) or an
+# encrypted environment variable in the Cloudflare dashboard — do NOT keep the
+# production origin in this committed file if it is private.
+[vars]
+BACKEND_ORIGIN = "http://127.0.0.1:8317"
+
+# Observability (Workers dashboard → Logs). Costs nothing when idle, very
+# useful when diagnosing a proxy/auth issue.
+[observability]
+enabled = true

@@ -1,0 +1,5 @@
+# Local secrets for `wrangler dev` / `npm run cf:dev`. Never committed.
+# Copy to .dev.vars and adjust. For production, set BACKEND_ORIGIN as an
+# encrypted variable via `npx wrangler secret put BACKEND_ORIGIN` or the
+# Cloudflare dashboard (Workers → Settings → Variables).
+BACKEND_ORIGIN=http://127.0.0.1:8317
