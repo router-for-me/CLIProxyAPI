@@ -568,6 +568,78 @@ func (s *APIKeyStore) ListPaged(ctx context.Context, page, pageSize int, statusF
 	return keys, total, nil
 }
 
+// APIKeyBudgetCaps is the per-key budget projection returned by
+// ListBudgetCaps. It pairs an active API key with its optional per-window
+// budget caps (nil = no cap for that window) plus the resolved key/user name
+// so the alert detector can produce a readable alert without extra joins.
+type APIKeyBudgetCaps struct {
+	APIKeyID         string    `json:"api_key_id"`
+	Name             string    `json:"name"`
+	KeyAlias         string    `json:"key_alias"`
+	KeyPrefix        string    `json:"key_prefix"`
+	UserID           string    `json:"user_id"`
+	UserAlias        string    `json:"user_alias"`
+	CreatedAt        time.Time `json:"created_at"`
+	BudgetHourlyUSD  *float64  `json:"budget_hourly_usd"`
+	BudgetWeeklyUSD  *float64  `json:"budget_weekly_usd"`
+	BudgetMonthlyUSD *float64  `json:"budget_monthly_usd"`
+}
+
+// ListBudgetCaps returns every active API key that carries at least one budget
+// cap (hourly/weekly/monthly), paired with its policy caps. Only active keys
+// are returned because only they can be enforced (a disabled/revoked key's
+// budget is moot). It is the drill source for the "API key max spend" alert
+// detector: the detector resolves each window's current spend from
+// usage_windows and compares against these caps. nil policy rows (key with no
+// budget policy) are skipped.
+func (s *APIKeyStore) ListBudgetCaps(ctx context.Context) ([]APIKeyBudgetCaps, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: api key store not initialized")
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT k.id, k.name, COALESCE(k.key_alias, ''), k.key_prefix,
+		       COALESCE(k.user_id, ''), COALESCE(u.user_alias, ''),
+		       k.created_at, p.budget_hourly_usd, p.budget_weekly_usd, p.budget_monthly_usd
+		FROM %s k
+		LEFT JOIN %s u ON u.id = k.user_id
+		JOIN %s p ON p.api_key_id = k.id
+		WHERE k.status = 'active'
+		  AND (p.budget_hourly_usd > 0 OR p.budget_weekly_usd > 0 OR p.budget_monthly_usd > 0)`, s.apiKeysTable, s.internalUsersTable, s.policiesTable))
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: list api key budget caps: %w", err)
+	}
+	defer func() {
+		if errClose := rows.Close(); errClose != nil {
+			log.WithError(errClose).Debug("postgres store: close api key budget caps rows failed")
+		}
+	}()
+	out := make([]APIKeyBudgetCaps, 0)
+	for rows.Next() {
+		var (
+			c                   APIKeyBudgetCaps
+			hourly, weekly, mon sql.NullFloat64
+		)
+		if err := rows.Scan(&c.APIKeyID, &c.Name, &c.KeyAlias, &c.KeyPrefix,
+			&c.UserID, &c.UserAlias, &c.CreatedAt, &hourly, &weekly, &mon); err != nil {
+			return nil, fmt.Errorf("postgres store: scan api key budget caps row: %w", err)
+		}
+		if hourly.Valid {
+			v := hourly.Float64
+			c.BudgetHourlyUSD = &v
+		}
+		if weekly.Valid {
+			v := weekly.Float64
+			c.BudgetWeeklyUSD = &v
+		}
+		if mon.Valid {
+			v := mon.Float64
+			c.BudgetMonthlyUSD = &v
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // UpdatePolicy creates or replaces the policy attached to api_key_id.
 func (s *APIKeyStore) UpdatePolicy(ctx context.Context, id string, policy Policy) error {
 	if s == nil || s.db == nil {

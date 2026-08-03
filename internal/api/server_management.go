@@ -329,6 +329,21 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/model-health/log", s.mgmt.ClearModelHealthLog)
 		mgmt.GET("/model-health/log/:id", s.mgmt.GetModelHealthLogEntry)
 
+		// Alerts / Notifications feed (Analysis → Alerts). Records conditions
+		// detected by the background sweep (max-spend, error-rate, provider
+		// cooldown, model-health). Returns 503 when the PG store is not
+		// configured.
+		mgmt.GET("/alerts", s.mgmt.ListAlerts)
+		mgmt.GET("/alerts/active", s.mgmt.ListActiveAlerts)
+		mgmt.GET("/alerts/unread-count", s.mgmt.GetUnreadAlertCount)
+		mgmt.POST("/alerts/read-all", s.mgmt.MarkAllAlertsRead)
+		mgmt.POST("/alerts/:id/read", s.mgmt.MarkAlertRead)
+		mgmt.POST("/alerts/:id/dismiss", s.mgmt.DismissAlert)
+		mgmt.DELETE("/alerts", s.mgmt.ClearAlerts)
+		mgmt.GET("/alerts/settings", s.mgmt.GetAlertSettings)
+		mgmt.PUT("/alerts/settings", s.mgmt.PutAlertSettings)
+		mgmt.PATCH("/alerts/settings", s.mgmt.PutAlertSettings)
+
 		// Reusable Model Group templates (allowed-models grant lists +
 		// per-model upstream routing) attachable to API-key policies and
 		// internal users. Return 503 when the PG store is not configured.

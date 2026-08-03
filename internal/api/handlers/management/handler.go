@@ -113,6 +113,11 @@ type Handler struct {
 	// endpoint degrades gracefully to an empty response instead).
 	pgModelHealth *store.ModelHealthStore
 
+	// pgAlerts stores the notification feed produced by the alert detectors
+	// (Analysis → Alerts). nil when PG is not configured — the /alerts routes
+	// return 503 in that case.
+	pgAlerts *store.AlertStore
+
 	// v1ModelsHandler is the http.Handler that serves GET /v1/models. It is
 	// wired by api.Server after route setup so the management handler can
 	// trigger an in-process sync into models_catalog without a network
@@ -368,6 +373,21 @@ func (h *Handler) SetModelHealthStore(s *store.ModelHealthStore) {
 	h.pgModelHealth = s
 	h.mu.Unlock()
 	store.StartModelHealthRetentionSweep(s) // nil-safe
+}
+
+// SetAlertsStore wires the PG-backed store for the alerts feed + settings
+// (Analysis → Alerts). When nil, the /v0/management/alerts routes return 503.
+// The retention sweep for the feed is launched here (no Handler dependency);
+// the detection sweep is started separately via StartAlertSweep so it only
+// runs on PG-configured deployments after the auth manager is attached.
+func (h *Handler) SetAlertsStore(s *store.AlertStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.pgAlerts = s
+	h.mu.Unlock()
+	store.StartAlertRetentionSweep(s) // nil-safe
 }
 
 // SetModelsCatalogResolver wires the resolver that translates an internal

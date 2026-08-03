@@ -48,6 +48,8 @@ const (
 	defaultModelHealthTable              = "model_health"
 	defaultModelHealthLogTable           = "model_health_log"
 	defaultModelHealthSettingsTable      = "model_health_settings"
+	defaultAlertsTable                   = "alerts"
+	defaultAlertSettingsTable            = "alert_settings"
 )
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
@@ -161,6 +163,14 @@ type PostgresStoreConfig struct {
 	// health check sweep.
 	ModelHealthSettingsTable string
 
+	// AlertsTable stores the notification feed produced by the alert detectors
+	// (max-spend, error-rate, provider cooldown, model-health). One row per
+	// alert occurrence, deduplicated by fingerprint + suppression window.
+	AlertsTable string
+	// AlertSettingsTable stores the singleton operator configuration row for the
+	// alert sweep (enabled, interval_seconds, per-category toggles, thresholds).
+	AlertSettingsTable string
+
 	// UsageEncryptionKey is the passphrase used to derive an AES-256-GCM
 	// key for sealing sensitive columns (api_key_principal in usage_events)
 	// at rest. Empty/nil disables encryption: writes stay in plaintext and
@@ -269,6 +279,12 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.ModelHealthSettingsTable == "" {
 		cfg.ModelHealthSettingsTable = defaultModelHealthSettingsTable
+	}
+	if cfg.AlertsTable == "" {
+		cfg.AlertsTable = defaultAlertsTable
+	}
+	if cfg.AlertSettingsTable == "" {
+		cfg.AlertSettingsTable = defaultAlertSettingsTable
 	}
 
 	spoolRoot := strings.TrimSpace(cfg.SpoolDir)
@@ -1368,6 +1384,90 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: seed model_health_settings singleton: %w", err)
 	}
+
+	// alerts stores the notification feed produced by the alert detectors
+	// (max-spend, error-rate, provider cooldown, model-health). One row per
+	// alert occurrence. Active rows are deduplicated by fingerprint; recurring
+	// conditions bump occurrences and refresh last_seen_at/info instead of
+	// inserting a new row until the suppression window elapses. The message and
+	// data columns are AES-GCM-sealed at rest when UsageEncryptionKey is set.
+	alertsTable := s.fullTableName(s.cfg.AlertsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id               BIGSERIAL PRIMARY KEY,
+			alert_type       TEXT NOT NULL,
+			severity         TEXT NOT NULL,
+			title            TEXT NOT NULL,
+			message          TEXT,
+			entity_id        TEXT NOT NULL DEFAULT '',
+			entity_name      TEXT NOT NULL DEFAULT '',
+			model            TEXT NOT NULL DEFAULT '',
+			provider         TEXT NOT NULL DEFAULT '',
+			value            DOUBLE PRECISION NOT NULL DEFAULT 0,
+			limit_value      DOUBLE PRECISION NOT NULL DEFAULT 0,
+			data             JSONB NOT NULL DEFAULT '{}'::jsonb,
+			fingerprint      TEXT NOT NULL,
+			occurrences      INTEGER NOT NULL DEFAULT 1,
+			last_seen_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			suppressed_until TIMESTAMPTZ,
+			read             BOOLEAN NOT NULL DEFAULT FALSE,
+			dismissed        BOOLEAN NOT NULL DEFAULT FALSE,
+			created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, alertsTable)); err != nil {
+		return fmt.Errorf("postgres store: create alerts table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_alerts_created_at ON %s(created_at DESC)`, alertsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create alerts created_at index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_alerts_entity_health ON %s(entity_id, alert_type) WHERE dismissed = FALSE`, alertsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create alerts entity index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_alerts_suppression ON %s(fingerprint) WHERE dismissed = FALSE`, alertsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create alerts fingerprint index: %w", err)
+	}
+
+	// alert_settings stores the singleton operator configuration row (enabled,
+	// interval_seconds, per-category toggles, thresholds) for the alert sweep.
+	alertSettingsTable := s.fullTableName(s.cfg.AlertSettingsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id                            INTEGER PRIMARY KEY DEFAULT 1,
+			enabled                       BOOLEAN NOT NULL DEFAULT TRUE,
+			interval_seconds              INTEGER NOT NULL DEFAULT 60,
+			suppression_minutes           INTEGER NOT NULL DEFAULT 60,
+			enable_user_budget            BOOLEAN NOT NULL DEFAULT TRUE,
+			enable_api_key_budget         BOOLEAN NOT NULL DEFAULT TRUE,
+			enable_error_rate             BOOLEAN NOT NULL DEFAULT TRUE,
+			enable_provider_cooldown      BOOLEAN NOT NULL DEFAULT TRUE,
+			error_rate_threshold          DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+			error_window_minutes          INTEGER NOT NULL DEFAULT 5,
+			updated_at                    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT alert_settings_singleton CHECK (id = 1)
+		)
+	`, alertSettingsTable)); err != nil {
+		return fmt.Errorf("postgres store: create alert_settings table: %w", err)
+	}
+	// Drop the model-health category toggle column, retired from the alert
+	// sweep. Idempotent so a dev DB that created the earlier schema upgrades
+	// cleanly.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s DROP COLUMN IF EXISTS enable_model_health`, alertSettingsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: drop alert_settings enable_model_health: %w", err)
+	}
+	// Seed the singleton row so GetAlertSettings always finds a row.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`INSERT INTO %s (id) VALUES (1) ON CONFLICT (id) DO NOTHING`, alertSettingsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: seed alert_settings singleton: %w", err)
+	}
 	return nil
 }
 
@@ -1650,6 +1750,23 @@ func (s *PostgresStore) ModelHealthSettingsTable() string {
 		return quoteIdentifier(defaultModelHealthSettingsTable)
 	}
 	return s.fullTableName(s.cfg.ModelHealthSettingsTable)
+}
+
+// AlertsTable returns the fully-qualified name of the alerts feed table.
+func (s *PostgresStore) AlertsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultAlertsTable)
+	}
+	return s.fullTableName(s.cfg.AlertsTable)
+}
+
+// AlertSettingsTable returns the fully-qualified name of the alert_settings
+// table (singleton operator configuration for the alert sweep).
+func (s *PostgresStore) AlertSettingsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultAlertSettingsTable)
+	}
+	return s.fullTableName(s.cfg.AlertSettingsTable)
 }
 
 // Save persists authentication metadata to disk and PostgreSQL.

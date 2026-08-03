@@ -210,3 +210,12 @@ func windowFor(windowType string, anchor, t time.Time) (start, end time.Time) {
 		return anchoredWindow(time.Hour, anchor, t, hourlyWindow)
 	}
 }
+
+// WindowFor is the exported form of windowFor, used by callers outside the
+// policy package (e.g. the alert detector) that must resolve the exact budget
+// window boundaries the enforcement path applies for a given created_at anchor
+// and wall-clock time — so an alert reads the same window spend the 402
+// decision would.
+func WindowFor(windowType string, anchor, t time.Time) (start, end time.Time) {
+	return windowFor(windowType, anchor, t)
+}

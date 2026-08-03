@@ -249,6 +249,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		// attached (it needs live auths to probe against). nil-safe.
 		s.mgmt.SetModelHealthStore(handles.ModelHealth)
 		s.mgmt.StartModelHealthSweep()
+		// Wire the PG-backed alerts feed + settings (Analysis → Alerts). The
+		// detection sweep is started here so it only runs after the auth manager
+		// is attached (the provider-cooldown detector polls live cooldowns).
+		s.mgmt.SetAlertsStore(handles.Alerts)
+		s.mgmt.StartAlertSweep()
 		// Attach the refresh-outcome sink so every OAuth/auth token refresh is
 		// persisted to upstream_sync_log. No-op when PG is not configured
 		// (SyncLogSink returns nil, SetRefreshSink detaches). Re-attached on

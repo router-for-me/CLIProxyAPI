@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	log "github.com/sirupsen/logrus"
 )
 
 // Internal user roles. internal_user is the default subject to per-user
@@ -248,6 +249,44 @@ func (s *UserStore) ListWithSpend(ctx context.Context, f ListFilter) ([]Internal
 		out = append(out, u)
 	}
 	return out, total, rows.Err()
+}
+
+// ListBudgetExceeded returns every internal user who has an active budget cap
+// (max_budget > 0) and whose running spend has reached or exceeded it. Only
+// budget-bearing non-admin users are returned so the alert detector can flag
+// exactly the users an operator cares about (admins bypass per-user caps at
+// enforcement time). Mirrors the enforcement predicate in policy.Check where a
+// user's request is denied once spend >= max_budget.
+func (s *UserStore) ListBudgetExceeded(ctx context.Context) ([]InternalUser, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: user store not initialized")
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT u.id, COALESCE(u.user_alias, ''), COALESCE(u.user_email, ''), u.user_role,
+		       u.models, u.metadata, u.max_budget, COALESCE(u.budget_duration, ''), u.budget_reset_at,
+		       u.rpm_limit, u.tpm_limit, u.max_parallel_requests, u.spend, u.created_at, u.updated_at, 0
+		FROM %s u
+		WHERE u.max_budget > 0
+		  AND u.spend >= u.max_budget
+		  AND u.user_role <> 'admin'
+		ORDER BY u.spend DESC`, s.usersTable))
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: list budget-exceeded internal users: %w", err)
+	}
+	defer func() {
+		if errClose := rows.Close(); errClose != nil {
+			log.WithError(errClose).Debug("postgres store: close budget-exceeded users rows failed")
+		}
+	}()
+	out := make([]InternalUser, 0)
+	for rows.Next() {
+		u, errScan := scanInternalUserFull(rows)
+		if errScan != nil {
+			return nil, fmt.Errorf("postgres store: scan budget-exceeded user: %w", errScan)
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
 }
 
 // Update mutates the mutable fields of an internal user. Pointer-typed fields

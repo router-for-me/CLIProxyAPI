@@ -83,6 +83,10 @@ type PgStoreHandles struct {
 	// /model-health routes return 503 and the public uptime endpoint degrades
 	// to an empty response.
 	ModelHealth *store.ModelHealthStore
+	// Alerts is the PG-backed store for the alerts feed + settings (Analysis →
+	// Alerts). nil when PG is not configured — the /alerts routes return 503
+	// and the detection sweep is a no-op.
+	Alerts *store.AlertStore
 }
 
 // ServerOption customises HTTP server construction.
