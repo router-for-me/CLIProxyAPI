@@ -376,6 +376,9 @@ type ClaudeModel struct {
 	// DisplayName is the optional human-readable name shown in model catalogs.
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 
+	// MaxContextLength overrides the context window advertised to Codex clients.
+	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
@@ -387,9 +390,9 @@ func (m ClaudeModel) GetName() string { return m.Name }
 
 func (m ClaudeModel) GetAlias() string { return m.Alias }
 
-func (m ClaudeModel) GetDisplayName() string { return m.DisplayName }
-
-func (m ClaudeModel) GetForceMapping() bool { return m.ForceMapping }
+func (m ClaudeModel) GetDisplayName() string   { return m.DisplayName }
+func (m ClaudeModel) GetMaxContextLength() int { return m.MaxContextLength }
+func (m ClaudeModel) GetForceMapping() bool    { return m.ForceMapping }
 
 func (m ClaudeModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 
@@ -455,6 +458,9 @@ type CodexModel struct {
 	// DisplayName is the optional human-readable name shown in model catalogs.
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 
+	// MaxContextLength overrides the context window advertised to Codex clients.
+	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
@@ -466,9 +472,9 @@ func (m CodexModel) GetName() string { return m.Name }
 
 func (m CodexModel) GetAlias() string { return m.Alias }
 
-func (m CodexModel) GetDisplayName() string { return m.DisplayName }
-
-func (m CodexModel) GetForceMapping() bool { return m.ForceMapping }
+func (m CodexModel) GetDisplayName() string   { return m.DisplayName }
+func (m CodexModel) GetMaxContextLength() int { return m.MaxContextLength }
+func (m CodexModel) GetForceMapping() bool    { return m.ForceMapping }
 
 func (m CodexModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 
@@ -533,6 +539,9 @@ type GeminiModel struct {
 	// DisplayName is the optional human-readable name shown in model catalogs.
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 
+	// MaxContextLength overrides the context window advertised to Codex clients.
+	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
@@ -544,9 +553,9 @@ func (m GeminiModel) GetName() string { return m.Name }
 
 func (m GeminiModel) GetAlias() string { return m.Alias }
 
-func (m GeminiModel) GetDisplayName() string { return m.DisplayName }
-
-func (m GeminiModel) GetForceMapping() bool { return m.ForceMapping }
+func (m GeminiModel) GetDisplayName() string   { return m.DisplayName }
+func (m GeminiModel) GetMaxContextLength() int { return m.MaxContextLength }
+func (m GeminiModel) GetForceMapping() bool    { return m.ForceMapping }
 
 func (m GeminiModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 
@@ -610,6 +619,9 @@ type OpenAICompatibilityModel struct {
 	// DisplayName is the optional human-readable name shown in model catalogs.
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 
+	// MaxContextLength overrides the context window advertised to Codex clients.
+	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
@@ -632,8 +644,8 @@ func (m OpenAICompatibilityModel) GetName() string { return m.Name }
 
 func (m OpenAICompatibilityModel) GetAlias() string { return m.Alias }
 
-func (m OpenAICompatibilityModel) GetDisplayName() string { return m.DisplayName }
-
-func (m OpenAICompatibilityModel) GetForceMapping() bool { return m.ForceMapping }
+func (m OpenAICompatibilityModel) GetDisplayName() string   { return m.DisplayName }
+func (m OpenAICompatibilityModel) GetMaxContextLength() int { return m.MaxContextLength }
+func (m OpenAICompatibilityModel) GetForceMapping() bool    { return m.ForceMapping }
 
 func (m OpenAICompatibilityModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }

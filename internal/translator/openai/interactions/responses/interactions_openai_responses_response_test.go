@@ -62,6 +62,13 @@ data: [DONE]
 	if payload := findResponsesEventPayload(out, "response.function_call_arguments.delta"); gjson.GetBytes(payload, "delta").String() != `{"location":"北京"}` {
 		t.Fatalf("function args delta payload = %s", string(payload))
 	}
+	argumentsDonePayload := findResponsesEventPayload(out, "response.function_call_arguments.done")
+	if got := gjson.GetBytes(argumentsDonePayload, "item_id").String(); got != "call_1" {
+		t.Fatalf("function args done item_id = %q, want call_1. Payload: %s", got, string(argumentsDonePayload))
+	}
+	if got := gjson.GetBytes(argumentsDonePayload, "arguments").String(); got != `{"location":"北京"}` {
+		t.Fatalf("function args done arguments = %q, want full arguments. Payload: %s", got, string(argumentsDonePayload))
+	}
 	completedPayload := findResponsesEventPayload(out, "response.completed")
 	if got := gjson.GetBytes(completedPayload, "response.usage.total_tokens").Int(); got != 399 {
 		t.Fatalf("total_tokens = %d, want 399. Payload: %s", got, string(completedPayload))
@@ -71,6 +78,105 @@ data: [DONE]
 	}
 	if got := strings.Join(responsesEventNames(out), ","); !strings.Contains(got, "response.completed") {
 		t.Fatalf("events = %s, want response.completed", got)
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponsesStreamFunctionCallStartArguments(t *testing.T) {
+	var param any
+	var out [][]byte
+	for _, raw := range [][]byte{
+		[]byte(`event: step.start
+data: {"index":0,"step":{"id":"call_1","type":"function_call","name":"lookup","arguments":{"q":"x"}},"event_type":"step.start"}
+
+`),
+		[]byte(`event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+`),
+	} {
+		out = append(out, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "gpt-test", nil, nil, raw, &param)...)
+	}
+
+	gotEvents := strings.Join(responsesEventNames(out), ",")
+	wantEvents := "response.output_item.added,response.function_call_arguments.delta,response.function_call_arguments.done,response.output_item.done"
+	if gotEvents != wantEvents {
+		t.Fatalf("events = %s, want %s", gotEvents, wantEvents)
+	}
+	if payload := findResponsesEventPayload(out, "response.function_call_arguments.delta"); gjson.GetBytes(payload, "delta").String() != `{"q":"x"}` {
+		t.Fatalf("function args delta = %s", string(payload))
+	}
+	if payload := findResponsesEventPayload(out, "response.function_call_arguments.done"); gjson.GetBytes(payload, "arguments").String() != `{"q":"x"}` {
+		t.Fatalf("function args done = %s", string(payload))
+	}
+	if payload := findResponsesEventPayload(out, "response.output_item.done"); gjson.GetBytes(payload, "item.arguments").String() != `{"q":"x"}` {
+		t.Fatalf("output item done = %s", string(payload))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponsesStreamFunctionCallEmptyArguments(t *testing.T) {
+	var param any
+	var out [][]byte
+	for _, raw := range [][]byte{
+		[]byte(`event: step.start
+data: {"index":0,"step":{"id":"call_1","type":"function_call","name":"lookup","arguments":{}},"event_type":"step.start"}
+
+`),
+		[]byte(`event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+`),
+		[]byte(`event: interaction.completed
+data: {"interaction":{"id":"interaction_1","status":"completed","model":"gpt-test"},"event_type":"interaction.completed"}
+
+`),
+	} {
+		out = append(out, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "gpt-test", nil, nil, raw, &param)...)
+	}
+
+	gotEvents := strings.Join(responsesEventNames(out), ",")
+	wantEvents := "response.output_item.added,response.function_call_arguments.done,response.output_item.done,response.completed"
+	if gotEvents != wantEvents {
+		t.Fatalf("events = %s, want %s", gotEvents, wantEvents)
+	}
+	if payload := findResponsesEventPayload(out, "response.function_call_arguments.done"); gjson.GetBytes(payload, "arguments").String() != "{}" {
+		t.Fatalf("function args done = %s", string(payload))
+	}
+	if payload := findResponsesEventPayload(out, "response.output_item.done"); gjson.GetBytes(payload, "item.arguments").String() != "{}" {
+		t.Fatalf("output item done = %s", string(payload))
+	}
+	if payload := findResponsesEventPayload(out, "response.completed"); gjson.GetBytes(payload, "response.output.0.arguments").String() != "{}" {
+		t.Fatalf("completed output = %s", string(payload))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponsesStreamFunctionCallEventsAreIdempotent(t *testing.T) {
+	var param any
+	var out [][]byte
+	for _, raw := range [][]byte{
+		[]byte(`event: step.start
+data: {"index":0,"step":{"id":"call_1","type":"function_call","name":"lookup","arguments":{"q":"x"}},"event_type":"step.start"}
+
+`),
+		[]byte(`event: step.start
+data: {"index":0,"step":{"id":"call_1","type":"function_call","name":"lookup","arguments":{"q":"x"}},"event_type":"step.start"}
+
+`),
+		[]byte(`event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+`),
+		[]byte(`event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+`),
+	} {
+		out = append(out, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "gpt-test", nil, nil, raw, &param)...)
+	}
+
+	gotEvents := strings.Join(responsesEventNames(out), ",")
+	wantEvents := "response.output_item.added,response.function_call_arguments.delta,response.function_call_arguments.done,response.output_item.done"
+	if gotEvents != wantEvents {
+		t.Fatalf("events = %s, want %s", gotEvents, wantEvents)
 	}
 }
 

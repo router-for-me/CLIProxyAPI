@@ -295,6 +295,7 @@ nonstream-keepalive-interval: 0
 #       - name: "gemini-2.5-flash" # upstream model name
 #         alias: "gemini-flash"    # client alias mapped to the upstream model
 #         display-name: "Gemini Flash" # optional catalog display name
+#         max-context-length: 1048576 # optional: override Codex client context window metadata
 #         thinking:                  # optional: exact thinking capability for this configured model
 #           levels: ["high", "medium", "low", "none", "auto"]
 #     excluded-models:
@@ -320,6 +321,7 @@ nonstream-keepalive-interval: 0
 #     models:
 #       - name: "gemini-2.5-flash" # upstream model name
 #         alias: "native-gemini-flash" # client alias mapped to the upstream model
+#         max-context-length: 1048576 # optional: override Codex client context window metadata
 #         thinking:                  # optional: exact thinking capability for this configured model
 #           levels: ["high", "medium", "low", "none", "auto"]
 #     excluded-models:
@@ -341,6 +343,7 @@ nonstream-keepalive-interval: 0
 #       - name: "gpt-5-codex"   # upstream model name
 #         alias: "codex-latest" # client alias mapped to the upstream model
 #         display-name: "Codex Latest" # optional catalog display name
+#         max-context-length: 1048576 # optional: override Codex client context window metadata
 #         force-mapping: true    # optional: rewrite response model fields back to the alias
 #         thinking:              # optional: exact thinking capability for this configured model
 #           levels: ["xhigh", "high", "medium", "low"]
@@ -367,6 +370,7 @@ nonstream-keepalive-interval: 0
 #       - name: "grok-4.5"       # upstream model name
 #         alias: "grok-latest"   # client alias mapped to the upstream model
 #         display-name: "Grok Latest" # optional catalog display name
+#         max-context-length: 1048576 # optional: override Codex client context window metadata
 #         force-mapping: true     # optional: rewrite response model fields back to the alias
 #         thinking:               # optional: exact thinking capability for this configured model
 #           levels: ["xhigh", "high", "medium", "low"]
@@ -390,6 +394,7 @@ nonstream-keepalive-interval: 0
 #       - name: "claude-3-5-sonnet-20241022" # upstream model name
 #         alias: "claude-sonnet-latest"      # client alias mapped to the upstream model
 #         display-name: "Claude Sonnet"      # optional catalog display name
+#         max-context-length: 1048576         # optional: override Codex client context window metadata
 #         force-mapping: true                 # optional: rewrite response model fields back to the alias
 #         thinking:                           # optional: exact thinking capability for this configured model
 #           levels: ["max", "xhigh", "high", "medium", "low", "minimal", "none", "auto"]
@@ -459,8 +464,9 @@ nonstream-keepalive-interval: 0
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2"               # The alias used in the API.
 #         display-name: "Kimi K2"         # optional catalog display name
+#         max-context-length: 1048576    # optional: override Codex client context window metadata
 #         image: false                   # optional: set true to allow this model on /v1/images/generations and /v1/images/edits (not chat/responses image input)
-#         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients
+#         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients. Use [text] for upstreams that reject multimodal tool result content.
 #         output-modalities: [text]       # optional: declare output modalities when known
 #         thinking:                      # optional: omit to default to levels ["low","medium","high"]
 #           levels: ["low", "medium", "high"]
