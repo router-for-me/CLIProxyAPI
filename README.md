@@ -181,6 +181,19 @@ All tunables are documented in [`.env.production.example`](.env.production.examp
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
+## Alerts / Notifications
+
+Since the PG-backed dashboard, NixLLM ships a notification feed. The **bell icon in the header** opens a modal listing every alert (read + unread) with per-row Read/Dismiss and Mark-all-read; a full **Alerts** page (paged history + filters) is under **Analysis → Alerts**. A background sweep detects conditions and records them to the `alerts` table (30-day retention).
+
+Detectors (each independently toggleable via **Settings → Alert / Notification settings**):
+
+- **Internal user max spend** — user `spend` reached its `max_budget` (non-admin).
+- **API key max spend** — key budget window (`budget_hourly/weekly/monthly_usd`) exceeded, read from the same `usage_windows` the enforcement path uses.
+- **Error rate** — failed-attempt rate (from `usage_errors`) above a threshold within a window.
+- **Provider cooldown** — auth/model pairs currently in cooldown.
+
+A condition is deduplicated by fingerprint within a suppression window (default 60 min); recurrence bumps `occurrences` instead of creating a new row. The sweep interval, thresholds, and per-category toggles are live-editable without a restart. Requires the PostgreSQL backend (`PGSTORE_DSN`); without PG the routes return 503 and the feed shows a banner.
+
 ## Usage Statistics
 
 Since v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. If you need usage statistics, use:
