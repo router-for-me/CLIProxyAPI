@@ -883,6 +883,78 @@ export async function previewErrorMessage(code, body) {
   });
 }
 
+// --- Alerts / Notifications (Analysis → Alerts) ----------------------------
+//
+// Notification feed produced by the background alert sweep (max-spend,
+// error-rate, provider cooldown, model-health). Sourced from the alerts +
+// alert_settings PG tables; 503 when PG is not configured.
+
+// Paged alert history + filters.
+// params: { alert_type, severity, dismissed ('true'|'false'), read ('true'|'false'), from, to, page, page_size }.
+// Returns { alerts: [...], total, page, page_size }.
+export async function getAlerts(params = {}) {
+  const qs = new URLSearchParams();
+  if (params.alert_type) qs.set('alert_type', params.alert_type);
+  if (params.severity) qs.set('severity', params.severity);
+  if (params.dismissed) qs.set('dismissed', params.dismissed);
+  if (params.read) qs.set('read', params.read);
+  if (params.from) qs.set('from', params.from);
+  if (params.to) qs.set('to', params.to);
+  if (params.page) qs.set('page', params.page);
+  if (params.page_size) qs.set('page_size', params.page_size);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return fetchJSON(`/alerts${suffix}`);
+}
+
+// Live "currently firing" feed: non-dismissed alerts whose suppression window
+// has not yet elapsed. Returns { alerts: [...] }.
+export async function getActiveAlerts() {
+  return fetchJSON('/alerts/active');
+}
+
+// Number of non-dismissed, unread alerts (drives the sidebar bell badge).
+// Returns { unread }.
+export async function getUnreadAlertCount() {
+  return fetchJSON('/alerts/unread-count');
+}
+
+// Mark a single alert as read. Returns { status, affected }.
+export async function markAlertRead(id) {
+  return fetchJSON(`/alerts/${encodeURIComponent(id)}/read`, { method: 'POST' });
+}
+
+// Mark every non-dismissed alert as read. Returns { status, affected }.
+export async function markAllAlertsRead() {
+  return fetchJSON('/alerts/read-all', { method: 'POST' });
+}
+
+// Dismiss a single alert (removes it from the active feed + unread count).
+// Returns { status, affected }.
+export async function dismissAlert(id) {
+  return fetchJSON(`/alerts/${encodeURIComponent(id)}/dismiss`, { method: 'POST' });
+}
+
+// Operator-initiated manual clear of all alert rows. Returns { status, deleted }.
+export async function clearAlerts() {
+  return fetchJSON('/alerts', { method: 'DELETE' });
+}
+
+// Singleton operator settings for the alert sweep.
+// Returns { settings: { enabled, interval_seconds, suppression_minutes,
+// enable_user_budget, enable_api_key_budget, enable_error_rate,
+// enable_provider_cooldown, error_rate_threshold, error_window_minutes } }.
+export async function getAlertSettings() {
+  return fetchJSON('/alerts/settings');
+}
+
+// Update the sweep settings (partial merge). Returns the persisted settings.
+export async function putAlertSettings(body) {
+  return fetchJSON('/alerts/settings', {
+    method: 'PUT',
+    body: JSON.stringify(body || {}),
+  });
+}
+
 // --- Model entry (per-model catalog edit) -----------------------------------
 //
 // The dashboard can edit individual catalog rows: rename display fields,

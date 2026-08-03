@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import {
   getStoredToken, setStoredToken, clearStoredToken, verifyToken, ApiError,
+  getUnreadAlertCount,
 } from './api/client.js';
 import Sidebar from './components/Sidebar.jsx';
 import LoginPage from './pages/LoginPage.jsx';
@@ -26,11 +27,13 @@ import UpstreamSyncLogPage from './pages/UpstreamSyncLogPage.jsx';
 import ModelHealthPage from './pages/ModelHealthPage.jsx';
 import CooldownProvidersPage from './pages/CooldownProvidersPage.jsx';
 import SessionAffinityPage from './pages/SessionAffinityPage.jsx';
+import AlertsPage from './pages/AlertsPage.jsx';
 import ManageCpaLayout from './pages/manage-cpa/ManageCpaLayout.jsx';
 import OverviewTab from './pages/manage-cpa/OverviewTab.jsx';
 import ProvidersTab from './pages/manage-cpa/ProvidersTab.jsx';
 import RawConfigTab from './pages/manage-cpa/RawConfigTab.jsx';
 import { ToastProvider } from './components/Toast.jsx';
+import AlertsDropdown from './components/AlertsDropdown.jsx';
 
 const SIDEBAR_COLLAPSED_KEY = 'nixllm.sidebar.collapsed';
 
@@ -55,6 +58,34 @@ export default function App() {
   );
   // Mobile drawer state: ephemeral, not persisted. Closed by route change.
   const [mobileOpen, setMobileOpen] = useState(false);
+
+  // Unread-alert count for the header bell badge. Polled periodically and
+  // refreshed instantly when any view mutates the feed (nixllm:alerts-changed).
+  const [alertsUnread, setAlertsUnread] = useState(0);
+  const [alertsOpen, setAlertsOpen] = useState(false);
+  const bellRef = useRef(null);
+
+  // Poll the unread badge on an independent cadence, and refresh immediately
+  // after alert mutations anywhere in the app. Errors are swallowed — a PG-less
+  // or momentarily-unavailable feed simply hides the badge.
+  useEffect(() => {
+    if (!authed) return;
+    let cancelled = false;
+    const poll = () => {
+      getUnreadAlertCount()
+        .then((r) => { if (!cancelled) setAlertsUnread(Number(r?.unread) || 0); })
+        .catch(() => { /* hide badge on transient errors */ });
+    };
+    poll();
+    const id = setInterval(poll, 30000);
+    const handler = () => poll();
+    window.addEventListener('nixllm:alerts-changed', handler);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      window.removeEventListener('nixllm:alerts-changed', handler);
+    };
+  }, [authed]);
 
   const toggleCollapsed = useCallback(() => {
     setCollapsed((prev) => {
@@ -138,7 +169,7 @@ export default function App() {
   return (
     <ToastProvider>
       <div className={`app-shell${collapsed ? ' app-shell--collapsed' : ''}`}>
-        <div className="topbar">
+        <header className="topbar">
           <button
             type="button"
             className="topbar__menu"
@@ -149,9 +180,29 @@ export default function App() {
               <path d="M2 4h12M2 8h12M2 12h12" />
             </svg>
           </button>
-          <span className="sidebar__brand-mark" dangerouslySetInnerHTML={{ __html: BRAND_SVG }} />
-          <span className="topbar__title">NixLLM</span>
-        </div>
+          <span className="topbar__brand">
+            <span className="sidebar__brand-mark" dangerouslySetInnerHTML={{ __html: BRAND_SVG }} />
+            <span className="topbar__title">NixLLM</span>
+          </span>
+          <div className="topbar__spacer" />
+          <div className="topbar__actions">
+            <button
+              ref={bellRef}
+              type="button"
+              className={`topbar__bell${alertsUnread > 0 ? ' has-unread' : ''}${alertsOpen ? ' is-open' : ''}`}
+              onClick={() => setAlertsOpen((v) => !v)}
+              aria-label="Open alerts"
+              aria-haspopup="dialog"
+              aria-expanded={alertsOpen}
+              title={alertsUnread > 0 ? `${alertsUnread} unread alert(s)` : 'Alerts'}
+            >
+              <BellIcon />
+              {alertsUnread > 0 && (
+                <span className="topbar__bell-badge">{alertsUnread > 99 ? '99+' : alertsUnread}</span>
+              )}
+            </button>
+          </div>
+        </header>
         <Sidebar
           onLogout={handleLogout}
           onToggleCollapsed={toggleCollapsed}
@@ -169,6 +220,7 @@ export default function App() {
   <Route path="/errors" element={<ErrorsPage />} />
             <Route path="/cooldown-providers" element={<CooldownProvidersPage />} />
             <Route path="/session-affinity" element={<SessionAffinityPage />} />
+            <Route path="/alerts" element={<AlertsPage />} />
             <Route path="/upstream-sync-log" element={<UpstreamSyncLogPage />} />
             <Route path="/model-health" element={<ModelHealthPage />} />
             <Route path="/internal-users" element={<InternalUsersPage />} />
@@ -191,6 +243,7 @@ export default function App() {
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>
+        {alertsOpen && <AlertsDropdown bellRef={bellRef} onClose={() => setAlertsOpen(false)} />}
       </div>
     </ToastProvider>
   );
@@ -203,3 +256,24 @@ const BRAND_SVG = `<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
         stroke-linecap="round" stroke-linejoin="round" />
   <circle cx="32" cy="46" r="3" fill="#5eead4" />
 </svg>`;
+
+// BellIcon — inline SVG for the header alerts button, matching the dependency-
+// free icon style used across the sidebar.
+function BellIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {/* Feather "bell" path — exactly symmetric about x=12 so the artwork is
+          centered in the button box regardless of stroke weight. */}
+      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+    </svg>
+  );
+}

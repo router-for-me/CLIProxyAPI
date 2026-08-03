@@ -120,16 +120,344 @@ code, pre {
 .app-shell {
   display: grid;
   grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-rows: auto 1fr;
   min-height: 100vh;
 }
 .app-shell--collapsed {
   grid-template-columns: var(--sidebar-w-collapsed) 1fr;
 }
 
-/* Top bar — mobile only. Hidden on desktop where the real sidebar lives. */
-.topbar {
-  display: none;
+/* Explicit placement: sidebar spans the full height of column 1; the topbar
+ * sits on row 1 of column 2 and main fills the remainder of column 2. */
+.sidebar {
+  grid-column: 1;
+  grid-row: 1 / -1;
 }
+.topbar {
+  grid-column: 2;
+  grid-row: 1;
+}
+.main {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+/* Top bar — spans the top of the main content column. On desktop it is a slim,
+ * floating utility bar (actions only — the sidebar already holds the brand);
+ * on mobile it becomes the app header with the brand + menu. */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: color-mix(in srgb, var(--bg-elevated) 88%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset,
+              0 4px 16px -8px rgba(0, 0, 0, 0.5);
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  grid-column: 2;
+}
+.topbar__spacer { flex: 1; }
+
+/* Brand group (mark + name) only shows on mobile where the sidebar is a
+ * drawer; on desktop the sidebar owns the brand. */
+.topbar__brand {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.topbar__brand .sidebar__brand-mark { width: 26px; height: 26px; }
+
+/* Action cluster pinned to the right edge of the header. */
+.topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Menu toggle only appears in the mobile drawer (hidden on desktop where the
+ * sidebar column is always visible). Enforced in the >900px base rules. */
+.topbar__menu { display: none; }
+
+/* Alerts bell — icon button in the header. A polished, quiet control that
+ * brightens on hover and takes on the accent when there are unread alerts, so
+ * it reads as a notification control (not a plain icon). */
+.topbar__bell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0; /* reset the global button padding so the icon sits dead-center */
+  flex-shrink: 0;
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  cursor: pointer;
+  line-height: 0;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+  transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease,
+              transform 0.08s ease, box-shadow 0.14s ease;
+}
+.topbar__bell:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: var(--bg-elevated);
+}
+.topbar__bell:active {
+  transform: translateY(1px);
+  box-shadow: none;
+}
+.topbar__bell.is-open,
+.topbar__bell.is-open:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+.topbar__bell:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* Unread: hold the accent tint steadily (not just on hover) so the operator can
+ * spot at a glance there are pending alerts. */
+.topbar__bell.has-unread {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+.topbar__bell.has-unread:hover { border-color: var(--accent-hover); }
+.topbar__bell.has-unread.is-open { color: var(--accent-hover); border-color: var(--accent-hover); }
+
+.topbar__bell svg { width: 20px; height: 20px; display: block; flex-shrink: 0; }
+
+/* Badge — a compact count pill pinned to the corner. Uses the danger token so
+ * it reads as "action needed"; a subtle border separates it from the button. */
+.topbar__bell-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 17px;
+  text-align: center;
+  box-shadow: 0 0 0 2px var(--bg-elevated);
+  animation: alerts-badge-pop 0.25s ease;
+}
+/* When the panel is open the badge sits against the accent-dim backdrop, so the
+ * separation ring switches to match. */
+.topbar__bell.has-unread.is-open .topbar__bell-badge { box-shadow: 0 0 0 2px var(--danger-dim); }
+
+/* Attention pulse behind the badge when there are unread alerts — a soft,
+ * repeating halo that gently nudges the operator without being noisy. */
+.topbar__bell.has-unread::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: var(--radius);
+  border: 2px solid var(--danger);
+  opacity: 0;
+  animation: alerts-halo 2.6s ease-out infinite;
+  pointer-events: none;
+}
+
+@keyframes alerts-halo {
+  0%   { opacity: 0.45; transform: scale(1); }
+  70%  { opacity: 0;     transform: scale(1.18); }
+  100% { opacity: 0; }
+}
+@keyframes alerts-badge-pop {
+  0%   { transform: scale(0.6); }
+  60%  { transform: scale(1.15); }
+  100% { transform: scale(1); }
+}
+
+/* Notification dropdown anchored to the header bell. */
+.alerts-dropdown {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: 200;
+  transform-origin: top right;
+  animation: alerts-drop-in 0.12s ease;
+}
+@keyframes alerts-drop-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.alerts-dropdown__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.alerts-dropdown__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.alerts-dropdown__unread-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--danger);
+  background: var(--danger-dim);
+  padding: 1px 7px;
+  border-radius: 9px;
+}
+.alerts-dropdown__markall {
+  font-size: 12px;
+  color: var(--accent);
+  background: transparent;
+  border: none;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.alerts-dropdown__markall:hover { background: var(--accent-dim); }
+.alerts-dropdown__markall:disabled { color: var(--text-dim); background: transparent; cursor: default; }
+
+.alerts-dropdown__body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 6px 0;
+}
+.alerts-dropdown__status {
+  padding: 20px 14px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.alerts-dropdown__status--error { color: var(--danger); }
+
+.alerts-dropdown__section-label {
+  padding: 8px 14px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+.alerts-dropdown__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-left: 3px solid transparent;
+}
+.alerts-dropdown__row.is-unread {
+  background: var(--accent-dim);
+  border-left-color: var(--accent);
+}
+.alerts-dropdown__row.is-dismissed { opacity: 0.6; }
+.alerts-dropdown__row:hover { background: var(--bg-card); }
+
+.alerts-dropdown__row-main { flex: 1 1 auto; min-width: 0; }
+.alerts-dropdown__row-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.alerts-dropdown__row-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.alerts-dropdown__row.is-unread .alerts-dropdown__row-title { color: var(--text); }
+.alerts-dropdown__row-time {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.alerts-dropdown__row-msg {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.alerts-dropdown__severity {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--accent);
+}
+.alerts-dropdown__severity.is-warning { color: var(--warning); }
+.alerts-dropdown__severity.is-critical { color: var(--danger); }
+.alerts-dropdown__severity svg { width: 100%; height: 100%; }
+
+.alerts-dropdown__row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.alerts-dropdown__row-actions button {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px 7px;
+  cursor: pointer;
+}
+.alerts-dropdown__row-actions button:hover { color: var(--accent); border-color: var(--accent); }
+
+.alerts-dropdown__footer {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.alerts-dropdown__link {
+  flex: 1;
+  text-align: center;
+  font-size: 12px;
+  color: var(--accent);
+  background: transparent;
+  border: none;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.alerts-dropdown__link:hover { background: var(--accent-dim); }
 
 .sidebar {
   background: var(--bg-elevated);
@@ -145,17 +473,20 @@ code, pre {
 .sidebar__header {
   display: flex;
   align-items: center;
-  padding: 20px 18px 16px;
+  padding: 20px 18px 18px;
   gap: 8px;
+  border-bottom: 1px solid var(--border);
+  position: relative;
 }
 .sidebar__brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-weight: 600;
+  gap: 11px;
+  font-weight: 650;
   font-size: 16px;
   letter-spacing: -0.01em;
   min-width: 0;
+  color: var(--text);
 }
 .sidebar__brand-mark {
   width: 28px;
@@ -163,11 +494,13 @@ code, pre {
   display: grid;
   place-items: center;
   flex-shrink: 0;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 40%, transparent));
 }
 .sidebar__brand-mark svg { width: 100%; height: 100%; }
 .sidebar__brand-text {
   white-space: nowrap;
   overflow: hidden;
+  font-variation-settings: 'wght' 650;
 }
 
 /* Collapse toggle — a floating circular handle pinned to the sidebar's right
@@ -230,11 +563,12 @@ code, pre {
   padding: 4px 12px 6px;
   font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.09em;
   text-transform: uppercase;
   color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sidebar__link {
@@ -246,47 +580,59 @@ code, pre {
   color: var(--text-muted);
   border-radius: var(--radius-sm);
   font-size: 13px;
-  transition: all 0.12s ease;
+  transition: background 0.14s ease, color 0.14s ease, transform 0.14s ease,
+              box-shadow 0.14s ease;
   text-decoration: none;
 }
 /* Left accent bar — the strong active indicator. Hidden by default. */
 .sidebar__link::before {
   content: '';
   position: absolute;
-  left: 2px;
+  left: 4px;
   top: 50%;
   transform: translateY(-50%);
   width: 3px;
   height: 0;
   border-radius: 2px;
   background: var(--accent);
-  transition: height 0.14s ease;
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 70%, transparent);
+  transition: height 0.18s ease;
 }
 .sidebar__link:hover {
   background: var(--bg-card);
   color: var(--text);
 }
+.sidebar__link:hover .sidebar__link-icon { color: var(--accent); }
 .sidebar__link.active {
-  background: var(--accent-dim);
+  background: linear-gradient(90deg, var(--accent-dim), transparent 85%);
   color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
 }
-.sidebar__link.active::before { height: 18px; }
+.sidebar__link.active::before { height: 20px; }
+.sidebar__link.active .sidebar__link-icon { color: var(--accent); }
+.sidebar__link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
 
 .sidebar__link-icon {
   display: grid;
   place-items: center;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   flex-shrink: 0;
+  color: var(--text-dim);
+  transition: color 0.14s ease;
 }
-.sidebar__link-icon svg { width: 100%; height: 100%; }
+.sidebar__link-icon svg { width: 17px; height: 17px; }
 .sidebar__link-label {
   white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sidebar__footer {
-  padding: 14px 14px 20px;
+  padding: 14px 14px 18px;
   border-top: 1px solid var(--border);
   margin-top: 12px;
   display: flex;
@@ -294,15 +640,26 @@ code, pre {
   gap: 10px;
 }
 .sidebar__version {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
   align-self: flex-start;
+  gap: 6px;
   font-family: var(--mono);
   font-size: 10px;
   color: var(--text-dim);
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 2px 8px;
+  border-radius: 5px;
+  padding: 3px 8px;
+  letter-spacing: 0.02em;
+}
+.sidebar__version::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success-dim);
 }
 .sidebar__signout {
   display: flex;
@@ -312,17 +669,19 @@ code, pre {
   padding: 9px 12px;
   color: var(--text-muted);
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
   font-size: 13px;
   cursor: pointer;
-  transition: all 0.12s ease;
+  transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
 }
 .sidebar__signout:hover {
   background: var(--danger-dim);
   color: var(--danger);
-  border-color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
 }
+.sidebar__signout .sidebar__link-icon { color: var(--text-dim); transition: color 0.14s ease; }
+.sidebar__signout:hover .sidebar__link-icon { color: var(--danger); }
 .sidebar__signout .sidebar__link-icon svg { width: 16px; height: 16px; }
 
 /* Collapsed rail: hide text, center icons. ------------------------------- */
@@ -341,6 +700,11 @@ code, pre {
   justify-content: center;
   padding: 9px 0;
 }
+.app-shell--collapsed .sidebar__link::before {
+  left: 2px;
+  height: 18px;
+}
+.app-shell--collapsed .sidebar__link.active::before { height: 18px; }
 .app-shell--collapsed .sidebar__section + .sidebar__section { margin-top: 10px; }
 /* Floating handle stays pinned to the right edge in collapsed mode too. */
 .app-shell--collapsed .sidebar__footer { padding: 14px 8px 20px; }
@@ -398,21 +762,19 @@ code, pre {
 @media (max-width: 900px) {
   .grid--2, .grid--3, .grid--4 { grid-template-columns: 1fr; }
   .app-shell,
-  .app-shell--collapsed { grid-template-columns: 1fr; }
+  .app-shell--collapsed { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .main { padding: 20px; }
 
-  /* Mobile top bar replaces the desktop sidebar column header. */
+  /* Mobile: header spans the single column; sidebar is an off-canvas drawer. */
   .topbar {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg-elevated);
-    position: sticky;
-    top: 0;
-    z-index: 40;
+    grid-column: 1;
+    grid-row: 1;
   }
+  .main {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  .topbar__brand { display: flex; flex: 1; min-width: 0; }
   .topbar__menu {
     display: grid;
     place-items: center;
