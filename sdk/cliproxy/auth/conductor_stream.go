@@ -71,6 +71,33 @@ func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamR
 	}
 }
 
+// attachFillFirstInflightRelease releases fill-first capacity when the stream fully drains.
+func attachFillFirstInflightRelease(result *cliproxyexecutor.StreamResult, release func()) *cliproxyexecutor.StreamResult {
+	if release == nil {
+		return result
+	}
+	if result == nil {
+		release()
+		return nil
+	}
+	if result.Chunks == nil {
+		release()
+		return result
+	}
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		defer release()
+		for chunk := range result.Chunks {
+			out <- chunk
+		}
+	}()
+	return &cliproxyexecutor.StreamResult{
+		Headers: result.Headers,
+		Chunks:  out,
+	}
+}
+
 func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk) ([]cliproxyexecutor.StreamChunk, bool, error) {
 	if ch == nil {
 		return nil, true, nil

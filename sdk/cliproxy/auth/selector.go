@@ -63,9 +63,13 @@ func weightedSelectorStateModel(ctx context.Context, availabilityModel string) s
 // FillFirstSelector selects the first available credential (deterministic ordering).
 // This "burns" one account before moving to the next, which can help stagger
 // rolling-window subscription caps (e.g. chat message limits).
+// When inflight tracking and maxInflight are configured, selection spills to the
+// next healthy credential once the sticky account reaches the soft capacity.
 type FillFirstSelector struct {
-	seedMu sync.Mutex
-	seed   uint64
+	seedMu      sync.Mutex
+	seed        uint64
+	inflight    *fillFirstInflightTracker
+	maxInflight func() int
 }
 
 func (s *FillFirstSelector) shuffleSeed() uint64 {
@@ -489,6 +493,31 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	sort.SliceStable(available, func(i, j int) bool {
 		return lessFillFirstAuth(available[i], available[j], model, seed)
 	})
+	if len(available) == 1 {
+		return available[0], nil
+	}
+
+	maxInflight := 0
+	if s != nil && s.maxInflight != nil {
+		maxInflight = s.maxInflight()
+	}
+	if maxInflight <= 0 || s == nil || s.inflight == nil {
+		return available[0], nil
+	}
+
+	orderedIDs := make([]string, 0, len(available))
+	byID := make(map[string]*Auth, len(available))
+	for _, candidate := range available {
+		if candidate == nil || strings.TrimSpace(candidate.ID) == "" {
+			continue
+		}
+		orderedIDs = append(orderedIDs, candidate.ID)
+		byID[candidate.ID] = candidate
+	}
+	pickedID := pickFillFirstAuthID(orderedIDs, s.inflight.snapshot(), maxInflight)
+	if picked := byID[pickedID]; picked != nil {
+		return picked, nil
+	}
 	return available[0], nil
 }
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -249,9 +250,161 @@ func (m *Manager) SetSelector(selector Selector) {
 	m.mu.Lock()
 	m.selector = selector
 	m.mu.Unlock()
+	m.wireFillFirstInflight(selector)
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
+	}
+}
+
+// wireFillFirstInflight shares the manager-owned in-flight tracker with fill-first
+// selectors and the built-in scheduler so picks observe live concurrency.
+func (m *Manager) wireFillFirstInflight(selector Selector) {
+	if m == nil {
+		return
+	}
+	if m.fillFirstInflight == nil {
+		m.fillFirstInflight = newFillFirstInflightTracker()
+	}
+	maxInflight := m.fillFirstMaxInflight
+	bindFillFirstInflight(selector, m.fillFirstInflight, maxInflight)
+	if m.scheduler != nil {
+		m.scheduler.setFillFirstInflight(m.fillFirstInflight, maxInflight)
+	}
+}
+
+func bindFillFirstInflight(selector Selector, tracker *fillFirstInflightTracker, maxInflight func() int) {
+	switch s := selector.(type) {
+	case *FillFirstSelector:
+		if s == nil {
+			return
+		}
+		s.inflight = tracker
+		s.maxInflight = maxInflight
+	case *SessionAffinitySelector:
+		if s == nil {
+			return
+		}
+		bindFillFirstInflight(s.fallback, tracker, maxInflight)
+	}
+}
+
+// unwrapSelector returns the innermost non-wrapper selector.
+func unwrapSelector(selector Selector) Selector {
+	for {
+		affinity, ok := selector.(*SessionAffinitySelector)
+		if !ok || affinity == nil || affinity.fallback == nil {
+			return selector
+		}
+		selector = affinity.fallback
+	}
+}
+
+// isFillFirstStrategy reports whether the active selector uses fill-first semantics.
+func (m *Manager) isFillFirstStrategy() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	selector := m.selector
+	m.mu.RUnlock()
+	return selectorStrategy(unwrapSelector(selector)) == schedulerStrategyFillFirst
+}
+
+// fillFirstMaxInflight returns the configured soft per-credential in-flight limit
+// when fill-first routing is active. 0 means unlimited / disabled.
+func (m *Manager) fillFirstMaxInflight() int {
+	if m == nil || !m.isFillFirstStrategy() {
+		return 0
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return 0
+	}
+	maxInflight := cfg.Routing.FillFirstMaxInflight
+	if maxInflight < 0 {
+		return 0
+	}
+	return maxInflight
+}
+
+// beginFillFirstInflight accounts one concurrent execution against authID when the
+// fill-first soft capacity limit is enabled. The returned release is safe to call
+// multiple times and is a no-op when capacity tracking is disabled.
+// Prefer reserveFillFirstAuth in execution paths so capacity checks are atomic with
+// reservation and concurrent picks spill instead of pile onto one sticky credential.
+func (m *Manager) beginFillFirstInflight(authID string) func() {
+	_, release := m.reserveFillFirstAuthID(authID, true)
+	return release
+}
+
+// reserveFillFirstAuthID tries to reserve fill-first capacity for authID.
+// When force is true (or the limit is disabled), reservation always succeeds.
+func (m *Manager) reserveFillFirstAuthID(authID string, force bool) (bool, func()) {
+	if m == nil || m.fillFirstInflight == nil {
+		return true, func() {}
+	}
+	maxInflight := m.fillFirstMaxInflight()
+	if maxInflight <= 0 {
+		return true, func() {}
+	}
+	if force {
+		return m.fillFirstInflight.tryReserve(authID, 0)
+	}
+	return m.fillFirstInflight.tryReserve(authID, maxInflight)
+}
+
+// reserveFillFirstAfterPick reserves capacity for the selected auth, re-picking when
+// the sticky credential is already saturated so burst traffic spills to the next
+// healthy account. When every ready credential is at capacity, the last pick is
+// force-reserved (soft overflow) so requests still proceed.
+func (m *Manager) reserveFillFirstAfterPick(
+	ctx context.Context,
+	providers []string,
+	model string,
+	opts cliproxyexecutor.Options,
+	tried map[string]struct{},
+	auth *Auth,
+	executor ProviderExecutor,
+	provider string,
+) (*Auth, ProviderExecutor, string, func(), error) {
+	if auth == nil {
+		return nil, nil, "", func() {}, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	ok, release := m.reserveFillFirstAuthID(auth.ID, false)
+	if ok {
+		return auth, executor, provider, release, nil
+	}
+
+	skip := map[string]struct{}{auth.ID: {}}
+	lastAuth, lastExecutor, lastProvider := auth, executor, provider
+	for {
+		combinedTried := tried
+		if len(tried) > 0 || len(skip) > 0 {
+			combinedTried = make(map[string]struct{}, len(tried)+len(skip))
+			for id := range tried {
+				combinedTried[id] = struct{}{}
+			}
+			for id := range skip {
+				combinedTried[id] = struct{}{}
+			}
+		}
+		nextAuth, nextExecutor, nextProvider, errPick := m.pickNextMixed(ctx, providers, model, opts, combinedTried)
+		if errPick != nil {
+			// All remaining ready credentials are saturated: soft-overflow on last pick.
+			_, release = m.reserveFillFirstAuthID(lastAuth.ID, true)
+			return lastAuth, lastExecutor, lastProvider, release, nil
+		}
+		lastAuth, lastExecutor, lastProvider = nextAuth, nextExecutor, nextProvider
+		ok, release = m.reserveFillFirstAuthID(nextAuth.ID, false)
+		if ok {
+			return nextAuth, nextExecutor, nextProvider, release, nil
+		}
+		if _, seen := skip[nextAuth.ID]; seen {
+			_, release = m.reserveFillFirstAuthID(nextAuth.ID, true)
+			return nextAuth, nextExecutor, nextProvider, release, nil
+		}
+		skip[nextAuth.ID] = struct{}{}
 	}
 }
 

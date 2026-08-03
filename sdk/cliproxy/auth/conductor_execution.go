@@ -289,6 +289,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			return cliproxyexecutor.Response{}, errPick
 		}
+		auth, executor, provider, releaseInflight, errReserve := m.reserveFillFirstAfterPick(ctx, providers, routeModel, pickOpts, tried, auth, executor, provider)
+		if errReserve != nil {
+			return cliproxyexecutor.Response{}, errReserve
+		}
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, routeModel)
@@ -304,6 +308,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 
 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
 		if len(models) == 0 {
+			releaseInflight()
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
@@ -313,6 +318,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare)}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
+			releaseInflight()
 			continue
 		}
 		var authErr error
@@ -328,6 +334,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			var errIntercept error
 			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
+				releaseInflight()
 				return cliproxyexecutor.Response{}, errIntercept
 			}
 			if !restoreExecutionModel {
@@ -336,6 +343,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
+					releaseInflight()
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(execCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
@@ -357,6 +365,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				}
 				m.MarkResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
+					releaseInflight()
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
@@ -365,18 +374,22 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			m.MarkResult(execCtx, result)
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)
+			releaseInflight()
 			return resp, nil
 		}
 		if authErr != nil {
 			if isRequestInvalidError(authErr) {
+				releaseInflight()
 				return cliproxyexecutor.Response{}, authErr
 			}
 			lastErr = authErr
+			releaseInflight()
 			if homeMode {
 				homeAuthCount++
 			}
 			continue
 		}
+		releaseInflight()
 	}
 }
 
@@ -410,6 +423,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			return cliproxyexecutor.Response{}, errPick
 		}
+		auth, executor, provider, releaseInflight, errReserve := m.reserveFillFirstAfterPick(ctx, providers, routeModel, pickOpts, tried, auth, executor, provider)
+		if errReserve != nil {
+			return cliproxyexecutor.Response{}, errReserve
+		}
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, routeModel)
@@ -425,6 +442,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 
 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
 		if len(models) == 0 {
+			releaseInflight()
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
@@ -434,6 +452,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare)}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
+			releaseInflight()
 			continue
 		}
 		var authErr error
@@ -449,6 +468,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			var errIntercept error
 			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
+				releaseInflight()
 				return cliproxyexecutor.Response{}, errIntercept
 			}
 			if !restoreExecutionModel {
@@ -457,6 +477,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
+					releaseInflight()
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(execCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
@@ -486,6 +507,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					m.MarkResult(execCtx, result)
 				}
 				if isRequestInvalidError(errExec) {
+					releaseInflight()
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
@@ -494,18 +516,22 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			m.MarkResult(execCtx, result)
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)
+			releaseInflight()
 			return resp, nil
 		}
 		if authErr != nil {
 			if isRequestInvalidError(authErr) {
+				releaseInflight()
 				return cliproxyexecutor.Response{}, authErr
 			}
 			lastErr = authErr
+			releaseInflight()
 			if homeMode {
 				homeAuthCount++
 			}
 			continue
 		}
+		releaseInflight()
 	}
 }
 
@@ -561,6 +587,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
+		releaseInflight := func() {}
+		if selection == nil {
+			var errReserve error
+			auth, executor, provider, releaseInflight, errReserve = m.reserveFillFirstAfterPick(ctx, providers, routeModel, pickOpts, tried, auth, executor, provider)
+			if errReserve != nil {
+				return nil, errReserve
+			}
+		}
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, routeModel)
@@ -592,6 +626,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			aliasResult.OriginalAlias = responseAlias
 		}
 		if len(models) == 0 {
+			releaseInflight()
 			if selection != nil {
 				releaseAttempt()
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "no_execution_models"); errEnd != nil {
@@ -616,6 +651,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				m.MarkResult(execCtx, result)
 			}
 			lastErr = errPrepare
+			releaseInflight()
 			if selection != nil {
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "prepare_failed"); errEnd != nil {
 					return nil, errEnd
@@ -638,6 +674,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode, selection != nil)
 		if errStream != nil {
+			releaseInflight()
 			if selection != nil {
 				releaseAttempt()
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "stream_start_failed"); errEnd != nil {
@@ -657,12 +694,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		if selection != nil {
+			releaseInflight()
 			if m.retainHomeWebsocketSelection(ctx, opts, routeModel, selection) {
 				return wrapHomeStream(ctx, streamResult, nil, releaseAttempt), nil
 			}
 			return wrapHomeStream(ctx, streamResult, selection, releaseAttempt), nil
 		}
-		return streamResult, nil
+		return attachFillFirstInflightRelease(streamResult, releaseInflight), nil
 	}
 }
 

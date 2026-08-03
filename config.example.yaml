@@ -248,6 +248,12 @@ routing:
   # Demoted credentials stay usable as fallback while others cool down.
   # 0 disables demotion (default). Example: 3
   fill-first-error-threshold: 0
+  # fill-first only: max concurrent in-flight requests per sticky credential.
+  # When the preferred account is already at this many concurrent executions,
+  # selection spills to the next healthy credential (soft capacity). If every
+  # ready credential is at capacity, the least-loaded one is chosen so requests
+  # still proceed. 0 disables the limit (default). Example: 5
+  fill-first-max-inflight: 0
 
 # Codex provider behavior.
 codex:

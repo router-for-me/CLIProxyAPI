@@ -34,22 +34,26 @@ const (
 
 // authScheduler keeps the incremental provider/model scheduling state used by Manager.
 type authScheduler struct {
-	mu                  sync.Mutex
-	strategy            schedulerStrategy
-	fillFirstSeed       uint64
-	providers           map[string]*providerScheduler
-	authProviders       map[string]string
-	mixedCursors        map[string]int
-	mixedWeightedStates map[string]*smoothWeightedState
+	mu                   sync.Mutex
+	strategy             schedulerStrategy
+	fillFirstSeed        uint64
+	fillFirstInflight    *fillFirstInflightTracker
+	fillFirstMaxInflight func() int
+	providers            map[string]*providerScheduler
+	authProviders        map[string]string
+	mixedCursors         map[string]int
+	mixedWeightedStates  map[string]*smoothWeightedState
 }
 
 // providerScheduler stores auth metadata and model shards for a single provider.
 type providerScheduler struct {
-	providerKey   string
-	strategy      schedulerStrategy
-	fillFirstSeed uint64
-	auths         map[string]*scheduledAuthMeta
-	modelShards   map[string]*modelScheduler
+	providerKey          string
+	strategy             schedulerStrategy
+	fillFirstSeed        uint64
+	fillFirstInflight    *fillFirstInflightTracker
+	fillFirstMaxInflight func() int
+	auths                map[string]*scheduledAuthMeta
+	modelShards          map[string]*modelScheduler
 }
 
 // scheduledAuthMeta stores the immutable scheduling fields derived from an auth snapshot.
@@ -64,13 +68,15 @@ type scheduledAuthMeta struct {
 
 // modelScheduler tracks ready and blocked auths for one provider/model combination.
 type modelScheduler struct {
-	modelKey        string
-	strategy        schedulerStrategy
-	fillFirstSeed   uint64
-	entries         map[string]*scheduledAuth
-	priorityOrder   []int
-	readyByPriority map[int]*readyBucket
-	blocked         cooldownQueue
+	modelKey             string
+	strategy             schedulerStrategy
+	fillFirstSeed        uint64
+	fillFirstInflight    *fillFirstInflightTracker
+	fillFirstMaxInflight func() int
+	entries              map[string]*scheduledAuth
+	priorityOrder        []int
+	readyByPriority      map[int]*readyBucket
+	blocked              cooldownQueue
 }
 
 // scheduledAuth stores the runtime scheduling state for a single auth inside a model shard.
@@ -187,6 +193,17 @@ func schedulerConfigForSelector(selector Selector) (schedulerStrategy, uint64) {
 		seed = fillSelector.shuffleSeed()
 	}
 	return strategy, seed
+}
+
+// setFillFirstInflight wires live concurrency tracking used by fill-first picks.
+func (s *authScheduler) setFillFirstInflight(tracker *fillFirstInflightTracker, maxInflight func() int) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fillFirstInflight = tracker
+	s.fillFirstMaxInflight = maxInflight
 }
 
 // setSelector updates the active built-in strategy and resets mixed-provider cursors.
@@ -684,6 +701,8 @@ func (p *providerScheduler) upsertAuthLocked(meta *scheduledAuthMeta, now time.T
 		}
 		shard.strategy = p.strategy
 		shard.fillFirstSeed = p.fillFirstSeed
+		shard.fillFirstInflight = p.fillFirstInflight
+		shard.fillFirstMaxInflight = p.fillFirstMaxInflight
 		if !meta.supportsModel(modelKey) {
 			shard.removeEntryLocked(meta.auth.ID)
 			continue
@@ -702,6 +721,8 @@ func (p *providerScheduler) removeAuthLocked(authID string) {
 		if shard != nil {
 			shard.strategy = p.strategy
 			shard.fillFirstSeed = p.fillFirstSeed
+			shard.fillFirstInflight = p.fillFirstInflight
+			shard.fillFirstMaxInflight = p.fillFirstMaxInflight
 			shard.removeEntryLocked(authID)
 		}
 	}
@@ -716,15 +737,19 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 	if shard, ok := p.modelShards[modelKey]; ok && shard != nil {
 		shard.strategy = p.strategy
 		shard.fillFirstSeed = p.fillFirstSeed
+		shard.fillFirstInflight = p.fillFirstInflight
+		shard.fillFirstMaxInflight = p.fillFirstMaxInflight
 		shard.promoteExpiredLocked(now)
 		return shard
 	}
 	shard := &modelScheduler{
-		modelKey:        modelKey,
-		strategy:        p.strategy,
-		fillFirstSeed:   p.fillFirstSeed,
-		entries:         make(map[string]*scheduledAuth),
-		readyByPriority: make(map[int]*readyBucket),
+		modelKey:             modelKey,
+		strategy:             p.strategy,
+		fillFirstSeed:        p.fillFirstSeed,
+		fillFirstInflight:    p.fillFirstInflight,
+		fillFirstMaxInflight: p.fillFirstMaxInflight,
+		entries:              make(map[string]*scheduledAuth),
+		readyByPriority:      make(map[int]*readyBucket),
 	}
 	for _, meta := range p.auths {
 		if meta == nil || !meta.supportsModel(modelKey) {
@@ -906,12 +931,7 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		if preferWebsocket && bucket.ws.pickFirst(predicate) != nil {
 			fillFirstEntries = bucket.fillFirstWS
 		}
-		for _, entry := range fillFirstEntries {
-			if predicate == nil || predicate(entry) {
-				picked = entry
-				break
-			}
-		}
+		picked = pickFillFirstScheduled(fillFirstEntries, predicate, m.fillFirstLoads(), m.fillFirstMax())
 	case schedulerStrategyWeightedRoundRobin:
 		picked = view.pickWeighted(predicate)
 	default:
@@ -1103,6 +1123,58 @@ func buildReadyBucket(entries []*scheduledAuth) *readyBucket {
 // buildReadyView creates a flat view for rotation.
 func buildReadyView(entries []*scheduledAuth) readyView {
 	return readyView{flat: append([]*scheduledAuth(nil), entries...)}
+}
+
+func (m *modelScheduler) fillFirstMax() int {
+	if m == nil || m.fillFirstMaxInflight == nil {
+		return 0
+	}
+	maxInflight := m.fillFirstMaxInflight()
+	if maxInflight < 0 {
+		return 0
+	}
+	return maxInflight
+}
+
+func (m *modelScheduler) fillFirstLoads() map[string]int {
+	if m == nil || m.fillFirstInflight == nil || m.fillFirstMax() <= 0 {
+		return nil
+	}
+	return m.fillFirstInflight.snapshot()
+}
+
+// pickFillFirstScheduled walks fill-first ordered entries and applies soft capacity.
+func pickFillFirstScheduled(entries []*scheduledAuth, predicate func(*scheduledAuth) bool, loads map[string]int, maxInflight int) *scheduledAuth {
+	if len(entries) == 0 {
+		return nil
+	}
+	orderedIDs := make([]string, 0, len(entries))
+	byID := make(map[string]*scheduledAuth, len(entries))
+	for _, entry := range entries {
+		if entry == nil || entry.auth == nil {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		authID := entry.auth.ID
+		if authID == "" {
+			continue
+		}
+		if _, exists := byID[authID]; exists {
+			continue
+		}
+		orderedIDs = append(orderedIDs, authID)
+		byID[authID] = entry
+	}
+	if len(orderedIDs) == 0 {
+		return nil
+	}
+	pickedID := pickFillFirstAuthID(orderedIDs, loads, maxInflight)
+	if picked := byID[pickedID]; picked != nil {
+		return picked
+	}
+	return byID[orderedIDs[0]]
 }
 
 // pickFirst returns the first ready entry that satisfies predicate without advancing cursors.

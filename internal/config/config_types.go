@@ -225,6 +225,14 @@ type RoutingConfig struct {
 	// (default). Only affects ordering when strategy is fill-first; demoted
 	// credentials remain usable as fallback when healthier ones are cooling.
 	FillFirstErrorThreshold int `yaml:"fill-first-error-threshold,omitempty" json:"fill-first-error-threshold,omitempty"`
+
+	// FillFirstMaxInflight is the soft per-credential in-flight limit under
+	// fill-first. When the sticky credential already has this many concurrent
+	// executions, selection spills to the next healthy credential (and to the
+	// least-loaded ready credential when every candidate is at capacity).
+	// 0 disables the limit (default, legacy behavior). Only applies when
+	// strategy is fill-first.
+	FillFirstMaxInflight int `yaml:"fill-first-max-inflight,omitempty" json:"fill-first-max-inflight,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
