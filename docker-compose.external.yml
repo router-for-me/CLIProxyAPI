@@ -1,0 +1,93 @@
+# =============================================================================
+# NixLLM Docker Compose — nixllm-only load with an EXTERNAL PostgreSQL.
+#
+# This variant runs ONLY the nixllm service. There is no bundled Postgres and
+# no edge proxy (Caddy/Traefik) — TLS/HTTPS is handled out-of-band by a
+# Cloudflare Tunnel pointing at this host's published port.
+#
+# The dashboard + management API are served by nixllm itself on :8317 and are
+# published so Cloudflare can reach them.
+#
+# PostgreSQL lives on the Docker host. From inside the container it is reached
+# through the `host.docker.internal` alias (auto-mapped to the host gateway),
+# so the external DSN is:
+#
+#   PGSTORE_DSN=postgresql://<user>:<pass>@host.docker.internal:5432/<db>?sslmode=require
+#
+# If your Postgres listens on the same machine, do NOT use `localhost` in the
+# DSN — that resolves to the container itself. Use host.docker.internal.
+#
+# Start:
+#   docker compose -f docker-compose.external.yml up -d
+# =============================================================================
+
+services:
+  nixllm:
+    image: ${CLI_PROXY_IMAGE:-ghcr.io/abilfida/nixllm:latest}
+    pull_policy: ${NIXLLM_PULL_POLICY:-always}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        CORE_VERSION: ${CORE_VERSION:-unknown}
+        COMMIT: ${COMMIT:-none}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    container_name: ${NIXLLM_CONTAINER_NAME:-nixllm}
+    init: true
+    environment:
+      DEPLOY: ${DEPLOY:-}
+      # Management API password — gates /v0/management and the dashboard login.
+      MANAGEMENT_PASSWORD: ${MANAGEMENT_PASSWORD:-}
+      # External PostgreSQL backing. PG-backed routes only activate when this
+      # is set. Point it at the host via host.docker.internal (see header).
+      PGSTORE_DSN: ${PGSTORE_DSN:-}
+      PGSTORE_SCHEMA: ${PGSTORE_SCHEMA:-public}
+      PGSTORE_LOCAL_PATH: ${PGSTORE_LOCAL_PATH:-/var/lib/nixllm}
+      PGSTORE_ENCRYPTION_KEY: ${PGSTORE_ENCRYPTION_KEY:-}
+      TZ: ${TZ:-Asia/Shanghai}
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      # Main API + dashboard/management web UI — the only port Cloudflare needs.
+      - "${NIXLLM_PORT:-8317}:8317"
+    extra_hosts:
+      # Lets the container reach the Docker host's PostgreSQL on Linux/WSL2.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/nixllm/config.yaml
+      - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
+      - ${CLI_PROXY_LOG_PATH:-./logs}:/nixllm/logs
+      - ${CLI_PROXY_PLUGIN_PATH:-./plugins}:/nixllm/plugins
+    restart: ${NIXLLM_RESTART:-unless-stopped}
+    stop_grace_period: ${NIXLLM_STOP_GRACE:-30s}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: ${NIXLLM_LOG_MAX_SIZE:-10m}
+        max-file: ${NIXLLM_LOG_MAX_FILE:-5}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >
+          wget -qO- --tries=1 --timeout=5 http://127.0.0.1:8317/healthz
+          | grep -q '"status":"ok"'
+      interval: ${NIXLLM_HEALTH_INTERVAL:-30s}
+      timeout: ${NIXLLM_HEALTH_TIMEOUT:-10s}
+      retries: ${NIXLLM_HEALTH_RETRIES:-3}
+      start_period: ${NIXLLM_HEALTH_START_PERIOD:-30s}
+    deploy:
+      resources:
+        limits:
+          cpus: ${NIXLLM_LIMIT_CPUS:-2.0}
+          memory: ${NIXLLM_LIMIT_MEM:-1G}
+        reservations:
+          memory: ${NIXLLM_RESERVE_MEM:-128M}
+    networks:
+      - nixllm-net
+
+networks:
+  nixllm-net:
+    name: ${NIXLLM_NETWORK_NAME:-nixllm-net}
+    driver: bridge
