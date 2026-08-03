@@ -35,6 +35,10 @@ services:
         BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: ${NIXLLM_CONTAINER_NAME:-nixllm}
     init: true
+    command:
+      - ./nixllm
+      - --config
+      - /nixllm/config/config.yaml
     environment:
       DEPLOY: ${DEPLOY:-}
       # Management API password — gates /v0/management and the dashboard login.
@@ -56,10 +60,11 @@ services:
       # Lets the container reach the Docker host's PostgreSQL on Linux/WSL2.
       - "host.docker.internal:host-gateway"
     volumes:
-      # Config + auth are files that live on the host and are edited there,
-      # so they stay bind-mounts.
-      - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/nixllm/config.yaml
-      - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
+      # Config + auth are edited on the host but persisted as named volumes.
+      # config.yaml lives at the volume root; the command below points the
+      # server at it so we don't shadow the image's OWN workdir file.
+      - nixllm-config:/nixllm/config
+      - nixllm-auth:/root/.cli-proxy-api
       # Runtime data persisted as named volumes (survive container recreate).
       - nixllm-logs:/nixllm/logs
       - nixllm-plugins:/nixllm/plugins
@@ -99,6 +104,10 @@ networks:
     driver: bridge
 
 volumes:
+  nixllm-config:
+    name: ${NIXLLM_VOLUME_CONFIG:-nixllm-config}
+  nixllm-auth:
+    name: ${NIXLLM_VOLUME_AUTH:-nixllm-auth}
   nixllm-logs:
     name: ${NIXLLM_VOLUME_LOGS:-nixllm-logs}
   nixllm-plugins:
