@@ -851,7 +851,8 @@ func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode220CLIFingerprint(t *testi
 		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "x", "")
+	assertClaudeUserTextBlock(t, content[1], "x")
+	assertEphemeralCacheControl(t, content[1], "")
 
 	userID := gjson.GetBytes(seenBody, "metadata.user_id").String()
 	if !helps.IsValidUserID(userID) {
@@ -1109,8 +1110,9 @@ func TestClaudeExecutor_CopiedVSCodeAgentSDKHeadersWithoutMetadataAreCloaked(t *
 		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "x", "")
-	assertClaudeMidConversationSystemMessage(t, seenBody, 1, "spoofed-system", "")
+	assertClaudeUserTextBlock(t, content[1], "x")
+	assertEphemeralCacheControl(t, content[1], "")
+	assertClaudeMidConversationSystemMessage(t, seenBody, 1, "spoofed-system")
 }
 
 func TestClaudeExecutor_AgentSDKEntrypointWithStrongSignalsUsesCLICloak(t *testing.T) {
@@ -2412,8 +2414,9 @@ func TestClaudeExecutor_CountTokensCloakRelocatesCallerSystemAndObfuscates(t *te
 			})
 			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
 			auth := &cliproxyauth.Auth{Attributes: map[string]string{
-				"api_key":               "sk-ant-oat-count-relocate",
-				"cloak_sensitive_words": sensitiveWord,
+				"api_key":                     "sk-ant-oat-count-relocate",
+				"cloak_relaxed_system_prompt": "true",
+				"cloak_sensitive_words":       sensitiveWord,
 			}}
 			payload := []byte(`{"model":"` + testCase.model + `","system":[{"type":"text","text":"` + callerSystem + `"}],` +
 				`"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}],"tools":[]}`)
@@ -3740,9 +3743,8 @@ func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity
 }
 
 // assertClaudeMidConversationSystemMessage checks a forwarded caller system prompt.
-// wantTTL is "" for the native default marker and "1h" once
-// upgradeClaudeCacheControlTTL has run, which only happens for OAuth credentials.
-func assertClaudeMidConversationSystemMessage(t *testing.T, body []byte, messageIndex int, wantText, wantTTL string) {
+// Cloaking owns only its layout, so the inserted block must remain markerless.
+func assertClaudeMidConversationSystemMessage(t *testing.T, body []byte, messageIndex int, wantText string) {
 	t.Helper()
 	messagePath := fmt.Sprintf("messages.%d", messageIndex)
 	if got := gjson.GetBytes(body, messagePath+".role").String(); got != "system" {
@@ -3755,11 +3757,8 @@ func assertClaudeMidConversationSystemMessage(t *testing.T, body []byte, message
 	if got := content[0].Get("text").String(); got != wantText {
 		t.Fatalf("%s.content.0.text lost caller prompt: got len %d, want len %d", messagePath, len(got), len(wantText))
 	}
-	if got := content[0].Get("cache_control.type").String(); got != "ephemeral" {
-		t.Fatalf("%s.content.0.cache_control.type = %q, want ephemeral", messagePath, got)
-	}
-	if got := content[0].Get("cache_control.ttl").String(); got != wantTTL {
-		t.Fatalf("%s.content.0.cache_control.ttl = %q, want %q: %s", messagePath, got, wantTTL, content[0].Raw)
+	if content[0].Get("cache_control").Exists() {
+		t.Fatalf("%s.content.0 must remain markerless during cloaking: %s", messagePath, content[0].Raw)
 	}
 }
 
@@ -3782,7 +3781,8 @@ func assertClaudeLegacySystemReminderLayout(t *testing.T, body []byte, wantSyste
 	if content[1].Get("cache_control").Exists() {
 		t.Fatalf("caller reminder unexpectedly has cache_control: %s", content[1].Raw)
 	}
-	assertEphemeralUserTextBlock(t, content[2], wantUser, wantTTL)
+	assertClaudeUserTextBlock(t, content[2], wantUser)
+	assertEphemeralCacheControl(t, content[2], wantTTL)
 }
 
 func assertClaudeCodeCurrentDateBlock(t *testing.T, block gjson.Result) {
@@ -3803,10 +3803,7 @@ func assertClaudeCodeCurrentDateBlockAt(t *testing.T, block gjson.Result, now ti
 	}
 }
 
-// assertEphemeralUserTextBlock checks the cloaked first-user block. wantTTL is ""
-// for the native default marker and "1h" once upgradeClaudeCacheControlTTL has run,
-// which only happens for OAuth credentials.
-func assertEphemeralUserTextBlock(t *testing.T, block gjson.Result, wantText, wantTTL string) {
+func assertClaudeUserTextBlock(t *testing.T, block gjson.Result, wantText string) {
 	t.Helper()
 	if got := block.Get("type").String(); got != "text" {
 		t.Fatalf("user block type = %q, want text", got)
@@ -3814,6 +3811,17 @@ func assertEphemeralUserTextBlock(t *testing.T, block gjson.Result, wantText, wa
 	if got := block.Get("text").String(); got != wantText {
 		t.Fatalf("user block text = %q, want %q", got, wantText)
 	}
+}
+
+func assertNoCacheControl(t *testing.T, block gjson.Result) {
+	t.Helper()
+	if block.Get("cache_control").Exists() {
+		t.Fatalf("block must remain markerless during cloaking: %s", block.Raw)
+	}
+}
+
+func assertEphemeralCacheControl(t *testing.T, block gjson.Result, wantTTL string) {
+	t.Helper()
 	if got := block.Get("cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("user block cache_control.type = %q, want ephemeral", got)
 	}
@@ -3870,7 +3878,7 @@ func TestClaudeCodeTimezoneUsesCredentialThenConfiguredProfile(t *testing.T) {
 	}
 }
 
-func TestInjectClaudeCodeCurrentDateIsIdempotentAndAlignsFirstUserCache(t *testing.T) {
+func TestInjectClaudeCodeCurrentDateIsIdempotentAndPreservesExplicitCacheControl(t *testing.T) {
 	fixed := time.Date(2026, time.August, 1, 9, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`)
 
@@ -3892,7 +3900,8 @@ func TestInjectClaudeCodeCurrentDateIsIdempotentAndAlignsFirstUserCache(t *testi
 	if content[0].Get("cache_control").Exists() {
 		t.Fatalf("currentDate block must not contain cache_control: %s", content[0].Raw)
 	}
-	assertEphemeralUserTextBlock(t, content[1], "hello", "")
+	assertClaudeUserTextBlock(t, content[1], "hello")
+	assertEphemeralCacheControl(t, content[1], "1h")
 }
 
 func TestInjectClaudeCodeCurrentDateMovesExistingCopyToFirstBlock(t *testing.T) {
@@ -3907,7 +3916,8 @@ func TestInjectClaudeCodeCurrentDateMovesExistingCopyToFirstBlock(t *testing.T) 
 		t.Fatalf("content has %d blocks, want one currentDate and user text: %s", len(content), out)
 	}
 	assertClaudeCodeCurrentDateBlockAt(t, content[0], fixed)
-	assertEphemeralUserTextBlock(t, content[1], "hello", "")
+	assertClaudeUserTextBlock(t, content[1], "hello")
+	assertNoCacheControl(t, content[1])
 }
 
 func TestInjectClaudeCodeCurrentDatePrecedesExistingReminder(t *testing.T) {
@@ -3926,7 +3936,8 @@ func TestInjectClaudeCodeCurrentDatePrecedesExistingReminder(t *testing.T) {
 	if got := content[1].Get("text").String(); got != reminder {
 		t.Fatalf("content[1].text = %q, want standalone reminder", got)
 	}
-	assertEphemeralUserTextBlock(t, content[2], "continue", "")
+	assertClaudeUserTextBlock(t, content[2], "continue")
+	assertEphemeralCacheControl(t, content[2], "1h")
 }
 
 func TestInjectClaudeCodeCurrentDateFollowsLeadingToolResults(t *testing.T) {
@@ -3954,7 +3965,8 @@ func TestInjectClaudeCodeCurrentDateFollowsLeadingToolResults(t *testing.T) {
 		t.Fatalf("content[0].tool_use_id = %q, want toolu_1", got)
 	}
 	assertClaudeCodeCurrentDateBlockAt(t, content[1], fixed)
-	assertEphemeralUserTextBlock(t, content[2], "continue", "")
+	assertClaudeUserTextBlock(t, content[2], "continue")
+	assertNoCacheControl(t, content[2])
 }
 
 func TestInjectClaudeCodeCurrentDateFollowsAllLeadingToolResults(t *testing.T) {
@@ -4004,19 +4016,241 @@ func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	if blocks[1].Get("text").String() != claudeCodeCLIIdentity {
 		t.Fatalf("blocks[1] should be official CLI identity, got %q", blocks[1].Get("text").String())
 	}
-	if got := blocks[1].Get("cache_control.type").String(); got != "ephemeral" {
-		t.Fatalf("blocks[1] cache_control.type = %q, want ephemeral", got)
-	}
-	if blocks[1].Get("cache_control.ttl").Exists() {
-		t.Fatalf("blocks[1] cache_control must not carry a default ttl: %s", blocks[1].Raw)
-	}
+	assertNoCacheControl(t, blocks[1])
 	content := gjson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text: %s", len(content), out)
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi", "")
-	assertClaudeMidConversationSystemMessage(t, out, 1, "You are a helpful assistant.", "")
+	assertClaudeUserTextBlock(t, content[1], "hi")
+	assertNoCacheControl(t, content[1])
+	assertClaudeMidConversationSystemMessage(t, out, 1, "You are a helpful assistant.")
+	if got := countCacheControls(out); got != 0 {
+		t.Fatalf("system layout generated %d cache breakpoints before payload rules: %s", got, out)
+	}
+}
+
+func TestApplyClaudeSystemInstructionPolicy_RelaxedPreservesTopLevelBlocksWithoutSynthesizingCacheControl(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5","system":[` +
+		`{"type":"text","text":"first guidance","cache_control":{"type":"ephemeral","ttl":"1h"}},` +
+		`{"type":"text","text":"second guidance"}],` +
+		`"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := applyClaudeSystemInstructionPolicy(
+		payload,
+		claudeCloakSettings{relaxedSystemPrompt: true},
+		true,
+		"2.1.220",
+		"cli",
+		"",
+		time.Now(),
+		false,
+		"",
+		"",
+	)
+
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 4 {
+		t.Fatalf("top-level system has %d blocks, want billing, identity, and two caller blocks: %s", len(blocks), out)
+	}
+	if got := blocks[0].Get("text").String(); !strings.HasPrefix(got, "x-anthropic-billing-header:") {
+		t.Fatalf("system[0].text = %q, want billing header", got)
+	}
+	if got := blocks[1].Get("text").String(); got != claudeCodeCLIIdentity {
+		t.Fatalf("system[1].text = %q, want Claude Code identity", got)
+	}
+	if blocks[1].Get("cache_control").Exists() {
+		t.Fatalf("relaxed identity block must defer cache placement: %s", blocks[1].Raw)
+	}
+	if got := blocks[2].Get("text").String(); got != "first guidance" {
+		t.Fatalf("system[2].text = %q, want first guidance", got)
+	}
+	if got := blocks[2].Get("cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("system[2].cache_control.ttl = %q, want preserved 1h", got)
+	}
+	if got := blocks[3].Get("text").String(); got != "second guidance" {
+		t.Fatalf("system[3].text = %q, want second guidance", got)
+	}
+	if blocks[3].Get("cache_control").Exists() {
+		t.Fatalf("relaxed mode must not synthesize caller cache_control: %s", blocks[3].Raw)
+	}
+	if got := gjson.GetBytes(out, `messages.#(role=="system")`); got.Exists() {
+		t.Fatalf("relaxed mode must not add a mid-conversation system message: %s", got.Raw)
+	}
+	if got, want := gjson.GetBytes(out, "messages").Raw, gjson.GetBytes(payload, "messages").Raw; got != want {
+		t.Fatalf("relaxed mode changed caller messages:\ngot:  %s\nwant: %s", got, want)
+	}
+	if bytes.Contains(out, []byte("# currentDate")) {
+		t.Fatalf("relaxed mode must not inject currentDate content: %s", out)
+	}
+}
+
+func TestApplyClaudeSystemInstructionPolicy_RelaxedPreservesFinalCallerCacheControl(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5","system":[{"type":"text","text":"guidance","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := applyClaudeSystemInstructionPolicy(
+		payload,
+		claudeCloakSettings{relaxedSystemPrompt: true},
+		true,
+		"2.1.220",
+		"cli",
+		"",
+		time.Now(),
+		false,
+		"",
+		"",
+	)
+
+	block := gjson.GetBytes(out, "system.2")
+	if got := block.Get("text").String(); got != "guidance" {
+		t.Fatalf("system[2].text = %q, want guidance", got)
+	}
+	if got := block.Get("cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("system[2].cache_control.ttl = %q, want caller-provided 1h", got)
+	}
+}
+
+func TestClaudeExecutor_RelaxedSystemPromptDefersCacheOwnershipUntilAfterPayloadRules(t *testing.T) {
+	const model = "claude-opus-5"
+	enabled := true
+	tests := []struct {
+		name                     string
+		stream                   bool
+		payloadBreakpoint        bool
+		wantSystemBreakpointPath string
+		wantSystemTTL            string
+		wantCacheControlCount    int
+		wantMessageBreakpoint    bool
+	}{
+		{
+			name:                     "automatic section breakpoints when none exist",
+			wantSystemBreakpointPath: "system.2.cache_control",
+			wantCacheControlCount:    2,
+			wantMessageBreakpoint:    true,
+		},
+		{
+			name:                     "payload system breakpoint owns the complete layout",
+			payloadBreakpoint:        true,
+			wantSystemBreakpointPath: "system.1.cache_control",
+			wantCacheControlCount:    1,
+		},
+		{
+			name:                     "streaming automatic section breakpoints when none exist",
+			stream:                   true,
+			wantSystemBreakpointPath: "system.2.cache_control",
+			wantCacheControlCount:    2,
+			wantMessageBreakpoint:    true,
+		},
+		{
+			name:                     "streaming payload system breakpoint owns the complete layout",
+			stream:                   true,
+			payloadBreakpoint:        true,
+			wantSystemBreakpointPath: "system.1.cache_control",
+			wantCacheControlCount:    1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var seenBody []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seenBody, _ = io.ReadAll(r.Body)
+				if test.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+			}))
+			defer server.Close()
+
+			cfg := &config.Config{
+				ClaudeKey: []config.ClaudeKey{{
+					APIKey:  "key-relaxed-cache-policy",
+					BaseURL: server.URL,
+					Cloak: &config.CloakConfig{
+						RelaxedSystemPrompt: &enabled,
+					},
+				}},
+			}
+			if test.payloadBreakpoint {
+				cfg.Payload.Override = []config.PayloadRule{{
+					Models: []config.PayloadModelRule{{
+						Name:         "*",
+						Protocol:     "claude",
+						FromProtocol: "openai",
+						Headers:      map[string]string{"user-agent": "node-fetch*"},
+					}},
+					Params: map[string]any{
+						"system.1.cache_control": map[string]any{"type": "ephemeral"},
+					},
+				}}
+			}
+
+			executor := NewClaudeExecutor(cfg)
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"api_key":  "key-relaxed-cache-policy",
+				"base_url": server.URL,
+			}}
+			payload := []byte(`{"model":"claude-opus-5","messages":[{"role":"system","content":"caller guidance"},{"role":"user","content":"hello"}]}`)
+
+			request := cliproxyexecutor.Request{Model: model, Payload: payload}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatOpenAI,
+				ResponseFormat: sdktranslator.FormatClaude,
+				Headers:        http.Header{"User-Agent": {"node-fetch/3.3.2"}},
+			}
+			if test.stream {
+				result, errExecute := executor.ExecuteStream(context.Background(), auth, request, opts)
+				if errExecute != nil {
+					t.Fatalf("ExecuteStream() error = %v", errExecute)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream error = %v", chunk.Err)
+					}
+				}
+			} else if _, errExecute := executor.Execute(context.Background(), auth, request, opts); errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+			if got := gjson.GetBytes(seenBody, "system.2.text").String(); got != "caller guidance" {
+				t.Fatalf("system.2.text = %q, want caller guidance: %s", got, seenBody)
+			}
+			if bytes.Contains(seenBody, []byte("# currentDate")) {
+				t.Fatalf("relaxed cloak must not inject currentDate content: %s", seenBody)
+			}
+			if got := countCacheControls(seenBody); got != test.wantCacheControlCount {
+				t.Fatalf("cache_control count = %d, want %d: %s", got, test.wantCacheControlCount, seenBody)
+			}
+			if got := gjson.GetBytes(seenBody, test.wantSystemBreakpointPath+".type").String(); got != "ephemeral" {
+				t.Fatalf("%s.type = %q, want ephemeral: %s", test.wantSystemBreakpointPath, got, seenBody)
+			}
+			if got := gjson.GetBytes(seenBody, test.wantSystemBreakpointPath+".ttl").String(); got != test.wantSystemTTL {
+				t.Fatalf("%s.ttl = %q, want %q: %s", test.wantSystemBreakpointPath, got, test.wantSystemTTL, seenBody)
+			}
+
+			otherSystemIndex := 1
+			if test.payloadBreakpoint {
+				otherSystemIndex = 2
+			}
+			if cacheControl := gjson.GetBytes(seenBody, fmt.Sprintf("system.%d.cache_control", otherSystemIndex)); cacheControl.Exists() {
+				t.Fatalf("system.%d must not receive another cache breakpoint: %s", otherSystemIndex, seenBody)
+			}
+			userContent := gjson.GetBytes(seenBody, "messages.0.content").Array()
+			if len(userContent) != 1 || userContent[0].Get("text").String() != "hello" {
+				t.Fatalf("relaxed cloak changed caller user text: %s", seenBody)
+			}
+			messageBreakpoint := userContent[0].Get("cache_control")
+			if test.wantMessageBreakpoint {
+				if got := messageBreakpoint.Get("type").String(); got != "ephemeral" {
+					t.Fatalf("messages[0] cache_control.type = %q, want downstream automatic breakpoint: %s", got, seenBody)
+				}
+			} else if messageBreakpoint.Exists() {
+				t.Fatalf("payload-owned layout must not receive an automatic message breakpoint: %s", seenBody)
+			}
+		})
+	}
 }
 
 func TestClaudeUsesLegacySystemReminder(t *testing.T) {
@@ -4054,8 +4288,9 @@ func TestCheckSystemInstructionsWithMode_FutureModelDefaultsToMidSystem(t *testi
 		t.Fatalf("user content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi", "")
-	assertClaudeMidConversationSystemMessage(t, out, 1, "future instructions", "")
+	assertClaudeUserTextBlock(t, content[1], "hi")
+	assertNoCacheControl(t, content[1])
+	assertClaudeMidConversationSystemMessage(t, out, 1, "future instructions")
 }
 
 func TestCheckSystemInstructionsWithMode_LegacyModelUsesSystemReminder(t *testing.T) {
@@ -4079,7 +4314,8 @@ func TestCheckSystemInstructionsWithMode_LegacyModelUsesSystemReminder(t *testin
 	if content[1].Get("cache_control").Exists() {
 		t.Fatalf("caller system reminder unexpectedly has cache_control: %s", content[1].Raw)
 	}
-	assertEphemeralUserTextBlock(t, content[2], "hi", "")
+	assertClaudeUserTextBlock(t, content[2], "hi")
+	assertNoCacheControl(t, content[2])
 }
 
 func TestCheckSystemInstructionsWithMode_LegacyModelKeepsSystemBlocksSeparate(t *testing.T) {
@@ -4103,7 +4339,8 @@ func TestCheckSystemInstructionsWithMode_LegacyModelKeepsSystemBlocksSeparate(t 
 			t.Fatalf("content[%d] caller reminder unexpectedly has cache_control: %s", idx+1, block.Raw)
 		}
 	}
-	assertEphemeralUserTextBlock(t, content[3], "hi", "")
+	assertClaudeUserTextBlock(t, content[3], "hi")
+	assertNoCacheControl(t, content[3])
 }
 
 // Test case 2: Strict mode keeps only the injected Claude Code system blocks.
@@ -4121,7 +4358,8 @@ func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
 		t.Fatalf("strict mode content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi", "")
+	assertClaudeUserTextBlock(t, content[1], "hi")
+	assertNoCacheControl(t, content[1])
 }
 
 // Test case 3: Empty string system prompt adds only currentDate before user text.
@@ -4139,7 +4377,8 @@ func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) 
 		t.Fatalf("empty system content has %d blocks, want 2", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi", "")
+	assertClaudeUserTextBlock(t, content[1], "hi")
+	assertNoCacheControl(t, content[1])
 }
 
 // Test case 4: Array system prompt becomes one mid-conversation system message.
@@ -4157,8 +4396,9 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi", "")
-	assertClaudeMidConversationSystemMessage(t, out, 1, "Be concise.", "")
+	assertClaudeUserTextBlock(t, content[1], "hi")
+	assertNoCacheControl(t, content[1])
+	assertClaudeMidConversationSystemMessage(t, out, 1, "Be concise.")
 }
 
 func TestCheckSystemInstructionsWithMode_ArraySystemKeepsBlocksAsSeparateMessages(t *testing.T) {
@@ -4176,9 +4416,10 @@ func TestCheckSystemInstructionsWithMode_ArraySystemKeepsBlocksAsSeparateMessage
 		t.Fatalf("user content has %d blocks, want currentDate and user text: %s", len(content), out)
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi", "")
-	assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance", "")
-	assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance", "")
+	assertClaudeUserTextBlock(t, content[1], "hi")
+	assertNoCacheControl(t, content[1])
+	assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance")
+	assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance")
 }
 
 func TestRelocateClaudeSystemPromptForCountTokensKeepsBlocksSeparate(t *testing.T) {
@@ -4221,8 +4462,8 @@ func TestRelocateClaudeSystemPromptForCountTokensKeepsBlocksSeparate(t *testing.
 			if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
 				t.Fatalf("message count = %d, want user and two system messages: %s", got, out)
 			}
-			assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance", "")
-			assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance", "")
+			assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance")
+			assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance")
 		})
 	}
 }
@@ -4609,8 +4850,9 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 		t.Fatalf("messages[0].content has %d blocks, want 2", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi", "")
-	assertClaudeMidConversationSystemMessage(t, out, 1, wantSystem, "")
+	assertClaudeUserTextBlock(t, content[1], "hi")
+	assertNoCacheControl(t, content[1])
+	assertClaudeMidConversationSystemMessage(t, out, 1, wantSystem)
 }
 
 func TestCheckSystemInstructionsWithSigningMode_LongPromptIsExactAndIdempotent(t *testing.T) {
@@ -4644,8 +4886,9 @@ func TestCheckSystemInstructionsWithSigningMode_LongPromptIsExactAndIdempotent(t
 		t.Fatalf("user content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hello", "")
-	assertClaudeMidConversationSystemMessage(t, first, 1, wantSystem, "")
+	assertClaudeUserTextBlock(t, content[1], "hello")
+	assertNoCacheControl(t, content[1])
+	assertClaudeMidConversationSystemMessage(t, first, 1, wantSystem)
 	if strings.Contains(content[0].Get("text").String(), "PI_SYSTEM_BEGIN") || strings.Contains(content[1].Get("text").String(), "PI_SYSTEM_BEGIN") {
 		t.Fatal("caller system prompt leaked into the user content blocks")
 	}
@@ -4910,6 +5153,152 @@ func TestResolveClaudeWirePolicy(t *testing.T) {
 				t.Fatalf("Cloak = %v, want %v", policy.Cloak, test.wantCloak)
 			}
 		})
+	}
+}
+
+func TestResolveClaudeWirePolicy_RelaxedSystemPromptPrecedence(t *testing.T) {
+	enabled := true
+	disabled := false
+	tests := []struct {
+		name        string
+		auth        *cliproxyauth.Auth
+		cloak       *config.CloakConfig
+		wantCloak   bool
+		wantStrict  bool
+		wantRelaxed bool
+	}{
+		{name: "default disabled", auth: &cliproxyauth.Auth{}},
+		{name: "metadata bool enabled", auth: &cliproxyauth.Auth{Metadata: map[string]any{"cloak_relaxed_system_prompt": true}}, wantCloak: true, wantRelaxed: true},
+		{name: "metadata string enabled", auth: &cliproxyauth.Auth{Metadata: map[string]any{"cloak_relaxed_system_prompt": "true"}}, wantCloak: true, wantRelaxed: true},
+		{name: "attribute disabled overrides metadata", auth: &cliproxyauth.Auth{Attributes: map[string]string{"cloak_relaxed_system_prompt": "false"}, Metadata: map[string]any{"cloak_relaxed_system_prompt": true}}, wantCloak: true},
+		{name: "key config overrides metadata", auth: &cliproxyauth.Auth{Metadata: map[string]any{"cloak_relaxed_system_prompt": false}}, cloak: &config.CloakConfig{RelaxedSystemPrompt: &enabled}, wantCloak: true, wantRelaxed: true},
+		{name: "key config explicit false", auth: &cliproxyauth.Auth{Metadata: map[string]any{"cloak_relaxed_system_prompt": true}}, cloak: &config.CloakConfig{RelaxedSystemPrompt: &disabled}, wantCloak: true},
+		{name: "key strict mode wins", auth: &cliproxyauth.Auth{Metadata: map[string]any{"cloak_relaxed_system_prompt": true}}, cloak: &config.CloakConfig{StrictMode: true}, wantCloak: true, wantStrict: true},
+		{name: "boolean metadata strict mode wins", auth: &cliproxyauth.Auth{Metadata: map[string]any{"cloak_strict_mode": true, "cloak_relaxed_system_prompt": true}}, wantCloak: true, wantStrict: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			if test.cloak != nil {
+				test.auth.Attributes = map[string]string{"api_key": "key-123"}
+				cfg.ClaudeKey = []config.ClaudeKey{{APIKey: "key-123", Cloak: test.cloak}}
+			}
+			policy, settings := resolveClaudeWirePolicy(cfg, test.auth, "key-123", false)
+			if policy.Cloak != test.wantCloak {
+				t.Fatalf("Cloak = %v, want %v", policy.Cloak, test.wantCloak)
+			}
+			if settings.strictMode != test.wantStrict {
+				t.Fatalf("strictMode = %v, want %v", settings.strictMode, test.wantStrict)
+			}
+			if settings.relaxedSystemPrompt != test.wantRelaxed {
+				t.Fatalf("relaxedSystemPrompt = %v, want %v", settings.relaxedSystemPrompt, test.wantRelaxed)
+			}
+		})
+	}
+}
+
+func TestResolveClaudeWirePolicy_RelaxedSystemPromptUsesConfigIdentity(t *testing.T) {
+	disabled := false
+	enabled := true
+	baseURL := "https://shared-relay.example"
+	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{
+		{
+			BaseURL: baseURL,
+			Headers: map[string]string{"X-Relay-Account": "first"},
+			Cloak:   &config.CloakConfig{RelaxedSystemPrompt: &disabled},
+		},
+		{
+			BaseURL: baseURL,
+			Headers: map[string]string{"X-Relay-Account": "second"},
+			Cloak:   &config.CloakConfig{RelaxedSystemPrompt: &enabled},
+		},
+	}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"source":                 "config:claude[second]",
+		"config_index":           "1",
+		"base_url":               baseURL,
+		"header:X-Relay-Account": "second",
+	}}
+
+	policy, settings := resolveClaudeWirePolicy(cfg, auth, "", false)
+	if !policy.Cloak {
+		t.Fatal("Cloak = false, want true for the selected base-url-only config entry")
+	}
+	if !settings.relaxedSystemPrompt {
+		t.Fatal("relaxedSystemPrompt = false, want the config_index-selected value true")
+	}
+}
+
+func TestResolveClaudeKeyConfigRejectsStaleConfigIndex(t *testing.T) {
+	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{
+		{
+			APIKey:   "shared-key",
+			BaseURL:  "https://shared.example",
+			Prefix:   "current",
+			ProxyURL: "https://current-proxy.example",
+		},
+		{
+			APIKey:   "shared-key",
+			BaseURL:  "https://shared.example",
+			Prefix:   "other",
+			ProxyURL: "https://other-proxy.example",
+		},
+	}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"source":       "config:claude[stale]",
+			"config_index": "1",
+			"api_key":      "shared-key",
+			"base_url":     "https://shared.example",
+		},
+		Prefix:   "current",
+		ProxyURL: "https://current-proxy.example",
+	}
+
+	if got := resolveClaudeKeyConfig(cfg, auth); got != &cfg.ClaudeKey[0] {
+		t.Fatalf("resolveClaudeKeyConfig() = %p, want current credential %p", got, &cfg.ClaudeKey[0])
+	}
+}
+
+func TestResolveClaudeKeyConfigRejectsStaleConfigIndexWithDifferentHeaders(t *testing.T) {
+	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{
+		{
+			APIKey:  "shared-key",
+			BaseURL: "https://shared.example",
+			Headers: map[string]string{"X-Relay-Account": "current"},
+		},
+		{
+			APIKey:  "shared-key",
+			BaseURL: "https://shared.example",
+			Headers: map[string]string{"X-Relay-Account": "other"},
+		},
+	}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"source":                 "config:claude[stale]",
+		"config_index":           "1",
+		"api_key":                "shared-key",
+		"base_url":               "https://shared.example",
+		"header:X-Relay-Account": "current",
+	}}
+
+	if got := resolveClaudeKeyConfig(cfg, auth); got != &cfg.ClaudeKey[0] {
+		t.Fatalf("resolveClaudeKeyConfig() = %p, want current credential %p", got, &cfg.ClaudeKey[0])
+	}
+}
+
+func TestResolveClaudeKeyConfigDoesNotFallbackAcrossExplicitBaseURL(t *testing.T) {
+	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
+		APIKey:  "shared-key",
+		BaseURL: "https://configured.example",
+	}}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "shared-key",
+		"base_url": "https://auth.example",
+	}}
+
+	if got := resolveClaudeKeyConfig(cfg, auth); got != nil {
+		t.Fatalf("resolveClaudeKeyConfig() = %p, want nil for an explicit base URL mismatch", got)
 	}
 }
 
@@ -6326,7 +6715,8 @@ func TestClaudeExecutor_FableWithSensitiveWordsHasSingleObfuscatedReportingBlock
 
 	cfg := &config.Config{
 		ClaudeKey: []config.ClaudeKey{{
-			APIKey: "sk-ant-oat-fable-sensitive-test",
+			APIKey:  "sk-ant-oat-fable-sensitive-test",
+			BaseURL: server.URL,
 			Cloak: &config.CloakConfig{
 				SensitiveWords: []string{"Reporting"},
 			},
@@ -6381,7 +6771,8 @@ func TestClaudeExecutor_PayloadSonnetToFableWithSensitiveWordsObfuscatesInjected
 
 	cfg := &config.Config{
 		ClaudeKey: []config.ClaudeKey{{
-			APIKey: "sk-ant-oat-sonnet-to-fable-sensitive-test",
+			APIKey:  "sk-ant-oat-sonnet-to-fable-sensitive-test",
+			BaseURL: server.URL,
 			Cloak: &config.CloakConfig{
 				SensitiveWords: []string{"Reporting"},
 			},
@@ -7563,8 +7954,9 @@ func TestClaudeExecutor_ExecuteOAuthCustomToolMCPAliasRoundTrip(t *testing.T) {
 		t.Fatalf("Messages first user content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "search", "1h")
-	assertClaudeMidConversationSystemMessage(t, upstreamBody, 1, "messages-system-prompt", "1h")
+	assertClaudeUserTextBlock(t, content[1], "search")
+	assertEphemeralCacheControl(t, content[1], "1h")
+	assertClaudeMidConversationSystemMessage(t, upstreamBody, 1, "messages-system-prompt")
 }
 
 func TestClaudeExecutor_ExecuteStreamOAuthCustomToolMCPAliasRoundTrip(t *testing.T) {
@@ -7640,8 +8032,9 @@ func TestClaudeExecutor_ExecuteStreamOAuthCustomToolMCPAliasRoundTrip(t *testing
 		t.Fatalf("streaming first user content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "fetch", "1h")
-	assertClaudeMidConversationSystemMessage(t, upstreamBody, 1, "stream-system-prompt", "1h")
+	assertClaudeUserTextBlock(t, content[1], "fetch")
+	assertEphemeralCacheControl(t, content[1], "1h")
+	assertClaudeMidConversationSystemMessage(t, upstreamBody, 1, "stream-system-prompt")
 	assertClaudeCredentialIdentity(t, upstreamBody, upstreamHeaders, deviceIDs, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 	if !strings.Contains(downstream.String(), `"name":"fetch_url"`) {
 		t.Fatalf("downstream stream did not restore fetch_url: %s", downstream.String())
@@ -7697,7 +8090,7 @@ func TestInsertClaudeMidConversationSystemMessages_FollowsToolResultUserTurn(t *
 	if got := blocks.Get("0.tool_use_id").String(); got != "toolu_1" {
 		t.Fatalf("tool_use_id = %q, want toolu_1: %s", got, out)
 	}
-	assertClaudeMidConversationSystemMessage(t, out, 2, "guidance", "")
+	assertClaudeMidConversationSystemMessage(t, out, 2, "guidance")
 }
 
 func TestInsertClaudeMidConversationSystemMessages_PrecedesExistingAssistantTurn(t *testing.T) {
@@ -7718,7 +8111,7 @@ func TestInsertClaudeMidConversationSystemMessages_PrecedesExistingAssistantTurn
 			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
 		}
 	}
-	assertClaudeMidConversationSystemMessage(t, out, 1, "guidance", "")
+	assertClaudeMidConversationSystemMessage(t, out, 1, "guidance")
 }
 
 func TestInsertClaudeMidConversationSystemMessages_FollowsConsecutiveUserRun(t *testing.T) {
@@ -7739,7 +8132,7 @@ func TestInsertClaudeMidConversationSystemMessages_FollowsConsecutiveUserRun(t *
 			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
 		}
 	}
-	assertClaudeMidConversationSystemMessage(t, out, 2, "guidance", "")
+	assertClaudeMidConversationSystemMessage(t, out, 2, "guidance")
 }
 
 func TestInsertClaudeMidConversationSystemMessages_IsIdempotent(t *testing.T) {
@@ -7753,8 +8146,8 @@ func TestInsertClaudeMidConversationSystemMessages_IsIdempotent(t *testing.T) {
 	if got := gjson.GetBytes(first, "messages.#").Int(); got != 3 {
 		t.Fatalf("message count = %d, want user and two system messages: %s", got, first)
 	}
-	assertClaudeMidConversationSystemMessage(t, first, 1, texts[0], "")
-	assertClaudeMidConversationSystemMessage(t, first, 2, texts[1], "")
+	assertClaudeMidConversationSystemMessage(t, first, 1, texts[0])
+	assertClaudeMidConversationSystemMessage(t, first, 2, texts[1])
 }
 
 // TestClaudeCodeCLIBetas_MatchesObservedClientMatrix pins the Anthropic-Beta
