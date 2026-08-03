@@ -1,0 +1,5 @@
+# Drop custom SQL or shell init scripts here. They run once on first boot of
+# the bundled Postgres (only under `--profile full`). The NixLLM server
+# auto-migrates its own schema on startup, so this directory is intentionally
+# empty by default — use it only for extensions (e.g. `CREATE EXTENSION pg_trgm`)
+# or custom grants.

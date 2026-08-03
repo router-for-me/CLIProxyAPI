@@ -1,7 +1,20 @@
+# =============================================================================
+# NixLLM Docker Compose — cluster (Home JWT) deployment.
+#
+# This variant connects a NixLLM worker node to a running CLIProxyAPIHome
+# instance (https://github.com/router-for-me/CLIProxyAPIHome) using HOME_JWT.
+# See .env.cluster.example for how to mint that JWT.
+#
+#   HOME_JWT=... docker compose -f docker-compose.cluster.yml up -d
+#
+# Only the main API port (8317) is published in cluster mode — OAuth flows
+# are brokered by Home, not by this worker.
+# =============================================================================
+
 services:
   nixllm:
     image: ${CLI_PROXY_IMAGE:-ghcr.io/abilfida/nixllm:latest}
-    pull_policy: always
+    pull_policy: ${NIXLLM_PULL_POLICY:-always}
     build:
       context: .
       dockerfile: Dockerfile
@@ -10,22 +23,58 @@ services:
         CORE_VERSION: ${CORE_VERSION:-unknown}
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
-    container_name: nixllm-cluster
+    container_name: ${NIXLLM_CONTAINER_NAME:-nixllm-cluster}
+    init: true
     environment:
       HOME_JWT: ${HOME_JWT:-}
+      TZ: ${TZ:-Asia/Shanghai}
+    env_file:
+      - path: .env
+        required: false
     ports:
-      - "8317:8317"
+      - "${NIXLLM_PORT:-8317}:8317"
     volumes:
       - ${CLI_PROXY_HOME_PATH:-./home}:/root/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/nixllm/logs
       - ${CLI_PROXY_PLUGIN_PATH:-./plugins}:/nixllm/plugins
-    command: >
-      sh -eu -c '
+    command:
+      - sh
+      - -eu
+      - -c
+      - |
         if [ -z "$$HOME_JWT" ]; then
-          echo "HOME_JWT is required" >&2
+          echo "HOME_JWT is required (see .env.cluster.example)" >&2
           exit 1
         fi
-
         exec ./nixllm -home-jwt "$$HOME_JWT"
-      '
-    restart: unless-stopped
+    restart: ${NIXLLM_RESTART:-unless-stopped}
+    stop_grace_period: ${NIXLLM_STOP_GRACE:-30s}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: ${NIXLLM_LOG_MAX_SIZE:-10m}
+        max-file: ${NIXLLM_LOG_MAX_FILE:-5}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >
+          wget -qO- --tries=1 --timeout=5 http://127.0.0.1:8317/healthz
+          | grep -q '"status":"ok"'
+      interval: ${NIXLLM_HEALTH_INTERVAL:-30s}
+      timeout: ${NIXLLM_HEALTH_TIMEOUT:-10s}
+      retries: ${NIXLLM_HEALTH_RETRIES:-3}
+      start_period: ${NIXLLM_HEALTH_START_PERIOD:-30s}
+    deploy:
+      resources:
+        limits:
+          cpus: ${NIXLLM_LIMIT_CPUS:-2.0}
+          memory: ${NIXLLM_LIMIT_MEM:-1G}
+        reservations:
+          memory: ${NIXLLM_RESERVE_MEM:-128M}
+    networks:
+      - nixllm-net
+
+networks:
+  nixllm-net:
+    name: ${NIXLLM_NETWORK_NAME:-nixllm-net}
+    driver: bridge

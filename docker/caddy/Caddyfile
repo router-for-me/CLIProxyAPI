@@ -1,0 +1,37 @@
+# Caddyfile for the optional `caddy` profile in docker-compose.yml.
+# Caddy reads NIXLLM_DOMAIN and NIXLLM_UPSTREAM from the environment block
+# defined in the compose service. ACME_EMAIL is optional — leave empty to use
+# Caddy's internal CA (good for testing; browsers will warn).
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$NIXLLM_DOMAIN} {
+	reverse_proxy {$NIXLLM_UPSTREAM} {
+		# NixLLM streams SSE/chunked responses for model traffic — flush
+		# immediately so tokens reach the client instead of buffering.
+		flush_interval -1
+	}
+
+	# Long-lived OAuth callback flows and large prompts.
+	request_body {
+		max_size 100MB
+	}
+
+	encode zstd gzip
+
+	header {
+		# Don't expose the upstream Server header.
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

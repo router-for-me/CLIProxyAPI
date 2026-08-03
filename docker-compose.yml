@@ -1,7 +1,27 @@
+# =============================================================================
+# NixLLM Docker Compose — full production deployment.
+#
+# Two profiles ship from this single file:
+#
+#   • default       — just the nixllm service. `docker compose up -d`.
+#   • full          — nixllm + managed Postgres (PG-backed keys/policy/usage),
+#                     rotated JSON-file logging, healthchecks, resource caps,
+#                     and graceful shutdown.
+#                     `docker compose --profile full up -d`.
+#
+# Toggle optional edge-side reverse proxies with:
+#   --profile caddy   (auto-HTTPS via Caddy)
+#   --profile traefik  (Traefik with Let's Encrypt)
+#
+# Every tunable has a documented default and a matching .env key so the same
+# file works for `docker compose up` on a laptop and `docker compose -f
+# docker-compose.yml --profile full up -d` in production.
+# =============================================================================
+
 services:
   nixllm:
     image: ${CLI_PROXY_IMAGE:-ghcr.io/abilfida/nixllm:latest}
-    pull_policy: always
+    pull_policy: ${NIXLLM_PULL_POLICY:-always}
     build:
       context: .
       dockerfile: Dockerfile
@@ -10,21 +30,233 @@ services:
         CORE_VERSION: ${CORE_VERSION:-unknown}
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
-    container_name: nixllm
-    # env_file:
-    #   - .env
+    container_name: ${NIXLLM_CONTAINER_NAME:-nixllm}
+    init: true
     environment:
       DEPLOY: ${DEPLOY:-}
+      MANAGEMENT_PASSWORD: ${MANAGEMENT_PASSWORD:-}
+      # Optional Postgres backing — only read when PGSTORE_DSN is set.
+      # In the `full` profile we wire this to the bundled postgres service.
+      PGSTORE_DSN: ${PGSTORE_DSN:-}
+      PGSTORE_SCHEMA: ${PGSTORE_SCHEMA:-public}
+      PGSTORE_LOCAL_PATH: ${PGSTORE_LOCAL_PATH:-/var/lib/nixllm}
+      PGSTORE_ENCRYPTION_KEY: ${PGSTORE_ENCRYPTION_KEY:-}
+      TZ: ${TZ:-Asia/Shanghai}
+    env_file:
+      # Comment out if you prefer to inline everything above. The file is
+      # optional; missing keys fall back to the environment section above.
+      - path: .env
+        required: false
     ports:
-      - "8317:8317"
-      - "8085:8085"
-      - "1455:1455"
-      - "54545:54545"
-      - "51121:51121"
-      - "11451:11451"
+      # Main API + management web UI.
+      - "${NIXLLM_PORT:-8317}:8317"
+      # OAuth callback ports — the server binds 0.0.0.0 on these for the
+      # in-browser OAuth flows (Anthropic/Claude 54545, Codex 1455,
+      # Antigravity 51121). Remove the ones you don't use.
+      - "${OAUTH_PORT_ANTHROPIC:-54545}:54545"
+      - "${OAUTH_PORT_CODEX:-1455}:1455"
+      - "${OAUTH_PORT_ANTIGRAVITY:-51121}:51121"
     volumes:
       - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/nixllm/config.yaml
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/nixllm/logs
       - ${CLI_PROXY_PLUGIN_PATH:-./plugins}:/nixllm/plugins
+      # PGSTORE_LOCAL_PATH target inside the container (only used under the
+      # `full` profile with a bundled Postgres). Kept as a named volume so
+      # `docker compose down -v` is the only thing that can lose it.
+      - nixllm-pgstore:/var/lib/nixllm
+    restart: ${NIXLLM_RESTART:-unless-stopped}
+    stop_grace_period: ${NIXLLM_STOP_GRACE:-30s}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: ${NIXLLM_LOG_MAX_SIZE:-10m}
+        max-file: ${NIXLLM_LOG_MAX_FILE:-5}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >
+          wget -qO- --tries=1 --timeout=5 http://127.0.0.1:8317/healthz
+          | grep -q '"status":"ok"'
+      interval: ${NIXLLM_HEALTH_INTERVAL:-30s}
+      timeout: ${NIXLLM_HEALTH_TIMEOUT:-10s}
+      retries: ${NIXLLM_HEALTH_RETRIES:-3}
+      start_period: ${NIXLLM_HEALTH_START_PERIOD:-30s}
+    deploy:
+      resources:
+        limits:
+          cpus: ${NIXLLM_LIMIT_CPUS:-2.0}
+          memory: ${NIXLLM_LIMIT_MEM:-1G}
+        reservations:
+          memory: ${NIXLLM_RESERVE_MEM:-128M}
+    # Traefik labels are inert until the `traefik` profile starts the proxy.
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.nixllm.rule=Host(`${NIXLLM_DOMAIN:-llm.example.com}`)"
+      - "traefik.http.routers.nixllm.entryPoints=websecure"
+      - "traefik.http.routers.nixllm.tls.certresolver=le"
+      - "traefik.http.services.nixllm.loadbalancer.server.port=8317"
+      - "traefik.http.services.nixllm.loadbalancer.passHostHeader=true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+    networks:
+      - nixllm-net
+
+  # ---------------------------------------------------------------------------
+  # Bundled Postgres — only starts under `--profile full`.
+  # Configure persistence + credentials via the PG_* env vars below.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:${POSTGRES_TAG:-17-bookworm}
+    container_name: ${POSTGRES_CONTAINER_NAME:-nixllm-postgres}
+    restart: ${POSTGRES_RESTART:-unless-stopped}
+    profiles:
+      - full
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nixllm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DB: ${POSTGRES_DB:-nixllm}
+      TZ: ${TZ:-Asia/Shanghai}
+    # Fail fast with a clear message if the operator forgot POSTGRES_PASSWORD.
+    # We can't use ${POSTGRES_PASSWORD:?...} in environment because Compose
+    # interpolates it at config-load time even when the `full` profile is not
+    # selected; this entrypoint guard only fires when the service runs.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        if [ -z "$$POSTGRES_PASSWORD" ]; then
+          echo "POSTGRES_PASSWORD must be set (e.g. in .env) before starting the 'full' profile." >&2
+          exit 1
+        fi
+        exec docker-entrypoint.sh postgres
+    volumes:
+      - nixllm-pgdata:/var/lib/postgresql/data
+      # Optional init SQL — drop *.sql / *.sh into ./docker/postgres/init/
+      # to run on first boot. The server auto-migrates on startup, so this
+      # is only for extensions or custom grants.
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: ${POSTGRES_LOG_MAX_SIZE:-10m}
+        max-file: ${POSTGRES_LOG_MAX_FILE:-5}
+    deploy:
+      resources:
+        limits:
+          cpus: ${POSTGRES_LIMIT_CPUS:-1.0}
+          memory: ${POSTGRES_LIMIT_MEM:-512M}
+    networks:
+      - nixllm-net
+
+  # ---------------------------------------------------------------------------
+  # Optional edge proxy — auto-HTTPS via Caddy.
+  #   NIXLLM_DOMAIN=llm.example.com docker compose --profile caddy up -d
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:${CADDY_TAG:-2-alpine}
+    container_name: ${CADDY_CONTAINER_NAME:-nixllm-caddy}
     restart: unless-stopped
+    profiles:
+      - caddy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"  # HTTP/3
+    environment:
+      NIXLLM_DOMAIN: ${NIXLLM_DOMAIN:-}
+      NIXLLM_UPSTREAM: nixllm:8317
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    # Caddy ignores {$NIXLLM_DOMAIN} silently if unset, which would bind :443
+    # with a bogus cert. Fail fast with a clear message instead.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        if [ -z "$$NIXLLM_DOMAIN" ]; then
+          echo "NIXLLM_DOMAIN must be set for the caddy profile." >&2
+          exit 1
+        fi
+        exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - nixllm-caddy-data:/data
+      - nixllm-caddy-config:/config
+    depends_on:
+      nixllm:
+        condition: service_healthy
+    networks:
+      - nixllm-net
+
+  # ---------------------------------------------------------------------------
+  # Optional edge proxy — Traefik with Let's Encrypt.
+  #   NIXLLM_DOMAIN=llm.example.com ACME_EMAIL=you@example.com \
+  #     docker compose --profile traefik up -d
+  # ---------------------------------------------------------------------------
+  traefik:
+    image: traefik:${TRAEFIK_TAG:-3}
+    container_name: ${TRAEFIK_CONTAINER_NAME:-nixllm-traefik}
+    restart: unless-stopped
+    profiles:
+      - traefik
+    environment:
+      NIXLLM_DOMAIN: ${NIXLLM_DOMAIN:-llm.example.com}
+      ACME_EMAIL: ${ACME_EMAIL:-}  # set in env; required by the boot guard below
+    command:
+      - sh
+      - -c
+      - |
+        if [ -z "$$ACME_EMAIL" ]; then
+          echo "ACME_EMAIL must be set for the traefik profile." >&2
+          exit 1
+        fi
+        exec traefik \
+          --providers.docker=true \
+          --providers.docker.exposedbydefault=false \
+          --entryPoints.web.address=:80 \
+          --entryPoints.websecure.address=:443 \
+          --entryPoints.web.http.redirections.entryPoint.to=websecure \
+          --entryPoints.web.http.redirections.entryPoint.scheme=https \
+          --certificatesResolvers.le.acme.tlschallenge=true \
+          --certificatesResolvers.le.acme.email=$$ACME_EMAIL \
+          --certificatesResolvers.le.acme.storage=/data/acme.json \
+          --metrics.prometheus=true
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - nixllm-traefik-data:/data
+    depends_on:
+      nixllm:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=false"
+    networks:
+      - nixllm-net
+
+networks:
+  nixllm-net:
+    name: ${NIXLLM_NETWORK_NAME:-nixllm-net}
+    driver: bridge
+
+volumes:
+  nixllm-pgstore:
+    name: ${NIXLLM_VOLUME_PGSTORE:-nixllm-pgstore}
+  nixllm-pgdata:
+    name: ${POSTGRES_VOLUME_DATA:-nixllm-pgdata}
+  nixllm-caddy-data:
+    name: nixllm-caddy-data
+  nixllm-caddy-config:
+    name: nixllm-caddy-config
+  nixllm-traefik-data:
+    name: nixllm-traefik-data

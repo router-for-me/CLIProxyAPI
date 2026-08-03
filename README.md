@@ -124,6 +124,59 @@ PackyCode provides special discounts for our software users: register using <a h
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+### Docker (production)
+
+A single `docker-compose.yml` covers everything from a quick local run to a
+full production stack. Pick a profile; everything else has a sensible default.
+
+**Lightweight (pull the prebuilt image, no database):**
+
+```bash
+docker compose up -d
+```
+
+**Full production (NixLLM + managed Postgres + healthchecks + log rotation +
+resource caps):**
+
+```bash
+cp .env.production.example .env
+# edit .env: set MANAGEMENT_PASSWORD, POSTGRES_PASSWORD, PGSTORE_DSN
+docker compose --profile full up -d
+```
+
+Behind an auto-HTTPS edge proxy, add exactly one of:
+
+```bash
+# Caddy (zero-config Let's Encrypt)
+NIXLLM_DOMAIN=llm.example.com ACME_EMAIL=you@example.com \
+  docker compose --profile full --profile caddy up -d
+
+# Traefik (Let's Encrypt + Prometheus metrics)
+NIXLLM_DOMAIN=llm.example.com ACME_EMAIL=you@example.com \
+  docker compose --profile full --profile traefik up -d
+```
+
+**Cluster (Home JWT) mode** — connect a worker to a running
+[CLIProxyAPIHome](https://github.com/router-for-me/CLIProxyAPIHome) instance:
+
+```bash
+cp .env.cluster.example .env
+# mint HOME_JWT per .env.cluster.example, then:
+HOME_JWT=... docker compose -f docker-compose.cluster.yml up -d
+```
+
+| Concern | Default | Knob |
+|---|---|---|
+| API + dashboard port | `8317:8317` | `NIXLLM_PORT` |
+| OAuth callback ports | `54545,1455,51121` | `OAUTH_PORT_*` |
+| Healthcheck | `GET /healthz` every 30s | `NIXLLM_HEALTH_*` |
+| Log rotation | 5×10 MB JSON files | `NIXLLM_LOG_MAX_*` |
+| Resource cap | 2 CPU / 1 GB | `NIXLLM_LIMIT_*` |
+| Restart policy | `unless-stopped` | `NIXLLM_RESTART` |
+| At-rest key encryption | plaintext | `PGSTORE_ENCRYPTION_KEY` |
+
+All tunables are documented in [`.env.production.example`](.env.production.example).
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
