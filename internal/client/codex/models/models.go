@@ -60,6 +60,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 		if template, ok := templates[id]; ok {
 			entry := cloneCodexClientModelMap(template)
 			applyCodexClientDisplayName(entry, model)
+			applyCodexClientMaxContextLengthOverride(entry, model)
 			applyCodexClientSearchToolSupport(entry, id, true, providersForModel)
 			sanitizeCodexClientReasoningMetadata(entry)
 			applyCodexClientVisibilityOverride(entry, id)
@@ -182,6 +183,13 @@ func applyCodexClientDisplayName(entry map[string]any, model map[string]any) {
 	}
 }
 
+func applyCodexClientMaxContextLengthOverride(entry map[string]any, model map[string]any) {
+	if maxContextLength := intModelValue(model, "max_context_length"); maxContextLength > 0 {
+		entry["context_window"] = maxContextLength
+		entry["max_context_window"] = maxContextLength
+	}
+}
+
 func applyCodexClientSearchToolSupport(entry map[string]any, id string, templateModel bool, providersForModel ProvidersForModelFunc) {
 	supportsSearch, _ := entry["supports_search_tool"].(bool)
 	if !supportsSearch {
@@ -235,6 +243,10 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 			applyCodexClientInputModalitiesMetadata(entry, info.SupportedInputModalities)
 		}
 		applyCodexClientThinkingMetadata(entry, info.Thinking)
+	}
+
+	if maxContextWindow := intModelValue(model, "max_context_length"); maxContextWindow > 0 {
+		contextWindow = maxContextWindow
 	}
 
 	if displayName == "" {

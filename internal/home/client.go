@@ -41,6 +41,7 @@ const (
 	homeReconnectInterval                     = time.Second
 	homeReconnectFailoverThreshold            = 3
 	homeRedisOperationTimeout                 = 3 * time.Second
+	homeRefreshOperationTimeout               = 35 * time.Second
 	homePluginSyncOperationTimeout            = 2 * time.Minute
 	homeSubscriptionReceiveTimeout            = 3 * time.Second
 	credentialConcurrencyNodeHeartbeatTimeout = 20 * time.Second
@@ -1337,7 +1338,7 @@ func isAmbiguousIssuedRPopAuthError(err error) bool {
 	return !errors.As(err, &redisErr)
 }
 
-func (c *Client) GetRefreshAuth(ctx context.Context, authIndex string) ([]byte, error) {
+func (c *Client) GetRefreshAuth(ctx context.Context, authIndex string, accessTokenSHA256 string) ([]byte, error) {
 	cmd, errClient := c.commandClient()
 	if errClient != nil {
 		return nil, errClient
@@ -1350,12 +1351,13 @@ func (c *Client) GetRefreshAuth(ctx context.Context, authIndex string) ([]byte, 
 		Type:      "refresh",
 		AuthIndex: authIndex,
 	}
+	req.ObservedAccessTokenSHA256 = strings.TrimSpace(accessTokenSHA256)
 	keyBytes, err := json.Marshal(&req)
 	if err != nil {
 		return nil, err
 	}
 
-	raw, err := cmd.Get(ctx, string(keyBytes)).Bytes()
+	raw, err := cmd.WithTimeout(homeRefreshOperationTimeout).Get(ctx, string(keyBytes)).Bytes()
 	if errors.Is(err, redis.Nil) {
 		return nil, ErrAuthNotFound
 	}
