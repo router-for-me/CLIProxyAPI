@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	xxHash64 "github.com/pierrec/xxHash/xxHash64"
@@ -513,21 +514,59 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 	}
 
 	apiKey, baseURL := claudeCreds(auth)
-	if apiKey == "" {
+	apiKey = strings.TrimSpace(apiKey)
+	baseURL = strings.TrimSpace(baseURL)
+	if apiKey == "" && baseURL == "" {
 		return nil
+	}
+	authHeaders := make(map[string]string)
+	for key, value := range auth.Attributes {
+		if strings.HasPrefix(key, "header:") {
+			authHeaders[strings.TrimPrefix(key, "header:")] = strings.TrimSpace(value)
+		}
+	}
+	formattedAuthHeaders := config.FormatSortedHeaders(authHeaders)
+	matchesCredentials := func(entry *config.ClaudeKey) bool {
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if apiKey != "" && baseURL != "" {
+			return strings.EqualFold(cfgKey, apiKey) && strings.EqualFold(cfgBase, baseURL)
+		}
+		if apiKey != "" {
+			return strings.EqualFold(cfgKey, apiKey) && (cfgBase == "" || strings.EqualFold(cfgBase, baseURL))
+		}
+		return strings.EqualFold(cfgBase, baseURL)
+	}
+	matchesIdentity := func(entry *config.ClaudeKey) bool {
+		return matchesCredentials(entry) && strings.EqualFold(strings.TrimSpace(entry.Prefix), strings.TrimSpace(auth.Prefix)) && strings.EqualFold(strings.TrimSpace(entry.ProxyURL), strings.TrimSpace(auth.ProxyURL)) && config.FormatSortedHeaders(entry.Headers) == formattedAuthHeaders
+	}
+
+	if auth.AuthSourceKind() == cliproxyauth.AuthSourceConfig && auth.Attributes != nil {
+		index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeConfigIndex]))
+		if errIndex == nil && index >= 0 && index < len(cfg.ClaudeKey) && matchesIdentity(&cfg.ClaudeKey[index]) {
+			return &cfg.ClaudeKey[index]
+		}
 	}
 
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if !strings.EqualFold(cfgKey, apiKey) {
-			continue
+		if matchesIdentity(entry) {
+			return entry
 		}
-		if baseURL != "" && cfgBase != "" && !strings.EqualFold(cfgBase, baseURL) {
-			continue
+	}
+	for i := range cfg.ClaudeKey {
+		entry := &cfg.ClaudeKey[i]
+		if matchesCredentials(entry) {
+			return entry
 		}
-		return entry
+	}
+	if apiKey != "" && baseURL == "" {
+		for i := range cfg.ClaudeKey {
+			entry := &cfg.ClaudeKey[i]
+			if strings.EqualFold(strings.TrimSpace(entry.APIKey), apiKey) {
+				return entry
+			}
+		}
 	}
 
 	return nil

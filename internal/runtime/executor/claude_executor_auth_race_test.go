@@ -89,7 +89,7 @@ func TestClaudeExecutorSharedCredentialMetadataReadersUseOneLock(t *testing.T) {
 				_, _ = claudeCreds(auth)
 				return
 			}
-			_, _, _, _ = getCloakConfigFromAuth(auth)
+			_, _, _, _, _ = getCloakConfigFromAuth(auth)
 		}(i)
 	}
 	close(start)
