@@ -144,7 +144,19 @@ func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick er
 	if !homeMode {
 		return true
 	}
-	return isHomeRequestRetryExceededError(errPick)
+	if isHomeRequestRetryExceededError(errPick) {
+		return true
+	}
+	var authErr *Error
+	if !errors.As(errPick, &authErr) || authErr == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(authErr.Code)) {
+	case "auth_not_found", "auth_unavailable":
+		return true
+	default:
+		return false
+	}
 }
 
 func homeAuthAlreadyTried(tried map[string]struct{}, authID string) bool {
@@ -178,6 +190,10 @@ type homeAuthDispatcher interface {
 	HeartbeatOK() bool
 	RPopAuth(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int) ([]byte, error)
 	AbortAmbiguousDispatch()
+}
+
+type homeCredentialPolicyDispatcher interface {
+	RPopAuthWithPolicy(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int, credentialPolicy string) ([]byte, error)
 }
 
 var currentHomeDispatcher = func() homeAuthDispatcher {
@@ -431,14 +447,18 @@ func (m *Manager) endHomeSelectionBeforeRedispatch(ctx context.Context, selectio
 }
 
 func (m *Manager) retainHomeWebsocketSelection(ctx context.Context, opts cliproxyexecutor.Options, model string, selection *HomeDispatchSelection) bool {
-	if m == nil || selection == nil || !selection.Retained() || !cliproxyexecutor.DownstreamWebsocket(ctx) || selection.Auth == nil {
+	if m == nil || selection == nil || !selection.Retained() || !cliproxyexecutor.DownstreamWebsocket(ctx) {
+		return false
+	}
+	selectionAuth := selection.CloneAuth()
+	if selectionAuth == nil {
 		return false
 	}
 	sessionID := homeExecutionSessionIDFromMetadata(opts.Metadata)
-	credentialID := strings.TrimSpace(selection.Auth.ID)
+	credentialID := strings.TrimSpace(selectionAuth.ID)
 	routeModel, validRouteModel := validCanonicalHomeConcurrencyModelKey(model)
 	if selection.accountedModel == "" {
-		selection.accountedModel, _ = m.predictedHomeConcurrencyModel(selection.Auth, model)
+		selection.accountedModel, _ = m.predictedHomeConcurrencyModel(selectionAuth, model)
 	}
 	if sessionID == "" || credentialID == "" || !validRouteModel || selection.accountedModel == "" {
 		return false
@@ -457,7 +477,7 @@ func (m *Manager) retainHomeWebsocketSelection(ctx context.Context, opts cliprox
 	previous := selections[key]
 	selections[key] = selection
 	m.mu.Unlock()
-	m.rememberHomeRuntimeAuth(sessionID, selection.Auth)
+	m.rememberHomeRuntimeAuth(sessionID, selectionAuth)
 	if previous != nil && previous != selection {
 		previous.End("target_replaced")
 	}
@@ -533,11 +553,15 @@ func (m *Manager) clearHomeRuntimeAuthsForSessionLocked(sessionID string) {
 }
 
 func (m *Manager) bindHomeSelectionRuntimeAuth(ctx context.Context, opts cliproxyexecutor.Options, selection *HomeDispatchSelection) error {
-	if m == nil || selection == nil || !cliproxyexecutor.DownstreamWebsocket(ctx) || selection.Auth == nil || !authWebsocketsEnabled(selection.Auth) {
+	if m == nil || selection == nil || !cliproxyexecutor.DownstreamWebsocket(ctx) {
+		return nil
+	}
+	selectionAuth := selection.CloneAuth()
+	if selectionAuth == nil || !authWebsocketsEnabled(selectionAuth) {
 		return nil
 	}
 	sessionID := homeExecutionSessionIDFromMetadata(opts.Metadata)
-	authID := strings.TrimSpace(selection.Auth.ID)
+	authID := strings.TrimSpace(selectionAuth.ID)
 	if sessionID == "" || authID == "" || !selection.runtimeAuthBound.CompareAndSwap(false, true) {
 		return nil
 	}
@@ -554,11 +578,15 @@ func (m *Manager) bindHomeSelectionRuntimeAuth(ctx context.Context, opts cliprox
 }
 
 func (m *Manager) rememberHomeSelectionRuntimeAuth(sessionID string, selection *HomeDispatchSelection) {
-	if m == nil || selection == nil || selection.Auth == nil {
+	if m == nil || selection == nil {
+		return
+	}
+	selectionAuth := selection.CloneAuth()
+	if selectionAuth == nil {
 		return
 	}
 	sessionID = strings.TrimSpace(sessionID)
-	authID := strings.TrimSpace(selection.Auth.ID)
+	authID := strings.TrimSpace(selectionAuth.ID)
 	if sessionID == "" || authID == "" {
 		return
 	}
@@ -575,8 +603,30 @@ func (m *Manager) rememberHomeSelectionRuntimeAuth(sessionID string, selection *
 	if m.homeRuntimeAuthOwners[sessionID] == nil {
 		m.homeRuntimeAuthOwners[sessionID] = make(map[string]*HomeDispatchSelection)
 	}
-	m.homeRuntimeAuths[sessionID][authID] = selection.Auth.Clone()
+	m.homeRuntimeAuths[sessionID][authID] = selectionAuth
 	m.homeRuntimeAuthOwners[sessionID][authID] = selection
+	m.mu.Unlock()
+}
+
+func (m *Manager) replaceHomeSelectionAuth(selection *HomeDispatchSelection, auth *Auth) {
+	if m == nil || selection == nil || auth == nil {
+		return
+	}
+	m.mu.Lock()
+	selection.ReplaceAuth(auth)
+	updated := selection.CloneAuth()
+	if updated == nil {
+		m.mu.Unlock()
+		return
+	}
+	for sessionID, owners := range m.homeRuntimeAuthOwners {
+		for authID, owner := range owners {
+			if owner != selection || m.homeRuntimeAuths[sessionID] == nil {
+				continue
+			}
+			m.homeRuntimeAuths[sessionID][authID] = updated.Clone()
+		}
+	}
 	m.mu.Unlock()
 }
 
@@ -665,7 +715,8 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	if errSelection != nil {
 		return nil, nil, "", errSelection
 	}
-	if selection.Auth == nil || homeAuthAlreadyTried(tried, selection.Auth.ID) {
+	selectionAuth := selection.CloneAuth()
+	if selectionAuth == nil || homeAuthAlreadyTried(tried, selectionAuth.ID) {
 		selection.End("repeated_auth")
 		return nil, nil, "", repeatedHomeAuthError()
 	}
@@ -719,7 +770,17 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 
 	sessionID := m.homeDispatchSessionID(opts)
 	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers)
-	raw, errRPop := client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata))
+	credentialPolicy := credentialPolicyFromContext(ctx)
+	var raw []byte
+	var errRPop error
+	if credentialPolicy == "" {
+		raw, errRPop = client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata))
+	} else if policyClient, okPolicy := client.(homeCredentialPolicyDispatcher); okPolicy {
+		raw, errRPop = policyClient.RPopAuthWithPolicy(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), credentialPolicy)
+	} else {
+		pending.End()
+		return nil, &Error{Code: "home_unavailable", Message: "home dispatcher does not support credential policies", HTTPStatus: http.StatusServiceUnavailable}
+	}
 	if errRPop != nil {
 		if home.IsAmbiguousDispatchError(errRPop) {
 			client.AbortAmbiguousDispatch()
@@ -1104,7 +1165,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		if len(models) == 0 {
 			continue
 		}
-		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult, routing, true, false)
+		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult, routing, true, false, nil)
 		if errStream != nil {
 			continue
 		}

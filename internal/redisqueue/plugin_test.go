@@ -36,6 +36,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			Alias:               "client-gpt",
 			APIKey:              "test-key",
 			AuthIndex:           "0",
+			AccessTokenSHA256:   "token-version-hash",
 			AuthType:            "apikey",
 			Source:              "user@example.com",
 			ReasoningEffort:     "medium",
@@ -60,6 +61,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireStringField(t, payload, "alias", "client-gpt")
 		requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
 		requireStringField(t, payload, "auth_type", "apikey")
+		requireStringField(t, payload, "access_token_sha256", "token-version-hash")
 		requireMissingField(t, payload, "user_api_key")
 		requireStringField(t, payload, "request_id", "ctx-request-id")
 		requireStringField(t, payload, "client_ip", "192.0.2.10")

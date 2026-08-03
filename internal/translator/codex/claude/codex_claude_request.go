@@ -341,7 +341,9 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		}
 	}
 	template, _ = sjson.SetBytes(template, "reasoning.effort", reasoningEffort)
-	template, _ = sjson.SetBytes(template, "reasoning.summary", "auto")
+	// OpenAI documents reasoning summaries as explicit opt-in output. Leave
+	// reasoning.summary to the source request's canonical summary intent instead
+	// of coupling it to reasoning effort.
 	serviceTier := normalizeCodexServiceTier(rootResult.Get("service_tier"))
 	if speed := rootResult.Get("speed"); speed.Type == gjson.String && speed.String() == "fast" {
 		serviceTier = "priority"

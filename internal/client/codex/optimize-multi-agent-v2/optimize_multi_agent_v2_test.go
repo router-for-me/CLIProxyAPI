@@ -587,3 +587,187 @@ func TestCodexClientUserAgentPrefersGinRequest(t *testing.T) {
 		t.Fatalf("codexClientUserAgent() = %q, want gin request User-Agent", got)
 	}
 }
+
+func TestCodexCollaborationMessageToolPathsFindsAllThreeTools(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"tools":[
+			{"type":"namespace","name":"collaboration","tools":[
+				{"type":"function","name":"spawn_agent","parameters":{"properties":{"message":{"encrypted":true}}}},
+				{"type":"function","name":"send_message","parameters":{"properties":{"message":{"encrypted":true}}}},
+				{"type":"function","name":"followup_task","parameters":{"properties":{"message":{"encrypted":true}}}},
+				{"type":"function","name":"unrelated_tool","parameters":{"properties":{"message":{"encrypted":true}}}}
+			]}
+		]
+	}`)
+	paths := codexCollaborationMessageToolPaths(payload)
+	wantCount := 3
+	if len(paths) != wantCount {
+		t.Fatalf("path count = %d, want %d; paths=%v", len(paths), wantCount, paths)
+	}
+}
+
+func TestCodexCollaborationMessageToolPathsAdditionalTools(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"input":[
+			{"type":"additional_tools","role":"developer","tools":[
+				{"type":"namespace","name":"collaboration","tools":[
+					{"type":"function","name":"send_message","parameters":{"properties":{"message":{"encrypted":true}}}},
+					{"type":"function","name":"followup_task","parameters":{"properties":{"message":{"encrypted":true}}}}
+				]}
+			]}
+		]
+	}`)
+	paths := codexCollaborationMessageToolPaths(payload)
+	if len(paths) != 2 {
+		t.Fatalf("path count = %d, want 2; paths=%v", len(paths), paths)
+	}
+}
+
+func TestRemoveCodexCollaborationMessageEncryptionAllTools(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"tools":[
+			{"type":"namespace","name":"collaboration","tools":[
+				{"type":"function","name":"spawn_agent","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
+				{"type":"function","name":"send_message","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
+				{"type":"function","name":"followup_task","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}
+			]}
+		]
+	}`)
+	paths := codexCollaborationMessageToolPaths(payload)
+	got := removeCodexCollaborationMessageEncryption(payload, paths)
+
+	for _, toolPath := range []string{
+		"tools.0.tools.0",
+		"tools.0.tools.1",
+		"tools.0.tools.2",
+	} {
+		if encrypted := gjson.GetBytes(got, toolPath+".parameters.properties.message.encrypted"); encrypted.Exists() {
+			t.Fatalf("%s.parameters.properties.message.encrypted was not removed: %s", toolPath, encrypted.Raw)
+		}
+		if msgType := gjson.GetBytes(got, toolPath+".parameters.properties.message.type").String(); msgType != "string" {
+			t.Fatalf("%s.parameters.properties.message.type changed: %q", toolPath, msgType)
+		}
+	}
+}
+
+func TestRemoveCodexCollaborationMessageEncryptionPreservesUnrelatedEncryptedFields(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"tools":[
+			{"type":"function","name":"send_message","parameters":{"properties":{"message":{"type":"string","encrypted":true},"data":{"encrypted":"keep-me"}}}},
+			{"type":"function","name":"unrelated_tool","parameters":{"properties":{"message":{"encrypted":true}}}}
+		]
+	}`)
+	paths := codexCollaborationMessageToolPaths(payload)
+	got := removeCodexCollaborationMessageEncryption(payload, paths)
+
+	if encrypted := gjson.GetBytes(got, "tools.0.parameters.properties.message.encrypted"); encrypted.Exists() {
+		t.Fatalf("send_message message.encrypted was not removed: %s", encrypted.Raw)
+	}
+	if dataEncrypted := gjson.GetBytes(got, "tools.0.parameters.properties.data.encrypted").String(); dataEncrypted != "keep-me" {
+		t.Fatalf("unrelated data.encrypted was changed: %q", dataEncrypted)
+	}
+	if unrelatedEncrypted := gjson.GetBytes(got, "tools.1.parameters.properties.message.encrypted"); !unrelatedEncrypted.Exists() {
+		t.Fatalf("unrelated tool message.encrypted was removed: %s", got)
+	}
+}
+
+func TestOptimizeCodexMultiAgentV2RequestRemovesEncryptionWithoutSpawnAgent(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"tools":[
+			{"type":"namespace","name":"collaboration","tools":[
+				{"type":"function","name":"send_message","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
+				{"type":"function","name":"followup_task","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}
+			]}
+		]
+	}`)
+	headers := http.Header{"User-Agent": []string{"Codex Desktop/0.146.0-alpha.3"}}
+	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+	got, optimized := OptimizeCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
+
+	if optimized {
+		t.Fatal("namespace was unexpectedly optimized without spawn_agent")
+	}
+	for _, path := range []string{"tools.0.tools.0", "tools.0.tools.1"} {
+		if encrypted := gjson.GetBytes(got, path+".parameters.properties.message.encrypted"); encrypted.Exists() {
+			t.Fatalf("%s.parameters.properties.message.encrypted was not removed: %s", path, encrypted.Raw)
+		}
+	}
+}
+
+func TestOptimizeCodexMultiAgentV2RequestRemovesEncryptionInAdditionalTools(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"input":[
+			{"type":"additional_tools","role":"developer","tools":[
+				{"type":"namespace","name":"collaboration","tools":[
+					{"type":"function","name":"send_message","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
+					{"type":"function","name":"followup_task","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}
+				]}
+			]}
+		]
+	}`)
+	headers := http.Header{"User-Agent": []string{"codex-tui/0.145.0"}}
+	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+	got, _ := OptimizeCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
+
+	for _, path := range []string{"input.0.tools.0.tools.0", "input.0.tools.0.tools.1"} {
+		if encrypted := gjson.GetBytes(got, path+".parameters.properties.message.encrypted"); encrypted.Exists() {
+			t.Fatalf("%s.parameters.properties.message.encrypted was not removed: %s", path, encrypted.Raw)
+		}
+	}
+}
+
+func TestOptimizeCodexMultiAgentV2RequestRemovesEncryptionFromAllThreeToolsWithSpawnAgent(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"tools":[
+			{"type":"namespace","name":"collaboration","tools":[
+				{"type":"function","name":"spawn_agent","description":"Spawns an agent.","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
+				{"type":"function","name":"send_message","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
+				{"type":"function","name":"followup_task","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}
+			]}
+		]
+	}`)
+	headers := http.Header{"User-Agent": []string{"Codex Desktop/0.146.0-alpha.3"}}
+	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+	got, optimized := OptimizeCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
+
+	if !optimized {
+		t.Fatal("collaboration namespace was not optimized with spawn_agent present")
+	}
+	for _, path := range []string{"tools.0.tools.0", "tools.0.tools.1", "tools.0.tools.2"} {
+		if encrypted := gjson.GetBytes(got, path+".parameters.properties.message.encrypted"); encrypted.Exists() {
+			t.Fatalf("%s.parameters.properties.message.encrypted was not removed: %s", path, encrypted.Raw)
+		}
+	}
+	if namespace := gjson.GetBytes(got, "tools.0.name").String(); namespace != codexOptimizedCollaborationNamespace {
+		t.Fatalf("namespace = %q, want %q", namespace, codexOptimizedCollaborationNamespace)
+	}
+}
+
+func TestRemoveCodexCollaborationMessageEncryptionNoOpWithoutEncrypted(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"tools":[
+			{"type":"function","name":"send_message","parameters":{"type":"object","properties":{"message":{"type":"string"}}}}
+		]
+	}`)
+	paths := codexCollaborationMessageToolPaths(payload)
+	got := removeCodexCollaborationMessageEncryption(payload, paths)
+	if string(got) != string(payload) {
+		t.Fatalf("payload changed when no encrypted field existed: %s", got)
+	}
+}

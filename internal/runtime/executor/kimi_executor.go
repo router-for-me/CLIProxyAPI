@@ -87,7 +87,16 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	from := opts.SourceFormat
 	if from.String() == "claude" {
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
-		return e.ClaudeExecutor.Execute(ctx, auth, req, opts)
+		preparedReq, replayScope := prepareKimiThinkingReplayRequest(ctx, req, opts)
+		claudeResp, errExecute := e.ClaudeExecutor.Execute(ctx, auth, preparedReq, opts)
+		if errExecute != nil {
+			if replayScope.replayApplied && shouldClearKimiThinkingReplayAfterError(errExecute) {
+				clearKimiThinkingReplayContent(ctx, replayScope)
+			}
+			return claudeResp, errExecute
+		}
+		cacheKimiThinkingReplayResponse(ctx, replayScope, claudeResp.Payload)
+		return claudeResp, nil
 	}
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 
@@ -114,7 +123,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
 	}
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), "kimi", e.Identifier())
+	body, err = helps.ApplyThinkingWithSourcePayload(body, req.Payload, originalPayloadSource, req.Model, from.String(), "kimi", e.Identifier())
 	if err != nil {
 		return resp, err
 	}
@@ -197,7 +206,15 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	from := opts.SourceFormat
 	if from.String() == "claude" {
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
-		return e.ClaudeExecutor.ExecuteStream(ctx, auth, req, opts)
+		preparedReq, replayScope := prepareKimiThinkingReplayRequest(ctx, req, opts)
+		claudeResult, errExecute := e.ClaudeExecutor.ExecuteStream(ctx, auth, preparedReq, opts)
+		if errExecute != nil {
+			if replayScope.replayApplied && shouldClearKimiThinkingReplayAfterError(errExecute) {
+				clearKimiThinkingReplayContent(ctx, replayScope)
+			}
+			return nil, errExecute
+		}
+		return wrapKimiThinkingReplayStream(ctx, claudeResult, replayScope), nil
 	}
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 
@@ -223,7 +240,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		return nil, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
 	}
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), "kimi", e.Identifier())
+	body, err = helps.ApplyThinkingWithSourcePayload(body, req.Payload, originalPayloadSource, req.Model, from.String(), "kimi", e.Identifier())
 	if err != nil {
 		return nil, err
 	}

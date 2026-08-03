@@ -10,10 +10,14 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-const codexInputItemIDLimit = 64
+const (
+	codexInputItemIDLimit    = 64
+	codexMessageItemIDPrefix = "msg"
+)
 
-// SanitizeCodexInputItemIDs removes encrypted reasoning items whose IDs exceed
-// the Codex limit and deterministically shortens other overlong input item IDs.
+// SanitizeCodexInputItemIDs normalizes message IDs for Codex, removes encrypted
+// reasoning items whose IDs exceed the Codex limit, and deterministically shortens
+// other overlong input item IDs.
 func SanitizeCodexInputItemIDs(body []byte) []byte {
 	input := gjson.GetBytes(body, "input")
 	if !input.IsArray() {
@@ -30,7 +34,7 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 		if itemID.Type != gjson.String {
 			continue
 		}
-		id := itemID.String()
+		id := normalizeCodexInputItemID(item, itemID.String())
 		if len([]rune(id)) <= codexInputItemIDLimit {
 			occupied[id] = struct{}{}
 		}
@@ -48,7 +52,8 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 		raw := item.Raw
 		itemID := item.Get("id")
 		if itemID.Type == gjson.String {
-			id := itemID.String()
+			originalID := itemID.String()
+			id := normalizeCodexInputItemID(item, originalID)
 			if len([]rune(id)) > codexInputItemIDLimit {
 				shortened, ok := mapped[id]
 				if !ok {
@@ -62,8 +67,11 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 					mapped[id] = shortened
 					occupied[shortened] = struct{}{}
 				}
+				id = shortened
+			}
 
-				next, errSet := sjson.SetBytes([]byte(raw), "id", shortened)
+			if id != originalID {
+				next, errSet := sjson.SetBytes([]byte(raw), "id", id)
 				if errSet == nil {
 					raw = string(next)
 					changed = true
@@ -81,6 +89,13 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 		return body
 	}
 	return updated
+}
+
+func normalizeCodexInputItemID(item gjson.Result, id string) string {
+	if item.Get("type").String() != "message" || id == "" || strings.HasPrefix(id, codexMessageItemIDPrefix) {
+		return id
+	}
+	return codexMessageItemIDPrefix + "_" + id
 }
 
 func shouldDropCodexEncryptedReasoningItem(item gjson.Result) bool {
