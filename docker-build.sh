@@ -32,21 +32,25 @@ case "$choice" in
 
     # Get Version Information
     VERSION="$(git describe --tags --always --dirty)"
+    CORE_VERSION="$(git describe --tags --match 'v7.*' --abbrev=0 2>/dev/null | sed 's/^v//')"
+    CORE_VERSION="${CORE_VERSION:-unknown}"
     COMMIT="$(git rev-parse --short HEAD)"
     BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     echo "Building with the following info:"
     echo "  Version: ${VERSION}"
+    echo "  Core Version: ${CORE_VERSION}"
     echo "  Commit: ${COMMIT}"
     echo "  Build Date: ${BUILD_DATE}"
     echo "----------------------------------------"
 
     # Build and start the services with a local-only image tag
-    export CLI_PROXY_IMAGE="cli-proxy-api:local"
+    export CLI_PROXY_IMAGE="nixllm:local"
 
     echo "Building the Docker image..."
     docker compose build \
       --build-arg VERSION="${VERSION}" \
+      --build-arg CORE_VERSION="${CORE_VERSION}" \
       --build-arg COMMIT="${COMMIT}" \
       --build-arg BUILD_DATE="${BUILD_DATE}"
 

@@ -1,6 +1,6 @@
 # NixLLM Dashboard
 
-Management UI for the CLIProxyAPI PostgreSQL-backed features: per-key API
+Management UI for the NixLLM PostgreSQL-backed features: per-key API
 policies (RPM, hourly rate, budget caps, model allow/deny lists), usage
 statistics persistence, and the PG-mirrored model catalog + pricing.
 
@@ -41,8 +41,8 @@ npm install
 npm run build              # produces web/dashboard/dist/
 
 cd ../..
-go build -o bin/cli-proxy-api ./cmd/server
-./bin/cli-proxy-api
+go build -o bin/nixllm ./cmd/server
+./bin/nixllm
 ```
 
 Open http://127.0.0.1:8317/dashboard/. The SPA is served unauthenticated
@@ -56,7 +56,7 @@ operator to run `npm run dev` instead.
 ## Quickstart — Cloudflare Workers (frontend-only deploy)
 
 Deploy the built SPA to Cloudflare Workers with a tiny Worker that reverse-
-proxies API requests to a running CLIProxyAPI Go server. The SPA keeps using
+proxies API requests to a running NixLLM Go server. The SPA keeps using
 its same-origin relative API base (`/v0/management`) — no CORS, no code
 change to `src/api/client.js`. The Go backend stays where it is (VPS /
 container / localhost reachable from Cloudflare).

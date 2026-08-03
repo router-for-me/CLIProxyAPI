@@ -67,7 +67,7 @@ export default function LoginPage({ onLogin }) {
 
         {serverAlive === false && (
           <div className="error-banner" style={{ marginBottom: 16 }}>
-            Cannot reach the CLIProxyAPI server. Make sure it is running and
+            Cannot reach the NixLLM server. Make sure it is running and
             reachable at the configured host (default http://127.0.0.1:8317).
           </div>
         )}
@@ -87,7 +87,7 @@ export default function LoginPage({ onLogin }) {
           />
           <div className="form__hint">
             This is the value of the <code>MANAGEMENT_PASSWORD</code> env var
-            configured on the CLIProxyAPI server (or the auto-printed local
+            configured on the NixLLM server (or the auto-printed local
             password when running in TUI mode).
           </div>
         </div>

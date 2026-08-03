@@ -1,6 +1,7 @@
-// Package main provides the entry point for the CLI Proxy API server.
-// This server acts as a proxy that provides OpenAI/Gemini/Claude compatible API interfaces
-// for CLI models, allowing CLI models to be used with tools and libraries designed for standard AI APIs.
+// Package main provides the entry point for the NixLLM server.
+// NixLLM is a Go proxy server core-derived from CLIProxyAPI; it provides
+// OpenAI/Gemini/Claude/Codex compatible API interfaces for CLI models,
+// allowing them to be used with tools and libraries designed for standard AI APIs.
 package main
 
 import (
@@ -48,6 +49,7 @@ import (
 
 var (
 	Version           = "dev"
+	CoreVersion       = "unknown"
 	Commit            = "none"
 	BuildDate         = "unknown"
 	DefaultConfigPath = ""
@@ -57,6 +59,7 @@ var (
 func init() {
 	logging.SetupBaseLogger()
 	buildinfo.Version = Version
+	buildinfo.CoreVersion = CoreVersion
 	buildinfo.Commit = Commit
 	buildinfo.BuildDate = BuildDate
 }
@@ -75,7 +78,7 @@ func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode,
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
 func main() {
-	fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+	fmt.Printf("NixLLM %s (core CLIProxyAPI %s), Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.CoreVersion, buildinfo.Commit, buildinfo.BuildDate)
 
 	// Command-line flags to control the application's behavior.
 	var codexLogin bool
@@ -579,7 +582,7 @@ func main() {
 		return
 	}
 
-	log.Infof("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+	log.Infof("NixLLM %s (core CLIProxyAPI %s), Commit: %s, BuiltAt: %s", buildinfo.Version, buildinfo.CoreVersion, buildinfo.Commit, buildinfo.BuildDate)
 
 	// Set the log level based on the configuration.
 	util.SetLogLevel(cfg)

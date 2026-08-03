@@ -1,6 +1,6 @@
 // API client for the NixLLM Dashboard.
 //
-// All calls target the existing /v0/management routes on the CLIProxyAPI
+// All calls target the existing /v0/management routes on the NixLLM
 // Go server. Authentication uses the same scheme as the official management
 // UI: `Authorization: Bearer <MANAGEMENT_PASSWORD>`. The password is stored
 // in localStorage after the user enters it on the login page; rotating the
@@ -977,8 +977,8 @@ export async function fetchV1Models(callerKey) {
 
 // --- Manage CPA: full server Config + AI Provider management ---------------
 //
-// These helpers expose every Config and AI-Provider surface that the CPA
-// (CLIProxyAPI) Go server manages through /v0/management. They are consumed
+// These helpers expose every Config and AI-Provider surface that the NixLLM
+// Go server manages through /v0/management. They are consumed
 // by the dashboard's "Manage CPA" menu (Overview / AI Providers / Raw
 // Config tabs). All endpoints already exist on the server — this file just
 // gives the SPA a typed, ergonomic wrapper layer.

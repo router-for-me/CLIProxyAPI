@@ -1,7 +1,7 @@
 # Cloudflare Workers configuration for the NixLLM dashboard SPA.
 #
 # Deploys the built dashboard (web/dashboard/dist) as Static Assets served by
-# a Worker that also reverse-proxies API requests to the CLIProxyAPI Go
+# a Worker that also reverse-proxies API requests to the NixLLM Go
 # backend. This lets the SPA keep its same-origin relative API base
 # (`/v0/management`) without any CORS configuration.
 #

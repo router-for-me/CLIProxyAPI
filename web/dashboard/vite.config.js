@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react';
 // NixLLM Dashboard — Vite config.
 //
 // Dev server runs on port 9173. The /v0 API calls are proxied to the
-// CLIProxyAPI Go server (default :8317) so the dashboard can authenticate
+// NixLLM Go server (default :8317) so the dashboard can authenticate
 // against the existing /v0/management routes using MANAGEMENT_PASSWORD,
 // avoiding CORS in development.
 //
@@ -25,7 +25,7 @@ export default defineConfig({
       },
       // Caller-facing API (used by the "Show available only" sync on the
       // Models Catalog page: GET /v1/models with a caller API key). Has to
-      // hit the CLIProxyAPI Go server so /v1/models resolves through the
+      // hit the NixLLM Go server so /v1/models resolves through the
       // AuthMiddleware -> policyMiddleware -> openai handlers pipeline, not
       // the Vite dev server itself (which would 404 to SPA fallback).
       '/v1': {

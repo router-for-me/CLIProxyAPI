@@ -1,23 +1,24 @@
 services:
-  cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
+  nixllm:
+    image: ${CLI_PROXY_IMAGE:-ghcr.io/abilfida/nixllm:latest}
     pull_policy: always
     build:
       context: .
       dockerfile: Dockerfile
       args:
         VERSION: ${VERSION:-dev}
+        CORE_VERSION: ${CORE_VERSION:-unknown}
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
-    container_name: cli-proxy-api-cluster
+    container_name: nixllm-cluster
     environment:
       HOME_JWT: ${HOME_JWT:-}
     ports:
       - "8317:8317"
     volumes:
       - ${CLI_PROXY_HOME_PATH:-./home}:/root/.cli-proxy-api
-      - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
-      - ${CLI_PROXY_PLUGIN_PATH:-./plugins}:/CLIProxyAPI/plugins
+      - ${CLI_PROXY_LOG_PATH:-./logs}:/nixllm/logs
+      - ${CLI_PROXY_PLUGIN_PATH:-./plugins}:/nixllm/plugins
     command: >
       sh -eu -c '
         if [ -z "$$HOME_JWT" ]; then
@@ -25,6 +26,6 @@ services:
           exit 1
         fi
 
-        exec ./CLIProxyAPI -home-jwt "$$HOME_JWT"
+        exec ./nixllm -home-jwt "$$HOME_JWT"
       '
     restart: unless-stopped

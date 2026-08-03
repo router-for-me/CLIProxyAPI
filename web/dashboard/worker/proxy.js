@@ -1,7 +1,7 @@
 // Cloudflare Worker — reverse proxy for the NixLLM dashboard SPA.
 //
 // The dashboard frontend (web/dashboard) is a static React SPA that talks to
-// the CLIProxyAPI Go server using same-origin relative URLs. The API client
+// the NixLLM Go server using same-origin relative URLs. The API client
 // hardcodes `API_BASE = '/v0/management'` (see src/api/client.js), and the
 // SPA also reaches /v1, /v1beta, /openai, /backend-api (WebSocket), and
 // /healthz. When the frontend is hosted on Cloudflare, those same-origin
@@ -50,7 +50,7 @@ export default {
           JSON.stringify({
             error: {
               message:
-                'BACKEND_ORIGIN is not configured. Set it to the CLIProxyAPI Go server origin (e.g. https://api.example.com) in the worker variables.',
+                'BACKEND_ORIGIN is not configured. Set it to the NixLLM Go server origin (e.g. https://api.example.com) in the worker variables.',
               type: 'proxy_misconfigured',
             },
           }),

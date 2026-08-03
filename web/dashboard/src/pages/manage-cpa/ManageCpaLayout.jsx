@@ -27,7 +27,7 @@ export default function ManageCpaLayout() {
         <div>
           <h1 className="main__title">Manage CPA</h1>
           <div className="main__subtitle">
-            Operate the running CLIProxyAPI (CPA) server: inspect config, manage
+            Operate the running NixLLM server: inspect config, manage
             every AI provider account, and edit <code>config.yaml</code> in place.
           </div>
         </div>

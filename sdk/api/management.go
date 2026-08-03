@@ -1,4 +1,4 @@
-// Package api exposes helpers for embedding CLIProxyAPI.
+// Package api exposes helpers for embedding NixLLM.
 //
 // It wraps internal management handler types and helpers so external projects
 // can integrate management endpoints without importing internal packages.

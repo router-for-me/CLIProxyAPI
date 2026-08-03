@@ -56,7 +56,7 @@ export default function OverviewTab() {
     <>
       <div className="row row--between" style={{ marginBottom: 12 }}>
         <div className="dim">
-          Live snapshot of the running CLIProxyAPI. Counts come from a fresh
+          Live snapshot of the running NixLLM. Counts come from a fresh
           fetch on every reload.
         </div>
         <button onClick={reloadAll}>Refresh</button>

@@ -135,7 +135,7 @@ func (s *Server) setupRoutes() {
 		// branding page instead.
 		if s.cfg == nil || !hasBranding(s.cfg.Branding) {
 			c.JSON(http.StatusOK, gin.H{
-				"message": "CLI Proxy API Server",
+				"message": "NixLLM Server",
 				"endpoints": []string{
 					"POST /v1/chat/completions",
 					"POST /v1/completions",

@@ -1,4 +1,4 @@
-# Makefile — development workflows for CLIProxyAPI.
+# Makefile — development workflows for NixLLM.
 #
 # Conventions match AGENTS.md:
 #   - `gofmt -w .` is the source of truth for formatting.
@@ -23,7 +23,7 @@ GOCOVER  := $(GO) tool cover
 # --- Paths --------------------------------------------------------------------
 ROOT          := $(CURDIR)
 BIN_DIR       := $(ROOT)/bin
-SERVER_BIN    := $(BIN_DIR)/cli-proxy-api
+SERVER_BIN    := $(BIN_DIR)/nixllm
 COVERAGE_OUT  := $(BIN_DIR)/coverage.out
 COVERAGE_HTML := $(BIN_DIR)/coverage.html
 DEV_PORT_FILE := $(BIN_DIR)/dev.ports

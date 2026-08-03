@@ -2,9 +2,11 @@ name: release
 
 on:
   push:
-    # run only against tags
+    # run only against v7.* tags (upstream-style CLIProxyAPI releases).
+    # NixLLM tags (v0.x) are handled by docker-publish.yml and excluded here
+    # so they don't produce spurious CLIProxyAPI archive releases.
     tags:
-      - '*'
+      - v7*
 
 permissions:
   contents: write
@@ -151,6 +153,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "CORE_VERSION=$(git describe --tags --match 'v7.*' --abbrev=0 2>/dev/null | sed 's/^v//')" >> "$GITHUB_ENV"
           echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - name: Build archive
@@ -174,7 +177,7 @@ jobs:
           mkdir -p "$archive_dir"
 
           CGO_ENABLED=1 GOOS="$GOOS" GOARCH="$GOARCH" go build \
-            -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
+            -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.CoreVersion=${CORE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
             -o "$archive_dir/$binary_name" ./cmd/server/
 
           cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
@@ -269,6 +272,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "CORE_VERSION=$(git describe --tags --match 'v7.*' --abbrev=0 2>/dev/null | sed 's/^v//')" >> "$GITHUB_ENV"
           echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - name: Build archive
@@ -292,6 +296,7 @@ jobs:
             -e GO_VERSION \
             -e GOARCH \
             -e RELEASE_VERSION \
+            -e CORE_VERSION \
             -e COMMIT \
             -e BUILD_DATE \
             "$MANYLINUX_IMAGE" \
@@ -303,7 +308,7 @@ jobs:
               export PATH="/usr/local/go/bin:${PATH}"
 
               CGO_ENABLED=1 GOOS=linux GOARCH="${GOARCH}" go build -buildvcs=false \
-                -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
+                -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.CoreVersion=${CORE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
                 -o "'"$archive_dir"'/cli-proxy-api" ./cmd/server/
 
               glibc_versions="$(readelf --version-info "'"$archive_dir"'/cli-proxy-api" | sed -n "s/.*Name: GLIBC_\([0-9.]*\).*/\1/p" | sort -Vu)"
@@ -410,6 +415,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "CORE_VERSION=$(git describe --tags --match 'v7.*' --abbrev=0 2>/dev/null | sed 's/^v//')" >> "$GITHUB_ENV"
           echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - name: Build archive
@@ -427,7 +433,7 @@ jobs:
           mkdir -p "$archive_dir"
 
           CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -buildvcs=false \
-            -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
+            -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.CoreVersion=${CORE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
             -o "$archive_dir/cli-proxy-api" ./cmd/server/
 
           if readelf -l "$archive_dir/cli-proxy-api" | grep -q 'Requesting program interpreter'; then
@@ -536,12 +542,16 @@ jobs:
         run: |
           set -euo pipefail
           release_version="${GITHUB_REF_NAME#v}"
+          core_version="$(git describe --tags --match 'v7.*' --abbrev=0 2>/dev/null | sed 's/^v//')"
+          core_version="${core_version:-unknown}"
           commit="$(git rev-parse --short HEAD)"
           build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "RELEASE_VERSION=$release_version" >> "$GITHUB_ENV"
+          echo "CORE_VERSION=$core_version" >> "$GITHUB_ENV"
           echo "COMMIT=$commit" >> "$GITHUB_ENV"
           echo "BUILD_DATE=$build_date" >> "$GITHUB_ENV"
           echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
+          echo "core_version=$core_version" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "build_date=$build_date" >> "$GITHUB_OUTPUT"
       - name: Prepare FreeBSD output
@@ -568,6 +578,7 @@ jobs:
           flags: >-
             -ldflags=-s -w
             -X main.Version=${{ steps.metadata.outputs.release_version }}
+            -X main.CoreVersion=${{ steps.metadata.outputs.core_version }}
             -X main.Commit=${{ steps.metadata.outputs.commit }}
             -X main.BuildDate=${{ steps.metadata.outputs.build_date }}
       - name: Build FreeBSD no-plugin binary
@@ -577,7 +588,7 @@ jobs:
           set -euo pipefail
           mkdir -p "dist/${TARGET}/bin"
           CGO_ENABLED=0 GOOS=freebsd GOARCH="$TARGET_GOARCH" go build -buildvcs=false \
-            -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
+            -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.CoreVersion=${CORE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
             -o "dist/${TARGET}/bin/cli-proxy-api" ./cmd/server/
       - name: Package FreeBSD archive
         shell: bash

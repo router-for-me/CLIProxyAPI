@@ -25,7 +25,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: cli-proxy-api
+  IMAGE_NAME: nixllm
   REGISTRY: ghcr.io
 
 jobs:
@@ -59,9 +59,14 @@ jobs:
           else
             version="$(git describe --tags --always --dirty)"
           fi
+          # Core version is derived from the latest upstream-style v7.* tag so
+          # the banner shows the CLIProxyAPI base version automatically.
+          core_version="$(git describe --tags --match 'v7.*' --abbrev=0 2>/dev/null | sed 's/^v//')"
+          core_version="${core_version:-unknown}"
           commit="$(git rev-parse --short HEAD)"
           build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "core_version=${core_version}" >> "$GITHUB_OUTPUT"
           echo "commit=${commit}" >> "$GITHUB_OUTPUT"
           echo "build_date=${build_date}" >> "$GITHUB_OUTPUT"
 
@@ -92,7 +97,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
             type=raw,value=${{ steps.meta.outputs.version }}
           labels: |
-            org.opencontainers.image.title=CLIProxyAPI
+            org.opencontainers.image.title=NixLLM
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
 
@@ -105,6 +110,7 @@ jobs:
           push: true
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
+            CORE_VERSION=${{ steps.meta.outputs.core_version }}
             COMMIT=${{ steps.meta.outputs.commit }}
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
           tags: ${{ steps.docker_meta.outputs.tags }}

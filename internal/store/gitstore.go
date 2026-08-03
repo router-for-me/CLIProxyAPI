@@ -862,8 +862,8 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 		message = "Update auth store"
 	}
 	signature := &object.Signature{
-		Name:  "CLIProxyAPI",
-		Email: "cliproxy@local",
+		Name:  "NixLLM",
+		Email: "nixllm@local",
 		When:  time.Now(),
 	}
 	commitHash, err := worktree.Commit(message, &git.CommitOptions{

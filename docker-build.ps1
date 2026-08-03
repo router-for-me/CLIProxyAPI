@@ -25,20 +25,23 @@ switch ($choice) {
 
         # Get Version Information
         $VERSION = (git describe --tags --always --dirty)
+        $CORE_VERSION = (git describe --tags --match "v7.*" --abbrev=0 2>$null) -replace '^v',''
+        if (-not $CORE_VERSION) { $CORE_VERSION = "unknown" }
         $COMMIT  = (git rev-parse --short HEAD)
         $BUILD_DATE = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 
         Write-Host "Building with the following info:"
         Write-Host "  Version: $VERSION"
+        Write-Host "  Core Version: $CORE_VERSION"
         Write-Host "  Commit: $COMMIT"
         Write-Host "  Build Date: $BUILD_DATE"
         Write-Host "----------------------------------------"
 
         # Build and start the services with a local-only image tag
-        $env:CLI_PROXY_IMAGE = "cli-proxy-api:local"
-        
+        $env:CLI_PROXY_IMAGE = "nixllm:local"
+
         Write-Host "Building the Docker image..."
-        docker compose build --build-arg VERSION=$VERSION --build-arg COMMIT=$COMMIT --build-arg BUILD_DATE=$BUILD_DATE
+        docker compose build --build-arg VERSION=$VERSION --build-arg CORE_VERSION=$CORE_VERSION --build-arg COMMIT=$COMMIT --build-arg BUILD_DATE=$BUILD_DATE
 
         Write-Host "Starting the services..."
         docker compose up -d --remove-orphans --pull never
