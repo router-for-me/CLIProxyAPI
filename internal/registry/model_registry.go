@@ -182,6 +182,32 @@ func (r *ModelRegistry) invalidateAvailableModelsCacheLocked() {
 	clear(r.availableModelsCache)
 }
 
+// GetModelProvidersSnapshot returns the active provider keys for every model.
+// The result is a defensive copy intended for caller-specific model catalog
+// filtering; provider metadata is not added to the public OpenAI response.
+func (r *ModelRegistry) GetModelProvidersSnapshot() map[string][]string {
+	if r == nil {
+		return map[string][]string{}
+	}
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	out := make(map[string][]string, len(r.models))
+	for modelID, registration := range r.models {
+		if registration == nil || len(registration.Providers) == 0 {
+			continue
+		}
+		providers := make([]string, 0, len(registration.Providers))
+		for provider, count := range registration.Providers {
+			if count > 0 {
+				providers = append(providers, provider)
+			}
+		}
+		sort.Strings(providers)
+		out[modelID] = providers
+	}
+	return out
+}
+
 // LookupModelInfo searches dynamic registry (provider-specific > global) then static definitions.
 func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	modelID = strings.TrimSpace(modelID)

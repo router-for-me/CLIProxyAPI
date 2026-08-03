@@ -357,7 +357,7 @@ func (h *OpenAIResponsesAPIHandler) Models() []map[string]any {
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAIResponses-compatible format.
 func (h *OpenAIResponsesAPIHandler) OpenAIResponsesModels(c *gin.Context) {
-	models, err := h.FilterModelCatalog(c, h.Models())
+	models, err := h.FilterModelCatalog(c, h.Models(), registry.GetGlobalRegistry().GetModelProvidersSnapshot())
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "model catalog unavailable"})
 		return

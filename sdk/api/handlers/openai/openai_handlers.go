@@ -66,7 +66,7 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 
 	// Get all available models
 	allModels := h.Models()
-	allModels, err := h.FilterModelCatalog(c, allModels)
+	allModels, err := h.FilterModelCatalog(c, allModels, registry.GetGlobalRegistry().GetModelProvidersSnapshot())
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "model catalog unavailable"})
 		return

@@ -13,7 +13,7 @@ type pluginModelCatalogFilterHost interface {
 }
 
 // FilterModelCatalog applies authenticated caller-specific catalog filters.
-func (h *BaseAPIHandler) FilterModelCatalog(c *gin.Context, models []map[string]any) ([]map[string]any, error) {
+func (h *BaseAPIHandler) FilterModelCatalog(c *gin.Context, models []map[string]any, modelProviders map[string][]string) ([]map[string]any, error) {
 	if h == nil || c == nil || h.PluginHost == nil {
 		return models, nil
 	}
@@ -36,6 +36,7 @@ func (h *BaseAPIHandler) FilterModelCatalog(c *gin.Context, models []map[string]
 		Query:          c.Request.URL.Query(),
 		AccessMetadata: metadata,
 		Models:         models,
+		ModelProviders: modelProviders,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("filter model catalog: %w", err)

@@ -490,6 +490,10 @@ type ModelCatalogFilterRequest struct {
 	Query          url.Values
 	AccessMetadata map[string]string
 	Models         []map[string]any
+	// ModelProviders maps model IDs to the currently available provider keys.
+	// It lets filters apply provider-scoped grants without exposing this
+	// host-internal routing metadata in the OpenAI response body.
+	ModelProviders map[string][]string
 }
 
 // ModelCatalogFilterResponse contains the caller-visible model list.

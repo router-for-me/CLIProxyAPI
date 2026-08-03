@@ -25,6 +25,7 @@ func (h *Host) FilterModelCatalog(ctx context.Context, req pluginapi.ModelCatalo
 		nextReq.Plugin = clonePluginMetadata(record.meta)
 		nextReq.PluginID = record.id
 		nextReq.Models = cloneCatalogModels(current)
+		nextReq.ModelProviders = cloneModelProviders(req.ModelProviders)
 		resp, err := filter.FilterModelCatalog(ctx, nextReq)
 		if err != nil {
 			return pluginapi.ModelCatalogFilterResponse{}, fmt.Errorf("model catalog filter %s: %w", record.id, err)
@@ -36,6 +37,17 @@ func (h *Host) FilterModelCatalog(ctx context.Context, req pluginapi.ModelCatalo
 		handled = true
 	}
 	return pluginapi.ModelCatalogFilterResponse{Handled: handled, Models: current}, nil
+}
+
+func cloneModelProviders(input map[string][]string) map[string][]string {
+	if len(input) == 0 {
+		return map[string][]string{}
+	}
+	out := make(map[string][]string, len(input))
+	for model, providers := range input {
+		out[model] = append([]string(nil), providers...)
+	}
+	return out
 }
 
 func cloneCatalogModels(models []map[string]any) []map[string]any {
