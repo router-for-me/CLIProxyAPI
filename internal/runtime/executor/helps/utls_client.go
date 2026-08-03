@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -25,6 +26,8 @@ type utlsRoundTripper struct {
 	pending     map[string]*sync.Cond
 	dialer      proxy.Dialer
 }
+
+const utlsConnectionShutdownTimeout = 30 * time.Second
 
 func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
@@ -75,8 +78,22 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.Clie
 		return nil, err
 	}
 
+	if old := t.connections[host]; old != nil && old != h2Conn {
+		go shutdownUtlsConnection(old)
+	}
 	t.connections[host] = h2Conn
 	return h2Conn, nil
+}
+
+func shutdownUtlsConnection(conn *http2.ClientConn) {
+	if conn == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), utlsConnectionShutdownTimeout)
+	defer cancel()
+	if err := conn.Shutdown(ctx); err != nil {
+		_ = conn.Close()
+	}
 }
 
 func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientConn, error) {
@@ -123,10 +140,73 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 			delete(t.connections, hostname)
 		}
 		t.mu.Unlock()
+		go shutdownUtlsConnection(h2Conn)
 		return nil, err
 	}
 
 	return resp, nil
+}
+
+func (t *utlsRoundTripper) CloseIdleConnections() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	connections := make([]*http2.ClientConn, 0, len(t.connections))
+	for host, conn := range t.connections {
+		delete(t.connections, host)
+		connections = append(connections, conn)
+	}
+	t.mu.Unlock()
+
+	for _, conn := range connections {
+		go shutdownUtlsConnection(conn)
+	}
+}
+
+type closeOwnedTransportRoundTripper struct {
+	base http.RoundTripper
+}
+
+// RoundTrip ties a request-owned uTLS transport to its response body. CPA
+// creates a fresh uTLS client for each upstream request, so the transport must
+// be drained when that request finishes instead of being left to a global pool.
+func (t *closeOwnedTransportRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil {
+		t.CloseIdleConnections()
+		return resp, err
+	}
+	if resp == nil || resp.Body == nil {
+		t.CloseIdleConnections()
+		return resp, nil
+	}
+	resp.Body = &closeOwnedTransportReadCloser{
+		ReadCloser: resp.Body,
+		close:      t.CloseIdleConnections,
+	}
+	return resp, nil
+}
+
+func (t *closeOwnedTransportRoundTripper) CloseIdleConnections() {
+	if t == nil || t.base == nil {
+		return
+	}
+	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
+type closeOwnedTransportReadCloser struct {
+	io.ReadCloser
+	once  sync.Once
+	close func()
+}
+
+func (r *closeOwnedTransportReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	r.once.Do(r.close)
+	return err
 }
 
 // utlsProtectedHosts contains the hosts that should use utls Chrome TLS fingerprint
@@ -169,7 +249,9 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var utlsRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
+	var utlsRT http.RoundTripper = &closeOwnedTransportRoundTripper{
+		base: newUtlsRoundTripper(proxyURL),
+	}
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
 		if transport := buildProxyTransport(proxyURL); transport != nil {
