@@ -50,11 +50,12 @@ func getWorkloadFromContext(ctx context.Context) string {
 
 // getCloakConfigFromAuth extracts cloak configuration from the auth's attributes,
 // falling back to its stored metadata (the raw OAuth/token JSON). Returns
-// (cloakMode, strictMode, sensitiveWords, cacheUserID); an empty cloakMode means
-// the credential did not explicitly configure a mode.
-func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMode bool, sensitiveWords []string, cacheUserID bool) {
+// (cloakMode, strictMode, relaxedSystemPrompt, sensitiveWords, cacheUserID); an
+// empty cloakMode and a nil relaxedSystemPrompt mean the credential did not
+// explicitly configure those options.
+func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMode bool, relaxedSystemPrompt *bool, sensitiveWords []string, cacheUserID bool) {
 	if auth == nil {
-		return "", false, nil, false
+		return "", false, nil, nil, false
 	}
 
 	// lookupCloakAttr prefers the executor-facing Attributes, then falls back to the
@@ -76,7 +77,17 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMo
 	// allowing the caller to fall back to the global/default behavior.
 	cloakMode = lookupCloakAttr("cloak_mode")
 
-	strictMode = strings.EqualFold(lookupCloakAttr("cloak_strict_mode"), "true")
+	if value := lookupCloakAttr("cloak_strict_mode"); value != "" {
+		strictMode = strings.EqualFold(value, "true")
+	} else if enabled, ok := claudeauth.ReadMetadataBool(&auth.Metadata, "cloak_strict_mode"); ok {
+		strictMode = enabled
+	}
+	if value := lookupCloakAttr("cloak_relaxed_system_prompt"); value != "" {
+		enabled := strings.EqualFold(value, "true")
+		relaxedSystemPrompt = &enabled
+	} else if enabled, ok := claudeauth.ReadMetadataBool(&auth.Metadata, "cloak_relaxed_system_prompt"); ok {
+		relaxedSystemPrompt = &enabled
+	}
 
 	if wordsStr := lookupCloakAttr("cloak_sensitive_words"); wordsStr != "" {
 		sensitiveWords = strings.Split(wordsStr, ",")
@@ -87,7 +98,7 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMo
 
 	cacheUserID = strings.EqualFold(lookupCloakAttr("cloak_cache_user_id"), "true")
 
-	return cloakMode, strictMode, sensitiveWords, cacheUserID
+	return cloakMode, strictMode, relaxedSystemPrompt, sensitiveWords, cacheUserID
 }
 
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
@@ -216,14 +227,31 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, cch
 }
 
 func checkSystemInstructionsWithSigningModeAt(payload []byte, strictMode bool, cchSigning bool, version, entrypoint, workload string, now time.Time) []byte {
+	return applyClaudeSystemInstructionPolicy(payload, claudeCloakSettings{strictMode: strictMode}, cchSigning, version, entrypoint, workload, now)
+}
+
+// applyClaudeSystemInstructionPolicy applies the selected caller-prompt policy.
+// This stage owns only the billing, identity, caller-system, and message layout.
+// It deliberately does not synthesize cache_control: after payload rules have
+// produced the final request, the shared cache policy decides whether CPA owns
+// breakpoint placement. Relaxed mode additionally leaves caller messages intact.
+func applyClaudeSystemInstructionPolicy(payload []byte, settings claudeCloakSettings, cchSigning bool, version, entrypoint, workload string, now time.Time) []byte {
 	system := gjson.GetBytes(payload, "system")
 	messageText := claudeBillingFingerprintMessageText(payload)
+	relaxedSystemPrompt := settings.relaxedSystemPrompt && !settings.strictMode
 
 	billingText := generateBillingHeader(cchSigning, version, messageText, entrypoint, workload)
 	billingBlock := buildTextBlock(billingText, nil)
-	agentBlock := buildTextBlock(claudeCodeCLIIdentity, &claudeCodeCacheControl)
-	payload, _ = sjson.SetRawBytes(payload, "system", []byte("["+billingBlock+","+agentBlock+"]"))
-	if strictMode {
+	agentBlock := buildTextBlock(claudeCodeCLIIdentity, nil)
+	topLevelBlocks := []string{billingBlock, agentBlock}
+	if relaxedSystemPrompt {
+		topLevelBlocks = append(topLevelBlocks, collectRelaxedClaudeSystemPromptBlocks(system)...)
+	}
+	payload, _ = sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(topLevelBlocks, ",")+"]"))
+	if relaxedSystemPrompt {
+		return payload
+	}
+	if settings.strictMode {
 		return injectClaudeCodeCurrentDate(payload, now)
 	}
 
@@ -434,7 +462,7 @@ func validateClaudeCallerSystemBlocks(system gjson.Result) error {
 func collectForwardedClaudeSystemPromptBlocks(system gjson.Result) []string {
 	var blocks []string
 	appendText := func(text string) {
-		if strings.TrimSpace(text) == "" || util.IsClaudeCodeAttributionSystemText(text) || text == claudeCodeCLIIdentity {
+		if !shouldForwardClaudeSystemText(text) {
 			return
 		}
 		blocks = append(blocks, text)
@@ -451,6 +479,29 @@ func collectForwardedClaudeSystemPromptBlocks(system gjson.Result) []string {
 		appendText(system.String())
 	}
 	return blocks
+}
+
+// collectRelaxedClaudeSystemPromptBlocks keeps each caller text block's supplied
+// fields, including supported metadata such as cache_control. Empty and already
+// injected Claude Code attribution blocks are omitted. Cache placement is left to
+// caller metadata, payload rules, and the existing automatic cache policy.
+func collectRelaxedClaudeSystemPromptBlocks(system gjson.Result) []string {
+	var blocks []string
+	if system.IsArray() {
+		system.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "text" && shouldForwardClaudeSystemText(part.Get("text").String()) {
+				blocks = append(blocks, part.Raw)
+			}
+			return true
+		})
+	} else if system.Type == gjson.String && shouldForwardClaudeSystemText(system.String()) {
+		blocks = append(blocks, buildTextBlock(system.String(), nil))
+	}
+	return blocks
+}
+
+func shouldForwardClaudeSystemText(text string) bool {
+	return strings.TrimSpace(text) != "" && !util.IsClaudeCodeAttributionSystemText(text) && text != claudeCodeCLIIdentity
 }
 
 // buildTextBlock constructs a JSON text block with JSON.stringify-compatible
@@ -578,7 +629,7 @@ func insertClaudeMidConversationSystemMessages(payload []byte, texts []string) [
 
 	systemMessages := make([]string, 0, len(texts))
 	for _, text := range texts {
-		content := "[" + buildTextBlock(text, &claudeCodeCacheControl) + "]"
+		content := "[" + buildTextBlock(text, nil) + "]"
 		systemMessages = append(systemMessages, `{"role":"system","content":`+content+"}")
 	}
 	rawMessages := make([]string, 0, len(messageBlocks)+len(systemMessages))
@@ -773,10 +824,6 @@ func firstClaudeUserMessageIndex(payload []byte) int {
 	return firstUserIdx
 }
 
-func isClaudeCodeContextReminder(text string) bool {
-	return strings.HasPrefix(text, "<system-reminder>") && strings.Contains(text, "</system-reminder>")
-}
-
 func isClaudeCodeCurrentDateReminder(text string) bool {
 	return strings.HasPrefix(text, "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is ")
 }
@@ -793,7 +840,7 @@ func injectClaudeCodeCurrentDate(payload []byte, now time.Time) []byte {
 	dateBlock := buildTextBlock(dateText, nil)
 
 	if content.Type == gjson.String {
-		userBlock := buildTextBlock(content.String(), &claudeCodeCacheControl)
+		userBlock := buildTextBlock(content.String(), nil)
 		newArray := "[" + dateBlock + "," + userBlock + "]"
 		payload, _ = sjson.SetRawBytes(payload, contentPath, []byte(newArray))
 		return payload
@@ -804,16 +851,10 @@ func injectClaudeCodeCurrentDate(payload []byte, now time.Time) []byte {
 
 	blocks := content.Array()
 	rawBlocks := make([]string, 0, len(blocks)+1)
-	actualTextCached := false
 	for _, block := range blocks {
 		if block.Get("type").String() == "text" {
 			text := block.Get("text").String()
 			if isClaudeCodeCurrentDateReminder(text) {
-				continue
-			}
-			if !actualTextCached && !isClaudeCodeContextReminder(text) {
-				rawBlocks = append(rawBlocks, withEphemeralCacheControl(block.Raw))
-				actualTextCached = true
 				continue
 			}
 		}
@@ -917,18 +958,6 @@ func reconcileClaudeCodeContextManagement(payload []byte, state claudeCodeContex
 	return updated
 }
 
-// withEphemeralCacheControl stamps the native Claude Code default cache marker
-// {"type":"ephemeral"} onto a content block. A 1h ttl is not part of the default
-// shape; upgradeClaudeCacheControlTTL adds it for the credentials native uses it
-// on, after all placement decisions are final.
-func withEphemeralCacheControl(rawBlock string) string {
-	updated, err := sjson.SetRawBytes([]byte(rawBlock), "cache_control", []byte(`{"type":"ephemeral"}`))
-	if err != nil {
-		return rawBlock
-	}
-	return string(updated)
-}
-
 type claudeWirePolicy struct {
 	OAuth                bool // real OAuth token runtime identity
 	ProfileClaudeCodeCLI bool // request fingerprint looks like Claude Code CLI
@@ -937,14 +966,15 @@ type claudeWirePolicy struct {
 }
 
 type claudeCloakSettings struct {
-	strictMode     bool
-	sensitiveWords []string
-	cacheUserID    bool
+	strictMode          bool
+	relaxedSystemPrompt bool
+	sensitiveWords      []string
+	cacheUserID         bool
 }
 
 func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey string, confirmedClaudeCode bool) (claudeWirePolicy, claudeCloakSettings) {
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
-	attrMode, attrStrict, attrWords, attrCache := getCloakConfigFromAuth(auth)
+	attrMode, attrStrict, attrRelaxedSystemPrompt, attrWords, attrCache := getCloakConfigFromAuth(auth)
 
 	cloakMode := "auto"
 	if cfg != nil && cfg.DisableClaudeCloakMode {
@@ -954,6 +984,9 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 		strictMode:     attrStrict,
 		sensitiveWords: attrWords,
 		cacheUserID:    attrCache,
+	}
+	if attrRelaxedSystemPrompt != nil {
+		settings.relaxedSystemPrompt = *attrRelaxedSystemPrompt
 	}
 	if attrMode != "" {
 		cloakMode = attrMode
@@ -965,6 +998,9 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 		if cloakCfg.StrictMode {
 			settings.strictMode = true
 		}
+		if cloakCfg.RelaxedSystemPrompt != nil {
+			settings.relaxedSystemPrompt = *cloakCfg.RelaxedSystemPrompt
+		}
 		if len(cloakCfg.SensitiveWords) > 0 {
 			settings.sensitiveWords = cloakCfg.SensitiveWords
 		}
@@ -972,9 +1008,12 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 			settings.cacheUserID = *cloakCfg.CacheUserID
 		}
 	}
+	if settings.strictMode {
+		settings.relaxedSystemPrompt = false
+	}
 
 	fp := resolveClaudeFingerprintPolicy(cfg, auth, apiKey)
-	cloakConfigured := cloakCfg != nil || attrMode != "" || attrStrict || len(attrWords) > 0 || attrCache
+	cloakConfigured := cloakCfg != nil || attrMode != "" || attrStrict || attrRelaxedSystemPrompt != nil || len(attrWords) > 0 || attrCache
 	policy := claudeWirePolicy{
 		OAuth:                fp.AuthIsOAuthToken,
 		ProfileClaudeCodeCLI: fp.ProfileClaudeCodeCLI,
@@ -1026,7 +1065,7 @@ func applyCloaking(
 
 	billingVersion := helps.DefaultClaudeVersion(cfg)
 	workload := getWorkloadFromContext(ctx)
-	payload = checkSystemInstructionsWithSigningModeAt(payload, settings.strictMode, cchSigning, billingVersion, "cli", workload, claudeCodeCurrentTime(cfg, auth))
+	payload = applyClaudeSystemInstructionPolicy(payload, settings, cchSigning, billingVersion, "cli", workload, claudeCodeCurrentTime(cfg, auth))
 
 	// Claude-Code-CLI fingerprint identity (real OAuth or fingerprint-profile=claude-code-cli)
 	// is applied later through the shared ApplyClaudeCredentialMetadata path.
@@ -1073,9 +1112,9 @@ var claudeCodeCacheControl = claudeCacheControl{
 // claudeCacheControlTTL1h is the only non-default ttl native ever selects.
 const claudeCacheControlTTL1h = "1h"
 
-// ensureCacheControl injects default cache_control breakpoints for translated
-// entrypoints (Responses/Chat/Gemini) after cloaking. Placement follows the
-// native request builder recovered from the installed binaries:
+// ensureCacheControl injects default cache_control breakpoints for a final,
+// markerless request after payload rules. Placement follows the native request
+// builder recovered from the installed binaries:
 //  1. LAST system block when no system marker exists
 //  2. LAST cacheable message when that message has no marker
 //
@@ -1087,8 +1126,8 @@ const claudeCacheControlTTL1h = "1h"
 // final message, so a stateless caller with large tool definitions rewrites the
 // whole prefix on every request and never reads it back.
 //
-// Each section injects independently so cloaking's first-user marker cannot
-// suppress system/latest-user breakpoints. Callers still run enforceCacheControlLimit.
+// Each section injects independently to construct CPA's complete default layout.
+// Callers still run enforceCacheControlLimit.
 // See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
 func ensureCacheControl(payload []byte) []byte {
 	if !claudePayloadHasCacheableSystem(payload) {
@@ -1196,8 +1235,13 @@ func forEachClaudeCacheControlBlock(payload []byte, visit func(path string, bloc
 	}
 }
 
-func shouldEnsureCacheControl(payload []byte, cloaked, confirmedClaudeCode bool) bool {
-	return !confirmedClaudeCode && (cloaked || countCacheControls(payload) == 0)
+// shouldEnsureCacheControl resolves cache placement ownership only after payload
+// rules have produced the final request. Confirmed Claude Code requests always
+// own their wire shape. For every other request, any explicit marker means the
+// caller or payload configuration owns the complete breakpoint layout; CPA only
+// installs defaults when the final request is markerless.
+func shouldEnsureCacheControl(payload []byte, confirmedClaudeCode bool) bool {
+	return !confirmedClaudeCode && countCacheControls(payload) == 0
 }
 
 func countCacheControls(payload []byte) int {

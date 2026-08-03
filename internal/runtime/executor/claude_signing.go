@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	xxHash64 "github.com/pierrec/xxHash/xxHash64"
@@ -511,9 +512,17 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 	if cfg == nil || auth == nil {
 		return nil
 	}
+	if auth.AuthSourceKind() == cliproxyauth.AuthSourceConfig && auth.Attributes != nil {
+		index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeConfigIndex]))
+		if errIndex == nil && index >= 0 && index < len(cfg.ClaudeKey) {
+			return &cfg.ClaudeKey[index]
+		}
+	}
 
 	apiKey, baseURL := claudeCreds(auth)
-	if apiKey == "" {
+	apiKey = strings.TrimSpace(apiKey)
+	baseURL = strings.TrimSpace(baseURL)
+	if apiKey == "" && baseURL == "" {
 		return nil
 	}
 
@@ -521,13 +530,18 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 		entry := &cfg.ClaudeKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if !strings.EqualFold(cfgKey, apiKey) {
-			continue
+		if apiKey != "" {
+			if !strings.EqualFold(cfgKey, apiKey) {
+				continue
+			}
+			if baseURL != "" && cfgBase != "" && !strings.EqualFold(cfgBase, baseURL) {
+				continue
+			}
+			return entry
 		}
-		if baseURL != "" && cfgBase != "" && !strings.EqualFold(cfgBase, baseURL) {
-			continue
+		if baseURL != "" && strings.EqualFold(cfgBase, baseURL) {
+			return entry
 		}
-		return entry
 	}
 
 	return nil

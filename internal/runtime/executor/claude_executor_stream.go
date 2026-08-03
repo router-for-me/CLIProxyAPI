@@ -119,13 +119,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = reconcileClaudeCodeContextManagement(body, contextManagementState)
 	body = normalizeClaudeSamplingForUpstream(body, confirmedClaudeCode)
 
-	// Default cache_control for translated entrypoints (Responses/Chat/Gemini) and other
-	// non-native callers. Confirmed native Claude Code owns its marker placement and must
-	// not be rewritten. Cloaked requests always run section-independent ensure so cloaking's
-	// first-user marker cannot suppress system/latest-user breakpoints.
-	// cloaked and confirmedClaudeCode are mutually exclusive: resolveClaudeWirePolicy
-	// forces Cloak off for a confirmed native client.
-	cpaOwnsCacheControl := shouldEnsureCacheControl(body, cloaked, confirmedClaudeCode)
+	// Resolve cache ownership only after payload rules and the remaining body policy
+	// have produced the final request. Confirmed Claude Code always owns its wire;
+	// otherwise any explicit marker gives the caller or payload configuration full
+	// control, while markerless requests receive CPA's shared defaults.
+	cpaOwnsCacheControl := shouldEnsureCacheControl(body, confirmedClaudeCode)
 	if cpaOwnsCacheControl {
 		body = ensureCacheControl(body)
 	}
@@ -138,12 +136,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// same credential condition. Upgrading after placement is settled mirrors the
 	// native ttl helper.
 	//
-	// This runs only while CPA owns placement, and it then owns the ttl of every
-	// breakpoint it can reach: a marker carrying no ttl is the wire default, not an
-	// opt-in to 5m, so a cloaked caller's bare {"type":"ephemeral"} is upgraded too.
-	// Only a ttl the caller wrote out explicitly survives, because
-	// upgradeClaudeCacheControlTTL skips any block that already has one.
-	// claude-code-cli fingerprint profiles emit extended-cache-ttl and must use the same 1h pool.
+	// This runs only while CPA owns placement, so explicit caller or payload markers
+	// keep their chosen ttl. For generated markers, the marker with no ttl is the
+	// native wire default and is upgraded for every Claude Code CLI fingerprint
+	// profile that advertises the extended cache pool.
 	if cpaOwnsCacheControl && fp.ProfileClaudeCodeCLI {
 		body = upgradeClaudeCacheControlTTL(body, claudeCacheControlTTL1h)
 	}
