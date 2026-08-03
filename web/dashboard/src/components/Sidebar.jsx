@@ -112,7 +112,8 @@ const NAV_GROUPS = [
   {
     label: 'Overview',
     items: [
-      { to: '/', label: 'API Keys', icon: 'key', end: true },
+      { to: '/', label: 'Dashboard', icon: 'home', end: true },
+      { to: '/api-keys', label: 'API Keys', icon: 'key' },
       { to: '/internal-users', label: 'Internal Users', icon: 'users' },
       { to: '/model-groups', label: 'Model Groups', icon: 'layers' },
       { to: '/models', label: 'Models Catalog', icon: 'cube' },
@@ -173,6 +174,7 @@ const BRAND_SVG = `<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
 </svg>`;
 
 const ICON_MAP = {
+  home: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2.5 7L8 2l5.5 5M4 6v7.5h8V6" /></svg>,
   key: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="5" cy="11" r="2.5" /><path d="M7 9l6-6M10 6l2 2" strokeLinecap="round" /></svg>,
   chart: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M2 14V2M2 14h12M5 11V7M8 11V4M11 11V8" /></svg>,
   users: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="5.5" r="2" /><path d="M2.5 13.5c0-2 1.5-3.5 3.5-3.5s3.5 1.5 3.5 3.5" /><circle cx="11" cy="6.5" r="1.7" /><path d="M9 13.5c0-1.6 1-3 2.5-3s2.5 1.4 2.5 3" /></svg>,

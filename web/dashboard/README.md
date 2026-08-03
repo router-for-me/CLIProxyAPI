@@ -123,7 +123,11 @@ fails.
 
 ## Pages
 
-- **API Keys** (`/`) — list, create, delete, and navigate to per-key detail.
+- **Dashboard** (`/`) — at-a-glance operational overview: usage KPIs,
+  request/cost charts, top models by cost, model health, catalog liveness,
+  active alerts, and cooldown providers (each block survives partial PG
+  outages independently).
+- **API Keys** (`/api-keys`) — list, create, delete, and navigate to per-key detail.
 - **API Key Detail** (`/api-keys/:id`) — view/edit policy (RPM, hourly rate,
   hourly/weekly/monthly budget caps, model whitelist/blacklist), regenerate
   secret, change status, view budget windows.

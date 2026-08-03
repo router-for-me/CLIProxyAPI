@@ -2481,6 +2481,16 @@ tr:focus-within .row-actions {
   transition: width 0.2s ease;
 }
 
+/* Compact list used by dashboard overview cards (cooldowns, active alerts). */
+.cooldown-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 /* Detail modal label/value pair — replaces inline-styled DetailRow. */
 .detail-row { display: flex; flex-direction: column; gap: 2px; }
 .detail-row__label {

@@ -28,6 +28,7 @@ import ModelHealthPage from './pages/ModelHealthPage.jsx';
 import CooldownProvidersPage from './pages/CooldownProvidersPage.jsx';
 import SessionAffinityPage from './pages/SessionAffinityPage.jsx';
 import AlertsPage from './pages/AlertsPage.jsx';
+import DashboardPage from './pages/DashboardPage.jsx';
 import ManageCpaLayout from './pages/manage-cpa/ManageCpaLayout.jsx';
 import OverviewTab from './pages/manage-cpa/OverviewTab.jsx';
 import ProvidersTab from './pages/manage-cpa/ProvidersTab.jsx';
@@ -213,7 +214,8 @@ export default function App() {
         <main className="main">
           <Routes>
             <Route path="/login" element={<Navigate to="/" replace />} />
-            <Route path="/" element={<ApiKeysPage />} />
+            <Route path="/" element={<DashboardPage />} />
+            <Route path="/api-keys" element={<ApiKeysPage />} />
             <Route path="/api-keys/:id" element={<ApiKeyDetailPage />} />
   <Route path="/usage" element={<UsageStatsPage />} />
   <Route path="/recent-events" element={<RecentEventsPage />} />
