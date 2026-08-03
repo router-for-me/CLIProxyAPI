@@ -19,6 +19,7 @@ _claude_profile_clear() {
   unset ANTHROPIC_DEFAULT_FABLE_MODEL
   unset ANTHROPIC_DEFAULT_FABLE_MODEL_NAME
   unset CLAUDE_CODE_SUBAGENT_MODEL
+  unset CLAUDE_CODE_ACTIVE_PROFILE
   unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
   unset CLAUDE_CODE_EFFORT_LEVEL
   unset ENABLE_TOOL_SEARCH
@@ -71,28 +72,30 @@ claude-profile() {
   export ANTHROPIC_BASE_URL="${CLAUDE_CODE_ROUTER_URL:-http://127.0.0.1:8317}"
   export ANTHROPIC_AUTH_TOKEN="$router_token"
   export CLAUDE_CODE_AUTO_COMPACT_WINDOW="262144"
-  export CLAUDE_CODE_EFFORT_LEVEL="max"
 
   case "$profile" in
     openai)
+      export CLAUDE_CODE_EFFORT_LEVEL="max"
       export ANTHROPIC_MODEL="gpt-5.6-luna(high)"
       export ANTHROPIC_DEFAULT_OPUS_MODEL="gpt-5.6-sol(medium)"
       export ANTHROPIC_DEFAULT_SONNET_MODEL="gpt-5.6-luna(max)"
       export ANTHROPIC_DEFAULT_HAIKU_MODEL="gpt-5.5"
       export ANTHROPIC_DEFAULT_FABLE_MODEL="gpt-5.6-sol(high)"
       export ANTHROPIC_SMALL_FAST_MODEL="gpt-5.5"
-      export CLAUDE_CODE_SUBAGENT_MODEL="gpt-5.5(high)"
+      export CLAUDE_CODE_SUBAGENT_MODEL="gpt-5.6-luna(high)"
       ;;
     claude)
-      export ANTHROPIC_MODEL="claude-sonnet-5"
+      export CLAUDE_CODE_EFFORT_LEVEL="max"
+      export ANTHROPIC_MODEL="claude-opus-5"
       export ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-5"
       export ANTHROPIC_DEFAULT_SONNET_MODEL="claude-sonnet-5"
       export ANTHROPIC_DEFAULT_HAIKU_MODEL="claude-sonnet-5"
       export ANTHROPIC_DEFAULT_FABLE_MODEL="claude-fable-5"
       export ANTHROPIC_SMALL_FAST_MODEL="claude-sonnet-5"
-      export CLAUDE_CODE_SUBAGENT_MODEL="claude-sonnet-5"
+      export CLAUDE_CODE_SUBAGENT_MODEL="claude-opus-5"
       ;;
     kimi)
+      export CLAUDE_CODE_EFFORT_LEVEL="high"
       export ANTHROPIC_MODEL="kimi-k2.7-code"
       export ANTHROPIC_DEFAULT_OPUS_MODEL="kimi-k2.7-code"
       export ANTHROPIC_DEFAULT_SONNET_MODEL="kimi-k2.7-code"
@@ -102,7 +105,8 @@ claude-profile() {
       export CLAUDE_CODE_SUBAGENT_MODEL="kimi-k2.7-code"
       ;;
     mixed)
-      export ANTHROPIC_MODEL="kimi-k2.7-code"
+      export CLAUDE_CODE_EFFORT_LEVEL="high"
+      export ANTHROPIC_MODEL="claude-opus-5"
       export ANTHROPIC_DEFAULT_OPUS_MODEL="gpt-5.6-sol(high)"
       export ANTHROPIC_DEFAULT_SONNET_MODEL="claude-opus-5"
       export ANTHROPIC_DEFAULT_HAIKU_MODEL="claude-fable-5"
@@ -112,8 +116,11 @@ claude-profile() {
       ;;
   esac
 
+  CLAUDE_CODE_ACTIVE_PROFILE="$profile"
+
   print "Claude profile: $profile"
   print "Base URL: $ANTHROPIC_BASE_URL"
+  print "Effort: $CLAUDE_CODE_EFFORT_LEVEL"
   print "Main: $ANTHROPIC_MODEL"
   print "Opus tier: $ANTHROPIC_DEFAULT_OPUS_MODEL"
   print "Sonnet tier: $ANTHROPIC_DEFAULT_SONNET_MODEL"
