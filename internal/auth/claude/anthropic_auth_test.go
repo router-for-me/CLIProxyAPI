@@ -17,6 +17,49 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+func TestNewAnthropicHttpClientDoesNotSetRequestTimeout(t *testing.T) {
+	if got := NewAnthropicHttpClient(nil).Timeout; got != 0 {
+		t.Fatalf("HTTP client timeout = %s, want zero", got)
+	}
+}
+
+func TestRefreshTokens_UsesIndependentTimeout(t *testing.T) {
+	resetClaudeRefreshState()
+	defer resetClaudeRefreshState()
+
+	callerCtx, cancelCaller := context.WithCancel(context.Background())
+	cancelCaller()
+	var requestDeadline time.Time
+	auth := &ClaudeAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				var ok bool
+				requestDeadline, ok = req.Context().Deadline()
+				if !ok {
+					t.Fatal("refresh request has no deadline")
+				}
+				if errContext := req.Context().Err(); errContext != nil {
+					t.Fatalf("refresh request context is already done: %v", errContext)
+				}
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Body:       io.NopCloser(strings.NewReader(`{"error":"probe"}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	_, err := auth.RefreshTokens(callerCtx, "independent-timeout-token")
+	if err == nil {
+		t.Fatal("expected refresh error")
+	}
+	if requestDeadline.IsZero() || !requestDeadline.After(time.Now()) {
+		t.Fatalf("refresh deadline = %v, want a future deadline", requestDeadline)
+	}
+}
+
 func TestRefreshTokensWithRetry_429BlocksImmediateReplay(t *testing.T) {
 	resetClaudeRefreshState()
 	defer resetClaudeRefreshState()

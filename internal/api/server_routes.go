@@ -294,12 +294,12 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 	var selection *auth.HomeDispatchSelection
 	var selected *auth.Auth
 	if s.handlers.AuthManager.HomeEnabled() {
-		selection, err = s.handlers.AuthManager.SelectHomeAuthByKind(ctx, "codex", selectionModel, auth.AuthKindOAuth, selectionOpts)
+		selection, err = s.handlers.AuthManager.SelectHomeAuthWithCredentialPolicy(ctx, "codex", selectionModel, auth.CredentialPolicyCodexAlphaSearchV1, selectionOpts)
 		if selection != nil {
 			selected = selection.CloneAuth()
 		}
 	} else {
-		selected, err = s.handlers.AuthManager.SelectAuthByKind(ctx, "codex", selectionModel, auth.AuthKindOAuth, selectionOpts)
+		selected, err = s.handlers.AuthManager.SelectAuthWithCredentialPolicy(ctx, "codex", selectionModel, auth.CredentialPolicyCodexAlphaSearchV1, selectionOpts)
 	}
 	if err != nil {
 		status := http.StatusServiceUnavailable
@@ -346,7 +346,21 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		headers.Set("Chatgpt-Account-Id", accountID)
 	}
 
-	const upstreamURL = "https://chatgpt.com/backend-api/codex/alpha/search"
+	upstreamURL := "https://chatgpt.com/backend-api/codex/alpha/search"
+	if selected.AuthKind() == auth.AuthKindAPIKey {
+		baseURL := ""
+		if selected.Attributes != nil {
+			baseURL = strings.TrimSpace(selected.Attributes["base_url"])
+		}
+		if baseURL == "" {
+			if selection != nil {
+				selection.End("missing_base_url")
+			}
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex Alpha Search API key base URL unavailable"})
+			return
+		}
+		upstreamURL = strings.TrimRight(baseURL, "/") + "/alpha/search"
+	}
 	req, err := s.handlers.AuthManager.NewHttpRequest(
 		ctx, selected, http.MethodPost, upstreamURL, upstreamRequestBody, headers,
 	)

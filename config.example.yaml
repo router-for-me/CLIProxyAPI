@@ -220,7 +220,7 @@ codex:
   # Some superstitious users believe request tracking identifiers can be used
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
-  # Disable forcing the official Codex User-Agent and Originator headers on HTTP requests.
+  # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
   disable-codex-cloaking: false
   # When true, optimize Codex Desktop and codex-tui requests for multi-agent v2.
   # This refreshes Codex spawn_agent model details, removes message parameter encryption,
@@ -295,6 +295,7 @@ nonstream-keepalive-interval: 0
 #       - name: "gemini-2.5-flash" # upstream model name
 #         alias: "gemini-flash"    # client alias mapped to the upstream model
 #         display-name: "Gemini Flash" # optional catalog display name
+#         max-context-length: 1048576 # optional: override Codex client context window metadata
 #         thinking:                  # optional: exact thinking capability for this configured model
 #           levels: ["high", "medium", "low", "none", "auto"]
 #     excluded-models:
@@ -320,6 +321,7 @@ nonstream-keepalive-interval: 0
 #     models:
 #       - name: "gemini-2.5-flash" # upstream model name
 #         alias: "native-gemini-flash" # client alias mapped to the upstream model
+#         max-context-length: 1048576 # optional: override Codex client context window metadata
 #         thinking:                  # optional: exact thinking capability for this configured model
 #           levels: ["high", "medium", "low", "none", "auto"]
 #     excluded-models:
@@ -332,6 +334,7 @@ nonstream-keepalive-interval: 0
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
+#     alpha-search: false # optional: allow this key to serve /v1/alpha/search via base-url + /alpha/search
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
@@ -340,6 +343,7 @@ nonstream-keepalive-interval: 0
 #       - name: "gpt-5-codex"   # upstream model name
 #         alias: "codex-latest" # client alias mapped to the upstream model
 #         display-name: "Codex Latest" # optional catalog display name
+#         max-context-length: 1048576 # optional: override Codex client context window metadata
 #         force-mapping: true    # optional: rewrite response model fields back to the alias
 #         thinking:              # optional: exact thinking capability for this configured model
 #           levels: ["xhigh", "high", "medium", "low"]
@@ -366,6 +370,7 @@ nonstream-keepalive-interval: 0
 #       - name: "grok-4.5"       # upstream model name
 #         alias: "grok-latest"   # client alias mapped to the upstream model
 #         display-name: "Grok Latest" # optional catalog display name
+#         max-context-length: 1048576 # optional: override Codex client context window metadata
 #         force-mapping: true     # optional: rewrite response model fields back to the alias
 #         thinking:               # optional: exact thinking capability for this configured model
 #           levels: ["xhigh", "high", "medium", "low"]
@@ -389,6 +394,7 @@ nonstream-keepalive-interval: 0
 #       - name: "claude-3-5-sonnet-20241022" # upstream model name
 #         alias: "claude-sonnet-latest"      # client alias mapped to the upstream model
 #         display-name: "Claude Sonnet"      # optional catalog display name
+#         max-context-length: 1048576         # optional: override Codex client context window metadata
 #         force-mapping: true                 # optional: rewrite response model fields back to the alias
 #         thinking:                           # optional: exact thinking capability for this configured model
 #           levels: ["max", "xhigh", "high", "medium", "low", "minimal", "none", "auto"]
@@ -444,6 +450,7 @@ nonstream-keepalive-interval: 0
 #     disabled: false # optional: set to true to disable this provider without removing it
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests from all input protocols
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -457,8 +464,9 @@ nonstream-keepalive-interval: 0
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2"               # The alias used in the API.
 #         display-name: "Kimi K2"         # optional catalog display name
+#         max-context-length: 1048576    # optional: override Codex client context window metadata
 #         image: false                   # optional: set true to allow this model on /v1/images/generations and /v1/images/edits (not chat/responses image input)
-#         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients
+#         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients. Use [text] for upstreams that reject multimodal tool result content.
 #         output-modalities: [text]       # optional: declare output modalities when known
 #         thinking:                      # optional: omit to default to levels ["low","medium","high"]
 #           levels: ["low", "medium", "high"]
