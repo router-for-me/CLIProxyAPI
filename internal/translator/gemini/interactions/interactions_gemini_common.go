@@ -449,20 +449,17 @@ func normalizeInteractionsGenerationConfig(out []byte) []byte {
 }
 
 func interactionsThinkingSummariesIncludeThoughts(summary gjson.Result) (bool, bool) {
-	switch summary.Type {
-	case gjson.True:
-		return true, true
-	case gjson.False:
-		return false, true
-	case gjson.String:
-		switch strings.ToLower(strings.TrimSpace(summary.String())) {
-		case "", "none", "off", "false", "disabled":
-			return false, true
-		default:
-			return true, true
-		}
+	if summary.Type != gjson.String {
+		return false, false
 	}
-	return false, false
+	switch strings.ToLower(strings.TrimSpace(summary.String())) {
+	case "auto":
+		return true, true
+	case "none":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func copyInteractionsResponseModalities(out []byte, root gjson.Result) []byte {
@@ -1057,6 +1054,15 @@ func interactionsGeminiContent(role string, parts [][]byte) []byte {
 	return content
 }
 
+func firstInteractionsGeminiUsage(usage gjson.Result, paths ...string) gjson.Result {
+	for _, path := range paths {
+		if value := usage.Get(path); value.Exists() {
+			return value
+		}
+	}
+	return gjson.Result{}
+}
+
 func setInteractionsUsageFromGemini(out []byte, path string, root gjson.Result) []byte {
 	usage := root.Get("usageMetadata")
 	if !usage.Exists() {
@@ -1065,12 +1071,12 @@ func setInteractionsUsageFromGemini(out []byte, path string, root gjson.Result) 
 	if !usage.Exists() {
 		return out
 	}
-	out, _ = sjson.SetBytes(out, path+".input_tokens", usage.Get("promptTokenCount").Int())
-	out, _ = sjson.SetBytes(out, path+".output_tokens", usage.Get("candidatesTokenCount").Int())
-	if reasoning := usage.Get("thoughtsTokenCount"); reasoning.Exists() {
+	out, _ = sjson.SetBytes(out, path+".input_tokens", firstInteractionsGeminiUsage(usage, "promptTokenCount", "prompt_token_count").Int())
+	out, _ = sjson.SetBytes(out, path+".output_tokens", firstInteractionsGeminiUsage(usage, "candidatesTokenCount", "candidates_token_count").Int())
+	if reasoning := firstInteractionsGeminiUsage(usage, "thoughtsTokenCount", "thoughts_token_count"); reasoning.Exists() {
 		out, _ = sjson.SetBytes(out, path+".reasoning_tokens", reasoning.Int())
 	}
-	out, _ = sjson.SetBytes(out, path+".total_tokens", usage.Get("totalTokenCount").Int())
+	out, _ = sjson.SetBytes(out, path+".total_tokens", firstInteractionsGeminiUsage(usage, "totalTokenCount", "total_token_count").Int())
 	if cached := usage.Get("cachedContentTokenCount"); cached.Exists() {
 		out, _ = sjson.SetBytes(out, path+".cached_tokens", cached.Int())
 	} else if cached := usage.Get("cached_content_token_count"); cached.Exists() {
@@ -1087,10 +1093,10 @@ func setInteractionsStreamUsageFromGemini(out []byte, path string, root gjson.Re
 	if !usage.Exists() {
 		return out
 	}
-	inputTokens := usage.Get("promptTokenCount").Int()
-	outputTokens := usage.Get("candidatesTokenCount").Int()
-	totalTokens := usage.Get("totalTokenCount").Int()
-	thoughtTokens := usage.Get("thoughtsTokenCount").Int()
+	inputTokens := firstInteractionsGeminiUsage(usage, "promptTokenCount", "prompt_token_count").Int()
+	outputTokens := firstInteractionsGeminiUsage(usage, "candidatesTokenCount", "candidates_token_count").Int()
+	totalTokens := firstInteractionsGeminiUsage(usage, "totalTokenCount", "total_token_count").Int()
+	thoughtTokens := firstInteractionsGeminiUsage(usage, "thoughtsTokenCount", "thoughts_token_count").Int()
 	cachedTokens := usage.Get("cachedContentTokenCount").Int()
 	if cachedTokens == 0 {
 		cachedTokens = usage.Get("cached_content_token_count").Int()
