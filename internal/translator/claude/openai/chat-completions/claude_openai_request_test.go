@@ -521,3 +521,60 @@ func TestConvertOpenAIRequestToClaude_PartCacheControlWinsOverMessageLevel(t *te
 		t.Fatalf("part-level cache_control should win; unexpected ttl: %s", result)
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_DeveloperRoleBecomesTopLevelSystem(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role": "system", "content": "S1"},
+			{"role": "developer", "content": [{"type": "text", "text": "D1"}, {"type": "text", "text": "D2"}]},
+			{"role": "user", "content": "Hello"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	system := resultJSON.Get("system").Array()
+	if len(system) != 3 {
+		t.Fatalf("system blocks = %d, want 3. system: %s", len(system), resultJSON.Get("system").Raw)
+	}
+	for idx, want := range []string{"S1", "D1", "D2"} {
+		if got := system[idx].Get("type").String(); got != "text" {
+			t.Fatalf("system[%d].type = %q, want text", idx, got)
+		}
+		if got := system[idx].Get("text").String(); got != want {
+			t.Fatalf("system[%d].text = %q, want %q", idx, got, want)
+		}
+	}
+
+	messages := resultJSON.Get("messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("messages = %d, want 1. messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("messages[0].role = %q, want user", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_DeveloperMessageCacheControlAppliesToLastBlock(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role": "developer", "content": [{"type": "text", "text": "D1"}, {"type": "text", "text": "D2"}], "cache_control": {"type": "ephemeral"}},
+			{"role": "user", "content": "Hello"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	system := gjson.ParseBytes(result).Get("system").Array()
+	if len(system) != 2 {
+		t.Fatalf("system blocks = %d, want 2", len(system))
+	}
+	if system[0].Get("cache_control").Exists() {
+		t.Fatalf("system[0] must not carry cache_control: %s", system[0].Raw)
+	}
+	if got := system[1].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system[1].cache_control.type = %q, want ephemeral", got)
+	}
+}

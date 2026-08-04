@@ -89,6 +89,72 @@ func TestConvertClaudeResponseToOpenAIResponses_ThinkingIncludesSignature(t *tes
 	}
 }
 
+func TestConvertClaudeResponseToOpenAIResponses_RedactedThinkingBecomesMarkedReasoningItem(t *testing.T) {
+	const data = "EroBCkYIBRgCKkA"
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"` + data + `"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"done"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &param)...)
+	}
+
+	want := ClaudeResponsesRedactedThinkingPrefix + data
+	var reasoningDone, completed gjson.Result
+	for _, output := range outputs {
+		event, parsed := parseClaudeResponsesSSEEvent(t, output)
+		switch event {
+		case "response.output_item.done":
+			if parsed.Get("item.type").String() == "reasoning" {
+				reasoningDone = parsed
+			}
+		case "response.completed":
+			completed = parsed
+		}
+	}
+
+	if !reasoningDone.Exists() {
+		t.Fatal("expected reasoning output_item.done event for redacted_thinking")
+	}
+	if got := reasoningDone.Get("item.encrypted_content").String(); got != want {
+		t.Fatalf("reasoning encrypted_content = %q, want %q", got, want)
+	}
+	if got := completed.Get("response.output.0.encrypted_content").String(); got != want {
+		t.Fatalf("completed reasoning encrypted_content = %q, want %q", got, want)
+	}
+	if got := completed.Get("response.output.1.type").String(); got != "message" {
+		t.Fatalf("completed output[1].type = %q, want message", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponsesNonStream_RedactedThinkingBecomesMarkedReasoningItem(t *testing.T) {
+	const data = "EroBCkYIBRgCKkA"
+	raw := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"` + data + `"}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n")
+
+	out := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, []byte(raw), nil)
+	parsed := gjson.ParseBytes(out)
+	if got := parsed.Get("output.0.type").String(); got != "reasoning" {
+		t.Fatalf("output.0.type = %q, want reasoning; body=%s", got, out)
+	}
+	want := ClaudeResponsesRedactedThinkingPrefix + data
+	if got := parsed.Get("output.0.encrypted_content").String(); got != want {
+		t.Fatalf("output.0.encrypted_content = %q, want %q", got, want)
+	}
+}
+
 func TestConvertClaudeResponseToOpenAIResponses_SuppressesSignatureDeltaPassthrough(t *testing.T) {
 	chunk := []byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"claude_sig_123"}}`)
 

@@ -40,6 +40,9 @@ type captureExecutor struct {
 	selectedAuth *auth.Auth
 	responseBody io.ReadCloser
 	statusCode   int
+	statuses     []int
+	httpCalls    atomic.Int32
+	refreshCalls atomic.Int32
 }
 
 func (*captureExecutor) Identifier() string { return "codex" }
@@ -52,8 +55,14 @@ func (*captureExecutor) ExecuteStream(context.Context, *auth.Auth, coreexecutor.
 	return nil, nil
 }
 
-func (*captureExecutor) Refresh(_ context.Context, credential *auth.Auth) (*auth.Auth, error) {
-	return credential, nil
+func (e *captureExecutor) Refresh(_ context.Context, credential *auth.Auth) (*auth.Auth, error) {
+	e.refreshCalls.Add(1)
+	updated := credential.Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = make(map[string]any)
+	}
+	updated.Metadata["access_token"] = "refreshed-home-live-token"
+	return updated, nil
 }
 
 func (*captureExecutor) CountTokens(context.Context, *auth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
@@ -69,14 +78,22 @@ func (*captureExecutor) PrepareRequest(req *http.Request, credential *auth.Auth)
 func (e *captureExecutor) HttpRequest(_ context.Context, credential *auth.Auth, req *http.Request) (*http.Response, error) {
 	e.request = req.Clone(req.Context())
 	e.selectedAuth = credential.Clone()
+	httpCall := int(e.httpCalls.Add(1))
 	body, errRead := io.ReadAll(req.Body)
 	if errRead != nil {
 		return nil, errRead
 	}
 	e.body = body
 	statusCode := e.statusCode
+	if httpCall <= len(e.statuses) && e.statuses[httpCall-1] > 0 {
+		statusCode = e.statuses[httpCall-1]
+	}
 	if statusCode == 0 {
 		statusCode = http.StatusCreated
+	}
+	responseBody := e.responseBody
+	if statusCode == http.StatusUnauthorized && httpCall < len(e.statuses) {
+		responseBody = io.NopCloser(strings.NewReader("unauthorized"))
 	}
 	return &http.Response{
 		StatusCode: statusCode,
@@ -88,7 +105,7 @@ func (e *captureExecutor) HttpRequest(_ context.Context, credential *auth.Auth, 
 			"X-Connection-Secret": []string{"secret"},
 			"X-Live-Session":      []string{"live-session-123"},
 		},
-		Body: e.responseBody,
+		Body: responseBody,
 	}, nil
 }
 
@@ -589,6 +606,40 @@ func TestHandlerClosesMediaWhenResponseWriteFails(t *testing.T) {
 	}
 }
 
+func TestHandlerRefreshesUnauthorizedHomeSelectionOnce(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := auth.NewManager(nil, nil, nil)
+	manager.SetConfig(&config.Config{Home: config.HomeConfig{Enabled: true}})
+	registry := executionregistry.New()
+	manager.PublishHomeDispatch(&homeDispatcher{}, registry, 1)
+	executor := &captureExecutor{
+		statuses:     []int{http.StatusUnauthorized, http.StatusCreated},
+		responseBody: &trackedResponseBody{Reader: strings.NewReader("v=0\r\n")},
+	}
+	manager.RegisterExecutor(executor)
+	handler := NewHandler(manager, nil)
+	router := gin.New()
+	router.POST("/v1/live", handler.Handle)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/live", strings.NewReader(`{"model":"gpt-live-1-codex","sdp":"v=0"}`))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusCreated, recorder.Body.String())
+	}
+	if executor.refreshCalls.Load() != 1 || executor.httpCalls.Load() != 2 {
+		t.Fatalf("refresh/http calls = %d/%d, want 1/2", executor.refreshCalls.Load(), executor.httpCalls.Load())
+	}
+	if got := executor.request.Header.Get("Authorization"); got != "Bearer refreshed-home-live-token" {
+		t.Fatalf("retry Authorization = %q, want refreshed token", got)
+	}
+	if errDrain := registry.Drain(context.Background()); errDrain != nil {
+		t.Fatalf("Drain() error = %v", errDrain)
+	}
+}
+
 func TestHandlerUsesLiveModelForHomeDispatch(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -764,6 +815,80 @@ func TestHandleSidebandPinsAuthAndRelaysBidirectionally(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("upstream sideband headers were not captured")
+	}
+}
+
+func TestHandleSidebandRefreshesUnauthorizedHomeHandshakeOnce(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var upstreamCalls atomic.Int32
+	upstreamHeaders := make(chan http.Header, 2)
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upstreamCalls.Add(1)
+		upstreamHeaders <- request.Header.Clone()
+		if request.Header.Get("Authorization") != "Bearer refreshed-home-live-token" {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, errUpgrade := upgrader.Upgrade(writer, request, nil)
+		if errUpgrade != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		messageType, payload, errRead := conn.ReadMessage()
+		if errRead == nil {
+			_ = conn.WriteMessage(messageType, append([]byte("echo:"), payload...))
+		}
+	}))
+	defer upstreamServer.Close()
+
+	manager := auth.NewManager(nil, nil, nil)
+	manager.SetConfig(&config.Config{Home: config.HomeConfig{Enabled: true}})
+	registry := executionregistry.New()
+	manager.PublishHomeDispatch(&homeDispatcher{}, registry, 1)
+	executor := &captureExecutor{}
+	manager.RegisterExecutor(executor)
+	selection, errSelect := manager.SelectHomeAuthByKind(context.Background(), "codex", defaultLiveModel, auth.AuthKindOAuth, coreexecutor.Options{})
+	if errSelect != nil {
+		t.Fatalf("SelectHomeAuthByKind() error = %v", errSelect)
+	}
+	selection.Retain()
+	defer selection.End("test_complete")
+
+	handler := NewHandler(manager, nil)
+	handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstreamServer.URL, "http") + "/v1"
+	handler.sessions.put("call-home-refresh", liveSession{authID: "home-codex-live", model: defaultLiveModel, homeSelection: selection})
+	router := gin.New()
+	router.GET("/v1/live/:call_id", handler.HandleSideband)
+	downstreamServer := httptest.NewServer(router)
+	defer downstreamServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(downstreamServer.URL, "http") + "/v1/live/call-home-refresh"
+	client, response, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
+		t.Fatalf("dial downstream sideband: %v", errDial)
+	}
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+	defer func() { _ = client.Close() }()
+	if errWrite := client.WriteMessage(websocket.TextMessage, []byte("ping")); errWrite != nil {
+		t.Fatalf("write sideband message: %v", errWrite)
+	}
+	_, payload, errRead := client.ReadMessage()
+	if errRead != nil || string(payload) != "echo:ping" {
+		t.Fatalf("read sideband message = %q, %v", string(payload), errRead)
+	}
+	if executor.refreshCalls.Load() != 1 || upstreamCalls.Load() != 2 {
+		t.Fatalf("refresh/upstream calls = %d/%d, want 1/2", executor.refreshCalls.Load(), upstreamCalls.Load())
+	}
+	first := <-upstreamHeaders
+	second := <-upstreamHeaders
+	if first.Get("Authorization") != "Bearer home-live-token" || second.Get("Authorization") != "Bearer refreshed-home-live-token" {
+		t.Fatalf("upstream Authorization sequence = %q, %q", first.Get("Authorization"), second.Get("Authorization"))
 	}
 }
 
