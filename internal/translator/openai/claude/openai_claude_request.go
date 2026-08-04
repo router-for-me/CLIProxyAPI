@@ -227,7 +227,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				}
 
 				hasContent := len(contentItems) > 0
-				hasReasoning := reasoningContent != ""
+				hasReasoning := strings.TrimSpace(reasoningContent) != ""
 				hasToolCalls := len(toolCalls) > 0
 				hasToolResults := len(toolResults) > 0
 

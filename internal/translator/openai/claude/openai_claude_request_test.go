@@ -459,7 +459,7 @@ func TestConvertClaudeRequestToOpenAI_ReasoningContentPreservedAfterToolCall(t *
 	}
 }
 
-func TestConvertClaudeRequestToOpenAI_FallbackReasoningContentWhenThinkingMissing(t *testing.T) {
+func TestConvertClaudeRequestToOpenAI_FallbackReasoningContentWhenThinkingUnavailable(t *testing.T) {
 	// Case 1: Assistant message with tool_use but NO thinking block
 	inputJSONNoThinking := `{
 		"model": "deepseek-v4-flash",
@@ -499,6 +499,40 @@ func TestConvertClaudeRequestToOpenAI_FallbackReasoningContentWhenThinkingMissin
 	assistantMsgClaudeSig := gjson.GetBytes(resultClaudeSig, "messages.1")
 	if got := assistantMsgClaudeSig.Get("reasoning_content").String(); got != "[reasoning unavailable]" {
 		t.Fatalf("expected fallback reasoning_content '[reasoning unavailable]' when thinking block has Claude signature, got %q. Output: %s", got, string(resultClaudeSig))
+	}
+
+	// Negative Assertion 1: Assistant message without tool_calls and without thinking must NOT have reasoning_content injected
+	inputJSONTextOnly := `{
+		"model": "deepseek-v4-flash",
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"Hello"}]},
+			{"role":"assistant","content":[{"type":"text","text":"Hi there"}]}
+		]
+	}`
+	resultTextOnly := ConvertClaudeRequestToOpenAI("deepseek-v4-flash", []byte(inputJSONTextOnly), false)
+	assistantMsgTextOnly := gjson.GetBytes(resultTextOnly, "messages.1")
+	if assistantMsgTextOnly.Get("reasoning_content").Exists() {
+		t.Fatalf("assistant message without tool_calls or thinking must NOT contain reasoning_content. Output: %s", string(resultTextOnly))
+	}
+
+	// Negative Assertion 2: Assistant message with tool_calls AND valid thinking must keep original thinking (not replaced by sentinel)
+	inputJSONValidThinking := `{
+		"model": "deepseek-v4-flash",
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"Read file"}]},
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"Valid reasoning text"},
+				{"type":"tool_use","id":"call_1","name":"read_file","input":{"path":"main.go"}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"call_1","content":"package main"}
+			]}
+		]
+	}`
+	resultValidThinking := ConvertClaudeRequestToOpenAI("deepseek-v4-flash", []byte(inputJSONValidThinking), false)
+	assistantMsgValidThinking := gjson.GetBytes(resultValidThinking, "messages.1")
+	if got := assistantMsgValidThinking.Get("reasoning_content").String(); got != "Valid reasoning text" {
+		t.Fatalf("expected original reasoning text 'Valid reasoning text', got %q. Output: %s", got, string(resultValidThinking))
 	}
 }
 
