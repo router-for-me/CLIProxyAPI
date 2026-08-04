@@ -173,8 +173,13 @@ func TestShouldEnsureOpenAICompatReasoningContent(t *testing.T) {
 		want           bool
 	}{
 		{
-			name:          "deepseek-reasoner model",
-			upstreamModel: "deepseek-reasoner",
+			name:          "deepseek-v4-reasoner model",
+			upstreamModel: "deepseek-v4-reasoner",
+			want:          true,
+		},
+		{
+			name:          "deepseek-v4-flash model",
+			upstreamModel: "deepseek-v4-flash",
 			want:          true,
 		},
 		{
