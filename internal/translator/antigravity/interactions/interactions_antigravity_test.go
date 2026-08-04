@@ -68,6 +68,35 @@ func TestConvertInteractionsRequestToAntigravityPreservesGenerationConfig(t *tes
 	}
 }
 
+func TestConvertInteractionsReasoningToAntigravityKeepsSummaryIndependent(t *testing.T) {
+	tests := []struct {
+		name       string
+		reasoning  string
+		want       bool
+		wantExists bool
+	}{
+		{name: "effort only leaves summaries unspecified", reasoning: `{"effort":"high"}`},
+		{name: "explicit auto enables summaries", reasoning: `{"effort":"high","summary":"auto"}`, want: true, wantExists: true},
+		{name: "explicit none disables summaries", reasoning: `{"effort":"high","summary":"none"}`, wantExists: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := []byte(`{"model":"antigravity-test","input":"hi","reasoning":` + test.reasoning + `}`)
+			out := ConvertInteractionsRequestToAntigravity("antigravity-test", body, false)
+			if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "high" {
+				t.Fatalf("thinkingLevel = %q, want high. Output: %s", got, out)
+			}
+			includeThoughts := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts")
+			if includeThoughts.Exists() != test.wantExists {
+				t.Fatalf("includeThoughts exists = %v, want %v. Output: %s", includeThoughts.Exists(), test.wantExists, out)
+			}
+			if test.wantExists && includeThoughts.Bool() != test.want {
+				t.Fatalf("includeThoughts = %v, want %v. Output: %s", includeThoughts.Bool(), test.want, out)
+			}
+		})
+	}
+}
+
 func TestConvertAntigravityResponseToInteractionsNonStream(t *testing.T) {
 	raw := []byte(`{"response":{"responseId":"resp_1","candidates":[{"content":{"role":"model","parts":[{"text":"ok"},{"functionCall":{"name":"lookup","id":"call_1","args":{"q":"x"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}}}`)
 	out := ConvertAntigravityResponseToInteractionsNonStream(context.Background(), "antigravity-test", nil, nil, raw, nil)

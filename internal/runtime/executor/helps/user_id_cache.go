@@ -64,8 +64,16 @@ func CachedUserID(apiKey string) string {
 
 // CachedUserIDRequired returns a stable fake user ID per apiKey for request-time paths.
 func CachedUserIDRequired(ctx context.Context, apiKey string) (string, error) {
+	newUserID := func() (string, error) {
+		sessionID, errSessionID := CachedSessionIDRequired(ctx, apiKey)
+		if errSessionID != nil {
+			return "", errSessionID
+		}
+		return generateFakeUserIDWithSessionID(sessionID), nil
+	}
+
 	if apiKey == "" {
-		return generateFakeUserID(), nil
+		return newUserID()
 	}
 	client, homeMode, errClient := currentClaudeIDKVClient()
 	if homeMode {
@@ -83,7 +91,10 @@ func CachedUserIDRequired(ctx context.Context, apiKey string) (string, error) {
 			}
 			return strings.TrimSpace(string(raw)), nil
 		}
-		newID := generateFakeUserID()
+		newID, errNewID := newUserID()
+		if errNewID != nil {
+			return "", errNewID
+		}
 		if _, errSet := client.KVSetNX(ctx, key, []byte(newID), userIDTTL); errSet != nil {
 			return "", errSet
 		}
@@ -118,7 +129,10 @@ func CachedUserIDRequired(ctx context.Context, apiKey string) (string, error) {
 		userIDCacheMu.Unlock()
 	}
 
-	newID := generateFakeUserID()
+	newID, errNewID := newUserID()
+	if errNewID != nil {
+		return "", errNewID
+	}
 
 	userIDCacheMu.Lock()
 	entry, ok = userIDCache[key]

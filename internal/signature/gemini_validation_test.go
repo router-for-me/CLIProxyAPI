@@ -126,24 +126,35 @@ func TestInspectGeminiThoughtSignature_AcceptsGemini3WrappedUUIDEnvelope(t *test
 	}
 }
 
-func TestInspectGeminiThoughtSignature_AcceptsGemini25Field1Envelope(t *testing.T) {
+// TestInspectGeminiThoughtSignature_RejectsGemini25Field1Envelope pins the removal
+// of the repeated field-1 envelope. Gemini 2.5 is out of scope, so its signatures
+// are no longer a known envelope; they degrade to the bypass sentinel on Gemini
+// model parts instead of being replayed verbatim.
+func TestInspectGeminiThoughtSignature_RejectsGemini25Field1Envelope(t *testing.T) {
 	sig := testGemini25ThoughtSignature([]byte{0x01, 0x8f}, []byte{0x01, 0x90, 0x91})
 
-	info, err := InspectGeminiThoughtSignature(sig, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true})
+	if _, err := InspectGeminiThoughtSignature(sig, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true}); err == nil {
+		t.Fatal("Gemini 2.5 field-1 envelope should no longer be a known envelope")
+	}
+
+	info, err := InspectGeminiThoughtSignature(sig)
 	if err != nil {
-		t.Fatalf("Gemini 2.5 field-1 envelope should be known: %v", err)
+		t.Fatalf("inspection without RequireKnownEnvelope should still succeed: %v", err)
 	}
-	if info.Envelope != GeminiThoughtSignatureEnvelopeProtobufField1 {
-		t.Fatalf("Envelope = %q, want %q", info.Envelope, GeminiThoughtSignatureEnvelopeProtobufField1)
+	if info.Envelope != GeminiThoughtSignatureEnvelopeUnknown {
+		t.Fatalf("Envelope = %q, want %q", info.Envelope, GeminiThoughtSignatureEnvelopeUnknown)
 	}
-	if info.HasObservedMarker {
-		t.Fatal("Gemini 2.5 field-1 envelope should not be marked as 0x12")
+	if info.KnownEnvelope {
+		t.Fatal("KnownEnvelope should be false for the retired field-1 envelope")
 	}
-	if info.RecordCount != 2 {
-		t.Fatalf("RecordCount = %d, want 2", info.RecordCount)
+
+	// Gemini model parts still recover through the documented sentinel.
+	decision := DecideSignatureCompatibility(SignatureProviderGemini, sig, SignatureBlockKindGeminiModelPart)
+	if decision.Action != SignatureActionReplaceWithGeminiBypass {
+		t.Fatalf("action = %q, want %q", decision.Action, SignatureActionReplaceWithGeminiBypass)
 	}
-	if info.OpaquePayloadLen != 5 {
-		t.Fatalf("OpaquePayloadLen = %d, want 5", info.OpaquePayloadLen)
+	if decision.ReplacementSignature != GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("replacement = %q, want %q", decision.ReplacementSignature, GeminiSkipThoughtSignatureValidator)
 	}
 }
 

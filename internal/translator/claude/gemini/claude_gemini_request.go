@@ -217,10 +217,6 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 							out, _ = sjson.SetBytes(out, "thinking.budget_tokens", budget)
 						}
 					}
-				} else if includeThoughts := thinkingConfig.Get("includeThoughts"); includeThoughts.Exists() && includeThoughts.Type == gjson.True {
-					out, _ = sjson.SetBytes(out, "thinking.type", "enabled")
-				} else if includeThoughts := thinkingConfig.Get("include_thoughts"); includeThoughts.Exists() && includeThoughts.Type == gjson.True {
-					out, _ = sjson.SetBytes(out, "thinking.type", "enabled")
 				}
 			}
 		}

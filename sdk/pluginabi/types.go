@@ -6,9 +6,8 @@ const (
 	// ABIVersion tracks the native C ABI shape (native plugin exports).
 	ABIVersion uint32 = 1
 	// SchemaVersion tracks the RPC JSON contract exchanged at plugin.register.
-	// Increment only for breaking RPC changes. New capabilities such as ModelRouter
-	// are gated by capability flags and method names while the version stays at 1.
-	SchemaVersion uint32 = 1
+	// Version 2 adds request lifecycle completion and active request termination.
+	SchemaVersion uint32 = 2
 )
 
 const (
@@ -44,6 +43,7 @@ const (
 	MethodRequestNormalize       = "request.normalize"
 	MethodRequestInterceptBefore = "request.intercept_before"
 	MethodRequestInterceptAfter  = "request.intercept_after"
+	MethodRequestComplete        = "request.complete"
 
 	MethodResponseTranslate            = "response.translate"
 	MethodResponseNormalizeBefore      = "response.normalize_before"

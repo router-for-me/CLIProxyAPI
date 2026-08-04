@@ -380,33 +380,57 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 
 	upstreamURL := buildSidebandURL(h.sidebandAPIBaseURL, style, callID)
 	upstreamHTTPURL := websocketHTTPURL(upstreamURL)
-	req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, upstreamHTTPURL, nil)
-	if errRequest != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": errRequest.Error()})
-		return
-	}
-	req.Header = protocolHeaders(c.Request.Header)
-	setAccountHeader(req.Header, selected)
-	if errPrepare := h.authManager.PrepareHttpRequest(ctx, selected, req); errPrepare != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": errPrepare.Error()})
-		return
+	dialUpstream := func(current *auth.Auth) (*websocket.Conn, *http.Response, error) {
+		req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, upstreamHTTPURL, nil)
+		if errRequest != nil {
+			return nil, nil, errRequest
+		}
+		req.Header = protocolHeaders(c.Request.Header)
+		setAccountHeader(req.Header, current)
+		if errPrepare := h.authManager.PrepareHttpRequest(ctx, current, req); errPrepare != nil {
+			return nil, nil, errPrepare
+		}
+		authType, authValue := current.AccountInfo()
+		helps.RecordAPIWebsocketRequest(ctx, runtimeConfig, helps.UpstreamRequestLog{
+			URL:       upstreamURL,
+			Method:    "WEBSOCKET",
+			Headers:   headersForLogging(req.Header),
+			Provider:  "codex",
+			AuthID:    current.ID,
+			AuthLabel: current.Label,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
+		dialer := newProxyAwareSidebandDialer(runtimeConfig, current)
+		dialer.Subprotocols = websocket.Subprotocols(c.Request)
+		return dialer.DialContext(ctx, upstreamURL, req.Header)
 	}
 
-	authType, authValue := selected.AccountInfo()
-	helps.RecordAPIWebsocketRequest(ctx, runtimeConfig, helps.UpstreamRequestLog{
-		URL:       upstreamURL,
-		Method:    "WEBSOCKET",
-		Headers:   headersForLogging(req.Header),
-		Provider:  "codex",
-		AuthID:    selected.ID,
-		AuthLabel: selected.Label,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
-
-	dialer := newProxyAwareSidebandDialer(runtimeConfig, selected)
-	dialer.Subprotocols = websocket.Subprotocols(c.Request)
-	upstream, handshakeResponse, errDial := dialer.DialContext(ctx, upstreamURL, req.Header)
+	upstream, handshakeResponse, errDial := dialUpstream(selected)
+	if errDial != nil && selection != nil && handshakeResponse != nil && handshakeResponse.StatusCode == http.StatusUnauthorized {
+		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", session.model)
+		helps.RecordAPIWebsocketHandshake(ctx, runtimeConfig, handshakeResponse.StatusCode, callResponseHeaders(handshakeResponse.Header))
+		if handshakeResponse.Body != nil {
+			if errClose := handshakeResponse.Body.Close(); errClose != nil {
+				log.Errorf("codex live sideband: close unauthorized handshake body error: %v", errClose)
+			}
+		}
+		refreshed, didRefresh, errRefresh := h.authManager.RefreshHomeSelectionAfterUnauthorized(ctx, selection, selected)
+		if errRefresh != nil {
+			writeSelectionError(c, errRefresh)
+			return
+		}
+		if !didRefresh || refreshed == nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Codex credential unauthorized"})
+			return
+		}
+		selected = refreshed
+		logging.SetGinCPATraceID(c, selected.EnsureIndex())
+		upstream, handshakeResponse, errDial = dialUpstream(selected)
+		if errDial != nil && handshakeResponse != nil && handshakeResponse.StatusCode == http.StatusUnauthorized {
+			h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", session.model)
+		}
+	}
 	if errDial != nil {
 		handleSidebandDialError(c, ctx, runtimeConfig, handshakeResponse, errDial)
 		return

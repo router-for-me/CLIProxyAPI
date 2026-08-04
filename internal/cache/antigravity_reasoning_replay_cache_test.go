@@ -17,6 +17,7 @@ type fakeAntigravityReasoningReplayKVClient struct {
 	mu          sync.Mutex
 	values      map[string][]byte
 	expireCount int
+	casErr      error
 }
 
 func newFakeAntigravityReasoningReplayKVClient() *fakeAntigravityReasoningReplayKVClient {
@@ -40,6 +41,9 @@ func (c *fakeAntigravityReasoningReplayKVClient) KVSet(_ context.Context, key st
 func (c *fakeAntigravityReasoningReplayKVClient) KVCompareAndSwap(_ context.Context, key string, expected []byte, expectedExists bool, value []byte, _ time.Duration) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.casErr != nil {
+		return false, c.casErr
+	}
 	current, exists := c.values[key]
 	if exists != expectedExists || (exists && !bytes.Equal(current, expected)) {
 		return false, nil
@@ -387,6 +391,32 @@ func TestAntigravityReasoningReplayHomeGenerationRejectsSuccessfulValueABA(t *te
 	}
 	if swapped, errSwap := ReplaceAntigravityReasoningReplayItemsIfUnchanged(context.Background(), model, session, staleSnapshot, [][]byte{itemB}); errSwap != nil || swapped {
 		t.Fatalf("stale A snapshot passed Home ABA guard: swapped=%v err=%v", swapped, errSwap)
+	}
+}
+
+func TestAntigravityReasoningReplayHomeReportsCASErrors(t *testing.T) {
+	// The cache layer keeps reporting CAS failures honestly. Deciding that a
+	// replay failure must not fail the request is the executor's job, so this
+	// layer must not start swallowing errors.
+	client := newFakeAntigravityReasoningReplayKVClient()
+	client.casErr = fmt.Errorf("ERR unknown command 'cas'")
+	useFakeAntigravityReasoningReplayKVClient(t, client, true)
+	const model, session = "gemini-3.6-flash-high", "home-cas-error"
+
+	_, _, found, errGet := GetAntigravityReasoningReplayItemsWithSnapshotRequired(context.Background(), model, session)
+	if errGet == nil {
+		t.Fatal("GetAntigravityReasoningReplayItemsWithSnapshotRequired() error = nil, want the CAS error")
+	}
+	if found {
+		t.Fatal("GetAntigravityReasoningReplayItemsWithSnapshotRequired() found = true, want false")
+	}
+
+	snapshot := AntigravityReasoningReplaySnapshot{loaded: true}
+	if _, errReplace := ReplaceAntigravityReasoningReplayItemsIfUnchanged(context.Background(), model, session, snapshot, [][]byte{antigravityReplayTestItem("home-cas-error-sig-1")}); errReplace == nil {
+		t.Fatal("ReplaceAntigravityReasoningReplayItemsIfUnchanged() error = nil, want the CAS error")
+	}
+	if _, errDelete := DeleteAntigravityReasoningReplayItemsIfUnchanged(context.Background(), model, session, snapshot); errDelete == nil {
+		t.Fatal("DeleteAntigravityReasoningReplayItemsIfUnchanged() error = nil, want the CAS error")
 	}
 }
 

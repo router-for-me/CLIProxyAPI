@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
@@ -12,7 +13,8 @@ import (
 )
 
 type openAICompatibilityRegistrationCache struct {
-	byName map[string]*openAICompatibilityRegistrationEntry
+	byName  map[string]*openAICompatibilityRegistrationEntry
+	byIndex map[int]*openAICompatibilityRegistrationEntry
 }
 
 type openAICompatibilityRegistrationEntry struct {
@@ -32,7 +34,8 @@ func (s *Service) newOpenAICompatibilityRegistrationCache() *openAICompatibility
 	}
 
 	cache := &openAICompatibilityRegistrationCache{
-		byName: make(map[string]*openAICompatibilityRegistrationEntry, len(cfg.OpenAICompatibility)),
+		byName:  make(map[string]*openAICompatibilityRegistrationEntry, len(cfg.OpenAICompatibility)),
+		byIndex: make(map[int]*openAICompatibilityRegistrationEntry, len(cfg.OpenAICompatibility)),
 	}
 	for i := range cfg.OpenAICompatibility {
 		compat := &cfg.OpenAICompatibility[i]
@@ -41,16 +44,17 @@ func (s *Service) newOpenAICompatibilityRegistrationCache() *openAICompatibility
 		}
 		compatName := strings.TrimSpace(compat.Name)
 		key := strings.ToLower(compatName)
-		if _, exists := cache.byName[key]; exists {
-			continue
-		}
 		providerName := strings.ToLower(compatName)
 		if providerName == "" {
 			providerName = "openai-compatibility"
 		}
-		cache.byName[key] = &openAICompatibilityRegistrationEntry{
+		entry := &openAICompatibilityRegistrationEntry{
 			providerKey: util.OpenAICompatibleProviderKey(providerName),
 			models:      buildOpenAICompatibilityConfigModels(compat),
+		}
+		cache.byIndex[i] = entry
+		if _, exists := cache.byName[key]; !exists {
+			cache.byName[key] = entry
 		}
 	}
 	if len(cache.byName) == 0 {
@@ -59,9 +63,15 @@ func (s *Service) newOpenAICompatibilityRegistrationCache() *openAICompatibility
 	return cache
 }
 
-func (c *openAICompatibilityRegistrationCache) lookup(compatName string) (*openAICompatibilityRegistrationEntry, bool) {
-	if c == nil || len(c.byName) == 0 {
+func (c *openAICompatibilityRegistrationCache) lookup(auth *coreauth.Auth, compatName string) (*openAICompatibilityRegistrationEntry, bool) {
+	if c == nil {
 		return nil, false
+	}
+	if auth != nil && auth.AuthSourceKind() == coreauth.AuthSourceConfig && auth.Attributes != nil {
+		if index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[coreauth.AttributeConfigIndex])); errIndex == nil {
+			entry, ok := c.byIndex[index]
+			return entry, ok
+		}
 	}
 	entry, ok := c.byName[strings.ToLower(strings.TrimSpace(compatName))]
 	return entry, ok

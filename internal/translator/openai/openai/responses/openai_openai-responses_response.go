@@ -20,14 +20,13 @@ type oaiToResponsesStateReasoning struct {
 	OutputIndex   int
 }
 type oaiToResponsesState struct {
-	Seq               int
-	ResponseID        string
-	Created           int64
-	Started           bool
-	CompletionPending bool
-	CompletedEmitted  bool
-	ReasoningID       string
-	ReasoningIndex    int
+	Seq              int
+	ResponseID       string
+	Created          int64
+	Started          bool
+	CompletedEmitted bool
+	ReasoningID      string
+	ReasoningIndex   int
 	// aggregation buffers for response.output
 	// Per-output message text buffers by index
 	MsgTextBuf   map[int]*strings.Builder
@@ -246,7 +245,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 	}
 	requestForNamespace := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
-		if st.CompletionPending && !st.CompletedEmitted {
+		if st.Started && !st.CompletedEmitted {
 			st.CompletedEmitted = true
 			return [][]byte{buildResponsesCompletedEvent(st, requestForNamespace, func() int { st.Seq++; return st.Seq })}
 		}
@@ -390,19 +389,28 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.TotalTokens = 0
 		st.ReasoningTokens = 0
 		st.UsageSeen = false
-		st.CompletionPending = false
 		st.CompletedEmitted = false
 		// response.created
 		created := []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
 		created, _ = sjson.SetBytes(created, "sequence_number", nextSeq())
 		created, _ = sjson.SetBytes(created, "response.id", st.ResponseID)
 		created, _ = sjson.SetBytes(created, "response.created_at", st.Created)
+		requestModelName := translatorcommon.RequestModelName(originalRequestRawJSON, requestRawJSON)
+		if requestModelName == "" {
+			requestModelName = modelName
+		}
+		if requestModelName != "" {
+			created, _ = sjson.SetBytes(created, "response.model", requestModelName)
+		}
 		out = append(out, emitRespEvent("response.created", created))
 
-		inprog := []byte(`{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress"}}`)
+		inprog := []byte(`{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","output":[]}}`)
 		inprog, _ = sjson.SetBytes(inprog, "sequence_number", nextSeq())
 		inprog, _ = sjson.SetBytes(inprog, "response.id", st.ResponseID)
 		inprog, _ = sjson.SetBytes(inprog, "response.created_at", st.Created)
+		if requestModelName != "" {
+			inprog, _ = sjson.SetBytes(inprog, "response.model", requestModelName)
+		}
 		out = append(out, emitRespEvent("response.in_progress", inprog))
 		st.Started = true
 	}
@@ -689,7 +697,6 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						st.FuncArgsDone[key] = true
 					}
 				}
-				st.CompletionPending = true
 			}
 
 			return true

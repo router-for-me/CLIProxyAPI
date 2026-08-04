@@ -135,6 +135,27 @@ func TestGetAvailableModelsReturnsClonedSupportedParameters(t *testing.T) {
 	}
 }
 
+func TestGetAvailableModelsIncludesMaxContextLengthOverride(t *testing.T) {
+	r := newTestModelRegistry()
+	const want = 1048576
+	r.RegisterClient("client-1", "openai", []*ModelInfo{{
+		ID:               "deepseek-v4-flash",
+		ContextLength:    want,
+		MaxContextLength: want,
+	}})
+
+	models := r.GetAvailableModels("openai")
+	if len(models) != 1 {
+		t.Fatalf("models length = %d, want 1", len(models))
+	}
+	if got := models[0]["context_length"]; got != want {
+		t.Fatalf("context_length = %#v, want %d", got, want)
+	}
+	if got := models[0]["max_context_length"]; got != want {
+		t.Fatalf("max_context_length = %#v, want %d", got, want)
+	}
+}
+
 func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
 	first := LookupModelInfo("claude-sonnet-4-6")
 	if first == nil || first.Thinking == nil || len(first.Thinking.Levels) == 0 {

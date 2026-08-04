@@ -41,6 +41,23 @@ func TestConvertClaudeRequestToGemini_ToolChoice_SpecificTool(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToGemini_StringSystemInstruction(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash-preview",
+		"system": "Be concise",
+		"messages": [{"role": "user", "content": "Hello"}]
+	}`)
+
+	output := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
+
+	if got := gjson.GetBytes(output, "systemInstruction.parts.0.text").String(); got != "Be concise" {
+		t.Fatalf("Expected systemInstruction text %q, got %q", "Be concise", got)
+	}
+	if gjson.GetBytes(output, "system_instruction").Exists() {
+		t.Fatalf("Legacy system_instruction field should not be emitted: %s", output)
+	}
+}
+
 func TestConvertClaudeRequestToGemini_ImageContent(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gemini-3-flash-preview",
@@ -92,9 +109,9 @@ func TestConvertClaudeRequestToGemini_StripsClaudeCodeAttribution(t *testing.T) 
 
 	output := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
 
-	parts := gjson.GetBytes(output, "system_instruction.parts").Array()
+	parts := gjson.GetBytes(output, "systemInstruction.parts").Array()
 	if len(parts) != 2 {
-		t.Fatalf("Expected 2 system parts after attribution strip, got %d: %s", len(parts), gjson.GetBytes(output, "system_instruction.parts").Raw)
+		t.Fatalf("Expected 2 system parts after attribution strip, got %d: %s", len(parts), gjson.GetBytes(output, "systemInstruction.parts").Raw)
 	}
 	if got := parts[0].Get("text").String(); got != "You are a Claude agent, built on Anthropic's Claude Agent SDK." {
 		t.Fatalf("Unexpected first system part: %q", got)
@@ -102,8 +119,8 @@ func TestConvertClaudeRequestToGemini_StripsClaudeCodeAttribution(t *testing.T) 
 	if got := parts[1].Get("text").String(); got != "User system prompt" {
 		t.Fatalf("Unexpected second system part: %q", got)
 	}
-	if gjson.GetBytes(output, `system_instruction.parts.#(text%"x-anthropic-billing-header:*")`).Exists() {
-		t.Fatalf("Claude Code attribution block was forwarded: %s", gjson.GetBytes(output, "system_instruction.parts").Raw)
+	if gjson.GetBytes(output, `systemInstruction.parts.#(text%"x-anthropic-billing-header:*")`).Exists() {
+		t.Fatalf("Claude Code attribution block was forwarded: %s", gjson.GetBytes(output, "systemInstruction.parts").Raw)
 	}
 }
 
@@ -144,9 +161,9 @@ func TestConvertClaudeRequestToGemini_ConvertsMessageSystemRoleToUserContent(t *
 		t.Fatalf("Unexpected array message-level system content text: %q", got)
 	}
 
-	parts := gjson.GetBytes(output, "system_instruction.parts").Array()
+	parts := gjson.GetBytes(output, "systemInstruction.parts").Array()
 	if len(parts) != 1 {
-		t.Fatalf("Expected only top-level system parts, got %d: %s", len(parts), gjson.GetBytes(output, "system_instruction.parts").Raw)
+		t.Fatalf("Expected only top-level system parts, got %d: %s", len(parts), gjson.GetBytes(output, "systemInstruction.parts").Raw)
 	}
 	if got := parts[0].Get("text").String(); got != "Top-level rules" {
 		t.Fatalf("Unexpected first system part: %q", got)

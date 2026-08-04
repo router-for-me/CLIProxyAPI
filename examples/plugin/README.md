@@ -4,8 +4,7 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 
 ## Layout
 
-- `simple/`- : Go-only plugin resource that calls host auth file callbacks (, , , ).
-- : full provider-native skeleton that declares every supported capability.
+- `simple/`: full provider-native skeleton that declares every supported capability.
 - `model/`: model capability only.
 - `auth/`: auth provider capability only.
 - `frontend-auth/`: frontend auth provider capability only.
@@ -15,6 +14,7 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `request-translator/`: request translation capability only.
 - `request-normalizer/`: request normalization capability only.
 - `codex-service-tier/`: Go-only request normalizer that sets Codex `gpt-5.5` requests to the priority service tier when enabled.
+- `request-lifecycle/`: Go-only request admission example with concurrency control, active HTTP termination, and terminal callbacks.
 - `scheduler/`: Go-only scheduler that can select a configured auth ID, delegate to a built-in scheduler, or deny picks.
 - `claude-web-search-router/`: ModelRouter + executor for Claude Code built-in `web_search` (antigravity / codex / xai / Tavily). See `claude-web-search-router/README.md`.
 - `response-translator/`: response translation capability only.
@@ -42,7 +42,21 @@ plugins:
       fast: false
 ```
 
+## Request Lifecycle
 
+`request-lifecycle` combines `request_interceptor` with `request_lifecycle_plugin`. It acquires a concurrency slot before auth selection, can return a custom `403` or `429` response without contacting an upstream model, and releases admitted slots from `request.complete` on success, failure, rejection, or cancellation.
+
+```yaml
+plugins:
+  configs:
+    request-lifecycle:
+      enabled: true
+      priority: 100
+      max_concurrency: 2
+      reject_keyword: "blocked"
+```
+
+See `request-lifecycle/README.md` for build instructions and lifecycle semantics.
 
 ## Host Auth Files Callback
 

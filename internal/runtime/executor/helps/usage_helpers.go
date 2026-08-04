@@ -22,22 +22,24 @@ import (
 )
 
 type UsageReporter struct {
-	provider     string
-	executorType string
-	model        string
-	alias        string
-	routeModel   string
-	endpoint     string
-	clientIP     string
-	forwardedFor string
-	authID       string
-	authIndex    string
-	authType     string
-	apiKey       string
-	source       string
-	reasoning    string
-	serviceTier  string
-	generate     bool
+	provider        string
+	executorType    string
+	model           string
+	alias           string
+	routeModel      string
+	endpoint        string
+	clientIP        string
+	forwardedFor    string
+	authID          string
+	authIndex       string
+	authMu          sync.RWMutex
+	accessTokenHash string
+	authType        string
+	apiKey          string
+	source          string
+	reasoning       string
+	serviceTier     string
+	generate        bool
 	// requestID is the per-request correlation identifier sourced from the
 	// logging context. Persisted on usage_events/usage_errors so a row can be
 	// traced back to its log entries and searched via the dashboard's Request
@@ -90,6 +92,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	if auth != nil {
 		reporter.authID = auth.ID
 		reporter.authIndex = auth.EnsureIndex()
+		reporter.accessTokenHash = authAccessTokenSHA256(auth)
 	}
 	return reporter
 }
@@ -133,6 +136,25 @@ func clientInfoFromContext(ctx context.Context) (clientIP, forwardedFor string) 
 	}
 	return strings.TrimSpace(ginCtx.ClientIP()),
 		strings.TrimSpace(ginCtx.GetHeader("X-Forwarded-For"))
+}
+
+// UpdateAccessTokenFingerprint records the token version actually used upstream.
+func (r *UsageReporter) UpdateAccessTokenFingerprint(auth *cliproxyauth.Auth) {
+	if r == nil {
+		return
+	}
+	r.authMu.Lock()
+	r.accessTokenHash = authAccessTokenSHA256(auth)
+	r.authMu.Unlock()
+}
+
+func (r *UsageReporter) accessTokenFingerprint() string {
+	if r == nil {
+		return ""
+	}
+	r.authMu.RLock()
+	defer r.authMu.RUnlock()
+	return r.accessTokenHash
 }
 
 func ExecutorTypeName(executor any) string {
@@ -323,6 +345,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		RequestID:           r.requestID,
 		AuthID:              r.authID,
 		AuthIndex:           r.authIndex,
+		AccessTokenSHA256:   r.accessTokenFingerprint(),
 		AuthType:            r.authType,
 		ReasoningEffort:     r.reasoning,
 		ServiceTier:         r.serviceTier,
@@ -774,9 +797,32 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 	cacheReadTokens := usageNode.Get("cache_read_input_tokens").Int()
 	cacheCreationTokens := usageNode.Get("cache_creation_input_tokens").Int()
+	rawOutputTokens := usageNode.Get("output_tokens").Int()
+	// Anthropic reports thinking as a subset of output_tokens. Prefer the official
+	// nested field, then fall back to legacy aliases used by some gateways.
+	reasoningNode := firstExistingUsageNode(
+		usageNode,
+		"output_tokens_details.thinking_tokens",
+		"output_tokens_details.reasoning_tokens",
+		"thinking_tokens",
+	)
+	reasoningTokens := reasoningNode.Int()
+	if reasoningTokens < 0 {
+		reasoningTokens = 0
+	}
+	nonReasoningOutput := rawOutputTokens
+	if reasoningTokens > 0 && reasoningTokens <= rawOutputTokens {
+		nonReasoningOutput = rawOutputTokens - reasoningTokens
+	} else if reasoningTokens > rawOutputTokens {
+		// Keep Detail.OutputTokens authoritative for keeper subset checks and
+		// avoid inventing extra non-reasoning output when the upstream payload
+		// is inconsistent.
+		nonReasoningOutput = 0
+	}
 	detail := usage.Detail{
 		InputTokens:         usageNode.Get("input_tokens").Int(),
-		OutputTokens:        usageNode.Get("output_tokens").Int(),
+		OutputTokens:        rawOutputTokens,
+		ReasoningTokens:     reasoningTokens,
 		CachedTokens:        cacheReadTokens,
 		CacheReadTokens:     cacheReadTokens,
 		CacheCreationTokens: cacheCreationTokens,
@@ -784,12 +830,14 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 	if detail.CachedTokens == 0 {
 		detail.CachedTokens = detail.CacheCreationTokens
 	}
-	detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.CacheReadTokens + detail.CacheCreationTokens
+	// raw output_tokens already includes thinking; cache fields are independent
+	// from input_tokens in the Messages API.
+	detail.TotalTokens = detail.InputTokens + rawOutputTokens + detail.CacheReadTokens + detail.CacheCreationTokens
 	detail.TokenBreakdown = usage.NewIndependentTokenBreakdown(
 		detail.InputTokens,
 		detail.CacheReadTokens,
 		detail.CacheCreationTokens,
-		detail.OutputTokens,
+		nonReasoningOutput,
 		detail.ReasoningTokens,
 		detail.TotalTokens,
 	)

@@ -384,6 +384,18 @@ func TestHomeBusyErrorMaps429AndRetryAfter(t *testing.T) {
 	}
 }
 
+func TestHomeNoCandidateErrorsMapToServiceUnavailable(t *testing.T) {
+	for _, code := range []string{"auth_not_found", "auth_unavailable"} {
+		t.Run(code, func(t *testing.T) {
+			errDispatch := decodeHomeDispatchError([]byte(fmt.Sprintf(`{"error":{"type":%q,"message":"no auth available"}}`, code)))
+			var authErr *Error
+			if !errors.As(errDispatch, &authErr) || authErr.Code != code || authErr.HTTPStatus != http.StatusServiceUnavailable {
+				t.Fatalf("decodeHomeDispatchError(%s) = %#v, want 503", code, errDispatch)
+			}
+		})
+	}
+}
+
 func TestHomeConcurrencyTupleAuthMismatchEndsScope(t *testing.T) {
 	dispatcher := &fixtureHomeDispatcher{payload: []byte(`{"concurrency":{"accounted":true,"credential_id":"cred-1","model":"gpt"},"auth_index":"other","auth":{"id":"cred-1","provider":"codex"}}`)}
 	manager := newHomeSelectionTestManager(t, dispatcher)

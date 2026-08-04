@@ -70,6 +70,15 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompleted
 			totalTokens:    18,
 		},
 		{
+			name: "no finish reason",
+			in: []string{
+				`data: {"id":"resp_no_finish_reason","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}`,
+				`data: [DONE]`,
+			},
+			doneInputIndex: 1,
+			hasUsage:       false,
+		},
+		{
 			// An OpenAI-compatible streams from a buggy server might never send usage, so response.completed should
 			// still wait for [DONE] but omit the usage object entirely.
 			name: "no usage chunk",
@@ -87,6 +96,8 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompleted
 		t.Run(tt.name, func(t *testing.T) {
 			completedCount := 0
 			completedInputIndex := -1
+			var createdData gjson.Result
+			var inProgressData gjson.Result
 			var completedData gjson.Result
 
 			// Reuse converter state across input lines to simulate one streaming response.
@@ -96,6 +107,14 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompleted
 				// One upstream chunk can emit multiple downstream SSE events.
 				for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param) {
 					event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+					if event == "response.created" {
+						createdData = data
+						continue
+					}
+					if event == "response.in_progress" {
+						inProgressData = data
+						continue
+					}
 					if event != "response.completed" {
 						continue
 					}
@@ -114,6 +133,12 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompleted
 			}
 			if completedInputIndex != tt.doneInputIndex {
 				t.Fatalf("expected response.completed on terminal [DONE] chunk at input index %d, got %d", tt.doneInputIndex, completedInputIndex)
+			}
+			if got := createdData.Get("response.model").String(); got != "gpt-5.4" {
+				t.Fatalf("response.created models = %q, want gpt-5.4", got)
+			}
+			if got := inProgressData.Get("response.model").String(); got != "gpt-5.4" {
+				t.Fatalf("response.in_progress models = %q, want gpt-5.4", got)
 			}
 
 			// Missing upstream usage should stay omitted in the final completed event.

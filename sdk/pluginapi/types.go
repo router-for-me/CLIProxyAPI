@@ -103,6 +103,8 @@ type Capabilities struct {
 	ResponseAfterTranslator ResponseNormalizer
 	// RequestInterceptor rewrites execution requests before and after credential selection.
 	RequestInterceptor RequestInterceptor
+	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request interception.
+	RequestLifecyclePlugin RequestLifecyclePlugin
 	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
 	ResponseInterceptor ResponseInterceptor
 	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
@@ -929,6 +931,11 @@ type RequestInterceptor interface {
 	InterceptRequestAfterAuth(context.Context, RequestInterceptRequest) (RequestInterceptResponse, error)
 }
 
+// RequestLifecyclePlugin receives asynchronous terminal events after execution finishes, fails, is rejected, or is canceled.
+type RequestLifecyclePlugin interface {
+	HandleRequestComplete(context.Context, RequestCompletion) error
+}
+
 // ResponseInterceptor rewrites successful non-streaming execution responses before downstream delivery.
 type ResponseInterceptor interface {
 	InterceptResponse(context.Context, ResponseInterceptRequest) (ResponseInterceptResponse, error)
@@ -976,6 +983,10 @@ type ResponseTransformRequest struct {
 
 // RequestInterceptRequest describes a request about to be executed upstream.
 type RequestInterceptRequest struct {
+	// RequestID uniquely identifies one model execution and correlates it with RequestCompletion.
+	RequestID string
+	// TraceID identifies the parent inbound HTTP request when available.
+	TraceID string
 	// SourceFormat is the original client protocol format.
 	SourceFormat string
 	// ToFormat is the selected upstream protocol format. It is empty before credential selection.
@@ -1002,10 +1013,49 @@ type RequestInterceptResponse struct {
 	Body []byte
 	// ClearHeaders explicitly removes current request headers before Headers is applied.
 	ClearHeaders []string
+	// Terminate stops the interceptor chain and prevents the request from reaching an upstream executor.
+	Terminate bool
+	// StatusCode is the downstream HTTP status used when Terminate is true. Invalid values default to 403.
+	StatusCode int
+	// ResponseHeaders contains downstream response headers used when Terminate is true.
+	ResponseHeaders http.Header
+	// ResponseBody contains the downstream response body used when Terminate is true.
+	ResponseBody []byte
+}
+
+// RequestCompletionOutcome identifies how an intercepted request ended.
+type RequestCompletionOutcome string
+
+const (
+	// RequestCompletionSucceeded means the request completed successfully.
+	RequestCompletionSucceeded RequestCompletionOutcome = "succeeded"
+	// RequestCompletionFailed means model execution failed.
+	RequestCompletionFailed RequestCompletionOutcome = "failed"
+	// RequestCompletionRejected means a request interceptor terminated the request before execution.
+	RequestCompletionRejected RequestCompletionOutcome = "rejected"
+	// RequestCompletionCanceled means the request context was canceled or the downstream client disconnected.
+	RequestCompletionCanceled RequestCompletionOutcome = "canceled"
+)
+
+// RequestCompletion describes the terminal state of an intercepted request.
+type RequestCompletion struct {
+	RequestID      string
+	TraceID        string
+	SourceFormat   string
+	Model          string
+	RequestedModel string
+	Stream         bool
+	Outcome        RequestCompletionOutcome
+	StatusCode     int
+	Error          string
+	StartedAt      time.Time
+	CompletedAt    time.Time
+	Metadata       map[string]any
 }
 
 // ResponseInterceptRequest describes a successful non-streaming response.
 type ResponseInterceptRequest struct {
+	RequestID       string
 	SourceFormat    string
 	Model           string
 	RequestedModel  string
@@ -1031,6 +1081,7 @@ type ResponseInterceptResponse struct {
 
 // StreamChunkInterceptRequest describes a successful stream chunk before downstream delivery.
 type StreamChunkInterceptRequest struct {
+	RequestID       string
 	SourceFormat    string
 	Model           string
 	RequestedModel  string

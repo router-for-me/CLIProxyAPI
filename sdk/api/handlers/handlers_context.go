@@ -54,8 +54,11 @@ func (h *BaseAPIHandler) PrepareStreamModelRoute(ctx context.Context, handlerTyp
 	return ctx, hasOverride
 }
 
-func preparedModelRouteFromContext(ctx context.Context) (modelRouteDecision, bool) {
-	if ctx == nil {
+func preparedModelRouteFromContext(ctx context.Context, skipRouterPluginID string) (modelRouteDecision, bool) {
+	// A host.model.execute_stream callback is a nested execution. Its caller is
+	// excluded from model routing, so an outer prepared route cannot be reused:
+	// it may point straight back at that caller.
+	if ctx == nil || strings.TrimSpace(skipRouterPluginID) != "" {
 		return modelRouteDecision{}, false
 	}
 	decision, ok := ctx.Value(preparedModelRouteContextKey{}).(modelRouteDecision)

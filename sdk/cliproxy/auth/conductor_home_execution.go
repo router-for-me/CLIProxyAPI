@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/sjson"
@@ -21,7 +22,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 	for homeAuthCount := 1; ; homeAuthCount++ {
 		selection, errSelection := m.pickHomeDispatchSelection(ctx, routeModel, withHomeAuthCount(opts, homeAuthCount))
 		if errSelection != nil {
-			if lastErr != nil && isHomeRequestRetryExceededError(errSelection) {
+			if shouldReturnLastErrorOnPickFailure(true, lastErr, errSelection) {
 				return cliproxyexecutor.Response{}, lastErr
 			}
 			return cliproxyexecutor.Response{}, errSelection
@@ -55,7 +56,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
 		if aliasResult.ForceMapping && responseAlias != "" {
 			aliasResult.OriginalAlias = responseAlias
 		}
@@ -81,6 +82,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			lastErr = errPrepare
 			continue
 		}
+		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(preparedAuth, routeModel, upstreamModel, pooled)
 			execReq := req
@@ -90,7 +92,16 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			}
 			execOpts := opts
 			execOpts.ExecutionLifecycle = selection
-			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			var errIntercept error
+			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			if errIntercept != nil {
+				releaseAttempt()
+				selection.End("request_intercepted")
+				return cliproxyexecutor.Response{}, errIntercept
+			}
+			if !restoreExecutionModel {
+				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, preparedAuth, routeModel, upstreamModel)
+			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				releaseAttempt()
 				selection.End("attempt_canceled")
@@ -98,16 +109,66 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			}
 			var response cliproxyexecutor.Response
 			var errExecute error
+			var effectiveAuthMu sync.RWMutex
+			effectiveAuth := preparedAuth.Clone()
+			setEffectiveAuth := func(auth *Auth) {
+				if auth == nil || AccessTokenSHA256(auth) == "" {
+					return
+				}
+				effectiveAuthMu.Lock()
+				effectiveAuth = auth.Clone()
+				effectiveAuthMu.Unlock()
+			}
+			getEffectiveAuth := func() (*Auth, string) {
+				effectiveAuthMu.RLock()
+				defer effectiveAuthMu.RUnlock()
+				if effectiveAuth == nil {
+					return nil, ""
+				}
+				return effectiveAuth.Clone(), AccessTokenSHA256(effectiveAuth)
+			}
+			executorCtx := execCtx
 			if countTokens {
-				response, errExecute = selection.Executor.CountTokens(execCtx, preparedAuth, execReq, execOpts)
-			} else {
-				response, errExecute = selection.Executor.Execute(execCtx, preparedAuth, execReq, execOpts)
+				executorCtx = withAccessTokenFingerprintObserver(execCtx, setEffectiveAuth)
+			}
+			execute := func() (cliproxyexecutor.Response, error) {
+				if countTokens {
+					return selection.Executor.CountTokens(executorCtx, preparedAuth, execReq, execOpts)
+				}
+				return selection.Executor.Execute(execCtx, preparedAuth, execReq, execOpts)
+			}
+			response, errExecute = execute()
+			refreshAuth := preparedAuth
+			if countTokens {
+				if observedAuth, fingerprint := getEffectiveAuth(); isUnauthorizedError(errExecute) {
+					m.reportHomeUnauthorized(execCtx, preparedAuth, selection.Provider, resultModel, fingerprint)
+					if observedAuth != nil {
+						refreshAuth = observedAuth
+					}
+				}
+			}
+			if errExecute != nil {
+				if refreshed, okRefresh, errRefresh := m.tryRefreshExecutionAuthAfterUnauthorized(execCtx, selection.Executor, refreshAuth, errExecute, didRefreshOnUnauthorized, true); errRefresh != nil {
+					errExecute = errRefresh
+				} else if okRefresh {
+					preparedAuth = refreshed
+					m.replaceHomeSelectionAuth(selection, preparedAuth)
+					didRefreshOnUnauthorized = true
+					publishSelectedAuthMetadata(opts.Metadata, preparedAuth)
+					setEffectiveAuth(preparedAuth)
+					response, errExecute = execute()
+					if countTokens && isUnauthorizedError(errExecute) {
+						_, fingerprint := getEffectiveAuth()
+						m.reportHomeUnauthorized(execCtx, preparedAuth, selection.Provider, resultModel, fingerprint)
+					}
+				}
 			}
 			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, Success: errExecute == nil}
 			if errExecute == nil {
 				m.reportHomeResult(execCtx, result, preparedAuth)
 				releaseAttempt()
-				rewriteForceMappedResponse(&response, aliasResult)
+				attemptAliasResult := resolveAttemptAliasResult(routing, preparedAuth, routeModel, upstreamModel, aliasResult)
+				rewriteForceMappedResponse(&response, attemptAliasResult)
 				if !m.retainHomeWebsocketSelection(ctx, opts, routeModel, selection) {
 					selection.End("completed")
 				}

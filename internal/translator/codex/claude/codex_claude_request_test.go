@@ -508,6 +508,44 @@ func TestConvertClaudeRequestToCodex_AssistantThinkingSignatureToReasoningItem(t
 	}
 }
 
+func TestConvertClaudeRequestToCodex_PreservesBase64PDFDocumentContent(t *testing.T) {
+	inputJSON := `{
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "before"},
+				{"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQK"}},
+				{"type": "text", "text": "after"}
+			]
+		}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("gpt-5.6-sol", []byte(inputJSON), false)
+	content := gjson.GetBytes(result, "input.0.content").Array()
+	if len(content) != 3 {
+		t.Fatalf("got %d content items, want 3. Output: %s", len(content), result)
+	}
+
+	wantTypes := []string{"input_text", "input_file", "input_text"}
+	for i, wantType := range wantTypes {
+		if got := content[i].Get("type").String(); got != wantType {
+			t.Fatalf("content[%d].type = %q, want %q. Output: %s", i, got, wantType, result)
+		}
+	}
+	if got := content[0].Get("text").String(); got != "before" {
+		t.Fatalf("content[0].text = %q, want %q", got, "before")
+	}
+	if got := content[1].Get("file_data").String(); got != "data:application/pdf;base64,JVBERi0xLjQK" {
+		t.Fatalf("content[1].file_data = %q, want PDF data URL", got)
+	}
+	if got := content[1].Get("filename").String(); got != "document.pdf" {
+		t.Fatalf("content[1].filename = %q, want %q", got, "document.pdf")
+	}
+	if got := content[2].Get("text").String(); got != "after" {
+		t.Fatalf("content[2].text = %q, want %q", got, "after")
+	}
+}
+
 func TestConvertClaudeRequestToCodex_PreservesContentOrderAcrossToolAndReasoningItems(t *testing.T) {
 	signature := validCodexReasoningSignature()
 	inputJSON := `{

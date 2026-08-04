@@ -24,7 +24,8 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 				Models: []config.OpenAICompatibilityModel{
 					{Name: "mimo-v2.5", Alias: ""},
 				},
-				DisableCooling: true,
+				SupportPromptCacheKey: true,
+				DisableCooling:        true,
 			},
 		},
 	}, nil)
@@ -40,7 +41,8 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 
 	var body struct {
 		OpenAICompatibility []struct {
-			DisableCooling *bool `json:"disable-cooling"`
+			SupportPromptCacheKey *bool `json:"support-prompt-cache-key"`
+			DisableCooling        *bool `json:"disable-cooling"`
 		} `json:"openai-compatibility"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
@@ -48,6 +50,9 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 	}
 	if len(body.OpenAICompatibility) != 1 {
 		t.Fatalf("expected 1 openai-compatibility entry, got %d", len(body.OpenAICompatibility))
+	}
+	if body.OpenAICompatibility[0].SupportPromptCacheKey == nil || !*body.OpenAICompatibility[0].SupportPromptCacheKey {
+		t.Fatalf("expected support-prompt-cache-key to be present and true, got %#v", body.OpenAICompatibility[0].SupportPromptCacheKey)
 	}
 	if body.OpenAICompatibility[0].DisableCooling == nil || !*body.OpenAICompatibility[0].DisableCooling {
 		t.Fatalf("expected disable-cooling to be present and true, got %#v", body.OpenAICompatibility[0].DisableCooling)

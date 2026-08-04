@@ -59,6 +59,14 @@ func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
 	return &AntigravityExecutor{cfg: cfg}
 }
 
+func (e *AntigravityExecutor) obfuscateSensitiveWords(payload []byte) []byte {
+	if e == nil || e.cfg == nil || len(e.cfg.Antigravity.SensitiveWords) == 0 {
+		return payload
+	}
+	matcher := helps.BuildSensitiveWordMatcher(e.cfg.Antigravity.SensitiveWords)
+	return helps.ObfuscateSensitiveWordsInSystemInstruction(payload, matcher)
+}
+
 // antigravityTransport is a singleton HTTP/1.1 transport shared by all Antigravity requests.
 // It is initialized once via antigravityTransportOnce to avoid leaking a new connection pool
 // (and the goroutines managing it) on every request.

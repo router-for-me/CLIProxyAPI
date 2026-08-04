@@ -243,6 +243,125 @@ func TestSanitizeAntigravityRequestSchemasMatchesWholePayloadCleaning(t *testing
 	}
 }
 
+func TestSanitizeAntigravityRequestSchemasKeepsResponseSchemasPlaceholderFree(t *testing.T) {
+	payload := `{"request":{
+		"tools":[{"functionDeclarations":[{"name":"tool","parameters":{"type":"object","properties":{"value":{"type":"string"}}}}]}],
+		"generationConfig":{"responseSchema":{"type":"object","properties":{
+			"empty":{"type":"object"},
+			"optional":{"type":"object","properties":{"value":{"type":"string"}}}
+		}}}
+	}}`
+
+	got := sanitizeAntigravityRequestSchemas(payload, true)
+	toolSchema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
+	if required := toolSchema.Get("required.0").String(); required != "_" {
+		t.Fatalf("tool schema lost VALIDATED placeholder, required[0] = %q: %s", required, got)
+	}
+
+	responseSchema := gjson.Get(got, "request.generationConfig.responseSchema")
+	for _, path := range []string{
+		"required",
+		"properties._",
+		"properties.reason",
+		"properties.empty.required",
+		"properties.empty.properties.reason",
+		"properties.optional.required",
+		"properties.optional.properties._",
+	} {
+		if responseSchema.Get(path).Exists() {
+			t.Errorf("response schema gained tool-only field %s: %s", path, responseSchema.Raw)
+		}
+	}
+}
+
+func TestSanitizeAntigravityRequestSchemasPreservesResponseUnionAndEnumType(t *testing.T) {
+	payload := `{"request":{
+		"tools":[{"functionDeclarations":[{"name":"tool","parameters":{"type":"object","properties":{
+			"choice":{"anyOf":[{"type":"string"},{"type":"null"}]},
+			"level":{"type":"number","enum":[1,2]}
+		}}}]}],
+		"generationConfig":{"responseSchema":{"type":"object","properties":{
+			"action":{"anyOf":[
+				{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]},
+				{"type":"null"}
+			]},
+			"conviction":{"type":"number","enum":[0.25,0.5,1]}
+		}}}
+	}}`
+
+	got := sanitizeAntigravityRequestSchemas(payload, true)
+	responseSchema := gjson.Get(got, "request.generationConfig.responseSchema")
+	union := responseSchema.Get("properties.action.anyOf")
+	if !union.IsArray() || len(union.Array()) != 2 || union.Get("1.type").String() != "null" {
+		t.Errorf("response anyOf union was flattened: %s", responseSchema.Raw)
+	}
+	conviction := responseSchema.Get("properties.conviction")
+	if gotType := conviction.Get("type").String(); gotType != "number" {
+		t.Errorf("response enum type = %q, want number: %s", gotType, responseSchema.Raw)
+	}
+	for _, enumValue := range conviction.Get("enum").Array() {
+		if enumValue.Type != gjson.String {
+			t.Errorf("response enum value is not a string: %s", conviction.Raw)
+		}
+	}
+
+	toolSchema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
+	if toolSchema.Get("properties.choice.anyOf").Exists() {
+		t.Errorf("tool anyOf union was not flattened: %s", toolSchema.Raw)
+	}
+	if gotType := toolSchema.Get("properties.level.type").String(); gotType != "string" {
+		t.Errorf("tool enum type = %q, want string: %s", gotType, toolSchema.Raw)
+	}
+}
+
+func TestAntigravityBuildRequestKeepsJSONObjectMimeOnly(t *testing.T) {
+	input := []byte(`{"model":"gemini-3.1-pro-low","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_object"}}`)
+	translated := antigravitychat.ConvertOpenAIRequestToAntigravity("gemini-3.1-pro-low", input, false)
+	body := buildRequestBodyFromRawPayload(t, "gemini-3.1-pro-low", translated)
+	encoded, errMarshal := json.Marshal(body)
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+
+	generationConfig := gjson.GetBytes(encoded, "request.generationConfig")
+	if got := generationConfig.Get("responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json: %s", got, encoded)
+	}
+	if generationConfig.Get("responseSchema").Exists() {
+		t.Fatalf("responseSchema should not be set for json_object: %s", encoded)
+	}
+}
+
+func TestAntigravityBuildRequestPreservesGenerationResponseSchemaMetadata(t *testing.T) {
+	payload := []byte(`{"request":{"generationConfig":{"responseSchema":{
+		"type":"object",
+		"nullable":true,
+		"properties":{"_":{"type":"string","nullable":true}},
+		"required":["_"]
+	}}}}`)
+
+	for _, modelName := range []string{"gemini-3.6-flash-high", "gemini-3.1-pro-low"} {
+		t.Run(modelName, func(t *testing.T) {
+			body := buildRequestBodyFromRawPayload(t, modelName, payload)
+			encoded, errMarshal := json.Marshal(body)
+			if errMarshal != nil {
+				t.Fatal(errMarshal)
+			}
+
+			schema := gjson.GetBytes(encoded, "request.generationConfig.responseSchema")
+			if !schema.Get("nullable").Bool() || !schema.Get("properties._.nullable").Bool() {
+				t.Fatalf("response schema nullable metadata was removed: %s", schema.Raw)
+			}
+			if !schema.Get("properties._").Exists() {
+				t.Fatalf("legitimate underscore property was removed: %s", schema.Raw)
+			}
+			if required := schema.Get("required.0").String(); required != "_" {
+				t.Fatalf("required[0] = %q, want underscore: %s", required, schema.Raw)
+			}
+		})
+	}
+}
+
 func TestAntigravityBuildRequestSanitizesSnakeCaseGenerationResponseSchemas(t *testing.T) {
 	for _, testCase := range []struct {
 		alias     string
@@ -334,6 +453,118 @@ func TestSanitizeAntigravityRequestSchemasIsIdempotent(t *testing.T) {
 		}
 		if strings.Count(second, "Allowed:") != 1 {
 			t.Errorf("%s: hint duplicated: %s", prop, second)
+		}
+	}
+}
+
+// propertyNamesShapes are the two nestings reported against the private Gemini backend, which
+// rejects the standard JSON Schema keyword "propertyNames" with an unknown-field 400.
+var propertyNamesShapes = map[string]string{
+	// An object nested in an array item.
+	"arrayItem": `{"type":"object","properties":{"records":{"type":"array","items":{"type":"object",` +
+		`"properties":{"name":{"type":"string"}},"propertyNames":{"type":"string"}}}}}`,
+	// A dynamic map declared by a property that is itself named "properties".
+	"propertyNamedProperties": `{"type":"object","properties":{"properties":{"type":"object",` +
+		`"propertyNames":{"type":"string"}}}}`,
+}
+
+// TestSanitizeAntigravityRequestSchemasStripsPropertyNamesEverywhere covers every payload location
+// that can carry a schema, in both spellings of the declarations container. A location that keeps
+// "propertyNames" sends a request the backend rejects before inference.
+func TestSanitizeAntigravityRequestSchemasStripsPropertyNamesEverywhere(t *testing.T) {
+	for shapeName, schema := range propertyNamesShapes {
+		for _, declContainer := range []string{"functionDeclarations", "function_declarations"} {
+			for _, genContainer := range antigravityGenerationConfigContainers {
+				name := shapeName + "_" + declContainer + "_" + strings.TrimPrefix(genContainer, "request.")
+				t.Run(name, func(t *testing.T) {
+					decl := `"name":"t"`
+					for _, k := range antigravityDeclarationSchemaKeys {
+						decl += `,"` + k + `":` + schema
+					}
+					gen := ""
+					for i, k := range antigravityGenerationSchemaKeys {
+						if i > 0 {
+							gen += ","
+						}
+						gen += `"` + k + `":` + schema
+					}
+					payload := `{"request":{"tools":[{"` + declContainer + `":[{` + decl + `}]}],"` +
+						strings.TrimPrefix(genContainer, "request.") + `":{` + gen + `}}}`
+
+					for _, useAntigravitySchema := range []bool{false, true} {
+						got := sanitizeAntigravityRequestSchemas(payload, useAntigravitySchema)
+						if strings.Contains(got, `"propertyNames"`) {
+							t.Errorf("antigravity=%v: propertyNames reaches upstream: %s", useAntigravitySchema, got)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestSanitizeAntigravityRequestSchemasKeepsPropertyNamesInHistory pins the boundary of the fix:
+// only schema locations may be rewritten. A functionCall argument or a property named
+// "propertyNames" is data and must survive untouched.
+func TestSanitizeAntigravityRequestSchemasKeepsPropertyNamesInHistory(t *testing.T) {
+	payload := `{"request":{
+		"contents":[{"role":"model","parts":[{"functionCall":{"name":"t","args":{
+			"propertyNames":"keep-me",
+			"properties":{"propertyNames":"keep-me-too"}
+		}}}]}],
+		"tools":[{"functionDeclarations":[{"name":"t","parameters":{"type":"object","properties":{
+			"propertyNames":{"type":"string"},
+			"properties":{"type":"object","propertyNames":{"type":"string"}}
+		}}}]}]
+	}}`
+
+	for _, useAntigravitySchema := range []bool{false, true} {
+		got := sanitizeAntigravityRequestSchemas(payload, useAntigravitySchema)
+
+		before := gjson.Get(payload, "request.contents")
+		after := gjson.Get(got, "request.contents")
+		if before.Raw != after.Raw {
+			t.Errorf("antigravity=%v: history was mutated.\nbefore: %s\nafter:  %s", useAntigravitySchema, before.Raw, after.Raw)
+		}
+
+		schema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
+		if !schema.Get("properties.propertyNames").Exists() {
+			t.Errorf("antigravity=%v: property named propertyNames was removed: %s", useAntigravitySchema, schema.Raw)
+		}
+		if schema.Get("properties.properties.propertyNames").Exists() {
+			t.Errorf("antigravity=%v: propertyNames keyword survived inside a property named properties: %s", useAntigravitySchema, schema.Raw)
+		}
+	}
+}
+
+// TestAntigravityBuildRequestStripsPropertyNamesFromOutboundBody asserts on the body that actually
+// leaves the executor, so a later transformation cannot reintroduce the keyword unnoticed.
+func TestAntigravityBuildRequestStripsPropertyNamesFromOutboundBody(t *testing.T) {
+	for shapeName, schema := range propertyNamesShapes {
+		for _, modelName := range []string{"gemini-3.1-pro", "claude-opus-4-6"} {
+			t.Run(shapeName+"_"+modelName, func(t *testing.T) {
+				payload := []byte(`{"request":{
+					"contents":[{"role":"model","parts":[{"functionCall":{"name":"t","args":{"propertyNames":"keep-me"}}}]}],
+					"tools":[{"function_declarations":[{"name":"t","parametersJsonSchema":` + schema + `}]}],
+					"generationConfig":{"responseSchema":` + schema + `}
+				}}`)
+
+				body := buildRequestBodyFromRawPayload(t, modelName, payload)
+				encoded, errMarshal := json.Marshal(body)
+				if errMarshal != nil {
+					t.Fatal(errMarshal)
+				}
+
+				for _, path := range []string{"request.tools", "request.generationConfig"} {
+					if node := gjson.GetBytes(encoded, path); strings.Contains(node.Raw, `"propertyNames"`) {
+						t.Errorf("%s still carries propertyNames: %s", path, node.Raw)
+					}
+				}
+				args := gjson.GetBytes(encoded, "request.contents.0.parts.0.functionCall.args")
+				if args.Get("propertyNames").String() != "keep-me" {
+					t.Errorf("functionCall argument named propertyNames was rewritten: %s", args.Raw)
+				}
+			})
 		}
 	}
 }

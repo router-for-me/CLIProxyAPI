@@ -27,6 +27,19 @@ const (
 	codexOptimizedCollaborationNamePrefix = codexOptimizedCollaborationNamespace + "__"
 )
 
+// CodexMultiAgentV2ToolsPreparedContextKey marks a request whose collaboration
+// tool definitions were prepared at the Responses API boundary.
+const CodexMultiAgentV2ToolsPreparedContextKey = "codex_multi_agent_v2_tools_prepared"
+
+// codexCollaborationMessageTools are the collaboration tool names whose
+// parameters.properties.message.encrypted field must be stripped so that
+// message content remains readable by the proxy.
+var codexCollaborationMessageTools = map[string]struct{}{
+	"spawn_agent":   {},
+	"send_message":  {},
+	"followup_task": {},
+}
+
 type codexSpawnAgentModel struct {
 	id                     string
 	description            string
@@ -66,6 +79,24 @@ func TranslateRequestWithCodexMultiAgentV2(ctx context.Context, headers http.Hea
 	return sdktranslator.TranslateRequest(from, to, model, payload, stream)
 }
 
+// PrepareCodexMultiAgentV2Tools prepares collaboration tool definitions at the
+// Responses API boundary without changing the collaboration namespace.
+func PrepareCodexMultiAgentV2Tools(ctx context.Context, headers http.Header, payload []byte, enabled, homeEnabled bool) ([]byte, bool) {
+	if !codexMultiAgentV2ClientEnabled(ctx, headers, enabled) {
+		return payload, false
+	}
+
+	updated := removeCodexCollaborationMessageEncryption(payload, codexCollaborationMessageToolPaths(payload))
+	toolPaths := codexSpawnAgentToolPaths(updated)
+	if len(toolPaths) == 0 || hasCodexOptimizedCollaborationConflict(updated) {
+		return updated, true
+	}
+
+	models := codexSpawnAgentModelsForRequest(ctx, headers, homeEnabled)
+	updated = rewriteCodexSpawnAgentTools(updated, toolPaths, models)
+	return updated, true
+}
+
 // OptimizeCodexMultiAgentV2Request rewrites an eligible spawn_agent request and
 // reports whether the collaboration namespace was renamed for upstream use.
 func OptimizeCodexMultiAgentV2Request(ctx context.Context, headers http.Header, payload []byte, cfg *config.Config) ([]byte, bool) {
@@ -73,17 +104,37 @@ func OptimizeCodexMultiAgentV2Request(ctx context.Context, headers http.Header, 
 		return payload, false
 	}
 	updated := rewriteCodexAgentMessageContent(payload)
+	if codexMultiAgentV2ToolsPrepared(ctx) {
+		updated = removeCodexCollaborationMessageEncryption(updated, codexCollaborationMessageToolPaths(updated))
+	} else {
+		updated, _ = PrepareCodexMultiAgentV2Tools(ctx, headers, updated, cfg.Codex.OptimizeMultiAgentV2, cfg.Home.Enabled)
+	}
 	toolPaths := codexSpawnAgentToolPaths(updated)
 	if len(toolPaths) == 0 || hasCodexOptimizedCollaborationConflict(updated) {
 		return updated, false
 	}
-	models := codexSpawnAgentModelsForRequest(ctx, headers, cfg.Home.Enabled)
-	updated = rewriteCodexSpawnAgentTools(updated, toolPaths, models)
 	return optimizeCodexCollaborationNamespace(updated, toolPaths)
 }
 
 func codexMultiAgentV2Enabled(ctx context.Context, headers http.Header, cfg *config.Config) bool {
-	return cfg != nil && cfg.Codex.OptimizeMultiAgentV2 && isCodexMultiAgentClient(codexClientUserAgent(ctx, headers))
+	return cfg != nil && codexMultiAgentV2ClientEnabled(ctx, headers, cfg.Codex.OptimizeMultiAgentV2)
+}
+
+func codexMultiAgentV2ClientEnabled(ctx context.Context, headers http.Header, enabled bool) bool {
+	return enabled && isCodexMultiAgentClient(codexClientUserAgent(ctx, headers))
+}
+
+func codexMultiAgentV2ToolsPrepared(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return false
+	}
+	prepared, ok := ginCtx.Get(CodexMultiAgentV2ToolsPreparedContextKey)
+	isPrepared, _ := prepared.(bool)
+	return ok && isPrepared
 }
 
 func codexClientUserAgent(ctx context.Context, headers http.Header) string {
@@ -117,7 +168,10 @@ func headerValueCaseInsensitive(headers http.Header, name string) string {
 
 func isCodexMultiAgentClient(userAgent string) bool {
 	userAgent = strings.TrimSpace(userAgent)
-	return strings.HasPrefix(userAgent, "Codex Desktop/") || strings.HasPrefix(userAgent, "codex-tui/")
+	return strings.HasPrefix(userAgent, "Codex Desktop/") ||
+		strings.HasPrefix(userAgent, "codex-tui/") ||
+		userAgent == "codex_cli_rs" ||
+		strings.HasPrefix(userAgent, "codex_cli_rs/")
 }
 
 func codexSpawnAgentModelsForRequest(ctx context.Context, headers http.Header, homeEnabled bool) []codexSpawnAgentModel {
@@ -609,8 +663,19 @@ func rewriteCodexAgentMessageContent(payload []byte) []byte {
 }
 
 func codexSpawnAgentToolPaths(payload []byte) []string {
-	paths := make([]string, 0, 1)
-	collectCodexSpawnAgentToolPaths(gjson.GetBytes(payload, "tools"), "tools", &paths)
+	return codexToolPathsByNames(payload, map[string]struct{}{"spawn_agent": {}})
+}
+
+// codexCollaborationMessageToolPaths discovers function tools named
+// spawn_agent, send_message, or followup_task inside top-level tools arrays and
+// input[].additional_tools arrays, including nested namespace tools.
+func codexCollaborationMessageToolPaths(payload []byte) []string {
+	return codexToolPathsByNames(payload, codexCollaborationMessageTools)
+}
+
+func codexToolPathsByNames(payload []byte, names map[string]struct{}) []string {
+	paths := make([]string, 0, len(names))
+	collectCodexToolPathsByNames(gjson.GetBytes(payload, "tools"), "tools", &paths, names)
 
 	input := gjson.GetBytes(payload, "input")
 	if input.IsArray() {
@@ -618,26 +683,43 @@ func codexSpawnAgentToolPaths(payload []byte) []string {
 			if strings.TrimSpace(item.Get("type").String()) != "additional_tools" {
 				continue
 			}
-			collectCodexSpawnAgentToolPaths(item.Get("tools"), fmt.Sprintf("input.%d.tools", index), &paths)
+			collectCodexToolPathsByNames(item.Get("tools"), fmt.Sprintf("input.%d.tools", index), &paths, names)
 		}
 	}
 	return paths
 }
 
-func collectCodexSpawnAgentToolPaths(tools gjson.Result, path string, paths *[]string) {
+func collectCodexToolPathsByNames(tools gjson.Result, path string, paths *[]string, names map[string]struct{}) {
 	if !tools.IsArray() {
 		return
 	}
 	for index, tool := range tools.Array() {
 		toolPath := fmt.Sprintf("%s.%d", path, index)
 		toolType := strings.TrimSpace(tool.Get("type").String())
-		if toolType == "function" && strings.TrimSpace(tool.Get("name").String()) == "spawn_agent" {
-			*paths = append(*paths, toolPath)
+		if toolType == "function" {
+			if _, ok := names[strings.TrimSpace(tool.Get("name").String())]; ok {
+				*paths = append(*paths, toolPath)
+			}
 		}
 		if toolType == "namespace" {
-			collectCodexSpawnAgentToolPaths(tool.Get("tools"), toolPath+".tools", paths)
+			collectCodexToolPathsByNames(tool.Get("tools"), toolPath+".tools", paths, names)
 		}
 	}
+}
+
+// removeCodexCollaborationMessageEncryption deletes the
+// parameters.properties.message.encrypted field from each discovered
+// collaboration message tool so the proxy can read the plaintext message.
+func removeCodexCollaborationMessageEncryption(payload []byte, toolPaths []string) []byte {
+	updated := payload
+	for _, toolPath := range toolPaths {
+		var errDelete error
+		updated, errDelete = sjson.DeleteBytes(updated, toolPath+".parameters.properties.message.encrypted")
+		if errDelete != nil {
+			return payload
+		}
+	}
+	return updated
 }
 
 func formatCodexSpawnAgentModels(models []codexSpawnAgentModel) string {

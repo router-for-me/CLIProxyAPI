@@ -61,6 +61,17 @@ func (f *releaseFlusher) SetConfigProvider(provider func() internalconfig.Creden
 	f.signal()
 }
 
+// SetSender replaces the Home lifetime used for subsequent release attempts.
+func (f *releaseFlusher) SetSender(send func(context.Context, ConcurrencyReleaseFrame) error) {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	f.send = send
+	f.mu.Unlock()
+	f.signal()
+}
+
 // MarkDirty records the latest cumulative sequence for one release group and
 // returns a ticket completed when Home acknowledges that sequence.
 func (f *releaseFlusher) MarkDirty(group executionregistry.ReleaseGroup, sequence int64) *executionregistry.ReleaseTicket {
@@ -174,11 +185,12 @@ func (f *releaseFlusher) timings() releaseFlusherTimings {
 }
 
 func (f *releaseFlusher) flush(ctx context.Context) bool {
-	if f == nil || f.send == nil {
+	if f == nil {
 		return false
 	}
 
 	f.mu.Lock()
+	send := f.send
 	pending := make(map[executionregistry.ReleaseGroup]int64, len(f.groups))
 	for group, state := range f.groups {
 		if state.Latest > state.Acked {
@@ -186,10 +198,13 @@ func (f *releaseFlusher) flush(ctx context.Context) bool {
 		}
 	}
 	f.mu.Unlock()
+	if send == nil {
+		return false
+	}
 
 	failed := false
 	for group, sequence := range pending {
-		errSend := f.send(ctx, ConcurrencyReleaseFrame{
+		errSend := send(ctx, ConcurrencyReleaseFrame{
 			CredentialID: group.CredentialID,
 			Model:        group.Model,
 			ReleaseSeq:   sequence,

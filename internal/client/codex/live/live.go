@@ -263,30 +263,29 @@ func (h *Handler) Handle(c *gin.Context) {
 		}
 	}
 
-	headers := protocolHeaders(c.Request.Header)
-	headers.Set("Content-Type", upstreamContentType)
-	setAccountHeader(headers, selected)
-	req, errRequest := h.authManager.NewHttpRequest(ctx, selected, http.MethodPost, upstreamCallURL, upstreamBody, headers)
-	if errRequest != nil {
-		if selection != nil {
-			selection.End("request_build_failed")
+	baseHeaders := protocolHeaders(c.Request.Header)
+	baseHeaders.Set("Content-Type", upstreamContentType)
+	performRequest := func(current *auth.Auth) (*http.Response, error) {
+		headers := baseHeaders.Clone()
+		setAccountHeader(headers, current)
+		req, errRequest := h.authManager.NewHttpRequest(ctx, current, http.MethodPost, upstreamCallURL, upstreamBody, headers)
+		if errRequest != nil {
+			return nil, errRequest
 		}
-		c.JSON(http.StatusBadGateway, gin.H{"error": errRequest.Error()})
-		return
+		authType, authValue := current.AccountInfo()
+		helps.RecordAPIRequest(ctx, runtimeConfig, helps.UpstreamRequestLog{
+			URL:       upstreamCallURL,
+			Method:    http.MethodPost,
+			Headers:   headersForLogging(req.Header),
+			Body:      upstreamBody,
+			Provider:  "codex",
+			AuthID:    current.ID,
+			AuthLabel: current.Label,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
+		return h.authManager.HttpRequest(ctx, current, req)
 	}
-
-	authType, authValue := selected.AccountInfo()
-	helps.RecordAPIRequest(ctx, runtimeConfig, helps.UpstreamRequestLog{
-		URL:       upstreamCallURL,
-		Method:    http.MethodPost,
-		Headers:   headersForLogging(req.Header),
-		Body:      upstreamBody,
-		Provider:  "codex",
-		AuthID:    selected.ID,
-		AuthLabel: selected.Label,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
 
 	if errContext := ctx.Err(); errContext != nil {
 		if selection != nil {
@@ -295,7 +294,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		c.JSON(http.StatusRequestTimeout, gin.H{"error": errContext.Error()})
 		return
 	}
-	resp, errRequest := h.authManager.HttpRequest(ctx, selected, req)
+	resp, errRequest := performRequest(selected)
 	if errRequest != nil {
 		if selection != nil {
 			selection.End("request_failed")
@@ -303,6 +302,37 @@ func (h *Handler) Handle(c *gin.Context) {
 		helps.RecordAPIResponseError(ctx, runtimeConfig, errRequest)
 		c.JSON(http.StatusBadGateway, gin.H{"error": errRequest.Error()})
 		return
+	}
+	if selection != nil && resp.StatusCode == http.StatusUnauthorized {
+		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", model)
+		helps.RecordAPIResponseMetadata(ctx, runtimeConfig, resp.StatusCode, callResponseHeaders(resp.Header))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("codex live: close unauthorized response body error: %v", errClose)
+		}
+		refreshed, didRefresh, errRefresh := h.authManager.RefreshHomeSelectionAfterUnauthorized(ctx, selection, selected)
+		if errRefresh != nil {
+			selection.End("refresh_failed")
+			writeSelectionError(c, errRefresh)
+			return
+		}
+		if !didRefresh || refreshed == nil {
+			selection.End("refresh_unavailable")
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Codex credential unauthorized"})
+			return
+		}
+		selected = refreshed
+		logging.SetGinCPATraceID(c, selected.EnsureIndex())
+		resp, errRequest = performRequest(selected)
+		if errRequest != nil {
+			selection.End("retry_failed")
+			helps.RecordAPIResponseError(ctx, runtimeConfig, errRequest)
+			c.JSON(http.StatusBadGateway, gin.H{"error": errRequest.Error()})
+			return
+		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", model)
+		}
 	}
 
 	var closeResponseOnce sync.Once

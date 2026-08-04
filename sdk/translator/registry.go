@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -66,24 +67,37 @@ func (r *Registry) TranslateRequest(from, to Format, model string, rawJSON []byt
 
 	body := rawJSON
 	if fn != nil {
+		summaryConfig := thinking.ExtractSummaryConfig(rawJSON, from.String())
 		body = fn(model, body, stream)
-	} else {
-		if model != "" && gjson.GetBytes(body, "model").String() != model {
-			if updated, err := sjson.SetBytes(body, "model", model); err != nil {
-				log.Warnf("translator: failed to normalize model in request fallback: %v", err)
-			} else {
-				body = updated
-			}
+		body = thinking.ApplySummaryConfigForModel(body, to.String(), model, summaryConfig)
+		if hooks != nil {
+			// Request normalizers run after native translation and own the final
+			// provider payload, including any summary field they remove.
+			body = hooks.NormalizeRequest(context.Background(), from, to, model, body, stream)
 		}
+		return body
 	}
 
-	if hooks != nil {
-		body = hooks.NormalizeRequest(context.Background(), from, to, model, body, stream)
-		if fn == nil {
-			if translated, ok := hooks.TranslateRequest(context.Background(), from, to, model, body, stream); ok {
-				body = translated
-			}
+	if model != "" && gjson.GetBytes(body, "model").String() != model {
+		if updated, err := sjson.SetBytes(body, "model", model); err != nil {
+			log.Warnf("translator: failed to normalize model in request fallback: %v", err)
+		} else {
+			body = updated
 		}
+	}
+	if hooks == nil {
+		// No translation occurred. Preserve the documented fallback shape instead
+		// of mixing target-protocol summary fields into the source payload.
+		return body
+	}
+
+	// Plugin request normalizers canonicalize the source before a plugin request
+	// translator gets a chance to handle a missing native route. Extract summary
+	// intent from that normalized source so a normalizer can remove or rewrite it.
+	body = hooks.NormalizeRequest(context.Background(), from, to, model, body, stream)
+	summaryConfig := thinking.ExtractSummaryConfig(body, from.String())
+	if translated, ok := hooks.TranslateRequest(context.Background(), from, to, model, body, stream); ok {
+		body = thinking.ApplySummaryConfigForModel(translated, to.String(), model, summaryConfig)
 	}
 	return body
 }

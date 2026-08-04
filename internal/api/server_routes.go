@@ -18,6 +18,7 @@ import (
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
 	codexmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/client/grokbuild"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
@@ -318,12 +319,12 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 	var selection *auth.HomeDispatchSelection
 	var selected *auth.Auth
 	if s.handlers.AuthManager.HomeEnabled() {
-		selection, err = s.handlers.AuthManager.SelectHomeAuthByKind(ctx, "codex", selectionModel, auth.AuthKindOAuth, selectionOpts)
+		selection, err = s.handlers.AuthManager.SelectHomeAuthWithCredentialPolicy(ctx, "codex", selectionModel, auth.CredentialPolicyCodexAlphaSearchV1, selectionOpts)
 		if selection != nil {
 			selected = selection.CloneAuth()
 		}
 	} else {
-		selected, err = s.handlers.AuthManager.SelectAuthByKind(ctx, "codex", selectionModel, auth.AuthKindOAuth, selectionOpts)
+		selected, err = s.handlers.AuthManager.SelectAuthWithCredentialPolicy(ctx, "codex", selectionModel, auth.CredentialPolicyCodexAlphaSearchV1, selectionOpts)
 	}
 	if err != nil {
 		status := http.StatusServiceUnavailable
@@ -357,49 +358,51 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 	}
 	logging.SetGinCPATraceID(c, selected.EnsureIndex())
 
-	headers := make(http.Header)
-	headers.Set("Content-Type", "application/json")
-	headers.Set("Accept", "application/json")
-	headers.Set("Originator", "codex_cli_rs")
+	baseHeaders := make(http.Header)
+	baseHeaders.Set("Content-Type", "application/json")
+	baseHeaders.Set("Accept", "application/json")
+	baseHeaders.Set("Originator", "codex_cli_rs")
 	for _, name := range []string{"Version", "User-Agent", "Session_id", "X-Client-Request-Id"} {
 		if value := strings.TrimSpace(c.GetHeader(name)); value != "" {
-			headers.Set(name, value)
+			baseHeaders.Set(name, value)
 		}
 	}
-	if accountID, ok := selected.Metadata["account_id"].(string); ok && strings.TrimSpace(accountID) != "" {
-		headers.Set("Chatgpt-Account-Id", accountID)
-	}
 
-	const upstreamURL = "https://chatgpt.com/backend-api/codex/alpha/search"
-	req, err := s.handlers.AuthManager.NewHttpRequest(
-		ctx, selected, http.MethodPost, upstreamURL, upstreamRequestBody, headers,
-	)
-	if err != nil {
-		if selection != nil {
-			selection.End("request_build_failed")
+	errMissingBaseURL := errors.New("Codex Alpha Search API key base URL unavailable")
+	performRequest := func(current *auth.Auth) (*http.Response, error) {
+		headers := baseHeaders.Clone()
+		if accountID, ok := current.Metadata["account_id"].(string); ok && strings.TrimSpace(accountID) != "" {
+			headers.Set("Chatgpt-Account-Id", accountID)
 		}
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-		return
+		upstreamURL := "https://chatgpt.com/backend-api/codex/alpha/search"
+		if current.AuthKind() == auth.AuthKindAPIKey {
+			baseURL := ""
+			if current.Attributes != nil {
+				baseURL = strings.TrimSpace(current.Attributes["base_url"])
+			}
+			if baseURL == "" {
+				return nil, errMissingBaseURL
+			}
+			upstreamURL = strings.TrimRight(baseURL, "/") + "/alpha/search"
+		}
+		req, errRequest := s.handlers.AuthManager.NewHttpRequest(ctx, current, http.MethodPost, upstreamURL, upstreamRequestBody, headers)
+		if errRequest != nil {
+			return nil, errRequest
+		}
+		authType, authValue := current.AccountInfo()
+		helps.RecordAPIRequest(ctx, s.cfg, helps.UpstreamRequestLog{
+			URL:       upstreamURL,
+			Method:    http.MethodPost,
+			Headers:   req.Header.Clone(),
+			Body:      upstreamRequestBody,
+			Provider:  "codex",
+			AuthID:    current.ID,
+			AuthLabel: current.Label,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
+		return s.handlers.AuthManager.HttpRequest(ctx, current, req)
 	}
-
-	var authID, authLabel, authType, authValue string
-	if selected != nil {
-		authID = selected.ID
-		authLabel = selected.Label
-		authType, authValue = selected.AccountInfo()
-	}
-	helpHeaders := req.Header.Clone()
-	helps.RecordAPIRequest(ctx, s.cfg, helps.UpstreamRequestLog{
-		URL:       upstreamURL,
-		Method:    http.MethodPost,
-		Headers:   helpHeaders,
-		Body:      upstreamRequestBody,
-		Provider:  "codex",
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
 
 	if errCtx := ctx.Err(); errCtx != nil {
 		if selection != nil {
@@ -408,14 +411,61 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		c.JSON(http.StatusRequestTimeout, gin.H{"error": errCtx.Error()})
 		return
 	}
-	resp, err := s.handlers.AuthManager.HttpRequest(ctx, selected, req)
+	resp, err := performRequest(selected)
 	if err != nil {
+		if errors.Is(err, errMissingBaseURL) {
+			if selection != nil {
+				selection.End("missing_base_url")
+			}
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+			return
+		}
 		if selection != nil {
 			selection.End("request_failed")
 		}
 		helps.RecordAPIResponseError(ctx, s.cfg, err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
+	}
+	if selection != nil && resp.StatusCode == http.StatusUnauthorized {
+		s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel)
+		helps.RecordAPIResponseMetadata(ctx, s.cfg, resp.StatusCode, resp.Header.Clone())
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("codex alpha search: close unauthorized response body error: %v", errClose)
+		}
+		refreshed, didRefresh, errRefresh := s.handlers.AuthManager.RefreshHomeSelectionAfterUnauthorized(ctx, selection, selected)
+		if errRefresh != nil {
+			selection.End("refresh_failed")
+			status := http.StatusServiceUnavailable
+			if statusError, ok := errRefresh.(interface{ StatusCode() int }); ok && statusError.StatusCode() > 0 {
+				status = statusError.StatusCode()
+			}
+			c.JSON(status, gin.H{"error": errRefresh.Error()})
+			return
+		}
+		if !didRefresh || refreshed == nil {
+			selection.End("refresh_unavailable")
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Codex credential unauthorized"})
+			return
+		}
+		selected = refreshed
+		logging.SetGinCPATraceID(c, selected.EnsureIndex())
+		resp, err = performRequest(selected)
+		if err != nil {
+			if errors.Is(err, errMissingBaseURL) {
+				selection.End("missing_base_url")
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+				return
+			}
+			selection.End("retry_failed")
+			helps.RecordAPIResponseError(ctx, s.cfg, err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel)
+		}
 	}
 	closeResponseBody := func() error {
 		errClose := resp.Body.Close()
@@ -502,6 +552,11 @@ func isAnthropicModelsRequest(c *gin.Context) bool {
 // route to the Claude handler, otherwise they route to the OpenAI handler.
 func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, claudeHandler *claude.ClaudeCodeAPIHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if grokbuild.IsGrokShellUserAgent(c.GetHeader("User-Agent")) {
+			s.handleGrokModels(c)
+			return
+		}
+
 		if _, ok := c.Request.URL.Query()["client_version"]; ok {
 			if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
 				s.handleHomeCodexClientModels(c)
@@ -523,6 +578,51 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			openaiHandler.OpenAIModels(c)
 		}
 	}
+}
+
+func grokModelsFromHomeEntries(entries []homeModelEntry) []grokbuild.ModelInfo {
+	models := make([]grokbuild.ModelInfo, 0, len(entries))
+	for _, entry := range entries {
+		models = append(models, grokbuild.ModelInfo{
+			ID:            entry.id,
+			DisplayName:   entry.displayName,
+			ContextLength: entry.contextLength,
+		})
+	}
+	return models
+}
+
+func grokModelsFromRegistryInfos(infos []*registry.ModelInfo) []grokbuild.ModelInfo {
+	models := make([]grokbuild.ModelInfo, 0, len(infos))
+	for _, info := range infos {
+		if info == nil {
+			continue
+		}
+		model := grokbuild.ModelInfo{
+			ID:            info.ID,
+			DisplayName:   info.DisplayName,
+			ContextLength: info.ContextLength,
+		}
+		if info.Thinking != nil {
+			model.ReasoningLevels = append([]string(nil), info.Thinking.Levels...)
+		}
+		models = append(models, model)
+	}
+	return models
+}
+
+func (s *Server) handleGrokModels(c *gin.Context) {
+	var models []grokbuild.ModelInfo
+	if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+		entries, ok := s.loadHomeModelEntries(c)
+		if !ok {
+			return
+		}
+		models = grokModelsFromHomeEntries(entries)
+	} else {
+		models = grokModelsFromRegistryInfos(registry.GetGlobalRegistry().GetAvailableModelInfos())
+	}
+	c.JSON(http.StatusOK, grokbuild.BuildResponse(models))
 }
 
 // handleHomeCodexClientModels builds the Codex client catalog from Home model IDs.
@@ -614,7 +714,8 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 	isClaude := isAnthropicModelsRequest(c)
 
 	if isClaude {
-		c.JSON(http.StatusOK, claudemodels.BuildResponse(formatHomeClaudeModels(entries)))
+		disableCloaking := s.cfg != nil && s.cfg.ClaudeCode.DisableCloakingModelList
+		c.JSON(http.StatusOK, claudemodels.BuildResponse(formatHomeClaudeModels(entries), disableCloaking))
 		return
 	}
 

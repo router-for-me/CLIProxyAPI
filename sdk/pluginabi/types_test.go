@@ -27,6 +27,9 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 }
 
 func TestMethodNamesAreStable(t *testing.T) {
+	if SchemaVersion != 2 {
+		t.Fatalf("SchemaVersion = %d, want 2", SchemaVersion)
+	}
 	if MethodPluginRegister != "plugin.register" {
 		t.Fatalf("MethodPluginRegister = %q", MethodPluginRegister)
 	}
@@ -35,6 +38,9 @@ func TestMethodNamesAreStable(t *testing.T) {
 	}
 	if MethodRequestInterceptAfter != "request.intercept_after" {
 		t.Fatalf("MethodRequestInterceptAfter = %q", MethodRequestInterceptAfter)
+	}
+	if MethodRequestComplete != "request.complete" {
+		t.Fatalf("MethodRequestComplete = %q", MethodRequestComplete)
 	}
 	if MethodResponseInterceptAfter != "response.intercept_after" {
 		t.Fatalf("MethodResponseInterceptAfter = %q", MethodResponseInterceptAfter)

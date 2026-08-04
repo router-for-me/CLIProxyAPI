@@ -272,6 +272,20 @@ func xaiBuildCompactionTriggerStreamChunks(prepared *xaiPreparedRequest, compact
 	createdResponse := xaiBuildCompactionBaseResponse(prepared, compactData, responseID, createdAt, "in_progress")
 	inProgressResponse := xaiBuildCompactionBaseResponse(prepared, compactData, responseID, createdAt, "in_progress")
 	completedResponse := xaiBuildCompactionBaseResponse(prepared, compactData, responseID, createdAt, "completed")
+	requestModelName := ""
+	if prepared != nil {
+		requestModelName = gjson.GetBytes(prepared.originalPayload, "model").String()
+		if requestModelName == "" {
+			requestModelName = prepared.baseModel
+		}
+	}
+	if requestModelName == "" {
+		requestModelName = gjson.GetBytes(compactData, "model").String()
+	}
+	if requestModelName != "" {
+		createdResponse, _ = sjson.SetBytes(createdResponse, "model", requestModelName)
+		inProgressResponse, _ = sjson.SetBytes(inProgressResponse, "model", requestModelName)
+	}
 	completedResponse, _ = sjson.SetBytes(completedResponse, "completed_at", completedAt)
 	completedResponse, _ = sjson.SetRawBytes(completedResponse, "output", output)
 	if usage := gjson.GetBytes(compactData, "usage"); usage.Exists() {

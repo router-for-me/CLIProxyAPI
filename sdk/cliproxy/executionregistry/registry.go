@@ -154,6 +154,30 @@ func (r *Registry) BeginDispatch() (*PendingDispatch, error) {
 	return pending, nil
 }
 
+// WaitPending waits until every dispatch with an unresolved Home response has ended or been installed.
+func (r *Registry) WaitPending(ctx context.Context) error {
+	if r == nil {
+		return ErrRegistryClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	r.mu.Lock()
+	for len(r.pending) != 0 {
+		changed := r.changed
+		r.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
+		r.mu.Lock()
+	}
+	r.mu.Unlock()
+	return nil
+}
+
 // End releases a dispatch token that was not installed.
 func (p *PendingDispatch) End() {
 	if p == nil || p.registry == nil {

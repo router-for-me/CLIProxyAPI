@@ -94,6 +94,18 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 			return nil, errIntercept
 		}
 		return marshalRPCResult(resp)
+	case pluginabi.MethodRequestComplete:
+		if l.active.Capabilities.RequestLifecyclePlugin == nil {
+			return nil, fmt.Errorf("missing request lifecycle plugin")
+		}
+		var req pluginapi.RequestCompletion
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		if errComplete := l.active.Capabilities.RequestLifecyclePlugin.HandleRequestComplete(ctx, req); errComplete != nil {
+			return nil, errComplete
+		}
+		return marshalRPCResult(rpcEmptyResponse{})
 	case pluginabi.MethodResponseInterceptAfter:
 		if l.active.Capabilities.ResponseInterceptor == nil {
 			return nil, fmt.Errorf("missing response interceptor")
@@ -244,6 +256,13 @@ func validTestPlugin(name string) pluginapi.Plugin {
 type testUsageCapability struct{}
 
 func (testUsageCapability) HandleUsage(ctx context.Context, record pluginapi.UsageRecord) {}
+
+type requestLifecyclePluginFunc func(context.Context, pluginapi.RequestCompletion)
+
+func (f requestLifecyclePluginFunc) HandleRequestComplete(ctx context.Context, completion pluginapi.RequestCompletion) error {
+	f(ctx, completion)
+	return nil
+}
 
 type testThinkingCapability struct {
 	provider string

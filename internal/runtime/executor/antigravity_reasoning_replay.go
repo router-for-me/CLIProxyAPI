@@ -5,19 +5,53 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// antigravityReplayLogKey returns a short, non-reversible tag for a replay
+// identifier. Session keys and tool call IDs are never logged verbatim.
+func antigravityReplayLogKey(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", sum[:8])
+}
+
+// antigravityCountClaudeToolProvenanceIDs reports how many reserved
+// Claude-facing provenance IDs are still present in a Gemini-shaped payload.
+func antigravityCountClaudeToolProvenanceIDs(payload []byte) int {
+	count := 0
+	contents := gjson.GetBytes(payload, "request.contents")
+	if !contents.IsArray() {
+		return 0
+	}
+	for _, content := range contents.Array() {
+		for _, part := range content.Get("parts").Array() {
+			for _, path := range []string{"functionCall.id", "functionResponse.id"} {
+				if util.IsGeminiClaudeToolUseID(part.Get(path).String()) {
+					count++
+				}
+			}
+		}
+	}
+	return count
+}
 
 type antigravityReasoningReplayScope struct {
 	modelName     string
@@ -198,23 +232,57 @@ func antigravityReasoningReplayResolveContentIndex(payload []byte, cached int) i
 	return -1
 }
 
+// logAntigravityReasoningReplayDegraded reports that a replay-state operation
+// failed and the request continued without it. A Home that predates the CAS
+// command fails every call, and the Home client already warns once about that,
+// so those are logged at debug level to avoid one warning per request.
+func logAntigravityReasoningReplayDegraded(scope antigravityReasoningReplayScope, stage string, err error) {
+	if err == nil {
+		return
+	}
+	if errors.Is(err, homekv.ErrCompareAndSwapUnsupported) {
+		log.Debugf("antigravity executor: reasoning replay %s unavailable on this Home (session=%s): %v",
+			stage, antigravityReplayLogKey(scope.sessionKey), err)
+		return
+	}
+	log.Warnf("antigravity executor: reasoning replay %s failed; continuing without replay (session=%s): %v",
+		stage, antigravityReplayLogKey(scope.sessionKey), err)
+}
+
 func prepareAntigravityGeminiReasoningReplayPayload(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, payload []byte) ([]byte, antigravityReasoningReplayScope, error) {
 	if !antigravityUsesReasoningReplayCache(modelName) {
 		return payload, antigravityReasoningReplayScope{}, nil
 	}
 	updated, scope, replayApplied, errReplay := applyAntigravityReasoningReplayCache(ctx, modelName, req, opts, payload)
 	if errReplay != nil {
-		return payload, scope, errReplay
+		// Replay state is an optimization, not a correctness requirement: a ledger
+		// miss is already a tolerated outcome below. Failing the request here would
+		// surface as an untyped executor error, which MarkResult treats as a
+		// credential fault and uses to mark every candidate credential unavailable.
+		// Degrade to "no replay this turn" instead.
+		logAntigravityReasoningReplayDegraded(scope, "read", errReplay)
+		updated = payload
 	}
 	updated = normalizeAntigravityGeminiFunctionResponseRoles(updated)
 	if antigravityPayloadHasClaudeToolProvenanceID(updated) {
-		return payload, scope, statusErr{code: http.StatusBadRequest, msg: "antigravity executor: missing Claude tool provenance; start a new session or restore replay state"}
+		// The replay ledger could not resolve every tool ID — the session lane
+		// changed, the entry expired, the process restarted, or a turn never
+		// committed. Degrade those calls instead of killing the conversation.
+		degradedPayload, degradedCount := degradeAntigravityClaudeToolProvenanceIDs(updated)
+		log.Warnf("antigravity executor: replay state missing for %d tool ID(s); rewriting them to synthetic IDs and continuing without reasoning replay for those calls", degradedCount)
+		updated = degradedPayload
 	}
+	// An identity-only restore drops the cached signature, which can leave a model
+	// turn's first function call unsigned. Gemini rejects that, so re-assert the
+	// invariant the pre-replay sanitizer established.
+	updated = antigravityRepairUnsignedFirstFunctionCalls(updated)
 	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(updated); errPairing != nil {
 		originalPairingValid := internalsignature.ValidateGeminiFunctionCallPairing(payload) == nil
 		if replayApplied && originalPairingValid && scope.valid() {
 			if _, errDelete := internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(ctx, scope.modelName, scope.sessionKey, scope.cacheSnapshot); errDelete != nil {
-				return payload, scope, errDelete
+				// Invalidation is best-effort cleanup. Returning it here would replace
+				// the pairing diagnosis below with an untyped error.
+				logAntigravityReasoningReplayDegraded(scope, "invalidate", errDelete)
 			}
 		}
 		return payload, scope, statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("antigravity executor: invalid Gemini function call history: %v", errPairing)}
@@ -244,7 +312,15 @@ func applyAntigravityReasoningReplayCache(ctx context.Context, modelName string,
 	}
 	items, snapshot, ok, err := internalcache.GetAntigravityReasoningReplayItemsWithSnapshotRequired(ctx, scope.modelName, scope.sessionKey)
 	scope.cacheSnapshot = snapshot
+	reservedBefore := antigravityCountClaudeToolProvenanceIDs(payload)
 	if err != nil || !ok || len(items) == 0 {
+		// A ledger miss on a payload that still carries reserved provenance IDs is
+		// the signature of a session/lane switch, cache expiry, or a turn that never
+		// committed. Log it so the two failure families stay distinguishable.
+		if reservedBefore > 0 {
+			log.Debugf("antigravity replay: ledger miss with %d reserved tool provenance ID(s) present (session=%s found=%t)",
+				reservedBefore, antigravityReplayLogKey(scope.sessionKey), ok)
+		}
 		return payload, scope, false, err
 	}
 	updated := payload
@@ -264,6 +340,11 @@ func applyAntigravityReasoningReplayCache(ctx context.Context, modelName string,
 		}
 		updated = next
 		changed = true
+	}
+	if reservedBefore > 0 {
+		log.Debugf("antigravity replay: ledger items=%d reserved before=%d after=%d applied=%t (session=%s)",
+			len(items), reservedBefore, antigravityCountClaudeToolProvenanceIDs(updated), changed,
+			antigravityReplayLogKey(scope.sessionKey))
 	}
 	if !changed {
 		return payload, scope, false, nil
@@ -290,6 +371,11 @@ func filterAntigravityReasoningReplayItemsForRequestWithSchemas(payload []byte, 
 				if !needsNativeRestore && (signature == "" || antigravityHasNativeThoughtSignature(part.Get("thoughtSignature").String())) {
 					continue
 				}
+				break
+			}
+			// Even without a context match, an exact opaque ID match can still
+			// restore the native call identity.
+			if _, _, foundProvenance := antigravityFunctionCallProvenanceLocation(payload, itemResult, toolSchemas); foundProvenance {
 				break
 			}
 			callID := strings.TrimSpace(itemResult.Get("call_id").String())
@@ -530,7 +616,15 @@ func antigravityFunctionCallPartLocationForReplayWithSchemas(payload []byte, ite
 			if antigravityFunctionCallMatchesReplayItem(fc, itemResult, toolSchemas) {
 				return ci, pi, true
 			}
+			log.Debugf("antigravity replay: located call %q at contents[%d].parts[%d] but name/args did not match ledger item (opaque_id=%t)",
+				name, ci, pi, util.IsGeminiClaudeToolUseID(candidateID))
+			return -1, -1, false
 		}
+		// The candidate ID matched exactly, so callID+name+args are already proven
+		// identical. Only the surrounding context drifted, which invalidates the
+		// cached signature but not the tool identity.
+		log.Debugf("antigravity replay: exact tool ID match for %q at contents[%d].parts[%d] rejected by context hash (opaque_id=%t)",
+			name, ci, pi, util.IsGeminiClaudeToolUseID(candidateID))
 		return -1, -1, false
 	}
 	contents := gjson.GetBytes(payload, "request.contents")
@@ -577,6 +671,37 @@ func antigravityFunctionCallPartLocationForReplayWithSchemas(payload []byte, ite
 		return matches[0][0], matches[0][1], true
 	}
 	return -1, -1, false
+}
+
+// antigravityFunctionCallProvenanceLocation locates the function call whose
+// Claude-facing opaque ID was derived from this exact ledger item.
+//
+// The opaque ID is sha256(call_id, name, args), so an exact match already proves
+// that the call ID, tool name and arguments are identical to the provider-native
+// call. The surrounding context hash adds nothing to that proof; it only decides
+// whether the cached thoughtSignature is still valid. Callers therefore use this
+// to recover tool identity after the context has drifted, without replaying any
+// signature.
+func antigravityFunctionCallProvenanceLocation(payload []byte, itemResult gjson.Result, toolSchemas map[string]any) (contentIndex int, partIndex int, ok bool) {
+	name := strings.TrimSpace(itemResult.Get("name").String())
+	args := itemResult.Get("args")
+	callID := strings.TrimSpace(itemResult.Get("call_id").String())
+	if name == "" || !args.Exists() || callID == "" {
+		return -1, -1, false
+	}
+	stableID := util.GeminiClaudeToolUseID(callID, name, args.Raw)
+	if stableID == "" || stableID == callID {
+		return -1, -1, false
+	}
+	ci, pi, found := antigravityFunctionCallPartLocation(payload, stableID)
+	if !found {
+		return -1, -1, false
+	}
+	fc := gjson.GetBytes(payload, fmt.Sprintf("request.contents.%d.parts.%d.functionCall", ci, pi))
+	if !antigravityFunctionCallMatchesReplayItem(fc, itemResult, toolSchemas) {
+		return -1, -1, false
+	}
+	return ci, pi, true
 }
 
 func insertAntigravityModelFunctionCallBeforeContent(payload []byte, beforeIndex int, name, callID, thoughtSig string, args gjson.Result) ([]byte, bool) {
@@ -887,6 +1012,102 @@ func antigravityPayloadHasClaudeToolProvenanceID(payload []byte) bool {
 	return false
 }
 
+// antigravitySyntheticToolCallID derives a deterministic neutral call ID for a
+// reserved Claude-facing provenance ID that could not be resolved back to its
+// provider-native call. It is stable across turns and never lands in the reserved
+// namespace, so call/response pairs stay consistent without impersonating a
+// provider-issued ID.
+func antigravitySyntheticToolCallID(reservedID string) string {
+	sum := sha256.Sum256([]byte("antigravity-degraded-tool-call\x00" + reservedID))
+	return fmt.Sprintf("call_%x", sum[:6])
+}
+
+// degradeAntigravityClaudeToolProvenanceIDs rewrites unresolved reserved tool
+// provenance IDs to neutral synthetic IDs so a conversation survives a replay
+// ledger miss instead of failing closed forever.
+//
+// The same reserved ID always maps to the same synthetic ID, so functionCall and
+// functionResponse stay paired. Whatever signature the client carried in-band is
+// kept: Gemini validates a thought signature's own integrity, not its binding to
+// the call ID or the surrounding history, so rewriting the ID does not invalidate
+// it. Calls left with no signature at all get the leading bypass sentinel from
+// antigravityRepairUnsignedFirstFunctionCalls. Every other part is left alone,
+// preserving the native "1 signed + N unsigned" parallel-call shape.
+func degradeAntigravityClaudeToolProvenanceIDs(payload []byte) ([]byte, int) {
+	contents := gjson.GetBytes(payload, "request.contents")
+	if !contents.IsArray() {
+		return payload, 0
+	}
+	out := payload
+	degraded := 0
+	for ci, content := range contents.Array() {
+		parts := content.Get("parts")
+		if !parts.IsArray() {
+			continue
+		}
+		for pi, part := range parts.Array() {
+			partPath := fmt.Sprintf("request.contents.%d.parts.%d", ci, pi)
+			if fc := part.Get("functionCall"); fc.Exists() {
+				id := strings.TrimSpace(fc.Get("id").String())
+				if !util.IsGeminiClaudeToolUseID(id) {
+					continue
+				}
+				out, _ = sjson.SetBytes(out, partPath+".functionCall.id", antigravitySyntheticToolCallID(id))
+				degraded++
+				continue
+			}
+			if fr := part.Get("functionResponse"); fr.Exists() {
+				id := strings.TrimSpace(fr.Get("id").String())
+				if !util.IsGeminiClaudeToolUseID(id) {
+					continue
+				}
+				out, _ = sjson.SetBytes(out, partPath+".functionResponse.id", antigravitySyntheticToolCallID(id))
+				degraded++
+			}
+		}
+	}
+	return out, degraded
+}
+
+// antigravityRepairUnsignedFirstFunctionCalls restores Gemini's bypass sentinel on
+// the first function call of any model turn that replay left completely unsigned.
+//
+// Gemini rejects a model turn whose leading functionCall carries no
+// thoughtSignature. The request-level sanitizer enforces that invariant, but it
+// runs before reasoning replay, and replay can legitimately drop a signature
+// afterwards: a degraded call loses one, and an identity-only restore on drifted
+// context deliberately declines to replay one. Only a missing signature is filled
+// in here, so native signatures are never touched.
+func antigravityRepairUnsignedFirstFunctionCalls(payload []byte) []byte {
+	contents := gjson.GetBytes(payload, "request.contents")
+	if !contents.IsArray() {
+		return payload
+	}
+	out := payload
+	for ci, content := range contents.Array() {
+		if !strings.EqualFold(strings.TrimSpace(content.Get("role").String()), "model") {
+			continue
+		}
+		parts := content.Get("parts")
+		if !parts.IsArray() {
+			continue
+		}
+		for pi, part := range parts.Array() {
+			if !part.Get("functionCall").Exists() {
+				continue
+			}
+			if antigravityNativePartThoughtSignature(part) == "" {
+				out, _ = sjson.SetBytes(out, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", ci, pi),
+					internalsignature.GeminiSkipThoughtSignatureValidator)
+			}
+			// Only the first function call of a turn needs a signature; siblings stay
+			// unsigned to preserve the native parallel-call shape.
+			break
+		}
+	}
+	return out
+}
+
 func antigravityCanonicalReplayJSON(raw []byte) []byte {
 	var value any
 	if json.Unmarshal(raw, &value) != nil {
@@ -921,9 +1142,6 @@ func antigravityThoughtSignatureReplayPartPath(payload []byte, itemResult gjson.
 	if ci < 0 || ci >= len(contentArr) || !strings.EqualFold(strings.TrimSpace(contentArr[ci].Get("role").String()), "model") {
 		return "", false
 	}
-	if !antigravityReplayItemContextMatches(payload, itemResult, ci) {
-		return "", false
-	}
 	parts := contentArr[ci].Get("parts")
 	if !parts.IsArray() {
 		return "", false
@@ -931,6 +1149,12 @@ func antigravityThoughtSignatureReplayPartPath(payload []byte, itemResult gjson.
 	partArr := parts.Array()
 	targetKind := strings.TrimSpace(itemResult.Get("targetKind").String())
 	targetHash := strings.TrimSpace(itemResult.Get("targetHash").String())
+	// A target hash pins the signature to a part whose own bytes are unchanged,
+	// which is all Gemini validates: the signature's own integrity, never its
+	// binding to the surrounding history. Drift elsewhere in the conversation
+	// therefore costs this signature nothing, so it is deliberately not gated on
+	// the context fingerprint. The fallback below has no such proof and stays
+	// gated.
 	if targetHash != "" {
 		if targetOccurrence := itemResult.Get("targetOccurrence"); targetOccurrence.Exists() {
 			wanted := int(targetOccurrence.Int())
@@ -963,6 +1187,11 @@ func antigravityThoughtSignatureReplayPartPath(payload []byte, itemResult gjson.
 		return "", false
 	}
 
+	// No target hash: nothing proves which part this signature belongs to, so
+	// only a matching context fingerprint makes the positional guess safe.
+	if !antigravityReplayItemContextMatches(payload, itemResult, ci) {
+		return "", false
+	}
 	pi := int(itemResult.Get("partIndex").Int())
 	if pi >= 0 && pi < len(partArr) && partArr[pi].Type != gjson.Null {
 		if kind, _ := antigravityReplayPartFingerprint(partArr[pi]); kind != "" {
@@ -1100,7 +1329,12 @@ func antigravityFunctionResponsesCanRestoreID(payload []byte, currentID, nativeN
 	return valid
 }
 
-func restoreAntigravityNativeFunctionCallReplay(payload []byte, contentIndex, partIndex int, itemResult gjson.Result, allowLegacyIDRestore bool) ([]byte, bool) {
+// restoreAntigravityNativeFunctionCallReplay rewrites one function call part back
+// to its provider-native identity. allowSignature reports whether the cached
+// thoughtSignature may be replayed as well; identity-only restores pass false
+// because the surrounding context no longer matches the one the signature was
+// issued for.
+func restoreAntigravityNativeFunctionCallReplay(payload []byte, contentIndex, partIndex int, itemResult gjson.Result, allowLegacyIDRestore, allowSignature bool) ([]byte, bool) {
 	partPath := fmt.Sprintf("request.contents.%d.parts.%d", contentIndex, partIndex)
 	currentCall := gjson.GetBytes(payload, partPath+".functionCall")
 	if !currentCall.Exists() {
@@ -1112,7 +1346,7 @@ func restoreAntigravityNativeFunctionCallReplay(payload []byte, contentIndex, pa
 	restoreIdentity := currentID == nativeID || util.IsGeminiClaudeToolUseID(currentID) || allowLegacyIDRestore
 	if !restoreIdentity {
 		signature := strings.TrimSpace(itemResult.Get("thoughtSignature").String())
-		if signature == "" || antigravityHasNativeThoughtSignature(gjson.GetBytes(payload, partPath+".thoughtSignature").String()) {
+		if !allowSignature || signature == "" || antigravityHasNativeThoughtSignature(gjson.GetBytes(payload, partPath+".thoughtSignature").String()) {
 			return payload, false
 		}
 		payload = antigravityRemoveThoughtSignatureFromOtherParts(payload, contentIndex, signature, partPath)
@@ -1133,7 +1367,7 @@ func restoreAntigravityNativeFunctionCallReplay(payload []byte, contentIndex, pa
 	for _, field := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
 		out, _ = sjson.DeleteBytes(out, partPath+"."+field)
 	}
-	if signature := strings.TrimSpace(itemResult.Get("thoughtSignature").String()); signature != "" {
+	if signature := strings.TrimSpace(itemResult.Get("thoughtSignature").String()); allowSignature && signature != "" {
 		out = antigravityRemoveThoughtSignatureFromOtherParts(out, contentIndex, signature, partPath)
 		out, _ = sjson.SetBytes(out, partPath+".thoughtSignature", signature)
 	}
@@ -1170,12 +1404,22 @@ func mergeAntigravityFunctionCallPartReplayWithSchemas(payload []byte, itemResul
 	}
 	if ci, pi, exists := antigravityFunctionCallPartLocationForReplayWithSchemas(payload, itemResult, toolSchemas); exists {
 		_, allowLegacyIDRestore := toolSchemas[name]
-		return restoreAntigravityNativeFunctionCallReplay(payload, ci, pi, itemResult, allowLegacyIDRestore)
+		return restoreAntigravityNativeFunctionCallReplay(payload, ci, pi, itemResult, allowLegacyIDRestore, true)
+	}
+	// The context drifted, but an exact opaque ID match still proves this call's
+	// identity. Gemini validates a thought signature's own integrity and nothing
+	// about the history around it, so the drift costs the signature nothing: restore
+	// the native call and its signature rather than making the model re-reason.
+	if ci, pi, exists := antigravityFunctionCallProvenanceLocation(payload, itemResult, toolSchemas); exists {
+		return restoreAntigravityNativeFunctionCallReplay(payload, ci, pi, itemResult, false, true)
 	}
 	if callID != "" {
-		if antigravityPayloadHasFunctionCallID(payload, callID) {
-			// The ID is present but its semantic payload did not match above. Never
-			// replay or reinsert an opaque signature onto that changed call.
+		stableID := util.GeminiClaudeToolUseID(callID, name, args.Raw)
+		if antigravityPayloadHasFunctionCallID(payload, callID) || (stableID != "" && antigravityPayloadHasFunctionCallID(payload, stableID)) {
+			// The call is already in the history under its native or Claude-facing
+			// ID, and neither lookup above accepted it, so the client changed it.
+			// Never replay an opaque signature onto that changed call, and never
+			// insert a second copy of it further down.
 			return payload, false
 		}
 		if frIndex, currentResponseID, ok := antigravityFunctionResponseContentIndexForReplay(payload, itemResult); ok {
@@ -1700,7 +1944,14 @@ func (a *antigravityReasoningReplayAccumulator) appendPendingThoughtSignatures()
 }
 
 func (a *antigravityReasoningReplayAccumulator) Commit(ctx context.Context) {
-	if a == nil || !a.scope.valid() || !a.terminal {
+	if a == nil || !a.scope.valid() {
+		return
+	}
+	log.Debugf("antigravity replay: accumulator commit terminal=%t overflow=%t items=%d (session=%s)",
+		a.terminal, a.overflow, len(a.items), antigravityReplayLogKey(a.scope.sessionKey))
+	if !a.terminal {
+		// No terminal finishReason means the stream never completed, so this turn
+		// contributes nothing to the ledger and its tool IDs become unresolvable.
 		return
 	}
 	if a.overflow {

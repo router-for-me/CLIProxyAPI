@@ -671,8 +671,8 @@ func TestGeminiExecutorNativeInteractionsAppliesThinkingSuffix(t *testing.T) {
 	if got := gjson.GetBytes(upstreamBody, "generation_config.thinking_level").String(); got != "high" {
 		t.Fatalf("thinking_level = %q, want high. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "generation_config.thinking_summaries").String(); got != "auto" {
-		t.Fatalf("thinking_summaries = %q, want auto. Body: %s", got, string(upstreamBody))
+	if gjson.GetBytes(upstreamBody, "generation_config.thinking_summaries").Exists() {
+		t.Fatalf("thinking_summaries should be absent without explicit summary intent. Body: %s", string(upstreamBody))
 	}
 }
 

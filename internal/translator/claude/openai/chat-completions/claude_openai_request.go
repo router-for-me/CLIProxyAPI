@@ -165,12 +165,17 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		systemBlocks := make([][]byte, 0)
 		messageBlocks := make([][]byte, 0)
+		previousRole := ""
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
 			contentResult := message.Get("content")
 
 			switch role {
-			case "system":
+			// Developer messages rank with system messages in OpenAI's instruction
+			// hierarchy, so both become top-level Claude system blocks. Dropping the
+			// developer role, as this translator used to, silently removed operator
+			// instructions from the upstream request.
+			case "system", "developer":
 				systemStart := len(systemBlocks)
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
 					textPart := []byte(`{"type":"text","text":""}`)
@@ -274,8 +279,15 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					msg, _ = sjson.SetBytes(msg, "content.0.content", toolResultContent)
 				}
 				msg = common.AttachMessageCacheControl(msg, message)
-				messageBlocks = append(messageBlocks, msg)
+				if previousRole == "tool" && len(messageBlocks) > 0 {
+					toolResult := gjson.GetBytes(msg, "content.0")
+					lastIdx := len(messageBlocks) - 1
+					messageBlocks[lastIdx], _ = sjson.SetRawBytes(messageBlocks[lastIdx], "content.-1", []byte(toolResult.Raw))
+				} else {
+					messageBlocks = append(messageBlocks, msg)
+				}
 			}
+			previousRole = role
 			return true
 		})
 
@@ -305,9 +317,9 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 				// Convert parameters schema for the tool
 				if parameters := function.Get("parameters"); parameters.Exists() {
-					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(parameters.Raw))
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", util.NormalizeClaudeToolInputSchema([]byte(parameters.Raw)))
 				} else if parameters := function.Get("parametersJsonSchema"); parameters.Exists() {
-					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(parameters.Raw))
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", util.NormalizeClaudeToolInputSchema([]byte(parameters.Raw)))
 				}
 				anthropicTool = common.AttachCacheControl(anthropicTool, tool)
 				if !gjson.GetBytes(anthropicTool, "cache_control").Exists() {

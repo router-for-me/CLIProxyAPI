@@ -17,6 +17,7 @@ import (
 
 	gin "github.com/gin-gonic/gin"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
@@ -37,6 +38,9 @@ type codexSearchCaptureExecutor struct {
 	prepareErr   error
 	httpErr      error
 	responseBody io.ReadCloser
+	statuses     []int
+	refreshCalls int
+	httpCalls    int
 }
 
 func (e *codexSearchCaptureExecutor) Identifier() string { return "codex" }
@@ -50,7 +54,13 @@ func (e *codexSearchCaptureExecutor) ExecuteStream(context.Context, *auth.Auth, 
 }
 
 func (e *codexSearchCaptureExecutor) Refresh(_ context.Context, a *auth.Auth) (*auth.Auth, error) {
-	return a, nil
+	e.refreshCalls++
+	updated := a.Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = make(map[string]any)
+	}
+	updated.Metadata["access_token"] = "refreshed-home-search-token"
+	return updated, nil
 }
 
 func (e *codexSearchCaptureExecutor) CountTokens(context.Context, *auth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
@@ -62,7 +72,12 @@ func (e *codexSearchCaptureExecutor) PrepareRequest(req *http.Request, a *auth.A
 		return e.prepareErr
 	}
 	token, _ := a.Metadata["access_token"].(string)
-	req.Header.Set("Authorization", "Bearer "+token)
+	if strings.TrimSpace(token) == "" && a.Attributes != nil {
+		token = a.Attributes[auth.AttributeAPIKey]
+	}
+	if strings.TrimSpace(token) != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	return nil
 }
 
@@ -109,6 +124,7 @@ func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *au
 	}
 	e.request = req.Clone(req.Context())
 	e.authIDs = append(e.authIDs, selected.ID)
+	e.httpCalls++
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
@@ -118,15 +134,20 @@ func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *au
 	if responseBody == nil {
 		responseBody = io.NopCloser(strings.NewReader(`{"results":[{"url":"https://example.com"}]}`))
 	}
+	statusCode := http.StatusOK
+	if e.httpCalls <= len(e.statuses) && e.statuses[e.httpCalls-1] > 0 {
+		statusCode = e.statuses[e.httpCalls-1]
+	}
 	return &http.Response{
-		StatusCode: http.StatusOK,
+		StatusCode: statusCode,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       responseBody,
 	}, nil
 }
 
 type codexSearchHomeDispatcher struct {
-	calls atomic.Int32
+	calls  atomic.Int32
+	policy atomic.Value
 }
 
 func (*codexSearchHomeDispatcher) HeartbeatOK() bool { return true }
@@ -150,6 +171,11 @@ func (d *codexSearchHomeDispatcher) RPopAuth(_ context.Context, model string, _ 
 	})
 }
 
+func (d *codexSearchHomeDispatcher) RPopAuthWithPolicy(ctx context.Context, model string, sessionID string, headers http.Header, count int, policy string) ([]byte, error) {
+	d.policy.Store(policy)
+	return d.RPopAuth(ctx, model, sessionID, headers, count)
+}
+
 func (*codexSearchHomeDispatcher) AbortAmbiguousDispatch() {}
 
 type codexSearchBusyHomeDispatcher struct{}
@@ -157,6 +183,9 @@ type codexSearchBusyHomeDispatcher struct{}
 func (*codexSearchBusyHomeDispatcher) HeartbeatOK() bool { return true }
 func (*codexSearchBusyHomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
 	return []byte(`{"error":{"type":"credential_concurrency_exceeded","message":"busy","retry_after_ms":750}}`), nil
+}
+func (d *codexSearchBusyHomeDispatcher) RPopAuthWithPolicy(ctx context.Context, model string, sessionID string, headers http.Header, count int, _ string) ([]byte, error) {
+	return d.RPopAuth(ctx, model, sessionID, headers, count)
 }
 func (*codexSearchBusyHomeDispatcher) AbortAmbiguousDispatch() {}
 
@@ -295,6 +324,33 @@ func TestAuditHomeCodexSearchBodyCloseBeforeRelease(t *testing.T) {
 	}
 }
 
+func TestHomeCodexAlphaSearchRefreshesUnauthorizedSelectionOnce(t *testing.T) {
+	server := newTestServer(t)
+	dispatcher := &codexSearchHomeDispatcher{}
+	server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
+	server.handlers.AuthManager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+	executor := &codexSearchCaptureExecutor{statuses: []int{http.StatusUnauthorized, http.StatusOK}}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"id":"home-search-refresh","model":"gpt-5-codex","query":"test"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if executor.refreshCalls != 1 || executor.httpCalls != 2 {
+		t.Fatalf("refresh/http calls = %d/%d, want 1/2", executor.refreshCalls, executor.httpCalls)
+	}
+	if got := executor.request.Header.Get("Authorization"); got != "Bearer refreshed-home-search-token" {
+		t.Fatalf("retry Authorization = %q, want refreshed token", got)
+	}
+	if got := dispatcher.calls.Load(); got != 1 {
+		t.Fatalf("Home RPOP calls = %d, want 1", got)
+	}
+}
+
 func TestHomeCodexAlphaSearchEndsSelectionAcrossDirectHTTPPaths(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -347,6 +403,9 @@ func TestHomeCodexAlphaSearchEndsSelectionAcrossDirectHTTPPaths(t *testing.T) {
 			}
 			if got := dispatcher.calls.Load(); got != 1 {
 				t.Fatalf("Home RPOP calls = %d, want 1", got)
+			}
+			if got, _ := dispatcher.policy.Load().(string); got != auth.CredentialPolicyCodexAlphaSearchV1 {
+				t.Fatalf("Home credential policy = %q, want %q", got, auth.CredentialPolicyCodexAlphaSearchV1)
 			}
 			if got := body.closed.Load(); got != test.wantClosed {
 				t.Fatalf("response body closed = %t, want %t", got, test.wantClosed)
@@ -736,7 +795,7 @@ func TestCodexAlphaSearchSanitizesResponsesOnlyFields(t *testing.T) {
 	}
 }
 
-func TestCodexAlphaSearchRequiresOAuthCredential(t *testing.T) {
+func TestCodexAlphaSearchCredentialPolicy(t *testing.T) {
 	newServer := func(t *testing.T, credentials ...*auth.Auth) (*Server, *codexSearchCaptureExecutor) {
 		t.Helper()
 		server := newTestServer(t)
@@ -782,7 +841,7 @@ func TestCodexAlphaSearchRequiresOAuthCredential(t *testing.T) {
 		}
 	})
 
-	t.Run("API key only", func(t *testing.T) {
+	t.Run("ordinary API key only", func(t *testing.T) {
 		server, executor := newServer(t, apiKeyCredential())
 		req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"query":"GPT-5.6"}`))
 		req.Header.Set("Authorization", "Bearer test-key")
@@ -796,6 +855,82 @@ func TestCodexAlphaSearchRequiresOAuthCredential(t *testing.T) {
 			t.Fatalf("selected auth IDs = %v, want none", executor.authIDs)
 		}
 	})
+}
+
+func TestCodexAlphaSearchOptInAPIKeyUsesConfiguredEndpoint(t *testing.T) {
+	server := newTestServer(t)
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	credential := &auth.Auth{
+		ID:       "codex-alpha-api-key",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Attributes: map[string]string{
+			auth.AttributeAPIKey:           "codex-alpha-key",
+			auth.AttributeCodexAlphaSearch: "true",
+			"base_url":                     "https://codex.example.com/v1/",
+		},
+	}
+	if _, errRegister := server.handlers.AuthManager.Register(context.Background(), credential); errRegister != nil {
+		t.Fatalf("register Codex API key: %v", errRegister)
+	}
+
+	payload := `{"query":"golang","prompt_cache_key":"cache","prompt_cache_retention":"24h"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if executor.request == nil {
+		t.Fatal("Codex executor did not receive a request")
+	}
+	if got, want := executor.request.URL.String(), "https://codex.example.com/v1/alpha/search"; got != want {
+		t.Fatalf("upstream URL = %q, want %q", got, want)
+	}
+	if got := executor.request.Header.Get("Authorization"); got != "Bearer codex-alpha-key" {
+		t.Fatalf("Authorization = %q, want API key bearer", got)
+	}
+	var upstreamBody map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(executor.body, &upstreamBody); errUnmarshal != nil {
+		t.Fatalf("unmarshal upstream body: %v", errUnmarshal)
+	}
+	for _, field := range []string{"prompt_cache_key", "prompt_cache_retention"} {
+		if _, exists := upstreamBody[field]; exists {
+			t.Fatalf("upstream body contains %s: %s", field, executor.body)
+		}
+	}
+}
+
+func TestCodexAlphaSearchOptInAPIKeyWithoutBaseURLFailsClosed(t *testing.T) {
+	server := newTestServer(t)
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	if _, errRegister := server.handlers.AuthManager.Register(context.Background(), &auth.Auth{
+		ID:       "codex-alpha-api-key",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Attributes: map[string]string{
+			auth.AttributeAPIKey:           "codex-alpha-key",
+			auth.AttributeCodexAlphaSearch: "true",
+		},
+	}); errRegister != nil {
+		t.Fatalf("register Codex API key: %v", errRegister)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"query":"GPT-5.6"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+	}
+	if executor.request != nil {
+		t.Fatal("request was sent without an API key base URL")
+	}
 }
 
 func TestCodexAlphaSearchPassesGinContextToAuthSelection(t *testing.T) {
@@ -1434,6 +1569,56 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 	})
 }
 
+func TestClaudeModelListCloakingConfigHotReload(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-claude-model-list-cloaking-hot-reload"
+	const modelID = "gpt-model-list-hot-reload"
+	modelRegistry.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
+		ID: modelID, Object: "model", OwnedBy: "test", Type: "openai",
+	}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	server := newTestServer(t)
+	assertModelID := func(want string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer test-key")
+		req.Header.Set("Anthropic-Version", "2023-06-01")
+
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+		}
+
+		var response struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+			t.Fatalf("decode response: %v", errUnmarshal)
+		}
+		for _, model := range response.Data {
+			if model.ID == want {
+				return
+			}
+		}
+		t.Fatalf("model %q not found in response: %s", want, recorder.Body.String())
+	}
+
+	assertModelID(claudemodels.EnsureClaudeModelIDPrefix(modelID))
+
+	updatedCfg := *server.cfg
+	updatedCfg.SDKConfig = server.cfg.SDKConfig
+	updatedCfg.ClaudeCode.DisableCloakingModelList = true
+	server.UpdateClients(&updatedCfg)
+
+	assertModelID(modelID)
+}
+
 func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-client-version-catalog"
@@ -1463,6 +1648,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		{ID: "gpt-image-2", Object: "model", OwnedBy: "openai", Type: "openai"},
 		{ID: "grok-imagine-image", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-video", Object: "model", OwnedBy: "xai", Type: "openai"},
+		{ID: "grok-imagine-video-1.5", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-video-1.5-preview", Object: "model", OwnedBy: "xai", Type: "openai"},
 	})
 	t.Cleanup(func() {
@@ -1533,7 +1719,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := custom["context_window"].(float64); got != 123456 {
 		t.Fatalf("custom context_window = %v, want 123456", custom["context_window"])
 	}
-	assertCodexSupportedReasoningLevels(t, custom, []string{"none", "low", "medium", "high", "xhigh"})
+	assertCodexSupportedReasoningLevels(t, custom, []string{"none", "minimal", "low", "medium", "high", "xhigh"})
 	if custom["base_instructions"] != gpt55["base_instructions"] {
 		t.Fatal("expected custom model to use gpt-5.5 base_instructions fallback")
 	}
@@ -1562,6 +1748,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		"gpt-image-2":                    false,
 		"grok-imagine-image":             false,
 		"grok-imagine-video":             false,
+		"grok-imagine-video-1.5":         false,
 		"grok-imagine-video-1.5-preview": false,
 	}
 	for _, model := range resp.Models {
