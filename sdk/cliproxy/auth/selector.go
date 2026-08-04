@@ -527,18 +527,33 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 	return true, blockReasonOther, time.Time{}
 }
 
+// Session ID derivation modes for session affinity.
+const (
+	// SessionIDModeDefault keeps the historical behavior: the Claude Code
+	// session_id alone identifies the session.
+	SessionIDModeDefault = ""
+	// SessionIDModeContentHash combines the Claude Code session_id with a hash
+	// of the first message contents. Subagents that inherit the parent's
+	// session_id but carry different prompts then bind to distinct auths,
+	// while each individual conversation stays pinned.
+	SessionIDModeContentHash = "content-hash"
+)
+
 // SessionAffinitySelector wraps another selector with session-sticky behavior.
 // It extracts session ID from multiple sources and maintains session-to-auth
 // mappings with automatic failover when the bound auth becomes unavailable.
 type SessionAffinitySelector struct {
-	fallback Selector
-	cache    *SessionCache
+	fallback      Selector
+	cache         *SessionCache
+	sessionIDMode string
 }
 
 // SessionAffinityConfig configures the session affinity selector.
 type SessionAffinityConfig struct {
 	Fallback Selector
 	TTL      time.Duration
+	// SessionIDMode selects how session identity is derived; see SessionIDMode* constants.
+	SessionIDMode string
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -558,8 +573,18 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		cfg.TTL = time.Hour
 	}
 	return &SessionAffinitySelector{
-		fallback: cfg.Fallback,
-		cache:    NewSessionCache(cfg.TTL),
+		fallback:      cfg.Fallback,
+		cache:         NewSessionCache(cfg.TTL),
+		sessionIDMode: normalizeSessionIDMode(cfg.SessionIDMode),
+	}
+}
+
+func normalizeSessionIDMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case SessionIDModeContentHash:
+		return SessionIDModeContentHash
+	default:
+		return SessionIDModeDefault
 	}
 }
 
@@ -572,7 +597,7 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	entry := selectorLogEntry(ctx)
-	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	primaryID, fallbackID := extractSessionIDsWithMode(opts.Headers, opts.OriginalRequest, opts.Metadata, s.sessionIDMode)
 	if primaryID == "" {
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
 		return s.fallback.Pick(ctx, provider, model, opts, auths)
@@ -658,10 +683,13 @@ func truncateSessionID(id string) string {
 	return id[:8] + "..."
 }
 
-// Stop releases resources held by the selector.
+// Stop releases resources held by the selector and its fallback.
 func (s *SessionAffinitySelector) Stop() {
 	if s.cache != nil {
 		s.cache.Stop()
+	}
+	if stoppable, ok := s.fallback.(StoppableSelector); ok {
+		stoppable.Stop()
 	}
 }
 
@@ -724,11 +752,17 @@ func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]a
 // fallbackID preserves an earlier binding when a stronger body identifier appears
 // later, and lets callers bind both identifiers when both are present.
 func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]any) (string, string) {
+	return extractSessionIDsWithMode(headers, payload, metadata, SessionIDModeDefault)
+}
+
+// extractSessionIDsWithMode is extractSessionIDs with an explicit session ID
+// derivation mode; see the SessionIDMode* constants.
+func extractSessionIDsWithMode(headers http.Header, payload []byte, metadata map[string]any, mode string) (string, string) {
 	if sid := sessionHeaderValue(headers, "X-Claude-Code-Session-Id"); sid != "" {
-		return "claude:" + sid, ""
+		return claudeSessionIDs(sid, payload, mode)
 	}
 	if sid := cliproxysession.ClaudeMetadataSessionID(payload); sid != "" {
-		return "claude:" + sid, ""
+		return claudeSessionIDs(sid, payload, mode)
 	}
 	if sid := sessionHeaderValue(headers, "Session-Id"); sid != "" {
 		return "codex:" + sid, ""
@@ -791,7 +825,40 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 	return extractMessageHashIDs(payload)
 }
 
+// claudeSessionIDs derives the affinity IDs for Claude Code traffic.
+// In content-hash mode the message content hash is folded into the session ID
+// so requests sharing a session_id but carrying different prompts (subagents)
+// get distinct bindings. The short-hash fallback ID preserves the first-turn
+// inherit mechanism from extractMessageHashIDs.
+func claudeSessionIDs(sessionID string, payload []byte, mode string) (string, string) {
+	base := "claude:" + sessionID
+	if mode != SessionIDModeContentHash {
+		return base, ""
+	}
+	// Hash FULL message content, not a truncated prefix: Claude Code subagents
+	// share their first several kilobytes verbatim (system-reminder and
+	// project-context blocks) and diverge only later, so a short prefix hash
+	// collapses every subagent onto one binding.
+	primaryHash, fallbackHash := extractMessageHashIDsLimited(payload, 0)
+	if primaryHash == "" {
+		return base, ""
+	}
+	if fallbackHash == "" {
+		return base + ":" + primaryHash, ""
+	}
+	return base + ":" + primaryHash, base + ":" + fallbackHash
+}
+
+// extractMessageHashIDs keeps the historical 100-char sampling used by the
+// last-resort session-ID fallback in extractSessionIDs.
 func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
+	return extractMessageHashIDsLimited(payload, 100)
+}
+
+// extractMessageHashIDsLimited hashes the system prompt and first user (and
+// assistant) message, each truncated to limit chars; limit <= 0 means no
+// truncation (full content).
+func extractMessageHashIDsLimited(payload []byte, limit int) (primaryID, fallbackID string) {
 	var systemPrompt, firstUserMsg, firstAssistantMsg string
 
 	// OpenAI/Claude messages format
@@ -807,15 +874,15 @@ func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
 			switch role {
 			case "system":
 				if systemPrompt == "" {
-					systemPrompt = truncateString(content, 100)
+					systemPrompt = truncateString(content, limit)
 				}
 			case "user":
 				if firstUserMsg == "" {
-					firstUserMsg = truncateString(content, 100)
+					firstUserMsg = truncateString(content, limit)
 				}
 			case "assistant":
 				if firstAssistantMsg == "" {
-					firstAssistantMsg = truncateString(content, 100)
+					firstAssistantMsg = truncateString(content, limit)
 				}
 			}
 
@@ -833,13 +900,13 @@ func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
 			if topSystem.IsArray() {
 				topSystem.ForEach(func(_, part gjson.Result) bool {
 					if text := part.Get("text").String(); text != "" && systemPrompt == "" {
-						systemPrompt = truncateString(text, 100)
+						systemPrompt = truncateString(text, limit)
 						return false
 					}
 					return true
 				})
 			} else if topSystem.Type == gjson.String {
-				systemPrompt = truncateString(topSystem.String(), 100)
+				systemPrompt = truncateString(topSystem.String(), limit)
 			}
 		}
 	}
@@ -850,7 +917,7 @@ func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
 		if sysInstr.Exists() && sysInstr.IsArray() {
 			sysInstr.ForEach(func(_, part gjson.Result) bool {
 				if text := part.Get("text").String(); text != "" && systemPrompt == "" {
-					systemPrompt = truncateString(text, 100)
+					systemPrompt = truncateString(text, limit)
 					return false
 				}
 				return true
@@ -869,11 +936,11 @@ func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
 					switch role {
 					case "user":
 						if firstUserMsg == "" {
-							firstUserMsg = truncateString(text, 100)
+							firstUserMsg = truncateString(text, limit)
 						}
 					case "model":
 						if firstAssistantMsg == "" {
-							firstAssistantMsg = truncateString(text, 100)
+							firstAssistantMsg = truncateString(text, limit)
 						}
 					}
 					return false
@@ -889,7 +956,7 @@ func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
 	// OpenAI Responses API format (v1/responses)
 	if systemPrompt == "" && firstUserMsg == "" {
 		if instr := gjson.GetBytes(payload, "instructions").String(); instr != "" {
-			systemPrompt = truncateString(instr, 100)
+			systemPrompt = truncateString(instr, limit)
 		}
 
 		input := gjson.GetBytes(payload, "input")
@@ -925,15 +992,15 @@ func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
 				switch role {
 				case "developer", "system":
 					if systemPrompt == "" {
-						systemPrompt = truncateString(text, 100)
+						systemPrompt = truncateString(text, limit)
 					}
 				case "user":
 					if firstUserMsg == "" {
-						firstUserMsg = truncateString(text, 100)
+						firstUserMsg = truncateString(text, limit)
 					}
 				case "assistant":
 					if firstAssistantMsg == "" {
-						firstAssistantMsg = truncateString(text, 100)
+						firstAssistantMsg = truncateString(text, limit)
 					}
 				}
 
@@ -973,7 +1040,8 @@ func computeSessionHash(systemPrompt, userMsg, assistantMsg string) string {
 }
 
 func truncateString(s string, maxLen int) string {
-	if len(s) > maxLen {
+	// maxLen <= 0 means no truncation (full content).
+	if maxLen > 0 && len(s) > maxLen {
 		return s[:maxLen]
 	}
 	return s

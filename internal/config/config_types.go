@@ -206,7 +206,8 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin",
+	// "fill-first", "quota-aware".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
@@ -219,6 +220,13 @@ type RoutingConfig struct {
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+
+	// SessionIDMode controls how the session identity used for affinity is derived.
+	// "" or "default": current behavior (Claude Code session_id alone).
+	// "content-hash": combine the Claude Code session_id with a hash of the first
+	// message contents, so subagents that share a parent session_id but differ in
+	// prompts bind to distinct auths while each conversation stays pinned.
+	SessionIDMode string `yaml:"session-id-mode,omitempty" json:"session-id-mode,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

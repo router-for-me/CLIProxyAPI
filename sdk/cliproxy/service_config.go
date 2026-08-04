@@ -28,6 +28,7 @@ type routingRuntimeState struct {
 	strategy           string
 	sessionAffinity    bool
 	sessionAffinityTTL time.Duration
+	sessionIDMode      string
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -44,12 +45,18 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "weighted-round-robin"
 	case "fill-first", "fillfirst", "ff":
 		state.strategy = "fill-first"
+	case "quota-aware", "quotaaware", "qa":
+		state.strategy = "quota-aware"
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
 		if parsed, errParse := time.ParseDuration(ttl); errParse == nil && parsed > 0 {
 			state.sessionAffinityTTL = parsed
 		}
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Routing.SessionIDMode)) {
+	case coreauth.SessionIDModeContentHash:
+		state.sessionIDMode = coreauth.SessionIDModeContentHash
 	}
 	return state
 }
@@ -61,13 +68,16 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 		selector = &coreauth.WeightedRoundRobinSelector{}
 	case "fill-first":
 		selector = &coreauth.FillFirstSelector{}
+	case "quota-aware":
+		selector = coreauth.NewQuotaAwareSelector()
 	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}
 	if state.sessionAffinity {
 		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
-			Fallback: selector,
-			TTL:      state.sessionAffinityTTL,
+			Fallback:      selector,
+			TTL:           state.sessionAffinityTTL,
+			SessionIDMode: state.sessionIDMode,
 		})
 	}
 	return selector
@@ -204,8 +214,14 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
 	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
+		previous := s.coreManager.Selector()
 		s.coreManager.SetSelector(newRoutingSelector(routingState))
 		s.appliedRoutingState = &routingState
+		// Release background resources (session cache, quota poller) held by
+		// the replaced selector.
+		if stoppable, ok := previous.(coreauth.StoppableSelector); ok {
+			stoppable.Stop()
+		}
 	}
 	s.applyRetryConfig(commit.cfg)
 	store := s.resolveCooldownStateStore(commit.cfg)
