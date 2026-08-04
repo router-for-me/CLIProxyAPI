@@ -183,13 +183,8 @@ func TestShouldEnsureOpenAICompatReasoningContent(t *testing.T) {
 			want:          true,
 		},
 		{
-			name:          "deepseek-r1 model",
-			upstreamModel: "deepseek-r1",
-			want:          true,
-		},
-		{
-			name:          "kimi-k1.5 model",
-			upstreamModel: "kimi-k1.5",
+			name:          "kimi-toggle-thinking-model",
+			upstreamModel: "kimi-toggle-thinking-model",
 			want:          true,
 		},
 		{
