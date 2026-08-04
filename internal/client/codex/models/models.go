@@ -64,6 +64,9 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 			applyCodexClientSearchToolSupport(entry, id, true, providersForModel)
 			sanitizeCodexClientReasoningMetadata(entry)
 			applyCodexClientVisibilityOverride(entry, id)
+			if optimizeMultiAgentV2 {
+				entry["multi_agent_version"] = "v2"
+			}
 			result = append(result, entry)
 			continue
 		}

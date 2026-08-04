@@ -3529,6 +3529,9 @@ func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 	if prewarmResponseID == "" {
 		t.Fatalf("prewarm response id is empty")
 	}
+	if got := gjson.GetBytes(createdPayload, "response.model").String(); got != "test-model" {
+		t.Fatalf("prewarm response.model = %q, want test-model", got)
+	}
 	if executor.streamCalls != 0 {
 		t.Fatalf("stream calls after prewarm = %d, want 0", executor.streamCalls)
 	}

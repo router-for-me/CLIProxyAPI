@@ -34,6 +34,16 @@ func TestIsCodexMultiAgentClient(t *testing.T) {
 			want:      true,
 		},
 		{
+			name:      "codex cli rs",
+			userAgent: "codex_cli_rs/0.144.1 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9",
+			want:      true,
+		},
+		{
+			name:      "bare codex cli rs",
+			userAgent: "codex_cli_rs",
+			want:      true,
+		},
+		{
 			name:      "other client",
 			userAgent: "curl/8.7.1",
 			want:      false,
@@ -306,6 +316,64 @@ func TestRewriteCodexSpawnAgentDescriptionEnabledOptimizesTool(t *testing.T) {
 	}
 	if encrypted := gjson.GetBytes(got, "tools.0.tools.0.parameters.properties.message.encrypted"); encrypted.Exists() {
 		t.Fatalf("spawn_agent message encrypted was not removed: %s", encrypted.Raw)
+	}
+}
+
+func TestPrepareCodexMultiAgentV2ToolsOnlyPreparesToolDefinitions(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"input":[
+			{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"task"}]},
+			{"type":"additional_tools","role":"developer","tools":[
+				{"type":"namespace","name":"collaboration","tools":[
+					{"type":"function","name":"spawn_agent","description":"Spawns an agent.","parameters":{"properties":{"message":{"encrypted":true}}}},
+					{"type":"function","name":"send_message","parameters":{"properties":{"message":{"encrypted":true}}}}
+				]}
+			]}
+		]
+	}`)
+	headers := http.Header{"User-Agent": []string{"codex_cli_rs/0.144.1"}}
+	got, prepared := PrepareCodexMultiAgentV2Tools(context.Background(), headers, payload, true, false)
+	if !prepared {
+		t.Fatal("Codex CLI request was not marked prepared")
+	}
+	if messageType := gjson.GetBytes(got, "input.0.content.0.type").String(); messageType != "encrypted_content" {
+		t.Fatalf("agent_message content type = %q, want encrypted_content", messageType)
+	}
+	if namespace := gjson.GetBytes(got, "input.1.tools.0.name").String(); namespace != codexCollaborationNamespace {
+		t.Fatalf("namespace = %q, want %q", namespace, codexCollaborationNamespace)
+	}
+	for _, path := range []string{"input.1.tools.0.tools.0", "input.1.tools.0.tools.1"} {
+		if encrypted := gjson.GetBytes(got, path+".parameters.properties.message.encrypted"); encrypted.Exists() {
+			t.Fatalf("%s message.encrypted was not removed: %s", path, encrypted.Raw)
+		}
+	}
+}
+
+func TestOptimizeCodexMultiAgentV2RequestSkipsPreparedToolRefresh(t *testing.T) {
+	t.Parallel()
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	request.Header.Set("User-Agent", "codex_cli_rs/0.144.1")
+	ginContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginContext.Request = request
+	ginContext.Set(CodexMultiAgentV2ToolsPreparedContextKey, true)
+	ctx := context.WithValue(context.Background(), "gin", ginContext)
+
+	payload := []byte(`{"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","description":"Available model overrides (optional; inherited parent model is preferred):
+- old-model: Old model.
+Spawns an agent.","parameters":{"properties":{"message":{"encrypted":true}}}}]}]}`)
+	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+	got, optimized := OptimizeCodexMultiAgentV2Request(ctx, nil, payload, cfg)
+	if !optimized {
+		t.Fatal("collaboration namespace was not optimized")
+	}
+	if description := gjson.GetBytes(got, "tools.0.tools.0.description").String(); !strings.Contains(description, "old-model") {
+		t.Fatalf("prepared spawn_agent description was refreshed: %q", description)
+	}
+	if encrypted := gjson.GetBytes(got, "tools.0.tools.0.parameters.properties.message.encrypted"); encrypted.Exists() {
+		t.Fatalf("message.encrypted was not removed: %s", encrypted.Raw)
 	}
 }
 

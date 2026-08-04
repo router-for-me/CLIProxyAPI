@@ -24,6 +24,10 @@ func TestConvertInteractionsResponseToOpenAIResponsesStream(t *testing.T) {
 	var param any
 	var out [][]byte
 	for _, raw := range [][]byte{
+		[]byte(`event: interaction.created
+data: {"interaction":{"id":"interaction_1","model":"source-model"},"event_type":"interaction.created"}
+
+`),
 		[]byte(`event: step.delta
 data: {"index":0,"delta":{"content":{"text":"thinking","type":"text"},"type":"thought_summary"},"event_type":"step.delta"}
 
@@ -68,6 +72,10 @@ data: [DONE]
 	}
 	if got := gjson.GetBytes(argumentsDonePayload, "arguments").String(); got != `{"location":"北京"}` {
 		t.Fatalf("function args done arguments = %q, want full arguments. Payload: %s", got, string(argumentsDonePayload))
+	}
+	createdPayload := findResponsesEventPayload(out, "response.created")
+	if got := gjson.GetBytes(createdPayload, "response.model").String(); got != "gpt-test" {
+		t.Fatalf("response.created models = %q, want gpt-test", got)
 	}
 	completedPayload := findResponsesEventPayload(out, "response.completed")
 	if got := gjson.GetBytes(completedPayload, "response.usage.total_tokens").Int(); got != 399 {
