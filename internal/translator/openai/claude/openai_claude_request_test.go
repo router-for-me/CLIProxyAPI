@@ -3,6 +3,7 @@ package claude
 import (
 	"encoding/base64"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -20,7 +21,7 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 		wantHasContent          bool
 	}{
 		{
-			name: "AC1: unsigned assistant thinking is dropped",
+			name: "AC1: unsigned assistant thinking is mapped to reasoning_content",
 			inputJSON: `{
 				"model": "claude-3-opus",
 				"messages": [{
@@ -31,8 +32,8 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 					]
 				}]
 			}`,
-			wantReasoningContent:    "",
-			wantHasReasoningContent: false,
+			wantReasoningContent:    "Let me analyze this step by step...",
+			wantHasReasoningContent: true,
 			wantContentText:         "Here is my response.",
 			wantHasContent:          true,
 		},
@@ -54,7 +55,7 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 			wantHasContent:          true,
 		},
 		{
-			name: "AC3: unsigned thinking-only message is dropped",
+			name: "AC3: unsigned thinking-only message maps to reasoning_content",
 			inputJSON: `{
 				"model": "claude-3-opus",
 				"messages": [{
@@ -64,8 +65,8 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 					]
 				}]
 			}`,
-			wantReasoningContent:    "",
-			wantHasReasoningContent: false,
+			wantReasoningContent:    "Internal reasoning only.",
+			wantHasReasoningContent: true,
 			wantContentText:         "",
 			wantHasContent:          false,
 		},
@@ -87,7 +88,7 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 			wantHasContent:          true,
 		},
 		{
-			name: "AC4: thinking in system role must be ignored",
+			name: "AC5: thinking in system role must be ignored",
 			inputJSON: `{
 				"model": "claude-3-opus",
 				"system": [
@@ -140,7 +141,7 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 			wantHasContent:          true,
 		},
 		{
-			name: "Unsigned thinking parts are dropped",
+			name: "Unsigned thinking parts are mapped to reasoning_content",
 			inputJSON: `{
 				"model": "claude-3-opus",
 				"messages": [{
@@ -152,8 +153,8 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 					]
 				}]
 			}`,
-			wantReasoningContent:    "",
-			wantHasReasoningContent: false,
+			wantReasoningContent:    "First thought.\n\nSecond thought.",
+			wantHasReasoningContent: true,
 			wantContentText:         "Final answer.",
 			wantHasContent:          true,
 		},
@@ -170,8 +171,8 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 					]
 				}]
 			}`,
-			wantReasoningContent:    "",
-			wantHasReasoningContent: false,
+			wantReasoningContent:    "Visible thought.",
+			wantHasReasoningContent: true,
 			wantContentText:         "Answer.",
 			wantHasContent:          true,
 		},
@@ -261,6 +262,12 @@ func TestConvertClaudeRequestToOpenAI_SignedThinkingCompatibility(t *testing.T) 
 			wantHasReasoningContent: true,
 		},
 		{
+			name:                    "Unsigned thinking keeps reasoning_content for OpenAI-compatible models",
+			signature:               "",
+			wantReasoningContent:    "provider state",
+			wantHasReasoningContent: true,
+		},
+		{
 			name:                    "Claude signature drops reasoning_content",
 			signature:               "claude#EjQ=",
 			wantReasoningContent:    "",
@@ -311,9 +318,9 @@ func TestConvertClaudeRequestToOpenAI_SignedThinkingCompatibility(t *testing.T) 
 	}
 }
 
-// TestConvertClaudeRequestToOpenAI_UnsignedThinkingOnlyMessageDropped verifies
-// that unsigned Claude thinking is not migrated into GPT reasoning state.
-func TestConvertClaudeRequestToOpenAI_UnsignedThinkingOnlyMessageDropped(t *testing.T) {
+// TestConvertClaudeRequestToOpenAI_UnsignedThinkingPreserved verifies
+// that unsigned thinking is preserved as reasoning_content for OpenAI-compatible models like DeepSeek.
+func TestConvertClaudeRequestToOpenAI_UnsignedThinkingPreserved(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-3-opus",
 		"messages": [
@@ -323,7 +330,10 @@ func TestConvertClaudeRequestToOpenAI_UnsignedThinkingOnlyMessageDropped(t *test
 			},
 			{
 				"role": "assistant",
-				"content": [{"type": "thinking", "thinking": "Let me calculate: 2+2=4"}]
+				"content": [
+					{"type": "thinking", "thinking": "Let me calculate: 2+2=4"},
+					{"type": "text", "text": "2+2 is 4"}
+				]
 			},
 			{
 				"role": "user",
@@ -336,14 +346,159 @@ func TestConvertClaudeRequestToOpenAI_UnsignedThinkingOnlyMessageDropped(t *test
 	resultJSON := gjson.ParseBytes(result)
 
 	messages := resultJSON.Get("messages").Array()
-
-	if len(messages) != 2 {
-		t.Fatalf("Expected unsigned thinking-only assistant message to be dropped, got %d. Messages: %v", len(messages), resultJSON.Get("messages").Raw)
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d. Messages: %v", len(messages), resultJSON.Get("messages").Raw)
 	}
-	for _, message := range messages {
-		if message.Get("reasoning_content").Exists() {
-			t.Fatalf("unsigned thinking should not produce reasoning_content. Messages: %v", resultJSON.Get("messages").Raw)
+
+	assistantMsg := messages[1]
+	if assistantMsg.Get("role").String() != "assistant" {
+		t.Fatalf("Expected assistant message at index 1, got role %q", assistantMsg.Get("role").String())
+	}
+
+	if got := assistantMsg.Get("reasoning_content").String(); got != "Let me calculate: 2+2=4" {
+		t.Fatalf("reasoning_content = %q, want %q. Output: %s", got, "Let me calculate: 2+2=4", string(result))
+	}
+}
+
+// TestConvertClaudeRequestToOpenAI_MultiTurnWithToolCallsAndThinking verifies
+// that multi-turn history containing thinking and tool_use preserves reasoning_content alongside tool_calls.
+func TestConvertClaudeRequestToOpenAI_MultiTurnWithToolCallsAndThinking(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-7-sonnet",
+		"messages": [
+			{
+				"role": "user",
+				"content": [{"type": "text", "text": "Read file main.go"}]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "I need to call the read file tool to see main.go"},
+					{"type": "tool_use", "id": "call_123", "name": "read_file", "input": {"path": "main.go"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_123", "content": "package main\nfunc main() {}"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("deepseek-v4-flash", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	messages := resultJSON.Get("messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages (user, assistant with tool_calls + reasoning_content, tool response), got %d. Output: %s", len(messages), string(result))
+	}
+
+	assistantMsg := messages[1]
+	if assistantMsg.Get("role").String() != "assistant" {
+		t.Fatalf("Expected assistant message at index 1, got role %q", assistantMsg.Get("role").String())
+	}
+
+	if got := assistantMsg.Get("reasoning_content").String(); got != "I need to call the read file tool to see main.go" {
+		t.Fatalf("reasoning_content = %q, want expected thinking string. Output: %s", got, string(result))
+	}
+
+	toolCalls := assistantMsg.Get("tool_calls").Array()
+	if len(toolCalls) != 1 {
+		t.Fatalf("Expected 1 tool_call, got %d. Output: %s", len(toolCalls), string(result))
+	}
+	if gotID := toolCalls[0].Get("id").String(); gotID != "call_123" {
+		t.Fatalf("tool_call id = %q, want call_123", gotID)
+	}
+}
+
+// TestConvertClaudeRequestToOpenAI_ReasoningContentPreservedAfterToolCall models a
+// turn-2 request: history already contains an assistant message with an unsigned thinking
+// block + a tool_use, followed by the tool result and a new user message. This is the
+// exact request shape DeepSeek rejects with 400 if reasoning_content is missing from the
+// assistant+tool_calls message:
+//
+//	"The `reasoning_content` in the thinking mode must be passed back to the API."
+func TestConvertClaudeRequestToOpenAI_ReasoningContentPreservedAfterToolCall(t *testing.T) {
+	inputJSON := `{
+		"model": "deepseek-v4-flash",
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"Read file"}]},
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"I should read the file"},
+				{"type":"tool_use","id":"call_1","name":"read_file","input":{"path":"main.go"}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"call_1","content":"package main"}
+			]},
+			{"role":"user","content":[{"type":"text","text":"Now explain it"}]}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("deepseek-v4-flash", []byte(inputJSON), false)
+
+	messages := gjson.ParseBytes(result).Get("messages").Array()
+
+	var assistantMsg gjson.Result
+	found := false
+	for _, m := range messages {
+		if m.Get("role").String() == "assistant" && m.Get("tool_calls").Exists() {
+			assistantMsg = m
+			found = true
+			break
 		}
+	}
+	if !found {
+		t.Fatal("no assistant message with tool_calls found in translated output")
+	}
+	if !assistantMsg.Get("reasoning_content").Exists() {
+		t.Fatalf("reasoning_content missing from assistant message with tool_calls — DeepSeek would return 400. Output: %s", string(result))
+	}
+	if got := strings.TrimSpace(assistantMsg.Get("reasoning_content").String()); got == "" {
+		t.Fatalf("reasoning_content is empty — DeepSeek requires a non-empty value. Output: %s", string(result))
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_FallbackReasoningContentWhenThinkingMissing(t *testing.T) {
+	// Case 1: Assistant message with tool_use but NO thinking block
+	inputJSONNoThinking := `{
+		"model": "deepseek-v4-flash",
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"Read file"}]},
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"call_1","name":"read_file","input":{"path":"main.go"}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"call_1","content":"package main"}
+			]}
+		]
+	}`
+
+	resultNoThinking := ConvertClaudeRequestToOpenAI("deepseek-v4-flash", []byte(inputJSONNoThinking), false)
+	assistantMsgNoThinking := gjson.GetBytes(resultNoThinking, "messages.1")
+	if got := assistantMsgNoThinking.Get("reasoning_content").String(); got != "[reasoning unavailable]" {
+		t.Fatalf("expected fallback reasoning_content '[reasoning unavailable]' when thinking block is missing, got %q. Output: %s", got, string(resultNoThinking))
+	}
+
+	// Case 2: Assistant message with tool_use and a Claude-signed thinking block (filtered out)
+	inputJSONClaudeSig := `{
+		"model": "deepseek-v4-flash",
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"Read file"}]},
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"Claude thought","signature":"claude#EjQ="},
+				{"type":"tool_use","id":"call_1","name":"read_file","input":{"path":"main.go"}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"call_1","content":"package main"}
+			]}
+		]
+	}`
+
+	resultClaudeSig := ConvertClaudeRequestToOpenAI("deepseek-v4-flash", []byte(inputJSONClaudeSig), false)
+	assistantMsgClaudeSig := gjson.GetBytes(resultClaudeSig, "messages.1")
+	if got := assistantMsgClaudeSig.Get("reasoning_content").String(); got != "[reasoning unavailable]" {
+		t.Fatalf("expected fallback reasoning_content '[reasoning unavailable]' when thinking block has Claude signature, got %q. Output: %s", got, string(resultClaudeSig))
 	}
 }
 
@@ -840,8 +995,8 @@ func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *t
 		t.Fatalf("Expected assistant message to have tool_calls")
 	}
 
-	if assistantMsg.Get("reasoning_content").Exists() {
-		t.Fatalf("unsigned thinking should not produce reasoning_content: %s", assistantMsg.Raw)
+	if got := assistantMsg.Get("reasoning_content").String(); got != "t1\n\nt2" {
+		t.Fatalf("reasoning_content = %q, want %q", got, "t1\n\nt2")
 	}
 }
 
