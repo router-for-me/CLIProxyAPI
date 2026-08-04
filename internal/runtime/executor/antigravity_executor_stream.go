@@ -58,6 +58,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	}
 	if updatedAuth != nil {
 		auth = updatedAuth
+		reporter.UpdateAccessTokenFingerprint(auth)
 	}
 
 	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true)

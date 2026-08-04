@@ -707,8 +707,40 @@ func setRawAt(jsonStr, path, value string) string {
 	return string(result)
 }
 
+// schemaNameMapKeywords are the schema keywords whose value maps author-chosen names to
+// subschemas. A key directly under one of them is a name, never a schema keyword.
+var schemaNameMapKeywords = map[string]struct{}{
+	"properties":        {},
+	"patternProperties": {},
+	"dependentSchemas":  {},
+	"$defs":             {},
+	"definitions":       {},
+}
+
+// isPropertyDefinition reports whether path points at a map whose keys are names chosen by the
+// tool author, so a key spelled like a schema keyword there must be preserved.
+//
+// A trailing ".properties" is not enough to tell: a tool may declare a property named
+// "properties", and the schema for that property then sits at a path ending in ".properties" while
+// being an ordinary schema node. Classifying it as a name map skipped every cleaning pass inside
+// it, so unsupported keywords such as "propertyNames" reached the private Gemini backend, which
+// rejects unknown fields with a 400.
+//
+// Each name-map keyword at the end of the path therefore flips the answer, because the node it
+// names is a map only when its own parent is a schema: "properties" is a map,
+// "properties.properties" the schema of a property named "properties", and
+// "properties.properties.properties" that schema's own map. Only the trailing run matters, so any
+// prefix the caller nests the schema under is ignored.
 func isPropertyDefinition(path string) bool {
-	return path == "properties" || strings.HasSuffix(path, ".properties")
+	segments := splitGJSONPath(path)
+	trailing := 0
+	for i := len(segments) - 1; i >= 0; i-- {
+		if _, ok := schemaNameMapKeywords[unescapeGJSONPathKey(segments[i])]; !ok {
+			break
+		}
+		trailing++
+	}
+	return trailing%2 == 1
 }
 
 func descriptionPath(parentPath string) string {

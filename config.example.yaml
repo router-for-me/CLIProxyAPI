@@ -406,34 +406,48 @@ nonstream-keepalive-interval: 0
 #     rebuild-mid-system-message: false # optional: default is false; when true, move messages with role "system" into the top-level Claude system field
 #     cloak:                         # optional: request cloaking for non-Claude-Code clients
 #       mode: "auto"                 # "auto" (default): cloak only when client is not Claude Code
-#                                    # "always": always apply cloaking
+#                                    # "always": cloak every unconfirmed client; confirmed native Claude Code still passes through
 #                                    # "never": never apply cloaking
 #       # This "cloak" block applies to this claude-api-key entry only. For Claude OAuth
 #       # credentials, set the same options in the auth/token JSON file via "cloak_mode" /
 #       # "cloak_strict_mode" / "cloak_sensitive_words" / "cloak_cache_user_id". The top-level
 #       # "disable-claude-cloak-mode: true" disables cloaking for all Claude credentials at once.
-#       strict-mode: false           # false (default): prepend Claude Code prompt to user system messages
-#                                    # true: strip all user system messages, keep only Claude Code prompt
+#       strict-mode: false           # false (default): legacy-model whitelist uses a user system-reminder;
+#                                    # all other and future models use messages[].role=system
+#                                    # true: strip caller prompts and keep only Claude Code billing and identity blocks
 #       sensitive-words:             # optional: words to obfuscate with zero-width characters
 #         - "API"
 #         - "proxy"
 #       cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
-#     experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
-#                                     # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior
+#       # Every custom tool on a cloaked OAuth request automatically uses a caller-stable opaque mcp__<server>__<tool> alias.
+#     experimental-cch-signing: false # deprecated compatibility field; CCH is generated automatically
+#                                     # all Claude OAuth requests sign, including custom gateways; direct Anthropic/Vertex paths also sign
 
-# Default headers for Claude API requests. Update when Claude Code releases new versions.
-# In legacy mode, user-agent/package-version/runtime-version/timeout are used as fallbacks
-# when the client omits them, while OS/arch remain runtime-derived. When
-# stabilize-device-profile is enabled, OS/arch stay pinned to the baseline values below,
-# while user-agent/package-version/runtime-version seed a software fingerprint that can
-# still upgrade to newer official Claude client versions.
+# Anthropic-Beta is assembled per request rather than sent as a fixed list, matching
+# Claude Code 2.1.220: context-1m sits right after claude-code, mid-conversation-system
+# is added only for models that accept a role=system turn, advanced-tool-use only when
+# the request declares tools, and server-side-fallback / fallback-credit /
+# structured-outputs trail effort. On direct api.anthropic.com a caller may only ask for
+# betas real Claude Code also sends, and they are placed at their observed positions;
+# anything else is dropped so the outgoing set stays one a real client could produce.
+# Other Anthropic-compatible upstreams still forward caller betas verbatim.
+#
+# Default headers for Claude API requests. Update only after measuring a new Claude Code release.
+# Unconfirmed clients use this CLI baseline. Verified native Claude Code CLI, sdk-cli,
+# and VSCode requests preserve their measured entrypoint and software shape only when the
+# Claude Code version, package version, and runtime version exactly match this configured
+# baseline; unmeasured versions fall back to it. In legacy mode, timeout is a fallback and
+# verified native OS/arch values remain client-supplied. When stabilize-device-profile is
+# enabled, OS/arch are pinned to the values below and cached profiles remain constrained to
+# the same exact software baseline rather than learning newer client versions.
 # claude-header-defaults:
-#   user-agent: "claude-cli/2.1.44 (external, sdk-cli)"
-#   package-version: "0.74.0"
-#   runtime-version: "v24.3.0"
+#   user-agent: "claude-cli/2.1.220 (external, cli)"
+#   package-version: "0.94.0"
+#   runtime-version: "v26.3.0"
 #   os: "MacOS"
 #   arch: "arm64"
 #   timeout: "600"
+#   timezone: "Asia/Singapore"  # fallback IANA timezone for cloaked currentDate; a credential JSON "timezone" takes priority
 #   stabilize-device-profile: false  # optional, default false; set true to enable per-auth/API-key fingerprint pinning
 
 # Default headers for Codex OAuth model requests.

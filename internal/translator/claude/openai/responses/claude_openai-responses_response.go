@@ -70,6 +70,33 @@ type claudeResponsesUsageTokens struct {
 
 var dataTag = []byte("data:")
 
+// ClaudeResponsesRedactedThinkingPrefix marks a Responses reasoning item whose
+// encrypted_content carries an Anthropic redacted_thinking payload instead of a
+// thinking signature. Responses has no redacted reasoning item type, and
+// Anthropic requires redacted_thinking blocks to be replayed verbatim, so the
+// payload rides in encrypted_content behind this marker and is restored on the
+// way back. The marker is not a valid signature for any provider, so a foreign
+// upstream drops the block instead of replaying an unusable value.
+const ClaudeResponsesRedactedThinkingPrefix = "claude-redacted-thinking:"
+
+// claudeReasoningCarrier returns the encrypted_content value for the Responses
+// reasoning item that mirrors a Claude thinking or redacted_thinking block.
+// Streaming thinking blocks usually announce an empty signature and fill it in
+// through signature_delta, so an empty result here is expected and later
+// replaced.
+func claudeReasoningCarrier(contentBlock gjson.Result) string {
+	if contentBlock.Get("type").String() == "redacted_thinking" {
+		if data := contentBlock.Get("data"); data.Exists() && data.String() != "" {
+			return ClaudeResponsesRedactedThinkingPrefix + data.String()
+		}
+		return ""
+	}
+	if signature := contentBlock.Get("signature"); signature.Exists() {
+		return signature.String()
+	}
+	return ""
+}
+
 func (u *claudeResponsesUsageTokens) Merge(usage gjson.Result) {
 	if !usage.Exists() {
 		return
@@ -331,16 +358,13 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			// record function metadata for aggregation
 			st.FuncCallIDs[idx] = st.CurrentFCID
 			st.FuncNames[idx] = name
-		} else if typ == "thinking" {
+		} else if typ == "thinking" || typ == "redacted_thinking" {
 			out = append(out, st.finalizeAssistantMessage(nextSeq)...)
 			// start reasoning item
 			st.ReasoningActive = true
 			st.ReasoningIndex = st.allocateOutputIndex()
 			st.ReasoningBuf.Reset()
-			st.ReasoningSignature = ""
-			if signature := cb.Get("signature"); signature.Exists() && signature.String() != "" {
-				st.ReasoningSignature = signature.String()
-			}
+			st.ReasoningSignature = claudeReasoningCarrier(cb)
 			st.ReasoningItemID = fmt.Sprintf("rs_%s_%d", st.ResponseID, idx)
 			item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","encrypted_content":"","summary":[]}}`)
 			item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
@@ -742,13 +766,11 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				item.callID = cb.Get("id").String()
 				item.id = fmt.Sprintf("fc_%s", item.callID)
 				item.name = cb.Get("name").String()
-			case "thinking":
+			case "thinking", "redacted_thinking":
 				activeMessageItem = nil
 				item := newOutputItem("reasoning", idx)
 				item.id = fmt.Sprintf("rs_%s_%d", responseID, idx)
-				if signature := cb.Get("signature"); signature.Exists() && signature.String() != "" {
-					item.signature = signature.String()
-				}
+				item.signature = claudeReasoningCarrier(cb)
 			}
 
 		case "content_block_delta":

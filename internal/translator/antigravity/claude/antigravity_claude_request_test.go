@@ -3365,3 +3365,59 @@ func TestConvertClaudeRequestToAntigravity_ToolAndThinking_NoExistingSystem(t *t
 		t.Errorf("Interleaved thinking hint should be in created systemInstruction, got: %v", sysInstruction.Raw)
 	}
 }
+
+// TestConvertClaudeRequestToAntigravityStripsPropertyNames covers the reported ingress route: a
+// Claude Messages request carrying MCP-style tool schemas. The private Gemini backend rejects the
+// standard JSON Schema keyword "propertyNames" with an unknown-field 400 before inference, so it
+// must not survive translation. Both reported nestings are exercised, including the one where the
+// keyword sits inside a property that is itself named "properties".
+func TestConvertClaudeRequestToAntigravityStripsPropertyNames(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [
+			{
+				"name": "notion-create-pages",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"records": {
+							"type": "array",
+							"items": {
+								"type": "object",
+								"properties": {"name": {"type": "string"}},
+								"propertyNames": {"type": "string"}
+							}
+						}
+					}
+				}
+			},
+			{
+				"name": "notion-update-page",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"properties": {"type": "object", "propertyNames": {"type": "string"}}
+					}
+				}
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+
+	decls := gjson.GetBytes(output, "request.tools.0.functionDeclarations")
+	if !decls.IsArray() || len(decls.Array()) != 2 {
+		t.Fatalf("expected two function declarations, got: %s", decls.Raw)
+	}
+	if strings.Contains(decls.Raw, `"propertyNames"`) {
+		t.Errorf("propertyNames survived translation: %s", decls.Raw)
+	}
+	// The declarations must still be usable, not emptied out by the cleaning.
+	if !decls.Get("0.parametersJsonSchema.properties.records.items.properties.name").Exists() {
+		t.Errorf("array item property was lost: %s", decls.Get("0").Raw)
+	}
+	if !decls.Get("1.parametersJsonSchema.properties.properties").Exists() {
+		t.Errorf("property named properties was lost: %s", decls.Get("1").Raw)
+	}
+}
