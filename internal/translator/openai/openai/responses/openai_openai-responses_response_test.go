@@ -337,8 +337,8 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MultiChoiceToolCa
 
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MixedMessageAndToolUseDistinctOutputIndexes(t *testing.T) {
 	in := []string{
-		`data: {"id":"resp_mixed","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello","reasoning_content":null,"tool_calls":null},"finish_reason":null},{"index":1,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_choice1","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
-		`data: {"id":"resp_mixed","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":"stop"},{"index":1,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"filePath\":\"C:\\\\repo\\\\README.md\",\"limit\":20,\"offset\":1}"}}]},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":10,"total_tokens":20,"prompt_tokens":10}}`,
+		`data: {"id":"","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello","reasoning_content":null,"tool_calls":null},"finish_reason":null},{"index":1,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_choice1","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":"stop"},{"index":1,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"filePath\":\"C:\\\\repo\\\\README.md\",\"limit\":20,\"offset\":1}"}}]},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":10,"total_tokens":20,"prompt_tokens":10}}`,
 		`data: [DONE]`,
 	}
 
@@ -352,6 +352,8 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MixedMessageAndTo
 
 	var messageOutputIndex int64 = -1
 	var toolOutputIndex int64 = -1
+	var messageItemID string
+	var toolItemID string
 	var completed gjson.Result
 
 	for _, chunk := range out {
@@ -365,11 +367,11 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MixedMessageAndTo
 		}
 		switch data.Get("item.type").String() {
 		case "message":
-			if data.Get("item.id").String() == "msg_resp_mixed_0" {
-				messageOutputIndex = data.Get("output_index").Int()
-			}
+			messageItemID = data.Get("item.id").String()
+			messageOutputIndex = data.Get("output_index").Int()
 		case "function_call":
 			if data.Get("item.call_id").String() == "call_choice1" {
+				toolItemID = data.Get("item.id").String()
 				toolOutputIndex = data.Get("output_index").Int()
 			}
 		}
@@ -386,6 +388,16 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MixedMessageAndTo
 	}
 	if !completed.Exists() {
 		t.Fatal("did not find response.completed event")
+	}
+	responseID := completed.Get("response.id").String()
+	if responseID == "" {
+		t.Fatal("streaming response did not synthesize an id")
+	}
+	if messageItemID != "msg_"+responseID+"_0" {
+		t.Fatalf("message item id = %q, want provenance for response %q", messageItemID, responseID)
+	}
+	if toolItemID != "fc_"+responseID+"_1_0" {
+		t.Fatalf("tool item id = %q, want provenance for response %q", toolItemID, responseID)
 	}
 
 	nextRequest := []byte(`{"model":"gpt-5.4","input":[]}`)

@@ -373,6 +373,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 
 	if !st.Started {
 		st.ResponseID = root.Get("id").String()
+		if st.ResponseID == "" {
+			st.ResponseID = fmt.Sprintf("resp_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&responseIDCounter, 1))
+		}
 		st.Created = root.Get("created").Int()
 		// reset aggregation state for a new streaming response
 		st.MsgTextBuf = make(map[int]*strings.Builder)

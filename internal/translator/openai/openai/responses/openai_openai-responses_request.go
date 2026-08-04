@@ -110,6 +110,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				lastMessage := gjson.ParseBytes(messages[lastIndex])
 				if lastMessage.Get("role").String() == "assistant" &&
 					!lastMessage.Get("tool_calls").Exists() &&
+					pendingToolCallProvenance != "" &&
 					messageProvenances[lastIndex] == pendingToolCallProvenance {
 					assistantMessage, _ := sjson.SetBytes(messages[lastIndex], "tool_calls", pendingToolCalls)
 					mergedReasoning := mergeOpenAIResponsesReasoningContent(lastMessage.Get("reasoning_content").String(), reasoningContent)

@@ -343,10 +343,11 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MergesAssistantTex
 			},
 			{
 				"type": "message",
+				"id": "msg_resp_tool_0",
 				"role": "assistant",
 				"content": [{"type": "output_text", "text": "I will inspect the next step."}]
 			},
-			{"type":"function_call","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
+			{"type":"function_call","id":"fc_resp_tool_0_0","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
 			{"type":"function_call_output","call_id":"call_1","output":"ok"}
 		]
 	}`)
@@ -371,17 +372,41 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MergesAssistantTex
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DoesNotMergeUnknownProvenance(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"message","id":"msg_1","role":"assistant","content":"choice zero"},
+			{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", raw, true)
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+		t.Fatalf("messages count = %d, want 3; output=%s", got, out)
+	}
+	if gjson.GetBytes(out, "messages.0.tool_calls").Exists() {
+		t.Fatalf("unknown-provenance tool call merged into assistant message; output=%s", out)
+	}
+	if got := gjson.GetBytes(out, "messages.1.tool_calls.0.id").String(); got != "call_1" {
+		t.Fatalf("separate assistant tool call id = %q, want call_1; output=%s", got, out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DeduplicatesReasoningWhenMergingAssistantTextAndToolCalls(t *testing.T) {
 	raw := []byte(`{
 		"input": [
 			{
 				"type":"message",
+				"id":"msg_resp_reasoning_0",
 				"role":"assistant",
 				"content":"I will inspect the file.",
 				"reasoning_content":"same reasoning"
 			},
 			{
 				"type":"function_call",
+				"id":"fc_resp_reasoning_0_0",
 				"call_id":"call_1",
 				"name":"exec_command",
 				"arguments":"{\"cmd\":\"pwd\"}",
@@ -406,12 +431,14 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesDistinctR
 		"input": [
 			{
 				"type":"message",
+				"id":"msg_resp_reasoning_0",
 				"role":"assistant",
 				"content":"I will inspect the file.",
 				"reasoning_content":"message reasoning"
 			},
 			{
 				"type":"function_call",
+				"id":"fc_resp_reasoning_0_0",
 				"call_id":"call_1",
 				"name":"exec_command",
 				"arguments":"{\"cmd\":\"pwd\"}",
