@@ -125,6 +125,12 @@ type XAIConfig struct {
 	InjectXSearch bool `yaml:"inject-x-search" json:"inject-x-search"`
 }
 
+// AntigravityConfig configures provider-wide Antigravity request behavior.
+type AntigravityConfig struct {
+	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.
+	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+}
+
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`

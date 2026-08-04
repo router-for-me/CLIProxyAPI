@@ -97,6 +97,44 @@ func ObfuscateSensitiveWords(payload []byte, matcher *SensitiveWordMatcher) []by
 	return payload
 }
 
+// ObfuscateSensitiveWordsInSystemInstruction obfuscates sensitive words in an Antigravity system instruction.
+func ObfuscateSensitiveWordsInSystemInstruction(payload []byte, matcher *SensitiveWordMatcher) []byte {
+	if matcher == nil || matcher.regex == nil {
+		return payload
+	}
+
+	for _, path := range []string{"request.systemInstruction", "request.system_instruction"} {
+		instruction := gjson.GetBytes(payload, path)
+		if !instruction.Exists() {
+			continue
+		}
+		if instruction.Type == gjson.String {
+			text := instruction.String()
+			if obfuscated := matcher.obfuscateText(text); obfuscated != text {
+				payload, _ = sjson.SetBytes(payload, path, obfuscated)
+			}
+			continue
+		}
+
+		parts := instruction.Get("parts")
+		if !parts.IsArray() {
+			continue
+		}
+		parts.ForEach(func(key, part gjson.Result) bool {
+			if part.Get("text").Type != gjson.String {
+				return true
+			}
+			text := part.Get("text").String()
+			if obfuscated := matcher.obfuscateText(text); obfuscated != text {
+				payload, _ = sjson.SetBytes(payload, path+".parts."+key.String()+".text", obfuscated)
+			}
+			return true
+		})
+	}
+
+	return payload
+}
+
 // obfuscateSystemBlocks obfuscates sensitive words in system blocks.
 func obfuscateSystemBlocks(payload []byte, matcher *SensitiveWordMatcher) []byte {
 	system := gjson.GetBytes(payload, "system")
