@@ -7,12 +7,13 @@ import (
 )
 
 const (
-	codexBuiltinImage15ModelID      = "gpt-image-1.5"
-	codexBuiltinImageModelID        = "gpt-image-2"
-	xaiBuiltinImageModelID          = "grok-imagine-image"
-	xaiBuiltinImageQualityModelID   = "grok-imagine-image-quality"
-	xaiBuiltinVideoModelID          = "grok-imagine-video"
-	xaiBuiltinVideo15PreviewModelID = "grok-imagine-video-1.5-preview"
+	codexBuiltinImage15ModelID    = "gpt-image-1.5"
+	codexBuiltinImageModelID      = "gpt-image-2"
+	xaiBuiltinImageModelID        = "grok-imagine-image"
+	xaiBuiltinImageQualityModelID = "grok-imagine-image-quality"
+	xaiBuiltinVideoModelID        = "grok-imagine-video"
+	xaiBuiltinVideo15ModelID      = "grok-imagine-video-1.5"
+	xaiBuiltinVideo15PreviewID    = "grok-imagine-video-1.5-preview"
 )
 
 // staticModelsJSON mirrors the top-level structure of models.json.
@@ -120,7 +121,7 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 // WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15PreviewModelInfo())
+	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo())
 }
 
 func normalizeAntigravityCapabilityModelID(modelID string) string {
@@ -194,16 +195,29 @@ func xaiBuiltinVideoModelInfo() *ModelInfo {
 	}
 }
 
+func xaiBuiltinVideo15ModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          xaiBuiltinVideo15ModelID,
+		Object:      "model",
+		Created:     1735689600, // 2025-01-01
+		OwnedBy:     "xai",
+		Type:        "xai",
+		DisplayName: "Grok Imagine Video 1.5",
+		Name:        xaiBuiltinVideo15ModelID,
+		Description: "xAI Grok video generation model.",
+	}
+}
+
 func xaiBuiltinVideo15PreviewModelInfo() *ModelInfo {
 	return &ModelInfo{
-		ID:          xaiBuiltinVideo15PreviewModelID,
+		ID:          xaiBuiltinVideo15PreviewID,
 		Object:      "model",
 		Created:     1735689600, // 2025-01-01
 		OwnedBy:     "xai",
 		Type:        "xai",
 		DisplayName: "Grok Imagine Video 1.5 Preview",
-		Name:        xaiBuiltinVideo15PreviewModelID,
-		Description: "xAI Grok preview video generation model.",
+		Name:        xaiBuiltinVideo15PreviewID,
+		Description: "Compatibility alias for the xAI Grok video generation model.",
 	}
 }
 

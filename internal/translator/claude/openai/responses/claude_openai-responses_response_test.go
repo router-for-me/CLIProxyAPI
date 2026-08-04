@@ -31,6 +31,36 @@ func parseClaudeResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Res
 	return event, gjson.Parse(data)
 }
 
+func TestConvertClaudeResponseToOpenAIResponses_CreatedIncludesOriginalRequestModel(t *testing.T) {
+	request := []byte(`{"model":"original-claude-model"}`)
+	translatedRequest := []byte(`{"model":"translated-claude-model"}`)
+	chunk := []byte(`data: {"type":"message_start","message":{"id":"msg_123"}}`)
+
+	var param any
+	outputs := ConvertClaudeResponseToOpenAIResponses(context.Background(), "fallback-model", request, translatedRequest, chunk, &param)
+	if len(outputs) < 2 {
+		t.Fatalf("expected response.created and response.in_progress outputs, got %d", len(outputs))
+	}
+
+	var createdModels string
+	var inProgressModels string
+	for _, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		switch event {
+		case "response.created":
+			createdModels = data.Get("response.model").String()
+		case "response.in_progress":
+			inProgressModels = data.Get("response.model").String()
+		}
+	}
+	if createdModels != "original-claude-model" {
+		t.Fatalf("response.created models = %q, want original-claude-model", createdModels)
+	}
+	if inProgressModels != "original-claude-model" {
+		t.Fatalf("response.in_progress models = %q, want original-claude-model", inProgressModels)
+	}
+}
+
 func translateClaudeResponsesStreamThroughRegistry(chunks [][]byte) [][]byte {
 	var param any
 	var outputs [][]byte
