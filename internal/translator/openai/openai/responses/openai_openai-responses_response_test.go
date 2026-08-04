@@ -352,9 +352,14 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MixedMessageAndTo
 
 	var messageOutputIndex int64 = -1
 	var toolOutputIndex int64 = -1
+	var completed gjson.Result
 
 	for _, chunk := range out {
 		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev == "response.completed" {
+			completed = data
+			continue
+		}
 		if ev != "response.output_item.added" {
 			continue
 		}
@@ -378,6 +383,26 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MixedMessageAndTo
 	}
 	if messageOutputIndex == toolOutputIndex {
 		t.Fatalf("expected distinct output indexes for message and tool call, both got %d", messageOutputIndex)
+	}
+	if !completed.Exists() {
+		t.Fatal("did not find response.completed event")
+	}
+
+	nextRequest := []byte(`{"model":"gpt-5.4","input":[]}`)
+	var err error
+	nextRequest, err = sjson.SetRawBytes(nextRequest, "input", []byte(completed.Get("response.output").Raw))
+	if err != nil {
+		t.Fatalf("set Responses history: %v", err)
+	}
+	roundTripped := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", nextRequest, false)
+	if got := gjson.GetBytes(roundTripped, "messages.#").Int(); got != 2 {
+		t.Fatalf("round-trip messages count = %d, want 2; output=%s", got, roundTripped)
+	}
+	if gjson.GetBytes(roundTripped, "messages.0.tool_calls").Exists() {
+		t.Fatalf("choice 1 tool call merged into choice 0 message; output=%s", roundTripped)
+	}
+	if got := gjson.GetBytes(roundTripped, "messages.1.tool_calls.0.id").String(); got != "call_choice1" {
+		t.Fatalf("separate tool-call message id = %q, want call_choice1; output=%s", got, roundTripped)
 	}
 }
 
@@ -709,15 +734,15 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_CustomToolNameArr
 		if got := tc.got.Get(tc.path + ".type").String(); got != "custom_tool_call" {
 			t.Fatalf("%s type = %q, want custom_tool_call", tc.label, got)
 		}
-		if got := tc.got.Get(tc.path + ".id").String(); got != "ctc_call_exec" {
-			t.Fatalf("%s id = %q, want ctc_call_exec", tc.label, got)
+		if got := tc.got.Get(tc.path + ".id").String(); got != "ctc_chatcmpl_custom_late_name_0_0" {
+			t.Fatalf("%s id = %q, want ctc_chatcmpl_custom_late_name_0_0", tc.label, got)
 		}
 		if got := tc.got.Get(tc.path + ".name").String(); got != "exec" {
 			t.Fatalf("%s name = %q, want exec", tc.label, got)
 		}
 	}
-	if got := inputDone.Get("item_id").String(); got != "ctc_call_exec" {
-		t.Fatalf("custom input done item_id = %q, want ctc_call_exec", got)
+	if got := inputDone.Get("item_id").String(); got != "ctc_chatcmpl_custom_late_name_0_0" {
+		t.Fatalf("custom input done item_id = %q, want ctc_chatcmpl_custom_late_name_0_0", got)
 	}
 	if got := inputDone.Get("input").String(); got != "pwd" {
 		t.Fatalf("custom input done input = %q, want pwd", got)
@@ -762,8 +787,8 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_CustomToolNameAnd
 		if got := tc.got.Get(tc.path + ".type").String(); got != "custom_tool_call" {
 			t.Fatalf("%s type = %q, want custom_tool_call", tc.label, got)
 		}
-		if got := tc.got.Get(tc.path + ".id").String(); got != "ctc_"+wantCallID {
-			t.Fatalf("%s id = %q, want %q", tc.label, got, "ctc_"+wantCallID)
+		if got := tc.got.Get(tc.path + ".id").String(); got != "ctc_chatcmpl_custom_missing_fields_0_0" {
+			t.Fatalf("%s id = %q, want ctc_chatcmpl_custom_missing_fields_0_0", tc.label, got)
 		}
 		if got := tc.got.Get(tc.path + ".call_id").String(); got != wantCallID {
 			t.Fatalf("%s call_id = %q, want %q", tc.label, got, wantCallID)
@@ -822,7 +847,11 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ToolCallIDMayArri
 				}
 			}
 
-			wantItemID := "fc_" + tt.wantCallID
+			responseID := "chatcmpl_late_id"
+			if tt.name == "missing id" {
+				responseID = "chatcmpl_missing_id"
+			}
+			wantItemID := "fc_" + responseID + "_0_0"
 			if got := added.Get("item.id").String(); got != wantItemID {
 				t.Fatalf("added item id = %q, want %q; events=%v", got, wantItemID, events)
 			}

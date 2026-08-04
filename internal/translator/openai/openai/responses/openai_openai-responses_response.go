@@ -67,6 +67,18 @@ func emitRespEvent(event string, payload []byte) []byte {
 	return translatorcommon.SSEEventData(event, payload)
 }
 
+func openAIResponsesToolItemID(responseID, stateKey string, custom bool) string {
+	prefix := "fc_"
+	if custom {
+		prefix = "ctc_"
+	}
+	return prefix + responseID + "_" + strings.ReplaceAll(stateKey, ":", "_")
+}
+
+func openAIResponsesNonStreamToolItemID(responseID string, choiceIndex, toolIndex int64, custom bool) string {
+	return openAIResponsesToolItemID(responseID, fmt.Sprintf("%d:%d", choiceIndex, toolIndex), custom)
+}
+
 func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte, nextSeq func() int) []byte {
 	completed := []byte(`{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`)
 	completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
@@ -173,7 +185,7 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 			name := st.FuncNames[key]
 			if st.FuncItemCustom[key] {
 				item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
-				item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ctc_%s", callID))
+				item, _ = sjson.SetBytes(item, "id", openAIResponsesToolItemID(st.ResponseID, key, true))
 				item, _ = sjson.SetBytes(item, "input", unwrapCustomToolInput(args))
 				item, _ = sjson.SetBytes(item, "call_id", callID)
 				item, _ = sjson.SetBytes(item, "name", name)
@@ -181,7 +193,7 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 				continue
 			}
 			item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
-			item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", callID))
+			item, _ = sjson.SetBytes(item, "id", openAIResponsesToolItemID(st.ResponseID, key, false))
 			item, _ = sjson.SetBytes(item, "arguments", args)
 			item, _ = sjson.SetBytes(item, "call_id", callID)
 			item = applyResponsesFunctionCallNamespaceFields(item, requestRawJSON, name, "")
@@ -325,7 +337,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			o := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"in_progress","input":"","call_id":"","name":""}}`)
 			o, _ = sjson.SetBytes(o, "sequence_number", nextSeq())
 			o, _ = sjson.SetBytes(o, "output_index", outputIndex)
-			o, _ = sjson.SetBytes(o, "item.id", fmt.Sprintf("ctc_%s", callID))
+			o, _ = sjson.SetBytes(o, "item.id", openAIResponsesToolItemID(st.ResponseID, key, true))
 			o, _ = sjson.SetBytes(o, "item.call_id", callID)
 			o, _ = sjson.SetBytes(o, "item.name", name)
 			out = append(out, emitRespEvent("response.output_item.added", o))
@@ -333,7 +345,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			o := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"in_progress","arguments":"","call_id":"","name":""}}`)
 			o, _ = sjson.SetBytes(o, "sequence_number", nextSeq())
 			o, _ = sjson.SetBytes(o, "output_index", outputIndex)
-			o, _ = sjson.SetBytes(o, "item.id", fmt.Sprintf("fc_%s", callID))
+			o, _ = sjson.SetBytes(o, "item.id", openAIResponsesToolItemID(st.ResponseID, key, false))
 			o, _ = sjson.SetBytes(o, "item.call_id", callID)
 			o = applyResponsesFunctionCallNamespaceFields(o, requestForNamespace, name, "item")
 			out = append(out, emitRespEvent("response.output_item.added", o))
@@ -350,10 +362,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		}
 		args := argsBuf.String()
 		delta := args[st.FuncArgsSent[key]:]
-		callID := st.FuncCallIDs[key]
 		ad := []byte(`{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`)
 		ad, _ = sjson.SetBytes(ad, "sequence_number", nextSeq())
-		ad, _ = sjson.SetBytes(ad, "item_id", fmt.Sprintf("fc_%s", callID))
+		ad, _ = sjson.SetBytes(ad, "item_id", openAIResponsesToolItemID(st.ResponseID, key, false))
 		ad, _ = sjson.SetBytes(ad, "output_index", st.FuncOutputIx[key])
 		ad, _ = sjson.SetBytes(ad, "delta", delta)
 		out = append(out, emitRespEvent("response.function_call_arguments.delta", ad))
@@ -651,7 +662,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 							input := unwrapCustomToolInput(args)
 							inputDone := []byte(`{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","output_index":0,"input":""}`)
 							inputDone, _ = sjson.SetBytes(inputDone, "sequence_number", nextSeq())
-							inputDone, _ = sjson.SetBytes(inputDone, "item_id", fmt.Sprintf("ctc_%s", callID))
+							inputDone, _ = sjson.SetBytes(inputDone, "item_id", openAIResponsesToolItemID(st.ResponseID, key, true))
 							inputDone, _ = sjson.SetBytes(inputDone, "output_index", outputIndex)
 							inputDone, _ = sjson.SetBytes(inputDone, "input", input)
 							out = append(out, emitRespEvent("response.custom_tool_call_input.done", inputDone))
@@ -659,7 +670,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 							itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}}`)
 							itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
 							itemDone, _ = sjson.SetBytes(itemDone, "output_index", outputIndex)
-							itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("ctc_%s", callID))
+							itemDone, _ = sjson.SetBytes(itemDone, "item.id", openAIResponsesToolItemID(st.ResponseID, key, true))
 							itemDone, _ = sjson.SetBytes(itemDone, "item.input", input)
 							itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", callID)
 							itemDone, _ = sjson.SetBytes(itemDone, "item.name", st.FuncNames[key])
@@ -670,7 +681,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						}
 						fcDone := []byte(`{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`)
 						fcDone, _ = sjson.SetBytes(fcDone, "sequence_number", nextSeq())
-						fcDone, _ = sjson.SetBytes(fcDone, "item_id", fmt.Sprintf("fc_%s", callID))
+						fcDone, _ = sjson.SetBytes(fcDone, "item_id", openAIResponsesToolItemID(st.ResponseID, key, false))
 						fcDone, _ = sjson.SetBytes(fcDone, "output_index", outputIndex)
 						fcDone, _ = sjson.SetBytes(fcDone, "arguments", args)
 						out = append(out, emitRespEvent("response.function_call_arguments.done", fcDone))
@@ -678,7 +689,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}}`)
 						itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
 						itemDone, _ = sjson.SetBytes(itemDone, "output_index", outputIndex)
-						itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("fc_%s", callID))
+						itemDone, _ = sjson.SetBytes(itemDone, "item.id", openAIResponsesToolItemID(st.ResponseID, key, false))
 						itemDone, _ = sjson.SetBytes(itemDone, "item.arguments", args)
 						itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", callID)
 						itemDone = applyResponsesFunctionCallNamespaceFields(itemDone, requestForNamespace, st.FuncNames[key], "item")
@@ -843,7 +854,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 						args := tc.Get("function.arguments").String()
 						if _, isCustomTool := customToolNames[name]; isCustomTool {
 							item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
-							item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ctc_%s", callID))
+							item, _ = sjson.SetBytes(item, "id", openAIResponsesNonStreamToolItemID(id, choice.Get("index").Int(), tcIndex.Int(), true))
 							item, _ = sjson.SetBytes(item, "input", unwrapCustomToolInput(args))
 							item, _ = sjson.SetBytes(item, "call_id", callID)
 							item, _ = sjson.SetBytes(item, "name", name)
@@ -851,7 +862,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 							return true
 						}
 						item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
-						item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", callID))
+						item, _ = sjson.SetBytes(item, "id", openAIResponsesNonStreamToolItemID(id, choice.Get("index").Int(), tcIndex.Int(), false))
 						item, _ = sjson.SetBytes(item, "arguments", args)
 						item, _ = sjson.SetBytes(item, "call_id", callID)
 						item = applyResponsesFunctionCallNamespaceFields(item, requestForNamespace, name, "")
