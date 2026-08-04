@@ -286,7 +286,9 @@ func newLaneObservationStore(clock func() time.Time) *laneObservationStore {
 	return &laneObservationStore{entries: make(map[laneObservationKey]laneObservation), clock: clock}
 }
 
-func (s *laneObservationStore) observe(key laneObservationKey, current requestObservation, ttl time.Duration, update bool) map[string]any {
+// observe compares one prior lane snapshot against the current request, emits the
+// resulting continuity fields, and replaces the snapshot with the current observation.
+func (s *laneObservationStore) observe(key laneObservationKey, current requestObservation, ttl time.Duration) map[string]any {
 	fields := map[string]any{
 		"lane_history_items": len(current.HistoryItems),
 		"lane_continuity":    "first_observation",
@@ -318,16 +320,11 @@ func (s *laneObservationStore) observe(key laneObservationKey, current requestOb
 			fields["lane_continuity"] = "warm_prefix_candidate"
 		}
 	}
-	if update {
-		s.entries[key] = laneObservation{
-			SystemFingerprint: current.SystemFingerprint,
-			ToolsFingerprint:  current.ToolsFingerprint,
-			HistoryItems:      append([]string(nil), current.HistoryItems...),
-			ExpiresAt:         now.Add(ttl),
-		}
-	} else if found {
-		previous.ExpiresAt = now.Add(ttl)
-		s.entries[key] = previous
+	s.entries[key] = laneObservation{
+		SystemFingerprint: current.SystemFingerprint,
+		ToolsFingerprint:  current.ToolsFingerprint,
+		HistoryItems:      append([]string(nil), current.HistoryItems...),
+		ExpiresAt:         now.Add(ttl),
 	}
 	s.mu.Unlock()
 	return fields

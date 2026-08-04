@@ -31,19 +31,20 @@ func newCursorStore(clock func() time.Time) *cursorStore {
 	return &cursorStore{entries: make(map[cursorKey]cursorEntry), clock: clock, random: rand.IntN}
 }
 
-func (s *cursorStore) selectTarget(key cursorKey, sequence []compiledTarget, available map[string]struct{}, ttl time.Duration, advance bool, randomStarts ...bool) (compiledTarget, int, bool) {
+// selectTarget reserves the next available sequence position for one conversation.
+// A successful selection always advances the cursor and refreshes its expiry; an
+// exhausted scan leaves the stored cursor untouched.
+func (s *cursorStore) selectTarget(key cursorKey, sequence []compiledTarget, available map[string]struct{}, ttl time.Duration, randomStart bool) (compiledTarget, int, bool) {
 	if s == nil || len(sequence) == 0 {
 		return compiledTarget{}, 0, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	randomStart := len(randomStarts) > 0 && randomStarts[0]
 	now := s.clock()
 	entry, exists := s.entries[key]
 	if !exists || !entry.ExpiresAt.After(now) || entry.Next < 0 || entry.Next >= len(sequence) {
 		entry = cursorEntry{}
-		exists = false
 		if randomStart {
 			entry.Next = s.random(len(sequence))
 		}
@@ -55,9 +56,7 @@ func (s *cursorStore) selectTarget(key cursorKey, sequence []compiledTarget, ava
 		if _, ok := available[target.Provider]; !ok {
 			continue
 		}
-		if advance {
-			entry.Next = (index + 1) % len(sequence)
-		}
+		entry.Next = (index + 1) % len(sequence)
 		entry.ExpiresAt = now.Add(ttl)
 		s.entries[key] = entry
 		return target, index, true

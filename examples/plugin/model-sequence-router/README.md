@@ -1,6 +1,6 @@
 # Model Sequence Router Plugin
 
-`model-sequence-router` exposes client-visible model aliases and routes each conversation through an ordered sequence of built-in providers and models. Clients request and receive only the configured alias; provider selection and credentials remain server-side.
+`model-sequence-router` exposes client-visible model aliases and routes each conversation through an ordered sequence of built-in providers and models. Clients request the configured alias; provider selection and credentials remain server-side.
 
 The plugin selects one target per logical request. It does not combine model outputs or send one model's output to another model.
 
@@ -63,8 +63,6 @@ codex/terra → codex/terra → codex/terra → claude/claude-opus-4-6 → repea
 
 Two simultaneous conversations maintain separate positions. By default, each new or expired conversation chooses a uniformly random effective sequence position and then follows the configured order. Set `random_start: false` on an alias for deterministic position-zero starts. Concurrent generations in one conversation reserve sequence positions atomically in dispatch order; response completion order may differ. A failed upstream request still consumes its reserved position.
 
-Token-count requests peek at the current position without advancing it. Repeated count requests therefore use the same target, and the following generation uses that target when provider availability has not changed.
-
 ## Arbitrary multi-provider example
 
 Targets are expanded in configured order, so repeated blocks can express patterns that are not equivalent to weights:
@@ -103,9 +101,10 @@ Any number of aliases, targets, and providers is supported. `repeat` defaults to
 
 ## Routing behavior
 
-- Alias matching is case-insensitive and ignores a supported thinking suffix. The configured alias spelling is used in model catalogs and successful response model fields.
+- Alias matching is case-insensitive and ignores a supported thinking suffix. The configured alias spelling is used in model catalogs.
+- The plugin selects a provider and target model. Response model presentation stays with the host and the upstream provider.
 - A client thinking suffix is preserved on the selected target unless that target already has its own suffix.
-- If the next provider is not currently registered, the router scans forward to the next available provider. Stateful generations consume skipped positions; token counts do not change the cursor.
+- If the next provider is not currently registered, the router scans forward to the next available provider. Every matched stateful route consumes the positions it skips.
 - If no configured provider is available, the route is declined so normal host routing can continue.
 - Requests without an identifiable conversation always use the first available target and do not create or advance state.
 - `random_start` defaults to `true` per alias. It randomizes the initial effective slot for identified conversations; truly stateless requests remain first-target selections.
@@ -117,13 +116,13 @@ Any number of aliases, targets, and providers is supported. `repeat` defaults to
 Set the top-level `debug: true` in `config.yaml`. Route decisions are emitted through the host logger as `model-sequence-router: selected target` with these structured fields:
 
 - `alias`, `sequence_index`, `provider`, and the effective target `model`
-- `operation` (`generate` or `count_tokens`) and `advanced` (`true` only when the cursor moved)
+- `advanced`, `true` when a conversation cursor moved and `false` for stateless routing
 - `random_start`, showing the alias policy used for a new or expired cursor
 - `session_hash`, an eight-character hash used to correlate one conversation without logging its identifier
 
-At startup or successful reconfiguration, the info log `model-sequence-router: configuration loaded and state reset` includes `alias_count`, `generation`, and `sequence_lengths`. Stateless routing is identified at debug level. If none of an alias's configured providers is registered, a warning lists only the alias, provider names, and operation. Request bodies, authorization data, credentials, prompt-cache keys, and complete session identifiers are never logged.
+At startup or successful reconfiguration, the info log `model-sequence-router: configuration loaded and state reset` includes `alias_count`, `generation`, and `sequence_lengths`, and its JSONL record carries an explicit `event=config` discriminator. Stateless routing is identified at debug level. If none of an alias's configured providers is registered, a warning lists only the alias and its provider names. Request bodies, authorization data, credentials, prompt-cache keys, and complete session identifiers are never logged.
 
-For the four-slot example above, filter for `model-sequence-router: selected target`. With the default `random_start: true`, a conversation begins at any one index and then follows cyclic order—for example, `2, 3, 0, 1, 2`. Set `random_start: false` when testing if you want the exact trace `0, 1, 2, 3, 0`. A token count and the immediately following generation should show the same index; the count has `advanced=false` and the generation has `advanced=true`.
+For the four-slot example above, filter for `model-sequence-router: selected target`. With the default `random_start: true`, a conversation begins at any one index and then follows cyclic order—for example, `2, 3, 0, 1, 2`. Set `random_start: false` when testing if you want the exact trace `0, 1, 2, 3, 0`. Host logs carry a supplementary subset of these fields; the JSONL diagnostic file is the authoritative record.
 
 ### Cache diagnostics and inspection
 
