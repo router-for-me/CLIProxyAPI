@@ -52,11 +52,13 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 		gotResponseDone bool
 		gotFuncDone     bool
 
-		textDone     string
-		messageText  string
-		responseID   string
-		instructions string
-		cachedTokens int64
+		textDone         string
+		messageText      string
+		responseID       string
+		createdModels    string
+		inProgressModels string
+		instructions     string
+		cachedTokens     int64
 
 		funcName string
 		funcArgs string
@@ -97,6 +99,10 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 			if data.Get("item.type").String() == "function_call" && posFuncAdded == -1 {
 				posFuncAdded = i
 			}
+		case "response.created":
+			createdModels = data.Get("response.model").String()
+		case "response.in_progress":
+			inProgressModels = data.Get("response.model").String()
 		case "response.completed":
 			gotResponseDone = true
 			responseID = data.Get("response.id").String()
@@ -133,6 +139,12 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 
 	if responseID != "resp_req_vrtx_1" {
 		t.Fatalf("unexpected response id: got %q", responseID)
+	}
+	if createdModels != "gpt-5" {
+		t.Fatalf("response.created models = %q, want gpt-5", createdModels)
+	}
+	if inProgressModels != "gpt-5" {
+		t.Fatalf("response.in_progress models = %q, want gpt-5", inProgressModels)
 	}
 	if instructions != "test instructions" {
 		t.Fatalf("unexpected instructions echo: got %q", instructions)

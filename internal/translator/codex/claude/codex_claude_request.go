@@ -26,7 +26,7 @@ import (
 // The function performs the following transformations:
 // 1. Sets up a template with the model name and empty instructions field
 // 2. Processes system messages and converts them to developer input content
-// 3. Transforms message contents (text, image, tool_use, tool_result) to appropriate formats
+// 3. Transforms message contents (text, image, document, tool_use, tool_result) to appropriate formats
 // 4. Converts tools declarations to the expected format
 // 5. Adds additional configuration parameters for the Codex API
 // 6. Maps Claude thinking configuration to Codex reasoning settings
@@ -129,6 +129,12 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				contentItems = append(contentItems, content)
 			}
 
+			appendDocumentContent := func(dataURL string) {
+				content := []byte(`{"type":"input_file","file_data":"","filename":"document.pdf"}`)
+				content, _ = sjson.SetBytes(content, "file_data", dataURL)
+				contentItems = append(contentItems, content)
+			}
+
 			appendReasoningContent := func(part gjson.Result) {
 				if messageRole != "assistant" {
 					return
@@ -181,6 +187,22 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 								dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
 								appendImageContent(dataURL)
 							}
+						}
+					case "document":
+						sourceResult := messageContentResult.Get("source")
+						if sourceResult.Get("type").String() != "base64" {
+							continue
+						}
+						mediaType := strings.TrimSpace(sourceResult.Get("media_type").String())
+						if !strings.EqualFold(mediaType, "application/pdf") {
+							continue
+						}
+						data := sourceResult.Get("data").String()
+						if data == "" {
+							data = sourceResult.Get("base64").String()
+						}
+						if data != "" {
+							appendDocumentContent(fmt.Sprintf("data:%s;base64,%s", mediaType, data))
 						}
 					case "tool_use":
 						flushMessage()

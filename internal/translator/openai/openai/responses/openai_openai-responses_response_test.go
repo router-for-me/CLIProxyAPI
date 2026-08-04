@@ -96,6 +96,8 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompleted
 		t.Run(tt.name, func(t *testing.T) {
 			completedCount := 0
 			completedInputIndex := -1
+			var createdData gjson.Result
+			var inProgressData gjson.Result
 			var completedData gjson.Result
 
 			// Reuse converter state across input lines to simulate one streaming response.
@@ -105,6 +107,14 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompleted
 				// One upstream chunk can emit multiple downstream SSE events.
 				for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param) {
 					event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+					if event == "response.created" {
+						createdData = data
+						continue
+					}
+					if event == "response.in_progress" {
+						inProgressData = data
+						continue
+					}
 					if event != "response.completed" {
 						continue
 					}
@@ -123,6 +133,12 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompleted
 			}
 			if completedInputIndex != tt.doneInputIndex {
 				t.Fatalf("expected response.completed on terminal [DONE] chunk at input index %d, got %d", tt.doneInputIndex, completedInputIndex)
+			}
+			if got := createdData.Get("response.model").String(); got != "gpt-5.4" {
+				t.Fatalf("response.created models = %q, want gpt-5.4", got)
+			}
+			if got := inProgressData.Get("response.model").String(); got != "gpt-5.4" {
+				t.Fatalf("response.in_progress models = %q, want gpt-5.4", got)
 			}
 
 			// Missing upstream usage should stay omitted in the final completed event.
