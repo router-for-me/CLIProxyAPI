@@ -1314,14 +1314,15 @@ function buildSchemas() {
     ],
   });
 
-  // Identifier field for Claude upstreams. Maps to the generic `name` column,
-  // which the dashboard already lists as the first-choice identifier and the
-  // proxy lower-cases into the executor/routing provider key
-  // (see util.UpstreamProviderKey). Optional — leave blank to keep the
-  // auto-derived key (empty name → path-based fallback).
-  const claudeIdentifierField = {
-    name: 'name', label: 'Identifier', type: 'text', placeholder: 'claude-team-a',
-    hint: 'Optional stable identifier for this Claude upstream. Lower-cased to form its routing key; shown in the provider list.',
+  // Identifier field for API-key upstreams (all keyed types). Maps to the
+  // generic `name` column, which the dashboard already lists as the
+  // first-choice identifier in the provider list; the proxy lower-cases it
+  // into the executor/routing provider key (see util.UpstreamProviderKey).
+  // Optional — leave blank to keep the auto-derived key (empty name →
+  // path-based fallback).
+  const identifierField = {
+    name: 'name', label: 'Identifier', type: 'text', placeholder: 'team-a-gemini',
+    hint: 'Optional stable identifier for this upstream. Lower-cased to form its routing key; shown in the provider list.',
   };
 
   const claudeCloakSection = {
@@ -1345,16 +1346,16 @@ function buildSchemas() {
   };
 
   const schemaMap = {
-    'gemini-api-key': apiKeyBase(),
-    'interactions-api-key': apiKeyBase(),
+    'gemini-api-key': apiKeyBase([], [], [identifierField]),
+    'interactions-api-key': apiKeyBase([], [], [identifierField]),
     'codex-api-key': apiKeyBase([
       { name: 'websockets', label: 'WebSockets', type: 'toggle',
         hint: 'Use the Responses API websocket transport for this entry.' },
-    ]),
+    ], [], [identifierField]),
     'xai-api-key': apiKeyBase([
       { name: 'websockets', label: 'WebSockets', type: 'toggle',
         hint: 'Use the Responses API websocket transport for this entry.' },
-    ]),
+    ], [], [identifierField]),
     'claude-api-key': apiKeyBase(
       [
         { name: 'rebuild_mid_system_message', label: 'Rebuild mid system message', type: 'toggle',
@@ -1363,9 +1364,9 @@ function buildSchemas() {
           hint: 'Opt-in final-body cch signing for cloaked Claude /v1/messages requests.' },
       ],
       [claudeCloakSection],
-      [claudeIdentifierField],
+      [identifierField],
     ),
-    'vertex-api-key': apiKeyBase(),
+    'vertex-api-key': apiKeyBase([], [], [identifierField]),
     'openai-compatibility': {
       sections: [
         { title: 'Identity', fields: [
@@ -1410,7 +1411,7 @@ function buildSchemas() {
     // For oauth:claude an Identifier is also surfaced — it populates the
     // generic `name` column shown in the provider list (the executor key for
     // oauth:* is fixed to the channel, so it stays "claude" regardless).
-    const identityFields = oauthType === 'oauth:claude' ? [claudeIdentifierField] : [];
+    const identityFields = oauthType === 'oauth:claude' ? [identifierField] : [];
     const sections = [
       { title: 'Identity', fields: [
         ...identityFields,
@@ -3270,7 +3271,9 @@ function buildPayload(form, providerType) {
       .filter((e) => e.api_key && e.api_key.trim())
       .map((e) => ({ api_key: e.api_key.trim(), proxy_url: (e.proxy_url || '').trim() }));
   } else {
-    // API-key providers.
+    // API-key providers. The Identifier field maps to the generic `name`
+    // column (lower-cased by the proxy into the routing provider key).
+    payload.name = (form.name || '').trim();
     payload.api_key = (form.api_key || '').trim();
   }
 
