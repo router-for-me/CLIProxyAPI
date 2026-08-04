@@ -62,3 +62,4 @@ _bmad-output/*
 ._*
 .gocache/
 /.qoder
+/split_logs

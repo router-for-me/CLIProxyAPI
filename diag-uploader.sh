@@ -68,7 +68,8 @@ echo "3. State.json Validation"
 sep
 
 # Check for -p2/-p3 bad keys
-BAD_KEYS=$(docker exec "$CONTAINER" sh -c "grep -c '\-p[0-9]' $STATE_FILE" 2>/dev/null || echo "0")
+BAD_KEYS=$(docker exec "$CONTAINER" sh -c "grep -c '\-p[0-9]' $STATE_FILE" 2>/dev/null || true)
+[ -n "$BAD_KEYS" ] || BAD_KEYS=0
 if [ "$BAD_KEYS" -gt 0 ]; then
     fail "Found $BAD_KEYS lines with -p2/-p3 split keys in state.json (blocks uploader)"
     echo "   Fix: remove these keys from hours/objects sections"
@@ -78,11 +79,13 @@ else
 fi
 
 # Check hours count
-HOURS_COUNT=$(docker exec "$CONTAINER" sh -c "grep -c '\"status\": \"sealed\"' $STATE_FILE" 2>/dev/null || echo "0")
+HOURS_COUNT=$(docker exec "$CONTAINER" sh -c "grep -c '\"status\": \"sealed\"' $STATE_FILE" 2>/dev/null || true)
+[ -n "$HOURS_COUNT" ] || HOURS_COUNT=0
 echo "   Sealed hours: $HOURS_COUNT"
 
 # Check prepared_hours (pending batches)
-PREPARED=$(docker exec "$CONTAINER" sh -c "grep -A1 'prepared_hours' $STATE_FILE | grep -c '{' " 2>/dev/null || echo "0")
+PREPARED=$(docker exec "$CONTAINER" sh -c "grep -A1 'prepared_hours' $STATE_FILE | grep -c '{' " 2>/dev/null || true)
+[ -n "$PREPARED" ] || PREPARED=0
 if [ "$PREPARED" -gt 0 ]; then
     warn "Found $PREPARED prepared (pending) hour(s) - may indicate stuck batch"
 fi
