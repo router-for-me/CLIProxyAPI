@@ -69,7 +69,13 @@ func ShouldEnsureOpenAICompatReasoningContent(upstreamModel, requestedModel stri
 			continue
 		}
 		parsed := thinking.ParseSuffix(model)
-		if parsed.HasSuffix {
+		// Only a suffix that parses to a valid thinking config (level, budget,
+		// or auto) signals reasoning intent. An arbitrary "(foo)" suffix is
+		// treated as no thinking config by the canonical ApplyRequestThinking
+		// pipeline (parseSuffixToConfig returns an empty config), so it must
+		// not enable fallback reasoning_content injection here. Disabled
+		// suffixes ("(none)"/"(0)") are already filtered by the disabled guard.
+		if openAICompatSuffixEnablesThinking(parsed) {
 			return true
 		}
 		lowerName := strings.ToLower(parsed.ModelName)
@@ -128,6 +134,29 @@ func openAICompatSuffixDisablesThinking(suffix thinking.SuffixResult) bool {
 	}
 	if budget, ok := thinking.ParseNumericSuffix(raw); ok && budget == 0 {
 		return true
+	}
+	return false
+}
+
+// openAICompatSuffixEnablesThinking reports whether a thinking suffix parses
+// to a valid thinking configuration that enables reasoning. It mirrors the
+// canonical parseSuffixToConfig acceptance set (special values, discrete
+// levels, numeric budgets) so that the capability gate stays in sync with
+// ApplyRequestThinking. Disabled suffixes ("(none)"/"(0)") must be rejected
+// here; callers handle them via openAICompatSuffixDisablesThinking.
+func openAICompatSuffixEnablesThinking(suffix thinking.SuffixResult) bool {
+	if !suffix.HasSuffix {
+		return false
+	}
+	raw := strings.TrimSpace(suffix.RawSuffix)
+	if mode, ok := thinking.ParseSpecialSuffix(raw); ok {
+		return mode != thinking.ModeNone
+	}
+	if _, ok := thinking.ParseLevelSuffix(raw); ok {
+		return true
+	}
+	if budget, ok := thinking.ParseNumericSuffix(raw); ok {
+		return budget > 0
 	}
 	return false
 }

@@ -193,6 +193,26 @@ func TestShouldEnsureOpenAICompatReasoningContent(t *testing.T) {
 			want:          true,
 		},
 		{
+			// An invalid suffix that the canonical ApplyRequestThinking pipeline
+			// treats as no thinking config must not enable fallback injection.
+			name:          "invalid suffix does not enable reasoning",
+			upstreamModel: "gpt-4o(foo)",
+			want:          false,
+		},
+		{
+			// A valid level suffix on a non-reasoning model name still signals
+			// explicit thinking intent.
+			name:          "valid level suffix enables reasoning",
+			upstreamModel: "gpt-4o(high)",
+			want:          true,
+		},
+		{
+			// An auto suffix enables reasoning intent.
+			name:          "auto suffix enables reasoning",
+			upstreamModel: "gpt-4o(auto)",
+			want:          true,
+		},
+		{
 			name:    "payload with reasoning_effort",
 			payload: `{"model":"gpt-4o","reasoning_effort":"medium"}`,
 			want:    true,
