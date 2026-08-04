@@ -54,7 +54,16 @@ func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
 
 // ShouldEnsureOpenAICompatReasoningContent reports whether the target model
 // or request requires reasoning_content on assistant tool_calls (e.g., DeepSeek/Kimi reasoning models).
+//
+// When thinking is explicitly disabled (model suffix "(none)"/"(0)",
+// reasoning_effort:"none", or Kimi thinking.type:"disabled"), fallback
+// reasoning_content is never injected: the request is no longer in thinking
+// mode, so the upstream no longer requires reasoning_content on prior tool_calls.
 func ShouldEnsureOpenAICompatReasoningContent(upstreamModel, requestedModel string, payload []byte) bool {
+	if openAICompatReasoningExplicitlyDisabled(upstreamModel, requestedModel, payload) {
+		return false
+	}
+
 	for _, model := range []string{upstreamModel, requestedModel} {
 		if strings.TrimSpace(model) == "" {
 			continue
@@ -73,12 +82,72 @@ func ShouldEnsureOpenAICompatReasoningContent(upstreamModel, requestedModel stri
 		}
 	}
 
-	if gjson.GetBytes(payload, "reasoning_effort").Exists() ||
-		gjson.GetBytes(payload, "thinking").Exists() {
+	if effort := gjson.GetBytes(payload, "reasoning_effort"); effort.Exists() && !isOpenAICompatDisabledEffortValue(effort) {
+		return true
+	}
+	if thinkingField := gjson.GetBytes(payload, "thinking"); thinkingField.Exists() && !isOpenAICompatThinkingObjectDisabled(thinkingField) {
 		return true
 	}
 
 	return false
+}
+
+// openAICompatReasoningExplicitlyDisabled reports whether the request or model
+// suffix explicitly disables thinking. This gates fallback reasoning_content
+// injection so that a reasoning-capable model with thinking disabled is not
+// mutated once the canonical thinking pipeline has disabled reasoning.
+func openAICompatReasoningExplicitlyDisabled(upstreamModel, requestedModel string, payload []byte) bool {
+	for _, model := range []string{upstreamModel, requestedModel} {
+		if strings.TrimSpace(model) == "" {
+			continue
+		}
+		if openAICompatSuffixDisablesThinking(thinking.ParseSuffix(model)) {
+			return true
+		}
+	}
+
+	if effort := gjson.GetBytes(payload, "reasoning_effort"); effort.Exists() && isOpenAICompatDisabledEffortValue(effort) {
+		return true
+	}
+	if thinkingField := gjson.GetBytes(payload, "thinking"); thinkingField.Exists() && isOpenAICompatThinkingObjectDisabled(thinkingField) {
+		return true
+	}
+
+	return false
+}
+
+// openAICompatSuffixDisablesThinking reports whether a thinking suffix
+// explicitly disables thinking, e.g. "(none)" or budget "(0)".
+func openAICompatSuffixDisablesThinking(suffix thinking.SuffixResult) bool {
+	if !suffix.HasSuffix {
+		return false
+	}
+	raw := strings.TrimSpace(suffix.RawSuffix)
+	if mode, ok := thinking.ParseSpecialSuffix(raw); ok && mode == thinking.ModeNone {
+		return true
+	}
+	if budget, ok := thinking.ParseNumericSuffix(raw); ok && budget == 0 {
+		return true
+	}
+	return false
+}
+
+// isOpenAICompatDisabledEffortValue reports whether a reasoning_effort value
+// disables thinking (currently the "none" level).
+func isOpenAICompatDisabledEffortValue(effort gjson.Result) bool {
+	if effort.Type != gjson.String {
+		return false
+	}
+	return strings.ToLower(strings.TrimSpace(effort.String())) == "none"
+}
+
+// isOpenAICompatThinkingObjectDisabled reports whether a Kimi-style thinking
+// object disables thinking via type:"disabled".
+func isOpenAICompatThinkingObjectDisabled(thinkingField gjson.Result) bool {
+	if !thinkingField.IsObject() {
+		return false
+	}
+	return strings.ToLower(strings.TrimSpace(thinkingField.Get("type").String())) == "disabled"
 }
 
 // EnsureOpenAICompatAssistantReasoningContent ensures every assistant message containing

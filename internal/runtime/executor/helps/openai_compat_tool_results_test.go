@@ -203,6 +203,49 @@ func TestShouldEnsureOpenAICompatReasoningContent(t *testing.T) {
 			payload:       `{"model":"gpt-4o"}`,
 			want:          false,
 		},
+		{
+			// Reasoning-capable model with thinking explicitly disabled must
+			// not trigger fallback reasoning_content injection.
+			name:          "reasoning model with reasoning_effort none disabled",
+			upstreamModel: "deepseek-v4-reasoner",
+			payload:       `{"model":"deepseek-v4-reasoner","reasoning_effort":"none"}`,
+			want:          false,
+		},
+		{
+			name:          "reasoning model with none thinking suffix",
+			upstreamModel: "deepseek-v4-reasoner(none)",
+			payload:       `{"model":"deepseek-v4-reasoner"}`,
+			want:          false,
+		},
+		{
+			name:          "reasoning model with zero budget thinking suffix",
+			upstreamModel: "deepseek-v4-reasoner(0)",
+			payload:       `{"model":"deepseek-v4-reasoner"}`,
+			want:          false,
+		},
+		{
+			name:          "kimi reasoning model with thinking.type disabled",
+			upstreamModel: "kimi-toggle-thinking-model",
+			payload:       `{"model":"kimi-toggle-thinking-model","thinking":{"type":"disabled"}}`,
+			want:          false,
+		},
+		{
+			// A non-disabled thinking object (enabled) on a reasoning model
+			// still requires reasoning_content.
+			name:          "kimi reasoning model with thinking.type enabled",
+			upstreamModel: "kimi-toggle-thinking-model",
+			payload:       `{"model":"kimi-toggle-thinking-model","thinking":{"type":"enabled"}}`,
+			want:          true,
+		},
+		{
+			// requestedModel suffix disabling thinking wins over an otherwise
+			// reasoning-capable upstream model.
+			name:           "requested model none suffix disables reasoning",
+			upstreamModel:  "deepseek-v4-reasoner",
+			requestedModel: "deepseek-v4-reasoner(none)",
+			payload:        `{"model":"deepseek-v4-reasoner"}`,
+			want:           false,
+		},
 	}
 
 	for _, tt := range tests {
