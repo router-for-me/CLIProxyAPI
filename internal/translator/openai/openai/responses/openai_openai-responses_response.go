@@ -846,18 +846,21 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 				// Function/tool calls
 				if tcs := msg.Get("tool_calls"); tcs.Exists() && tcs.IsArray() {
 					customToolNames := responsesCustomToolNames(requestForNamespace)
-					tcs.ForEach(func(tcIndex, tc gjson.Result) bool {
+					toolIndex := int64(0)
+					tcs.ForEach(func(_, tc gjson.Result) bool {
+						currentToolIndex := toolIndex
+						toolIndex++
 						callID := tc.Get("id").String()
 						if callID == "" {
 							// Providers may omit tool_call ids; synthesize one so the
 							// function_call item stays usable for Codex round-trips.
-							callID = fmt.Sprintf("call_%s_%d_%d", id, choice.Get("index").Int(), tcIndex.Int())
+							callID = fmt.Sprintf("call_%s_%d_%d", id, choice.Get("index").Int(), currentToolIndex)
 						}
 						name := tc.Get("function.name").String()
 						args := tc.Get("function.arguments").String()
 						if _, isCustomTool := customToolNames[name]; isCustomTool {
 							item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
-							item, _ = sjson.SetBytes(item, "id", openAIResponsesNonStreamToolItemID(id, choice.Get("index").Int(), tcIndex.Int(), true))
+							item, _ = sjson.SetBytes(item, "id", openAIResponsesNonStreamToolItemID(id, choice.Get("index").Int(), currentToolIndex, true))
 							item, _ = sjson.SetBytes(item, "input", unwrapCustomToolInput(args))
 							item, _ = sjson.SetBytes(item, "call_id", callID)
 							item, _ = sjson.SetBytes(item, "name", name)
@@ -865,7 +868,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 							return true
 						}
 						item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
-						item, _ = sjson.SetBytes(item, "id", openAIResponsesNonStreamToolItemID(id, choice.Get("index").Int(), tcIndex.Int(), false))
+						item, _ = sjson.SetBytes(item, "id", openAIResponsesNonStreamToolItemID(id, choice.Get("index").Int(), currentToolIndex, false))
 						item, _ = sjson.SetBytes(item, "arguments", args)
 						item, _ = sjson.SetBytes(item, "call_id", callID)
 						item = applyResponsesFunctionCallNamespaceFields(item, requestForNamespace, name, "")

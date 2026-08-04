@@ -2,6 +2,7 @@ package responses
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -598,6 +599,83 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_OmitsTop
 	}
 	if got := data.Get("output.0.content.0.text").String(); got != "ping" {
 		t.Fatalf("output text = %q, want %q; response=%s", got, "ping", resp)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_ParallelToolCallIDsAreUnique(t *testing.T) {
+	tests := []struct {
+		name       string
+		request    []byte
+		toolName   string
+		itemType   string
+		itemPrefix string
+	}{
+		{
+			name:       "function tools",
+			request:    []byte(`{"model":"model"}`),
+			toolName:   "lookup",
+			itemType:   "function_call",
+			itemPrefix: "fc_",
+		},
+		{
+			name:       "custom tools",
+			request:    []byte(`{"model":"model","tools":[{"type":"custom","name":"exec"}]}`),
+			toolName:   "exec",
+			itemType:   "custom_tool_call",
+			itemPrefix: "ctc_",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(`{
+				"id":"resp_parallel",
+				"object":"chat.completion",
+				"created":1,
+				"model":"model",
+				"choices":[{
+					"index":2,
+					"message":{"role":"assistant","tool_calls":[
+						{"id":"call_a","type":"function","function":{"name":"","arguments":"{}"}},
+						{"id":"call_b","type":"function","function":{"name":"","arguments":"{}"}}
+					]},
+					"finish_reason":"tool_calls"
+				}]
+			}`)
+			var err error
+			raw, err = sjson.SetBytes(raw, "choices.0.message.tool_calls.0.function.name", tt.toolName)
+			if err != nil {
+				t.Fatalf("set first tool name: %v", err)
+			}
+			raw, err = sjson.SetBytes(raw, "choices.0.message.tool_calls.1.function.name", tt.toolName)
+			if err != nil {
+				t.Fatalf("set second tool name: %v", err)
+			}
+
+			resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(
+				context.Background(), "model", tt.request, tt.request, raw, nil,
+			)
+			outputs := gjson.GetBytes(resp, "output").Array()
+			if len(outputs) != 2 {
+				t.Fatalf("output count = %d, want 2; response=%s", len(outputs), resp)
+			}
+			for i, wantCallID := range []string{"call_a", "call_b"} {
+				item := outputs[i]
+				if got := item.Get("type").String(); got != tt.itemType {
+					t.Fatalf("output.%d type = %q, want %q; response=%s", i, got, tt.itemType, resp)
+				}
+				wantItemID := tt.itemPrefix + "resp_parallel_2_" + strconv.Itoa(i)
+				if got := item.Get("id").String(); got != wantItemID {
+					t.Fatalf("output.%d id = %q, want %q; response=%s", i, got, wantItemID, resp)
+				}
+				if got := item.Get("call_id").String(); got != wantCallID {
+					t.Fatalf("output.%d call_id = %q, want %q; response=%s", i, got, wantCallID, resp)
+				}
+			}
+			if gjson.GetBytes(resp, "output.0.id").String() == gjson.GetBytes(resp, "output.1.id").String() {
+				t.Fatalf("parallel tool item ids are duplicated; response=%s", resp)
+			}
+		})
 	}
 }
 
