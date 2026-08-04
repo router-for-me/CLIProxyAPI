@@ -43,7 +43,7 @@ run_worker_first = true
 # encrypted environment variable in the Cloudflare dashboard — do NOT keep the
 # production origin in this committed file if it is private.
 [vars]
-BACKEND_ORIGIN = "https://nixllm.serunix.my.id"
+BACKEND_ORIGIN = "http://127.0.0.1:8317"
 
 # Observability (Workers dashboard → Logs). Costs nothing when idle, very
 # useful when diagnosing a proxy/auth issue.
