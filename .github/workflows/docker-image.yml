@@ -3,7 +3,11 @@ name: docker-image
 on:
   push:
     tags:
+      # v* covers the legacy NixLLM tags (e.g. v0.1.3). The unified pattern
+      # covers "<core>-<nixllm>" tags (e.g. 7.2.104-0.1.3) so the GHCR image
+      # build is triggered for both naming schemes.
       - v*
+      - '*.*.*-*.*.*'
 
 permissions:
   contents: read
@@ -33,8 +37,22 @@ jobs:
         uses: docker/setup-buildx-action@v3
       - name: Generate Build Metadata
         run: |
-          echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          echo "CORE_VERSION=$(git describe --tags --match 'v7.*' --abbrev=0 2>/dev/null | sed 's/^v//')" >> $GITHUB_ENV
+          IMAGE_TAG="${GITHUB_REF_NAME}"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+          if [[ "${IMAGE_TAG}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            # Unified tag "<core>-<nixllm>", e.g. 7.2.104-0.1.3. The first
+            # segment is the core CLIProxyAPI version, the second the NixLLM
+            # fork version.
+            CORE_VERSION="${IMAGE_TAG%%-*}"
+            VERSION="${IMAGE_TAG#*-}"
+            echo "CORE_VERSION=${CORE_VERSION}" >> $GITHUB_ENV
+            echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          else
+            # Legacy v* tag (e.g. v0.1.3): NixLLM version is the tag itself and
+            # the core version comes from the nearest v7.* git tag.
+            echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+            echo "CORE_VERSION=$(git describe --tags --match 'v7.*' --abbrev=0 2>/dev/null | sed 's/^v//')" >> $GITHUB_ENV
+          fi
           echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
           echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
       - name: Lowercase the image owner
@@ -58,7 +76,7 @@ jobs:
             COMMIT=${{ env.COMMIT }}
             BUILD_DATE=${{ env.BUILD_DATE }}
           tags: |
-            ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/${{ env.APP_NAME }}:${{ env.VERSION }}-amd64
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/${{ env.APP_NAME }}:${{ env.IMAGE_TAG }}-amd64
 
   docker_arm64:
     runs-on: ubuntu-24.04-arm
@@ -76,8 +94,17 @@ jobs:
         uses: docker/setup-buildx-action@v3
       - name: Generate Build Metadata
         run: |
-          echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          echo "CORE_VERSION=$(git describe --tags --match 'v7.*' --abbrev=0 2>/dev/null | sed 's/^v//')" >> $GITHUB_ENV
+          IMAGE_TAG="${GITHUB_REF_NAME}"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+          if [[ "${IMAGE_TAG}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            CORE_VERSION="${IMAGE_TAG%%-*}"
+            VERSION="${IMAGE_TAG#*-}"
+            echo "CORE_VERSION=${CORE_VERSION}" >> $GITHUB_ENV
+            echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          else
+            echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+            echo "CORE_VERSION=$(git describe --tags --match 'v7.*' --abbrev=0 2>/dev/null | sed 's/^v//')" >> $GITHUB_ENV
+          fi
           echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
           echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
       - name: Lowercase the image owner
@@ -101,7 +128,7 @@ jobs:
             COMMIT=${{ env.COMMIT }}
             BUILD_DATE=${{ env.BUILD_DATE }}
           tags: |
-            ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/${{ env.APP_NAME }}:${{ env.VERSION }}-arm64
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/${{ env.APP_NAME }}:${{ env.IMAGE_TAG }}-arm64
 
   docker_manifest:
     runs-on: ubuntu-latest
@@ -115,7 +142,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
       - name: Generate Build Metadata
         run: |
-          echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+          echo "IMAGE_TAG=${GITHUB_REF_NAME}" >> $GITHUB_ENV
       - name: Lowercase the image owner
         id: owner
         run: echo "name=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
@@ -132,12 +159,12 @@ jobs:
           IMAGE="${REGISTRY}/${OWNER}/${APP_NAME}"
           docker buildx imagetools create \
             --tag "${IMAGE}:latest" \
-            "${IMAGE}:${VERSION}-amd64" \
-            "${IMAGE}:${VERSION}-arm64"
+            "${IMAGE}:${IMAGE_TAG}-amd64" \
+            "${IMAGE}:${IMAGE_TAG}-arm64"
           docker buildx imagetools create \
-            --tag "${IMAGE}:${VERSION}" \
-            "${IMAGE}:${VERSION}-amd64" \
-            "${IMAGE}:${VERSION}-arm64"
+            --tag "${IMAGE}:${IMAGE_TAG}" \
+            "${IMAGE}:${IMAGE_TAG}-amd64" \
+            "${IMAGE}:${IMAGE_TAG}-arm64"
       - name: Cleanup per-arch tags
         continue-on-error: true
         env:
@@ -174,5 +201,5 @@ jobs:
             return 0
           }
 
-          delete_tag "${VERSION}-amd64"
-          delete_tag "${VERSION}-arm64"
+          delete_tag "${IMAGE_TAG}-amd64"
+          delete_tag "${IMAGE_TAG}-arm64"
