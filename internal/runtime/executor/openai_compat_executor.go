@@ -128,7 +128,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if helps.ShouldNormalizeOpenAIToolResultsForModel(e.resolveCompatConfig(auth), baseModel, requestedModel) {
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
 	}
-	translated = helps.EnsureOpenAICompatAssistantReasoningContent(translated)
+	if helps.ShouldEnsureOpenAICompatReasoningContent(baseModel, requestedModel, translated) {
+		translated = helps.EnsureOpenAICompatAssistantReasoningContent(translated)
+	}
 	if opts.Alt != "responses/compact" {
 		translated, err = e.applyPromptCacheKey(ctx, auth, from, baseModel, req, opts, translated)
 		if err != nil {
@@ -339,7 +341,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if helps.ShouldNormalizeOpenAIToolResultsForModel(e.resolveCompatConfig(auth), baseModel, requestedModel) {
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
 	}
-	translated = helps.EnsureOpenAICompatAssistantReasoningContent(translated)
+	if helps.ShouldEnsureOpenAICompatReasoningContent(baseModel, requestedModel, translated) {
+		translated = helps.EnsureOpenAICompatAssistantReasoningContent(translated)
+	}
 	if opts.Alt != "responses/compact" {
 		translated, err = e.applyPromptCacheKey(ctx, auth, from, baseModel, req, opts, translated)
 		if err != nil {

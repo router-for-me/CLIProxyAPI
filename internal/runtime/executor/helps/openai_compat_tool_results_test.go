@@ -163,3 +163,54 @@ func TestEnsureOpenAICompatAssistantReasoningContent(t *testing.T) {
 		})
 	}
 }
+
+func TestShouldEnsureOpenAICompatReasoningContent(t *testing.T) {
+	tests := []struct {
+		name           string
+		upstreamModel  string
+		requestedModel string
+		payload        string
+		want           bool
+	}{
+		{
+			name:          "deepseek-reasoner model",
+			upstreamModel: "deepseek-reasoner",
+			want:          true,
+		},
+		{
+			name:          "deepseek-r1 model",
+			upstreamModel: "deepseek-r1",
+			want:          true,
+		},
+		{
+			name:          "kimi-k1.5 model",
+			upstreamModel: "kimi-k1.5",
+			want:          true,
+		},
+		{
+			name:          "model with thinking suffix",
+			upstreamModel: "custom-model(1024)",
+			want:          true,
+		},
+		{
+			name:    "payload with reasoning_effort",
+			payload: `{"model":"gpt-4o","reasoning_effort":"medium"}`,
+			want:    true,
+		},
+		{
+			name:          "non-reasoning standard model",
+			upstreamModel: "gpt-4o",
+			payload:       `{"model":"gpt-4o"}`,
+			want:          false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ShouldEnsureOpenAICompatReasoningContent(tt.upstreamModel, tt.requestedModel, []byte(tt.payload))
+			if got != tt.want {
+				t.Fatalf("ShouldEnsureOpenAICompatReasoningContent() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}

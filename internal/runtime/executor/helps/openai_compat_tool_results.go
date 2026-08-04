@@ -52,6 +52,35 @@ func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
 	return out
 }
 
+// ShouldEnsureOpenAICompatReasoningContent reports whether the target model
+// or request requires reasoning_content on assistant tool_calls (e.g., DeepSeek/Kimi reasoning models).
+func ShouldEnsureOpenAICompatReasoningContent(upstreamModel, requestedModel string, payload []byte) bool {
+	for _, model := range []string{upstreamModel, requestedModel} {
+		if strings.TrimSpace(model) == "" {
+			continue
+		}
+		parsed := thinking.ParseSuffix(model)
+		if parsed.HasSuffix {
+			return true
+		}
+		lowerName := strings.ToLower(parsed.ModelName)
+		if strings.Contains(lowerName, "reasoner") ||
+			strings.Contains(lowerName, "reasoning") ||
+			strings.Contains(lowerName, "deepseek-r1") ||
+			strings.Contains(lowerName, "kimi-k1.5") ||
+			strings.Contains(lowerName, "thinking") {
+			return true
+		}
+	}
+
+	if gjson.GetBytes(payload, "reasoning_effort").Exists() ||
+		gjson.GetBytes(payload, "thinking").Exists() {
+		return true
+	}
+
+	return false
+}
+
 // EnsureOpenAICompatAssistantReasoningContent ensures every assistant message containing
 // tool_calls has a non-empty reasoning_content field to satisfy strict OpenAI-compatible
 // reasoning providers (e.g. DeepSeek, Kimi).
