@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/tidwall/gjson"
 )
 
@@ -476,8 +477,13 @@ func TestConvertClaudeRequestToOpenAI_FallbackReasoningContentWhenThinkingUnavai
 
 	resultNoThinking := ConvertClaudeRequestToOpenAI("deepseek-v4-flash", []byte(inputJSONNoThinking), false)
 	assistantMsgNoThinking := gjson.GetBytes(resultNoThinking, "messages.1")
-	if got := assistantMsgNoThinking.Get("reasoning_content").String(); got != "[reasoning unavailable]" {
-		t.Fatalf("expected fallback reasoning_content '[reasoning unavailable]' when thinking block is missing, got %q. Output: %s", got, string(resultNoThinking))
+	if assistantMsgNoThinking.Get("reasoning_content").Exists() {
+		t.Fatalf("generic ConvertClaudeRequestToOpenAI must NOT inject non-standard reasoning_content into standard OpenAI schema when thinking is missing. Output: %s", string(resultNoThinking))
+	}
+	compatResultNoThinking := helps.EnsureOpenAICompatAssistantReasoningContent(resultNoThinking)
+	compatMsgNoThinking := gjson.GetBytes(compatResultNoThinking, "messages.1")
+	if got := compatMsgNoThinking.Get("reasoning_content").String(); got != "[reasoning unavailable]" {
+		t.Fatalf("expected OpenAI-compat executor helper to inject fallback reasoning_content '[reasoning unavailable]', got %q. Output: %s", got, string(compatResultNoThinking))
 	}
 
 	// Case 2: Assistant message with tool_use and a Claude-signed thinking block (filtered out)
@@ -497,8 +503,13 @@ func TestConvertClaudeRequestToOpenAI_FallbackReasoningContentWhenThinkingUnavai
 
 	resultClaudeSig := ConvertClaudeRequestToOpenAI("deepseek-v4-flash", []byte(inputJSONClaudeSig), false)
 	assistantMsgClaudeSig := gjson.GetBytes(resultClaudeSig, "messages.1")
-	if got := assistantMsgClaudeSig.Get("reasoning_content").String(); got != "[reasoning unavailable]" {
-		t.Fatalf("expected fallback reasoning_content '[reasoning unavailable]' when thinking block has Claude signature, got %q. Output: %s", got, string(resultClaudeSig))
+	if assistantMsgClaudeSig.Get("reasoning_content").Exists() {
+		t.Fatalf("generic ConvertClaudeRequestToOpenAI must NOT inject non-standard reasoning_content into standard OpenAI schema when thinking is filtered. Output: %s", string(resultClaudeSig))
+	}
+	compatResultClaudeSig := helps.EnsureOpenAICompatAssistantReasoningContent(resultClaudeSig)
+	compatMsgClaudeSig := gjson.GetBytes(compatResultClaudeSig, "messages.1")
+	if got := compatMsgClaudeSig.Get("reasoning_content").String(); got != "[reasoning unavailable]" {
+		t.Fatalf("expected OpenAI-compat executor helper to inject fallback reasoning_content '[reasoning unavailable]', got %q. Output: %s", got, string(compatResultClaudeSig))
 	}
 
 	// Negative Assertion 1: Assistant message without tool_calls and without thinking must NOT have reasoning_content injected

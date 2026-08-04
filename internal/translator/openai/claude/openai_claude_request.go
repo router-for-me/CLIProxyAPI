@@ -250,11 +250,9 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 							msgJSON, _ = sjson.SetBytes(msgJSON, "content", "")
 						}
 
-						// Add reasoning_content if present, or fallback if tool_calls exist (required by DeepSeek/Kimi)
+						// Add reasoning_content if present
 						if hasReasoning {
 							msgJSON, _ = sjson.SetBytes(msgJSON, "reasoning_content", reasoningContent)
-						} else if hasToolCalls {
-							msgJSON, _ = sjson.SetBytes(msgJSON, "reasoning_content", "[reasoning unavailable]")
 						}
 
 						// Add tool_calls if present (in same message as content)

@@ -109,3 +109,57 @@ func TestShouldNormalizeOpenAIToolResultsForModel(t *testing.T) {
 		t.Fatal("nil compatibility config unexpectedly enabled normalization")
 	}
 }
+
+func TestEnsureOpenAICompatAssistantReasoningContent(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         string
+		wantReasoning string
+		wantExists    bool
+	}{
+		{
+			name:          "assistant tool_calls without reasoning_content gets fallback",
+			input:         `{"messages":[{"role":"user","content":"read"},{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}]}`,
+			wantReasoning: "[reasoning unavailable]",
+			wantExists:    true,
+		},
+		{
+			name:          "assistant tool_calls with empty reasoning_content gets fallback",
+			input:         `{"messages":[{"role":"assistant","content":"","reasoning_content":"   ","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}]}`,
+			wantReasoning: "[reasoning unavailable]",
+			wantExists:    true,
+		},
+		{
+			name:          "assistant tool_calls with existing reasoning_content preserved",
+			input:         `{"messages":[{"role":"assistant","content":"","reasoning_content":"existing reasoning","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}]}`,
+			wantReasoning: "existing reasoning",
+			wantExists:    true,
+		},
+		{
+			name:       "assistant text only without tool_calls has no reasoning_content injected",
+			input:      `{"messages":[{"role":"assistant","content":"hello"}]}`,
+			wantExists: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EnsureOpenAICompatAssistantReasoningContent([]byte(tt.input))
+			var assistantMsg gjson.Result
+			gjson.GetBytes(got, "messages").ForEach(func(_, m gjson.Result) bool {
+				if m.Get("role").String() == "assistant" {
+					assistantMsg = m
+					return false
+				}
+				return true
+			})
+			reasoning := assistantMsg.Get("reasoning_content")
+			if reasoning.Exists() != tt.wantExists {
+				t.Fatalf("reasoning.Exists() = %t, want %t. Payload: %s", reasoning.Exists(), tt.wantExists, string(got))
+			}
+			if tt.wantExists && reasoning.String() != tt.wantReasoning {
+				t.Fatalf("reasoning_content = %q, want %q. Payload: %s", reasoning.String(), tt.wantReasoning, string(got))
+			}
+		})
+	}
+}
