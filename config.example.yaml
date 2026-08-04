@@ -212,6 +212,21 @@ routing:
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
+  # Max sticky requests per session→auth binding before rebind (global default).
+  # Only applies when session-affinity is true.
+  # <=0 (omit, 0, or -1): unlimited. Rebind also happens when TTL expires (whichever first).
+  #
+  # NOTE: rebind calls the same routing.strategy selector again. With fill-first,
+  # that still returns the first available credential, so max-requests rarely
+  # rotates accounts unless the current one is unavailable (cooldown/quota/disabled).
+  # Prefer round-robin or weighted-round-robin when using max-requests for rotation.
+  session-affinity-max-requests: -1
+  # Optional per-model / per-provider overrides. More specific wins:
+  # provider+model > model-only > provider-only > global default.
+  # session-affinity-rules:
+  #   - model: "grok-4.5"
+  #     provider: "xai"       # optional
+  #     max-requests: 20
 
 # Codex provider behavior.
 codex:

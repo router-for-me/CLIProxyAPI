@@ -13,6 +13,7 @@ type sessionEntry struct {
 	authID    string
 	expiresAt time.Time
 	aliases   []string
+	hits      int // sticky picks served by this binding (shared across aliases)
 }
 
 // SessionCache provides TTL-based session to auth mapping with automatic cleanup.
@@ -71,25 +72,36 @@ func (c *SessionCache) Get(sessionID string) (string, bool) {
 
 // GetAndRefresh retrieves the auth ID bound to a session and refreshes the TTL
 // for every identifier known to represent the same logical session.
+// Each successful refresh increments the binding hit counter.
 func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
+	authID, _, ok := c.GetAndRefreshWithHits(sessionID)
+	return authID, ok
+}
+
+// GetAndRefreshWithHits is like GetAndRefresh but also returns the hit count after increment.
+func (c *SessionCache) GetAndRefreshWithHits(sessionID string) (authID string, hits int, ok bool) {
 	if sessionID == "" {
-		return "", false
+		return "", 0, false
 	}
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	entry, ok := c.entries[sessionID]
-	if !ok {
-		return "", false
+	entry, found := c.entries[sessionID]
+	if !found {
+		return "", 0, false
 	}
 	if !now.Before(entry.expiresAt) {
 		c.removeAliasGroupLocked(entry)
-		return "", false
+		return "", 0, false
 	}
 
+	nextHits := entry.hits + 1
+	if nextHits <= 0 {
+		nextHits = 1
+	}
 	aliases := compactSessionAliases(mergeSessionAliases([]string{sessionID}, entry.aliases...))
-	c.replaceAliasGroupsLocked(entry.authID, now.Add(c.ttl), aliases, entry)
-	return entry.authID, true
+	c.replaceAliasGroupsLocked(entry.authID, now.Add(c.ttl), aliases, nextHits, entry)
+	return entry.authID, nextHits, true
 }
 
 // Set binds a session to an auth ID with TTL refresh. Existing aliases for the
@@ -99,6 +111,7 @@ func (c *SessionCache) Set(sessionID, authID string) {
 }
 
 // SetAliases binds multiple identifiers for one logical session to an auth ID.
+// A new auth binding starts at hits=1. Refreshing the same authID preserves hits.
 func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
 	if authID == "" {
 		return
@@ -109,6 +122,8 @@ func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
 
 	aliases := mergeSessionAliases(nil, sessionIDs...)
 	previousGroups := make([]sessionEntry, 0, len(sessionIDs))
+	hits := 1
+	sameAuthHits := 0
 	for _, sessionID := range sessionIDs {
 		entry, ok := c.entries[sessionID]
 		if !ok {
@@ -120,19 +135,42 @@ func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
 		}
 		previousGroups = append(previousGroups, entry)
 		aliases = mergeSessionAliases(aliases, entry.aliases...)
+		if entry.authID == authID && entry.hits > sameAuthHits {
+			sameAuthHits = entry.hits
+		}
+	}
+	if sameAuthHits > 0 {
+		hits = sameAuthHits
 	}
 	aliases = compactSessionAliases(aliases)
 	if len(aliases) == 0 {
 		return
 	}
-	c.replaceAliasGroupsLocked(authID, now.Add(c.ttl), aliases, previousGroups...)
+	c.replaceAliasGroupsLocked(authID, now.Add(c.ttl), aliases, hits, previousGroups...)
 }
 
-func (c *SessionCache) replaceAliasGroupsLocked(authID string, expiresAt time.Time, aliases []string, previousGroups ...sessionEntry) {
+// InvalidateAliasGroup removes every alias for the logical session containing sessionID.
+func (c *SessionCache) InvalidateAliasGroup(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[sessionID]
+	if !ok {
+		return
+	}
+	c.removeAliasGroupLocked(entry)
+}
+
+func (c *SessionCache) replaceAliasGroupsLocked(authID string, expiresAt time.Time, aliases []string, hits int, previousGroups ...sessionEntry) {
 	for _, previous := range previousGroups {
 		c.removeAliasGroupLocked(previous)
 	}
-	entry := sessionEntry{authID: authID, expiresAt: expiresAt, aliases: aliases}
+	if hits <= 0 {
+		hits = 1
+	}
+	entry := sessionEntry{authID: authID, expiresAt: expiresAt, aliases: aliases, hits: hits}
 	for _, alias := range aliases {
 		c.entries[alias] = entry
 	}
