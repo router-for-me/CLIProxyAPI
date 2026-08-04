@@ -33,11 +33,6 @@ func (r *runtimeState) routeWithCallback(req pluginapi.ModelRouteRequest, hostCa
 		}
 	}
 	sessionID := coreauth.ExtractSessionID(req.Headers, req.Body, req.Metadata)
-	operation := req.Operation
-	if operation == "" {
-		operation = pluginapi.ModelRouteOperationGenerate
-	}
-	advance := operation != pluginapi.ModelRouteOperationCountTokens
 	var (
 		selected compiledTarget
 		index    int
@@ -46,16 +41,16 @@ func (r *runtimeState) routeWithCallback(req pluginapi.ModelRouteRequest, hostCa
 	if sessionID == "" {
 		selected, index, ok = selectStateless(alias.Sequence, available)
 		r.log("debug", "model-sequence-router: stateless first-target routing", map[string]any{
-			"alias": alias.Alias, "operation": operation,
+			"alias": alias.Alias,
 		}, hostCallbackID)
 	} else {
 		key := cursorKey{Generation: cfg.Generation, Alias: alias.LookupKey, SessionID: sessionID}
-		selected, index, ok = r.cursors.selectTarget(key, alias.Sequence, available, cfg.SessionTTL, advance, alias.RandomStart)
+		selected, index, ok = r.cursors.selectTarget(key, alias.Sequence, available, cfg.SessionTTL, alias.RandomStart)
 	}
 	if !ok {
 		providers := uniqueProviders(alias.Sequence)
 		r.log("warn", "model-sequence-router: all configured providers unavailable", map[string]any{
-			"alias": alias.Alias, "providers": providers, "operation": operation,
+			"alias": alias.Alias, "providers": providers,
 		}, hostCallbackID)
 		return pluginapi.ModelRouteResponse{Handled: false}
 	}
@@ -64,9 +59,12 @@ func (r *runtimeState) routeWithCallback(req pluginapi.ModelRouteRequest, hostCa
 	if hasRequestedSuffix && !targetHasSuffix {
 		targetModel += "(" + requestedSuffix + ")"
 	}
+
+	// A conversation cursor reserved and moved one sequence position; stateless routing moves none.
+	advanced := sessionID != ""
 	fields := map[string]any{
 		"alias": alias.Alias, "sequence_index": index, "provider": selected.Provider,
-		"model": targetModel, "operation": operation, "advanced": advance, "random_start": alias.RandomStart,
+		"model": targetModel, "advanced": advanced, "random_start": alias.RandomStart,
 	}
 	if sessionID != "" {
 		fields["session_hash"] = shortSessionHash(sessionID)
@@ -98,19 +96,18 @@ func (r *runtimeState) routeWithCallback(req pluginapi.ModelRouteRequest, hostCa
 				Provider:   selected.Provider,
 				Model:      targetModel,
 			}
-			for name, value := range r.observations.observe(key, observation, cfg.SessionTTL, advance) {
+			for name, value := range r.observations.observe(key, observation, cfg.SessionTTL) {
 				fields[name] = value
 			}
 		}
 	}
 	r.log("debug", "model-sequence-router: selected target", fields, hostCallbackID)
 	return pluginapi.ModelRouteResponse{
-		Handled:       true,
-		TargetKind:    pluginapi.ModelRouteTargetProvider,
-		Target:        selected.Provider,
-		TargetModel:   targetModel,
-		ResponseModel: alias.Alias,
-		Reason:        routeReason,
+		Handled:     true,
+		TargetKind:  pluginapi.ModelRouteTargetProvider,
+		Target:      selected.Provider,
+		TargetModel: targetModel,
+		Reason:      routeReason,
 	}
 }
 

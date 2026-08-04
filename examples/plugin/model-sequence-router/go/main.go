@@ -246,7 +246,7 @@ func (r *runtimeState) configure(raw []byte) error {
 		lengths[alias.Alias] = len(alias.Sequence)
 	}
 	r.log("info", "model-sequence-router: configuration loaded and state reset", map[string]any{
-		"alias_count": len(next.Aliases), "generation": generation, "sequence_lengths": lengths,
+		"event": "config", "alias_count": len(next.Aliases), "generation": generation, "sequence_lengths": lengths,
 	}, "")
 	return nil
 }
