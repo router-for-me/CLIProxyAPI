@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -21,6 +23,10 @@ import (
 const (
 	latestReleaseURL       = "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest"
 	latestReleaseUserAgent = "CLIProxyAPI"
+	// nixllmReleaseURL is NixLLM's own GitHub repo. NixLLM is a fork of
+	// CLIProxyAPI, so it versions independently (v0.*) from the core (v7.*).
+	nixllmReleaseURL       = "https://api.github.com/repos/abilfida/nixllm/releases/latest"
+	nixllmReleaseUserAgent = "NixLLM"
 )
 
 func (h *Handler) GetConfig(c *gin.Context) {
@@ -36,8 +42,60 @@ type releaseInfo struct {
 	Name    string `json:"name"`
 }
 
-// GetLatestVersion returns the latest release version from GitHub without downloading assets.
+// GetLatestVersion returns the running NixLLM + core CLIProxyAPI versions,
+// plus the latest available release tag for each from GitHub, without
+// downloading any assets.
+//
+//   - latest-version         : latest upstream CLIProxyAPI tag (e.g. 7.2.104)
+//   - nixllm-latest-version  : latest NixLLM fork tag (e.g. 0.1.0); "" when
+//     the NixLLM repo cannot be reached (the core result still returns)
+//   - version                : the running build as a unified version string,
+//     "<core>-<nixllm>" (e.g. 7.2.104-0.0.4)
+//   - running-version        : the NixLLM version this binary was built from
+//   - running-core-version   : the CLIProxyAPI version this binary was rebased on
 func (h *Handler) GetLatestVersion(c *gin.Context) {
+	version, errGet := h.fetchLatestRelease(c.Request.Context(), latestReleaseURL, latestReleaseUserAgent)
+	if errGet != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "request_failed", "message": errGet.Error()})
+		return
+	}
+
+	nixllmVersion, _ := h.fetchLatestRelease(c.Request.Context(), nixllmReleaseURL, nixllmReleaseUserAgent)
+
+	c.JSON(http.StatusOK, gin.H{
+		"latest-version":        version,
+		"nixllm-latest-version": nixllmVersion,
+		"version":               unifiedVersion(buildinfo.CoreVersion, buildinfo.Version),
+		"running-version":       buildinfo.Version,
+		"running-core-version":  buildinfo.CoreVersion,
+	})
+}
+
+// unifiedVersion joins the core CLIProxyAPI and NixLLM versions into a single
+// "<core>-<nixllm>" string (e.g. 7.2.104-0.0.4). Unknown dev markers are
+// trimmed so the result stays compact.
+func unifiedVersion(coreVersion, nixllmVersion string) string {
+	core := strings.TrimSpace(coreVersion)
+	if core == "unknown" || core == "dev" {
+		core = ""
+	}
+	nixllm := strings.TrimSpace(nixllmVersion)
+	if nixllm == "unknown" || nixllm == "dev" {
+		nixllm = ""
+	}
+	switch {
+	case core != "" && nixllm != "":
+		return core + "-" + nixllm
+	case core != "":
+		return core
+	case nixllm != "":
+		return nixllm
+	default:
+		return "dev"
+	}
+}
+
+func (h *Handler) fetchLatestRelease(ctx context.Context, url, userAgent string) (string, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	proxyURL := ""
 	if h != nil && h.cfg != nil {
@@ -48,18 +106,16 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 		util.SetProxy(sdkCfg, client)
 	}
 
-	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, latestReleaseURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "request_create_failed", "message": err.Error()})
-		return
+		return "", err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", latestReleaseUserAgent)
+	req.Header.Set("User-Agent", userAgent)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "request_failed", "message": err.Error()})
-		return
+		return "", err
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
@@ -69,14 +125,12 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		c.JSON(http.StatusBadGateway, gin.H{"error": "unexpected_status", "message": fmt.Sprintf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))})
-		return
+		return "", fmt.Errorf("unexpected_status: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var info releaseInfo
 	if errDecode := json.NewDecoder(resp.Body).Decode(&info); errDecode != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "decode_failed", "message": errDecode.Error()})
-		return
+		return "", fmt.Errorf("decode_failed: %w", errDecode)
 	}
 
 	version := strings.TrimSpace(info.TagName)
@@ -84,11 +138,10 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 		version = strings.TrimSpace(info.Name)
 	}
 	if version == "" {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "invalid_response", "message": "missing release version"})
-		return
+		return "", fmt.Errorf("invalid_response: missing release version")
 	}
 
-	c.JSON(http.StatusOK, gin.H{"latest-version": version})
+	return version, nil
 }
 
 func WriteConfig(path string, data []byte) error {

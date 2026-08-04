@@ -699,6 +699,10 @@ code, pre {
   background: var(--success);
   box-shadow: 0 0 6px var(--success-dim);
 }
+.sidebar__version.has-update::before {
+  background: var(--warning);
+  box-shadow: 0 0 6px var(--warning-dim);
+}
 .sidebar__signout {
   display: flex;
   align-items: center;

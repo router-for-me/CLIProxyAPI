@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import {
   getStoredToken, setStoredToken, clearStoredToken, verifyToken, ApiError,
-  getUnreadAlertCount,
+  getUnreadAlertCount, getCpaLatestVersion,
 } from './api/client.js';
 import Sidebar from './components/Sidebar.jsx';
 import LoginPage from './pages/LoginPage.jsx';
@@ -66,6 +66,29 @@ export default function App() {
   const [alertsUnread, setAlertsUnread] = useState(0);
   const [alertsOpen, setAlertsOpen] = useState(false);
   const bellRef = useRef(null);
+
+  // Version identity for the sidebar footer: the running build as a single
+  // unified version string (e.g. 7.2.104-0.0.4) plus whether a newer NixLLM
+  // release exists upstream. Fetched once per session from /latest-version;
+  // any failure keeps the defaults so an offline server doesn't break the UI.
+  const [versionInfo, setVersionInfo] = useState(null);
+
+  useEffect(() => {
+    if (!authed) return;
+    let cancelled = false;
+    getCpaLatestVersion()
+      .then((r) => { if (!cancelled && r) setVersionInfo(r); })
+      .catch(() => { /* keep default version label */ });
+    return () => { cancelled = true; };
+  }, [authed]);
+
+  const runningVersion = versionInfo?.['running-version'] || 'dev';
+  const nixllmUpdateAvailable =
+    // Ignore update hints when we can't pin our own running version or the
+    // latest NixLLM tag hasn't been resolved.
+    !!versionInfo?.['nixllm-latest-version']
+    && !/dev|unknown/i.test(runningVersion)
+    && semverGreater(versionInfo['nixllm-latest-version'], runningVersion);
 
   // Poll the unread badge on an independent cadence, and refresh immediately
   // after alert mutations anywhere in the app. Errors are swallowed — a PG-less
@@ -211,6 +234,10 @@ export default function App() {
           collapsed={collapsed}
           mobileOpen={mobileOpen}
           onCloseMobile={() => setMobileOpen(false)}
+          version={versionInfo?.['version'] || 'dev'}
+          latestVersion={versionInfo?.['nixllm-latest-version'] || ''}
+          coreVersion={versionInfo?.['running-core-version'] || 'unknown'}
+          updateAvailable={nixllmUpdateAvailable}
         />
         <main className="main">
           <Routes>
@@ -251,6 +278,25 @@ export default function App() {
       </div>
     </ToastProvider>
   );
+}
+
+// semverGreater — true when `a` is a strictly newer semver version than `b`.
+// Handles tags with or without a leading "v" and dotted numeric segments
+// (including pre-release suffixes, which are ignored for the comparison).
+export function semverGreater(a, b) {
+  const parse = (s) => String(s || '')
+    .replace(/^v/i, '')
+    .split('.')
+    .map((seg) => { const n = parseInt(seg, 10); return Number.isNaN(n) ? 0 : n; });
+  const pa = parse(a);
+  const pb = parse(b);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x !== y) return x > y;
+  }
+  return false;
 }
 
 // BRAND_SVG — duplicated from Sidebar.jsx for the mobile top bar, where the

@@ -62,6 +62,9 @@ func init() {
 	buildinfo.CoreVersion = CoreVersion
 	buildinfo.Commit = Commit
 	buildinfo.BuildDate = BuildDate
+	// In dev builds (no ldflags) fall back to the nearest git tags so the
+	// running version is meaningful even when built with a bare `go build`.
+	buildinfo.ResolveFromGit()
 }
 
 func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode bool) bool {

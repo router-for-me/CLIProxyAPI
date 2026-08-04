@@ -21,6 +21,9 @@ export default function Sidebar({
   collapsed = false,
   mobileOpen = false,
   onCloseMobile,
+  version = 'dev',
+  latestVersion = '',
+  updateAvailable = false,
 }) {
   const closeMobile = useCallback(() => onCloseMobile?.(), [onCloseMobile]);
 
@@ -81,7 +84,12 @@ export default function Sidebar({
         </nav>
 
         <div className="sidebar__footer">
-          <span className="sidebar__version">v1.0.0</span>
+          <span
+            className={`sidebar__version${updateAvailable ? ' has-update' : ''}`}
+            title={updateAvailable ? `NixLLM update available: ${latestVersion}` : `NixLLM ${version || 'dev'}`}
+          >
+            {version || 'dev'}
+          </span>
           <button
             type="button"
             className="sidebar__signout"
