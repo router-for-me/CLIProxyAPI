@@ -108,6 +108,78 @@ func (s *PostgresStore) clearAllResourceTables(ctx context.Context, resources []
 	return nil
 }
 
+// TestBackupImportResyncsIdSequence guards the export→import workflow against
+// primary-key collisions on serial-id tables (usage_events / usage_errors
+// among them). Import restores rows with their original explicit ids, which a
+// fresh destination sequence does not know about; without a resync the next
+// auto-generated insert collides with a restored id and fails — the exact
+// symptom "usage events no longer recorded after full migration".
+func TestBackupImportResyncsIdSequence(t *testing.T) {
+	// One store, one schema — the shared default-schema shape of a real
+	// migration (export from the prod DB, import into the same default schema on
+	// the fresh host). Rows get the natural serial ids 1, 2, 3.
+	st := roundTripTestStore(t, "backup_seq_"+randSuffix())
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	us := NewUsageStore(st)
+	seed := func(principal string, n int64) UsageEvent {
+		ev := UsageEvent{
+			APIKeyPrincipal: principal,
+			Provider:        "anthropic",
+			Model:           "claude-opus",
+			InputTokens:     n * 1000,
+			RequestedAt:     now(),
+		}
+		if err := us.InsertEvent(ctx, ev); err != nil {
+			t.Fatalf("seed %s: %v", principal, err)
+		}
+		return ev
+	}
+	seed("sk-1", 1)
+	seed("sk-2", 2)
+	seed("sk-3", 3)
+
+	bundle, err := st.ExportData(ctx, BackupExportOpts{Resources: []BackupResource{ResourceUsage}})
+	if err != nil {
+		t.Fatalf("ExportData: %v", err)
+	}
+
+	// Simulate the fresh live host: wipe the rows and reset the id sequence back
+	// to its initial value (a brand-new DB's sequence starts at 1). Importing
+	// must then resync the sequence past the restored ids.
+	if err := st.clearAllResourceTables(ctx, []BackupResource{ResourceUsage}); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `SELECT setval(pg_get_serial_sequence('`+st.UsageEventsTable()+`', 'id'), 1, false)`); err != nil {
+		t.Fatalf("reset sequence: %v", err)
+	}
+	if _, err := st.ImportData(ctx, bundle, BackupImportOpts{Resources: []BackupResource{ResourceUsage}}); err != nil {
+		t.Fatalf("ImportData: %v", err)
+	}
+
+	// The next auto-generated insert must not collide with the restored ids 1..3.
+	// Before the resync fix this failed with a unique-violation on id.
+	ev := UsageEvent{
+		APIKeyPrincipal: "sk-new",
+		Provider:        "anthropic",
+		Model:           "claude-opus",
+		InputTokens:     500,
+		RequestedAt:     now(),
+	}
+	if err := us.InsertEvent(ctx, ev); err != nil {
+		t.Fatalf("InsertEvent after import must succeed; got: %v", err)
+	}
+
+	// Both the restored rows and the new row must be present.
+	total, err := us.SelectTotals(ctx, UsageFilter{})
+	if err != nil {
+		t.Fatalf("SelectTotals: %v", err)
+	}
+	if total.RequestCount != 4 {
+		t.Fatalf("request count = %d; want 4 (3 restored + 1 new)", total.RequestCount)
+	}
+}
+
 // TestBackupFilterResources verifies that requesting a subset of resources only
 // exports those resources.
 func TestBackupFilterResources(t *testing.T) {

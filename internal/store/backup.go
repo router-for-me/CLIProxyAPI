@@ -481,6 +481,12 @@ func (s *PostgresStore) ImportData(ctx context.Context, bundle BackupBundle, opt
 				report.Resources[res] = r
 				return report, err
 			}
+			// Rows are restored with their original serial ids, so the id
+			// sequence is still sitting far below the highest imported id.
+			// Advance it to max(id)+1 so subsequent auto-generated ids never
+			// collide with (and silently fail on) restored rows. No-op for
+			// tables without a serial id column.
+			s.resyncIdSequence(ctx, tx, bt.name)
 		}
 		// Restore any pricing-source catalog files referenced by the imported rows.
 		if res == ResourcePricingSources {
@@ -549,4 +555,37 @@ func defaultTableHint(qualified string) string {
 		name = name[idx+1:]
 	}
 	return name
+}
+
+// resyncIdSequence advances a table's serial-id sequence past the highest
+// currently stored id. Import restores rows with their original explicit ids,
+// which the sequence does not know about; without a resync the next
+// auto-generated id can collide with a restored id and fail the insert. The
+// function discovers the owning sequence via pg_get_serial_sequence and only
+// touches tables that actually carry one (no-op otherwise).
+func (s *PostgresStore) resyncIdSequence(ctx context.Context, tx *sql.Tx, table string) {
+	var seqName sql.NullString
+	if err := tx.QueryRowContext(ctx,
+		`SELECT pg_get_serial_sequence($1, 'id')`, table,
+	).Scan(&seqName); err != nil {
+		log.WithError(err).WithField("table", table).Debug("postgres store: import: sequence lookup failed")
+		return
+	}
+	if !seqName.Valid || seqName.String == "" {
+		return // no serial id column on this table
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+		`SELECT setval(%s, COALESCE((SELECT MAX(id) + 1 FROM %s), 1), false)`,
+		quoteLiteral(seqName.String), table,
+	)); err != nil {
+		// Best-effort: a failed resync leaves the sequence too low, which can
+		// cause later auto-id collisions, so surface it rather than swallowing.
+		log.WithError(err).WithField("table", table).Error("postgres store: import: id sequence resync failed")
+	}
+}
+
+// quoteLiteral quotes a string as a SQL string literal (single quotes doubled),
+// matching pg_get_serial_sequence's need for a text argument.
+func quoteLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
