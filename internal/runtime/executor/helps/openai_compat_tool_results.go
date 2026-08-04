@@ -66,9 +66,6 @@ func ShouldEnsureOpenAICompatReasoningContent(upstreamModel, requestedModel stri
 		lowerName := strings.ToLower(parsed.ModelName)
 		if strings.Contains(lowerName, "reasoner") ||
 			strings.Contains(lowerName, "reasoning") ||
-			strings.Contains(lowerName, "deepseek-v4") ||
-			strings.Contains(lowerName, "deepseek-r1") ||
-			strings.Contains(lowerName, "deepseek-v3") ||
 			strings.Contains(lowerName, "deepseek") ||
 			strings.Contains(lowerName, "kimi") ||
 			strings.Contains(lowerName, "thinking") {
