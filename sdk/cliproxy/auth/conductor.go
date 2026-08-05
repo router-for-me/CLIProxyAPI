@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -56,6 +57,9 @@ type Result struct {
 	RetryAfter *time.Duration
 	// Error describes the failure when Success is false.
 	Error *Error
+
+	credentialFingerprint    [sha256.Size]byte
+	hasCredentialFingerprint bool
 }
 
 // Selector chooses an auth candidate for execution.

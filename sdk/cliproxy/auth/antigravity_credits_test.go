@@ -17,12 +17,22 @@ import (
 
 type antigravityCreditsFallbackExecutor struct {
 	streamCreditsRequested []bool
+	executeStarted         chan struct{}
+	executeRelease         chan struct{}
 }
 
 func (e *antigravityCreditsFallbackExecutor) Identifier() string { return "antigravity" }
 
-func (e *antigravityCreditsFallbackExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "Execute not implemented"}
+func (e *antigravityCreditsFallbackExecutor) Execute(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if e.executeStarted == nil {
+		return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "Execute not implemented"}
+	}
+	if !AntigravityCreditsRequested(ctx) {
+		return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "standard quota exhausted"}
+	}
+	close(e.executeStarted)
+	<-e.executeRelease
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusUnauthorized, Message: "old token unauthorized"}
 }
 
 func (e *antigravityCreditsFallbackExecutor) ExecuteStream(ctx context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
@@ -125,6 +135,84 @@ func TestManagerExecuteStream_AntigravityCreditsFallbackAfterBootstrap429(t *tes
 	}
 	if executor.streamCreditsRequested[0] || !executor.streamCreditsRequested[1] {
 		t.Fatalf("credits flags = %v, want [false true]", executor.streamCreditsRequested)
+	}
+}
+
+func TestManagerExecute_AntigravityCreditsFallbackIgnoresLateUnauthorizedAfterMutableCredentialReplacement(t *testing.T) {
+	const (
+		authID = "ag-credits-mutable-replacement"
+		model  = "claude-opus-4-6-thinking"
+	)
+	storage := &mutableCredentialSnapshotStorage{metadata: map[string]any{"token": "old-token"}}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		QuotaExceeded: internalconfig.QuotaExceeded{AntigravityCredits: true},
+	})
+	manager.SetRetryConfig(0, 0, 1)
+	executor := &antigravityCreditsFallbackExecutor{
+		executeStarted: make(chan struct{}),
+		executeRelease: make(chan struct{}),
+	}
+	manager.RegisterExecutor(executor)
+	registry.GetGlobalRegistry().RegisterClient(authID, "antigravity", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+	if _, errRegister := manager.Register(context.Background(), &Auth{
+		ID:       authID,
+		Provider: "antigravity",
+		Status:   StatusActive,
+		Metadata: map[string]any{"token": "old-token"},
+		Storage:  storage,
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	executeDone := make(chan error, 1)
+	go func() {
+		_, errExecute := manager.Execute(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+		executeDone <- errExecute
+	}()
+	select {
+	case <-executor.executeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("credits fallback did not start")
+	}
+
+	replacement := &Auth{
+		ID:       authID,
+		Provider: "antigravity",
+		Status:   StatusActive,
+		Metadata: map[string]any{"token": "replacement-token"},
+		Storage:  storage,
+		ModelStates: map[string]*ModelState{
+			model: {Status: StatusActive},
+		},
+	}
+	if _, errUpdate := manager.Update(context.Background(), replacement); errUpdate != nil {
+		t.Fatalf("update replacement: %v", errUpdate)
+	}
+	close(executor.executeRelease)
+	select {
+	case errExecute := <-executeDone:
+		if errExecute == nil {
+			t.Fatal("Execute() error = nil, want exhausted fallback")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Execute() did not finish")
+	}
+
+	current, okCurrent := manager.GetByID(authID)
+	if !okCurrent || current == nil {
+		t.Fatal("replacement auth missing")
+	}
+	if token, _ := current.Metadata["token"].(string); token != "replacement-token" {
+		t.Fatalf("replacement token = %q, want replacement-token", token)
+	}
+	if current.Status != StatusActive || current.Unavailable || current.LastError != nil || current.StatusMessage != "" {
+		t.Fatalf("late unauthorized result changed replacement auth: %#v", current)
+	}
+	state := current.ModelStates[model]
+	if state == nil || state.Status != StatusActive || state.Unavailable || state.LastError != nil || state.StatusMessage != "" {
+		t.Fatalf("late unauthorized result changed replacement model state: %#v", state)
 	}
 }
 

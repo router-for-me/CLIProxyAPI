@@ -64,6 +64,15 @@ func (m *Manager) UnregisterExecutor(provider string) {
 	m.mu.Unlock()
 }
 
+func syncAuthStorageMetadata(auth *Auth) {
+	if auth == nil || auth.Storage == nil {
+		return
+	}
+	if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok && setter != nil {
+		setter.SetMetadata(auth.Metadata)
+	}
+}
+
 // Register inserts a new auth entry into the manager.
 func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil {
@@ -80,6 +89,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
 		clearedCooldown = clearCooldownStateForAuth(auth, now)
 	}
+	syncAuthStorageMetadata(auth)
 	auth.EnsureIndex()
 	authClone := auth.Clone()
 	m.mu.Lock()
@@ -102,17 +112,29 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 
 // Update replaces an existing auth entry and notifies hooks.
 func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
+	updated, _, errUpdate := m.updateAuth(ctx, auth, nil)
+	return updated, errUpdate
+}
+
+// updateAuth replaces auth only while expectedCurrent still owns its ID. A nil
+// expectedCurrent preserves the unconditional Update behavior.
+func (m *Manager) updateAuth(ctx context.Context, auth, expectedCurrent *Auth) (*Auth, bool, error) {
 	if auth == nil || auth.ID == "" {
-		return nil, nil
+		return nil, false, nil
 	}
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
-		return nil, fmt.Errorf("update auth: %w", errWeight)
+		return nil, false, fmt.Errorf("update auth: %w", errWeight)
 	}
 	m.mu.Lock()
 	existing, ok := m.auths[auth.ID]
 	if !ok || existing == nil {
 		m.mu.Unlock()
-		return nil, nil
+		return nil, false, nil
+	}
+	if expectedCurrent != nil && existing != expectedCurrent {
+		current := existing.Clone()
+		m.mu.Unlock()
+		return current, false, nil
 	}
 	if !auth.indexAssigned && auth.Index == "" {
 		auth.Index = existing.Index
@@ -131,23 +153,51 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
 		clearedCooldown = clearCooldownStateForAuth(auth, now)
 	}
+	syncAuthStorageMetadata(auth)
 	auth.EnsureIndex()
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
+	persistedWithCAS := expectedCurrent != nil
 	m.mu.Unlock()
+	if persistedWithCAS {
+		m.persistConditionalUpdate(ctx, auth, authClone)
+	}
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
-	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone)
+	if persistedWithCAS {
+		// Persistence can outlive this generation. Publish the update only while
+		// authClone still owns the runtime ID so a concurrent replacement cannot
+		// be overwritten in the scheduler or returned to a retrying request.
+		m.mu.RLock()
+		current := m.auths[auth.ID]
+		if current != authClone {
+			var currentClone *Auth
+			if current != nil {
+				currentClone = current.Clone()
+			}
+			m.mu.RUnlock()
+			return currentClone, false, nil
+		}
+		if m.scheduler != nil {
+			m.scheduler.upsertAuth(authClone)
+		}
+		if loop := m.refreshLoop; loop != nil {
+			loop.queueReschedule(auth.ID)
+		}
+		m.mu.RUnlock()
+	} else {
+		if m.scheduler != nil {
+			m.scheduler.upsertAuth(authClone)
+		}
+		m.queueRefreshReschedule(auth.ID)
+		_ = m.persist(ctx, auth)
 	}
-	m.queueRefreshReschedule(auth.ID)
-	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	if clearedCooldown {
 		m.persistCooldownStates(ctx)
 	}
-	return auth.Clone(), nil
+	return auth.Clone(), true, nil
 }
 
 // Remove deletes an auth from runtime state without persisting.
@@ -245,6 +295,101 @@ func (m *Manager) Load(ctx context.Context) error {
 	return nil
 }
 
+// shouldPersistAuth reports whether auth persistence is enabled for this record.
+func (m *Manager) shouldPersistAuth(ctx context.Context, auth *Auth) bool {
+	if m == nil || m.store == nil || auth == nil || shouldSkipPersist(ctx) {
+		return false
+	}
+	if ValidateAuthWeight(auth) != nil {
+		return false
+	}
+	if IsConfigAPIKeyAuth(auth) || IsPluginVirtualAuth(auth) {
+		return false
+	}
+	if auth.Attributes != nil {
+		if v := strings.ToLower(strings.TrimSpace(auth.Attributes["runtime_only"])); v == "true" {
+			return false
+		}
+	}
+	return auth.Metadata != nil
+}
+
+func authPersistenceDeleteID(auth *Auth, savedID string) string {
+	if savedID = strings.TrimSpace(savedID); savedID != "" {
+		return savedID
+	}
+	if auth == nil {
+		return ""
+	}
+	if path := authAttribute(auth, AttributePath); path != "" {
+		return path
+	}
+	if fileName := strings.TrimSpace(auth.FileName); fileName != "" {
+		return fileName
+	}
+	return strings.TrimSpace(auth.ID)
+}
+
+// persistConditionalUpdate persists a CAS-owned auth without holding the
+// manager-wide auth lock. If ownership changes while I/O is in flight, the
+// current same-ID generation is persisted again. If ownership disappears, the
+// stale save is deleted; a new owner that appears during cleanup is then
+// re-persisted so deletion cannot erase a legitimate replacement.
+func (m *Manager) persistConditionalUpdate(ctx context.Context, auth, owner *Auth) {
+	if auth == nil || owner == nil || auth.ID == "" || !m.shouldPersistAuth(ctx, auth) {
+		return
+	}
+	candidate := auth.Clone()
+	candidateOwner := owner
+	staleSavedID := ""
+	for {
+		savedID, errPersist := m.store.Save(ctx, candidate)
+		if errPersist != nil {
+			return
+		}
+		savedID = authPersistenceDeleteID(candidate, savedID)
+		if staleSavedID != "" && staleSavedID != savedID {
+			if errDelete := m.store.Delete(ctx, staleSavedID); errDelete != nil {
+				return
+			}
+		}
+		staleSavedID = ""
+
+		m.mu.RLock()
+		current := m.auths[auth.ID]
+		if current == candidateOwner {
+			m.mu.RUnlock()
+			return
+		}
+		if current != nil && m.shouldPersistAuth(ctx, current) {
+			candidate = current.Clone()
+			candidateOwner = current
+			staleSavedID = savedID
+			m.mu.RUnlock()
+			continue
+		}
+		m.mu.RUnlock()
+
+		deleteID := savedID
+		if deleteID == "" {
+			return
+		}
+		if errDelete := m.store.Delete(ctx, deleteID); errDelete != nil {
+			return
+		}
+
+		m.mu.RLock()
+		current = m.auths[auth.ID]
+		if current == nil || !m.shouldPersistAuth(ctx, current) {
+			m.mu.RUnlock()
+			return
+		}
+		candidate = current.Clone()
+		candidateOwner = current
+		m.mu.RUnlock()
+	}
+}
+
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if m.store == nil || auth == nil {
 		return nil
@@ -252,22 +397,7 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return fmt.Errorf("persist auth: %w", errWeight)
 	}
-	if shouldSkipPersist(ctx) {
-		return nil
-	}
-	if IsConfigAPIKeyAuth(auth) {
-		return nil
-	}
-	if auth.Attributes != nil {
-		if v := strings.ToLower(strings.TrimSpace(auth.Attributes["runtime_only"])); v == "true" {
-			return nil
-		}
-	}
-	if IsPluginVirtualAuth(auth) {
-		return nil
-	}
-	// Skip persistence when metadata is absent (e.g., runtime-only auths).
-	if auth.Metadata == nil {
+	if !m.shouldPersistAuth(ctx, auth) {
 		return nil
 	}
 	_, err := m.store.Save(ctx, auth)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 )
 
@@ -57,6 +58,19 @@ type ClaudeTokenStorage struct {
 // SetMetadata allows external callers to inject metadata into the storage before saving.
 func (ts *ClaudeTokenStorage) SetMetadata(meta map[string]any) {
 	ts.Metadata = meta
+}
+
+// CredentialFingerprintMaterial returns the canonical OAuth credential fields
+// without serializing unrelated storage metadata.
+func (ts *ClaudeTokenStorage) CredentialFingerprintMaterial() baseauth.CredentialFingerprintMaterial {
+	if ts == nil {
+		return baseauth.CredentialFingerprintMaterial{}
+	}
+	return baseauth.CredentialFingerprintMaterial{
+		AccessToken:  ts.AccessToken,
+		RefreshToken: ts.RefreshToken,
+		IDToken:      ts.IDToken,
+	}
 }
 
 // SaveTokenToFile serializes the Claude token storage to a JSON file.
