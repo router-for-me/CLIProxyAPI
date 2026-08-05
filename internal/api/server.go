@@ -266,6 +266,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		}
 		// Surface persisted official_provider values in auth-selection errors.
 		s.handlers.SetModelsCatalogStore(store.NewModelsCatalogResolver(handles.Models))
+		// Wire the per-model-id global routing override (pinned providers +
+		// strategy + priorities) from the persisted model catalog so requests
+		// route by Global Model the same way a Models Group route does. Shares
+		// the same ModelsStore-backed resolver instance; nil when PG is off.
+		s.handlers.SetGlobalModelRouter(store.NewModelsCatalogResolver(handles.Models))
 		// Surface official_provider on Usage Stats / Errors rows so the
 		// dashboard can show "Provider Official" (e.g. "anthropic") instead of
 		// the raw internal provider key (e.g. "claude").

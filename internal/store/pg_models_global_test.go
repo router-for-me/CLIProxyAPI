@@ -164,3 +164,77 @@ func TestModelsStoreSelectByIDAllProvidersNilSafe(t *testing.T) {
 // strPtr is a tiny helper to take the address of a string literal (Go does not
 // allow &"literal").
 func strPtr(s string) *string { return &s }
+
+// TestModelsStoreGlobalModelRoute verifies the per-model-id global routing
+// override round-trip: upsert persists + populates the cache, reads resolve
+// case-insensitively, empty providers clears the route, and an unknown id reads
+// as nil.
+func TestModelsStoreGlobalModelRoute(t *testing.T) {
+	store := newTestPostgresStore(t, "models_route_test")
+	ctx := cancelableTestCtx(t)
+	ms := NewModelsStore(store)
+
+	// Unknown id resolves nil.
+	if r := ms.GlobalModelRoute(ctx, "gpt-4o"); r != nil {
+		t.Fatalf("GlobalModelRoute(unknown) = %+v, want nil", r)
+	}
+
+	// Upsert a route; read back case-insensitively.
+	err := ms.UpsertGlobalModelRoute(ctx, "gpt-4o", GlobalModelRouteUpsert{
+		Providers:  []string{"openai", "acme"},
+		Strategy:   "priority",
+		Priorities: []ProviderPriority{{Provider: "acme", Priority: 10}},
+	}, false)
+	if err != nil {
+		t.Fatalf("UpsertGlobalModelRoute: %v", err)
+	}
+	r := ms.GlobalModelRoute(ctx, "GPT-4O")
+	if r == nil {
+		t.Fatal("GlobalModelRoute = nil after upsert, want route")
+	}
+	if len(r.Providers) != 2 || r.Providers[0] != "openai" || r.Providers[1] != "acme" {
+		t.Fatalf("route providers = %v, want [openai acme]", r.Providers)
+	}
+	if r.Strategy != "priority" {
+		t.Fatalf("route strategy = %q, want priority", r.Strategy)
+	}
+	if len(r.Priorities) != 1 || r.Priorities[0].Provider != "acme" || r.Priorities[0].Priority != 10 {
+		t.Fatalf("route priorities = %+v, want [acme=10]", r.Priorities)
+	}
+
+	// Clearing (empty=true) removes the route from the cache and DB.
+	if err := ms.UpsertGlobalModelRoute(ctx, "gpt-4o", GlobalModelRouteUpsert{Providers: []string{"openai"}}, true); err != nil {
+		t.Fatalf("UpsertGlobalModelRoute(clear): %v", err)
+	}
+	if r := ms.GlobalModelRoute(ctx, "gpt-4o"); r != nil {
+		t.Fatalf("GlobalModelRoute after clear = %+v, want nil", r)
+	}
+
+	// An upsert with no normalized providers also clears the route.
+	err = ms.UpsertGlobalModelRoute(ctx, "gpt-4o", GlobalModelRouteUpsert{Providers: []string{"  ", ""}}, false)
+	if err != nil {
+		t.Fatalf("UpsertGlobalModelRoute(empty providers): %v", err)
+	}
+	if r := ms.GlobalModelRoute(ctx, "gpt-4o"); r != nil {
+		t.Fatalf("GlobalModelRoute after empty-provider upsert = %+v, want nil", r)
+	}
+}
+
+// TestGlobalModelRouteUpsertNormalize verifies Normalize trims, de-dupes,
+// lowercases strategy, and drops priorities referencing providers not listed.
+func TestGlobalModelRouteUpsertNormalize(t *testing.T) {
+	got := (GlobalModelRouteUpsert{
+		Providers:  []string{" OpenCode ", "opencode", "", "cometapi"},
+		Strategy:   "PRIORITY",
+		Priorities: []ProviderPriority{{Provider: "opencode", Priority: 5}, {Provider: "ghost", Priority: 9}},
+	}).Normalize()
+	if len(got.Providers) != 2 || got.Providers[0] != "OpenCode" || got.Providers[1] != "cometapi" {
+		t.Fatalf("providers = %v, want [OpenCode cometapi]", got.Providers)
+	}
+	if got.Strategy != "priority" {
+		t.Fatalf("strategy = %q, want priority", got.Strategy)
+	}
+	if len(got.Priorities) != 1 || got.Priorities[0].Provider != "opencode" {
+		t.Fatalf("priorities = %+v, want [opencode=5] (ghost dropped)", got.Priorities)
+	}
+}

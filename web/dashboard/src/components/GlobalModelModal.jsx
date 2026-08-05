@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { getGlobalModel, putGlobalModel, ApiError } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
+import ModelRouteConfigSection from './ModelRouteConfigSection.jsx';
 import { Modal, Spinner, ErrorBanner } from './Primitives.jsx';
 
 // GlobalModelModal — edit a model id's attributes AND pricing once, fanning
@@ -31,6 +32,7 @@ export default function GlobalModelModal({ modelId, onClose, onSaved }) {
   const [form, setForm] = useState(null);
   const [pricing, setPricing] = useState(null);
   const [applyPricing, setApplyPricing] = useState(false);
+  const [routing, setRouting] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
 
@@ -56,6 +58,12 @@ export default function GlobalModelModal({ modelId, onClose, onSaved }) {
         cached_read_per_1m_usd: String(p?.cached_read_per_1m_usd ?? 0),
         reasoning_per_1m_usd: String(p?.reasoning_per_1m_usd ?? 0),
       });
+      const r = data.routing;
+      setRouting({
+        providers: Array.isArray(r?.providers) ? r.providers : [],
+        strategy: r?.strategy || '',
+        priorities: Array.isArray(r?.priorities) ? r.priorities.map((pr) => ({ ...pr })) : [],
+      });
     }
   }, [data, form]);
 
@@ -68,6 +76,10 @@ export default function GlobalModelModal({ modelId, onClose, onSaved }) {
   function updatePricing(name, value) {
     setPricing((p) => ({ ...p, [name]: value }));
     setApplyPricing(true);
+  }
+  // updateRouting receives the fresh route entry emitted by ModelRouteConfigSection.
+  function updateRouting(next) {
+    setRouting(next);
   }
 
   const providerCount = data?.provider_count ?? 0;
@@ -94,6 +106,14 @@ export default function GlobalModelModal({ modelId, onClose, onSaved }) {
       }
     }
     if (anyAttr) body.attributes = attrs;
+    // Routing is always submitted: whichever providers are pinned define the
+    // route (empty = no pin → clears the global route; the default strategy).
+    const route = routing || { providers: [], strategy: '', priorities: [] };
+    body.routing = {
+      providers: Array.isArray(route.providers) ? route.providers : [],
+      strategy: route.strategy || '',
+      priorities: Array.isArray(route.priorities) ? route.priorities : [],
+    };
     if (applyPricing) {
       body.pricing = {
         input_per_1m_usd: Number(pricing.input_per_1m_usd) || 0,
@@ -103,8 +123,8 @@ export default function GlobalModelModal({ modelId, onClose, onSaved }) {
         reasoning_per_1m_usd: Number(pricing.reasoning_per_1m_usd) || 0,
       };
     }
-    if (!body.attributes && !body.pricing) {
-      setSaveError('Select at least one attribute to apply or edit the pricing.');
+    if (!body.attributes && !body.pricing && !body.routing) {
+      setSaveError('Select at least one attribute to apply, edit the routing, or edit the pricing.');
       setSaving(false);
       return;
     }
@@ -185,6 +205,26 @@ export default function GlobalModelModal({ modelId, onClose, onSaved }) {
                 onUpdate={updateField} onToggle={toggleApply} placeholder="TEXT&#10;IMAGE" />
               <GlobalFieldTextarea label="Output modalities (one per line)" name="output_modalities" form={form}
                 onUpdate={updateField} onToggle={toggleApply} placeholder="TEXT" />
+            </div>
+
+            {/* Routing section — global per model id (mirrors a Models Group route) */}
+            <div className="form__section" style={{ marginTop: 16 }}>
+              <div className="row row--between" style={{ marginBottom: 4 }}>
+                <label className="form__label">Routing (global per model id)</label>
+                <span className="dim" style={{ fontSize: 12 }}>
+                  {routing && routing.providers && routing.providers.length > 0
+                    ? 'Pinned — will be saved'
+                    : 'No pin — default routing'}
+                </span>
+              </div>
+              <p className="form__hint" style={{ marginBottom: 12 }}>
+                Pin this model id to a subset of upstream providers. Applies to every request for this
+                model, like a Models Group per-model route. A per-API-key Models Group route takes
+                precedence for keys that define one. Leave all providers unpinned to use default routing
+                (clears any global route).
+              </p>
+              <ModelRouteConfigSection model={modelId} route={routing || { providers: [], strategy: '', priorities: [] }}
+                onChange={updateRouting} />
             </div>
 
             {/* Pricing section — always global per model id */}

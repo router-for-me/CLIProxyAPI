@@ -31,6 +31,7 @@ const (
 	defaultUsageWindowsTable             = "usage_windows"
 	defaultModelsTable                   = "models_catalog"
 	defaultModelPricingTable             = "model_pricing"
+	defaultModelRoutingTable             = "model_routing"
 	defaultErrorMessagesTable            = "error_messages"
 	defaultInternalUsersTable            = "internal_users"
 	defaultUserWindowsTable              = "user_windows"
@@ -82,6 +83,10 @@ type PostgresStoreConfig struct {
 	ModelsTable string
 	// ModelPricingTable stores per-model unit pricing used to compute usage cost.
 	ModelPricingTable string
+	// ModelRoutingTable stores per-model-id global routing overrides (pinned
+	// providers + strategy + priorities) applied to every request for the model,
+	// independent of any per-API-key Models Group policy.
+	ModelRoutingTable string
 	// ErrorMessagesTable stores operator-customized error responses keyed by
 	// HTTP status code. Served by the errormessages package.
 	ErrorMessagesTable string
@@ -228,6 +233,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.ModelPricingTable == "" {
 		cfg.ModelPricingTable = defaultModelPricingTable
+	}
+	if cfg.ModelRoutingTable == "" {
+		cfg.ModelRoutingTable = defaultModelRoutingTable
 	}
 	if cfg.ErrorMessagesTable == "" {
 		cfg.ErrorMessagesTable = defaultErrorMessagesTable
@@ -864,6 +872,25 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		modelPricingTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: alter model_pricing add cached_read_per_1m_usd: %w", err)
+	}
+
+	// model_routing stores per-model-id global routing overrides applied to
+	// every request for the model, independent of any per-API-key Models Group
+	// policy. Keyed by model id only (mirroring model_pricing) because a global
+	// route pins the provider set for the model across all providers that serve
+	// it; the request-time handler intersects this pinned set with the registry
+	// providers, exactly as it does for a Models Group route.
+	modelRoutingTable := s.fullTableName(s.cfg.ModelRoutingTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id          TEXT PRIMARY KEY,
+			providers   JSONB NOT NULL DEFAULT '[]'::jsonb,
+			strategy    TEXT NOT NULL DEFAULT '',
+			priorities  JSONB NOT NULL DEFAULT '[]'::jsonb,
+			updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, modelRoutingTable)); err != nil {
+		return fmt.Errorf("postgres store: create model_routing table: %w", err)
 	}
 
 	// error_messages stores operator-customized error responses keyed by
@@ -1586,6 +1613,15 @@ func (s *PostgresStore) ModelPricingTable() string {
 		return quoteIdentifier(defaultModelPricingTable)
 	}
 	return s.fullTableName(s.cfg.ModelPricingTable)
+}
+
+// ModelRoutingTable returns the fully-qualified name of the model_routing
+// table holding per-model-id global routing overrides.
+func (s *PostgresStore) ModelRoutingTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultModelRoutingTable)
+	}
+	return s.fullTableName(s.cfg.ModelRoutingTable)
 }
 
 // ErrorMessagesTable returns the fully-qualified name of the operator-

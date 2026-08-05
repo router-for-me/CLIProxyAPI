@@ -36,6 +36,9 @@ type GlobalModelResponse struct {
 	Canonical store.StoredModel `json:"canonical"`
 	Rows      []GlobalModelRow  `json:"rows"`
 	ProviderN int               `json:"provider_count"`
+	// Routing is the per-model-id global routing override (pinned providers +
+	// strategy + priorities), present (non-nil) when the operator has set one.
+	Routing *store.ModelRoute `json:"routing,omitempty"`
 }
 
 // GlobalModelAttributesRequest is the operator-editable attribute set for the
@@ -56,20 +59,35 @@ type GlobalModelAttributesRequest struct {
 	OutputModalities    *[]string `json:"output_modalities,omitempty"`
 }
 
+// GlobalModelRoutingRequest is the operator-editable routing override for the
+// Global Model editor. It pins the model id to a subset of upstream providers,
+// mirroring a Models Group ModelRoute (the request-time handler applies the same
+// intersect/order/stash mechanics). Per-model caps (RPM/budget/discount) are
+// policy concepts and are not part of a Global route.
+type GlobalModelRoutingRequest struct {
+	Providers  []string                 `json:"providers"`
+	Strategy   string                   `json:"strategy,omitempty"`
+	Priorities []store.ProviderPriority `json:"priorities,omitempty"`
+}
+
 // GlobalModelPutRequest is the body for PUT /models-catalog/global/:id. Either
-// Attributes or Pricing (or both) may be present. When a section is omitted it
-// is left untouched.
+// Attributes, Routing, or Pricing (or any combination) may be present. When a
+// section is omitted it is left untouched.
 type GlobalModelPutRequest struct {
 	Attributes *GlobalModelAttributesRequest `json:"attributes,omitempty"`
+	Routing    *GlobalModelRoutingRequest    `json:"routing,omitempty"`
 	Pricing    *store.Pricing                `json:"pricing,omitempty"`
 }
 
 // GlobalModelResult is the PUT response: how many catalog rows had attributes
-// updated, plus whether the (global) pricing row was written.
+// updated, whether the (global) pricing row was written, and whether a global
+// routing override was set (or cleared).
 type GlobalModelResult struct {
-	ModelID     string `json:"model_id"`
-	RowsUpdated int64  `json:"rows_updated"`
-	PricingSet  bool   `json:"pricing_set"`
+	ModelID      string `json:"model_id"`
+	RowsUpdated  int64  `json:"rows_updated"`
+	PricingSet   bool   `json:"pricing_set"`
+	RouteSet     bool   `json:"route_set"`
+	RouteCleared bool   `json:"route_cleared,omitempty"`
 }
 
 // GetGlobalModel handles GET /v0/management/models-catalog/global/:id.
@@ -121,6 +139,7 @@ func (h *Handler) GetGlobalModel(c *gin.Context) {
 		Canonical: canonical,
 		Rows:      make([]GlobalModelRow, 0, len(rows)),
 		ProviderN: len(rows),
+		Routing:   models.GlobalModelRoute(c.Request.Context(), id),
 	}
 	for _, r := range rows {
 		updatedAt := ""
@@ -168,8 +187,8 @@ func (h *Handler) PutGlobalModel(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": err.Error()}})
 		return
 	}
-	if body.Attributes == nil && body.Pricing == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": "at least one of attributes or pricing must be present"}})
+	if body.Attributes == nil && body.Pricing == nil && body.Routing == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": "at least one of attributes, routing or pricing must be present"}})
 		return
 	}
 
@@ -184,6 +203,25 @@ func (h *Handler) PutGlobalModel(c *gin.Context) {
 			return
 		}
 		result.RowsUpdated = n
+	}
+
+	if body.Routing != nil {
+		route := store.GlobalModelRouteUpsert{
+			Providers:  body.Routing.Providers,
+			Strategy:   body.Routing.Strategy,
+			Priorities: body.Routing.Priorities,
+		}
+		// A Global route is one-per-model-id, so "no providers" clears it (the
+		// routing section cannot be left partially applied like attributes can).
+		// Normalize first so the RouteSet result reflects the stored route.
+		normalized := route.Normalize()
+		clear := len(normalized.Providers) == 0
+		if err := models.UpsertGlobalModelRoute(ctx, id, route, clear); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+			return
+		}
+		result.RouteSet = !clear
+		result.RouteCleared = clear
 	}
 
 	if body.Pricing != nil {

@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -313,6 +314,13 @@ type BaseAPIHandler struct {
 	// (file-based deployments), resolution falls back to the in-memory model
 	// registry and OpenAI-compatible auth attributes.
 	ModelsCatalogStore ModelsCatalogResolver
+
+	// GlobalModelRouter optionally resolves a per-model-id global routing
+	// override (pinned providers + strategy + priorities) from the persisted
+	// model catalog (Postgres). When nil (file-based deployments), requests use
+	// the default registry provider set unless a per-API-key Models Group route
+	// pins one.
+	GlobalModelRouter GlobalModelRouteResolver
 }
 
 // ModelsCatalogResolver resolves an internal provider key to the official
@@ -320,6 +328,12 @@ type BaseAPIHandler struct {
 // id (may be empty). Returns "" when no row matches.
 type ModelsCatalogResolver interface {
 	OfficialProvider(ctx context.Context, providerKey, model string) string
+}
+
+// GlobalModelRouteResolver resolves the global routing override persisted for a
+// model id in the model catalog. Returns nil when no override is set.
+type GlobalModelRouteResolver interface {
+	GlobalModelRoute(ctx context.Context, modelID string) *store.ModelRoute
 }
 
 // SetModelsCatalogStore wires a models-catalog resolver (backed by the
@@ -330,6 +344,16 @@ func (h *BaseAPIHandler) SetModelsCatalogStore(r ModelsCatalogResolver) {
 		return
 	}
 	h.ModelsCatalogStore = r
+}
+
+// SetGlobalModelRouter wires a resolver for per-model-id global routing
+// overrides (pinned providers + strategy + priorities) backed by the Postgres
+// ModelsStore route cache. Safe to call with nil to clear the resolver.
+func (h *BaseAPIHandler) SetGlobalModelRouter(r GlobalModelRouteResolver) {
+	if h == nil {
+		return
+	}
+	h.GlobalModelRouter = r
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.

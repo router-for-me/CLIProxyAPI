@@ -67,6 +67,19 @@ func (r *ModelsCatalogResolverImpl) OfficialProvider(ctx context.Context, provid
 	return official
 }
 
+// GlobalModelRoute returns the persisted global routing override for model id,
+// or nil when none is set. This bridges the store to the handlers.GlobalModelRoute
+// contract without the handlers package importing the store (the interface is
+// satisfied structurally, mirroring OfficialProvider). The store serves results
+// from its in-memory route cache, so request-time reads hit the DB at most once
+// per model.
+func (r *ModelsCatalogResolverImpl) GlobalModelRoute(ctx context.Context, modelID string) *ModelRoute {
+	if r == nil || r.store == nil || ctx == nil {
+		return nil
+	}
+	return r.store.GlobalModelRoute(ctx, strings.TrimSpace(modelID))
+}
+
 // catalogCoordinate returns the (model id, provider column value) coordinate
 // used by the models catalog for the supplied internal provider key and model.
 // The provider column holds the model owner (OwnedBy), derived here via the

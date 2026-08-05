@@ -301,31 +301,62 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(ctx context.Context, model
 		return []string{"home"}, resolvedModelName, nil
 	}
 
-	providers = util.GetProviderName(baseModel)
+	// registryProviders is the default candidate provider list derived from the
+	// in-memory registry. Both the global model route and the per-API-key route
+	// intersect against this baseline; the per-key route wins by recomputing from
+	// it, so a per-key route overrides a global route for the same model.
+	registryProviders := util.GetProviderName(baseModel)
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,
 	// try using the full model name. This handles edge cases where custom models
 	// may be registered with their full suffixed name (e.g., "my-model(8192)").
 	// Evaluated in Story 11.8: This fallback is intentionally preserved to support
 	// custom model registrations that include thinking suffixes.
-	if len(providers) == 0 && baseModel != resolvedModelName {
-		providers = util.GetProviderName(resolvedModelName)
+	if len(registryProviders) == 0 && baseModel != resolvedModelName {
+		registryProviders = util.GetProviderName(resolvedModelName)
 	}
 
-	if len(providers) == 0 {
+	if len(registryProviders) == 0 {
 		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 	}
 
+	providers = registryProviders
+
+	// Apply the "Global Model" routing override from the model catalog: when the
+	// operator pinned this model id to a subset of upstream providers, confine the
+	// candidate list to that subset. This applies to every request for the model,
+	// independent of any per-API-key policy. It uses the same intersect/order/stash
+	// mechanics as a Models Group route, so a Global Model routes identically to a
+	// model pinned inside a group.
+	if h != nil && h.GlobalModelRouter != nil {
+		if route := h.GlobalModelRouter.GlobalModelRoute(ctx, baseModel); route != nil {
+			filtered := intersectProviders(providers, route.Providers)
+			if len(filtered) == 0 {
+				return nil, "", &interfaces.ErrorMessage{
+					StatusCode: http.StatusServiceUnavailable,
+					Error:      fmt.Errorf("no available upstream for model %s on allowed providers %v", modelName, route.Providers),
+				}
+			}
+			providers = filtered
+			strategy := strings.ToLower(strings.TrimSpace(route.Strategy))
+			if strategy == "priority" || strategy == "failover" {
+				providers = orderProvidersByPriority(providers, route.Priorities)
+				stashRouteStrategy(ctx, strategy)
+			}
+		}
+	}
+
 	// Apply per-API-key model routing: when the policy pins this model to a
-	// subset of upstream providers, confine the candidate list to that subset.
-	// There is no failover to registry providers outside the pinned set; an
-	// empty intersection (no pinned provider serves the model) is a hard 503.
-	// When the route carries a strategy ("priority" or "failover"), reorder the
-	// providers by descending priority and stash the strategy so the conductor
-	// pins credential selection to the primary provider (priority) or relies on
-	// its cross-provider failover loop (failover). An empty strategy inherits
-	// the global routing.strategy unchanged.
+	// subset of upstream providers, confine the candidate list to that subset,
+	// recomputing from the registry baseline so a per-key route takes precedence
+	// over any Global Model route for the same model. There is no failover to
+	// registry providers outside the pinned set; an empty intersection (no pinned
+	// provider serves the model) is a hard 503. When the route carries a strategy
+	// ("priority" or "failover"), reorder the providers by descending priority and
+	// stash the strategy so the conductor pins credential selection to the primary
+	// provider (priority) or relies on its cross-provider failover loop (failover).
+	// An empty strategy inherits the global routing.strategy unchanged.
 	if route := policyRouteForModel(ctx, baseModel); route != nil {
-		filtered := intersectProviders(providers, route.Providers)
+		filtered := intersectProviders(registryProviders, route.Providers)
 		if len(filtered) == 0 {
 			return nil, "", &interfaces.ErrorMessage{
 				StatusCode: http.StatusServiceUnavailable,

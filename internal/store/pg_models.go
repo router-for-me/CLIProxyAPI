@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -51,8 +52,16 @@ type StoredModel struct {
 
 // ModelsStore wraps the database handle for model catalog persistence.
 type ModelsStore struct {
-	db          *sql.DB
-	modelsTable string
+	db           *sql.DB
+	modelsTable  string
+	routingTable string
+
+	// routeCache caches global per-model routing overrides (ModelRoute keyed by
+	// lowercased model id) in memory so the request-time routing decision never
+	// hits the DB after the first access. A nil value / missing key caches a
+	// negative result ("no global route for this model"). Guarded by routeMu.
+	routeMu    sync.RWMutex
+	routeCache map[string]*ModelRoute
 }
 
 // NewModelsStore builds a ModelsStore from a PostgresStore. Returns nil when the
@@ -62,8 +71,10 @@ func NewModelsStore(parent *PostgresStore) *ModelsStore {
 		return nil
 	}
 	return &ModelsStore{
-		db:          parent.DB(),
-		modelsTable: parent.ModelsTable(),
+		db:           parent.DB(),
+		modelsTable:  parent.ModelsTable(),
+		routingTable: parent.ModelRoutingTable(),
+		routeCache:   make(map[string]*ModelRoute),
 	}
 }
 
@@ -1204,3 +1215,169 @@ func (s *ModelsStore) DeleteOne(ctx context.Context, id, provider string) error 
 
 // ErrModelNotFound is returned when a single model lookup finds no row.
 var ErrModelNotFound = errors.New("postgres store: model not found")
+
+// GlobalModelRouteUpsert is the routing-only portion of a global model route.
+// It carries the same fields as a Models Group ModelRoute (pinned providers +
+// strategy + priorities) so the request-time routing decision applies the exact
+// same intersect/order/stash mechanics for a Global Model as it does for a
+// per-API-key Models Group route. Per-model caps (RPM/budget/discount) are
+// policy concepts and are deliberately NOT included.
+type GlobalModelRouteUpsert struct {
+	Providers  []string
+	Strategy   string
+	Priorities []ProviderPriority
+}
+
+// Normalize returns a cleaned copy of the route: providers trimmed and
+// de-duplicated (case-insensitive), strategy lowercased, and Priorities
+// filtered to providers actually listed in Providers. This mirrors
+// normalizeModelRoutes so persisted routing stays consistent.
+func (r GlobalModelRouteUpsert) Normalize() GlobalModelRouteUpsert {
+	providers := make([]string, 0, len(r.Providers))
+	providerSet := make(map[string]struct{}, len(r.Providers))
+	for _, p := range r.Providers {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		key := strings.ToLower(p)
+		if _, dup := providerSet[key]; dup {
+			continue
+		}
+		providerSet[key] = struct{}{}
+		providers = append(providers, p)
+	}
+	strategy := strings.ToLower(strings.TrimSpace(r.Strategy))
+	var priorities []ProviderPriority
+	for _, pr := range r.Priorities {
+		provider := strings.TrimSpace(pr.Provider)
+		if provider == "" {
+			continue
+		}
+		if _, ok := providerSet[strings.ToLower(provider)]; !ok {
+			continue
+		}
+		priorities = append(priorities, ProviderPriority{Provider: provider, Priority: pr.Priority})
+	}
+	return GlobalModelRouteUpsert{Providers: providers, Strategy: strategy, Priorities: priorities}
+}
+
+// UpsertGlobalModelRoute persists a per-model-id global routing override and
+// refreshes the in-memory route cache so the request-time routing decision
+// reflects the change immediately. empty indicates the route should be cleared
+// (deleted) rather than written.
+func (s *ModelsStore) UpsertGlobalModelRoute(ctx context.Context, id string, route GlobalModelRouteUpsert, empty bool) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: models store not initialized")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("postgres store: global route upsert requires non-empty id")
+	}
+	route = route.Normalize()
+	key := strings.ToLower(id)
+
+	if empty || len(route.Providers) == 0 {
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+			`DELETE FROM %s WHERE LOWER(id) = LOWER($1)`, s.routingTable,
+		), id); err != nil {
+			return fmt.Errorf("postgres store: delete global route: %w", err)
+		}
+		s.setRouteCache(key, nil)
+		return nil
+	}
+
+	providersJSON, err := json.Marshal(route.Providers)
+	if err != nil {
+		return fmt.Errorf("postgres store: marshal global route providers: %w", err)
+	}
+	var prioritiesJSON []byte
+	if len(route.Priorities) > 0 {
+		prioritiesJSON, err = json.Marshal(route.Priorities)
+		if err != nil {
+			return fmt.Errorf("postgres store: marshal global route priorities: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO %s (id, providers, strategy, priorities, updated_at)
+		VALUES ($1, $2, $3, $4, NOW())
+		ON CONFLICT (id) DO UPDATE SET
+			providers = EXCLUDED.providers,
+			strategy = EXCLUDED.strategy,
+			priorities = EXCLUDED.priorities,
+			updated_at = NOW()
+	`, s.routingTable), id, string(providersJSON), route.Strategy, string(prioritiesJSON)); err != nil {
+		return fmt.Errorf("postgres store: upsert global route: %w", err)
+	}
+
+	s.setRouteCache(key, &ModelRoute{
+		Model:      id,
+		Providers:  route.Providers,
+		Strategy:   route.Strategy,
+		Priorities: route.Priorities,
+	})
+	return nil
+}
+
+// GlobalModelRoute returns the persisted global routing override for model id,
+// or nil when none is set. Results are cached in memory (keyed by lowercased
+// model id), so request-time reads incur at most one DB lookup per model. An
+// error on a cache-miss DB read returns nil so the routing decision degrades to
+// the default registry providers rather than failing the request.
+func (s *ModelsStore) GlobalModelRoute(ctx context.Context, id string) *ModelRoute {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	key := strings.ToLower(strings.TrimSpace(id))
+	if key == "" {
+		return nil
+	}
+	if r, ok := s.getRouteCache(key); ok {
+		// Copy so callers cannot mutate the cached route.
+		if r == nil {
+			return nil
+		}
+		cp := *r
+		return &cp
+	}
+
+	var providersRaw, prioritiesRaw []byte
+	var strategy string
+	err := s.db.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT providers, strategy, priorities FROM %s WHERE LOWER(id) = LOWER($1)`, s.routingTable,
+	), id).Scan(&providersRaw, &strategy, &prioritiesRaw)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.WithError(err).Warn("postgres store: read global route: " + id)
+		}
+		s.setRouteCache(key, nil)
+		return nil
+	}
+	var providers []string
+	_ = json.Unmarshal(providersRaw, &providers)
+	var priorities []ProviderPriority
+	_ = json.Unmarshal(prioritiesRaw, &priorities)
+	if len(providers) == 0 {
+		s.setRouteCache(key, nil)
+		return nil
+	}
+	route := &ModelRoute{Model: id, Providers: providers, Strategy: strategy, Priorities: priorities}
+	cp := *route
+	s.setRouteCache(key, route)
+	return &cp
+}
+
+func (s *ModelsStore) setRouteCache(key string, route *ModelRoute) {
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	s.routeCache[key] = route
+}
+
+// getRouteCache is a cache-lookup helper: false (with empty second value)
+// means not cached yet; true means cached (value may be nil = negative result).
+func (s *ModelsStore) getRouteCache(key string) (*ModelRoute, bool) {
+	s.routeMu.RLock()
+	defer s.routeMu.RUnlock()
+	r, ok := s.routeCache[key]
+	return r, ok
+}
