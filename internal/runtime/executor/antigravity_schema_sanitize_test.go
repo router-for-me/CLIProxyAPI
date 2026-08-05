@@ -120,13 +120,16 @@ func TestSanitizeAntigravityBooleanSubschemas(t *testing.T) {
 		"not",
 		"propertyNames",
 		"allOf.0",
-		"anyOf.0",
-		"oneOf.0",
 		"unevaluatedItems",
 		"unevaluatedProperties",
 	} {
 		if node := gjson.GetBytes(got, path); node.Raw != "{}" {
 			t.Errorf("%s = %s, want {}", path, node.Raw)
+		}
+	}
+	for _, keyword := range []string{"anyOf", "oneOf"} {
+		if node := gjson.GetBytes(got, keyword); node.Exists() {
+			t.Errorf("tautological %s was not removed: %s", keyword, node.Raw)
 		}
 	}
 	if node := gjson.GetBytes(got, "allOf.1"); node.Raw != "false" {
@@ -426,6 +429,46 @@ func TestSanitizeAntigravityRequestSchemasMatchesToolSchemaCleaning(t *testing.T
 	got := gjson.Get(sanitizeAntigravityRequestSchemas(doc, true), schemaPath)
 	if req := got.Get("required").Array(); len(req) != 1 || req[0].String() != "_" {
 		t.Errorf("Claude VALIDATED placeholder missing for an optional-only schema: %s", got.Raw)
+	}
+}
+
+func TestSanitizeAntigravityRequestSchemasPreservesUnionSemantics(t *testing.T) {
+	tests := []struct {
+		name  string
+		union string
+		want  string
+	}{
+		{name: "anyOf_false_true", union: `"anyOf":[false,true]`, want: `{}`},
+		{name: "anyOf_true_false", union: `"anyOf":[true,false]`, want: `{}`},
+		{name: "oneOf_false_true", union: `"oneOf":[false,true]`, want: `{}`},
+		{name: "oneOf_true_false", union: `"oneOf":[true,false]`, want: `{}`},
+		{name: "anyOf_all_false", union: `"anyOf":[false,false]`, want: `false`},
+		{name: "oneOf_all_false", union: `"oneOf":[false,false]`, want: `false`},
+		{name: "anyOf_mixed_true", union: `"anyOf":[false,true,{"type":"string"}]`, want: `{}`},
+		{name: "anyOf_mixed_schema", union: `"anyOf":[false,{"type":"string"},false]`, want: `{"type":"string"}`},
+		{name: "oneOf_single_true_mixed", union: `"oneOf":[false,true,false]`, want: `{}`},
+		{name: "oneOf_multiple_true", union: `"oneOf":[true,true]`, want: `false`},
+		{name: "oneOf_multiple_true_mixed", union: `"oneOf":[true,false,true]`, want: `false`},
+		{name: "anyOf_preserves_sibling", union: `"type":"string","anyOf":[false,true]`, want: `{"type":"string"}`},
+		{name: "oneOf_preserves_sibling", union: `"type":"string","oneOf":[false,true]`, want: `{"type":"string"}`},
+		{name: "oneOf_true_schema", union: `"oneOf":[true,{"type":"string"}]`, want: `{"not":{"type":"string"}}`},
+		{name: "oneOf_schema_true", union: `"oneOf":[{"type":"string"},true]`, want: `{"not":{"type":"string"}}`},
+		{name: "oneOf_true_schema_with_false", union: `"oneOf":[true,false,{"type":"string"}]`, want: `{"not":{"type":"string"}}`},
+		{name: "oneOf_complement_preserves_sibling", union: `"type":"number","oneOf":[true,{"type":"string"}]`, want: `{"not":{"type":"string"},"type":"number"}`},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			doc := `{"request":{"tools":[{"functionDeclarations":[{"name":"t","parameters":` +
+				`{"type":"object","properties":{"choice":{` + testCase.union + `}}}}]}]}}`
+			got := gjson.Get(
+				sanitizeAntigravityRequestSchemas(doc, false),
+				"request.tools.0.functionDeclarations.0.parameters.properties.choice",
+			).Raw
+			if got != testCase.want {
+				t.Fatalf("union result = %s, want %s", got, testCase.want)
+			}
+		})
 	}
 }
 

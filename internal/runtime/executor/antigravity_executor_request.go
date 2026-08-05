@@ -225,6 +225,41 @@ func sanitizeAntigravitySchemaNode(raw json.RawMessage) (json.RawMessage, error)
 		}
 
 		changed := false
+		for _, keyword := range []string{"anyOf", "oneOf"} {
+			child, ok := schema[keyword]
+			if !ok {
+				continue
+			}
+			normalized, complement, remove, unsatisfiable, errNormalize := normalizeAntigravityBooleanUnion(keyword, child)
+			if errNormalize != nil {
+				return nil, fmt.Errorf("normalize %s: %w", keyword, errNormalize)
+			}
+			if unsatisfiable {
+				return json.RawMessage("false"), nil
+			}
+			if complement != nil {
+				if _, hasExistingNot := schema["not"]; hasExistingNot {
+					// Combining complements requires a union that the downstream cleaner flattens
+					// lossily, so retain the existing compatibility behavior for this rare shape.
+					normalized = child
+				} else {
+					delete(schema, keyword)
+					schema["not"] = complement
+					changed = true
+					continue
+				}
+			}
+			if remove {
+				delete(schema, keyword)
+				changed = true
+				continue
+			}
+			if !bytes.Equal(normalized, child) {
+				schema[keyword] = normalized
+				changed = true
+			}
+		}
+
 		for _, keyword := range antigravitySingleSchemaKeywords {
 			child, ok := schema[keyword]
 			if !ok {
@@ -313,6 +348,64 @@ func sanitizeAntigravitySchemaNode(raw json.RawMessage) (json.RawMessage, error)
 		}
 		return append(json.RawMessage(nil), raw...), nil
 	}
+}
+
+// normalizeAntigravityBooleanUnion simplifies boolean members before true schemas become empty
+// objects. Removing a tautological union preserves constraints carried by its parent schema.
+func normalizeAntigravityBooleanUnion(keyword string, raw json.RawMessage) (normalized, complement json.RawMessage, remove, unsatisfiable bool, err error) {
+	var branches []json.RawMessage
+	if errUnmarshal := json.Unmarshal(raw, &branches); errUnmarshal != nil {
+		return nil, nil, false, false, fmt.Errorf("decode boolean union: %w", errUnmarshal)
+	}
+
+	trueCount := 0
+	falseCount := 0
+	nonBoolean := make([]json.RawMessage, 0, len(branches))
+	for _, branch := range branches {
+		trimmed := bytes.TrimSpace(branch)
+		switch {
+		case bytes.Equal(trimmed, []byte("true")):
+			trueCount++
+		case bytes.Equal(trimmed, []byte("false")):
+			falseCount++
+		default:
+			nonBoolean = append(nonBoolean, branch)
+		}
+	}
+	if trueCount == 0 && falseCount == 0 {
+		return append(json.RawMessage(nil), raw...), nil, false, false, nil
+	}
+
+	switch keyword {
+	case "anyOf":
+		if trueCount > 0 {
+			return nil, nil, true, false, nil
+		}
+		if len(nonBoolean) == 0 {
+			return nil, nil, false, true, nil
+		}
+	case "oneOf":
+		if trueCount > 1 || trueCount == 0 && len(nonBoolean) == 0 {
+			return nil, nil, false, true, nil
+		}
+		if trueCount == 1 {
+			if len(nonBoolean) == 0 {
+				return nil, nil, true, false, nil
+			}
+			if len(nonBoolean) == 1 {
+				return nil, append(json.RawMessage(nil), nonBoolean[0]...), false, false, nil
+			}
+			// A multi-branch complement needs a nested union that the downstream cleaner flattens
+			// lossily, so retain the existing compatibility behavior for that shape.
+			return append(json.RawMessage(nil), raw...), nil, false, false, nil
+		}
+	}
+
+	updated, errMarshal := json.Marshal(nonBoolean)
+	if errMarshal != nil {
+		return nil, nil, false, false, fmt.Errorf("encode boolean union: %w", errMarshal)
+	}
+	return updated, nil, false, false, nil
 }
 
 func firstJSONToken(raw json.RawMessage) byte {
