@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -174,10 +175,15 @@ func setSourceAuthFileDisabled(path string, disabled bool) error {
 	if errMarshal != nil {
 		return fmt.Errorf("marshal auth file: %w", errMarshal)
 	}
-	if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
+	file, errOpen := misc.OpenFileForSecureRewrite(path)
+	if errOpen != nil {
+		return errOpen
+	}
+	if _, errWrite := file.Write(raw); errWrite != nil {
+		_ = file.Close()
 		return errWrite
 	}
-	return nil
+	return file.Close()
 }
 
 func applyAuthDisabledState(auth *coreauth.Auth, disabled bool) {

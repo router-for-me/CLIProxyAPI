@@ -45,7 +45,7 @@ func (ts *TokenStorage) SaveTokenToFile(authFilePath string) error {
 	if errMkdirAll := os.MkdirAll(filepath.Dir(authFilePath), 0o700); errMkdirAll != nil {
 		return fmt.Errorf("xai token storage: create directory: %w", errMkdirAll)
 	}
-	file, err := os.Create(authFilePath)
+	file, err := misc.OpenFileForSecureRewrite(authFilePath)
 	if err != nil {
 		return fmt.Errorf("xai token storage: create token file: %w", err)
 	}
