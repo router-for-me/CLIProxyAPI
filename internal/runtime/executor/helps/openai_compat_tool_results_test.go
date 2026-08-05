@@ -244,6 +244,43 @@ func TestShouldEnsureOpenAICompatReasoningContent(t *testing.T) {
 			want:          false,
 		},
 		{
+			// A cannot-disable model requested with a "(none)" suffix is clamped
+			// back to the lowest supported level by the canonical thinking
+			// pipeline. The effective payload reasoning_effort:"low" is thinking
+			// enabled, so fallback reasoning_content must still be injected.
+			name:          "cannot-disable model none suffix clamped to low in payload stays thinking",
+			upstreamModel: "deepseek-v4-reasoner(none)",
+			payload:       `{"model":"deepseek-v4-reasoner","reasoning_effort":"low"}`,
+			want:          true,
+		},
+		{
+			// Same as above but with a "(0)" budget suffix that is clamped to
+			// the lowest supported level ("low") in the translated payload.
+			name:          "cannot-disable model zero suffix clamped to low in payload stays thinking",
+			upstreamModel: "deepseek-v4-reasoner(0)",
+			payload:       `{"model":"deepseek-v4-reasoner","reasoning_effort":"low"}`,
+			want:          true,
+		},
+		{
+			// A non-disabled Kimi thinking object in the translated payload
+			// overrides a raw "(none)" suffix because the canonical pipeline
+			// normalized the request back into thinking mode.
+			name:          "cannot-disable model none suffix with enabled thinking object stays thinking",
+			upstreamModel: "deepseek-v4-reasoner(none)",
+			payload:       `{"model":"deepseek-v4-reasoner","thinking":{"type":"enabled"}}`,
+			want:          true,
+		},
+		{
+			// requestedModel none suffix with no payload thinking signal still
+			// disables reasoning via the raw-suffix fallback (request never
+			// entered the thinking pipeline).
+			name:           "requested model none suffix with no payload signal disables reasoning",
+			upstreamModel:  "deepseek-v4-reasoner",
+			requestedModel: "deepseek-v4-reasoner(none)",
+			payload:        `{"model":"deepseek-v4-reasoner"}`,
+			want:           false,
+		},
+		{
 			name:          "kimi reasoning model with thinking.type disabled",
 			upstreamModel: "kimi-toggle-thinking-model",
 			payload:       `{"model":"kimi-toggle-thinking-model","thinking":{"type":"disabled"}}`,

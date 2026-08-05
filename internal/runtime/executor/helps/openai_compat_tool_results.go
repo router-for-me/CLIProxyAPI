@@ -55,10 +55,15 @@ func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
 // ShouldEnsureOpenAICompatReasoningContent reports whether the target model
 // or request requires reasoning_content on assistant tool_calls (e.g., DeepSeek/Kimi reasoning models).
 //
-// When thinking is explicitly disabled (model suffix "(none)"/"(0)",
-// reasoning_effort:"none", or Kimi thinking.type:"disabled"), fallback
+// When thinking is explicitly disabled in the effective translated payload
+// (reasoning_effort:"none", Kimi thinking.type:"disabled", or a "(none)"/"(0)"
+// suffix on a model that actually supports disabling), fallback
 // reasoning_content is never injected: the request is no longer in thinking
 // mode, so the upstream no longer requires reasoning_content on prior tool_calls.
+// A "(none)"/"(0)" suffix on a cannot-disable model is clamped back to the
+// lowest supported level by the canonical thinking pipeline, so it is NOT
+// treated as disabled here; the effective reasoning_effort in the payload
+// decides.
 func ShouldEnsureOpenAICompatReasoningContent(upstreamModel, requestedModel string, payload []byte) bool {
 	if openAICompatReasoningExplicitlyDisabled(upstreamModel, requestedModel, payload) {
 		return false
@@ -102,7 +107,24 @@ func ShouldEnsureOpenAICompatReasoningContent(upstreamModel, requestedModel stri
 // suffix explicitly disables thinking. This gates fallback reasoning_content
 // injection so that a reasoning-capable model with thinking disabled is not
 // mutated once the canonical thinking pipeline has disabled reasoning.
+//
+// The translated payload is authoritative: ApplyRequestThinking runs before
+// this guard and has already normalized suffix/body thinking config through
+// ValidateConfig. A cannot-disable model requested with a "(none)"/"(0)"
+// suffix is clamped back to its lowest supported level (e.g.
+// reasoning_effort:"low"), so checking the raw suffix first would wrongly
+// treat thinking as disabled while the effective request is still in thinking
+// mode and still needs reasoning_content on prior tool_calls (DeepSeek/Kimi
+// replay 400). The raw suffix is consulted only as a fallback when the
+// payload carries no explicit thinking signal.
 func openAICompatReasoningExplicitlyDisabled(upstreamModel, requestedModel string, payload []byte) bool {
+	if effort := gjson.GetBytes(payload, "reasoning_effort"); effort.Exists() {
+		return isOpenAICompatDisabledEffortValue(effort)
+	}
+	if thinkingField := gjson.GetBytes(payload, "thinking"); thinkingField.Exists() {
+		return isOpenAICompatThinkingObjectDisabled(thinkingField)
+	}
+
 	for _, model := range []string{upstreamModel, requestedModel} {
 		if strings.TrimSpace(model) == "" {
 			continue
@@ -110,13 +132,6 @@ func openAICompatReasoningExplicitlyDisabled(upstreamModel, requestedModel strin
 		if openAICompatSuffixDisablesThinking(thinking.ParseSuffix(model)) {
 			return true
 		}
-	}
-
-	if effort := gjson.GetBytes(payload, "reasoning_effort"); effort.Exists() && isOpenAICompatDisabledEffortValue(effort) {
-		return true
-	}
-	if thinkingField := gjson.GetBytes(payload, "thinking"); thinkingField.Exists() && isOpenAICompatThinkingObjectDisabled(thinkingField) {
-		return true
 	}
 
 	return false
