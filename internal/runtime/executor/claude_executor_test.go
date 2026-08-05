@@ -5368,20 +5368,419 @@ func TestApplyClaudeHeaders_CallerBetasScopedByUpstream(t *testing.T) {
 	}
 }
 
-// TestInjectClaudeCodeContextManagement pins the captured 2.1.220 object and the
-// rule that a caller's own context_management is never overwritten.
+// TestInjectClaudeCodeContextManagement pins the captured 2.1.220 object and
+// the thinking and caller-ownership rules that control automatic injection.
 func TestInjectClaudeCodeContextManagement(t *testing.T) {
 	const captured = `{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`
 
-	got := injectClaudeCodeContextManagement([]byte(`{"model":"claude-opus-4-6"}`))
-	if diff := gjson.GetBytes(got, "context_management").Raw; diff != captured {
-		t.Fatalf("context_management = %s, want the captured object %s", diff, captured)
+	for _, test := range []struct {
+		name    string
+		payload string
+	}{
+		{name: "omitted thinking", payload: `{"model":"claude-opus-4-6"}`},
+		{name: "enabled thinking", payload: `{"model":"claude-opus-5","thinking":{"type":"enabled"}}`},
+		{name: "adaptive thinking", payload: `{"model":"claude-opus-5","thinking":{"type":"adaptive"}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, automaticallyInjected := injectClaudeCodeContextManagement([]byte(test.payload))
+			if !automaticallyInjected {
+				t.Fatal("automatic context_management injection was not reported")
+			}
+			if diff := gjson.GetBytes(got, "context_management").Raw; diff != captured {
+				t.Fatalf("context_management = %s, want the captured object %s", diff, captured)
+			}
+		})
 	}
 
 	callerOwned := []byte(`{"model":"claude-opus-4-6","context_management":{"edits":[]}}`)
-	if got := injectClaudeCodeContextManagement(callerOwned); !bytes.Equal(got, callerOwned) {
-		t.Fatalf("caller context_management was modified: %s", got)
+	callerOwnedGot, automaticallyInjected := injectClaudeCodeContextManagement(callerOwned)
+	if automaticallyInjected {
+		t.Error("caller context_management was reported as automatically injected")
 	}
+	if !bytes.Equal(callerOwnedGot, callerOwned) {
+		t.Fatalf("caller context_management was modified: %s", callerOwnedGot)
+	}
+
+	disabledThinking := []byte(`{"model":"claude-opus-5","thinking":{"type":"disabled"}}`)
+	disabledThinkingGot, automaticallyInjected := injectClaudeCodeContextManagement(disabledThinking)
+	if automaticallyInjected {
+		t.Error("disabled thinking context_management was reported as automatically injected")
+	}
+	if !bytes.Equal(disabledThinkingGot, disabledThinking) {
+		t.Errorf("disabled thinking payload was modified: %s", disabledThinkingGot)
+	}
+	if got := gjson.GetBytes(disabledThinkingGot, "context_management"); got.Exists() {
+		t.Errorf("disabled thinking payload has context_management = %s, want absent", got.Raw)
+	}
+}
+
+func TestReconcileClaudeCodeContextManagement(t *testing.T) {
+	withAutomatic := func(thinkingType string) string {
+		return `{"thinking":{"type":"` + thinkingType + `"},"context_management":` + claudeCodeContextManagement + `}`
+	}
+
+	for _, test := range []struct {
+		name    string
+		payload string
+		state   claudeCodeContextManagementState
+		wantRaw string
+	}{
+		{
+			name:    "removes unchanged automatic object when disabled",
+			payload: withAutomatic("disabled"),
+			state:   claudeCodeContextManagementState{eligible: true, automaticallyInjected: true},
+		},
+		{
+			name:    "preserves rule owned automatic object when disabled",
+			payload: withAutomatic("disabled"),
+			state:   claudeCodeContextManagementState{eligible: true, automaticallyInjected: true, payloadRuleTouched: true},
+			wantRaw: claudeCodeContextManagement,
+		},
+		{
+			name:    "preserves changed automatic object when disabled",
+			payload: `{"thinking":{"type":"disabled"},"context_management":{"edits":[{"type":"custom"}]}}`,
+			state:   claudeCodeContextManagementState{eligible: true, automaticallyInjected: true},
+			wantRaw: `{"edits":[{"type":"custom"}]}`,
+		},
+		{
+			name:    "adds automatic object when enabled",
+			payload: `{"thinking":{"type":"enabled"}}`,
+			state:   claudeCodeContextManagementState{eligible: true},
+			wantRaw: claudeCodeContextManagement,
+		},
+		{
+			name:    "adds automatic object when adaptive",
+			payload: `{"thinking":{"type":"adaptive"}}`,
+			state:   claudeCodeContextManagementState{eligible: true},
+			wantRaw: claudeCodeContextManagement,
+		},
+		{
+			name:    "caller ownership prevents addition",
+			payload: `{"thinking":{"type":"enabled"}}`,
+			state:   claudeCodeContextManagementState{eligible: true, callerOwned: true},
+		},
+		{
+			name:    "payload rule ownership prevents addition",
+			payload: `{"thinking":{"type":"enabled"}}`,
+			state:   claudeCodeContextManagementState{eligible: true, payloadRuleTouched: true},
+		},
+		{
+			name:    "ineligible request prevents addition",
+			payload: `{"thinking":{"type":"enabled"}}`,
+		},
+		{
+			name:    "omitted thinking prevents addition",
+			payload: `{}`,
+			state:   claudeCodeContextManagementState{eligible: true},
+		},
+		{
+			name:    "unknown thinking prevents addition",
+			payload: `{"thinking":{"type":"unexpected"}}`,
+			state:   claudeCodeContextManagementState{eligible: true},
+		},
+		{
+			name:    "invalid thinking prevents addition",
+			payload: `{"thinking":{"type":123}}`,
+			state:   claudeCodeContextManagementState{eligible: true},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := reconcileClaudeCodeContextManagement([]byte(test.payload), test.state)
+			if raw := gjson.GetBytes(got, "context_management").Raw; raw != test.wantRaw {
+				t.Fatalf("context_management = %s, want %s; body=%s", raw, test.wantRaw, got)
+			}
+		})
+	}
+}
+
+func TestClaudeExecutorPayloadOverrideDisabledThinking(t *testing.T) {
+	const model = "claude-opus-5"
+	modelRules := []config.PayloadModelRule{{Name: model, Protocol: "claude"}}
+	basePayload := []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+
+	for _, test := range []struct {
+		name   string
+		stream bool
+	}{
+		{name: "execute"},
+		{name: "execute stream", stream: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+				Models: modelRules,
+				Params: map[string]any{"thinking.type": "disabled"},
+			}}}}
+			upstreamBody := executeClaudeContextManagementRequest(t, cfg, basePayload, test.stream)
+			if got := gjson.GetBytes(upstreamBody, "thinking.type").String(); got != "disabled" {
+				t.Fatalf("final upstream thinking.type = %q, want disabled; body=%s", got, upstreamBody)
+			}
+			if got := gjson.GetBytes(upstreamBody, "context_management"); got.Exists() {
+				t.Errorf("final upstream context_management = %s with disabled thinking, want absent", got.Raw)
+			}
+		})
+	}
+
+	t.Run("caller context management is preserved", func(t *testing.T) {
+		cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+			Models: modelRules,
+			Params: map[string]any{"thinking.type": "disabled"},
+		}}}}
+		payload := []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"context_management":{"edits":[{"type":"caller_owned"}]}}`)
+		upstreamBody := executeClaudeContextManagementRequest(t, cfg, payload, false)
+		if got := gjson.GetBytes(upstreamBody, "context_management.edits.0.type").String(); got != "caller_owned" {
+			t.Fatalf("caller context_management type = %q, want caller_owned; body=%s", got, upstreamBody)
+		}
+	})
+
+	t.Run("payload override replacement is preserved", func(t *testing.T) {
+		cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+			Models: modelRules,
+			Params: map[string]any{
+				"thinking.type":      "disabled",
+				"context_management": map[string]any{"edits": []any{map[string]any{"type": "payload_rule"}}},
+			},
+		}}}}
+		upstreamBody := executeClaudeContextManagementRequest(t, cfg, basePayload, false)
+		if got := gjson.GetBytes(upstreamBody, "context_management.edits.0.type").String(); got != "payload_rule" {
+			t.Fatalf("payload-rule context_management type = %q, want payload_rule; body=%s", got, upstreamBody)
+		}
+	})
+
+	t.Run("exact automatic value remains payload rule owned", func(t *testing.T) {
+		ownershipConfigs := []struct {
+			name string
+			cfg  *config.Config
+		}{
+			{
+				name: "default",
+				cfg: &config.Config{Payload: config.PayloadConfig{
+					Default: []config.PayloadRule{{
+						Models: modelRules,
+						Params: map[string]any{"context_management": json.RawMessage(claudeCodeContextManagement)},
+					}},
+					Override: []config.PayloadRule{{
+						Models: modelRules,
+						Params: map[string]any{"thinking.type": "disabled"},
+					}},
+				}},
+			},
+			{
+				name: "raw default",
+				cfg: &config.Config{Payload: config.PayloadConfig{
+					DefaultRaw: []config.PayloadRule{{
+						Models: modelRules,
+						Params: map[string]any{"context_management": claudeCodeContextManagement},
+					}},
+					Override: []config.PayloadRule{{
+						Models: modelRules,
+						Params: map[string]any{"thinking.type": "disabled"},
+					}},
+				}},
+			},
+			{
+				name: "override",
+				cfg: &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+					Models: modelRules,
+					Params: map[string]any{
+						"thinking.type":      "disabled",
+						"context_management": json.RawMessage(claudeCodeContextManagement),
+					},
+				}}}},
+			},
+			{
+				name: "raw override",
+				cfg: &config.Config{Payload: config.PayloadConfig{
+					Override: []config.PayloadRule{{
+						Models: modelRules,
+						Params: map[string]any{"thinking.type": "disabled"},
+					}},
+					OverrideRaw: []config.PayloadRule{{
+						Models: modelRules,
+						Params: map[string]any{"context_management": claudeCodeContextManagement},
+					}},
+				}},
+			},
+		}
+		for _, ownership := range ownershipConfigs {
+			for _, stream := range []bool{false, true} {
+				name := ownership.name + " execute"
+				if stream {
+					name += " stream"
+				}
+				t.Run(name, func(t *testing.T) {
+					upstreamBody := executeClaudeContextManagementRequest(t, ownership.cfg, basePayload, stream)
+					if got := gjson.GetBytes(upstreamBody, "thinking.type").String(); got != "disabled" {
+						t.Fatalf("final upstream thinking.type = %q, want disabled; body=%s", got, upstreamBody)
+					}
+					if got := gjson.GetBytes(upstreamBody, "context_management").Raw; got != claudeCodeContextManagement {
+						t.Fatalf("%s context_management = %s, want payload-rule-owned %s; body=%s", ownership.name, got, claudeCodeContextManagement, upstreamBody)
+					}
+				})
+			}
+		}
+	})
+
+	t.Run("payload filter remains effective", func(t *testing.T) {
+		cfg := &config.Config{Payload: config.PayloadConfig{Filter: []config.PayloadFilterRule{{
+			Models: modelRules,
+			Params: []string{"context_management"},
+		}}}}
+		upstreamBody := executeClaudeContextManagementRequest(t, cfg, basePayload, false)
+		if got := gjson.GetBytes(upstreamBody, "context_management"); got.Exists() {
+			t.Fatalf("filtered context_management = %s, want absent", got.Raw)
+		}
+	})
+
+	for _, stream := range []bool{false, true} {
+		name := "forced tool choice retains automatic context management execute"
+		if stream {
+			name += " stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			payload := []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"tool_choice":{"type":"any"}}`)
+			upstreamBody := executeClaudeContextManagementRequest(t, &config.Config{}, payload, stream)
+			if got := gjson.GetBytes(upstreamBody, "thinking"); got.Exists() {
+				t.Fatalf("forced tool choice thinking = %s, want absent", got.Raw)
+			}
+			if got := gjson.GetBytes(upstreamBody, "context_management").Raw; got != claudeCodeContextManagement {
+				t.Fatalf("forced tool choice context_management = %s, want %s", got, claudeCodeContextManagement)
+			}
+			if got := gjson.GetBytes(upstreamBody, "tool_choice.type").String(); got != "any" {
+				t.Fatalf("forced tool_choice.type = %q, want any", got)
+			}
+		})
+	}
+}
+
+func TestClaudeExecutorPayloadOverrideReenablesThinking(t *testing.T) {
+	const model = "claude-opus-5"
+	modelRules := []config.PayloadModelRule{{Name: model, Protocol: "claude"}}
+	basePayload := []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"}}`)
+
+	for _, test := range []struct {
+		name         string
+		thinkingType string
+		stream       bool
+	}{
+		{name: "execute enabled", thinkingType: "enabled"},
+		{name: "execute adaptive", thinkingType: "adaptive"},
+		{name: "execute stream enabled", thinkingType: "enabled", stream: true},
+		{name: "execute stream adaptive", thinkingType: "adaptive", stream: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+				Models: modelRules,
+				Params: map[string]any{"thinking.type": test.thinkingType},
+			}}}}
+			upstreamBody := executeClaudeContextManagementRequest(t, cfg, basePayload, test.stream)
+			if got := gjson.GetBytes(upstreamBody, "thinking.type").String(); got != test.thinkingType {
+				t.Fatalf("final upstream thinking.type = %q, want %q; body=%s", got, test.thinkingType, upstreamBody)
+			}
+			if got := gjson.GetBytes(upstreamBody, "context_management").Raw; got != claudeCodeContextManagement {
+				t.Fatalf("final upstream context_management = %s, want %s after payload override to %s; body=%s", got, claudeCodeContextManagement, test.thinkingType, upstreamBody)
+			}
+		})
+	}
+
+	for _, stream := range []bool{false, true} {
+		nameSuffix := "execute"
+		if stream {
+			nameSuffix = "execute stream"
+		}
+
+		t.Run("caller context management is preserved after re-enabling "+nameSuffix, func(t *testing.T) {
+			cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+				Models: modelRules,
+				Params: map[string]any{"thinking.type": "enabled"},
+			}}}}
+			payload := []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"},"context_management":{"edits":[{"type":"caller_owned"}]}}`)
+			upstreamBody := executeClaudeContextManagementRequest(t, cfg, payload, stream)
+			if got := gjson.GetBytes(upstreamBody, "context_management.edits.0.type").String(); got != "caller_owned" {
+				t.Fatalf("caller context_management type = %q, want caller_owned; body=%s", got, upstreamBody)
+			}
+		})
+
+		t.Run("custom payload rule object is preserved after re-enabling "+nameSuffix, func(t *testing.T) {
+			cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+				Models: modelRules,
+				Params: map[string]any{
+					"thinking.type":      "adaptive",
+					"context_management": map[string]any{"edits": []any{map[string]any{"type": "payload_rule"}}},
+				},
+			}}}}
+			upstreamBody := executeClaudeContextManagementRequest(t, cfg, basePayload, stream)
+			if got := gjson.GetBytes(upstreamBody, "context_management.edits.0.type").String(); got != "payload_rule" {
+				t.Fatalf("payload-rule context_management type = %q, want payload_rule; body=%s", got, upstreamBody)
+			}
+		})
+
+		t.Run("context management filter remains authoritative after re-enabling "+nameSuffix, func(t *testing.T) {
+			cfg := &config.Config{Payload: config.PayloadConfig{
+				Override: []config.PayloadRule{{
+					Models: modelRules,
+					Params: map[string]any{"thinking.type": "enabled"},
+				}},
+				Filter: []config.PayloadFilterRule{{
+					Models: modelRules,
+					Params: []string{"context_management"},
+				}},
+			}}
+			upstreamBody := executeClaudeContextManagementRequest(t, cfg, basePayload, stream)
+			if got := gjson.GetBytes(upstreamBody, "thinking.type").String(); got != "enabled" {
+				t.Fatalf("final upstream thinking.type = %q, want enabled; body=%s", got, upstreamBody)
+			}
+			if got := gjson.GetBytes(upstreamBody, "context_management"); got.Exists() {
+				t.Fatalf("filtered context_management = %s after re-enabling, want absent; body=%s", got.Raw, upstreamBody)
+			}
+		})
+	}
+}
+
+func executeClaudeContextManagementRequest(t *testing.T, cfg *config.Config, payload []byte, stream bool) []byte {
+	t.Helper()
+
+	var upstreamBody []byte
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(req.Body)
+		if errRead != nil {
+			t.Fatal(errRead)
+		}
+		contentType := "application/json"
+		responseBody := `{"id":"msg_test","type":"message","role":"assistant","model":"claude-opus-5","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+		if stream {
+			contentType = "text/event-stream"
+			responseBody = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{contentType}},
+			Body:       io.NopCloser(strings.NewReader(responseBody)),
+			Request:    req,
+		}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+	executor := NewClaudeExecutor(cfg)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-payload-rule"}}
+	request := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}
+	options := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+
+	if stream {
+		result, errStream := executor.ExecuteStream(ctx, auth, request, options)
+		if errStream != nil {
+			t.Fatalf("ExecuteStream() error = %v", errStream)
+		}
+		for chunk := range result.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("stream chunk error = %v", chunk.Err)
+			}
+		}
+		return upstreamBody
+	}
+	if _, errExecute := executor.Execute(ctx, auth, request, options); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	return upstreamBody
 }
 
 func TestValidateClaudeCallerSystemBlocksAcceptsTextOnly(t *testing.T) {
