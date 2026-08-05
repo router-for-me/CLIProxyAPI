@@ -254,6 +254,12 @@ codex:
     #     username: "user"
     #     credential: "secret"
 
+# Antigravity provider behavior.
+# antigravity:
+#   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions
+#     - "API"
+#     - "proxy"
+
 # xAI provider behavior.
 xai:
   # When true, inject the native x_search tool when the request does not declare it.
