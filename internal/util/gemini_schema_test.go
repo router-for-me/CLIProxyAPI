@@ -872,6 +872,70 @@ func TestCleanJSONSchemaRemovesEmptyEnumValues(t *testing.T) {
 	}
 }
 
+func TestCleanJSONSchemaForcesStringTypeWhenDroppingEmptyEnums(t *testing.T) {
+	// Tool cleaners force enum parents to string. Dropping an all-invalid enum must
+	// still apply that rewrite so const:null / type:null enums do not leave type:null.
+	input := `{
+		"type":"object",
+		"properties":{
+			"null_enum":{"type":"null","enum":[null,""]},
+			"const_null":{"const":null}
+		}
+	}`
+
+	for _, testCase := range []struct {
+		name          string
+		clean         func(string) string
+		wantEmptyType string
+		wantConstType string
+	}{
+		{
+			name:          "gemini",
+			clean:         CleanJSONSchemaForGemini,
+			wantEmptyType: "string",
+			wantConstType: "string",
+		},
+		{
+			name:          "antigravity",
+			clean:         CleanJSONSchemaForAntigravity,
+			wantEmptyType: "string",
+			wantConstType: "string",
+		},
+		{
+			name:  "antigravity_response",
+			clean: CleanJSONSchemaForAntigravityResponse,
+			// Response path preserves declared types when only enum is dropped.
+			wantEmptyType: "null",
+			// const is converted to enum then dropped; type is not forced.
+			wantConstType: "",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			result := gjson.Parse(testCase.clean(input))
+
+			if result.Get("properties.null_enum.enum").Exists() {
+				t.Fatalf("null_enum enum was retained: %s", result.Raw)
+			}
+			if result.Get("properties.const_null.enum").Exists() {
+				t.Fatalf("const_null enum was retained: %s", result.Raw)
+			}
+
+			gotEmptyType := result.Get("properties.null_enum.type").String()
+			if gotEmptyType != testCase.wantEmptyType {
+				t.Errorf("null_enum.type = %q, want %q: %s", gotEmptyType, testCase.wantEmptyType, result.Raw)
+			}
+
+			gotConstType := result.Get("properties.const_null.type").String()
+			if gotConstType != testCase.wantConstType {
+				t.Errorf("const_null.type = %q, want %q: %s", gotConstType, testCase.wantConstType, result.Raw)
+			}
+			if result.Get("properties.const_null.const").Exists() {
+				t.Errorf("const keyword should have been converted away: %s", result.Raw)
+			}
+		})
+	}
+}
+
 func TestCleanJSONSchemaForAntigravity_RemovesNullAndEmptyEnumValues(t *testing.T) {
 	// Field-shaped schemas that trigger Gemini "enum[n]: cannot be empty" when null is
 	// listed alongside string enum values (e.g. optional enums from schema generators).

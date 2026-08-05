@@ -244,7 +244,14 @@ func convertEnumValuesToStrings(jsonStr string, forceStringType bool) string {
 		}
 
 		if len(stringVals) == 0 {
+			// Drop the invalid enum, but still normalize tool schemas to string type.
+			// Otherwise {"type":"null","enum":[null]} / const:null becomes type:null with no enum.
 			jsonStr, _ = sjson.Delete(jsonStr, p)
+			if forceStringType {
+				parentPath := trimSuffix(p, ".enum")
+				updated, _ := sjson.SetBytes([]byte(jsonStr), joinPath(parentPath, "type"), "string")
+				jsonStr = string(updated)
+			}
 			continue
 		}
 
