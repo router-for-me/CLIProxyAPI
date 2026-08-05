@@ -64,6 +64,9 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 			applyCodexClientSearchToolSupport(entry, id, true, providersForModel)
 			sanitizeCodexClientReasoningMetadata(entry)
 			applyCodexClientVisibilityOverride(entry, id)
+			if optimizeMultiAgentV2 {
+				entry["multi_agent_version"] = "v2"
+			}
 			result = append(result, entry)
 			continue
 		}
@@ -283,7 +286,7 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 
 func applyCodexClientVisibilityOverride(entry map[string]any, id string) {
 	switch strings.TrimSpace(id) {
-	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "grok-imagine-image", "grok-imagine-video", "grok-imagine-video-1.5-preview":
+	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "grok-imagine-image", "grok-imagine-video", "grok-imagine-video-1.5", "grok-imagine-video-1.5-preview":
 		entry["visibility"] = "hide"
 	}
 }

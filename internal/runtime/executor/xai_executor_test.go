@@ -2156,6 +2156,9 @@ func TestXAIExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testing
 			t.Fatalf("missing %s event in stream: %s", eventName, output)
 		}
 	}
+	if strings.Count(output, `"model":"grok-4.3"`) < 2 {
+		t.Fatalf("response.model missing from created/in_progress events: %s", output)
+	}
 	if !strings.Contains(output, `"type":"compaction"`) || !strings.Contains(output, `"encrypted_content":"opaque"`) {
 		t.Fatalf("compaction output missing from stream: %s", output)
 	}

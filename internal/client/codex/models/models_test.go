@@ -143,6 +143,21 @@ func TestCodexClientModelsResponse_AppliesDisplayNameToTemplateModel(t *testing.
 	}
 }
 
+func TestCodexClientModelsResponse_RewritesTemplateMultiAgentVersionWhenEnabled(t *testing.T) {
+	modelIDs := []string{"gpt-5.6-luna", "gpt-5.5"}
+	resp := BuildResponse([]map[string]any{{"id": modelIDs[0]}, {"id": modelIDs[1]}}, nil, true)
+	models, ok := resp["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
+	}
+
+	for _, model := range models {
+		if got := stringModelValue(model, "multi_agent_version"); got != "v2" {
+			t.Errorf("%s multi_agent_version = %q, want v2", stringModelValue(model, "slug"), got)
+		}
+	}
+}
+
 func TestCodexClientModelsResponse_DisablesSearchToolForSynthesizedModels(t *testing.T) {
 	resp := BuildResponse([]map[string]any{
 		{"id": "custom-openai-compatible-model"},
