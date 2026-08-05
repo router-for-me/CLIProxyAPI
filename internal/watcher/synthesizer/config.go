@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codebuddy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -272,6 +273,12 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 		if compat.Disabled {
 			continue
 		}
+		if strings.EqualFold(strings.TrimSpace(compat.AuthType), codebuddy.AuthType) {
+			if auth := s.synthesizeCodeBuddy(ctx, compat, i); auth != nil {
+				out = append(out, auth)
+			}
+			continue
+		}
 		prefix := strings.TrimSpace(compat.Prefix)
 		providerName := strings.ToLower(strings.TrimSpace(compat.Name))
 		if providerName == "" {
@@ -369,6 +376,87 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 		}
 	}
 	return out
+}
+
+// synthesizeCodeBuddy creates the single runtime auth record backed by the
+// CodeBuddy desktop session file.  The request executor rereads that file so a
+// desktop-side token refresh becomes visible without copying token material
+// into CLIProxyAPI's own auth directory.
+func (s *ConfigSynthesizer) synthesizeCodeBuddy(ctx *SynthesisContext, compat *config.OpenAICompatibility, configIndex int) *coreauth.Auth {
+	if ctx == nil || ctx.Config == nil || compat == nil {
+		return nil
+	}
+	authFile, errFind := codebuddy.FindAuthFile(compat.AuthDir, compat.AuthFile)
+	if errFind != nil || strings.TrimSpace(authFile) == "" {
+		return nil
+	}
+
+	providerName := strings.ToLower(strings.TrimSpace(compat.Name))
+	if providerName == "" {
+		providerName = codebuddy.AuthType
+	}
+	providerKey := util.OpenAICompatibleProviderKey(providerName)
+	baseURL := strings.TrimSpace(compat.BaseURL)
+	if baseURL == "" {
+		baseURL = codebuddy.DefaultBackendBaseURL
+	}
+	id, token := ctx.IDGenerator.Next("openai-compatibility:"+providerName, authFile, baseURL)
+	attrs := map[string]string{
+		"source":              fmt.Sprintf("config:%s[%s]", providerName, token),
+		"base_url":            baseURL,
+		"compat_name":         compat.Name,
+		"provider_key":        providerKey,
+		"config_index":        strconv.Itoa(configIndex),
+		"auth_type":           codebuddy.AuthType,
+		"auth_kind":           coreauth.AuthKindOAuth,
+		"codebuddy_auth_file": authFile,
+	}
+	if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
+		attrs["models_hash"] = hash
+	}
+	if compat.Priority != 0 {
+		attrs["priority"] = strconv.Itoa(compat.Priority)
+	}
+	addConfigHeadersToAttrs(compat.Headers, attrs)
+
+	metadata := map[string]any{}
+	if compat.DisableCooling {
+		metadata["disable_cooling"] = true
+	}
+	if manager, errManager := codebuddy.NewCredentialManager(authFile); errManager == nil {
+		if summary, errSummary := manager.Summary(); errSummary == nil {
+			if summary.UID != "" {
+				metadata["email"] = summary.UID
+			}
+			if summary.TokenExpiresAt > 0 {
+				metadata["expires_at"] = summary.TokenExpiresAt
+			}
+			if summary.Nickname != "" {
+				metadata["nickname"] = summary.Nickname
+			}
+		}
+	}
+	label := strings.TrimSpace(compat.Name)
+	if label == "" {
+		label = codebuddy.AuthType
+	}
+	if nickname, ok := metadata["nickname"].(string); ok && nickname != "" {
+		label = nickname
+	}
+	if len(metadata) == 0 {
+		metadata = nil
+	}
+	return &coreauth.Auth{
+		ID:         id,
+		Provider:   providerKey,
+		Label:      label,
+		Prefix:     strings.TrimSpace(compat.Prefix),
+		Status:     coreauth.StatusActive,
+		Attributes: attrs,
+		Metadata:   metadata,
+		CreatedAt:  ctx.Now,
+		UpdatedAt:  ctx.Now,
+	}
 }
 
 // synthesizeVertexCompat creates Auth entries for Vertex-compatible providers.

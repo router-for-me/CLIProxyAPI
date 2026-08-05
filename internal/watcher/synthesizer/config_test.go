@@ -1,6 +1,9 @@
 package synthesizer
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -557,6 +560,69 @@ func TestConfigSynthesizer_OpenAICompat_UsesNamespacedProviderKey(t *testing.T) 
 	}
 	if auth.Attributes["config_index"] != "0" {
 		t.Fatalf("config_index = %q, want 0", auth.Attributes["config_index"])
+	}
+}
+
+func TestConfigSynthesizer_CodeBuddySessionFile(t *testing.T) {
+	authPath := filepath.Join(t.TempDir(), "codebuddy.info")
+	session := map[string]any{
+		"account": map[string]any{
+			"uid":          "user-42",
+			"nickname":     "CodeBuddy User",
+			"enterpriseId": "enterprise-42",
+		},
+		"auth": map[string]any{
+			"accessToken":  "access-token",
+			"refreshToken": "refresh-token",
+			"expiresAt":    time.Now().Add(time.Hour).UnixMilli(),
+		},
+	}
+	raw, errMarshal := json.Marshal(session)
+	if errMarshal != nil {
+		t.Fatalf("marshal session: %v", errMarshal)
+	}
+	if errWrite := os.WriteFile(authPath, raw, 0o600); errWrite != nil {
+		t.Fatalf("write session: %v", errWrite)
+	}
+
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:     "codebuddy",
+			AuthType: "codebuddy",
+			AuthFile: authPath,
+			BaseURL:  "https://copilot.tencent.com/v2",
+			Prefix:   "cb",
+		}}},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	auth := auths[0]
+	if auth.Provider != "openai-compatible-codebuddy" {
+		t.Fatalf("provider = %q, want openai-compatible-codebuddy", auth.Provider)
+	}
+	if auth.Label != "CodeBuddy User" {
+		t.Fatalf("label = %q, want CodeBuddy User", auth.Label)
+	}
+	if auth.Prefix != "cb" {
+		t.Fatalf("prefix = %q, want cb", auth.Prefix)
+	}
+	if auth.Attributes["auth_type"] != "codebuddy" {
+		t.Fatalf("auth_type = %q, want codebuddy", auth.Attributes["auth_type"])
+	}
+	if auth.Attributes["codebuddy_auth_file"] != authPath {
+		t.Fatalf("codebuddy_auth_file = %q, want %q", auth.Attributes["codebuddy_auth_file"], authPath)
+	}
+	if got, _ := auth.Metadata["email"].(string); got != "user-42" {
+		t.Fatalf("metadata email = %q, want user-42", got)
 	}
 }
 
