@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -173,19 +174,167 @@ func sanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySchema b
 		payloadStr = renamed
 	}
 
-	toolSchemaCleaner := util.CleanJSONSchemaForGemini
-	if useAntigravitySchema {
-		toolSchemaCleaner = util.CleanJSONSchemaForAntigravity
+	toolSchemaCleaner := func(schema string) string {
+		return util.CleanJSONSchemaForAntigravityTool(schema, useAntigravitySchema)
 	}
-	responseSchemaCleaner := util.CleanJSONSchemaForAntigravityResponse
 
+	sanitizeThenClean := func(schemaRaw string, clean func(string) string) string {
+		sanitized, errSanitize := sanitizeAntigravityBooleanSubschemas([]byte(schemaRaw))
+		if errSanitize != nil {
+			log.Debugf("antigravity: failed to sanitize boolean subschemas: %v", errSanitize)
+			return clean(schemaRaw)
+		}
+		return clean(string(sanitized))
+	}
 	cleanNestedToolSchema := func(schemaRaw string) string {
-		return cleanNestedSchema(toolSchemaCleaner, schemaRaw)
+		return sanitizeThenClean(schemaRaw, func(sanitized string) string {
+			return cleanNestedSchema(toolSchemaCleaner, sanitized)
+		})
+	}
+	cleanResponseSchema := func(schemaRaw string) string {
+		return sanitizeThenClean(schemaRaw, util.CleanJSONSchemaForAntigravityResponse)
 	}
 	payloadStr = cleanAntigravitySchemasAtPaths(payloadStr, antigravityDeclarationSchemaPaths(payloadStr), cleanNestedToolSchema)
-	payloadStr = cleanAntigravitySchemasAtPaths(payloadStr, antigravityGenerationSchemaPaths(payloadStr), responseSchemaCleaner)
+	payloadStr = cleanAntigravitySchemasAtPaths(payloadStr, antigravityGenerationSchemaPaths(payloadStr), cleanResponseSchema)
 	return payloadStr
 }
+
+// sanitizeAntigravityBooleanSubschemas replaces true schemas with their equivalent empty object.
+// False schemas and booleans outside schema-bearing keywords are preserved.
+func sanitizeAntigravityBooleanSubschemas(raw []byte) ([]byte, error) {
+	return sanitizeAntigravitySchemaNode(json.RawMessage(raw))
+}
+
+func sanitizeAntigravitySchemaNode(raw json.RawMessage) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if bytes.Equal(trimmed, []byte("true")) {
+		return json.RawMessage(`{}`), nil
+	}
+	if bytes.Equal(trimmed, []byte("false")) {
+		return append(json.RawMessage(nil), raw...), nil
+	}
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("empty schema")
+	}
+
+	switch trimmed[0] {
+	case '{':
+		var schema map[string]json.RawMessage
+		if errUnmarshal := json.Unmarshal(trimmed, &schema); errUnmarshal != nil {
+			return nil, fmt.Errorf("decode schema object: %w", errUnmarshal)
+		}
+
+		changed := false
+		for _, keyword := range antigravitySingleSchemaKeywords {
+			child, ok := schema[keyword]
+			if !ok {
+				continue
+			}
+			sanitized, errSanitize := sanitizeAntigravitySchemaNode(child)
+			if errSanitize != nil {
+				return nil, fmt.Errorf("sanitize %s: %w", keyword, errSanitize)
+			}
+			if !bytes.Equal(sanitized, child) {
+				schema[keyword] = sanitized
+				changed = true
+			}
+		}
+
+		for _, keyword := range antigravitySchemaMapKeywords {
+			rawChildren, ok := schema[keyword]
+			if !ok {
+				continue
+			}
+			var children map[string]json.RawMessage
+			if errUnmarshal := json.Unmarshal(rawChildren, &children); errUnmarshal != nil {
+				continue
+			}
+			childrenChanged := false
+			for name, child := range children {
+				if keyword == "dependencies" && firstJSONToken(child) == '[' {
+					continue
+				}
+				sanitized, errSanitize := sanitizeAntigravitySchemaNode(child)
+				if errSanitize != nil {
+					return nil, fmt.Errorf("sanitize %s.%s: %w", keyword, name, errSanitize)
+				}
+				if !bytes.Equal(sanitized, child) {
+					children[name] = sanitized
+					childrenChanged = true
+				}
+			}
+			if childrenChanged {
+				updated, errMarshal := json.Marshal(children)
+				if errMarshal != nil {
+					return nil, fmt.Errorf("encode %s: %w", keyword, errMarshal)
+				}
+				schema[keyword] = updated
+				changed = true
+			}
+		}
+
+		if !changed {
+			return append(json.RawMessage(nil), raw...), nil
+		}
+		updated, errMarshal := json.Marshal(schema)
+		if errMarshal != nil {
+			return nil, fmt.Errorf("encode schema object: %w", errMarshal)
+		}
+		return updated, nil
+
+	case '[':
+		var schemas []json.RawMessage
+		if errUnmarshal := json.Unmarshal(trimmed, &schemas); errUnmarshal != nil {
+			return nil, fmt.Errorf("decode schema array: %w", errUnmarshal)
+		}
+		changed := false
+		for i, child := range schemas {
+			sanitized, errSanitize := sanitizeAntigravitySchemaNode(child)
+			if errSanitize != nil {
+				return nil, fmt.Errorf("sanitize schema array item %d: %w", i, errSanitize)
+			}
+			if !bytes.Equal(sanitized, child) {
+				schemas[i] = sanitized
+				changed = true
+			}
+		}
+		if !changed {
+			return append(json.RawMessage(nil), raw...), nil
+		}
+		updated, errMarshal := json.Marshal(schemas)
+		if errMarshal != nil {
+			return nil, fmt.Errorf("encode schema array: %w", errMarshal)
+		}
+		return updated, nil
+
+	default:
+		if !json.Valid(trimmed) {
+			return nil, fmt.Errorf("invalid schema JSON")
+		}
+		return append(json.RawMessage(nil), raw...), nil
+	}
+}
+
+func firstJSONToken(raw json.RawMessage) byte {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return 0
+	}
+	return trimmed[0]
+}
+
+var (
+	antigravitySingleSchemaKeywords = []string{
+		"additionalItems", "additionalProperties", "contains", "contentSchema",
+		"if", "then", "else", "not", "propertyNames", "items",
+		"unevaluatedItems", "unevaluatedProperties",
+		"prefixItems", "allOf", "anyOf", "oneOf",
+	}
+	antigravitySchemaMapKeywords = []string{
+		"properties", "patternProperties", "dependentSchemas", "dependencies",
+		"$defs", "definitions",
+	}
+)
 
 func cleanAntigravitySchemasAtPaths(payloadStr string, schemaPaths []string, clean func(string) string) string {
 	for _, schemaPath := range schemaPaths {
@@ -258,7 +407,8 @@ func antigravityDeclarationSchemaPaths(payloadStr string) []string {
 	paths := make([]string, 0, 8)
 	for _, base := range antigravityFunctionDeclarationPaths(payloadStr) {
 		for _, key := range antigravityDeclarationSchemaKeys {
-			if gjson.Get(payloadStr, base+"."+key).IsObject() {
+			schema := gjson.Get(payloadStr, base+"."+key)
+			if schema.IsObject() || schema.Type == gjson.True || schema.Type == gjson.False {
 				paths = append(paths, base+"."+key)
 			}
 		}
@@ -271,7 +421,8 @@ func antigravityGenerationSchemaPaths(payloadStr string) []string {
 	for _, container := range antigravityGenerationConfigContainers {
 		for _, key := range antigravityGenerationSchemaKeys {
 			path := container + "." + key
-			if gjson.Get(payloadStr, path).IsObject() {
+			schema := gjson.Get(payloadStr, path)
+			if schema.IsObject() || schema.Type == gjson.True || schema.Type == gjson.False {
 				paths = append(paths, path)
 			}
 		}

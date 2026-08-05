@@ -15,6 +15,12 @@ import (
 const geminiResponsesThoughtSignature = "skip_thought_signature_validator"
 
 func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte, stream bool) []byte {
+	return ConvertOpenAIResponsesRequestToGeminiWithSchemaCleaner(modelName, inputRawJSON, stream, util.CleanJSONSchemaForGemini)
+}
+
+// ConvertOpenAIResponsesRequestToGeminiWithSchemaCleaner converts a Responses request while letting
+// provider-specific callers defer schema normalization to their outbound request boundary.
+func ConvertOpenAIResponsesRequestToGeminiWithSchemaCleaner(modelName string, inputRawJSON []byte, stream bool, cleanSchema func(string) string) []byte {
 	rawJSON := inputRawJSON
 
 	// Note: stream parameter is part of the fixed method signature
@@ -325,7 +331,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 					funcDecl, _ = sjson.SetBytes(funcDecl, "description", desc.String())
 				}
 				if params := tool.Get("parameters"); params.Exists() {
-					funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(util.CleanJSONSchemaForGemini(params.Raw)))
+					funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(cleanSchema(params.Raw)))
 				}
 
 				functionDeclarations = append(functionDeclarations, funcDecl)
