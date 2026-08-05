@@ -109,3 +109,285 @@ func TestShouldNormalizeOpenAIToolResultsForModel(t *testing.T) {
 		t.Fatal("nil compatibility config unexpectedly enabled normalization")
 	}
 }
+
+func TestEnsureOpenAICompatAssistantReasoningContent(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         string
+		wantReasoning string
+		wantExists    bool
+	}{
+		{
+			name:          "assistant tool_calls without reasoning_content gets fallback",
+			input:         `{"messages":[{"role":"user","content":"read"},{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}]}`,
+			wantReasoning: "[reasoning unavailable]",
+			wantExists:    true,
+		},
+		{
+			name:          "assistant tool_calls with empty reasoning_content gets fallback",
+			input:         `{"messages":[{"role":"assistant","content":"","reasoning_content":"   ","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}]}`,
+			wantReasoning: "[reasoning unavailable]",
+			wantExists:    true,
+		},
+		{
+			name:          "assistant tool_calls with existing reasoning_content preserved",
+			input:         `{"messages":[{"role":"assistant","content":"","reasoning_content":"existing reasoning","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}]}`,
+			wantReasoning: "existing reasoning",
+			wantExists:    true,
+		},
+		{
+			name:       "assistant text only without tool_calls has no reasoning_content injected",
+			input:      `{"messages":[{"role":"assistant","content":"hello"}]}`,
+			wantExists: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EnsureOpenAICompatAssistantReasoningContent([]byte(tt.input))
+			var assistantMsg gjson.Result
+			gjson.GetBytes(got, "messages").ForEach(func(_, m gjson.Result) bool {
+				if m.Get("role").String() == "assistant" {
+					assistantMsg = m
+					return false
+				}
+				return true
+			})
+			reasoning := assistantMsg.Get("reasoning_content")
+			if reasoning.Exists() != tt.wantExists {
+				t.Fatalf("reasoning.Exists() = %t, want %t. Payload: %s", reasoning.Exists(), tt.wantExists, string(got))
+			}
+			if tt.wantExists && reasoning.String() != tt.wantReasoning {
+				t.Fatalf("reasoning_content = %q, want %q. Payload: %s", reasoning.String(), tt.wantReasoning, string(got))
+			}
+		})
+	}
+}
+
+func TestStripOpenAICompatAssistantReasoningContent(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         string
+		wantReasoning bool
+	}{
+		{
+			name:          "assistant with reasoning_content gets stripped",
+			input:         `{"messages":[{"role":"assistant","content":"","reasoning_content":"thinking text","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}]}`,
+			wantReasoning: false,
+		},
+		{
+			name:          "assistant without reasoning_content unchanged",
+			input:         `{"messages":[{"role":"assistant","content":"hello"}]}`,
+			wantReasoning: false,
+		},
+		{
+			name:          "multiple assistant messages with reasoning_content all stripped",
+			input:         `{"messages":[{"role":"assistant","content":"","reasoning_content":"first","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]},{"role":"user","content":"next"},{"role":"assistant","content":"","reasoning_content":"second","tool_calls":[{"id":"call_2","type":"function","function":{"name":"write_file","arguments":"{}"}}]}]}`,
+			wantReasoning: false,
+		},
+		{
+			name:          "non-assistant messages with reasoning_content untouched",
+			input:         `{"messages":[{"role":"user","content":"hello","reasoning_content":"should stay"}]}`,
+			wantReasoning: false,
+		},
+		{
+			name:          "mixed messages only assistant reasoning_content stripped",
+			input:         `{"messages":[{"role":"user","content":"hello","reasoning_content":"user reasoning"},{"role":"assistant","content":"","reasoning_content":"assistant reasoning","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}]}`,
+			wantReasoning: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := StripOpenAICompatAssistantReasoningContent([]byte(tt.input))
+			var foundReasoning bool
+			gjson.GetBytes(got, "messages").ForEach(func(_, m gjson.Result) bool {
+				if m.Get("role").String() == "assistant" && m.Get("reasoning_content").Exists() {
+					foundReasoning = true
+					return false
+				}
+				return true
+			})
+			if foundReasoning != tt.wantReasoning {
+				t.Fatalf("assistant reasoning_content exists = %t, want %t. Payload: %s", foundReasoning, tt.wantReasoning, string(got))
+			}
+		})
+	}
+}
+
+func TestShouldEnsureOpenAICompatReasoningContent(t *testing.T) {
+	tests := []struct {
+		name           string
+		upstreamModel  string
+		requestedModel string
+		payload        string
+		want           bool
+	}{
+		{
+			name:          "deepseek-v4-reasoner model",
+			upstreamModel: "deepseek-v4-reasoner",
+			want:          true,
+		},
+		{
+			name:          "deepseek-v4-flash model",
+			upstreamModel: "deepseek-v4-flash",
+			want:          true,
+		},
+		{
+			name:          "kimi-toggle-thinking-model",
+			upstreamModel: "kimi-toggle-thinking-model",
+			want:          true,
+		},
+		{
+			name:          "model with thinking suffix",
+			upstreamModel: "custom-model(1024)",
+			want:          true,
+		},
+		{
+			// An invalid suffix that the canonical ApplyRequestThinking pipeline
+			// treats as no thinking config must not enable fallback injection.
+			name:          "invalid suffix does not enable reasoning",
+			upstreamModel: "gpt-4o(foo)",
+			want:          false,
+		},
+		{
+			// A valid level suffix on a non-reasoning model name still signals
+			// explicit thinking intent.
+			name:          "valid level suffix enables reasoning",
+			upstreamModel: "gpt-4o(high)",
+			want:          true,
+		},
+		{
+			// An auto suffix enables reasoning intent.
+			name:          "auto suffix enables reasoning",
+			upstreamModel: "gpt-4o(auto)",
+			want:          true,
+		},
+		{
+			name:    "payload with reasoning_effort",
+			payload: `{"model":"gpt-4o","reasoning_effort":"medium"}`,
+			want:    true,
+		},
+		{
+			name:          "non-reasoning standard model",
+			upstreamModel: "gpt-4o",
+			payload:       `{"model":"gpt-4o"}`,
+			want:          false,
+		},
+		{
+			// Reasoning-capable model with thinking explicitly disabled must
+			// not trigger fallback reasoning_content injection.
+			name:          "reasoning model with reasoning_effort none disabled",
+			upstreamModel: "deepseek-v4-reasoner",
+			payload:       `{"model":"deepseek-v4-reasoner","reasoning_effort":"none"}`,
+			want:          false,
+		},
+		{
+			name:          "reasoning model with none thinking suffix",
+			upstreamModel: "deepseek-v4-reasoner(none)",
+			payload:       `{"model":"deepseek-v4-reasoner"}`,
+			want:          false,
+		},
+		{
+			name:          "reasoning model with zero budget thinking suffix",
+			upstreamModel: "deepseek-v4-reasoner(0)",
+			payload:       `{"model":"deepseek-v4-reasoner"}`,
+			want:          false,
+		},
+		{
+			// A cannot-disable model requested with a "(none)" suffix is clamped
+			// back to the lowest supported level by the canonical thinking
+			// pipeline. The effective payload reasoning_effort:"low" is thinking
+			// enabled, so fallback reasoning_content must still be injected.
+			name:          "cannot-disable model none suffix clamped to low in payload stays thinking",
+			upstreamModel: "deepseek-v4-reasoner(none)",
+			payload:       `{"model":"deepseek-v4-reasoner","reasoning_effort":"low"}`,
+			want:          true,
+		},
+		{
+			// Same as above but with a "(0)" budget suffix that is clamped to
+			// the lowest supported level ("low") in the translated payload.
+			name:          "cannot-disable model zero suffix clamped to low in payload stays thinking",
+			upstreamModel: "deepseek-v4-reasoner(0)",
+			payload:       `{"model":"deepseek-v4-reasoner","reasoning_effort":"low"}`,
+			want:          true,
+		},
+		{
+			// A non-disabled Kimi thinking object in the translated payload
+			// overrides a raw "(none)" suffix because the canonical pipeline
+			// normalized the request back into thinking mode.
+			name:          "cannot-disable model none suffix with enabled thinking object stays thinking",
+			upstreamModel: "deepseek-v4-reasoner(none)",
+			payload:       `{"model":"deepseek-v4-reasoner","thinking":{"type":"enabled"}}`,
+			want:          true,
+		},
+		{
+			// requestedModel none suffix with no payload thinking signal still
+			// disables reasoning via the raw-suffix fallback (request never
+			// entered the thinking pipeline).
+			name:           "requested model none suffix with no payload signal disables reasoning",
+			upstreamModel:  "deepseek-v4-reasoner",
+			requestedModel: "deepseek-v4-reasoner(none)",
+			payload:        `{"model":"deepseek-v4-reasoner"}`,
+			want:           false,
+		},
+		{
+			name:          "kimi reasoning model with thinking.type disabled",
+			upstreamModel: "kimi-toggle-thinking-model",
+			payload:       `{"model":"kimi-toggle-thinking-model","thinking":{"type":"disabled"}}`,
+			want:          false,
+		},
+		{
+			// A non-disabled thinking object (enabled) on a reasoning model
+			// still requires reasoning_content.
+			name:          "kimi reasoning model with thinking.type enabled",
+			upstreamModel: "kimi-toggle-thinking-model",
+			payload:       `{"model":"kimi-toggle-thinking-model","thinking":{"type":"enabled"}}`,
+			want:          true,
+		},
+		{
+			// Native Kimi thinking.type:"disabled" must win over a legacy
+			// reasoning_effort left by the OpenAI applier. A payload override
+			// may disable Kimi thinking after the applier emitted an effort.
+			name:          "kimi thinking.type disabled wins over reasoning_effort low",
+			upstreamModel: "kimi-toggle-thinking-model",
+			payload:       `{"model":"kimi-toggle-thinking-model","reasoning_effort":"low","thinking":{"type":"disabled"}}`,
+			want:          false,
+		},
+		{
+			// Native Kimi thinking.type:"enabled" must win over
+			// reasoning_effort:"none" (native field has higher precedence,
+			// matching extractKimiConfig).
+			name:          "kimi thinking.type enabled wins over reasoning_effort none",
+			upstreamModel: "kimi-toggle-thinking-model",
+			payload:       `{"model":"kimi-toggle-thinking-model","reasoning_effort":"none","thinking":{"type":"enabled"}}`,
+			want:          true,
+		},
+		{
+			// Non-Kimi model with both fields: thinking.type:"disabled" still
+			// wins over reasoning_effort for consistency.
+			name:          "non-kimi thinking.type disabled wins over reasoning_effort",
+			upstreamModel: "deepseek-v4-reasoner",
+			payload:       `{"model":"deepseek-v4-reasoner","reasoning_effort":"high","thinking":{"type":"disabled"}}`,
+			want:          false,
+		},
+		{
+			// requestedModel suffix disabling thinking wins over an otherwise
+			// reasoning-capable upstream model.
+			name:           "requested model none suffix disables reasoning",
+			upstreamModel:  "deepseek-v4-reasoner",
+			requestedModel: "deepseek-v4-reasoner(none)",
+			payload:        `{"model":"deepseek-v4-reasoner"}`,
+			want:           false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ShouldEnsureOpenAICompatReasoningContent(tt.upstreamModel, tt.requestedModel, []byte(tt.payload))
+			if got != tt.want {
+				t.Fatalf("ShouldEnsureOpenAICompatReasoningContent() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
