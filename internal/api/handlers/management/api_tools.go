@@ -260,6 +260,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		return current, nil
 	}
 
+	maintenanceSource := auth.Clone()
 	refreshToken := stringValue(metadata, "refresh_token")
 	if refreshToken == "" {
 		return "", fmt.Errorf("antigravity refresh token missing")
@@ -335,7 +336,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 	if h != nil && h.authManager != nil {
 		auth.LastRefreshedAt = now
 		auth.UpdatedAt = now
-		_, _ = h.authManager.Update(ctx, auth)
+		_, _ = h.authManager.UpdateCredentialMaintenance(ctx, maintenanceSource, auth)
 	}
 
 	return strings.TrimSpace(tokenResp.AccessToken), nil

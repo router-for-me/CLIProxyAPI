@@ -692,14 +692,21 @@ func cooldownReason(statusMessage string, quota QuotaState, lastErr *Error) stri
 
 // MarkResult records an execution result and notifies hooks.
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
+	_ = m.markResult(ctx, result)
+}
+
+// markResult records a result and reports whether callers must stop trying
+// additional models on the same auth because the credential was disabled.
+func (m *Manager) markResult(ctx context.Context, result Result) (stopAuth bool) {
 	if result.AuthID == "" {
-		return
+		return false
 	}
+	unlockAuthMutation := m.lockAuthMutation(result.AuthID)
 
 	shouldResumeModel := false
 	shouldSuspendModel := false
+	var modelsToResume []string
 	suspendReason := ""
-	clearModelQuota := false
 	setModelQuota := false
 	var authSnapshot *Auth
 	cooldownStateChanged := false
@@ -713,13 +720,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			cooldownRecordsBefore = m.cooldownStateRecordsForAuthLocked(auth, now)
 		}
 		auth.recordRecentRequest(now, result.Success)
+		paymentDisabled := isPaymentRequiredDisabled(auth)
+		if paymentDisabled {
+			stopAuth = true
+		}
 		if result.Success {
 			auth.Success++
 		} else {
 			auth.Failed++
 		}
 
-		if result.Success {
+		if result.Success && paymentDisabled {
+			auth.UpdatedAt = now
+		} else if result.Success {
 			if result.Model != "" {
 				state := ensureModelState(auth, result.Model)
 				resetModelState(state, now)
@@ -731,7 +744,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 				auth.UpdatedAt = now
 				shouldResumeModel = true
-				clearModelQuota = true
 			} else {
 				clearAuthStateOnSuccess(auth, now)
 			}
@@ -739,6 +751,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if result.Model != "" {
 				if !isRequestScopedResultError(result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
+					statusCode := statusCodeFromResult(result.Error)
+					paymentAction := ""
+					var priorState *ModelState
+					if statusCode == http.StatusPaymentRequired {
+						cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+						paymentAction = paymentRequiredActionForAuth(cfg, auth)
+						if paymentAction == "disable" {
+							if clonedAuth := auth.Clone(); clonedAuth != nil {
+								priorState = clonedAuth.ModelStates[result.Model]
+							}
+						}
+					}
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
 					state.Status = StatusError
@@ -750,7 +774,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						auth.StatusMessage = result.Error.Message
 					}
 
-					statusCode := statusCodeFromResult(result.Error)
 					if isModelSupportResultError(result.Error) {
 						next := now.Add(12 * time.Hour)
 						state.NextRetryAfter = next
@@ -788,7 +811,22 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								suspendReason = "unauthorized"
 								shouldSuspendModel = true
 							}
-						case 402, 403:
+						case 402:
+							if applyPaymentRequiredModelFailure(auth, state, now, result.Error, disableCooling, paymentAction) {
+								suspendReason = "payment_required"
+								shouldSuspendModel = true
+							} else if paymentAction == "disable" {
+								if priorState == nil {
+									resetModelState(state, now)
+								} else {
+									auth.ModelStates[result.Model] = priorState
+								}
+								modelsToResume = append(modelsToResume, clearPaymentRequiredModelCooldowns(auth, now)...)
+							}
+							if auth.Disabled || auth.Status == StatusDisabled {
+								stopAuth = true
+							}
+						case 403:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
@@ -841,13 +879,22 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state.Unavailable = false
 						state.Quota.Exceeded = false
 					}
-					auth.Status = StatusError
+					if !auth.Disabled && auth.Status != StatusDisabled {
+						auth.Status = StatusError
+					}
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
 				}
 			} else {
 				disableCooling := m.cooldownDisabledForAuth(auth)
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+				if statusCodeFromResult(result.Error) == http.StatusPaymentRequired && paymentRequiredActionForAuth(cfg, auth) == "disable" {
+					disableAuthForPaymentRequired(auth, now, result.Error)
+					modelsToResume = append(modelsToResume, clearPaymentRequiredModelCooldowns(auth, now)...)
+					stopAuth = true
+				} else {
+					applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				}
 			}
 		}
 
@@ -866,28 +913,33 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		m.persistCooldownStates(context.Background())
 	}
 
-	if clearModelQuota && result.Model != "" {
-		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, result.Model)
-	}
 	if setModelQuota && result.Model != "" {
 		registry.GetGlobalRegistry().SetModelQuotaExceeded(result.AuthID, result.Model)
 	}
-	if shouldResumeModel {
-		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, result.Model)
+	if shouldResumeModel && result.Model != "" {
+		modelsToResume = append(modelsToResume, result.Model)
+	}
+	if len(modelsToResume) > 0 {
+		for _, model := range dedupeStrings(modelsToResume) {
+			registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, model)
+			registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, model)
+		}
 	} else if shouldSuspendModel {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
 	}
 
+	unlockAuthMutation()
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, authSnapshot)
+	return stopAuth
 }
 
-func (m *Manager) recordExecutionResult(ctx context.Context, result Result, auth *Auth, ephemeral bool) {
+func (m *Manager) recordExecutionResult(ctx context.Context, result Result, auth *Auth, ephemeral bool) bool {
 	if !ephemeral {
-		m.MarkResult(ctx, result)
-		return
+		return m.markResult(ctx, result)
 	}
 	m.reportHomeResult(ctx, result, auth)
+	return false
 }
 
 // reportHomeResult only observes a Home dispatch result and never updates local auth state.

@@ -336,7 +336,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		MaxRetryCredentials:           1,
 		MaxRetryInterval:              1,
 		WebsocketAuth:                 false,
-		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: false, SwitchPreviewModel: false, AntigravityCredits: false},
+		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: false, SwitchPreviewModel: false, AntigravityCredits: false, OnPaymentRequired: "cooldown"},
 		Antigravity:                   config.AntigravityConfig{SensitiveWords: []string{"old-word"}},
 		ClaudeKey:                     []config.ClaudeKey{{APIKey: "c1"}},
 		CodexKey:                      []config.CodexKey{{APIKey: "x1"}},
@@ -362,7 +362,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		MaxRetryCredentials:           3,
 		MaxRetryInterval:              3,
 		WebsocketAuth:                 true,
-		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true, AntigravityCredits: true},
+		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true, AntigravityCredits: true, OnPaymentRequired: "disable"},
 		Antigravity:                   config.AntigravityConfig{SensitiveWords: []string{"new-word-1", "new-word-2"}},
 		XAI:                           config.XAIConfig{InjectXSearch: true},
 		ClaudeKey: []config.ClaudeKey{
@@ -412,6 +412,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "quota-exceeded.switch-project: false -> true")
 	expectContains(t, details, "quota-exceeded.switch-preview-model: false -> true")
 	expectContains(t, details, "quota-exceeded.antigravity-credits: false -> true")
+	expectContains(t, details, "quota-exceeded.on-payment-required: cooldown -> disable")
 	expectContains(t, details, "antigravity.sensitive-words: 1 -> 2")
 	expectContains(t, details, "xai.inject-x-search: false -> true")
 	expectContains(t, details, "api-keys count: 1 -> 2")

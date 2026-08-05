@@ -281,8 +281,11 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 	// immediately for API calls, rather than waiting for model registration to complete.
 	op := "register"
 	var err error
+	preservePaymentDisabledRegistration := false
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
 		auth.CreatedAt = existing.CreatedAt
+		preservePaymentDisabledRegistration = coreauth.IsPaymentRequiredDisabled(existing) &&
+			coreauth.IsPaymentRequiredDisabled(auth)
 		if !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
 			auth.LastRefreshedAt = existing.LastRefreshedAt
 			auth.NextRefreshAfter = existing.NextRefreshAfter
@@ -303,6 +306,9 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 			return nil
 		}
 		auth = current
+	}
+	if preservePaymentDisabledRegistration {
+		return nil
 	}
 	return auth
 }

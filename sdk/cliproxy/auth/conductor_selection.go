@@ -159,17 +159,18 @@ func (m *Manager) RefreshSchedulerAll() {
 // ReconcileRegistryModelStates aligns per-model runtime state with the current
 // registry snapshot for one auth.
 //
-// Supported models are reset to a clean state because re-registration already
-// cleared the registry-side cooldown/suspension snapshot. ModelStates for
-// models that are no longer present in the registry are pruned entirely so
-// renamed/removed models cannot keep auth-level status stale.
+// Normal catalog refreshes reset supported models because re-registration
+// clears the registry-side cooldown/suspension snapshot. Watcher updates
+// preserve supported runtime state and restore its registry markers. Models
+// no longer present in the registry are always pruned so renamed/removed
+// models cannot keep auth-level status stale.
 func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID string) {
 	if m == nil || authID == "" {
 		return
 	}
 
 	supportedModels := registry.GetGlobalRegistry().GetModelsForClient(authID)
-	supported := make(map[string]struct{}, len(supportedModels))
+	supported := make(map[string]string, len(supportedModels))
 	for _, model := range supportedModels {
 		if model == nil {
 			continue
@@ -178,10 +179,12 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 		if modelKey == "" {
 			continue
 		}
-		supported[modelKey] = struct{}{}
+		supported[modelKey] = model.ID
 	}
 
 	var snapshot *Auth
+	runtimeStatesToRestore := make(map[string]*ModelState)
+	preserveRuntimeState := shouldSkipPersist(ctx)
 	now := time.Now()
 
 	m.mu.Lock()
@@ -193,7 +196,8 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 			if baseModel == "" {
 				baseModel = strings.TrimSpace(modelKey)
 			}
-			if _, supportedModel := supported[baseModel]; !supportedModel {
+			registryModel, supportedModel := supported[baseModel]
+			if !supportedModel {
 				// Drop state for models that disappeared from the current registry
 				// snapshot. Keeping them around leaks stale errors into auth-level
 				// status, management output, and websocket fallback checks.
@@ -205,6 +209,10 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 				continue
 			}
 			if modelStateIsClean(state) {
+				continue
+			}
+			if preserveRuntimeState {
+				runtimeStatesToRestore[registryModel] = state.Clone()
 				continue
 			}
 			resetModelState(state, now)
@@ -231,6 +239,18 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 
 	if m.scheduler != nil && snapshot != nil {
 		m.scheduler.upsertAuth(snapshot)
+	}
+	for model, state := range runtimeStatesToRestore {
+		if state.Quota.Exceeded {
+			registry.GetGlobalRegistry().SetModelQuotaExceeded(authID, model)
+		}
+		if state.Unavailable {
+			reason := state.Quota.Reason
+			if reason == "" {
+				reason = state.StatusMessage
+			}
+			registry.GetGlobalRegistry().SuspendClientModel(authID, model, reason)
+		}
 	}
 }
 

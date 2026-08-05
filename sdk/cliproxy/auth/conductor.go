@@ -153,6 +153,10 @@ type Manager struct {
 	refreshLoop   *authAutoRefreshLoop
 
 	requestPrepareLocks sync.Map
+	// authMutationLocks serialize each auth's runtime, scheduler, and persistence
+	// side effects so a newer result cannot be overwritten by an older update.
+	authMutationLocks   sync.Map
+	authMutationLocksMu sync.Mutex
 	// refreshLocks serializes credential refresh per auth ID so concurrent
 	// 401 recoveries and auto-refresh workers do not race the same refresh_token.
 	refreshLocks sync.Map

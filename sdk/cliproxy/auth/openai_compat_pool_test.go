@@ -835,3 +835,72 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolStopsOnInvalidBootstrap(t *te
 		t.Fatalf("stream calls = %v, want only first upstream model", got)
 	}
 }
+
+func TestManagerOpenAICompatPoolStopsAfterPaymentRequiredDisable(t *testing.T) {
+	alias := "pooled-pay-alias"
+	models := []internalconfig.OpenAICompatibilityModel{
+		{Name: "model-a", Alias: alias},
+		{Name: "model-b", Alias: alias},
+	}
+	payErr := &Error{HTTPStatus: http.StatusPaymentRequired, Message: "insufficient balance"}
+	paymentRequiredConfig := func() *internalconfig.Config {
+		return &internalconfig.Config{
+			QuotaExceeded: internalconfig.QuotaExceeded{OnPaymentRequired: "disable"},
+			OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+				Name: "pool", Models: models,
+			}},
+		}
+	}
+
+	t.Run("execute", func(t *testing.T) {
+		executor := &openAICompatPoolExecutor{
+			id:            openAICompatPoolProviderKey,
+			executeErrors: map[string]error{"model-a": payErr},
+		}
+		m := newOpenAICompatPoolTestManager(t, alias, models, executor)
+		m.SetConfig(paymentRequiredConfig())
+		_, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+		if err == nil {
+			t.Fatal("expected 402 error")
+		}
+		if got := executor.ExecuteModels(); len(got) != 1 || got[0] != "model-a" {
+			t.Fatalf("execute models = %v, want only model-a", got)
+		}
+		auth, ok := m.GetByID("pool-auth-" + t.Name())
+		if !ok || auth == nil || !auth.Disabled || auth.Status != StatusDisabled {
+			t.Fatalf("auth after 402 = %#v, want disabled", auth)
+		}
+	})
+
+	t.Run("count", func(t *testing.T) {
+		executor := &openAICompatPoolExecutor{
+			id:          openAICompatPoolProviderKey,
+			countErrors: map[string]error{"model-a": payErr},
+		}
+		m := newOpenAICompatPoolTestManager(t, alias, models, executor)
+		m.SetConfig(paymentRequiredConfig())
+		_, err := m.ExecuteCount(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+		if err == nil {
+			t.Fatal("expected 402 error")
+		}
+		if got := executor.CountModels(); len(got) != 1 || got[0] != "model-a" {
+			t.Fatalf("count models = %v, want only model-a", got)
+		}
+	})
+
+	t.Run("stream bootstrap", func(t *testing.T) {
+		executor := &openAICompatPoolExecutor{
+			id:                openAICompatPoolProviderKey,
+			streamFirstErrors: map[string]error{"model-a": payErr},
+		}
+		m := newOpenAICompatPoolTestManager(t, alias, models, executor)
+		m.SetConfig(paymentRequiredConfig())
+		_, err := m.ExecuteStream(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+		if err == nil {
+			t.Fatal("expected 402 error")
+		}
+		if got := executor.StreamModels(); len(got) != 1 || got[0] != "model-a" {
+			t.Fatalf("stream models = %v, want only model-a", got)
+		}
+	})
+}

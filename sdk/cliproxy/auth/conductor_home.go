@@ -1089,6 +1089,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 	if errCandidates != nil {
 		return cliproxyexecutor.Response{}, false, errCandidates
 	}
+candidateLoop:
 	for _, c := range candidates {
 		if ctx.Err() != nil {
 			return cliproxyexecutor.Response{}, false, nil
@@ -1121,7 +1122,9 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(creditsCtx, result)
+				if m.markResult(creditsCtx, result) {
+					continue candidateLoop
+				}
 				continue
 			}
 			m.MarkResult(creditsCtx, result)

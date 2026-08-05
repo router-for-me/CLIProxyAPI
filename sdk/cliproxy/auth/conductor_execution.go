@@ -374,11 +374,14 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(execCtx, result)
+				stopAuth := m.markResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
+				if stopAuth {
+					break
+				}
 				continue
 			}
 			m.MarkResult(execCtx, result)
@@ -505,15 +508,19 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				// count_tokens route and return a generic endpoint 404. Record
 				// the failure for hooks and metrics without suspending a model
 				// that remains usable through the messages endpoint.
+				stopAuth := false
 				if isCountTokensEndpointNotFoundError(errExec, execReq.Model) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
-					m.MarkResult(execCtx, result)
+					stopAuth = m.markResult(execCtx, result)
 				}
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
+				if stopAuth {
+					break
+				}
 				continue
 			}
 			m.MarkResult(execCtx, result)
@@ -907,7 +914,7 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 		return target, nil
 	}
 
-	saved, errUpdate := m.Update(ctx, updated)
+	saved, errUpdate := m.Update(withCredentialMaintenanceUpdate(ctx, target), updated)
 	if errUpdate != nil {
 		return updated, errUpdate
 	}

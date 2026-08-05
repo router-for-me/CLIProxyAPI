@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
 // SetRetryConfig updates retry attempts, credential retry limit and cooldown wait interval.
@@ -75,6 +76,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
+	unlockAuthMutation := m.lockAuthMutation(auth.ID)
 	now := time.Now()
 	clearedCooldown := false
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
@@ -93,11 +95,20 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
-	m.hook.OnAuthRegistered(ctx, auth.Clone())
 	if clearedCooldown {
 		m.persistCooldownStates(ctx)
 	}
-	return auth.Clone(), nil
+	result := auth.Clone()
+	unlockAuthMutation()
+	m.hook.OnAuthRegistered(ctx, result.Clone())
+	return result, nil
+}
+
+// UpdateCredentialMaintenance applies a credential refresh or preparation update
+// without allowing a stale snapshot to cross an authoritative payment-disable or
+// re-enable transition. source must be the auth snapshot used to start maintenance.
+func (m *Manager) UpdateCredentialMaintenance(ctx context.Context, source, updated *Auth) (*Auth, error) {
+	return m.Update(withCredentialMaintenanceUpdate(ctx, source), updated)
 }
 
 // Update replaces an existing auth entry and notifies hooks.
@@ -108,10 +119,12 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, fmt.Errorf("update auth: %w", errWeight)
 	}
+	unlockAuthMutation := m.lockAuthMutation(auth.ID)
 	m.mu.Lock()
 	existing, ok := m.auths[auth.ID]
 	if !ok || existing == nil {
 		m.mu.Unlock()
+		unlockAuthMutation()
 		return nil, nil
 	}
 	if !auth.indexAssigned && auth.Index == "" {
@@ -121,6 +134,21 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = existing.recentRequests
+	authoritativePaymentReenable := !isCredentialMaintenanceUpdate(ctx) &&
+		isPaymentRequiredDisabled(existing) &&
+		!auth.Disabled &&
+		auth.Status != StatusDisabled
+	preserveRuntimeState := false
+	if isCredentialMaintenanceUpdate(ctx) {
+		preservePaymentRequiredDisableForMaintenance(ctx, existing, auth)
+		preserveRuntimeState = isPaymentRequiredDisabled(existing)
+	}
+	// Updates that keep a credential payment-disabled may change persistent
+	// metadata, but the current quota/cooldown state remains authoritative.
+	if isPaymentRequiredDisabled(existing) && isPaymentRequiredDisabled(auth) {
+		copyAuthoritativeRuntimeState(existing, auth)
+		preserveRuntimeState = true
+	}
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
 		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
@@ -128,8 +156,12 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	now := time.Now()
 	clearedCooldown := false
-	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
-		clearedCooldown = clearCooldownStateForAuth(auth, now)
+	var paymentModelsToResume []string
+	if authoritativePaymentReenable {
+		paymentModelsToResume, clearedCooldown = clearPaymentRequiredRuntimeState(auth, now)
+	}
+	if !preserveRuntimeState && (m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled) {
+		clearedCooldown = clearCooldownStateForAuth(auth, now) || clearedCooldown
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
@@ -143,11 +175,17 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
-	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	if clearedCooldown {
 		m.persistCooldownStates(ctx)
 	}
-	return auth.Clone(), nil
+	for _, model := range paymentModelsToResume {
+		registry.GetGlobalRegistry().ClearModelQuotaExceeded(auth.ID, model)
+		registry.GetGlobalRegistry().ResumeClientModel(auth.ID, model)
+	}
+	result := auth.Clone()
+	unlockAuthMutation()
+	m.hook.OnAuthUpdated(ctx, result.Clone())
+	return result, nil
 }
 
 // Remove deletes an auth from runtime state without persisting.

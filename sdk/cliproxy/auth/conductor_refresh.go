@@ -581,9 +581,13 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
-	saved, errUpdate := m.Update(ctx, updated)
-	for _, model := range modelsToResume {
-		registry.GetGlobalRegistry().ResumeClientModel(id, model)
+	saved, errUpdate := m.Update(withCredentialMaintenanceUpdate(ctx, auth), updated)
+	if saved != nil {
+		for _, model := range modelsToResume {
+			if modelStateIsClean(saved.ModelStates[model]) {
+				registry.GetGlobalRegistry().ResumeClientModel(id, model)
+			}
+		}
 	}
 	if errUpdate != nil {
 		log.Debugf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)

@@ -268,11 +268,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			rerr := resultErrorFromError(errStream)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
-			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			stopAuth := m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
 			lastErr = errStream
+			if stopAuth {
+				return nil, errStream
+			}
 			continue
 		}
 
@@ -336,9 +339,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				rerr := resultErrorFromError(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				stopAuth := m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 				discardStreamChunks(streamResult.Chunks)
 				lastErr = bootstrapErr
+				if stopAuth {
+					return nil, bootstrapErr
+				}
 				continue
 			}
 			rerr := resultErrorFromError(bootstrapErr)

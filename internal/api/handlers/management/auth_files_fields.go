@@ -184,6 +184,7 @@ func applyAuthDisabledState(auth *coreauth.Auth, disabled bool) {
 	if auth == nil {
 		return
 	}
+	paymentRequiredDisabled := isPaymentRequiredDisabled(auth)
 	auth.Disabled = disabled
 	if disabled {
 		auth.Status = coreauth.StatusDisabled
@@ -191,6 +192,9 @@ func applyAuthDisabledState(auth *coreauth.Auth, disabled bool) {
 	} else {
 		auth.Status = coreauth.StatusActive
 		auth.StatusMessage = ""
+		if paymentRequiredDisabled {
+			clearPaymentRequiredDisabledReason(auth)
+		}
 	}
 	auth.UpdatedAt = time.Now()
 	if auth.Metadata == nil {
@@ -589,6 +593,7 @@ func syncAuthFileDisabledState(auth *coreauth.Auth) {
 	if !ok {
 		return
 	}
+	paymentRequiredDisabled := isPaymentRequiredDisabled(auth)
 	auth.Disabled = disabled
 	if disabled {
 		auth.Status = coreauth.StatusDisabled
@@ -599,6 +604,23 @@ func syncAuthFileDisabledState(auth *coreauth.Auth) {
 	}
 	auth.Status = coreauth.StatusActive
 	auth.StatusMessage = ""
+	if paymentRequiredDisabled {
+		clearPaymentRequiredDisabledReason(auth)
+	}
+}
+
+func isPaymentRequiredDisabled(auth *coreauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	reason, _ := auth.Metadata["disabled_reason"].(string)
+	return reason == "payment_required"
+}
+
+func clearPaymentRequiredDisabledReason(auth *coreauth.Auth) {
+	if auth.Metadata != nil {
+		delete(auth.Metadata, "disabled_reason")
+	}
 }
 
 func (h *Handler) removeAuth(ctx context.Context, id string) {

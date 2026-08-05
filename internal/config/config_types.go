@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
@@ -207,6 +208,18 @@ type QuotaExceeded struct {
 	// When all free-tier auths are exhausted (429/503), the conductor retries with
 	// an auth that has available Google One AI credits.
 	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
+
+	// OnPaymentRequired controls what happens when an auth receives HTTP 402 Payment Required.
+	// Supported values are "cooldown" (default) and "disable".
+	OnPaymentRequired string `yaml:"on-payment-required,omitempty" json:"on-payment-required,omitempty"`
+}
+
+// PaymentRequiredAction returns the normalized HTTP 402 handling mode.
+func (q QuotaExceeded) PaymentRequiredAction() string {
+	if strings.EqualFold(strings.TrimSpace(q.OnPaymentRequired), "disable") {
+		return "disable"
+	}
+	return "cooldown"
 }
 
 // RoutingConfig configures how credentials are selected for requests.

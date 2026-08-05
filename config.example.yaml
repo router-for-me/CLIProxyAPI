@@ -197,6 +197,11 @@ quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
   antigravity-credits: true # Whether to use credits as last-resort fallback when all free-tier auths are exhausted for Claude models
+  # HTTP 402 handling: "cooldown" (default) or "disable".
+  # "disable" removes the exhausted credential from rotation until manually re-enabled.
+  # File-backed auths persist this state; config-listed API keys may be re-created active on reload.
+  # Plugin-expanded virtual auths retain cooldown because their source file controls the whole group.
+  on-payment-required: "cooldown"
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
