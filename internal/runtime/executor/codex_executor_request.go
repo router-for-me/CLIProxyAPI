@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -40,6 +41,55 @@ func translateCodexRequestPair(from, to sdktranslator.Format, model string, orig
 	originalTranslated := sdktranslator.TranslateRequest(from, to, model, originalPayload, stream)
 	body := sdktranslator.TranslateRequest(from, to, model, payload, stream)
 	return originalTranslated, body
+}
+
+func applyClaudeResponsesCompactionReplay(translated, source []byte, opts cliproxyexecutor.Options) []byte {
+	if opts.Alt != constant.ClaudeResponsesBridgeAlt && opts.Alt != constant.ClaudeResponsesCompactBridgeAlt {
+		return translated
+	}
+	replay := gjson.GetBytes(source, constant.ClaudeResponsesCompactionField+".output")
+	if !replay.IsArray() || len(replay.Array()) == 0 {
+		return translated
+	}
+
+	input := gjson.GetBytes(translated, "input")
+	var combined bytes.Buffer
+	combined.WriteByte('[')
+	needsComma := false
+	for _, item := range replay.Array() {
+		if needsComma {
+			combined.WriteByte(',')
+		}
+		combined.WriteString(item.Raw)
+		needsComma = true
+	}
+	if input.IsArray() {
+		for _, item := range input.Array() {
+			if needsComma {
+				combined.WriteByte(',')
+			}
+			combined.WriteString(item.Raw)
+			needsComma = true
+		}
+	}
+	combined.WriteByte(']')
+	updated, errSet := sjson.SetRawBytes(translated, "input", combined.Bytes())
+	if errSet != nil {
+		return translated
+	}
+	return updated
+}
+
+func codexCompactRequestPayload(body []byte) []byte {
+	out := []byte(`{"model":"","instructions":"","input":[]}`)
+	out, _ = sjson.SetBytes(out, "model", gjson.GetBytes(body, "model").String())
+	if instructions := gjson.GetBytes(body, "instructions"); instructions.Type == gjson.String {
+		out, _ = sjson.SetBytes(out, "instructions", instructions.String())
+	}
+	if input := gjson.GetBytes(body, "input"); input.IsArray() {
+		out, _ = sjson.SetRawBytes(out, "input", []byte(input.Raw))
+	}
+	return out
 }
 
 // PrepareRequest injects Codex credentials into the outgoing HTTP request.
