@@ -421,7 +421,7 @@ func (h *Handler) runCodexFreeRefresh(taskID string, task *codexFreeRefreshTask,
 			result.Success = false
 			result.Error = errPing.Error()
 			log.WithError(errPing).WithField("auth", auth.FileName).Warn("codex free refresh ping failed")
-			h.markRefreshPingFailure(auth, "gpt-5.4-mini", errPing)
+			h.markRefreshPingFailure(auth, "gpt-5.6-luna", errPing)
 		} else {
 			result.Success = true
 			now := time.Now().UTC()
@@ -450,7 +450,7 @@ func (h *Handler) runCodexFreeRefresh(taskID string, task *codexFreeRefreshTask,
 }
 
 func minimalCodexRefreshPayload() []byte {
-	return []byte(`{"model":"gpt-5.4-mini","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":true,"store":false,"instructions":""}`)
+	return []byte(`{"model":"gpt-5.6-luna","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":true,"store":false,"instructions":""}`)
 }
 
 // pingCodexAccount sends a minimal chat request to activate the account cycle.
@@ -462,7 +462,7 @@ func (h *Handler) pingCodexAccount(auth *coreauth.Auth) error {
 	minimalPayload := minimalCodexRefreshPayload()
 
 	req := cliproxyexecutor.Request{
-		Model:   "gpt-5.4-mini",
+		Model:   "gpt-5.6-luna",
 		Payload: minimalPayload,
 		Format:  sdktranslator.FromString("codex"),
 	}

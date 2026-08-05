@@ -10,8 +10,8 @@ func TestMinimalCodexRefreshPayloadSetsStoreFalse(t *testing.T) {
 	if err := json.Unmarshal(minimalCodexRefreshPayload(), &payload); err != nil {
 		t.Fatalf("unmarshal minimal payload: %v", err)
 	}
-	if payload["model"] != "gpt-5.4-mini" {
-		t.Fatalf("model = %v, want gpt-5.4-mini", payload["model"])
+	if payload["model"] != "gpt-5.6-luna" {
+		t.Fatalf("model = %v, want gpt-5.6-luna", payload["model"])
 	}
 	store, ok := payload["store"].(bool)
 	if !ok {
