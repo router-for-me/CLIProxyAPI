@@ -130,6 +130,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 	if helps.ShouldEnsureOpenAICompatReasoningContent(baseModel, requestedModel, translated) {
 		translated = helps.EnsureOpenAICompatAssistantReasoningContent(translated)
+	} else if helps.OpenAICompatReasoningExplicitlyDisabled(baseModel, requestedModel, translated) {
+		translated = helps.StripOpenAICompatAssistantReasoningContent(translated)
 	}
 	if opts.Alt != "responses/compact" {
 		translated, err = e.applyPromptCacheKey(ctx, auth, from, baseModel, req, opts, translated)
@@ -343,6 +345,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 	if helps.ShouldEnsureOpenAICompatReasoningContent(baseModel, requestedModel, translated) {
 		translated = helps.EnsureOpenAICompatAssistantReasoningContent(translated)
+	} else if helps.OpenAICompatReasoningExplicitlyDisabled(baseModel, requestedModel, translated) {
+		translated = helps.StripOpenAICompatAssistantReasoningContent(translated)
 	}
 	if opts.Alt != "responses/compact" {
 		translated, err = e.applyPromptCacheKey(ctx, auth, from, baseModel, req, opts, translated)

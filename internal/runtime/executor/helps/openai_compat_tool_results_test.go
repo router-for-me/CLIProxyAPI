@@ -164,6 +164,57 @@ func TestEnsureOpenAICompatAssistantReasoningContent(t *testing.T) {
 	}
 }
 
+func TestStripOpenAICompatAssistantReasoningContent(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         string
+		wantReasoning bool
+	}{
+		{
+			name:          "assistant with reasoning_content gets stripped",
+			input:         `{"messages":[{"role":"assistant","content":"","reasoning_content":"thinking text","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}]}`,
+			wantReasoning: false,
+		},
+		{
+			name:          "assistant without reasoning_content unchanged",
+			input:         `{"messages":[{"role":"assistant","content":"hello"}]}`,
+			wantReasoning: false,
+		},
+		{
+			name:          "multiple assistant messages with reasoning_content all stripped",
+			input:         `{"messages":[{"role":"assistant","content":"","reasoning_content":"first","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]},{"role":"user","content":"next"},{"role":"assistant","content":"","reasoning_content":"second","tool_calls":[{"id":"call_2","type":"function","function":{"name":"write_file","arguments":"{}"}}]}]}`,
+			wantReasoning: false,
+		},
+		{
+			name:          "non-assistant messages with reasoning_content untouched",
+			input:         `{"messages":[{"role":"user","content":"hello","reasoning_content":"should stay"}]}`,
+			wantReasoning: false,
+		},
+		{
+			name:          "mixed messages only assistant reasoning_content stripped",
+			input:         `{"messages":[{"role":"user","content":"hello","reasoning_content":"user reasoning"},{"role":"assistant","content":"","reasoning_content":"assistant reasoning","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}]}`,
+			wantReasoning: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := StripOpenAICompatAssistantReasoningContent([]byte(tt.input))
+			var foundReasoning bool
+			gjson.GetBytes(got, "messages").ForEach(func(_, m gjson.Result) bool {
+				if m.Get("role").String() == "assistant" && m.Get("reasoning_content").Exists() {
+					foundReasoning = true
+					return false
+				}
+				return true
+			})
+			if foundReasoning != tt.wantReasoning {
+				t.Fatalf("assistant reasoning_content exists = %t, want %t. Payload: %s", foundReasoning, tt.wantReasoning, string(got))
+			}
+		})
+	}
+}
+
 func TestShouldEnsureOpenAICompatReasoningContent(t *testing.T) {
 	tests := []struct {
 		name           string

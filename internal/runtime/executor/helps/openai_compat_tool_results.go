@@ -65,7 +65,7 @@ func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
 // treated as disabled here; the effective reasoning_effort in the payload
 // decides.
 func ShouldEnsureOpenAICompatReasoningContent(upstreamModel, requestedModel string, payload []byte) bool {
-	if openAICompatReasoningExplicitlyDisabled(upstreamModel, requestedModel, payload) {
+	if OpenAICompatReasoningExplicitlyDisabled(upstreamModel, requestedModel, payload) {
 		return false
 	}
 
@@ -117,7 +117,7 @@ func ShouldEnsureOpenAICompatReasoningContent(upstreamModel, requestedModel stri
 // mode and still needs reasoning_content on prior tool_calls (DeepSeek/Kimi
 // replay 400). The raw suffix is consulted only as a fallback when the
 // payload carries no explicit thinking signal.
-func openAICompatReasoningExplicitlyDisabled(upstreamModel, requestedModel string, payload []byte) bool {
+func OpenAICompatReasoningExplicitlyDisabled(upstreamModel, requestedModel string, payload []byte) bool {
 	// Native Kimi thinking object takes precedence over legacy reasoning_effort.
 	// A payload override may set thinking.type:"disabled" after the OpenAI
 	// applier left a reasoning_effort, so the native directive must win.
@@ -226,6 +226,34 @@ func EnsureOpenAICompatAssistantReasoningContent(payload []byte) []byte {
 						out = updated
 					}
 				}
+			}
+		}
+		messageIndex++
+		return true
+	})
+	return out
+}
+
+// StripOpenAICompatAssistantReasoningContent removes reasoning_content from
+// every assistant message in the payload. It is used when thinking is
+// explicitly disabled: the Claude translator may have pre-populated
+// reasoning_content from unsigned thinking blocks before the disabled guard
+// ran, and that replay field must not be left in the final payload when the
+// effective thinking state is disabled (strict upstreams may reject it or
+// continue reasoning state).
+func StripOpenAICompatAssistantReasoningContent(payload []byte) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return payload
+	}
+
+	out := payload
+	messageIndex := 0
+	messages.ForEach(func(_, message gjson.Result) bool {
+		if message.Get("role").String() == "assistant" && message.Get("reasoning_content").Exists() {
+			path := fmt.Sprintf("messages.%d.reasoning_content", messageIndex)
+			if updated, errDel := sjson.DeleteBytes(out, path); errDel == nil {
+				out = updated
 			}
 		}
 		messageIndex++
