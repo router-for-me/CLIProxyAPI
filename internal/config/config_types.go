@@ -571,6 +571,23 @@ type OpenAICompatibility struct {
 	// Name is the identifier for this OpenAI compatibility configuration.
 	Name string `yaml:"name" json:"name"`
 
+	// AuthType selects a provider-specific credential mechanism.  The built-in
+	// "codebuddy" value reads a CodeBuddy desktop .info session file while
+	// retaining the normal OpenAI-compatible request/response pipeline.
+	AuthType string `yaml:"auth-type,omitempty" json:"auth-type,omitempty"`
+
+	// AuthDir optionally overrides the directory searched for provider session
+	// files.  It is used by AuthType=codebuddy.
+	AuthDir string `yaml:"auth-dir,omitempty" json:"auth-dir,omitempty"`
+
+	// AuthFile optionally selects one exact provider session file.  It is used
+	// by AuthType=codebuddy and takes precedence over AuthDir.
+	AuthFile string `yaml:"auth-file,omitempty" json:"auth-file,omitempty"`
+
+	// Desensitize enables the lightweight CodeBuddy content-filter mitigation
+	// for system/developer text and tool descriptions.
+	Desensitize bool `yaml:"desensitize,omitempty" json:"desensitize,omitempty"`
+
 	// Priority controls selection preference when multiple providers or credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`

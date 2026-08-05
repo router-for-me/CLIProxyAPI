@@ -502,6 +502,24 @@ nonstream-keepalive-interval: 0
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
 
+# CodeBuddy desktop session (native codebuddy2api-compatible integration)
+# CodeBuddy stores the login session in a .info file.  Set auth-dir or
+# auth-file when the automatic platform-specific discovery is not suitable.
+# The upstream base URL includes /v2; requests are sent to
+# /v2/chat/completions and token refreshes to /v2/plugin/auth/token/refresh.
+# openai-compatibility:
+#   - name: "codebuddy"
+#     auth-type: "codebuddy"
+#     auth-dir: "C:/Users/your-name/AppData/Local/CodeBuddyExtension/Data/Public/auth"
+#     # auth-file: "C:/path/to/account.info" # optional; takes precedence over auth-dir
+#     base-url: "https://copilot.tencent.com/v2"
+#     desensitize: true # optional; obfuscate high-risk harness wording before forwarding
+#     models: # optional; omitted models use CodeBuddy's built-in model catalog
+#       - name: "glm-5.2"
+#         alias: "glm-5.2"
+#       - name: "auto"
+#         alias: "auto"
+
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
 #   - api-key: "vk-123..."                        # x-goog-api-key header

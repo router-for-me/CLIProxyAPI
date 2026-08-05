@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codebuddy"
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
 )
 
@@ -112,8 +113,19 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 	for i := range cfg.OpenAICompatibility {
 		e := cfg.OpenAICompatibility[i]
 		e.Name = strings.TrimSpace(e.Name)
+		e.AuthType = strings.ToLower(strings.TrimSpace(e.AuthType))
+		e.AuthDir = strings.TrimSpace(e.AuthDir)
+		e.AuthFile = strings.TrimSpace(e.AuthFile)
+		if e.AuthType == codebuddy.AuthType && len(e.Models) == 0 {
+			for _, modelName := range codebuddy.DefaultModels {
+				e.Models = append(e.Models, OpenAICompatibilityModel{Name: modelName, Alias: modelName})
+			}
+		}
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		if e.BaseURL == "" && e.AuthType == codebuddy.AuthType {
+			e.BaseURL = codebuddy.DefaultBackendBaseURL
+		}
 		e.Headers = NormalizeHeaders(e.Headers)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
