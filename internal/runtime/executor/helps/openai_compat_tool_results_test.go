@@ -295,6 +295,32 @@ func TestShouldEnsureOpenAICompatReasoningContent(t *testing.T) {
 			want:          true,
 		},
 		{
+			// Native Kimi thinking.type:"disabled" must win over a legacy
+			// reasoning_effort left by the OpenAI applier. A payload override
+			// may disable Kimi thinking after the applier emitted an effort.
+			name:          "kimi thinking.type disabled wins over reasoning_effort low",
+			upstreamModel: "kimi-toggle-thinking-model",
+			payload:       `{"model":"kimi-toggle-thinking-model","reasoning_effort":"low","thinking":{"type":"disabled"}}`,
+			want:          false,
+		},
+		{
+			// Native Kimi thinking.type:"enabled" must win over
+			// reasoning_effort:"none" (native field has higher precedence,
+			// matching extractKimiConfig).
+			name:          "kimi thinking.type enabled wins over reasoning_effort none",
+			upstreamModel: "kimi-toggle-thinking-model",
+			payload:       `{"model":"kimi-toggle-thinking-model","reasoning_effort":"none","thinking":{"type":"enabled"}}`,
+			want:          true,
+		},
+		{
+			// Non-Kimi model with both fields: thinking.type:"disabled" still
+			// wins over reasoning_effort for consistency.
+			name:          "non-kimi thinking.type disabled wins over reasoning_effort",
+			upstreamModel: "deepseek-v4-reasoner",
+			payload:       `{"model":"deepseek-v4-reasoner","reasoning_effort":"high","thinking":{"type":"disabled"}}`,
+			want:          false,
+		},
+		{
 			// requestedModel suffix disabling thinking wins over an otherwise
 			// reasoning-capable upstream model.
 			name:           "requested model none suffix disables reasoning",

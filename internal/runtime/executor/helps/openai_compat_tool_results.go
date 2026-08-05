@@ -118,11 +118,21 @@ func ShouldEnsureOpenAICompatReasoningContent(upstreamModel, requestedModel stri
 // replay 400). The raw suffix is consulted only as a fallback when the
 // payload carries no explicit thinking signal.
 func openAICompatReasoningExplicitlyDisabled(upstreamModel, requestedModel string, payload []byte) bool {
+	// Native Kimi thinking object takes precedence over legacy reasoning_effort.
+	// A payload override may set thinking.type:"disabled" after the OpenAI
+	// applier left a reasoning_effort, so the native directive must win.
+	if thinkingField := gjson.GetBytes(payload, "thinking"); thinkingField.Exists() {
+		if isOpenAICompatThinkingObjectDisabled(thinkingField) {
+			return true
+		}
+		// thinking.type:"enabled" overrides reasoning_effort:"none" (native
+		// field has higher precedence, matching extractKimiConfig).
+		if strings.EqualFold(strings.TrimSpace(thinkingField.Get("type").String()), "enabled") {
+			return false
+		}
+	}
 	if effort := gjson.GetBytes(payload, "reasoning_effort"); effort.Exists() {
 		return isOpenAICompatDisabledEffortValue(effort)
-	}
-	if thinkingField := gjson.GetBytes(payload, "thinking"); thinkingField.Exists() {
-		return isOpenAICompatThinkingObjectDisabled(thinkingField)
 	}
 
 	for _, model := range []string{upstreamModel, requestedModel} {
