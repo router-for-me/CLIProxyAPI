@@ -498,8 +498,13 @@ func (s *service) Consume(ctx context.Context, principal, model, alias string, t
 	if err != nil {
 		return err
 	}
-	if snap.Policy == nil {
-		return nil // no policy → no window increments
+	// Nothing to record when there is neither a per-key policy nor an owning
+	// internal user. The internal user is intentionally included here: an
+	// internal user's key is auto-provisioned without a per-key policy row
+	// (unlimited per-key caps, user caps as fallback), so per-user spend
+	// accounting must still run for policy-less keys.
+	if snap.Policy == nil && snap.InternalUser == nil {
+		return nil
 	}
 	total := tokens.Total
 	if total == 0 {
@@ -528,11 +533,16 @@ func (s *service) Consume(ctx context.Context, principal, model, alias string, t
 		cost *= (1 - pct/100)
 	}
 	now := time.Now()
-	for _, wt := range []string{store.WindowTypeHourly, store.WindowTypeWeekly, store.WindowTypeMonthly} {
-		start, end := windowFor(wt, snap.APIKey.CreatedAt, now)
-		if err := s.usage.UpsertWindow(ctx, snap.APIKey.ID, wt, start, end, 1, total, cost); err != nil {
-			log.WithError(err).WithField("window", wt).Debug("policy: upsert window failed")
-			// Continue: a single failed upsert should not break the others.
+	// Per-key budget windows only exist when the key carries a policy. For
+	// policy-less keys (the internal-user fallback workflow) there is no
+	// per-key cap to enforce, so only the per-user accounting below runs.
+	if snap.Policy != nil {
+		for _, wt := range []string{store.WindowTypeHourly, store.WindowTypeWeekly, store.WindowTypeMonthly} {
+			start, end := windowFor(wt, snap.APIKey.CreatedAt, now)
+			if err := s.usage.UpsertWindow(ctx, snap.APIKey.ID, wt, start, end, 1, total, cost); err != nil {
+				log.WithError(err).WithField("window", wt).Debug("policy: upsert window failed")
+				// Continue: a single failed upsert should not break the others.
+			}
 		}
 	}
 	// Per-user accounting (best-effort). Failures do not abort the request;
