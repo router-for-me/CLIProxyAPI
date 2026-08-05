@@ -120,6 +120,23 @@ export default function App() {
     });
   }, []);
 
+  // Keyboard shortcut: Cmd+B or Ctrl+B to toggle sidebar collapse mode
+  useEffect(() => {
+    if (!authed) return;
+    function onKeyDown(e) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') {
+        const target = e.target;
+        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+          return;
+        }
+        e.preventDefault();
+        toggleCollapsed();
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [authed, toggleCollapsed]);
+
   // Close the mobile drawer whenever the route changes — operators expect a
   // tap-then-navigate-then-close flow without an extra dismiss click.
   useEffect(() => { setMobileOpen(false); }, [location.pathname]);

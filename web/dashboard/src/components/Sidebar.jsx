@@ -1,20 +1,18 @@
-import React, { useCallback, useEffect } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 
-// Sidebar — the primary navigation chrome for the authenticated dashboard.
+const GROUPS_KEY = 'nixllm.sidebar.groups';
+const FAVORITES_KEY = 'nixllm.sidebar.favorites';
+
+// Sidebar — primary navigation chrome for the authenticated dashboard.
 //
-// Responsibilities:
-//   * Render the brand, grouped nav links, and footer (version + sign out).
-//   * Strong active indicator (left accent bar + accent-dim bg) via NavLink.
-//   * Collapsible rail mode ("collapsed" prop) — icon-only column, persisted
-//     by the caller in localStorage under `nixllm.sidebar.collapsed`.
-//   * Mobile drawer ("mobileOpen" prop) — slides in as an overlay below 900px;
-//     the caller owns the open/close state and renders the matching top bar.
-//   * Sticky while the main content scrolls (handled in CSS).
-//
-// The component is pure/react-router-driven: it reads `currentPath` only for
-// the escape-key + link-click close-on-mobile behavior, since NavLink computes
-// active state itself.
+// Features:
+//   * Disambiguated labels & unique icons (Upstream Providers vs Sync Log).
+//   * Quick navigation filter bar with '/' focus shortcut and Escape clear.
+//   * Pinned / Favorite routes system with star toggles.
+//   * Collapsible section accordions with localStorage persistence.
+//   * High-end collapsed rail mode with floating rich tooltips.
+//   * Footer with running version info, update indicator, and sign out button.
 export default function Sidebar({
   onLogout,
   onToggleCollapsed,
@@ -23,25 +21,180 @@ export default function Sidebar({
   onCloseMobile,
   version = 'dev',
   latestVersion = '',
+  coreVersion = '',
   updateAvailable = false,
 }) {
   const closeMobile = useCallback(() => onCloseMobile?.(), [onCloseMobile]);
 
-  // Escape closes the mobile drawer. Kept here (not in App) so the sidebar
-  // owns its own keyboard affordance, mirroring the Modal pattern.
-  useEffect(() => {
-    if (!mobileOpen) return;
-    function onKey(e) {
-      if (e.key === 'Escape') closeMobile();
+  const [query, setQuery] = useState('');
+  const [collapsedGroups, setCollapsedGroups] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(GROUPS_KEY) || '{}');
+    } catch {
+      return {};
     }
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [mobileOpen, closeMobile]);
+  });
+
+  const [favorites, setFavorites] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(FAVORITES_KEY) || '[]');
+    } catch {
+      return [];
+    }
+  });
+
+  const [railTip, setRailTip] = useState(null);
+  const searchRef = useRef(null);
+  const navRef = useRef(null);
+  const searchExpandRef = useRef(false);
+
+  // Toggle favorite status for a route
+  const toggleFavorite = useCallback((toRoute, e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setFavorites((prev) => {
+      const isFav = prev.includes(toRoute);
+      const next = isFav ? prev.filter((r) => r !== toRoute) : [...prev, toRoute];
+      localStorage.setItem(FAVORITES_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  // Toggle accordion section collapse
+  const toggleGroup = useCallback((groupLabel) => {
+    setCollapsedGroups((prev) => {
+      const next = { ...prev, [groupLabel]: !prev[groupLabel] };
+      localStorage.setItem(GROUPS_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  // Keyboard affordances (Escape to clear/close, '/' to focus search)
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.key === 'Escape') {
+        if (query) {
+          setQuery('');
+          searchRef.current?.blur();
+        } else if (mobileOpen) {
+          closeMobile();
+        }
+      } else if (e.key === '/' && !collapsed) {
+        const target = e.target;
+        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+          return;
+        }
+        e.preventDefault();
+        searchRef.current?.focus();
+        searchRef.current?.select();
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [collapsed, mobileOpen, query, closeMobile]);
+
+  // Clear filter when sidebar is collapsed to rail mode
+  useEffect(() => {
+    if (collapsed) setQuery('');
+  }, [collapsed]);
+
+  // Focus search after expanding rail via search click
+  useEffect(() => {
+    if (!collapsed && searchExpandRef.current) {
+      searchExpandRef.current = false;
+      searchRef.current?.focus();
+    }
+  }, [collapsed]);
+
+  // Dismiss floating rail tooltip on scroll
+  useEffect(() => {
+    if (!collapsed) return;
+    const navEl = navRef.current;
+    if (!navEl) return;
+    const handleScroll = () => setRailTip(null);
+    navEl.addEventListener('scroll', handleScroll, { passive: true });
+    return () => navEl.removeEventListener('scroll', handleScroll);
+  }, [collapsed]);
+
+  const handleSearchClick = useCallback(() => {
+    if (collapsed) {
+      searchExpandRef.current = true;
+      onToggleCollapsed();
+    } else {
+      searchRef.current?.focus();
+    }
+  }, [collapsed, onToggleCollapsed]);
+
+  const showTip = useCallback((label, category, el) => {
+    if (!collapsed) return;
+    const rect = el.getBoundingClientRect();
+    setRailTip({
+      label,
+      category,
+      top: rect.top + rect.height / 2,
+    });
+  }, [collapsed]);
+
+  const hideTip = useCallback(() => setRailTip(null), []);
+
+  const isSearching = query.trim().length > 0;
+  const normalizedQuery = query.trim().toLowerCase();
+
+  // All flat items for lookup
+  const allNavItems = useMemo(() => {
+    const items = [];
+    NAV_GROUPS.forEach((g) => {
+      g.items.forEach((it) => {
+        items.push({ ...it, groupLabel: g.label });
+      });
+    });
+    return items;
+  }, []);
+
+  // Filtered navigation structure including Favorites
+  const displayGroups = useMemo(() => {
+    let resultGroups = [];
+
+    // Favorite items group (if any exist and not searching or if search matches favorites)
+    if (favorites.length > 0) {
+      const favItems = allNavItems
+        .filter((it) => favorites.includes(it.to))
+        .filter((it) => !isSearching || it.label.toLowerCase().includes(normalizedQuery));
+
+      if (favItems.length > 0) {
+        resultGroups.push({
+          label: 'Favorites',
+          isFavorites: true,
+          items: favItems,
+        });
+      }
+    }
+
+    // Standard groups
+    NAV_GROUPS.forEach((g) => {
+      const matchingItems = g.items.filter(
+        (it) => !isSearching || it.label.toLowerCase().includes(normalizedQuery),
+      );
+      if (matchingItems.length > 0) {
+        resultGroups.push({
+          label: g.label,
+          items: matchingItems,
+        });
+      }
+    });
+
+    return resultGroups;
+  }, [favorites, allNavItems, isSearching, normalizedQuery]);
+
+  const versionTitle = updateAvailable
+    ? `NixLLM update available: ${latestVersion}`
+    : `NixLLM ${version || 'dev'}`;
 
   return (
     <>
       {mobileOpen && <div className="sidebar-backdrop" onClick={closeMobile} aria-hidden />}
       <aside className={`sidebar${mobileOpen ? ' sidebar--open' : ''}`}>
+        {/* Header / Brand */}
         <div className="sidebar__header">
           <span className="sidebar__brand">
             <span className="sidebar__brand-mark" dangerouslySetInnerHTML={{ __html: BRAND_SVG }} />
@@ -49,52 +202,163 @@ export default function Sidebar({
           </span>
         </div>
 
+        {/* Collapse floating toggle button */}
         <button
           type="button"
           className={`sidebar__collapse-btn${collapsed ? ' is-collapsed' : ''}`}
           onClick={onToggleCollapsed}
-          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          title={collapsed ? 'Expand sidebar (⌘B)' : 'Collapse sidebar (⌘B)'}
           aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           aria-expanded={!collapsed}
         >
           <ChevronIcon />
         </button>
 
-        <nav className="sidebar__nav" aria-label="Primary">
-          {NAV_GROUPS.map((group) => (
-            <div className="sidebar__section" key={group.label}>
-              <div className="sidebar__section-label">{group.label}</div>
-              {group.items.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  end={item.end}
-                  className={({ isActive }) =>
-                    `sidebar__link${isActive ? ' active' : ''}`
+        {/* Quick Filter Search Bar */}
+        <div
+          className="sidebar__search"
+          onClick={handleSearchClick}
+          role={collapsed ? 'button' : undefined}
+          tabIndex={collapsed ? 0 : undefined}
+          aria-label="Filter navigation"
+          onMouseEnter={(e) => showTip('Filter Menu', 'Quick Search', e.currentTarget)}
+          onMouseLeave={hideTip}
+          onKeyDown={
+            collapsed
+              ? (e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    handleSearchClick();
                   }
-                  onClick={closeMobile}
-                  title={item.label}
+                }
+              : undefined
+          }
+        >
+          <span className="sidebar__search-icon" aria-hidden>
+            <SearchIcon />
+          </span>
+          <input
+            ref={searchRef}
+            className="sidebar__search-input"
+            type="text"
+            placeholder="Filter navigation..."
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            aria-label="Filter navigation"
+            spellCheck={false}
+            autoComplete="off"
+          />
+          {query ? (
+            <button
+              type="button"
+              className="sidebar__search-clear"
+              onClick={(e) => {
+                e.stopPropagation();
+                setQuery('');
+                searchRef.current?.focus();
+              }}
+              aria-label="Clear search"
+            >
+              <ClearIcon />
+            </button>
+          ) : (
+            <kbd className="sidebar__search-kbd" aria-hidden>/</kbd>
+          )}
+        </div>
+
+        {/* Navigation list */}
+        <nav className="sidebar__nav" aria-label="Primary" ref={navRef}>
+          {displayGroups.length === 0 ? (
+            <div className="sidebar__empty">No menu matches for &ldquo;{query.trim()}&rdquo;</div>
+          ) : (
+            displayGroups.map((group) => {
+              const groupIsCollapsed = !isSearching && !group.isFavorites && !!collapsedGroups[group.label];
+              return (
+                <div
+                  className={`sidebar__section${groupIsCollapsed ? ' is-collapsed' : ''}${
+                    group.isFavorites ? ' sidebar__section--favorites' : ''
+                  }`}
+                  key={group.label}
                 >
-                  <span className="sidebar__link-icon">{ICON_MAP[item.icon]}</span>
-                  <span className="sidebar__link-label">{item.label}</span>
-                </NavLink>
-              ))}
-            </div>
-          ))}
+                  <button
+                    type="button"
+                    className="sidebar__section-label"
+                    onClick={() => !group.isFavorites && toggleGroup(group.label)}
+                    disabled={isSearching || group.isFavorites}
+                    title={group.isFavorites ? 'Pinned Favorites' : `Toggle ${group.label}`}
+                  >
+                    <span className="sidebar__section-title">
+                      {group.isFavorites && <StarIcon fill="currentColor" className="sidebar__fav-star-header" />}
+                      {group.label}
+                    </span>
+                    {!group.isFavorites && (
+                      <svg
+                        className="sidebar__section-chevron"
+                        viewBox="0 0 12 12"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M3 4.5L6 7.5L9 4.5" />
+                      </svg>
+                    )}
+                  </button>
+
+                  <div className="sidebar__section-items">
+                    <div className="sidebar__section-items-inner">
+                      {group.items.map((item) => {
+                        const isFav = favorites.includes(item.to);
+                        return (
+                          <NavLink
+                            key={item.to}
+                            to={item.to}
+                            end={item.end}
+                            className={({ isActive }) => `sidebar__link${isActive ? ' active' : ''}`}
+                            onClick={closeMobile}
+                            title={item.label}
+                            onMouseEnter={(e) => showTip(item.label, group.label, e.currentTarget)}
+                            onMouseLeave={hideTip}
+                          >
+                            <span className="sidebar__link-icon">{ICON_MAP[item.icon]}</span>
+                            <span className="sidebar__link-label">{item.label}</span>
+                            <button
+                              type="button"
+                              className={`sidebar__fav-btn${isFav ? ' is-fav' : ''}`}
+                              onClick={(e) => toggleFavorite(item.to, e)}
+                              title={isFav ? 'Unpin from favorites' : 'Pin to favorites'}
+                              aria-label={isFav ? `Unpin ${item.label}` : `Pin ${item.label}`}
+                            >
+                              <StarIcon fill={isFav ? 'currentColor' : 'none'} />
+                            </button>
+                          </NavLink>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )}
         </nav>
 
+        {/* Footer */}
         <div className="sidebar__footer">
-          <span
-            className={`sidebar__version${updateAvailable ? ' has-update' : ''}`}
-            title={updateAvailable ? `NixLLM update available: ${latestVersion}` : `NixLLM ${version || 'dev'}`}
-          >
+          <span className={`sidebar__version${updateAvailable ? ' has-update' : ''}`} title={versionTitle}>
             {version || 'dev'}
+            {coreVersion && coreVersion !== 'unknown' && (
+              <span className="sidebar__version-core"> · core {coreVersion}</span>
+            )}
           </span>
           <button
             type="button"
             className="sidebar__signout"
             onClick={onLogout}
             title="Sign out"
+            onMouseEnter={(e) => showTip('Sign Out', 'Account', e.currentTarget)}
+            onMouseLeave={hideTip}
           >
             <span className="sidebar__link-icon">
               <LogoutIcon />
@@ -103,19 +367,19 @@ export default function Sidebar({
           </button>
         </div>
       </aside>
+
+      {/* Floating rich tooltip for rail (collapsed) mode */}
+      {collapsed && railTip && (
+        <div className="sidebar__rail-tip" style={{ top: railTip.top }}>
+          <div className="sidebar__rail-tip-category">{railTip.category}</div>
+          <div className="sidebar__rail-tip-label">{railTip.label}</div>
+        </div>
+      )}
     </>
   );
 }
 
-// NAV_GROUPS — three logical sections. "Overview" groups the operate-the-service
-// items; "Analysis" groups the read-only observability surfaces — Usage Stats,
-// Recent Events, and Errors. Errors was split out of the Usage Stats tab into
-// its own page so operators can triage failures without losing the events
-// view; Recent Events was in turn split out of the Usage Stats page so the
-// event log can be paged/searched independently of the aggregate KPIs and
-// charts. All three sit next to each other in the sidebar so the pages share
-// a context. "System" holds settings. Order matches the prior flat list so
-// muscle memory transfers. Sign out is footer-only and not duplicated here.
+// Logical navigation groups
 const NAV_GROUPS = [
   {
     label: 'Overview',
@@ -127,7 +391,7 @@ const NAV_GROUPS = [
       { to: '/models', label: 'Models Catalog', icon: 'cube' },
       { to: '/error-messages', label: 'Error Messages', icon: 'alert' },
       { to: '/api-tokens', label: 'API Management', icon: 'shield' },
-      { to: '/upstream-providers', label: 'Upstream Providers', icon: 'layers' },
+      { to: '/upstream-providers', label: 'Upstream Providers', icon: 'server' },
       { to: '/developer', label: 'Developer', icon: 'code' },
       { to: '/manage-cpa', label: 'Manage CPA', icon: 'cpa' },
     ],
@@ -140,7 +404,7 @@ const NAV_GROUPS = [
       { to: '/errors', label: 'Errors', icon: 'bug' },
       { to: '/cooldown-providers', label: 'Cooldown Providers', icon: 'snow' },
       { to: '/session-affinity', label: 'Session Affinity', icon: 'link' },
-      { to: '/upstream-sync-log', label: 'Upstream Providers', icon: 'layers' },
+      { to: '/upstream-sync-log', label: 'Sync Log', icon: 'sync' },
       { to: '/model-health', label: 'Model Health', icon: 'pulse' },
     ],
   },
@@ -155,11 +419,7 @@ const NAV_GROUPS = [
 ];
 
 // --- Icons ----------------------------------------------------------------
-// Inline SVGs keep the bundle dependency-free. All use currentColor so they
-// inherit the link text color (muted → accent on active).
 
-// ChevronIcon — single icon rotated via CSS (180° when collapsed). Using one
-// icon + transform keeps the motion continuous instead of swapping elements.
 function ChevronIcon() {
   return (
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
@@ -167,6 +427,32 @@ function ChevronIcon() {
     </svg>
   );
 }
+
+function SearchIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="7" cy="7" r="4.5" />
+      <path d="M10.5 10.5L14 14" />
+    </svg>
+  );
+}
+
+function ClearIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+      <path d="M4 4l8 8M12 4l-8 8" />
+    </svg>
+  );
+}
+
+function StarIcon({ fill = 'none', className = '' }) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill={fill} stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="8,1.5 10.2,5.8 15,6.5 11.5,9.9 12.3,14.6 8,12.3 3.7,14.6 4.5,9.9 1,6.5 5.8,5.8" />
+    </svg>
+  );
+}
+
 function LogoutIcon() {
   return (
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -195,6 +481,8 @@ const ICON_MAP = {
   list: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 4h9M5 8h9M5 12h9" /><circle cx="2" cy="4" r="1" fill="currentColor" stroke="none" /><circle cx="2" cy="8" r="1" fill="currentColor" stroke="none" /><circle cx="2" cy="12" r="1" fill="currentColor" stroke="none" /></svg>,
   cpa: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><rect x="2" y="2" width="5" height="5" rx="1" /><rect x="9" y="2" width="5" height="5" rx="1" /><rect x="2" y="9" width="5" height="5" rx="1" /><rect x="9" y="9" width="5" height="5" rx="1" /></svg>,
   layers: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round"><path d="M8 1l6 3-6 3-6-3 6-3zM2 8l6 3 6-3M2 11l6 3 6-3" /></svg>,
+  server: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><rect x="2" y="2.5" width="12" height="4" rx="1" /><rect x="2" y="9.5" width="12" height="4" rx="1" /><circle cx="4.8" cy="4.5" r="0.7" fill="currentColor" stroke="none" /><circle cx="4.8" cy="11.5" r="0.7" fill="currentColor" stroke="none" /></svg>,
+  sync: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M13 6A5 5 0 0 0 3.5 5" /><path d="M3 2.5V5h2.5" /><path d="M3 10A5 5 0 0 0 12.5 11" /><path d="M13 13.5V11h-2.5" /></svg>,
   gear: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="2" /><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3" strokeLinecap="round" /></svg>,
   tag: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2 8V3a1 1 0 0 1 1-1h5l6 6-6 6-6-6z" /><circle cx="5" cy="5" r="1" fill="currentColor" stroke="none" /></svg>,
   snow: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M8 1v14M1 8h14M3 3l10 10M13 3L3 13M8 3L6 1M8 3l2-2M8 13l-2 2M8 13l2 2M3 8L1 6M3 8l-2 2M13 8l2-2M13 8l2 2" /></svg>,
