@@ -13,6 +13,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -79,8 +80,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Only the Messages endpoint on Anthropic itself was captured; count_tokens
 	// keeps its own shape and other gateways never see this field.
 	diagnosticsState := claudeDiagnosticsRequestState{}
-	if cloaked && isAnthropicUpstreamBase(baseURL) {
-		body = injectClaudeCodeContextManagement(body)
+	contextManagementState := claudeCodeContextManagementState{
+		eligible:    cloaked && isAnthropicUpstreamBase(baseURL),
+		callerOwned: gjson.GetBytes(body, "context_management").Exists(),
+	}
+	if contextManagementState.eligible {
+		body, contextManagementState.automaticallyInjected = injectClaudeCodeContextManagement(body)
 		if oauthToken {
 			body, diagnosticsState = injectClaudeDiagnostics(body, auth, claudeSessionID)
 		}
@@ -88,11 +93,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body, contextManagementState.payloadRuleTouched = helps.ApplyPayloadConfigWithRequestTracked(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers, "context_management")
 	body = ensureModelMaxTokens(body, baseModel)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
+	body = reconcileClaudeCodeContextManagement(body, contextManagementState)
 	body = normalizeClaudeSamplingForUpstream(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
