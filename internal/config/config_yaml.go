@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"gopkg.in/yaml.v3"
 )
 
@@ -61,7 +62,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	normalizeCollectionNodeStyles(original.Content[0])
 
 	// Write back.
-	f, err := os.Create(configFile)
+	f, err := misc.OpenFileForSecureRewrite(configFile)
 	if err != nil {
 		return err
 	}
@@ -113,7 +114,7 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 			node = next
 		}
 	}
-	f, err := os.Create(configFile)
+	f, err := misc.OpenFileForSecureRewrite(configFile)
 	if err != nil {
 		return err
 	}

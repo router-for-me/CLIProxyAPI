@@ -79,7 +79,7 @@ func (ts *ClaudeTokenStorage) SaveTokenToFile(authFilePath string) error {
 	}
 
 	// Create the token file
-	f, err := os.Create(authFilePath)
+	f, err := misc.OpenFileForSecureRewrite(authFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}

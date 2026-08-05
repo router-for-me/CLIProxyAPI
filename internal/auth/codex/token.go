@@ -60,7 +60,7 @@ func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to create directory: %v", err)
 	}
 
-	f, err := os.Create(authFilePath)
+	f, err := misc.OpenFileForSecureRewrite(authFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}
