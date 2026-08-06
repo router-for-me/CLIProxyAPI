@@ -209,6 +209,9 @@ routing:
   # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
   # execution or derived session identity, and the existing first-message hash fallback.
   # Automatic failover is always enabled when bound auth becomes unavailable.
+  # An established binding outranks credential priority: once a session is bound, that
+  # credential is kept even if a higher-priority credential recovers. Credential priority
+  # still decides cold bindings, requests without a session, and post-failover rebinding.
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
