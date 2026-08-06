@@ -5,6 +5,8 @@
 # Builds (optional) and starts:
 #   - cli-proxy-api      (proxy + Management UI)
 #   - log-uploader       (hourly archive upload to TOS)
+#
+# Optional (not started by default):
 #   - log-qa             (read-only QA for unuploaded request logs)
 #
 
@@ -72,7 +74,7 @@ read -r -p "Enter choice [1-2]: " choice
 
 start_services() {
   local mode="$1"
-  local services=(cli-proxy-api log-uploader log-qa)
+  local services=(cli-proxy-api log-uploader)
   if [[ "${mode}" == "prebuilt" ]]; then
     docker compose up -d --remove-orphans --no-build "${services[@]}"
   else
@@ -88,7 +90,10 @@ print_status() {
   echo "Services started:"
   echo "  - cli-proxy-api         proxy + Management UI"
   echo "  - log-uploader          hourly upload to TOS"
+  echo
+  echo "Optional (not started by default):"
   echo "  - log-qa                unuploaded log QA (Management LOG QA panel)"
+  echo "                          start with: docker compose --profile qa up -d log-qa"
   echo
   echo "Useful commands:"
   echo "  docker compose ps"
@@ -116,7 +121,7 @@ print_status() {
 case "$choice" in
   1)
     echo "--- Running with Pre-built Image ---"
-    echo "Note: starts cli-proxy-api + log-uploader + log-qa."
+    echo "Note: starts cli-proxy-api + log-uploader."
     start_services prebuilt
     print_status
     ;;
@@ -142,7 +147,7 @@ case "$choice" in
       --build-arg COMMIT="${COMMIT}" \
       --build-arg BUILD_DATE="${BUILD_DATE}"
 
-    echo "Starting cli-proxy-api + log-uploader + log-qa..."
+    echo "Starting cli-proxy-api + log-uploader..."
     start_services local
     print_status
     ;;
