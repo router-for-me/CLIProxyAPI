@@ -3459,3 +3459,29 @@ func (failingReadCloser) Read(p []byte) (int, error) {
 func (failingReadCloser) Close() error {
 	return nil
 }
+
+func TestUsageAdapterPreservesServiceTierStages(t *testing.T) {
+	var got pluginapi.UsageRecord
+	plugin := usagePluginFunc(func(_ context.Context, record pluginapi.UsageRecord) {
+		got = record
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-tier-stages",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{host: host, pluginID: "usage-tier-stages"}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider:             "openai",
+		Model:                "gpt-5.4",
+		ServiceTier:          "auto",
+		EffectiveServiceTier: "priority",
+		ResponseServiceTier:  "default",
+	})
+
+	if got.ServiceTier != "auto" || got.EffectiveServiceTier != "priority" || got.ResponseServiceTier != "default" {
+		t.Fatalf("plugin tiers = requested:%q effective:%q response:%q", got.ServiceTier, got.EffectiveServiceTier, got.ResponseServiceTier)
+	}
+}

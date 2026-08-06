@@ -30,21 +30,22 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 
 		plugin := &usageQueuePlugin{}
 		plugin.HandleUsage(ctx, coreusage.Record{
-			Provider:            "openai",
-			ExecutorType:        "KimiExecutor",
-			Model:               "gpt-5.4",
-			Alias:               "client-gpt",
-			APIKey:              "test-key",
-			AuthIndex:           "0",
-			AccessTokenSHA256:   "token-version-hash",
-			AuthType:            "apikey",
-			Source:              "user@example.com",
-			ReasoningEffort:     "medium",
-			ServiceTier:         "auto",
-			ResponseServiceTier: "default",
-			Generate:            coreusage.GenerateFlag(true),
-			RequestedAt:         time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
-			Latency:             1500 * time.Millisecond,
+			Provider:             "openai",
+			ExecutorType:         "KimiExecutor",
+			Model:                "gpt-5.4",
+			Alias:                "client-gpt",
+			APIKey:               "test-key",
+			AuthIndex:            "0",
+			AccessTokenSHA256:    "token-version-hash",
+			AuthType:             "apikey",
+			Source:               "user@example.com",
+			ReasoningEffort:      "medium",
+			ServiceTier:          "auto",
+			EffectiveServiceTier: "priority",
+			ResponseServiceTier:  "default",
+			Generate:             coreusage.GenerateFlag(true),
+			RequestedAt:          time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Latency:              1500 * time.Millisecond,
 			Detail: coreusage.Detail{
 				InputTokens:  10,
 				OutputTokens: 20,
@@ -69,6 +70,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireStringField(t, payload, "user_agent", "test-client/1.0")
 		requireStringField(t, payload, "reasoning_effort", "medium")
 		requireStringField(t, payload, "service_tier", "auto")
+		requireStringField(t, payload, "effective_service_tier", "priority")
 		requireMissingField(t, payload, "request_service_tier")
 		requireStringField(t, payload, "response_service_tier", "default")
 		requireIntField(t, payload, "accounting_version", coreusage.TokenAccountingSchemaVersion)
@@ -193,6 +195,7 @@ func TestUsageQueuePluginEmitsSingleCanonicalAutoTier(t *testing.T) {
 
 		payload := popSinglePayload(t)
 		requireStringField(t, payload, "service_tier", "auto")
+		requireMissingField(t, payload, "effective_service_tier")
 		requireMissingField(t, payload, "request_service_tier")
 	})
 }

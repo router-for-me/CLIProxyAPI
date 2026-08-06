@@ -63,6 +63,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if serviceTier == "" {
 		serviceTier = coreusage.ServiceTierFromContext(ctx)
 	}
+	effectiveServiceTier := strings.TrimSpace(record.EffectiveServiceTier)
 	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
 	clientRequestMetadata := internallogging.GetClientRequestMetadata(ctx)
 
@@ -102,20 +103,21 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 
 	payload, err := json.Marshal(queuedUsageDetail{
-		requestDetail:       detail,
-		AccountingVersion:   coreusage.TokenAccountingSchemaVersion,
-		TokenBreakdown:      usageDetail.TokenBreakdown,
-		Provider:            provider,
-		ExecutorType:        executorType,
-		Model:               modelName,
-		Alias:               aliasName,
-		Endpoint:            resolveEndpoint(ctx),
-		AuthType:            authType,
-		APIKey:              apiKey,
-		RequestID:           requestID,
-		ReasoningEffort:     reasoningEffort,
-		ServiceTier:         serviceTier,
-		ResponseServiceTier: responseServiceTier,
+		requestDetail:        detail,
+		AccountingVersion:    coreusage.TokenAccountingSchemaVersion,
+		TokenBreakdown:       usageDetail.TokenBreakdown,
+		Provider:             provider,
+		ExecutorType:         executorType,
+		Model:                modelName,
+		Alias:                aliasName,
+		Endpoint:             resolveEndpoint(ctx),
+		AuthType:             authType,
+		APIKey:               apiKey,
+		RequestID:            requestID,
+		ReasoningEffort:      reasoningEffort,
+		ServiceTier:          serviceTier,
+		EffectiveServiceTier: effectiveServiceTier,
+		ResponseServiceTier:  responseServiceTier,
 	})
 	if err != nil {
 		return
@@ -125,19 +127,20 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 
 type queuedUsageDetail struct {
 	requestDetail
-	AccountingVersion   int                      `json:"accounting_version"`
-	TokenBreakdown      coreusage.TokenBreakdown `json:"token_breakdown"`
-	Provider            string                   `json:"provider"`
-	ExecutorType        string                   `json:"executor_type"`
-	Model               string                   `json:"model"`
-	Alias               string                   `json:"alias"`
-	Endpoint            string                   `json:"endpoint"`
-	AuthType            string                   `json:"auth_type"`
-	APIKey              string                   `json:"api_key"`
-	RequestID           string                   `json:"request_id"`
-	ReasoningEffort     string                   `json:"reasoning_effort"`
-	ServiceTier         string                   `json:"service_tier"`
-	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
+	AccountingVersion    int                      `json:"accounting_version"`
+	TokenBreakdown       coreusage.TokenBreakdown `json:"token_breakdown"`
+	Provider             string                   `json:"provider"`
+	ExecutorType         string                   `json:"executor_type"`
+	Model                string                   `json:"model"`
+	Alias                string                   `json:"alias"`
+	Endpoint             string                   `json:"endpoint"`
+	AuthType             string                   `json:"auth_type"`
+	APIKey               string                   `json:"api_key"`
+	RequestID            string                   `json:"request_id"`
+	ReasoningEffort      string                   `json:"reasoning_effort"`
+	ServiceTier          string                   `json:"service_tier"`
+	EffectiveServiceTier string                   `json:"effective_service_tier,omitempty"`
+	ResponseServiceTier  string                   `json:"response_service_tier,omitempty"`
 }
 
 type requestDetail struct {

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -630,15 +631,77 @@ func TestUsageReporterBuildRecordIncludesGenerateFalse(t *testing.T) {
 	}
 }
 
-func TestUsageReporterSetTranslatedReasoningEffortPreservesClientServiceTier(t *testing.T) {
+func TestUsageReporterSetTranslatedRequestMetadataSeparatesServiceTiers(t *testing.T) {
 	ctx := usage.WithServiceTier(context.Background(), "auto")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
 
 	reporter.SetTranslatedReasoningEffort([]byte(`{"service_tier":"priority"}`), "openai")
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3, ResponseServiceTier: "default"}, false)
 	if record.ServiceTier != "auto" {
-		t.Fatalf("service tier = %q, want %q", record.ServiceTier, "auto")
+		t.Fatalf("service tier = %q, want auto", record.ServiceTier)
+	}
+	if record.EffectiveServiceTier != "priority" {
+		t.Fatalf("effective service tier = %q, want priority", record.EffectiveServiceTier)
+	}
+	if record.ResponseServiceTier != "default" {
+		t.Fatalf("response service tier = %q, want default", record.ResponseServiceTier)
+	}
+}
+
+func TestUsageReporterExtractsEffectiveServiceTierFromOutboundShapes(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{name: "top level", payload: `{"service_tier":"priority"}`, want: "priority"},
+		{name: "antigravity request envelope", payload: `{"request":{"service_tier":"priority"}}`, want: "priority"},
+		{name: "interaction envelope", payload: `{"interaction":{"service_tier":"standard"}}`, want: "standard"},
+		{name: "missing", payload: `{"model":"gpt-5.4"}`, want: ""},
+		{name: "invalid json", payload: `{"service_tier":`, want: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
+			reporter.SetTranslatedRequestMetadata([]byte(tt.payload), "openai")
+			record := reporter.buildRecord(usage.Detail{TotalTokens: 1}, false)
+			if record.EffectiveServiceTier != tt.want {
+				t.Fatalf("effective service tier = %q, want %q", record.EffectiveServiceTier, tt.want)
+			}
+		})
+	}
+}
+
+func TestUsageReporterCapturesEffectiveServiceTierAfterPayloadOverride(t *testing.T) {
+	cfg := &internalconfig.Config{
+		Payload: internalconfig.PayloadConfig{
+			Override: []internalconfig.PayloadRule{{
+				Models: []internalconfig.PayloadModelRule{{Name: "gpt-5.4", Protocol: "openai"}},
+				Params: map[string]any{"service_tier": "priority"},
+			}},
+		},
+	}
+	finalPayload := ApplyPayloadConfigWithRequest(
+		cfg,
+		"gpt-5.4",
+		"openai",
+		"openai-response",
+		"",
+		[]byte(`{"model":"gpt-5.4"}`),
+		nil,
+		"gpt-5.4",
+		"/v1/responses",
+		nil,
+	)
+
+	ctx := usage.WithServiceTier(context.Background(), "auto")
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+	reporter.SetTranslatedRequestMetadata(finalPayload, "openai")
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 1, ResponseServiceTier: "default"}, false)
+	if record.ServiceTier != "auto" || record.EffectiveServiceTier != "priority" || record.ResponseServiceTier != "default" {
+		t.Fatalf("tiers = requested:%q effective:%q response:%q", record.ServiceTier, record.EffectiveServiceTier, record.ResponseServiceTier)
 	}
 }
 
