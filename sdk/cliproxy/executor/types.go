@@ -54,8 +54,13 @@ const (
 )
 
 // AuthSelectionCandidate describes one credential a caller allows for a single request.
-// The candidate list is request scoped: it never mutates persistent auth priority or any
-// scheduler state, and it restricts selection to exactly the listed credentials.
+// The candidate list is request scoped: it never mutates persistent auth priority, and it
+// restricts selection to exactly the listed credentials.
+//
+// Like PinnedAuthMetadataKey and DisallowFreeAuthMetadataKey, narrowing the candidate list
+// for one request can perturb smooth weighted round-robin bookkeeping observed by concurrent
+// requests, because that strategy derives its running state from the eligible weight vector.
+// Round-robin and fill-first only advance on a match and are unaffected.
 type AuthSelectionCandidate struct {
 	// AuthID is the manager registered credential identifier.
 	AuthID string
