@@ -26,6 +26,49 @@ func convertResponsesToolToOpenAIChatTools(tool gjson.Result) [][]byte {
 	return nil
 }
 
+// mergeResponsesRequestChatTools converts every tool declaration in a Responses
+// request into Chat Completions form, merging the top-level "tools" field with
+// Codex Desktop (Responses Lite) "additional_tools" input items.
+//
+// Codex clients may deliver the same tool through both channels, and namespace
+// qualification can collapse distinct declarations onto one Chat Completions
+// name, so entries are deduplicated by function name. The first occurrence
+// wins, which keeps the top-level "tools" definition authoritative over the
+// "additional_tools" copy. Chat Completions requires tool names to be unique;
+// strict upstreams reject the whole request otherwise.
+func mergeResponsesRequestChatTools(root gjson.Result) [][]byte {
+	var merged [][]byte
+	seenToolNames := make(map[string]struct{})
+	appendChatTools := func(tools gjson.Result) {
+		if !tools.Exists() || !tools.IsArray() {
+			return
+		}
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			for _, chatTool := range convertResponsesToolToOpenAIChatTools(tool) {
+				name := gjson.GetBytes(chatTool, "function.name").String()
+				if name != "" {
+					if _, duplicate := seenToolNames[name]; duplicate {
+						continue
+					}
+					seenToolNames[name] = struct{}{}
+				}
+				merged = append(merged, chatTool)
+			}
+			return true
+		})
+	}
+	appendChatTools(root.Get("tools"))
+	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("type").String() == "additional_tools" {
+				appendChatTools(item.Get("tools"))
+			}
+			return true
+		})
+	}
+	return merged
+}
+
 // convertResponsesCustomToolToOpenAIChat maps a Responses freeform ("custom")
 // tool onto a Chat Completions function tool with a single freeform "input"
 // string, mirroring the function-based shape Codex uses for apply_patch.
@@ -193,27 +236,10 @@ func responsesSingleCustomToolName(requestRawJSON []byte) (string, bool) {
 		return "", false
 	}
 
-	toolCount := 0
-	collect := func(tools gjson.Result) {
-		if !tools.Exists() || !tools.IsArray() {
-			return
-		}
-		tools.ForEach(func(_, tool gjson.Result) bool {
-			toolCount += len(convertResponsesToolToOpenAIChatTools(tool))
-			return true
-		})
-	}
-
-	root := gjson.ParseBytes(requestRawJSON)
-	collect(root.Get("tools"))
-	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		input.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("type").String() == "additional_tools" {
-				collect(item.Get("tools"))
-			}
-			return true
-		})
-	}
+	// Count the tools actually emitted, which are deduplicated by name, so a
+	// tool delivered through both "tools" and "additional_tools" still counts
+	// once and freeform unwrapping stays enabled.
+	toolCount := len(mergeResponsesRequestChatTools(gjson.ParseBytes(requestRawJSON)))
 	for name := range customToolNames {
 		return name, toolCount == 1
 	}

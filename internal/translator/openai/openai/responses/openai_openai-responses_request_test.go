@@ -695,3 +695,121 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_NormalizesInputIma
 		})
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DeduplicatesToolsAcrossAdditionalTools(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"role":"user","content":"What time is it?"},
+			{
+				"type":"additional_tools",
+				"tools":[
+					{"type":"function","name":"get_time","description":"copy from additional_tools","parameters":{"type":"object","properties":{"tz":{"type":"string"}}}}
+				]
+			}
+		],
+		"tools": [
+			{"type":"function","name":"get_time","description":"authoritative top-level definition","parameters":{"type":"object","properties":{"timezone":{"type":"string"}}}}
+		]
+	}`)
+	t.Logf("input json:\n%s", prettyJSONForTest(raw))
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", raw, false)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != 1 {
+		t.Fatalf("tools count = %d, want 1; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.name").String(); got != "get_time" {
+		t.Fatalf("tools.0.function.name = %q, want get_time; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.description").String(); got != "authoritative top-level definition" {
+		t.Fatalf("tools.0.function.description = %q, want the top-level definition to win; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.timezone.type").String(); got != "string" {
+		t.Fatalf("tools.0.function.parameters should come from the top-level definition; output=%s", out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DeduplicatesNamespaceQualifiedCollision(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"role":"user","content":"Patch the file."}
+		],
+		"tools": [
+			{"type":"function","name":"editor__apply_patch","parameters":{"type":"object"}},
+			{
+				"type":"namespace",
+				"name":"editor",
+				"tools":[{"type":"function","name":"apply_patch","parameters":{"type":"object"}}]
+			}
+		]
+	}`)
+	t.Logf("input json:\n%s", prettyJSONForTest(raw))
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", raw, false)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != 1 {
+		t.Fatalf("tools count = %d, want 1; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.name").String(); got != "editor__apply_patch" {
+		t.Fatalf("tools.0.function.name = %q, want editor__apply_patch; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_KeepsDistinctToolsFromBothSources(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"role":"user","content":"Do the thing."},
+			{
+				"type":"additional_tools",
+				"tools":[
+					{"type":"function","name":"get_date","parameters":{"type":"object"}},
+					{"type":"function","name":"get_time","parameters":{"type":"object"}}
+				]
+			}
+		],
+		"tools": [
+			{"type":"function","name":"get_time","parameters":{"type":"object"}},
+			{"type":"function","name":"get_weather","parameters":{"type":"object"}}
+		]
+	}`)
+	t.Logf("input json:\n%s", prettyJSONForTest(raw))
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", raw, false)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	want := []string{"get_time", "get_weather", "get_date"}
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != int64(len(want)) {
+		t.Fatalf("tools count = %d, want %d; output=%s", got, len(want), out)
+	}
+	for i, wantName := range want {
+		got := gjson.GetBytes(out, fmt.Sprintf("tools.%d.function.name", i)).String()
+		if got != wantName {
+			t.Fatalf("tools.%d.function.name = %q, want %q; output=%s", i, got, wantName, out)
+		}
+	}
+}
+
+func TestResponsesSingleCustomToolName_CountsDeduplicatedTools(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"role":"user","content":"Patch the file."},
+			{
+				"type":"additional_tools",
+				"tools":[{"type":"custom","name":"apply_patch","description":"copy"}]
+			}
+		],
+		"tools": [
+			{"type":"custom","name":"apply_patch","description":"authoritative"}
+		]
+	}`)
+
+	name, ok := responsesSingleCustomToolName(raw)
+	if !ok {
+		t.Fatalf("responsesSingleCustomToolName ok = false, want true when the only tool is duplicated across both sources")
+	}
+	if name != "apply_patch" {
+		t.Fatalf("responsesSingleCustomToolName name = %q, want apply_patch", name)
+	}
+}
