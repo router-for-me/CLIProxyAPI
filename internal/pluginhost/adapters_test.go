@@ -2924,6 +2924,40 @@ func TestPluginExecutorUsageBuffersSplitClaudeStreamCounts(t *testing.T) {
 	}
 }
 
+func TestPluginExecutorUsageParsesGeminiCounts(t *testing.T) {
+	payload := []byte(`{"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":4,"totalTokenCount":16}}`)
+	detail, ok := pluginExecutorNonStreamUsage(sdktranslator.FormatGemini, payload)
+	if !ok {
+		t.Fatal("non-stream Gemini usage was not observed")
+	}
+	if detail.InputTokens != 12 || detail.OutputTokens != 4 || detail.TotalTokens != 16 {
+		t.Fatalf("non-stream Gemini usage = %#v, want input=12 output=4 total=16", detail)
+	}
+
+	var usageBuffer helps.StreamUsageBuffer
+	observePluginExecutorStreamUsage(&usageBuffer, sdktranslator.FormatGemini, append([]byte("data: "), payload...))
+	detail, ok = usageBuffer.Detail()
+	if !ok {
+		t.Fatal("stream Gemini usage was not observed")
+	}
+	if detail.InputTokens != 12 || detail.OutputTokens != 4 || detail.TotalTokens != 16 {
+		t.Fatalf("stream Gemini usage = %#v, want input=12 output=4 total=16", detail)
+	}
+}
+
+func TestPluginExecutorUsageDoesNotBufferUnsupportedStreamFormat(t *testing.T) {
+	var usageBuffer helps.StreamUsageBuffer
+	pending := observePluginExecutorStreamChunk(
+		&usageBuffer,
+		sdktranslator.Format("plugin-custom-output"),
+		nil,
+		[]byte("custom stream payload without a newline"),
+	)
+	if len(pending) != 0 {
+		t.Fatalf("pending unsupported stream payload = %q, want empty", pending)
+	}
+}
+
 func TestExecutorAdapterPublishesNativeUsageForBilling(t *testing.T) {
 	const model = "plugin-usage-billing-model"
 	records := make(chan coreusage.Record, 1)

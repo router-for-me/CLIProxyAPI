@@ -83,17 +83,17 @@ type kiroToolUse struct {
 }
 
 type kiroInferenceConfig struct {
-	MaxTokens   int     `json:"maxTokens,omitempty"`
-	Temperature float64 `json:"temperature,omitempty"`
-	TopP        float64 `json:"topP,omitempty"`
+	MaxTokens   int      `json:"maxTokens,omitempty"`
+	Temperature *float64 `json:"temperature,omitempty"`
+	TopP        *float64 `json:"topP,omitempty"`
 }
 
 type claudeRequest struct {
 	Model       string          `json:"model"`
 	Messages    []claudeMessage `json:"messages"`
 	MaxTokens   int             `json:"max_tokens"`
-	Temperature float64         `json:"temperature,omitempty"`
-	TopP        float64         `json:"top_p,omitempty"`
+	Temperature *float64        `json:"temperature,omitempty"`
+	TopP        *float64        `json:"top_p,omitempty"`
 	Stream      bool            `json:"stream,omitempty"`
 	System      any             `json:"system,omitempty"`
 	Thinking    *struct {

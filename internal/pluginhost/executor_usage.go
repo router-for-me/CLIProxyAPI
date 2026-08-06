@@ -76,6 +76,9 @@ func (u *pluginExecutorUsage) observeStream(ctx context.Context, format sdktrans
 }
 
 func observePluginExecutorStreamChunk(buffer *helps.StreamUsageBuffer, format sdktranslator.Format, pending, payload []byte) []byte {
+	if !pluginExecutorSupportsStreamUsage(format) {
+		return nil
+	}
 	pending = append(pending, payload...)
 	lastNewline := bytes.LastIndexByte(pending, '\n')
 	if lastNewline < 0 {
@@ -91,8 +94,19 @@ func pluginExecutorNonStreamUsage(format sdktranslator.Format, payload []byte) (
 		return helps.ParseClaudeUsage(payload), bytes.Contains(payload, []byte(`"usage"`))
 	case sdktranslator.FormatOpenAI, sdktranslator.FormatOpenAIResponse:
 		return helps.ParseOpenAIUsage(payload), bytes.Contains(payload, []byte(`"usage"`))
+	case sdktranslator.FormatGemini:
+		return helps.ParseGeminiUsage(payload), bytes.Contains(payload, []byte(`"usageMetadata"`)) || bytes.Contains(payload, []byte(`"usage_metadata"`))
 	default:
 		return coreusage.Detail{}, false
+	}
+}
+
+func pluginExecutorSupportsStreamUsage(format sdktranslator.Format) bool {
+	switch format {
+	case sdktranslator.FormatClaude, sdktranslator.FormatOpenAI, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatGemini:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -108,6 +122,9 @@ func observePluginExecutorStreamUsage(buffer *helps.StreamUsageBuffer, format sd
 		case sdktranslator.FormatOpenAIResponse:
 			jsonPayload := helps.JSONPayload(line)
 			detail, ok := helps.ParseCodexUsage(jsonPayload)
+			buffer.Observe(detail, ok)
+		case sdktranslator.FormatGemini:
+			detail, ok := helps.ParseGeminiStreamUsage(line)
 			buffer.Observe(detail, ok)
 		}
 	}

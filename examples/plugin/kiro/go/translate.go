@@ -99,7 +99,7 @@ func claudeToKiro(raw []byte, requestedModel string) (*kiroPayload, *claudeReque
 	payload.ConversationState.CurrentMessage.UserInputMessage = current
 	payload.ConversationState.History = trimLeadingAssistant(history)
 	payload.EstimatedInputTokens = estimateClaudeRequestInputTokens(&request)
-	if request.MaxTokens > 0 || request.Temperature > 0 || request.TopP > 0 {
+	if request.MaxTokens > 0 || request.Temperature != nil || request.TopP != nil {
 		payload.InferenceConfig = &kiroInferenceConfig{MaxTokens: request.MaxTokens, Temperature: request.Temperature, TopP: request.TopP}
 	}
 	truncatePayload(payload, systemPrompt != "")

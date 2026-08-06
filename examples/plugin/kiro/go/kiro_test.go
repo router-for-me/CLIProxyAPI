@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"hash/crc32"
@@ -274,6 +275,29 @@ func TestTruncatePayloadEvictsOldestConversationTurn(t *testing.T) {
 	}
 	if len(raw) > maxKiroPayloadBytes {
 		t.Fatalf("truncated payload size = %d, limit = %d", len(raw), maxKiroPayloadBytes)
+	}
+}
+
+func TestClaudeToKiroPreservesExplicitZeroSamplingValues(t *testing.T) {
+	payload, _, errTranslate := claudeToKiro([]byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[{"role":"user","content":"hello"}],
+		"temperature":0,
+		"top_p":0
+	}`), "")
+	if errTranslate != nil {
+		t.Fatalf("claudeToKiro() error = %v", errTranslate)
+	}
+	if payload.InferenceConfig == nil || payload.InferenceConfig.Temperature == nil || payload.InferenceConfig.TopP == nil {
+		t.Fatalf("inference config = %#v, want explicit sampling values", payload.InferenceConfig)
+	}
+
+	raw, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	if !bytes.Contains(raw, []byte(`"temperature":0`)) || !bytes.Contains(raw, []byte(`"topP":0`)) {
+		t.Fatalf("Kiro payload = %s, want explicit zero sampling values", raw)
 	}
 }
 
