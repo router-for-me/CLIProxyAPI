@@ -686,6 +686,8 @@ type websocketCanonicalRollbackExecutor struct {
 	mu       sync.Mutex
 	payloads [][]byte
 	calls    int
+	// failErr overrides the default second-call failure when set.
+	failErr error
 }
 
 type websocketPinnedFailoverStatusError struct {
@@ -857,14 +859,18 @@ func (e *websocketCanonicalRollbackExecutor) ExecuteStream(_ context.Context, _ 
 	e.calls++
 	call := e.calls
 	e.payloads = append(e.payloads, bytes.Clone(req.Payload))
+	failErr := e.failErr
 	e.mu.Unlock()
 
 	chunks := make(chan coreexecutor.StreamChunk, 1)
 	if call == 2 {
-		chunks <- coreexecutor.StreamChunk{Err: websocketPinnedFailoverStatusError{
-			status: http.StatusBadRequest,
-			msg:    `{"error":{"message":"bad turn","type":"invalid_request_error","code":"invalid_request"}}`,
-		}}
+		if failErr == nil {
+			failErr = websocketPinnedFailoverStatusError{
+				status: http.StatusBadRequest,
+				msg:    `{"error":{"message":"bad turn","type":"invalid_request_error","code":"invalid_request"}}`,
+			}
+		}
+		chunks <- coreexecutor.StreamChunk{Err: failErr}
 		close(chunks)
 		return &coreexecutor.StreamResult{Chunks: chunks}, nil
 	}
@@ -3629,6 +3635,119 @@ func TestResponsesWebsocketClosesAfterNonRetryableClientError(t *testing.T) {
 
 	if got := len(executor.Payloads()); got != 2 {
 		t.Fatalf("executor payload count = %d, want 2", got)
+	}
+}
+
+// itemNotPersistedUpstreamMessage is the verbatim upstream 404 text raised when a
+// turn references a response item the upstream never stored because `store` was
+// false. It arrives as plain text, not as a JSON error body.
+const itemNotPersistedUpstreamMessage = "Item with id 'rs_0b5f3eb6f51f175c0169ca74e4a85881998539920821603a74' not found. Items are not persisted when `store` is set to false. Try again with `store` set to true, or remove this item from your input."
+
+// TestResponsesWebsocketExposesItemNotPersistedAndRecoversOnReconnect pins the
+// store=false item miss end to end. The client must be told (it has to drop the
+// stale reference; retrying the same input can never succeed), and the
+// conversation must survive: after reconnecting with the full input the turn
+// succeeds, and no stale per-socket transcript leaks into the new connection.
+func TestResponsesWebsocketExposesItemNotPersistedAndRecoversOnReconnect(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	modelName := "xai-item-miss-model"
+	executor := &websocketCanonicalRollbackExecutor{
+		failErr: websocketPinnedFailoverStatusError{
+			status: http.StatusNotFound,
+			msg:    itemNotPersistedUpstreamMessage,
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: "auth-xai-item-miss", Provider: "xai", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: modelName}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	sessionHeader := http.Header{"Session-Id": []string{"item-miss-session"}}
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, sessionHeader)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	firstRequest := fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","id":"msg-1"}]}`, modelName)
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(firstRequest)); errWrite != nil {
+		t.Fatalf("write first request: %v", errWrite)
+	}
+	if _, firstResponse, errRead := conn.ReadMessage(); errRead != nil ||
+		gjson.GetBytes(firstResponse, "type").String() != wsEventTypeCompleted {
+		t.Fatalf("first response = %s, err=%v", firstResponse, errRead)
+	}
+
+	// The turn references a reasoning item the upstream no longer holds.
+	staleRequest := `{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"reasoning","id":"rs_0b5f3eb6f51f175c0169ca74e4a85881998539920821603a74"},{"type":"message","id":"msg-2"}]}`
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(staleRequest)); errWrite != nil {
+		t.Fatalf("write stale request: %v", errWrite)
+	}
+	_, errorResponse, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("item miss was hidden from the client: %v", errRead)
+	}
+	if got := gjson.GetBytes(errorResponse, "type").String(); got != wsEventTypeError {
+		t.Fatalf("response type = %q, want %q: %s", got, wsEventTypeError, errorResponse)
+	}
+	if got := int(gjson.GetBytes(errorResponse, "status").Int()); got != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d: %s", got, http.StatusNotFound, errorResponse)
+	}
+	if msg := gjson.GetBytes(errorResponse, "error.message").String(); !strings.Contains(msg, "Items are not persisted") {
+		t.Fatalf("error.message lost the upstream reason: %q", msg)
+	}
+	if _, extra, errRead := conn.ReadMessage(); errRead == nil {
+		t.Fatalf("received frame after terminal error: %s", extra)
+	}
+
+	// The client rebuilds the conversation on a new socket with the full input.
+	reconn, _, errDial := websocket.DefaultDialer.Dial(wsURL, sessionHeader)
+	if errDial != nil {
+		t.Fatalf("reconnect websocket: %v", errDial)
+	}
+	defer func() { _ = reconn.Close() }()
+
+	fullRequest := fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","id":"msg-1"},{"type":"message","id":"msg-2"}]}`, modelName)
+	if errWrite := reconn.WriteMessage(websocket.TextMessage, []byte(fullRequest)); errWrite != nil {
+		t.Fatalf("write rebuilt request: %v", errWrite)
+	}
+	_, recovered, errRead := reconn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read rebuilt response: %v", errRead)
+	}
+	if got := gjson.GetBytes(recovered, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("rebuilt response type = %q, want %q: %s", got, wsEventTypeCompleted, recovered)
+	}
+
+	payloads := executor.Payloads()
+	if len(payloads) != 3 {
+		t.Fatalf("upstream payload count = %d, want 3", len(payloads))
+	}
+	// The rebuilt turn must carry the full input and none of the failed turn's state.
+	rebuilt := payloads[2]
+	if got := gjson.GetBytes(rebuilt, "previous_response_id").String(); got != "" {
+		t.Fatalf("rebuilt upstream request still pinned previous_response_id=%q: %s", got, rebuilt)
+	}
+	inputIDs := gjson.GetBytes(rebuilt, "input.#.id").Array()
+	if len(inputIDs) != 2 || inputIDs[0].String() != "msg-1" || inputIDs[1].String() != "msg-2" {
+		t.Fatalf("rebuilt upstream input lost context: %s", rebuilt)
+	}
+	if strings.Contains(string(rebuilt), "rs_0b5f3eb6f51f175c0169ca74e4a85881998539920821603a74") {
+		t.Fatalf("rebuilt upstream request replayed the stale item: %s", rebuilt)
 	}
 }
 

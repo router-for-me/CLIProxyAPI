@@ -44,6 +44,9 @@ func IsRequestFault(status int, err error) bool {
 	if hasRequestFaultBody(err) {
 		return true
 	}
+	if err != nil && IsItemNotPersisted(err.Error()) {
+		return true
+	}
 	switch status {
 	case http.StatusBadRequest,
 		http.StatusConflict,
@@ -53,6 +56,21 @@ func IsRequestFault(status int, err error) bool {
 	default:
 		return false
 	}
+}
+
+// IsItemNotPersisted matches the upstream 404 raised when a request references a
+// response item the upstream never stored because `store` was false. The upstream
+// sends this as a plain-text message rather than a JSON body, so it cannot be
+// recognized through the structured identifiers above.
+//
+// The request can only succeed once the client rebuilds it without the stale
+// reference, so it is a request fault: rotating credentials cannot help, and the
+// client must be told rather than left to retry the same broken input.
+func IsItemNotPersisted(message string) bool {
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "item with id") &&
+		strings.Contains(lower, "not found") &&
+		strings.Contains(lower, "items are not persisted when `store` is set to false")
 }
 
 func hasRequestFaultBody(err error) bool {

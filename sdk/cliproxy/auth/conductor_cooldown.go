@@ -1319,21 +1319,11 @@ func nextCloudflareCooldown(backoffLevel int, disableCooling bool, now time.Time
 	return next, backoffLevel
 }
 
-func isRequestScopedNotFoundMessage(message string) bool {
-	if message == "" {
-		return false
-	}
-	lower := strings.ToLower(message)
-	return strings.Contains(lower, "item with id") &&
-		strings.Contains(lower, "not found") &&
-		strings.Contains(lower, "items are not persisted when `store` is set to false")
-}
-
 func isRequestScopedNotFoundResultError(err *Error) bool {
 	if err == nil || statusCodeFromResult(err) != http.StatusNotFound {
 		return false
 	}
-	return isRequestScopedNotFoundMessage(err.Message)
+	return clienterror.IsItemNotPersisted(err.Message)
 }
 
 func isRequestScopedResultError(err *Error) bool {
@@ -1552,20 +1542,7 @@ func isRequestInvalidError(err error) bool {
 	if isModelSupportError(err) {
 		return false
 	}
-	status := statusCodeFromError(err)
-	if clienterror.IsRequestFault(status, err) {
-		return true
-	}
-	switch status {
-	case http.StatusNotFound:
-		return isRequestScopedNotFoundMessage(err.Error())
-	case http.StatusInternalServerError:
-		msg := err.Error()
-		return strings.Contains(msg, "\"status\":\"UNKNOWN\"") ||
-			strings.Contains(msg, "\"status\": \"UNKNOWN\"")
-	default:
-		return false
-	}
+	return clienterror.IsRequestFault(statusCodeFromError(err), err)
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {

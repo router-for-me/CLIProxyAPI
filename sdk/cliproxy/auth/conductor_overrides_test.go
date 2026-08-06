@@ -1220,6 +1220,11 @@ func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(
 		HTTPStatus: http.StatusBadGateway,
 		Message:    `{"body":{"error":{"type":"invalid_request","message":"invalid input"}}}`,
 	}
+	// Upstream sends this one as plain text rather than a JSON error body.
+	itemNotPersistedErr := &Error{
+		HTTPStatus: http.StatusNotFound,
+		Message:    requestScopedNotFoundMessage,
+	}
 	tests := []struct {
 		name               string
 		provider           string
@@ -1247,6 +1252,9 @@ func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(
 		{name: "non-streaming context length behind bad gateway", err: contextLengthErr, wantStatus: http.StatusBadGateway},
 		{name: "streaming context length behind bad gateway", stream: true, err: contextLengthErr, wantStatus: http.StatusBadGateway},
 		{name: "streaming invalid request type behind bad gateway", stream: true, err: invalidRequestTypeErr, wantStatus: http.StatusBadGateway},
+		{name: "non-streaming item not persisted", err: itemNotPersistedErr, wantStatus: http.StatusNotFound},
+		{name: "streaming item not persisted", stream: true, err: itemNotPersistedErr, wantStatus: http.StatusNotFound},
+		{name: "streaming item not persisted after payload", stream: true, streamAfterPayload: true, err: itemNotPersistedErr, wantStatus: http.StatusNotFound},
 	}
 
 	for _, tc := range tests {
@@ -1342,6 +1350,79 @@ func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(
 				t.Fatalf("fallback auth failed count = %d, want 0", updatedGood.Failed)
 			}
 		})
+	}
+}
+
+// TestManager_UnknownUpstreamErrorRotatesAndPenalizesModelOnly pins the upstream
+// 500 "status":"UNKNOWN" contract. It is an upstream internal failure, not a
+// request fault, so the request must fall through to the next credential. The
+// cooldown that follows must land on the (credential, model) pair only: sibling
+// models on the same credential stay selectable.
+func TestManager_UnknownUpstreamErrorRotatesAndPenalizesModelOnly(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second, 0)
+
+	const provider = "gemini"
+	const model = "gemini-3.6-pro"
+	const siblingModel = "gemini-3.6-flash"
+
+	executor := &authFallbackExecutor{id: provider}
+	executor.executeErrors = map[string]error{
+		"aa-bad-auth": &Error{
+			HTTPStatus: http.StatusInternalServerError,
+			Message:    `{"error":{"code":500,"message":"Internal error encountered.","status":"UNKNOWN"}}`,
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	badAuth := &Auth{ID: "aa-bad-auth", Provider: provider}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: provider}
+
+	reg := registry.GetGlobalRegistry()
+	models := []*registry.ModelInfo{{ID: model}, {ID: siblingModel}}
+	reg.RegisterClient(badAuth.ID, provider, models)
+	reg.RegisterClient(goodAuth.ID, provider, models)
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("expected fallback to the next credential, got error: %v", errExecute)
+	}
+	if got := string(resp.Payload); got != goodAuth.ID {
+		t.Fatalf("served by %q, want %q", got, goodAuth.ID)
+	}
+	if calls := executor.ExecuteCalls(); len(calls) != 2 || calls[0] != badAuth.ID || calls[1] != goodAuth.ID {
+		t.Fatalf("credential calls = %v, want [%s %s]", calls, badAuth.ID, goodAuth.ID)
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatal("expected bad auth to remain registered")
+	}
+	state := updatedBad.ModelStates[model]
+	if state == nil {
+		t.Fatal("expected the failing (credential, model) pair to be penalized")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatal("expected a cooldown on the failing (credential, model) pair")
+	}
+
+	now := time.Now()
+	if blocked, _, _ := isAuthBlockedForModel(updatedBad, model, now); !blocked {
+		t.Fatal("expected the failing model to be blocked on that credential")
+	}
+	if blocked, reason, _ := isAuthBlockedForModel(updatedBad, siblingModel, now); blocked {
+		t.Fatalf("sibling model was blocked on the same credential (reason=%v); the penalty must stay scoped to (credential, model)", reason)
 	}
 }
 
