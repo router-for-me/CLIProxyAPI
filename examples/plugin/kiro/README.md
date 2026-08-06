@@ -1,9 +1,11 @@
 # Kiro Provider Plugin
 
 This Go plugin adds an API-key-only Kiro provider to CLIProxyAPI. It uses the
-Kiro CLI runtime protocol and exposes Claude as its native protocol. The host
-translates OpenAI Chat Completions and Responses API requests to and from Claude
-when those entry points are used.
+Kiro CLI runtime protocol and exposes Claude as its native protocol. Claude
+`/v1/messages` requests are supported directly. Complete non-streaming OpenAI
+Chat Completions and Responses API compatibility additionally requires the
+restricted translator work tracked in
+[issue #4815](https://github.com/router-for-me/CLIProxyAPI/issues/4815).
 
 The implementation deliberately does not include Kiro OAuth, device login,
 refresh tokens, account selection, or its own HTTP client. CLIProxyAPI owns
@@ -120,8 +122,10 @@ Run these after providing a real key:
    explicit allow-list is configured, confirm only its intersection appears.
 2. Send a non-streaming `/v1/messages` text request.
 3. Send the same request with `stream: true` and verify Anthropic SSE ordering.
-4. Call `/v1/chat/completions` to verify host-side OpenAI translation.
-5. Call `/v1/responses` to verify Responses API translation.
+4. After issue #4815 is implemented, call `/v1/chat/completions` to verify
+   host-side OpenAI translation.
+5. After issue #4815 is implemented, call `/v1/responses` to verify Responses
+   API translation.
 6. Exercise one client tool call and return its `tool_result`.
 7. Send a small base64 image if the selected account model supports images.
 8. Use an invalid key and verify a 401/403 does not leak the key.
@@ -133,6 +137,8 @@ Run these after providing a real key:
 
 - The Kiro subscription API key is documented, but the raw runtime protocol is
   not a public model API and may change.
+- Complete non-streaming OpenAI-compatible endpoint support depends on the
+  maintainer-owned translator changes tracked in issue #4815.
 - Model discovery uses Kiro's internal `ListAvailableModels` service rather
   than a documented public model API and may change.
 - Discovery is refreshed when the host registers an auth. The five-minute
