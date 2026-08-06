@@ -46,12 +46,13 @@ func (u *pluginExecutorUsage) observeStream(ctx context.Context, format sdktrans
 	go func() {
 		defer close(out)
 		var usageBuffer helps.StreamUsageBuffer
+		var pendingUsagePayload []byte
 		var terminalErr error
 		for chunk := range in {
 			if chunk.Err != nil {
 				terminalErr = chunk.Err
 			} else {
-				observePluginExecutorStreamUsage(&usageBuffer, format, chunk.Payload)
+				pendingUsagePayload = observePluginExecutorStreamChunk(&usageBuffer, format, pendingUsagePayload, chunk.Payload)
 			}
 			if !sendExecutorPluginStreamChunk(ctx, out, chunk) {
 				if errContext := ctx.Err(); errContext != nil {
@@ -64,11 +65,24 @@ func (u *pluginExecutorUsage) observeStream(ctx context.Context, format sdktrans
 			u.reporter.PublishFailure(ctx, terminalErr)
 			return
 		}
+		if len(pendingUsagePayload) > 0 {
+			observePluginExecutorStreamUsage(&usageBuffer, format, pendingUsagePayload)
+		}
 		if !usageBuffer.Publish(ctx, u.reporter) {
 			u.reporter.EnsurePublished(ctx)
 		}
 	}()
 	return out
+}
+
+func observePluginExecutorStreamChunk(buffer *helps.StreamUsageBuffer, format sdktranslator.Format, pending, payload []byte) []byte {
+	pending = append(pending, payload...)
+	lastNewline := bytes.LastIndexByte(pending, '\n')
+	if lastNewline < 0 {
+		return pending
+	}
+	observePluginExecutorStreamUsage(buffer, format, pending[:lastNewline+1])
+	return bytes.Clone(pending[lastNewline+1:])
 }
 
 func pluginExecutorNonStreamUsage(format sdktranslator.Format, payload []byte) (coreusage.Detail, bool) {

@@ -2874,6 +2874,23 @@ func TestPluginExecutorUsageParsesFinalClaudeStreamCounts(t *testing.T) {
 	}
 }
 
+func TestPluginExecutorUsageBuffersSplitClaudeStreamCounts(t *testing.T) {
+	var usageBuffer helps.StreamUsageBuffer
+	var pending []byte
+	pending = observePluginExecutorStreamChunk(&usageBuffer, sdktranslator.FormatClaude, pending, []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":12,"))
+	pending = observePluginExecutorStreamChunk(&usageBuffer, sdktranslator.FormatClaude, pending, []byte("\"output_tokens\":4}}\n\n"))
+	if len(pending) != 0 {
+		t.Fatalf("pending stream payload = %q, want empty", pending)
+	}
+	detail, ok := usageBuffer.Detail()
+	if !ok {
+		t.Fatal("stream usage was not observed")
+	}
+	if detail.InputTokens != 12 || detail.OutputTokens != 4 || detail.TotalTokens != 16 {
+		t.Fatalf("stream usage = %#v, want input=12 output=4 total=16", detail)
+	}
+}
+
 func TestExecutorAdapterPublishesNativeUsageForBilling(t *testing.T) {
 	const model = "plugin-usage-billing-model"
 	records := make(chan coreusage.Record, 1)

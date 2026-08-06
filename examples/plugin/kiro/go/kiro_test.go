@@ -239,12 +239,49 @@ func TestClaudeToKiroTransformsSystemToolsAndResults(t *testing.T) {
 	if context == nil || len(context.Tools) != 1 || len(context.ToolResults) != 1 {
 		t.Fatalf("current context = %#v", context)
 	}
+	if context.ToolResults[0].Status != "success" {
+		t.Fatalf("tool result status = %q, want success", context.ToolResults[0].Status)
+	}
 	toolName := context.Tools[0].ToolSpecification.Name
 	if toolName != "math_add_unsafe" || payload.ToolNameMap[toolName] != "math.add/unsafe" {
 		t.Fatalf("tool name=%q map=%#v", toolName, payload.ToolNameMap)
 	}
 	if !strings.Contains(current.Content, "Tool results:") {
 		t.Fatalf("current content = %q", current.Content)
+	}
+}
+
+func TestClaudeToKiroPreservesToolResultErrorStatus(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"lookup failed","is_error":true}]}
+		]
+	}`)
+	payload, _, errTranslate := claudeToKiro(raw, "")
+	if errTranslate != nil {
+		t.Fatalf("claudeToKiro() error = %v", errTranslate)
+	}
+	context := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	if context == nil || len(context.ToolResults) != 1 {
+		t.Fatalf("current context = %#v", context)
+	}
+	if context.ToolResults[0].Status != "error" {
+		t.Fatalf("tool result status = %q, want error", context.ToolResults[0].Status)
+	}
+}
+
+func TestClaudeToKiroRejectsAssistantPrefill(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[
+			{"role":"user","content":"Complete this sentence"},
+			{"role":"assistant","content":"The answer starts with"}
+		]
+	}`)
+	if _, _, errTranslate := claudeToKiro(raw, ""); errTranslate == nil || !strings.Contains(errTranslate.Error(), "assistant prefills") {
+		t.Fatalf("claudeToKiro() error = %v, want unsupported assistant prefill error", errTranslate)
 	}
 }
 

@@ -33,6 +33,9 @@ func claudeToKiro(raw []byte, requestedModel string) (*kiroPayload, *claudeReque
 	if len(request.Messages) == 0 {
 		return nil, nil, fmt.Errorf("messages must not be empty")
 	}
+	if lastRole := strings.ToLower(strings.TrimSpace(request.Messages[len(request.Messages)-1].Role)); lastRole != "user" {
+		return nil, nil, fmt.Errorf("last message must have role user; Kiro does not support assistant prefills")
+	}
 
 	systemPrompt := extractSystemPrompt(request.System)
 	if request.Thinking != nil {
@@ -158,7 +161,11 @@ func extractUserContent(content any) (string, []kiroImage, []kiroToolResult) {
 			toolUseID, _ := block["tool_use_id"].(string)
 			text, resultImages := extractToolResultContent(block["content"])
 			images = append(images, resultImages...)
-			results = append(results, kiroToolResult{ToolUseID: toolUseID, Content: []kiroResultContent{{Text: fallbackContent(text, len(resultImages) > 0)}}, Status: "success"})
+			status := "success"
+			if isError, _ := block["is_error"].(bool); isError {
+				status = "error"
+			}
+			results = append(results, kiroToolResult{ToolUseID: toolUseID, Content: []kiroResultContent{{Text: fallbackContent(text, len(resultImages) > 0)}}, Status: status})
 		}
 	}
 	return strings.Join(texts, ""), images, results
