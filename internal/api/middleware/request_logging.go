@@ -24,6 +24,11 @@ const (
 	maxDeferredErrorRequestBodyBytes     int64 = 32 << 20 // 32 MiB
 )
 
+// noLogChecker is implemented by loggers that can skip logging for specific API keys.
+type noLogChecker interface {
+	ShouldSkipLog(apiKey string) bool
+}
+
 // RequestLoggingMiddleware creates a Gin middleware that logs HTTP requests and responses.
 // It captures detailed information about the request and response, including headers and body,
 // and uses the provided RequestLogger to record this data. When full request logging is disabled,
@@ -44,6 +49,14 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		if !shouldLogRequest(path) {
 			c.Next()
 			return
+		}
+
+		// Skip logging entirely for API keys configured in the no-log list.
+		if checker, ok := logger.(noLogChecker); ok {
+			if rawKey := requestAPIKey(c.Request); rawKey != "" && checker.ShouldSkipLog(rawKey) {
+				c.Next()
+				return
+			}
 		}
 
 		// Provisional scope from the raw credential (pre-auth). After AuthMiddleware

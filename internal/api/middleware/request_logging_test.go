@@ -499,3 +499,93 @@ func TestCaptureRequestInfoDecodesZstdRequestBodyForLog(t *testing.T) {
 		t.Fatal("request body was not restored with the original compressed bytes")
 	}
 }
+
+func TestRequestLoggingMiddlewareSkipsNoLogAPIKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	logsDir := t.TempDir()
+	logger := logging.NewFileRequestLogger(true, logsDir, "", 10)
+	noLogKey := "cpa_nologsecretvalue1234567890"
+	logger.SetNoLogAPIKeys([]string{noLogKey})
+
+	handlerCalled := false
+	router := gin.New()
+	router.Use(RequestLoggingMiddleware(logger))
+	router.POST("/v1/chat/completions", func(c *gin.Context) {
+		handlerCalled = true
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"gpt-5.4"}`)))
+	request.Header.Set("Authorization", "Bearer "+noLogKey)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("response status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if !handlerCalled {
+		t.Fatal("handler was not called; no-log should only skip logging, not request processing")
+	}
+
+	// No log files should be created anywhere under the logs directory.
+	var logFiles []string
+	errWalk := filepath.Walk(logsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && strings.HasSuffix(info.Name(), ".log") {
+			logFiles = append(logFiles, path)
+		}
+		return nil
+	})
+	if errWalk != nil {
+		t.Fatalf("walk logs dir: %v", errWalk)
+	}
+	if len(logFiles) > 0 {
+		t.Fatalf("expected no log files for no-log API key, found: %v", logFiles)
+	}
+}
+
+func TestRequestLoggingMiddlewareLogsNonNoLogAPIKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	logsDir := t.TempDir()
+	logger := logging.NewFileRequestLogger(true, logsDir, "", 10)
+	logger.SetNoLogAPIKeys([]string{"cpa_nologsecretvalue1234567890"})
+
+	router := gin.New()
+	router.Use(RequestLoggingMiddleware(logger))
+	router.POST("/v1/chat/completions", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	// A different key should still be logged normally.
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"gpt-5.4"}`)))
+	request.Header.Set("Authorization", "Bearer cpa_normalloggedkey12345678")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("response status = %d, want %d", response.Code, http.StatusOK)
+	}
+
+	found := false
+	errWalk := filepath.Walk(logsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && strings.HasSuffix(info.Name(), ".log") {
+			found = true
+		}
+		return nil
+	})
+	if errWalk != nil {
+		t.Fatalf("walk logs dir: %v", errWalk)
+	}
+	if !found {
+		t.Fatal("expected log files for non-no-log API key, found none")
+	}
+}

@@ -47,6 +47,11 @@ api-key-names:
   - "User 2"
   - "User 3"
 
+# API keys whose requests should skip request logging entirely.
+# Requests authenticated with these keys are neither recorded to log files nor uploaded.
+# api-keys-no-log:
+#   - "your-api-key-1"
+
 # Enable debug logging
 debug: false
 

@@ -48,6 +48,10 @@ type SDKConfig struct {
 	// APIKeyNames contains optional display names matched to APIKeys by index.
 	APIKeyNames []string `yaml:"api-key-names,omitempty" json:"api-key-names,omitempty"`
 
+	// APIKeysNoLog lists API keys whose requests should skip request logging entirely.
+	// Requests authenticated with these keys are neither recorded to log files nor uploaded.
+	APIKeysNoLog []string `yaml:"api-keys-no-log,omitempty" json:"api-keys-no-log,omitempty"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`

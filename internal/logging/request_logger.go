@@ -425,6 +425,11 @@ type FileRequestLogger struct {
 	homeEnabled bool
 
 	keyNames *apiKeyNameIndex
+
+	// noLogAPIKeys contains API keys whose requests should skip logging entirely.
+	noLogAPIKeys map[string]struct{}
+	// noLogMu guards noLogAPIKeys.
+	noLogMu sync.RWMutex
 }
 
 type apiKeyNameIndex struct {
@@ -564,6 +569,33 @@ func (l *FileRequestLogger) SetAPIKeyNames(keys, names []string) {
 	l.keyNames.mu.Lock()
 	l.keyNames.names = next
 	l.keyNames.mu.Unlock()
+}
+
+// SetNoLogAPIKeys replaces the set of API keys whose requests should skip logging.
+func (l *FileRequestLogger) SetNoLogAPIKeys(keys []string) {
+	if l == nil {
+		return
+	}
+	next := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		if trimmed := strings.TrimSpace(key); trimmed != "" {
+			next[trimmed] = struct{}{}
+		}
+	}
+	l.noLogMu.Lock()
+	l.noLogAPIKeys = next
+	l.noLogMu.Unlock()
+}
+
+// ShouldSkipLog reports whether the given API key should bypass request logging.
+func (l *FileRequestLogger) ShouldSkipLog(apiKey string) bool {
+	if l == nil || apiKey == "" {
+		return false
+	}
+	l.noLogMu.RLock()
+	_, found := l.noLogAPIKeys[apiKey]
+	l.noLogMu.RUnlock()
+	return found
 }
 
 // ForAPIKey returns a request logger scoped to a safe per-key directory.
