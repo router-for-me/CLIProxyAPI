@@ -282,6 +282,191 @@ func TestConvertOpenAIResponsesRequestToClaude_DropsIncompatibleReasoningSignatu
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_GroupsAssistantAndToolResultTurns(t *testing.T) {
+	rawSignature, expectedSignature := testClaudeResponsesThinkingSignature(t)
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{
+				"type":"reasoning",
+				"encrypted_content":"` + rawSignature + `",
+				"summary":[{"type":"summary_text","text":"internal reasoning"}]
+			},
+			{
+				"type":"message",
+				"role":"assistant",
+				"content":[{"type":"output_text","text":"visible answer"}]
+			},
+			{
+				"type":"function_call",
+				"call_id":"call_first",
+				"name":"read_file",
+				"arguments":"{\"path\":\"first\"}"
+			},
+			{
+				"type":"function_call",
+				"call_id":"call_second",
+				"name":"read_file",
+				"arguments":"{\"path\":\"second\"}"
+			},
+			{
+				"type":"function_call_output",
+				"call_id":"call_first",
+				"output":"first result"
+			},
+			{
+				"type":"function_call_output",
+				"call_id":"call_second",
+				"output":"second result"
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+	if got := root.Get("messages.#").Int(); got != 2 {
+		t.Fatalf("message count = %d, want 2. Output: %s", got, string(out))
+	}
+
+	assistant := root.Get("messages.0")
+	if got := assistant.Get("role").String(); got != "assistant" {
+		t.Fatalf("first message role = %q, want assistant. Output: %s", got, string(out))
+	}
+	wantAssistantTypes := []string{"thinking", "text", "tool_use", "tool_use"}
+	assistantContent := assistant.Get("content").Array()
+	if len(assistantContent) != len(wantAssistantTypes) {
+		t.Fatalf("assistant content count = %d, want %d. Output: %s", len(assistantContent), len(wantAssistantTypes), string(out))
+	}
+	for i, wantType := range wantAssistantTypes {
+		if got := assistantContent[i].Get("type").String(); got != wantType {
+			t.Fatalf("assistant content[%d].type = %q, want %q. Output: %s", i, got, wantType, string(out))
+		}
+	}
+	if got := assistantContent[0].Get("signature").String(); got != expectedSignature {
+		t.Fatalf("thinking signature = %q, want %q", got, expectedSignature)
+	}
+	if got := assistantContent[2].Get("id").String(); got != "call_first" {
+		t.Fatalf("first tool_use id = %q, want call_first", got)
+	}
+	if got := assistantContent[3].Get("id").String(); got != "call_second" {
+		t.Fatalf("second tool_use id = %q, want call_second", got)
+	}
+
+	user := root.Get("messages.1")
+	if got := user.Get("role").String(); got != "user" {
+		t.Fatalf("second message role = %q, want user. Output: %s", got, string(out))
+	}
+	userContent := user.Get("content").Array()
+	if len(userContent) != 2 {
+		t.Fatalf("user content count = %d, want 2. Output: %s", len(userContent), string(out))
+	}
+	for i, wantID := range []string{"call_first", "call_second"} {
+		if got := userContent[i].Get("type").String(); got != "tool_result" {
+			t.Fatalf("user content[%d].type = %q, want tool_result. Output: %s", i, got, string(out))
+		}
+		if got := userContent[i].Get("tool_use_id").String(); got != wantID {
+			t.Fatalf("user content[%d].tool_use_id = %q, want %q", i, got, wantID)
+		}
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_MergesConsecutiveUserMessagesAndPreservesCacheControl(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{
+				"type":"message",
+				"role":"user",
+				"cache_control":{"type":"ephemeral"},
+				"content":[{"type":"input_text","text":"first"}]
+			},
+			{
+				"type":"message",
+				"role":"user",
+				"content":[{"type":"input_text","text":"second"}]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+	if got := root.Get("messages.#").Int(); got != 1 {
+		t.Fatalf("message count = %d, want 1. Output: %s", got, string(out))
+	}
+	content := root.Get("messages.0.content").Array()
+	if len(content) != 2 {
+		t.Fatalf("content count = %d, want 2. Output: %s", len(content), string(out))
+	}
+	if got := content[0].Get("text").String(); got != "first" {
+		t.Fatalf("content[0].text = %q, want first", got)
+	}
+	if got := content[0].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("content[0].cache_control.type = %q, want ephemeral", got)
+	}
+	if got := content[1].Get("text").String(); got != "second" {
+		t.Fatalf("content[1].text = %q, want second", got)
+	}
+	if content[1].Get("cache_control").Exists() {
+		t.Fatalf("content[1] should not have cache_control. Output: %s", string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_DoesNotMergeAcrossRoleChanges(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first assistant"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"user reply"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"second assistant"}]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+	messages := root.Get("messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("message count = %d, want 3. Output: %s", len(messages), string(out))
+	}
+	for i, wantRole := range []string{"assistant", "user", "assistant"} {
+		if got := messages[i].Get("role").String(); got != wantRole {
+			t.Fatalf("messages[%d].role = %q, want %q", i, got, wantRole)
+		}
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_EmptyStringContentDoesNotBreakAssistantTurn(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"message","role":"assistant","content":"first assistant"},
+			{"type":"message","role":"user","content":""},
+			{"type":"message","role":"assistant","content":"second assistant"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+	messages := root.Get("messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("message count = %d, want 1. Output: %s", len(messages), string(out))
+	}
+	if got := messages[0].Get("role").String(); got != "assistant" {
+		t.Fatalf("message role = %q, want assistant. Output: %s", got, string(out))
+	}
+	content := messages[0].Get("content").Array()
+	if len(content) != 2 {
+		t.Fatalf("content count = %d, want 2. Output: %s", len(content), string(out))
+	}
+	for i, wantText := range []string{"first assistant", "second assistant"} {
+		if got := content[i].Get("type").String(); got != "text" {
+			t.Fatalf("content[%d].type = %q, want text. Output: %s", i, got, string(out))
+		}
+		if got := content[i].Get("text").String(); got != wantText {
+			t.Fatalf("content[%d].text = %q, want %q. Output: %s", i, got, wantText, string(out))
+		}
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_FunctionCallOutputPreservesInputImage(t *testing.T) {
 	const imageB64 = "iVBORw0KGgo="
 	dataURL := "data:image/png;base64," + imageB64
@@ -355,22 +540,25 @@ func TestConvertOpenAIResponsesRequestToClaude_KeepsToolUseAdjacentToToolResult(
 	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
 	root := gjson.ParseBytes(out)
 
+	if got := root.Get("messages.#").Int(); got != 2 {
+		t.Fatalf("message count = %d, want 2. Output: %s", got, string(out))
+	}
 	if got := root.Get("messages.0.role").String(); got != "assistant" {
 		t.Fatalf("first message role = %q, want assistant. Output: %s", got, string(out))
 	}
-	if got := root.Get("messages.0.content").String(); got != "I'll check your Obsidian vault for articles." {
-		t.Fatalf("first message content = %q, want assistant text. Output: %s", got, string(out))
+	if got := root.Get("messages.0.content.0.text").String(); got != "I'll check your Obsidian vault for articles." {
+		t.Fatalf("first assistant block text = %q. Output: %s", got, string(out))
 	}
-	if got := root.Get("messages.1.content.0.type").String(); got != "tool_use" {
-		t.Fatalf("second message first content type = %q, want tool_use. Output: %s", got, string(out))
+	if got := root.Get("messages.0.content.1.type").String(); got != "tool_use" {
+		t.Fatalf("second assistant block type = %q, want tool_use. Output: %s", got, string(out))
 	}
-	if got := root.Get("messages.1.content.0.id").String(); got != "call_00_awGuheXs4aRbtedNK8LE3743" {
+	if got := root.Get("messages.0.content.1.id").String(); got != "call_00_awGuheXs4aRbtedNK8LE3743" {
 		t.Fatalf("tool_use id = %q, want call_00_awGuheXs4aRbtedNK8LE3743. Output: %s", got, string(out))
 	}
-	if got := root.Get("messages.2.content.0.type").String(); got != "tool_result" {
-		t.Fatalf("third message first content type = %q, want tool_result. Output: %s", got, string(out))
+	if got := root.Get("messages.1.content.0.type").String(); got != "tool_result" {
+		t.Fatalf("user block type = %q, want tool_result. Output: %s", got, string(out))
 	}
-	if got := root.Get("messages.2.content.0.tool_use_id").String(); got != "call_00_awGuheXs4aRbtedNK8LE3743" {
+	if got := root.Get("messages.1.content.0.tool_use_id").String(); got != "call_00_awGuheXs4aRbtedNK8LE3743" {
 		t.Fatalf("tool_result id = %q, want call_00_awGuheXs4aRbtedNK8LE3743. Output: %s", got, string(out))
 	}
 }

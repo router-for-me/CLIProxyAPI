@@ -50,7 +50,7 @@ func ComputeClaudeModelsHash(models []config.ClaudeModel) string {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + thinkingHashSuffix(model.Thinking))
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + "|" + fmt.Sprintf("is-compat=%t", model.IsCompat) + thinkingHashSuffix(model.Thinking))
 		}
 	})
 	return hashJoined(keys)
@@ -65,7 +65,7 @@ func ComputeCodexModelsHash(models []config.CodexModel) string {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + thinkingHashSuffix(model.Thinking))
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + "|" + fmt.Sprintf("is-compat=%t", model.IsCompat) + thinkingHashSuffix(model.Thinking))
 		}
 	})
 	return hashJoined(keys)
@@ -80,7 +80,7 @@ func ComputeGeminiModelsHash(models []config.GeminiModel) string {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + thinkingHashSuffix(model.Thinking))
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + "|" + fmt.Sprintf("is-compat=%t", model.IsCompat) + thinkingHashSuffix(model.Thinking))
 		}
 	})
 	return hashJoined(keys)

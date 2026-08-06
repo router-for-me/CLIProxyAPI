@@ -291,6 +291,10 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterPluginExecutorRoute(ctx co
 	return req, opts, nil
 }
 
+func ExecutionErrorMessage(err error) *interfaces.ErrorMessage {
+	return executionErrorMessage(err)
+}
+
 func executionErrorMessage(err error) *interfaces.ErrorMessage {
 	var terminated *coreexecutor.RequestTerminatedError
 	if errors.As(err, &terminated) && terminated != nil {
