@@ -34,6 +34,9 @@ const GenerateMetadataKey = "generate"
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
+	// AuthSelectionCandidatesMetadataKey restricts auth selection to an explicit ranked
+	// candidate list. Its value must be a []AuthSelectionCandidate.
+	AuthSelectionCandidatesMetadataKey = "auth_selection_candidates"
 	// SelectedAuthMetadataKey stores the auth ID selected by the scheduler.
 	SelectedAuthMetadataKey = "selected_auth_id"
 	// SelectedAuthCallbackMetadataKey carries an optional callback invoked with the selected auth ID.
@@ -49,6 +52,20 @@ const (
 	// CallerScopeMetadataKey isolates inferred session identities between downstream callers.
 	CallerScopeMetadataKey = "caller_scope"
 )
+
+// AuthSelectionCandidate describes one credential a caller allows for a single request.
+// The candidate list is request scoped: it never mutates persistent auth priority or any
+// scheduler state, and it restricts selection to exactly the listed credentials.
+type AuthSelectionCandidate struct {
+	// AuthID is the manager registered credential identifier.
+	AuthID string
+	// PriorityRank groups candidates into request-scoped ranks; the lowest rank that still
+	// contains an eligible credential is the only rank the configured scheduler runs within.
+	PriorityRank uint32
+	// StableOrder deterministically orders candidates inside one rank. It is presentation
+	// only and never replaces the configured scheduling strategy.
+	StableOrder uint32
+}
 
 // Request encapsulates the translated payload that will be sent to a provider executor.
 type Request struct {

@@ -708,6 +708,11 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	if m == nil {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	// Defensive: Home dispatch cannot honour a ranked candidate list, so fail closed here as
+	// well as in pickHomeDispatchSelection to keep the intent local to every selection funnel.
+	if errCandidates := homeRankedCandidateGuard(opts); errCandidates != nil {
+		return nil, nil, "", errCandidates
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -730,6 +735,11 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, opts cliproxyexecutor.Options) (*HomeDispatchSelection, error) {
 	if m == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	// Home selects remotely and exposes no local candidate filter, so a ranked request fails
+	// closed before session retention, before BeginDispatch, and before any remote dispatch.
+	if errCandidates := homeRankedCandidateGuard(opts); errCandidates != nil {
+		return nil, errCandidates
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -974,6 +984,10 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 		return nil, nil
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	candidateSet, errCandidates := authSelectionCandidatesFromMetadata(opts.Metadata)
+	if errCandidates != nil {
+		return nil, errCandidates
+	}
 	var candidates []creditsCandidateEntry
 	m.mu.RLock()
 	for _, auth := range m.auths {
@@ -981,6 +995,11 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 			continue
 		}
 		if pinnedAuthID != "" && auth.ID != pinnedAuthID {
+			continue
+		}
+		// This fallback path has no eligibility filter of its own; the request-scoped candidate
+		// list must still hold so a ranked request never executes on an unlisted credential.
+		if !candidateSet.allows(auth.ID) {
 			continue
 		}
 		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
@@ -1001,6 +1020,8 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 		})
 	}
 	m.mu.RUnlock()
+
+	candidates = narrowCreditsCandidatesToLowestRank(candidateSet, candidates)
 
 	var known []creditsCandidateEntry
 	var unknown []creditsCandidateEntry
