@@ -113,6 +113,58 @@ func TestCursorExecuteReturnsReasoningAndUsage(t *testing.T) {
 	}
 }
 
+func TestCursorExecuteToolResultUsesColdContinuation(t *testing.T) {
+	clientID := normalizeToolCallID("call non-stream")
+	processCount := 0
+	e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), onMcpExec func(pendingMcpExec), toolResultCh <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
+		if onMcpExec == nil {
+			return errors.New("OpenAI non-stream request did not install an MCP callback")
+		}
+		if toolResultCh != nil {
+			return errors.New("OpenAI non-stream request parked an H2 tool session")
+		}
+		processCount++
+		if processCount == 1 {
+			onMcpExec(pendingMcpExec{ToolCallId: clientID, ToolName: "read", Args: `{"path":"README.md"}`})
+			return nil
+		}
+		onText("after tool", false)
+		return nil
+	})
+
+	first, err := e.Execute(context.Background(), cursorTestAuth(), cursorTestRequest(false), cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("first Execute() error = %v", err)
+	}
+	if got := gjson.GetBytes(first.Payload, "choices.0.finish_reason").String(); got != "tool_calls" {
+		t.Fatalf("first finish_reason = %q, want tool_calls", got)
+	}
+	if got := gjson.GetBytes(first.Payload, "choices.0.message.tool_calls.0.id").String(); got != clientID {
+		t.Fatalf("tool call ID = %q, want %q", got, clientID)
+	}
+	if got := gjson.GetBytes(first.Payload, "choices.0.message.tool_calls.0.function.name").String(); got != "read" {
+		t.Fatalf("tool name = %q, want read", got)
+	}
+	if got := gjson.GetBytes(first.Payload, "choices.0.message.tool_calls.0.function.arguments").String(); got != `{"path":"README.md"}` {
+		t.Fatalf("tool arguments = %q", got)
+	}
+
+	secondPayload := []byte(`{"model":"cursor-test-model","messages":[{"role":"user","content":"hello"},{"role":"assistant","tool_calls":[{"id":"` + clientID + `","type":"function","function":{"name":"read","arguments":"{\"path\":\"README.md\"}"}}]},{"role":"tool","tool_call_id":"` + clientID + `","content":"file contents"}]}`)
+	second, err := e.Execute(context.Background(), cursorTestAuth(), cliproxyexecutor.Request{Model: "cursor-test-model", Payload: secondPayload}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("second Execute() error = %v", err)
+	}
+	if got := gjson.GetBytes(second.Payload, "choices.0.finish_reason").String(); got != "stop" {
+		t.Fatalf("second finish_reason = %q, want stop", got)
+	}
+	if got := gjson.GetBytes(second.Payload, "choices.0.message.content").String(); got != "after tool" {
+		t.Fatalf("second content = %q, want after tool", got)
+	}
+	if processCount != 2 {
+		t.Fatalf("processor calls = %d, want 2", processCount)
+	}
+}
+
 func TestCursorExecuteReasoningOnlyErrorIsFailure(t *testing.T) {
 	boom := errors.New("upstream reset")
 	e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func(pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
@@ -281,6 +333,31 @@ func TestParseOpenAIToolCallIDDoesNotDoubleNormalize(t *testing.T) {
 	}
 	if got := parsed.ToolResults[0].ToolCallId; got != clientID {
 		t.Fatalf("tool_call_id = %q, want exact client ID %q", got, clientID)
+	}
+}
+
+func TestFlattenConversationIntoUserTextPreservesToolResult(t *testing.T) {
+	parsed := parseOpenAIRequest([]byte(`{
+		"messages": [
+			{"role":"user","content":"Read the project file."},
+			{"role":"assistant","content":"I will read it.","tool_calls":[{"id":"call_read","type":"function","function":{"name":"read","arguments":"{\"path\":\"README.md\"}"}}]},
+			{"role":"tool","tool_call_id":"call_read","content":"project contents"}
+		]
+	}`))
+
+	flattenConversationIntoUserText(parsed)
+	for _, want := range []string{
+		"USER: Read the project file.",
+		"ASSISTANT: I will read it.",
+		"TOOL_RESULT (call_id: call_read): project contents",
+		"Continue your response based on this context.",
+	} {
+		if !strings.Contains(parsed.UserText, want) {
+			t.Fatalf("flattened transcript is missing %q: %q", want, parsed.UserText)
+		}
+	}
+	if len(parsed.Turns) != 0 || len(parsed.ToolResults) != 0 {
+		t.Fatal("flattenConversationIntoUserText() retained structured history")
 	}
 }
 
@@ -486,20 +563,26 @@ func TestCursorResumeRejectsUnmatchedToolResultAndRestoresSession(t *testing.T) 
 	}
 }
 
-func TestCursorToolBoundaryImmediateResumeUsesPublishedSession(t *testing.T) {
+func TestCursorOpenAIToolResultUsesColdContinuation(t *testing.T) {
 	clientID := normalizeToolCallID("call immediate")
-	e := newCursorExecutorHarness(func(ctx context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, _ func(string, bool), onMcpExec func(pendingMcpExec), toolResultCh <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
-		onMcpExec(pendingMcpExec{ToolCallId: clientID, ToolName: "read", Args: `{}`})
-		select {
-		case results := <-toolResultCh:
-			if len(results) != 1 || results[0].ToolCallId != clientID {
-				return errors.New("immediate resume delivered wrong tool result")
-			}
-		case <-ctx.Done():
-			return ctx.Err()
+	var processMu sync.Mutex
+	processCount := 0
+	e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), onMcpExec func(pendingMcpExec), toolResultCh <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
+		if toolResultCh != nil {
+			return errors.New("OpenAI request parked an H2 tool session")
 		}
+		processMu.Lock()
+		processCount++
+		current := processCount
+		processMu.Unlock()
+		if current == 1 {
+			onMcpExec(pendingMcpExec{ToolCallId: clientID, ToolName: "read", Args: `{}`})
+			return nil
+		}
+		onText("after tool", false)
 		return nil
 	})
+
 	var openMu sync.Mutex
 	openCount := 0
 	e.openStream = func(string) (cursorStream, error) {
@@ -508,43 +591,41 @@ func TestCursorToolBoundaryImmediateResumeUsesPublishedSession(t *testing.T) {
 		openMu.Unlock()
 		return newFakeCursorStream(), nil
 	}
-	first, err := e.ExecuteStream(context.Background(), cursorTestAuth(), cursorTestRequest(true), cliproxyexecutor.Options{})
+
+	openAI := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")}
+	first, err := e.ExecuteStream(context.Background(), cursorTestAuth(), cursorTestRequest(true), openAI)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondPayload := []byte(`{"model":"cursor-test-model","stream":true,"messages":[{"role":"user","content":"hello"},{"role":"assistant","tool_calls":[{"id":"` + clientID + `","type":"function","function":{"name":"read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"` + clientID + `","content":"ok"}]}`)
-	type outcome struct {
-		body string
-		err  error
+	firstBody := cursorStreamPayload(collectCursorStream(t, first))
+	if !strings.Contains(firstBody, `"finish_reason":"tool_calls"`) || strings.Contains(firstBody, `"finish_reason":"stop"`) {
+		t.Fatalf("first OpenAI tool boundary is invalid:\n%s", firstBody)
 	}
-	resumed := make(chan outcome, 1)
-	go func() {
-		for range first.Chunks {
-		}
-		second, errResume := e.ExecuteStream(context.Background(), cursorTestAuth(), cliproxyexecutor.Request{Model: "cursor-test-model", Payload: secondPayload}, cliproxyexecutor.Options{})
-		if errResume != nil {
-			resumed <- outcome{err: errResume}
-			return
-		}
-		var chunks []cliproxyexecutor.StreamChunk
-		for chunk := range second.Chunks {
-			chunks = append(chunks, chunk)
-		}
-		resumed <- outcome{body: cursorStreamPayload(chunks)}
-	}()
-	select {
-	case got := <-resumed:
-		if got.err != nil {
-			t.Fatal(got.err)
-		}
-		openMu.Lock()
-		gotOpenCount := openCount
-		openMu.Unlock()
-		if gotOpenCount != 1 {
-			t.Fatalf("immediate resume cold-started a second Cursor stream: opens=%d body=%s", gotOpenCount, got.body)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("immediate close-triggered resume hung")
+	e.mu.Lock()
+	parkedSessions := len(e.sessions)
+	e.mu.Unlock()
+	if parkedSessions != 0 {
+		t.Fatalf("OpenAI tool call parked %d H2 session(s)", parkedSessions)
+	}
+
+	secondPayload := []byte(`{"model":"cursor-test-model","stream":true,"messages":[{"role":"user","content":"hello"},{"role":"assistant","tool_calls":[{"id":"` + clientID + `","type":"function","function":{"name":"read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"` + clientID + `","content":"file contents"}]}`)
+	second, err := e.ExecuteStream(context.Background(), cursorTestAuth(), cliproxyexecutor.Request{Model: "cursor-test-model", Payload: secondPayload}, openAI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondBody := cursorStreamPayload(collectCursorStream(t, second))
+	if !strings.Contains(secondBody, `"content":"after tool"`) || !strings.Contains(secondBody, `"finish_reason":"stop"`) {
+		t.Fatalf("cold continuation did not complete normally:\n%s", secondBody)
+	}
+
+	openMu.Lock()
+	gotOpenCount := openCount
+	openMu.Unlock()
+	processMu.Lock()
+	gotProcessCount := processCount
+	processMu.Unlock()
+	if gotOpenCount != 2 || gotProcessCount != 2 {
+		t.Fatalf("cold continuation opens=%d processor calls=%d, want 2 and 2", gotOpenCount, gotProcessCount)
 	}
 }
 
