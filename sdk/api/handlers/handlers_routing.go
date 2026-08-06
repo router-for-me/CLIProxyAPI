@@ -1,9 +1,12 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/tidwall/sjson"
 
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
@@ -201,12 +204,17 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 		// error so streaming clients receive an actionable message instead of a
 		// gateway failure they would keep retrying. 400 is used rather than 404 to keep
 		// it distinguishable from an unregistered HTTP route.
+		// The model name is client supplied, so it is inserted through sjson rather
+		// than formatted into the JSON literal: an unescaped quote would otherwise
+		// corrupt the body or let the caller overwrite the error code.
+		body := `{"error":{"message":"","type":"invalid_request_error","code":"model_not_found","param":"model"}}`
+		body, errSet := sjson.Set(body, "error.message", "unknown provider for model "+modelName)
+		if errSet != nil {
+			body = `{"error":{"message":"unknown provider for model","type":"invalid_request_error","code":"model_not_found","param":"model"}}`
+		}
 		return nil, "", &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
-			Error: fmt.Errorf(
-				`{"error":{"message":"unknown provider for model %s","type":"invalid_request_error","code":"model_not_found","param":"model"}}`,
-				modelName,
-			),
+			Error:      errors.New(body),
 		}
 	}
 
