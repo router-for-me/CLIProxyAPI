@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
@@ -196,65 +197,6 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 	return status
 }
 
-// responsesClientFaultErrorCodes lists upstream error codes caused by the request
-// payload itself. These must reach the client verbatim regardless of the HTTP
-// status the upstream attached, because retrying or rotating credentials cannot
-// change the outcome.
-var responsesClientFaultErrorCodes = map[string]struct{}{
-	"cyber_policy":                {},
-	"context_length_exceeded":     {},
-	"message_too_big":             {},
-	"string_above_max_length":     {},
-	"invalid_prompt":              {},
-	"invalid_value":               {},
-	"unsupported_value":           {},
-	"invalid_request_error":       {},
-	"previous_response_not_found": {},
-}
-
-// responsesClientFaultErrorTypes mirrors responsesClientFaultErrorCodes for
-// upstreams that only classify the failure through `error.type`.
-var responsesClientFaultErrorTypes = map[string]struct{}{
-	"invalid_request":       {},
-	"invalid_request_error": {},
-	"bad_request_error":     {},
-	"invalid_prompt":        {},
-}
-
-// isResponsesClientFaultError reports whether the upstream error body identifies
-// a request-shape failure. Upstreams are inconsistent about the status paired
-// with these bodies: Codex reports `cyber_policy` as 400 on the stream error path
-// but as 502 when the same rejection arrives through the websocket disconnect
-// channel, so the body is authoritative here rather than the status.
-func isResponsesClientFaultError(errMsg *interfaces.ErrorMessage) bool {
-	if errMsg == nil || errMsg.Error == nil {
-		return false
-	}
-	body := strings.TrimSpace(errMsg.Error.Error())
-	if body == "" || !json.Valid([]byte(body)) {
-		return false
-	}
-	for _, path := range []string{"error.code", "code", "response.error.code"} {
-		code := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
-		if code == "" {
-			continue
-		}
-		if _, ok := responsesClientFaultErrorCodes[code]; ok {
-			return true
-		}
-	}
-	for _, path := range []string{"error.type", "type", "response.error.type"} {
-		errType := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
-		if errType == "" {
-			continue
-		}
-		if _, ok := responsesClientFaultErrorTypes[errType]; ok {
-			return true
-		}
-	}
-	return false
-}
-
 // shouldExposeResponsesUpstreamError reports whether a terminal upstream error
 // must reach the downstream client.
 //
@@ -267,18 +209,7 @@ func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if errMsg == nil {
 		return false
 	}
-	if isResponsesClientFaultError(errMsg) {
-		return true
-	}
-	switch responsesWebsocketErrorStatus(errMsg) {
-	case http.StatusBadRequest,
-		http.StatusConflict,
-		http.StatusRequestEntityTooLarge,
-		http.StatusUnprocessableEntity:
-		return true
-	default:
-		return false
-	}
+	return clienterror.IsRequestFault(responsesWebsocketErrorStatus(errMsg), errMsg.Error)
 }
 
 func writeResponsesWebsocketTerminalError(
