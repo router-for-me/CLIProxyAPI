@@ -2919,6 +2919,32 @@ func TestPluginExecutorUsageParsesFinalClaudeStreamCounts(t *testing.T) {
 	}
 }
 
+func TestPluginExecutorUsageMergesClaudeStreamCounts(t *testing.T) {
+	var usageBuffer helps.StreamUsageBuffer
+	observePluginExecutorStreamUsage(&usageBuffer, sdktranslator.FormatClaude, []byte("event: message_start\ndata: {\"type\":\"message_start\",\"usage\":{\"input_tokens\":12,\"output_tokens\":1,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":2}}\n\n"))
+	observePluginExecutorStreamUsage(&usageBuffer, sdktranslator.FormatClaude, []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n\n"))
+	detail, ok := usageBuffer.Detail()
+	if !ok {
+		t.Fatal("stream usage was not observed")
+	}
+	if detail.InputTokens != 12 || detail.OutputTokens != 4 || detail.CacheReadTokens != 3 || detail.CacheCreationTokens != 2 || detail.TotalTokens != 21 {
+		t.Fatalf("merged Claude stream usage = %#v, want input=12 output=4 cache-read=3 cache-create=2 total=21", detail)
+	}
+}
+
+func TestPluginExecutorUsageReassemblesMultilineSSEData(t *testing.T) {
+	var usageBuffer helps.StreamUsageBuffer
+	payload := []byte("event: message_delta\ndata: {\ndata:   \"type\": \"message_delta\",\ndata:   \"usage\": {\"output_tokens\": 4}\ndata: }\n\n")
+	observePluginExecutorStreamUsage(&usageBuffer, sdktranslator.FormatClaude, payload)
+	detail, ok := usageBuffer.Detail()
+	if !ok {
+		t.Fatal("multi-line SSE usage was not observed")
+	}
+	if detail.OutputTokens != 4 || detail.TotalTokens != 4 {
+		t.Fatalf("multi-line SSE usage = %#v, want output=4 total=4", detail)
+	}
+}
+
 func TestPluginExecutorUsageBuffersSplitClaudeStreamCounts(t *testing.T) {
 	var usageBuffer helps.StreamUsageBuffer
 	var pending []byte

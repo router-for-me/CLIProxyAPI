@@ -63,6 +63,7 @@ func claudeToKiro(raw []byte, requestedModel string) (*kiroPayload, *claudeReque
 		)
 	}
 
+	tools, nameMap, requestToolNames := convertTools(request.Tools)
 	var currentText string
 	var currentImages []kiroImage
 	var currentToolResults []kiroToolResult
@@ -81,12 +82,11 @@ func claudeToKiro(raw []byte, requestedModel string) (*kiroPayload, *claudeReque
 			}
 			history = append(history, kiroHistoryMessage{UserInputMessage: userMessage})
 		case "assistant":
-			text, tools := extractAssistantContent(message.Content)
-			history = append(history, kiroHistoryMessage{AssistantResponseMessage: &kiroAssistantResponseMessage{Content: text, ToolUses: tools}})
+			text, assistantTools := extractAssistantContent(message.Content, requestToolNames)
+			history = append(history, kiroHistoryMessage{AssistantResponseMessage: &kiroAssistantResponseMessage{Content: text, ToolUses: assistantTools}})
 		}
 	}
 
-	tools, nameMap := convertTools(request.Tools)
 	payload.ToolNameMap = nameMap
 	if len(currentToolResults) > 0 {
 		currentText = joinNonEmpty(currentText, readableToolResults(currentToolResults))
@@ -177,7 +177,7 @@ func extractUserContent(content any) (string, []kiroImage, []kiroToolResult) {
 	return strings.Join(texts, ""), images, results
 }
 
-func extractAssistantContent(content any) (string, []kiroToolUse) {
+func extractAssistantContent(content any, toolNames map[string]string) (string, []kiroToolUse) {
 	if text, ok := content.(string); ok {
 		return text, nil
 	}
@@ -193,11 +193,15 @@ func extractAssistantContent(content any) (string, []kiroToolUse) {
 		case "tool_use":
 			id, _ := block["id"].(string)
 			name, _ := block["name"].(string)
+			kiroName := toolNames[name]
+			if kiroName == "" {
+				kiroName = sanitizeToolName(name)
+			}
 			input, _ := block["input"].(map[string]any)
 			if input == nil {
 				input = map[string]any{}
 			}
-			tools = append(tools, kiroToolUse{ToolUseID: id, Name: sanitizeToolName(name), Input: input})
+			tools = append(tools, kiroToolUse{ToolUseID: id, Name: kiroName, Input: input})
 		}
 	}
 	return strings.Join(texts, ""), tools
@@ -257,15 +261,17 @@ func extractToolResultContent(content any) (string, []kiroImage) {
 	return strings.Join(texts, ""), images
 }
 
-func convertTools(tools []claudeTool) ([]kiroToolWrapper, map[string]string) {
+func convertTools(tools []claudeTool) ([]kiroToolWrapper, map[string]string, map[string]string) {
 	out := make([]kiroToolWrapper, 0, len(tools))
 	nameMap := make(map[string]string)
+	requestNameMap := make(map[string]string)
 	used := make(map[string]int)
 	for _, tool := range tools {
 		if strings.HasPrefix(strings.ToLower(tool.Type), "web_search") {
 			continue
 		}
 		name := uniqueToolName(sanitizeToolName(tool.Name), used)
+		requestNameMap[tool.Name] = name
 		if name != tool.Name {
 			nameMap[name] = tool.Name
 		}
@@ -290,7 +296,10 @@ func convertTools(tools []claudeTool) ([]kiroToolWrapper, map[string]string) {
 	if len(nameMap) == 0 {
 		nameMap = nil
 	}
-	return out, nameMap
+	if len(requestNameMap) == 0 {
+		requestNameMap = nil
+	}
+	return out, nameMap, requestNameMap
 }
 
 func sanitizeToolName(name string) string {

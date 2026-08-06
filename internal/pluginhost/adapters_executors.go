@@ -789,7 +789,7 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 	if errExecuteStream != nil {
 		return nil, errExecuteStream
 	}
-	nativeChunks := usageReporter.observeStream(ctx, prepared.outputFormat, pluginResp.Chunks)
+	nativeChunks := usageReporter.observeStream(ctx, prepared.outputFormat, pluginResp.Headers, pluginResp.Chunks)
 	return &coreexecutor.StreamResult{
 		Headers: cloneHeader(pluginResp.Headers),
 		Chunks:  mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, pluginResp.Headers, nativeChunks)),
