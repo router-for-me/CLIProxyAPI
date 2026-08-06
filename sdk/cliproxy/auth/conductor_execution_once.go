@@ -104,8 +104,10 @@ type ExecuteWithAuthOnceRequest struct {
 	Options cliproxyexecutor.Options
 	// RedirectPolicy optionally constrains redirects for the executor's HTTP
 	// client. Empty keeps the executor's own behavior, which is what every
-	// existing caller gets today. Enforcement is only possible while the
-	// manager-installed transport is in effect; see redirectPolicyRoundTripper.
+	// existing caller gets today. Enforcement is best effort here because the
+	// executor owns its http.Client; it holds only while the manager-installed
+	// transport is in effect (see onceRoundTripper). DoHTTPOnce owns the client
+	// itself and is therefore the path with the unconditional guarantee.
 	RedirectPolicy HTTPRedirectPolicy
 }
 
@@ -249,8 +251,14 @@ func (m *Manager) ExecuteWithAuthOnce(ctx context.Context, in ExecuteWithAuthOnc
 	return resp, facts, nil
 }
 
-// DoHTTPOnce injects the credentials of the supplied auth into req and performs
-// exactly one policed HTTP attempt.
+// DoHTTPOnce resolves a persisted credential by ID, refreshes and prepares it,
+// and then performs exactly one policed HTTP attempt against the supplied target.
+//
+// It is the raw-HTTP twin of ExecuteWithAuthOnce and shares its lifecycle: the ID
+// must name a durable auth (Home runtime/session auths are rejected with
+// auth_not_durable before any network I/O), the credential is refreshed under the
+// existing per-auth refresh lock, and request preparation runs under the existing
+// per-auth prepare lock. Selection never runs and nothing is ever replayed.
 //
 // Credential injection reuses the registered executor's RequestPreparer through
 // PrepareHttpRequest, and the proxy chain is resolved with the same priority the
@@ -265,31 +273,10 @@ func (m *Manager) ExecuteWithAuthOnce(ctx context.Context, in ExecuteWithAuthOnc
 //
 // The response body is not read or closed; the caller owns it. Exactly one
 // execution result is marked: success is HTTP 2xx alone, so a 3xx is never
-// marked as success.
+// marked as success. An empty RedirectPolicy means HTTPRedirectDeny.
 //
-// An empty policy means HTTPRedirectDeny.
-func (m *Manager) DoHTTPOnce(ctx context.Context, auth *Auth, req *http.Request, policy HTTPRedirectPolicy) (*http.Response, HTTPAttemptFacts, error) {
-	var facts HTTPAttemptFacts
-	if m == nil {
-		return nil, facts, &Error{Code: "provider_not_found", Message: "manager is nil"}
-	}
-	if auth == nil {
-		return nil, facts, &Error{Code: "auth_not_found", Message: "auth is nil"}
-	}
-	if req == nil {
-		return nil, facts, &Error{Code: "invalid_request", Message: "http request is nil"}
-	}
-	return m.httpOnce(ctx, auth, req, "", policy)
-}
-
-// HTTPOnce resolves a persisted credential by ID, refreshes and prepares it, and
-// then performs exactly one policed HTTP attempt against the supplied target.
-//
-// It is DoHTTPOnce plus the credential lifecycle: the ID must name a durable
-// auth (Home runtime/session auths are rejected with auth_not_durable before any
-// network I/O), the credential is refreshed under the existing per-auth refresh
-// lock, and request preparation runs under the existing per-auth prepare lock.
-func (m *Manager) HTTPOnce(ctx context.Context, in HTTPOnceRequest) (*http.Response, HTTPAttemptFacts, error) {
+// It never returns an *Auth, request headers or any other credential material.
+func (m *Manager) DoHTTPOnce(ctx context.Context, in HTTPOnceRequest) (*http.Response, HTTPAttemptFacts, error) {
 	var facts HTTPAttemptFacts
 	if m == nil {
 		return nil, facts, &Error{Code: "provider_not_found", Message: "manager is nil"}
@@ -342,6 +329,15 @@ func (m *Manager) HTTPOnce(ctx context.Context, in HTTPOnceRequest) (*http.Respo
 // httpOnce injects credentials, performs one policed attempt and marks once.
 func (m *Manager) httpOnce(ctx context.Context, auth *Auth, req *http.Request, model string, policy HTTPRedirectPolicy) (*http.Response, HTTPAttemptFacts, error) {
 	var facts HTTPAttemptFacts
+	if m == nil {
+		return nil, facts, &Error{Code: "provider_not_found", Message: "manager is nil"}
+	}
+	if auth == nil {
+		return nil, facts, &Error{Code: "auth_not_found", Message: "auth is nil"}
+	}
+	if req == nil {
+		return nil, facts, &Error{Code: "invalid_request", Message: "http request is nil"}
+	}
 	if errPolicy := validateRedirectPolicy(policy); errPolicy != nil {
 		return nil, facts, errPolicy
 	}

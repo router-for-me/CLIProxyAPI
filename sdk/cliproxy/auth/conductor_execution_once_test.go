@@ -98,8 +98,16 @@ func (e *onceTestExecutor) models() []string {
 	return append([]string(nil), e.executedModel...)
 }
 
+// httpOnceWithAuth exercises the shared one-shot HTTP core against a caller
+// resolved auth. DoHTTPOnce resolves the credential by ID, refreshes and prepares
+// it, and then funnels into exactly this core, so the redirect, marking and
+// attempt-fact contracts are pinned here once instead of at every entry point.
+func httpOnceWithAuth(m *Manager, ctx context.Context, auth *Auth, req *http.Request, policy HTTPRedirectPolicy) (*http.Response, HTTPAttemptFacts, error) {
+	return m.httpOnce(ctx, auth, req, "", policy)
+}
+
 // onceAuthByID reads a registered auth snapshot directly from the manager, which
-// is what a host holds when it calls DoHTTPOnce with an auth it already resolved.
+// is what the one-shot HTTP core receives after DoHTTPOnce resolves an auth ID.
 func onceAuthByID(t *testing.T, manager *Manager, id string) *Auth {
 	t.Helper()
 	manager.mu.RLock()
@@ -565,7 +573,7 @@ func onceHTTPRequest(t *testing.T, ctx context.Context, method, target string, b
 	return req
 }
 
-func TestManagerDoHTTPOnce_MarksOnceAndOnlySucceedsOn2xx(t *testing.T) {
+func TestManagerHTTPOnceCore_MarksOnceAndOnlySucceedsOn2xx(t *testing.T) {
 	tests := []struct {
 		name        string
 		status      int
@@ -599,9 +607,9 @@ func TestManagerDoHTTPOnce_MarksOnceAndOnlySucceedsOn2xx(t *testing.T) {
 			manager, hook := newOnceTestManager(t, executor, newOnceTestAuth("http-once"))
 			auth := onceAuthByID(t, manager, "http-once")
 
-			resp, facts, errDo := manager.DoHTTPOnce(context.Background(), auth, onceHTTPRequest(t, context.Background(), http.MethodPost, server.URL, strings.NewReader(`{}`)), HTTPRedirectDeny)
+			resp, facts, errDo := httpOnceWithAuth(manager, context.Background(), auth, onceHTTPRequest(t, context.Background(), http.MethodPost, server.URL, strings.NewReader(`{}`)), HTTPRedirectDeny)
 			if errDo != nil {
-				t.Fatalf("DoHTTPOnce() error = %v", errDo)
+				t.Fatalf("httpOnceWithAuth() error = %v", errDo)
 			}
 			defer func() { _ = resp.Body.Close() }()
 
@@ -634,7 +642,7 @@ func TestManagerDoHTTPOnce_MarksOnceAndOnlySucceedsOn2xx(t *testing.T) {
 	}
 }
 
-func TestManagerDoHTTPOnce_DenyNeverFollowsRedirect(t *testing.T) {
+func TestManagerHTTPOnceCore_DenyNeverFollowsRedirect(t *testing.T) {
 	tests := []struct {
 		name   string
 		status int
@@ -670,9 +678,9 @@ func TestManagerDoHTTPOnce_DenyNeverFollowsRedirect(t *testing.T) {
 			if tt.method != http.MethodGet {
 				body = strings.NewReader(`{"paid":true}`)
 			}
-			resp, facts, errDo := manager.DoHTTPOnce(context.Background(), auth, onceHTTPRequest(t, context.Background(), tt.method, server.URL+"/start", body), HTTPRedirectDeny)
+			resp, facts, errDo := httpOnceWithAuth(manager, context.Background(), auth, onceHTTPRequest(t, context.Background(), tt.method, server.URL+"/start", body), HTTPRedirectDeny)
 			if errDo != nil {
-				t.Fatalf("DoHTTPOnce() error = %v", errDo)
+				t.Fatalf("httpOnceWithAuth() error = %v", errDo)
 			}
 			defer func() { _ = resp.Body.Close() }()
 
@@ -693,7 +701,7 @@ func TestManagerDoHTTPOnce_DenyNeverFollowsRedirect(t *testing.T) {
 	}
 }
 
-func TestManagerDoHTTPOnce_EmptyPolicyDefaultsToDeny(t *testing.T) {
+func TestManagerHTTPOnceCore_EmptyPolicyDefaultsToDeny(t *testing.T) {
 	var followed atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/start", func(w http.ResponseWriter, _ *http.Request) {
@@ -710,9 +718,9 @@ func TestManagerDoHTTPOnce_EmptyPolicyDefaultsToDeny(t *testing.T) {
 	manager, _ := newOnceTestManager(t, &onceTestExecutor{provider: "codex"}, newOnceTestAuth("redirect-default"))
 	auth := onceAuthByID(t, manager, "redirect-default")
 
-	resp, facts, errDo := manager.DoHTTPOnce(context.Background(), auth, onceHTTPRequest(t, context.Background(), http.MethodGet, server.URL+"/start", nil), "")
+	resp, facts, errDo := httpOnceWithAuth(manager, context.Background(), auth, onceHTTPRequest(t, context.Background(), http.MethodGet, server.URL+"/start", nil), "")
 	if errDo != nil {
-		t.Fatalf("DoHTTPOnce() error = %v", errDo)
+		t.Fatalf("httpOnceWithAuth() error = %v", errDo)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusFound {
@@ -726,14 +734,14 @@ func TestManagerDoHTTPOnce_EmptyPolicyDefaultsToDeny(t *testing.T) {
 	}
 }
 
-func TestManagerDoHTTPOnce_InvalidRedirectPolicyIsRejected(t *testing.T) {
+func TestManagerHTTPOnceCore_InvalidRedirectPolicyIsRejected(t *testing.T) {
 	manager, hook := newOnceTestManager(t, &onceTestExecutor{provider: "codex"}, newOnceTestAuth("bad-policy"))
 	auth := onceAuthByID(t, manager, "bad-policy")
 
-	_, facts, errDo := manager.DoHTTPOnce(context.Background(), auth, onceHTTPRequest(t, context.Background(), http.MethodGet, "https://example.invalid/", nil), HTTPRedirectPolicy("follow-everything"))
+	_, facts, errDo := httpOnceWithAuth(manager, context.Background(), auth, onceHTTPRequest(t, context.Background(), http.MethodGet, "https://example.invalid/", nil), HTTPRedirectPolicy("follow-everything"))
 	var authErr *Error
 	if !errors.As(errDo, &authErr) || authErr == nil || authErr.Code != "invalid_redirect_policy" {
-		t.Fatalf("DoHTTPOnce() error = %v, want invalid_redirect_policy", errDo)
+		t.Fatalf("httpOnceWithAuth() error = %v, want invalid_redirect_policy", errDo)
 	}
 	if facts.RequestWritten || facts.RequestCount != 0 {
 		t.Fatalf("facts = %+v, want an undispatched attempt", facts)
@@ -750,7 +758,7 @@ func newOnceTLSContext(server *httptest.Server) context.Context {
 	return context.WithValue(context.Background(), "cliproxy.roundtripper", server.Client().Transport)
 }
 
-func TestManagerDoHTTPOnce_SameOriginSafeFollowsOnlySafeRedirects(t *testing.T) {
+func TestManagerHTTPOnceCore_SameOriginSafeFollowsOnlySafeRedirects(t *testing.T) {
 	tests := []struct {
 		name          string
 		method        string
@@ -820,9 +828,9 @@ func TestManagerDoHTTPOnce_SameOriginSafeFollowsOnlySafeRedirects(t *testing.T) 
 			if tt.withBody {
 				body = strings.NewReader(`{"paid":true}`)
 			}
-			resp, facts, errDo := manager.DoHTTPOnce(ctx, auth, onceHTTPRequest(t, ctx, tt.method, server.URL+"/start", body), HTTPRedirectSameOriginSafe)
+			resp, facts, errDo := httpOnceWithAuth(manager, ctx, auth, onceHTTPRequest(t, ctx, tt.method, server.URL+"/start", body), HTTPRedirectSameOriginSafe)
 			if errDo != nil {
-				t.Fatalf("DoHTTPOnce() error = %v", errDo)
+				t.Fatalf("httpOnceWithAuth() error = %v", errDo)
 			}
 			defer func() { _ = resp.Body.Close() }()
 
@@ -851,7 +859,7 @@ func TestManagerDoHTTPOnce_SameOriginSafeFollowsOnlySafeRedirects(t *testing.T) 
 	}
 }
 
-func TestManagerDoHTTPOnce_SameOriginSafeStopsAtThreeHops(t *testing.T) {
+func TestManagerHTTPOnceCore_SameOriginSafeStopsAtThreeHops(t *testing.T) {
 	var final atomic.Int32
 	mux := http.NewServeMux()
 	for _, hop := range []struct{ from, to string }{
@@ -877,9 +885,9 @@ func TestManagerDoHTTPOnce_SameOriginSafeStopsAtThreeHops(t *testing.T) {
 	auth := onceAuthByID(t, manager, "hops")
 
 	ctx := newOnceTLSContext(server)
-	resp, facts, errDo := manager.DoHTTPOnce(ctx, auth, onceHTTPRequest(t, ctx, http.MethodGet, server.URL+"/hop1", nil), HTTPRedirectSameOriginSafe)
+	resp, facts, errDo := httpOnceWithAuth(manager, ctx, auth, onceHTTPRequest(t, ctx, http.MethodGet, server.URL+"/hop1", nil), HTTPRedirectSameOriginSafe)
 	if errDo != nil {
-		t.Fatalf("DoHTTPOnce() error = %v", errDo)
+		t.Fatalf("httpOnceWithAuth() error = %v", errDo)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -894,7 +902,7 @@ func TestManagerDoHTTPOnce_SameOriginSafeStopsAtThreeHops(t *testing.T) {
 	}
 }
 
-func TestManagerDoHTTPOnce_AttemptFacts(t *testing.T) {
+func TestManagerHTTPOnceCore_AttemptFacts(t *testing.T) {
 	t.Run("clean response", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte("done"))
@@ -904,9 +912,9 @@ func TestManagerDoHTTPOnce_AttemptFacts(t *testing.T) {
 		manager, _ := newOnceTestManager(t, &onceTestExecutor{provider: "codex"}, newOnceTestAuth("facts-clean"))
 		auth := onceAuthByID(t, manager, "facts-clean")
 
-		resp, facts, err := manager.DoHTTPOnce(context.Background(), auth, onceHTTPRequest(t, context.Background(), http.MethodGet, server.URL, nil), HTTPRedirectDeny)
+		resp, facts, err := httpOnceWithAuth(manager, context.Background(), auth, onceHTTPRequest(t, context.Background(), http.MethodGet, server.URL, nil), HTTPRedirectDeny)
 		if err != nil {
-			t.Fatalf("DoHTTPOnce() error = %v", err)
+			t.Fatalf("httpOnceWithAuth() error = %v", err)
 		}
 		defer func() { _ = resp.Body.Close() }()
 		if !facts.RequestWritten || !facts.ResponseStarted || facts.StatusCode != http.StatusOK || facts.RequestCount != 1 {
@@ -922,12 +930,12 @@ func TestManagerDoHTTPOnce_AttemptFacts(t *testing.T) {
 		manager, hook := newOnceTestManager(t, &onceTestExecutor{provider: "codex"}, newOnceTestAuth("facts-refused"))
 		auth := onceAuthByID(t, manager, "facts-refused")
 
-		resp, facts, err := manager.DoHTTPOnce(context.Background(), auth, onceHTTPRequest(t, context.Background(), http.MethodPost, target, strings.NewReader(`{}`)), HTTPRedirectDeny)
+		resp, facts, err := httpOnceWithAuth(manager, context.Background(), auth, onceHTTPRequest(t, context.Background(), http.MethodPost, target, strings.NewReader(`{}`)), HTTPRedirectDeny)
 		if err == nil {
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
-			t.Fatal("DoHTTPOnce() error = nil, want a transport failure")
+			t.Fatal("httpOnceWithAuth() error = nil, want a transport failure")
 		}
 		if facts.RequestWritten {
 			t.Fatalf("facts.RequestWritten = true, want false when the connection was refused")
@@ -962,9 +970,9 @@ func TestManagerDoHTTPOnce_AttemptFacts(t *testing.T) {
 		manager, _ := newOnceTestManager(t, &onceTestExecutor{provider: "codex"}, newOnceTestAuth("facts-truncated"))
 		auth := onceAuthByID(t, manager, "facts-truncated")
 
-		resp, facts, err := manager.DoHTTPOnce(context.Background(), auth, onceHTTPRequest(t, context.Background(), http.MethodGet, server.URL, nil), HTTPRedirectDeny)
+		resp, facts, err := httpOnceWithAuth(manager, context.Background(), auth, onceHTTPRequest(t, context.Background(), http.MethodGet, server.URL, nil), HTTPRedirectDeny)
 		if err != nil {
-			t.Fatalf("DoHTTPOnce() error = %v", err)
+			t.Fatalf("httpOnceWithAuth() error = %v", err)
 		}
 		defer func() { _ = resp.Body.Close() }()
 		if _, errRead := io.ReadAll(resp.Body); errRead == nil {
@@ -986,9 +994,9 @@ func TestManagerDoHTTPOnce_AttemptFacts(t *testing.T) {
 		manager, _ := newOnceTestManager(t, &onceTestExecutor{provider: "codex"}, newOnceTestAuth("facts-opaque"))
 		auth := onceAuthByID(t, manager, "facts-opaque")
 
-		_, facts, err := manager.DoHTTPOnce(ctx, auth, onceHTTPRequest(t, ctx, http.MethodPost, "https://example.invalid/create", strings.NewReader(`{}`)), HTTPRedirectDeny)
+		_, facts, err := httpOnceWithAuth(manager, ctx, auth, onceHTTPRequest(t, ctx, http.MethodPost, "https://example.invalid/create", strings.NewReader(`{}`)), HTTPRedirectDeny)
 		if err == nil {
-			t.Fatal("DoHTTPOnce() error = nil, want the transport failure")
+			t.Fatal("httpOnceWithAuth() error = nil, want the transport failure")
 		}
 		if !facts.RequestWritten {
 			t.Fatal("facts.RequestWritten = false, want true when the transport reports nothing")
@@ -999,7 +1007,7 @@ func TestManagerDoHTTPOnce_AttemptFacts(t *testing.T) {
 	})
 }
 
-func TestManagerHTTPOnce_ResolvesDurableAuthAndPreparesBeforeDispatch(t *testing.T) {
+func TestManagerDoHTTPOnce_ResolvesDurableAuthAndPreparesBeforeDispatch(t *testing.T) {
 	var seenKey atomic.Value
 	seenKey.Store("")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1011,7 +1019,7 @@ func TestManagerHTTPOnce_ResolvesDurableAuthAndPreparesBeforeDispatch(t *testing
 	executor := &onceTestExecutor{provider: "codex"}
 	manager, hook := newOnceTestManager(t, executor, newOnceTestAuth("http-once-id"))
 
-	resp, facts, err := manager.HTTPOnce(context.Background(), HTTPOnceRequest{
+	resp, facts, err := manager.DoHTTPOnce(context.Background(), HTTPOnceRequest{
 		AuthID:         "http-once-id",
 		Model:          "test-model",
 		Method:         http.MethodPost,
@@ -1021,7 +1029,7 @@ func TestManagerHTTPOnce_ResolvesDurableAuthAndPreparesBeforeDispatch(t *testing
 		RedirectPolicy: HTTPRedirectDeny,
 	})
 	if err != nil {
-		t.Fatalf("HTTPOnce() error = %v", err)
+		t.Fatalf("DoHTTPOnce() error = %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -1037,7 +1045,7 @@ func TestManagerHTTPOnce_ResolvesDurableAuthAndPreparesBeforeDispatch(t *testing
 	}
 }
 
-func TestManagerHTTPOnce_PreflightFailuresNeverDispatch(t *testing.T) {
+func TestManagerDoHTTPOnce_PreflightFailuresNeverDispatch(t *testing.T) {
 	tests := []struct {
 		name     string
 		request  HTTPOnceRequest
@@ -1065,10 +1073,10 @@ func TestManagerHTTPOnce_PreflightFailuresNeverDispatch(t *testing.T) {
 				tt.setup(manager)
 			}
 
-			_, facts, err := manager.HTTPOnce(context.Background(), tt.request)
+			_, facts, err := manager.DoHTTPOnce(context.Background(), tt.request)
 			var authErr *Error
 			if !errors.As(err, &authErr) || authErr == nil {
-				t.Fatalf("HTTPOnce() error = %v, want *Error", err)
+				t.Fatalf("DoHTTPOnce() error = %v, want *Error", err)
 			}
 			if authErr.Code != tt.wantCode {
 				t.Fatalf("error code = %q, want %q", authErr.Code, tt.wantCode)
