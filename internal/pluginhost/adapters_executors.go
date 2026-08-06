@@ -537,7 +537,7 @@ func (a *executorAdapter) translateExecutorResponse(ctx context.Context, prepare
 	return sdktranslator.TranslateNonStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, payload, param)
 }
 
-func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, prepared preparedExecutorCall, in <-chan pluginapi.ExecutorStreamChunk) <-chan pluginapi.ExecutorStreamChunk {
+func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, prepared preparedExecutorCall, headers http.Header, in <-chan pluginapi.ExecutorStreamChunk) <-chan pluginapi.ExecutorStreamChunk {
 	if prepared.requestedFormat == "" || prepared.outputFormat == prepared.requestedFormat {
 		return in
 	}
@@ -551,12 +551,30 @@ func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, pre
 	go func() {
 		defer close(out)
 		var param any
+		var sseBuffer executorSSERecordBuffer
+		isSSE := strings.Contains(strings.ToLower(headers.Get("Content-Type")), "text/event-stream")
+		sendTranslated := func(payload []byte) bool {
+			frames := a.translateExecutorStreamPayload(ctx, prepared, payload, &param)
+			for _, frame := range frames {
+				if !sendExecutorPluginStreamChunk(ctx, out, pluginapi.ExecutorStreamChunk{Payload: frame}) {
+					return false
+				}
+			}
+			return true
+		}
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case chunk, ok := <-in:
 				if !ok {
+					if isSSE {
+						for _, payload := range sseBuffer.Flush() {
+							if !sendTranslated(payload) {
+								return
+							}
+						}
+					}
 					a.emitTranslatedExecutorStreamTail(ctx, prepared, out, &param)
 					return
 				}
@@ -564,9 +582,12 @@ func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, pre
 					_ = sendExecutorPluginStreamChunk(ctx, out, chunk)
 					continue
 				}
-				frames := a.translateExecutorStreamPayload(ctx, prepared, chunk.Payload, &param)
-				for _, frame := range frames {
-					if !sendExecutorPluginStreamChunk(ctx, out, pluginapi.ExecutorStreamChunk{Payload: frame}) {
+				payloads := [][]byte{chunk.Payload}
+				if isSSE {
+					payloads = sseBuffer.Push(chunk.Payload)
+				}
+				for _, payload := range payloads {
+					if !sendTranslated(payload) {
 						return
 					}
 				}
@@ -574,6 +595,46 @@ func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, pre
 		}
 	}()
 	return out
+}
+
+type executorSSERecordBuffer struct {
+	pending []byte
+}
+
+func (b *executorSSERecordBuffer) Push(payload []byte) [][]byte {
+	if b == nil || len(payload) == 0 {
+		return nil
+	}
+	b.pending = append(b.pending, payload...)
+	var records [][]byte
+	for {
+		end := executorSSERecordEnd(b.pending)
+		if end < 0 {
+			return records
+		}
+		records = append(records, bytes.Clone(b.pending[:end]))
+		b.pending = append(b.pending[:0], b.pending[end:]...)
+	}
+}
+
+func (b *executorSSERecordBuffer) Flush() [][]byte {
+	if b == nil || len(bytes.TrimSpace(b.pending)) == 0 {
+		return nil
+	}
+	payload := bytes.Clone(b.pending)
+	b.pending = b.pending[:0]
+	return [][]byte{payload}
+}
+
+func executorSSERecordEnd(payload []byte) int {
+	end := -1
+	if index := bytes.Index(payload, []byte("\n\n")); index >= 0 {
+		end = index + 2
+	}
+	if index := bytes.Index(payload, []byte("\r\n\r\n")); index >= 0 && (end < 0 || index+4 < end) {
+		end = index + 4
+	}
+	return end
 }
 
 func (a *executorAdapter) translateExecutorStreamPayload(ctx context.Context, prepared preparedExecutorCall, payload []byte, param *any) [][]byte {
@@ -709,7 +770,7 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 	nativeChunks := usageReporter.observeStream(ctx, prepared.outputFormat, pluginResp.Chunks)
 	return &coreexecutor.StreamResult{
 		Headers: cloneHeader(pluginResp.Headers),
-		Chunks:  mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, nativeChunks)),
+		Chunks:  mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, pluginResp.Headers, nativeChunks)),
 	}, nil
 }
 

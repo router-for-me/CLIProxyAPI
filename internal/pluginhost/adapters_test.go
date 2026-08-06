@@ -2861,6 +2861,39 @@ func TestExecutorStreamTranslationPayloadsExtractsDataFromSSEFrame(t *testing.T)
 	}
 }
 
+func TestExecutorSSERecordBufferRetainsSplitDataLine(t *testing.T) {
+	var buffer executorSSERecordBuffer
+	first := []byte("event: message_delta\ndata: {\"type\":")
+	if records := buffer.Push(first); len(records) != 0 {
+		t.Fatalf("first chunk produced %d records, want none", len(records))
+	}
+
+	second := []byte("\"message_delta\",\"usage\":{\"output_tokens\":4}}\n\n")
+	records := buffer.Push(second)
+	if len(records) != 1 {
+		t.Fatalf("second chunk produced %d records, want one", len(records))
+	}
+	want := append(bytes.Clone(first), second...)
+	if !bytes.Equal(records[0], want) {
+		t.Fatalf("buffered record = %q, want %q", records[0], want)
+	}
+	if tail := buffer.Flush(); len(tail) != 0 {
+		t.Fatalf("buffer tail = %q, want empty", tail)
+	}
+}
+
+func TestExecutorSSERecordBufferFlushesFinalRecordWithoutDelimiter(t *testing.T) {
+	var buffer executorSSERecordBuffer
+	payload := []byte("data: [DONE]")
+	if records := buffer.Push(payload); len(records) != 0 {
+		t.Fatalf("unterminated chunk produced %d records, want none", len(records))
+	}
+	tail := buffer.Flush()
+	if len(tail) != 1 || !bytes.Equal(tail[0], payload) {
+		t.Fatalf("buffer tail = %q, want %q", tail, payload)
+	}
+}
+
 func TestPluginExecutorUsageParsesFinalClaudeStreamCounts(t *testing.T) {
 	var usageBuffer helps.StreamUsageBuffer
 	payload := []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":12,\"output_tokens\":4}}\n\n")

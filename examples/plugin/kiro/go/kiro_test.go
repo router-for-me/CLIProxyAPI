@@ -251,6 +251,56 @@ func TestClaudeToKiroTransformsSystemToolsAndResults(t *testing.T) {
 	}
 }
 
+func TestTruncatePayloadEvictsOldestConversationTurn(t *testing.T) {
+	payload := &kiroPayload{}
+	payload.ConversationState.History = []kiroHistoryMessage{
+		{UserInputMessage: &kiroUserInputMessage{Content: strings.Repeat("x", maxKiroPayloadBytes), ModelID: "model", Origin: "KIRO_CLI"}},
+		{AssistantResponseMessage: &kiroAssistantResponseMessage{Content: "old response"}},
+		{UserInputMessage: &kiroUserInputMessage{Content: "new request", ModelID: "model", Origin: "KIRO_CLI"}},
+		{AssistantResponseMessage: &kiroAssistantResponseMessage{Content: "new response"}},
+	}
+
+	truncatePayload(payload, false)
+
+	if len(payload.ConversationState.History) != 2 {
+		t.Fatalf("history length = %d, want newest turn only", len(payload.ConversationState.History))
+	}
+	if got := payload.ConversationState.History[0].UserInputMessage.Content; got != "new request" {
+		t.Fatalf("oldest retained request = %q, want newest request", got)
+	}
+	raw, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	if len(raw) > maxKiroPayloadBytes {
+		t.Fatalf("truncated payload size = %d, limit = %d", len(raw), maxKiroPayloadBytes)
+	}
+}
+
+func TestTruncatePayloadPreservesSyntheticSystemPair(t *testing.T) {
+	payload := &kiroPayload{}
+	payload.ConversationState.History = []kiroHistoryMessage{
+		{UserInputMessage: &kiroUserInputMessage{Content: "system prompt", ModelID: "model", Origin: "KIRO_CLI"}},
+		{AssistantResponseMessage: &kiroAssistantResponseMessage{Content: "I will follow these instructions."}},
+		{UserInputMessage: &kiroUserInputMessage{Content: strings.Repeat("x", maxKiroPayloadBytes), ModelID: "model", Origin: "KIRO_CLI"}},
+		{AssistantResponseMessage: &kiroAssistantResponseMessage{Content: "old response"}},
+		{UserInputMessage: &kiroUserInputMessage{Content: "new request", ModelID: "model", Origin: "KIRO_CLI"}},
+		{AssistantResponseMessage: &kiroAssistantResponseMessage{Content: "new response"}},
+	}
+
+	truncatePayload(payload, true)
+
+	if len(payload.ConversationState.History) != 4 {
+		t.Fatalf("history length = %d, want system pair plus newest turn", len(payload.ConversationState.History))
+	}
+	if got := payload.ConversationState.History[0].UserInputMessage.Content; got != "system prompt" {
+		t.Fatalf("first history request = %q, want preserved system prompt", got)
+	}
+	if got := payload.ConversationState.History[2].UserInputMessage.Content; got != "new request" {
+		t.Fatalf("retained conversation request = %q, want newest request", got)
+	}
+}
+
 func TestClaudeToKiroPreservesToolResultErrorStatus(t *testing.T) {
 	raw := []byte(`{
 		"model":"claude-sonnet-4-5",

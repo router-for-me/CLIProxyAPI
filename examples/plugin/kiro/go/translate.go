@@ -102,7 +102,7 @@ func claudeToKiro(raw []byte, requestedModel string) (*kiroPayload, *claudeReque
 	if request.MaxTokens > 0 || request.Temperature > 0 || request.TopP > 0 {
 		payload.InferenceConfig = &kiroInferenceConfig{MaxTokens: request.MaxTokens, Temperature: request.Temperature, TopP: request.TopP}
 	}
-	truncatePayload(payload)
+	truncatePayload(payload, systemPrompt != "")
 	return payload, &request, nil
 }
 
@@ -394,19 +394,22 @@ func formatUUID(b []byte) string {
 	return hexValue[:8] + "-" + hexValue[8:12] + "-" + hexValue[12:16] + "-" + hexValue[16:20] + "-" + hexValue[20:32]
 }
 
-func truncatePayload(payload *kiroPayload) {
+func truncatePayload(payload *kiroPayload, preserveSystemPair bool) {
+	protected := 0
+	if preserveSystemPair {
+		protected = 2
+	}
 	for {
 		raw, errMarshal := json.Marshal(payload)
-		if errMarshal != nil || len(raw) <= maxKiroPayloadBytes || len(payload.ConversationState.History) <= 4 {
+		if errMarshal != nil || len(raw) <= maxKiroPayloadBytes || len(payload.ConversationState.History) <= protected {
 			return
 		}
-		removeAt := 0
-		if len(payload.ConversationState.History) >= 2 && payload.ConversationState.History[0].UserInputMessage != nil && payload.ConversationState.History[1].AssistantResponseMessage != nil {
-			removeAt = 2
+		removeCount := 1
+		if protected+1 < len(payload.ConversationState.History) &&
+			payload.ConversationState.History[protected].UserInputMessage != nil &&
+			payload.ConversationState.History[protected+1].AssistantResponseMessage != nil {
+			removeCount = 2
 		}
-		if removeAt >= len(payload.ConversationState.History) {
-			return
-		}
-		payload.ConversationState.History = append(payload.ConversationState.History[:removeAt], payload.ConversationState.History[removeAt+1:]...)
+		payload.ConversationState.History = append(payload.ConversationState.History[:protected], payload.ConversationState.History[protected+removeCount:]...)
 	}
 }

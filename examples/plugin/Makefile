@@ -38,6 +38,12 @@ $(BIN_DIR):
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
+KIRO_GO_SOURCES := $(wildcard kiro/go/*.go)
+
+$(BIN_DIR)/kiro-go.$(PLUGIN_EXT): $(KIRO_GO_SOURCES) kiro/go/go.mod kiro/go/go.sum | $(BIN_DIR)
+	cd kiro/go && go build -buildmode=c-shared -o $(abspath $@) .
+	rm -f $(BIN_DIR)/kiro-go.h
+
 $(BIN_DIR)/%-go.$(PLUGIN_EXT): %/go/main.go %/go/go.mod | $(BIN_DIR)
 	cd $*/go && go build -buildmode=c-shared -o $(abspath $@) .
 	rm -f $(BIN_DIR)/$*-go.h
