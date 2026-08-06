@@ -1,4 +1,5 @@
 EXAMPLES := simple model auth frontend-auth executor protocol-format request-translator request-normalizer response-translator response-normalizer thinking usage cli management-api host-callback host-callback-auth-files host-model-callback claude-web-search-router
+GO_ONLY_EXAMPLES := kiro
 LANGUAGES := go c rust
 BIN_DIR := $(CURDIR)/bin
 BUILD_DIR := $(BIN_DIR)/build
@@ -19,12 +20,14 @@ RUST_DYLIB_PREFIX := lib
 RUST_DYLIB_EXT := so
 endif
 
-.PHONY: build list clean
+.PHONY: build build-kiro list clean
 
-build: $(foreach example,$(EXAMPLES),$(foreach lang,$(LANGUAGES),$(BIN_DIR)/$(example)-$(lang).$(PLUGIN_EXT)))
+build: $(foreach example,$(EXAMPLES),$(foreach lang,$(LANGUAGES),$(BIN_DIR)/$(example)-$(lang).$(PLUGIN_EXT))) $(foreach example,$(GO_ONLY_EXAMPLES),$(BIN_DIR)/$(example)-go.$(PLUGIN_EXT))
+
+build-kiro: $(BIN_DIR)/kiro-go.$(PLUGIN_EXT)
 
 list:
-	@$(foreach example,$(EXAMPLES),$(foreach lang,$(LANGUAGES),echo $(example)/$(lang);))
+	@$(foreach example,$(EXAMPLES),$(foreach lang,$(LANGUAGES),echo $(example)/$(lang);)) $(foreach example,$(GO_ONLY_EXAMPLES),echo $(example)/go;)
 
 clean:
 	rm -rf $(BIN_DIR)
