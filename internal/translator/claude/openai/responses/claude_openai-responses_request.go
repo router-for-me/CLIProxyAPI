@@ -30,9 +30,9 @@ var (
 //   - instructions, input[].role==system and input[].role==developer -> separate
 //     top-level system blocks, in source order
 //   - input[].type==message with input_text/output_text -> user/assistant messages
-//   - function_call -> assistant tool_use
-//   - function_call_output -> user tool_result
-//   - tools[].parameters -> tools[].input_schema
+//   - function_call/custom_tool_call -> assistant tool_use
+//   - function_call_output/custom_tool_call_output -> user tool_result
+//   - top-level tools and input[].additional_tools -> Claude tools[].input_schema
 //   - max_output_tokens -> max_tokens
 //   - stream passthrough via parameter
 func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
@@ -384,23 +384,33 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					pendingReasoningParts = append(pendingReasoningParts, thinkingPart)
 				}
 
-			case "function_call":
-				// Map to assistant tool_use
+			case "function_call", "custom_tool_call":
+				// Map to assistant tool_use. Freeform custom input is wrapped in an
+				// object because Claude tool_use input must be a JSON object.
 				callID := item.Get("call_id").String()
 				if callID == "" {
 					callID = genToolCallID()
 				}
 				callID = util.SanitizeClaudeToolID(callID)
 				name := item.Get("name").String()
-				argsStr := item.Get("arguments").String()
+				if namespaceName := strings.TrimSpace(item.Get("namespace").String()); namespaceName != "" {
+					// Rebuild the qualified name emitted by the previous Responses turn.
+					name = qualifyResponsesNamespaceToolName(namespaceName, name)
+				}
+				isCustomToolCall := typ == "custom_tool_call"
 
 				toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 				toolUse, _ = sjson.SetBytes(toolUse, "id", callID)
 				toolUse, _ = sjson.SetBytes(toolUse, "name", name)
-				if argsStr != "" && gjson.Valid(argsStr) {
-					argsJSON := gjson.Parse(argsStr)
-					if argsJSON.IsObject() {
-						toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsJSON.Raw))
+				if isCustomToolCall {
+					toolUse, _ = sjson.SetBytes(toolUse, "input.input", item.Get("input").String())
+				} else {
+					argsStr := item.Get("arguments").String()
+					if argsStr != "" && gjson.Valid(argsStr) {
+						argsJSON := gjson.Parse(argsStr)
+						if argsJSON.IsObject() {
+							toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsJSON.Raw))
+						}
 					}
 				}
 
@@ -413,7 +423,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					raw:    asst,
 				})
 
-			case "function_call_output":
+			case "function_call_output", "custom_tool_call_output":
 				flushPendingReasoning()
 				// Map to user tool_result
 				callID := item.Get("call_id").String()
@@ -446,23 +456,29 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	includedToolNames := map[string]struct{}{}
 	toolNameMap := map[string]string{}
 
-	// tools mapping: parameters -> input_schema
-	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		var toolItems [][]byte
-		tools.ForEach(func(_, tool gjson.Result) bool {
-			convertedTools := convertResponsesToolToClaudeTools(tool, toolNameMap)
-			for _, tJSON := range convertedTools {
-				toolName := gjson.GetBytes(tJSON, "name").String()
-				if toolName != "" {
-					includedToolNames[toolName] = struct{}{}
-				}
-				toolItems = append(toolItems, tJSON)
-			}
-			return true
-		})
-		if len(toolItems) > 0 {
-			out, _ = sjson.SetRawBytes(out, "tools", common.JoinRawArray(toolItems))
+	// Responses Lite puts tool definitions in input[].additional_tools. Select
+	// one winner for each final name, while keeping the original order for the
+	// tools that survive conversion.
+	var toolItems [][]byte
+	winners := responsesToolWinners(root)
+	for _, descriptor := range responsesToolDescriptors(root) {
+		winner, ok := winners[descriptor.name]
+		if !ok || winner.order != descriptor.order {
+			continue
 		}
+		tJSON, ok := convertResponsesToolDescriptorToClaude(descriptor)
+		if !ok {
+			continue
+		}
+		toolName := gjson.GetBytes(tJSON, "name").String()
+		if toolName != "" {
+			includedToolNames[toolName] = struct{}{}
+		}
+		toolItems = append(toolItems, tJSON)
+	}
+	toolNameMap = responsesToolNameMap(root, includedToolNames)
+	if len(toolItems) > 0 {
+		out, _ = sjson.SetRawBytes(out, "tools", common.JoinRawArray(toolItems))
 	}
 
 	// Map tool_choice similar to Chat Completions translator (optional in docs, safe to handle)
@@ -480,10 +496,24 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 			}
 		case gjson.JSON:
-			if toolChoice.Get("type").String() == "function" {
+			choiceType := toolChoice.Get("type").String()
+			if choiceType == "function" || choiceType == "custom" {
 				fn := toolChoice.Get("function.name").String()
 				if fn == "" {
+					fn = toolChoice.Get("custom.name").String()
+				}
+				if fn == "" {
 					fn = toolChoice.Get("name").String()
+				}
+				namespaceName := toolChoice.Get("namespace").String()
+				if namespaceName == "" {
+					namespaceName = toolChoice.Get("function.namespace").String()
+				}
+				if namespaceName == "" {
+					namespaceName = toolChoice.Get("custom.namespace").String()
+				}
+				if namespaceName != "" {
+					fn = qualifyResponsesNamespaceToolName(namespaceName, fn)
 				}
 				if mappedName := toolNameMap[fn]; mappedName != "" {
 					fn = mappedName
@@ -703,61 +733,220 @@ func convertResponsesContentPartToClaude(part gjson.Result) []byte {
 	return nil
 }
 
-func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string]string) [][]byte {
-	toolType := strings.TrimSpace(tool.Get("type").String())
-	switch toolType {
-	case "", "function":
-		if tJSON, ok := convertResponsesFunctionToolToClaude(tool, ""); ok {
-			return [][]byte{tJSON}
-		}
-	case "namespace":
-		return convertResponsesNamespaceToolToClaude(tool, toolNameMap)
-	case "web_search":
-		if tJSON, ok := convertResponsesWebSearchToolToClaude(tool); ok {
-			if name := gjson.GetBytes(tJSON, "name").String(); name != "" {
-				toolNameMap[name] = name
-			}
-			return [][]byte{tJSON}
-		}
-	default:
-		if isOpenAIResponsesApplyPatchCustomTool(toolType, tool) {
-			return nil
-		}
-		if isUnsupportedOpenAIBuiltinToolType(toolType) {
-			return nil
-		}
-		if tool.Get("name").String() != "" {
-			return [][]byte{[]byte(tool.Raw)}
-		}
-	}
-	return nil
-}
-
 func isOpenAIResponsesApplyPatchCustomTool(toolType string, tool gjson.Result) bool {
 	return toolType == "custom" && strings.TrimSpace(tool.Get("name").String()) == "apply_patch"
 }
 
-func convertResponsesNamespaceToolToClaude(tool gjson.Result, toolNameMap map[string]string) [][]byte {
-	namespaceName := strings.TrimSpace(tool.Get("name").String())
-	children := tool.Get("tools")
-	if !children.Exists() || !children.IsArray() {
-		return nil
+func convertResponsesToolDescriptorToClaude(descriptor responsesToolDescriptor) ([]byte, bool) {
+	overrideName := ""
+	if !descriptor.direct {
+		overrideName = descriptor.name
+	}
+	switch descriptor.toolType {
+	case "function":
+		return convertResponsesFunctionToolToClaude(descriptor.tool, overrideName)
+	case "custom":
+		return convertResponsesCustomToolToClaude(descriptor.tool, overrideName)
+	case "web_search":
+		return convertResponsesWebSearchToolToClaude(descriptor.tool)
+	default:
+		if isUnsupportedOpenAIBuiltinToolType(descriptor.toolType) {
+			return nil, false
+		}
+		if descriptor.tool.Get("name").String() == "" {
+			return nil, false
+		}
+		return []byte(descriptor.tool.Raw), true
+	}
+}
+
+type responsesToolSource struct {
+	tools    gjson.Result
+	priority int // Top-level tools use 0; all additional_tools sources use 1.
+}
+
+func responsesToolSources(root gjson.Result) []responsesToolSource {
+	var sources []responsesToolSource
+	appendSource := func(tools gjson.Result, priority int) {
+		if tools.Exists() && tools.IsArray() {
+			sources = append(sources, responsesToolSource{tools: tools, priority: priority})
+		}
 	}
 
-	var out [][]byte
-	children.ForEach(func(_, child gjson.Result) bool {
-		childName := responsesToolName(child)
-		qualifiedName := qualifyResponsesNamespaceToolName(namespaceName, childName)
-		if tJSON, ok := convertResponsesFunctionToolToClaude(child, qualifiedName); ok {
-			out = append(out, tJSON)
-			toolNameMap[qualifiedName] = qualifiedName
-			if childName != "" {
-				toolNameMap[childName] = qualifiedName
+	appendSource(root.Get("tools"), 0)
+	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("type").String() == "additional_tools" {
+				appendSource(item.Get("tools"), 1)
 			}
+			return true
+		})
+	}
+	return sources
+}
+
+type responsesToolDescriptor struct {
+	name           string
+	childName      string
+	namespace      string
+	toolType       string
+	tool           gjson.Result
+	sourcePriority int
+	direct         bool
+	order          int
+}
+
+func responsesToolDescriptors(root gjson.Result) []responsesToolDescriptor {
+	var descriptors []responsesToolDescriptor
+	appendDescriptor := func(tool gjson.Result, name, childName, namespaceName, toolType string, sourcePriority int, direct bool) {
+		if name == "" {
+			return
 		}
-		return true
-	})
-	return out
+		descriptors = append(descriptors, responsesToolDescriptor{
+			name:           name,
+			childName:      childName,
+			namespace:      namespaceName,
+			toolType:       toolType,
+			tool:           tool,
+			sourcePriority: sourcePriority,
+			direct:         direct,
+			order:          len(descriptors),
+		})
+	}
+	appendNamespaceChildren := func(namespaceTool gjson.Result, sourcePriority int) {
+		namespaceName := strings.TrimSpace(namespaceTool.Get("name").String())
+		children := namespaceTool.Get("tools")
+		if !children.Exists() || !children.IsArray() {
+			return
+		}
+		children.ForEach(func(_, child gjson.Result) bool {
+			childName := responsesToolName(child)
+			if childName == "" {
+				return true
+			}
+			qualifiedName := qualifyResponsesNamespaceToolName(namespaceName, childName)
+			switch strings.TrimSpace(child.Get("type").String()) {
+			case "", "function":
+				appendDescriptor(child, qualifiedName, childName, namespaceName, "function", sourcePriority, false)
+			case "custom":
+				if !isOpenAIResponsesApplyPatchCustomTool("custom", child) {
+					appendDescriptor(child, qualifiedName, childName, namespaceName, "custom", sourcePriority, false)
+				}
+			}
+			return true
+		})
+	}
+	for _, source := range responsesToolSources(root) {
+		source.tools.ForEach(func(_, tool gjson.Result) bool {
+			toolType := strings.TrimSpace(tool.Get("type").String())
+			switch toolType {
+			case "", "function":
+				appendDescriptor(tool, responsesToolName(tool), "", "", "function", source.priority, true)
+			case "custom":
+				if !isOpenAIResponsesApplyPatchCustomTool("custom", tool) {
+					appendDescriptor(tool, responsesToolName(tool), "", "", "custom", source.priority, true)
+				}
+			case "namespace":
+				appendNamespaceChildren(tool, source.priority)
+			case "web_search":
+				if externalWebAccess := tool.Get("external_web_access"); externalWebAccess.Exists() && !externalWebAccess.Bool() {
+					return true
+				}
+				name := strings.TrimSpace(tool.Get("name").String())
+				if name == "" {
+					name = "web_search"
+				}
+				appendDescriptor(tool, name, "", "", "web_search", source.priority, true)
+			default:
+				if isUnsupportedOpenAIBuiltinToolType(toolType) {
+					return true
+				}
+				appendDescriptor(tool, strings.TrimSpace(tool.Get("name").String()), "", "", toolType, source.priority, true)
+			}
+			return true
+		})
+	}
+	return descriptors
+}
+
+func responsesToolDescriptorPrecedes(left, right responsesToolDescriptor) bool {
+	// Keep top-level tools ahead of additional_tools, then let direct
+	// declarations win over namespace children within the same source class.
+	if left.sourcePriority != right.sourcePriority {
+		return left.sourcePriority < right.sourcePriority
+	}
+	if left.direct != right.direct {
+		return left.direct
+	}
+	return left.order < right.order
+}
+
+func responsesToolWinners(root gjson.Result) map[string]responsesToolDescriptor {
+	winners := map[string]responsesToolDescriptor{}
+	for _, descriptor := range responsesToolDescriptors(root) {
+		current, exists := winners[descriptor.name]
+		if !exists || responsesToolDescriptorPrecedes(descriptor, current) {
+			winners[descriptor.name] = descriptor
+		}
+	}
+	return winners
+}
+
+func responsesToolNameMap(root gjson.Result, acceptedToolNames map[string]struct{}) map[string]string {
+	toolNameMap := map[string]string{}
+	descriptors := responsesToolDescriptors(root)
+	winners := responsesToolWinners(root)
+
+	// Direct tool names are canonical aliases and must win over namespace
+	// child aliases, regardless of declaration order.
+	for _, descriptor := range descriptors {
+		winner, ok := winners[descriptor.name]
+		if !ok || winner.order != descriptor.order || !descriptor.direct {
+			continue
+		}
+		if _, accepted := acceptedToolNames[descriptor.name]; !accepted {
+			continue
+		}
+		toolNameMap[descriptor.name] = descriptor.name
+	}
+
+	// Namespace aliases fill only names that are not already owned by a
+	// winning direct function/custom tool.
+	for _, descriptor := range descriptors {
+		winner, ok := winners[descriptor.name]
+		if !ok || winner.order != descriptor.order || descriptor.direct || descriptor.childName == "" {
+			continue
+		}
+		if _, accepted := acceptedToolNames[descriptor.name]; !accepted {
+			continue
+		}
+		if _, exists := toolNameMap[descriptor.childName]; exists {
+			continue
+		}
+		toolNameMap[descriptor.childName] = descriptor.name
+	}
+	return toolNameMap
+}
+
+func responsesCustomToolNames(requestRawJSON []byte) map[string]struct{} {
+	names := make(map[string]struct{})
+	root := gjson.ParseBytes(requestRawJSON)
+	for name, descriptor := range responsesToolWinners(root) {
+		if descriptor.toolType == "custom" {
+			names[name] = struct{}{}
+		}
+	}
+	return names
+}
+
+func unwrapCustomToolInput(arguments string) string {
+	if v := gjson.Get(arguments, "input"); v.Exists() {
+		if v.Type == gjson.String {
+			return v.String()
+		}
+		return v.Raw
+	}
+	return arguments
 }
 
 func convertResponsesFunctionToolToClaude(tool gjson.Result, overrideName string) ([]byte, bool) {
@@ -779,6 +968,24 @@ func convertResponsesFunctionToolToClaude(tool gjson.Result, overrideName string
 	if !gjson.GetBytes(tJSON, "cache_control").Exists() {
 		tJSON = common.AttachCacheControl(tJSON, tool.Get("function"))
 	}
+	return tJSON, true
+}
+
+func convertResponsesCustomToolToClaude(tool gjson.Result, overrideName string) ([]byte, bool) {
+	name := strings.TrimSpace(overrideName)
+	if name == "" {
+		name = responsesToolName(tool)
+	}
+	if name == "" {
+		return nil, false
+	}
+
+	tJSON := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}}`)
+	tJSON, _ = sjson.SetBytes(tJSON, "name", name)
+	if description := responsesToolDescription(tool); description != "" {
+		tJSON, _ = sjson.SetBytes(tJSON, "description", description)
+	}
+	tJSON = common.AttachCacheControl(tJSON, tool)
 	return tJSON, true
 }
 
@@ -839,7 +1046,7 @@ func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {
 	if childName == "" || namespaceName == "" || strings.HasPrefix(childName, "mcp__") {
 		return childName
 	}
-	if strings.HasPrefix(childName, namespaceName) {
+	if childName == namespaceName || strings.HasPrefix(childName, namespaceName+"__") {
 		return childName
 	}
 	if strings.HasSuffix(namespaceName, "__") {
@@ -854,43 +1061,15 @@ func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, quali
 		return "", ""
 	}
 
-	tools := gjson.GetBytes(requestRawJSON, "tools")
-	if !tools.Exists() || !tools.IsArray() {
+	root := gjson.ParseBytes(requestRawJSON)
+	descriptor, ok := responsesToolWinners(root)[qualifiedName]
+	if !ok {
 		return qualifiedName, ""
 	}
-
-	var bestNamespace string
-	var bestChild string
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		if strings.TrimSpace(tool.Get("type").String()) != "namespace" {
-			return true
-		}
-		namespaceName := strings.TrimSpace(tool.Get("name").String())
-		if namespaceName == "" {
-			return true
-		}
-		children := tool.Get("tools")
-		if !children.Exists() || !children.IsArray() {
-			return true
-		}
-		children.ForEach(func(_, child gjson.Result) bool {
-			childName := responsesToolName(child)
-			if childName == "" {
-				return true
-			}
-			if qualifyResponsesNamespaceToolName(namespaceName, childName) == qualifiedName {
-				bestNamespace = namespaceName
-				bestChild = childName
-			}
-			return true
-		})
-		return true
-	})
-
-	if bestNamespace == "" || bestChild == "" {
-		return qualifiedName, ""
+	if descriptor.toolType == "function" && !descriptor.direct {
+		return descriptor.childName, descriptor.namespace
 	}
-	return bestChild, bestNamespace
+	return qualifiedName, ""
 }
 
 func isUnsupportedOpenAIBuiltinToolType(toolType string) bool {
