@@ -84,12 +84,6 @@ func openURLPlatformSpecific(url string) error {
 // Returns:
 //   - true if a browser can be opened, false otherwise.
 func IsAvailable() bool {
-	// First check if open-golang can work
-	testErr := open.Run("about:blank")
-	if testErr == nil {
-		return true
-	}
-
 	// Check platform-specific commands
 	switch runtime.GOOS {
 	case "darwin":
