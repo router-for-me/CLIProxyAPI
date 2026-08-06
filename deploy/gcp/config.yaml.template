@@ -1,0 +1,55 @@
+host: ""
+port: 8317
+
+tls:
+  enable: false
+  cert: ""
+  key: ""
+
+remote-management:
+  allow-remote: false
+  secret-key: ""
+  disable-control-panel: true
+  disable-auto-update-panel: true
+
+auth-dir: "/root/.cli-proxy-api"
+
+api-keys:
+  - "__CLIPROXY_API_KEY__"
+
+debug: false
+
+pprof:
+  enable: false
+  addr: "127.0.0.1:8316"
+
+commercial-mode: false
+logging-to-file: false
+request-log: false
+usage-statistics-enabled: false
+passthrough-headers: false
+
+request-retry: 3
+max-retry-credentials: 0
+max-retry-interval: 30
+disable-cooling: false
+save-cooldown-status: false
+
+streaming:
+  keepalive-seconds: 15
+  bootstrap-retries: 1
+
+routing:
+  strategy: "round-robin"
+  session-affinity: true
+  session-affinity-ttl: "1h"
+
+plugins:
+  enabled: true
+  dir: "plugins"
+  configs:
+    kiro-go:
+      enabled: true
+      priority: 1
+      models:
+        - "*"
