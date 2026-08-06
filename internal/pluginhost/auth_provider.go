@@ -10,8 +10,10 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
+	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -412,6 +414,7 @@ func (h *Host) AuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string
 }
 
 type pluginTokenStorage struct {
+	mu       sync.RWMutex
 	provider string
 	rawJSON  []byte
 	meta     map[string]any
@@ -421,17 +424,41 @@ func (s *pluginTokenStorage) SetMetadata(meta map[string]any) {
 	if s == nil {
 		return
 	}
-	s.meta = cloneAnyMap(meta)
+	s.mu.Lock()
+	s.meta = cloneInterceptorMetadata(meta)
+	s.mu.Unlock()
+}
+
+func (s *pluginTokenStorage) CredentialSnapshot() ([]byte, map[string]any, baseauth.CredentialFingerprintMaterial) {
+	payload, metadata, fingerprint, _ := s.credentialSnapshot()
+	return payload, metadata, fingerprint
+}
+
+func (s *pluginTokenStorage) credentialSnapshot() ([]byte, map[string]any, baseauth.CredentialFingerprintMaterial, error) {
+	if s == nil {
+		return nil, nil, baseauth.CredentialFingerprintMaterial{}, fmt.Errorf("plugin token storage is nil")
+	}
+	s.mu.RLock()
+	rawJSON := bytes.Clone(s.rawJSON)
+	metadata := cloneInterceptorMetadata(s.meta)
+	provider := s.provider
+	s.mu.RUnlock()
+
+	fingerprint := pluginCredentialFingerprintMaterial(rawJSON, metadata)
+	payload, errPayload := mergedStorageJSON(rawJSON, metadata, provider)
+	if errPayload != nil {
+		return nil, metadata, fingerprint, errPayload
+	}
+	return payload, metadata, fingerprint, nil
+}
+
+func (s *pluginTokenStorage) CredentialFingerprintMaterial() baseauth.CredentialFingerprintMaterial {
+	_, _, fingerprint, _ := s.credentialSnapshot()
+	return fingerprint
 }
 
 func (s *pluginTokenStorage) RawJSON() []byte {
-	if s == nil {
-		return nil
-	}
-	payload, errPayload := mergedStorageJSON(s.rawJSON, s.meta, s.provider)
-	if errPayload != nil {
-		return nil
-	}
+	payload, _, _ := s.CredentialSnapshot()
 	return payload
 }
 
@@ -439,9 +466,9 @@ func (s *pluginTokenStorage) SaveTokenToFile(path string) error {
 	if s == nil {
 		return fmt.Errorf("plugin token storage is nil")
 	}
-	payload, errPayload := mergedStorageJSON(s.rawJSON, s.meta, s.provider)
-	if errPayload != nil {
-		return errPayload
+	payload, _, _, errSnapshot := s.credentialSnapshot()
+	if errSnapshot != nil {
+		return errSnapshot
 	}
 	if len(bytes.TrimSpace(payload)) == 0 {
 		return fmt.Errorf("plugin token storage payload is empty")
@@ -473,6 +500,137 @@ func jsonPayloadEqual(left, right []byte) bool {
 		return false
 	}
 	return reflect.DeepEqual(leftValue, rightValue)
+}
+
+func pluginCredentialFingerprintMaterial(raw []byte, metadata map[string]any) baseauth.CredentialFingerprintMaterial {
+	parts := make(map[string]any, 2)
+	trimmedRaw := bytes.TrimSpace(raw)
+	if len(trimmedRaw) > 0 {
+		var storage any
+		if errUnmarshal := json.Unmarshal(trimmedRaw, &storage); errUnmarshal == nil {
+			parts["storage"] = storage
+		} else {
+			parts["storage"] = string(trimmedRaw)
+		}
+	}
+	if credentialMetadata := pluginCredentialMetadata(metadata); len(credentialMetadata) > 0 {
+		parts["metadata"] = credentialMetadata
+	}
+	if len(parts) == 0 {
+		return baseauth.CredentialFingerprintMaterial{}
+	}
+	canonical, errMarshal := json.Marshal(parts)
+	if errMarshal != nil {
+		return baseauth.CredentialFingerprintMaterial{Opaque: string(trimmedRaw)}
+	}
+	return baseauth.CredentialFingerprintMaterial{Opaque: string(canonical)}
+}
+
+func pluginCredentialMetadata(metadata map[string]any) map[string]any {
+	out := make(map[string]any)
+	for key, value := range metadata {
+		if pluginCredentialHeaderContainer(key) {
+			if filtered, ok := filterPluginCredentialHeaders(value); ok {
+				out[key] = filtered
+			}
+			continue
+		}
+		if pluginNonCredentialMetadataContainer(key) {
+			continue
+		}
+		if pluginCredentialMetadataKey(key) {
+			out[key] = value
+			continue
+		}
+		if filtered, ok := filterPluginCredentialMetadata(value); ok {
+			out[key] = filtered
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func filterPluginCredentialMetadata(value any) (any, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		filtered := pluginCredentialMetadata(typed)
+		return filtered, len(filtered) > 0
+	case []any:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			if filtered, ok := filterPluginCredentialMetadata(item); ok {
+				out = append(out, filtered)
+			}
+		}
+		return out, len(out) > 0
+	default:
+		return nil, false
+	}
+}
+
+func filterPluginCredentialHeaders(value any) (map[string]any, bool) {
+	headers := reflect.ValueOf(value)
+	if !headers.IsValid() || headers.Kind() != reflect.Map || headers.Type().Key().Kind() != reflect.String {
+		return nil, false
+	}
+	out := make(map[string]any)
+	iter := headers.MapRange()
+	for iter.Next() {
+		key := iter.Key().String()
+		if pluginCredentialHeaderName(key) {
+			out[key] = iter.Value().Interface()
+		}
+	}
+	return out, len(out) > 0
+}
+
+func pluginCredentialHeaderName(key string) bool {
+	normalized := normalizePluginMetadataKey(key)
+	if pluginCredentialMetadataKey(normalized) {
+		return true
+	}
+	return strings.Contains(normalized, "authorization") ||
+		strings.Contains(normalized, "apikey") ||
+		strings.Contains(normalized, "token") ||
+		strings.Contains(normalized, "secret")
+}
+
+func pluginCredentialMetadataKey(key string) bool {
+	switch normalizePluginMetadataKey(key) {
+	case "apikey", "accesstoken", "refreshtoken", "idtoken",
+		"token", "authtoken", "bearertoken", "sessiontoken",
+		"secret", "clientsecret", "password", "credential", "credentials",
+		"privatekey", "authorization", "cookie", "sessioncookie":
+		return true
+	default:
+		return false
+	}
+}
+
+func pluginCredentialHeaderContainer(key string) bool {
+	switch normalizePluginMetadataKey(key) {
+	case "headers", "requestheaders":
+		return true
+	default:
+		return false
+	}
+}
+
+func pluginNonCredentialMetadataContainer(key string) bool {
+	switch normalizePluginMetadataKey(key) {
+	case "responseheaders":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizePluginMetadataKey(key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	replacer := strings.NewReplacer("-", "", "_", "", " ", "")
+	return replacer.Replace(key)
 }
 
 func mergedStorageJSON(raw []byte, metadata map[string]any, provider string) ([]byte, error) {

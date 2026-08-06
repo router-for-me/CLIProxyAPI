@@ -182,6 +182,7 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	}
 
 	var snapshot *Auth
+	persistCooldownState := false
 	now := time.Now()
 
 	m.mu.Lock()
@@ -224,6 +225,7 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 			if errPersist := m.persist(ctx, auth); errPersist != nil {
 				logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth changes during model state reconciliation: %v", errPersist)
 			}
+			persistCooldownState = m.cooldownStore != nil
 			snapshot = auth.Clone()
 		}
 	}
@@ -231,6 +233,9 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 
 	if m.scheduler != nil && snapshot != nil {
 		m.scheduler.upsertAuth(snapshot)
+	}
+	if snapshot != nil && persistCooldownState {
+		m.persistCooldownStates(ctx)
 	}
 }
 

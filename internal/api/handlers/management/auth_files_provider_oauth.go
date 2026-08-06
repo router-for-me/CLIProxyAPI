@@ -193,6 +193,22 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
+func codexTokenMetadata(storage *codex.CodexTokenStorage) map[string]any {
+	if storage == nil {
+		return nil
+	}
+	return map[string]any{
+		"type":          "codex",
+		"id_token":      storage.IDToken,
+		"access_token":  storage.AccessToken,
+		"refresh_token": storage.RefreshToken,
+		"account_id":    storage.AccountID,
+		"last_refresh":  storage.LastRefresh,
+		"email":         storage.Email,
+		"expired":       storage.Expire,
+	}
+}
+
 func (h *Handler) RequestCodexToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
@@ -316,10 +332,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			Provider: "codex",
 			FileName: fileName,
 			Storage:  tokenStorage,
-			Metadata: map[string]any{
-				"email":      tokenStorage.Email,
-				"account_id": tokenStorage.AccountID,
-			},
+			Metadata: codexTokenMetadata(tokenStorage),
 		}
 		if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
 			return
