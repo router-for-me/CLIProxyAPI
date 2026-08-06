@@ -813,3 +813,74 @@ func TestResponsesSingleCustomToolName_CountsDeduplicatedTools(t *testing.T) {
 		t.Fatalf("responsesSingleCustomToolName name = %q, want apply_patch", name)
 	}
 }
+
+func TestSplitResponsesQualifiedFunctionCallFromRequest_FirstDeclarationWins(t *testing.T) {
+	flatFirst := []byte(`{
+		"tools": [
+			{"type":"function","name":"editor__apply_patch","parameters":{"type":"object"}},
+			{"type":"namespace","name":"editor","tools":[{"type":"function","name":"apply_patch","parameters":{"type":"object"}}]}
+		]
+	}`)
+	namespaceFirst := []byte(`{
+		"tools": [
+			{"type":"namespace","name":"editor","tools":[{"type":"function","name":"apply_patch","parameters":{"type":"object"}}]},
+			{"type":"function","name":"editor__apply_patch","parameters":{"type":"object"}}
+		]
+	}`)
+	namespaceOnly := []byte(`{
+		"tools": [
+			{"type":"namespace","name":"mcp__github","tools":[{"type":"function","name":"get_me","parameters":{"type":"object"}}]}
+		]
+	}`)
+
+	tests := []struct {
+		name          string
+		raw           []byte
+		qualified     string
+		wantName      string
+		wantNamespace string
+	}{
+		// The flat tool is the one that survives merging, so it must stay flat.
+		{"flat declared first", flatFirst, "editor__apply_patch", "editor__apply_patch", ""},
+		// The namespace child survives here, so the call splits back into it.
+		{"namespace declared first", namespaceFirst, "editor__apply_patch", "apply_patch", "editor"},
+		// No collision: unchanged behaviour.
+		{"namespace only", namespaceOnly, "mcp__github__get_me", "get_me", "mcp__github"},
+		// Unknown name falls through untouched.
+		{"unknown name", flatFirst, "something_else", "something_else", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotName, gotNamespace := splitResponsesQualifiedFunctionCallFromRequest(tt.raw, tt.qualified)
+			if gotName != tt.wantName || gotNamespace != tt.wantNamespace {
+				t.Fatalf("split(%q) = (%q, %q), want (%q, %q)",
+					tt.qualified, gotName, gotNamespace, tt.wantName, tt.wantNamespace)
+			}
+		})
+	}
+}
+
+func TestSplitResponsesQualifiedFunctionCallFromRequest_MatchesMergedToolIdentity(t *testing.T) {
+	// Whatever survives the merge must be what reverse translation reports.
+	raw := []byte(`{
+		"tools": [
+			{"type":"function","name":"editor__apply_patch","parameters":{"type":"object"}},
+			{"type":"namespace","name":"editor","tools":[{"type":"function","name":"apply_patch","parameters":{"type":"object"}}]}
+		]
+	}`)
+
+	merged := mergeResponsesRequestChatTools(gjson.ParseBytes(raw))
+	if len(merged) != 1 {
+		t.Fatalf("merged tool count = %d, want 1", len(merged))
+	}
+	emitted := gjson.GetBytes(merged[0], "function.name").String()
+
+	name, namespace := splitResponsesQualifiedFunctionCallFromRequest(raw, emitted)
+	if namespace != "" {
+		t.Fatalf("emitted tool %q came from a flat declaration, but split reported namespace %q", emitted, namespace)
+	}
+	if name != emitted {
+		t.Fatalf("split(%q) name = %q, want %q", emitted, name, emitted)
+	}
+}

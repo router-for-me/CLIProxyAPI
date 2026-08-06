@@ -273,60 +273,77 @@ func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {
 	return namespaceName + "__" + childName
 }
 
+// resolveResponsesQualifiedToolIdentity maps an emitted Chat Completions
+// function name back to the Responses declaration that produced it.
+//
+// Declarations are walked in the same order mergeResponsesRequestChatTools
+// uses, and the first one producing the name wins, so reverse translation
+// reports the identity of the declaration that actually survived the merge. A
+// flat top-level tool named "editor__apply_patch" therefore stays flat even
+// when a later namespace declares a child qualifying to the same name.
+func resolveResponsesQualifiedToolIdentity(root gjson.Result, qualifiedName string) (name, namespace string, found bool) {
+	scan := func(tools gjson.Result) {
+		if found || !tools.Exists() || !tools.IsArray() {
+			return
+		}
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			switch strings.TrimSpace(tool.Get("type").String()) {
+			case "namespace":
+				namespaceName := strings.TrimSpace(tool.Get("name").String())
+				children := tool.Get("tools")
+				if namespaceName == "" || !children.Exists() || !children.IsArray() {
+					return true
+				}
+				children.ForEach(func(_, child gjson.Result) bool {
+					switch strings.TrimSpace(child.Get("type").String()) {
+					case "", "function", "custom":
+					default:
+						return true
+					}
+					childName := responsesToolName(child)
+					if childName == "" {
+						return true
+					}
+					if qualifyResponsesNamespaceToolName(namespaceName, childName) == qualifiedName {
+						name, namespace, found = childName, namespaceName, true
+						return false
+					}
+					return true
+				})
+			case "", "function", "custom":
+				if responsesToolName(tool) == qualifiedName {
+					name, namespace, found = qualifiedName, "", true
+					return false
+				}
+			}
+			return !found
+		})
+	}
+
+	scan(root.Get("tools"))
+	if !found {
+		if input := root.Get("input"); input.Exists() && input.IsArray() {
+			input.ForEach(func(_, item gjson.Result) bool {
+				if item.Get("type").String() == "additional_tools" {
+					scan(item.Get("tools"))
+				}
+				return !found
+			})
+		}
+	}
+	return name, namespace, found
+}
+
 func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, qualifiedName string) (name, namespace string) {
 	qualifiedName = strings.TrimSpace(qualifiedName)
 	if qualifiedName == "" {
 		return "", ""
 	}
 
-	var bestNamespace string
-	var bestChild string
-	collect := func(tools gjson.Result) {
-		if !tools.Exists() || !tools.IsArray() {
-			return
-		}
-		tools.ForEach(func(_, tool gjson.Result) bool {
-			if strings.TrimSpace(tool.Get("type").String()) != "namespace" {
-				return true
-			}
-			namespaceName := strings.TrimSpace(tool.Get("name").String())
-			if namespaceName == "" {
-				return true
-			}
-			children := tool.Get("tools")
-			if !children.Exists() || !children.IsArray() {
-				return true
-			}
-			children.ForEach(func(_, child gjson.Result) bool {
-				childName := responsesToolName(child)
-				if childName == "" {
-					return true
-				}
-				if qualifyResponsesNamespaceToolName(namespaceName, childName) == qualifiedName {
-					bestNamespace = namespaceName
-					bestChild = childName
-				}
-				return true
-			})
-			return true
-		})
+	if resolvedName, resolvedNamespace, ok := resolveResponsesQualifiedToolIdentity(gjson.ParseBytes(requestRawJSON), qualifiedName); ok {
+		return resolvedName, resolvedNamespace
 	}
-
-	root := gjson.ParseBytes(requestRawJSON)
-	collect(root.Get("tools"))
-	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		input.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("type").String() == "additional_tools" {
-				collect(item.Get("tools"))
-			}
-			return true
-		})
-	}
-
-	if bestNamespace == "" || bestChild == "" {
-		return qualifiedName, ""
-	}
-	return bestChild, bestNamespace
+	return qualifiedName, ""
 }
 
 func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
