@@ -658,17 +658,39 @@ func executorStreamTranslationPayloads(payload []byte) [][]byte {
 	if !bytes.Contains(payload, []byte("\n")) {
 		return [][]byte{payload}
 	}
-	var dataLines [][]byte
+	var translationPayloads [][]byte
+	var dataValues [][]byte
+	sawData := false
+	flushData := func() {
+		if len(dataValues) == 0 {
+			return
+		}
+		joined := bytes.Join(dataValues, []byte("\n"))
+		frame := []byte("data:")
+		if len(joined) > 0 {
+			frame = append(frame, ' ')
+			frame = append(frame, joined...)
+		}
+		translationPayloads = append(translationPayloads, frame)
+		dataValues = nil
+	}
 	for _, line := range bytes.Split(payload, []byte("\n")) {
 		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
+			flushData()
+			continue
+		}
 		if bytes.HasPrefix(trimmed, []byte("data:")) {
-			dataLines = append(dataLines, bytes.Clone(trimmed))
+			sawData = true
+			value := bytes.TrimPrefix(trimmed[len("data:"):], []byte(" "))
+			dataValues = append(dataValues, bytes.Clone(value))
 		}
 	}
-	if len(dataLines) == 0 {
+	flushData()
+	if !sawData {
 		return [][]byte{payload}
 	}
-	return dataLines
+	return translationPayloads
 }
 
 func executorStreamTranslationFellBack(prepared preparedExecutorCall, payload []byte, frames [][]byte) bool {

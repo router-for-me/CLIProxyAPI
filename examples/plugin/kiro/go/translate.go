@@ -41,7 +41,11 @@ func claudeToKiro(raw []byte, requestedModel string) (*kiroPayload, *claudeReque
 	if request.Thinking != nil {
 		kind := strings.ToLower(strings.TrimSpace(request.Thinking.Type))
 		if kind == "enabled" || kind == "adaptive" {
-			systemPrompt = strings.TrimSpace("<thinking_mode>enabled</thinking_mode>\n<max_thinking_length>200000</max_thinking_length>\n\n" + systemPrompt)
+			thinkingBudget := 200000
+			if request.Thinking.BudgetTokens > 0 {
+				thinkingBudget = request.Thinking.BudgetTokens
+			}
+			systemPrompt = strings.TrimSpace(fmt.Sprintf("<thinking_mode>enabled</thinking_mode>\n<max_thinking_length>%d</max_thinking_length>\n\n%s", thinkingBudget, systemPrompt))
 		}
 	}
 
@@ -102,7 +106,9 @@ func claudeToKiro(raw []byte, requestedModel string) (*kiroPayload, *claudeReque
 	if request.MaxTokens > 0 || request.Temperature != nil || request.TopP != nil {
 		payload.InferenceConfig = &kiroInferenceConfig{MaxTokens: request.MaxTokens, Temperature: request.Temperature, TopP: request.TopP}
 	}
-	truncatePayload(payload, systemPrompt != "")
+	if errTruncate := truncatePayload(payload, systemPrompt != ""); errTruncate != nil {
+		return nil, nil, errTruncate
+	}
 	return payload, &request, nil
 }
 
@@ -394,15 +400,21 @@ func formatUUID(b []byte) string {
 	return hexValue[:8] + "-" + hexValue[8:12] + "-" + hexValue[12:16] + "-" + hexValue[16:20] + "-" + hexValue[20:32]
 }
 
-func truncatePayload(payload *kiroPayload, preserveSystemPair bool) {
+func truncatePayload(payload *kiroPayload, preserveSystemPair bool) error {
 	protected := 0
 	if preserveSystemPair {
 		protected = 2
 	}
 	for {
 		raw, errMarshal := json.Marshal(payload)
-		if errMarshal != nil || len(raw) <= maxKiroPayloadBytes || len(payload.ConversationState.History) <= protected {
-			return
+		if errMarshal != nil {
+			return fmt.Errorf("encode Kiro payload: %w", errMarshal)
+		}
+		if len(raw) <= maxKiroPayloadBytes {
+			return nil
+		}
+		if len(payload.ConversationState.History) <= protected {
+			return fmt.Errorf("Kiro request payload is %d bytes after truncating removable history; limit is %d bytes", len(raw), maxKiroPayloadBytes)
 		}
 		removeCount := 1
 		if protected+1 < len(payload.ConversationState.History) &&

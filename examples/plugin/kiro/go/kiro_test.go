@@ -301,6 +301,47 @@ func TestClaudeToKiroPreservesExplicitZeroSamplingValues(t *testing.T) {
 	}
 }
 
+func TestClaudeToKiroPreservesThinkingBudget(t *testing.T) {
+	payload, _, errTranslate := claudeToKiro([]byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[{"role":"user","content":"hello"}],
+		"thinking":{"type":"enabled","budget_tokens":1024}
+	}`), "")
+	if errTranslate != nil {
+		t.Fatalf("claudeToKiro() error = %v", errTranslate)
+	}
+	if len(payload.ConversationState.History) < 1 || payload.ConversationState.History[0].UserInputMessage == nil {
+		t.Fatalf("history = %#v, want thinking system prompt", payload.ConversationState.History)
+	}
+	content := payload.ConversationState.History[0].UserInputMessage.Content
+	if !strings.Contains(content, "<max_thinking_length>1024</max_thinking_length>") {
+		t.Fatalf("thinking system prompt = %q, want requested budget", content)
+	}
+}
+
+func TestClaudeToKiroRejectsPayloadAboveSizeLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{
+			name: "oversized current message",
+			raw:  []byte(`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"` + strings.Repeat("x", maxKiroPayloadBytes) + `"}]}`),
+		},
+		{
+			name: "oversized protected system prompt",
+			raw:  []byte(`{"model":"claude-sonnet-4-5","system":"` + strings.Repeat("x", maxKiroPayloadBytes) + `","messages":[{"role":"user","content":"hello"}]}`),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, _, errTranslate := claudeToKiro(test.raw, ""); errTranslate == nil || !strings.Contains(errTranslate.Error(), "limit is") {
+				t.Fatalf("claudeToKiro() error = %v, want local size-limit error", errTranslate)
+			}
+		})
+	}
+}
+
 func TestTruncatePayloadPreservesSyntheticSystemPair(t *testing.T) {
 	payload := &kiroPayload{}
 	payload.ConversationState.History = []kiroHistoryMessage{

@@ -2861,6 +2861,18 @@ func TestExecutorStreamTranslationPayloadsExtractsDataFromSSEFrame(t *testing.T)
 	}
 }
 
+func TestExecutorStreamTranslationPayloadsReassemblesMultilineData(t *testing.T) {
+	payload := []byte("event: content_block_delta\ndata: {\ndata:   \"type\": \"content_block_delta\",\ndata:   \"delta\": {\"type\": \"text_delta\", \"text\": \"hello\"}\ndata: }\n\n")
+	frames := executorStreamTranslationPayloads(payload)
+	if len(frames) != 1 {
+		t.Fatalf("translation payload count = %d, want 1", len(frames))
+	}
+	want := []byte("data: {\n  \"type\": \"content_block_delta\",\n  \"delta\": {\"type\": \"text_delta\", \"text\": \"hello\"}\n}")
+	if !bytes.Equal(frames[0], want) {
+		t.Fatalf("translation payload = %q, want %q", frames[0], want)
+	}
+}
+
 func TestExecutorSSERecordBufferRetainsSplitDataLine(t *testing.T) {
 	var buffer executorSSERecordBuffer
 	first := []byte("event: message_delta\ndata: {\"type\":")

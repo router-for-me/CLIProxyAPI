@@ -97,7 +97,8 @@ type claudeRequest struct {
 	Stream      bool            `json:"stream,omitempty"`
 	System      any             `json:"system,omitempty"`
 	Thinking    *struct {
-		Type string `json:"type,omitempty"`
+		Type         string `json:"type,omitempty"`
+		BudgetTokens int    `json:"budget_tokens,omitempty"`
 	} `json:"thinking,omitempty"`
 	Tools []claudeTool `json:"tools,omitempty"`
 }
