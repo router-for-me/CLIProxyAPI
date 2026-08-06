@@ -103,7 +103,7 @@ func (e *onceTestExecutor) models() []string {
 // it, and then funnels into exactly this core, so the redirect, marking and
 // attempt-fact contracts are pinned here once instead of at every entry point.
 func httpOnceWithAuth(m *Manager, ctx context.Context, auth *Auth, req *http.Request, policy HTTPRedirectPolicy) (*http.Response, HTTPAttemptFacts, error) {
-	return m.httpOnce(ctx, auth, req, "", policy)
+	return m.httpOnce(ctx, auth, req, "test-model", policy)
 }
 
 // onceAuthByID reads a registered auth snapshot directly from the manager, which
@@ -564,6 +564,18 @@ type onceRoundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f onceRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
+// onceErrorCode returns the *Error code carried by err, or "" when err is nil.
+func onceErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		return authErr.Code
+	}
+	return err.Error()
+}
+
 func onceHTTPRequest(t *testing.T, ctx context.Context, method, target string, body io.Reader) *http.Request {
 	t.Helper()
 	req, err := http.NewRequestWithContext(ctx, method, target, body)
@@ -580,10 +592,12 @@ func TestManagerHTTPOnceCore_MarksOnceAndOnlySucceedsOn2xx(t *testing.T) {
 		retryAfter  string
 		wantSuccess bool
 		wantRetry   bool
+		wantErrCode string
 	}{
 		{name: "ok", status: http.StatusOK, wantSuccess: true},
 		{name: "created", status: http.StatusCreated, wantSuccess: true},
-		{name: "found", status: http.StatusFound},
+		{name: "found", status: http.StatusFound, wantErrCode: "redirect_denied"},
+		{name: "not found", status: http.StatusNotFound},
 		{name: "unauthorized", status: http.StatusUnauthorized},
 		{name: "request timeout", status: http.StatusRequestTimeout},
 		{name: "rate limited", status: http.StatusTooManyRequests, retryAfter: "30", wantRetry: true},
@@ -608,8 +622,8 @@ func TestManagerHTTPOnceCore_MarksOnceAndOnlySucceedsOn2xx(t *testing.T) {
 			auth := onceAuthByID(t, manager, "http-once")
 
 			resp, facts, errDo := httpOnceWithAuth(manager, context.Background(), auth, onceHTTPRequest(t, context.Background(), http.MethodPost, server.URL, strings.NewReader(`{}`)), HTTPRedirectDeny)
-			if errDo != nil {
-				t.Fatalf("httpOnceWithAuth() error = %v", errDo)
+			if code := onceErrorCode(errDo); code != tt.wantErrCode {
+				t.Fatalf("httpOnceWithAuth() error = %v, want code %q", errDo, tt.wantErrCode)
 			}
 			defer func() { _ = resp.Body.Close() }()
 
@@ -679,8 +693,8 @@ func TestManagerHTTPOnceCore_DenyNeverFollowsRedirect(t *testing.T) {
 				body = strings.NewReader(`{"paid":true}`)
 			}
 			resp, facts, errDo := httpOnceWithAuth(manager, context.Background(), auth, onceHTTPRequest(t, context.Background(), tt.method, server.URL+"/start", body), HTTPRedirectDeny)
-			if errDo != nil {
-				t.Fatalf("httpOnceWithAuth() error = %v", errDo)
+			if code := onceErrorCode(errDo); code != "redirect_denied" {
+				t.Fatalf("httpOnceWithAuth() error = %v, want redirect_denied", errDo)
 			}
 			defer func() { _ = resp.Body.Close() }()
 
@@ -696,6 +710,12 @@ func TestManagerHTTPOnceCore_DenyNeverFollowsRedirect(t *testing.T) {
 			results := hook.snapshot()
 			if len(results) != 1 || results[0].Success {
 				t.Fatalf("results = %+v, want exactly one unsuccessful result", results)
+			}
+			// Refusing a redirect is the policy working, not the credential
+			// failing, so it must never cool the credential.
+			stored := onceAuthByID(t, manager, "redirect-deny")
+			if state := stored.ModelStates["test-model"]; state != nil && state.Unavailable {
+				t.Fatalf("model state = %+v, want a policy refusal to leave the credential untouched", state)
 			}
 		})
 	}
@@ -719,8 +739,8 @@ func TestManagerHTTPOnceCore_EmptyPolicyDefaultsToDeny(t *testing.T) {
 	auth := onceAuthByID(t, manager, "redirect-default")
 
 	resp, facts, errDo := httpOnceWithAuth(manager, context.Background(), auth, onceHTTPRequest(t, context.Background(), http.MethodGet, server.URL+"/start", nil), "")
-	if errDo != nil {
-		t.Fatalf("httpOnceWithAuth() error = %v", errDo)
+	if code := onceErrorCode(errDo); code != "redirect_denied" {
+		t.Fatalf("httpOnceWithAuth() error = %v, want redirect_denied", errDo)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusFound {
@@ -768,6 +788,7 @@ func TestManagerHTTPOnceCore_SameOriginSafeFollowsOnlySafeRedirects(t *testing.T
 		wantFollowed  int32
 		wantRequests  uint32
 		wantSucceeded bool
+		wantErrCode   string
 	}{
 		{
 			name:          "same origin get is followed",
@@ -785,6 +806,7 @@ func TestManagerHTTPOnceCore_SameOriginSafeFollowsOnlySafeRedirects(t *testing.T
 			wantStatus:   http.StatusFound,
 			wantFollowed: 0,
 			wantRequests: 1,
+			wantErrCode:  "redirect_denied",
 		},
 		{
 			name:         "post is refused",
@@ -794,6 +816,7 @@ func TestManagerHTTPOnceCore_SameOriginSafeFollowsOnlySafeRedirects(t *testing.T
 			wantStatus:   http.StatusTemporaryRedirect,
 			wantFollowed: 0,
 			wantRequests: 1,
+			wantErrCode:  "redirect_denied",
 		},
 	}
 
@@ -829,8 +852,8 @@ func TestManagerHTTPOnceCore_SameOriginSafeFollowsOnlySafeRedirects(t *testing.T
 				body = strings.NewReader(`{"paid":true}`)
 			}
 			resp, facts, errDo := httpOnceWithAuth(manager, ctx, auth, onceHTTPRequest(t, ctx, tt.method, server.URL+"/start", body), HTTPRedirectSameOriginSafe)
-			if errDo != nil {
-				t.Fatalf("httpOnceWithAuth() error = %v", errDo)
+			if code := onceErrorCode(errDo); code != tt.wantErrCode {
+				t.Fatalf("httpOnceWithAuth() error = %v, want code %q", errDo, tt.wantErrCode)
 			}
 			defer func() { _ = resp.Body.Close() }()
 
@@ -886,8 +909,8 @@ func TestManagerHTTPOnceCore_SameOriginSafeStopsAtThreeHops(t *testing.T) {
 
 	ctx := newOnceTLSContext(server)
 	resp, facts, errDo := httpOnceWithAuth(manager, ctx, auth, onceHTTPRequest(t, ctx, http.MethodGet, server.URL+"/hop1", nil), HTTPRedirectSameOriginSafe)
-	if errDo != nil {
-		t.Fatalf("httpOnceWithAuth() error = %v", errDo)
+	if code := onceErrorCode(errDo); code != "redirect_denied" {
+		t.Fatalf("httpOnceWithAuth() error = %v, want redirect_denied", errDo)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -1166,24 +1189,28 @@ func TestSameOriginSafeRedirectAllowed(t *testing.T) {
 
 func TestOnceAttemptRecorderFacts(t *testing.T) {
 	tests := []struct {
-		name    string
-		prepare func(recorder *onceAttemptRecorder)
-		want    HTTPAttemptFacts
+		name        string
+		clientOwned bool
+		prepare     func(recorder *onceAttemptRecorder)
+		want        HTTPAttemptFacts
 	}{
 		{
-			name:    "never dispatched",
-			prepare: func(*onceAttemptRecorder) {},
-			want:    HTTPAttemptFacts{},
+			name:        "never dispatched",
+			clientOwned: true,
+			prepare:     func(*onceAttemptRecorder) {},
+			want:        HTTPAttemptFacts{},
 		},
 		{
-			name: "dispatched without observation is ambiguous",
+			name:        "dispatched without observation is ambiguous",
+			clientOwned: true,
 			prepare: func(recorder *onceAttemptRecorder) {
 				recorder.markDispatched()
 			},
 			want: HTTPAttemptFacts{RequestWritten: true},
 		},
 		{
-			name: "trace observed without write",
+			name:        "owned client trace observed without write",
+			clientOwned: true,
 			prepare: func(recorder *onceAttemptRecorder) {
 				recorder.markDispatched()
 				recorder.clientTrace().ConnectStart("tcp", "host:443")
@@ -1191,29 +1218,52 @@ func TestOnceAttemptRecorderFacts(t *testing.T) {
 			want: HTTPAttemptFacts{},
 		},
 		{
-			name: "trace observed with write",
+			name: "executor owned client never claims not written",
+			prepare: func(recorder *onceAttemptRecorder) {
+				recorder.markDispatched()
+				recorder.clientTrace().ConnectStart("tcp", "host:443")
+			},
+			want: HTTPAttemptFacts{RequestWritten: true},
+		},
+		{
+			name:        "trace observed with write",
+			clientOwned: true,
 			prepare: func(recorder *onceAttemptRecorder) {
 				recorder.markDispatched()
 				trace := recorder.clientTrace()
 				trace.WroteHeaders()
 				trace.GotFirstResponseByte()
 			},
-			want: HTTPAttemptFacts{RequestCount: 1, RequestWritten: true, ResponseStarted: true},
+			want: HTTPAttemptFacts{RequestCount: 1, RequestWritten: true, RequestWrittenObserved: true, ResponseStarted: true},
 		},
 		{
-			name: "transport observed",
+			name:        "transport observed",
+			clientOwned: true,
 			prepare: func(recorder *onceAttemptRecorder) {
 				recorder.markDispatched()
 				recorder.observeRequest()
 				recorder.observeResponse(http.StatusTooManyRequests)
 			},
-			want: HTTPAttemptFacts{RequestCount: 1, RequestWritten: true, ResponseStarted: true, StatusCode: http.StatusTooManyRequests},
+			want: HTTPAttemptFacts{RequestCount: 1, RequestWritten: true, RequestWrittenObserved: true, ResponseStarted: true, StatusCode: http.StatusTooManyRequests},
+		},
+		{
+			name:        "transport resend below the wrapper is counted from the trace",
+			clientOwned: true,
+			prepare: func(recorder *onceAttemptRecorder) {
+				recorder.markDispatched()
+				recorder.observeRequest()
+				trace := recorder.clientTrace()
+				trace.WroteHeaders()
+				trace.WroteHeaders()
+				recorder.observeResponse(http.StatusOK)
+			},
+			want: HTTPAttemptFacts{RequestCount: 2, RequestWritten: true, RequestWrittenObserved: true, ResponseStarted: true, StatusCode: http.StatusOK},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			recorder := newOnceAttemptRecorder()
+			recorder := newOnceAttemptRecorder(tt.clientOwned)
 			tt.prepare(recorder)
 			if got := recorder.facts(); got != tt.want {
 				t.Fatalf("facts() = %+v, want %+v", got, tt.want)

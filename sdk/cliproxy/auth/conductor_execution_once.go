@@ -30,13 +30,26 @@ import (
 //     preparation, no result marking and reports no attempt facts.
 //
 // ExecuteWithAuthOnce and DoHTTPOnce keep the lifecycle and drop every replay
-// vector, and they report typed attempt facts so a caller can tell "definitely
-// not sent" from "may have been sent".
+// vector the manager owns, and they report typed attempt facts so a caller can
+// tell "definitely not sent" from "may have been sent".
+//
+// The two differ in how far the guarantee reaches, and the difference is a
+// boundary rather than a gap in effort. DoHTTPOnce performs the request itself,
+// so it can police redirects and cap the attempt outright. ExecuteWithAuthOnce
+// hands the request to a provider executor that constructs and owns its own
+// http.Client, which the manager cannot reach: the shared executor helper
+// consults the auth proxy and the runtime config proxy before it looks at the
+// manager transport, and no executor sets a CheckRedirect. So there the manager
+// guarantees one executor invocation and reports what it observed, and
+// HTTPAttemptFacts.RequestCount - not the absence of an error - is what a caller
+// of a non-idempotent create reconciles against.
 
 // maxSameOriginSafeRedirectHops bounds HTTPRedirectSameOriginSafe redirect following.
 const maxSameOriginSafeRedirectHops = 3
 
 // HTTPRedirectPolicy names the redirect contract applied to a one-shot request.
+// It is only offered by DoHTTPOnce, the path where the manager owns the client
+// and can therefore enforce it; see the file comment for why.
 type HTTPRedirectPolicy string
 
 const (
@@ -55,7 +68,8 @@ func normalizedRedirectPolicy(policy HTTPRedirectPolicy) HTTPRedirectPolicy {
 }
 
 // validateRedirectPolicy reports whether the supplied policy is understood.
-// An empty policy is accepted; each caller documents what it means for that path.
+// An empty policy is accepted and means HTTPRedirectDeny: redirect policy is only
+// offered where the manager owns the http.Client, which is DoHTTPOnce alone.
 func validateRedirectPolicy(policy HTTPRedirectPolicy) error {
 	switch normalizedRedirectPolicy(policy) {
 	case "", HTTPRedirectDeny, HTTPRedirectSameOriginSafe:
@@ -70,16 +84,23 @@ func validateRedirectPolicy(policy HTTPRedirectPolicy) error {
 // not sent" from "may have been sent" without parsing an error string.
 //
 // The facts are derived from the transport the manager installed and from
-// net/http/httptrace. When neither source reports anything - which happens when
-// a host supplied RoundTripper ignores httptrace - RequestWritten is reported as
-// true for any attempt that reached the executor, because an ambiguous "may have
-// been sent" is safe while a false "not sent" causes a double charge.
+// net/http/httptrace, and both sources are optional. RequestWritten is therefore
+// the pessimistic claim - it is true whenever bytes may have reached the wire -
+// while RequestWrittenObserved is the positive one, true only when a write was
+// actually observed. A false RequestWritten is the only statement of "definitely
+// not sent", and it is never made on a path where a provider executor owned the
+// http.Client, because an executor can issue requests the manager cannot see.
 type HTTPAttemptFacts struct {
-	// RequestCount counts upstream requests observed by the manager transport,
-	// including redirect hops. It stays 0 when the attempt never dispatched.
+	// RequestCount counts upstream requests observed on this attempt, including
+	// redirect hops and transport-internal resends, taking the larger of what the
+	// manager transport and httptrace saw. A 0 means "nothing observed", which is
+	// "unknown" rather than "not sent" whenever the client was not manager owned.
 	RequestCount uint32
 	// RequestWritten reports whether any request byte may have reached the wire.
 	RequestWritten bool
+	// RequestWrittenObserved reports that a write was positively observed. It is
+	// the proof-carrying counterpart of RequestWritten.
+	RequestWrittenObserved bool
 	// ResponseStarted reports whether upstream response headers were received.
 	ResponseStarted bool
 	// StatusCode is the observed upstream status, or the status carried by the
@@ -102,20 +123,16 @@ type ExecuteWithAuthOnceRequest struct {
 	Request cliproxyexecutor.Request
 	// Options are the canonical executor options.
 	Options cliproxyexecutor.Options
-	// RedirectPolicy optionally constrains redirects for the executor's HTTP
-	// client. Empty keeps the executor's own behavior, which is what every
-	// existing caller gets today. Enforcement is best effort here because the
-	// executor owns its http.Client; it holds only while the manager-installed
-	// transport is in effect (see onceRoundTripper). DoHTTPOnce owns the client
-	// itself and is therefore the path with the unconditional guarantee.
-	RedirectPolicy HTTPRedirectPolicy
 }
 
 // HTTPOnceRequest describes a single pinned, non-replayed raw HTTP call.
 type HTTPOnceRequest struct {
 	// AuthID identifies a manager-persisted credential.
 	AuthID string
-	// Model is recorded with the execution result. It may be empty.
+	// Model names the model this call is attributed to. Credential availability
+	// in this manager is model scoped, so a call that names no model is recorded
+	// for observability only and never rewrites credential health - a raw poll
+	// must not resurrect a rate-limited credential nor suspend a working one.
 	Model string
 	// Method is the HTTP method. Empty defaults to GET.
 	Method string
@@ -139,6 +156,21 @@ type HTTPOnceRequest struct {
 // credential hop, no post-401 re-execute, and a model pool collapsed to its
 // first entry exactly as the Home execution path does.
 //
+// SCOPE OF THE ONCE GUARANTEE. Once-ness here is per executor invocation, not per
+// upstream HTTP request. A provider executor constructs and owns its own
+// http.Client, so the manager cannot install a CheckRedirect on it and cannot cap
+// the requests it makes: an executor may follow redirects (net/http replays the
+// body on 307 and 308 whenever GetBody is set, which it always is for a bytes
+// body), may fall back across base URLs, and may run its own attempt loop. The
+// manager does not offer a redirect policy on this path, because any policy it
+// could advertise would be silently unenforced whenever a proxy is configured -
+// the shared executor helper consults the auth proxy and the runtime config proxy
+// before it ever looks at the manager transport. HTTPAttemptFacts.RequestCount is
+// therefore the only authority on how many upstream requests were made, and a
+// caller performing a non-idempotent create must treat RequestCount > 1 as a
+// possible double spend and RequestCount == 0 as unknown rather than "not sent".
+// DoHTTPOnce owns its client and is the path with an enforceable guarantee.
+//
 // MarkResult is called at most once. It is not called at all when the failure
 // happened before the credential was exercised: unknown or non-durable auth,
 // unregistered executor, refresh failure, or an interceptor termination.
@@ -151,9 +183,6 @@ func (m *Manager) ExecuteWithAuthOnce(ctx context.Context, in ExecuteWithAuthOnc
 	}
 	if ctx == nil {
 		ctx = context.Background()
-	}
-	if errPolicy := validateRedirectPolicy(in.RedirectPolicy); errPolicy != nil {
-		return cliproxyexecutor.Response{}, facts, errPolicy
 	}
 
 	auth, executor, providerKey, errResolve := m.resolveDurableAuthForOnce(in.AuthID, in.Provider)
@@ -178,8 +207,10 @@ func (m *Manager) ExecuteWithAuthOnce(ctx context.Context, in ExecuteWithAuthOnc
 	opts := ensureRequestedModelMetadata(in.Options, routeModel)
 	publishSelectedAuthMetadata(opts.Metadata, auth)
 
-	recorder := newOnceAttemptRecorder()
-	execCtx := m.onceExecutionContext(ctx, auth, opts, routeModel, in.RedirectPolicy, recorder)
+	// The executor owns its http.Client, so the recorder must never claim that a
+	// request was definitely not written on this path.
+	recorder := newOnceAttemptRecorder(false)
+	execCtx := m.onceExecutionContext(ctx, auth, opts, routeModel, recorder)
 
 	models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
 	if len(models) == 0 {
@@ -271,9 +302,19 @@ func (m *Manager) ExecuteWithAuthOnce(ctx context.Context, in ExecuteWithAuthOnc
 // style headers cross-host - net/http only strips Authorization, Cookie and
 // WWW-Authenticate. Both of those are disqualifying for a paid create.
 //
-// The response body is not read or closed; the caller owns it. Exactly one
-// execution result is marked: success is HTTP 2xx alone, so a 3xx is never
-// marked as success. An empty RedirectPolicy means HTTPRedirectDeny.
+// The response body is not read or closed; the caller owns it. A redirect the
+// policy refuses is returned as the unfollowed 3xx response together with a
+// redirect_denied error, so a caller that branches on the error alone cannot read
+// a refused attempt as a success. An empty RedirectPolicy means HTTPRedirectDeny.
+//
+// Exactly one execution result is recorded, and the recording is classified
+// because a raw HTTP call addresses arbitrary endpoints rather than a model
+// serving route. Only statuses that describe the credential - 401, 402, 403, 408,
+// 429, 5xx - and transport failures reach MarkResult and may cool the credential;
+// success is HTTP 2xx alone; every other outcome, including a 3xx and a
+// request-shaped 4xx such as 404, is recorded through the availability-neutral
+// path the count_tokens 404 case already uses, so polling a job URL cannot
+// suspend a healthy credential. A call that names no Model is always neutral.
 //
 // It never returns an *Auth, request headers or any other credential material.
 func (m *Manager) DoHTTPOnce(ctx context.Context, in HTTPOnceRequest) (*http.Response, HTTPAttemptFacts, error) {
@@ -349,7 +390,9 @@ func (m *Manager) httpOnce(ctx context.Context, auth *Auth, req *http.Request, m
 		normalized = HTTPRedirectDeny
 	}
 
-	recorder := newOnceAttemptRecorder()
+	// The manager owns this client end to end, so the recorder may report a
+	// negative: an attempt that never wrote is provably not sent.
+	recorder := newOnceAttemptRecorder(true)
 	tracedCtx := httptrace.WithClientTrace(ctx, recorder.clientTrace())
 	httpReq := req.WithContext(tracedCtx)
 	if httpReq.Body != nil || httpReq.ContentLength != 0 {
@@ -362,9 +405,10 @@ func (m *Manager) httpOnce(ctx context.Context, auth *Auth, req *http.Request, m
 		return nil, facts, errPrepare
 	}
 
+	guard := &onceRedirectGuard{policy: normalized, origin: newRedirectOrigin(httpReq)}
 	client := &http.Client{
-		Transport:     m.transportForOnce(tracedCtx, auth, recorder, ""),
-		CheckRedirect: redirectGuard(normalized, newRedirectOrigin(httpReq)),
+		Transport:     m.clientTransportForOnce(tracedCtx, auth, recorder),
+		CheckRedirect: guard.checkRedirect,
 	}
 
 	recorder.markDispatched()
@@ -374,6 +418,7 @@ func (m *Manager) httpOnce(ctx context.Context, auth *Auth, req *http.Request, m
 		facts.StatusCode = resp.StatusCode
 		facts.ResponseStarted = true
 		facts.RequestWritten = true
+		facts.RequestWrittenObserved = true
 	} else if facts.StatusCode == 0 {
 		facts.StatusCode = statusCodeFromError(errDo)
 	}
@@ -384,6 +429,7 @@ func (m *Manager) httpOnce(ctx context.Context, auth *Auth, req *http.Request, m
 
 	marker := &onceResultMarker{}
 	result := Result{AuthID: auth.ID, Provider: executorKeyFromAuth(auth), Model: model}
+	availabilityRelevant := false
 	switch {
 	case resp == nil:
 		result.Success = false
@@ -391,23 +437,83 @@ func (m *Manager) httpOnce(ctx context.Context, auth *Auth, req *http.Request, m
 		if retryAfter := retryAfterFromError(errDo); retryAfter != nil {
 			result.RetryAfter = retryAfter
 		}
+		availabilityRelevant = true
 	case resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices:
 		result.Success = true
+		availabilityRelevant = true
 	default:
 		result.Success = false
 		result.Error = resultErrorFromError(httpStatusError(resp.StatusCode))
 		if retryAfter := retryAfterFromResponse(resp); retryAfter != nil {
 			result.RetryAfter = retryAfter
 		}
+		availabilityRelevant = httpStatusCoolsCredential(resp.StatusCode)
 	}
-	marker.mark(tracedCtx, m, result)
+	if strings.TrimSpace(model) == "" {
+		// Credential health is model scoped here. With no model, a success would
+		// clear the whole credential's quota state and a failure would suspend the
+		// credential outright, so an unattributed call is only ever observed.
+		availabilityRelevant = false
+	}
+	marker.record(tracedCtx, m, result, availabilityRelevant)
+
+	if errDo == nil && resp != nil {
+		denied, target := guard.denied()
+		if !denied && unfollowedRedirect(resp) {
+			// net/http can refuse a redirect before CheckRedirect runs: with
+			// GetBody cleared it hands a 307 or 308 straight back rather than
+			// replaying the body. Either way a redirect was offered, not followed,
+			// and the caller must not read the 3xx as a completed request.
+			denied = true
+			target = resp.Header.Get("Location")
+		}
+		if denied {
+			return resp, facts, &Error{
+				Code:       "redirect_denied",
+				Message:    "redirect to " + target + " was not followed",
+				HTTPStatus: resp.StatusCode,
+			}
+		}
+	}
 	return resp, facts, errDo
+}
+
+// unfollowedRedirect reports whether a response is a redirect the client handed
+// back instead of following.
+func unfollowedRedirect(resp *http.Response) bool {
+	if resp == nil || strings.TrimSpace(resp.Header.Get("Location")) == "" {
+		return false
+	}
+	switch resp.StatusCode {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	default:
+		return false
+	}
 }
 
 // httpStatusError converts an upstream HTTP status into the package error type
 // so MarkResult keeps its status-driven cooldown classification.
 func httpStatusError(status int) error {
 	return &Error{Code: "upstream_http_status", Message: "upstream returned status " + strconv.Itoa(status), HTTPStatus: status}
+}
+
+// httpStatusCoolsCredential reports whether an upstream status says something
+// about the credential rather than about the request that was addressed.
+//
+// A raw one-shot HTTP call targets arbitrary endpoints - a job status URL, an
+// asset URL - so its statuses cannot be read the way a serving response is. Only
+// credential-shaped statuses may change availability; everything else, including
+// a policy-refused 3xx and request-shaped 4xx such as 404, stays neutral. This is
+// the same distinction the count_tokens 404 case draws in conductor_execution.go.
+func httpStatusCoolsCredential(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden,
+		http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return true
+	}
+	return status >= http.StatusInternalServerError
 }
 
 // retryAfterFromResponse extracts a Retry-After hint from an upstream response.
@@ -529,18 +635,30 @@ func (m *Manager) refreshAuthForOnce(ctx context.Context, auth *Auth) (*Auth, er
 	return refreshed, nil
 }
 
-// onceResultMarker guarantees at most one MarkResult call per one-shot request.
+// onceResultMarker guarantees at most one result recording per one-shot request.
 type onceResultMarker struct {
 	once sync.Once
 }
 
-// mark records the execution result the first time it is called and never again.
+// mark records an availability-relevant execution result exactly once.
 func (r *onceResultMarker) mark(ctx context.Context, m *Manager, result Result) {
+	r.record(ctx, m, result, true)
+}
+
+// record records the execution result the first time it is called and never
+// again. An availability-irrelevant result is reported through the neutral path
+// so hooks, counters and error events still see it while credential cooldown,
+// quota and suspension state stay untouched.
+func (r *onceResultMarker) record(ctx context.Context, m *Manager, result Result, availabilityRelevant bool) {
 	if r == nil || m == nil {
 		return
 	}
 	r.once.Do(func() {
-		m.MarkResult(ctx, result)
+		if availabilityRelevant {
+			m.MarkResult(ctx, result)
+			return
+		}
+		m.recordAvailabilityNeutralResult(ctx, result)
 	})
 }
 
@@ -548,22 +666,41 @@ func (r *onceResultMarker) mark(ctx context.Context, m *Manager, result Result) 
 // mirrors the retrying path (per-auth transport under both round tripper keys,
 // requested-model alias attribution) and adds the httptrace hooks the attempt
 // facts are derived from.
-func (m *Manager) onceExecutionContext(ctx context.Context, auth *Auth, opts cliproxyexecutor.Options, routeModel string, policy HTTPRedirectPolicy, recorder *onceAttemptRecorder) context.Context {
+func (m *Manager) onceExecutionContext(ctx context.Context, auth *Auth, opts cliproxyexecutor.Options, routeModel string, recorder *onceAttemptRecorder) context.Context {
 	execCtx := contextWithRequestedModelAlias(ctx, opts, routeModel)
-	transport := m.transportForOnce(ctx, auth, recorder, policy)
+	transport := m.executorTransportForOnce(ctx, auth, recorder)
 	execCtx = context.WithValue(execCtx, roundTripperContextKey{}, transport)
 	execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", transport)
 	return httptrace.WithClientTrace(execCtx, recorder.clientTrace())
 }
 
-// transportForOnce resolves the transport for a one-shot attempt using the same
-// priority the shared executor helper applies - auth proxy, runtime config
-// proxy, context or per-auth RoundTripper, default transport - and wraps it so
-// the manager can count requests, observe statuses and, when a policy is set,
-// keep a shared http.Client from following a redirect.
-func (m *Manager) transportForOnce(ctx context.Context, auth *Auth, recorder *onceAttemptRecorder, policy HTTPRedirectPolicy) http.RoundTripper {
-	var base http.RoundTripper
+// executorTransportForOnce wraps the transport the retrying execution path would
+// hand to the executor - the context RoundTripper, then the per-auth one, then
+// the default transport - so the manager can count requests and observe statuses.
+//
+// It deliberately does not resolve a proxy URL: the shared executor helper
+// consults the auth and runtime config proxies before the context RoundTripper,
+// so a proxy transport built here would never be used, and building one would
+// also diverge from what the retrying path installs.
+func (m *Manager) executorTransportForOnce(ctx context.Context, auth *Auth, recorder *onceAttemptRecorder) http.RoundTripper {
+	return &onceRoundTripper{base: m.baseTransportForOnce(ctx, auth), recorder: recorder}
+}
 
+// clientTransportForOnce wraps the transport the manager-owned one-shot HTTP
+// client rides. It applies the same priority the shared executor helper does -
+// auth proxy, runtime config proxy, context or per-auth RoundTripper, default
+// transport - because here the manager, not the executor, performs the request.
+func (m *Manager) clientTransportForOnce(ctx context.Context, auth *Auth, recorder *onceAttemptRecorder) http.RoundTripper {
+	base := m.proxyTransportForOnce(auth)
+	if base == nil {
+		base = m.baseTransportForOnce(ctx, auth)
+	}
+	return &onceRoundTripper{base: base, recorder: recorder}
+}
+
+// proxyTransportForOnce returns the transport implied by the auth proxy or the
+// runtime config proxy, or nil when neither is configured or usable.
+func (m *Manager) proxyTransportForOnce(auth *Auth) http.RoundTripper {
 	proxyURL := ""
 	if auth != nil {
 		proxyURL = strings.TrimSpace(auth.ProxyURL)
@@ -573,79 +710,55 @@ func (m *Manager) transportForOnce(ctx context.Context, auth *Auth, recorder *on
 			proxyURL = strings.TrimSpace(cfg.ProxyURL)
 		}
 	}
-	if proxyURL != "" {
-		transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
-		if errBuild != nil || transport == nil {
-			log.Debugf("one-shot request: proxy transport unavailable for %s: %v", proxyutil.Redact(proxyURL), errBuild)
-		} else {
-			base = transport
-		}
+	if proxyURL == "" {
+		return nil
 	}
-	if base == nil && ctx != nil {
-		if rt, ok := ctx.Value(roundTripperContextKey{}).(http.RoundTripper); ok && rt != nil {
-			base = rt
-		} else if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-			base = rt
-		}
+	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
+	if errBuild != nil || transport == nil {
+		log.Debugf("one-shot request: proxy transport unavailable for %s: %v", proxyutil.Redact(proxyURL), errBuild)
+		return nil
 	}
-	if base == nil {
-		if rt := m.roundTripperFor(auth); rt != nil {
-			base = rt
-		}
-	}
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	return &onceRoundTripper{base: base, recorder: recorder, policy: normalizedRedirectPolicy(policy)}
+	return transport
 }
 
-// onceRoundTripper records attempt facts and, for executor-owned clients, keeps
-// a redirect from being followed.
+// baseTransportForOnce resolves the non-proxy transport for a one-shot attempt.
+func (m *Manager) baseTransportForOnce(ctx context.Context, auth *Auth) http.RoundTripper {
+	if ctx != nil {
+		if rt, ok := ctx.Value(roundTripperContextKey{}).(http.RoundTripper); ok && rt != nil {
+			return rt
+		}
+		if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
+			return rt
+		}
+	}
+	if rt := m.roundTripperFor(auth); rt != nil {
+		return rt
+	}
+	return http.DefaultTransport
+}
+
+// onceRoundTripper observes a one-shot attempt and never alters it.
 //
-// A provider executor builds its own http.Client, so the manager cannot install
-// a CheckRedirect on it. What it can do is remove the Location header from a
-// disallowed 3xx: net/http returns a 3xx without Location to its caller instead
-// of following it, so the paid request is never replayed. The policy is only
-// enforced while this transport is in effect; an executor that resolves a proxy
-// from the auth or the runtime config builds its own transport and governs its
-// own redirects, which is why the reliable guarantee lives in DoHTTPOnce.
+// It counts requests and records statuses so HTTPAttemptFacts can be derived even
+// when httptrace is ignored. It deliberately performs no redirect enforcement: a
+// transport sits below http.Client's redirect handling and cannot tell a followed
+// redirect from an executor's own second request, so any enforcement attempted
+// here would either corrupt an upstream response or strip credentials from a
+// legitimate request. Redirect policy lives where the manager owns the client,
+// which is DoHTTPOnce.
 type onceRoundTripper struct {
 	base     http.RoundTripper
 	recorder *onceAttemptRecorder
-	policy   HTTPRedirectPolicy
-	mu       sync.Mutex
-	origin   *redirectOrigin
 }
 
 // RoundTrip implements http.RoundTripper.
 func (rt *onceRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	hop := rt.recorder.observeRequest()
-	origin := rt.rememberOrigin(req)
-
-	if rt.policy != "" && origin != nil && req.URL != nil && req.URL.String() != origin.target() {
-		// A followed redirect reached the transport; strip credentials so they
-		// never travel to a target the caller did not address.
-		stripSensitiveRedirectHeaders(req.Header)
-	}
-
+	rt.recorder.observeRequest()
 	resp, err := rt.base.RoundTrip(req)
 	if resp != nil {
 		rt.recorder.observeResponse(resp.StatusCode)
-		if rt.policy != "" && isRedirectStatus(resp.StatusCode) && !sameOriginSafeRedirectAllowed(rt.policy, origin, resp.Header.Get("Location"), int(hop)) {
-			resp.Header.Del("Location")
-		}
 	}
 	return resp, err
-}
-
-// rememberOrigin records the first request the transport observed.
-func (rt *onceRoundTripper) rememberOrigin(req *http.Request) *redirectOrigin {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	if rt.origin == nil {
-		rt.origin = newRedirectOrigin(req)
-	}
-	return rt.origin
 }
 
 // redirectOrigin snapshots the properties of the original request that decide
@@ -669,30 +782,44 @@ func newRedirectOrigin(req *http.Request) *redirectOrigin {
 	}
 }
 
-// target returns the original absolute URL as a string.
-func (o *redirectOrigin) target() string {
-	if o == nil || o.url == nil {
-		return ""
-	}
-	return o.url.String()
+// onceRedirectGuard is the CheckRedirect implementation for a one-shot HTTP
+// attempt. It records the refusal so the caller receives an explicit error
+// alongside the unfollowed 3xx response instead of a silent success.
+type onceRedirectGuard struct {
+	policy HTTPRedirectPolicy
+	origin *redirectOrigin
+
+	mu           sync.Mutex
+	refused      bool
+	refusedAfter string
 }
 
-// redirectGuard builds the CheckRedirect implementation for a policy. Denied
-// redirects surface the 3xx response to the caller rather than raising an error.
-func redirectGuard(policy HTTPRedirectPolicy, origin *redirectOrigin) func(*http.Request, []*http.Request) error {
-	return func(req *http.Request, via []*http.Request) error {
-		target := ""
-		if req != nil && req.URL != nil {
-			target = req.URL.String()
-		}
-		if !sameOriginSafeRedirectAllowed(policy, origin, target, len(via)) {
-			return http.ErrUseLastResponse
-		}
-		if req != nil {
-			stripSensitiveRedirectHeaders(req.Header)
-		}
-		return nil
+// checkRedirect implements http.Client.CheckRedirect.
+func (g *onceRedirectGuard) checkRedirect(req *http.Request, via []*http.Request) error {
+	target := ""
+	if req != nil && req.URL != nil {
+		target = req.URL.String()
 	}
+	if !sameOriginSafeRedirectAllowed(g.policy, g.origin, target, len(via)) {
+		g.mu.Lock()
+		if !g.refused {
+			g.refused = true
+			g.refusedAfter = target
+		}
+		g.mu.Unlock()
+		return http.ErrUseLastResponse
+	}
+	if req != nil {
+		stripSensitiveRedirectHeaders(req.Header)
+	}
+	return nil
+}
+
+// denied reports whether a redirect was refused and where it pointed.
+func (g *onceRedirectGuard) denied() (bool, string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.refused, g.refusedAfter
 }
 
 // sameOriginSafeRedirectAllowed reports whether a redirect may be followed.
@@ -749,16 +876,6 @@ func normalizedOriginHost(target *url.URL) string {
 	return strings.TrimSuffix(host, ":443")
 }
 
-// isRedirectStatus reports whether a status triggers redirect handling.
-func isRedirectStatus(status int) bool {
-	switch status {
-	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
-		return true
-	default:
-		return false
-	}
-}
-
 // redirectSensitiveHeaders lists credential-bearing headers that must never
 // travel to a redirect target. net/http only strips the first three of these on
 // its own, and only cross-host, which leaves executor-injected api-key style
@@ -791,10 +908,15 @@ func stripSensitiveRedirectHeaders(header http.Header) {
 // onceAttemptRecorder collects attempt facts from the manager transport and from
 // net/http/httptrace. Both sources are optional: a host supplied RoundTripper may
 // bypass the manager transport, and a non stdlib transport may ignore httptrace.
+//
+// clientOwned records whether the manager owned the http.Client for the whole
+// attempt. Only then may the recorder state that a request was not written: when
+// a provider executor owns the client it can issue requests on a detached context
+// and an unwrapped transport, so silence proves nothing.
 type onceAttemptRecorder struct {
 	mu                sync.Mutex
+	clientOwned       bool
 	dispatched        bool
-	transportObserved bool
 	traceObserved     bool
 	transportRequests uint32
 	traceRequests     uint32
@@ -805,8 +927,8 @@ type onceAttemptRecorder struct {
 }
 
 // newOnceAttemptRecorder returns a recorder ready for a single attempt.
-func newOnceAttemptRecorder() *onceAttemptRecorder {
-	return &onceAttemptRecorder{}
+func newOnceAttemptRecorder(clientOwned bool) *onceAttemptRecorder {
+	return &onceAttemptRecorder{clientOwned: clientOwned}
 }
 
 // markDispatched records that the attempt was handed to the executor or client.
@@ -827,7 +949,6 @@ func (r *onceAttemptRecorder) observeRequest() uint32 {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.transportObserved = true
 	r.transportRequests++
 	return r.transportRequests
 }
@@ -883,9 +1004,17 @@ func (r *onceAttemptRecorder) clientTrace() *httptrace.ClientTrace {
 
 // facts collapses the observations into the caller-visible attempt facts.
 //
+// RequestCount takes the larger of the two counts rather than preferring one:
+// http.Transport and the bundled HTTP/2 transport resend a request internally,
+// below any wrapping RoundTripper, and httptrace's WroteHeaders fires once per
+// wire attempt inside them. Under-reporting the number of upstream sends is the
+// dangerous direction for a caller reconciling a non-idempotent create.
+//
 // RequestWritten is deliberately biased: an attempt that dispatched but produced
-// no observation at all is reported as written, because a false "not sent" would
-// invite a duplicate paid create while a false "sent" only invites a reconcile.
+// no conclusive observation is reported as written, because a false "not sent"
+// would invite a duplicate paid create while a false "sent" only invites a
+// reconcile. The negative is stated only when the manager owned the client and
+// httptrace reported connection progress without a write.
 func (r *onceAttemptRecorder) facts() HTTPAttemptFacts {
 	if r == nil {
 		return HTTPAttemptFacts{}
@@ -898,14 +1027,16 @@ func (r *onceAttemptRecorder) facts() HTTPAttemptFacts {
 		ResponseStarted: r.responseStarted,
 		StatusCode:      r.statusCode,
 	}
-	if !r.transportObserved {
+	if r.traceRequests > facts.RequestCount {
 		facts.RequestCount = r.traceRequests
 	}
+	facts.RequestWrittenObserved = r.wroteHeaders || r.wroteRequest || r.responseStarted
 	switch {
-	case r.wroteHeaders || r.wroteRequest || r.responseStarted:
+	case facts.RequestWrittenObserved:
 		facts.RequestWritten = true
-	case r.traceObserved:
-		// httptrace was honored and never reported request bytes on the wire.
+	case r.clientOwned && r.traceObserved:
+		// The manager owned the whole attempt and httptrace, which it honored,
+		// never reported request bytes on the wire.
 		facts.RequestWritten = false
 	default:
 		facts.RequestWritten = r.dispatched
