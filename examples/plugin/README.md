@@ -26,6 +26,7 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `host-callback/`: minimal plugin resource that demonstrates host callbacks.
 - `host-callback-auth-files/`: Go-only plugin resource that calls host auth file callbacks.
 - `host-model-callback/`: Go-only plugin resource that calls the host model execution callbacks.
+- `vision-fallback/`: Go-only request interceptor that describes images for explicitly text-only models.
 
 Most standard capability examples contain `go/`, `c/`, and `rust/` subdirectories. Specialized examples may provide only the implementation language they need.
 
@@ -87,6 +88,22 @@ plugins:
 ```
 
 The default example model is `gpt-5.5`, but the request succeeds only when the current CPA model and auth configuration can route that model.
+
+## Vision Fallback
+
+`vision-fallback` handles image-bearing OpenAI, Claude, and Gemini requests when the selected model is known not to accept images. It calls the configured multimodal model once per image container, replaces the images with an explicitly untrusted visual report, and preserves the client's original model for the final answer.
+
+```yaml
+plugins:
+  configs:
+    vision-fallback:
+      enabled: true
+      priority: 100
+      vision-model: "gemini-2.5-flash"
+      unknown-model-policy: "bypass"
+```
+
+See `vision-fallback/README.md` for limits, supported image references, and build instructions.
 
 ## Scheduler
 

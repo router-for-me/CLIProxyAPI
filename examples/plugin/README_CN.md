@@ -25,6 +25,7 @@
 - `host-callback/`：使用最小插件资源演示宿主回调。
 - `host-callback-auth-files/`：仅 Go 实现的插件资源，演示 host 凭证文件回调。
 - `host-model-callback/`：仅 Go 实现的插件资源，演示调用宿主模型执行回调。
+- `vision-fallback/`：仅 Go 实现的请求拦截插件，为明确不支持图片的模型生成视觉描述。
 
 多数标准能力示例都包含 `go/`、`c/` 和 `rust/` 三个子目录。专用示例可能只提供所需的实现语言。
 
@@ -86,6 +87,22 @@ plugins:
 ```
 
 默认示例模型是 `gpt-5.5`，但请求能否成功取决于当前 CPA 模型和认证配置是否可以路由该模型。
+
+## Vision Fallback
+
+`vision-fallback` 在选中的模型明确不接受图片时处理包含图片的 OpenAI、Claude 和 Gemini 请求。它按图片容器调用配置的多模态模型，将图片替换为明确标记为不可信的视觉报告，并继续使用客户端原先选择的模型回答。
+
+```yaml
+plugins:
+  configs:
+    vision-fallback:
+      enabled: true
+      priority: 100
+      vision-model: "gemini-2.5-flash"
+      unknown-model-policy: "bypass"
+```
+
+详细限制、支持的图片引用和构建方式见 `vision-fallback/README.md`。
 
 ## Scheduler
 

@@ -18,6 +18,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 type handlerInterceptorTestHost struct {
@@ -218,6 +219,53 @@ func TestRequestLifecycleTrackerUsesUniqueExecutionIDs(t *testing.T) {
 	}
 	if first.completion.TraceID != "trace-1" || second.completion.TraceID != "trace-1" {
 		t.Fatalf("trace IDs = %q and %q", first.completion.TraceID, second.completion.TraceID)
+	}
+}
+
+func TestRegisteredModelInputModalitiesPrefersUpstreamModel(t *testing.T) {
+	provider := "vision-test-provider"
+	upstream := "vision-upstream-model"
+	alias := "vision-alias-model"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("vision-test-upstream", provider, []*registry.ModelInfo{{ID: upstream, SupportedInputModalities: []string{"text"}}})
+	reg.RegisterClient("vision-test-alias", provider, []*registry.ModelInfo{{ID: alias, SupportedInputModalities: []string{"text", "image"}}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("vision-test-upstream")
+		reg.UnregisterClient("vision-test-alias")
+	})
+	got := registeredModelInputModalities(provider, upstream, alias)
+	if len(got) != 1 || got[0] != "text" {
+		t.Fatalf("modalities = %#v, want upstream model modalities", got)
+	}
+}
+
+func TestApplyRequestInterceptorsAfterAuthPropagatesExecutionContext(t *testing.T) {
+	provider := "context-provider"
+	model := "context-model"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("context-client", provider, []*registry.ModelInfo{{ID: model, SupportedInputModalities: []string{"text"}}})
+	t.Cleanup(func() { reg.UnregisterClient("context-client") })
+
+	handler := NewBaseAPIHandlers(nil, nil)
+	var captured pluginapi.RequestInterceptRequest
+	handler.SetPluginHost(&handlerInterceptorTestHost{interceptRequestAfterAuth: func(_ context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+		captured = req
+		return pluginapi.RequestInterceptResponse{Body: req.Body}
+	}})
+	handler.applyRequestInterceptorsAfterAuth(context.Background(), coreexecutor.RequestAfterAuthInterceptRequest{
+		Operation:      pluginapi.RequestOperationCountTokens,
+		Provider:       provider,
+		SourceFormat:   sdktranslator.FormatClaude,
+		ToFormat:       sdktranslator.FormatGemini,
+		Model:          model,
+		RequestedModel: "context-alias",
+		Body:           []byte(`{"messages":[]}`),
+	}, "context-request", "")
+	if captured.Operation != pluginapi.RequestOperationCountTokens || captured.Provider != provider {
+		t.Fatalf("execution context = operation %q provider %q", captured.Operation, captured.Provider)
+	}
+	if len(captured.ModelInputModalities) != 1 || captured.ModelInputModalities[0] != "text" {
+		t.Fatalf("modalities = %#v", captured.ModelInputModalities)
 	}
 }
 

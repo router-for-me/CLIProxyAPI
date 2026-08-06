@@ -32,6 +32,13 @@ const ServiceTierMetadataKey = "service_tier"
 const GenerateMetadataKey = "generate"
 
 const (
+	// RequestOperationExecute identifies a model execution.
+	RequestOperationExecute = "execute"
+	// RequestOperationCountTokens identifies token counting.
+	RequestOperationCountTokens = "count_tokens"
+)
+
+const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
 	// SelectedAuthMetadataKey stores the auth ID selected by the scheduler.
@@ -67,6 +74,10 @@ type RequestAfterAuthInterceptor func(context.Context, RequestAfterAuthIntercept
 
 // RequestAfterAuthInterceptRequest describes a selected-auth request before executor translation.
 type RequestAfterAuthInterceptRequest struct {
+	// Operation identifies whether this is execute or count_tokens.
+	Operation string
+	// Provider is the authenticated upstream provider.
+	Provider string
 	// SourceFormat is the original client protocol format.
 	SourceFormat sdktranslator.Format
 	// ToFormat is the selected upstream protocol format.

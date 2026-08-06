@@ -319,6 +319,31 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 	}
 }
 
+func TestRequestInterceptRequestPreservesExecutionContext(t *testing.T) {
+	req := RequestInterceptRequest{
+		Operation:            RequestOperationCountTokens,
+		Provider:             "gemini",
+		ModelInputModalities: []string{"text", "image"},
+		RequestID:            "request-1",
+	}
+	raw, errMarshal := json.Marshal(req)
+	if errMarshal != nil {
+		t.Fatalf("json.Marshal() error = %v", errMarshal)
+	}
+	for _, field := range []string{"operation", "provider", "model_input_modalities"} {
+		if !strings.Contains(string(raw), `"`+field+`"`) {
+			t.Fatalf("RequestInterceptRequest JSON missing %q: %s", field, raw)
+		}
+	}
+	var decoded RequestInterceptRequest
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+	}
+	if decoded.Operation != req.Operation || decoded.Provider != req.Provider || strings.Join(decoded.ModelInputModalities, ",") != "text,image" {
+		t.Fatalf("decoded request = %#v", decoded)
+	}
+}
+
 func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
 	request := SchedulerPickRequest{
 		Plugin:    Metadata{Name: "scheduler-plugin"},

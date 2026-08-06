@@ -983,6 +983,12 @@ type ResponseTransformRequest struct {
 
 // RequestInterceptRequest describes a request about to be executed upstream.
 type RequestInterceptRequest struct {
+	// Operation identifies the execution operation. Empty values are treated as execute by older hosts.
+	Operation string `json:"operation,omitempty"`
+	// Provider is the authenticated upstream provider when available.
+	Provider string `json:"provider,omitempty"`
+	// ModelInputModalities contains the selected model's registered input modalities.
+	ModelInputModalities []string `json:"model_input_modalities,omitempty"`
 	// RequestID uniquely identifies one model execution and correlates it with RequestCompletion.
 	RequestID string
 	// TraceID identifies the parent inbound HTTP request when available.
@@ -1004,6 +1010,13 @@ type RequestInterceptRequest struct {
 	// Metadata is a best-effort cloned context snapshot. Treat it as read-only and JSON-like.
 	Metadata map[string]any
 }
+
+const (
+	// RequestOperationExecute identifies a billable model execution.
+	RequestOperationExecute = "execute"
+	// RequestOperationCountTokens identifies token counting.
+	RequestOperationCountTokens = "count_tokens"
+)
 
 // RequestInterceptResponse returns request modifications.
 type RequestInterceptResponse struct {

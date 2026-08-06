@@ -2,12 +2,14 @@ package handlers
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"golang.org/x/net/context"
@@ -404,12 +406,13 @@ func interceptStreamChunk(ctx context.Context, host PluginInterceptorHost, req p
 	return host.InterceptStreamChunk(ctx, req)
 }
 
-func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context, handlerType, requestedModel, requestID string, req coreexecutor.Request, opts coreexecutor.Options, skipPluginID string) (coreexecutor.Request, coreexecutor.Options, *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context, handlerType, requestedModel, requestID, operation string, req coreexecutor.Request, opts coreexecutor.Options, skipPluginID string) (coreexecutor.Request, coreexecutor.Options, *interfaces.ErrorMessage) {
 	host := h.interceptorHost()
 	if host == nil {
 		return req, opts, nil
 	}
 	resp := interceptRequestBeforeAuth(ctx, host, pluginapi.RequestInterceptRequest{
+		Operation:      operation,
 		RequestID:      requestID,
 		TraceID:        logging.GetRequestID(ctx),
 		SourceFormat:   handlerType,
@@ -450,16 +453,19 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, 
 		return coreexecutor.RequestAfterAuthInterceptResponse{}
 	}
 	resp := interceptRequestAfterAuth(ctx, host, pluginapi.RequestInterceptRequest{
-		RequestID:      requestID,
-		TraceID:        logging.GetRequestID(ctx),
-		SourceFormat:   req.SourceFormat.String(),
-		ToFormat:       req.ToFormat.String(),
-		Model:          req.Model,
-		RequestedModel: req.RequestedModel,
-		Stream:         req.Stream,
-		Headers:        cloneHeader(req.Headers),
-		Body:           cloneBytes(req.Body),
-		Metadata:       req.Metadata,
+		Operation:            req.Operation,
+		Provider:             req.Provider,
+		RequestID:            requestID,
+		TraceID:              logging.GetRequestID(ctx),
+		SourceFormat:         req.SourceFormat.String(),
+		ToFormat:             req.ToFormat.String(),
+		Model:                req.Model,
+		RequestedModel:       req.RequestedModel,
+		ModelInputModalities: registeredModelInputModalities(req.Provider, req.Model, req.RequestedModel),
+		Stream:               req.Stream,
+		Headers:              cloneHeader(req.Headers),
+		Body:                 cloneBytes(req.Body),
+		Metadata:             req.Metadata,
 	}, skipPluginID)
 	return coreexecutor.RequestAfterAuthInterceptResponse{
 		Headers:         resp.Headers,
@@ -470,6 +476,29 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, 
 		ResponseHeaders: resp.ResponseHeaders,
 		ResponseBody:    resp.ResponseBody,
 	}
+}
+
+func registeredModelInputModalities(provider, model, requestedModel string) []string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	model = strings.TrimSpace(model)
+	requestedModel = strings.TrimSpace(requestedModel)
+	modelRegistry := registry.GetGlobalRegistry()
+	for _, candidate := range []string{model, requestedModel} {
+		if candidate == "" {
+			continue
+		}
+		if info := modelRegistry.GetModelInfo(candidate, provider); info != nil {
+			return cloneStrings(info.SupportedInputModalities)
+		}
+	}
+	return nil
+}
+
+func cloneStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	return append([]string(nil), values...)
 }
 
 func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestID, handlerType, normalizedModel, requestedModel string, opts coreexecutor.Options, rawResponseHeaders, responseHeaders http.Header, originalRequest, requestBody, body []byte, statusCode int, skipPluginID string) ([]byte, http.Header) {
