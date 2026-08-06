@@ -583,7 +583,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			framer.Flush(c.Writer)
-			if errMsg == nil {
+			if !shouldExposeResponsesUpstreamError(errMsg) {
 				return
 			}
 			status := http.StatusInternalServerError

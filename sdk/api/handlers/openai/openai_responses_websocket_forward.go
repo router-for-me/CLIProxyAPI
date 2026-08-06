@@ -60,21 +60,27 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				errs = nil
 				continue
 			}
-			if errMsg != nil {
-				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
-				if opts.suppressError != nil && opts.suppressError(errMsg) {
-					cancel(errMsg.Error)
-					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, nil
+			if errMsg == nil {
+				cancel(nil)
+				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, nil
+			}
+
+			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+			if opts.suppressError != nil && opts.suppressError(errMsg) {
+				cancel(errMsg.Error)
+				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, nil
+			}
+			markAPIResponseTimestamp(c)
+			if matched, errClose := writer.closeForUpstreamError(errMsg.Error); matched {
+				cancel(errMsg.Error)
+				if errClose != nil {
+					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errClose
 				}
-				markAPIResponseTimestamp(c)
-				if matched, errClose := writer.closeForUpstreamError(errMsg.Error); matched {
-					cancel(errMsg.Error)
-					if errClose != nil {
-						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errClose
-					}
-					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, websocket.ErrCloseSent
-				}
-				errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
+				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, websocket.ErrCloseSent
+			}
+
+			errorPayload, wrote, errTerminate := writeResponsesWebsocketTerminalError(writer, wsTimelineLog, errMsg, nil)
+			if wrote {
 				log.Infof(
 					"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
 					sessionID,
@@ -82,23 +88,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					websocketPayloadEventType(errorPayload),
 					websocketPayloadPreview(errorPayload),
 				)
-				if errWrite != nil {
-					// log.Warnf(
-					// 	"responses websocket: downstream_out write failed id=%s event=%s error=%v",
-					// 	sessionID,
-					// 	websocketPayloadEventType(errorPayload),
-					// 	errWrite,
-					// )
-					cancel(errMsg.Error)
-					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errWrite
-				}
 			}
-			if errMsg != nil {
-				cancel(errMsg.Error)
-			} else {
-				cancel(nil)
-			}
-			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, nil
+			cancel(errMsg.Error)
+			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errTerminate
 		case chunk, ok := <-data:
 			if !ok {
 				if !completed {
@@ -108,26 +100,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					}
 					h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 					markAPIResponseTimestamp(c)
-					errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
-					log.Infof(
-						"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
-						sessionID,
-						websocket.TextMessage,
-						websocketPayloadEventType(errorPayload),
-						websocketPayloadPreview(errorPayload),
-					)
-					if errWrite != nil {
-						log.Warnf(
-							"responses websocket: downstream_out write failed id=%s event=%s error=%v",
-							sessionID,
-							websocketPayloadEventType(errorPayload),
-							errWrite,
-						)
-						cancel(errMsg.Error)
-						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errWrite
-					}
+					_, errClose := writer.closeWithoutError()
 					cancel(errMsg.Error)
-					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, nil
+					if errClose != nil {
+						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errClose
+					}
+					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, websocket.ErrCloseSent
 				}
 				cancel(nil)
 				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, nil
@@ -162,6 +140,27 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					completedResponseID = responseCompletedIDFromPayload(payloads[i])
 				}
 				markAPIResponseTimestamp(c)
+				if payloadErrMsg != nil {
+					if matched, errClose := writer.closeForUpstreamError(payloadErrMsg.Error); matched {
+						cancel(payloadErrMsg.Error)
+						if errClose != nil {
+							return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, errClose
+						}
+						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, websocket.ErrCloseSent
+					}
+					errorPayload, wrote, errTerminate := writeResponsesWebsocketTerminalError(writer, wsTimelineLog, payloadErrMsg, payloads[i])
+					if wrote {
+						log.Infof(
+							"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+							sessionID,
+							websocket.TextMessage,
+							websocketPayloadEventType(errorPayload),
+							websocketPayloadPreview(errorPayload),
+						)
+					}
+					cancel(payloadErrMsg.Error)
+					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, errTerminate
+				}
 				// log.Infof(
 				// 	"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
 				// 	sessionID,
@@ -179,10 +178,6 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					cancel(errWrite)
 					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errWrite
 				}
-				if payloadErrMsg != nil {
-					cancel(payloadErrMsg.Error)
-					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, nil
-				}
 			}
 		}
 	}
@@ -199,6 +194,130 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 		}
 	}
 	return status
+}
+
+// responsesClientFaultErrorCodes lists upstream error codes caused by the request
+// payload itself. These must reach the client verbatim regardless of the HTTP
+// status the upstream attached, because retrying or rotating credentials cannot
+// change the outcome.
+var responsesClientFaultErrorCodes = map[string]struct{}{
+	"cyber_policy":                {},
+	"context_length_exceeded":     {},
+	"message_too_big":             {},
+	"string_above_max_length":     {},
+	"invalid_prompt":              {},
+	"invalid_value":               {},
+	"unsupported_value":           {},
+	"invalid_request_error":       {},
+	"previous_response_not_found": {},
+}
+
+// responsesClientFaultErrorTypes mirrors responsesClientFaultErrorCodes for
+// upstreams that only classify the failure through `error.type`.
+var responsesClientFaultErrorTypes = map[string]struct{}{
+	"invalid_request":       {},
+	"invalid_request_error": {},
+	"bad_request_error":     {},
+	"invalid_prompt":        {},
+}
+
+// isResponsesClientFaultError reports whether the upstream error body identifies
+// a request-shape failure. Upstreams are inconsistent about the status paired
+// with these bodies: Codex reports `cyber_policy` as 400 on the stream error path
+// but as 502 when the same rejection arrives through the websocket disconnect
+// channel, so the body is authoritative here rather than the status.
+func isResponsesClientFaultError(errMsg *interfaces.ErrorMessage) bool {
+	if errMsg == nil || errMsg.Error == nil {
+		return false
+	}
+	body := strings.TrimSpace(errMsg.Error.Error())
+	if body == "" || !json.Valid([]byte(body)) {
+		return false
+	}
+	for _, path := range []string{"error.code", "code", "response.error.code"} {
+		code := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
+		if code == "" {
+			continue
+		}
+		if _, ok := responsesClientFaultErrorCodes[code]; ok {
+			return true
+		}
+	}
+	for _, path := range []string{"error.type", "type", "response.error.type"} {
+		errType := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
+		if errType == "" {
+			continue
+		}
+		if _, ok := responsesClientFaultErrorTypes[errType]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// shouldExposeResponsesUpstreamError reports whether a terminal upstream error
+// must reach the downstream client.
+//
+// Only request-shape failures are exposed: the client can act on them and no
+// credential rotation or retry can make the request succeed. Credential, quota
+// and transport failures stay silent so the client simply reconnects and retries;
+// a fresh connection carries no server-side transcript, so reconnecting already
+// implies a full context resend.
+func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
+	if errMsg == nil {
+		return false
+	}
+	if isResponsesClientFaultError(errMsg) {
+		return true
+	}
+	switch responsesWebsocketErrorStatus(errMsg) {
+	case http.StatusBadRequest,
+		http.StatusConflict,
+		http.StatusRequestEntityTooLarge,
+		http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
+}
+
+func writeResponsesWebsocketTerminalError(
+	writer *responsesWebsocketWriter,
+	wsTimelineLog websocketTimelineAppender,
+	errMsg *interfaces.ErrorMessage,
+	payload []byte,
+) ([]byte, bool, error) {
+	if !shouldExposeResponsesUpstreamError(errMsg) {
+		// Keep the upstream reason in the request-log timeline even though the client
+		// only observes a closed connection, otherwise silent failures are
+		// undiagnosable after the fact.
+		if wsTimelineLog != nil && errMsg != nil {
+			appendWebsocketTimelineDisconnect(wsTimelineLog, errMsg.Error, time.Now())
+		}
+		_, errClose := writer.closeWithoutError()
+		if errClose != nil {
+			return nil, false, errClose
+		}
+		return nil, false, websocket.ErrCloseSent
+	}
+
+	if len(payload) == 0 {
+		var errBuild error
+		payload, errBuild = buildResponsesWebsocketErrorPayload(errMsg)
+		if errBuild != nil {
+			_, _ = writer.closeWithoutError()
+			return nil, false, errBuild
+		}
+	}
+
+	wrote, errClose := writer.closeWithPayload(payload)
+	if wrote && wsTimelineLog != nil {
+		wsTimelineLog.Append("response", payload, time.Now())
+	}
+	if errClose != nil {
+		return payload, wrote, errClose
+	}
+	return payload, wrote, websocket.ErrCloseSent
 }
 
 func shouldReplayResponsesWebsocketPinnedAuthFailure(errMsg *interfaces.ErrorMessage) bool {
@@ -478,7 +597,7 @@ func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {
 	return payloads
 }
 
-func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, errMsg *interfaces.ErrorMessage) ([]byte, error) {
+func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byte, error) {
 	status := http.StatusInternalServerError
 	errText := http.StatusText(status)
 	if errMsg != nil {
@@ -548,5 +667,13 @@ func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLo
 		}
 	}
 
+	return payload, nil
+}
+
+func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, errMsg *interfaces.ErrorMessage) ([]byte, error) {
+	payload, errBuild := buildResponsesWebsocketErrorPayload(errMsg)
+	if errBuild != nil {
+		return nil, errBuild
+	}
 	return payload, writeResponsesWebsocketPayload(writer, wsTimelineLog, payload, time.Now())
 }

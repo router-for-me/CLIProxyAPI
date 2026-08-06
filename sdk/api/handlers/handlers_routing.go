@@ -197,7 +197,17 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	}
 
 	if len(providers) == 0 {
-		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
+		// The client asked for a model this proxy cannot route. Report it as a request
+		// error so streaming clients receive an actionable message instead of a
+		// gateway failure they would keep retrying. 400 is used rather than 404 to keep
+		// it distinguishable from an unregistered HTTP route.
+		return nil, "", &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error: fmt.Errorf(
+				`{"error":{"message":"unknown provider for model %s","type":"invalid_request_error","code":"model_not_found","param":"model"}}`,
+				modelName,
+			),
+		}
 	}
 
 	// The thinking suffix is preserved in the model name itself, so no

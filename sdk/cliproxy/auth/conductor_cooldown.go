@@ -1532,17 +1532,53 @@ func isMissingModelPhrase(value string) bool {
 	}
 }
 
+func isCyberPolicyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var payload any
+	if errJSON := json.Unmarshal([]byte(strings.TrimSpace(err.Error())), &payload); errJSON != nil {
+		return false
+	}
+	return containsStructuredErrorCode(payload, "cyber_policy")
+}
+
+func containsStructuredErrorCode(value any, target string) bool {
+	target = strings.ToLower(strings.TrimSpace(target))
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			if strings.EqualFold(strings.TrimSpace(key), "code") {
+				if code, ok := item.(string); ok && strings.ToLower(strings.TrimSpace(code)) == target {
+					return true
+				}
+			}
+			if containsStructuredErrorCode(item, target) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if containsStructuredErrorCode(item, target) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // isRequestInvalidError returns true if the error represents a client request
-// error that should not be retried. Specifically, it treats 400 responses with
-// "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
-// and all 422 responses as request-shape failures, where switching auths or
-// pooled upstream models will not help. Model-support errors are excluded so
-// routing can fall through to another auth or upstream.
+// error that should not be retried. Specifically, it treats cyber policy
+// rejections, 400 responses with "invalid_request_error", request-scoped 404
+// item misses caused by `store=false`, 413 payload/frame size rejections, and all
+// 422 responses as request-shape failures, where switching auths or pooled
+// upstream models will not help. Model-support errors are excluded so routing can
+// fall through to another auth or upstream.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if isRequestScopedError(err) {
+	if isRequestScopedError(err) || isCyberPolicyError(err) {
 		return true
 	}
 	if isCloudflareChallengeError(err) {
@@ -1564,6 +1600,11 @@ func isRequestInvalidError(err error) bool {
 			strings.Contains(msg, "FAILED_PRECONDITION")
 	case http.StatusNotFound:
 		return isRequestScopedNotFoundMessage(err.Error())
+	case http.StatusRequestEntityTooLarge:
+		// The request payload (or websocket frame) is too large for the upstream.
+		// Every other credential enforces the same limit, so retrying elsewhere only
+		// burns the pool and marks healthy credentials unavailable.
+		return true
 	case http.StatusUnprocessableEntity:
 		return true
 	case http.StatusInternalServerError:
