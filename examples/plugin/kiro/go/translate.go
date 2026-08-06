@@ -33,9 +33,6 @@ func claudeToKiro(raw []byte, requestedModel string) (*kiroPayload, *claudeReque
 	if len(request.Messages) == 0 {
 		return nil, nil, fmt.Errorf("messages must not be empty")
 	}
-	if lastRole := strings.ToLower(strings.TrimSpace(request.Messages[len(request.Messages)-1].Role)); lastRole != "user" {
-		return nil, nil, fmt.Errorf("last message must have role user; Kiro does not support assistant prefills")
-	}
 
 	systemPrompt := extractSystemPrompt(request.System)
 	if request.Thinking != nil {

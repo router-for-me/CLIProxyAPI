@@ -446,7 +446,7 @@ func TestClaudeToKiroPreservesToolResultErrorStatus(t *testing.T) {
 	}
 }
 
-func TestClaudeToKiroRejectsAssistantPrefill(t *testing.T) {
+func TestClaudeToKiroSupportsAssistantPrefill(t *testing.T) {
 	raw := []byte(`{
 		"model":"claude-sonnet-4-5",
 		"messages":[
@@ -454,8 +454,16 @@ func TestClaudeToKiroRejectsAssistantPrefill(t *testing.T) {
 			{"role":"assistant","content":"The answer starts with"}
 		]
 	}`)
-	if _, _, errTranslate := claudeToKiro(raw, ""); errTranslate == nil || !strings.Contains(errTranslate.Error(), "assistant prefills") {
-		t.Fatalf("claudeToKiro() error = %v, want unsupported assistant prefill error", errTranslate)
+	payload, _, errTranslate := claudeToKiro(raw, "")
+	if errTranslate != nil {
+		t.Fatalf("claudeToKiro() error = %v", errTranslate)
+	}
+	if got := payload.ConversationState.CurrentMessage.UserInputMessage.Content; got != "." {
+		t.Fatalf("current content = %q, want fallback continuation", got)
+	}
+	history := payload.ConversationState.History
+	if len(history) != 2 || history[1].AssistantResponseMessage == nil || history[1].AssistantResponseMessage.Content != "The answer starts with" {
+		t.Fatalf("history = %#v, want assistant prefill preserved", history)
 	}
 }
 
