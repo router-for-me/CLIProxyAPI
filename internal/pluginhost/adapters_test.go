@@ -15,6 +15,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -2845,6 +2846,72 @@ func TestExecutorAdapterUsesResponseFormatForOutputTranslation(t *testing.T) {
 	}
 	if !bytes.Equal(resp.Payload, claudeResponse) {
 		t.Fatalf("Execute() payload = %s, want Claude response payload %s", resp.Payload, claudeResponse)
+	}
+}
+
+func TestExecutorStreamTranslationPayloadsExtractsDataFromSSEFrame(t *testing.T) {
+	payload := []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n")
+	frames := executorStreamTranslationPayloads(payload)
+	if len(frames) != 1 {
+		t.Fatalf("translation payload count = %d, want 1", len(frames))
+	}
+	want := []byte(`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}`)
+	if !bytes.Equal(frames[0], want) {
+		t.Fatalf("translation payload = %q, want %q", frames[0], want)
+	}
+}
+
+func TestPluginExecutorUsageParsesFinalClaudeStreamCounts(t *testing.T) {
+	var usageBuffer helps.StreamUsageBuffer
+	payload := []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":12,\"output_tokens\":4}}\n\n")
+	observePluginExecutorStreamUsage(&usageBuffer, sdktranslator.FormatClaude, payload)
+	detail, ok := usageBuffer.Detail()
+	if !ok {
+		t.Fatal("stream usage was not observed")
+	}
+	if detail.InputTokens != 12 || detail.OutputTokens != 4 || detail.TotalTokens != 16 {
+		t.Fatalf("stream usage = %#v, want input=12 output=4 total=16", detail)
+	}
+}
+
+func TestExecutorAdapterPublishesNativeUsageForBilling(t *testing.T) {
+	const model = "plugin-usage-billing-model"
+	records := make(chan coreusage.Record, 1)
+	coreusage.RegisterNamedPlugin("test:plugin-executor-usage", coreUsagePluginFunc(func(ctx context.Context, record coreusage.Record) {
+		if record.Model == model {
+			select {
+			case records <- record:
+			default:
+			}
+		}
+	}))
+
+	host := New()
+	adapter := newCurrentExecutorAdapterForTest(host, "executor-usage", &fakeExecutor{
+		execute: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{Payload: []byte(`{"id":"msg_usage","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":12,"output_tokens":4}}`)}, nil
+		},
+	}, []sdktranslator.Format{sdktranslator.FormatClaude}, []sdktranslator.Format{sdktranslator.FormatClaude})
+
+	_, errExecute := adapter.Execute(context.Background(), &coreauth.Auth{ID: "auth-usage", Provider: "plugin-provider"}, coreexecutor.Request{
+		Model:   model,
+		Format:  sdktranslator.FormatClaude,
+		Payload: []byte(`{"model":"plugin-usage-billing-model","messages":[{"role":"user","content":"hi"}]}`),
+	}, coreexecutor.Options{SourceFormat: sdktranslator.FormatClaude, ResponseFormat: sdktranslator.FormatClaude})
+	if errExecute != nil {
+		t.Fatal(errExecute)
+	}
+
+	select {
+	case record := <-records:
+		if record.Provider != "plugin-provider" || record.AuthID != "auth-usage" {
+			t.Fatalf("billing identity = provider:%q auth:%q", record.Provider, record.AuthID)
+		}
+		if record.Detail.InputTokens != 12 || record.Detail.OutputTokens != 4 || record.Detail.TotalTokens != 16 {
+			t.Fatalf("billing usage = %#v, want input=12 output=4 total=16", record.Detail)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for plugin executor billing record")
 	}
 }
 

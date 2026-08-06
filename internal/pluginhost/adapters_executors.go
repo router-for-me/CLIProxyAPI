@@ -581,11 +581,33 @@ func (a *executorAdapter) translateExecutorStreamPayload(ctx context.Context, pr
 	if len(originalRequest) == 0 {
 		originalRequest = prepared.req.Payload
 	}
-	frames := sdktranslator.TranslateStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, payload, param)
-	if executorStreamTranslationFellBack(prepared, payload, frames) {
-		return nil
+	translationPayloads := executorStreamTranslationPayloads(payload)
+	frames := make([][]byte, 0, len(translationPayloads))
+	for _, translationPayload := range translationPayloads {
+		translated := sdktranslator.TranslateStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, translationPayload, param)
+		if executorStreamTranslationFellBack(prepared, translationPayload, translated) {
+			continue
+		}
+		frames = append(frames, translated...)
 	}
 	return frames
+}
+
+func executorStreamTranslationPayloads(payload []byte) [][]byte {
+	if !bytes.Contains(payload, []byte("\n")) {
+		return [][]byte{payload}
+	}
+	var dataLines [][]byte
+	for _, line := range bytes.Split(payload, []byte("\n")) {
+		trimmed := bytes.TrimSpace(line)
+		if bytes.HasPrefix(trimmed, []byte("data:")) {
+			dataLines = append(dataLines, bytes.Clone(trimmed))
+		}
+	}
+	if len(dataLines) == 0 {
+		return [][]byte{payload}
+	}
+	return dataLines
 }
 
 func executorStreamTranslationFellBack(prepared preparedExecutorCall, payload []byte, frames [][]byte) bool {
@@ -636,6 +658,8 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return coreexecutor.Response{}, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
+	usageReporter := newPluginExecutorUsage(ctx, a, req.Model, auth)
+	defer usageReporter.trackFailure(ctx, &err)
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "Executor.Execute", recovered)
@@ -652,6 +676,7 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 	if errExecute != nil {
 		return coreexecutor.Response{}, errExecute
 	}
+	usageReporter.publishNonStream(ctx, prepared.outputFormat, pluginResp.Payload)
 	return coreexecutor.Response{
 		Payload:  a.translateExecutorResponse(ctx, prepared, pluginResp.Payload, false, nil),
 		Metadata: cloneAnyMap(pluginResp.Metadata),
@@ -663,6 +688,8 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
+	usageReporter := newPluginExecutorUsage(ctx, a, req.Model, auth)
+	defer usageReporter.trackFailure(ctx, &err)
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "Executor.ExecuteStream", recovered)
@@ -679,9 +706,10 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 	if errExecuteStream != nil {
 		return nil, errExecuteStream
 	}
+	nativeChunks := usageReporter.observeStream(ctx, prepared.outputFormat, pluginResp.Chunks)
 	return &coreexecutor.StreamResult{
 		Headers: cloneHeader(pluginResp.Headers),
-		Chunks:  mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, pluginResp.Chunks)),
+		Chunks:  mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, nativeChunks)),
 	}, nil
 }
 
