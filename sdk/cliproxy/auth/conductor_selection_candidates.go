@@ -22,7 +22,6 @@ type activeSelectionRank struct {
 // It is derived from Options.Metadata for one selection call and is never persisted.
 type rankedCandidateSet struct {
 	ranksByAuthID map[string]uint32
-	orderByAuthID map[string]uint32
 	ranks         []uint32
 }
 
@@ -76,35 +75,6 @@ func (s *rankedCandidateSet) lowestRankPresent(authIDs []string) (uint32, bool) 
 	return lowest, found
 }
 
-// sortCandidates orders candidates by rank then stable order so ranked requests present a
-// deterministic candidate list to the configured selector and to plugin schedulers.
-// Stable order is presentation only: it never replaces the configured scheduling strategy.
-func (s *rankedCandidateSet) sortCandidates(auths []*Auth) {
-	if s == nil || len(auths) < 2 {
-		return
-	}
-	sort.SliceStable(auths, func(i, j int) bool {
-		left, right := auths[i], auths[j]
-		if left == nil || right == nil {
-			return right == nil && left != nil
-		}
-		leftRank, leftListed := s.rankFor(left.ID)
-		rightRank, rightListed := s.rankFor(right.ID)
-		if leftListed != rightListed {
-			return leftListed
-		}
-		if leftRank != rightRank {
-			return leftRank < rightRank
-		}
-		leftOrder := s.orderByAuthID[strings.TrimSpace(left.ID)]
-		rightOrder := s.orderByAuthID[strings.TrimSpace(right.ID)]
-		if leftOrder != rightOrder {
-			return leftOrder < rightOrder
-		}
-		return left.ID < right.ID
-	})
-}
-
 // authSelectionCandidatesPresent reports whether a request carries ranked candidate metadata.
 func authSelectionCandidatesPresent(meta map[string]any) bool {
 	if len(meta) == 0 {
@@ -131,7 +101,6 @@ func authSelectionCandidatesFromMetadata(meta map[string]any) (*rankedCandidateS
 	}
 	set := &rankedCandidateSet{
 		ranksByAuthID: make(map[string]uint32, len(candidates)),
-		orderByAuthID: make(map[string]uint32, len(candidates)),
 	}
 	ordersByRank := make(map[uint32]map[uint32]struct{}, len(candidates))
 	for _, candidate := range candidates {
@@ -148,12 +117,13 @@ func authSelectionCandidatesFromMetadata(meta map[string]any) (*rankedCandidateS
 			ordersByRank[candidate.PriorityRank] = orders
 			set.ranks = append(set.ranks, candidate.PriorityRank)
 		}
+		// StableOrder never influences which credential is selected; it is validated
+		// only so a caller can record an unambiguous, replayable candidate list.
 		if _, duplicate := orders[candidate.StableOrder]; duplicate {
 			return nil, &Error{Code: "invalid_auth_selection_candidates", Message: "duplicate auth selection candidate stable order in one rank: " + authID, HTTPStatus: http.StatusBadRequest}
 		}
 		orders[candidate.StableOrder] = struct{}{}
 		set.ranksByAuthID[authID] = candidate.PriorityRank
-		set.orderByAuthID[authID] = candidate.StableOrder
 	}
 	sort.Slice(set.ranks, func(i, j int) bool { return set.ranks[i] < set.ranks[j] })
 	return set, nil

@@ -1083,7 +1083,6 @@ func (m *Manager) pickNextLegacyWithinRank(ctx context.Context, provider, model 
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	eligibility.candidates.sortCandidates(candidates)
 	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, provider, model, time.Now())
 	if errAvailable != nil {
 		m.mu.RUnlock()
@@ -1422,7 +1421,6 @@ func (m *Manager) pickNextMixedLegacyWithinRank(ctx context.Context, providers [
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	eligibility.candidates.sortCandidates(candidates)
 	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, time.Now())
 	if errAvailable != nil {
 		m.mu.RUnlock()

@@ -67,8 +67,15 @@ type AuthSelectionCandidate struct {
 	// PriorityRank groups candidates into request-scoped ranks; the lowest rank that still
 	// contains an eligible credential is the only rank the configured scheduler runs within.
 	PriorityRank uint32
-	// StableOrder deterministically orders candidates inside one rank. It is presentation
-	// only and never replaces the configured scheduling strategy.
+	// StableOrder does not influence selection order within a rank. Once a rank is
+	// chosen, the configured scheduler alone decides which of that rank's credentials
+	// runs, and it observes its own ordering; nothing in this package reorders the
+	// candidates by this value.
+	//
+	// The field exists so a caller can record a deterministic, reproducible candidate
+	// list alongside the request: it is validated to be unique within a rank, so a
+	// stored plan identifies each candidate unambiguously and a routing decision can
+	// be replayed and explained after the fact. It is an audit key, not a preference.
 	StableOrder uint32
 }
 

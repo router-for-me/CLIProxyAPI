@@ -418,6 +418,7 @@ func TestManagerLegacySelectionPresentsOnlyRankedCandidates(t *testing.T) {
 		&Auth{ID: "auth-a", Provider: "gemini"},
 		&Auth{ID: "auth-b", Provider: "gemini"},
 		&Auth{ID: "auth-c", Provider: "gemini"},
+		&Auth{ID: "auth-unlisted", Provider: "gemini"},
 	)
 	opts := rankedCandidateOptions(
 		cliproxyexecutor.AuthSelectionCandidate{AuthID: "auth-c", PriorityRank: 0, StableOrder: 1},
@@ -432,12 +433,115 @@ func TestManagerLegacySelectionPresentsOnlyRankedCandidates(t *testing.T) {
 	if selector.calls != 1 {
 		t.Fatalf("selector.calls = %d, want 1", selector.calls)
 	}
-	if len(selector.lastAuthID) != 2 || selector.lastAuthID[0] != "auth-a" || selector.lastAuthID[1] != "auth-c" {
-		t.Fatalf("selector candidates = %v, want [auth-a auth-c] in stable order", selector.lastAuthID)
+	// The guarantee is set membership, not order: exactly the lowest-rank listed
+	// credentials are presented. auth-b is listed but ranks higher, so its rank is
+	// never reached; nothing unlisted may appear at all.
+	if len(selector.lastAuthID) != 2 {
+		t.Fatalf("selector candidates = %v, want exactly 2 candidates", selector.lastAuthID)
 	}
-	if selected == nil || selected.ID != "auth-c" {
-		t.Fatalf("pickNextLegacy() auth = %#v, want auth-c", selected)
+	if got, want := authIDSet(selector.lastAuthID), map[string]struct{}{"auth-a": {}, "auth-c": {}}; !sameAuthIDSet(got, want) {
+		t.Fatalf("selector candidates = %v, want exactly [auth-a auth-c] in any order", selector.lastAuthID)
 	}
+	for _, authID := range []string{"auth-b", "auth-unlisted"} {
+		if _, presented := authIDSet(selector.lastAuthID)[authID]; presented {
+			t.Fatalf("selector candidates = %v, want %q withheld", selector.lastAuthID, authID)
+		}
+	}
+	if selected == nil {
+		t.Fatal("pickNextLegacy() auth = nil, want a lowest-rank candidate")
+	}
+	if selected.ID != "auth-a" && selected.ID != "auth-c" {
+		t.Fatalf("pickNextLegacy() auth = %q, want one of [auth-a auth-c]", selected.ID)
+	}
+}
+
+// TestManagerRankedCandidatesStableOrderDoesNotAffectPresentedOrder pins the documented
+// contract of AuthSelectionCandidate.StableOrder: it is an audit key, not a preference.
+// Selection order inside a rank belongs to the configured scheduler, which observes its
+// own ordering, so inverting StableOrder against auth ID order changes nothing. This is
+// current, intended behavior - a future reader must not read it as a bug.
+func TestManagerRankedCandidatesStableOrderDoesNotAffectPresentedOrder(t *testing.T) {
+	tests := []struct {
+		name       string
+		candidates []cliproxyexecutor.AuthSelectionCandidate
+	}{
+		{
+			name: "stable order agrees with auth id order",
+			candidates: []cliproxyexecutor.AuthSelectionCandidate{
+				{AuthID: "auth-a", PriorityRank: 0, StableOrder: 0},
+				{AuthID: "auth-c", PriorityRank: 0, StableOrder: 1},
+			},
+		},
+		{
+			name: "stable order is inverted against auth id order",
+			candidates: []cliproxyexecutor.AuthSelectionCandidate{
+				{AuthID: "auth-c", PriorityRank: 0, StableOrder: 0},
+				{AuthID: "auth-a", PriorityRank: 0, StableOrder: 1},
+			},
+		},
+	}
+
+	var presented [][]string
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			selector := &trackingSelector{}
+			manager := newRankedCandidateTestManager(t, selector,
+				&Auth{ID: "auth-a", Provider: "gemini"},
+				&Auth{ID: "auth-c", Provider: "gemini"},
+			)
+
+			if _, _, errPick := manager.pickNextLegacy(context.Background(), "gemini", "", rankedCandidateOptions(tt.candidates...), nil); errPick != nil {
+				t.Fatalf("pickNextLegacy() error = %v", errPick)
+			}
+			got := append([]string(nil), selector.lastAuthID...)
+			presented = append(presented, got)
+			if len(got) != 2 {
+				t.Fatalf("selector candidates = %v, want 2 candidates", got)
+			}
+		})
+	}
+
+	if len(presented) != 2 {
+		t.Fatalf("presented candidate lists = %d, want 2", len(presented))
+	}
+	if !equalAuthIDs(presented[0], presented[1]) {
+		t.Fatalf("presented order with inverted stable order = %v, want %v (StableOrder must not affect order)", presented[1], presented[0])
+	}
+}
+
+// authIDSet collects auth IDs into a set for order-independent assertions.
+func authIDSet(authIDs []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(authIDs))
+	for _, authID := range authIDs {
+		set[authID] = struct{}{}
+	}
+	return set
+}
+
+// sameAuthIDSet reports whether two auth ID sets hold exactly the same members.
+func sameAuthIDSet(got, want map[string]struct{}) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for authID := range want {
+		if _, present := got[authID]; !present {
+			return false
+		}
+	}
+	return true
+}
+
+// equalAuthIDs reports whether two auth ID slices match element for element.
+func equalAuthIDs(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for index := range got {
+		if got[index] != want[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestManagerMixedSelectionRestrictsToRankedCandidates(t *testing.T) {

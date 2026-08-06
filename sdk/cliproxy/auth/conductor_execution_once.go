@@ -30,8 +30,11 @@ import (
 //     preparation, no result marking and reports no attempt facts.
 //
 // ExecuteWithAuthOnce and DoHTTPOnce keep the lifecycle and drop every replay
-// vector the manager owns, and they report typed attempt facts so a caller can
-// tell "definitely not sent" from "may have been sent".
+// vector the manager owns, and both report typed attempt facts. How much those
+// facts can claim differs by entry point: only DoHTTPOnce owns the http.Client,
+// so only there can RequestWritten be false and mean "definitely not sent". On
+// ExecuteWithAuthOnce a provider executor owns the client, so the facts describe
+// what was observed and RequestWritten is never false.
 //
 // The two differ in how far the guarantee reaches, and the difference is a
 // boundary rather than a gap in effort. DoHTTPOnce performs the request itself,
@@ -58,7 +61,12 @@ const (
 	HTTPRedirectDeny HTTPRedirectPolicy = "deny"
 	// HTTPRedirectSameOriginSafe follows at most maxSameOriginSafeRedirectHops
 	// redirects, and only for a bodyless GET or HEAD request whose target keeps
-	// the same HTTPS origin. Credential headers are stripped before following.
+	// the same HTTPS origin. Credential headers are stripped before following, so
+	// every hop after the first is unauthenticated even though the origin is
+	// unchanged. That makes this policy suitable for following a signed URL or an
+	// asset redirect, and unsuitable for polling an endpoint that requires the
+	// credential on the followed hop - there the redirect target returns 401/403
+	// rather than the resource.
 	HTTPRedirectSameOriginSafe HTTPRedirectPolicy = "same_origin_safe"
 )
 
@@ -305,7 +313,11 @@ func (m *Manager) ExecuteWithAuthOnce(ctx context.Context, in ExecuteWithAuthOnc
 // The response body is not read or closed; the caller owns it. A redirect the
 // policy refuses is returned as the unfollowed 3xx response together with a
 // redirect_denied error, so a caller that branches on the error alone cannot read
-// a refused attempt as a success. An empty RedirectPolicy means HTTPRedirectDeny.
+// a refused 3xx as a success - with one degenerate exception: a 3xx carrying no
+// Location header is not a followable redirect at all and is returned as a plain
+// (3xx, nil error) result, like any other non-2xx status. A caller that must not
+// treat any non-2xx as success should branch on the status code, not on the error.
+// An empty RedirectPolicy means HTTPRedirectDeny.
 //
 // Exactly one execution result is recorded, and the recording is classified
 // because a raw HTTP call addresses arbitrary endpoints rather than a model
