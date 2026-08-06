@@ -160,6 +160,19 @@ func TestAntigravitySensitiveWordsObfuscatesSystemInstructionOnly(t *testing.T) 
 	}
 }
 
+func TestAntigravitySensitiveWordsDefaultObfuscation(t *testing.T) {
+	executor := NewAntigravityExecutor(&config.Config{})
+	payload := []byte(`{"request":{"systemInstruction":{"parts":[{"text":"Created by Nous Research"}]},"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
+
+	got := executor.obfuscateSensitiveWords(payload)
+	if systemText := gjson.GetBytes(got, "request.systemInstruction.parts.0.text").String(); systemText != "Created by N​ous R​esearch" {
+		t.Fatalf("system instruction = %q, want default sensitive words obfuscated", systemText)
+	}
+	if contentText := gjson.GetBytes(got, "request.contents.0.parts.0.text").String(); contentText != "hello" {
+		t.Fatalf("content text = %q, want unchanged", contentText)
+	}
+}
+
 func TestAntigravityStreamObfuscatesSensitiveSystemInstruction(t *testing.T) {
 	captured := make(chan []byte, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
