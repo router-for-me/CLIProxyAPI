@@ -4,14 +4,20 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"strconv"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-const codexInputItemIDLimit = 64
+const (
+	codexInputItemIDLimit    = 64
+	codexMessageItemIDPrefix = "msg"
+)
 
-// SanitizeCodexInputItemIDs deterministically shortens overlong Responses input item IDs.
+// SanitizeCodexInputItemIDs normalizes message IDs for Codex, removes encrypted
+// reasoning items whose IDs exceed the Codex limit, and deterministically shortens
+// other overlong input item IDs.
 func SanitizeCodexInputItemIDs(body []byte) []byte {
 	input := gjson.GetBytes(body, "input")
 	if !input.IsArray() {
@@ -21,47 +27,87 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 	items := input.Array()
 	occupied := make(map[string]struct{}, len(items))
 	for _, item := range items {
+		if shouldDropCodexEncryptedReasoningItem(item) {
+			continue
+		}
 		itemID := item.Get("id")
 		if itemID.Type != gjson.String {
 			continue
 		}
-		id := itemID.String()
+		id := normalizeCodexInputItemID(item, itemID.String())
 		if len([]rune(id)) <= codexInputItemIDLimit {
 			occupied[id] = struct{}{}
 		}
 	}
 
 	mapped := make(map[string]string, len(items))
-	updated := body
-	for index, item := range items {
+	rebuilt := make([]string, 0, len(items))
+	changed := false
+	for _, item := range items {
+		if shouldDropCodexEncryptedReasoningItem(item) {
+			changed = true
+			continue
+		}
+
+		raw := item.Raw
 		itemID := item.Get("id")
-		if itemID.Type != gjson.String {
-			continue
-		}
-		id := itemID.String()
-		if len([]rune(id)) <= codexInputItemIDLimit {
-			continue
-		}
-
-		shortened, ok := mapped[id]
-		if !ok {
-			shortened = shortenCodexInputItemID(id)
-			for attempt := 1; ; attempt++ {
-				if _, exists := occupied[shortened]; !exists {
-					break
+		if itemID.Type == gjson.String {
+			originalID := itemID.String()
+			id := normalizeCodexInputItemID(item, originalID)
+			if len([]rune(id)) > codexInputItemIDLimit {
+				shortened, ok := mapped[id]
+				if !ok {
+					shortened = shortenCodexInputItemID(id)
+					for attempt := 1; ; attempt++ {
+						if _, exists := occupied[shortened]; !exists {
+							break
+						}
+						shortened = shortenCodexInputItemIDWithAttempt(id, attempt)
+					}
+					mapped[id] = shortened
+					occupied[shortened] = struct{}{}
 				}
-				shortened = shortenCodexInputItemIDWithAttempt(id, attempt)
+				id = shortened
 			}
-			mapped[id] = shortened
-			occupied[shortened] = struct{}{}
-		}
 
-		next, errSet := sjson.SetBytes(updated, "input."+strconv.Itoa(index)+".id", shortened)
-		if errSet == nil {
-			updated = next
+			if id != originalID {
+				next, errSet := sjson.SetBytes([]byte(raw), "id", id)
+				if errSet == nil {
+					raw = string(next)
+					changed = true
+				}
+			}
 		}
+		rebuilt = append(rebuilt, raw)
+	}
+	if !changed {
+		return body
+	}
+
+	updated, errSet := sjson.SetRawBytes(body, "input", []byte("["+strings.Join(rebuilt, ",")+"]"))
+	if errSet != nil {
+		return body
 	}
 	return updated
+}
+
+func normalizeCodexInputItemID(item gjson.Result, id string) string {
+	if item.Get("type").String() != "message" || id == "" || strings.HasPrefix(id, codexMessageItemIDPrefix) {
+		return id
+	}
+	return codexMessageItemIDPrefix + "_" + id
+}
+
+func shouldDropCodexEncryptedReasoningItem(item gjson.Result) bool {
+	if item.Get("type").String() != "reasoning" {
+		return false
+	}
+	itemID := item.Get("id")
+	if itemID.Type != gjson.String || len([]rune(itemID.String())) <= codexInputItemIDLimit {
+		return false
+	}
+	encryptedContent := item.Get("encrypted_content")
+	return encryptedContent.Type == gjson.String && encryptedContent.String() != ""
 }
 
 func shortenCodexInputItemID(id string) string {

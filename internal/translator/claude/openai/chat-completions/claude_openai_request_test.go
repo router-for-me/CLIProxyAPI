@@ -44,6 +44,70 @@ func TestConvertOpenAIRequestToClaude_SanitizesToolCallIDsForClaude(t *testing.T
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_GroupsConsecutiveParallelToolResults(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role": "user", "content": "Use both tools."},
+			{
+				"role": "assistant",
+				"content": "",
+				"tool_calls": [
+					{"id": "call_1", "type": "function", "function": {"name": "tool_a", "arguments": "{}"}},
+					{"id": "call_2", "type": "function", "function": {"name": "tool_b", "arguments": "{}"}}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_1",
+				"content": "one",
+				"cache_control": {"type": "ephemeral"}
+			},
+			{"role": "tool", "tool_call_id": "call_2", "content": "two"},
+			{"role": "assistant", "content": "Done."}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 4 {
+		t.Fatalf("Expected 4 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[2].Get("role").String(); got != "user" {
+		t.Fatalf("Expected grouped tool result role %q, got %q", "user", got)
+	}
+	toolResults := messages[2].Get("content").Array()
+	if len(toolResults) != 2 {
+		t.Fatalf("Expected 2 grouped tool results, got %d. Content: %s", len(toolResults), messages[2].Get("content").Raw)
+	}
+	wants := []struct {
+		id      string
+		content string
+	}{
+		{id: "call_1", content: "one"},
+		{id: "call_2", content: "two"},
+	}
+	for i, want := range wants {
+		if got := toolResults[i].Get("type").String(); got != "tool_result" {
+			t.Fatalf("tool result %d type = %q, want tool_result", i, got)
+		}
+		if got := toolResults[i].Get("tool_use_id").String(); got != want.id {
+			t.Fatalf("tool result %d tool_use_id = %q, want %q", i, got, want.id)
+		}
+		if got := toolResults[i].Get("content").String(); got != want.content {
+			t.Fatalf("tool result %d content = %q, want %q", i, got, want.content)
+		}
+	}
+	if got := toolResults[0].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("first tool result cache_control.type = %q, want ephemeral", got)
+	}
+	if got := messages[3].Get("content.0.text").String(); got != "Done." {
+		t.Fatalf("following assistant message text = %q, want Done.", got)
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_DropsTemperature(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",
@@ -382,6 +446,57 @@ func TestConvertOpenAIRequestToClaude_PreservesToolCacheControl(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_NormalizesRootToolSchemaUnions(t *testing.T) {
+	inputJSON := `{
+		"model":"claude-sonnet-4-5",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[
+			{
+				"type":"function",
+				"function":{
+					"name":"without_type",
+					"parameters":{
+						"anyOf":[
+							{"type":"object","properties":{"a":{"type":"string"}}},
+							{"type":"object","properties":{"b":{"type":"string"}}}
+						]
+					}
+				}
+			},
+			{
+				"type":"function",
+				"function":{
+					"name":"constraint_union",
+					"parametersJsonSchema":{
+						"type":"object",
+						"properties":{"a":{"type":"string"},"b":{"type":"string"}},
+						"anyOf":[{"required":["a"]},{"required":["b"]}]
+					}
+				}
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	root := gjson.ParseBytes(result)
+
+	for _, toolName := range []string{"without_type", "constraint_union"} {
+		schema := root.Get(`tools.#(name=="` + toolName + `").input_schema`)
+		if got := schema.Get("type").String(); got != "object" {
+			t.Fatalf("%s input_schema.type = %q, want object. Output: %s", toolName, got, result)
+		}
+		if schema.Get("anyOf").Exists() {
+			t.Fatalf("%s input_schema should not contain root anyOf. Output: %s", toolName, result)
+		}
+		if !schema.Get("properties.a").Exists() || !schema.Get("properties.b").Exists() {
+			t.Fatalf("%s input_schema should contain properties a and b. Output: %s", toolName, result)
+		}
+		if schema.Get("required").Exists() {
+			t.Fatalf("%s input_schema should not merge alternative required fields. Output: %s", toolName, result)
+		}
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_PartCacheControlWinsOverMessageLevel(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",
@@ -404,5 +519,62 @@ func TestConvertOpenAIRequestToClaude_PartCacheControlWinsOverMessageLevel(t *te
 	}
 	if resultJSON.Get("messages.0.content.0.cache_control.ttl").Exists() {
 		t.Fatalf("part-level cache_control should win; unexpected ttl: %s", result)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_DeveloperRoleBecomesTopLevelSystem(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role": "system", "content": "S1"},
+			{"role": "developer", "content": [{"type": "text", "text": "D1"}, {"type": "text", "text": "D2"}]},
+			{"role": "user", "content": "Hello"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	system := resultJSON.Get("system").Array()
+	if len(system) != 3 {
+		t.Fatalf("system blocks = %d, want 3. system: %s", len(system), resultJSON.Get("system").Raw)
+	}
+	for idx, want := range []string{"S1", "D1", "D2"} {
+		if got := system[idx].Get("type").String(); got != "text" {
+			t.Fatalf("system[%d].type = %q, want text", idx, got)
+		}
+		if got := system[idx].Get("text").String(); got != want {
+			t.Fatalf("system[%d].text = %q, want %q", idx, got, want)
+		}
+	}
+
+	messages := resultJSON.Get("messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("messages = %d, want 1. messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("messages[0].role = %q, want user", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_DeveloperMessageCacheControlAppliesToLastBlock(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role": "developer", "content": [{"type": "text", "text": "D1"}, {"type": "text", "text": "D2"}], "cache_control": {"type": "ephemeral"}},
+			{"role": "user", "content": "Hello"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	system := gjson.ParseBytes(result).Get("system").Array()
+	if len(system) != 2 {
+		t.Fatalf("system blocks = %d, want 2", len(system))
+	}
+	if system[0].Get("cache_control").Exists() {
+		t.Fatalf("system[0] must not carry cache_control: %s", system[0].Raw)
+	}
+	if got := system[1].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system[1].cache_control.type = %q, want ephemeral", got)
 	}
 }

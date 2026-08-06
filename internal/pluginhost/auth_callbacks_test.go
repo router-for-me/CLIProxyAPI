@@ -211,6 +211,34 @@ func TestHostAuthGetRuntimeCallbackReturnsRuntimeInfo(t *testing.T) {
 	}
 }
 
+func TestHostAuthSaveCallbackRejectsInvalidWeightBeforePersistence(t *testing.T) {
+	for _, rawWeight := range []string{`1.5`, `1000001`, `9223372036854775808`, `"invalid"`} {
+		t.Run(rawWeight, func(t *testing.T) {
+			authDir := t.TempDir()
+			host := New()
+			host.runtimeConfig = &config.Config{AuthDir: authDir}
+			host.SetAuthManager(coreauth.NewManager(nil, nil, nil))
+
+			req, errMarshal := json.Marshal(pluginapi.HostAuthSaveRequest{
+				Name: "invalid.json",
+				JSON: json.RawMessage(`{"type":"demo","weight":` + rawWeight + `}`),
+			})
+			if errMarshal != nil {
+				t.Fatalf("marshal request: %v", errMarshal)
+			}
+			if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthSave, req); errCall == nil {
+				t.Fatal("host.auth.save accepted an invalid weight")
+			}
+			if _, errStat := os.Stat(filepath.Join(authDir, "invalid.json")); !os.IsNotExist(errStat) {
+				t.Fatalf("invalid auth file was persisted: %v", errStat)
+			}
+			if auths := host.currentAuthManager().List(); len(auths) != 0 {
+				t.Fatalf("invalid auth was registered: %#v", auths)
+			}
+		})
+	}
+}
+
 func TestHostAuthSaveCallbackWritesPhysicalFile(t *testing.T) {
 	authDir := t.TempDir()
 	host := New()

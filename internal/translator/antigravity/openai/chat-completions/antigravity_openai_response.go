@@ -95,9 +95,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	// Extract and set usage metadata (token counts).
 	if usageResult := gjson.GetBytes(rawJSON, "response.usageMetadata"); usageResult.Exists() {
 		cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
-		if candidatesTokenCountResult := usageResult.Get("candidatesTokenCount"); candidatesTokenCountResult.Exists() {
-			template, _ = sjson.SetBytes(template, "usage.completion_tokens", candidatesTokenCountResult.Int())
-		}
+		template, _ = sjson.SetBytes(template, "usage.completion_tokens", usageResult.Get("candidatesTokenCount").Int())
 		if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
 			template, _ = sjson.SetBytes(template, "usage.total_tokens", totalTokenCountResult.Int())
 		}
@@ -256,12 +254,17 @@ func restoreAntigravityOpenAIFunctionNames(rawJSON, originalRequestRawJSON []byt
 	for candidateIndex, candidate := range candidates.Array() {
 		for partIndex, part := range candidate.Get("content.parts").Array() {
 			for _, field := range []string{"functionCall", "functionResponse"} {
-				name := part.Get(field + ".name").String()
+				nameResult := part.Get(field + ".name")
+				name := nameResult.String()
 				if name == "" {
 					continue
 				}
+				restoredName := util.RestoreSanitizedToolName(nameMap, name)
+				if nameResult.Type == gjson.String && restoredName == name {
+					continue
+				}
 				path := fmt.Sprintf("candidates.%d.content.parts.%d.%s.name", candidateIndex, partIndex, field)
-				rawJSON, _ = sjson.SetBytes(rawJSON, path, util.RestoreSanitizedToolName(nameMap, name))
+				rawJSON, _ = sjson.SetBytes(rawJSON, path, restoredName)
 			}
 		}
 	}

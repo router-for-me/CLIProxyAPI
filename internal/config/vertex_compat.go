@@ -1,6 +1,10 @@
 package config
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+)
 
 // VertexCompatKey represents the configuration for Vertex AI-compatible API keys.
 // This supports third-party services that use Vertex AI-style endpoint paths
@@ -16,6 +20,10 @@ type VertexCompatKey struct {
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Weight controls proportional selection under weighted-round-robin.
+	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
 
 	// Prefix optionally namespaces model aliases for this credential (e.g., "teamA/vertex-pro").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
@@ -39,8 +47,10 @@ type VertexCompatKey struct {
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 }
 
-func (k VertexCompatKey) GetAPIKey() string  { return k.APIKey }
-func (k VertexCompatKey) GetBaseURL() string { return k.BaseURL }
+func (k VertexCompatKey) GetAPIKey() string   { return k.APIKey }
+func (k VertexCompatKey) GetBaseURL() string  { return k.BaseURL }
+func (k VertexCompatKey) GetPrefix() string   { return k.Prefix }
+func (k VertexCompatKey) GetProxyURL() string { return k.ProxyURL }
 
 // VertexCompatModel represents a model configuration for Vertex compatibility,
 // including the actual model name and its alias for API routing.
@@ -56,12 +66,18 @@ type VertexCompatModel struct {
 
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+
+	// Thinking configures the thinking/reasoning capability for this model.
+	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
 }
 
 func (m VertexCompatModel) GetName() string        { return m.Name }
 func (m VertexCompatModel) GetAlias() string       { return m.Alias }
 func (m VertexCompatModel) GetDisplayName() string { return m.DisplayName }
 func (m VertexCompatModel) GetForceMapping() bool  { return m.ForceMapping }
+func (m VertexCompatModel) GetThinking() *registry.ThinkingSupport {
+	return m.Thinking
+}
 
 // SanitizeVertexCompatKeys deduplicates and normalizes Vertex-compatible API key credentials.
 func (cfg *Config) SanitizeVertexCompatKeys() {
