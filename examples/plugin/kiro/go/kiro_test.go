@@ -252,16 +252,17 @@ func TestClaudeToKiroTransformsSystemToolsAndResults(t *testing.T) {
 	}
 }
 
-func TestClaudeToKiroDisambiguatesHistoricalToolNames(t *testing.T) {
+func TestClaudeToKiroGloballyDisambiguatesHistoricalToolNames(t *testing.T) {
 	payload, _, errTranslate := claudeToKiro([]byte(`{
 		"model":"claude-sonnet-4-5",
 		"tools":[
 			{"name":"foo","input_schema":{"type":"object"}},
-			{"name":"foo_","input_schema":{"type":"object"}}
+			{"name":"foo_","input_schema":{"type":"object"}},
+			{"name":"foo_2","input_schema":{"type":"object"}}
 		],
 		"messages":[
-			{"role":"user","content":"Use the second tool"},
-			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"foo_","input":{}}]},
+			{"role":"user","content":"Use the third tool"},
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"foo_2","input":{}}]},
 			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"done"}]}
 		]
 	}`), "")
@@ -269,20 +270,44 @@ func TestClaudeToKiroDisambiguatesHistoricalToolNames(t *testing.T) {
 		t.Fatalf("claudeToKiro() error = %v", errTranslate)
 	}
 	context := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
-	if context == nil || len(context.Tools) != 2 {
-		t.Fatalf("current context = %#v, want two tools", context)
+	if context == nil || len(context.Tools) != 3 {
+		t.Fatalf("current context = %#v, want three tools", context)
 	}
 	if got := context.Tools[1].ToolSpecification.Name; got != "foo_2" {
 		t.Fatalf("second declared tool name = %q, want foo_2", got)
 	}
+	if got := context.Tools[2].ToolSpecification.Name; got != "foo_2_2" {
+		t.Fatalf("third declared tool name = %q, want foo_2_2", got)
+	}
 	if len(payload.ConversationState.History) != 2 || len(payload.ConversationState.History[1].AssistantResponseMessage.ToolUses) != 1 {
 		t.Fatalf("history = %#v, want assistant tool call", payload.ConversationState.History)
 	}
-	if got := payload.ConversationState.History[1].AssistantResponseMessage.ToolUses[0].Name; got != "foo_2" {
-		t.Fatalf("historical tool name = %q, want foo_2", got)
+	if got := payload.ConversationState.History[1].AssistantResponseMessage.ToolUses[0].Name; got != "foo_2_2" {
+		t.Fatalf("historical tool name = %q, want foo_2_2", got)
 	}
-	if got := payload.ToolNameMap["foo_2"]; got != "foo_" {
-		t.Fatalf("response tool name mapping = %q, want foo_", got)
+	if got := payload.ToolNameMap["foo_2_2"]; got != "foo_2" {
+		t.Fatalf("response tool name mapping = %q, want foo_2", got)
+	}
+}
+
+func TestClaudeToKiroRecalculatesInputEstimateAfterTruncation(t *testing.T) {
+	payload, request, errTranslate := claudeToKiro([]byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[
+			{"role":"user","content":"`+strings.Repeat("x", maxKiroPayloadBytes)+`"},
+			{"role":"assistant","content":"old response"},
+			{"role":"user","content":"new request"}
+		]
+	}`), "")
+	if errTranslate != nil {
+		t.Fatalf("claudeToKiro() error = %v", errTranslate)
+	}
+	if len(payload.ConversationState.History) != 0 {
+		t.Fatalf("retained history length = %d, want 0", len(payload.ConversationState.History))
+	}
+	originalEstimate := estimateClaudeRequestInputTokens(request)
+	if originalEstimate < 100_000 || payload.EstimatedInputTokens >= 1_000 {
+		t.Fatalf("input estimates = original:%d retained:%d, want large original and small retained estimate", originalEstimate, payload.EstimatedInputTokens)
 	}
 }
 

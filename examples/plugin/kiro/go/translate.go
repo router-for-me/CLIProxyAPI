@@ -102,13 +102,13 @@ func claudeToKiro(raw []byte, requestedModel string) (*kiroPayload, *claudeReque
 	}
 	payload.ConversationState.CurrentMessage.UserInputMessage = current
 	payload.ConversationState.History = trimLeadingAssistant(history)
-	payload.EstimatedInputTokens = estimateClaudeRequestInputTokens(&request)
 	if request.MaxTokens > 0 || request.Temperature != nil || request.TopP != nil {
 		payload.InferenceConfig = &kiroInferenceConfig{MaxTokens: request.MaxTokens, Temperature: request.Temperature, TopP: request.TopP}
 	}
 	if errTruncate := truncatePayload(payload, systemPrompt != ""); errTruncate != nil {
 		return nil, nil, errTruncate
 	}
+	payload.EstimatedInputTokens = estimateJSONTokens(payload)
 	return payload, &request, nil
 }
 
@@ -265,7 +265,7 @@ func convertTools(tools []claudeTool) ([]kiroToolWrapper, map[string]string, map
 	out := make([]kiroToolWrapper, 0, len(tools))
 	nameMap := make(map[string]string)
 	requestNameMap := make(map[string]string)
-	used := make(map[string]int)
+	used := make(map[string]struct{})
 	for _, tool := range tools {
 		if strings.HasPrefix(strings.ToLower(tool.Type), "web_search") {
 			continue
@@ -314,16 +314,24 @@ func sanitizeToolName(name string) string {
 	return name
 }
 
-func uniqueToolName(name string, used map[string]int) string {
-	used[name]++
-	if used[name] == 1 {
+func uniqueToolName(name string, used map[string]struct{}) string {
+	if _, exists := used[name]; !exists {
+		used[name] = struct{}{}
 		return name
 	}
-	suffix := fmt.Sprintf("_%d", used[name])
-	if len(name)+len(suffix) > 64 {
-		name = name[:64-len(suffix)]
+	for index := 2; ; index++ {
+		suffix := fmt.Sprintf("_%d", index)
+		base := name
+		if len(base)+len(suffix) > 64 {
+			base = base[:64-len(suffix)]
+		}
+		candidate := base + suffix
+		if _, exists := used[candidate]; exists {
+			continue
+		}
+		used[candidate] = struct{}{}
+		return candidate
 	}
-	return name + suffix
 }
 
 func readableToolResults(results []kiroToolResult) string {
