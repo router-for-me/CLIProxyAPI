@@ -7,10 +7,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -25,6 +28,14 @@ const (
 )
 
 var antigravityOAuthTokenURL = "https://oauth2.googleapis.com/token"
+
+type managementCodexRefreshService interface {
+	RefreshTokensWithRetry(context.Context, string, int) (*codexauth.CodexTokenData, error)
+}
+
+var newManagementCodexRefreshService = func(cfg *config.Config, proxyURL string) managementCodexRefreshService {
+	return codexauth.NewCodexAuthWithProxyURL(cfg, proxyURL)
+}
 
 type apiCallRequest struct {
 	AuthIndexSnake  *string           `json:"auth_index"`
@@ -123,6 +134,12 @@ func (h *Handler) APICall(c *gin.Context) {
 	if reqHeaders == nil {
 		reqHeaders = map[string]string{}
 	}
+	tokenHeaderTemplates := make(map[string]string)
+	for key, value := range reqHeaders {
+		if strings.Contains(value, "$TOKEN$") {
+			tokenHeaderTemplates[key] = value
+		}
+	}
 
 	var hostOverride string
 	var token string
@@ -183,6 +200,44 @@ func (h *Handler) APICall(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
 		return
 	}
+	if resp.StatusCode == http.StatusUnauthorized && len(tokenHeaderTemplates) > 0 && auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		_ = resp.Body.Close()
+		refreshedToken, errRefresh := h.refreshCodexOAuthAccessToken(c.Request.Context(), auth)
+		if errRefresh != nil {
+			log.WithError(errRefresh).Debug("management APICall Codex token refresh failed")
+			refreshError := managementCodexRefreshErrorCode(errRefresh)
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":         "auth token refresh failed: " + refreshError,
+				"refresh_error": refreshError,
+			})
+			return
+		}
+		for key, template := range tokenHeaderTemplates {
+			reqHeaders[key] = strings.ReplaceAll(template, "$TOKEN$", refreshedToken)
+		}
+		requestBody = nil
+		if body.Data != "" {
+			requestBody = strings.NewReader(body.Data)
+		}
+		req, errNewRequest = http.NewRequestWithContext(c.Request.Context(), method, urlStr, requestBody)
+		if errNewRequest != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "failed to build request"})
+			return
+		}
+		for key, value := range reqHeaders {
+			if strings.EqualFold(key, "host") {
+				req.Host = strings.TrimSpace(value)
+				continue
+			}
+			req.Header.Set(key, value)
+		}
+		resp, errDo = httpClient.Do(req)
+		if errDo != nil {
+			log.WithError(errDo).Debug("management APICall retry request failed")
+			c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
+			return
+		}
+	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
@@ -200,6 +255,149 @@ func (h *Handler) APICall(c *gin.Context) {
 		Header:     resp.Header,
 		Body:       string(respBody),
 	})
+}
+
+func (h *Handler) refreshCodexOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return "", fmt.Errorf("codex auth missing")
+	}
+	refreshTokens := h.managementCodexRefreshTokens(auth)
+	if len(refreshTokens) == 0 {
+		return "", fmt.Errorf("codex refresh token missing")
+	}
+	service := newManagementCodexRefreshService(h.cfg, auth.ProxyURL)
+	var tokenData *codexauth.CodexTokenData
+	var errRefresh error
+	for _, refreshToken := range refreshTokens {
+		tokenData, errRefresh = service.RefreshTokensWithRetry(ctx, refreshToken, 3)
+		if errRefresh == nil && tokenData != nil && strings.TrimSpace(tokenData.AccessToken) != "" {
+			break
+		}
+		if errRefresh == nil {
+			errRefresh = fmt.Errorf("codex token refresh returned empty access token")
+		}
+		tokenData = nil
+	}
+	if tokenData == nil {
+		return "", errRefresh
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["access_token"] = strings.TrimSpace(tokenData.AccessToken)
+	if value := strings.TrimSpace(tokenData.RefreshToken); value != "" {
+		auth.Metadata["refresh_token"] = value
+	}
+	if value := strings.TrimSpace(tokenData.IDToken); value != "" {
+		auth.Metadata["id_token"] = value
+	}
+	if value := strings.TrimSpace(tokenData.AccountID); value != "" {
+		auth.Metadata["account_id"] = value
+	}
+	if value := strings.TrimSpace(tokenData.Email); value != "" {
+		auth.Metadata["email"] = value
+	}
+	auth.Metadata["expired"] = tokenData.Expire
+	auth.Metadata["type"] = "codex"
+	now := time.Now()
+	auth.Metadata["last_refresh"] = now.Format(time.RFC3339)
+	auth.LastRefreshedAt = now
+	auth.UpdatedAt = now
+	if h != nil && h.authManager != nil {
+		if _, errUpdate := h.authManager.Update(ctx, auth); errUpdate != nil {
+			return "", errUpdate
+		}
+	}
+	return strings.TrimSpace(tokenData.AccessToken), nil
+}
+
+func (h *Handler) managementCodexRefreshTokens(auth *coreauth.Auth) []string {
+	if auth == nil {
+		return nil
+	}
+	refreshTokens := make([]string, 0, 2)
+	seenTokens := make(map[string]struct{}, 2)
+	addToken := func(refreshToken string) {
+		refreshToken = strings.TrimSpace(refreshToken)
+		if refreshToken == "" {
+			return
+		}
+		if _, exists := seenTokens[refreshToken]; exists {
+			return
+		}
+		seenTokens[refreshToken] = struct{}{}
+		refreshTokens = append(refreshTokens, refreshToken)
+	}
+	addToken(stringValue(auth.Metadata, "refresh_token"))
+
+	paths := make([]string, 0, 4)
+	seenPaths := make(map[string]struct{}, 4)
+	addPath := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		path = filepath.Clean(path)
+		if _, exists := seenPaths[path]; exists {
+			return
+		}
+		seenPaths[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	for _, attribute := range []string{coreauth.AttributePath, coreauth.AttributeSource} {
+		addPath(auth.Attributes[attribute])
+	}
+	if h != nil && h.cfg != nil {
+		authDir := strings.TrimSpace(h.cfg.AuthDir)
+		if authDir != "" {
+			for _, name := range []string{auth.FileName, auth.ID} {
+				if name = strings.TrimSpace(name); name != "" {
+					addPath(filepath.Join(authDir, filepath.Base(name)))
+				}
+			}
+		}
+	}
+	for _, path := range paths {
+		data, errRead := os.ReadFile(path)
+		if errRead != nil {
+			continue
+		}
+		var stored map[string]any
+		if errUnmarshal := json.Unmarshal(data, &stored); errUnmarshal != nil {
+			continue
+		}
+		addToken(stringValue(stored, "refresh_token"))
+	}
+	return refreshTokens
+}
+
+func managementCodexRefreshErrorCode(err error) string {
+	if err == nil {
+		return "none"
+	}
+	raw := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(raw, "refresh token missing"):
+		return "refresh_token_missing"
+	case strings.Contains(raw, "refresh_token_reused") || strings.Contains(raw, "already used"):
+		return "refresh_token_reused"
+	case strings.Contains(raw, "invalid_grant") || strings.Contains(raw, "sign in again") || strings.Contains(raw, "status 400") || strings.Contains(raw, "status 401"):
+		return "reauth_required"
+	case strings.Contains(raw, "status 403"):
+		return "oauth_access_denied"
+	case strings.Contains(raw, "status 429"):
+		return "upstream_rate_limited"
+	case strings.Contains(raw, "status 500") || strings.Contains(raw, "status 502") || strings.Contains(raw, "status 503") || strings.Contains(raw, "status 504"):
+		return "upstream_unavailable"
+	case strings.Contains(raw, "deadline exceeded") || strings.Contains(raw, "timeout") || strings.Contains(raw, "connection"):
+		return "transient_transport_failure"
+	case strings.Contains(raw, "failed to parse refresh response") || strings.Contains(raw, "failed to read refresh response"):
+		return "malformed_upstream_response"
+	case strings.Contains(raw, "empty access token"):
+		return "empty_access_token"
+	default:
+		return "unknown"
+	}
 }
 
 func firstNonEmptyString(values ...*string) string {
