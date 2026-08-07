@@ -272,10 +272,11 @@ func (h *Handler) translateAutoRouterError(c *gin.Context, err error) {
 }
 
 // validateTierMappings ensures each mapping targets a known tier, contains no
-// duplicate tiers, and carries a non-empty model when present. It also verifies
-// that every routing priority entry references a pinned provider (mirroring
-// ModelRoute validation in Models Group). Returns a human-readable message, or
-// "" when valid.
+// duplicate tiers, and carries at least one usable target (a non-empty Model or
+// a non-empty Targets list). It also verifies that every routing priority entry
+// references a pinned provider (mirroring ModelRoute validation in Models
+// Group) and that the target strategy is one of the supported values. Returns a
+// human-readable message, or "" when valid.
 func validateTierMappings(mappings []store.TierMapping) string {
 	seen := map[string]bool{}
 	for _, m := range mappings {
@@ -292,8 +293,42 @@ func validateTierMappings(mappings []store.TierMapping) string {
 			return fmt.Sprintf("tier_mappings: duplicate tier %q", m.Tier)
 		}
 		seen[tier] = true
-		if strings.TrimSpace(m.Model) == "" {
-			return fmt.Sprintf("tier_mappings: tier %q must specify a target model", m.Tier)
+		// A tier must have at least one usable target: the single Model or a
+		// non-empty Targets list.
+		hasTargets := len(m.Targets) > 0
+		if strings.TrimSpace(m.Model) == "" && !hasTargets {
+			return fmt.Sprintf("tier_mappings: tier %q must specify a target model or targets", m.Tier)
+		}
+		if hasTargets {
+			for _, t := range m.Targets {
+				if strings.TrimSpace(t.Model) == "" {
+					return fmt.Sprintf("tier_mappings: tier %q has a target without a model", m.Tier)
+				}
+				// Per-target routing mirrors the tier-level rules: the target's
+				// strategy must be a supported value, and every priority entry
+				// must reference one of the target's pinned providers.
+				switch strings.ToLower(strings.TrimSpace(t.Strategy)) {
+				case "", "priority", "failover":
+				default:
+					return fmt.Sprintf("tier_mappings: tier %q target %q has unknown strategy %q (expected priority/failover)", m.Tier, t.Model, t.Strategy)
+				}
+				pinned := map[string]bool{}
+				for _, p := range t.Providers {
+					pinned[strings.ToLower(strings.TrimSpace(p))] = true
+				}
+				for _, pr := range t.Priorities {
+					if !pinned[strings.ToLower(strings.TrimSpace(pr.Provider))] {
+						return fmt.Sprintf("tier_mappings: tier %q target %q priority references %q which is not a pinned provider", m.Tier, t.Model, pr.Provider)
+					}
+				}
+			}
+		}
+		// The target strategy must be a supported value; unknown values would
+		// silently degrade to the weighted default at runtime.
+		switch strings.ToLower(strings.TrimSpace(m.TargetStrategy)) {
+		case "", "weighted", "priority":
+		default:
+			return fmt.Sprintf("tier_mappings: tier %q has unknown target_strategy %q (expected weighted/priority)", m.Tier, m.TargetStrategy)
 		}
 		// Every priority entry must target one of the pinned providers, so a
 		// priority never silently applies to an unpinned provider.

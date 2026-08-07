@@ -41,9 +41,33 @@ func storeRouterToConfig(r *store.AutoRouter) *autorouter.Config {
 	}
 	for _, m := range r.Mappings {
 		arm := autorouter.TierMapping{
-			Tier:     autorouter.Tier(strings.ToLower(strings.TrimSpace(m.Tier))),
-			Model:    strings.TrimSpace(m.Model),
-			Strategy: strings.TrimSpace(m.Strategy),
+			Tier:           autorouter.Tier(strings.ToLower(strings.TrimSpace(m.Tier))),
+			Model:          strings.TrimSpace(m.Model),
+			TargetStrategy: strings.TrimSpace(m.TargetStrategy),
+			Strategy:       strings.TrimSpace(m.Strategy),
+		}
+		if len(m.Targets) > 0 {
+			arm.Targets = make([]autorouter.TierTarget, 0, len(m.Targets))
+			for _, t := range m.Targets {
+				target := autorouter.TierTarget{
+					Model:    strings.TrimSpace(t.Model),
+					Weight:   t.Weight,
+					Strategy: strings.TrimSpace(t.Strategy),
+				}
+				if len(t.Providers) > 0 {
+					target.Providers = append([]string{}, t.Providers...)
+				}
+				if len(t.Priorities) > 0 {
+					target.Priorities = make([]autorouter.ProviderPriority, 0, len(t.Priorities))
+					for _, p := range t.Priorities {
+						target.Priorities = append(target.Priorities, autorouter.ProviderPriority{
+							Provider: strings.TrimSpace(p.Provider),
+							Priority: p.Priority,
+						})
+					}
+				}
+				arm.Targets = append(arm.Targets, target)
+			}
 		}
 		if len(m.Providers) > 0 {
 			arm.Providers = append([]string{}, m.Providers...)

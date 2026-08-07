@@ -88,21 +88,66 @@ type ProviderPriority struct {
 	Priority int    `json:"priority"`
 }
 
-// TierMapping maps a single complexity tier to a concrete upstream target plus
-// its per-model routing, mirroring a Model Route (providers + strategy +
-// priorities) exactly like Models Group. When Model is empty the tier is
-// unresolved and resolution falls back to a lower tier.
+// TierTarget is one candidate upstream model within a tier's multi-target set.
+// Weight drives the "weighted" target strategy: higher numbers are picked more
+// often (proportionally). A missing or non-positive weight defaults to 1 (equal
+// share), so an operator leaving weights blank gets a uniform distribution.
+//
+// A target may carry its own per-model routing (providers/strategy/priorities),
+// mirroring a Model Route exactly like Models Group. When it configures none,
+// resolution falls back to the tier mapping's routing (or the model's default
+// providers + the global routing strategy).
+type TierTarget struct {
+	// Model is the concrete upstream model id for this candidate.
+	Model string `json:"model" yaml:"model"`
+	// Weight is the relative selection weight for the "weighted" strategy.
+	Weight int `json:"weight,omitempty" yaml:"weight,omitempty"`
+	// Providers pins this target model to a subset of upstream provider keys.
+	// Empty inherits the tier's Providers (or the model's default providers).
+	Providers []string `json:"providers,omitempty" yaml:"providers,omitempty"`
+	// Strategy optionally overrides the routing strategy ("priority"/"failover")
+	// for this target. Empty inherits the tier's Strategy (or the global
+	// routing strategy).
+	Strategy string `json:"strategy,omitempty" yaml:"strategy,omitempty"`
+	// Priorities optionally assigns a priority weight per pinned provider for
+	// this target (higher = primary). Only providers also pinned for the target
+	// are honored.
+	Priorities []ProviderPriority `json:"priorities,omitempty" yaml:"priorities,omitempty"`
+}
+
+// TierMapping maps a single complexity tier to one or more concrete upstream
+// targets plus per-model routing, mirroring a Model Route (providers + strategy
+// + priorities) exactly like Models Group.
+//
+// A tier targets a single model via Model (the legacy form) or multiple models
+// via Targets. When Targets is non-empty it is authoritative and Model (if also
+// set) is kept for display/back-compat only. When both Model and Targets are
+// empty the tier is unresolved and resolution falls back to a lower tier.
+//
+// The routing fields on the mapping act as the tier's default routing: a target
+// that carries its own per-target routing wins, otherwise the tier's routing
+// applies (or the target model's default providers + global strategy).
 type TierMapping struct {
 	// Tier is the complexity tier this mapping applies to.
 	Tier Tier `json:"tier" yaml:"tier"`
 	// Model is the concrete upstream model id to send requests classified into
-	// this tier (e.g. "claude-sonnet-4-5"). Empty means the tier is unmapped.
+	// this tier (e.g. "claude-sonnet-4-5"). Ignored for selection when Targets
+	// is non-empty. Empty means the tier has no single-model target.
 	Model string `json:"model,omitempty" yaml:"model,omitempty"`
-	// Providers pins the tier's target model to a subset of upstream provider
+	// Targets optionally lists multiple candidate upstream models for this tier,
+	// selected per TargetStrategy. Empty falls back to the single Model.
+	Targets []TierTarget `json:"targets,omitempty" yaml:"targets,omitempty"`
+	// TargetStrategy picks among Targets: "" inherits the default, "weighted"
+	// (the default for multiple targets) selects randomly weighted by each
+	// target's Weight, and "priority" deterministically selects the highest
+	// weight (ties broken by list order). Ignored for a single target.
+	TargetStrategy string `json:"target_strategy,omitempty" yaml:"target_strategy,omitempty"`
+	// Providers pins the tier's target model(s) to a subset of upstream provider
 	// keys. Empty inherits the model's default providers.
 	Providers []string `json:"providers,omitempty" yaml:"providers,omitempty"`
 	// Strategy optionally overrides the routing strategy ("priority"/"failover").
-	// Empty inherits the global routing strategy.
+	// Empty inherits the global routing strategy. Acts as the tier's default
+	// routing for targets that do not configure their own.
 	Strategy string `json:"strategy,omitempty" yaml:"strategy,omitempty"`
 	// Priorities optionally assigns a priority weight per pinned provider
 	// (higher = primary). Only providers also in Providers are honored.
