@@ -1,6 +1,7 @@
 package api
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -59,6 +60,34 @@ func TestStudioCorrelationMiddlewareAllowsStudioModelDiscoveryWithoutSession(t *
 				t.Fatalf("model discovery correlation = %+v", correlation)
 			}
 		})
+	}
+}
+
+func TestStudioCorrelationMiddlewareAllowsStudioModelMetadataWithoutSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("GET", "http://example.com/v1beta/models/gemini-2.5-flash", nil)
+	ctx.Set("accessProvider", "studio")
+
+	StudioCorrelationMiddleware()(ctx)
+	if ctx.IsAborted() {
+		t.Fatal("model metadata without a session was rejected")
+	}
+	correlation := coreusage.CorrelationFromContext(ctx.Request.Context())
+	if correlation.InferenceSessionID != "" || correlation.GatewayRequestID == "" {
+		t.Fatalf("model metadata correlation = %+v", correlation)
+	}
+}
+
+func TestStudioCorrelationMiddlewareRejectsMissingSessionForStudioGenerationRoute(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "http://example.com/v1beta/models/gemini-2.5-flash:generateContent", nil)
+	ctx.Set("accessProvider", "studio")
+
+	StudioCorrelationMiddleware()(ctx)
+	if !ctx.IsAborted() || ctx.Writer.Status() != http.StatusBadRequest {
+		t.Fatalf("generation route status=%d aborted=%v", ctx.Writer.Status(), ctx.IsAborted())
 	}
 }
 

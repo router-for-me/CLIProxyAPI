@@ -218,12 +218,17 @@ func isStudioModelDiscoveryRequest(c *gin.Context) bool {
 	if c == nil || c.Request == nil || c.Request.URL == nil || c.Request.Method != http.MethodGet {
 		return false
 	}
-	switch c.Request.URL.Path {
+	path := c.Request.URL.Path
+	switch path {
 	case "/v1/models", "/v1beta/models":
 		return true
-	default:
+	}
+	const modelMetadataPrefix = "/v1beta/models/"
+	if !strings.HasPrefix(path, modelMetadataPrefix) {
 		return false
 	}
+	model := strings.TrimPrefix(path, modelMetadataPrefix)
+	return model != "" && !strings.ContainsAny(model, "/:")
 }
 
 func setRequestCorrelationContext(c *gin.Context, sessionID string) {
