@@ -308,3 +308,78 @@ func TestJitteredCooldownWaitBounds(t *testing.T) {
 		t.Fatalf("expected sub-4ns wait to stay unchanged, got %v", got)
 	}
 }
+
+func TestCappedUpstreamRetryAfter(t *testing.T) {
+	if got := cappedUpstreamRetryAfter(0); got != 0 {
+		t.Fatalf("expected zero hint to collapse to 0, got %v", got)
+	}
+	if got := cappedUpstreamRetryAfter(-time.Second); got != 0 {
+		t.Fatalf("expected negative hint to collapse to 0, got %v", got)
+	}
+	belowCap := quotaBackoffMax - time.Minute
+	if got := cappedUpstreamRetryAfter(belowCap); got != belowCap {
+		t.Fatalf("expected below-cap hint honored, got %v", got)
+	}
+	if got := cappedUpstreamRetryAfter(quotaBackoffMax); got != quotaBackoffMax {
+		t.Fatalf("expected at-cap hint honored, got %v", got)
+	}
+	aboveCap := quotaBackoffMax + 24*time.Hour
+	if got := cappedUpstreamRetryAfter(aboveCap); got != quotaBackoffMax {
+		t.Fatalf("expected above-cap hint capped at %v, got %v", quotaBackoffMax, got)
+	}
+}
+
+func TestApplyAuthFailureStateCapsUpstreamRetryAfter(t *testing.T) {
+	now := time.Now()
+	quotaErr := &Error{Code: "rate_limit", Message: "quota", HTTPStatus: http.StatusTooManyRequests}
+
+	// A multi-day upstream reset hint (e.g. weekly ChatGPT quota) must not park
+	// the credential past the proxy's own backoff ceiling.
+	auth := &Auth{ID: "auth-capped-retry-after"}
+	huge := 7 * 24 * time.Hour
+	applyAuthFailureState(auth, quotaErr, &huge, now, false)
+	want := now.Add(quotaBackoffMax)
+	if !auth.Quota.NextRecoverAt.Equal(want) {
+		t.Fatalf("expected cooldown capped at %v, got %v", want, auth.Quota.NextRecoverAt)
+	}
+	if !auth.NextRetryAfter.Equal(want) {
+		t.Fatalf("expected NextRetryAfter capped at %v, got %v", want, auth.NextRetryAfter)
+	}
+	if blocked, _, _ := isAuthBlockedForModel(auth, "", want.Add(time.Nanosecond)); blocked {
+		t.Fatal("auth did not auto-recover after capped retry deadline")
+	}
+}
+
+func quotaResultWithRetryAfter(authID, model string, retryAfter time.Duration) Result {
+	result := quotaResult(authID, model)
+	result.RetryAfter = &retryAfter
+	return result
+}
+
+func TestMarkResultCapsUpstreamRetryAfter(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "auth-capped-retry-after-model",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex"},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	huge := 7 * 24 * time.Hour
+	manager.MarkResult(context.Background(), quotaResultWithRetryAfter(auth.ID, "gpt-5", huge))
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil || updated.ModelStates["gpt-5"] == nil {
+		t.Fatalf("expected model state after failure")
+	}
+	state := updated.ModelStates["gpt-5"]
+	if state.Quota.NextRecoverAt.After(time.Now().Add(quotaBackoffMax)) {
+		t.Fatalf("expected cooldown capped at %v, got %v", time.Now().Add(quotaBackoffMax), state.Quota.NextRecoverAt)
+	}
+	if blocked, _, _ := isAuthBlockedForModel(updated, "gpt-5", state.Quota.NextRecoverAt.Add(time.Nanosecond)); blocked {
+		t.Fatal("auth did not auto-recover after capped retry deadline")
+	}
+}
