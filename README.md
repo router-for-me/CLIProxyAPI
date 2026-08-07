@@ -271,6 +271,10 @@ Native macOS SwiftUI dashboard for AI subscriptions and coding proxies. It manag
 
 Run multiple native-feeling Claude Code commands, each powered by a different model (Codex, GLM, Kimi, Gemini, Grok, MiniMax, DeepSeek, Cursor, Copilot, Claude). Every dialect launches the real Claude Code interface with its own isolated config, history, ports, and an embedded CLIProxyAPI instance linked through the Go SDK — no separate proxy install. macOS only. Learn more at [claude-dialects.cc](https://claude-dialects.cc/).
 
+### [CLIProxyAPI Codex Server Compaction](https://github.com/sumeirsoni/CLIProxyAPI-Codex-Server-Compaction)
+
+Maintained CLIProxyAPI fork adding opt-in OpenAI Codex server-side compaction for Claude Code sessions routed to compatible GPT/Codex models. It persists compatibility-scoped opaque artifacts for replay, fails open, and documents installation, security, maintenance, and rollback. OpenAI artifacts are not compatible with actual Anthropic Claude models.
+
 > [!NOTE]  
 > If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.
 

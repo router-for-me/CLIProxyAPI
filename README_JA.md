@@ -267,6 +267,10 @@ macOSネイティブのSwiftUI製AIサブスクリプションダッシュボー
 
 ネイティブ同様の操作感を持つ複数のClaude Codeコマンドを実行し、それぞれを異なるモデル（Codex、GLM、Kimi、Gemini、Grok、MiniMax、DeepSeek、Cursor、Copilot、Claude）で動作させます。各コマンドは、独立した設定、履歴、ポート、およびGo SDKで連携した組み込みCLIProxyAPIインスタンスを備えた本物のClaude Codeインターフェースを起動するため、プロキシを別途インストールする必要はありません。macOSのみ対応。詳細は[claude-dialects.cc](https://claude-dialects.cc/)をご覧ください。
 
+### [CLIProxyAPI Codex Server Compaction](https://github.com/sumeirsoni/CLIProxyAPI-Codex-Server-Compaction)
+
+継続的にメンテナンスされている CLIProxyAPI フォークで、互換性のある GPT/Codex モデルへルーティングされる Claude Code セッションに、オプトインの OpenAI Codex サーバーサイドコンパクションを追加します。互換性スコープごとに不透明なコンパクション成果物を永続化して再利用し、障害時は元のリクエストへフェイルオープンします。インストール、セキュリティ、保守、ロールバックの文書も含まれます。OpenAI の成果物は実際の Anthropic Claude モデルとは互換性がありません。
+
 > [!NOTE]
 > CLIProxyAPIをベースにプロジェクトを開発した場合は、PRを送ってこのリストに追加してください。
 
