@@ -884,3 +884,89 @@ func TestSplitResponsesQualifiedFunctionCallFromRequest_MatchesMergedToolIdentit
 		t.Fatalf("split(%q) name = %q, want %q", emitted, name, emitted)
 	}
 }
+
+func TestResponsesCustomToolNames_FollowsMergedDeclaration(t *testing.T) {
+	// Declarations delivered through the two channels may differ in type: a
+	// top-level function and an "additional_tools" custom tool can flatten to
+	// the same Chat Completions name. Only the winner may decide whether the
+	// tool is freeform, otherwise a plain function call comes back as a
+	// custom_tool_call with unwrapped arguments.
+	functionFirst := []byte(`{
+		"input": [
+			{"type":"additional_tools","tools":[{"type":"custom","name":"exec","description":"copy"}]}
+		],
+		"tools": [
+			{"type":"function","name":"exec","parameters":{"type":"object"}}
+		]
+	}`)
+	customFirst := []byte(`{
+		"input": [
+			{"type":"additional_tools","tools":[{"type":"function","name":"exec","parameters":{"type":"object"}}]}
+		],
+		"tools": [
+			{"type":"custom","name":"exec","description":"authoritative"}
+		]
+	}`)
+
+	tests := []struct {
+		name       string
+		raw        []byte
+		wantCustom bool
+	}{
+		{name: "function declaration wins", raw: functionFirst, wantCustom: false},
+		{name: "custom declaration wins", raw: customFirst, wantCustom: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			merged := mergeResponsesRequestChatTools(gjson.ParseBytes(tt.raw))
+			if len(merged) != 1 {
+				t.Fatalf("merged tool count = %d, want 1", len(merged))
+			}
+			// Freeform tools are the ones converted to the single-string shape.
+			mergedIsCustom := gjson.GetBytes(merged[0], "function.parameters.properties.input").Exists()
+			if mergedIsCustom != tt.wantCustom {
+				t.Fatalf("merged tool custom = %v, want %v", mergedIsCustom, tt.wantCustom)
+			}
+
+			if _, isCustom := responsesCustomToolNames(tt.raw)["exec"]; isCustom != tt.wantCustom {
+				t.Fatalf("responsesCustomToolNames classified exec as custom = %v, want %v", isCustom, tt.wantCustom)
+			}
+
+			name, ok := responsesSingleCustomToolName(tt.raw)
+			if ok != tt.wantCustom {
+				t.Fatalf("responsesSingleCustomToolName ok = %v, want %v", ok, tt.wantCustom)
+			}
+			if ok && name != "exec" {
+				t.Fatalf("responsesSingleCustomToolName name = %q, want exec", name)
+			}
+		})
+	}
+}
+
+func TestResponsesCustomToolNames_OnlyReportsMergedTools(t *testing.T) {
+	// Nested namespaces are not converted, so their children never reach the
+	// upstream request and must not be classified as freeform tools either.
+	raw := []byte(`{
+		"tools": [
+			{"type":"namespace","name":"outer","tools":[
+				{"type":"namespace","name":"inner","tools":[{"type":"custom","name":"buried"}]},
+				{"type":"custom","name":"reachable"}
+			]}
+		]
+	}`)
+
+	mergedNames := make(map[string]struct{})
+	for _, chatTool := range mergeResponsesRequestChatTools(gjson.ParseBytes(raw)) {
+		mergedNames[gjson.GetBytes(chatTool, "function.name").String()] = struct{}{}
+	}
+	if _, ok := mergedNames["outer__reachable"]; !ok {
+		t.Fatalf("merged tool names = %v, want outer__reachable", mergedNames)
+	}
+
+	for name := range responsesCustomToolNames(raw) {
+		if _, ok := mergedNames[name]; !ok {
+			t.Fatalf("responsesCustomToolNames reported %q, which the merge never emits", name)
+		}
+	}
+}
