@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -405,6 +406,71 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 				t.Fatalf("expected 2 calls with max-retry-credentials=0, got %d", calls)
 			}
 		})
+	}
+}
+
+func TestManager_Execute_RetryAfterCooldownFallsBackImmediately(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	const retryAfter = 124633 * time.Second
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-rate-limited-auth": &retryAfterStatusError{
+				status:     http.StatusTooManyRequests,
+				message:    "quota exhausted",
+				retryAfter: retryAfter,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-opus-5-retry-after"
+	rateLimitedAuth := &Auth{ID: "aa-rate-limited-auth", Provider: "claude"}
+	fallbackAuth := &Auth{ID: "bb-fallback-auth", Provider: "claude"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(rateLimitedAuth.ID, rateLimitedAuth.Provider, []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(fallbackAuth.ID, fallbackAuth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(rateLimitedAuth.ID)
+		reg.UnregisterClient(fallbackAuth.ID)
+	})
+	if _, errRegister := m.Register(t.Context(), rateLimitedAuth); errRegister != nil {
+		t.Fatalf("register rate-limited auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(t.Context(), fallbackAuth); errRegister != nil {
+		t.Fatalf("register fallback auth: %v", errRegister)
+	}
+
+	startedAt := time.Now()
+	resp, errExecute := m.Execute(t.Context(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	finishedAt := time.Now()
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v, want fallback success", errExecute)
+	}
+	if got := string(resp.Payload); got != fallbackAuth.ID {
+		t.Fatalf("Execute() payload = %q, want %q", got, fallbackAuth.ID)
+	}
+	if got, want := executor.ExecuteCalls(), []string{rateLimitedAuth.ID, fallbackAuth.ID}; !slices.Equal(got, want) {
+		t.Fatalf("Execute() auth calls = %v, want %v", got, want)
+	}
+
+	updated, ok := m.GetByID(rateLimitedAuth.ID)
+	if !ok || updated == nil {
+		t.Fatal("rate-limited auth is missing")
+	}
+	state := updated.ModelStates[model]
+	if state == nil || !state.Unavailable || !state.Quota.Exceeded {
+		t.Fatalf("rate-limited model state = %#v, want unavailable quota state", state)
+	}
+	if state.NextRetryAfter.Before(startedAt.Add(retryAfter)) || state.NextRetryAfter.After(finishedAt.Add(retryAfter)) {
+		t.Fatalf("NextRetryAfter = %v, want request time + %v", state.NextRetryAfter, retryAfter)
+	}
+	if !state.Quota.NextRecoverAt.Equal(state.NextRetryAfter) {
+		t.Fatalf("quota recovery = %v, want NextRetryAfter %v", state.Quota.NextRecoverAt, state.NextRetryAfter)
 	}
 }
 

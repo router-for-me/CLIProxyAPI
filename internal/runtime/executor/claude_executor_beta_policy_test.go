@@ -256,7 +256,7 @@ func TestClassifyClaudeUpstreamError_FastModeCreditsIsRequestScoped(t *testing.T
 		[]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Fast mode requires usage credits"}}`),
 	}
 	for _, body := range bodies {
-		err := classifyClaudeUpstreamError(http.StatusTooManyRequests, body)
+		err := classifyClaudeUpstreamError(http.StatusTooManyRequests, nil, body)
 
 		scoped, ok := err.(cliproxyexecutor.RequestScopedError)
 		if !ok || !scoped.IsRequestScoped() {
@@ -281,7 +281,7 @@ func TestClassifyClaudeUpstreamError_RealRateLimitStaysCredentialScoped(t *testi
 		[]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"This organization has exceeded its usage limit."}}`),
 	}
 	for _, body := range cases {
-		err := classifyClaudeUpstreamError(http.StatusTooManyRequests, body)
+		err := classifyClaudeUpstreamError(http.StatusTooManyRequests, nil, body)
 		if scoped, ok := err.(cliproxyexecutor.RequestScopedError); ok && scoped.IsRequestScoped() {
 			t.Fatalf("genuine rate limit was misclassified as request-scoped: %s", body)
 		}
@@ -292,7 +292,7 @@ func TestClassifyClaudeUpstreamError_OtherStatusesUnaffected(t *testing.T) {
 	body := []byte(`{"error":{"message":"Usage credits are required for fast mode."}}`)
 	// Only 429 carries the entitlement refusal; a 500 mentioning it is still a
 	// credential-scoped failure worth rotating away from.
-	err := classifyClaudeUpstreamError(http.StatusInternalServerError, body)
+	err := classifyClaudeUpstreamError(http.StatusInternalServerError, nil, body)
 	if scoped, ok := err.(cliproxyexecutor.RequestScopedError); ok && scoped.IsRequestScoped() {
 		t.Fatal("non-429 status was misclassified as request-scoped")
 	}
