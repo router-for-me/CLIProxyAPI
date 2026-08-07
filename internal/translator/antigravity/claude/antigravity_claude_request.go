@@ -801,10 +801,9 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			}
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
-				// Sanitize the input schema for Antigravity API compatibility
-				inputSchema := util.CleanJSONSchemaForAntigravity(inputSchemaResult.Raw)
+				// The executor owns Antigravity schema normalization after every translator converges.
 				tool, _ := sjson.DeleteBytes([]byte(toolResult.Raw), "input_schema")
-				tool, _ = sjson.SetRawBytes(tool, "parametersJsonSchema", []byte(inputSchema))
+				tool, _ = sjson.SetRawBytes(tool, "parametersJsonSchema", []byte(inputSchemaResult.Raw))
 				nameResult := gjson.GetBytes(tool, "name")
 				originalName := nameResult.String()
 				mappedName := util.MapSanitizedFunctionName(functionNameMap, originalName)

@@ -5,7 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/claude"
+	antigravitygemini "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/gemini"
 	antigravitychat "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/openai/chat-completions"
+	antigravityresponses "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 )
@@ -40,6 +43,188 @@ const sanitizeTestPayload = `{
     }]}]
   }
 }`
+
+func TestSanitizeAntigravityBooleanSubschemas(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "root true", in: "true", want: "{}"},
+		{name: "root false", in: "false", want: "false"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, errSanitize := sanitizeAntigravityBooleanSubschemas([]byte(testCase.in))
+			if errSanitize != nil {
+				t.Fatalf("sanitize error: %v", errSanitize)
+			}
+			if string(got) != testCase.want {
+				t.Fatalf("sanitize(%s) = %s, want %s", testCase.in, got, testCase.want)
+			}
+		})
+	}
+
+	input := []byte(`{
+		"properties":{"property":true},
+		"patternProperties":{"pattern":true},
+		"dependentSchemas":{"dependent":true},
+		"dependencies":{"schema":true,"propertyList":["a","b"]},
+		"$defs":{"modern":true},
+		"definitions":{"legacy":true},
+		"items":[true,{"properties":{"nested":true}}],
+		"additionalItems":true,
+		"prefixItems":[true],
+		"additionalProperties":false,
+		"contains":true,
+		"contentSchema":true,
+		"if":true,
+		"then":true,
+		"else":true,
+		"not":true,
+		"propertyNames":true,
+		"allOf":[true,false],
+		"anyOf":[true],
+		"oneOf":[true],
+		"unevaluatedItems":true,
+		"unevaluatedProperties":true,
+		"deprecated":true,
+		"readOnly":true,
+		"writeOnly":false,
+		"uniqueItems":true,
+		"enum":[9007199254740993],
+		"minimum":9007199254740993,
+		"maximum":9223372036854775807
+	}`)
+
+	got, errSanitize := sanitizeAntigravityBooleanSubschemas(input)
+	if errSanitize != nil {
+		t.Fatalf("sanitize error: %v", errSanitize)
+	}
+
+	for _, path := range []string{
+		"properties.property",
+		"patternProperties.pattern",
+		"dependentSchemas.dependent",
+		"dependencies.schema",
+		"$defs.modern",
+		"definitions.legacy",
+		"items.0",
+		"items.1.properties.nested",
+		"additionalItems",
+		"prefixItems.0",
+		"contains",
+		"contentSchema",
+		"if",
+		"then",
+		"else",
+		"not",
+		"propertyNames",
+		"allOf.0",
+		"unevaluatedItems",
+		"unevaluatedProperties",
+	} {
+		if node := gjson.GetBytes(got, path); node.Raw != "{}" {
+			t.Errorf("%s = %s, want {}", path, node.Raw)
+		}
+	}
+	for _, keyword := range []string{"anyOf", "oneOf"} {
+		if node := gjson.GetBytes(got, keyword); node.Exists() {
+			t.Errorf("tautological %s was not removed: %s", keyword, node.Raw)
+		}
+	}
+	if node := gjson.GetBytes(got, "allOf.1"); node.Raw != "false" {
+		t.Errorf("false schema = %s, want false", node.Raw)
+	}
+	if node := gjson.GetBytes(got, "additionalProperties"); node.Raw != "false" {
+		t.Errorf("additionalProperties = %s, want false", node.Raw)
+	}
+	if node := gjson.GetBytes(got, "dependencies.propertyList"); node.Raw != `["a","b"]` {
+		t.Errorf("property dependency = %s, want unchanged array", node.Raw)
+	}
+	for _, path := range []string{"deprecated", "readOnly", "writeOnly", "uniqueItems"} {
+		if before, after := gjson.GetBytes(input, path).Raw, gjson.GetBytes(got, path).Raw; after != before {
+			t.Errorf("%s = %s, want unchanged %s", path, after, before)
+		}
+	}
+	for _, path := range []string{"enum.0", "minimum"} {
+		if node := gjson.GetBytes(got, path); node.Raw != "9007199254740993" {
+			t.Errorf("%s = %s, want exact large integer", path, node.Raw)
+		}
+	}
+	if node := gjson.GetBytes(got, "maximum"); node.Raw != "9223372036854775807" {
+		t.Errorf("maximum = %s, want exact int64 maximum", node.Raw)
+	}
+}
+
+func TestAntigravityBuildRequestSanitizesBooleanSubschemasFromEveryTranslator(t *testing.T) {
+	const modelName = "gemini-2.5-pro"
+	const schema = `{"type":"object","additionalProperties":false,"properties":{"screenshot_id":true,"denied":{"allOf":[false]},"union":{"anyOf":[{"type":"object","additionalProperties":false}]}}}`
+
+	tests := []struct {
+		name      string
+		translate func() []byte
+	}{
+		{
+			name: "OpenAI Chat Completions",
+			translate: func() []byte {
+				input := []byte(`{"model":"` + modelName + `","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"capture","parameters":` + schema + `}}]}`)
+				return antigravitychat.ConvertOpenAIRequestToAntigravity(modelName, input, false)
+			},
+		},
+		{
+			name: "OpenAI Responses",
+			translate: func() []byte {
+				input := []byte(`{"model":"` + modelName + `","input":"hi","tools":[{"type":"function","name":"capture","parameters":` + schema + `}]}`)
+				return antigravityresponses.ConvertOpenAIResponsesRequestToAntigravity(modelName, input, false)
+			},
+		},
+		{
+			name: "Gemini",
+			translate: func() []byte {
+				input := []byte(`{"model":"` + modelName + `","contents":[{"role":"user","parts":[{"text":"hi"}]}],"tools":[{"functionDeclarations":[{"name":"capture","parametersJsonSchema":` + schema + `}]}]}`)
+				return antigravitygemini.ConvertGeminiRequestToAntigravity(modelName, input, false)
+			},
+		},
+		{
+			name: "Claude",
+			translate: func() []byte {
+				input := []byte(`{"model":"` + modelName + `","max_tokens":128,"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"capture","input_schema":` + schema + `}]}`)
+				return antigravityclaude.ConvertClaudeRequestToAntigravity(modelName, input, false)
+			},
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			body := buildRequestBodyFromRawPayload(t, modelName, testCase.translate())
+			encoded, errMarshal := json.Marshal(body)
+			if errMarshal != nil {
+				t.Fatal(errMarshal)
+			}
+
+			declaration := gjson.GetBytes(encoded, "request.tools.0.functionDeclarations.0")
+			if !declaration.Exists() {
+				t.Fatalf("function declaration missing: %s", encoded)
+			}
+			if declaration.Get("parametersJsonSchema").Exists() {
+				t.Fatalf("parametersJsonSchema was not renamed: %s", declaration.Raw)
+			}
+			parameters := declaration.Get("parameters")
+			if node := parameters.Get("properties.screenshot_id"); node.Raw != "{}" {
+				t.Errorf("true subschema = %s, want {}", node.Raw)
+			}
+			if node := parameters.Get("additionalProperties"); node.Raw != "false" {
+				t.Errorf("additionalProperties = %s, want false", node.Raw)
+			}
+			if node := parameters.Get("properties.union.additionalProperties"); node.Raw != "false" {
+				t.Errorf("union additionalProperties = %s, want false", node.Raw)
+			}
+			if node := parameters.Get("properties.denied"); node.Raw != "false" {
+				t.Errorf("false subschema = %s, want false", node.Raw)
+			}
+		})
+	}
+}
 
 // TestSanitizeAntigravityRequestSchemasPreservesHistory guards against the schema cleaner being
 // applied to the whole payload, which silently stripped keys such as "title" from functionCall
@@ -146,7 +331,7 @@ func TestSanitizeAntigravityRequestSchemasCleansResultSchemas(t *testing.T) {
 // added here too; this test only fails once the key is listed below, so treat the pairing as
 // something to check whenever that list changes.
 func TestAntigravitySchemaPathsCoverEverySchemaLocation(t *testing.T) {
-	const schema = `{"type":"object","$id":"drop","properties":{"a":{"type":"string"}}}`
+	const schema = `{"type":"object","$id":"drop","additionalProperties":false,"properties":{"a":true}}`
 
 	// Both spellings of the declarations container are exercised: the Gemini translator forwards
 	// snake_case untouched, so covering only camelCase leaves those requests uncleaned.
@@ -182,6 +367,12 @@ func TestAntigravitySchemaPathsCoverEverySchemaLocation(t *testing.T) {
 					if node.Get(`\$id`).Exists() {
 						t.Errorf("%s was never cleaned, $id reaches upstream: %s", path, node.Raw)
 					}
+					if child := node.Get("properties.a"); child.Raw != "{}" {
+						t.Errorf("%s true subschema = %s, want {}", path, child.Raw)
+					}
+					if child := node.Get("additionalProperties"); child.Raw != "false" {
+						t.Errorf("%s additionalProperties = %s, want false", path, child.Raw)
+					}
 				}
 				base := "request.tools.0." + declContainer + ".0."
 				for _, k := range antigravityDeclarationSchemaKeys {
@@ -191,6 +382,7 @@ func TestAntigravitySchemaPathsCoverEverySchemaLocation(t *testing.T) {
 						if gjson.Get(got, base+k).Exists() {
 							t.Errorf("%s should have been renamed onto parameters: %s", k, got)
 						}
+						check(base + "parameters")
 						continue
 					}
 					check(base + k)
@@ -203,11 +395,10 @@ func TestAntigravitySchemaPathsCoverEverySchemaLocation(t *testing.T) {
 	}
 }
 
-// TestSanitizeAntigravityRequestSchemasMatchesWholePayloadCleaning pins the emitted schema to what
-// whole-payload cleaning produced. Narrowing the scope must change which nodes are cleaned, never
-// the result for a schema node — in particular the Claude VALIDATED placeholder, which the cleaner
-// only adds when the schema is not top-level.
-func TestSanitizeAntigravityRequestSchemasMatchesWholePayloadCleaning(t *testing.T) {
+// TestSanitizeAntigravityRequestSchemasMatchesToolSchemaCleaning pins the emitted schema to the
+// dedicated Antigravity cleaner. The synthetic nesting preserves the placeholder behavior required
+// by Claude VALIDATED mode without ever handing a whole request to a schema-only cleaner.
+func TestSanitizeAntigravityRequestSchemasMatchesToolSchemaCleaning(t *testing.T) {
 	shapes := map[string]string{
 		"optionalOnly": `{"type":"object","properties":{"flag":{"type":"string"}}}`,
 		"emptyProps":   `{"type":"object","properties":{}}`,
@@ -222,14 +413,12 @@ func TestSanitizeAntigravityRequestSchemasMatchesWholePayloadCleaning(t *testing
 	for _, useAntigravitySchema := range []bool{false, true} {
 		for name, schema := range shapes {
 			doc := `{"request":{"tools":[{"functionDeclarations":[{"name":"t","parameters":` + schema + `}]}]}}`
-			whole := util.CleanJSONSchemaForGemini(doc)
-			if useAntigravitySchema {
-				whole = util.CleanJSONSchemaForAntigravity(doc)
-			}
-			want := gjson.Get(whole, schemaPath).Raw
+			want := cleanNestedSchema(func(schema string) string {
+				return util.CleanJSONSchemaForAntigravityTool(schema, useAntigravitySchema)
+			}, schema)
 			got := gjson.Get(sanitizeAntigravityRequestSchemas(doc, useAntigravitySchema), schemaPath).Raw
 			if want != got {
-				t.Errorf("%s (antigravity=%v) diverged from whole-payload cleaning.\nwant: %s\ngot:  %s",
+				t.Errorf("%s (antigravity=%v) diverged from tool-schema cleaning.\nwant: %s\ngot:  %s",
 					name, useAntigravitySchema, want, got)
 			}
 		}
@@ -240,6 +429,46 @@ func TestSanitizeAntigravityRequestSchemasMatchesWholePayloadCleaning(t *testing
 	got := gjson.Get(sanitizeAntigravityRequestSchemas(doc, true), schemaPath)
 	if req := got.Get("required").Array(); len(req) != 1 || req[0].String() != "_" {
 		t.Errorf("Claude VALIDATED placeholder missing for an optional-only schema: %s", got.Raw)
+	}
+}
+
+func TestSanitizeAntigravityRequestSchemasPreservesUnionSemantics(t *testing.T) {
+	tests := []struct {
+		name  string
+		union string
+		want  string
+	}{
+		{name: "anyOf_false_true", union: `"anyOf":[false,true]`, want: `{}`},
+		{name: "anyOf_true_false", union: `"anyOf":[true,false]`, want: `{}`},
+		{name: "oneOf_false_true", union: `"oneOf":[false,true]`, want: `{}`},
+		{name: "oneOf_true_false", union: `"oneOf":[true,false]`, want: `{}`},
+		{name: "anyOf_all_false", union: `"anyOf":[false,false]`, want: `false`},
+		{name: "oneOf_all_false", union: `"oneOf":[false,false]`, want: `false`},
+		{name: "anyOf_mixed_true", union: `"anyOf":[false,true,{"type":"string"}]`, want: `{}`},
+		{name: "anyOf_mixed_schema", union: `"anyOf":[false,{"type":"string"},false]`, want: `{"type":"string"}`},
+		{name: "oneOf_single_true_mixed", union: `"oneOf":[false,true,false]`, want: `{}`},
+		{name: "oneOf_multiple_true", union: `"oneOf":[true,true]`, want: `false`},
+		{name: "oneOf_multiple_true_mixed", union: `"oneOf":[true,false,true]`, want: `false`},
+		{name: "anyOf_preserves_sibling", union: `"type":"string","anyOf":[false,true]`, want: `{"type":"string"}`},
+		{name: "oneOf_preserves_sibling", union: `"type":"string","oneOf":[false,true]`, want: `{"type":"string"}`},
+		{name: "oneOf_true_schema", union: `"oneOf":[true,{"type":"string"}]`, want: `{"not":{"type":"string"}}`},
+		{name: "oneOf_schema_true", union: `"oneOf":[{"type":"string"},true]`, want: `{"not":{"type":"string"}}`},
+		{name: "oneOf_true_schema_with_false", union: `"oneOf":[true,false,{"type":"string"}]`, want: `{"not":{"type":"string"}}`},
+		{name: "oneOf_complement_preserves_sibling", union: `"type":"number","oneOf":[true,{"type":"string"}]`, want: `{"not":{"type":"string"},"type":"number"}`},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			doc := `{"request":{"tools":[{"functionDeclarations":[{"name":"t","parameters":` +
+				`{"type":"object","properties":{"choice":{` + testCase.union + `}}}}]}]}}`
+			got := gjson.Get(
+				sanitizeAntigravityRequestSchemas(doc, false),
+				"request.tools.0.functionDeclarations.0.parameters.properties.choice",
+			).Raw
+			if got != testCase.want {
+				t.Fatalf("union result = %s, want %s", got, testCase.want)
+			}
+		})
 	}
 }
 

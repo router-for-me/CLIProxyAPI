@@ -3366,12 +3366,10 @@ func TestConvertClaudeRequestToAntigravity_ToolAndThinking_NoExistingSystem(t *t
 	}
 }
 
-// TestConvertClaudeRequestToAntigravityStripsPropertyNames covers the reported ingress route: a
-// Claude Messages request carrying MCP-style tool schemas. The private Gemini backend rejects the
-// standard JSON Schema keyword "propertyNames" with an unknown-field 400 before inference, so it
-// must not survive translation. Both reported nestings are exercised, including the one where the
-// keyword sits inside a property that is itself named "properties".
-func TestConvertClaudeRequestToAntigravityStripsPropertyNames(t *testing.T) {
+// TestConvertClaudeRequestToAntigravityPreservesSchemaForExecutor verifies that translation only
+// renames the Claude schema field. The executor owns Antigravity compatibility cleaning after every
+// source translator converges, so removing propertyNames here would bypass that single boundary.
+func TestConvertClaudeRequestToAntigravityPreservesSchemaForExecutor(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "claude-sonnet-4-5",
 		"messages": [{"role": "user", "content": "hi"}],
@@ -3410,8 +3408,8 @@ func TestConvertClaudeRequestToAntigravityStripsPropertyNames(t *testing.T) {
 	if !decls.IsArray() || len(decls.Array()) != 2 {
 		t.Fatalf("expected two function declarations, got: %s", decls.Raw)
 	}
-	if strings.Contains(decls.Raw, `"propertyNames"`) {
-		t.Errorf("propertyNames survived translation: %s", decls.Raw)
+	if !strings.Contains(decls.Raw, `"propertyNames"`) {
+		t.Errorf("propertyNames was cleaned before the executor boundary: %s", decls.Raw)
 	}
 	// The declarations must still be usable, not emptied out by the cleaning.
 	if !decls.Get("0.parametersJsonSchema.properties.records.items.properties.name").Exists() {

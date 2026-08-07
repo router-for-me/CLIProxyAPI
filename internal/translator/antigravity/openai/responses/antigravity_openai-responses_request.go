@@ -13,7 +13,7 @@ import (
 
 func ConvertOpenAIResponsesRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
-	rawJSON = ConvertOpenAIResponsesRequestToGemini(modelName, rawJSON, stream)
+	rawJSON = ConvertOpenAIResponsesRequestToGeminiWithSchemaCleaner(modelName, rawJSON, stream, func(schema string) string { return schema })
 	rawJSON = rewriteOpenAIResponsesReasoningForAntigravityClaude(modelName, inputRawJSON, rawJSON)
 	return ConvertGeminiRequestToAntigravity(modelName, rawJSON, stream)
 }
