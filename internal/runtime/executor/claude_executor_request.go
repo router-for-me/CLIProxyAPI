@@ -349,23 +349,25 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	return betas, body
 }
 
-// disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
-// Anthropic API does not allow thinking when tool_choice is set to "any" or a specific tool.
-// See: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations
-func disableThinkingIfToolChoiceForced(body []byte) []byte {
+// normalizeClaudeToolChoiceForThinking follows Claude Code's tool-choice policy
+// when cloaking constructs that fingerprint. Manual thinking is handled for all
+// callers because Anthropic only accepts auto/none in that mode.
+func normalizeClaudeToolChoiceForThinking(body []byte, claudeCodeFingerprint bool) []byte {
 	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
-	// "auto" is allowed with thinking, but "any" or "tool" (specific tool) are not
-	if toolChoiceType == "any" || toolChoiceType == "tool" {
-		// Remove thinking configuration entirely to avoid API error
-		body, _ = sjson.DeleteBytes(body, "thinking")
-		// Adaptive thinking may also set output_config.effort; remove it to avoid
-		// leaking thinking controls when tool_choice forces tool use.
-		body, _ = sjson.DeleteBytes(body, "output_config.effort")
-		if oc := gjson.GetBytes(body, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
-			body, _ = sjson.DeleteBytes(body, "output_config")
-		}
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	manualThinking := thinkingType == "enabled"
+	forcedTool := toolChoiceType == "tool" || toolChoiceType == "any"
+	manualThinkingWithForcedTool := manualThinking && forcedTool
+	fingerprintedNamedTool := claudeCodeFingerprint && toolChoiceType == "tool" && thinkingType != "disabled"
+	if !manualThinkingWithForcedTool && !fingerprintedNamedTool {
+		return body
 	}
-	return body
+
+	updated, err := sjson.SetRawBytes(body, "tool_choice", []byte(`{"type":"auto"}`))
+	if err != nil {
+		return body
+	}
+	return updated
 }
 
 // normalizeClaudeSamplingForUpstream keeps Anthropic message requests valid.
