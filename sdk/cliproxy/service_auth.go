@@ -292,19 +292,6 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 		}
 		op = "update"
 		_, err = s.coreManager.Update(ctx, auth)
-		// Conservative invalidation, success-gated: an in-place upsert of
-		// an existing auth.ID could be a credential rotation (same ID, new
-		// underlying account/token), so clear the Anthropic rate-limit
-		// hint to prevent /management/auth-files from surfacing the
-		// pre-update credential's quota state. Only on success — a failed
-		// Update leaves the previous auth active in coreManager, and
-		// dropping its hint would lose still-valid observability state
-		// until the next Claude response repopulates. The next response
-		// after a successful update repopulates within seconds. No-op
-		// for IDs without a stored hint.
-		if err == nil {
-			coreauth.DeleteAnthropicRateLimitHint(auth.ID)
-		}
 	} else {
 		_, err = s.coreManager.Register(ctx, auth)
 	}
@@ -357,12 +344,6 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 		provider = strings.TrimSpace(existing.Provider)
 	}
 	GlobalModelRegistry().UnregisterClient(id)
-	// Scrub the Anthropic rate-limit hint so a recreated auth with the same
-	// ID can't surface stale quota state via the management API. Provider-
-	// agnostic call: hint store lookup is keyed by authID and a no-op for
-	// IDs without a stored hint, so this is safe regardless of the removed
-	// auth's provider.
-	coreauth.DeleteAnthropicRateLimitHint(id)
 	s.coreManager.Remove(ctx, id)
 	if strings.EqualFold(provider, "codex") {
 		executor.CloseCodexWebsocketSessionsForAuthID(id, "auth_removed")

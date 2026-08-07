@@ -9,99 +9,91 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
-// seedAnthropicHint stores a hint for authID and registers cleanup. The hint
-// store is package-global, so every test here uses a distinct auth ID.
-func seedAnthropicHint(t *testing.T, authID string) {
+// These cover the hint through the Service entry point a config-file credential
+// swap actually takes — the watcher raises Modify and
+// Service.applyCoreAuthAddOrUpdate upserts through coreManager.Update. The
+// Manager-level tests drive Update directly with hand-built structs, so without
+// these nothing exercises the production path.
+//
+// Invalidation lives on the Manager now, so what is asserted here is the
+// behaviour that path must produce, not the presence of a Service-level hook.
+
+func seedHint(t *testing.T, authID, email string) {
 	t.Helper()
 	coreauth.DeleteAnthropicRateLimitHint(authID)
 	t.Cleanup(func() {
 		coreauth.DeleteAnthropicRateLimitHint(authID)
 		GlobalModelRegistry().UnregisterClient(authID)
 	})
+	fp := coreauth.AnthropicAccountFingerprint(claudeAuth(authID, email))
 	coreauth.SetAnthropicRateLimitHint(authID, coreauth.AnthropicRateLimitHint{
-		Known:      true,
-		Status:     "allowed",
-		ObservedAt: time.Date(2026, time.March, 1, 8, 0, 0, 0, time.UTC),
+		Known:              true,
+		Status:             "allowed",
+		ObservedAt:         time.Unix(1777500000, 0).UTC(),
+		AccountFingerprint: fp,
 	})
-	if _, ok := coreauth.GetAnthropicRateLimitHint(authID); !ok {
-		t.Fatalf("seed failed: no hint stored for %q", authID)
+}
+
+func claudeAuth(authID, email string) *coreauth.Auth {
+	return &coreauth.Auth{
+		ID:       authID,
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": email},
 	}
 }
 
-// TestApplyCoreAuthAddOrUpdate_ScrubsHintOnSuccessfulUpdate covers the
-// success-gated scrub. An in-place upsert of an existing auth ID can be a
-// credential rotation (same ID, new underlying account), so the hint must not
-// survive it and report the previous credential's quota.
-func TestApplyCoreAuthAddOrUpdate_ScrubsHintOnSuccessfulUpdate(t *testing.T) {
+// A token refresh rewrites the auth file with the same account; the quota state
+// must survive it. Scrubbing on update was the original defect here.
+func TestServiceUpsert_TokenRefreshKeepsHint(t *testing.T) {
 	service := &Service{cfg: &config.Config{}, coreManager: coreauth.NewManager(nil, nil, nil)}
-	const authID = "hint-scrub-on-update"
+	const authID = "svc-refresh@example.com"
 	ctx := context.Background()
 
-	// Register first: the scrub is on the update branch, not the register one.
-	service.applyCoreAuthAddOrUpdate(ctx, &coreauth.Auth{
-		ID: authID, Provider: "claude", Status: coreauth.StatusActive,
-	})
-	if _, ok := service.coreManager.GetByID(authID); !ok {
-		t.Fatalf("expected auth %q to be registered", authID)
+	service.applyCoreAuthAddOrUpdate(ctx, claudeAuth(authID, "same@example.com"))
+	seedHint(t, authID, "same@example.com")
+
+	// Same account, new token — the routine refresh shape.
+	refreshed := claudeAuth(authID, "same@example.com")
+	refreshed.Metadata["access_token"] = "rotated-token"
+	service.applyCoreAuthAddOrUpdate(ctx, refreshed)
+
+	// Read back what the manager actually stored, not a hand-built Auth —
+	// otherwise the assertion holds even if the upsert did nothing.
+	stored, ok := service.coreManager.GetByID(authID)
+	if !ok || stored == nil {
+		t.Fatal("auth missing from the manager after update")
 	}
-
-	seedAnthropicHint(t, authID)
-
-	// Second upsert takes the update branch.
-	service.applyCoreAuthAddOrUpdate(ctx, &coreauth.Auth{
-		ID: authID, Provider: "claude", Status: coreauth.StatusActive,
-	})
-
-	if _, ok := coreauth.GetAnthropicRateLimitHint(authID); ok {
-		t.Error("hint survived a successful in-place update; a rotated credential's quota would still be served")
+	if got := stored.Metadata["access_token"]; got != "rotated-token" {
+		t.Fatalf("update did not reach the manager: access_token = %v", got)
+	}
+	if _, ok := coreauth.AnthropicRateLimitHintFor(stored); !ok {
+		t.Error("hint was lost across a same-account update; an ordinary token refresh must not drop quota state")
 	}
 }
 
-// TestApplyCoreAuthAddOrUpdate_KeepsHintWhenRegisteringNewAuth guards the
-// other side of the branch: registering an auth that is not already present
-// is not a rotation, so an unrelated seeded hint must not be disturbed.
-func TestApplyCoreAuthAddOrUpdate_KeepsHintWhenRegisteringNewAuth(t *testing.T) {
+// The same entry point with a different account behind the ID must not serve
+// the previous account's quota.
+func TestServiceUpsert_RotationToNewAccountIsRejectedOnRead(t *testing.T) {
 	service := &Service{cfg: &config.Config{}, coreManager: coreauth.NewManager(nil, nil, nil)}
-	const authID = "hint-kept-on-register"
-	seedAnthropicHint(t, authID)
+	const authID = "svc-rotation@example.com"
+	ctx := context.Background()
 
-	service.applyCoreAuthAddOrUpdate(context.Background(), &coreauth.Auth{
-		ID: authID, Provider: "claude", Status: coreauth.StatusActive,
-	})
+	service.applyCoreAuthAddOrUpdate(ctx, claudeAuth(authID, "old@example.com"))
+	seedHint(t, authID, "old@example.com")
 
-	if _, ok := coreauth.GetAnthropicRateLimitHint(authID); !ok {
-		t.Error("hint was scrubbed on the register branch; only a successful in-place update should scrub")
+	service.applyCoreAuthAddOrUpdate(ctx, claudeAuth(authID, "new@example.com"))
+
+	// Read back the manager's Auth so the rejection is proven against the
+	// credential the upsert actually installed.
+	stored, ok := service.coreManager.GetByID(authID)
+	if !ok || stored == nil {
+		t.Fatal("auth missing from the manager after update")
 	}
-}
-
-// TestApplyCoreAuthRemoval_ScrubsHint covers the removal hook. The scrub is
-// deliberately provider-agnostic — the store is keyed by auth ID and the call
-// is a no-op for IDs without a hint.
-func TestApplyCoreAuthRemoval_ScrubsHint(t *testing.T) {
-	for _, provider := range []string{"claude", "gemini"} {
-		t.Run(provider, func(t *testing.T) {
-			service := &Service{cfg: &config.Config{}, coreManager: coreauth.NewManager(nil, nil, nil)}
-			authID := "hint-scrub-on-removal-" + provider
-			ctx := context.Background()
-
-			service.applyCoreAuthAddOrUpdate(ctx, &coreauth.Auth{
-				ID: authID, Provider: provider, Status: coreauth.StatusActive,
-			})
-			seedAnthropicHint(t, authID)
-
-			service.applyCoreAuthRemoval(ctx, authID)
-
-			if _, ok := coreauth.GetAnthropicRateLimitHint(authID); ok {
-				t.Error("hint survived auth removal; a recreated auth with the same ID would inherit it")
-			}
-		})
+	if got := stored.Metadata["email"]; got != "new@example.com" {
+		t.Fatalf("rotation did not reach the manager: email = %v", got)
 	}
-}
-
-// TestApplyCoreAuthRemoval_ScrubIsNoOpForUnknownID pins that the scrub
-// tolerates IDs it has never seen, which is the common case for non-Claude
-// providers flowing through the same removal path.
-func TestApplyCoreAuthRemoval_ScrubIsNoOpForUnknownID(t *testing.T) {
-	service := &Service{cfg: &config.Config{}, coreManager: coreauth.NewManager(nil, nil, nil)}
-	service.applyCoreAuthRemoval(context.Background(), "hint-never-seen")
+	if _, ok := coreauth.AnthropicRateLimitHintFor(stored); ok {
+		t.Error("the previous account's quota is served under the rotated credential")
+	}
 }

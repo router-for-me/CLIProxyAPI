@@ -72,16 +72,25 @@ const (
 // reported in NousResearch/hermes-agent#17169), the hint store is left
 // untouched — any prior hint stays put rather than being overwritten with
 // empty state.
-func RecordAnthropicRateLimit(authID string, headers http.Header, now time.Time) {
-	authID = strings.TrimSpace(authID)
-	if authID == "" || headers == nil {
+//
+// Takes the auth rather than a bare ID so the capture can be tagged with the
+// account fingerprint it came from; readers use that to reject a capture that
+// belongs to a credential since rotated out from under this ID. A nil auth or
+// an auth with a blank ID is a no-op.
+func RecordAnthropicRateLimit(auth *cliproxyauth.Auth, headers http.Header, now time.Time) {
+	if auth == nil || headers == nil {
+		return
+	}
+	authID := strings.TrimSpace(auth.ID)
+	if authID == "" {
 		return
 	}
 
 	raw := make(map[string]string)
 	windows := make(map[string]cliproxyauth.AnthropicQuotaWindow)
 	hint := cliproxyauth.AnthropicRateLimitHint{
-		ObservedAt: now,
+		ObservedAt:         now,
+		AccountFingerprint: cliproxyauth.AnthropicAccountFingerprint(auth),
 	}
 
 	for canonicalName, values := range headers {
@@ -142,7 +151,10 @@ func recordAnthropicRateLimitField(
 		hint.Reset = parseAnthropicEpochSeconds(value)
 		return
 	case "fallback-percentage":
-		hint.FallbackPercentage = parseAnthropicFloat(value)
+		if f, ok := parseAnthropicFloat(value); ok {
+			hint.FallbackPercentage = f
+			hint.HasFallbackPercentage = true
+		}
 		return
 	case "overage-status":
 		hint.OverageStatus = value
@@ -183,17 +195,20 @@ func recordAnthropicRateLimitField(
 		case "-reset":
 			window.Reset = parseAnthropicEpochSeconds(value)
 		case "-utilization":
-			window.Utilization = parseAnthropicFloat(value)
-			// Tag presence so the serializer can omit the field when the
-			// upstream response had no utilization signal at all (vs. an
-			// explicit 0.0 reading). Stays true even when parseAnthropicFloat
-			// falls back to 0 on a malformed value: the operator-visible
-			// signal is still "Anthropic shipped this header", and 0 is the
-			// safest fallback consistent with how status/reset behave on
-			// malformed input.
-			window.HasUtilization = true
+			// Tag presence so a consumer can tell an explicit 0.0 reading from
+			// no utilization signal at all. Set only when the value actually
+			// parses: a malformed header would otherwise be published as a
+			// healthy 0.0, which is the reading an operator is least able to
+			// question. Malformed values stay visible in RawHeaders.
+			if f, ok := parseAnthropicFloat(value); ok {
+				window.Utilization = f
+				window.HasUtilization = true
+			}
 		case "-surpassed-threshold":
-			window.SurpassedThreshold = parseAnthropicFloat(value)
+			if f, ok := parseAnthropicFloat(value); ok {
+				window.SurpassedThreshold = f
+				window.HasSurpassedThreshold = true
+			}
 		}
 		windows[slug] = window
 		return
@@ -233,17 +248,17 @@ func parseAnthropicEpochSeconds(s string) time.Time {
 // breaks downstream JSON serialization and any consumer arithmetic. Callers
 // should not special-case 0 as "missing"; use the parent struct's presence
 // to disambiguate.
-func parseAnthropicFloat(s string) float64 {
+func parseAnthropicFloat(s string) (float64, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return 0
+		return 0, false
 	}
 	f, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		return 0
+		return 0, false
 	}
 	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return 0
+		return 0, false
 	}
-	return f
+	return f, true
 }
