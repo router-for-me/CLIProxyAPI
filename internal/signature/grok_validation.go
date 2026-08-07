@@ -11,12 +11,15 @@ import (
 const (
 	// MaxGrokEncryptedContentLen is a transport safety cap for opaque replay blobs.
 	MaxGrokEncryptedContentLen = 8 * 1024 * 1024
-	// MinGrokEncryptedContentDecodedLen is a deliberately loose floor. The
-	// shortest observed native payload is exactly 50 bytes (grok-composer-2.5-fast),
-	// and those samples share no structure, so 50 is a sampling artifact rather
-	// than a protocol minimum. Sitting on the observed floor would silently reject
-	// a future shorter payload and surface as lost reasoning context, so keep
-	// headroom here and let the entropy check do the real filtering.
+	// MinGrokEncryptedContentDecodedLen is a deliberately loose floor, and the
+	// headroom has already proven necessary. An earlier corpus of 207 samples put
+	// the shortest native payload at exactly 50 bytes, with several samples piled
+	// on that value, which read like a protocol floor; a later 215-sample capture
+	// from grok-4.5 and grok-composer-2.5-fast reached 43 and 48 bytes and moved
+	// it. Both corpora agree there is no structure to anchor on, so the observed
+	// minimum is a sampling artifact that keeps sliding, and sitting on it would
+	// silently reject a future shorter payload as lost reasoning context. Keep the
+	// floor low and let the entropy check do the real filtering.
 	MinGrokEncryptedContentDecodedLen = 32
 	// MinGrokEncryptedContentEntropyRatio rejects obvious non-ciphertext payloads.
 	// Native samples are >= 0.892 against the sample-size entropy ceiling.

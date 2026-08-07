@@ -13,6 +13,13 @@ const (
 	// SignatureProviderKimi is identified by fixed signature size rather than by
 	// an envelope. See kimi_validation.go for the empirical basis and its limits.
 	SignatureProviderKimi SignatureProvider = "kimi"
+	// SignatureProviderGrok is a target-only family. DetectSignatureProvider never
+	// returns it: xAI emits no envelope, no version byte and no fixed length, and
+	// its ciphertext is statistically indistinguishable from uniform random bytes,
+	// so any positive claim would also capture every other opaque blob. Grok
+	// handling is provenance-first - establish the target from the model or route,
+	// then use InspectGrokEncryptedContent as a replay-safety shape check.
+	SignatureProviderGrok SignatureProvider = "grok"
 )
 
 type SignatureBlockKind string
@@ -67,6 +74,8 @@ func SignatureProviderFromModelName(modelName string) SignatureProvider {
 		strings.HasPrefix(lower, "k2"),
 		strings.HasPrefix(lower, "k3"):
 		return SignatureProviderKimi
+	case strings.Contains(lower, "grok"):
+		return SignatureProviderGrok
 	default:
 		return SignatureProviderUnknown
 	}
@@ -283,6 +292,12 @@ func DecideSignatureCompatibilityForModel(targetProvider SignatureProvider, targ
 		// thinking text for no upstream benefit, so drop only the signature.
 		decision.Action = SignatureActionDropSignature
 		decision.Reason = "Kimi does not validate replayed thinking signatures, so the block survives without one"
+	case SignatureProviderGrok:
+		// xAI decrypts encrypted_content and rejects the request with 400
+		// "Could not decrypt" when the blob is foreign or mutated, so a
+		// non-matching value has to leave with the block.
+		decision.Action = SignatureActionDropBlock
+		decision.Reason = "xAI verifies encrypted_content on replay and rejects foreign or mutated blobs"
 	default:
 		decision.Action = SignatureActionNoCompatibleReplacement
 		decision.Reason = "unknown target provider"
@@ -404,6 +419,9 @@ func signatureProviderMatchesTarget(target, detected SignatureProvider) bool {
 	case SignatureProviderKimi:
 		return detected == SignatureProviderKimi
 	default:
+		// SignatureProviderGrok is deliberately absent. Detection never yields it,
+		// so a Grok target must decide replay safety from provenance plus
+		// InspectGrokEncryptedContent rather than from a detected-provider match.
 		return false
 	}
 }
