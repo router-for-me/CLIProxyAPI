@@ -598,6 +598,43 @@ func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testin
 	}
 }
 
+func TestIsAuthBlockedForModel_ThinkingSuffixStatesBlockCanonicalModel(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	laterRetry := now.Add(2 * time.Hour)
+	auth := &Auth{
+		ID: "a",
+		ModelStates: map[string]*ModelState{
+			"test-model(high)": {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(time.Hour),
+				Quota: QuotaState{
+					Exceeded:      true,
+					NextRecoverAt: now.Add(time.Hour),
+				},
+			},
+			"test-model(low)": {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: laterRetry,
+				Quota: QuotaState{
+					Exceeded:      true,
+					NextRecoverAt: laterRetry,
+				},
+			},
+		},
+	}
+
+	for _, model := range []string{"test-model", "test-model(medium)", "test-model(low)"} {
+		blocked, reason, next := isAuthBlockedForModel(auth, model, now)
+		if !blocked || reason != blockReasonCooldown || !next.Equal(laterRetry) {
+			t.Fatalf("isAuthBlockedForModel(%q) = %v, %v, %v; want true, cooldown, %v", model, blocked, reason, next, laterRetry)
+		}
+	}
+}
+
 func TestRoundRobinSelectorPick_ThinkingSuffixSharesCursor(t *testing.T) {
 	t.Parallel()
 

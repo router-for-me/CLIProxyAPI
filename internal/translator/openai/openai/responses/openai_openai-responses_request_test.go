@@ -581,6 +581,74 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesParallelT
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesJSONSchemaTextFormat(t *testing.T) {
+	raw := []byte(`{
+		"text": {
+			"format": {
+				"type": "json_schema",
+				"name": "answer",
+				"description": "Structured answer",
+				"strict": true,
+				"schema": {
+					"type": "object",
+					"properties": {
+						"ok": {"type": "boolean"}
+					},
+					"required": ["ok"],
+					"additionalProperties": false
+				}
+			}
+		}
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", raw, false)
+
+	if got := gjson.GetBytes(out, "response_format.type").String(); got != "json_schema" {
+		t.Fatalf("response_format.type = %q, want json_schema; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "response_format.json_schema.name").String(); got != "answer" {
+		t.Fatalf("response_format.json_schema.name = %q, want answer; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "response_format.json_schema.description").String(); got != "Structured answer" {
+		t.Fatalf("response_format.json_schema.description = %q, want Structured answer; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "response_format.json_schema.strict"); !got.Exists() || !got.Bool() {
+		t.Fatalf("response_format.json_schema.strict = %v, want true; output=%s", got.Value(), out)
+	}
+	if got := gjson.GetBytes(out, "response_format.json_schema.schema.properties.ok.type").String(); got != "boolean" {
+		t.Fatalf("response_format.json_schema.schema.properties.ok.type = %q, want boolean; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "response_format.json_schema.schema.required.0").String(); got != "ok" {
+		t.Fatalf("response_format.json_schema.schema.required.0 = %q, want ok; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "response_format.json_schema.schema.additionalProperties"); !got.Exists() || got.Bool() {
+		t.Fatalf("response_format.json_schema.schema.additionalProperties = %v, want false; output=%s", got.Value(), out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesJSONObjectTextFormat(t *testing.T) {
+	raw := []byte(`{"text":{"format":{"type":"json_object"}}}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", raw, false)
+
+	if got := gjson.GetBytes(out, "response_format.type").String(); got != "json_object" {
+		t.Fatalf("response_format.type = %q, want json_object; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "response_format.json_schema"); got.Exists() {
+		t.Fatalf("response_format.json_schema should be omitted; output=%s", out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_OmitsResponseFormatWithoutTextFormat(t *testing.T) {
+	raw := []byte(`{"input":"Return plain text."}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", raw, false)
+
+	if got := gjson.GetBytes(out, "response_format"); got.Exists() {
+		t.Fatalf("response_format should be omitted, got %s; output=%s", got.Raw, out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_NormalizesInputImageDetail(t *testing.T) {
 	tests := []struct {
 		name           string
