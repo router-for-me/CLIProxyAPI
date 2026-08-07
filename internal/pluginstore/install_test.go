@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -355,6 +358,142 @@ func TestInstallUsesLatestReleaseVersion(t *testing.T) {
 	}
 }
 
+func TestDownloadAssetFollowsGitHubRedirectWithTokenQuery(t *testing.T) {
+	artifact := []byte("artifact-data")
+	cdn := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("token") == "" {
+			t.Fatalf("expected token query on CDN request, got %s", r.URL.String())
+		}
+		_, _ = w.Write(artifact)
+	}))
+	t.Cleanup(cdn.Close)
+
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, cdn.URL+"/github-production-release-asset/file.zip?token=temp-github-token&filename=file.zip", http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
+	httpClient := origin.Client()
+	httpClient.Transport = transport
+
+	client := Client{HTTPClient: httpClient}
+	data, errDownload := client.DownloadAsset(context.Background(), ReleaseAsset{
+		Name:               "sample-provider_0.2.0_darwin_arm64.zip",
+		BrowserDownloadURL: origin.URL + "/releases/download/v0.2.0/sample-provider_0.2.0_darwin_arm64.zip",
+	})
+	if errDownload != nil {
+		t.Fatalf("DownloadAsset() error = %v", errDownload)
+	}
+	if string(data) != string(artifact) {
+		t.Fatalf("DownloadAsset() = %q, want artifact-data", data)
+	}
+}
+
+type recordingHTTPDoer struct {
+	requests []string
+	handler  func(req *http.Request, n int) (*http.Response, error)
+}
+
+func (d *recordingHTTPDoer) Do(req *http.Request) (*http.Response, error) {
+	n := len(d.requests)
+	d.requests = append(d.requests, req.URL.String())
+	return d.handler(req, n)
+}
+
+func TestDownloadAssetAcceleratorFollowsRedirectWithTokenQuery(t *testing.T) {
+	artifact := []byte("artifact-data")
+	accelBase := "https://gh-proxy.example/"
+	doer := &recordingHTTPDoer{
+		handler: func(req *http.Request, n int) (*http.Response, error) {
+			switch n {
+			case 0:
+				wantPrefix := accelBase + "https://github.com/"
+				if !strings.HasPrefix(req.URL.String(), wantPrefix) {
+					return nil, fmt.Errorf("unexpected first URL %s", req.URL.String())
+				}
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header: http.Header{
+						"Location": []string{"https://objects.githubusercontent.com/github-production-release-asset/file.zip?token=temp-github-token"},
+					},
+					Body:    io.NopCloser(strings.NewReader("")),
+					Request: req,
+				}, nil
+			case 1:
+				want := accelBase + "https://objects.githubusercontent.com/github-production-release-asset/file.zip?token=temp-github-token"
+				if req.URL.String() != want {
+					return nil, fmt.Errorf("unexpected second URL %s, want %s", req.URL.String(), want)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(string(artifact))),
+					Request:    req,
+				}, nil
+			default:
+				return nil, fmt.Errorf("unexpected extra request %d: %s", n, req.URL.String())
+			}
+		},
+	}
+
+	client := Client{
+		HTTPClient:      doer,
+		AcceleratorBase: accelBase,
+	}
+	data, errDownload := client.DownloadAsset(context.Background(), ReleaseAsset{
+		Name:               "sample-provider_0.2.0_darwin_arm64.zip",
+		BrowserDownloadURL: "https://github.com/owner/repo/releases/download/v0.2.0/sample-provider_0.2.0_darwin_arm64.zip",
+	})
+	if errDownload != nil {
+		t.Fatalf("DownloadAsset() error = %v; requests=%v", errDownload, doer.requests)
+	}
+	if string(data) != string(artifact) {
+		t.Fatalf("DownloadAsset() = %q, want artifact-data; requests=%v", data, doer.requests)
+	}
+}
+
+func TestFetchLatestReleaseDoesNotUseAcceleratorForAPI(t *testing.T) {
+	accelBase := "https://gh-proxy.example/"
+	var seen []string
+	doer := &recordingHTTPDoer{
+		handler: func(req *http.Request, n int) (*http.Response, error) {
+			seen = append(seen, req.URL.String())
+			if strings.HasPrefix(req.URL.String(), accelBase) {
+				return nil, fmt.Errorf("api request must not use accelerator: %s", req.URL.String())
+			}
+			if req.URL.String() != "https://api.github.com/repos/owner/repo/releases/latest" {
+				return nil, fmt.Errorf("unexpected URL %s", req.URL.String())
+			}
+			body := `{"tag_name":"v1.2.3","assets":[{"name":"x.zip","browser_download_url":"https://github.com/owner/repo/releases/download/v1.2.3/x.zip"}]}`
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		},
+	}
+	client := Client{HTTPClient: doer, AcceleratorBase: accelBase}
+	release, err := client.FetchLatestRelease(context.Background(), Plugin{
+		ID:          "sample",
+		Name:        "Sample",
+		Description: "d",
+		Author:      "owner",
+		Repository:  "https://github.com/owner/repo",
+		Install:     InstallPlan{Type: InstallTypeGitHubRelease},
+	})
+	if err != nil {
+		t.Fatalf("FetchLatestRelease() error = %v; seen=%v", err, seen)
+	}
+	if release.TagName != "v1.2.3" {
+		t.Fatalf("TagName = %q", release.TagName)
+	}
+	if len(seen) != 1 || seen[0] != "https://api.github.com/repos/owner/repo/releases/latest" {
+		t.Fatalf("seen = %v", seen)
+	}
+}
+
 func TestDownloadAssetFallsBackToReleaseAssetAPIURLWhenBrowserDownloadURLEmpty(t *testing.T) {
 	apiURL := "https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/assets/1"
 	client := Client{HTTPClient: mapHTTPDoer{
@@ -675,6 +814,40 @@ func TestDownloadArtifactEnforcesDeclaredSizeDuringRead(t *testing.T) {
 	}
 }
 
+func TestDownloadArtifactRetriesInterruptedResponse(t *testing.T) {
+	t.Parallel()
+
+	checksum := sha256.Sum256([]byte("artifact-data"))
+	client := Client{HTTPClient: &interruptedResponseHTTPDoer{}}
+	data, errDownload := client.DownloadArtifact(context.Background(), Artifact{
+		GOOS: "linux", GOARCH: "amd64", URL: "https://downloads.example/sample-provider.zip", SHA256: hex.EncodeToString(checksum[:]),
+	})
+	if errDownload != nil {
+		t.Fatalf("DownloadArtifact() error = %v", errDownload)
+	}
+	if string(data) != "artifact-data" {
+		t.Fatalf("DownloadArtifact() = %q, want artifact-data", data)
+	}
+}
+
+func TestDownloadArtifactDoesNotRetryCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	checksum := sha256.Sum256([]byte("artifact-data"))
+	client := &countingCanceledHTTPDoer{}
+	_, errDownload := (Client{HTTPClient: client}).DownloadArtifact(ctx, Artifact{
+		GOOS: "linux", GOARCH: "amd64", URL: "https://downloads.example/sample-provider.zip", SHA256: hex.EncodeToString(checksum[:]),
+	})
+	if !errors.Is(errDownload, context.Canceled) {
+		t.Fatalf("DownloadArtifact() error = %v, want context canceled", errDownload)
+	}
+	if client.calls != 1 {
+		t.Fatalf("HTTP calls = %d, want 1", client.calls)
+	}
+}
+
 func TestInstallRejectsInvalidLatestReleaseTag(t *testing.T) {
 	t.Parallel()
 
@@ -762,6 +935,42 @@ func (c singleResponseHTTPDoer) Do(req *http.Request) (*http.Response, error) {
 type trackingReadCloser struct {
 	data   []byte
 	offset int
+}
+
+type interruptedResponseHTTPDoer struct {
+	calls int
+}
+
+func (c *interruptedResponseHTTPDoer) Do(req *http.Request) (*http.Response, error) {
+	c.calls++
+	body := io.NopCloser(strings.NewReader("artifact-data"))
+	if c.calls == 1 {
+		body = io.NopCloser(&errorAfterReader{data: []byte("partial"), err: context.Canceled})
+	}
+	return &http.Response{StatusCode: http.StatusOK, Body: body, Header: make(http.Header), Request: req}, nil
+}
+
+type countingCanceledHTTPDoer struct {
+	calls int
+}
+
+func (c *countingCanceledHTTPDoer) Do(req *http.Request) (*http.Response, error) {
+	c.calls++
+	return nil, req.Context().Err()
+}
+
+type errorAfterReader struct {
+	data []byte
+	err  error
+}
+
+func (r *errorAfterReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, r.err
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
 }
 
 func (r *trackingReadCloser) Read(p []byte) (int, error) {

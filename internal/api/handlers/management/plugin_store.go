@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
@@ -130,7 +131,7 @@ type sourcedPlugin struct {
 }
 
 func (h *Handler) ListPluginStore(c *gin.Context) {
-	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, host := h.pluginStoreSnapshot()
+	pluginsEnabled, pluginsDir, proxyURL, acceleratorBase, pluginProxyStatus, sourceConfigs, storeAuth, configs, host := h.pluginStoreSnapshot()
 	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
 	if errResolvePluginsDir != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_directory_invalid", "message": errResolvePluginsDir.Error()})
@@ -142,7 +143,7 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_store_source_invalid", "message": errSources.Error()})
 		return
 	}
-	plugins, sourceErrors := h.fetchSourcedPlugins(c.Request.Context(), proxyURL, storeAuth, sources)
+	plugins, sourceErrors := h.fetchSourcedPlugins(c.Request.Context(), proxyURL, acceleratorBase, pluginProxyStatus, storeAuth, sources)
 	if len(plugins) == 0 && len(sourceErrors) > 0 {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_store_registry_failed", "message": sourceErrors[0].Message})
 		return
@@ -157,7 +158,7 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 	for _, item := range plugins {
 		latestInput = append(latestInput, item.plugin)
 	}
-	client := h.newPluginStoreClient(proxyURL, "", storeAuth)
+	client := h.newPluginStoreClient(proxyURL, acceleratorBase, "", pluginProxyStatus, storeAuth)
 	latestVersions := h.latestPluginVersions(c.Request.Context(), client, latestInput)
 	pluginSourceCounts := make(map[string]int, len(plugins))
 	for _, item := range plugins {
@@ -235,8 +236,11 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": errVersionRequest.Error()})
 		return
 	}
-	installCtx := c.Request.Context()
-	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, host := h.pluginStoreSnapshot()
+	// Plugin downloads can take longer than the browser request lifetime.
+	// Detach from client cancellation without imposing a post-connection
+	// network deadline (per AGENTS.md timeout policy).
+	installCtx := context.WithoutCancel(c.Request.Context())
+	pluginsEnabled, pluginsDir, proxyURL, acceleratorBase, pluginProxyStatus, sourceConfigs, storeAuth, configs, host := h.pluginStoreSnapshot()
 	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
 	if errResolvePluginsDir != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_directory_invalid", "message": errResolvePluginsDir.Error()})
@@ -248,7 +252,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_store_source_invalid", "message": errSources.Error()})
 		return
 	}
-	source, plugin, client, okPlugin := h.findPluginStoreInstallTarget(installCtx, proxyURL, storeAuth, sources, id, c.Query("source"), c)
+	source, plugin, client, okPlugin := h.findPluginStoreInstallTarget(installCtx, proxyURL, acceleratorBase, pluginProxyStatus, storeAuth, sources, id, c.Query("source"), c)
 	if !okPlugin {
 		return
 	}
@@ -495,25 +499,27 @@ func pluginStoreManifestYAMLNode(manifest pluginstore.Manifest) (*yaml.Node, err
 	return &node, nil
 }
 
-func (h *Handler) pluginStoreSnapshot() (bool, string, string, []string, []pluginstore.AuthConfig, map[string]config.PluginInstanceConfig, *pluginhost.Host) {
+func (h *Handler) pluginStoreSnapshot() (bool, string, string, string, int, []string, []pluginstore.AuthConfig, map[string]config.PluginInstanceConfig, *pluginhost.Host) {
 	if h == nil {
-		return false, "plugins", "", nil, nil, map[string]config.PluginInstanceConfig{}, nil
+		return false, "plugins", "", "", config.PluginProxyStatusNone, nil, nil, map[string]config.PluginInstanceConfig{}, nil
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.cfg == nil {
-		return false, "plugins", "", nil, nil, map[string]config.PluginInstanceConfig{}, nil
+		return false, "plugins", "", "", config.PluginProxyStatusNone, nil, nil, map[string]config.PluginInstanceConfig{}, nil
 	}
 	pluginsEnabled := h.cfg.Plugins.Enabled
 	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
-	proxyURL := strings.TrimSpace(h.cfg.ProxyURL)
+	proxyURL := config.EffectivePluginStoreProxyURL(h.cfg)
+	acceleratorBase := config.EffectivePluginStoreAcceleratorBase(h.cfg)
+	pluginProxyStatus := config.NormalizePluginProxyConfig(h.cfg.PluginProxy).Status
 	sourceConfigs := append([]string(nil), h.cfg.Plugins.StoreSources...)
 	storeAuth := append([]pluginstore.AuthConfig(nil), h.cfg.Plugins.StoreAuth...)
 	configs := make(map[string]config.PluginInstanceConfig, len(h.cfg.Plugins.Configs))
 	for id, item := range h.cfg.Plugins.Configs {
 		configs[id] = item
 	}
-	return pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, h.pluginHost
+	return pluginsEnabled, pluginsDir, proxyURL, acceleratorBase, pluginProxyStatus, sourceConfigs, storeAuth, configs, h.pluginHost
 }
 
 func (h *Handler) pluginStoreSources(sourceConfigs []string) ([]pluginstore.Source, error) {
@@ -525,8 +531,9 @@ func (h *Handler) pluginStoreSources(sourceConfigs []string) ([]pluginstore.Sour
 	return pluginstore.NormalizeSources(sourceConfigs)
 }
 
-func (h *Handler) newPluginStoreClient(proxyURL string, registryURL string, storeAuth []pluginstore.AuthConfig) pluginstore.Client {
+func (h *Handler) newPluginStoreClient(proxyURL string, acceleratorBase string, registryURL string, pluginProxyStatus int, storeAuth []pluginstore.AuthConfig) pluginstore.Client {
 	registryURL = strings.TrimSpace(registryURL)
+	acceleratorBase = strings.TrimSpace(acceleratorBase)
 	var httpClient pluginstore.HTTPDoer
 	if h != nil {
 		httpClient = h.pluginStoreHTTPClient
@@ -535,20 +542,33 @@ func (h *Handler) newPluginStoreClient(proxyURL string, registryURL string, stor
 		registryURL = pluginstore.DefaultRegistryURL
 	}
 	if httpClient != nil {
-		return pluginstore.Client{HTTPClient: httpClient, RegistryURL: registryURL, Auth: storeAuth}
+		return pluginstore.Client{HTTPClient: httpClient, RegistryURL: registryURL, AcceleratorBase: acceleratorBase, Auth: storeAuth}
 	}
-	client := &http.Client{}
-	if strings.TrimSpace(proxyURL) != "" {
+	client := &http.Client{
+		// Plugin downloads are bounded by the install context.
+		Timeout: 0,
+	}
+	if pluginProxyStatus == config.PluginProxyStatusDirect || pluginProxyStatus == config.PluginProxyStatusAccelerator {
+		// Direct mode and accelerator mode must not use any traditional
+		// proxy. Install a direct transport that clones http.DefaultTransport
+		// (so idle-conn timeout, TLS handshake timeout, HTTP/2 upgrade, etc.
+		// are preserved) with the proxy function cleared, so inherited
+		// HTTP_PROXY/HTTPS_PROXY environment variables are bypassed. A bare
+		// &http.Transport{Proxy: nil} would drop the default connection
+		// management settings. Accelerator only rewrites artifact URLs;
+		// registry/API calls still go direct.
+		client.Transport = proxyutil.NewDirectTransport()
+	} else if strings.TrimSpace(proxyURL) != "" {
 		util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(proxyURL)}, client)
 	}
-	return pluginstore.Client{HTTPClient: client, RegistryURL: registryURL, Auth: storeAuth}
+	return pluginstore.Client{HTTPClient: client, RegistryURL: registryURL, AcceleratorBase: acceleratorBase, Auth: storeAuth}
 }
 
-func (h *Handler) fetchSourcedPlugins(ctx context.Context, proxyURL string, storeAuth []pluginstore.AuthConfig, sources []pluginstore.Source) ([]sourcedPlugin, []pluginStoreSourceErr) {
+func (h *Handler) fetchSourcedPlugins(ctx context.Context, proxyURL string, acceleratorBase string, pluginProxyStatus int, storeAuth []pluginstore.AuthConfig, sources []pluginstore.Source) ([]sourcedPlugin, []pluginStoreSourceErr) {
 	plugins := make([]sourcedPlugin, 0)
 	sourceErrors := make([]pluginStoreSourceErr, 0)
 	for _, source := range sources {
-		client := h.newPluginStoreClient(proxyURL, source.URL, storeAuth)
+		client := h.newPluginStoreClient(proxyURL, acceleratorBase, source.URL, pluginProxyStatus, storeAuth)
 		registry, errRegistry := client.FetchRegistry(ctx)
 		if errRegistry != nil {
 			sourceErrors = append(sourceErrors, pluginStoreSourceErr{
@@ -566,14 +586,14 @@ func (h *Handler) fetchSourcedPlugins(ctx context.Context, proxyURL string, stor
 	return plugins, sourceErrors
 }
 
-func (h *Handler) findPluginStoreInstallTarget(ctx context.Context, proxyURL string, storeAuth []pluginstore.AuthConfig, sources []pluginstore.Source, id string, requestedSourceID string, c *gin.Context) (pluginstore.Source, pluginstore.Plugin, pluginstore.Client, bool) {
+func (h *Handler) findPluginStoreInstallTarget(ctx context.Context, proxyURL string, acceleratorBase string, pluginProxyStatus int, storeAuth []pluginstore.AuthConfig, sources []pluginstore.Source, id string, requestedSourceID string, c *gin.Context) (pluginstore.Source, pluginstore.Plugin, pluginstore.Client, bool) {
 	requestedSourceID = strings.TrimSpace(requestedSourceID)
 	if requestedSourceID != "" {
 		for _, source := range sources {
 			if source.ID != requestedSourceID {
 				continue
 			}
-			client := h.newPluginStoreClient(proxyURL, source.URL, storeAuth)
+			client := h.newPluginStoreClient(proxyURL, acceleratorBase, source.URL, pluginProxyStatus, storeAuth)
 			registry, errRegistry := client.FetchRegistry(ctx)
 			if errRegistry != nil {
 				c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_store_registry_failed", "message": errRegistry.Error()})
@@ -590,7 +610,7 @@ func (h *Handler) findPluginStoreInstallTarget(ctx context.Context, proxyURL str
 		return pluginstore.Source{}, pluginstore.Plugin{}, pluginstore.Client{}, false
 	}
 
-	plugins, sourceErrors := h.fetchSourcedPlugins(ctx, proxyURL, storeAuth, sources)
+	plugins, sourceErrors := h.fetchSourcedPlugins(ctx, proxyURL, acceleratorBase, pluginProxyStatus, storeAuth, sources)
 	matches := make([]sourcedPlugin, 0)
 	for _, item := range plugins {
 		if item.plugin.ID == id {
@@ -614,7 +634,7 @@ func (h *Handler) findPluginStoreInstallTarget(ctx context.Context, proxyURL str
 		return pluginstore.Source{}, pluginstore.Plugin{}, pluginstore.Client{}, false
 	}
 	match := matches[0]
-	return match.source, match.plugin, h.newPluginStoreClient(proxyURL, match.source.URL, storeAuth), true
+	return match.source, match.plugin, h.newPluginStoreClient(proxyURL, acceleratorBase, match.source.URL, pluginProxyStatus, storeAuth), true
 }
 
 func sourcedPluginSources(plugins []sourcedPlugin) []pluginstore.Source {

@@ -31,6 +31,9 @@ type Config struct {
 	// Plugins configures dynamic plugin discovery and per-plugin settings.
 	Plugins PluginsConfig `yaml:"plugins" json:"plugins"`
 
+	// PluginProxy configures proxy or accelerator for plugin store operations.
+	PluginProxy PluginProxyConfig `yaml:"plugin-proxy" json:"plugin-proxy"`
+
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
 
