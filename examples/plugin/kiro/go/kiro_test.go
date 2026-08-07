@@ -580,7 +580,7 @@ func TestExecuteStreamEmitsAnthropicSSE(t *testing.T) {
 	}
 }
 
-func TestAccumulatorMergesAdjacentFragments(t *testing.T) {
+func TestAccumulatorOmitsUnsignedReasoningAndMergesTextFragments(t *testing.T) {
 	payload := &kiroPayload{}
 	payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = "claude-sonnet-4.5"
 	accumulator := newAccumulator(payload)
@@ -596,10 +596,10 @@ func TestAccumulatorMergesAdjacentFragments(t *testing.T) {
 			t.Fatal(errAccept)
 		}
 	}
-	if len(accumulator.Blocks) != 2 {
-		t.Fatalf("content blocks = %#v, want one thinking and one text block", accumulator.Blocks)
+	if len(accumulator.Blocks) != 1 {
+		t.Fatalf("content blocks = %#v, want one text block", accumulator.Blocks)
 	}
-	if accumulator.Blocks[0].Thinking != "Think first." || accumulator.Blocks[1].Text != "Hello world." {
+	if accumulator.Blocks[0].Type != "text" || accumulator.Blocks[0].Text != "Hello world." {
 		t.Fatalf("merged content blocks = %#v", accumulator.Blocks)
 	}
 }

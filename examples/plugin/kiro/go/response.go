@@ -25,11 +25,10 @@ func (a *responseAccumulator) accept(event kiroEvent) ([]claudeContentBlock, err
 			return []claudeContentBlock{block}, nil
 		}
 	case "reasoningContentEvent":
-		if text := firstStringField(event.Payload, "text", "content"); text != "" {
-			block := claudeContentBlock{Type: "thinking", Thinking: text}
-			a.appendFragment(block)
-			return []claudeContentBlock{block}, nil
-		}
+		// Kiro does not return an Anthropic-verifiable signature. Omit its
+		// reasoning instead of emitting a Claude thinking block that clients
+		// cannot safely replay.
+		return nil, nil
 	case "toolUseEvent":
 		tools, errTools := a.pendingTools.accept(event.Payload)
 		if errTools != nil {

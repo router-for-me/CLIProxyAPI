@@ -2906,6 +2906,27 @@ func TestExecutorSSERecordBufferFlushesFinalRecordWithoutDelimiter(t *testing.T)
 	}
 }
 
+func TestExecutorSSERecordBufferRecognizesCROnlyDelimiter(t *testing.T) {
+	var buffer executorSSERecordBuffer
+	payload := []byte("event: message_delta\rdata: {\"type\":\"message_delta\"}\r\r")
+	records := buffer.Push(payload)
+	if len(records) != 1 || !bytes.Equal(records[0], payload) {
+		t.Fatalf("CR-only records = %q, want one complete record %q", records, payload)
+	}
+	if tail := buffer.Flush(); len(tail) != 0 {
+		t.Fatalf("buffer tail = %q, want empty", tail)
+	}
+}
+
+func TestExecutorStreamTranslationPayloadsExtractsDataFromCROnlySSEFrame(t *testing.T) {
+	payload := []byte("event: content_block_delta\rdata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\r\r")
+	frames := executorStreamTranslationPayloads(payload)
+	want := []byte(`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}`)
+	if len(frames) != 1 || !bytes.Equal(frames[0], want) {
+		t.Fatalf("CR-only translation payloads = %q, want %q", frames, want)
+	}
+}
+
 func TestPluginExecutorUsageParsesFinalClaudeStreamCounts(t *testing.T) {
 	var usageBuffer helps.StreamUsageBuffer
 	payload := []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":12,\"output_tokens\":4}}\n\n")

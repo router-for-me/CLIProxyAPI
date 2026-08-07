@@ -51,7 +51,7 @@ func (u *pluginExecutorUsage) observeStream(ctx context.Context, format sdktrans
 		var sseBuffer executorSSERecordBuffer
 		var pendingUsagePayload []byte
 		var terminalErr error
-		isSSE := strings.Contains(strings.ToLower(headers.Get("Content-Type")), "text/event-stream")
+		isSSE := pluginExecutorSupportsStreamUsage(format) && strings.Contains(strings.ToLower(headers.Get("Content-Type")), "text/event-stream")
 		for chunk := range in {
 			if chunk.Err != nil {
 				terminalErr = chunk.Err

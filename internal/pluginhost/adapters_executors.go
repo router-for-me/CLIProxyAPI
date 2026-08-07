@@ -634,6 +634,9 @@ func executorSSERecordEnd(payload []byte) int {
 	if index := bytes.Index(payload, []byte("\r\n\r\n")); index >= 0 && (end < 0 || index+4 < end) {
 		end = index + 4
 	}
+	if index := bytes.Index(payload, []byte("\r\r")); index >= 0 && (end < 0 || index+2 < end) {
+		end = index + 2
+	}
 	return end
 }
 
@@ -655,7 +658,9 @@ func (a *executorAdapter) translateExecutorStreamPayload(ctx context.Context, pr
 }
 
 func executorStreamTranslationPayloads(payload []byte) [][]byte {
-	if !bytes.Contains(payload, []byte("\n")) {
+	normalized := bytes.ReplaceAll(payload, []byte("\r\n"), []byte("\n"))
+	normalized = bytes.ReplaceAll(normalized, []byte("\r"), []byte("\n"))
+	if !bytes.Contains(normalized, []byte("\n")) {
 		return [][]byte{payload}
 	}
 	var translationPayloads [][]byte
@@ -674,7 +679,7 @@ func executorStreamTranslationPayloads(payload []byte) [][]byte {
 		translationPayloads = append(translationPayloads, frame)
 		dataValues = nil
 	}
-	for _, line := range bytes.Split(payload, []byte("\n")) {
+	for _, line := range bytes.Split(normalized, []byte("\n")) {
 		trimmed := bytes.TrimSpace(line)
 		if len(trimmed) == 0 {
 			flushData()
