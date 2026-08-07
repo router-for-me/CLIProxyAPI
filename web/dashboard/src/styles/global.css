@@ -3663,3 +3663,132 @@ button.ghost:hover:not(:disabled) {
   padding: 10px 12px;
 }
 .group-summary .muted + .muted { margin-top: 4px; }
+
+/* ---------------------------------------------------------------------------
+ * Auto Router modal (ar-modal)
+ * ------------------------------------------------------------------------- */
+.ar-modal__section + .ar-modal__section { border-top: 1px solid var(--border); padding-top: 18px; }
+
+.ar-modal__sectionhead {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 14px;
+}
+.ar-modal__sectionnum {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+  margin-top: 1px;
+}
+.ar-modal__sectiontitle { margin: 0 0 2px; font-size: 14px; }
+.ar-modal__sectionhint { margin: 0; color: var(--text-muted); font-size: 12px; line-height: 1.45; }
+
+/* Form grid ---------------------------------------------------------------- */
+.ar-form { display: flex; flex-direction: column; gap: 12px; }
+.ar-form__grid {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 12px;
+}
+.ar-form__grid--3 { grid-template-columns: 1.2fr 1fr 1fr; }
+.ar-form__grid--4 { grid-template-columns: 1.2fr 1fr 1fr 1fr; }
+.ar-form__grid--5 { grid-template-columns: 1.2fr 1fr 1fr 1fr 1fr; }
+.ar-form__field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ar-form__label { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+.ar-form__hint { font-size: 11px; color: var(--text-dim); }
+.ar-form__error { font-size: 11px; color: var(--danger); }
+
+.ar-form__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+.ar-form__toggle input { margin: 0; }
+.ar-form__toggle label { color: var(--text); font-size: 13px; cursor: pointer; }
+
+/* Tier cards --------------------------------------------------------------- */
+.ar-tiers {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ar-tier {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  transition: border-color 0.15s ease;
+}
+.ar-tier--mapped { border-color: var(--border-strong); }
+.ar-tier__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ar-tier__badgewrap { display: inline-flex; align-items: center; gap: 8px; }
+.ar-tier__badge {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 999px;
+}
+.ar-tier__badge--success { background: var(--success-dim); color: var(--success); }
+.ar-tier__badge--accent  { background: var(--accent-dim);  color: var(--accent); }
+.ar-tier__badge--warning { background: var(--warning-dim); color: var(--warning); }
+.ar-tier__badge--danger  { background: var(--danger-dim);  color: var(--danger); }
+.ar-tier__range { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+.ar-tier__status {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.ar-tier--mapped .ar-tier__status { color: var(--success); }
+.ar-tier__hint { margin: 0; font-size: 12px; color: var(--text-muted); line-height: 1.4; }
+
+/* Target-model row: the model combobox sits on its own full line above the
+   per-model routing section. */
+.ar-tier__modelrow {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ar-tier__modelrow .model-multiselect__input { font-family: var(--mono); font-size: 13px; }
+
+/* Per-model routing section (reuses Models Group ModelRouteConfigSection). */
+.ar-tier__route { min-width: 0; }
+.ar-tier__routemuted {
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 12px;
+  background: var(--bg);
+}
+
+/* Modal footer left hint --------------------------------------------------- */
+.ar-modal__lefthint {
+  margin-right: auto;
+  align-self: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}

@@ -1721,6 +1721,49 @@ export async function detachModelGroup(groupID, apiKeyId) {
 }
 
 // ---------------------------------------------------------------------------
+// Auto Routers (the router entity that scores requests across complexity
+// dimensions and forwards them to a tier-appropriate upstream model)
+// ---------------------------------------------------------------------------
+
+export async function listAutoRouters({
+  page = 1,
+  pageSize = 25,
+  search = '',
+  sortBy = 'name',
+  sortOrder = 'asc',
+} = {}) {
+  const qs = new URLSearchParams();
+  qs.set('page', String(page));
+  qs.set('page_size', String(pageSize));
+  if (search) qs.set('search', search);
+  qs.set('sort_by', sortBy);
+  qs.set('sort_order', sortOrder);
+  return fetchJSON(`/auto-routers?${qs}`);
+}
+
+export async function getAutoRouter(id) {
+  return fetchJSON(`/auto-routers/${encodeURIComponent(id)}`);
+}
+
+export async function createAutoRouter(payload) {
+  return fetchJSON('/auto-routers', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateAutoRouter(id, payload) {
+  return fetchJSON(`/auto-routers/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteAutoRouter(id) {
+  await fetchJSON(`/auto-routers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+// ---------------------------------------------------------------------------
 // Backup / restore (export & import all data)
 // ---------------------------------------------------------------------------
 

@@ -46,6 +46,7 @@ const (
 	defaultUpstreamProviderEntriesTable  = "upstream_provider_api_key_entries"
 	defaultUpstreamSyncLogTable          = "upstream_sync_log"
 	defaultModelGroupsTable              = "model_groups"
+	defaultAutoRoutersTable              = "auto_routers"
 	defaultModelHealthTable              = "model_health"
 	defaultModelHealthLogTable           = "model_health_log"
 	defaultModelHealthSettingsTable      = "model_health_settings"
@@ -153,6 +154,11 @@ type PostgresStoreConfig struct {
 	// group's allowed/blocked lists (and, for API-key policies, routes) are
 	// the source of truth, overriding the entity's own fields.
 	ModelGroupsTable string
+
+	// AutoRoutersTable stores Auto Router definitions (the router entity that
+	// scores requests and forwards them to a tier-appropriate model). Multiple
+	// routers are supported, each with a unique name and requestable model_id.
+	AutoRoutersTable string
 
 	// ModelHealthTable stores the latest health-check snapshot for each model
 	// id (one row per model). Updated in place on every sweep; surfaced on the
@@ -278,6 +284,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.ModelGroupsTable == "" {
 		cfg.ModelGroupsTable = defaultModelGroupsTable
+	}
+	if cfg.AutoRoutersTable == "" {
+		cfg.AutoRoutersTable = defaultAutoRoutersTable
 	}
 	if cfg.ModelHealthTable == "" {
 		cfg.ModelHealthTable = defaultModelHealthTable
@@ -1278,6 +1287,46 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		return fmt.Errorf("postgres store: create api_key_policies model_group_id index: %w", err)
 	}
 
+	// auto_routers stores Auto Router definitions (the "smart model" / router
+	// entity). An Auto Router is a kind of global model: it exposes a requestable
+	// model_id plus name/display/pricing metadata, and maps each complexity tier
+	// (simple/medium/complex/reasoning) to a concrete upstream target model.
+	// Multiple routers with distinct names/model ids are supported. At request
+	// time the scorer classifies the incoming request and the router forwards it
+	// to the chosen tier's target model.
+	autoRoutersTable := s.fullTableName(s.cfg.AutoRoutersTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id           TEXT PRIMARY KEY,
+			name         TEXT NOT NULL UNIQUE,
+			model_id     TEXT NOT NULL UNIQUE,
+			description  TEXT,
+			display_name TEXT,
+			tier_mappings JSONB NOT NULL DEFAULT '[]'::jsonb,
+			pricing      JSONB,
+			enabled      BOOLEAN NOT NULL DEFAULT TRUE,
+			metadata     JSONB NOT NULL DEFAULT '{}'::jsonb,
+			created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, autoRoutersTable)); err != nil {
+		return fmt.Errorf("postgres store: create auto_routers table: %w", err)
+	}
+	// Idempotent backfill for deployments that created the table before the
+	// metadata column existed (mirrors the model_groups backfills below).
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb`, autoRoutersTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter auto_routers add metadata: %w", err)
+	}
+	// Idempotent backfill for the optional per-router vision bridge model
+	// column. Nullable; empty = feature off for that router.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS vision_bridge_model TEXT`, autoRoutersTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter auto_routers add vision_bridge_model: %w", err)
+	}
+
 	// model_health stores the latest health-check snapshot for each model id
 	// (one row per model). Updated in place on every sweep. Surfaced on the
 	// Analysis → Model Health page and through the public
@@ -1759,6 +1808,15 @@ func (s *PostgresStore) ModelGroupsTable() string {
 		return quoteIdentifier(defaultModelGroupsTable)
 	}
 	return s.fullTableName(s.cfg.ModelGroupsTable)
+}
+
+// AutoRoutersTable returns the fully-qualified name of the auto_routers table
+// (the Auto Router entity definitions).
+func (s *PostgresStore) AutoRoutersTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultAutoRoutersTable)
+	}
+	return s.fullTableName(s.cfg.AutoRoutersTable)
 }
 
 // ModelHealthTable returns the fully-qualified name of the model_health table

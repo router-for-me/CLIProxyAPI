@@ -1017,6 +1017,15 @@ type GlobalModelPatch struct {
 	OutputTokenLimit    *int      // = output_token_limit
 	InputModalities     *[]string // = input_modalities (full replace)
 	OutputModalities    *[]string // = output_modalities (full replace)
+	// UserDefined is the "user-defined" flag per row. The auto-sync upsert
+	// path sets it to false unconditionally, so a model id that exists under
+	// multiple upstream providers can end up with one row marked user_defined
+	// and the rest not — even after an "Apply globally" global edit, because
+	// that flag was never part of this patch. Including it here lets the
+	// dashboard's Global Model editor fan an explicit user_defined toggled
+	// state out to every provider sharing the model id, so the operator no
+	// longer has to open every (id, provider) row individually to align them.
+	UserDefined *bool // = user_defined
 }
 
 // UpdateByID applies the non-nil fields of patch to every models_catalog row
@@ -1071,6 +1080,9 @@ func (s *ModelsStore) UpdateByID(ctx context.Context, id string, patch GlobalMod
 	}
 	if patch.OutputModalities != nil {
 		add("output_modalities", marshalJSONBArray(*patch.OutputModalities))
+	}
+	if patch.UserDefined != nil {
+		add("user_defined", *patch.UserDefined)
 	}
 	if len(setParts) == 0 {
 		// Nothing to change — no rows affected, no error.

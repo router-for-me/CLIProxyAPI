@@ -77,6 +77,11 @@ type PgStoreHandles struct {
 	// (allowed-models grant lists + per-model upstream routing). nil when PG
 	// is not configured — the /model-groups routes return 503 in that case.
 	ModelGroups *store.ModelGroupStore
+	// AutoRouters is the PG-backed store for Auto Router definitions (the
+	// router entity that scores requests and forwards them to a
+	// tier-appropriate model). nil when PG is not configured — the
+	// /auto-routers routes return 503 in that case.
+	AutoRouters *store.AutoRouterStore
 	// ModelHealth is the PG-backed store for model health-check snapshots +
 	// history + operator settings (Analysis → Model Health page + the public
 	// /v0/model-health/uptime endpoint). nil when PG is not configured — the

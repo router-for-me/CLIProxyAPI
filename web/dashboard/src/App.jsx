@@ -15,6 +15,8 @@ import InternalUsersPage from './pages/InternalUsersPage.jsx';
 import InternalUserDetailPage from './pages/InternalUserDetailPage.jsx';
 import ModelGroupsPage from './pages/ModelGroupsPage.jsx';
 import ModelGroupDetailPage from './pages/ModelGroupDetailPage.jsx';
+import AutoRoutersPage from './pages/AutoRoutersPage.jsx';
+import AutoRouterPage from './pages/AutoRouterPage.jsx';
 import ModelsCatalogPage from './pages/ModelsCatalogPage.jsx';
 import ErrorMessagesPage from './pages/ErrorMessagesPage.jsx';
 import SettingsPage from './pages/SettingsPage.jsx';
@@ -274,6 +276,9 @@ export default function App() {
             <Route path="/internal-users/:id" element={<InternalUserDetailPage />} />
             <Route path="/model-groups" element={<ModelGroupsPage />} />
             <Route path="/model-groups/:id" element={<ModelGroupDetailPage />} />
+            <Route path="/auto-routers" element={<AutoRoutersPage />} />
+            <Route path="/auto-routers/new" element={<AutoRouterPage />} />
+            <Route path="/auto-routers/:id" element={<AutoRouterPage />} />
             <Route path="/models" element={<ModelsCatalogPage />} />
             <Route path="/error-messages" element={<ErrorMessagesPage />} />
             <Route path="/api-tokens" element={<ApiTokensPage />} />

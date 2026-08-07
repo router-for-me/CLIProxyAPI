@@ -106,6 +106,11 @@ type Handler struct {
 	// routes return 503 in that case.
 	pgModelGroups *store.ModelGroupStore
 
+	// pgAutoRouters stores Auto Router definitions (the router entity that
+	// scores requests and forwards them to a tier-appropriate model). nil when
+	// PG is not configured — the /auto-routers routes return 503 in that case.
+	pgAutoRouters *store.AutoRouterStore
+
 	// pgModelHealth stores the model health-check snapshots + history +
 	// operator settings (Analysis → Model Health page + the public
 	// /v0/model-health/uptime endpoint). nil when PG is not configured — the
@@ -360,6 +365,19 @@ func (h *Handler) SetModelGroupStore(groups *store.ModelGroupStore) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pgModelGroups = groups
+}
+
+// SetAutoRouterStore wires the PG-backed store for Auto Router definitions
+// (the router entity that scores requests and forwards them to a
+// tier-appropriate model). When nil, the /v0/management/auto-routers routes
+// return 503.
+func (h *Handler) SetAutoRouterStore(routers *store.AutoRouterStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pgAutoRouters = routers
 }
 
 // SetModelHealthStore wires the PG-backed store for model health-check

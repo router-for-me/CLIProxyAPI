@@ -127,6 +127,17 @@ function withGlobSuffix(entries) {
   });
 
   groups.push({
+    label: 'Auto Routers',
+    entries: [
+      entry('GET', '/auto-routers'),
+      entry('POST', '/auto-routers'),
+      entry('GET', '/auto-routers/:id'),
+      entry('PUT', '/auto-routers/:id'),
+      entry('DELETE', '/auto-routers/:id'),
+    ],
+  });
+
+  groups.push({
     label: 'Pricing Sources',
     entries: [
       entry('GET', '/pricing-sources'),

@@ -272,12 +272,13 @@ func (s *AlertStore) RecordAlert(ctx context.Context, a Alert, suppression time.
 		data = []byte("{}")
 	}
 
-	// Try to merge into an existing non-dismissed, non-suppressed row first.
+	// Try to merge into an existing non-dismissed row for the same fingerprint
+	// that is still within its suppression window first.
 	var existingID int64
 	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT id FROM %s
 		WHERE fingerprint = $1 AND dismissed = FALSE
-		  AND (suppressed_until IS NULL OR suppressed_until <= $2)
+		  AND (suppressed_until IS NULL OR suppressed_until > $2)
 		ORDER BY id DESC LIMIT 1`, s.alertsTable),
 		a.Fingerprint, now,
 	).Scan(&existingID)

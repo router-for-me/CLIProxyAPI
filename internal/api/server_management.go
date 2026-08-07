@@ -357,6 +357,17 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/model-groups/:id/attach", s.mgmt.AttachModelGroup)
 		mgmt.POST("/model-groups/:id/detach", s.mgmt.DetachModelGroup)
 
+		// Auto Routers: the router entity (a kind of global model) that scores
+		// requests across complexity dimensions and forwards them to a
+		// tier-appropriate upstream model. Multiple routers with distinct
+		// names/model ids are supported. Return 503 when the PG store is not
+		// configured.
+		mgmt.GET("/auto-routers", s.mgmt.ListAutoRouters)
+		mgmt.POST("/auto-routers", s.mgmt.CreateAutoRouter)
+		mgmt.GET("/auto-routers/:id", s.mgmt.GetAutoRouter)
+		mgmt.PUT("/auto-routers/:id", s.mgmt.UpdateAutoRouter)
+		mgmt.DELETE("/auto-routers/:id", s.mgmt.DeleteAutoRouter)
+
 		// PG-backed management API tokens: gate access to the /v0/management
 		// REST surface with per-token policy (read/write scope, per-endpoint
 		// allowlist, RPM + max-parallel limits, expiry) and a full audit log

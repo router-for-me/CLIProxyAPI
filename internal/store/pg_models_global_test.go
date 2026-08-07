@@ -147,6 +147,88 @@ func TestModelsStoreUpdateByIDEmptyPatch(t *testing.T) {
 	}
 }
 
+// TestModelsStoreUpdateByIDUserDefined covers the "fan user_defined out across
+// providers" regression: a model id fanned out across several upstream
+// providers can end up with only some rows marked user_defined (the auto-sync
+// path writes false unconditionally). The dashboard exposes a global
+// "Apply globally" toggle that needs to align every row in one PUT, so the
+// GlobalModelPatch must carry the user_defined column and UpdateByID must
+// write it to every matching row.
+func TestModelsStoreUpdateByIDUserDefined(t *testing.T) {
+	store := newTestPostgresStore(t, "models_global_userdefined")
+	ctx := cancelableTestCtx(t)
+	ms := NewModelsStore(store)
+	rows := []StoredModel{
+		{ID: "gpt-4o", Provider: "openai", Object: "model", OwnedBy: "openai", Type: "openai",
+			DisplayName: "GPT-4o (openai)", UserDefined: true},
+		{ID: "gpt-4o", Provider: "acme", Object: "model", OwnedBy: "acme", Type: "openai-compatibility",
+			DisplayName: "GPT-4o (acme)", UserDefined: false},
+		{ID: "gpt-4o", Provider: "mirror", Object: "model", OwnedBy: "mirror", Type: "openai-compatibility",
+			DisplayName: "GPT-4o (mirror)", UserDefined: false},
+		// Unrelated id — must NOT be touched by an UpdateByID("gpt-4o").
+		{ID: "claude-3-5", Provider: "anthropic", Object: "model", OwnedBy: "anthropic", Type: "claude",
+			DisplayName: "Claude 3.5", UserDefined: false},
+	}
+	if err := ms.UpsertModels(ctx, rows); err != nil {
+		t.Fatalf("UpsertModels: %v", err)
+	}
+
+	// Apply only user_defined=true; the canonical attributes must survive.
+	flag := true
+	n, err := ms.UpdateByID(ctx, "gpt-4o", GlobalModelPatch{UserDefined: &flag})
+	if err != nil {
+		t.Fatalf("UpdateByID: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("UpdateByID rows = %d; want 3 (all providers of gpt-4o)", n)
+	}
+	all, err := ms.SelectByIDAllProviders(ctx, "gpt-4o")
+	if err != nil {
+		t.Fatalf("SelectByIDAllProviders: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("SelectByIDAllProviders len = %d; want 3", len(all))
+	}
+	for _, m := range all {
+		if m.ID != "gpt-4o" {
+			t.Errorf("returned id = %q; want gpt-4o", m.ID)
+		}
+		if !m.UserDefined {
+			t.Errorf("provider %s user_defined = false; want true (global fan-out must align all rows)", m.Provider)
+		}
+		// DisplayName is a nil-patch field → must survive unchanged.
+		want := "GPT-4o (" + m.Provider + ")"
+		if m.DisplayName != want {
+			t.Errorf("provider %s display_name = %q; want %q (nil patch must not nullify)", m.Provider, m.DisplayName, want)
+		}
+	}
+
+	// Flip the bit back to false and ensure the fan-out still reaches every
+	// row (the symmetric regression path).
+	flag = false
+	if _, err := ms.UpdateByID(ctx, "gpt-4o", GlobalModelPatch{UserDefined: &flag}); err != nil {
+		t.Fatalf("UpdateByID flip off: %v", err)
+	}
+	all, err = ms.SelectByIDAllProviders(ctx, "gpt-4o")
+	if err != nil {
+		t.Fatalf("SelectByIDAllProviders after flip: %v", err)
+	}
+	for _, m := range all {
+		if m.UserDefined {
+			t.Errorf("provider %s user_defined = true; want false after explicit flip", m.Provider)
+		}
+	}
+
+	// The unrelated claude row must be untouched.
+	claude, err := ms.SelectOne(ctx, "claude-3-5", "anthropic")
+	if err != nil {
+		t.Fatalf("SelectOne claude: %v", err)
+	}
+	if claude.UserDefined {
+		t.Errorf("claude user_defined flipped to true; unrelated id must be untouched")
+	}
+}
+
 // TestModelsStoreSelectByIDAllProvidersNilSafe asserts the no-PG / empty-id
 // guards return errors (never panic), mirroring TestModelsStoreNilSafe.
 func TestModelsStoreSelectByIDAllProvidersNilSafe(t *testing.T) {

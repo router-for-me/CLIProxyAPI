@@ -388,6 +388,7 @@ const NAV_GROUPS = [
       { to: '/api-keys', label: 'API Keys', icon: 'key' },
       { to: '/internal-users', label: 'Internal Users', icon: 'users' },
       { to: '/model-groups', label: 'Model Groups', icon: 'layers' },
+      { to: '/auto-routers', label: 'Auto Routers', icon: 'route' },
       { to: '/models', label: 'Models Catalog', icon: 'cube' },
       { to: '/error-messages', label: 'Error Messages', icon: 'alert' },
       { to: '/api-tokens', label: 'API Management', icon: 'shield' },
@@ -489,4 +490,5 @@ const ICON_MAP = {
   link: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6.5 9.5a2.5 2.5 0 0 0 3.5 0l2-2a2.5 2.5 0 0 0-3.5-3.5l-1 1" /><path d="M9.5 6.5a2.5 2.5 0 0 0-3.5 0l-2 2a2.5 2.5 0 0 0 3.5 3.5l1-1" /></svg>,
   pulse: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 8h3l1.5-4 3 9 2-6 1 1h3.5" /></svg>,
   transfer: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2 5h11M9 2l3 3-3 3M14 11H3M7 8l-3 3 3 3" /></svg>,
+  route: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="3" cy="8" r="1.6" /><circle cx="13" cy="8" r="1.6" /><path d="M4.6 8h6.8" /><path d="M5 6c0-1.5 1-2.5 3-2.5S11 4.5 11 6v.5" /><path d="M5 10c0 1.5 1 2.5 3 2.5s3-1 3-2.5V9.5" /></svg>,
 };

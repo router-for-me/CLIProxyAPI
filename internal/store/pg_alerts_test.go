@@ -147,6 +147,98 @@ func TestAlertStoreSettingsClampAndToggle(t *testing.T) {
 	}
 }
 
+func TestAlertStoreSuppressionWindowReArm(t *testing.T) {
+	pg := newTestPostgresStore(t, "test_alerts_rearm")
+	ctx := context.Background()
+	as := NewAlertStore(pg)
+	if as == nil {
+		t.Fatal("NewAlertStore returned nil")
+	}
+
+	// Use a short suppression window so the re-arm boundary is testable in
+	// milliseconds instead of minutes.
+	suppression := 100 * time.Millisecond
+	fp := alertFingerprintKeyForTest(AlertTypeUserBudget, "u1")
+
+	created, merged, err := as.RecordAlert(ctx, Alert{
+		AlertType:   AlertTypeUserBudget,
+		Severity:    AlertSeverityCritical,
+		Title:       "Internal user budget exceeded",
+		EntityID:    "u1",
+		Value:       50,
+		LimitValue:  10,
+		Fingerprint: fp,
+	}, suppression)
+	if err != nil {
+		t.Fatalf("RecordAlert: %v", err)
+	}
+	if merged {
+		t.Fatal("expected a fresh insert, not a merge")
+	}
+
+	// Immediately inside the suppression window: the same fingerprint must merge
+	// into the existing row (bump occurrences) instead of inserting a duplicate.
+	second, merged2, err := as.RecordAlert(ctx, Alert{
+		AlertType:   AlertTypeUserBudget,
+		Severity:    AlertSeverityCritical,
+		Title:       "Internal user budget exceeded",
+		EntityID:    "u1",
+		Value:       60,
+		LimitValue:  10,
+		Fingerprint: fp,
+	}, suppression)
+	if err != nil {
+		t.Fatalf("RecordAlert within window: %v", err)
+	}
+	if !merged2 {
+		t.Fatal("expected a merge while the suppression window is still open")
+	}
+	if second.ID != created.ID {
+		t.Fatalf("expected merge to keep same id, got %d vs %d", second.ID, created.ID)
+	}
+	if second.Occurrences != 2 {
+		t.Fatalf("expected 2 occurrences after merge, got %d", second.Occurrences)
+	}
+
+	// After the suppression window elapses the same condition is a new episode:
+	// a fresh row is created rather than the old one being reused forever.
+	time.Sleep(2 * suppression)
+	third, merged3, err := as.RecordAlert(ctx, Alert{
+		AlertType:   AlertTypeUserBudget,
+		Severity:    AlertSeverityCritical,
+		Title:       "Internal user budget exceeded",
+		EntityID:    "u1",
+		Value:       70,
+		LimitValue:  10,
+		Fingerprint: fp,
+	}, suppression)
+	if err != nil {
+		t.Fatalf("RecordAlert after window: %v", err)
+	}
+	if merged3 {
+		t.Fatal("expected a fresh insert after the suppression window lapsed")
+	}
+	if third.ID == created.ID {
+		t.Fatal("expected a new row for a new suppression episode")
+	}
+	if third.Occurrences != 1 {
+		t.Fatalf("expected 1 occurrence on the new episode, got %d", third.Occurrences)
+	}
+
+	// Two episodes exist for the same fingerprint: the original merged row plus
+	// the re-armed row. Confirms dedup happens per window, not per fingerprint.
+	rows, total, err := as.ListPaged(ctx, AlertFilter{AlertType: AlertTypeUserBudget}, 1, 10)
+	if err != nil {
+		t.Fatalf("ListPaged: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows for one fingerprint across two episodes, got %d", len(rows))
+	}
+	if total != 2 {
+		t.Fatalf("expected total 2, got %d", total)
+	}
+}
+
 func alertFingerprintKeyForTest(parts ...string) string {
 	out := parts[0]
 	for i := 1; i < len(parts); i++ {

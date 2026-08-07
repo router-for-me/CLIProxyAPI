@@ -39,6 +39,10 @@ export default function GlobalModelModal({ modelId, onClose, onSaved }) {
   useEffect(() => {
     if (data && !form) {
       const c = data.canonical || {};
+      // Seed user_defined from the canonical row when present, otherwise
+      // default to true so the operator's intent is preserved on first open.
+      // The Apply flag is a separate toggle the operator uses to scope the
+      // branch to a single global edit.
       setForm({
         official_provider: { value: c.official_provider || '', apply: true },
         display_name: { value: c.display_name || '', apply: true },
@@ -49,6 +53,7 @@ export default function GlobalModelModal({ modelId, onClose, onSaved }) {
         output_token_limit: { value: String(c.output_token_limit || 0), apply: true },
         input_modalities: { value: (c.input_modalities || []).join('\n'), apply: true },
         output_modalities: { value: (c.output_modalities || []).join('\n'), apply: true },
+        user_defined: { value: !!c.user_defined, apply: false },
       });
       const p = data.pricing;
       setPricing({
@@ -99,6 +104,8 @@ export default function GlobalModelModal({ modelId, onClose, onSaved }) {
       anyAttr = true;
       if (name === 'input_modalities' || name === 'output_modalities') {
         attrs[name] = splitList(entry.value);
+      } else if (name === 'user_defined') {
+        attrs[name] = !!entry.value;
       } else if (['context_length', 'max_completion_tokens', 'input_token_limit', 'output_token_limit'].includes(name)) {
         attrs[name] = Number(entry.value) || 0;
       } else {
@@ -205,6 +212,30 @@ export default function GlobalModelModal({ modelId, onClose, onSaved }) {
                 onUpdate={updateField} onToggle={toggleApply} placeholder="TEXT&#10;IMAGE" />
               <GlobalFieldTextarea label="Output modalities (one per line)" name="output_modalities" form={form}
                 onUpdate={updateField} onToggle={toggleApply} placeholder="TEXT" />
+            </div>
+
+            {/* User-defined flag — per-row, but checked here so a single
+                "Apply globally" PUT can align the user_defined state across
+                every upstream provider that shares this model id. Without
+                this, the auto-sync path keeps newly-ingested upstream rows
+                marked user_defined=false even after a global edit. */}
+            <div className="form__row">
+              <label className="row gap-sm" style={{ cursor: 'pointer', fontSize: 13 }}>
+                <input
+                  type="checkbox"
+                  checked={!!form.user_defined.value}
+                  onChange={(e) => updateField('user_defined', e.target.checked)}
+                  style={{ width: 'auto' }}
+                />
+                <span className="form__label" style={{ margin: 0 }}>
+                  User-defined (skip registry validation)
+                </span>
+              </label>
+              <div className="form__hint" style={{ marginTop: 2 }}>
+                Toggle is shared across every upstream provider that serves this model id.
+                Tick "Apply globally" below to fan it out.
+              </div>
+              <ApplyToggle checked={form.user_defined.apply} onChange={() => toggleApply('user_defined')} />
             </div>
 
             {/* Routing section — global per model id (mirrors a Models Group route) */}

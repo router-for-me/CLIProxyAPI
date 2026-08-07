@@ -155,6 +155,12 @@ func (h *Handler) runHealthChecks(ctx context.Context) {
 			skippedCount++
 			continue
 		}
+		// Auto Routers register synthetic model ids with no real auth behind
+		// them; probing them would always fail, so exclude them from the sweep.
+		if registry.IsAutoRouterModel(modelID) {
+			skippedCount++
+			continue
+		}
 		row := h.probeModel(ctx, modelID, settings.MaxTokens)
 		// Persist with a bounded-time context so a slow DB never pins the
 		// sweep goroutine between probes (mirrors SyncLogSink's insert guard).

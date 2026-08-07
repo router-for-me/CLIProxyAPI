@@ -27,6 +27,8 @@ const (
 	ResourceInternalUsers BackupResource = "internal_users"
 	// ResourceModelGroups covers reusable Model Group templates.
 	ResourceModelGroups BackupResource = "model_groups"
+	// ResourceAutoRouters covers Auto Router entity definitions.
+	ResourceAutoRouters BackupResource = "auto_routers"
 	// ResourceModels covers the model catalog (models_catalog + model_pricing).
 	ResourceModels BackupResource = "models_catalog"
 	// ResourceUpstreamProviders covers normalized upstream providers and their
@@ -58,6 +60,7 @@ var AllBackupResources = []BackupResource{
 	ResourceAPIKeys,
 	ResourceInternalUsers,
 	ResourceModelGroups,
+	ResourceAutoRouters,
 	ResourceModels,
 	ResourceUpstreamProviders,
 	ResourceManagementTokens,
@@ -114,6 +117,8 @@ func (s *PostgresStore) resourceTables(res BackupResource) []backupTable {
 		}
 	case ResourceModelGroups:
 		return []backupTable{{s.ModelGroupsTable(), "id"}}
+	case ResourceAutoRouters:
+		return []backupTable{{s.AutoRoutersTable(), "id"}}
 	case ResourceModels:
 		return []backupTable{
 			{s.ModelsTable(), ""},

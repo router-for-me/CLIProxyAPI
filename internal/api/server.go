@@ -241,6 +241,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.mgmt.SetManagementTokenStore(handles.ManagementTokens)
 		s.mgmt.SetUpstreamProvidersStore(handles.UpstreamProviders)
 		s.mgmt.SetModelGroupStore(handles.ModelGroups)
+		s.mgmt.SetAutoRouterStore(handles.AutoRouters)
+		// Re-register every enabled Auto Router's model id in the in-memory
+		// registry + models catalog so auto routers survive a restart (the
+		// registry is rebuilt at boot and only sessions recreate it otherwise).
+		s.mgmt.RehydrateAutoRouters(context.Background())
 		s.mgmt.SetSyncLogStore(handles.SyncLog)
 		// Wire the PG-backed model health store (Analysis → Model Health page
 		// + the public /v0/model-health/uptime endpoint). The retention sweep
@@ -271,6 +276,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		// route by Global Model the same way a Models Group route does. Shares
 		// the same ModelsStore-backed resolver instance; nil when PG is off.
 		s.handlers.SetGlobalModelRouter(store.NewModelsCatalogResolver(handles.Models))
+		// Wire the Auto Router resolver so requests whose model id matches an
+		// Auto Router are scored and forwarded to a tier-appropriate upstream
+		// model. Non-nil only when PG is configured and routers exist.
+		s.handlers.SetAutoRouterResolver(store.NewAutoRoutersResolver(handles.AutoRouters))
 		// Surface official_provider on Usage Stats / Errors rows so the
 		// dashboard can show "Provider Official" (e.g. "anthropic") instead of
 		// the raw internal provider key (e.g. "claude").

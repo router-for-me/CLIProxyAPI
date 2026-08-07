@@ -643,6 +643,7 @@ func main() {
 		pgSyncLog     *store.SyncLogStore
 		pgSyncAdapter *registry.PGSync
 		pgModelGroups *store.ModelGroupStore
+		pgAutoRouters *store.AutoRouterStore
 		policySvc     policy.PolicyService
 		usageFlusher  *store.UsageFlusher
 	)
@@ -654,6 +655,7 @@ func main() {
 		pgMgmtTokens = store.NewManagementTokenStore(pgStoreInst)
 		pgSyncLog = store.NewSyncLogStore(pgStoreInst)
 		pgModelGroups = store.NewModelGroupStore(pgStoreInst)
+		pgAutoRouters = store.NewAutoRouterStore(pgStoreInst)
 		pgModelHealth := store.NewModelHealthStore(pgStoreInst)
 		pgAlerts := store.NewAlertStore(pgStoreInst)
 		pgSyncAdapter = registry.NewPGSync(store.NewPGModelsAdapter(pgModelsStore))
@@ -750,6 +752,7 @@ func main() {
 			UpstreamProviders: pgUpstreamProviders,
 			SyncLog:           pgSyncLog,
 			ModelGroups:       pgModelGroups,
+			AutoRouters:       pgAutoRouters,
 			ModelHealth:       pgModelHealth,
 			Alerts:            pgAlerts,
 			Backup:            pgStoreInst,

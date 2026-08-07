@@ -57,6 +57,13 @@ type GlobalModelAttributesRequest struct {
 	OutputTokenLimit    *int      `json:"output_token_limit,omitempty"`
 	InputModalities     *[]string `json:"input_modalities,omitempty"`
 	OutputModalities    *[]string `json:"output_modalities,omitempty"`
+	// UserDefined is the per-row "user-defined" flag. The auto-sync path
+	// writes it as false, so a model id fanned out across multiple upstream
+	// providers can end up with one row marked user_defined and the rest not.
+	// Surfacing it here lets the dashboard's "Apply globally" checkbox flip
+	// every row sharing the model id in one PUT, instead of forcing the
+	// operator to edit each (id, provider) row individually.
+	UserDefined *bool `json:"user_defined,omitempty"`
 }
 
 // GlobalModelRoutingRequest is the operator-editable routing override for the
@@ -255,6 +262,7 @@ func globalAttributesToPatch(a *GlobalModelAttributesRequest) store.GlobalModelP
 		OutputTokenLimit:    a.OutputTokenLimit,
 		InputModalities:     a.InputModalities,
 		OutputModalities:    a.OutputModalities,
+		UserDefined:         a.UserDefined,
 	}
 }
 

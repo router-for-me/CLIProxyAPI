@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -241,12 +242,26 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	if routeDecision.ExecutorPluginID != "" {
 		return h.streamWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(ctx, modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
+	executionModel := modelName
+	var autoRoute *autorouter.Resolved
+	var resolvedAR autoRouterResolved
+	if rr := h.resolveAutoRouterModel(ctx, entryProtocol, modelName, rawJSON); rr.matched {
+		resolvedAR = rr
+		executionModel = resolvedAR.targetModel
+		autoRoute = resolvedAR.route
+	}
+	if resolvedAR.matched {
+		rawJSON = h.autoRouterRequestAdjustments(ctx, resolvedAR, rawJSON)
+	}
+	providers, normalizedModel, errMsg := h.providersForExecution(ctx, executionModel, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
 		close(errChan)
 		return nil, nil, errChan
+	}
+	if autoRoute != nil {
+		providers = h.applyAutoRouterRoute(ctx, providers, autoRoute)
 	}
 	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
 	reqMeta := requestExecutionMetadata(ctx)

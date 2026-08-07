@@ -321,6 +321,13 @@ type BaseAPIHandler struct {
 	// the default registry provider set unless a per-API-key Models Group route
 	// pins one.
 	GlobalModelRouter GlobalModelRouteResolver
+
+	// AutoRouterResolver optionally resolves an Auto Router definition by its
+	// requestable model id, so requests to that model are scored and forwarded
+	// to a tier-appropriate upstream model. When nil (file-based deployments),
+	// no Auto Router matching occurs and requests use normal model-to-provider
+	// routing.
+	AutoRouterResolver AutoRouterResolver
 }
 
 // ModelsCatalogResolver resolves an internal provider key to the official
@@ -334,6 +341,15 @@ type ModelsCatalogResolver interface {
 // model id in the model catalog. Returns nil when no override is set.
 type GlobalModelRouteResolver interface {
 	GlobalModelRoute(ctx context.Context, modelID string) *store.ModelRoute
+}
+
+// AutoRouterResolver resolves an Auto Router definition by its client-facing
+// model id. Returned routers are read-only; the type mirrors the store's
+// AutoRouter shape (see internal/store/pg_auto_routers.go). Implementing the
+// interface structurally (as store.AutoRoutersResolverImpl does) keeps the
+// store package free of an import on this package.
+type AutoRouterResolver interface {
+	AutoRouterForModel(ctx context.Context, modelID string) *store.AutoRouter
 }
 
 // SetModelsCatalogStore wires a models-catalog resolver (backed by the
@@ -354,6 +370,17 @@ func (h *BaseAPIHandler) SetGlobalModelRouter(r GlobalModelRouteResolver) {
 		return
 	}
 	h.GlobalModelRouter = r
+}
+
+// SetAutoRouterResolver wires a resolver for Auto Router definitions, so
+// requests whose model id matches a router are scored and forwarded to a
+// tier-appropriate upstream model. Safe to call with nil to clear the resolver
+// (file-based deployments leave it nil).
+func (h *BaseAPIHandler) SetAutoRouterResolver(r AutoRouterResolver) {
+	if h == nil {
+		return
+	}
+	h.AutoRouterResolver = r
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.

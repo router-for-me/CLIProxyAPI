@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -48,9 +49,33 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	if routeDecision.ExecutorPluginID != "" {
 		return h.executeWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(ctx, modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
+	// Auto Router: if the requested model is an Auto Router id, score the
+	// request and forward it to the tier-appropriate upstream model. The
+	// original requested model (the router id) is preserved for attribution
+	// and logging, while execution uses the resolved target model. The tier's
+	// per-model routing (providers/strategy/priorities) is applied after
+	// provider resolution so it overrides the target model's default routing.
+	executionModel := modelName
+	var autoRoute *autorouter.Resolved
+	var resolvedAR autoRouterResolved
+	if rr := h.resolveAutoRouterModel(ctx, entryProtocol, modelName, rawJSON); rr.matched {
+		resolvedAR = rr
+		executionModel = resolvedAR.targetModel
+		autoRoute = resolvedAR.route
+	}
+	// Vision bridge: when the tier target lacks vision support and the request
+	// carries images, analyze them via the router's bridge model and replace the
+	// image blocks with the textual analysis before dispatching to the target.
+	// Falls back to the original request on bridge failure (never breaks flow).
+	if resolvedAR.matched {
+		rawJSON = h.autoRouterRequestAdjustments(ctx, resolvedAR, rawJSON)
+	}
+	providers, normalizedModel, errMsg := h.providersForExecution(ctx, executionModel, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
 		return nil, nil, errMsg
+	}
+	if autoRoute != nil {
+		providers = h.applyAutoRouterRoute(ctx, providers, autoRoute)
 	}
 	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
 	reqMeta := requestExecutionMetadata(ctx)
@@ -115,9 +140,23 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	if routeDecision.ExecutorPluginID != "" {
 		return h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(ctx, modelName, originalRequestedModel, false, routeDecision, execOptions)
+	executionModel := modelName
+	var autoRoute *autorouter.Resolved
+	var resolvedAR autoRouterResolved
+	if rr := h.resolveAutoRouterModel(ctx, handlerType, modelName, rawJSON); rr.matched {
+		resolvedAR = rr
+		executionModel = resolvedAR.targetModel
+		autoRoute = resolvedAR.route
+	}
+	if resolvedAR.matched {
+		rawJSON = h.autoRouterRequestAdjustments(ctx, resolvedAR, rawJSON)
+	}
+	providers, normalizedModel, errMsg := h.providersForExecution(ctx, executionModel, originalRequestedModel, false, routeDecision, execOptions)
 	if errMsg != nil {
 		return nil, nil, errMsg
+	}
+	if autoRoute != nil {
+		providers = h.applyAutoRouterRoute(ctx, providers, autoRoute)
 	}
 	providers = adjustExecutionProvidersForEntryProtocol(handlerType, providers)
 	reqMeta := requestExecutionMetadata(ctx)
