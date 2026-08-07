@@ -649,6 +649,7 @@ func (s *Service) buildArchive(ctx context.Context, hour time.Time, provider str
 
 	var jsonlSize int64
 	var errWrite error
+	var filteredCount int
 	for index := range sources {
 		if errContext := ctx.Err(); errContext != nil {
 			errWrite = errContext
@@ -661,6 +662,9 @@ func (s *Service) buildArchive(ctx context.Context, hour time.Time, provider str
 			break
 		}
 		sources[index].SHA256 = sourceSHA256
+		if written == 0 {
+			filteredCount++
+		}
 	}
 	errEncoderClose := encoder.Close()
 	errDestinationSync := destination.Sync()
@@ -668,6 +672,13 @@ func (s *Service) buildArchive(ctx context.Context, hour time.Time, provider str
 	if errCombined := errors.Join(errWrite, errEncoderClose, errDestinationSync, errDestinationClose); errCombined != nil {
 		_ = os.Remove(tmpPath)
 		return "", 0, 0, fmt.Errorf("write Zstandard archive: %w", errCombined)
+	}
+	if filteredCount > 0 {
+		log.WithFields(log.Fields{
+			"hour":             hour.Format(time.RFC3339),
+			"filtered_records": filteredCount,
+			"source_files":     len(sources),
+		}).Info("records filtered during normalization (empty response outputs)")
 	}
 
 	archiveFilename := makeArchiveFilename(hour, provider, jsonlSize)

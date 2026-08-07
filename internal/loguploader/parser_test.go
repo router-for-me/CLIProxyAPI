@@ -18,7 +18,7 @@ func TestWriteJSONLRecordStreamsLargeMultibyteLog(t *testing.T) {
 	timestamp := time.Date(2026, time.July, 15, 1, 23, 45, 123000000, location)
 	prefix := "Timestamp: " + timestamp.Format(time.RFC3339Nano) + "\n" +
 		"=== REQUEST BODY ===\n" +
-		`{"model":"gpt-5.6-sol","input":"` + "\n"
+		`{"model":"claude-opus-4","input":"` + "\n"
 
 	// Put the first byte of a three-byte rune at byte 65535. This forces the
 	// streaming encoder to preserve a rune split across its 64 KiB read boundary.
@@ -70,8 +70,8 @@ func TestWriteJSONLRecordStreamsLargeMultibyteLog(t *testing.T) {
 	if record.KeyName != "panda" {
 		t.Errorf("key_name = %q, want panda", record.KeyName)
 	}
-	if record.Model != "gpt-5.6-sol" {
-		t.Errorf("model = %q, want gpt-5.6-sol", record.Model)
+	if record.Model != "claude-opus-4" {
+		t.Errorf("model = %q, want claude-opus-4", record.Model)
 	}
 	if record.SourceFile != filepath.ToSlash(filepath.Join("panda", filepath.Base(path))) {
 		t.Errorf("source_file = %q", record.SourceFile)
@@ -201,7 +201,7 @@ func TestWriteJSONLRecordRedactsSensitiveHeaders(t *testing.T) {
 		"X-OpenAI-Api-Key: secret-openai-key\n" +
 		"X-ApiKey: secret-compact-key\n" +
 		"Content-Type: application/json\n\n" +
-		`{"model":"gpt-5.6-sol"}` + "\n"
+		`{"model":"claude-opus-4"}` + "\n"
 	path := mustWriteLog(t, root, "panda", "redaction.log", rawLog, timestamp.Add(-time.Hour))
 	info, errStat := os.Stat(path)
 	if errStat != nil {

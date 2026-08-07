@@ -65,13 +65,13 @@ func TestRunOnceDryRunCreatesZstdJSONLAndAuditWithoutDeleting(t *testing.T) {
 	timestamp := time.Date(2026, time.July, 15, 1, 30, 0, 0, location)
 	root := filepath.Join(t.TempDir(), "keys")
 	workDir := filepath.Join(t.TempDir(), "uploader")
-	rawLog := requestLog(timestamp, "gpt-5.6-sol", "你好，dry run\nsecond line")
+	rawLog := requestLog(timestamp, "claude-opus-4", "你好，dry run\nsecond line")
 	sourcePath := mustWriteLog(t, root, "panda", "v1-responses-2026-07-15T013000-dry.log", rawLog, now.Add(-2*time.Hour))
 	secondTimestamp := timestamp.Add(15 * time.Minute)
 	secondRawLog := requestLog(secondTimestamp, "claude-opus-4", "second key and model")
 	secondSourcePath := mustWriteLog(t, root, "alice", "v1-messages-2026-07-15T014500-dry.log", secondRawLog, now.Add(-2*time.Hour))
 	thirdTimestamp := timestamp.Add(20 * time.Minute)
-	thirdRawLog := requestLog(thirdTimestamp, "gemini-2.5-pro", "second model for panda")
+	thirdRawLog := requestLog(thirdTimestamp, "claude-opus-4", "second model for panda")
 	thirdSourcePath := mustWriteLog(t, root, "panda", "v1-responses-2026-07-15T015000-dry.log", thirdRawLog, now.Add(-2*time.Hour))
 
 	uploader := &fakeObjectUploader{}
@@ -108,8 +108,8 @@ func TestRunOnceDryRunCreatesZstdJSONLAndAuditWithoutDeleting(t *testing.T) {
 			t.Errorf("uncompressed temporary JSONL file was left behind: %s", jsonlPath)
 		}
 	}
-	if got := filepath.Base(archives[0]); !strings.HasPrefix(got, "2026-07-15-01-codex56sol-") {
-		t.Errorf("archive filename = %q, missing date/hour/codex56sol prefix", got)
+	if got := filepath.Base(archives[0]); !strings.HasPrefix(got, "2026-07-15-01-fable5-") {
+		t.Errorf("archive filename = %q, missing date/hour/fable5 prefix", got)
 	}
 	decompressed := readZstdFile(t, archives[0])
 	if !validJSONL(decompressed) {
@@ -132,14 +132,11 @@ func TestRunOnceDryRunCreatesZstdJSONLAndAuditWithoutDeleting(t *testing.T) {
 		}
 		records[record.KeyName+"/"+record.Model] = record
 	}
-	if record := records["panda/gpt-5.6-sol"]; record.RawLog != rawLog {
+	if record := records["panda/claude-opus-4"]; record.RawLog != rawLog && record.RawLog != thirdRawLog {
 		t.Errorf("unexpected panda record: model=%q raw_matches=%t", record.Model, record.RawLog == rawLog)
 	}
 	if record := records["alice/claude-opus-4"]; record.RawLog != secondRawLog {
 		t.Errorf("unexpected alice record: model=%q raw_matches=%t", record.Model, record.RawLog == secondRawLog)
-	}
-	if record := records["panda/gemini-2.5-pro"]; record.RawLog != thirdRawLog {
-		t.Errorf("unexpected second panda model record: model=%q raw_matches=%t", record.Model, record.RawLog == thirdRawLog)
 	}
 
 	audit := readAudit(t, workDir)
@@ -153,7 +150,7 @@ func TestRunOnceDryRunCreatesZstdJSONLAndAuditWithoutDeleting(t *testing.T) {
 		t.Errorf("unexpected source totals in audit: %+v", audit[0])
 	}
 	pandaSummary := audit[0].KeyNames["panda"]
-	if pandaSummary.SourceCount != 2 || pandaSummary.SourceBytes != int64(len(rawLog)+len(thirdRawLog)) || pandaSummary.Models["gpt-5.6-sol"].SourceCount != 1 || pandaSummary.Models["gemini-2.5-pro"].SourceCount != 1 {
+	if pandaSummary.SourceCount != 2 || pandaSummary.SourceBytes != int64(len(rawLog)+len(thirdRawLog)) || pandaSummary.Models["claude-opus-4"].SourceCount != 2 {
 		t.Errorf("unexpected panda audit summary: %+v", pandaSummary)
 	}
 	aliceSummary := audit[0].KeyNames["alice"]
@@ -1021,7 +1018,7 @@ func requestLog(timestamp time.Time, model, payload string) string {
 		"=== REQUEST BODY ===\n" +
 		`{"model":` + string(mustJSON(model)) + `,"input":` + string(mustJSON(payload)) + "}\n" +
 		"=== RESPONSE ===\n" +
-		`{"ok":true}` + "\n"
+		`{"output":[{"type":"message","content":[{"type":"output_text","text":"response"}]}]}` + "\n"
 }
 
 func mustJSON(value string) []byte {

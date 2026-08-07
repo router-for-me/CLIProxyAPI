@@ -524,6 +524,110 @@ func TestGetRequestLogUsageMalformedUploaderConfigUsesFallback(t *testing.T) {
 	}
 }
 
+func TestGetRequestLogUsageJSONLBytes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	root := t.TempDir()
+	workDir := filepath.Join(root, "work")
+	mustWriteRequestLogUsageFile(t, filepath.Join(root, "log-uploader.yaml"), []byte("logs-root: logs/keys\nwork-dir: work\ntimezone: Asia/Shanghai\n"))
+
+	hour1 := time.Date(2026, 8, 1, 10, 0, 0, 0, time.FixedZone("CST", 8*60*60))
+	hour2 := hour1.Add(time.Hour)
+
+	// Codex batch: source_bytes=500, jsonl_bytes=350 (normalization reduced size)
+	// Fable5 batch: source_bytes=800, jsonl_bytes=800 (no normalization)
+	lines := []string{
+		marshalRequestLogUsageAudit(t, requestLogUsageAuditRecord{
+			Status:     "uploaded",
+			Hour:       hour1,
+			Provider:   "codex",
+			JSONLBytes: 350,
+			KeyNames: map[string]requestLogUsageAuditKey{
+				"alice": requestLogUsageAuditKeyWithModel(5, 500, "gpt-5.6", 5, 500),
+			},
+		}),
+		marshalRequestLogUsageAudit(t, requestLogUsageAuditRecord{
+			Status:     "uploaded",
+			Hour:       hour1,
+			Provider:   "fable5",
+			JSONLBytes: 800,
+			KeyNames: map[string]requestLogUsageAuditKey{
+				"alice": requestLogUsageAuditKeyWithModel(8, 800, "claude-fable-5", 8, 800),
+			},
+		}),
+		// Second codex batch in a different hour; jsonl_bytes=200
+		marshalRequestLogUsageAudit(t, requestLogUsageAuditRecord{
+			Status:     "uploaded",
+			Hour:       hour2,
+			Provider:   "codex",
+			JSONLBytes: 200,
+			KeyNames: map[string]requestLogUsageAuditKey{
+				"bob": requestLogUsageAuditKeyWithModel(3, 300, "gpt-5.6", 3, 300),
+			},
+		}),
+	}
+	mustWriteRequestLogUsageFile(t, filepath.Join(workDir, "audit.jsonl"), []byte(strings.Join(lines, "\n")+"\n"))
+
+	handler := NewHandler(&config.Config{AuthDir: filepath.Join(root, "auths")}, filepath.Join(root, "config.yaml"), nil)
+	response, _ := performRequestLogUsage(t, handler)
+
+	// Totals: source_bytes = 500+800+300 = 1600, jsonl_bytes = 350+800+200 = 1350
+	if response.Totals.SourceBytes != 1600 {
+		t.Fatalf("totals source_bytes = %d, want 1600", response.Totals.SourceBytes)
+	}
+	if response.Totals.JSONLBytes != 1350 {
+		t.Fatalf("totals jsonl_bytes = %d, want 1350", response.Totals.JSONLBytes)
+	}
+
+	// Provider summaries
+	if len(response.Providers) != 2 {
+		t.Fatalf("providers count = %d, want 2", len(response.Providers))
+	}
+	codexProvider := response.Providers[0]
+	if codexProvider.Provider != "codex" {
+		t.Fatalf("first provider = %q, want codex", codexProvider.Provider)
+	}
+	if codexProvider.SourceBytes != 800 || codexProvider.JSONLBytes != 550 {
+		t.Fatalf("codex provider: source=%d jsonl=%d, want 800/550", codexProvider.SourceBytes, codexProvider.JSONLBytes)
+	}
+	fable5Provider := response.Providers[1]
+	if fable5Provider.Provider != "fable5" {
+		t.Fatalf("second provider = %q, want fable5", fable5Provider.Provider)
+	}
+	if fable5Provider.SourceBytes != 800 || fable5Provider.JSONLBytes != 800 {
+		t.Fatalf("fable5 provider: source=%d jsonl=%d, want 800/800", fable5Provider.SourceBytes, fable5Provider.JSONLBytes)
+	}
+
+	// Days: both hours are on the same day
+	if len(response.Days) != 1 {
+		t.Fatalf("days count = %d, want 1", len(response.Days))
+	}
+	if response.Days[0].SourceBytes != 1600 || response.Days[0].JSONLBytes != 1350 {
+		t.Fatalf("day: source=%d jsonl=%d, want 1600/1350", response.Days[0].SourceBytes, response.Days[0].JSONLBytes)
+	}
+
+	// Hours
+	if len(response.Hours) != 3 {
+		t.Fatalf("hours count = %d, want 3", len(response.Hours))
+	}
+	for _, h := range response.Hours {
+		if h.Provider == "codex" && h.Hour == "2026-08-01T10:00:00+08:00" {
+			if h.JSONLBytes != 350 {
+				t.Fatalf("hour1 codex jsonl_bytes = %d, want 350", h.JSONLBytes)
+			}
+		}
+		if h.Provider == "codex" && h.Hour == "2026-08-01T11:00:00+08:00" {
+			if h.JSONLBytes != 200 {
+				t.Fatalf("hour2 codex jsonl_bytes = %d, want 200", h.JSONLBytes)
+			}
+		}
+	}
+
+	// JSONLBytesMeaning should be set
+	if response.JSONLBytesMeaning == "" {
+		t.Fatal("jsonl_bytes_meaning is empty")
+	}
+}
+
 func performRequestLogUsage(t *testing.T, handler *Handler) (requestLogUsageResponse, string) {
 	t.Helper()
 	recorder := httptest.NewRecorder()

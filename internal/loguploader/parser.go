@@ -24,12 +24,12 @@ const (
 	providerClaude = "fable5"
 	providerGrok   = "grok45"
 
-	archiveNameLabel          = "codex56sol"
-	claudeArchiveNameLabel    = "fable5"
-	grokArchiveNameLabel      = "grok45"
-	archiveNamingPolicy       = "provider-jsonl-size-v2"
-	legacyArchiveNamingPolicy = "codex56sol-jsonl-size-v1"
-	legacyArchiveNameLabel    = "all-models"
+	archiveNameLabel            = "codex56sol"
+	claudeArchiveNameLabel      = "fable5"
+	grokArchiveNameLabel        = "grok45"
+	archiveNamingPolicy         = "provider-jsonl-size-v2"
+	legacyArchiveNamingPolicy   = "codex56sol-jsonl-size-v1"
+	legacyArchiveNameLabel      = "all-models"
 	legacyAllModelsNamingPolicy = "all-models-jsonl-size-v1"
 )
 
@@ -126,6 +126,9 @@ func writeJSONLRecord(dst io.Writer, source sourceLog) (int64, error) {
 }
 
 func writeJSONLRecordWithHash(dst io.Writer, source sourceLog) (int64, string, error) {
+	if source.Provider == providerCodex {
+		return writeCodexNormalizedRecord(dst, source)
+	}
 	header := jsonlRecordHeader{
 		SchemaVersion:   1,
 		KeyName:         source.KeyName,

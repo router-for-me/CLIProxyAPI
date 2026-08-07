@@ -883,7 +883,7 @@
     var table = element('table', 'cpa-rlu-table');
     var head = element('thead');
     var headerRow = element('tr');
-    ['日期', '日志数', '原始大小', '来源', '模型'].forEach(function (label) {
+    ['日期', '日志数', '归档大小', '来源', '模型'].forEach(function (label) {
       headerRow.appendChild(element('th', '', label));
     });
     head.appendChild(headerRow);
@@ -898,7 +898,7 @@
         var row = element('tr');
         row.appendChild(element('td', '', String((day && day.date) || '—')));
         row.appendChild(element('td', '', integer(day.source_count)));
-        row.appendChild(element('td', '', bytes(day.source_bytes)));
+        row.appendChild(element('td', '', bytes(day.jsonl_bytes || day.source_bytes)));
         row.appendChild(element('td', '', providerText(day.providers) || '—'));
         row.appendChild(element('td', '', modelText(day.models) || '—'));
         body.appendChild(row);
@@ -961,7 +961,7 @@
     card.appendChild(cardHead);
 
     var metrics = element('div', 'cpa-rlu-metrics');
-    metrics.appendChild(metric('已上传原始日志', bytes(entry && entry.source_bytes)));
+    metrics.appendChild(metric('原始日志大小', bytes(entry && entry.source_bytes)));
     metrics.appendChild(metric('已上传日志数', integer(entry && entry.source_count)));
     metrics.appendChild(
       metric(
@@ -1028,13 +1028,13 @@
     var timezone = String((payload && payload.timezone) || '');
 
     var summary = element('div', 'cpa-rlu-summary');
-    summary.appendChild(summaryCard('已上传原始日志', bytes(totals.source_bytes)));
+    summary.appendChild(summaryCard('已上传归档日志', bytes(totals.jsonl_bytes || totals.source_bytes)));
     summary.appendChild(summaryCard('已上传日志数', integer(totals.source_count)));
     providerEntries(payload && payload.providers).forEach(function (entry) {
       summary.appendChild(
         summaryCard(
           providerLabel(entry.provider) + ' 日志',
-          bytes(entry.source_bytes) + ' / ' + integer(entry.source_count) + ' 条'
+          bytes(entry.jsonl_bytes || entry.source_bytes) + ' / ' + integer(entry.source_count) + ' 条'
         )
       );
     });
@@ -1053,7 +1053,7 @@
       element(
         'p',
         'cpa-rlu-note',
-        '大小按完整原始 .log 文件计算，不是压缩包分摊值。本地尚存日志在保留源文件或清理未完成时可能已上传。Key 改名后，旧名称会作为独立历史记录保留。每日表与 Key 列表支持分页与搜索，无需重新请求后端。'
+        '大小按归一化 JSONL 计算（压缩前实际上传 TOS 的体积），不是压缩包分摊值。本地尚存日志在保留源文件或清理未完成时可能已上传。Key 改名后，旧名称会作为独立历史记录保留。每日表与 Key 列表支持分页与搜索，无需重新请求后端。'
       )
     );
 

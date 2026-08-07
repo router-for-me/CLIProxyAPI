@@ -56,10 +56,11 @@ type requestLogUsageAuditKey struct {
 }
 
 type requestLogUsageAuditRecord struct {
-	Status   string                             `json:"status"`
-	Hour     time.Time                          `json:"hour"`
-	Provider string                             `json:"provider"`
-	KeyNames map[string]requestLogUsageAuditKey `json:"key_names"`
+	Status     string                             `json:"status"`
+	Hour       time.Time                          `json:"hour"`
+	Provider   string                             `json:"provider"`
+	KeyNames   map[string]requestLogUsageAuditKey `json:"key_names"`
+	JSONLBytes int64                              `json:"jsonl_bytes"`
 }
 
 type requestLogUsageBatch struct {
@@ -68,6 +69,7 @@ type requestLogUsageBatch struct {
 	statusRank  int
 	sourceCount int64
 	sourceBytes int64
+	jsonlBytes  int64
 	keyNames    map[string]requestLogUsageAuditKey
 }
 
@@ -110,6 +112,7 @@ type requestLogUsageHour struct {
 	Provider    string                   `json:"provider"`
 	SourceCount int64                    `json:"source_count"`
 	SourceBytes int64                    `json:"source_bytes"`
+	JSONLBytes  int64                    `json:"jsonl_bytes"`
 	Keys        []requestLogUsageHourKey `json:"keys"`
 }
 
@@ -125,6 +128,7 @@ type requestLogUsageDay struct {
 	Date        string                         `json:"date"`
 	SourceCount int64                          `json:"source_count"`
 	SourceBytes int64                          `json:"source_bytes"`
+	JSONLBytes  int64                          `json:"jsonl_bytes"`
 	Providers   []requestLogUsageProviderUsage `json:"providers"`
 	Keys        []requestLogUsageDayKey        `json:"keys"`
 }
@@ -132,6 +136,7 @@ type requestLogUsageDay struct {
 type requestLogUsageTotals struct {
 	SourceCount  int64 `json:"source_count"`
 	SourceBytes  int64 `json:"source_bytes"`
+	JSONLBytes   int64 `json:"jsonl_bytes"`
 	PendingCount int64 `json:"pending_count"`
 	PendingBytes int64 `json:"pending_bytes"`
 	BatchCount   int   `json:"batch_count"`
@@ -142,12 +147,14 @@ type requestLogUsageProviderSummary struct {
 	Provider    string `json:"provider"`
 	SourceCount int64  `json:"source_count"`
 	SourceBytes int64  `json:"source_bytes"`
+	JSONLBytes  int64  `json:"jsonl_bytes"`
 	BatchCount  int    `json:"batch_count"`
 }
 
 type requestLogUsageResponse struct {
 	Timezone           string                           `json:"timezone"`
 	SourceBytesMeaning string                           `json:"source_bytes_meaning"`
+	JSONLBytesMeaning  string                           `json:"jsonl_bytes_meaning"`
 	Totals             requestLogUsageTotals            `json:"totals"`
 	Providers          []requestLogUsageProviderSummary `json:"providers"`
 	Keys               []requestLogUsageKey             `json:"keys"`
@@ -178,6 +185,7 @@ type requestLogUsagePending struct {
 type requestLogUsageDayAggregate struct {
 	sourceCount  int64
 	sourceBytes  int64
+	jsonlBytes   int64
 	providers    map[string]requestLogUsageAuditModel
 	keys         map[string]requestLogUsageAuditKey
 	keyProviders map[string]map[string]requestLogUsageAuditModel
@@ -486,6 +494,7 @@ func readRequestLogUsageAudit(path, label string, location *time.Location, batch
 			// accumulate source counts and key-level details instead of overwriting.
 			previous.sourceCount += batch.sourceCount
 			previous.sourceBytes += batch.sourceBytes
+			previous.jsonlBytes += batch.jsonlBytes
 			for keyName, key := range batch.keyNames {
 				existing, found := previous.keyNames[keyName]
 				if !found {
@@ -540,6 +549,7 @@ func normalizeRequestLogUsageBatch(record requestLogUsageAuditRecord, location *
 		hour:       localHour,
 		provider:   provider,
 		statusRank: statusRank,
+		jsonlBytes: record.JSONLBytes,
 		keyNames:   make(map[string]requestLogUsageAuditKey),
 	}
 	for rawKeyName, rawKey := range record.KeyNames {
@@ -674,10 +684,12 @@ func buildRequestLogUsageResponse(settings requestLogUsageSettings, configuredKe
 			Provider:    provider,
 			SourceCount: batch.sourceCount,
 			SourceBytes: batch.sourceBytes,
+			JSONLBytes:  batch.jsonlBytes,
 			Keys:        make([]requestLogUsageHourKey, 0, len(batch.keyNames)),
 		}
 		_ = safeRequestLogUsageAdd(&totals.SourceCount, batch.sourceCount)
 		_ = safeRequestLogUsageAdd(&totals.SourceBytes, batch.sourceBytes)
+		_ = safeRequestLogUsageAdd(&totals.JSONLBytes, batch.jsonlBytes)
 		dayKey := batch.hour.In(location).Format(time.DateOnly)
 		dayAggregate := dailyAggregates[dayKey]
 		if dayAggregate == nil {
@@ -690,6 +702,7 @@ func buildRequestLogUsageResponse(settings requestLogUsageSettings, configuredKe
 		}
 		_ = safeRequestLogUsageAdd(&dayAggregate.sourceCount, batch.sourceCount)
 		_ = safeRequestLogUsageAdd(&dayAggregate.sourceBytes, batch.sourceBytes)
+		_ = safeRequestLogUsageAdd(&dayAggregate.jsonlBytes, batch.jsonlBytes)
 		dayProvider := dayAggregate.providers[provider]
 		_ = safeRequestLogUsageAdd(&dayProvider.SourceCount, batch.sourceCount)
 		_ = safeRequestLogUsageAdd(&dayProvider.SourceBytes, batch.sourceBytes)
@@ -767,6 +780,7 @@ func buildRequestLogUsageResponse(settings requestLogUsageSettings, configuredKe
 			Date:        dayKey,
 			SourceCount: aggregate.sourceCount,
 			SourceBytes: aggregate.sourceBytes,
+			JSONLBytes:  aggregate.jsonlBytes,
 			Providers:   requestLogUsageProviderUsages(aggregate.providers),
 			Keys:        make([]requestLogUsageDayKey, 0, len(aggregate.keys)),
 		}
@@ -842,6 +856,7 @@ func buildRequestLogUsageResponse(settings requestLogUsageSettings, configuredKe
 		}
 		_ = safeRequestLogUsageAdd(&summary.SourceCount, batch.sourceCount)
 		_ = safeRequestLogUsageAdd(&summary.SourceBytes, batch.sourceBytes)
+		_ = safeRequestLogUsageAdd(&summary.JSONLBytes, batch.jsonlBytes)
 		summary.BatchCount++
 	}
 	providerNames := make([]string, 0, len(providerAggregates))
@@ -860,6 +875,7 @@ func buildRequestLogUsageResponse(settings requestLogUsageSettings, configuredKe
 	return requestLogUsageResponse{
 		Timezone:           settings.timezone,
 		SourceBytesMeaning: "complete raw .log file bytes before JSONL conversion and compression",
+		JSONLBytesMeaning:  "normalized JSONL bytes after conversion, before zstd compression (actual content uploaded to TOS)",
 		Totals:             totals,
 		Providers:          providers,
 		Keys:               keys,
