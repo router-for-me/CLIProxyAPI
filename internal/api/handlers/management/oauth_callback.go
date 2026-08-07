@@ -53,22 +53,34 @@ func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) 
 	errMsg := strings.TrimSpace(req.Error)
 
 	if rawRedirect := strings.TrimSpace(req.RedirectURL); rawRedirect != "" {
-		u, errParse := url.Parse(rawRedirect)
-		if errParse != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid redirect_url"})
-			return
-		}
-		q := u.Query()
-		if state == "" {
-			state = strings.TrimSpace(q.Get("state"))
-		}
-		if code == "" {
-			code = strings.TrimSpace(q.Get("code"))
-		}
-		if errMsg == "" {
-			errMsg = strings.TrimSpace(q.Get("error"))
+		// The manual Claude flow hands the user a bare "<code>#<state>" pair rendered
+		// by Anthropic's hosted callback instead of a callback URL, so accept it in
+		// the same field.
+		if manualCode, manualState, isManual := parseManualCodePair(rawRedirect); isManual {
+			if state == "" {
+				state = manualState
+			}
+			if code == "" {
+				code = manualCode
+			}
+		} else {
+			u, errParse := url.Parse(rawRedirect)
+			if errParse != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid redirect_url"})
+				return
+			}
+			q := u.Query()
+			if state == "" {
+				state = strings.TrimSpace(q.Get("state"))
+			}
+			if code == "" {
+				code = strings.TrimSpace(q.Get("code"))
+			}
 			if errMsg == "" {
-				errMsg = strings.TrimSpace(q.Get("error_description"))
+				errMsg = strings.TrimSpace(q.Get("error"))
+				if errMsg == "" {
+					errMsg = strings.TrimSpace(q.Get("error_description"))
+				}
 			}
 		}
 	}
@@ -135,6 +147,25 @@ func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) 
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// parseManualCodePair splits the "<code>#<state>" pair Anthropic's hosted OAuth
+// callback page renders for manual logins. Anything carrying URL syntax is left
+// to the callback-URL parser instead.
+func parseManualCodePair(raw string) (code, state string, ok bool) {
+	if strings.Contains(raw, "://") || strings.ContainsAny(raw, "?&") {
+		return "", "", false
+	}
+	idx := strings.Index(raw, "#")
+	if idx <= 0 {
+		return "", "", false
+	}
+	code = strings.TrimSpace(raw[:idx])
+	state = strings.TrimSpace(raw[idx+1:])
+	if code == "" || state == "" {
+		return "", "", false
+	}
+	return code, state, true
 }
 
 func firstNonEmpty(values ...string) string {

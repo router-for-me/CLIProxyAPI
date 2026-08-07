@@ -67,6 +67,13 @@ type SDKConfig struct {
 type ClaudeCodeConfig struct {
 	// DisableCloakingModelList disables model ID cloaking in Anthropic model list responses.
 	DisableCloakingModelList bool `yaml:"disable-cloaking-model-list" json:"disable-cloaking-model-list"`
+
+	// ManualOAuth switches Claude logins to the manual flow the native Claude Code
+	// CLI uses on headless hosts: the authorization URL points at Anthropic's hosted
+	// callback instead of http://localhost:54545/callback, and the login is completed
+	// by pasting the "<code>#<state>" pair that page renders. Required when the
+	// browser used for authorization cannot reach this host on the callback port.
+	ManualOAuth bool `yaml:"manual-oauth" json:"manual-oauth"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.
