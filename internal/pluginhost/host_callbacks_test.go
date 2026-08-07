@@ -26,6 +26,23 @@ type fakeHostModelExecutor struct {
 	executeModelStream func(context.Context, handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage)
 }
 
+type callbackHTTPClient struct {
+	doCalls       int
+	doStreamCalls int
+}
+
+func (c *callbackHTTPClient) Do(context.Context, pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+	c.doCalls++
+	return pluginapi.HTTPResponse{StatusCode: http.StatusCreated, Body: []byte("selected-client")}, nil
+}
+
+func (c *callbackHTTPClient) DoStream(context.Context, pluginapi.HTTPRequest) (pluginapi.HTTPStreamResponse, error) {
+	c.doStreamCalls++
+	chunks := make(chan pluginapi.HTTPStreamChunk)
+	close(chunks)
+	return pluginapi.HTTPStreamResponse{StatusCode: http.StatusAccepted, Chunks: chunks}, nil
+}
+
 func (e *fakeHostModelExecutor) ExecuteModel(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
 	return e.executeModel(ctx, req)
 }
@@ -68,6 +85,49 @@ func TestHostHTTPDoCallbackUsesHostHTTPClient(t *testing.T) {
 	}
 	if resp.Headers.Get("X-Test") != "ok" {
 		t.Fatalf("X-Test = %q, want ok", resp.Headers.Get("X-Test"))
+	}
+}
+
+func TestHostHTTPCallbacksUseRegisteredAuthAwareClient(t *testing.T) {
+	host := New()
+	httpClient := &callbackHTTPClient{}
+	callbackID, closeCallback := host.openCallbackContextForPlugin(context.Background(), "test-plugin", httpClient)
+	defer closeCallback()
+
+	rawReq, errMarshal := json.Marshal(rpcHostHTTPRequest{
+		HostCallbackID: callbackID,
+		Method:         http.MethodPost,
+		URL:            "https://example.test",
+	})
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostHTTPDo, rawReq)
+	if errCall != nil {
+		t.Fatalf("HTTP callback error = %v", errCall)
+	}
+	resp, errDecode := decodeRPCEnvelope[pluginapi.HTTPResponse](rawResp)
+	if errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	if resp.StatusCode != http.StatusCreated || string(resp.Body) != "selected-client" {
+		t.Fatalf("HTTP response = %#v, want registered client response", resp)
+	}
+
+	rawStreamResp, errCallStream := host.callFromPlugin(context.Background(), pluginabi.MethodHostHTTPDoStream, rawReq)
+	if errCallStream != nil {
+		t.Fatalf("stream callback error = %v", errCallStream)
+	}
+	streamResp, errDecodeStream := decodeRPCEnvelope[rpcHostHTTPStreamResponse](rawStreamResp)
+	if errDecodeStream != nil {
+		t.Fatal(errDecodeStream)
+	}
+	if streamResp.StatusCode != http.StatusAccepted || streamResp.StreamID == "" {
+		t.Fatalf("stream response = %#v, want registered client response", streamResp)
+	}
+	host.httpStreams.close(streamResp.StreamID)
+	if httpClient.doCalls != 1 || httpClient.doStreamCalls != 1 {
+		t.Fatalf("registered client calls = do:%d stream:%d, want one each", httpClient.doCalls, httpClient.doStreamCalls)
 	}
 }
 
