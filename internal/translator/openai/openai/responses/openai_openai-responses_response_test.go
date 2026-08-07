@@ -2,10 +2,12 @@ package responses
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func parseOpenAIResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Result) {
@@ -352,8 +354,8 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MultiChoiceToolCa
 
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MixedMessageAndToolUseDistinctOutputIndexes(t *testing.T) {
 	in := []string{
-		`data: {"id":"resp_mixed","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello","reasoning_content":null,"tool_calls":null},"finish_reason":null},{"index":1,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_choice1","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
-		`data: {"id":"resp_mixed","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":"stop"},{"index":1,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"filePath\":\"C:\\\\repo\\\\README.md\",\"limit\":20,\"offset\":1}"}}]},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":10,"total_tokens":20,"prompt_tokens":10}}`,
+		`data: {"id":"","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello","reasoning_content":null,"tool_calls":null},"finish_reason":null},{"index":1,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_choice1","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":"stop"},{"index":1,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"filePath\":\"C:\\\\repo\\\\README.md\",\"limit\":20,\"offset\":1}"}}]},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":10,"total_tokens":20,"prompt_tokens":10}}`,
 		`data: [DONE]`,
 	}
 
@@ -367,19 +369,26 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MixedMessageAndTo
 
 	var messageOutputIndex int64 = -1
 	var toolOutputIndex int64 = -1
+	var messageItemID string
+	var toolItemID string
+	var completed gjson.Result
 
 	for _, chunk := range out {
 		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev == "response.completed" {
+			completed = data
+			continue
+		}
 		if ev != "response.output_item.added" {
 			continue
 		}
 		switch data.Get("item.type").String() {
 		case "message":
-			if data.Get("item.id").String() == "msg_resp_mixed_0" {
-				messageOutputIndex = data.Get("output_index").Int()
-			}
+			messageItemID = data.Get("item.id").String()
+			messageOutputIndex = data.Get("output_index").Int()
 		case "function_call":
 			if data.Get("item.call_id").String() == "call_choice1" {
+				toolItemID = data.Get("item.id").String()
 				toolOutputIndex = data.Get("output_index").Int()
 			}
 		}
@@ -393,6 +402,36 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MixedMessageAndTo
 	}
 	if messageOutputIndex == toolOutputIndex {
 		t.Fatalf("expected distinct output indexes for message and tool call, both got %d", messageOutputIndex)
+	}
+	if !completed.Exists() {
+		t.Fatal("did not find response.completed event")
+	}
+	responseID := completed.Get("response.id").String()
+	if responseID == "" {
+		t.Fatal("streaming response did not synthesize an id")
+	}
+	if messageItemID != "msg_"+responseID+"_0" {
+		t.Fatalf("message item id = %q, want provenance for response %q", messageItemID, responseID)
+	}
+	if toolItemID != "fc_"+responseID+"_1_0" {
+		t.Fatalf("tool item id = %q, want provenance for response %q", toolItemID, responseID)
+	}
+
+	nextRequest := []byte(`{"model":"gpt-5.4","input":[]}`)
+	var err error
+	nextRequest, err = sjson.SetRawBytes(nextRequest, "input", []byte(completed.Get("response.output").Raw))
+	if err != nil {
+		t.Fatalf("set Responses history: %v", err)
+	}
+	roundTripped := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", nextRequest, false)
+	if got := gjson.GetBytes(roundTripped, "messages.#").Int(); got != 2 {
+		t.Fatalf("round-trip messages count = %d, want 2; output=%s", got, roundTripped)
+	}
+	if gjson.GetBytes(roundTripped, "messages.0.tool_calls").Exists() {
+		t.Fatalf("choice 1 tool call merged into choice 0 message; output=%s", roundTripped)
+	}
+	if got := gjson.GetBytes(roundTripped, "messages.1.tool_calls.0.id").String(); got != "call_choice1" {
+		t.Fatalf("separate tool-call message id = %q, want call_choice1; output=%s", got, roundTripped)
 	}
 }
 
@@ -462,6 +501,57 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ToolCallCompleted
 	}
 }
 
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_StreamingRoundTripKeepsCombinedAssistantTurn(t *testing.T) {
+	in := []string{
+		`data: {"id":"resp_round_trip","object":"chat.completion.chunk","created":1,"model":"kimi-k3","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"inspect the next step","content":null},"finish_reason":null}]}`,
+		`data: {"id":"resp_round_trip","object":"chat.completion.chunk","created":1,"model":"kimi-k3","choices":[{"index":0,"delta":{"role":"assistant","content":"Step 1 completed; continue to step 2."},"finish_reason":null}]}`,
+		`data: {"id":"resp_round_trip","object":"chat.completion.chunk","created":1,"model":"kimi-k3","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec_command","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_round_trip","object":"chat.completion.chunk","created":1,"model":"kimi-k3","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":\"printf step-2\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+		`data: [DONE]`,
+	}
+	request := []byte(`{"model":"kimi-k3","reasoning":{"effort":"max"}}`)
+
+	var param any
+	var completed gjson.Result
+	for _, line := range in {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "kimi-k3", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			if event == "response.completed" {
+				completed = data
+			}
+		}
+	}
+	if !completed.Exists() {
+		t.Fatal("expected response.completed event")
+	}
+
+	nextRequest := []byte(`{"model":"kimi-k3","input":[]}`)
+	var err error
+	nextRequest, err = sjson.SetRawBytes(nextRequest, "input", []byte(completed.Get("response.output").Raw))
+	if err != nil {
+		t.Fatalf("set Responses output history: %v", err)
+	}
+	nextRequest, err = sjson.SetRawBytes(nextRequest, "input.-1", []byte(`{"type":"function_call_output","call_id":"call_1","output":"step-2"}`))
+	if err != nil {
+		t.Fatalf("append function call output: %v", err)
+	}
+
+	roundTripped := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", nextRequest, true)
+	if got := gjson.GetBytes(roundTripped, "messages.#").Int(); got != 2 {
+		t.Fatalf("messages count after streaming round-trip = %d, want 2; output=%s", got, roundTripped)
+	}
+	assistant := gjson.GetBytes(roundTripped, "messages.0")
+	if got := assistant.Get("content.0.text").String(); got != "Step 1 completed; continue to step 2." {
+		t.Fatalf("assistant content = %q; output=%s", got, roundTripped)
+	}
+	if got := assistant.Get("reasoning_content").String(); got != "inspect the next step" {
+		t.Fatalf("assistant reasoning_content = %q; output=%s", got, roundTripped)
+	}
+	if got := assistant.Get("tool_calls.0.id").String(); got != "call_1" {
+		t.Fatalf("assistant tool call id = %q; output=%s", got, roundTripped)
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FunctionCallDoneAndCompletedOutputStayAscending(t *testing.T) {
 	in := []string{
 		`data: {"id":"resp_order","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_glob","type":"function","function":{"name":"glob","arguments":""}}]},"finish_reason":null}]}`,
@@ -525,6 +615,83 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_OmitsTop
 	}
 	if got := data.Get("output.0.content.0.text").String(); got != "ping" {
 		t.Fatalf("output text = %q, want %q; response=%s", got, "ping", resp)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_ParallelToolCallIDsAreUnique(t *testing.T) {
+	tests := []struct {
+		name       string
+		request    []byte
+		toolName   string
+		itemType   string
+		itemPrefix string
+	}{
+		{
+			name:       "function tools",
+			request:    []byte(`{"model":"model"}`),
+			toolName:   "lookup",
+			itemType:   "function_call",
+			itemPrefix: "fc_",
+		},
+		{
+			name:       "custom tools",
+			request:    []byte(`{"model":"model","tools":[{"type":"custom","name":"exec"}]}`),
+			toolName:   "exec",
+			itemType:   "custom_tool_call",
+			itemPrefix: "ctc_",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(`{
+				"id":"resp_parallel",
+				"object":"chat.completion",
+				"created":1,
+				"model":"model",
+				"choices":[{
+					"index":2,
+					"message":{"role":"assistant","tool_calls":[
+						{"id":"call_a","type":"function","function":{"name":"","arguments":"{}"}},
+						{"id":"call_b","type":"function","function":{"name":"","arguments":"{}"}}
+					]},
+					"finish_reason":"tool_calls"
+				}]
+			}`)
+			var err error
+			raw, err = sjson.SetBytes(raw, "choices.0.message.tool_calls.0.function.name", tt.toolName)
+			if err != nil {
+				t.Fatalf("set first tool name: %v", err)
+			}
+			raw, err = sjson.SetBytes(raw, "choices.0.message.tool_calls.1.function.name", tt.toolName)
+			if err != nil {
+				t.Fatalf("set second tool name: %v", err)
+			}
+
+			resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(
+				context.Background(), "model", tt.request, tt.request, raw, nil,
+			)
+			outputs := gjson.GetBytes(resp, "output").Array()
+			if len(outputs) != 2 {
+				t.Fatalf("output count = %d, want 2; response=%s", len(outputs), resp)
+			}
+			for i, wantCallID := range []string{"call_a", "call_b"} {
+				item := outputs[i]
+				if got := item.Get("type").String(); got != tt.itemType {
+					t.Fatalf("output.%d type = %q, want %q; response=%s", i, got, tt.itemType, resp)
+				}
+				wantItemID := tt.itemPrefix + "resp_parallel_2_" + strconv.Itoa(i)
+				if got := item.Get("id").String(); got != wantItemID {
+					t.Fatalf("output.%d id = %q, want %q; response=%s", i, got, wantItemID, resp)
+				}
+				if got := item.Get("call_id").String(); got != wantCallID {
+					t.Fatalf("output.%d call_id = %q, want %q; response=%s", i, got, wantCallID, resp)
+				}
+			}
+			if gjson.GetBytes(resp, "output.0.id").String() == gjson.GetBytes(resp, "output.1.id").String() {
+				t.Fatalf("parallel tool item ids are duplicated; response=%s", resp)
+			}
+		})
 	}
 }
 
@@ -673,15 +840,15 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_CustomToolNameArr
 		if got := tc.got.Get(tc.path + ".type").String(); got != "custom_tool_call" {
 			t.Fatalf("%s type = %q, want custom_tool_call", tc.label, got)
 		}
-		if got := tc.got.Get(tc.path + ".id").String(); got != "ctc_call_exec" {
-			t.Fatalf("%s id = %q, want ctc_call_exec", tc.label, got)
+		if got := tc.got.Get(tc.path + ".id").String(); got != "ctc_chatcmpl_custom_late_name_0_0" {
+			t.Fatalf("%s id = %q, want ctc_chatcmpl_custom_late_name_0_0", tc.label, got)
 		}
 		if got := tc.got.Get(tc.path + ".name").String(); got != "exec" {
 			t.Fatalf("%s name = %q, want exec", tc.label, got)
 		}
 	}
-	if got := inputDone.Get("item_id").String(); got != "ctc_call_exec" {
-		t.Fatalf("custom input done item_id = %q, want ctc_call_exec", got)
+	if got := inputDone.Get("item_id").String(); got != "ctc_chatcmpl_custom_late_name_0_0" {
+		t.Fatalf("custom input done item_id = %q, want ctc_chatcmpl_custom_late_name_0_0", got)
 	}
 	if got := inputDone.Get("input").String(); got != "pwd" {
 		t.Fatalf("custom input done input = %q, want pwd", got)
@@ -726,8 +893,8 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_CustomToolNameAnd
 		if got := tc.got.Get(tc.path + ".type").String(); got != "custom_tool_call" {
 			t.Fatalf("%s type = %q, want custom_tool_call", tc.label, got)
 		}
-		if got := tc.got.Get(tc.path + ".id").String(); got != "ctc_"+wantCallID {
-			t.Fatalf("%s id = %q, want %q", tc.label, got, "ctc_"+wantCallID)
+		if got := tc.got.Get(tc.path + ".id").String(); got != "ctc_chatcmpl_custom_missing_fields_0_0" {
+			t.Fatalf("%s id = %q, want ctc_chatcmpl_custom_missing_fields_0_0", tc.label, got)
 		}
 		if got := tc.got.Get(tc.path + ".call_id").String(); got != wantCallID {
 			t.Fatalf("%s call_id = %q, want %q", tc.label, got, wantCallID)
@@ -786,7 +953,11 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ToolCallIDMayArri
 				}
 			}
 
-			wantItemID := "fc_" + tt.wantCallID
+			responseID := "chatcmpl_late_id"
+			if tt.name == "missing id" {
+				responseID = "chatcmpl_missing_id"
+			}
+			wantItemID := "fc_" + responseID + "_0_0"
 			if got := added.Get("item.id").String(); got != wantItemID {
 				t.Fatalf("added item id = %q, want %q; events=%v", got, wantItemID, events)
 			}

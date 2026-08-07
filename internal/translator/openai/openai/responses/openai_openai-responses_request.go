@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"strconv"
 	"strings"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
@@ -35,8 +36,14 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	root := gjson.ParseBytes(rawJSON)
 
 	messages := make([][]byte, 0)
+	messageProvenances := make([]string, 0)
 	appendMessage := func(message []byte) {
 		messages = append(messages, message)
+		messageProvenances = append(messageProvenances, "")
+	}
+	appendMessageWithProvenance := func(message []byte, provenance string) {
+		messages = append(messages, message)
+		messageProvenances = append(messageProvenances, provenance)
 	}
 
 	// Set model name
@@ -82,25 +89,53 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 		pendingToolCalls := make([]interface{}, 0)
 		pendingToolCallIDs := make([]string, 0)
+		pendingToolCallProvenance := ""
 		pendingReasoningContent := ""
 		awaitingToolOutputs := make(map[string]struct{})
-		deferredMessages := make([][]byte, 0)
+		type deferredMessage struct {
+			raw        []byte
+			provenance string
+		}
+		deferredMessages := make([]deferredMessage, 0)
 
 		takePendingReasoningContent := func() string {
 			reasoningContent := pendingReasoningContent
 			pendingReasoningContent = ""
 			return reasoningContent
 		}
+		appendPendingReasoningContent := func(reasoningContent string) {
+			pendingReasoningContent = mergeOpenAIResponsesReasoningContent(pendingReasoningContent, reasoningContent)
+		}
 		flushPendingToolCalls := func() {
 			if len(pendingToolCalls) == 0 {
 				return
 			}
-			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
-			assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
-			if reasoningContent := takePendingReasoningContent(); reasoningContent != "" {
-				assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)
+			reasoningContent := takePendingReasoningContent()
+			mergedIntoPreviousAssistant := false
+			if len(messages) > 0 {
+				lastIndex := len(messages) - 1
+				lastMessage := gjson.ParseBytes(messages[lastIndex])
+				if lastMessage.Get("role").String() == "assistant" &&
+					!lastMessage.Get("tool_calls").Exists() &&
+					pendingToolCallProvenance != "" &&
+					messageProvenances[lastIndex] == pendingToolCallProvenance {
+					assistantMessage, _ := sjson.SetBytes(messages[lastIndex], "tool_calls", pendingToolCalls)
+					mergedReasoning := mergeOpenAIResponsesReasoningContent(lastMessage.Get("reasoning_content").String(), reasoningContent)
+					if mergedReasoning != "" {
+						assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", mergedReasoning)
+					}
+					messages[lastIndex] = assistantMessage
+					mergedIntoPreviousAssistant = true
+				}
 			}
-			appendMessage(assistantMessage)
+			if !mergedIntoPreviousAssistant {
+				assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
+				assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
+				if reasoningContent != "" {
+					assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)
+				}
+				appendMessageWithProvenance(assistantMessage, pendingToolCallProvenance)
+			}
 			for _, id := range pendingToolCallIDs {
 				if strings.TrimSpace(id) == "" {
 					continue
@@ -109,10 +144,11 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 			pendingToolCalls = pendingToolCalls[:0]
 			pendingToolCallIDs = pendingToolCallIDs[:0]
+			pendingToolCallProvenance = ""
 		}
 		flushDeferredMessages := func() {
 			for _, message := range deferredMessages {
-				appendMessage(message)
+				appendMessageWithProvenance(message.raw, message.provenance)
 			}
 			deferredMessages = deferredMessages[:0]
 		}
@@ -124,14 +160,14 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 			return false
 		}
-		appendRegularMessage := func(message []byte) {
+		appendRegularMessage := func(message []byte, provenance string) {
 			// Keep tool-call adjacency strict for providers that require
 			// assistant(tool_calls) -> tool(tool_call_id) with no message in between.
 			if hasAwaitingToolOutput() {
-				deferredMessages = append(deferredMessages, message)
+				deferredMessages = append(deferredMessages, deferredMessage{raw: message, provenance: provenance})
 				return
 			}
-			appendMessage(message)
+			appendMessageWithProvenance(message, provenance)
 		}
 		appendPendingReasoningMessage := func() {
 			reasoningContent := takePendingReasoningContent()
@@ -140,7 +176,16 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 			message := []byte(`{"role":"assistant","content":"","reasoning_content":""}`)
 			message, _ = sjson.SetBytes(message, "reasoning_content", reasoningContent)
-			appendRegularMessage(message)
+			appendRegularMessage(message, "")
+		}
+		preparePendingToolCall := func(item gjson.Result) {
+			provenance := openAIResponsesOutputItemProvenance(item)
+			if len(pendingToolCalls) > 0 && provenance != pendingToolCallProvenance {
+				flushPendingToolCalls()
+			}
+			if len(pendingToolCalls) == 0 {
+				pendingToolCallProvenance = provenance
+			}
 		}
 
 		for _, item := range inputItems {
@@ -196,28 +241,23 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 				if role == "assistant" {
-					reasoningContent := item.Get("reasoning_content").String()
-					if reasoningContent == "" {
-						reasoningContent = takePendingReasoningContent()
-					} else {
-						pendingReasoningContent = ""
-					}
+					reasoningContent := mergeOpenAIResponsesReasoningContent(
+						takePendingReasoningContent(),
+						item.Get("reasoning_content").String(),
+					)
 					if reasoningContent != "" {
 						message, _ = sjson.SetBytes(message, "reasoning_content", reasoningContent)
 					}
 				}
 
-				appendRegularMessage(message)
+				appendRegularMessage(message, openAIResponsesOutputItemProvenance(item))
 
 			case "reasoning":
-				reasoningContent := collectOpenAIResponsesReasoningContent(item)
-				if pendingReasoningContent == "" {
-					pendingReasoningContent = reasoningContent
-				} else {
-					pendingReasoningContent += reasoningContent
-				}
+				appendPendingReasoningContent(collectOpenAIResponsesReasoningContent(item))
 
 			case "function_call":
+				preparePendingToolCall(item)
+				appendPendingReasoningContent(item.Get("reasoning_content").String())
 				// Buffer consecutive function calls and emit them as one assistant message.
 				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 
@@ -264,6 +304,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 			case "custom_tool_call":
+				preparePendingToolCall(item)
+				appendPendingReasoningContent(item.Get("reasoning_content").String())
 				// Codex freeform tool call replay: wrap the raw input so it
 				// matches the {"input": string} function shape used when
 				// converting custom tool definitions.
@@ -519,4 +561,60 @@ func collectOpenAIResponsesReasoningContent(item gjson.Result) string {
 		return "[reasoning unavailable]"
 	}
 	return reasoningText.String()
+}
+
+func mergeOpenAIResponsesReasoningContent(existing, incoming string) string {
+	existingTrimmed := strings.TrimSpace(existing)
+	incomingTrimmed := strings.TrimSpace(incoming)
+	switch {
+	case existingTrimmed == "":
+		return incoming
+	case incomingTrimmed == "":
+		return existing
+	case existingTrimmed == "[reasoning unavailable]":
+		return incoming
+	case incomingTrimmed == "[reasoning unavailable]":
+		return existing
+	case existingTrimmed == incomingTrimmed:
+		return existing
+	default:
+		return existing + "\n\n" + incoming
+	}
+}
+
+func openAIResponsesOutputItemProvenance(item gjson.Result) string {
+	itemID := strings.TrimSpace(item.Get("id").String())
+	switch item.Get("type").String() {
+	case "message":
+		return parseOpenAIResponsesOutputItemProvenance(itemID, "msg_", 1)
+	case "function_call":
+		return parseOpenAIResponsesOutputItemProvenance(itemID, "fc_", 2)
+	case "custom_tool_call":
+		return parseOpenAIResponsesOutputItemProvenance(itemID, "ctc_", 2)
+	default:
+		return ""
+	}
+}
+
+func parseOpenAIResponsesOutputItemProvenance(itemID, prefix string, trailingIndexes int) string {
+	if !strings.HasPrefix(itemID, prefix) {
+		return ""
+	}
+	remainder := strings.TrimPrefix(itemID, prefix)
+	indexes := make([]string, trailingIndexes)
+	for i := trailingIndexes - 1; i >= 0; i-- {
+		separator := strings.LastIndexByte(remainder, '_')
+		if separator <= 0 {
+			return ""
+		}
+		indexes[i] = remainder[separator+1:]
+		if _, err := strconv.Atoi(indexes[i]); err != nil {
+			return ""
+		}
+		remainder = remainder[:separator]
+	}
+	if remainder == "" {
+		return ""
+	}
+	return remainder + "\x00" + indexes[0]
 }

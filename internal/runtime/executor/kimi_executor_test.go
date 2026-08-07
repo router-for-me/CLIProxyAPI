@@ -10,10 +10,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func TestNewKimiExecutorInitializesDelegatedClaudeConfig(t *testing.T) {
@@ -238,6 +240,90 @@ func TestKimiExecutorClaudeStreamForwardsAnthropicBetaAndLogsUpstream(t *testing
 		if !strings.Contains(apiResponseText, want) {
 			t.Fatalf("API_RESPONSE = %q, want %q", apiResponseText, want)
 		}
+	}
+}
+
+func TestKimiNativeAssistantMessageSurvivesResponsesRoundTrip(t *testing.T) {
+	responsesRequest := []byte(`{
+		"model":"kimi-k3",
+		"instructions":"system instructions",
+		"tools":[{
+			"type":"function",
+			"name":"exec_command",
+			"parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}
+		}]
+	}`)
+	chatRequest := []byte(`{
+		"model":"kimi-k3",
+		"messages":[{"role":"system","content":"system instructions"}],
+		"tools":[{
+			"type":"function",
+			"function":{"name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}}
+		}]
+	}`)
+	chatResponse := []byte(`{
+		"id":"chatcmpl-roundtrip",
+		"object":"chat.completion",
+		"created":1,
+		"model":"kimi-k3",
+		"choices":[{
+			"index":0,
+			"message":{
+				"role":"assistant",
+				"reasoning_content":"inspect the next step",
+				"content":"Step 1 completed; continue to step 2.",
+				"tool_calls":[{
+					"id":"call_1",
+					"type":"function",
+					"function":{"name":"exec_command","arguments":"{\"cmd\":\"printf step-2\"}"}
+				}]
+			},
+			"finish_reason":"tool_calls"
+		}]
+	}`)
+
+	responsesResult := responsesconverter.ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(
+		context.Background(), "kimi-k3", responsesRequest, chatRequest, chatResponse, nil,
+	)
+	output := gjson.GetBytes(responsesResult, "output")
+	if !output.Exists() || !output.IsArray() {
+		t.Fatalf("Responses output is missing: %s", responsesResult)
+	}
+
+	nextRequest := []byte(`{"model":"kimi-k3","instructions":"system instructions","input":[]}`)
+	var err error
+	nextRequest, err = sjson.SetRawBytes(nextRequest, "input", []byte(output.Raw))
+	if err != nil {
+		t.Fatalf("set Responses history: %v", err)
+	}
+	nextRequest, err = sjson.SetRawBytes(nextRequest, "input.-1", []byte(`{
+		"type":"function_call_output",
+		"call_id":"call_1",
+		"output":"step-2"
+	}`))
+	if err != nil {
+		t.Fatalf("append tool output: %v", err)
+	}
+
+	roundTripped := responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", nextRequest, false)
+	roundTripped, err = normalizeKimiToolMessageLinks(roundTripped)
+	if err != nil {
+		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
+	}
+
+	messages := gjson.GetBytes(roundTripped, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("messages length = %d, want 3; output=%s", len(messages), roundTripped)
+	}
+	assistant := messages[1]
+	if got := assistant.Get("reasoning_content").String(); got != "inspect the next step" {
+		t.Fatalf("assistant reasoning_content = %q; output=%s", got, roundTripped)
+	}
+	if got := assistant.Get("content.0.text").String(); got != "Step 1 completed; continue to step 2." {
+		t.Fatalf("assistant content = %q; output=%s", got, roundTripped)
+	}
+	if got := assistant.Get("tool_calls.0.id").String(); got != "call_1" {
+		t.Fatalf("assistant tool call id = %q; output=%s", got, roundTripped)
 	}
 }
 
