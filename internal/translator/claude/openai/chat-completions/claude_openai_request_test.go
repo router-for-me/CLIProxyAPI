@@ -6,6 +6,93 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertOpenAIRequestToClaudeWithCompat_GroupsAssistantThinkingTextAndTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"assistant","reasoning_content":"reason","content":"answer"},
+			{
+				"role":"assistant",
+				"content":"",
+				"tool_calls":[
+					{"id":"call_1","type":"function","function":{"name":"first","arguments":"{}"}},
+					{"id":"call_2","type":"function","function":{"name":"second","arguments":"{}"}}
+				]
+			}
+		]
+	}`)
+	out := ConvertOpenAIRequestToClaudeWithCompat("claude-test", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("message count = %d, want 1. Output: %s", len(messages), string(out))
+	}
+	content := messages[0].Get("content").Array()
+	wantTypes := []string{"thinking", "text", "tool_use", "tool_use"}
+	if len(content) != len(wantTypes) {
+		t.Fatalf("content count = %d, want %d. Output: %s", len(content), len(wantTypes), string(out))
+	}
+	for i, wantType := range wantTypes {
+		if got := content[i].Get("type").String(); got != wantType {
+			t.Fatalf("content[%d].type = %q, want %q", i, got, wantType)
+		}
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_MergesToolResultWithAdjacentUserContent(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"work","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"ok"},
+			{"role":"user","content":"continue"}
+		]
+	}`)
+	out := ConvertOpenAIRequestToClaude("claude-test", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("message count = %d, want 2. Output: %s", len(messages), string(out))
+	}
+	userContent := messages[1].Get("content").Array()
+	if len(userContent) != 2 {
+		t.Fatalf("user content count = %d, want 2. Output: %s", len(userContent), string(out))
+	}
+	if got := userContent[0].Get("type").String(); got != "tool_result" {
+		t.Fatalf("user content[0].type = %q, want tool_result", got)
+	}
+	if got := userContent[1].Get("text").String(); got != "continue" {
+		t.Fatalf("user content[1].text = %q, want continue", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_SystemDoesNotBreakUserTurnAndCacheBoundary(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"user","content":"first","cache_control":{"type":"ephemeral"}},
+			{"role":"system","content":"system rule"},
+			{"role":"user","content":"second"}
+		]
+	}`)
+	out := ConvertOpenAIRequestToClaude("claude-test", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("message count = %d, want 1. Output: %s", len(messages), string(out))
+	}
+	content := messages[0].Get("content").Array()
+	if len(content) != 2 {
+		t.Fatalf("content count = %d, want 2. Output: %s", len(content), string(out))
+	}
+	if got := content[0].Get("text").String(); got != "first" {
+		t.Fatalf("content[0].text = %q, want first", got)
+	}
+	if got := content[0].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("content[0].cache_control.type = %q, want ephemeral", got)
+	}
+	if got := content[1].Get("text").String(); got != "second" {
+		t.Fatalf("content[1].text = %q, want second", got)
+	}
+	if got := gjson.GetBytes(out, "system.0.text").String(); got != "system rule" {
+		t.Fatalf("system text = %q, want system rule", got)
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_SanitizesToolCallIDsForClaude(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",

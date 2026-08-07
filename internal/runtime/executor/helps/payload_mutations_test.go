@@ -92,6 +92,101 @@ func TestApplyPayloadConfigReusesCanonicalOverrides(t *testing.T) {
 	}
 }
 
+func TestApplyPayloadConfigWithRequestTrackedReportsContextManagementTouches(t *testing.T) {
+	const automatic = `{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`
+	modelRules := []config.PayloadModelRule{{Name: "claude-opus-5", Protocol: "claude"}}
+	originalWithoutContextManagement := []byte(`{"model":"claude-opus-5"}`)
+
+	for _, test := range []struct {
+		name          string
+		payload       string
+		original      []byte
+		payloadConfig config.PayloadConfig
+		wantTouched   bool
+	}{
+		{
+			name:     "default",
+			payload:  `{"model":"claude-opus-5"}`,
+			original: originalWithoutContextManagement,
+			payloadConfig: config.PayloadConfig{Default: []config.PayloadRule{{
+				Models: modelRules,
+				Params: map[string]any{"context_management": map[string]any{"edits": []any{map[string]any{"type": "default"}}}},
+			}}},
+			wantTouched: true,
+		},
+		{
+			name:     "raw default",
+			payload:  `{"model":"claude-opus-5"}`,
+			original: originalWithoutContextManagement,
+			payloadConfig: config.PayloadConfig{DefaultRaw: []config.PayloadRule{{
+				Models: modelRules,
+				Params: map[string]any{"context_management": `{"edits":[{"type":"raw_default"}]}`},
+			}}},
+			wantTouched: true,
+		},
+		{
+			name:    "canonical descendant override",
+			payload: `{"model":"claude-opus-5","context_management":` + automatic + `}`,
+			payloadConfig: config.PayloadConfig{Override: []config.PayloadRule{{
+				Models: modelRules,
+				Params: map[string]any{"context_management.edits.0.keep": "all"},
+			}}},
+			wantTouched: true,
+		},
+		{
+			name:    "identical raw override",
+			payload: `{"model":"claude-opus-5","context_management":` + automatic + `}`,
+			payloadConfig: config.PayloadConfig{OverrideRaw: []config.PayloadRule{{
+				Models: modelRules,
+				Params: map[string]any{"context_management": automatic},
+			}}},
+			wantTouched: true,
+		},
+		{
+			name:    "filter already absent",
+			payload: `{"model":"claude-opus-5"}`,
+			payloadConfig: config.PayloadConfig{Filter: []config.PayloadFilterRule{{
+				Models: modelRules,
+				Params: []string{"context_management"},
+			}}},
+			wantTouched: true,
+		},
+		{
+			name:    "unrelated override",
+			payload: `{"model":"claude-opus-5"}`,
+			payloadConfig: config.PayloadConfig{Override: []config.PayloadRule{{
+				Models: modelRules,
+				Params: map[string]any{"thinking.type": "enabled"},
+			}}},
+		},
+		{
+			name:    "nonmatching override",
+			payload: `{"model":"claude-opus-5"}`,
+			payloadConfig: config.PayloadConfig{Override: []config.PayloadRule{{
+				Models: []config.PayloadModelRule{{Name: "other-model", Protocol: "claude"}},
+				Params: map[string]any{"context_management": map[string]any{"edits": []any{}}},
+			}}},
+		},
+		{
+			name:     "default skipped for caller owned field",
+			payload:  `{"model":"claude-opus-5","context_management":{"edits":[{"type":"caller"}]}}`,
+			original: []byte(`{"model":"claude-opus-5","context_management":{"edits":[{"type":"caller"}]}}`),
+			payloadConfig: config.PayloadConfig{Default: []config.PayloadRule{{
+				Models: modelRules,
+				Params: map[string]any{"context_management": map[string]any{"edits": []any{map[string]any{"type": "default"}}}},
+			}}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.Config{Payload: test.payloadConfig}
+			_, touched := ApplyPayloadConfigWithRequestTracked(cfg, "claude-opus-5", "claude", "claude", "", []byte(test.payload), test.original, "claude-opus-5", "", nil, "context_management")
+			if touched != test.wantTouched {
+				t.Fatalf("context_management touched = %t, want %t", touched, test.wantTouched)
+			}
+		})
+	}
+}
+
 func TestApplyPayloadConfigProjectionOverrideWritesEveryMatch(t *testing.T) {
 	cfg := &config.Config{Payload: config.PayloadConfig{
 		Override: []config.PayloadRule{{

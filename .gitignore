@@ -33,6 +33,7 @@ docs/*
 AGENTS.md
 CLAUDE.md
 GEMINI.md
+AGENTS.override.md
 
 # Tooling metadata
 .vscode/*
@@ -52,11 +53,12 @@ GEMINI.md
 .bmad/*
 _bmad/*
 _bmad-output/*
+.gocache/
+.gitnexus/
 
 # macOS
 .DS_Store
 ._*
-.gocache/
 
 # Local artifacts
 /server
@@ -83,3 +85,13 @@ web/dashboard/.dev.vars
 # marks the file's origin URL/security zone). Tracked as separate files
 # by git, so we blank the pattern to ignore *:Zone.Identifier everywhere.
 *:Zone.Identifier
+
+# docker
+docker-compose.override.yml
+
+
+# Local LLM Wiki vault
+.llm-wiki/
+
+# Local overrides / agent-specific files
+AGENTS.override.md

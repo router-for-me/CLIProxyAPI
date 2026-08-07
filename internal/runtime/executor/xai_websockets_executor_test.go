@@ -1600,6 +1600,43 @@ func TestParseXAIWebsocketErrorFreeUsageExhaustedSetsRetryAfter(t *testing.T) {
 	}
 }
 
+func TestParseXAIWebsocketErrorBadCredentialsRemapsToUnauthorized(t *testing.T) {
+	payload := []byte(`{"type":"error","status":403,"headers":{"x-request-id":"req-bad-credentials"},"error":{"code":"unauthenticated:bad-credentials","message":"The OAuth2 access token could not be validated."}}`)
+	err, ok := parseXAIWebsocketError(payload)
+	if !ok {
+		t.Fatal("expected xAI websocket error")
+	}
+
+	status, okStatus := err.(interface{ StatusCode() int })
+	if !okStatus || status.StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("status = %#v, want 401", err)
+	}
+	headerSource, okHeaders := err.(interface{ Headers() http.Header })
+	if !okHeaders {
+		t.Fatalf("expected websocket error to preserve headers, got %#v", err)
+	}
+	if got := headerSource.Headers().Get("x-request-id"); got != "req-bad-credentials" {
+		t.Fatalf("x-request-id = %q, want req-bad-credentials", got)
+	}
+	parsed := gjson.Parse(err.Error())
+	if got := parsed.Get("error.code").String(); got != "unauthenticated:bad-credentials" {
+		t.Fatalf("error code = %q, want unauthenticated:bad-credentials; payload=%s", got, err)
+	}
+}
+
+func TestParseXAIWebsocketBareErrorBadCredentialsRemapsToUnauthorized(t *testing.T) {
+	payload := []byte(`{"status":403,"error":{"code":"unauthenticated:bad-credentials","message":"The OAuth2 access token could not be validated."}}`)
+	err, ok := parseXAIWebsocketError(payload)
+	if !ok {
+		t.Fatal("expected bare xAI websocket error")
+	}
+
+	status, okStatus := err.(interface{ StatusCode() int })
+	if !okStatus || status.StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("status = %#v, want 401", err)
+	}
+}
+
 func TestParseXAIWebsocketBareErrorFreeUsageExhaustedSetsRetryAfter(t *testing.T) {
 	payload := []byte(`{"status":429,"error":{"code":"subscription:free-usage-exhausted","message":"You've used all the included free usage for now."}}`)
 	err, ok := parseXAIWebsocketError(payload)

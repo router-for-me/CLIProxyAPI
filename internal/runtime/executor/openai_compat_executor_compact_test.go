@@ -902,3 +902,66 @@ func TestOpenAICompatExecutorStreamSkipsKeepAliveUntilDataLine(t *testing.T) {
 		t.Fatalf("stream payload = %s", got.String())
 	}
 }
+
+func TestOpenAICompatExecutorStreamDropsChunksAfterDone(t *testing.T) {
+	// Some OpenAI-compatible upstreams (e.g. OpenCode zen) append non-spec
+	// metadata after data: [DONE]. Those trailing events must not be forwarded,
+	// otherwise clients that treat every pre-[DONE] data line as a chat chunk
+	// fail to deserialize (e.g. missing required "id").
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = w.Write([]byte(`data: {"id":"c1a4ba22","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"id":"c1a4ba22","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}` + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		_, _ = w.Write([]byte(`data: {"choices":[],"cost":"0"}` + "\n\n"))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek-v4-flash-free",
+		Payload: []byte(`{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var payloads []string
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		if len(chunk.Payload) == 0 {
+			continue
+		}
+		payloads = append(payloads, string(chunk.Payload))
+	}
+	if len(payloads) != 2 {
+		t.Fatalf("got %d payloads %v, want 2 (content + finish; no post-DONE cost chunk)", len(payloads), payloads)
+	}
+	for _, p := range payloads {
+		if strings.Contains(p, `"cost"`) {
+			t.Fatalf("post-DONE cost chunk was forwarded: %s", p)
+		}
+		if !gjson.Get(p, "id").Exists() {
+			t.Fatalf("chunk missing id: %s", p)
+		}
+	}
+	if gjson.Get(payloads[0], "choices.0.delta.content").String() != "hi" {
+		t.Fatalf("first chunk = %s", payloads[0])
+	}
+	if gjson.Get(payloads[1], "choices.0.finish_reason").String() != "stop" {
+		t.Fatalf("second chunk = %s", payloads[1])
+	}
+}

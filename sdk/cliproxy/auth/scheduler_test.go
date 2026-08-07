@@ -1649,6 +1649,73 @@ func TestManager_PickNextMixed_UsesSchedulerRotation(t *testing.T) {
 	}
 }
 
+func TestManager_SchedulerSharesThinkingSuffixCooldownAndRegistryState(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	reg := registry.GetGlobalRegistry()
+	baseModel := "scheduler-thinking-model"
+	reg.RegisterClient("thinking-auth-a", "gemini", []*registry.ModelInfo{{ID: baseModel}})
+	reg.RegisterClient("thinking-auth-b", "gemini", []*registry.ModelInfo{{ID: baseModel}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("thinking-auth-a")
+		reg.UnregisterClient("thinking-auth-b")
+	})
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "thinking-auth-a", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(thinking-auth-a) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "thinking-auth-b", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(thinking-auth-b) error = %v", errRegister)
+	}
+
+	retryAfter := time.Hour
+	manager.MarkResult(context.Background(), Result{
+		AuthID:     "thinking-auth-a",
+		Provider:   "gemini",
+		Model:      baseModel + "(high)",
+		Success:    false,
+		Error:      &Error{HTTPStatus: 429, Message: "quota"},
+		RetryAfter: &retryAfter,
+	})
+
+	auth, ok := manager.GetByID("thinking-auth-a")
+	if !ok || auth == nil {
+		t.Fatal("thinking-auth-a was not found")
+	}
+	if len(auth.ModelStates) != 1 || auth.ModelStates[baseModel] == nil {
+		t.Fatalf("ModelStates = %+v, want only canonical key %q", auth.ModelStates, baseModel)
+	}
+	if count := reg.GetModelCount(baseModel); count != 0 {
+		t.Fatalf("registry model count during cooldown = %d, want 0", count)
+	}
+	for _, model := range []string{baseModel, baseModel + "(medium)", baseModel + "(low)"} {
+		got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("scheduler.pickSingle(%q) error = %v", model, errPick)
+		}
+		if got == nil || got.ID != "thinking-auth-b" {
+			t.Fatalf("scheduler.pickSingle(%q) auth = %v, want thinking-auth-b", model, got)
+		}
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   "thinking-auth-a",
+		Provider: "gemini",
+		Model:    baseModel + "(low)",
+		Success:  true,
+	})
+
+	auth, ok = manager.GetByID("thinking-auth-a")
+	if !ok || auth == nil || auth.ModelStates[baseModel] == nil {
+		t.Fatal("canonical model state was not retained after success")
+	}
+	state := auth.ModelStates[baseModel]
+	if state.Unavailable || state.Quota.Exceeded || !state.NextRetryAfter.IsZero() {
+		t.Fatalf("canonical model state after success = %+v, want cleared", state)
+	}
+	if count := reg.GetModelCount(baseModel); count != 2 {
+		t.Fatalf("registry model count after recovery = %d, want 2", count)
+	}
+}
+
 func TestManager_PickNextMixed_SkipsProvidersWithoutExecutors(t *testing.T) {
 	t.Parallel()
 

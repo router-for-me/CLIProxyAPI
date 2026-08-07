@@ -676,8 +676,51 @@ const claudeCodeContextManagement = `{"edits":[{"type":"clear_thinking_20251015"
 // omitted it. CPA already claims context-management-2025-06-27 in Anthropic-Beta,
 // so a missing body field is an observable inconsistency with the real client. A
 // caller that sent its own object keeps it untouched.
-func injectClaudeCodeContextManagement(payload []byte) []byte {
+func injectClaudeCodeContextManagement(payload []byte) ([]byte, bool) {
 	if gjson.GetBytes(payload, "context_management").Exists() {
+		return payload, false
+	}
+	if gjson.GetBytes(payload, "thinking.type").String() == "disabled" {
+		return payload, false
+	}
+	updated, err := sjson.SetRawBytes(payload, "context_management", []byte(claudeCodeContextManagement))
+	if err != nil {
+		return payload, false
+	}
+	return updated, true
+}
+
+type claudeCodeContextManagementState struct {
+	eligible              bool
+	callerOwned           bool
+	automaticallyInjected bool
+	payloadRuleTouched    bool
+}
+
+// reconcileClaudeCodeContextManagement resolves automatic ownership after all
+// payload rules and forced tool-choice processing have completed.
+func reconcileClaudeCodeContextManagement(payload []byte, state claudeCodeContextManagementState) []byte {
+	thinkingType := gjson.GetBytes(payload, "thinking.type").String()
+	contextManagement := gjson.GetBytes(payload, "context_management")
+
+	if thinkingType == "disabled" {
+		if state.callerOwned || !state.automaticallyInjected || state.payloadRuleTouched {
+			return payload
+		}
+		if contextManagement.Raw != claudeCodeContextManagement {
+			return payload
+		}
+		updated, err := sjson.DeleteBytes(payload, "context_management")
+		if err != nil {
+			return payload
+		}
+		return updated
+	}
+
+	if thinkingType != "enabled" && thinkingType != "adaptive" {
+		return payload
+	}
+	if !state.eligible || state.callerOwned || state.payloadRuleTouched || contextManagement.Exists() {
 		return payload
 	}
 	updated, err := sjson.SetRawBytes(payload, "context_management", []byte(claudeCodeContextManagement))

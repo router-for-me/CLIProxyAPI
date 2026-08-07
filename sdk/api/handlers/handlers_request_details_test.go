@@ -2,11 +2,14 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tidwall/gjson"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -115,6 +118,43 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 			}
 			if model != tt.wantModel {
 				t.Fatalf("getRequestDetails() model = %v, want %v", model, tt.wantModel)
+			}
+		})
+	}
+}
+
+// TestGetRequestDetails_UnknownModelErrorResistsJSONInjection pins the unroutable
+// model error body against client-controlled model names. The name is echoed into
+// the body, so formatting it into a JSON literal would let a caller corrupt the
+// payload or overwrite the error code that clients branch on.
+func TestGetRequestDetails_UnknownModelErrorResistsJSONInjection(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	for _, model := range []string{
+		"unroutable-model",
+		`foo"bar`,
+		`x","code":"insufficient_quota","x":"`,
+		`x"}}`,
+		`foo\bar`,
+		"foo\nbar",
+	} {
+		t.Run(model, func(t *testing.T) {
+			_, _, errMsg := handler.getRequestDetails(model)
+			if errMsg == nil || errMsg.Error == nil {
+				t.Fatal("expected an error for an unroutable model")
+			}
+			if errMsg.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusBadRequest)
+			}
+			body := errMsg.Error.Error()
+			if !json.Valid([]byte(body)) {
+				t.Fatalf("error body is not valid JSON: %s", body)
+			}
+			if got := gjson.Get(body, "error.code").String(); got != "model_not_found" {
+				t.Fatalf("error code = %q, want model_not_found; the caller controlled the body: %s", got, body)
+			}
+			if got, want := gjson.Get(body, "error.message").String(), "unknown provider for model "+model; got != want {
+				t.Fatalf("error message = %q, want %q", got, want)
 			}
 		})
 	}
