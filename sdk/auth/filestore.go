@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -126,14 +127,15 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
 		}
 		if existing, errRead := os.ReadFile(path); errRead == nil {
+			dataToWrite := raw
 			if jsonEqual(existing, raw) {
-				break
+				dataToWrite = existing
 			}
-			file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+			file, errOpen := misc.OpenFileForSecureRewrite(path)
 			if errOpen != nil {
 				return "", fmt.Errorf("auth filestore: open existing failed: %w", errOpen)
 			}
-			if _, errWrite := file.Write(raw); errWrite != nil {
+			if _, errWrite := file.Write(dataToWrite); errWrite != nil {
 				_ = file.Close()
 				return "", fmt.Errorf("auth filestore: write existing failed: %w", errWrite)
 			}
@@ -144,8 +146,16 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		} else if !os.IsNotExist(errRead) {
 			return "", fmt.Errorf("auth filestore: read existing failed: %w", errRead)
 		}
-		if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
+		file, errOpen := misc.OpenFileForSecureRewrite(path)
+		if errOpen != nil {
+			return "", fmt.Errorf("auth filestore: write file failed: %w", errOpen)
+		}
+		if _, errWrite := file.Write(raw); errWrite != nil {
+			_ = file.Close()
 			return "", fmt.Errorf("auth filestore: write file failed: %w", errWrite)
+		}
+		if errClose := file.Close(); errClose != nil {
+			return "", fmt.Errorf("auth filestore: write file failed: %w", errClose)
 		}
 	default:
 		return "", fmt.Errorf("auth filestore: nothing to persist for %s", auth.ID)

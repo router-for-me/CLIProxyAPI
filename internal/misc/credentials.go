@@ -3,6 +3,7 @@ package misc
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -11,6 +12,23 @@ import (
 
 // Separator used to visually group related log lines.
 var credentialSeparator = strings.Repeat("-", 67)
+
+// OpenFileForSecureRewrite opens a secret file, tightens its permissions, and then truncates it.
+func OpenFileForSecureRewrite(path string) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open file for secure rewrite: %w", err)
+	}
+	if errChmod := file.Chmod(0o600); errChmod != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("set secure file permissions: %w", errChmod)
+	}
+	if errTruncate := file.Truncate(0); errTruncate != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("truncate secure file: %w", errTruncate)
+	}
+	return file, nil
+}
 
 // LogSavingCredentials emits a consistent log message when persisting auth material.
 func LogSavingCredentials(path string) {

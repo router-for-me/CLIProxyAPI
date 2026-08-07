@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -269,8 +270,16 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	if err != nil {
 		return err
 	}
-	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
+	file, errOpen := misc.OpenFileForSecureRewrite(dst)
+	if errOpen != nil {
+		return fmt.Errorf("failed to write file: %w", errOpen)
+	}
+	if _, errWrite := file.Write(data); errWrite != nil {
+		_ = file.Close()
 		return fmt.Errorf("failed to write file: %w", errWrite)
+	}
+	if errClose := file.Close(); errClose != nil {
+		return fmt.Errorf("failed to write file: %w", errClose)
 	}
 	if err := h.upsertAuthRecord(ctx, auth); err != nil {
 		return err
