@@ -136,6 +136,18 @@ func TestBuildConfigChangeDetails_CodexLiveMediaRelay(t *testing.T) {
 	}
 }
 
+func TestBuildConfigChangeDetails_CacheControlDefaultTTL(t *testing.T) {
+	oldCfg := &config.Config{}
+	newCfg := &config.Config{CacheControlDefaultTTL: "1h"}
+
+	details := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, details, "cache-control-default-ttl:  -> 1h")
+
+	if changed := BuildConfigChangeDetails(newCfg, newCfg); len(changed) != 0 {
+		t.Fatalf("expected no change entries for identical configs, got %v", changed)
+	}
+}
+
 func TestBuildConfigChangeDetails_GeminiVertexHeaders(t *testing.T) {
 	oldCfg := &config.Config{
 		GeminiKey: []config.GeminiKey{
