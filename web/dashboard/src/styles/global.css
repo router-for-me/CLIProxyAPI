@@ -3727,14 +3727,24 @@ button.ghost:hover:not(:disabled) {
 .ar-tier {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
   border-radius: var(--radius);
   padding: 12px;
   transition: border-color 0.15s ease;
 }
+/* Accent strip per tier so the four cards are scannable at a glance. */
+.ar-tier--simple   { border-left-color: var(--success); }
+.ar-tier--medium   { border-left-color: var(--accent); }
+.ar-tier--complex  { border-left-color: var(--warning); }
+.ar-tier--reasoning{ border-left-color: var(--danger); }
 .ar-tier--mapped { border-color: var(--border-strong); }
+.ar-tier--mapped.ar-tier--simple   { border-left-color: var(--success); }
+.ar-tier--mapped.ar-tier--medium   { border-left-color: var(--accent); }
+.ar-tier--mapped.ar-tier--complex  { border-left-color: var(--warning); }
+.ar-tier--mapped.ar-tier--reasoning{ border-left-color: var(--danger); }
 .ar-tier__head {
   display: flex;
   align-items: center;
@@ -3774,8 +3784,189 @@ button.ghost:hover:not(:disabled) {
 }
 .ar-tier__modelrow .model-multiselect__input { font-family: var(--mono); font-size: 13px; }
 
+/* Multi-target editor: one block per target model (a top row with rank glyph +
+   combobox + optional weight + status/actions, then the target's own route
+   editor when expanded), an "add target" action, and the weighted/priority
+   strategy control that appears once a tier has more than one target. */
+.ar-targets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ar-target-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ar-target {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.ar-target-block--filled .ar-target { border-color: var(--border-strong); }
+.ar-target__rank {
+  flex: none;
+  align-self: center;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text-dim);
+  min-width: 18px;
+  text-align: center;
+}
+.ar-target__rank--success { color: var(--success); }
+.ar-target__rank--accent  { color: var(--accent); }
+.ar-target__rank--warning { color: var(--warning); }
+.ar-target__rank--danger  { color: var(--danger); }
+.ar-target__field {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ar-target__field .model-multiselect__input { font-family: var(--mono); font-size: 13px; }
+.ar-target__weight {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100px;
+  flex: none;
+}
+.ar-target__weightrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ar-target__weightrow input {
+  font-family: var(--mono);
+  font-size: 13px;
+  width: 56px;
+}
+.ar-target__share {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.ar-target__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  align-self: center;
+}
+.ar-target__pill {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.ar-target__pill--custom {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+.ar-target__remove,
+.ar-target__toggle {
+  flex: none;
+  white-space: nowrap;
+}
+.ar-target__toggle { min-width: 66px; }
+.ar-target__route {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 0 2px 2px 30px;
+}
+.ar-target__routelabel,
+.ar-tier__routelabel {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.ar-target__routelabel .mono { color: var(--text); }
+
+/* Weight/priority distribution: a stacked bar showing each mapped target's
+   share plus a legend with the model id and percentage (or pick order). */
+.ar-targets__distribution {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.ar-targets__distbar {
+  display: flex;
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--border);
+}
+.ar-targets__distseg { height: 100%; }
+.ar-targets__distseg--success { background: var(--success); }
+.ar-targets__distseg--accent  { background: var(--accent); }
+.ar-targets__distseg--warning { background: var(--warning); }
+.ar-targets__distseg--danger  { background: var(--danger); }
+.ar-targets__distlegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+.ar-targets__distlegend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+}
+.ar-targets__distslot {
+  font-size: 11px;
+  line-height: 1;
+}
+.ar-targets__distslot--success { color: var(--success); }
+.ar-targets__distslot--accent  { color: var(--accent); }
+.ar-targets__distslot--warning { color: var(--warning); }
+.ar-targets__distslot--danger  { color: var(--danger); }
+.ar-targets__distmodel { color: var(--text); font-size: 11px; }
+.ar-targets__distpct { font-size: 11px; }
+
+.ar-targets__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.ar-targets__strategy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.ar-tier__defaultroute {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.ar-tier__defroute-chevron {
+  font-size: 9px;
+  vertical-align: middle;
+  margin-right: 4px;
+  color: var(--success);
+}
+.ar-tier__defroute-chevron--off { color: var(--border-strong); }
+.ar-tier__defroute-sub { color: var(--text-dim); }
+
 /* Per-model routing section (reuses Models Group ModelRouteConfigSection). */
-.ar-tier__route { min-width: 0; }
 .ar-tier__routemuted {
   padding: 10px 12px;
   border: 1px dashed var(--border);

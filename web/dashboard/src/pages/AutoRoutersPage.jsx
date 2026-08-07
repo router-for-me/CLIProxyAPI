@@ -116,7 +116,10 @@ function RouterRow({ router, onChanged }) {
   const navigate = useNavigate();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
-  const mappedCount = (router.mappings || []).filter((m) => (m.model || '').trim() !== '').length;
+  // A tier is mapped when it carries a single model or at least one target.
+  const mappedCount = (router.mappings || []).filter((m) => (
+    (m.model || '').trim() !== '' || (Array.isArray(m.targets) && m.targets.some((t) => (t?.model || '').trim() !== ''))
+  )).length;
 
   async function handleDelete() {
     setBusy(true);
