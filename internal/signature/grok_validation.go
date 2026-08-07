@@ -81,6 +81,15 @@ func InspectGrokEncryptedContent(raw string) (*GrokEncryptedContentInfo, error) 
 			return nil, fmt.Errorf("Grok encrypted_content looks like Gemini thoughtSignature")
 		}
 	}
+	// Kimi emits no envelope either, so the pre-filter above cannot narrow it and
+	// this check has to run unconditionally. Length is the only separator the two
+	// families have: Kimi is fixed at two code-path constants while xAI payload
+	// length tracks reasoning volume continuously at 1-byte granularity. Neither
+	// observed Kimi length appears anywhere in 1027 catalogued signatures or 215
+	// native Grok samples, so rejecting them here costs no real Grok traffic.
+	if IsValidKimiThinkingSignature(sig) {
+		return nil, fmt.Errorf("Grok encrypted_content has a Kimi thinking signature length")
+	}
 
 	decoded, err := decodeGrokEncryptedContent(sig)
 	if err != nil {

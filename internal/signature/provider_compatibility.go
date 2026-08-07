@@ -10,6 +10,9 @@ const (
 	SignatureProviderGemini       SignatureProvider = "gemini"
 	SignatureProviderGeminiBypass SignatureProvider = "gemini_bypass"
 	SignatureProviderGPT          SignatureProvider = "gpt"
+	// SignatureProviderKimi is identified by fixed signature size rather than by
+	// an envelope. See kimi_validation.go for the empirical basis and its limits.
+	SignatureProviderKimi SignatureProvider = "kimi"
 )
 
 type SignatureBlockKind string
@@ -59,6 +62,11 @@ func SignatureProviderFromModelName(modelName string) SignatureProvider {
 		strings.HasPrefix(lower, "o3"),
 		strings.HasPrefix(lower, "o4"):
 		return SignatureProviderGPT
+	case strings.Contains(lower, "kimi"),
+		strings.Contains(lower, "moonshot"),
+		strings.HasPrefix(lower, "k2"),
+		strings.HasPrefix(lower, "k3"):
+		return SignatureProviderKimi
 	default:
 		return SignatureProviderUnknown
 	}
@@ -170,10 +178,6 @@ func DetectSignatureProviderForBlock(rawSignature string, blockKind SignatureBlo
 	if IsGeminiThoughtSignatureBypass(sig) {
 		return SignatureProviderGeminiBypass
 	}
-	if !maybeSelfDescribingSignatureEnvelope(sig) {
-		return SignatureProviderUnknown
-	}
-
 	// Probes run from the strongest marker to the weakest:
 	//   1. GPT carries the literal "gAAAA" prefix, which pins both the version
 	//      byte and the high timestamp bytes.
@@ -188,17 +192,33 @@ func DetectSignatureProviderForBlock(rawSignature string, blockKind SignatureBlo
 	// separable in either order. TestGeminiEnvelopeNeverClaimsClaudeSignatures
 	// pins that invariant so a looser Gemini envelope check cannot make the
 	// order silently start mattering.
-	if IsValidGPTReasoningSignature(sig) {
-		return SignatureProviderGPT
+	//
+	// The envelope pre-filter gates only the envelope probes. A blob that cannot
+	// be an envelope skips straight to the size probe below rather than returning
+	// early, because Kimi's uniformly distributed base64 starts with one of
+	// "CERg" about 6% of the time and would otherwise be dropped by whichever
+	// side of the gate it happened to land on.
+	if maybeSelfDescribingSignatureEnvelope(sig) {
+		if IsValidGPTReasoningSignature(sig) {
+			return SignatureProviderGPT
+		}
+		if IsValidClaudeCAISSignature(sig) {
+			return SignatureProviderClaude
+		}
+		if IsValidClaudeThinkingSignature(sig, ClaudeSignatureValidationOptions{Strict: true}) {
+			return SignatureProviderClaude
+		}
+		if isRecognizedGeminiProviderSignature(sig, blockKind) {
+			return SignatureProviderGemini
+		}
 	}
-	if IsValidClaudeCAISSignature(sig) {
-		return SignatureProviderClaude
-	}
-	if IsValidClaudeThinkingSignature(sig, ClaudeSignatureValidationOptions{Strict: true}) {
-		return SignatureProviderClaude
-	}
-	if isRecognizedGeminiProviderSignature(sig, blockKind) {
-		return SignatureProviderGemini
+	// Kimi carries no envelope, so it can only be claimed once every
+	// self-describing probe above has declined. Ordering it last means a length
+	// coincidence can never capture another provider's signature, and a future
+	// drift in Kimi's sizes costs Kimi its own identification rather than
+	// corrupting a neighbouring family.
+	if IsValidKimiThinkingSignature(sig) {
+		return SignatureProviderKimi
 	}
 	return SignatureProviderUnknown
 }
@@ -254,6 +274,15 @@ func DecideSignatureCompatibilityForModel(targetProvider SignatureProvider, targ
 	case SignatureProviderGPT:
 		decision.Action = SignatureActionDropBlock
 		decision.Reason = "GPT reasoning encrypted_content cannot be synthesized from another provider signature"
+	case SignatureProviderKimi:
+		// Kimi is the only target that can keep the reasoning text when the
+		// signature does not match. Its Messages endpoint never reads the field
+		// back: a mutated, truncated, non-base64 or absent signature all return
+		// 200, because reasoning continuity there travels in OpenAI-style
+		// reasoning_content instead. Dropping the block would discard recoverable
+		// thinking text for no upstream benefit, so drop only the signature.
+		decision.Action = SignatureActionDropSignature
+		decision.Reason = "Kimi does not validate replayed thinking signatures, so the block survives without one"
 	default:
 		decision.Action = SignatureActionNoCompatibleReplacement
 		decision.Reason = "unknown target provider"
@@ -372,6 +401,8 @@ func signatureProviderMatchesTarget(target, detected SignatureProvider) bool {
 		return detected == SignatureProviderClaude
 	case SignatureProviderGPT:
 		return detected == SignatureProviderGPT
+	case SignatureProviderKimi:
+		return detected == SignatureProviderKimi
 	default:
 		return false
 	}
@@ -398,6 +429,10 @@ func normalizeCompatibleSignatureForProvider(targetProvider SignatureProvider, r
 		}
 	case SignatureProviderGPT:
 		if IsValidGPTReasoningSignature(payload) {
+			return payload
+		}
+	case SignatureProviderKimi:
+		if IsValidKimiThinkingSignature(payload) {
 			return payload
 		}
 	}
