@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 )
 
 var regionPattern = regexp.MustCompile(`^[a-z]{2}(?:-gov)?-[a-z]+-\d+$`)
+
+var errKiroAPIKeyUnavailable = errors.New("Kiro API key unavailable")
 
 type kiroCredential struct {
 	Type      string `json:"type"`
@@ -134,7 +137,7 @@ func resolveAPIKey(credential kiroCredential) (string, error) {
 	}
 	key := strings.TrimSpace(os.Getenv(credential.APIKeyEnv))
 	if key == "" {
-		return "", fmt.Errorf("environment variable %s is empty", credential.APIKeyEnv)
+		return "", fmt.Errorf("%w: environment variable %s is empty", errKiroAPIKeyUnavailable, credential.APIKeyEnv)
 	}
 	return key, nil
 }

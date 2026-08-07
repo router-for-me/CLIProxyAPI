@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -70,7 +71,7 @@ func execute(raw []byte) ([]byte, error) {
 	}
 	upstream, payload, errPrepare := prepareUpstreamRequest(request.ExecutorRequest)
 	if errPrepare != nil {
-		return errorEnvelope("invalid_request", errPrepare.Error(), http.StatusBadRequest, false), nil
+		return prepareRequestErrorEnvelope(errPrepare), nil
 	}
 
 	var lastErr error
@@ -118,10 +119,17 @@ func executeStream(raw []byte) ([]byte, error) {
 	}
 	upstream, payload, errPrepare := prepareUpstreamRequest(request.ExecutorRequest)
 	if errPrepare != nil {
-		return errorEnvelope("invalid_request", errPrepare.Error(), http.StatusBadRequest, false), nil
+		return prepareRequestErrorEnvelope(errPrepare), nil
 	}
 	go runStream(request, upstream, payload)
 	return okEnvelope(map[string]any{"headers": http.Header{"Content-Type": []string{"text/event-stream"}}})
+}
+
+func prepareRequestErrorEnvelope(errPrepare error) []byte {
+	if errors.Is(errPrepare, errKiroAPIKeyUnavailable) {
+		return errorEnvelope("invalid_auth", errPrepare.Error(), http.StatusUnauthorized, false)
+	}
+	return errorEnvelope("invalid_request", errPrepare.Error(), http.StatusBadRequest, false)
 }
 
 func runStream(request rpcExecutorRequest, upstream upstreamRequest, payload *kiroPayload) {

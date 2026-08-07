@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"hash/crc32"
 	"net/http"
 	"net/url"
@@ -53,6 +54,23 @@ func TestDecodeCredentialRejectsHostInjectionRegion(t *testing.T) {
 	_, handled, errCredential := decodeCredential([]byte(`{"type":"kiro","api_key_env":"KEY","region":"us-east-1.kiro.dev.evil"}`))
 	if !handled || errCredential == nil {
 		t.Fatalf("decodeCredential() handled=%v error=%v", handled, errCredential)
+	}
+}
+
+func TestMissingEnvironmentAPIKeyIsAuthenticationFailure(t *testing.T) {
+	t.Setenv("KIRO_MISSING_TEST_KEY", "")
+	_, errKey := resolveAPIKey(kiroCredential{APIKeyEnv: "KIRO_MISSING_TEST_KEY"})
+	if !errors.Is(errKey, errKiroAPIKeyUnavailable) {
+		t.Fatalf("resolveAPIKey() error = %v, want API-key unavailable", errKey)
+	}
+
+	raw := prepareRequestErrorEnvelope(errKey)
+	var env envelope
+	if errUnmarshal := json.Unmarshal(raw, &env); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+	if env.Error == nil || env.Error.Code != "invalid_auth" || env.Error.HTTPStatus != http.StatusUnauthorized {
+		t.Fatalf("prepare error envelope = %#v, want invalid_auth/401", env.Error)
 	}
 }
 
@@ -360,6 +378,38 @@ func TestClaudeToKiroPreservesExplicitZeroSamplingValues(t *testing.T) {
 	}
 }
 
+func TestClaudeToKiroRejectsUnsupportedGenerationControls(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "stop sequences",
+			body: `{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":"hello"}],"stop_sequences":["END"]}`,
+			want: "stop_sequences",
+		},
+		{
+			name: "forced tool",
+			body: `{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":"hello"}],"tool_choice":{"type":"tool","name":"lookup"}}`,
+			want: "automatic tool choice",
+		},
+		{
+			name: "disabled parallel tools",
+			body: `{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":"hello"}],"tool_choice":{"type":"auto","disable_parallel_tool_use":true}}`,
+			want: "parallel-tool restrictions",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, errTranslate := claudeToKiro([]byte(test.body), "")
+			if errTranslate == nil || !strings.Contains(errTranslate.Error(), test.want) {
+				t.Fatalf("claudeToKiro() error = %v, want %q", errTranslate, test.want)
+			}
+		})
+	}
+}
+
 func TestClaudeToKiroPreservesThinkingBudget(t *testing.T) {
 	payload, _, errTranslate := claudeToKiro([]byte(`{
 		"model":"claude-sonnet-4-5",
@@ -657,6 +707,16 @@ func TestUpdateUsageReadsNestedCacheBuckets(t *testing.T) {
 	inputTokens, outputTokens := updateUsage(event, 0, 0)
 	if inputTokens != 12 || outputTokens != 2 {
 		t.Fatalf("usage = input:%d output:%d, want input:12 output:2", inputTokens, outputTokens)
+	}
+}
+
+func TestUpdateUsageIgnoresNestedToolInputUsage(t *testing.T) {
+	event := map[string]any{"input": map[string]any{"usage": map[string]any{
+		"inputTokens": 100000.0, "outputTokens": 100000.0,
+	}}}
+	inputTokens, outputTokens := updateUsage(event, 12, 2)
+	if inputTokens != 12 || outputTokens != 2 {
+		t.Fatalf("usage = input:%d output:%d, want existing provider counts", inputTokens, outputTokens)
 	}
 }
 

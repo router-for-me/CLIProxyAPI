@@ -33,6 +33,12 @@ func claudeToKiro(raw []byte, requestedModel string) (*kiroPayload, *claudeReque
 	if len(request.Messages) == 0 {
 		return nil, nil, fmt.Errorf("messages must not be empty")
 	}
+	if len(request.StopSequences) > 0 {
+		return nil, nil, fmt.Errorf("Kiro provider does not support stop_sequences")
+	}
+	if request.ToolChoice != nil && (strings.ToLower(strings.TrimSpace(request.ToolChoice.Type)) != "auto" || request.ToolChoice.DisableParallelToolUse) {
+		return nil, nil, fmt.Errorf("Kiro provider supports only automatic tool choice without parallel-tool restrictions")
+	}
 
 	systemPrompt := extractSystemPrompt(request.System)
 	if request.Thinking != nil {

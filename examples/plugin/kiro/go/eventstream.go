@@ -287,7 +287,13 @@ func readFloat(values map[string]any, keys ...string) (float64, bool) {
 
 func updateUsage(event map[string]any, inputTokens, outputTokens int) (int, int) {
 	candidates := []map[string]any{event}
-	collectUsageMaps(event, &candidates)
+	appendDirectUsageMaps(event, &candidates)
+	for _, key := range []string{"metrics", "metadata"} {
+		if container, ok := event[key].(map[string]any); ok {
+			candidates = append(candidates, container)
+			appendDirectUsageMaps(container, &candidates)
+		}
+	}
 	for _, candidate := range candidates {
 		if value, ok := readNumber(candidate, "outputTokens", "completionTokens", "totalOutputTokens", "output_tokens", "completion_tokens", "total_output_tokens"); ok {
 			outputTokens = value
@@ -310,21 +316,10 @@ func updateUsage(event map[string]any, inputTokens, outputTokens int) (int, int)
 	return inputTokens, outputTokens
 }
 
-func collectUsageMaps(value any, candidates *[]map[string]any) {
-	switch typed := value.(type) {
-	case map[string]any:
-		for key, child := range typed {
-			normalized := strings.ToLower(key)
-			if normalized == "usage" || normalized == "tokenusage" || normalized == "token_usage" {
-				if nested, ok := child.(map[string]any); ok {
-					*candidates = append(*candidates, nested)
-				}
-			}
-			collectUsageMaps(child, candidates)
-		}
-	case []any:
-		for _, child := range typed {
-			collectUsageMaps(child, candidates)
+func appendDirectUsageMaps(value map[string]any, candidates *[]map[string]any) {
+	for _, key := range []string{"usage", "tokenUsage", "token_usage"} {
+		if nested, ok := value[key].(map[string]any); ok {
+			*candidates = append(*candidates, nested)
 		}
 	}
 }

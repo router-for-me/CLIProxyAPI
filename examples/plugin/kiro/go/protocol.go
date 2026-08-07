@@ -89,18 +89,26 @@ type kiroInferenceConfig struct {
 }
 
 type claudeRequest struct {
-	Model       string          `json:"model"`
-	Messages    []claudeMessage `json:"messages"`
-	MaxTokens   int             `json:"max_tokens"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	TopP        *float64        `json:"top_p,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
-	System      any             `json:"system,omitempty"`
-	Thinking    *struct {
+	Model         string            `json:"model"`
+	Messages      []claudeMessage   `json:"messages"`
+	MaxTokens     int               `json:"max_tokens"`
+	Temperature   *float64          `json:"temperature,omitempty"`
+	TopP          *float64          `json:"top_p,omitempty"`
+	Stream        bool              `json:"stream,omitempty"`
+	System        any               `json:"system,omitempty"`
+	StopSequences []string          `json:"stop_sequences,omitempty"`
+	ToolChoice    *claudeToolChoice `json:"tool_choice,omitempty"`
+	Thinking      *struct {
 		Type         string `json:"type,omitempty"`
 		BudgetTokens int    `json:"budget_tokens,omitempty"`
 	} `json:"thinking,omitempty"`
 	Tools []claudeTool `json:"tools,omitempty"`
+}
+
+type claudeToolChoice struct {
+	Type                   string `json:"type"`
+	Name                   string `json:"name,omitempty"`
+	DisableParallelToolUse bool   `json:"disable_parallel_tool_use,omitempty"`
 }
 
 type claudeMessage struct {
