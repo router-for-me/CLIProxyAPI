@@ -89,9 +89,5 @@ web/dashboard/.dev.vars
 # docker
 docker-compose.override.yml
 
-
 # Local LLM Wiki vault
-.llm-wiki/
-
-# Local overrides / agent-specific files
-AGENTS.override.md
+.llm-wiki

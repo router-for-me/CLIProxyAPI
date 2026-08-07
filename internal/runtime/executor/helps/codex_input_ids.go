@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -21,7 +22,7 @@ const (
 // reasoning items whose IDs exceed the Codex limit, and deterministically shortens
 // other overlong input item IDs.
 func SanitizeCodexInputItemIDs(body []byte) []byte {
-	input := gjson.GetBytes(body, "input")
+	input := util.GetGJSONBytesNoCopy(body, "input")
 	if !input.IsArray() {
 		return body
 	}
