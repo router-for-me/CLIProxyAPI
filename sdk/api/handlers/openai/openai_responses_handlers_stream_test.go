@@ -194,6 +194,31 @@ func TestForwardResponsesStreamPreservesValidFullSSEEventChunks(t *testing.T) {
 	}
 }
 
+func TestForwardResponsesStreamRewritesKeepaliveEventsAsSSEComments(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 3)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte("event: keepalive\ndata: {\"type\":\"keepalive\",\"sequence_number\":1}\n\n")
+	data <- []byte("data: {\"type\":\"keepalive\",\"sequence_number\":2}")
+	data <- []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}")
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+
+	body := recorder.Body.String()
+	if got := strings.Count(body, ": keep-alive\n\n"); got != 2 {
+		t.Fatalf("expected 2 SSE comment heartbeats, got %d. Body: %q", got, body)
+	}
+	if strings.Contains(body, `"type":"keepalive"`) || strings.Contains(body, "event: keepalive") {
+		t.Fatalf("non-standard keepalive event leaked downstream. Body: %q", body)
+	}
+	if !strings.Contains(body, `"type":"response.completed"`) {
+		t.Fatalf("terminal response event was not preserved. Body: %q", body)
+	}
+}
+
 func TestForwardResponsesStreamBuffersSplitDataPayloadChunks(t *testing.T) {
 	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
 
