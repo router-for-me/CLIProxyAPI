@@ -3,6 +3,7 @@ package misc
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -11,6 +12,26 @@ import (
 
 // Separator used to visually group related log lines.
 var credentialSeparator = strings.Repeat("-", 67)
+
+// SecretFileMode is the permission used for files holding secrets (OAuth tokens,
+// API keys, management keys). Only the owning user may read or write them.
+const SecretFileMode os.FileMode = 0o600
+
+// CreateSecretFile truncates or creates path with SecretFileMode. Unlike os.Create
+// it never depends on the process umask, and it also tightens the mode of files
+// that already exist with wider permissions.
+func CreateSecretFile(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, SecretFileMode)
+	if err != nil {
+		return nil, err
+	}
+	// O_CREATE only applies the mode to newly created files; re-apply it so an
+	// existing world-readable file gets fixed on the next write.
+	if err = f.Chmod(SecretFileMode); err != nil && !os.IsPermission(err) {
+		log.Debugf("failed to tighten permissions on %s: %v", path, err)
+	}
+	return f, nil
+}
 
 // LogSavingCredentials emits a consistent log message when persisting auth material.
 func LogSavingCredentials(path string) {
