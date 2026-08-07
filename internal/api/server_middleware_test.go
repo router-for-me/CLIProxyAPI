@@ -42,6 +42,26 @@ func TestStudioCorrelationMiddlewareRejectsMissingSessionForStudio(t *testing.T)
 	}
 }
 
+func TestStudioCorrelationMiddlewareAllowsStudioModelDiscoveryWithoutSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, path := range []string{"/v1/models", "/v1beta/models"} {
+		t.Run(path, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest("GET", "http://example.com"+path, nil)
+			ctx.Set("accessProvider", "studio")
+
+			StudioCorrelationMiddleware()(ctx)
+			if ctx.IsAborted() {
+				t.Fatal("model discovery without a session was rejected")
+			}
+			correlation := coreusage.CorrelationFromContext(ctx.Request.Context())
+			if correlation.InferenceSessionID != "" || correlation.GatewayRequestID == "" {
+				t.Fatalf("model discovery correlation = %+v", correlation)
+			}
+		})
+	}
+}
+
 func TestStudioCorrelationMiddlewareIgnoresUntrustedHeader(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())

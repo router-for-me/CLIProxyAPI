@@ -195,6 +195,11 @@ func StudioCorrelationMiddleware() gin.HandlerFunc {
 			return
 		}
 		if len(values) == 0 {
+			if isStudioModelDiscoveryRequest(c) {
+				setRequestCorrelationContext(c, "")
+				c.Next()
+				return
+			}
 			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing Studio inference session ID"})
 			return
 		}
@@ -206,6 +211,18 @@ func StudioCorrelationMiddleware() gin.HandlerFunc {
 		c.Set(studioInferenceSessionContextKey, sessionID)
 		setRequestCorrelationContext(c, sessionID)
 		c.Next()
+	}
+}
+
+func isStudioModelDiscoveryRequest(c *gin.Context) bool {
+	if c == nil || c.Request == nil || c.Request.URL == nil || c.Request.Method != http.MethodGet {
+		return false
+	}
+	switch c.Request.URL.Path {
+	case "/v1/models", "/v1beta/models":
+		return true
+	default:
+		return false
 	}
 }
 
