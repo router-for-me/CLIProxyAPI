@@ -13,6 +13,10 @@ import (
 // this auth, suitable for embedding under a `rate_limit` key on an auth-files
 // entry.
 //
+// The `windows` map is the exception to "most-recent": the store carries live
+// windows forward, so each carries its own `observed_at` (see
+// coreauth.SetAnthropicRateLimitHint).
+//
 // Returns nil when the auth is not a Claude provider, no hint has been
 // captured yet, the hint has Known=false, or the captured hint belongs to a
 // different account than this auth now holds. Mirrors extractCodexIDTokenClaims
@@ -91,6 +95,13 @@ func buildClaudeRateLimitEntry(auth *coreauth.Auth) gin.H {
 			// consumers nothing actionable and invites them to treat window
 			// presence as meaningful. The forensic signal stays in raw_headers.
 			if len(windowEntry) > 0 {
+				// Which capture this window came from; a carried one lags the
+				// top-level observed_at. After the emptiness gate on purpose:
+				// a timestamp is not a reading and must not resurrect a window
+				// with nothing to report.
+				if !window.ObservedAt.IsZero() {
+					windowEntry["observed_at"] = window.ObservedAt
+				}
 				windows[slug] = windowEntry
 			}
 		}

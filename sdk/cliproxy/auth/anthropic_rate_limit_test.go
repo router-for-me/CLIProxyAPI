@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -611,5 +613,712 @@ func TestSetAnthropicRateLimitHint_ConcurrentOrderingHolds(t *testing.T) {
 			t.Fatalf("round %d: ObservedAt = %v, want %v — an older concurrent capture won",
 				round, got.ObservedAt, base)
 		}
+	}
+}
+
+// windowSlugs lists the stored window keys in a stable order, so a failure
+// message says which windows survived rather than printing a randomized map.
+func windowSlugs(hint AnthropicRateLimitHint) []string {
+	slugs := make([]string, 0, len(hint.Windows))
+	for slug := range hint.Windows {
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+	return slugs
+}
+
+// TestSetAnthropicRateLimitHint_CarriesWindowOmittedByPartialCapture pins the
+// merge. Anthropic reports only the windows belonging to the responding model's
+// tier, so the first ordinary-tier response after a premium one carries no
+// `7d_oi` header at all. Replacing the stored windows wholesale erased that
+// window while its quota was still live — observed in production as a premium
+// weekly reading that vanished minutes after appearing, hours before its reset.
+func TestSetAnthropicRateLimitHint_CarriesWindowOmittedByPartialCapture(t *testing.T) {
+	const authID = "auth-carry-premium-weekly"
+	DeleteAnthropicRateLimitHint(authID)
+	t.Cleanup(func() { DeleteAnthropicRateLimitHint(authID) })
+
+	premiumAt := time.Date(2026, 5, 1, 16, 1, 0, 0, time.UTC)
+	ordinaryAt := premiumAt.Add(4 * time.Minute)
+	oiReset := premiumAt.Add(30 * time.Hour)
+	// An identified account on both sides, so the carry rides the same
+	// fingerprint comparison production does rather than the both-empty branch.
+	const fingerprint = "fp-carry-premium-weekly"
+
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known:              true,
+		ObservedAt:         premiumAt,
+		Status:             "allowed_warning",
+		AccountFingerprint: fingerprint,
+		Windows: map[string]AnthropicQuotaWindow{
+			"5h":    {Status: "allowed", Reset: premiumAt.Add(2 * time.Hour), Utilization: 0.20, HasUtilization: true},
+			"7d":    {Status: "allowed", Reset: premiumAt.Add(72 * time.Hour), Utilization: 0.40, HasUtilization: true},
+			"7d_oi": {Status: "allowed_warning", Reset: oiReset, Utilization: 0.88, HasUtilization: true},
+		},
+	})
+
+	// An ordinary-tier response: same account, no premium window in the family.
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known:              true,
+		ObservedAt:         ordinaryAt,
+		Status:             "allowed",
+		AccountFingerprint: fingerprint,
+		Windows: map[string]AnthropicQuotaWindow{
+			"5h": {Status: "allowed", Reset: ordinaryAt.Add(2 * time.Hour), Utilization: 0.30, HasUtilization: true},
+			"7d": {Status: "allowed", Reset: ordinaryAt.Add(72 * time.Hour), Utilization: 0.45, HasUtilization: true},
+		},
+	})
+
+	got, ok := GetAnthropicRateLimitHint(authID)
+	if !ok {
+		t.Fatal("GetAnthropicRateLimitHint() ok = false, want true")
+	}
+	if len(got.Windows) != 3 {
+		t.Fatalf("windows = %v, want 5h, 7d and a carried 7d_oi", windowSlugs(got))
+	}
+
+	oi, ok := got.Windows["7d_oi"]
+	if !ok {
+		t.Fatalf("7d_oi erased by a capture that never reported it; windows = %v", windowSlugs(got))
+	}
+	if oi.Utilization != 0.88 || oi.Status != "allowed_warning" || !oi.Reset.Equal(oiReset) {
+		t.Errorf("carried 7d_oi = %+v, want the premium capture's reading unchanged", oi)
+	}
+	if !oi.ObservedAt.Equal(premiumAt) {
+		t.Errorf("carried 7d_oi ObservedAt = %v, want %v — a carried window must keep the stamp of the capture that saw it", oi.ObservedAt, premiumAt)
+	}
+
+	// Windows the newest capture did report come from it, stamp included.
+	fiveHour := got.Windows["5h"]
+	if fiveHour.Utilization != 0.30 {
+		t.Errorf("5h utilization = %v, want 0.30 from the newest capture", fiveHour.Utilization)
+	}
+	if !fiveHour.ObservedAt.Equal(ordinaryAt) {
+		t.Errorf("5h ObservedAt = %v, want %v", fiveHour.ObservedAt, ordinaryAt)
+	}
+	// Everything outside Windows still describes the newest capture alone.
+	if got.Status != "allowed" || !got.ObservedAt.Equal(ordinaryAt) {
+		t.Errorf("hint-level state = (%q, %v), want the newest capture's (%q, %v)", got.Status, got.ObservedAt, "allowed", ordinaryAt)
+	}
+}
+
+// TestSetAnthropicRateLimitHint_DoesNotCarryAcrossAccounts pins the identity
+// gate. Carrying is a claim that two captures describe the same quota, so it
+// requires the same account on both sides. An unknown account on either side
+// is not a match: unlike the read path — where serving an unidentifiable hint
+// only risks showing the operator a stale reading — carrying would fabricate a
+// window the current credential may never have had.
+func TestSetAnthropicRateLimitHint_DoesNotCarryAcrossAccounts(t *testing.T) {
+	first := time.Date(2026, 5, 1, 16, 1, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+
+	cases := []struct {
+		name string
+		prev string
+		next string
+	}{
+		{name: "different accounts", prev: "fingerprint-before", next: "fingerprint-after"},
+		{name: "prior identified, capture unknown", prev: "fingerprint-before", next: ""},
+		{name: "prior unknown, capture identified", prev: "", next: "fingerprint-after"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			authID := "auth-carry-identity-" + tc.name
+			DeleteAnthropicRateLimitHint(authID)
+			t.Cleanup(func() { DeleteAnthropicRateLimitHint(authID) })
+
+			SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+				Known:              true,
+				ObservedAt:         first,
+				AccountFingerprint: tc.prev,
+				Windows: map[string]AnthropicQuotaWindow{
+					"7d_oi": {Status: "allowed", Reset: first.Add(30 * time.Hour)},
+				},
+			})
+			SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+				Known:              true,
+				ObservedAt:         second,
+				AccountFingerprint: tc.next,
+				Windows: map[string]AnthropicQuotaWindow{
+					"5h": {Status: "allowed", Reset: second.Add(2 * time.Hour)},
+				},
+			})
+
+			got, _ := GetAnthropicRateLimitHint(authID)
+			if _, present := got.Windows["7d_oi"]; present {
+				t.Errorf("carried a window across unproven identity (%q → %q); windows = %v", tc.prev, tc.next, windowSlugs(got))
+			}
+		})
+	}
+}
+
+// TestSetAnthropicRateLimitHint_FreshWindowReplacesStored pins that the merge
+// works at window granularity and never at field granularity. A slug the new
+// capture reports is that capture's reading in full: a field the older capture
+// had and the newer one lacks must not survive inside it, or a cleared warning
+// would look permanent.
+func TestSetAnthropicRateLimitHint_FreshWindowReplacesStored(t *testing.T) {
+	const authID = "auth-carry-fresh-wins"
+	DeleteAnthropicRateLimitHint(authID)
+	t.Cleanup(func() { DeleteAnthropicRateLimitHint(authID) })
+
+	first := time.Date(2026, 5, 1, 16, 1, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+
+	const fingerprint = "fp-fresh-wins"
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known:              true,
+		ObservedAt:         first,
+		AccountFingerprint: fingerprint,
+		Windows: map[string]AnthropicQuotaWindow{
+			"5h": {
+				Status:                "allowed_warning",
+				Reset:                 first.Add(2 * time.Hour),
+				Utilization:           0.91,
+				HasUtilization:        true,
+				SurpassedThreshold:    0.90,
+				HasSurpassedThreshold: true,
+			},
+		},
+	})
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known:              true,
+		ObservedAt:         second,
+		AccountFingerprint: fingerprint,
+		Windows: map[string]AnthropicQuotaWindow{
+			"5h": {Status: "allowed", Reset: second.Add(5 * time.Hour), Utilization: 0.05, HasUtilization: true},
+		},
+	})
+
+	got, _ := GetAnthropicRateLimitHint(authID)
+	fiveHour := got.Windows["5h"]
+	if fiveHour.Status != "allowed" || fiveHour.Utilization != 0.05 {
+		t.Errorf("5h = %+v, want the newest capture's reading", fiveHour)
+	}
+	if fiveHour.HasSurpassedThreshold || fiveHour.SurpassedThreshold != 0 {
+		t.Errorf("5h kept the stored capture's surpassed_threshold (%v) — windows merge whole, never field by field", fiveHour.SurpassedThreshold)
+	}
+	if !fiveHour.ObservedAt.Equal(second) {
+		t.Errorf("5h ObservedAt = %v, want %v", fiveHour.ObservedAt, second)
+	}
+}
+
+// TestSetAnthropicRateLimitHint_CarriesIntoCaptureWithoutWindows covers the
+// nil-map path: a capture can carry the unified-* family with no per-window
+// headers at all (RecordAnthropicRateLimit leaves Windows nil then), and the
+// carry has to allocate rather than write to a nil map.
+func TestSetAnthropicRateLimitHint_CarriesIntoCaptureWithoutWindows(t *testing.T) {
+	const authID = "auth-carry-into-nil-windows"
+	DeleteAnthropicRateLimitHint(authID)
+	t.Cleanup(func() { DeleteAnthropicRateLimitHint(authID) })
+
+	first := time.Date(2026, 5, 1, 16, 1, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+	oiReset := first.Add(30 * time.Hour)
+	const fingerprint = "fp-carry-into-nil-windows"
+
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known:              true,
+		ObservedAt:         first,
+		AccountFingerprint: fingerprint,
+		Windows: map[string]AnthropicQuotaWindow{
+			"7d_oi": {Status: "allowed", Reset: oiReset, Utilization: 0.88, HasUtilization: true},
+		},
+	})
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known:              true,
+		ObservedAt:         second,
+		Status:             "allowed",
+		AccountFingerprint: fingerprint,
+	})
+
+	got, _ := GetAnthropicRateLimitHint(authID)
+	oi, ok := got.Windows["7d_oi"]
+	if !ok {
+		t.Fatalf("7d_oi lost to a capture with no windows of its own; windows = %v", windowSlugs(got))
+	}
+	if !oi.ObservedAt.Equal(first) || oi.Utilization != 0.88 {
+		t.Errorf("carried 7d_oi = %+v, want the first capture's reading and stamp", oi)
+	}
+}
+
+// TestSetAnthropicRateLimitHint_StampsWindowObservedAt pins that the store owns
+// the per-window timestamp. The field only means "which capture saw this" if no
+// caller can set it, and the carry policy reads it back as exactly that.
+func TestSetAnthropicRateLimitHint_StampsWindowObservedAt(t *testing.T) {
+	const authID = "auth-window-observed-at-stamp"
+	DeleteAnthropicRateLimitHint(authID)
+	t.Cleanup(func() { DeleteAnthropicRateLimitHint(authID) })
+
+	capturedAt := time.Date(2026, 5, 1, 16, 1, 0, 0, time.UTC)
+	callerSupplied := capturedAt.Add(-72 * time.Hour)
+
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known:      true,
+		ObservedAt: capturedAt,
+		Windows: map[string]AnthropicQuotaWindow{
+			"5h": {Status: "allowed", Reset: capturedAt.Add(2 * time.Hour), ObservedAt: callerSupplied},
+		},
+	})
+
+	got, _ := GetAnthropicRateLimitHint(authID)
+	if !got.Windows["5h"].ObservedAt.Equal(capturedAt) {
+		t.Errorf("5h ObservedAt = %v, want %v — the store stamps this field, the caller does not", got.Windows["5h"].ObservedAt, capturedAt)
+	}
+}
+
+// TestSetAnthropicRateLimitHint_ConcurrentMergeKeepsCarriedWindow runs the
+// merge itself under concurrency, which the ordering tests do not: they store
+// window-less hints, so the carry loop never executes there. Premium- and
+// ordinary-tier captures race for one auth, and 7d_oi must survive whichever
+// one lands last — every capture after the seed either reports it or merges
+// from a stored hint that already carries it.
+//
+// Worth running under -race: the merge reads the store-owned window map of the
+// previous hint while other goroutines clone it on Get.
+func TestSetAnthropicRateLimitHint_ConcurrentMergeKeepsCarriedWindow(t *testing.T) {
+	const authID = "auth-concurrent-merge"
+	const writers = 64
+	const iterations = 32
+	const concurrentFingerprint = "fp-concurrent-merge"
+
+	base := time.Unix(1777500000, 0).UTC()
+	DeleteAnthropicRateLimitHint(authID)
+	t.Cleanup(func() { DeleteAnthropicRateLimitHint(authID) })
+
+	premiumWindows := func() map[string]AnthropicQuotaWindow {
+		return map[string]AnthropicQuotaWindow{
+			"5h":    {Status: "allowed", Reset: base.Add(2 * time.Hour), Utilization: 0.2, HasUtilization: true},
+			"7d":    {Status: "allowed", Reset: base.Add(72 * time.Hour), Utilization: 0.4, HasUtilization: true},
+			"7d_oi": {Status: "allowed", Reset: base.Add(96 * time.Hour), Utilization: 0.6, HasUtilization: true},
+		}
+	}
+
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known: true, ObservedAt: base, AccountFingerprint: concurrentFingerprint, Windows: premiumWindows(),
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				windows := premiumWindows()
+				if i%2 == 1 {
+					// Ordinary tier: the premium window is not in the family.
+					delete(windows, "7d_oi")
+				}
+				SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+					Known:              true,
+					ObservedAt:         base.Add(time.Duration(i*iterations+j+1) * time.Millisecond),
+					AccountFingerprint: concurrentFingerprint,
+					Windows:            windows,
+				})
+				_, _ = GetAnthropicRateLimitHint(authID)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	got, ok := GetAnthropicRateLimitHint(authID)
+	if !ok {
+		t.Fatal("GetAnthropicRateLimitHint() ok = false, want true")
+	}
+	if _, present := got.Windows["7d_oi"]; !present {
+		t.Errorf("7d_oi lost under concurrent partial-family captures; windows = %v", windowSlugs(got))
+	}
+}
+
+// TestSetAnthropicRateLimitHint_UnknownCaptureCarriesNothing pins the Known
+// gate. A capture with no unified-* content says nothing about the account's
+// quota — it is either a scrub or a record that the auth exists — so it must
+// not inherit windows and quietly become a hint that reports quota nobody
+// observed.
+func TestSetAnthropicRateLimitHint_UnknownCaptureCarriesNothing(t *testing.T) {
+	const authID = "auth-carry-unknown-capture"
+	DeleteAnthropicRateLimitHint(authID)
+	t.Cleanup(func() { DeleteAnthropicRateLimitHint(authID) })
+
+	first := time.Date(2026, 5, 1, 16, 1, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known:      true,
+		ObservedAt: first,
+		Windows: map[string]AnthropicQuotaWindow{
+			"7d_oi": {Status: "allowed", Reset: first.Add(30 * time.Hour), Utilization: 0.88, HasUtilization: true},
+		},
+	})
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known:      false,
+		ObservedAt: second,
+	})
+
+	got, ok := GetAnthropicRateLimitHint(authID)
+	if !ok {
+		t.Fatal("GetAnthropicRateLimitHint() ok = false, want true")
+	}
+	if got.Known {
+		t.Error("Known = true, want false — the scrub itself must still land")
+	}
+	if len(got.Windows) != 0 {
+		t.Errorf("a capture with no unified-* content inherited windows %v", windowSlugs(got))
+	}
+}
+
+// TestSetAnthropicRateLimitHint_CapsCarriedWindows bounds the union. Carrying
+// windows forward means the stored map is no longer sized by one response, and
+// both the slug and the reset come from upstream — so a base that rotates slug
+// names would grow one auth's map for the life of the process. The cap falls on
+// the carried side, which is the unbounded one: what this capture reported is
+// never given up, and a capture that fills its own budget still gets its carry.
+func TestSetAnthropicRateLimitHint_CapsCarriedWindows(t *testing.T) {
+	const authID = "auth-carry-cap"
+	const stored = 100
+	const fingerprint = "fp-carry-cap"
+	DeleteAnthropicRateLimitHint(authID)
+	t.Cleanup(func() { DeleteAnthropicRateLimitHint(authID) })
+
+	first := time.Date(2026, 5, 1, 16, 1, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+
+	// Every window is live at `second` and inside the carry horizon, each
+	// resetting an hour later than the one before, so eviction order is
+	// unambiguous.
+	windows := make(map[string]AnthropicQuotaWindow, stored)
+	for i := 0; i < stored; i++ {
+		windows[fmt.Sprintf("w%03d", i)] = AnthropicQuotaWindow{
+			Status: "allowed",
+			Reset:  second.Add(time.Duration(i+1) * time.Hour),
+		}
+	}
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known: true, ObservedAt: first, AccountFingerprint: fingerprint, Windows: windows,
+	})
+
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known:              true,
+		ObservedAt:         second,
+		AccountFingerprint: fingerprint,
+		Windows: map[string]AnthropicQuotaWindow{
+			"5h": {Status: "allowed", Reset: second.Add(2 * time.Hour)},
+			"7d": {Status: "allowed", Reset: second.Add(72 * time.Hour)},
+		},
+	})
+
+	got, _ := GetAnthropicRateLimitHint(authID)
+	// The capture's own two windows, plus a full carry budget on top.
+	if want := 2 + maxCarriedAnthropicWindows; len(got.Windows) != want {
+		t.Fatalf("stored %d windows, want %d (2 reported + %d carried)", len(got.Windows), want, maxCarriedAnthropicWindows)
+	}
+	for _, slug := range []string{"5h", "7d"} {
+		if _, present := got.Windows[slug]; !present {
+			t.Errorf("%s: a window this capture reported was evicted to make room for a carried one", slug)
+		}
+	}
+	// Keep the furthest resets: w099 (+100h) down to w036 (+37h). Those are the
+	// long-horizon windows an ordinary capture stops re-reporting; the soonest
+	// candidates are re-reported anyway and age out on their own.
+	firstKept := stored - maxCarriedAnthropicWindows
+	for i := 0; i < stored; i++ {
+		slug := fmt.Sprintf("w%03d", i)
+		_, present := got.Windows[slug]
+		if want := i >= firstKept; present != want {
+			t.Errorf("%s (reset +%dh) present = %v, want %v — the soonest resets go first", slug, i+1, present, want)
+		}
+	}
+}
+
+// TestSetAnthropicRateLimitHint_CarryEvictionTieBreaksOnSlug contests the last
+// carry seat between two windows resetting at the same instant. Without a
+// tie-break the winner is whichever the map happened to yield first, so the
+// store would evict a different window on identical input.
+//
+// Repeated: Go randomizes map iteration per range, so one round would let an
+// order-dependent implementation through about half the time.
+func TestSetAnthropicRateLimitHint_CarryEvictionTieBreaksOnSlug(t *testing.T) {
+	const authID = "auth-carry-cap-tiebreak"
+	const rounds = 20
+	const fingerprint = "fp-carry-tiebreak"
+	t.Cleanup(func() { DeleteAnthropicRateLimitHint(authID) })
+
+	first := time.Date(2026, 5, 1, 16, 1, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+
+	// One seat short of the budget goes to windows resetting far out, which
+	// eviction keeps; the two tied windows reset sooner and contest what is
+	// left.
+	sharedReset := second.Add(10 * time.Hour)
+	prior := map[string]AnthropicQuotaWindow{
+		"aaa_window": {Status: "allowed", Reset: sharedReset},
+		"bbb_window": {Status: "allowed", Reset: sharedReset},
+	}
+	for i := 0; i < maxCarriedAnthropicWindows-1; i++ {
+		prior[fmt.Sprintf("far%03d", i)] = AnthropicQuotaWindow{
+			Status: "allowed",
+			Reset:  second.Add(time.Duration(100+i) * time.Hour),
+		}
+	}
+
+	for round := 0; round < rounds; round++ {
+		DeleteAnthropicRateLimitHint(authID)
+
+		SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+			Known: true, ObservedAt: first, AccountFingerprint: fingerprint, Windows: prior,
+		})
+		SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+			Known:              true,
+			ObservedAt:         second,
+			AccountFingerprint: fingerprint,
+			Windows: map[string]AnthropicQuotaWindow{
+				"5h": {Status: "allowed", Reset: second.Add(2 * time.Hour)},
+			},
+		})
+
+		got, _ := GetAnthropicRateLimitHint(authID)
+		if want := 1 + maxCarriedAnthropicWindows; len(got.Windows) != want {
+			t.Fatalf("round %d: stored %d windows, want %d", round, len(got.Windows), want)
+		}
+		if _, present := got.Windows["aaa_window"]; !present {
+			t.Fatalf("round %d: equal resets must break toward the lower slug, kept %v", round, windowSlugs(got))
+		}
+		if _, present := got.Windows["bbb_window"]; present {
+			t.Fatalf("round %d: both tied windows were kept, so the cap did not bind", round)
+		}
+	}
+}
+
+// TestSetAnthropicRateLimitHint_ContentFreeWindowDoesNotDisplaceStored covers
+// the way a capture can name a window without observing it. The parser seeds a
+// slug as soon as any header mentions it, so a single malformed header — say
+// `unified-7d_oi-reset: garbage` — produces a zero-value entry. Treating that
+// as a reported window would be the worst of both outcomes: it destroys the
+// rich stored reading, and having no reset of its own it can never be carried
+// afterwards, so the window is gone until the next premium response.
+func TestSetAnthropicRateLimitHint_ContentFreeWindowDoesNotDisplaceStored(t *testing.T) {
+	const authID = "auth-carry-content-free-fresh"
+	const fingerprint = "fp-content-free"
+	DeleteAnthropicRateLimitHint(authID)
+	t.Cleanup(func() { DeleteAnthropicRateLimitHint(authID) })
+
+	first := time.Date(2026, 5, 1, 16, 1, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+	oiReset := first.Add(30 * time.Hour)
+
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known:              true,
+		ObservedAt:         first,
+		AccountFingerprint: fingerprint,
+		Windows: map[string]AnthropicQuotaWindow{
+			"7d_oi": {Status: "allowed_warning", Reset: oiReset, Utilization: 0.88, HasUtilization: true},
+		},
+	})
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known:              true,
+		ObservedAt:         second,
+		AccountFingerprint: fingerprint,
+		Windows: map[string]AnthropicQuotaWindow{
+			"5h":    {Status: "allowed", Reset: second.Add(2 * time.Hour)},
+			"7d_oi": {},
+		},
+	})
+
+	got, _ := GetAnthropicRateLimitHint(authID)
+	oi, ok := got.Windows["7d_oi"]
+	if !ok {
+		t.Fatalf("7d_oi missing entirely; windows = %v", windowSlugs(got))
+	}
+	if oi.Utilization != 0.88 || oi.Status != "allowed_warning" || !oi.Reset.Equal(oiReset) {
+		t.Errorf("7d_oi = %+v, want the stored reading — a slug named without content is not an observation", oi)
+	}
+	if !oi.ObservedAt.Equal(first) {
+		t.Errorf("7d_oi ObservedAt = %v, want %v — the surviving reading is the carried one", oi.ObservedAt, first)
+	}
+}
+
+// TestSetAnthropicRateLimitHint_PartiallyReportedWindowReplacesStored is the
+// other side of that line. A capture that reported even one field for the slug
+// observed something, so it replaces the stored window whole rather than being
+// treated as a gap to fill.
+func TestSetAnthropicRateLimitHint_PartiallyReportedWindowReplacesStored(t *testing.T) {
+	const authID = "auth-carry-partial-fresh"
+	const fingerprint = "fp-partial-fresh"
+	DeleteAnthropicRateLimitHint(authID)
+	t.Cleanup(func() { DeleteAnthropicRateLimitHint(authID) })
+
+	first := time.Date(2026, 5, 1, 16, 1, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known:              true,
+		ObservedAt:         first,
+		AccountFingerprint: fingerprint,
+		Windows: map[string]AnthropicQuotaWindow{
+			"7d_oi": {Status: "allowed_warning", Reset: first.Add(30 * time.Hour), Utilization: 0.88, HasUtilization: true},
+		},
+	})
+	// Status arrived, reset did not.
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known:              true,
+		ObservedAt:         second,
+		AccountFingerprint: fingerprint,
+		Windows: map[string]AnthropicQuotaWindow{
+			"7d_oi": {Status: "rejected"},
+		},
+	})
+
+	got, _ := GetAnthropicRateLimitHint(authID)
+	oi := got.Windows["7d_oi"]
+	if oi.Status != "rejected" {
+		t.Errorf("7d_oi status = %q, want %q — a reported window replaces the stored one", oi.Status, "rejected")
+	}
+	if oi.HasUtilization || !oi.Reset.IsZero() {
+		t.Errorf("7d_oi = %+v, want no stored fields surviving inside a replaced window", oi)
+	}
+	if !oi.ObservedAt.Equal(second) {
+		t.Errorf("7d_oi ObservedAt = %v, want %v", oi.ObservedAt, second)
+	}
+}
+
+// TestSetAnthropicRateLimitHint_CarriesWhenBothAccountsUnknown keeps the
+// both-empty branch under test on purpose. Equality is the gate, so two
+// captures that both failed to identify an account match and carry. That is
+// deliberate — it mirrors the read path, which serves an unidentifiable hint
+// rather than discarding it — and it is the one case where the gate does not
+// actually prove the two captures came from the same credential.
+func TestSetAnthropicRateLimitHint_CarriesWhenBothAccountsUnknown(t *testing.T) {
+	const authID = "auth-carry-both-unknown"
+	DeleteAnthropicRateLimitHint(authID)
+	t.Cleanup(func() { DeleteAnthropicRateLimitHint(authID) })
+
+	first := time.Date(2026, 5, 1, 16, 1, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known:      true,
+		ObservedAt: first,
+		Windows: map[string]AnthropicQuotaWindow{
+			"7d_oi": {Status: "allowed", Reset: first.Add(30 * time.Hour)},
+		},
+	})
+	SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+		Known:      true,
+		ObservedAt: second,
+		Windows: map[string]AnthropicQuotaWindow{
+			"5h": {Status: "allowed", Reset: second.Add(2 * time.Hour)},
+		},
+	})
+
+	got, _ := GetAnthropicRateLimitHint(authID)
+	if _, present := got.Windows["7d_oi"]; !present {
+		t.Errorf("two unidentified captures must still match and carry; windows = %v", windowSlugs(got))
+	}
+}
+
+// TestSetAnthropicRateLimitHint_CarryResetGates walks the reset axis of the
+// carry policy in one place: whether a stored window survives depends on where
+// its reset sits relative to this capture, and on how old the reading is.
+func TestSetAnthropicRateLimitHint_CarryResetGates(t *testing.T) {
+	const fingerprint = "fp-reset-gates"
+	storedAt := time.Date(2026, 5, 1, 16, 1, 0, 0, time.UTC)
+	soonAfter := storedAt.Add(time.Minute)
+
+	cases := []struct {
+		name        string
+		storedReset time.Time
+		captureAt   time.Time
+		wantCarried bool
+	}{
+		{"no reset known", time.Time{}, soonAfter, false},
+		{"already reset", soonAfter.Add(-30 * time.Second), soonAfter, false},
+		{"resets exactly at the capture instant", soonAfter, soonAfter, false},
+		{"live", soonAfter.Add(30 * time.Hour), soonAfter, true},
+		{"resets exactly at the horizon", soonAfter.Add(maxAnthropicCarryHorizon), soonAfter, true},
+		{"resets beyond the horizon", soonAfter.Add(maxAnthropicCarryHorizon + time.Hour), soonAfter, false},
+		// The horizon is measured from THIS capture, not the stored one. A
+		// reset nine days past the original observation is seven days out from
+		// a capture two days later, which is a window worth keeping.
+		{"outside the stored capture's horizon, inside this one's", storedAt.Add(9 * 24 * time.Hour), storedAt.Add(2 * 24 * time.Hour), true},
+		// And the age bound is what stops that from becoming a loophole: after
+		// a long gap the same distant reset falls back inside the horizon while
+		// the reading itself is weeks old.
+		{"reading older than the horizon", storedAt.Add(30 * 24 * time.Hour), storedAt.Add(25 * 24 * time.Hour), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			authID := "auth-carry-reset-gate-" + tc.name
+			DeleteAnthropicRateLimitHint(authID)
+			t.Cleanup(func() { DeleteAnthropicRateLimitHint(authID) })
+
+			SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+				Known: true, ObservedAt: storedAt, AccountFingerprint: fingerprint,
+				Windows: map[string]AnthropicQuotaWindow{
+					"7d_oi": {Status: "allowed", Reset: tc.storedReset},
+				},
+			})
+			SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+				Known: true, ObservedAt: tc.captureAt, AccountFingerprint: fingerprint,
+				Windows: map[string]AnthropicQuotaWindow{
+					"5h": {Status: "allowed", Reset: tc.captureAt.Add(2 * time.Hour)},
+				},
+			})
+
+			got, _ := GetAnthropicRateLimitHint(authID)
+			_, carried := got.Windows["7d_oi"]
+			if carried != tc.wantCarried {
+				t.Errorf("7d_oi carried = %v, want %v (stored reset %v, observed %v, capture at %v); windows = %v",
+					carried, tc.wantCarried, tc.storedReset, storedAt, tc.captureAt, windowSlugs(got))
+			}
+		})
+	}
+}
+
+// TestSetAnthropicRateLimitHint_SingleReportedFieldCountsAsObservation pins each
+// clause of the content test independently. Any one of the four fields makes a
+// capture's window a real observation, so it replaces the stored reading rather
+// than being treated as a gap for the carry to fill — and dropping any single
+// clause would silently turn that field's readings into carry fodder.
+func TestSetAnthropicRateLimitHint_SingleReportedFieldCountsAsObservation(t *testing.T) {
+	const fingerprint = "fp-single-field"
+	storedAt := time.Date(2026, 5, 1, 16, 1, 0, 0, time.UTC)
+	captureAt := storedAt.Add(time.Minute)
+
+	cases := []struct {
+		name  string
+		fresh AnthropicQuotaWindow
+	}{
+		{"status only", AnthropicQuotaWindow{Status: "rejected"}},
+		{"utilization only", AnthropicQuotaWindow{HasUtilization: true}},
+		{"surpassed threshold only", AnthropicQuotaWindow{HasSurpassedThreshold: true}},
+		{"reset only", AnthropicQuotaWindow{Reset: captureAt.Add(3 * time.Hour)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			authID := "auth-single-field-" + tc.name
+			DeleteAnthropicRateLimitHint(authID)
+			t.Cleanup(func() { DeleteAnthropicRateLimitHint(authID) })
+
+			SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+				Known: true, ObservedAt: storedAt, AccountFingerprint: fingerprint,
+				Windows: map[string]AnthropicQuotaWindow{
+					"7d_oi": {Status: "allowed_warning", Reset: storedAt.Add(30 * time.Hour), Utilization: 0.88, HasUtilization: true},
+				},
+			})
+			SetAnthropicRateLimitHint(authID, AnthropicRateLimitHint{
+				Known: true, ObservedAt: captureAt, AccountFingerprint: fingerprint,
+				Windows: map[string]AnthropicQuotaWindow{"7d_oi": tc.fresh},
+			})
+
+			got, _ := GetAnthropicRateLimitHint(authID)
+			oi := got.Windows["7d_oi"]
+			if !oi.ObservedAt.Equal(captureAt) {
+				t.Errorf("7d_oi ObservedAt = %v, want %v — the capture reported this window, so its reading must stand",
+					oi.ObservedAt, captureAt)
+			}
+			if oi.Utilization == 0.88 && !tc.fresh.HasUtilization {
+				t.Errorf("7d_oi kept the stored utilization: the capture's window was treated as unreported")
+			}
+		})
 	}
 }

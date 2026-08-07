@@ -3,10 +3,35 @@ package auth
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 )
+
+// maxCarriedAnthropicWindows bounds how many windows one merge carries forward,
+// so a hint holds at most its own capture's windows plus this many. The carried
+// side is the one needing a bound: a capture is sized by one response, while
+// merging accumulates across responses over slugs and resets the upstream
+// chooses. The capture's own count is not deducted, so a capture that fills its
+// own budget still carries.
+//
+// On the executor path the capture side is bounded by maxAnthropicWindows in
+// internal/runtime/executor/helps/claude_rate_limit_record.go. That value is
+// restated here rather than imported: sdk does not depend on that package, and
+// this entry point is exported to callers that bypass it.
+const maxCarriedAnthropicWindows = 64
+
+// maxAnthropicCarryHorizon bounds both how far ahead a carried window's reset
+// may be and how old the reading itself may be. Seven days is the longest
+// window the unified family exposes, and Reset comes from the response, so a
+// distant reset is one the age-out gate never fires on. Bounding the reading's
+// age as well keeps a beyond-horizon window from re-entering the carry set once
+// a gap in traffic moves the capture instant close enough to that reset.
+//
+// Only carrying is gated: such a window is still stored and served while the
+// capture that reported it is the current one.
+const maxAnthropicCarryHorizon = 8 * 24 * time.Hour
 
 // AnthropicRateLimitHint records the most-recent Anthropic
 // `anthropic-ratelimit-unified-*` response-header state observed for one auth.
@@ -41,6 +66,9 @@ type AnthropicRateLimitHint struct {
 	// header names of the form `anthropic-ratelimit-unified-{slug}-{field}`,
 	// e.g. "5h", "7d", "7d_opus". The map is generative; consumers should
 	// iterate rather than assume a fixed key set.
+	//
+	// Not necessarily one response's worth: SetAnthropicRateLimitHint carries
+	// live windows forward, so this can hold windows RawHeaders never mentions.
 	Windows map[string]AnthropicQuotaWindow
 	// FallbackPercentage mirrors `anthropic-ratelimit-unified-fallback-percentage`.
 	// Optional; 0 when absent.
@@ -76,6 +104,13 @@ type AnthropicRateLimitHint struct {
 // AnthropicQuotaWindow records per-window state captured from
 // `anthropic-ratelimit-unified-{slug}-{field}` headers.
 type AnthropicQuotaWindow struct {
+	// ObservedAt is when this window's state was captured, which lags the
+	// hint-level ObservedAt for a window carried forward from an earlier
+	// capture (see SetAnthropicRateLimitHint). Age a reading out against this
+	// field, not the hint-level one. The store sets it, overwriting whatever
+	// the caller supplied, and it changes on every capture — exclude it when
+	// comparing windows to detect a change in quota state.
+	ObservedAt time.Time
 	// Status mirrors `unified-{slug}-status`: "allowed", "allowed_warning",
 	// "rejected". Pass-through string.
 	Status string
@@ -111,6 +146,48 @@ var anthropicRateLimitWriteMu sync.Mutex
 // SetAnthropicRateLimitHint updates the latest known Anthropic rate-limit state
 // for an auth. ObservedAt is defaulted to time.Now() if zero. Empty authID is
 // silently ignored. Concurrent-safe.
+//
+// Windows are merged with the stored hint; everything else — Status, Reset,
+// RepresentativeClaim, RawHeaders and the rest — describes this capture alone
+// and replaces what was stored. The `unified-*` family covers only the windows
+// belonging to the responding model's tier, so an ordinary response omits a
+// premium window such as `7d_oi` whose quota is still live, and replacing
+// wholesale drops it hours before its reset.
+//
+// A window the stored hint knows and this capture omits — or names without
+// reporting a single field for — is carried over when all of:
+//
+//   - this capture has Known set. One with no unified-* content inherits
+//     nothing.
+//   - the stored capture's AccountFingerprint equals this one's. Any
+//     difference, including one side empty, leaves identity unestablished.
+//   - the window's Reset is after this capture's ObservedAt. A reset exactly at
+//     it has arrived; a zero Reset can never age out.
+//   - that Reset is at most maxAnthropicCarryHorizon ahead, and the reading is
+//     itself no older than that.
+//
+// A window this capture did report replaces the stored one whole, never field
+// by field — including one reported without a parseable reset, which is honest
+// new data that no later capture can carry.
+//
+// At most maxCarriedAnthropicWindows are carried per merge. When that binds the
+// candidates resetting soonest are dropped, since ordinary captures re-report a
+// near-reset window anyway while the long-horizon ones are what the carry
+// exists to preserve; ties break on slug.
+//
+// Carried windows keep the per-window ObservedAt of the capture that observed
+// them, and the rest are stamped with this capture's, overwriting the caller's
+// value. A hint from GetAnthropicRateLimitHint must therefore not be written
+// back through this function: the round trip re-stamps carried windows as
+// freshly observed, so it is not an identity. To assert that the window set is
+// exactly X, call DeleteAnthropicRateLimitHint first — a sequence that is not
+// atomic against a concurrent capture, since Delete does not take the writer
+// mutex.
+//
+// One limitation: a capture older than the stored one is dropped whole, windows
+// included, so a live window only it observed is lost rather than merged. Call
+// sites stamp ObservedAt and then parse the response before calling, so the
+// window for that reorder is the parse plus the wait on the writer mutex.
 func SetAnthropicRateLimitHint(authID string, hint AnthropicRateLimitHint) {
 	authID = strings.TrimSpace(authID)
 	if authID == "" {
@@ -127,6 +204,9 @@ func SetAnthropicRateLimitHint(authID string, hint AnthropicRateLimitHint) {
 	if hint.Windows != nil {
 		cloned := make(map[string]AnthropicQuotaWindow, len(hint.Windows))
 		for k, v := range hint.Windows {
+			// The store owns per-window ObservedAt; carried windows keep the
+			// stamp of the capture that saw them.
+			v.ObservedAt = hint.ObservedAt
 			cloned[k] = v
 		}
 		hint.Windows = cloned
@@ -138,11 +218,8 @@ func SetAnthropicRateLimitHint(authID string, hint AnthropicRateLimitHint) {
 		}
 		hint.RawHeaders = cloned
 	}
-	// Drop a capture that is older than what is already stored. ObservedAt is
-	// stamped by the caller before it parses the response, so two goroutines
-	// serving concurrent requests on one credential -- the normal mode for a
-	// proxy -- can stamp t1 < t2 and still reach this Store in the reverse
-	// order, leaving the older snapshot as "the most recent state observed".
+	// Drop a capture older than what is already stored; the godoc above covers
+	// how two concurrent captures on one credential arrive out of order.
 	//
 	// This orders same-credential captures only. A response already in flight
 	// when the credential rotated carries a *newer* ObservedAt than the
@@ -157,11 +234,94 @@ func SetAnthropicRateLimitHint(authID string, hint AnthropicRateLimitHint) {
 	anthropicRateLimitWriteMu.Lock()
 	defer anthropicRateLimitWriteMu.Unlock()
 	if prev, ok := anthropicRateLimitHintByAuth.Load(authID); ok {
-		if prevHint, ok := prev.(AnthropicRateLimitHint); ok && prevHint.ObservedAt.After(hint.ObservedAt) {
-			return
+		if prevHint, okPrev := prev.(AnthropicRateLimitHint); okPrev {
+			if prevHint.ObservedAt.After(hint.ObservedAt) {
+				return
+			}
+			carryLiveWindows(&hint, prevHint)
 		}
 	}
 	anthropicRateLimitHintByAuth.Store(authID, hint)
+}
+
+// windowHasContent reports whether a window says anything about quota, matching
+// the emptiness rule the management projection applies before emitting one. The
+// parser seeds a slug as soon as any header names it, so an entry whose every
+// header failed to parse records that a header arrived, not an observation.
+func windowHasContent(window AnthropicQuotaWindow) bool {
+	return window.Status != "" ||
+		window.HasUtilization ||
+		window.HasSurpassedThreshold ||
+		!window.Reset.IsZero()
+}
+
+// carryLiveWindows extends the capture's windows with the still-live windows
+// prevHint knows and this capture did not report; SetAnthropicRateLimitHint
+// documents the policy.
+//
+// prevHint is the stored hint, so its map is read-only here; its values are
+// flat structs, so copying one out shares nothing. hint.Windows is this call's
+// private clone and the only map written.
+//
+// Must be called with anthropicRateLimitWriteMu held.
+func carryLiveWindows(hint *AnthropicRateLimitHint, prevHint AnthropicRateLimitHint) {
+	// A capture stating nothing about quota inherits nothing.
+	if !hint.Known {
+		return
+	}
+	if prevHint.AccountFingerprint != hint.AccountFingerprint {
+		return
+	}
+	horizon := hint.ObservedAt.Add(maxAnthropicCarryHorizon)
+
+	type carryCandidate struct {
+		slug  string
+		reset time.Time
+	}
+	candidates := make([]carryCandidate, 0, len(prevHint.Windows))
+	for slug, window := range prevHint.Windows {
+		if reported, ok := hint.Windows[slug]; ok && windowHasContent(reported) {
+			continue
+		}
+		// Excludes a zero Reset too: a window with no known reset could never
+		// be aged out.
+		if !window.Reset.After(hint.ObservedAt) {
+			continue
+		}
+		if window.Reset.After(horizon) {
+			continue
+		}
+		// A close-enough reset is not sufficient on its own. After a gap in
+		// traffic a reset that was implausibly distant when observed comes back
+		// inside the horizon, so bound the age of the reading as well.
+		if hint.ObservedAt.Sub(window.ObservedAt) > maxAnthropicCarryHorizon {
+			continue
+		}
+		candidates = append(candidates, carryCandidate{slug: slug, reset: window.Reset})
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	if len(candidates) > maxCarriedAnthropicWindows {
+		// Keep the furthest resets: those are the long-horizon windows the
+		// responding tier stopped reporting, while near-reset candidates get
+		// re-reported anyway. Slug breaks ties so eviction never depends on map
+		// iteration order.
+		sort.Slice(candidates, func(left, right int) bool {
+			if !candidates[left].reset.Equal(candidates[right].reset) {
+				return candidates[left].reset.After(candidates[right].reset)
+			}
+			return candidates[left].slug < candidates[right].slug
+		})
+		candidates = candidates[:maxCarriedAnthropicWindows]
+	}
+
+	if hint.Windows == nil {
+		hint.Windows = make(map[string]AnthropicQuotaWindow, len(candidates))
+	}
+	for _, candidate := range candidates {
+		hint.Windows[candidate.slug] = prevHint.Windows[candidate.slug]
+	}
 }
 
 // GetAnthropicRateLimitHint returns the latest known Anthropic rate-limit state

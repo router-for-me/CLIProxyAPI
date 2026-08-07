@@ -3,6 +3,7 @@ package management
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -591,4 +592,178 @@ func TestBuildClaudeRateLimitEntry_MalformedNumericsAreNotPublished(t *testing.T
 			t.Errorf("explicit zero surpassed_threshold = %v (present=%v), want 0 present", got, ok)
 		}
 	})
+}
+
+// TestBuildClaudeRateLimitEntry_SurfacesPerWindowObservedAt pins the field that
+// tells an operator which reading is live and which is inherited. The hint
+// store carries a window forward when a later response omits it — an
+// ordinary-tier response reports no premium weekly window — so `7d_oi` here
+// comes from the earlier capture and must say so, while the windows the newest
+// response did report carry the newest timestamp.
+func TestBuildClaudeRateLimitEntry_SurfacesPerWindowObservedAt(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "claude-test-window-observed-at@example.com",
+		Provider: "claude",
+	}
+	resetClaudeRateLimitHint(t, auth.ID)
+
+	premiumAt := fixedObservedAt()
+	ordinaryAt := premiumAt.Add(4 * time.Minute)
+	fingerprint := coreauth.AnthropicAccountFingerprint(auth)
+
+	coreauth.SetAnthropicRateLimitHint(auth.ID, coreauth.AnthropicRateLimitHint{
+		Known:              true,
+		ObservedAt:         premiumAt,
+		Status:             "allowed_warning",
+		AccountFingerprint: fingerprint,
+		Windows: map[string]coreauth.AnthropicQuotaWindow{
+			"5h":    {Status: "allowed", Reset: premiumAt.Add(2 * time.Hour), Utilization: 0.2, HasUtilization: true},
+			"7d_oi": {Status: "allowed_warning", Reset: premiumAt.Add(30 * time.Hour), Utilization: 0.88, HasUtilization: true},
+		},
+	})
+	coreauth.SetAnthropicRateLimitHint(auth.ID, coreauth.AnthropicRateLimitHint{
+		Known:              true,
+		ObservedAt:         ordinaryAt,
+		Status:             "allowed",
+		AccountFingerprint: fingerprint,
+		Windows: map[string]coreauth.AnthropicQuotaWindow{
+			"5h": {Status: "allowed", Reset: ordinaryAt.Add(2 * time.Hour), Utilization: 0.3, HasUtilization: true},
+		},
+	})
+
+	got := buildClaudeRateLimitEntry(auth)
+	if got == nil {
+		t.Fatal("expected non-nil entry")
+	}
+	if !got["observed_at"].(time.Time).Equal(ordinaryAt) {
+		t.Errorf("observed_at = %v want %v", got["observed_at"], ordinaryAt)
+	}
+
+	// gin.H is a named type: asserting to map[string]any yields a nil map
+	// and every lookup below would silently report "absent".
+	windows, ok := got["windows"].(gin.H)
+	if !ok {
+		t.Fatalf("windows has type %T, want gin.H", got["windows"])
+	}
+
+	carried, ok := windows["7d_oi"].(gin.H)
+	if !ok {
+		t.Fatalf("windows[7d_oi] has type %T, want gin.H — the carried window did not reach the projection", windows["7d_oi"])
+	}
+	observedAt, present := carried["observed_at"]
+	if !present {
+		t.Fatalf("windows[7d_oi]: expected observed_at so a consumer can tell a carried reading from a live one, got %v", carried)
+	}
+	if !observedAt.(time.Time).Equal(premiumAt) {
+		t.Errorf("windows[7d_oi].observed_at = %v want %v — a carried window keeps the stamp of the capture that saw it", observedAt, premiumAt)
+	}
+	if carried["utilization"] != 0.88 {
+		t.Errorf("windows[7d_oi].utilization = %v want 0.88", carried["utilization"])
+	}
+
+	live, ok := windows["5h"].(gin.H)
+	if !ok {
+		t.Fatalf("windows[5h] has type %T, want gin.H", windows["5h"])
+	}
+	if !live["observed_at"].(time.Time).Equal(ordinaryAt) {
+		t.Errorf("windows[5h].observed_at = %v want %v", live["observed_at"], ordinaryAt)
+	}
+}
+
+// TestBuildClaudeRateLimitEntry_ObservedAtDoesNotResurrectEmptyWindow guards
+// the interaction between the per-window timestamp and the emptiness gate. The
+// store stamps every window it holds, including one whose every header was
+// malformed, so a timestamp emitted before the gate would turn `"7d": {}` into
+// `"7d": {"observed_at": ...}` and put window data in front of consumers where
+// there is none.
+func TestBuildClaudeRateLimitEntry_ObservedAtDoesNotResurrectEmptyWindow(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "claude-test-observed-at-empty-window@example.com",
+		Provider: "claude",
+	}
+	resetClaudeRateLimitHint(t, auth.ID)
+
+	coreauth.SetAnthropicRateLimitHint(auth.ID, coreauth.AnthropicRateLimitHint{
+		Known:      true,
+		ObservedAt: fixedObservedAt(),
+		Status:     "allowed",
+		Windows: map[string]coreauth.AnthropicQuotaWindow{
+			"5h": {Status: "allowed", Reset: fixedObservedAt().Add(2 * time.Hour), Utilization: 0.4, HasUtilization: true},
+			"7d": {},
+		},
+		RawHeaders: map[string]string{
+			"anthropic-ratelimit-unified-7d-reset": "garbage",
+		},
+	})
+
+	got := buildClaudeRateLimitEntry(auth)
+	if got == nil {
+		t.Fatal("expected non-nil entry")
+	}
+	windows, ok := got["windows"].(gin.H)
+	if !ok {
+		t.Fatalf("windows has type %T, want gin.H", got["windows"])
+	}
+	if _, present := windows["7d"]; present {
+		t.Errorf("windows[7d]: a window with nothing to report must stay dropped, got %v", windows["7d"])
+	}
+}
+
+// TestBuildClaudeRateLimitEntry_WindowEmptinessMatchesStore walks every
+// combination of the four fields that count as window content and asserts a
+// window is emitted exactly when at least one is set.
+//
+// The store applies the same rule on the write side to decide whether a
+// capture's entry counts as a reported window (coreauth's windowHasContent). If
+// the two drift, a window the store treats as unreported still gets published
+// as though it were a reading, or a real one silently stops being published.
+func TestBuildClaudeRateLimitEntry_WindowEmptinessMatchesStore(t *testing.T) {
+	resetAt := fixedObservedAt().Add(2 * time.Hour)
+	for combo := 0; combo < 16; combo++ {
+		hasStatus := combo&1 != 0
+		hasUtilization := combo&2 != 0
+		hasThreshold := combo&4 != 0
+		hasReset := combo&8 != 0
+		name := fmt.Sprintf("status=%v/util=%v/threshold=%v/reset=%v", hasStatus, hasUtilization, hasThreshold, hasReset)
+
+		t.Run(name, func(t *testing.T) {
+			auth := &coreauth.Auth{ID: "claude-window-emptiness-" + name, Provider: "claude"}
+			resetClaudeRateLimitHint(t, auth.ID)
+
+			window := coreauth.AnthropicQuotaWindow{}
+			if hasStatus {
+				window.Status = "allowed"
+			}
+			if hasUtilization {
+				window.HasUtilization = true
+			}
+			if hasThreshold {
+				window.HasSurpassedThreshold = true
+			}
+			if hasReset {
+				window.Reset = resetAt
+			}
+			coreauth.SetAnthropicRateLimitHint(auth.ID, coreauth.AnthropicRateLimitHint{
+				Known:      true,
+				ObservedAt: fixedObservedAt(),
+				Status:     "allowed",
+				Windows:    map[string]coreauth.AnthropicQuotaWindow{"7d": window},
+			})
+
+			entry := buildClaudeRateLimitEntry(auth)
+			if entry == nil {
+				t.Fatal("expected an entry: the hint carries a top-level status")
+			}
+			// gin.H is a named type: asserting to map[string]any yields a nil
+			// map and the lookup below would always report "absent".
+			var published bool
+			if windows, ok := entry["windows"].(gin.H); ok {
+				_, published = windows["7d"]
+			}
+			want := hasStatus || hasUtilization || hasThreshold || hasReset
+			if published != want {
+				t.Errorf("window published = %v, want %v (%s)", published, want, name)
+			}
+		})
+	}
 }

@@ -801,3 +801,64 @@ func TestRecordAnthropicRateLimit_BudgetDoesNotTruncateRealCaptures(t *testing.T
 		})
 	}
 }
+
+// TestRecordAnthropicRateLimit_MalformedWindowDoesNotDisplaceCarried drives the
+// content-free-window case end to end, through the parser that creates it.
+//
+// A slug is seeded as soon as any header names it, so a response whose only
+// `7d_oi` header is an unparseable reset produces a zero-value entry for that
+// window. If the hint store treated that as a reported window it would both
+// destroy the rich reading captured moments earlier and — having no reset of
+// its own — be ineligible to be carried by anything afterwards, so the premium
+// window would stay gone until the next premium response.
+func TestRecordAnthropicRateLimit_MalformedWindowDoesNotDisplaceCarried(t *testing.T) {
+	const authID = "claude-malformed-window-carry@example.com"
+	resetAnthropicHint(t, authID)
+	auth := testAuth(authID)
+
+	premiumAt := fixturePinnedNow()
+	ordinaryAt := premiumAt.Add(4 * time.Minute)
+	oiReset := premiumAt.Add(30 * time.Hour)
+
+	premium := http.Header{
+		"Anthropic-Ratelimit-Unified-Status":            {"allowed_warning"},
+		"Anthropic-Ratelimit-Unified-5h-Status":         {"allowed"},
+		"Anthropic-Ratelimit-Unified-5h-Reset":          {strconv.FormatInt(premiumAt.Add(2*time.Hour).Unix(), 10)},
+		"Anthropic-Ratelimit-Unified-7d_oi-Status":      {"allowed_warning"},
+		"Anthropic-Ratelimit-Unified-7d_oi-Reset":       {strconv.FormatInt(oiReset.Unix(), 10)},
+		"Anthropic-Ratelimit-Unified-7d_oi-Utilization": {"0.88"},
+	}
+	RecordAnthropicRateLimit(auth, premium, premiumAt)
+
+	// The next response mentions 7d_oi only through a header that cannot be
+	// parsed, which is exactly how a zero-value window entry gets created.
+	ordinary := http.Header{
+		"Anthropic-Ratelimit-Unified-Status":      {"allowed"},
+		"Anthropic-Ratelimit-Unified-5h-Status":   {"allowed"},
+		"Anthropic-Ratelimit-Unified-5h-Reset":    {strconv.FormatInt(ordinaryAt.Add(2*time.Hour).Unix(), 10)},
+		"Anthropic-Ratelimit-Unified-7d_oi-Reset": {"garbage"},
+	}
+	RecordAnthropicRateLimit(auth, ordinary, ordinaryAt)
+
+	hint, ok := cliproxyauth.AnthropicRateLimitHintFor(auth)
+	if !ok {
+		t.Fatal("AnthropicRateLimitHintFor() ok = false, want true")
+	}
+	oi, ok := hint.Windows["7d_oi"]
+	if !ok {
+		t.Fatal("7d_oi missing after a capture whose only 7d_oi header was malformed")
+	}
+	if oi.Utilization != 0.88 || !oi.HasUtilization || oi.Status != "allowed_warning" {
+		t.Errorf("7d_oi = %+v, want the premium capture's reading preserved", oi)
+	}
+	if !oi.Reset.Equal(oiReset) {
+		t.Errorf("7d_oi reset = %v, want %v", oi.Reset, oiReset)
+	}
+	if !oi.ObservedAt.Equal(premiumAt) {
+		t.Errorf("7d_oi ObservedAt = %v, want %v — the surviving reading is the carried one", oi.ObservedAt, premiumAt)
+	}
+	// The malformed header itself stays visible for forensics.
+	if got := hint.RawHeaders["anthropic-ratelimit-unified-7d_oi-reset"]; got != "garbage" {
+		t.Errorf("raw_headers lost the malformed value: %q", got)
+	}
+}
