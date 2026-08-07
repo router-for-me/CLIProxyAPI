@@ -43,7 +43,7 @@ func cliproxyHostCall(hostCtx unsafe.Pointer, method *C.char, request *C.uint8_t
 	ctx := withHostCallbackPluginID(context.Background(), entry.pluginID)
 	resp, errCall := entry.host.callFromPlugin(ctx, C.GoString(method), requestBytes)
 	if errCall != nil {
-		resp = marshalRPCError("host_call_failed", errCall.Error())
+		resp = marshalRPCErrorFromError("host_call_failed", errCall)
 	}
 	if len(resp) == 0 || response == nil {
 		return 0
