@@ -3983,3 +3983,109 @@ button.ghost:hover:not(:disabled) {
   font-size: 12px;
   color: var(--text-muted);
 }
+
+/* =========================================================================
+   Light Theme & Overrides
+   ========================================================================= */
+
+[data-theme="light"] {
+  --bg: #f8f9fb;
+  --bg-elevated: #ffffff;
+  --bg-card: #ffffff;
+  --border: #e2e5ea;
+  --border-strong: #d0d4db;
+  --text: #1a1d23;
+  --text-muted: #5f6672;
+  --text-dim: #8c93a1;
+  --accent: #0d9488;        /* teal-600, darker for readability on light bg */
+  --accent-hover: #0f766e;
+  --accent-dim: rgba(13, 148, 136, 0.10);
+  --danger: #dc2626;
+  --danger-dim: rgba(220, 38, 38, 0.08);
+  --warning: #d97706;
+  --warning-dim: rgba(217, 119, 6, 0.08);
+  --success: #16a34a;
+  --success-dim: rgba(22, 163, 74, 0.08);
+}
+
+/* Overrides for hardcoded RGBA values in light mode */
+[data-theme="light"] .topbar {
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.05) inset, 0 4px 16px -8px rgba(0, 0, 0, 0.15);
+}
+[data-theme="light"] .topbar__bell {
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.05) inset;
+}
+[data-theme="light"] .alerts-dropdown,
+[data-theme="light"] .model-routes__bulkmenu,
+[data-theme="light"] .model-multiselect__dropdown,
+[data-theme="light"] .toast,
+[data-theme="light"] .endpoint-multiselect__dropdown {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+}
+[data-theme="light"] .sidebar__rail-tip {
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+}
+[data-theme="light"] .keys-kpi-card:hover {
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08);
+}
+@media (max-width: 900px) {
+  [data-theme="light"] .sidebar {
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.15);
+  }
+  [data-theme="light"] .sidebar-backdrop {
+    background: rgba(0, 0, 0, 0.3);
+  }
+}
+[data-theme="light"] .modal-backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+[data-theme="light"] .model-routes__searchclear:hover,
+[data-theme="light"] .model-routes__bulkmenu button:hover,
+[data-theme="light"] .seg__btn:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+[data-theme="light"] .model-routes__card:hover {
+  border-color: rgba(0, 0, 0, 0.12);
+}
+[data-theme="light"] .dropzone--hover {
+  background: rgba(0, 0, 0, 0.02);
+}
+
+/* Sidebar footer theme toggle */
+.sidebar__theme-toggle {
+  display: flex;
+  margin-top: 4px;
+}
+.sidebar__theme-toggle .seg {
+  width: 100%;
+  display: flex;
+}
+.sidebar__theme-toggle .seg__btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 0;
+}
+.sidebar__theme-toggle .seg__btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Rail mode adjustments for theme toggle */
+.app-shell--collapsed .sidebar__theme-toggle .seg {
+  flex-direction: column;
+  border-right: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+.app-shell--collapsed .sidebar__theme-toggle .seg__btn {
+  border-right: none;
+  border-bottom: 1px solid var(--border-strong);
+  padding: 8px 0;
+}
+.app-shell--collapsed .sidebar__theme-toggle .seg__btn:last-child {
+  border-bottom: none;
+}
+.app-shell--collapsed .sidebar__theme-toggle .seg__btn:not(.seg__btn--active) {
+  display: none;
+}

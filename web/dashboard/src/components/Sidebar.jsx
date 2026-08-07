@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NavLink } from 'react-router-dom';
+import { useTheme } from '../hooks/useTheme.jsx';
 
 const GROUPS_KEY = 'nixllm.sidebar.groups';
 const FAVORITES_KEY = 'nixllm.sidebar.favorites';
@@ -25,6 +26,7 @@ export default function Sidebar({
   updateAvailable = false,
 }) {
   const closeMobile = useCallback(() => onCloseMobile?.(), [onCloseMobile]);
+  const { theme, setTheme } = useTheme();
 
   const [query, setQuery] = useState('');
   const [collapsedGroups, setCollapsedGroups] = useState(() => {
@@ -352,6 +354,40 @@ export default function Sidebar({
               <span className="sidebar__version-core"> · core {coreVersion}</span>
             )}
           </span>
+          <div className="sidebar__theme-toggle">
+            <div className="seg">
+              <button
+                type="button"
+                className={`seg__btn ${theme === 'light' ? 'seg__btn--active' : ''}`}
+                onClick={() => setTheme('light')}
+                title="Light Theme"
+                onMouseEnter={(e) => showTip('Light Theme', 'Appearance', e.currentTarget)}
+                onMouseLeave={hideTip}
+              >
+                <SunIcon />
+              </button>
+              <button
+                type="button"
+                className={`seg__btn ${theme === 'system' ? 'seg__btn--active' : ''}`}
+                onClick={() => setTheme('system')}
+                title="System Default"
+                onMouseEnter={(e) => showTip('System Default', 'Appearance', e.currentTarget)}
+                onMouseLeave={hideTip}
+              >
+                <MonitorIcon />
+              </button>
+              <button
+                type="button"
+                className={`seg__btn ${theme === 'dark' ? 'seg__btn--active' : ''}`}
+                onClick={() => setTheme('dark')}
+                title="Dark Theme"
+                onMouseEnter={(e) => showTip('Dark Theme', 'Appearance', e.currentTarget)}
+                onMouseLeave={hideTip}
+              >
+                <MoonIcon />
+              </button>
+            </div>
+          </div>
           <button
             type="button"
             className="sidebar__signout"
@@ -459,6 +495,32 @@ function LogoutIcon() {
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M6 2H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h2" />
       <path d="M10 4l3 4-3 4M13 8H6" />
+    </svg>
+  );
+}
+
+function SunIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="8" cy="8" r="3.5" />
+      <path d="M8 2V1M8 15v-1M2 8H1M15 8h-1M3.8 3.8L3 3M13 13l-.8-.8M3.8 12.2L3 13M13 3l-.8.8" />
+    </svg>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M13.5 10.5A5.5 5.5 0 0 1 5.5 2.5 6 6 0 1 0 14 11a5.5 5.5 0 0 1-.5-.5z" />
+    </svg>
+  );
+}
+
+function MonitorIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="3" width="12" height="7" rx="1.5" />
+      <path d="M5.5 13h5M8 10v3" />
     </svg>
   );
 }
