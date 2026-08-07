@@ -4635,6 +4635,18 @@ func TestRemapOAuthToolNames_TypedCustomUsesMCPAlias(t *testing.T) {
 	}
 }
 
+func TestRemapOAuthToolNames_AdvisorServerToolRemainsNative(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"advisor_20260301","name":"advisor","model":"claude-opus-5"}]}`)
+	out, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "caller-secret"})
+
+	if !bytes.Equal(out, body) {
+		t.Fatalf("advisor server tool was rewritten:\n got: %s\nwant: %s", out, body)
+	}
+	if len(reverseMap) != 0 {
+		t.Fatalf("reverseMap = %v, want empty", reverseMap)
+	}
+}
+
 func TestRemapOAuthToolNames_MCPAliasAvoidsClientCollision(t *testing.T) {
 	const secret = "credential-secret"
 	initialCandidate := helps.ClaudeMCPToolAlias(secret, "fetch_url", 0)

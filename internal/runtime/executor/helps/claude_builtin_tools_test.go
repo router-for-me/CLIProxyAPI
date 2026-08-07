@@ -32,7 +32,7 @@ func TestClaudeBuiltinToolRegistry_AugmentsKnownTypedBuiltinsFromBody(t *testing
 }
 
 func TestIsClaudeServerToolType(t *testing.T) {
-	for _, toolType := range []string{"web_search_20250305", "code_execution_20250522", "tool_search_tool_regex_20251119"} {
+	for _, toolType := range []string{"advisor_20260301", "web_search_20250305", "code_execution_20250522", "tool_search_tool_regex_20251119"} {
 		if !IsClaudeServerToolType(toolType) {
 			t.Fatalf("IsClaudeServerToolType(%q) = false, want true", toolType)
 		}
