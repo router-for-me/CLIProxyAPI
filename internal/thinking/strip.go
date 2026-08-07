@@ -72,3 +72,31 @@ func StripThinkingConfig(body []byte, provider string) []byte {
 	}
 	return result
 }
+
+// ReconcileClaudePayloadEffort adjusts Claude thinking configuration when a
+// payload rule has injected output_config.effort after the thinking applier
+// already ran.
+//
+// The thinking applier runs before payload rules in the executor pipeline, so
+// when a payload rule writes output_config.effort the thinking configuration
+// may already be in budget_tokens form. This function detects that mismatch
+// and converts the thinking block to adaptive mode, letting the discrete
+// effort level reach the upstream.
+//
+// See: https://github.com/router-for-me/CLIProxyAPI/issues/4796
+func ReconcileClaudePayloadEffort(body []byte) []byte {
+	effort := gjson.GetBytes(body, "output_config.effort")
+	if !effort.Exists() || effort.Type != gjson.String || effort.String() == "" {
+		return body
+	}
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingType == "adaptive" {
+		// Already in adaptive mode; nothing to reconcile.
+		return body
+	}
+	// Convert enabled/other → adaptive and drop the numeric budget so the
+	// upstream uses the discrete effort level instead.
+	body, _ = sjson.SetBytes(body, "thinking.type", "adaptive")
+	body, _ = sjson.DeleteBytes(body, "thinking.budget_tokens")
+	return body
+}
