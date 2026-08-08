@@ -90,42 +90,58 @@ var inPlaceByteWritePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^\s*[a-zA-Z_][A-Za-z0-9_.]*\[[a-zA-Z0-9_]+\] = 0$`),
 }
 
-// inPlaceByteWriteAllowlist enumerates the reviewed in-place byte writes. Each
-// entry states why the write cannot corrupt a no-copy GJSON result: either the
-// buffer is private to the writer, or every reader copies out before the write.
-var inPlaceByteWriteAllowlist = map[string]string{
-	"internal/runtime/executor/claude_signing.go":           "writes CCH digits into bytes.Clone(body); the caller's body is never touched",
-	"internal/runtime/executor/claude_executor_cloaking.go": "shifts []string headers to prepend a block; no byte of any payload is rewritten",
-	"internal/runtime/executor/claude_executor_request.go":  "shifts []string headers to insert a part; no byte of any payload is rewritten",
-	"internal/runtime/executor/helps/claude_mcp_alias.go":   "copies an HMAC sum into a local fixed-size digest array",
-	"internal/client/codex/live/tcp_proxy.go":               "copies header and payload into a freshly allocated frame",
-	"internal/home/client.go":                               "zeroes a secret buffer after json.Unmarshal has copied every value out",
-	"internal/pluginstore/auth.go":                          "zeroes a locally built credential buffer after base64 encoding copied it out",
-	"internal/wsrelay/manager.go":                           "rewrites a locally allocated random-id buffer",
+// reviewedInPlaceByteWrites records the reviewed in-place byte writes per file.
+// The count is part of the contract: a new write inside an already reviewed file
+// must be reviewed too, so the count must be updated deliberately. Each reason
+// states why the write cannot corrupt a no-copy GJSON result, either because the
+// buffer is private to the writer or because every reader copies out first.
+type reviewedInPlaceByteWrite struct {
+	count  int
+	reason string
+}
+
+var reviewedInPlaceByteWrites = map[string]reviewedInPlaceByteWrite{
+	"internal/runtime/executor/claude_signing.go":           {2, "writes CCH digits into bytes.Clone(body); the caller's body is never touched"},
+	"internal/runtime/executor/claude_executor_cloaking.go": {1, "shifts []string headers to prepend a block; no byte of any payload is rewritten"},
+	"internal/runtime/executor/claude_executor_request.go":  {2, "shifts []string headers to insert a part; no byte of any payload is rewritten"},
+	"internal/runtime/executor/helps/claude_mcp_alias.go":   {1, "copies an HMAC sum into a local fixed-size digest array"},
+	"internal/client/codex/live/tcp_proxy.go":               {1, "copies header and payload into a freshly allocated frame"},
+	"internal/home/client.go":                               {1, "zeroes a secret buffer after json.Unmarshal has copied every value out"},
+	"internal/pluginstore/auth.go":                          {1, "zeroes a locally built credential buffer after base64 encoding copied it out"},
 }
 
 // TestInPlaceByteWritesAreReviewed keeps the set of in-place byte writes small
-// and justified. A new hit means the author must prove that no no-copy GJSON
-// result derived from that buffer can still be alive, then document it here.
+// and justified. Any change to the set, including a new write in an already
+// reviewed file, fails until the author proves that no no-copy GJSON result
+// derived from that buffer can still be alive and records it above.
 func TestInPlaceByteWritesAreReviewed(t *testing.T) {
 	root := repoRoot(t)
-	var offenders []string
+	found := make(map[string][]string)
 	forEachSourceFile(t, root, func(rel string, data []byte) {
-		if _, allowed := inPlaceByteWriteAllowlist[rel]; allowed {
-			return
-		}
 		for _, line := range strings.Split(string(data), "\n") {
 			for _, pattern := range inPlaceByteWritePatterns {
 				if pattern.MatchString(line) {
-					offenders = append(offenders, rel+": "+strings.TrimSpace(line))
+					found[rel] = append(found[rel], strings.TrimSpace(line))
 				}
 			}
 		}
 	})
-	if len(offenders) > 0 {
-		t.Fatalf("unreviewed in-place byte write(s):\n  %s\n"+
-			"Prove that no no-copy GJSON result derived from that buffer is still alive, then add the file to inPlaceByteWriteAllowlist with the reason.",
-			strings.Join(offenders, "\n  "))
+	for rel, lines := range found {
+		reviewed, ok := reviewedInPlaceByteWrites[rel]
+		if !ok {
+			t.Errorf("unreviewed in-place byte write in %s:\n  %s\nProve that no no-copy GJSON result derived from that buffer is still alive, then record it in reviewedInPlaceByteWrites.",
+				rel, strings.Join(lines, "\n  "))
+			continue
+		}
+		if len(lines) != reviewed.count {
+			t.Errorf("%s has %d in-place byte write(s), reviewed %d (%s):\n  %s",
+				rel, len(lines), reviewed.count, reviewed.reason, strings.Join(lines, "\n  "))
+		}
+	}
+	for rel := range reviewedInPlaceByteWrites {
+		if _, ok := found[rel]; !ok {
+			t.Errorf("stale entry in reviewedInPlaceByteWrites: %s no longer contains an in-place byte write", rel)
+		}
 	}
 }
 
