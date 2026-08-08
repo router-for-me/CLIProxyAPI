@@ -394,7 +394,7 @@ func codexReasoningMetadata(metadata map[string]any) ([]string, string) {
 func normalizeCodexReasoningEffort(effort string) string {
 	effort = strings.ToLower(strings.TrimSpace(effort))
 	switch effort {
-	case "none", "low", "medium", "high", "xhigh", "max", "ultra":
+	case "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra":
 		return effort
 	default:
 		return ""
