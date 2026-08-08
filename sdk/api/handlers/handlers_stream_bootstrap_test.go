@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -552,6 +553,410 @@ func TestExecuteStreamWithAuthManager_RetriesAfterDroppedBootstrapPayload(t *tes
 	}
 	if strings.Join(intercepted, ",") != "drop,ok" {
 		t.Fatalf("intercepted payloads = %v, want [drop ok] without double interception", intercepted)
+	}
+}
+
+func TestStreamBootstrapPayloadCommitsResponse_OpenAIResponsesLifecycle(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    bool
+	}{
+		{name: "event prefix only", payload: "event: response.created", want: false},
+		{name: "queued raw JSON", payload: `{"type":"response.queued"}`, want: false},
+		{name: "created SSE data", payload: `data: {"type":"response.created"}`, want: false},
+		{name: "in progress SSE data", payload: `data: {"type":"response.in_progress"}`, want: false},
+		{name: "output delta", payload: `data: {"type":"response.output_text.delta","delta":"hello"}`, want: true},
+		{name: "completed", payload: `data: {"type":"response.completed"}`, want: true},
+		{name: "failed", payload: `data: {"type":"response.failed"}`, want: true},
+		{name: "done marker", payload: "data: [DONE]", want: true},
+		{name: "unknown event", payload: `data: {"type":"response.future_event"}`, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := streamBootstrapPayloadCommitsResponse("openai-response", []byte(test.payload)); got != test.want {
+				t.Fatalf("streamBootstrapPayloadCommitsResponse() = %t, want %t", got, test.want)
+			}
+		})
+	}
+	if !streamBootstrapPayloadCommitsResponse("openai", []byte("event: response.created")) {
+		t.Fatal("non-Responses protocols must retain first-payload commitment")
+	}
+}
+
+func TestExecuteStreamWithAuthManager_RetriesAfterOpenAIResponsesProvisionalLifecycleFrame(t *testing.T) {
+	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, call int) (*coreexecutor.StreamResult, error) {
+		chunks := make(chan coreexecutor.StreamChunk, 4)
+		chunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.created")}
+		if call == 1 {
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp-1","status":"in_progress"}}`)}
+			chunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{
+				Code:       "upstream_closed",
+				Message:    "stream closed before response.completed",
+				HTTPStatus: http.StatusRequestTimeout,
+			}}
+		} else {
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp-2","status":"in_progress"}}`)}
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed","response":{"id":"resp-2","output":[]}}`)}
+		}
+		close(chunks)
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}}
+	handler, _ := registerBootstrapExecutor(t, executor)
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(
+		context.Background(),
+		"openai-response",
+		"bootstrap-model",
+		[]byte(`{"model":"bootstrap-model","input":"hello"}`),
+		"",
+	)
+
+	var got []string
+	for chunk := range dataChan {
+		got = append(got, string(chunk))
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	if executor.Calls() != 2 {
+		t.Fatalf("stream attempts = %d, want retry after provisional lifecycle failure", executor.Calls())
+	}
+	want := []string{
+		"event: response.created",
+		`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp-2","status":"in_progress"}}`,
+		`data: {"type":"response.completed","response":{"id":"resp-2","output":[]}}`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("forwarded chunks = %#v, want only successful attempt %#v", got, want)
+	}
+}
+
+func TestExecuteStreamWithAuthManager_UsesRetryHeadersAfterOpenAIResponsesProvisionalFailure(t *testing.T) {
+	allowFirstAttemptFailure := make(chan struct{})
+	firstAttemptPrefixConsumed := make(chan struct{})
+	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, call int) (*coreexecutor.StreamResult, error) {
+		if call == 1 {
+			chunks := make(chan coreexecutor.StreamChunk)
+			go func() {
+				chunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.created")}
+				chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`)}
+				close(firstAttemptPrefixConsumed)
+				<-allowFirstAttemptFailure
+				chunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{
+					Code:       "upstream_closed",
+					Message:    "stream closed before response.completed",
+					HTTPStatus: http.StatusRequestTimeout,
+				}}
+				close(chunks)
+			}()
+			return &coreexecutor.StreamResult{
+				Headers: http.Header{"X-Upstream-Attempt": {"1"}},
+				Chunks:  chunks,
+			}, nil
+		}
+
+		chunks := make(chan coreexecutor.StreamChunk, 2)
+		chunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.created")}
+		chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed","response":{"id":"resp-2","output":[]}}`)}
+		close(chunks)
+		return &coreexecutor.StreamResult{
+			Headers: http.Header{"X-Upstream-Attempt": {fmt.Sprintf("%d", call)}},
+			Chunks:  chunks,
+		}, nil
+	}}
+	handler, _ := registerBootstrapExecutor(t, executor)
+	handler.Cfg.PassthroughHeaders = true
+
+	type streamResult struct {
+		data    <-chan []byte
+		headers http.Header
+		errs    <-chan *interfaces.ErrorMessage
+	}
+	resultChan := make(chan streamResult, 1)
+	go func() {
+		dataChan, upstreamHeaders, errChan := handler.ExecuteStreamWithAuthManager(
+			context.Background(),
+			"openai-response",
+			"bootstrap-model",
+			[]byte(`{"model":"bootstrap-model","input":"hello"}`),
+			"",
+		)
+		resultChan <- streamResult{data: dataChan, headers: upstreamHeaders, errs: errChan}
+	}()
+
+	<-firstAttemptPrefixConsumed
+	select {
+	case result := <-resultChan:
+		t.Fatalf("stream returned stale headers before retry selection: %#v", result.headers)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(allowFirstAttemptFailure)
+	result := <-resultChan
+
+	if got := result.headers.Get("X-Upstream-Attempt"); got != "2" {
+		t.Fatalf("upstream attempt header = %q, want successful retry attempt", got)
+	}
+	var got []string
+	for chunk := range result.data {
+		got = append(got, string(chunk))
+	}
+	for msg := range result.errs {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	want := []string{
+		"event: response.created",
+		`data: {"type":"response.completed","response":{"id":"resp-2","output":[]}}`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("forwarded chunks = %#v, want only successful attempt %#v", got, want)
+	}
+}
+
+func TestExecuteStreamWithAuthManagerBootstrapCommit_PreservesPrivateRetryHeaders(t *testing.T) {
+	allowFirstAttemptFailure := make(chan struct{})
+	retryStarted := make(chan struct{})
+	retryChunks := make(chan coreexecutor.StreamChunk, 1)
+	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, call int) (*coreexecutor.StreamResult, error) {
+		if call == 1 {
+			chunks := make(chan coreexecutor.StreamChunk, 3)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.created")}
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`)}
+			go func() {
+				<-allowFirstAttemptFailure
+				chunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{
+					Code:       "upstream_closed",
+					Message:    "stream closed before response.completed",
+					HTTPStatus: http.StatusRequestTimeout,
+				}}
+				close(chunks)
+			}()
+			return &coreexecutor.StreamResult{
+				Headers: http.Header{"X-Upstream-Attempt": {"1"}},
+				Chunks:  chunks,
+			}, nil
+		}
+		retryChunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.created")}
+		close(retryStarted)
+		return &coreexecutor.StreamResult{
+			Headers: http.Header{"X-Upstream-Attempt": {fmt.Sprintf("%d", call)}},
+			Chunks:  retryChunks,
+		}, nil
+	}}
+	handler, _ := registerBootstrapExecutor(t, executor)
+	handler.Cfg.PassthroughHeaders = true
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptStreamChunk: func(_ context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			headers := cloneHeader(req.ResponseHeaders)
+			if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex {
+				headers.Set("X-Selected-Attempt", headers.Get("X-Upstream-Attempt"))
+			}
+			return pluginapi.StreamChunkInterceptResponse{Headers: headers, Body: cloneBytes(req.Body)}
+		},
+	})
+
+	dataChan, errChan, committer := handler.ExecuteStreamWithAuthManagerBootstrapCommit(
+		context.Background(),
+		"openai-response",
+		"bootstrap-model",
+		[]byte(`{"model":"bootstrap-model","input":"hello"}`),
+		"",
+	)
+	close(allowFirstAttemptFailure)
+	<-retryStarted
+
+	committedHeaders := committer.Commit()
+	if got := committedHeaders.Get("X-Upstream-Attempt"); got != "2" {
+		t.Fatalf("committed upstream attempt header = %q, want successful retry attempt", got)
+	}
+	if got := committedHeaders.Get("X-Selected-Attempt"); got != "2" {
+		t.Fatalf("interceptor selected-attempt header = %q, want retry attempt 2", got)
+	}
+	retryChunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed","response":{"id":"resp-2","output":[]}}`)}
+	close(retryChunks)
+	var got []string
+	for chunk := range dataChan {
+		got = append(got, string(chunk))
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	want := []string{
+		"event: response.created",
+		`data: {"type":"response.completed","response":{"id":"resp-2","output":[]}}`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("forwarded chunks = %#v, want only successful attempt %#v", got, want)
+	}
+}
+
+func TestExecuteStreamWithAuthManagerBootstrapCommit_FreezesRetryAtFirstByte(t *testing.T) {
+	afterCommit := make(chan coreexecutor.StreamChunk, 1)
+	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, call int) (*coreexecutor.StreamResult, error) {
+		if call > 1 {
+			return nil, fmt.Errorf("unexpected retry after bootstrap commit: call %d", call)
+		}
+		chunks := make(chan coreexecutor.StreamChunk, 3)
+		chunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.created")}
+		chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`)}
+		go func() {
+			chunk := <-afterCommit
+			chunks <- chunk
+			close(chunks)
+		}()
+		return &coreexecutor.StreamResult{
+			Headers: http.Header{"X-Upstream-Attempt": {"1"}},
+			Chunks:  chunks,
+		}, nil
+	}}
+	handler, _ := registerBootstrapExecutor(t, executor)
+	handler.Cfg.PassthroughHeaders = true
+
+	dataChan, errChan, committer := handler.ExecuteStreamWithAuthManagerBootstrapCommit(
+		context.Background(),
+		"openai-response",
+		"bootstrap-model",
+		[]byte(`{"model":"bootstrap-model","input":"hello"}`),
+		"",
+	)
+	headers := committer.Commit()
+	if got := headers.Get("X-Upstream-Attempt"); got != "1" {
+		t.Fatalf("committed upstream attempt header = %q, want 1", got)
+	}
+	if got := committer.Commit().Get("X-Upstream-Attempt"); got != "1" {
+		t.Fatalf("second commit upstream attempt header = %q, want stable snapshot", got)
+	}
+	afterCommit <- coreexecutor.StreamChunk{Err: &coreauth.Error{
+		Code:       "upstream_closed",
+		Message:    "stream closed after downstream heartbeat",
+		HTTPStatus: http.StatusRequestTimeout,
+	}}
+
+	var got []string
+	for chunk := range dataChan {
+		got = append(got, string(chunk))
+	}
+	var streamErr *interfaces.ErrorMessage
+	for msg := range errChan {
+		if msg != nil {
+			streamErr = msg
+		}
+	}
+	if streamErr == nil || streamErr.StatusCode != http.StatusRequestTimeout {
+		t.Fatalf("stream error = %+v, want terminal 408 after commit", streamErr)
+	}
+	if executor.Calls() != 1 {
+		t.Fatalf("stream attempts = %d, want no retry after bootstrap commit", executor.Calls())
+	}
+	want := []string{
+		"event: response.created",
+		`data: {"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("forwarded chunks = %#v, want committed first attempt prefix %#v", got, want)
+	}
+}
+
+func TestExecuteStreamWithAuthManager_BoundsOpenAIResponsesPrefixBuffer(t *testing.T) {
+	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, _ int) (*coreexecutor.StreamResult, error) {
+		chunks := make(chan coreexecutor.StreamChunk, 128)
+		for index := 0; index < 128; index++ {
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(": queued heartbeat")}
+		}
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}}
+	handler, _ := registerBootstrapExecutor(t, executor)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type streamResult struct {
+		data <-chan []byte
+		errs <-chan *interfaces.ErrorMessage
+	}
+	results := make(chan streamResult, 1)
+	go func() {
+		dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(
+			ctx,
+			"openai-response",
+			"bootstrap-model",
+			[]byte(`{"model":"bootstrap-model","input":"hello"}`),
+			"",
+		)
+		results <- streamResult{data: dataChan, errs: errChan}
+	}()
+
+	var result streamResult
+	select {
+	case result = <-results:
+	case <-time.After(time.Second):
+		cancel()
+		<-results
+		t.Fatal("prefix-only Responses stream kept bootstrap blocked without a bound")
+	}
+	cancel()
+	for range result.data {
+	}
+	for range result.errs {
+	}
+}
+
+func TestExecuteStreamWithAuthManager_ReturnsAfterAvailableOpenAIResponsesProvisionalPrefix(t *testing.T) {
+	chunks := make(chan coreexecutor.StreamChunk, 3)
+	chunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.created")}
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`)}
+	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, _ int) (*coreexecutor.StreamResult, error) {
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}}
+	handler, _ := registerBootstrapExecutor(t, executor)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type streamResult struct {
+		data <-chan []byte
+		errs <-chan *interfaces.ErrorMessage
+	}
+	results := make(chan streamResult, 1)
+	go func() {
+		dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(
+			ctx,
+			"openai-response",
+			"bootstrap-model",
+			[]byte(`{"model":"bootstrap-model","input":"hello"}`),
+			"",
+		)
+		results <- streamResult{data: dataChan, errs: errChan}
+	}()
+
+	var result streamResult
+	select {
+	case result = <-results:
+	case <-time.After(time.Second):
+		cancel()
+		<-results
+		t.Fatal("provisional Responses prefix kept bootstrap blocked waiting for another upstream chunk")
+	}
+
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed","response":{"id":"resp-1","output":[]}}`)}
+	close(chunks)
+	var got []string
+	for chunk := range result.data {
+		got = append(got, string(chunk))
+	}
+	for range result.errs {
+	}
+	want := []string{
+		"event: response.created",
+		`data: {"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`,
+		`data: {"type":"response.completed","response":{"id":"resp-1","output":[]}}`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("forwarded chunks = %#v, want complete delayed stream %#v", got, want)
 	}
 }
 
