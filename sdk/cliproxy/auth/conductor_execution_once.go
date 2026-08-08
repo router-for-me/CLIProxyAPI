@@ -606,11 +606,15 @@ func (m *Manager) resolveDurableAuthForOnce(authID, providerOverride string) (*A
 // it with refreshAuthForRequest, so it shares the per-auth refresh lock and the
 // backoff bookkeeping with the auto-refresh loop instead of duplicating them.
 //
-// The refresh is skipped, without error, when the credential does not need one
-// or when another goroutine already owns it. It is also skipped when no executor
-// is registered under the raw provider string, because that is the only key the
-// manager refresh path resolves; failing there would reject openai-compatibility
-// credentials that never had a refreshable executor to begin with.
+// The refresh is skipped, without error, when the credential does not need one.
+// Concurrent callers all enter refreshAuthForRequest with the access token they
+// observed before claiming the refresh. Its per-auth lock makes the first caller
+// the refresh owner; waiters then reload and reuse the replacement credential
+// instead of dispatching with the stale clone. It is also skipped when no
+// executor is registered under the raw provider string, because that is the only
+// key the manager refresh path resolves; failing there would reject
+// openai-compatibility credentials that never had a refreshable executor to begin
+// with.
 func (m *Manager) refreshAuthForOnce(ctx context.Context, auth *Auth) (*Auth, error) {
 	if m == nil || auth == nil {
 		return auth, nil
@@ -623,6 +627,16 @@ func (m *Manager) refreshAuthForOnce(ctx context.Context, auth *Auth) (*Auth, er
 	m.mu.RLock()
 	current := m.auths[id]
 	needsRefresh := current != nil && m.shouldRefresh(current, now)
+	if !needsRefresh && current != nil && !current.NextRefreshAfter.IsZero() && now.Before(current.NextRefreshAfter) {
+		// NextRefreshAfter also represents an in-flight refresh claim. Ignore it
+		// for this due check so a concurrent paid call joins the per-auth refresh
+		// lock instead of treating the stale credential as fresh. This also makes
+		// a paid one-shot fail closed during refresh backoff rather than spending a
+		// credential the evaluator still considers due.
+		withoutBackoff := current.Clone()
+		withoutBackoff.NextRefreshAfter = time.Time{}
+		needsRefresh = m.shouldRefresh(withoutBackoff, now)
+	}
 	provider := ""
 	if current != nil {
 		provider = strings.TrimSpace(current.Provider)
@@ -634,10 +648,13 @@ func (m *Manager) refreshAuthForOnce(ctx context.Context, auth *Auth) (*Auth, er
 	if m.executorFor(provider) == nil {
 		return auth, nil
 	}
-	if !m.markRefreshPending(id, now) {
-		return auth, nil
-	}
-	refreshed, errRefresh := m.refreshAuthForRequest(ctx, id, "")
+	observedAccessToken := authAccessToken(current)
+	// markRefreshPending coordinates scheduling/backoff, but losing that claim
+	// does not mean the refresh is complete. Enter the per-auth refresh lock in
+	// either case and identify the credential version we observed so a waiter can
+	// reuse the owner's replacement without refreshing twice.
+	_ = m.markRefreshPending(id, now)
+	refreshed, errRefresh := m.refreshAuthForRequest(ctx, id, observedAccessToken)
 	if errRefresh != nil {
 		return nil, errRefresh
 	}
@@ -790,7 +807,7 @@ func newRedirectOrigin(req *http.Request) *redirectOrigin {
 	return &redirectOrigin{
 		method:  strings.ToUpper(strings.TrimSpace(req.Method)),
 		url:     req.URL,
-		hasBody: req.Body != nil || req.ContentLength > 0,
+		hasBody: (req.Body != nil && req.Body != http.NoBody) || req.ContentLength > 0,
 	}
 }
 

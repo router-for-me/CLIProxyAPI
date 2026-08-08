@@ -37,6 +37,7 @@ type onceTestExecutor struct {
 	countCalls    atomic.Int32
 	executeErr    error
 	refreshErr    error
+	refreshFunc   func(ctx context.Context, auth *Auth) (*Auth, error)
 	executeFunc   func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error)
 	mu            sync.Mutex
 	executedModel []string
@@ -62,8 +63,11 @@ func (e *onceTestExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecuto
 	return nil, errors.New("stream not implemented")
 }
 
-func (e *onceTestExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+func (e *onceTestExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
 	e.refreshCalls.Add(1)
+	if e.refreshFunc != nil {
+		return e.refreshFunc(ctx, auth)
+	}
 	if e.refreshErr != nil {
 		return nil, e.refreshErr
 	}
@@ -361,6 +365,57 @@ func TestManagerExecuteWithAuthOnce_RefreshFailureFailsClosed(t *testing.T) {
 	}
 	if got := len(hook.snapshot()); got != 0 {
 		t.Fatalf("MarkResult calls = %d, want 0", got)
+	}
+}
+
+func TestManagerExecuteWithAuthOnce_ConcurrentRefreshWaitsForOwner(t *testing.T) {
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	executor := &onceTestExecutor{provider: "codex"}
+	executor.refreshFunc = func(ctx context.Context, auth *Auth) (*Auth, error) {
+		close(refreshStarted)
+		select {
+		case <-releaseRefresh:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		updated := auth.Clone()
+		if updated.Metadata == nil {
+			updated.Metadata = map[string]any{}
+		}
+		updated.Metadata["access_token"] = "fresh-token"
+		return updated, nil
+	}
+	auth := newOnceTestAuth("refresh-concurrent")
+	auth.Attributes["refresh_interval_seconds"] = "1"
+	auth.Metadata = map[string]any{"access_token": "stale-token"}
+	manager, _ := newOnceTestManager(t, executor, auth)
+
+	const callers = 2
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			_, _, err := manager.ExecuteWithAuthOnce(context.Background(), onceRequest("refresh-concurrent"))
+			errs <- err
+		}()
+	}
+
+	<-refreshStarted
+	time.Sleep(20 * time.Millisecond)
+	if got := executor.executeCalls.Load(); got != 0 {
+		t.Fatalf("executor invocations before refresh owner completed = %d, want 0", got)
+	}
+	close(releaseRefresh)
+	for i := 0; i < callers; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("ExecuteWithAuthOnce() error = %v", err)
+		}
+	}
+	if got := executor.refreshCalls.Load(); got != 1 {
+		t.Fatalf("refresh calls = %d, want exactly one", got)
+	}
+	if got := executor.executeCalls.Load(); got != callers {
+		t.Fatalf("executor invocations = %d, want %d", got, callers)
 	}
 }
 
@@ -800,6 +855,16 @@ func TestManagerHTTPOnceCore_SameOriginSafeFollowsOnlySafeRedirects(t *testing.T
 			wantSucceeded: true,
 		},
 		{
+			name:          "same origin get with explicit zero-length body is followed",
+			method:        http.MethodGet,
+			withBody:      true,
+			location:      func(*httptest.Server) string { return "/followed" },
+			wantStatus:    http.StatusOK,
+			wantFollowed:  1,
+			wantRequests:  2,
+			wantSucceeded: true,
+		},
+		{
 			name:         "cross origin is refused",
 			method:       http.MethodGet,
 			location:     func(*httptest.Server) string { return "https://redirect-target.invalid/followed" },
@@ -849,7 +914,11 @@ func TestManagerHTTPOnceCore_SameOriginSafeFollowsOnlySafeRedirects(t *testing.T
 			ctx := newOnceTLSContext(server)
 			var body io.Reader
 			if tt.withBody {
-				body = strings.NewReader(`{"paid":true}`)
+				if strings.Contains(tt.name, "zero-length") {
+					body = strings.NewReader("")
+				} else {
+					body = strings.NewReader(`{"paid":true}`)
+				}
 			}
 			resp, facts, errDo := httpOnceWithAuth(manager, ctx, auth, onceHTTPRequest(t, ctx, tt.method, server.URL+"/start", body), HTTPRedirectSameOriginSafe)
 			if code := onceErrorCode(errDo); code != tt.wantErrCode {
