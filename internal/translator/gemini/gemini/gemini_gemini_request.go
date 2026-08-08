@@ -24,7 +24,7 @@ import (
 func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
 	// Fast path: if no contents field, only attach safety settings
-	contents := gjson.GetBytes(rawJSON, "contents")
+	contents := util.GetGJSONBytesNoCopy(rawJSON, "contents")
 	if !contents.Exists() {
 		return common.AttachDefaultSafetySettings(rawJSON, "safetySettings")
 	}
@@ -134,7 +134,7 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 // For the immediately following user/function turn containing functionResponse
 // parts, any empty name is replaced with the corresponding call name.
 func backfillEmptyFunctionResponseNames(data []byte) []byte {
-	contents := gjson.GetBytes(data, "contents")
+	contents := util.GetGJSONBytesNoCopy(data, "contents")
 	if !contents.Exists() {
 		return data
 	}

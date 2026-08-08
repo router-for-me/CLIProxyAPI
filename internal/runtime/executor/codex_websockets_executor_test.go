@@ -24,6 +24,8 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+var benchmarkBuildCodexWebsocketRequestBodyOutput []byte
+
 func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`)
 
@@ -40,6 +42,16 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 	if got := gjson.GetBytes(wsReqBody, "type").String(); got == "response.append" {
 		t.Fatalf("unexpected websocket request type: %s", got)
+	}
+}
+
+func BenchmarkBuildCodexWebsocketRequestBodyLargePayload(b *testing.B) {
+	body := []byte(`{"model":"gpt-5.6","input":[{"type":"message","id":"msg_1","role":"user","content":"` + strings.Repeat("x", 8<<20) + `"}]}`)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	b.ResetTimer()
+	for b.Loop() {
+		benchmarkBuildCodexWebsocketRequestBodyOutput = buildCodexWebsocketRequestBody(body)
 	}
 }
 

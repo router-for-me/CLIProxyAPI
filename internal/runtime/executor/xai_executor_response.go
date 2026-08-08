@@ -857,13 +857,25 @@ func xaiPatchCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]by
 // cli-chat-proxy ("Usage resets over a rolling 24-hour window").
 const xaiFreeUsageExhaustedCooldown = 24 * time.Hour
 
-// xaiStatusErr wraps upstream error bodies so free-tier exhaustion
-// (subscription:free-usage-exhausted) carries a 24h RetryAfter hint for
-// auth cooldown / account rotation. Generic 429s stay without an explicit
-// retry hint so conductor backoff still applies.
+// xaiStatusErr normalizes upstream xAI error bodies for conductor behavior:
+//   - credential invalidation (403 bad-credentials) is remapped to 401 so the
+//     existing OAuth refresh-once-and-retry path runs instead of payment cooldown
+//   - free-tier exhaustion (subscription:free-usage-exhausted) carries a 24h
+//     RetryAfter hint for auth cooldown / account rotation
+//
+// Generic 429s stay without an explicit retry hint so conductor backoff still applies.
 func xaiStatusErr(code int, body []byte) statusErr {
 	err := statusErr{code: code, msg: string(body)}
-	if code != http.StatusTooManyRequests || len(body) == 0 {
+	if len(body) == 0 {
+		return err
+	}
+	if code == http.StatusForbidden && isXAIBadCredentialsBody(body) {
+		// Upstream returns 403 for invalidated OAuth access tokens. Map to 401 so
+		// tryRefreshAfterUnauthorized / MarkResult unauthorized handling applies.
+		err.code = http.StatusUnauthorized
+		return err
+	}
+	if code != http.StatusTooManyRequests {
 		return err
 	}
 	codeStr := strings.ToLower(gjson.GetBytes(body, "code").String())
@@ -878,4 +890,25 @@ func xaiStatusErr(code int, body []byte) statusErr {
 		err.retryAfter = &d
 	}
 	return err
+}
+
+// isXAIBadCredentialsBody reports whether an xAI error body indicates an
+// invalidated/unusable OAuth access token rather than a generic permission or
+// payment failure. HTTP and websocket payloads both use this helper, so nested
+// error.code / error.message shapes are checked as well as flat bodies.
+func isXAIBadCredentialsBody(body []byte) bool {
+	for _, path := range []string{"code", "error.code", "body.error.code"} {
+		if strings.Contains(strings.ToLower(gjson.GetBytes(body, path).String()), "bad-credentials") {
+			return true
+		}
+	}
+	for _, path := range []string{"error", "error.message", "message", "body.error", "body.error.message"} {
+		msg := strings.ToLower(gjson.GetBytes(body, path).String())
+		if strings.Contains(msg, "access token could not be validated") {
+			return true
+		}
+	}
+	raw := strings.ToLower(string(body))
+	return strings.Contains(raw, "bad-credentials") ||
+		strings.Contains(raw, "access token could not be validated")
 }

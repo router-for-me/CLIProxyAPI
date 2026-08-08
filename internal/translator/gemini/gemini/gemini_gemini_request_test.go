@@ -1,10 +1,63 @@
 package gemini
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
 )
+
+const largeInlineDataSize = 20 << 20
+
+var largeInlineDataBenchmarkOutput []byte
+
+func TestConvertGeminiRequestToGeminiReusesLargeNormalizedPayload(t *testing.T) {
+	input := largeInlineDataGeminiRequest(true)
+
+	result := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			output := ConvertGeminiRequestToGemini("gemini-test", input, false)
+			if &output[0] != &input[0] {
+				b.Fatal("normalized request should reuse the input payload")
+			}
+			largeInlineDataBenchmarkOutput = output
+		}
+	})
+
+	if allocated := result.AllocedBytesPerOp(); allocated >= 1<<20 {
+		t.Fatalf("normalized 20 MiB inlineData request allocated %d bytes/op, want less than 1 MiB", allocated)
+	}
+}
+
+func BenchmarkConvertGeminiRequestToGeminiLargeInlineData(b *testing.B) {
+	for _, test := range []struct {
+		name                  string
+		includeSafetySettings bool
+	}{
+		{name: "normalized_passthrough", includeSafetySettings: true},
+		{name: "attach_default_safety", includeSafetySettings: false},
+	} {
+		b.Run(test.name, func(b *testing.B) {
+			input := largeInlineDataGeminiRequest(test.includeSafetySettings)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(input)))
+			b.ResetTimer()
+			for b.Loop() {
+				largeInlineDataBenchmarkOutput = ConvertGeminiRequestToGemini("gemini-test", input, false)
+			}
+		})
+	}
+}
+
+func largeInlineDataGeminiRequest(includeSafetySettings bool) []byte {
+	prefix := `{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"video/mp4","data":"`
+	suffix := `"}}]}]`
+	if includeSafetySettings {
+		suffix += `,"safetySettings":[]`
+	}
+	return []byte(prefix + strings.Repeat("A", largeInlineDataSize) + suffix + `}`)
+}
 
 func TestBackfillEmptyFunctionResponseNames_Single(t *testing.T) {
 	input := []byte(`{
