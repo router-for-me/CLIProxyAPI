@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/optimize-multi-agent-v2"
@@ -517,21 +518,58 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	// New core execution path
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	dataChan, errChan, bootstrapCommitter := h.ExecuteStreamWithAuthManagerBootstrapCommit(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 
+	framer := &responsesSSEFramer{}
+	h.forwardInitialResponsesStream(
+		c,
+		flusher,
+		func(err error) { cliCancel(err) },
+		dataChan,
+		errChan,
+		func() http.Header { return bootstrapCommitter.CommitContext(c.Request.Context()) },
+		bootstrapCommitter.Headers,
+		framer,
+		handlers.StreamingKeepAliveInterval(h.Cfg),
+	)
+}
+
+func (h *OpenAIResponsesAPIHandler) forwardInitialResponsesStream(
+	c *gin.Context,
+	flusher http.Flusher,
+	cancel func(error),
+	dataChan <-chan []byte,
+	errChan <-chan *interfaces.ErrorMessage,
+	commitHeaders func() http.Header,
+	selectedHeaders func() http.Header,
+	framer *responsesSSEFramer,
+	keepAliveInterval time.Duration,
+) {
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
-	framer := &responsesSSEFramer{}
+	var keepAlive *time.Ticker
+	var keepAliveC <-chan time.Time
+	if keepAliveInterval > 0 {
+		keepAlive = time.NewTicker(keepAliveInterval)
+		keepAliveC = keepAlive.C
+	}
+	stopKeepAlive := func() {
+		if keepAlive != nil {
+			keepAlive.Stop()
+			keepAlive = nil
+			keepAliveC = nil
+		}
+	}
+	defer stopKeepAlive()
 
-	// Peek at the first chunk
 	for {
 		select {
 		case <-c.Request.Context().Done():
-			cliCancel(c.Request.Context().Err())
+			cancel(c.Request.Context().Err())
 			return
 		case errMsg, ok := <-errChan:
 			if !ok {
@@ -540,21 +578,38 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				continue
 			}
 			// Upstream failed immediately. Return proper error status and JSON.
+			if selectedHeaders != nil {
+				handlers.WriteUpstreamHeaders(c.Writer.Header(), selectedHeaders())
+			}
 			h.WriteErrorResponse(c, errMsg)
 			if errMsg != nil {
-				cliCancel(errMsg.Error)
+				cancel(errMsg.Error)
 			} else {
-				cliCancel(nil)
+				cancel(nil)
 			}
 			return
 		case chunk, ok := <-dataChan:
+			var upstreamHeaders http.Header
+			if selectedHeaders != nil {
+				upstreamHeaders = selectedHeaders()
+			}
 			if !ok {
+				select {
+				case errMsg, okErr := <-errChan:
+					if okErr && errMsg != nil {
+						handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+						h.WriteErrorResponse(c, errMsg)
+						cancel(errMsg.Error)
+						return
+					}
+				default:
+				}
 				// Stream closed without data? Send headers and done.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 				_, _ = c.Writer.Write([]byte("\n"))
 				flusher.Flush()
-				cliCancel(nil)
+				cancel(nil)
 				return
 			}
 
@@ -567,7 +622,24 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			flusher.Flush()
 
 			// Continue
-			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
+			stopKeepAlive()
+			h.forwardResponsesStream(c, flusher, cancel, dataChan, errChan, framer)
+			return
+		case <-keepAliveC:
+			var upstreamHeaders http.Header
+			if commitHeaders != nil {
+				upstreamHeaders = commitHeaders()
+			}
+			if err := c.Request.Context().Err(); err != nil {
+				cancel(err)
+				return
+			}
+			setSSEHeaders()
+			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+			flusher.Flush()
+			stopKeepAlive()
+			h.forwardResponsesStream(c, flusher, cancel, dataChan, errChan, framer)
 			return
 		}
 	}

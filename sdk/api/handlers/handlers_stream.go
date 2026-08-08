@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -13,11 +14,104 @@ import (
 	"golang.org/x/net/context"
 )
 
+const (
+	maxResponsesBootstrapPrefixChunks = 32
+	maxResponsesBootstrapPrefixBytes  = 64 << 10
+)
+
+// StreamBootstrapCommitter freezes a provisional Responses stream at the
+// current upstream attempt before the HTTP response commits its first byte.
+type StreamBootstrapCommitter struct {
+	request     chan struct{}
+	ready       chan struct{}
+	requestOnce sync.Once
+	publishOnce sync.Once
+	mu          sync.Mutex
+	headers     http.Header
+	deferred    bool
+}
+
+func newStreamBootstrapCommitter() *StreamBootstrapCommitter {
+	return &StreamBootstrapCommitter{
+		request: make(chan struct{}),
+		ready:   make(chan struct{}),
+	}
+}
+
+// Commit stops private bootstrap retries and returns the selected attempt's
+// stable downstream headers.
+func (c *StreamBootstrapCommitter) Commit() http.Header {
+	return c.CommitContext(context.Background())
+}
+
+// CommitContext requests a freeze and waits for stable headers until ctx ends.
+func (c *StreamBootstrapCommitter) CommitContext(ctx context.Context) http.Header {
+	if c == nil {
+		return nil
+	}
+	c.requestOnce.Do(func() { close(c.request) })
+	if ctx == nil {
+		return c.Headers()
+	}
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-c.ready:
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return cloneHeader(c.headers)
+	}
+}
+
+// Headers waits for and returns the selected attempt's stable downstream
+// headers without forcing an in-progress bootstrap attempt to commit.
+func (c *StreamBootstrapCommitter) Headers() http.Header {
+	if c == nil {
+		return nil
+	}
+	<-c.ready
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return cloneHeader(c.headers)
+}
+
+func (c *StreamBootstrapCommitter) publish(headers http.Header) {
+	if c == nil {
+		return
+	}
+	c.publishOnce.Do(func() {
+		c.mu.Lock()
+		c.headers = cloneHeader(headers)
+		c.mu.Unlock()
+		close(c.ready)
+	})
+}
+
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
 	return h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false)
+}
+
+// ExecuteStreamWithAuthManagerBootstrapCommit lets an HTTP Responses endpoint
+// freeze provisional bootstrap when it is ready to commit headers or a heartbeat.
+func (h *BaseAPIHandler) ExecuteStreamWithAuthManagerBootstrapCommit(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, <-chan *interfaces.ErrorMessage, *StreamBootstrapCommitter) {
+	committer := newStreamBootstrapCommitter()
+	dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(
+		ctx,
+		handlerType,
+		handlerType,
+		modelName,
+		rawJSON,
+		alt,
+		false,
+		modelExecutionOptions{StreamBootstrapCommit: committer},
+	)
+	if !committer.deferred {
+		committer.publish(headers)
+	}
+	return dataChan, errChan, committer
 }
 
 // ExecuteImageStreamWithAuthManager executes a streaming OpenAI-compatible image endpoint request.
@@ -310,8 +404,14 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
 	interceptorHost := h.interceptorHost()
 	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
-	// Resolve bootstrap retries and header initialization before returning so the
-	// returned header snapshot is never modified by the stream goroutine.
+	bootstrapCommitter := execOptions.StreamBootstrapCommit
+	if bootstrapCommitter != nil {
+		bootstrapCommitter.deferred = true
+	}
+	// Resolve immediately available bootstrap retries and header initialization
+	// before returning. A provisional Responses prefix may continue in the stream
+	// goroutine so downstream forwarding and keep-alives can start without waiting
+	// for the next upstream chunk. The returned header snapshot remains immutable.
 	rawStreamHeaders := cloneHeader(streamResult.Headers)
 	baseStreamHeaders := cloneHeader(streamResult.Headers)
 	chunks := streamResult.Chunks
@@ -387,16 +487,62 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return payload, true, nil
 	}
 
-	var bootstrapPayload []byte
+	var bootstrapPayloads [][]byte
+	bootstrapPayloadBytes := 0
 	bootstrapChunkIndex := 0
 	var bootstrapHistoryChunks [][]byte
 	var bootstrapStreamErr error
 	var bootstrapErr *interfaces.ErrorMessage
-	readInitialStreamChunks := func() {
+	bootstrapPaused := false
+	canPauseBootstrap := responseProtocol == "openai-response" &&
+		(bootstrapCommitter != nil || (!passthroughHeadersEnabled && !streamInterceptorsActive))
+	readInitialStreamChunks := func(blockAfterPrefix bool) {
+		bootstrapPaused = false
 		for {
 			var chunk coreexecutor.StreamChunk
 			var ok bool
-			if ctx != nil {
+			if !blockAfterPrefix && canPauseBootstrap && len(bootstrapPayloads) > 0 {
+				if ctx != nil {
+					select {
+					case <-ctx.Done():
+						streamCanceledBeforeRead = true
+						return
+					case chunk, ok = <-chunks:
+					default:
+						bootstrapPaused = true
+						return
+					}
+				} else {
+					select {
+					case chunk, ok = <-chunks:
+					default:
+						bootstrapPaused = true
+						return
+					}
+				}
+			} else if blockAfterPrefix && bootstrapCommitter != nil {
+				select {
+				case <-bootstrapCommitter.request:
+					return
+				default:
+				}
+				if ctx != nil {
+					select {
+					case <-ctx.Done():
+						streamCanceledBeforeRead = true
+						return
+					case <-bootstrapCommitter.request:
+						return
+					case chunk, ok = <-chunks:
+					}
+				} else {
+					select {
+					case <-bootstrapCommitter.request:
+						return
+					case chunk, ok = <-chunks:
+					}
+				}
+			} else if ctx != nil {
 				select {
 				case <-ctx.Done():
 					streamCanceledBeforeRead = true
@@ -426,8 +572,15 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			if !deliverable {
 				continue
 			}
-			bootstrapPayload = payload
-			return
+			bootstrapPayloads = append(bootstrapPayloads, payload)
+			bootstrapPayloadBytes += len(payload)
+			if streamInterceptorsActive {
+				bootstrapHistoryChunks = appendStreamInterceptorHistory(bootstrapHistoryChunks, payload)
+			}
+			if streamBootstrapPayloadCommitsResponse(responseProtocol, payload) ||
+				streamBootstrapPrefixBufferFull(responseProtocol, len(bootstrapPayloads), bootstrapPayloadBytes) {
+				return
+			}
 		}
 	}
 
@@ -449,45 +602,50 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	if h.AuthManager.HomeEnabled() {
 		maxBootstrapRetries = 0
 	}
-	for bootstrapRetries := 0; !streamCanceledBeforeRead; {
-		readInitialStreamChunks()
-		if streamCanceledBeforeRead || bootstrapErr != nil || bootstrapStreamErr == nil {
-			break
-		}
-		if bootstrapRetries >= maxBootstrapRetries || !bootstrapEligible(bootstrapStreamErr) {
-			bootstrapErr = executionErrorMessage(bootstrapStreamErr)
-			break
-		}
-		bootstrapRetries++
-		retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
-		if retryErr != nil {
-			originalBootstrapErr := executionErrorMessage(bootstrapStreamErr)
-			if isAuthSelectionUnavailable(retryErr) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {
-				bootstrapErr = originalBootstrapErr
-			} else {
-				bootstrapErr = executionErrorMessage(enrichAuthSelectionError(retryErr, providers, normalizedModel))
+	bootstrapRetries := 0
+	resolveBootstrap := func(blockAfterPrefix bool) {
+		for !streamCanceledBeforeRead {
+			readInitialStreamChunks(blockAfterPrefix)
+			if bootstrapPaused || streamCanceledBeforeRead || bootstrapErr != nil || bootstrapStreamErr == nil {
+				return
 			}
-			break
-		}
-		if retryResult == nil {
-			bootstrapErr = executionErrorMessage(fmt.Errorf("auth manager returned nil stream"))
-			break
-		}
-		rawStreamHeaders = cloneHeader(retryResult.Headers)
-		baseStreamHeaders = cloneHeader(retryResult.Headers)
-		streamHeaderInitialized = false
-		streamClosedBeforeRead = false
-		bootstrapStreamErr = nil
-		bootstrapPayload = nil
-		bootstrapChunkIndex = 0
-		bootstrapHistoryChunks = nil
-		chunks = retryResult.Chunks
-		if chunks == nil {
-			closed := make(chan coreexecutor.StreamChunk)
-			close(closed)
-			chunks = closed
+			if bootstrapRetries >= maxBootstrapRetries || !bootstrapEligible(bootstrapStreamErr) {
+				bootstrapErr = executionErrorMessage(bootstrapStreamErr)
+				return
+			}
+			bootstrapRetries++
+			retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+			if retryErr != nil {
+				originalBootstrapErr := executionErrorMessage(bootstrapStreamErr)
+				if isAuthSelectionUnavailable(retryErr) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {
+					bootstrapErr = originalBootstrapErr
+				} else {
+					bootstrapErr = executionErrorMessage(enrichAuthSelectionError(retryErr, providers, normalizedModel))
+				}
+				return
+			}
+			if retryResult == nil {
+				bootstrapErr = executionErrorMessage(fmt.Errorf("auth manager returned nil stream"))
+				return
+			}
+			rawStreamHeaders = cloneHeader(retryResult.Headers)
+			baseStreamHeaders = cloneHeader(retryResult.Headers)
+			streamHeaderInitialized = false
+			streamClosedBeforeRead = false
+			bootstrapStreamErr = nil
+			bootstrapPayloads = nil
+			bootstrapPayloadBytes = 0
+			bootstrapChunkIndex = 0
+			bootstrapHistoryChunks = nil
+			chunks = retryResult.Chunks
+			if chunks == nil {
+				closed := make(chan coreexecutor.StreamChunk)
+				close(closed)
+				chunks = closed
+			}
 		}
 	}
+	resolveBootstrap(false)
 
 	upstreamHeaders := downstreamHeadersAfterInterceptors(baseStreamHeaders, rawStreamHeaders, passthroughHeadersEnabled)
 	if upstreamHeaders == nil && (passthroughHeadersEnabled || streamInterceptorsActive) {
@@ -505,6 +663,11 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}()
 		defer close(dataChan)
 		defer close(errChan)
+		defer func() {
+			if bootstrapCommitter != nil {
+				bootstrapCommitter.publish(downstreamHeadersAfterInterceptors(baseStreamHeaders, rawStreamHeaders, passthroughHeadersEnabled))
+			}
+		}()
 		if streamCanceledBeforeRead {
 			completionOutcome = pluginapi.RequestCompletionCanceled
 			completionStatus = 0
@@ -540,6 +703,15 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			}
 		}
 
+		if bootstrapPaused {
+			// Keep the provisional prefix private until semantic output commits the
+			// response or a bootstrap failure selects a clean retry.
+			resolveBootstrap(true)
+		}
+		if bootstrapCommitter != nil {
+			applyStreamHeaderInit()
+			bootstrapCommitter.publish(downstreamHeadersAfterInterceptors(baseStreamHeaders, rawStreamHeaders, passthroughHeadersEnabled))
+		}
 		if bootstrapErr != nil {
 			completionOutcome = pluginapi.RequestCompletionFailed
 			if bootstrapErr.DirectResponse {
@@ -557,7 +729,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 
 		chunkIndex := bootstrapChunkIndex
 		historyChunks := bootstrapHistoryChunks
-		if bootstrapPayload != nil {
+		for _, bootstrapPayload := range bootstrapPayloads {
 			if okSendData := sendData(bootstrapPayload); !okSendData {
 				completionOutcome = pluginapi.RequestCompletionCanceled
 				completionStatus = 0
@@ -565,9 +737,6 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 					completionErr = ctx.Err()
 				}
 				return
-			}
-			if streamInterceptorsActive {
-				historyChunks = appendStreamInterceptorHistory(historyChunks, bootstrapPayload)
 			}
 		}
 		for {
@@ -627,6 +796,53 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 	}()
 	return dataChan, upstreamHeaders, errChan
+}
+
+func streamBootstrapPrefixBufferFull(responseProtocol string, chunks, bytes int) bool {
+	return responseProtocol == "openai-response" &&
+		(chunks >= maxResponsesBootstrapPrefixChunks || bytes >= maxResponsesBootstrapPrefixBytes)
+}
+
+func streamBootstrapPayloadCommitsResponse(responseProtocol string, payload []byte) bool {
+	if responseProtocol != "openai-response" {
+		return true
+	}
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 {
+		return false
+	}
+	if json.Valid(trimmed) {
+		return openAIResponsesPayloadCommitsResponse(trimmed)
+	}
+	for _, line := range bytes.Split(payload, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(line[5:])
+		if len(data) == 0 {
+			continue
+		}
+		if bytes.Equal(data, []byte("[DONE]")) || openAIResponsesPayloadCommitsResponse(data) {
+			return true
+		}
+	}
+	return false
+}
+
+func openAIResponsesPayloadCommitsResponse(payload []byte) bool {
+	var event struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return true
+	}
+	switch event.Type {
+	case "response.queued", "response.created", "response.in_progress":
+		return false
+	default:
+		return true
+	}
 }
 
 func validateSSEDataJSON(chunk []byte) error {
