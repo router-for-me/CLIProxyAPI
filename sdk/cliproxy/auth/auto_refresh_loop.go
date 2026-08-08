@@ -3,6 +3,7 @@ package auth
 import (
 	"container/heap"
 	"context"
+	"hash/fnv"
 	"strings"
 	"sync"
 	"time"
@@ -11,9 +12,11 @@ import (
 )
 
 type authAutoRefreshLoop struct {
-	manager     *Manager
-	interval    time.Duration
-	concurrency int
+	manager      *Manager
+	interval     time.Duration
+	concurrency  int
+	maxPerMinute int
+	jitter       time.Duration
 
 	mu    sync.Mutex
 	queue refreshMinHeap
@@ -25,6 +28,10 @@ type authAutoRefreshLoop struct {
 }
 
 func newAuthAutoRefreshLoop(manager *Manager, interval time.Duration, concurrency int) *authAutoRefreshLoop {
+	return newAuthAutoRefreshLoopWithSmoothing(manager, interval, concurrency, 0, 0)
+}
+
+func newAuthAutoRefreshLoopWithSmoothing(manager *Manager, interval time.Duration, concurrency, maxPerMinute int, jitter time.Duration) *authAutoRefreshLoop {
 	if interval <= 0 {
 		interval = refreshCheckInterval
 	}
@@ -36,13 +43,15 @@ func newAuthAutoRefreshLoop(manager *Manager, interval time.Duration, concurrenc
 		jobBuffer = 64
 	}
 	return &authAutoRefreshLoop{
-		manager:     manager,
-		interval:    interval,
-		concurrency: concurrency,
-		index:       make(map[string]*refreshHeapItem),
-		dirty:       make(map[string]struct{}),
-		wakeCh:      make(chan struct{}, 1),
-		jobs:        make(chan string, jobBuffer),
+		manager:      manager,
+		interval:     interval,
+		concurrency:  concurrency,
+		maxPerMinute: maxPerMinute,
+		jitter:       jitter,
+		index:        make(map[string]*refreshHeapItem),
+		dirty:        make(map[string]struct{}),
+		wakeCh:       make(chan struct{}, 1),
+		jobs:         make(chan string, jobBuffer),
 	}
 }
 
@@ -68,14 +77,21 @@ func (l *authAutoRefreshLoop) run(ctx context.Context) {
 	if workers <= 0 {
 		workers = refreshMaxConcurrency
 	}
+	var rateCh <-chan time.Time
+	var ticker *time.Ticker
+	if spacing := refreshRateInterval(l.maxPerMinute); spacing > 0 {
+		ticker = time.NewTicker(spacing)
+		rateCh = ticker.C
+		defer ticker.Stop()
+	}
 	for i := 0; i < workers; i++ {
-		go l.worker(ctx)
+		go l.worker(ctx, rateCh)
 	}
 
 	l.loop(ctx)
 }
 
-func (l *authAutoRefreshLoop) worker(ctx context.Context) {
+func (l *authAutoRefreshLoop) worker(ctx context.Context, rateCh <-chan time.Time) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -83,6 +99,13 @@ func (l *authAutoRefreshLoop) worker(ctx context.Context) {
 		case authID := <-l.jobs:
 			if authID == "" {
 				continue
+			}
+			if rateCh != nil {
+				select {
+				case <-ctx.Done():
+					return
+				case <-rateCh:
+				}
 			}
 			l.manager.refreshAuth(ctx, authID)
 			l.queueReschedule(authID)
@@ -100,7 +123,7 @@ func (l *authAutoRefreshLoop) rebuild(now time.Time) {
 
 	l.manager.mu.RLock()
 	for id, auth := range l.manager.auths {
-		next, ok := nextRefreshCheckAt(now, auth, l.interval)
+		next, ok := nextRefreshCheckAtWithJitter(now, auth, l.interval, l.jitter)
 		if !ok {
 			continue
 		}
@@ -231,8 +254,8 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 		manager.mu.RUnlock()
 		return
 	}
-	next, shouldSchedule := nextRefreshCheckAt(now, auth, l.interval)
-	shouldRefresh := manager.shouldRefresh(auth, now)
+	next, shouldSchedule := nextRefreshCheckAtWithJitter(now, auth, l.interval, l.jitter)
+	shouldRefresh := manager.shouldRefresh(auth, now) || refreshDueWithJitter(now, auth, l.interval, l.jitter)
 	exec := manager.executors[auth.Provider]
 	manager.mu.RUnlock()
 
@@ -254,7 +277,7 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 	if !manager.markRefreshPending(authID, now) {
 		manager.mu.RLock()
 		auth = manager.auths[authID]
-		next, shouldSchedule = nextRefreshCheckAt(now, auth, l.interval)
+		next, shouldSchedule = nextRefreshCheckAtWithJitter(now, auth, l.interval, l.jitter)
 		manager.mu.RUnlock()
 		if shouldSchedule {
 			l.upsert(authID, next)
@@ -280,7 +303,7 @@ func (l *authAutoRefreshLoop) applyDirty(now time.Time) {
 	for _, authID := range dirty {
 		l.manager.mu.RLock()
 		auth := l.manager.auths[authID]
-		next, ok := nextRefreshCheckAt(now, auth, l.interval)
+		next, ok := nextRefreshCheckAtWithJitter(now, auth, l.interval, l.jitter)
 		l.manager.mu.RUnlock()
 
 		if !ok {
@@ -333,6 +356,65 @@ func (l *authAutoRefreshLoop) remove(authID string) {
 	}
 	heap.Remove(&l.queue, item.index)
 	delete(l.index, authID)
+}
+
+func refreshRateInterval(maxPerMinute int) time.Duration {
+	if maxPerMinute <= 0 {
+		return 0
+	}
+	spacing := time.Minute / time.Duration(maxPerMinute)
+	if spacing < time.Millisecond {
+		return time.Millisecond
+	}
+	return spacing
+}
+
+func nextRefreshCheckAtWithJitter(now time.Time, auth *Auth, interval, maxJitter time.Duration) (time.Time, bool) {
+	next, ok := nextRefreshCheckAt(now, auth, interval)
+	if !ok || !next.After(now) {
+		return next, ok
+	}
+	offset := scheduledRefreshJitter(auth, maxJitter)
+	if offset <= 0 {
+		return next, ok
+	}
+	jittered := next.Add(-offset)
+	if jittered.Before(now) {
+		return now, ok
+	}
+	return jittered, ok
+}
+
+func refreshDueWithJitter(now time.Time, auth *Auth, interval, maxJitter time.Duration) bool {
+	if auth == nil || maxJitter <= 0 {
+		return false
+	}
+	next, ok := nextRefreshCheckAt(now, auth, interval)
+	if !ok || !next.After(now) {
+		return false
+	}
+	offset := scheduledRefreshJitter(auth, maxJitter)
+	return offset > 0 && !next.Add(-offset).After(now)
+}
+
+func scheduledRefreshJitter(auth *Auth, maxJitter time.Duration) time.Duration {
+	if auth == nil || maxJitter <= 0 || !auth.NextRefreshAfter.IsZero() {
+		return 0
+	}
+	if evaluator, hasEvaluator := auth.Runtime.(RefreshEvaluator); hasEvaluator && evaluator != nil {
+		return 0
+	}
+	return deterministicRefreshJitter(auth.ID, maxJitter)
+}
+
+func deterministicRefreshJitter(authID string, maxJitter time.Duration) time.Duration {
+	if strings.TrimSpace(authID) == "" || maxJitter < time.Second {
+		return 0
+	}
+	maxSeconds := uint64(maxJitter / time.Second)
+	hasher := fnv.New64a()
+	_, _ = hasher.Write([]byte(authID))
+	return time.Duration(hasher.Sum64()%(maxSeconds+1)) * time.Second
 }
 
 func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time.Time, bool) {
