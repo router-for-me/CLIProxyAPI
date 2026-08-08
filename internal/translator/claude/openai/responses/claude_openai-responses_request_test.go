@@ -708,7 +708,7 @@ func TestConvertOpenAIResponsesRequestToClaude_DeduplicatesExpandedToolNames(t *
 	if _, ok := customNames["collaboration__send"]; ok {
 		t.Fatal("final-name collision should keep the top-level function type")
 	}
-	name, namespace := splitResponsesQualifiedFunctionCallFromRequest(raw, "collaboration__send")
+	name, namespace := splitResponsesQualifiedToolCallFromRequest(raw, "collaboration__send")
 	if name != "collaboration__send" || namespace != "" {
 		t.Fatalf("final-name collision namespace = (%q, %q), want (collaboration__send, empty)", name, namespace)
 	}
@@ -825,6 +825,32 @@ func TestConvertOpenAIResponsesRequestToClaude_ReplaysCustomToolCallHistory(t *t
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_ReplaysNamespacedCustomToolCallHistory(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"additional_tools","tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec"}]}]},
+			{"type":"custom_tool_call","call_id":"call.custom:1","name":"exec","namespace":"functions","input":"pwd"},
+			{"type":"custom_tool_call_output","call_id":"call.custom:1","output":"/workspace"}
+		]
+	}`)
+
+	root := gjson.ParseBytes(ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false))
+	if !root.Get(`tools.#(name=="functions__exec")`).Exists() {
+		t.Fatal("missing qualified namespace custom tool declaration")
+	}
+	toolUse := root.Get("messages.0.content.0")
+	if got := toolUse.Get("name").String(); got != "functions__exec" {
+		t.Fatalf("historical custom tool_use name = %q, want functions__exec", got)
+	}
+	if got := toolUse.Get("input.input").String(); got != "pwd" {
+		t.Fatalf("historical custom tool input = %q, want pwd", got)
+	}
+	if got := root.Get("messages.1.content.0.tool_use_id").String(); got != "call_custom_1" {
+		t.Fatalf("historical custom tool_result id = %q, want call_custom_1", got)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_ReplaysNamespacedFunctionCallHistory(t *testing.T) {
 	raw := []byte(`{
 		"model":"claude-test",
@@ -930,7 +956,7 @@ func TestSplitResponsesQualifiedFunctionCallFromAdditionalTools(t *testing.T) {
 		"input":[{"type":"additional_tools","tools":[{"type":"namespace","name":"mcp__node_repl","tools":[{"type":"function","name":"js"}]}]}]
 	}`)
 
-	name, namespace := splitResponsesQualifiedFunctionCallFromRequest(raw, "mcp__node_repl__js")
+	name, namespace := splitResponsesQualifiedToolCallFromRequest(raw, "mcp__node_repl__js")
 	if name != "js" {
 		t.Fatalf("name = %q, want js", name)
 	}

@@ -1043,7 +1043,7 @@ func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {
 	return namespaceName + "__" + childName
 }
 
-func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, qualifiedName string) (name, namespace string) {
+func splitResponsesQualifiedToolCallFromRequest(requestRawJSON []byte, qualifiedName string) (name, namespace string) {
 	qualifiedName = strings.TrimSpace(qualifiedName)
 	if qualifiedName == "" {
 		return "", ""
@@ -1054,7 +1054,7 @@ func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, quali
 	if !ok {
 		return qualifiedName, ""
 	}
-	if descriptor.toolType == "function" && !descriptor.direct {
+	if !descriptor.direct && (descriptor.toolType == "function" || descriptor.toolType == "custom") {
 		return descriptor.childName, descriptor.namespace
 	}
 	return qualifiedName, ""
