@@ -3,8 +3,6 @@ package pluginhost
 import (
 	"bytes"
 	"context"
-	"fmt"
-	"runtime/debug"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -12,7 +10,6 @@ import (
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	log "github.com/sirupsen/logrus"
 )
 
 func (h *Host) RegisterUsagePlugins() {
@@ -47,7 +44,8 @@ func (h *Host) refreshThinkingProviders(records []capabilityRecord) {
 		if !okProvider {
 			continue
 		}
-		thinking.RegisterPluginProvider(record.id, provider, record.priority, &thinkingAdapter{
+		generation := pluginIdentityGeneration(record.path, record.version)
+		registered := thinking.RegisterPluginProviderGeneration(record.id, generation, provider, record.priority, &thinkingAdapter{
 			host:     h,
 			pluginID: record.id,
 			path:     record.path,
@@ -55,6 +53,9 @@ func (h *Host) refreshThinkingProviders(records []capabilityRecord) {
 			provider: provider,
 			applier:  applier,
 		})
+		if registered && (h.isPluginFused(record.id) || !h.recordCurrent(record)) {
+			thinking.UnregisterPluginProvidersGeneration(record.id, generation)
+		}
 	}
 }
 
@@ -64,7 +65,7 @@ func (h *Host) callThinkingIdentifier(record capabilityRecord, applier pluginapi
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "ThinkingApplier.Identifier", recovered)
+			h.fusePlugin(record, "ThinkingApplier.Identifier", recovered)
 			provider = ""
 			ok = false
 		}
@@ -76,31 +77,21 @@ func (h *Host) callThinkingIdentifier(record capabilityRecord, applier pluginapi
 	return provider, true
 }
 
-func (h *Host) currentUsagePlugin(pluginID string) pluginapi.UsagePlugin {
+func (h *Host) currentUsagePlugin(pluginID string) (pluginapi.UsagePlugin, capabilityRecord, bool) {
 	if h == nil || strings.TrimSpace(pluginID) == "" {
-		return nil
+		return nil, capabilityRecord{}, false
 	}
 	for _, record := range h.activeRecords() {
 		if record.id != pluginID {
 			continue
 		}
 		if h.isPluginFused(record.id) {
-			return nil
+			return nil, capabilityRecord{}, false
 		}
-		return record.plugin.Capabilities.UsagePlugin
+		plugin := record.plugin.Capabilities.UsagePlugin
+		return plugin, record, plugin != nil
 	}
-	return nil
-}
-
-func (h *Host) fusePlugin(id, method string, recovered any) {
-	if h == nil {
-		return
-	}
-	h.mu.Lock()
-	h.fused[id] = fmt.Sprintf("%s panic: %v", method, recovered)
-	h.mu.Unlock()
-	thinking.UnregisterPluginProviders(id)
-	log.WithField("plugin_id", id).WithField("method", method).Errorf("pluginhost: plugin panic recovered: %v\n%s", recovered, debug.Stack())
+	return nil, capabilityRecord{}, false
 }
 
 func (h *Host) isPluginFused(id string) bool {
@@ -132,13 +123,13 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	if a == nil {
 		return
 	}
-	plugin := a.host.currentUsagePlugin(a.pluginID)
-	if plugin == nil {
+	plugin, pluginRecord, okPlugin := a.host.currentUsagePlugin(a.pluginID)
+	if !okPlugin {
 		return
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(a.pluginID, "UsagePlugin.HandleUsage", recovered)
+			a.host.fusePlugin(pluginRecord, "UsagePlugin.HandleUsage", recovered)
 		}
 	}()
 	plugin.HandleUsage(ctx, pluginapi.UsageRecord{
@@ -181,7 +172,7 @@ func (a *thinkingAdapter) Apply(body []byte, config thinking.ThinkingConfig, mod
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(a.pluginID, "ThinkingApplier.ApplyThinking", recovered)
+			a.host.fusePluginIdentity(a.pluginID, a.path, a.version, "ThinkingApplier.ApplyThinking", recovered)
 			out = bytes.Clone(body)
 			err = nil
 		}
@@ -274,7 +265,7 @@ func (h *Host) callRequestNormalizer(ctx context.Context, record capabilityRecor
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "RequestNormalizer.NormalizeRequest", recovered)
+			h.fusePlugin(record, "RequestNormalizer.NormalizeRequest", recovered)
 			out = nil
 			ok = false
 		}
@@ -298,7 +289,7 @@ func (h *Host) callRequestTranslator(ctx context.Context, record capabilityRecor
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "RequestTranslator.TranslateRequest", recovered)
+			h.fusePlugin(record, "RequestTranslator.TranslateRequest", recovered)
 			out = nil
 			ok = false
 		}
@@ -322,7 +313,7 @@ func (h *Host) callResponseNormalizer(ctx context.Context, record capabilityReco
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, method, recovered)
+			h.fusePlugin(record, method, recovered)
 			out = nil
 			ok = false
 		}
@@ -348,7 +339,7 @@ func (h *Host) callResponseTranslator(ctx context.Context, record capabilityReco
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "ResponseTranslator.TranslateResponse", recovered)
+			h.fusePlugin(record, "ResponseTranslator.TranslateResponse", recovered)
 			out = nil
 			ok = false
 		}

@@ -98,7 +98,7 @@ func (a *accessAdapter) Identifier() (identifier string) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			if a.host != nil {
-				a.host.fusePlugin(a.pluginID, "FrontendAuthProvider.Identifier", recovered)
+				a.host.fusePluginIdentity(a.pluginID, a.path, a.version, "FrontendAuthProvider.Identifier", recovered)
 			}
 			identifier = ""
 		}
@@ -117,7 +117,7 @@ func (a *accessAdapter) Authenticate(ctx context.Context, r *http.Request) (resu
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(a.pluginID, "FrontendAuthProvider.Authenticate", recovered)
+			a.host.fusePluginIdentity(a.pluginID, a.path, a.version, "FrontendAuthProvider.Authenticate", recovered)
 			result = nil
 			authErr = sdkaccess.NewNotHandledError()
 		}

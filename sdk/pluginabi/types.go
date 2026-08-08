@@ -7,7 +7,8 @@ const (
 	ABIVersion uint32 = 1
 	// SchemaVersion tracks the RPC JSON contract exchanged at plugin.register.
 	// Version 2 adds request lifecycle completion and active request termination.
-	SchemaVersion uint32 = 2
+	// Version 3 adds stateful stream interceptor session negotiation and lifecycle.
+	SchemaVersion uint32 = 3
 )
 
 const (

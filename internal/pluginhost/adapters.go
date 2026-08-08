@@ -319,7 +319,7 @@ func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModel
 		}
 		authProvider := record.plugin.Capabilities.AuthProvider
 		if authProvider != nil {
-			identifier, okIdentifier := h.callAuthProviderIdentifier(record.id, authProvider)
+			identifier, okIdentifier := h.callAuthProviderIdentifier(record, authProvider)
 			if !okIdentifier || normalizeProviderID(identifier) != providerKey {
 				continue
 			}
@@ -452,7 +452,7 @@ func (h *Host) callModelRegistrar(ctx context.Context, record capabilityRecord, 
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "ModelRegistrar.RegisterModels", recovered)
+			h.fusePlugin(record, "ModelRegistrar.RegisterModels", recovered)
 			resp = pluginapi.ModelRegistrationResponse{}
 			err = fmt.Errorf("model registrar panic: %v", recovered)
 		}
@@ -466,7 +466,7 @@ func (h *Host) callModelProviderStaticModels(ctx context.Context, record capabil
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "ModelProvider.StaticModels", recovered)
+			h.fusePlugin(record, "ModelProvider.StaticModels", recovered)
 			resp = pluginapi.ModelResponse{}
 			err = fmt.Errorf("model provider panic: %v", recovered)
 		}
@@ -483,7 +483,7 @@ func (h *Host) callModelsForAuth(ctx context.Context, record capabilityRecord, p
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(record.id, "ModelProvider.ModelsForAuth", recovered)
+			h.fusePlugin(record, "ModelProvider.ModelsForAuth", recovered)
 			resp = pluginapi.ModelResponse{}
 			err = fmt.Errorf("model provider per-auth models panic: %v", recovered)
 		}
