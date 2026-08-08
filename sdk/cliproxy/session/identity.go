@@ -11,6 +11,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
@@ -140,7 +141,9 @@ func hasExplicitSession(headers map[string][]string, payload []byte) bool {
 	if len(payload) == 0 {
 		return false
 	}
-	root := gjson.ParseBytes(payload)
+	// Parsing without copying matters here: this runs on every request and the
+	// payload can be multiple megabytes.
+	root := util.ParseGJSONBytesNoCopy(payload)
 	for _, path := range []string{"session_id", "sessionId", "conversation_id", "prompt_cache_key"} {
 		if NormalizeExplicitID(root.Get(path).String()) != "" {
 			return true

@@ -37,7 +37,7 @@ func antigravityReplayLogKey(value string) string {
 // Claude-facing provenance IDs are still present in a Gemini-shaped payload.
 func antigravityCountClaudeToolProvenanceIDs(payload []byte) int {
 	count := 0
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return 0
 	}
@@ -139,7 +139,7 @@ func antigravityReasoningReplayClientSessionKey(ctx context.Context, req cliprox
 }
 
 func antigravityClaudeReplaySystemLane(payload []byte) string {
-	system := gjson.GetBytes(payload, "system")
+	system := util.GetGJSONBytesNoCopy(payload, "system")
 	if !system.Exists() {
 		return ""
 	}
@@ -191,7 +191,7 @@ func antigravityReplaySessionIDFromPayload(payload []byte) string {
 }
 
 func antigravityReasoningReplayPendingModelContentIndex(payload []byte) (contentIndex int, basePartIndex int) {
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return 0, 0
 	}
@@ -221,7 +221,7 @@ func antigravityReasoningReplayPendingModelContentIndex(payload []byte) (content
 }
 
 func antigravityReasoningReplayResolveContentIndex(payload []byte, cached int) int {
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return cached
 	}
@@ -408,7 +408,7 @@ func filterAntigravityReasoningReplayItemsForRequestWithSchemas(payload []byte, 
 
 func antigravityExistingToolCallKeys(payload []byte) map[string]bool {
 	existing := make(map[string]bool)
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return existing
 	}
@@ -512,7 +512,7 @@ func antigravityFunctionResponseContentIndex(payload []byte, callID string) (int
 	if callID == "" {
 		return -1, false
 	}
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return -1, false
 	}
@@ -539,7 +539,7 @@ func restoreAntigravityFunctionResponseReplayIdentity(payload []byte, currentID,
 		return payload
 	}
 	out := payload
-	contents := gjson.GetBytes(out, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(out, "request.contents")
 	contents.ForEach(func(contentKey, content gjson.Result) bool {
 		content.Get("parts").ForEach(func(partKey, part gjson.Result) bool {
 			response := part.Get("functionResponse")
@@ -566,7 +566,7 @@ func antigravityFunctionCallPartLocation(payload []byte, callID string) (content
 	if callID == "" {
 		return -1, -1, false
 	}
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return -1, -1, false
 	}
@@ -627,7 +627,7 @@ func antigravityFunctionCallPartLocationForReplayWithSchemas(payload []byte, ite
 			name, ci, pi, util.IsGeminiClaudeToolUseID(candidateID))
 		return -1, -1, false
 	}
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return -1, -1, false
 	}
@@ -705,7 +705,7 @@ func antigravityFunctionCallProvenanceLocation(payload []byte, itemResult gjson.
 }
 
 func insertAntigravityModelFunctionCallBeforeContent(payload []byte, beforeIndex int, name, callID, thoughtSig string, args gjson.Result) ([]byte, bool) {
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return payload, false
 	}
@@ -838,7 +838,7 @@ func antigravityReplayPartOccurrence(parts []gjson.Result, targetPartIndex int, 
 }
 
 func antigravityReplayContextFingerprint(payload []byte, beforeContentIndex int) string {
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() || beforeContentIndex < 0 {
 		return ""
 	}
@@ -887,7 +887,7 @@ func antigravityReplayToolSchemasFromRequests(rawRequests ...[]byte) map[string]
 			continue
 		}
 		nameMap := util.SanitizedFunctionNameMap(raw)
-		tools := gjson.GetBytes(raw, "tools")
+		tools := util.GetGJSONBytesNoCopy(raw, "tools")
 		if !tools.IsArray() {
 			continue
 		}
@@ -996,7 +996,7 @@ func antigravityFunctionCallMatchesReplayItem(functionCall, itemResult gjson.Res
 }
 
 func antigravityPayloadHasClaudeToolProvenanceID(payload []byte) bool {
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return false
 	}
@@ -1034,7 +1034,7 @@ func antigravitySyntheticToolCallID(reservedID string) string {
 // antigravityRepairUnsignedFirstFunctionCalls. Every other part is left alone,
 // preserving the native "1 signed + N unsigned" parallel-call shape.
 func degradeAntigravityClaudeToolProvenanceIDs(payload []byte) ([]byte, int) {
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return payload, 0
 	}
@@ -1079,7 +1079,7 @@ func degradeAntigravityClaudeToolProvenanceIDs(payload []byte) ([]byte, int) {
 // context deliberately declines to replay one. Only a missing signature is filled
 // in here, so native signatures are never touched.
 func antigravityRepairUnsignedFirstFunctionCalls(payload []byte) []byte {
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return payload
 	}
@@ -1134,7 +1134,7 @@ func antigravitySetReplayItemContextHash(item []byte, payload []byte, contentInd
 
 func antigravityThoughtSignatureReplayPartPath(payload []byte, itemResult gjson.Result) (string, bool) {
 	ci := int(itemResult.Get("contentIndex").Int())
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return "", false
 	}
@@ -1309,7 +1309,7 @@ func antigravityFunctionResponsesCanRestoreID(payload []byte, currentID, nativeN
 	if currentID == "" {
 		return true
 	}
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return false
 	}
@@ -1372,7 +1372,7 @@ func restoreAntigravityNativeFunctionCallReplay(payload []byte, contentIndex, pa
 		out, _ = sjson.SetBytes(out, partPath+".thoughtSignature", signature)
 	}
 	if currentID != "" && nativeID != "" && currentID != nativeID {
-		contents := gjson.GetBytes(out, "request.contents")
+		contents := util.GetGJSONBytesNoCopy(out, "request.contents")
 		contents.ForEach(func(contentKey, content gjson.Result) bool {
 			content.Get("parts").ForEach(func(partKey, part gjson.Result) bool {
 				response := part.Get("functionResponse")
@@ -1581,7 +1581,7 @@ func newAntigravityReasoningReplayAccumulator(scope antigravityReasoningReplaySc
 }
 
 func antigravityReasoningReplayItemsFromRequest(payload []byte) [][]byte {
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return nil
 	}
