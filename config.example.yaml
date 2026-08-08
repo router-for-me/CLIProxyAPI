@@ -429,11 +429,17 @@ nonstream-keepalive-interval: 0
 #                                    # "never": never apply cloaking
 #       # This "cloak" block applies to this claude-api-key entry only. For Claude OAuth
 #       # credentials, set the same options in the auth/token JSON file via "cloak_mode" /
-#       # "cloak_strict_mode" / "cloak_sensitive_words" / "cloak_cache_user_id". The top-level
+#       # "cloak_strict_mode" / "cloak_relaxed_system_prompt" / "cloak_sensitive_words" /
+#       # "cloak_cache_user_id". The top-level
 #       # "disable-claude-cloak-mode: true" disables cloaking for all Claude credentials at once.
 #       strict-mode: false           # false (default): legacy-model whitelist uses a user system-reminder;
 #                                    # all other and future models use messages[].role=system
 #                                    # true: strip caller prompts and keep only Claude Code billing and identity blocks
+#       relaxed-system-prompt: false # optional: keep caller text system blocks in the top-level system array
+#                                    # after billing and identity; keep caller messages free of generated currentDate content
+#                                    # and preserve caller cache metadata; generated breakpoints are deferred until after
+#                                    # payload rules, then CPA's existing automatic cache policy runs if none are present
+#                                    # strict-mode takes precedence; default false uses the standard placement above
 #       sensitive-words:             # optional: words to obfuscate with zero-width characters
 #         - "API"
 #         - "proxy"

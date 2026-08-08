@@ -2275,8 +2275,9 @@ func TestClaudeExecutor_CountTokensCloakRelocatesCallerSystemAndObfuscates(t *te
 			})
 			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
 			auth := &cliproxyauth.Auth{Attributes: map[string]string{
-				"api_key":               "sk-ant-oat-count-relocate",
-				"cloak_sensitive_words": sensitiveWord,
+				"api_key":                     "sk-ant-oat-count-relocate",
+				"cloak_relaxed_system_prompt": "true",
+				"cloak_sensitive_words":       sensitiveWord,
 			}}
 			payload := []byte(`{"model":"` + testCase.model + `","system":[{"type":"text","text":"` + callerSystem + `"}],` +
 				`"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}],"tools":[]}`)
@@ -3828,6 +3829,179 @@ func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	assertClaudeMidConversationSystemMessage(t, out, 1, "You are a helpful assistant.")
 }
 
+func TestApplyClaudeSystemInstructionPolicy_RelaxedPreservesTopLevelBlocksWithoutSynthesizingCacheControl(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5","system":[` +
+		`{"type":"text","text":"first guidance","cache_control":{"type":"ephemeral","ttl":"1h"}},` +
+		`{"type":"text","text":"second guidance"}],` +
+		`"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := applyClaudeSystemInstructionPolicy(
+		payload,
+		claudeCloakSettings{relaxedSystemPrompt: true},
+		true,
+		"2.1.220",
+		"cli",
+		"",
+		time.Now(),
+	)
+
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 4 {
+		t.Fatalf("top-level system has %d blocks, want billing, identity, and two caller blocks: %s", len(blocks), out)
+	}
+	if got := blocks[0].Get("text").String(); !strings.HasPrefix(got, "x-anthropic-billing-header:") {
+		t.Fatalf("system[0].text = %q, want billing header", got)
+	}
+	if got := blocks[1].Get("text").String(); got != claudeCodeCLIIdentity {
+		t.Fatalf("system[1].text = %q, want Claude Code identity", got)
+	}
+	if blocks[1].Get("cache_control").Exists() {
+		t.Fatalf("relaxed identity block must defer cache placement: %s", blocks[1].Raw)
+	}
+	if got := blocks[2].Get("text").String(); got != "first guidance" {
+		t.Fatalf("system[2].text = %q, want first guidance", got)
+	}
+	if got := blocks[2].Get("cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("system[2].cache_control.ttl = %q, want preserved 1h", got)
+	}
+	if got := blocks[3].Get("text").String(); got != "second guidance" {
+		t.Fatalf("system[3].text = %q, want second guidance", got)
+	}
+	if blocks[3].Get("cache_control").Exists() {
+		t.Fatalf("relaxed mode must not synthesize caller cache_control: %s", blocks[3].Raw)
+	}
+	if got := gjson.GetBytes(out, `messages.#(role=="system")`); got.Exists() {
+		t.Fatalf("relaxed mode must not add a mid-conversation system message: %s", got.Raw)
+	}
+	if got, want := gjson.GetBytes(out, "messages").Raw, gjson.GetBytes(payload, "messages").Raw; got != want {
+		t.Fatalf("relaxed mode changed caller messages:\ngot:  %s\nwant: %s", got, want)
+	}
+	if bytes.Contains(out, []byte("# currentDate")) {
+		t.Fatalf("relaxed mode must not inject currentDate content: %s", out)
+	}
+}
+
+func TestApplyClaudeSystemInstructionPolicy_RelaxedPreservesFinalCallerCacheControl(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5","system":[{"type":"text","text":"guidance","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := applyClaudeSystemInstructionPolicy(
+		payload,
+		claudeCloakSettings{relaxedSystemPrompt: true},
+		true,
+		"2.1.220",
+		"cli",
+		"",
+		time.Now(),
+	)
+
+	block := gjson.GetBytes(out, "system.2")
+	if got := block.Get("text").String(); got != "guidance" {
+		t.Fatalf("system[2].text = %q, want guidance", got)
+	}
+	if got := block.Get("cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("system[2].cache_control.ttl = %q, want caller-provided 1h", got)
+	}
+}
+
+func TestClaudeExecutor_RelaxedSystemPromptUsesExistingCachePolicyAfterPayloadRules(t *testing.T) {
+	const model = "claude-opus-5"
+	enabled := true
+	tests := []struct {
+		name               string
+		payloadBreakpoint  bool
+		wantBreakpointPath string
+		wantTTL            string
+	}{
+		{
+			name:               "automatic breakpoint when none exists",
+			wantBreakpointPath: "system.2.cache_control",
+		},
+		{
+			name:               "payload breakpoint suppresses automatic placement",
+			payloadBreakpoint:  true,
+			wantBreakpointPath: "system.1.cache_control",
+			wantTTL:            "1h",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var seenBody []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seenBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+			}))
+			defer server.Close()
+
+			cfg := &config.Config{
+				ClaudeKey: []config.ClaudeKey{{
+					APIKey:  "key-relaxed-cache-policy",
+					BaseURL: server.URL,
+					Cloak: &config.CloakConfig{
+						RelaxedSystemPrompt: &enabled,
+					},
+				}},
+			}
+			if test.payloadBreakpoint {
+				cfg.Payload.Default = []config.PayloadRule{{
+					Models: []config.PayloadModelRule{{Name: model, Protocol: "claude"}},
+					Params: map[string]any{
+						"system.1.cache_control": map[string]any{"type": "ephemeral", "ttl": "1h"},
+					},
+				}}
+			}
+
+			executor := NewClaudeExecutor(cfg)
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"api_key":  "key-relaxed-cache-policy",
+				"base_url": server.URL,
+			}}
+			payload := []byte(`{"model":"claude-opus-5","messages":[{"role":"system","content":"caller guidance"},{"role":"user","content":"hello"}]}`)
+
+			_, errExecute := executor.Execute(
+				context.Background(),
+				auth,
+				cliproxyexecutor.Request{Model: model, Payload: payload},
+				cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, ResponseFormat: sdktranslator.FormatClaude},
+			)
+			if errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+			if got := gjson.GetBytes(seenBody, "system.2.text").String(); got != "caller guidance" {
+				t.Fatalf("system.2.text = %q, want caller guidance: %s", got, seenBody)
+			}
+			if bytes.Contains(seenBody, []byte("# currentDate")) {
+				t.Fatalf("relaxed cloak must not inject currentDate content: %s", seenBody)
+			}
+			if got := countCacheControls(seenBody); got != 1 {
+				t.Fatalf("cache_control count = %d, want 1: %s", got, seenBody)
+			}
+			if got := gjson.GetBytes(seenBody, test.wantBreakpointPath+".type").String(); got != "ephemeral" {
+				t.Fatalf("%s.type = %q, want ephemeral: %s", test.wantBreakpointPath, got, seenBody)
+			}
+			if got := gjson.GetBytes(seenBody, test.wantBreakpointPath+".ttl").String(); got != test.wantTTL {
+				t.Fatalf("%s.ttl = %q, want %q: %s", test.wantBreakpointPath, got, test.wantTTL, seenBody)
+			}
+
+			otherSystemIndex := 1
+			if test.payloadBreakpoint {
+				otherSystemIndex = 2
+			}
+			if cacheControl := gjson.GetBytes(seenBody, fmt.Sprintf("system.%d.cache_control", otherSystemIndex)); cacheControl.Exists() {
+				t.Fatalf("system.%d must not receive another cache breakpoint: %s", otherSystemIndex, seenBody)
+			}
+			userContent := gjson.GetBytes(seenBody, "messages.0.content").Array()
+			if len(userContent) != 1 || userContent[0].Get("text").String() != "hello" {
+				t.Fatalf("relaxed cloak changed caller user content: %s", seenBody)
+			}
+			if userCache := userContent[0].Get("cache_control"); userCache.Exists() {
+				t.Fatalf("relaxed cloak must not preempt cache selection: %s", seenBody)
+			}
+		})
+	}
+}
+
 func TestClaudeUsesLegacySystemReminder(t *testing.T) {
 	tests := map[string]bool{
 		"claude-opus-4-6":          true,
@@ -4356,6 +4530,44 @@ func TestResolveClaudeWirePolicy(t *testing.T) {
 			}
 			if policy.Cloak != test.wantCloak {
 				t.Fatalf("Cloak = %v, want %v", policy.Cloak, test.wantCloak)
+			}
+		})
+	}
+}
+
+func TestResolveClaudeWirePolicy_RelaxedSystemPromptPrecedence(t *testing.T) {
+	enabled := true
+	disabled := false
+	tests := []struct {
+		name        string
+		auth        *cliproxyauth.Auth
+		cloak       *config.CloakConfig
+		wantStrict  bool
+		wantRelaxed bool
+	}{
+		{name: "default disabled", auth: &cliproxyauth.Auth{}},
+		{name: "metadata bool enabled", auth: &cliproxyauth.Auth{Metadata: map[string]any{"cloak_relaxed_system_prompt": true}}, wantRelaxed: true},
+		{name: "metadata string enabled", auth: &cliproxyauth.Auth{Metadata: map[string]any{"cloak_relaxed_system_prompt": "true"}}, wantRelaxed: true},
+		{name: "attribute disabled overrides metadata", auth: &cliproxyauth.Auth{Attributes: map[string]string{"cloak_relaxed_system_prompt": "false"}, Metadata: map[string]any{"cloak_relaxed_system_prompt": true}}},
+		{name: "key config overrides metadata", auth: &cliproxyauth.Auth{Metadata: map[string]any{"cloak_relaxed_system_prompt": false}}, cloak: &config.CloakConfig{RelaxedSystemPrompt: &enabled}, wantRelaxed: true},
+		{name: "key config explicit false", auth: &cliproxyauth.Auth{Metadata: map[string]any{"cloak_relaxed_system_prompt": true}}, cloak: &config.CloakConfig{RelaxedSystemPrompt: &disabled}},
+		{name: "key strict mode wins", auth: &cliproxyauth.Auth{Metadata: map[string]any{"cloak_relaxed_system_prompt": true}}, cloak: &config.CloakConfig{StrictMode: true}, wantStrict: true},
+		{name: "boolean metadata strict mode wins", auth: &cliproxyauth.Auth{Metadata: map[string]any{"cloak_strict_mode": true, "cloak_relaxed_system_prompt": true}}, wantStrict: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			if test.cloak != nil {
+				test.auth.Attributes = map[string]string{"api_key": "key-123"}
+				cfg.ClaudeKey = []config.ClaudeKey{{APIKey: "key-123", Cloak: test.cloak}}
+			}
+			_, settings := resolveClaudeWirePolicy(cfg, test.auth, "key-123", false)
+			if settings.strictMode != test.wantStrict {
+				t.Fatalf("strictMode = %v, want %v", settings.strictMode, test.wantStrict)
+			}
+			if settings.relaxedSystemPrompt != test.wantRelaxed {
+				t.Fatalf("relaxedSystemPrompt = %v, want %v", settings.relaxedSystemPrompt, test.wantRelaxed)
 			}
 		})
 	}
