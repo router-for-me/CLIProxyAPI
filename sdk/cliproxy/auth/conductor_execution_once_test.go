@@ -344,6 +344,32 @@ func TestManagerExecuteWithAuthOnce_PreflightFailuresNeverDispatch(t *testing.T)
 	}
 }
 
+func TestManagerExecuteWithAuthOnce_RefreshUsesEffectiveExecutorKey(t *testing.T) {
+	executor := &onceTestExecutor{provider: "openai-compatible-custom"}
+	auth := newOnceTestAuth("refresh-compatible")
+	auth.Provider = "plugin-provider"
+	auth.Attributes["compat_name"] = "custom"
+	auth.Attributes["provider_key"] = "custom"
+	auth.Attributes["refresh_interval_seconds"] = "1"
+	auth.Metadata = map[string]any{
+		"access_token":  "stale-token",
+		"refresh_token": "refresh-token",
+	}
+	manager, _ := newOnceTestManager(t, executor, auth)
+
+	request := onceRequest(auth.ID)
+	request.Provider = "openai-compatible-custom"
+	if _, _, err := manager.ExecuteWithAuthOnce(context.Background(), request); err != nil {
+		t.Fatalf("ExecuteWithAuthOnce() error = %v", err)
+	}
+	if got := executor.refreshCalls.Load(); got != 1 {
+		t.Fatalf("refresh calls = %d, want 1 through effective executor key", got)
+	}
+	if got := executor.executeCalls.Load(); got != 1 {
+		t.Fatalf("executor calls = %d, want 1", got)
+	}
+}
+
 func TestManagerExecuteWithAuthOnce_RefreshFailureFailsClosed(t *testing.T) {
 	executor := &onceTestExecutor{provider: "codex", refreshErr: errors.New("refresh rejected")}
 	auth := newOnceTestAuth("refresh-fail")

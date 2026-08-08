@@ -611,10 +611,9 @@ func (m *Manager) resolveDurableAuthForOnce(authID, providerOverride string) (*A
 // observed before claiming the refresh. Its per-auth lock makes the first caller
 // the refresh owner; waiters then reload and reuse the replacement credential
 // instead of dispatching with the stale clone. It is also skipped when no
-// executor is registered under the raw provider string, because that is the only
-// key the manager refresh path resolves; failing there would reject
-// openai-compatibility credentials that never had a refreshable executor to begin
-// with.
+// executor is registered under the auth's effective executor key. This matches
+// refreshAuthForRequest, including OpenAI-compatible credentials whose raw
+// Provider differs from compat_name/provider_key.
 func (m *Manager) refreshAuthForOnce(ctx context.Context, auth *Auth) (*Auth, error) {
 	if m == nil || auth == nil {
 		return auth, nil
@@ -637,15 +636,15 @@ func (m *Manager) refreshAuthForOnce(ctx context.Context, auth *Auth) (*Auth, er
 		withoutBackoff.NextRefreshAfter = time.Time{}
 		needsRefresh = m.shouldRefresh(withoutBackoff, now)
 	}
-	provider := ""
+	providerKey := ""
 	if current != nil {
-		provider = strings.TrimSpace(current.Provider)
+		providerKey = executorKeyFromAuth(current)
 	}
 	m.mu.RUnlock()
 	if !needsRefresh {
 		return auth, nil
 	}
-	if m.executorFor(provider) == nil {
+	if m.executorFor(providerKey) == nil {
 		return auth, nil
 	}
 	observedAccessToken := authAccessToken(current)

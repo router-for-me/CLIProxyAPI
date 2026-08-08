@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
@@ -758,6 +759,32 @@ func TestFindAllAntigravityCreditsCandidateAuthsHonoursRankedCandidates(t *testi
 	}}
 	if _, errInvalid := manager.findAllAntigravityCreditsCandidateAuths(context.Background(), "claude-sonnet-4-6", invalidOpts); errInvalid == nil {
 		t.Fatal("findAllAntigravityCreditsCandidateAuths(invalid) error = nil, want invalid_auth_selection_candidates")
+	}
+}
+
+func TestFindAllAntigravityCreditsCandidateAuths_WalksPastExhaustedLowerRank(t *testing.T) {
+	manager := &Manager{
+		auths: map[string]*Auth{
+			"ranked-credits-exhausted": {ID: "ranked-credits-exhausted", Provider: "antigravity"},
+			"ranked-credits-available": {ID: "ranked-credits-available", Provider: "antigravity"},
+		},
+		executors: map[string]ProviderExecutor{
+			"antigravity": schedulerTestExecutor{},
+		},
+	}
+	SetAntigravityCreditsHint("ranked-credits-exhausted", AntigravityCreditsHint{Known: true, Available: false, UpdatedAt: time.Now()})
+	SetAntigravityCreditsHint("ranked-credits-available", AntigravityCreditsHint{Known: true, Available: true, UpdatedAt: time.Now()})
+
+	opts := rankedCandidateOptions(
+		cliproxyexecutor.AuthSelectionCandidate{AuthID: "ranked-credits-exhausted", PriorityRank: 0, StableOrder: 0},
+		cliproxyexecutor.AuthSelectionCandidate{AuthID: "ranked-credits-available", PriorityRank: 1, StableOrder: 0},
+	)
+	candidates, errCandidates := manager.findAllAntigravityCreditsCandidateAuths(context.Background(), "claude-sonnet-4-6", opts)
+	if errCandidates != nil {
+		t.Fatalf("findAllAntigravityCreditsCandidateAuths() error = %v", errCandidates)
+	}
+	if len(candidates) != 1 || candidates[0].auth.ID != "ranked-credits-available" {
+		t.Fatalf("candidates = %#v, want available candidate from next rank", candidates)
 	}
 }
 

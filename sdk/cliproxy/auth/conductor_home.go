@@ -1021,10 +1021,11 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 	}
 	m.mu.RUnlock()
 
-	candidates = narrowCreditsCandidatesToLowestRank(candidateSet, candidates)
-
-	var known []creditsCandidateEntry
-	var unknown []creditsCandidateEntry
+	// Credit availability is part of eligibility. Filter known-unavailable
+	// credentials before choosing the lowest surviving request-scoped rank, so
+	// an exhausted lower rank cannot hide an eligible higher-ranked fallback.
+	knownAvailable := make(map[string]bool, len(candidates))
+	eligible := make([]creditsCandidateEntry, 0, len(candidates))
 	for _, candidate := range candidates {
 		hint, okHint, errHint := GetAntigravityCreditsHintRequired(ctx, candidate.auth.ID)
 		if errHint != nil {
@@ -1034,6 +1035,16 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 			if !hint.Available {
 				continue
 			}
+			knownAvailable[candidate.auth.ID] = true
+		}
+		eligible = append(eligible, candidate)
+	}
+	eligible = narrowCreditsCandidatesToLowestRank(candidateSet, eligible)
+
+	var known []creditsCandidateEntry
+	var unknown []creditsCandidateEntry
+	for _, candidate := range eligible {
+		if knownAvailable[candidate.auth.ID] {
 			known = append(known, candidate)
 			continue
 		}
