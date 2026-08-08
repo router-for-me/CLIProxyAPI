@@ -139,6 +139,56 @@ export function Stat({ label, value, delta }) {
   );
 }
 
+// KpiCard renders a single metric tile used in the home KPI rows. tone drives
+// the accent rail + icon/number tint so status-bearing metrics (alerts,
+// failures, budget pressure) read at a glance without losing the neutral
+// baseline. Icons are dependency-free inline SVGs passed by the caller.
+export function KpiCard({ label, value, hint, tone = 'neutral', icon }) {
+  const toneClass = tone === 'ok' ? 'kpi-card--ok'
+    : tone === 'warn' ? 'kpi-card--warn'
+    : tone === 'danger' ? 'kpi-card--danger'
+    : tone === 'accent' ? 'kpi-card--accent'
+    : '';
+  return (
+    <div className={`kpi-card ${toneClass}`}>
+      <div className="kpi-card__head">
+        <div className="kpi-card__label">{label}</div>
+        {icon && <div className="kpi-card__icon">{icon}</div>}
+      </div>
+      <div className="kpi-card__value">{value}</div>
+      <div className="kpi-card__hint">{hint}</div>
+    </div>
+  );
+}
+
+// KpiSkeleton is a shimmer placeholder for a KPI value while its data loads,
+// keeping the card footprint stable (no layout shift on arrival).
+export function KpiSkeleton() {
+  return (
+    <div className="kpi-card">
+      <div className="kpi-skeleton">
+        <span className="kpi-skeleton__line" />
+        <span className="kpi-skeleton__line kpi-skeleton__line--val" />
+      </div>
+    </div>
+  );
+}
+
+// CardSkeleton renders N shimmer lines for list-style cards while loading,
+// with varied widths so the placeholder reads as organic content.
+export function CardSkeleton({ rows = 3 }) {
+  const widths = [62, 48, 72, 40, 80];
+  return (
+    <div className="card-skel">
+      {Array.from({ length: rows }).map((_, i) => (
+        <div key={i} className="card-skel__row">
+          <span className="card-skel__bar" style={{ width: `${widths[i % widths.length]}%` }} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function errorMessage(err) {
   if (!err) return 'Unknown error';
   if (err.message) return err.message;

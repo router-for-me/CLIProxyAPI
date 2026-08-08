@@ -2524,6 +2524,32 @@ tr:focus-within .row-actions {
   gap: 12px;
   font-size: 12px;
 }
+
+/* Models Catalog — expandable-row affordance.
+   The row is clickable to reveal extra metadata; give it a chevron with a
+   void mouse/keyboard affordance and a subtle tint when open so the intent
+   and current state are both legible. */
+.mc-model-id {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.mc-expand-chevron {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  color: var(--text-dim);
+  transition: transform 0.16s ease, color 0.16s ease;
+}
+.mc-expand-chevron--open {
+  transform: rotate(90deg);
+  color: var(--accent);
+}
+.table tbody tr.mc-row--expanded > td {
+  background: var(--accent-dim);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
 .row-expanded__field {
   display: flex;
   flex-direction: column;
@@ -3429,6 +3455,14 @@ button.ghost:hover:not(:disabled) {
   filter: brightness(1.08);
 }
 
+/* API Keys page uses `.is-selected` (rather than `.row--selected`) on its
+   clickable rows; give the checked state the same accent tint so selected
+   rows are visually distinct from the row-link hover. */
+.table tbody tr.row-link.is-selected,
+.table tbody tr.row-link.is-selected:hover {
+  background: var(--accent-dim);
+}
+
 /* Bulk-action bar — sits directly below the table (inside the same card),
    full-width accent-tinted strip. Three columns: count, breakdown chips,
    actions. Wraps gracefully on narrow widths. */
@@ -3646,6 +3680,29 @@ button.ghost:hover:not(:disabled) {
   color: var(--danger);
   border-color: var(--danger);
   background: var(--danger-dim);
+}
+/* Primary action — the emphasized button in a row-action cluster (e.g. Edit
+   in the Models Catalog). Accent border + tint so it reads as the main
+   affordance next to the quieter secondary actions. */
+.row-actions__btn--primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.row-actions__btn--primary:hover {
+  border-color: var(--accent-hover);
+  color: var(--accent-hover);
+  background: var(--accent-dim);
+}
+/* Pricing action — a distinct info-toned variant so it stands apart from the
+   generic secondary actions without competing with the primary Edit. */
+.row-actions__btn--pricing {
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+}
+.row-actions__btn--pricing:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-dim);
 }
 
 /* model-access-source — the Entity-settings | Model-Group segmented switch in
@@ -3985,6 +4042,372 @@ button.ghost:hover:not(:disabled) {
 }
 
 /* =========================================================================
+   Dashboard overview (DashboardPage)
+   Scoped classes used by the landing page only — the shared .card / .grid /
+   .stat-card primitives are left untouched so other pages stay consistent.
+   ========================================================================= */
+
+/* KPI cards — a slightly richer surface than .stat-card for the home row.
+   Sets tabular figures so the numeric values line up across cards. */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+@media (max-width: 1100px) {
+  .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .kpi-grid { grid-template-columns: 1fr; }
+}
+.kpi-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px 14px;
+  overflow: hidden;
+  transition: border-color 0.14s ease, box-shadow 0.14s ease, transform 0.14s ease;
+}
+/* Subtle top accent rail, tinted per tone (ok / warn / danger / neutral). */
+.kpi-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: var(--border-strong);
+  opacity: 0.6;
+}
+.kpi-card--ok::before    { background: var(--success); opacity: 0.8; }
+.kpi-card--warn::before  { background: var(--warning); opacity: 0.8; }
+.kpi-card--danger::before{ background: var(--danger);  opacity: 0.8; }
+.kpi-card--accent::before{ background: var(--accent);  opacity: 0.8; }
+.kpi-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+  transform: translateY(-1px);
+}
+.kpi-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.kpi-card__icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.kpi-card--ok .kpi-card__icon      { color: var(--success); }
+.kpi-card--warn .kpi-card__icon    { color: var(--warning); }
+.kpi-card--danger .kpi-card__icon  { color: var(--danger); }
+.kpi-card--accent .kpi-card__icon  { color: var(--accent); }
+.kpi-card__icon svg { width: 17px; height: 17px; }
+.kpi-card__label {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.kpi-card__value {
+  font-family: var(--mono);
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+/* Tone the number itself (not just the rail) for status-bearing cards. */
+.kpi-card--ok .kpi-card__value      { color: var(--success); }
+.kpi-card--warn .kpi-card__value    { color: var(--warning); }
+.kpi-card--danger .kpi-card__value  { color: var(--danger); }
+.kpi-card--accent .kpi-card__value  { color: var(--accent); }
+.kpi-card__hint {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.kpi-card__hint a { color: var(--accent); }
+.kpi-card__hint a:hover { color: var(--accent-hover); }
+
+/* KPI shimmer — value-line placeholder while totals load (prevents layout
+   shift and the jarring spinner-in-card look). */
+.kpi-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.kpi-skeleton__line {
+  height: 12px;
+  width: 60%;
+  background: linear-gradient(90deg, var(--bg-elevated) 0%, var(--bg-card) 50%, var(--bg-elevated) 100%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  border-radius: 3px;
+}
+.kpi-skeleton__line--val {
+  height: 26px;
+  width: 40%;
+}
+
+/* Dashboard row gap — page-level vertical rhythm between card rows. */
+.dash-row {
+  margin-top: 16px;
+}
+
+/* Leaderboard (Top models) — value beside the bar + per-rank accent so the
+   ranking reads at a glance without looking at the Cost column only. */
+.lb-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.lb-row:last-child { border-bottom: none; }
+.lb-row__rank {
+  flex: 0 0 auto;
+  width: 16px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.lb-row__rank--top { color: var(--accent); font-weight: 600; }
+.lb-row__model {
+  flex: 0 0 180px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+}
+.lb-row__bar {
+  flex: 1 1 auto;
+  height: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  overflow: hidden;
+}
+.lb-row__fill {
+  height: 100%;
+  background: var(--accent);
+  opacity: 0.7;
+  border-radius: var(--radius-sm);
+  transition: width 0.25s ease;
+}
+.lb-row__cost {
+  flex: 0 0 auto;
+  min-width: 76px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Compact list rows (cooldown providers / active alerts) — tighter rhythm
+   than a plain .cooldown-list so several rows fit in a card. */
+.dash-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.dash-list__item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+.dash-list__item:first-child { padding-top: 0; }
+.dash-list__item:last-child { border-bottom: none; padding-bottom: 0; }
+.dash-list__time {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.dash-list__msg {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.dash-list__code {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1px 8px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+}
+
+/* Health summary tiles inside the Model health card. */
+.kpi-mini {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+.kpi-mini__value {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.kpi-mini__label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+/* Card list skeleton — a few shimmer lines for list-style cards while
+   loading, keeping the card height stable. */
+.card-skel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 0;
+}
+.card-skel__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.card-skel__bar {
+  display: inline-block;
+  height: 11px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--bg-elevated) 0%, var(--bg-card) 50%, var(--bg-elevated) 100%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+/* =========================================================================
+   Internal Users overview
+   ========================================================================= */
+
+/* Leaderboard ("Top N by Spend") — spend shown as a bar beside each row so
+   the ranking reads at a glance, mirroring the dashboard's Top Models list. */
+.iu-lb-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.iu-lb-row:last-child { border-bottom: none; }
+.iu-lb-row__rank {
+  flex: 0 0 18px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.iu-lb-row__rank--top { color: var(--accent); font-weight: 600; }
+.iu-lb-row__user {
+  flex: 1 1 160px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text);
+}
+.iu-lb-row__user a { color: inherit; }
+.iu-lb-row__user a:hover { color: var(--accent); }
+.iu-lb-row__bar {
+  flex: 2 1 auto;
+  height: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  overflow: hidden;
+}
+.iu-lb-row__fill {
+  height: 100%;
+  border-radius: var(--radius-sm);
+  transition: width 0.25s ease;
+}
+.iu-lb-row__fill--ok    { background: var(--success); opacity: 0.75; }
+.iu-lb-row__fill--warn  { background: var(--warning); opacity: 0.85; }
+.iu-lb-row__fill--bad   { background: var(--danger);  opacity: 0.9; }
+.iu-lb-row__spend {
+  flex: 0 0 auto;
+  min-width: 92px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.iu-lb-row__keys {
+  flex: 0 0 auto;
+  min-width: 48px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Light mode leaderboard bar track. */
+[data-theme="light"] .iu-lb-row__bar {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+/* Filter toolbar — one line of filters with a leading icon/title, tighter
+   than stacked .form__row cards. */
+.iu-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+.iu-toolbar__field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.iu-toolbar__field--role { flex: 1 1 150px; }
+.iu-toolbar__field--sort { flex: 1 1 140px; }
+.iu-toolbar__field--search { flex: 2 1 220px; }
+.iu-toolbar__label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+/* =========================================================================
    Light Theme & Overrides
    ========================================================================= */
 
@@ -4049,6 +4472,19 @@ button.ghost:hover:not(:disabled) {
 }
 [data-theme="light"] .dropzone--hover {
   background: rgba(0, 0, 0, 0.02);
+}
+/* Dashboard overview KPI / leaderboard surfaces that hardcode dark RGBA
+   shadows or bar tracks get matched to the light palette. */
+[data-theme="light"] .kpi-card:hover {
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
+}
+[data-theme="light"] .lb-row__bar {
+  background: rgba(0, 0, 0, 0.06);
+}
+[data-theme="light"] .kpi-skeleton__line,
+[data-theme="light"] .card-skel__bar {
+  background: linear-gradient(90deg, var(--bg-elevated) 0%, var(--border) 50%, var(--bg-elevated) 100%);
+  background-size: 200% 100%;
 }
 
 /* Sidebar footer theme toggle */
