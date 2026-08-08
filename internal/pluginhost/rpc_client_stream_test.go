@@ -14,6 +14,7 @@ import (
 
 func TestRPCExecuteStreamKeepsHostCallbackScopeUntilStreamCloses(t *testing.T) {
 	host := New()
+	httpClient := host.newHTTPClient(nil)
 	client := newStreamCallbackPluginClient()
 	adapter := &rpcPluginAdapter{
 		id:     "stream-plugin",
@@ -21,7 +22,7 @@ func TestRPCExecuteStreamKeepsHostCallbackScopeUntilStreamCloses(t *testing.T) {
 		client: client,
 	}
 
-	stream, errStream := adapter.ExecuteStream(context.Background(), pluginapi.ExecutorRequest{Stream: true})
+	stream, errStream := adapter.ExecuteStream(context.Background(), pluginapi.ExecutorRequest{Stream: true, HTTPClient: httpClient})
 	if errStream != nil {
 		t.Fatalf("ExecuteStream() error = %v", errStream)
 	}
@@ -31,6 +32,9 @@ func TestRPCExecuteStreamKeepsHostCallbackScopeUntilStreamCloses(t *testing.T) {
 	}
 	if !callbackContextExists(host, client.callbackID) {
 		t.Fatal("host callback scope closed before plugin stream closed")
+	}
+	if got := host.callbackHTTPClient(client.callbackID); got != httpClient {
+		t.Fatalf("callback HTTP client = %T, want selected auth-aware client", got)
 	}
 
 	closeReq, errMarshal := json.Marshal(rpcStreamCloseRequest{StreamID: client.streamID})
