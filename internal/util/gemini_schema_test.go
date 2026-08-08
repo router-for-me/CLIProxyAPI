@@ -834,6 +834,145 @@ func TestCleanJSONSchemaForAntigravityResponsePreservesEnumType(t *testing.T) {
 	}
 }
 
+func TestCleanJSONSchemaRemovesEmptyEnumValues(t *testing.T) {
+	input := `{
+		"type":"object",
+		"properties":{
+			"mixed":{"type":"string","enum":["ready","",null,"done"]},
+			"empty":{"type":"string","enum":["",null]}
+		}
+	}`
+
+	for _, testCase := range []struct {
+		name  string
+		clean func(string) string
+	}{
+		{name: "gemini", clean: CleanJSONSchemaForGemini},
+		{name: "antigravity", clean: CleanJSONSchemaForAntigravity},
+		{name: "antigravity_response", clean: CleanJSONSchemaForAntigravityResponse},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			result := gjson.Parse(testCase.clean(input))
+			mixed := result.Get("properties.mixed.enum")
+			if !mixed.IsArray() {
+				t.Fatalf("mixed enum was removed: %s", result.Raw)
+			}
+
+			var got []string
+			for _, value := range mixed.Array() {
+				got = append(got, value.String())
+			}
+			if want := []string{"ready", "done"}; !reflect.DeepEqual(got, want) {
+				t.Errorf("mixed enum values = %v, want %v: %s", got, want, result.Raw)
+			}
+			if result.Get("properties.empty.enum").Exists() {
+				t.Errorf("empty-only enum was retained: %s", result.Raw)
+			}
+		})
+	}
+}
+
+func TestCleanJSONSchemaForcesStringTypeWhenDroppingEmptyEnums(t *testing.T) {
+	// Tool cleaners force enum parents to string. Dropping an all-invalid enum must
+	// still apply that rewrite so const:null / type:null enums do not leave type:null.
+	input := `{
+		"type":"object",
+		"properties":{
+			"null_enum":{"type":"null","enum":[null,""]},
+			"const_null":{"const":null}
+		}
+	}`
+
+	for _, testCase := range []struct {
+		name          string
+		clean         func(string) string
+		wantEmptyType string
+		wantConstType string
+	}{
+		{
+			name:          "gemini",
+			clean:         CleanJSONSchemaForGemini,
+			wantEmptyType: "string",
+			wantConstType: "string",
+		},
+		{
+			name:          "antigravity",
+			clean:         CleanJSONSchemaForAntigravity,
+			wantEmptyType: "string",
+			wantConstType: "string",
+		},
+		{
+			name:  "antigravity_response",
+			clean: CleanJSONSchemaForAntigravityResponse,
+			// Response path preserves declared types when only enum is dropped.
+			wantEmptyType: "null",
+			// const is converted to enum then dropped; type is not forced.
+			wantConstType: "",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			result := gjson.Parse(testCase.clean(input))
+
+			if result.Get("properties.null_enum.enum").Exists() {
+				t.Fatalf("null_enum enum was retained: %s", result.Raw)
+			}
+			if result.Get("properties.const_null.enum").Exists() {
+				t.Fatalf("const_null enum was retained: %s", result.Raw)
+			}
+
+			gotEmptyType := result.Get("properties.null_enum.type").String()
+			if gotEmptyType != testCase.wantEmptyType {
+				t.Errorf("null_enum.type = %q, want %q: %s", gotEmptyType, testCase.wantEmptyType, result.Raw)
+			}
+
+			gotConstType := result.Get("properties.const_null.type").String()
+			if gotConstType != testCase.wantConstType {
+				t.Errorf("const_null.type = %q, want %q: %s", gotConstType, testCase.wantConstType, result.Raw)
+			}
+			if result.Get("properties.const_null.const").Exists() {
+				t.Errorf("const keyword should have been converted away: %s", result.Raw)
+			}
+		})
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_RemovesNullAndEmptyEnumValues(t *testing.T) {
+	// Field-shaped schemas that trigger Gemini "enum[n]: cannot be empty" when null is
+	// listed alongside string enum values (e.g. optional enums from schema generators).
+	input := `{
+		"type": "object",
+		"properties": {
+			"todos": {
+				"type": "array",
+				"items": {
+					"type": "object",
+					"properties": {
+						"status": {"type": ["string", "null"], "enum": ["pending", "in_progress", "completed", "cancelled", null, ""]}
+					}
+				}
+			},
+			"capability_mode": {"type": ["string", "null"], "enum": ["read-only", "read-write", "execute", "all", null]}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	for _, path := range []string{
+		"properties.todos.items.properties.status.enum",
+		"properties.capability_mode.enum",
+	} {
+		values := gjson.Get(result, path).Array()
+		if len(values) != 4 {
+			t.Fatalf("%s contains %d values, want 4: %s", path, len(values), result)
+		}
+		for _, value := range values {
+			if value.Type != gjson.String || value.String() == "" {
+				t.Fatalf("%s contains invalid enum value %q: %s", path, value.Raw, result)
+			}
+		}
+	}
+}
+
 // ============================================================================
 // Format field handling (ad-hoc patch removal)
 // ============================================================================
