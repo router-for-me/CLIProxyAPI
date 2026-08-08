@@ -176,6 +176,29 @@ func TestForwardResponsesStreamReassemblesSplitSSEEventChunks(t *testing.T) {
 	}
 }
 
+func TestForwardResponsesStreamDropsNonStandardKeepaliveEvents(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 6)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte("event: keepalive")
+	data <- []byte(`data: {"type":"keepalive","sequence_number":186}`)
+	data <- []byte("\n")
+	data <- []byte("event: response.created")
+	data <- []byte(`data: {"type":"response.created","response":{"id":"resp-1"}}`)
+	data <- []byte("\n")
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+
+	got := strings.TrimSuffix(recorder.Body.String(), "\n")
+	want := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n"
+	if got != want {
+		t.Fatalf("unexpected keepalive filtering.\nGot:  %q\nWant: %q", got, want)
+	}
+}
+
 func TestForwardResponsesStreamPreservesValidFullSSEEventChunks(t *testing.T) {
 	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
 
