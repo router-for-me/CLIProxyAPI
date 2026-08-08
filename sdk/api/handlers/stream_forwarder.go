@@ -8,6 +8,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 )
 
+// KeepAliveSSEComment is the SSE comment written as a heartbeat while a stream is idle.
+// Comments are ignored by SSE clients but keep the connection from going idle.
+const KeepAliveSSEComment = ": keep-alive\n\n"
+
 type StreamForwardOptions struct {
 	// KeepAliveInterval overrides the configured streaming keep-alive interval.
 	// If nil, the configured default is used. If set to <= 0, keep-alives are disabled.
@@ -45,7 +49,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 	writeKeepAlive := opts.WriteKeepAlive
 	if writeKeepAlive == nil {
 		writeKeepAlive = func() {
-			_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+			_, _ = c.Writer.Write([]byte(KeepAliveSSEComment))
 		}
 	}
 

@@ -188,7 +188,6 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 	}
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -197,45 +196,45 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
 
-	// Peek at the first chunk
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			cliCancel(c.Request.Context().Err())
-			return
-		case errMsg, ok := <-errChan:
-			if !ok {
-				// Err channel closed cleanly; wait for data channel.
-				errChan = nil
-				continue
+	// An `alt` stream is raw JSON rather than SSE, so an SSE comment heartbeat would
+	// corrupt the body. Disable heartbeats there, as forwardGeminiStream already does.
+	var keepAliveInterval *time.Duration
+	if alt != "" {
+		keepAliveInterval = new(time.Duration)
+	}
+
+	h.BootstrapStream(c, flusher, handlers.StreamBootstrapOptions{
+		KeepAliveInterval: keepAliveInterval,
+		Execute: func() (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+			return h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
+		},
+		SetSSEHeaders: setSSEHeaders,
+		WriteCommittedError: func(errMsg *interfaces.ErrorMessage) []byte {
+			if errMsg == nil {
+				return nil
 			}
-			// Upstream failed immediately. Return proper error status and JSON.
+			status := http.StatusInternalServerError
+			if errMsg.StatusCode > 0 {
+				status = errMsg.StatusCode
+			}
+			errText := http.StatusText(status)
+			if errMsg.Error != nil && errMsg.Error.Error() != "" {
+				errText = errMsg.Error.Error()
+			}
+			body := handlers.BuildErrorResponseBody(status, errText)
+			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
+			return body
+		},
+		WriteUncommittedError: func(errMsg *interfaces.ErrorMessage) {
 			h.WriteErrorResponse(c, errMsg)
-			if errMsg != nil {
-				cliCancel(errMsg.Error)
-			} else {
-				cliCancel(nil)
-			}
-			return
-		case chunk, ok := <-dataChan:
-			if !ok {
-				// Closed without data
+		},
+		OnFirstChunk: func(headersCommitted bool, upstreamHeaders http.Header, chunk []byte) {
+			if !headersCommitted {
 				if alt == "" {
 					setSSEHeaders()
 				}
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				flusher.Flush()
-				cliCancel(nil)
-				return
 			}
-
-			// Success! Set headers.
-			if alt == "" {
-				setSSEHeaders()
-			}
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-
-			// Write first chunk
 			if alt == "" {
 				_, _ = c.Writer.Write([]byte("data: "))
 				_, _ = c.Writer.Write(chunk)
@@ -244,12 +243,20 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 				_, _ = c.Writer.Write(chunk)
 			}
 			flusher.Flush()
-
-			// Continue
-			h.forwardGeminiStream(c, flusher, alt, func(err error) { cliCancel(err) }, dataChan, errChan)
-			return
-		}
-	}
+		},
+		OnStreamClosedWithoutData: func(headersCommitted bool, upstreamHeaders http.Header) {
+			if !headersCommitted {
+				if alt == "" {
+					setSSEHeaders()
+				}
+				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			}
+		},
+		Forward: func(data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+			h.forwardGeminiStream(c, flusher, alt, func(err error) { cliCancel(err) }, data, errs)
+		},
+		Cancel: func(err error) { cliCancel(err) },
+	})
 }
 
 // handleCountTokens handles token counting requests for Gemini models.
@@ -304,7 +311,7 @@ func (h *GeminiAPIHandler) handleGenerateContent(c *gin.Context, modelName strin
 func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flusher, alt string, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 	var keepAliveInterval *time.Duration
 	if alt != "" {
-		keepAliveInterval = new(time.Duration(0))
+		keepAliveInterval = new(time.Duration)
 	}
 
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
