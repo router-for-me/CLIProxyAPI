@@ -372,6 +372,7 @@ export default function ModelsCatalogPage() {
                     model={m}
                     liveIDs={liveIDs}
                     density={density}
+                    isGlobal={distinctIds}
                     expanded={expandedId === `${m.id}|${m.provider}`}
                     onToggleExpand={() => setExpandedId((cur) =>
                       cur === `${m.id}|${m.provider}` ? null : `${m.id}|${m.provider}`,
@@ -437,29 +438,47 @@ export default function ModelsCatalogPage() {
   );
 }
 
-function ModelRow({ model, liveIDs, density, expanded, onToggleExpand, onEdit, onGlobalEdit }) {
+function ModelRow({ model, liveIDs, density, isGlobal, expanded, onToggleExpand, onEdit, onGlobalEdit }) {
   const isLive = liveIDs ? !!liveIDs[String(model.id || '').toLowerCase()] : true;
   return (
     <>
-      <tr style={{ cursor: 'pointer' }} onClick={onToggleExpand}>
+      <tr
+        className={expanded ? 'mc-row--expanded' : ''}
+        onClick={onToggleExpand}
+        aria-expanded={expanded}
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggleExpand(); } }}
+        title={expanded ? 'Collapse details' : 'Expand details'}
+      >
         <td>
-          <div className="mono">
+          <div className="mono mc-model-id">
+            <ExpandChevron expanded={expanded} />
             <LiveBadge live={isLive} />
-            {model.id}
+            <span>{model.id}</span>
           </div>
           {model.user_defined && (
             <span className="badge badge--muted" style={{ marginTop: 2 }}>user-defined</span>
           )}
         </td>
         <td><span className="badge badge--muted">{model.provider}</span></td>
-        <td><span className="badge">{model.official_provider || '—'}</span></td>
+        <td><span className="badge badge--info">{model.official_provider || '—'}</span></td>
         <td className="mono">{formatTokens(model.context_length)}</td>
         <td className="mono">{formatTokens(model.max_completion_tokens)}</td>
         <td><InlinePricing model={model} /></td>
         <td onClick={(e) => e.stopPropagation()}>
           <div className="row-actions">
-            <button className="row-actions__btn--primary" onClick={onEdit}>Edit</button>
-            <button onClick={() => onGlobalEdit?.(model.id)}>Global edit</button>
+            <button
+              className="row-actions__btn row-actions__btn--primary"
+              onClick={onEdit}
+              title="Edit this model's catalog entry"
+            >Edit</button>
+            {isGlobal && (
+              <button
+                className="row-actions__btn"
+                onClick={() => onGlobalEdit?.(model.id)}
+                title="Edit pricing / fields for every row with this model ID"
+              >Global edit</button>
+            )}
             <PricingButton modelId={model.id} />
           </div>
         </td>
@@ -513,7 +532,11 @@ function PricingButton({ modelId }) {
   const [open, setOpen] = useState(false);
   return (
     <>
-      <button onClick={() => setOpen(true)}>Pricing</button>
+      <button
+        className="row-actions__btn row-actions__btn--pricing"
+        onClick={() => setOpen(true)}
+        title="Set USD-per-token pricing for this model"
+      >Pricing</button>
       {open && <PricingModal modelId={modelId} onClose={() => setOpen(false)} />}
     </>
   );
@@ -646,6 +669,26 @@ function LiveBadge({ live }) {
     return <span className="live-dot live-dot--on" title="Live in registry" aria-label="live" />;
   }
   return <span className="live-dot live-dot--off" title="Not in current registry" aria-label="stale" />;
+}
+
+// ExpandChevron renders a small chevron affording that a catalog row is
+// expandable. Rotates 90° when the row is expanded so the affordance gives
+// continuous feedback.
+function ExpandChevron({ expanded }) {
+  return (
+    <svg
+      className={`mc-expand-chevron${expanded ? ' mc-expand-chevron--open' : ''}`}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M6 3.5l4 4.5-4 4.5" />
+    </svg>
+  );
 }
 
 // formatRelativeTime renders a short "2m ago" / "just now" string from an
