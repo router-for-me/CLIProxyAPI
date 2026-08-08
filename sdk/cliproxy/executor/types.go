@@ -213,3 +213,12 @@ type RequestScopedError interface {
 	error
 	IsRequestScoped() bool
 }
+
+// AvailabilityNeutral marks an error that should not change credential availability
+// (no cooldown, no suspension) while still allowing the auth manager to failover
+// to the next credential. Unlike RequestScopedError, AvailabilityNeutral does not
+// stop the failover loop.
+type AvailabilityNeutral interface {
+	error
+	AvailabilityNeutral() bool
+}

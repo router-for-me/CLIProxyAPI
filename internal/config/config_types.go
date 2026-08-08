@@ -448,6 +448,13 @@ type CodexKey struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// DisableImageGeneration disables image_generation tool injection/passthrough for this
+	// credential when true. This overrides a global disable-image-generation of false/off so
+	// mixed Codex upstreams can keep image gen enabled globally while excluding providers that
+	// reject hosted image_generation tools (e.g. "Image generation is not enabled for this group").
+	// It cannot re-enable image generation when the global mode is true/chat/passthrough.
+	DisableImageGeneration bool `yaml:"disable-image-generation,omitempty" json:"disable-image-generation,omitempty"`
 }
 
 func (k CodexKey) GetAPIKey() string { return k.APIKey }

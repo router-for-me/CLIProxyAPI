@@ -286,3 +286,175 @@ func TestEnsureImageGenerationTool_FreeCodexAuthDoesNotInjectTool(t *testing.T) 
 		t.Fatalf("expected no tools for free codex auth, got %s", gjson.GetBytes(result, "tools").Raw)
 	}
 }
+
+func TestShouldInjectImageGeneration_GlobalModes(t *testing.T) {
+	if !shouldInjectImageGeneration(nil, nil) {
+		t.Fatal("nil cfg should inject")
+	}
+	if !shouldInjectImageGeneration(&config.Config{}, nil) {
+		t.Fatal("Off mode should inject")
+	}
+	cfgAll := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}}
+	if shouldInjectImageGeneration(cfgAll, nil) {
+		t.Fatal("All mode must not inject")
+	}
+	cfgChat := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationChat}}
+	if shouldInjectImageGeneration(cfgChat, nil) {
+		t.Fatal("Chat mode must not inject")
+	}
+}
+
+func TestShouldInjectImageGeneration_PerAuthOverride(t *testing.T) {
+	cfgOff := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationOff}}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"disable_image_generation": true}}
+	if shouldInjectImageGeneration(cfgOff, auth) {
+		t.Fatal("per-auth override must block injection when global is Off")
+	}
+	authFalse := &cliproxyauth.Auth{Metadata: map[string]any{"disable_image_generation": false}}
+	if !shouldInjectImageGeneration(cfgOff, authFalse) {
+		t.Fatal("false override must be treated as unset")
+	}
+}
+
+func TestApplyCodexImageGenerationPolicy_PerAuthOverrideStripsClientTool(t *testing.T) {
+	cfgOff := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationOff}}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"disable-image-generation": true}}
+	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"image_generation","output_format":"png"},{"type":"function","name":"f1"}],"tool_choice":{"type":"image_generation"}}`)
+	result := applyCodexImageGenerationPolicy(cfgOff, auth, body, "gpt-5.4", nil)
+
+	tools := gjson.GetBytes(result, "tools")
+	if !tools.IsArray() || len(tools.Array()) != 1 {
+		t.Fatalf("expected only function tool remaining, got %s", tools.Raw)
+	}
+	if tools.Array()[0].Get("type").String() != "function" {
+		t.Fatalf("expected remaining tool type=function, got %s", tools.Array()[0].Get("type").String())
+	}
+	if gjson.GetBytes(result, "tool_choice").Exists() {
+		t.Fatalf("expected tool_choice removed, got %s", gjson.GetBytes(result, "tool_choice").Raw)
+	}
+}
+
+func TestApplyCodexImageGenerationPolicy_InjectsWhenEnabled(t *testing.T) {
+	cfgOff := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationOff}}
+	body := []byte(`{"model":"gpt-5.4","input":"draw a cat"}`)
+	result := applyCodexImageGenerationPolicy(cfgOff, nil, body, "gpt-5.4", nil)
+	tools := gjson.GetBytes(result, "tools")
+	if !tools.IsArray() || len(tools.Array()) != 1 {
+		t.Fatalf("expected injected image_generation tool, got %s", tools.Raw)
+	}
+	if tools.Array()[0].Get("type").String() != "image_generation" {
+		t.Fatalf("expected type=image_generation, got %s", tools.Array()[0].Get("type").String())
+	}
+}
+
+func TestApplyCodexImageGenerationPolicy_GlobalChatDoesNotInject(t *testing.T) {
+	cfgChat := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationChat}}
+	body := []byte(`{"model":"gpt-5.4","input":"draw a cat"}`)
+	result := applyCodexImageGenerationPolicy(cfgChat, nil, body, "gpt-5.4", nil)
+	if gjson.GetBytes(result, "tools").Exists() {
+		t.Fatalf("expected no tools injection in chat mode, got %s", gjson.GetBytes(result, "tools").Raw)
+	}
+}
+
+func TestCodexAuthImageGenerationDisabledErr(t *testing.T) {
+	if err := codexAuthImageGenerationDisabledErr(nil); err != nil {
+		t.Fatalf("nil auth must allow image generation, got %v", err)
+	}
+	if err := codexAuthImageGenerationDisabledErr(&cliproxyauth.Auth{}); err != nil {
+		t.Fatalf("auth without override must allow image generation, got %v", err)
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"disable_image_generation": true}}
+	err := codexAuthImageGenerationDisabledErr(auth)
+	if err == nil {
+		t.Fatal("expected error for disabled image-generation auth")
+	}
+	se, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error %T does not expose StatusCode()", err)
+	}
+	if got := se.StatusCode(); got != http.StatusForbidden {
+		t.Fatalf("StatusCode() = %d, want %d", got, http.StatusForbidden)
+	}
+}
+
+func TestExecuteOpenAIImage_PerAuthDisableFailsFast(t *testing.T) {
+	exec := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"disable_image_generation": true},
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": "http://127.0.0.1:1",
+		},
+	}
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-image-2",
+		Payload: []byte(`{"model":"gpt-image-2","prompt":"a cat"}`),
+	}, codexOpenAIImageTestOptions(codexImagesGenerationsPath, false))
+	if err == nil {
+		t.Fatal("expected per-auth image disable to reject /v1/images path")
+	}
+	se, ok := err.(interface{ StatusCode() int })
+	if !ok || se.StatusCode() != http.StatusForbidden {
+		t.Fatalf("got err=%v status, want 403", err)
+	}
+}
+
+func TestExecuteOpenAIImageStream_PerAuthDisableFailsFast(t *testing.T) {
+	exec := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"disable-image-generation": true},
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": "http://127.0.0.1:1",
+		},
+	}
+	_, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-image-2",
+		Payload: []byte(`{"model":"gpt-image-2","prompt":"a cat","stream":true}`),
+	}, codexOpenAIImageTestOptions(codexImagesGenerationsPath, true))
+	if err == nil {
+		t.Fatal("expected per-auth image disable to reject streaming /v1/images path")
+	}
+	se, ok := err.(interface{ StatusCode() int })
+	if !ok || se.StatusCode() != http.StatusForbidden {
+		t.Fatalf("got err=%v status, want 403", err)
+	}
+}
+
+func TestStripCodexImageGenerationIfDisabled(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"image_generation"},{"type":"function","name":"f1"}],"tool_choice":{"type":"image_generation"}}`)
+	if got := stripCodexImageGenerationIfDisabled(nil, body); string(got) != string(body) {
+		t.Fatalf("nil auth must leave body unchanged")
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"disable_image_generation": true}}
+	got := stripCodexImageGenerationIfDisabled(auth, body)
+	tools := gjson.GetBytes(got, "tools")
+	if !tools.IsArray() || len(tools.Array()) != 1 || tools.Array()[0].Get("type").String() != "function" {
+		t.Fatalf("expected only function tool remaining, got %s", tools.Raw)
+	}
+	if gjson.GetBytes(got, "tool_choice").Exists() {
+		t.Fatalf("expected tool_choice removed, got %s", gjson.GetBytes(got, "tool_choice").Raw)
+	}
+}
+
+func TestCodexAuthImageGenerationDisabledErr_AvailabilityNeutral(t *testing.T) {
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"disable_image_generation": true}}
+	err := codexAuthImageGenerationDisabledErr(auth)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	// Must expose StatusCode for conductor status routing.
+	if se, ok := err.(interface{ StatusCode() int }); !ok || se.StatusCode() != http.StatusForbidden {
+		t.Fatalf("StatusCode() = %v, want 403", se)
+	}
+	// Must expose AvailabilityNeutral so MarkResult skips cooldown while preserving failover.
+	if an, ok := err.(interface{ AvailabilityNeutral() bool }); !ok || !an.AvailabilityNeutral() {
+		t.Fatal("expected AvailabilityNeutral() true to avoid credential cooldown without stopping failover")
+	}
+	// Must NOT be request-scoped (that would stop failover).
+	if rs, ok := err.(interface{ IsRequestScoped() bool }); ok && rs.IsRequestScoped() {
+		t.Fatal("must not be request-scoped — that would prevent failover to next credential")
+	}
+}

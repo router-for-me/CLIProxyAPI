@@ -82,6 +82,9 @@ func (e *CodexExecutor) resolveGPTImage2BaseModel() string {
 }
 
 func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if errDisabled := codexAuthImageGenerationDisabledErr(auth); errDisabled != nil {
+		return resp, errDisabled
+	}
 	if directEndpoint := codexDirectOpenAIImageEndpoint(req, opts); directEndpoint != "" {
 		return e.executeDirectOpenAIImage(ctx, auth, req, opts, directEndpoint)
 	}
@@ -179,6 +182,9 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 }
 
 func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if errDisabled := codexAuthImageGenerationDisabledErr(auth); errDisabled != nil {
+		return nil, errDisabled
+	}
 	if directEndpoint := codexDirectOpenAIImageEndpoint(req, opts); directEndpoint != "" {
 		return e.executeDirectOpenAIImageStream(ctx, auth, req, opts, directEndpoint)
 	}
@@ -316,6 +322,9 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 }
 
 func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (resp cliproxyexecutor.Response, err error) {
+	if errDisabled := codexAuthImageGenerationDisabledErr(auth); errDisabled != nil {
+		return resp, errDisabled
+	}
 	body, contentType, model, errPrepare := codexPrepareDirectOpenAIImageBody(req, opts, false)
 	if errPrepare != nil {
 		return resp, errPrepare
@@ -377,6 +386,9 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 }
 
 func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {
+	if errDisabled := codexAuthImageGenerationDisabledErr(auth); errDisabled != nil {
+		return nil, errDisabled
+	}
 	body, contentType, model, errPrepare := codexPrepareDirectOpenAIImageBody(req, opts, true)
 	if errPrepare != nil {
 		return nil, errPrepare

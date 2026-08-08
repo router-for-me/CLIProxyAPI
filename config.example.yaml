@@ -344,6 +344,10 @@ nonstream-keepalive-interval: 0
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     # optional: per-auth override — when true, never inject/forward image_generation for this credential
+#     # even if the global disable-image-generation is false. Useful for mixed Codex upstreams where some
+#     # providers reject hosted image tools ("Image generation is not enabled for this group").
+#     disable-image-generation: false
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
 #     alpha-search: false # optional: allow this key to serve /v1/alpha/search via base-url + /alpha/search
 #     headers:
