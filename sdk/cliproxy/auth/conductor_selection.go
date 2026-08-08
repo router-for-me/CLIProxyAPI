@@ -1135,6 +1135,35 @@ func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts c
 	return selected, nil
 }
 
+// SelectAuthMixed selects one credential through the configured scheduling
+// strategy across an explicit set of provider executor keys. The provider list
+// and any ranked-candidate metadata are request scoped; neither mutates global
+// auth priority or replaces the configured scheduler.
+//
+// This is the public mixed-provider counterpart of SelectAuth. It exists for
+// callers whose one semantic operation has compatible routes on more than one
+// provider and therefore cannot safely probe providers with multiple selection
+// calls. Exactly one mixed selection funnel is entered.
+func (m *Manager) SelectAuthMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options) (*Auth, error) {
+	if m != nil && m.HomeEnabled() {
+		if errCandidates := homeRankedCandidateGuard(opts); errCandidates != nil {
+			return nil, errCandidates
+		}
+		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
+	}
+	selected, _, _, errPick := m.pickNextMixed(ctx, providers, model, opts, nil)
+	if errPick != nil {
+		return nil, errPick
+	}
+	if selected == nil {
+		return nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+	}
+	if m.HomeEnabled() {
+		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
+	}
+	return selected, nil
+}
+
 // SelectAuthByKind selects one credential of the required kind through the
 // configured scheduling strategy. Credentials of other kinds are skipped.
 func (m *Manager) SelectAuthByKind(ctx context.Context, provider, model, requiredKind string, opts cliproxyexecutor.Options) (*Auth, error) {

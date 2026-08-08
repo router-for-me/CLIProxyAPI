@@ -893,3 +893,41 @@ func TestManagerRankedCandidatesAreIsolatedBetweenConcurrentRequests(t *testing.
 		t.Fatalf("concurrent selection error = %v", errWorker)
 	}
 }
+
+func TestManagerSelectAuthMixedAppliesRankedCandidatesAcrossProviders(t *testing.T) {
+	manager := newRankedCandidateTestManager(t, &RoundRobinSelector{},
+		&Auth{ID: "gemini-low", Provider: "gemini"},
+		&Auth{ID: "codex-high", Provider: "codex"},
+	)
+	opts := rankedCandidateOptions(
+		cliproxyexecutor.AuthSelectionCandidate{AuthID: "gemini-low", PriorityRank: 5, StableOrder: 0},
+		cliproxyexecutor.AuthSelectionCandidate{AuthID: "codex-high", PriorityRank: 0, StableOrder: 0},
+	)
+
+	selected, errSelect := manager.SelectAuthMixed(context.Background(), []string{"gemini", "codex"}, "", opts)
+	if errSelect != nil {
+		t.Fatalf("SelectAuthMixed() error = %v", errSelect)
+	}
+	if selected == nil || selected.ID != "codex-high" {
+		t.Fatalf("SelectAuthMixed() auth = %#v, want codex-high", selected)
+	}
+}
+
+func TestManagerSelectAuthMixedRejectsRankedCandidatesInHomeBeforeDispatch(t *testing.T) {
+	dispatcher := &rankedHomeTestDispatcher{}
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{provider: "gemini"}
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+
+	_, errSelect := manager.SelectAuthMixed(context.Background(), []string{"gemini"}, "", rankedCandidateOptions(
+		cliproxyexecutor.AuthSelectionCandidate{AuthID: "auth-a"},
+	))
+	var authErr *Error
+	if !errors.As(errSelect, &authErr) || authErr.Code != "ranked_candidates_unsupported_in_home" {
+		t.Fatalf("SelectAuthMixed() error = %#v, want ranked_candidates_unsupported_in_home", errSelect)
+	}
+	if calls := dispatcher.dispatchCalls(); calls != 0 {
+		t.Fatalf("home dispatch calls = %d, want 0", calls)
+	}
+}
