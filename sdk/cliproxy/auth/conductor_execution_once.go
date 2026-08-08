@@ -344,7 +344,7 @@ func (m *Manager) DoHTTPOnce(ctx context.Context, in HTTPOnceRequest) (*http.Res
 		return nil, facts, &Error{Code: "invalid_request", Message: "http request url is empty", HTTPStatus: http.StatusBadRequest}
 	}
 
-	auth, executor, _, errResolve := m.resolveDurableAuthForOnce(in.AuthID, "")
+	auth, executor, providerKey, errResolve := m.resolveDurableAuthForOnce(in.AuthID, "")
 	if errResolve != nil {
 		return nil, facts, errResolve
 	}
@@ -357,6 +357,17 @@ func (m *Manager) DoHTTPOnce(ctx context.Context, in HTTPOnceRequest) (*http.Res
 
 	prepared, errPrepare := m.prepareRequestAuth(ctx, executor, auth)
 	if errPrepare != nil {
+		if errCancel := claudeOAuthRequestCancellation(ctx, auth, errPrepare); errCancel != nil {
+			return nil, facts, errCancel
+		}
+		marker := &onceResultMarker{}
+		marker.record(ctx, m, Result{
+			AuthID:   auth.ID,
+			Provider: providerKey,
+			Model:    strings.TrimSpace(in.Model),
+			Success:  false,
+			Error:    resultErrorFromError(errPrepare),
+		}, strings.TrimSpace(in.Model) != "")
 		return nil, facts, errPrepare
 	}
 	auth = prepared
@@ -442,6 +453,7 @@ func (m *Manager) httpOnce(ctx context.Context, auth *Auth, req *http.Request, m
 	marker := &onceResultMarker{}
 	result := Result{AuthID: auth.ID, Provider: executorKeyFromAuth(auth), Model: model}
 	availabilityRelevant := false
+	redirectFollowed := guard.followedRedirect()
 	switch {
 	case resp == nil:
 		result.Success = false
@@ -465,6 +477,14 @@ func (m *Manager) httpOnce(ctx context.Context, auth *Auth, req *http.Request, m
 		// Credential health is model scoped here. With no model, a success would
 		// clear the whole credential's quota state and a failure would suspend the
 		// credential outright, so an unattributed call is only ever observed.
+		availabilityRelevant = false
+	}
+	if redirectFollowed {
+		// Every allowed redirect hop has its credential headers stripped. The
+		// terminal response therefore says nothing reliable about the selected
+		// credential: a 401/403 can be caused solely by the stripped hop, while a
+		// success can come from a signed or otherwise public target. Keep all such
+		// results observable but availability-neutral.
 		availabilityRelevant = false
 	}
 	marker.record(tracedCtx, m, result, availabilityRelevant)
@@ -824,6 +844,7 @@ type onceRedirectGuard struct {
 	mu           sync.Mutex
 	refused      bool
 	refusedAfter string
+	followed     bool
 }
 
 // checkRedirect implements http.Client.CheckRedirect.
@@ -841,10 +862,21 @@ func (g *onceRedirectGuard) checkRedirect(req *http.Request, via []*http.Request
 		g.mu.Unlock()
 		return http.ErrUseLastResponse
 	}
+	g.mu.Lock()
+	g.followed = true
+	g.mu.Unlock()
 	if req != nil {
 		stripSensitiveRedirectHeaders(req.Header)
 	}
 	return nil
+}
+
+// followed reports whether at least one redirect was allowed after stripping
+// credential headers from the next hop.
+func (g *onceRedirectGuard) followedRedirect() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.followed
 }
 
 // denied reports whether a redirect was refused and where it pointed.

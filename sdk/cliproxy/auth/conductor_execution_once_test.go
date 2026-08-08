@@ -1392,3 +1392,90 @@ func TestOnceAttemptRecorderFacts(t *testing.T) {
 		})
 	}
 }
+
+// oncePrepareAuthExecutor fails the request-scoped credential preparation seam
+// before any HTTP request can be constructed or dispatched.
+type oncePrepareAuthExecutor struct {
+	*onceTestExecutor
+	prepareAuthErr error
+}
+
+func (e *oncePrepareAuthExecutor) ShouldPrepareRequestAuth(*Auth) bool { return true }
+
+func (e *oncePrepareAuthExecutor) PrepareRequestAuth(context.Context, *Auth) (*Auth, error) {
+	return nil, e.prepareAuthErr
+}
+
+func TestManagerDoHTTPOnce_RequestAuthPreparationFailureIsRecordedWithoutDispatch(t *testing.T) {
+	executor := &oncePrepareAuthExecutor{
+		onceTestExecutor: &onceTestExecutor{provider: "codex"},
+		prepareAuthErr:   &onceStatusError{status: http.StatusUnauthorized, message: "credential acquisition failed"},
+	}
+	hook := &onceResultHook{}
+	manager := NewManager(nil, &RoundRobinSelector{}, hook)
+	manager.RegisterExecutor(executor)
+	if _, err := manager.Register(context.Background(), newOnceTestAuth("prepare-auth-failure")); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	resp, facts, errDo := manager.DoHTTPOnce(context.Background(), HTTPOnceRequest{
+		AuthID: "prepare-auth-failure",
+		Model:  "test-model",
+		URL:    "https://example.invalid/never-dispatched",
+	})
+	if resp != nil {
+		t.Fatalf("response = %#v, want nil", resp)
+	}
+	if code := onceErrorCode(errDo); code != "credential acquisition failed" {
+		t.Fatalf("DoHTTPOnce() error = %v, want preparation failure", errDo)
+	}
+	if facts.RequestCount != 0 || facts.RequestWritten || facts.RequestWrittenObserved || facts.ResponseStarted {
+		t.Fatalf("facts = %+v, want undispatched attempt", facts)
+	}
+	if got := executor.prepareCalls.Load(); got != 0 {
+		t.Fatalf("HTTP credential injections = %d, want 0", got)
+	}
+	results := hook.snapshot()
+	if len(results) != 1 {
+		t.Fatalf("recorded results = %d, want 1", len(results))
+	}
+	if results[0].Success || results[0].AuthID != "prepare-auth-failure" || results[0].Provider != "codex" || results[0].Model != "test-model" {
+		t.Fatalf("recorded result = %+v, want the pinned credential preparation failure", results[0])
+	}
+}
+
+func TestManagerHTTPOnceCore_FollowedUnauthenticatedRedirectIsAvailabilityNeutral(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "/protected")
+		w.WriteHeader(http.StatusFound)
+	})
+	mux.HandleFunc("/protected", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization") + "|" + r.Header.Get("X-Api-Key"); got != "|" {
+			t.Errorf("credential headers on followed hop = %q, want stripped", got)
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	server := httptest.NewTLSServer(mux)
+	defer server.Close()
+
+	manager, hook := newOnceTestManager(t, &onceTestExecutor{provider: "codex"}, newOnceTestAuth("redirect-neutral"))
+	auth := onceAuthByID(t, manager, "redirect-neutral")
+	ctx := newOnceTLSContext(server)
+	resp, facts, errDo := httpOnceWithAuth(manager, ctx, auth, onceHTTPRequest(t, ctx, http.MethodGet, server.URL+"/start", nil), HTTPRedirectSameOriginSafe)
+	if errDo != nil {
+		t.Fatalf("httpOnceWithAuth() error = %v", errDo)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnauthorized || facts.RequestCount != 2 {
+		t.Fatalf("response status/facts = %d/%+v, want 401 after two requests", resp.StatusCode, facts)
+	}
+	results := hook.snapshot()
+	if len(results) != 1 || results[0].Success {
+		t.Fatalf("recorded results = %+v, want one observable failure", results)
+	}
+	stored := onceAuthByID(t, manager, "redirect-neutral")
+	if state := stored.ModelStates["test-model"]; state != nil && state.Unavailable {
+		t.Fatalf("model state = %+v, want stripped redirect-hop failure to remain availability-neutral", state)
+	}
+}
