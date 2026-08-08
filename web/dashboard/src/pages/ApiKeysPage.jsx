@@ -98,6 +98,15 @@ export default function ApiKeysPage() {
     return { active, disabled, revokedOrExpired, unassigned };
   }, [keys]);
 
+  // Status breakdown of the currently selected rows, for the bulk-action bar.
+  const selectedBreakdown = useMemo(() => {
+    const byStatus = new Map();
+    filteredKeys
+      .filter((k) => selectedIds.includes(k.id))
+      .forEach((k) => byStatus.set(k.status, (byStatus.get(k.status) || 0) + 1));
+    return [...byStatus.entries()].sort((a, b) => b[1] - a[1]);
+  }, [filteredKeys, selectedIds]);
+
   function handlePageChange(newPage) {
     if (newPage < 1 || newPage > totalPages) return;
     setPage(newPage);
@@ -317,44 +326,15 @@ export default function ApiKeysPage() {
           </select>
         </div>
 
-        {/* Bulk Action Sub-Toolbar */}
+        {/* Bulk Action Bar */}
         {selectedIds.length > 0 && (
-          <div
-            className="row gap-sm"
-            style={{
-              marginTop: 12,
-              paddingTop: 12,
-              borderTop: '1px solid var(--border)',
-              alignItems: 'center',
-            }}
-          >
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--accent)' }}>
-              {selectedIds.length} key(s) selected
-            </span>
-            <button
-              type="button"
-              className="primary"
-              style={{ fontSize: 12, padding: '4px 10px' }}
-              onClick={() => handleBulkStatusChange('active')}
-            >
-              Enable Selected
-            </button>
-            <button
-              type="button"
-              style={{ fontSize: 12, padding: '4px 10px' }}
-              onClick={() => handleBulkStatusChange('disabled')}
-            >
-              Disable Selected
-            </button>
-            <button
-              type="button"
-              className="linklike"
-              style={{ marginLeft: 'auto', fontSize: 12 }}
-              onClick={() => setSelectedIds([])}
-            >
-              Deselect all
-            </button>
-          </div>
+          <BulkActionBar
+            total={selectedIds.length}
+            breakdown={selectedBreakdown}
+            onEnable={() => handleBulkStatusChange('active')}
+            onDisable={() => handleBulkStatusChange('disabled')}
+            onClear={() => setSelectedIds([])}
+          />
         )}
       </div>
 
@@ -545,6 +525,31 @@ function SkeletonRows({ columns, rows }) {
         </tr>
       ))}
     </>
+  );
+}
+
+// BulkActionBar — full-width accent strip shown when rows are selected,
+// matching the shared .bulk-action-bar pattern (count + status breakdown
+// chips + actions) used on the Upstream Providers page.
+function BulkActionBar({ total, breakdown, onEnable, onDisable, onClear }) {
+  return (
+    <div className="bulk-action-bar" role="region" aria-label="Bulk actions">
+      <div className="bulk-action-bar__count">
+        <strong>{total}</strong> key(s) selected
+      </div>
+      <div className="bulk-action-bar__breakdown">
+        {breakdown.map(([status, n]) => (
+          <span key={status} className="filter-chip" title={`${n} ${status}`}>
+            {status}<span className="dim">×{n}</span>
+          </span>
+        ))}
+      </div>
+      <div className="bulk-action-bar__actions">
+        <button onClick={onEnable} title="Enable selected">✓ Enable</button>
+        <button onClick={onDisable} title="Disable selected">⊘ Disable</button>
+        <button className="ghost" onClick={onClear} title="Clear selection">Clear</button>
+      </div>
+    </div>
   );
 }
 
@@ -862,7 +867,7 @@ function UserAlertIcon() {
 
 function RefreshIcon() {
   return (
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M13 6A5 5 0 0 0 3.5 5" />
       <path d="M3 2.5V5h2.5" />
       <path d="M3 10A5 5 0 0 0 12.5 11" />
