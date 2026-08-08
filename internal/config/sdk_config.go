@@ -51,6 +51,11 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// APIKeyProfiles contains named client keys with optional model access and
+	// weekly or monthly usage limits. Plain APIKeys remain supported for
+	// backwards compatibility.
+	APIKeyProfiles []APIKeyProfile `yaml:"api-key-profiles,omitempty" json:"api-key-profiles,omitempty"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`

@@ -139,7 +139,9 @@ CLIProxyAPIガイド：[https://help.router-for.me/](https://help.router-for.me/
 
 ## 使用量統計
 
-v6.10.0以降、CLIProxyAPIおよび [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) プロジェクトには使用量統計機能がプリセットされなくなりました。使用量統計が必要な場合は、次のプロジェクトをご利用ください：
+CLIProxyAPI には、デフォルトで無効な API Key 別の使用量記録機能があります。下流ユーザーごとの名前付き Key、週次・月次のリクエスト数と Token 制限、モデル許可リスト、SQLite 集計を設定できます。詳細は [Per-key usage accounting and limits](docs/per-key-usage.md) を参照してください。
+
+課金向け分析、費用見積もり、外部データベースが必要な場合は、次の専用プロジェクトをご利用ください：
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 
