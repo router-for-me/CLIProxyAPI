@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import ModelGroupForm, { formToGroup } from '../components/ModelGroupForm.jsx';
-import { Modal, Spinner, ErrorBanner, EmptyState } from '../components/Primitives.jsx';
+import { Modal, ErrorBanner, EmptyState, CatalogSkeleton, KpiCard, KpiSkeleton } from '../components/Primitives.jsx';
 import Pager from '../components/Pager.jsx';
 import { useAsync } from '../hooks/useAsync.js';
 import { useToast } from '../components/Toast.jsx';
@@ -28,6 +28,23 @@ export default function ModelGroupsPage() {
     setPage(newPage);
   }
 
+  // Summary metrics from the current page (groups loaded).
+  const summary = useMemo(() => {
+    const totalModels = groups.reduce(
+      (a, g) => a + (Array.isArray(g.allowed_models) ? g.allowed_models.length : 0),
+      0,
+    );
+    const routed = groups.filter((g) => (Array.isArray(g.model_routes) ? g.model_routes.length : 0) > 0).length;
+    const blocked = groups.filter((g) => (Array.isArray(g.blocked_models) ? g.blocked_models.length : 0) > 0).length;
+    return {
+      totalModels,
+      avgPerGroup: groups.length ? (totalModels / groups.length).toFixed(1) : '0',
+      routed,
+      blocked,
+      total: groups.length,
+    };
+  }, [groups]);
+
   return (
     <>
       <div className="main__header">
@@ -41,12 +58,50 @@ export default function ModelGroupsPage() {
           </div>
         </div>
         <div className="row gap-sm">
-          <button onClick={() => { reload(); toast.info('Groups refreshed'); }}>Refresh</button>
+          <button onClick={() => { reload(); toast.info('Groups refreshed'); }}>
+            <RefreshIcon /> Refresh
+          </button>
           <button className="primary" onClick={() => setShowCreate(true)}>+ New Group</button>
         </div>
       </div>
 
-      <div className="card">
+      {/* KPI cards */}
+      <div className="kpi-grid">
+        {loading ? (
+          <>
+            <KpiSkeleton /><KpiSkeleton /><KpiSkeleton /><KpiSkeleton />
+          </>
+        ) : (
+          <>
+            <KpiCard
+              label="Total Groups"
+              value={String(total)}
+              icon={<GroupsIcon />}
+            />
+            <KpiCard
+              label="Allowed Models (page)"
+              value={summary.totalModels.toLocaleString()}
+              hint={`avg ${summary.avgPerGroup} per group`}
+              icon={<ModelsIcon />}
+            />
+            <KpiCard
+              label="Groups with Routing"
+              value={String(summary.routed)}
+              hint={summary.routed ? `${Math.round((summary.routed / (summary.total || 1)) * 100)}% of page` : 'no per-model routes'}
+              tone={summary.routed > 0 ? 'accent' : 'neutral'}
+              icon={<RouteIcon />}
+            />
+            <KpiCard
+              label="Groups with Block Lists"
+              value={String(summary.blocked)}
+              hint="groups with explicit exclusions"
+              icon={<BlockIcon />}
+            />
+          </>
+        )}
+      </div>
+
+      <div className="card dash-row">
         <div className="catalog-toolbar">
           <input
             className="search-input"
@@ -65,7 +120,17 @@ export default function ModelGroupsPage() {
 
       {loading && (
         <div className="card" style={{ padding: 0 }}>
-          <Spinner label="Loading groups…" />
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Name</th><th>Description</th><th>Allowed</th>
+                <th>Blocked</th><th>Routed</th><th>Updated</th><th />
+              </tr>
+            </thead>
+            <tbody>
+              <CatalogSkeleton columns={7} rows={6} />
+            </tbody>
+          </table>
         </div>
       )}
 
@@ -224,5 +289,64 @@ function CreateGroupModal({ onClose, onCreated }) {
     >
       <ModelGroupForm initial={null} onChange={setForm} />
     </Modal>
+  );
+}
+
+// --- Inline KPI / button icons (dependency-free, matching the design) ---
+
+const ITEM_PROPS = {
+  viewBox: '0 0 16 16',
+  fill: 'none',
+  stroke: 'currentColor',
+  strokeWidth: '1.5',
+  strokeLinecap: 'round',
+  strokeLinejoin: 'round',
+};
+
+function RefreshIcon() {
+  return (
+    <svg {...ITEM_PROPS} width="14" height="14">
+      <path d="M13 6A5 5 0 0 0 3.5 5" />
+      <path d="M3 2.5V5h2.5" />
+      <path d="M3 10A5 5 0 0 0 12.5 11" />
+      <path d="M13 13.5V11h-2.5" />
+    </svg>
+  );
+}
+
+function GroupsIcon() {
+  return (
+    <svg {...ITEM_PROPS}>
+      <circle cx="6" cy="5" r="2" />
+      <path d="M2.5 13c0-1.8 1.5-3.2 3.5-3.2s3.5 1.4 3.5 3.2" />
+      <path d="M12 3.5v4M10 5.5h4" />
+    </svg>
+  );
+}
+
+function ModelsIcon() {
+  return (
+    <svg {...ITEM_PROPS}>
+      <path d="M8 1l6 3.5v7L8 15l-6-3.5v-7L8 1zM8 1v14M2 4.5l6 3.5 6-3.5" />
+    </svg>
+  );
+}
+
+function RouteIcon() {
+  return (
+    <svg {...ITEM_PROPS}>
+      <circle cx="3" cy="8" r="1.7" />
+      <circle cx="13" cy="8" r="1.7" />
+      <path d="M4.7 8h6.6" />
+    </svg>
+  );
+}
+
+function BlockIcon() {
+  return (
+    <svg {...ITEM_PROPS}>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M4.5 4.5l7 7" />
+    </svg>
   );
 }
