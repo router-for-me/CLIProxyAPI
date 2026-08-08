@@ -10,6 +10,10 @@ import (
 )
 
 func (m *Manager) executeHome(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, countTokens bool) (cliproxyexecutor.Response, error) {
+	// Fail closed before the dispatch loop starts: Home cannot honour ranked auth candidates.
+	if errCandidates := homeRankedCandidateGuard(opts); errCandidates != nil {
+		return cliproxyexecutor.Response{}, errCandidates
+	}
 	if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
 		defer unlockSession()
 	}

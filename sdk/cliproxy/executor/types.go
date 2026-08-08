@@ -34,6 +34,9 @@ const GenerateMetadataKey = "generate"
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
+	// AuthSelectionCandidatesMetadataKey restricts auth selection to an explicit ranked
+	// candidate list. Its value must be a []AuthSelectionCandidate.
+	AuthSelectionCandidatesMetadataKey = "auth_selection_candidates"
 	// SelectedAuthMetadataKey stores the auth ID selected by the scheduler.
 	SelectedAuthMetadataKey = "selected_auth_id"
 	// SelectedAuthCallbackMetadataKey carries an optional callback invoked with the selected auth ID.
@@ -49,6 +52,32 @@ const (
 	// CallerScopeMetadataKey isolates inferred session identities between downstream callers.
 	CallerScopeMetadataKey = "caller_scope"
 )
+
+// AuthSelectionCandidate describes one credential a caller allows for a single request.
+// The candidate list is request scoped: it never mutates persistent auth priority, and it
+// restricts selection to exactly the listed credentials.
+//
+// Like PinnedAuthMetadataKey and DisallowFreeAuthMetadataKey, narrowing the candidate list
+// for one request can perturb smooth weighted round-robin bookkeeping observed by concurrent
+// requests, because that strategy derives its running state from the eligible weight vector.
+// Round-robin and fill-first only advance on a match and are unaffected.
+type AuthSelectionCandidate struct {
+	// AuthID is the manager registered credential identifier.
+	AuthID string
+	// PriorityRank groups candidates into request-scoped ranks; the lowest rank that still
+	// contains an eligible credential is the only rank the configured scheduler runs within.
+	PriorityRank uint32
+	// StableOrder does not influence selection order within a rank. Once a rank is
+	// chosen, the configured scheduler alone decides which of that rank's credentials
+	// runs, and it observes its own ordering; nothing in this package reorders the
+	// candidates by this value.
+	//
+	// The field exists so a caller can record a deterministic, reproducible candidate
+	// list alongside the request: it is validated to be unique within a rank, so a
+	// stored plan identifies each candidate unambiguously and a routing decision can
+	// be replayed and explained after the fact. It is an audit key, not a preference.
+	StableOrder uint32
+}
 
 // Request encapsulates the translated payload that will be sent to a provider executor.
 type Request struct {

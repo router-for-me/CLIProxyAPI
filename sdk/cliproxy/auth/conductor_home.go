@@ -708,6 +708,11 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	if m == nil {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	// Defensive: Home dispatch cannot honour a ranked candidate list, so fail closed here as
+	// well as in pickHomeDispatchSelection to keep the intent local to every selection funnel.
+	if errCandidates := homeRankedCandidateGuard(opts); errCandidates != nil {
+		return nil, nil, "", errCandidates
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -730,6 +735,11 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, opts cliproxyexecutor.Options) (*HomeDispatchSelection, error) {
 	if m == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	// Home selects remotely and exposes no local candidate filter, so a ranked request fails
+	// closed before session retention, before BeginDispatch, and before any remote dispatch.
+	if errCandidates := homeRankedCandidateGuard(opts); errCandidates != nil {
+		return nil, errCandidates
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -974,6 +984,10 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 		return nil, nil
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	candidateSet, errCandidates := authSelectionCandidatesFromMetadata(opts.Metadata)
+	if errCandidates != nil {
+		return nil, errCandidates
+	}
 	var candidates []creditsCandidateEntry
 	m.mu.RLock()
 	for _, auth := range m.auths {
@@ -981,6 +995,11 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 			continue
 		}
 		if pinnedAuthID != "" && auth.ID != pinnedAuthID {
+			continue
+		}
+		// This fallback path has no eligibility filter of its own; the request-scoped candidate
+		// list must still hold so a ranked request never executes on an unlisted credential.
+		if !candidateSet.allows(auth.ID) {
 			continue
 		}
 		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
@@ -1002,8 +1021,11 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 	}
 	m.mu.RUnlock()
 
-	var known []creditsCandidateEntry
-	var unknown []creditsCandidateEntry
+	// Credit availability is part of eligibility. Filter known-unavailable
+	// credentials before choosing the lowest surviving request-scoped rank, so
+	// an exhausted lower rank cannot hide an eligible higher-ranked fallback.
+	knownAvailable := make(map[string]bool, len(candidates))
+	eligible := make([]creditsCandidateEntry, 0, len(candidates))
 	for _, candidate := range candidates {
 		hint, okHint, errHint := GetAntigravityCreditsHintRequired(ctx, candidate.auth.ID)
 		if errHint != nil {
@@ -1013,18 +1035,31 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 			if !hint.Available {
 				continue
 			}
-			known = append(known, candidate)
-			continue
+			knownAvailable[candidate.auth.ID] = true
 		}
-		unknown = append(unknown, candidate)
+		eligible = append(eligible, candidate)
 	}
-	sort.Slice(known, func(i, j int) bool {
-		return known[i].auth.ID < known[j].auth.ID
+	// Preserve the full eligible rank ladder. The caller attempts candidates in
+	// this order, so retaining higher ranks lets it advance after every candidate
+	// in a lower rank has failed. Within one rank, a known-available credit hint
+	// precedes an unknown hint; auth ID is only a deterministic tie-breaker.
+	sort.Slice(eligible, func(i, j int) bool {
+		leftRank, rightRank := uint32(0), uint32(0)
+		if candidateSet != nil {
+			leftRank, _ = candidateSet.rankFor(eligible[i].auth.ID)
+			rightRank, _ = candidateSet.rankFor(eligible[j].auth.ID)
+		}
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		leftKnown := knownAvailable[eligible[i].auth.ID]
+		rightKnown := knownAvailable[eligible[j].auth.ID]
+		if leftKnown != rightKnown {
+			return leftKnown
+		}
+		return eligible[i].auth.ID < eligible[j].auth.ID
 	})
-	sort.Slice(unknown, func(i, j int) bool {
-		return unknown[i].auth.ID < unknown[j].auth.ID
-	})
-	return append(known, unknown...), nil
+	return eligible, nil
 }
 
 type creditsCandidateEntry struct {

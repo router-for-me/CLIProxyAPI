@@ -56,6 +56,14 @@ type authSelectionEligibility struct {
 	requiredKind     string
 	credentialPolicy string
 	disallowFreeAuth bool
+	// candidates restricts selection to a request-scoped ranked candidate allow list.
+	candidates *rankedCandidateSet
+	// activeRank is the candidate rank the current selection attempt is restricted to.
+	activeRank uint32
+	// activeRankSet reports whether activeRank narrows the candidate list.
+	activeRankSet bool
+	// candidatesInvalid fails selection closed when candidate metadata is malformed.
+	candidatesInvalid bool
 }
 
 func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
@@ -80,11 +88,38 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
 	}
+	eligibility.applyRankedCandidates(ctx, opts)
 	return eligibility
+}
+
+// applyRankedCandidates narrows the eligibility to the request-scoped ranked candidate list.
+// The active rank is read from the context first because the built-in scheduler and the
+// plugin delegation path re-derive eligibility from context and options rather than receiving it.
+func (e *authSelectionEligibility) applyRankedCandidates(ctx context.Context, opts cliproxyexecutor.Options) {
+	if active, ok := activeSelectionRankFromContext(ctx); ok {
+		e.candidates = active.candidates
+		e.activeRank = active.rank
+		e.activeRankSet = active.candidates != nil
+		return
+	}
+	set, errCandidates := authSelectionCandidatesFromMetadata(opts.Metadata)
+	if errCandidates != nil {
+		// The selection funnel reports the typed error; eligibility only fails closed so no
+		// path that skipped the funnel can widen selection past a malformed candidate list.
+		e.candidatesInvalid = true
+		return
+	}
+	e.candidates = set
 }
 
 func (e authSelectionEligibility) allows(auth *Auth) bool {
 	if auth == nil {
+		return false
+	}
+	if e.candidatesInvalid {
+		return false
+	}
+	if e.candidates != nil && !e.candidates.allowsAtRank(auth.ID, e.activeRank, e.activeRankSet) {
 		return false
 	}
 	if e.requiredKind != "" && auth.AuthKind() != e.requiredKind {
@@ -994,6 +1029,12 @@ func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) boo
 }
 
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	return runRankedSingleSelection(ctx, opts, func(rankCtx context.Context) (*Auth, ProviderExecutor, error) {
+		return m.pickNextLegacyWithinRank(rankCtx, provider, model, opts, tried)
+	})
+}
+
+func (m *Manager) pickNextLegacyWithinRank(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
 	if m.HomeEnabled() {
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
 		return auth, exec, err
@@ -1094,6 +1135,35 @@ func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts c
 	return selected, nil
 }
 
+// SelectAuthMixed selects one credential through the configured scheduling
+// strategy across an explicit set of provider executor keys. The provider list
+// and any ranked-candidate metadata are request scoped; neither mutates global
+// auth priority or replaces the configured scheduler.
+//
+// This is the public mixed-provider counterpart of SelectAuth. It exists for
+// callers whose one semantic operation has compatible routes on more than one
+// provider and therefore cannot safely probe providers with multiple selection
+// calls. Exactly one mixed selection funnel is entered.
+func (m *Manager) SelectAuthMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options) (*Auth, error) {
+	if m != nil && m.HomeEnabled() {
+		if errCandidates := homeRankedCandidateGuard(opts); errCandidates != nil {
+			return nil, errCandidates
+		}
+		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
+	}
+	selected, _, _, errPick := m.pickNextMixed(ctx, providers, model, opts, nil)
+	if errPick != nil {
+		return nil, errPick
+	}
+	if selected == nil {
+		return nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+	}
+	if m.HomeEnabled() {
+		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
+	}
+	return selected, nil
+}
+
 // SelectAuthByKind selects one credential of the required kind through the
 // configured scheduling strategy. Credentials of other kinds are skipped.
 func (m *Manager) SelectAuthByKind(ctx context.Context, provider, model, requiredKind string, opts cliproxyexecutor.Options) (*Auth, error) {
@@ -1154,6 +1224,9 @@ func (m *Manager) SelectHomeAuthWithCredentialPolicy(ctx context.Context, provid
 	if m == nil || !m.HomeEnabled() {
 		return nil, &Error{Code: "home_unavailable", Message: "home control center unavailable", HTTPStatus: http.StatusServiceUnavailable}
 	}
+	if errCandidates := homeRankedCandidateGuard(opts); errCandidates != nil {
+		return nil, errCandidates
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1203,6 +1276,9 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
 	if m == nil || !m.HomeEnabled() {
 		return nil, &Error{Code: "home_unavailable", Message: "home control center unavailable", HTTPStatus: http.StatusServiceUnavailable}
 	}
+	if errCandidates := homeRankedCandidateGuard(opts); errCandidates != nil {
+		return nil, errCandidates
+	}
 
 	homeAuthCount := homeAuthCountFromMetadata(opts.Metadata)
 	tried := make(map[string]struct{})
@@ -1242,6 +1318,12 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
 }
 
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	return runRankedSingleSelection(ctx, opts, func(rankCtx context.Context) (*Auth, ProviderExecutor, error) {
+		return m.pickNextWithinRank(rankCtx, provider, model, opts, tried)
+	})
+}
+
+func (m *Manager) pickNextWithinRank(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
 	if m.HomeEnabled() {
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
 		return auth, exec, err
@@ -1298,6 +1380,12 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 }
 
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	return runRankedMixedSelection(ctx, opts, func(rankCtx context.Context) (*Auth, ProviderExecutor, string, error) {
+		return m.pickNextMixedLegacyWithinRank(rankCtx, providers, model, opts, tried)
+	})
+}
+
+func (m *Manager) pickNextMixedLegacyWithinRank(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
@@ -1404,6 +1492,12 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	return runRankedMixedSelection(ctx, opts, func(rankCtx context.Context) (*Auth, ProviderExecutor, string, error) {
+		return m.pickNextMixedWithinRank(rankCtx, providers, model, opts, tried)
+	})
+}
+
+func (m *Manager) pickNextMixedWithinRank(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
