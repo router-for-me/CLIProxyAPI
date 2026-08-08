@@ -394,6 +394,32 @@ func TestManagerExecuteWithAuthOnce_RefreshFailureFailsClosed(t *testing.T) {
 	}
 }
 
+func TestManagerRefreshAuthForOnce_ReloadsCurrentAuthWhenNoLongerDue(t *testing.T) {
+	executor := &onceTestExecutor{provider: "codex"}
+	auth := newOnceTestAuth("refresh-reload")
+	auth.Metadata = map[string]any{"access_token": "stale-token"}
+	manager, _ := newOnceTestManager(t, executor, auth)
+
+	stale := onceAuthByID(t, manager, auth.ID)
+	manager.mu.Lock()
+	current := manager.auths[auth.ID].Clone()
+	current.Metadata["access_token"] = "fresh-token"
+	current.LastRefreshedAt = time.Now()
+	manager.auths[auth.ID] = current
+	manager.mu.Unlock()
+
+	reloaded, errRefresh := manager.refreshAuthForOnce(context.Background(), stale)
+	if errRefresh != nil {
+		t.Fatalf("refreshAuthForOnce() error = %v", errRefresh)
+	}
+	if got := authAccessToken(reloaded); got != "fresh-token" {
+		t.Fatalf("reloaded access token = %q, want fresh-token", got)
+	}
+	if got := executor.refreshCalls.Load(); got != 0 {
+		t.Fatalf("refresh calls = %d, want 0", got)
+	}
+}
+
 func TestManagerExecuteWithAuthOnce_ConcurrentRefreshWaitsForOwner(t *testing.T) {
 	refreshStarted := make(chan struct{})
 	releaseRefresh := make(chan struct{})

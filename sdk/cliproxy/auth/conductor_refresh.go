@@ -509,12 +509,17 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	defer lock.mu.Unlock()
 
 	m.mu.RLock()
-	auth := m.auths[id]
+	storedAuth := m.auths[id]
+	var auth *Auth
 	var exec ProviderExecutor
-	if auth != nil {
+	if storedAuth != nil {
+		// Clone while the manager lock protects the mutable stored auth. MarkResult
+		// updates that object in place, so cloning after unlock would race with
+		// concurrent request accounting.
+		auth = storedAuth.Clone()
 		// Use the same effective provider key as request execution so OpenAI-compat
 		// auths registered under namespaced keys still resolve for refresh.
-		exec = m.executors[executorKeyFromAuth(auth)]
+		exec = m.executors[executorKeyFromAuth(storedAuth)]
 	}
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {

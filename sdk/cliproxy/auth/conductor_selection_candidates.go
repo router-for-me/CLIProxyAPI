@@ -165,37 +165,6 @@ func rankedSelectionPlan(ctx context.Context, opts cliproxyexecutor.Options) ([]
 	return set.ranks, set, nil
 }
 
-// narrowCreditsCandidatesToLowestRank keeps only the lowest request-scoped rank that still holds a
-// candidate, mirroring the ladder the selection funnels walk. The credits fallback collection has
-// no eligibility filter of its own, so the ladder is applied here rather than inherited; its
-// caller orders the survivors.
-func narrowCreditsCandidatesToLowestRank(set *rankedCandidateSet, entries []creditsCandidateEntry) []creditsCandidateEntry {
-	if set == nil || len(entries) == 0 {
-		return entries
-	}
-	authIDs := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.auth != nil {
-			authIDs = append(authIDs, entry.auth.ID)
-		}
-	}
-	lowest, found := set.lowestRankPresent(authIDs)
-	if !found {
-		return nil
-	}
-	out := make([]creditsCandidateEntry, 0, len(entries))
-	for _, entry := range entries {
-		if entry.auth == nil {
-			continue
-		}
-		if rank, listed := set.rankFor(entry.auth.ID); !listed || rank != lowest {
-			continue
-		}
-		out = append(out, entry)
-	}
-	return out
-}
-
 // errRankedCandidatesUnsupportedInHome reports that Home dispatch cannot honour ranked candidates.
 // Home selection happens remotely and exposes no local candidate filter, so a ranked request
 // fails closed before any remote dispatch instead of silently selecting outside the list.

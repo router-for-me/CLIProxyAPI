@@ -750,8 +750,8 @@ func TestFindAllAntigravityCreditsCandidateAuthsHonoursRankedCandidates(t *testi
 	if errCandidates != nil {
 		t.Fatalf("findAllAntigravityCreditsCandidateAuths() error = %v", errCandidates)
 	}
-	if len(candidates) != 1 || candidates[0].auth.ID != "ranked-credits-b" {
-		t.Fatalf("candidates = %#v, want only ranked-credits-b", candidates)
+	if len(candidates) != 2 || candidates[0].auth.ID != "ranked-credits-b" || candidates[1].auth.ID != "ranked-credits-c" {
+		t.Fatalf("candidates = %#v, want ranked ladder [ranked-credits-b ranked-credits-c]", candidates)
 	}
 
 	invalidOpts := cliproxyexecutor.Options{Metadata: map[string]any{

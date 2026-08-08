@@ -625,6 +625,7 @@ func (m *Manager) refreshAuthForOnce(ctx context.Context, auth *Auth) (*Auth, er
 	now := time.Now()
 	m.mu.RLock()
 	current := m.auths[id]
+	currentSnapshot := current.Clone()
 	needsRefresh := current != nil && m.shouldRefresh(current, now)
 	if !needsRefresh && current != nil && !current.NextRefreshAfter.IsZero() && now.Before(current.NextRefreshAfter) {
 		// NextRefreshAfter also represents an in-flight refresh claim. Ignore it
@@ -642,12 +643,15 @@ func (m *Manager) refreshAuthForOnce(ctx context.Context, auth *Auth) (*Auth, er
 	}
 	m.mu.RUnlock()
 	if !needsRefresh {
+		if currentSnapshot != nil {
+			return currentSnapshot, nil
+		}
 		return auth, nil
 	}
 	if m.executorFor(providerKey) == nil {
 		return auth, nil
 	}
-	observedAccessToken := authAccessToken(current)
+	observedAccessToken := authAccessToken(currentSnapshot)
 	// markRefreshPending coordinates scheduling/backoff, but losing that claim
 	// does not mean the refresh is complete. Enter the per-auth refresh lock in
 	// either case and identify the credential version we observed so a waiter can

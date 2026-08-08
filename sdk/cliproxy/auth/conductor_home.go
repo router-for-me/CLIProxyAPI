@@ -1039,24 +1039,27 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 		}
 		eligible = append(eligible, candidate)
 	}
-	eligible = narrowCreditsCandidatesToLowestRank(candidateSet, eligible)
-
-	var known []creditsCandidateEntry
-	var unknown []creditsCandidateEntry
-	for _, candidate := range eligible {
-		if knownAvailable[candidate.auth.ID] {
-			known = append(known, candidate)
-			continue
+	// Preserve the full eligible rank ladder. The caller attempts candidates in
+	// this order, so retaining higher ranks lets it advance after every candidate
+	// in a lower rank has failed. Within one rank, a known-available credit hint
+	// precedes an unknown hint; auth ID is only a deterministic tie-breaker.
+	sort.Slice(eligible, func(i, j int) bool {
+		leftRank, rightRank := uint32(0), uint32(0)
+		if candidateSet != nil {
+			leftRank, _ = candidateSet.rankFor(eligible[i].auth.ID)
+			rightRank, _ = candidateSet.rankFor(eligible[j].auth.ID)
 		}
-		unknown = append(unknown, candidate)
-	}
-	sort.Slice(known, func(i, j int) bool {
-		return known[i].auth.ID < known[j].auth.ID
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		leftKnown := knownAvailable[eligible[i].auth.ID]
+		rightKnown := knownAvailable[eligible[j].auth.ID]
+		if leftKnown != rightKnown {
+			return leftKnown
+		}
+		return eligible[i].auth.ID < eligible[j].auth.ID
 	})
-	sort.Slice(unknown, func(i, j int) bool {
-		return unknown[i].auth.ID < unknown[j].auth.ID
-	})
-	return append(known, unknown...), nil
+	return eligible, nil
 }
 
 type creditsCandidateEntry struct {
