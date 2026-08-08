@@ -51,8 +51,9 @@ type ErrorDetail struct {
 const idempotencyKeyMetadataKey = "idempotency_key"
 
 const (
-	defaultStreamingKeepAliveSeconds = 0
-	defaultStreamingBootstrapRetries = 0
+	defaultStreamingKeepAliveSeconds   = 0
+	defaultStreamingBootstrapRetries   = 0
+	defaultStreamingTTFTTimeoutSeconds = 0
 	// Stream interceptor history is intentionally bounded and not configurable in the first SDK surface.
 	maxStreamInterceptorHistoryChunks = 64
 	maxStreamInterceptorHistoryBytes  = 1 << 20
@@ -144,6 +145,19 @@ func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 		retries = 0
 	}
 	return retries
+}
+
+// StreamingTTFTTimeout returns the maximum wait for the first non-empty upstream payload.
+// Returning 0 disables the timeout (default when unset).
+func StreamingTTFTTimeout(cfg *config.SDKConfig) time.Duration {
+	seconds := defaultStreamingTTFTTimeoutSeconds
+	if cfg != nil {
+		seconds = cfg.Streaming.TTFTTimeoutSeconds
+	}
+	if seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // PassthroughHeadersEnabled returns whether upstream response headers should be forwarded to clients.
