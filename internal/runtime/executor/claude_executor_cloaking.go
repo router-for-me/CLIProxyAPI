@@ -1184,31 +1184,11 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 // injectMessagesCacheControl adds cache_control to the second-to-last user turn for multi-turn caching.
 // Per Anthropic docs: "Place cache_control on the second-to-last User message to let the model reuse the earlier cache."
 // This enables caching of conversation history, which is especially beneficial for long multi-turn conversations.
-// Only adds cache_control if:
-// - There are at least 2 user turns in the conversation
-// - No message content already has cache_control
+// Only adds cache_control if there are at least 2 user turns and the target
+// content block does not already have one. Other message breakpoints are kept.
 func injectMessagesCacheControl(payload []byte) []byte {
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.Exists() || !messages.IsArray() {
-		return payload
-	}
-
-	// Check if ANY message content already has cache_control
-	hasCacheControlInMessages := false
-	messages.ForEach(func(_, msg gjson.Result) bool {
-		content := msg.Get("content")
-		if content.IsArray() {
-			content.ForEach(func(_, item gjson.Result) bool {
-				if item.Get("cache_control").Exists() {
-					hasCacheControlInMessages = true
-					return false
-				}
-				return true
-			})
-		}
-		return !hasCacheControlInMessages
-	})
-	if hasCacheControlInMessages {
 		return payload
 	}
 
@@ -1237,6 +1217,9 @@ func injectMessagesCacheControl(payload []byte) []byte {
 		// Add cache_control to the last content block of this message
 		contentCount := int(content.Get("#").Int())
 		if contentCount > 0 {
+			if content.Get(fmt.Sprintf("%d.cache_control", contentCount-1)).Exists() {
+				return payload
+			}
 			cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", secondToLastUserIdx, contentCount-1)
 			result, err := sjson.SetBytes(payload, cacheControlPath, map[string]string{"type": "ephemeral"})
 			if err != nil {

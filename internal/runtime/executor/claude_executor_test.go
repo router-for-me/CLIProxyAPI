@@ -5801,6 +5801,32 @@ func executeClaudeContextManagementRequest(t *testing.T, cfg *config.Config, pay
 	return upstreamBody
 }
 
+func TestClaudeExecutor_CloakedCacheBreakpointAdvancesAcrossExecutePaths(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5","messages":[
+		{"role":"user","content":"first"},
+		{"role":"assistant","content":"reply one"},
+		{"role":"user","content":"second"},
+		{"role":"assistant","content":"reply two"},
+		{"role":"user","content":"third"}
+	]}`)
+
+	for _, stream := range []bool{false, true} {
+		name := "execute"
+		if stream {
+			name = "execute stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			upstreamBody := executeClaudeContextManagementRequest(t, &config.Config{}, payload, stream)
+			if got := gjson.GetBytes(upstreamBody, "messages.2.content.0.cache_control.type").String(); got != "ephemeral" {
+				t.Fatalf("rolling breakpoint type = %q, want ephemeral: %s", got, upstreamBody)
+			}
+			if got := gjson.GetBytes(upstreamBody, "messages.0.content.1.cache_control.type").String(); got != "ephemeral" {
+				t.Fatalf("first-user cloak marker type = %q, want preserved ephemeral: %s", got, upstreamBody)
+			}
+		})
+	}
+}
+
 func TestValidateClaudeCallerSystemBlocksAcceptsTextOnly(t *testing.T) {
 	tests := []struct {
 		name   string

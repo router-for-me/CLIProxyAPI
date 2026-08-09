@@ -3,6 +3,7 @@ package executor
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/tidwall/gjson"
 )
@@ -191,28 +192,146 @@ func TestEnsureCacheControl(t *testing.T) {
 		}
 	})
 
-	// Test case 9: Existing message cache_control should skip injection
-	t.Run("Messages Skip When Cache Control Exists", func(t *testing.T) {
+	// Test case 9: An existing message cache_control does not block the rolling breakpoint
+	t.Run("Messages Preserve Existing And Add Rolling Breakpoint", func(t *testing.T) {
 		input := []byte(`{
 			"model": "claude-3-5-sonnet",
 			"messages": [
-				{"role": "user", "content": [{"type": "text", "text": "First user"}]},
+				{"role": "user", "content": [{"type": "text", "text": "First user", "cache_control": {"type": "ephemeral", "ttl": "1h"}}]},
 				{"role": "assistant", "content": [{"type": "text", "text": "Assistant reply", "cache_control": {"type": "ephemeral"}}]},
-				{"role": "user", "content": [{"type": "text", "text": "Second user"}]}
+				{"role": "user", "content": [{"type": "text", "text": "Second user"}]},
+				{"role": "assistant", "content": "Assistant reply 2"},
+				{"role": "user", "content": "Third user"}
 			]
 		}`)
 		output := ensureCacheControl(input)
 
-		userCache := gjson.GetBytes(output, "messages.0.content.0.cache_control")
-		if userCache.Exists() {
-			t.Errorf("cache_control should NOT be injected when a message already has cache_control")
+		if got := gjson.GetBytes(output, "messages.2.content.0.cache_control.type").String(); got != "ephemeral" {
+			t.Errorf("rolling cache_control type = %q, want ephemeral: %s", got, output)
 		}
-
-		existingCache := gjson.GetBytes(output, "messages.1.content.0.cache_control.type")
-		if existingCache.String() != "ephemeral" {
-			t.Errorf("existing cache_control should be preserved. Output: %s", string(output))
+		if got := gjson.GetBytes(output, "messages.0.content.0.cache_control.ttl").String(); got != "1h" {
+			t.Errorf("caller cache_control ttl = %q, want preserved 1h: %s", got, output)
+		}
+		if got := gjson.GetBytes(output, "messages.1.content.0.cache_control.type").String(); got != "ephemeral" {
+			t.Errorf("existing assistant cache_control type = %q, want preserved ephemeral: %s", got, output)
 		}
 	})
+}
+
+func TestEnsureCacheControlCloakedMultiTurnRolling(t *testing.T) {
+	fixed := time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		payload    string
+		wantTarget string
+	}{
+		{
+			name: "two user turns keeps first-user cloak marker as target",
+			payload: `{"messages":[
+				{"role":"user","content":"first"},
+				{"role":"assistant","content":"reply one"},
+				{"role":"user","content":"second"}
+			]}`,
+			wantTarget: "messages.0.content.1.cache_control.type",
+		},
+		{
+			name: "third user turn advances past first-user cloak marker",
+			payload: `{"messages":[
+				{"role":"user","content":"first"},
+				{"role":"assistant","content":"reply one"},
+				{"role":"user","content":"second"},
+				{"role":"assistant","content":"reply two"},
+				{"role":"user","content":"third"}
+			]}`,
+			wantTarget: "messages.2.content.0.cache_control.type",
+		},
+		{
+			name: "fourth user turn advances again",
+			payload: `{"messages":[
+				{"role":"user","content":"first"},
+				{"role":"assistant","content":"reply one"},
+				{"role":"user","content":"second"},
+				{"role":"assistant","content":"reply two"},
+				{"role":"user","content":"third"},
+				{"role":"assistant","content":"reply three"},
+				{"role":"user","content":"fourth"}
+			]}`,
+			wantTarget: "messages.4.content.0.cache_control.type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cloaked := injectClaudeCodeCurrentDate([]byte(tt.payload), fixed)
+			output := ensureCacheControl(cloaked)
+			if got := gjson.GetBytes(output, tt.wantTarget).String(); got != "ephemeral" {
+				t.Fatalf("rolling cache_control type = %q, want ephemeral at %s: %s", got, tt.wantTarget, output)
+			}
+			if got := gjson.GetBytes(output, "messages.0.content.1.cache_control.type").String(); got != "ephemeral" {
+				t.Fatalf("first-user cloak marker type = %q, want preserved ephemeral: %s", got, output)
+			}
+		})
+	}
+}
+
+func TestEnsureCacheControlNonCloakedMultiTurn(t *testing.T) {
+	input := []byte(`{
+		"tools":[{"name":"tool"}],
+		"system":[{"type":"text","text":"system","cache_control":{"type":"ephemeral","ttl":"1h"}}],
+		"messages":[
+			{"role":"user","content":"first"},
+			{"role":"assistant","content":"reply one"},
+			{"role":"user","content":"second"},
+			{"role":"assistant","content":"reply two"},
+			{"role":"user","content":"third"}
+		]
+	}`)
+
+	output := ensureCacheControl(input)
+	if got := gjson.GetBytes(output, "tools.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tools breakpoint type = %q, want ephemeral: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "system.0.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("caller system breakpoint ttl = %q, want preserved 1h: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "messages.2.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("rolling breakpoint type = %q, want ephemeral: %s", got, output)
+	}
+	if gjson.GetBytes(output, "messages.0.content.0.cache_control").Exists() {
+		t.Fatalf("first user turn unexpectedly received cache_control: %s", output)
+	}
+}
+
+func TestEnsureCacheControlCappedAfterIndependentInjection(t *testing.T) {
+	input := []byte(`{
+		"tools":[{"name":"tool"}],
+		"system":[{"type":"text","text":"system"}],
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"first","cache_control":{"type":"ephemeral"}}]},
+			{"role":"assistant","content":[{"type":"text","text":"reply","cache_control":{"type":"ephemeral"}}]},
+			{"role":"user","content":"second"},
+			{"role":"assistant","content":"reply two"},
+			{"role":"user","content":"third"}
+		]
+	}`)
+
+	output := ensureCacheControl(input)
+	if got := countCacheControls(output); got != 5 {
+		t.Fatalf("cache_control count before cap = %d, want 5: %s", got, output)
+	}
+	output = enforceCacheControlLimit(output, 4)
+	if got := countCacheControls(output); got != 4 {
+		t.Fatalf("cache_control count after cap = %d, want 4: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "tools.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tools breakpoint type = %q, want ephemeral: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "system.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system breakpoint type = %q, want ephemeral: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "messages.2.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("rolling breakpoint type = %q, want ephemeral: %s", got, output)
+	}
 }
 
 func TestInjectToolsCacheControlSkipsDeferredTools(t *testing.T) {
