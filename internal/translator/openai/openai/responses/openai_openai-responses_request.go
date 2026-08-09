@@ -311,25 +311,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	// "additional_tools" input item instead of the top-level "tools" field,
 	// so merge both sources.
 	var chatCompletionsTools []interface{}
-	appendChatTools := func(tools gjson.Result) {
-		if !tools.Exists() || !tools.IsArray() {
-			return
-		}
-		tools.ForEach(func(_, tool gjson.Result) bool {
-			for _, chatTool := range convertResponsesToolToOpenAIChatTools(tool) {
-				chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
-			}
-			return true
-		})
-	}
-	appendChatTools(root.Get("tools"))
-	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		input.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("type").String() == "additional_tools" {
-				appendChatTools(item.Get("tools"))
-			}
-			return true
-		})
+	for _, chatTool := range mergeResponsesRequestChatTools(root) {
+		chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
 	}
 	if len(chatCompletionsTools) > 0 {
 		out, _ = sjson.SetBytes(out, "tools", chatCompletionsTools)

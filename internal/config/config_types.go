@@ -388,7 +388,8 @@ type ClaudeModel struct {
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
-	// IsCompat preserves thinking blocks with empty signatures for compatible upstreams.
+	// IsCompat preserves thinking blocks with empty signatures for compatible upstreams
+	// and enables provider-aware signed-thinking replay for Claude-compatible API-key models.
 	// Default false keeps the normal signature validation behavior.
 	IsCompat bool `yaml:"is-compat,omitempty" json:"is-compat,omitempty"`
 

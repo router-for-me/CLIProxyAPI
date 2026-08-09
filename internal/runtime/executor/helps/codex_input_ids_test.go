@@ -94,6 +94,16 @@ func TestSanitizeCodexInputItemIDsNormalizesResponseItemIDs(t *testing.T) {
 	}
 }
 
+func TestSanitizeCodexInputItemIDsNormalizesCustomToolCallIDs(t *testing.T) {
+	const invalidID = "item_44e13caebc1ddf25f1337cbe"
+	body := []byte(`{"input":[{"type":"custom_tool_call","id":"` + invalidID + `","call_id":"call-1","name":"lookup","input":"{}"}]}`)
+
+	got := SanitizeCodexInputItemIDs(body)
+	if actual := gjson.GetBytes(got, "input.0.id").String(); actual != "ctc_"+invalidID {
+		t.Fatalf("custom_tool_call ID = %q, want ctc-prefixed ID", actual)
+	}
+}
+
 func TestSanitizeCodexInputItemIDsDropsOverlongEncryptedReasoningItem(t *testing.T) {
 	longReasoningID := "rs_" + strings.Repeat("a", 64)
 	shortReasoningID := "rs_" + strings.Repeat("b", 48)

@@ -12,10 +12,11 @@ import (
 )
 
 const (
-	codexInputItemIDLimit         = 64
-	codexMessageItemIDPrefix      = "msg"
-	codexReasoningItemIDPrefix    = "rs"
-	codexFunctionCallItemIDPrefix = "fc"
+	codexInputItemIDLimit           = 64
+	codexMessageItemIDPrefix        = "msg"
+	codexReasoningItemIDPrefix      = "rs"
+	codexFunctionCallItemIDPrefix   = "fc"
+	codexCustomToolCallItemIDPrefix = "ctc"
 )
 
 // SanitizeCodexInputItemIDs normalizes supported input item IDs for Codex, removes encrypted
@@ -103,6 +104,8 @@ func normalizeCodexInputItemID(item gjson.Result, id string) string {
 		prefix = codexReasoningItemIDPrefix
 	case "function_call":
 		prefix = codexFunctionCallItemIDPrefix
+	case "custom_tool_call":
+		prefix = codexCustomToolCallItemIDPrefix
 	default:
 		return id
 	}

@@ -643,12 +643,37 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 }
 
 // Refresh is a no-op for API-key based compatibility providers.
+// OAuth-style credentials with a refresh token cannot be rotated here; callers
+// that need plugin/Home refresh must bind a refresh-capable executor instead.
 func (e *OpenAICompatExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("openai compat executor: refresh called")
 	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
 		return refreshed, err
 	}
+	if openAICompatAuthHasRefreshToken(auth) {
+		provider := ""
+		if e != nil {
+			provider = e.Identifier()
+		}
+		if provider == "" && auth != nil {
+			provider = strings.TrimSpace(auth.Provider)
+		}
+		return nil, fmt.Errorf("openai compat executor cannot refresh oauth credentials for provider %s", provider)
+	}
 	return auth, nil
+}
+
+func openAICompatAuthHasRefreshToken(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	if token, _ := auth.Metadata["refresh_token"].(string); strings.TrimSpace(token) != "" {
+		return true
+	}
+	if token, _ := auth.Metadata["refreshToken"].(string); strings.TrimSpace(token) != "" {
+		return true
+	}
+	return false
 }
 
 func openAICompatImageEndpointPath(opts cliproxyexecutor.Options) string {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -307,10 +308,8 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
 		}
 	}
 	status := http.StatusInternalServerError
-	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-		if code := se.StatusCode(); code > 0 {
-			status = code
-		}
+	if code := clienterror.HTTPStatusFromError(err); code > 0 {
+		status = code
 	}
 	var addon http.Header
 	if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {

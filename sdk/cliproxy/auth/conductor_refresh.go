@@ -512,7 +512,9 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	auth := m.auths[id]
 	var exec ProviderExecutor
 	if auth != nil {
-		exec = m.executors[auth.Provider]
+		// Use the same effective provider key as request execution so OpenAI-compat
+		// auths registered under namespaced keys still resolve for refresh.
+		exec = m.executors[executorKeyFromAuth(auth)]
 	}
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {

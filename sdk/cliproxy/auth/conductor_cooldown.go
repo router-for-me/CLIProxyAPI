@@ -1273,7 +1273,8 @@ func isConnectionLifecycleError(err error) bool {
 	if statusCodeFromError(err) != 0 {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+	// Client abort and request-scoped timeouts are not credential faults.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 	return isConnectionLifecycleMessage(err.Error())
@@ -1300,7 +1301,7 @@ func isConnectionLifecycleMessage(message string) bool {
 		return false
 	}
 	switch lower {
-	case "context canceled", "eof", "unexpected eof":
+	case "context canceled", "context deadline exceeded", "eof", "unexpected eof":
 		return true
 	}
 	// gorilla/websocket CloseError.Error() and common wrappers.
