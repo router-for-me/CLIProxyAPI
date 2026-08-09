@@ -242,6 +242,15 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.mgmt.SetUpstreamProvidersStore(handles.UpstreamProviders)
 		s.mgmt.SetModelGroupStore(handles.ModelGroups)
 		s.mgmt.SetAutoRouterStore(handles.AutoRouters)
+		// Wire the Manage-LiteLLM stores (dedicated litellm_* tables). No-op
+		// when PG is not configured — the /litellm routes return 503.
+		s.mgmt.SetLiteLLMStores(handles.LiteLLMUsers, handles.LiteLLMKeys)
+		// Wire the Manage-LiteLLM external-sync settings store and start the
+		// background auto-sync sweep. The sweep is nil-safe and skips syncs when
+		// disabled/unconfigured; started here (not in the setter) so it only
+		// runs after the auth manager is attached.
+		s.mgmt.SetLiteLLMSyncStore(handles.LiteLLMSync)
+		s.mgmt.StartLiteLLMSyncSweep()
 		// Re-register every enabled Auto Router's model id in the in-memory
 		// registry + models catalog so auto routers survive a restart (the
 		// registry is rebuilt at boot and only sessions recreate it otherwise).

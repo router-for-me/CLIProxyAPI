@@ -159,6 +159,18 @@ type Handler struct {
 	// /import routes (dump/restore of the PG tables). nil when PG is not
 	// configured — those routes return 503.
 	pgBackup *store.PostgresStore
+
+	// litellmUsers / litellmKeys are the Manage-LiteLLM stores backed by the
+	// dedicated litellm_internal_users / litellm_api_keys / litellm_key_policies
+	// tables. nil when PG is not configured — the /v0/management/litellm/*
+	// routes return 503 in that case.
+	litellmUsers *store.LiteLLMUserStore
+	litellmKeys  *store.LiteLLMKeyStore
+
+	// litellmSync is the Manage-LiteLLM external-sync settings store (base URL +
+	// sealed master API key + last-sync outcome). nil when PG is not configured
+	// — the /litellm/settings and /litellm/sync/run routes return 503.
+	litellmSync *store.LiteLLMSyncStore
 }
 
 type configReloadSnapshot struct {
@@ -264,6 +276,33 @@ func (h *Handler) SetUserStore(users *store.UserStore) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pgUsers = users
+}
+
+// SetLiteLLMStores wires the optional PG-backed Manage-LiteLLM stores (the
+// dedicated litellm_internal_users / litellm_api_keys / litellm_key_policies
+// tables). When nil, the /v0/management/litellm/* routes return 503. The
+// Manage-LiteLLM stores are management-only: the runtime request path never
+// reads them, so no policy-cache invalidation is needed on mutations.
+func (h *Handler) SetLiteLLMStores(users *store.LiteLLMUserStore, keys *store.LiteLLMKeyStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.litellmUsers = users
+	h.litellmKeys = keys
+}
+
+// SetLiteLLMSyncStore wires the PG-backed Manage-LiteLLM external-sync settings
+// store. When nil, the /v0/management/litellm/settings and /litellm/sync/run
+// routes return 503 and the background auto-sync sweep is a no-op.
+func (h *Handler) SetLiteLLMSyncStore(s *store.LiteLLMSyncStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.litellmSync = s
 }
 
 // SetV1ModelsHandler wires the http.Handler that serves GET /v1/models on

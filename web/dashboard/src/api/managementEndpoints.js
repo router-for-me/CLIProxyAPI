@@ -72,6 +72,31 @@ function withGlobSuffix(entries) {
   });
 
   groups.push({
+    label: 'Manage LiteLLM',
+    entries: [
+      entry('GET', '/litellm/users'),
+      entry('POST', '/litellm/users'),
+      glob('GET', '/litellm/users/*'),
+      entry('GET', '/litellm/users/:id'),
+      entry('PATCH', '/litellm/users/:id'),
+      entry('DELETE', '/litellm/users/:id'),
+      entry('POST', '/litellm/users/:id/reset-spend'),
+      entry('GET', '/litellm/users/:id/keys'),
+      entry('GET', '/litellm/keys'),
+      entry('POST', '/litellm/keys'),
+      glob('GET', '/litellm/keys/*'),
+      entry('GET', '/litellm/keys/:id'),
+      entry('PATCH', '/litellm/keys/:id'),
+      entry('PUT', '/litellm/keys/:id/policy'),
+      entry('POST', '/litellm/keys/:id/regenerate'),
+      entry('DELETE', '/litellm/keys/:id'),
+      entry('GET', '/litellm/settings'),
+      entry('PUT', '/litellm/settings'),
+      entry('POST', '/litellm/sync/run'),
+    ],
+  });
+
+  groups.push({
     label: 'Management API Tokens',
     entries: [
       entry('GET', '/api-tokens'),

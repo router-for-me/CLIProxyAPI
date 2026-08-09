@@ -96,6 +96,17 @@ type PgStoreHandles struct {
 	// (dump/restore of the PG tables). nil when PG is not configured — those
 	// routes return 503.
 	Backup *store.PostgresStore
+	// LiteLLMUsers / LiteLLMKeys are the PG-backed stores for the Manage
+	// LiteLLM feature (dedicated litellm_internal_users / litellm_api_keys /
+	// litellm_key_policies tables). nil when PG is not configured — the
+	// /v0/management/litellm/* routes return 503 in that case.
+	LiteLLMUsers *store.LiteLLMUserStore
+	LiteLLMKeys  *store.LiteLLMKeyStore
+	// LiteLLMSync is the PG-backed store for the Manage-LiteLLM external sync
+	// settings (base URL + sealed master API key + last-sync outcome). nil when
+	// PG is not configured — the /litellm/settings and /litellm/sync/run routes
+	// return 503.
+	LiteLLMSync *store.LiteLLMSyncStore
 }
 
 // ServerOption customises HTTP server construction.

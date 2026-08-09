@@ -36,6 +36,7 @@ import ManageCpaLayout from './pages/manage-cpa/ManageCpaLayout.jsx';
 import OverviewTab from './pages/manage-cpa/OverviewTab.jsx';
 import ProvidersTab from './pages/manage-cpa/ProvidersTab.jsx';
 import RawConfigTab from './pages/manage-cpa/RawConfigTab.jsx';
+import LiteLLMPage from './pages/litellm/LiteLLMPage.jsx';
 import { ToastProvider } from './components/Toast.jsx';
 import AlertsDropdown from './components/AlertsDropdown.jsx';
 
@@ -293,6 +294,7 @@ export default function App() {
               <Route path="providers" element={<ProvidersTab />} />
               <Route path="raw-config" element={<RawConfigTab />} />
             </Route>
+            <Route path="/litellm" element={<LiteLLMPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>

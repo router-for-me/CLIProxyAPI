@@ -658,6 +658,11 @@ func main() {
 		pgAutoRouters = store.NewAutoRouterStore(pgStoreInst)
 		pgModelHealth := store.NewModelHealthStore(pgStoreInst)
 		pgAlerts := store.NewAlertStore(pgStoreInst)
+		// Manage-LiteLLM stores (dedicated litellm_* tables, management-only).
+		pgLiteLLMUsers := store.NewLiteLLMUserStore(pgStoreInst)
+		pgLiteLLMKeys := store.NewLiteLLMKeyStore(pgStoreInst)
+		// Manage-LiteLLM external sync settings (base URL + sealed master key).
+		pgLiteLLMSync := store.NewLiteLLMSyncStore(pgStoreInst)
 		pgSyncAdapter = registry.NewPGSync(store.NewPGModelsAdapter(pgModelsStore))
 		policySvc = policy.NewService(pgAPIKeyStore, pgUsageStore, policy.ServiceConfig{})
 		// Attach the user store so per-user budget/RPM enforcement is
@@ -756,6 +761,9 @@ func main() {
 			ModelHealth:       pgModelHealth,
 			Alerts:            pgAlerts,
 			Backup:            pgStoreInst,
+			LiteLLMUsers:      pgLiteLLMUsers,
+			LiteLLMKeys:       pgLiteLLMKeys,
+			LiteLLMSync:       pgLiteLLMSync,
 		}))
 	}
 

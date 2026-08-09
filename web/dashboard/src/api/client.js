@@ -639,6 +639,166 @@ export async function getInternalUsersLeaderboard({
   return fetchJSON(`/internal-users/leaderboard?${qs}`);
 }
 
+// --- Manage LiteLLM ----------------------------------------------------------
+//
+// The Manage LiteLLM feature manages Internal Users and API Keys in the
+// dedicated litellm_* tables (complete LiteLLM-style data: key spend, budget +
+// duration, tpm_limit, tags, aliases). The runtime request path never reads
+// these tables — they are management-only storage.
+
+export async function listLiteLLMUsers({
+  page = 1,
+  pageSize = 25,
+  role = '',
+  search = '',
+  sortBy = 'spend',
+  sortOrder = 'desc',
+} = {}) {
+  const qs = new URLSearchParams();
+  qs.set('page', String(page));
+  qs.set('page_size', String(pageSize));
+  if (role) qs.set('role', role);
+  if (search) qs.set('search', search);
+  qs.set('sort_by', sortBy);
+  qs.set('sort_order', sortOrder);
+  return fetchJSON(`/litellm/users?${qs}`);
+}
+
+// createLiteLLMUser creates a new Manage-LiteLLM internal user. When
+// payload.auto_create_key is not explicitly false, the server auto-provisions
+// a default API key bound to the new user and returns the plaintext secret
+// ONCE in the response body (fields `secret` + `api_key`).
+export async function createLiteLLMUser(payload) {
+  return fetchJSON('/litellm/users', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getLiteLLMUser(id) {
+  return fetchJSON(`/litellm/users/${encodeURIComponent(id)}`);
+}
+
+export async function patchLiteLLMUser(id, patch) {
+  return fetchJSON(`/litellm/users/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteLiteLLMUser(id) {
+  await fetchJSON(`/litellm/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export async function resetLiteLLMUserSpend(id) {
+  return fetchJSON(`/litellm/users/${encodeURIComponent(id)}/reset-spend`, {
+    method: 'POST',
+  });
+}
+
+// List the keys owned by a Manage-LiteLLM user. The user_id filter is applied
+// natively in SQL so total reflects every matching key (unlike the runtime
+// /internal-users/:id/keys endpoint's in-Go filter).
+export async function listLiteLLMUserKeys(id, { page = 1, pageSize = 50, status = '' } = {}) {
+  const qs = new URLSearchParams();
+  qs.set('page', String(page));
+  qs.set('page_size', String(pageSize));
+  if (status) qs.set('status', status);
+  return fetchJSON(`/litellm/users/${encodeURIComponent(id)}/keys?${qs}`);
+}
+
+export async function listLiteLLMKeys({
+  page = 1,
+  pageSize = 25,
+  status = '',
+  search = '',
+  userId = '',
+  sortBy = '',
+  sortOrder = '',
+} = {}) {
+  const qs = new URLSearchParams();
+  qs.set('page', String(page));
+  qs.set('page_size', String(pageSize));
+  if (status) qs.set('status', status);
+  if (search) qs.set('search', search);
+  if (userId) qs.set('user_id', userId);
+  if (sortBy) qs.set('sort_by', sortBy);
+  if (sortOrder) qs.set('sort_order', sortOrder);
+  return fetchJSON(`/litellm/keys?${qs}`);
+}
+
+// createLiteLLMKey creates a new Manage-LiteLLM API key. user_id is REQUIRED:
+// every Manage-LiteLLM key is owned by a litellm_internal_users row. policy
+// carries the complete LiteLLM-style limits (budget_usd + budget_duration,
+// tpm_limit, aliases, tags).
+export async function createLiteLLMKey({ name, secret, user_id, expires_at, metadata, tags, policy }) {
+  return fetchJSON('/litellm/keys', {
+    method: 'POST',
+    body: JSON.stringify({ name, secret, user_id, expires_at, metadata, tags, policy }),
+  });
+}
+
+export async function getLiteLLMKey(id) {
+  return fetchJSON(`/litellm/keys/${encodeURIComponent(id)}`);
+}
+
+export async function patchLiteLLMKey(id, patch) {
+  return fetchJSON(`/litellm/keys/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function putLiteLLMKeyPolicy(id, policy) {
+  return fetchJSON(`/litellm/keys/${encodeURIComponent(id)}/policy`, {
+    method: 'PUT',
+    body: JSON.stringify(policy),
+  });
+}
+
+// regenerateLiteLLMKey issues a new secret for an existing Manage-LiteLLM key.
+// The old secret stops working immediately; the key ID, policy, and metadata
+// are preserved. Pass an optional custom secret (min 16 chars); omit/empty to
+// let the server auto-generate one.
+export async function regenerateLiteLLMKey(id, secret) {
+  return fetchJSON(`/litellm/keys/${encodeURIComponent(id)}/regenerate`, {
+    method: 'POST',
+    body: JSON.stringify(secret ? { secret } : {}),
+  });
+}
+
+export async function deleteLiteLLMKey(id) {
+  await fetchJSON(`/litellm/keys/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+// --- Manage LiteLLM: external sync settings --------------------------------
+
+// getLiteLLMSyncSettings returns the singleton external-LiteLLM sync settings.
+// The master API key is masked (master_key_set + master_key_prefix only) — the
+// plaintext is never returned. Returns { settings: { ... } }.
+export async function getLiteLLMSyncSettings() {
+  return fetchJSON('/litellm/settings');
+}
+
+// putLiteLLMSyncSettings updates the external-LiteLLM sync settings.
+// body: { enabled?, interval_seconds?, base_url?, master_key? }.
+//   - master_key omitted (undefined) → keep the stored key
+//   - master_key = "" → clear the stored key
+//   - master_key = non-empty → rotate (sealed at rest)
+// Returns the persisted settings.
+export async function putLiteLLMSyncSettings(body) {
+  return fetchJSON('/litellm/settings', {
+    method: 'PUT',
+    body: JSON.stringify(body || {}),
+  });
+}
+
+// runLiteLLMSyncNow triggers an immediate external sync and returns the fresh
+// settings (with last_sync_* outcome populated).
+export async function runLiteLLMSyncNow() {
+  return fetchJSON('/litellm/sync/run', { method: 'POST' });
+}
+
 // --- Models Catalog + Pricing -----------------------------------------------
 
 export async function listModelsCatalog({

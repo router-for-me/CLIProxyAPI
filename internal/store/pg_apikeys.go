@@ -192,6 +192,13 @@ func HashSecret(secret string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// SecretPrefixOf returns the displayable prefix of a secret (exported wrapper
+// around prefixOf so sibling packages like the management handlers can render a
+// masked prefix without importing unexported helpers).
+func SecretPrefixOf(secret string) string {
+	return prefixOf(secret)
+}
+
 // prefixOf returns the displayable prefix of a secret. The prefix exposes the
 // first APIKeyPrefixLen characters of the secret body (without the SecretPrefix
 // marker), which is insufficient to reconstruct the secret.

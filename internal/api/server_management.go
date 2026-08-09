@@ -220,6 +220,29 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/internal-users/:id/model-spend", s.mgmt.GetInternalUserModelSpend)
 		mgmt.GET("/internal-users/:id/models", s.mgmt.GetInternalUserModels)
 
+		// Manage LiteLLM — Internal Users and API Keys stored in the dedicated
+		// litellm_* tables (complete LiteLLM-style data, management-only).
+		// Return 503 when the PG store is not configured. These routes never
+		// touch the runtime tables or the policy cache.
+		mgmt.GET("/litellm/users", s.mgmt.ListLiteLLMUsers)
+		mgmt.POST("/litellm/users", s.mgmt.CreateLiteLLMUser)
+		mgmt.GET("/litellm/users/:id", s.mgmt.GetLiteLLMUser)
+		mgmt.PATCH("/litellm/users/:id", s.mgmt.PatchLiteLLMUser)
+		mgmt.DELETE("/litellm/users/:id", s.mgmt.DeleteLiteLLMUser)
+		mgmt.POST("/litellm/users/:id/reset-spend", s.mgmt.ResetLiteLLMUserSpend)
+		mgmt.GET("/litellm/users/:id/keys", s.mgmt.ListLiteLLMUserKeys)
+		mgmt.GET("/litellm/keys", s.mgmt.ListLiteLLMKeys)
+		mgmt.POST("/litellm/keys", s.mgmt.CreateLiteLLMKey)
+		mgmt.GET("/litellm/keys/:id", s.mgmt.GetLiteLLMKey)
+		mgmt.PATCH("/litellm/keys/:id", s.mgmt.PatchLiteLLMKey)
+		mgmt.PUT("/litellm/keys/:id/policy", s.mgmt.PutLiteLLMKeyPolicy)
+		mgmt.POST("/litellm/keys/:id/regenerate", s.mgmt.RegenerateLiteLLMKey)
+		mgmt.DELETE("/litellm/keys/:id", s.mgmt.DeleteLiteLLMKey)
+		// Manage LiteLLM — external sync settings + manual sync trigger.
+		mgmt.GET("/litellm/settings", s.mgmt.GetLiteLLMSyncSettings)
+		mgmt.PUT("/litellm/settings", s.mgmt.PutLiteLLMSyncSettings)
+		mgmt.POST("/litellm/sync/run", s.mgmt.RunLiteLLMSync)
+
 		// Aggregate usage stats powered by the PG usage_events table.
 		mgmt.GET("/usage-stats", s.mgmt.GetUsageStats)
 		mgmt.GET("/usage-stats/summary", s.mgmt.GetUsageSummary)

@@ -52,6 +52,19 @@ const (
 	defaultModelHealthSettingsTable      = "model_health_settings"
 	defaultAlertsTable                   = "alerts"
 	defaultAlertSettingsTable            = "alert_settings"
+	// Manage-LiteLLM tables. These mirror LiteLLM's own schema (internal
+	// users + API keys + key policies) but are intentionally separate from the
+	// runtime tables (internal_users / api_keys / api_key_policies) so the
+	// Manage LiteLLM feature can hold complete LiteLLM-style data without
+	// affecting the request-serving path.
+	defaultLiteLLMUsersTable       = "litellm_internal_users"
+	defaultLiteLLMKeysTable        = "litellm_api_keys"
+	defaultLiteLLMKeyPoliciesTable = "litellm_key_policies"
+	// Manage-LiteLLM sync settings table stores the singleton connection +
+	// sync configuration for an external LiteLLM instance (base URL + sealed
+	// master API key) plus the last-sync outcome. Mirrors the alert_settings
+	// singleton pattern.
+	defaultLiteLLMSyncSettingsTable = "litellm_sync_settings"
 )
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
@@ -182,6 +195,23 @@ type PostgresStoreConfig struct {
 	// alert sweep (enabled, interval_seconds, per-category toggles, thresholds).
 	AlertSettingsTable string
 
+	// LiteLLMUsersTable stores the Manage-LiteLLM internal-user entity
+	// (LiteLLM-style key owners). Kept separate from InternalUsersTable so the
+	// Manage LiteLLM feature holds its own data without touching the runtime
+	// user rows.
+	LiteLLMUsersTable string
+	// LiteLLMKeysTable stores the Manage-LiteLLM API keys, including complete
+	// LiteLLM-style fields (spend, tags) not present on the runtime api_keys
+	// table.
+	LiteLLMKeysTable string
+	// LiteLLMKeyPoliciesTable stores per-key policy for LiteLLMKeysTable rows
+	// (FK ON DELETE CASCADE), including LiteLLM-style budget + tpm_limit +
+	// aliases.
+	LiteLLMKeyPoliciesTable string
+	// LiteLLMSyncSettingsTable stores the singleton Manage-LiteLLM external
+	// sync settings (base URL + sealed master API key + last-sync outcome).
+	LiteLLMSyncSettingsTable string
+
 	// UsageEncryptionKey is the passphrase used to derive an AES-256-GCM
 	// key for sealing sensitive columns (api_key_principal in usage_events)
 	// at rest. Empty/nil disables encryption: writes stay in plaintext and
@@ -303,6 +333,18 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	if cfg.AlertSettingsTable == "" {
 		cfg.AlertSettingsTable = defaultAlertSettingsTable
 	}
+	if cfg.LiteLLMUsersTable == "" {
+		cfg.LiteLLMUsersTable = defaultLiteLLMUsersTable
+	}
+	if cfg.LiteLLMKeysTable == "" {
+		cfg.LiteLLMKeysTable = defaultLiteLLMKeysTable
+	}
+	if cfg.LiteLLMKeyPoliciesTable == "" {
+		cfg.LiteLLMKeyPoliciesTable = defaultLiteLLMKeyPoliciesTable
+	}
+	if cfg.LiteLLMSyncSettingsTable == "" {
+		cfg.LiteLLMSyncSettingsTable = defaultLiteLLMSyncSettingsTable
+	}
 
 	spoolRoot := strings.TrimSpace(cfg.SpoolDir)
 	if spoolRoot == "" {
@@ -416,6 +458,136 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 
 	if err := s.ensurePolicySchema(ctx); err != nil {
 		return err
+	}
+	if err := s.ensureLiteLLMSchema(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensureLiteLLMSchema creates the tables backing the Manage LiteLLM feature
+// (LiteLLM-style internal users + API keys + key policies). The tables are
+// intentionally separate from the runtime tables so the Manage LiteLLM feature
+// can store complete LiteLLM-style data (key spend, budget + duration,
+// tpm_limit, tags, aliases) without affecting the request-serving path. All
+// statements are idempotent (CREATE TABLE IF NOT EXISTS).
+func (s *PostgresStore) ensureLiteLLMSchema(ctx context.Context) error {
+	usersTable := s.fullTableName(s.cfg.LiteLLMUsersTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id                  TEXT PRIMARY KEY,
+			user_alias          TEXT,
+			user_email          TEXT UNIQUE,
+			user_role           TEXT NOT NULL DEFAULT 'internal_user',
+			models              JSONB NOT NULL DEFAULT '[]'::jsonb,
+			metadata            JSONB NOT NULL DEFAULT '{}'::jsonb,
+			max_budget          NUMERIC(12,6),
+			budget_duration     TEXT,
+			budget_reset_at     TIMESTAMPTZ,
+			rpm_limit           BIGINT,
+			tpm_limit           BIGINT,
+			max_parallel_requests INTEGER,
+			spend               NUMERIC(12,6) NOT NULL DEFAULT 0,
+			created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, usersTable)); err != nil {
+		return fmt.Errorf("postgres store: create litellm_internal_users table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_litellm_internal_users_role ON %s(user_role)`, usersTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create litellm_internal_users role index: %w", err)
+	}
+
+	keysTable := s.fullTableName(s.cfg.LiteLLMKeysTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id            TEXT PRIMARY KEY,
+			name          TEXT NOT NULL,
+			key_alias     TEXT,
+			key_hash      TEXT NOT NULL UNIQUE,
+			key_prefix    TEXT NOT NULL,
+			status        TEXT NOT NULL DEFAULT 'active',
+			user_id       TEXT,
+			key_spend     NUMERIC(12,6) NOT NULL DEFAULT 0,
+			tags          JSONB NOT NULL DEFAULT '[]'::jsonb,
+			metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
+			created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			expires_at    TIMESTAMPTZ,
+			last_used_at  TIMESTAMPTZ
+		)
+	`, keysTable)); err != nil {
+		return fmt.Errorf("postgres store: create litellm_api_keys table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_litellm_api_keys_key_hash ON %s(key_hash)`, keysTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create litellm_api_keys key_hash index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_litellm_api_keys_status ON %s(status) WHERE status = 'active'`, keysTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create litellm_api_keys status index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_litellm_api_keys_user_id ON %s(user_id) WHERE user_id IS NOT NULL`, keysTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create litellm_api_keys user_id index: %w", err)
+	}
+
+	policiesTable := s.fullTableName(s.cfg.LiteLLMKeyPoliciesTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			api_key_id            TEXT PRIMARY KEY REFERENCES %s(id) ON DELETE CASCADE,
+			rpm_limit             INTEGER,
+			tpm_limit             INTEGER,
+			budget_usd            NUMERIC(12,6),
+			budget_duration       TEXT,
+			max_parallel_requests INTEGER,
+			allowed_models        JSONB NOT NULL DEFAULT '[]'::jsonb,
+			blocked_models        JSONB NOT NULL DEFAULT '[]'::jsonb,
+			aliases               JSONB NOT NULL DEFAULT '{}'::jsonb,
+			allowed_ips           JSONB NOT NULL DEFAULT '[]'::jsonb,
+			blocked_ips           JSONB NOT NULL DEFAULT '[]'::jsonb,
+			model_routes          JSONB NOT NULL DEFAULT '[]'::jsonb,
+			updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, policiesTable, keysTable)); err != nil {
+		return fmt.Errorf("postgres store: create litellm_key_policies table: %w", err)
+	}
+
+	// litellm_sync_settings stores the singleton Manage-LiteLLM external sync
+	// configuration (base URL + sealed master API key) and the last-sync
+	// outcome. master_key_sealed holds the SHA-256-keyed AES-GCM ciphertext of
+	// the external LiteLLM master API key when PGSTORE_ENCRYPTION_KEY is set;
+	// otherwise plaintext (the legacy-tolerant path shared with other stores).
+	syncTable := s.fullTableName(s.cfg.LiteLLMSyncSettingsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id                  INTEGER PRIMARY KEY DEFAULT 1,
+			enabled             BOOLEAN NOT NULL DEFAULT FALSE,
+			interval_seconds    INTEGER NOT NULL DEFAULT 300,
+			base_url            TEXT,
+			master_key_sealed   TEXT,
+			master_key_prefix   TEXT,
+			last_sync_at        TIMESTAMPTZ,
+			last_sync_status    TEXT,
+			last_sync_error     TEXT,
+			last_sync_users     INTEGER NOT NULL DEFAULT 0,
+			last_sync_keys      INTEGER NOT NULL DEFAULT 0,
+			updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT litellm_sync_settings_singleton CHECK (id = 1)
+		)
+	`, syncTable)); err != nil {
+		return fmt.Errorf("postgres store: create litellm_sync_settings table: %w", err)
+	}
+	// Seed the singleton row so GetLitellmSyncSettings always finds a row.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`INSERT INTO %s (id) VALUES (1) ON CONFLICT (id) DO NOTHING`, syncTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: seed litellm_sync_settings singleton: %w", err)
 	}
 	return nil
 }
@@ -1861,6 +2033,42 @@ func (s *PostgresStore) AlertSettingsTable() string {
 		return quoteIdentifier(defaultAlertSettingsTable)
 	}
 	return s.fullTableName(s.cfg.AlertSettingsTable)
+}
+
+// LiteLLMUsersTable returns the fully-qualified name of the Manage-LiteLLM
+// internal users table.
+func (s *PostgresStore) LiteLLMUsersTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultLiteLLMUsersTable)
+	}
+	return s.fullTableName(s.cfg.LiteLLMUsersTable)
+}
+
+// LiteLLMKeysTable returns the fully-qualified name of the Manage-LiteLLM API
+// keys table.
+func (s *PostgresStore) LiteLLMKeysTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultLiteLLMKeysTable)
+	}
+	return s.fullTableName(s.cfg.LiteLLMKeysTable)
+}
+
+// LiteLLMKeyPoliciesTable returns the fully-qualified name of the
+// Manage-LiteLLM per-key policy table.
+func (s *PostgresStore) LiteLLMKeyPoliciesTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultLiteLLMKeyPoliciesTable)
+	}
+	return s.fullTableName(s.cfg.LiteLLMKeyPoliciesTable)
+}
+
+// LiteLLMSyncSettingsTable returns the fully-qualified name of the
+// Manage-LiteLLM external sync settings table.
+func (s *PostgresStore) LiteLLMSyncSettingsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultLiteLLMSyncSettingsTable)
+	}
+	return s.fullTableName(s.cfg.LiteLLMSyncSettingsTable)
 }
 
 // Save persists authentication metadata to disk and PostgreSQL.
