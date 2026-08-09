@@ -662,10 +662,12 @@ func TestXAIExecutorPrepareHonorsInjectXSearchConfig(t *testing.T) {
 	tests := []struct {
 		name        string
 		cfg         *config.Config
+		toolName    string
 		wantXSearch bool
 	}{
-		{name: "default disabled", cfg: &config.Config{}, wantXSearch: false},
-		{name: "explicitly enabled", cfg: &config.Config{XAI: config.XAIConfig{InjectXSearch: true}}, wantXSearch: true},
+		{name: "default disabled", cfg: &config.Config{}, toolName: "lookup", wantXSearch: false},
+		{name: "explicitly enabled", cfg: &config.Config{XAI: config.XAIConfig{InjectXSearch: true}}, toolName: "lookup", wantXSearch: true},
+		{name: "client web search collision", cfg: &config.Config{XAI: config.XAIConfig{InjectXSearch: true}}, toolName: "web_search", wantXSearch: false},
 	}
 
 	for _, tt := range tests {
@@ -675,12 +677,12 @@ func TestXAIExecutorPrepareHonorsInjectXSearchConfig(t *testing.T) {
 			exec := NewXAIExecutor(tt.cfg)
 			prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
 				Model: "grok-4.5",
-				Payload: []byte(`{
+				Payload: []byte(fmt.Sprintf(`{
 					"model":"grok-4.5",
 					"input":"search the web",
-					"tools":[{"type":"function","name":"web_search","parameters":{"type":"object"}}],
-					"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"web_search"}]}
-				}`),
+					"tools":[{"type":"function","name":%q,"parameters":{"type":"object"}}],
+					"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":%q}]}
+				}`, tt.toolName, tt.toolName)),
 			}, cliproxyexecutor.Options{
 				SourceFormat: sdktranslator.FormatOpenAIResponse,
 				Stream:       false,
@@ -697,8 +699,8 @@ func TestXAIExecutorPrepareHonorsInjectXSearchConfig(t *testing.T) {
 			if len(tools) != 1+wantXSearchCount {
 				t.Fatalf("tools length = %d, want %d; body=%s", len(tools), 1+wantXSearchCount, prepared.body)
 			}
-			if got := tools[0].Get("name").String(); got != "web_search" {
-				t.Fatalf("client web_search tool missing; body=%s", prepared.body)
+			if got := tools[0].Get("name").String(); got != tt.toolName {
+				t.Fatalf("client tool name = %q, want %q; body=%s", got, tt.toolName, prepared.body)
 			}
 			xSearchTools := 0
 			for _, tool := range tools {
@@ -799,6 +801,60 @@ func TestEnsureXAINativeXSearchTool(t *testing.T) {
 	}
 	if xSearchAllowed != 1 {
 		t.Fatalf("allowed_tools x_search count = %d, want 1; body=%s", xSearchAllowed, out)
+	}
+}
+
+func TestEnsureXAINativeXSearchToolPreservesClientWebSearchTool(t *testing.T) {
+	t.Parallel()
+
+	for _, toolType := range []string{xaiFunctionToolType, xaiCustomToolType} {
+		t.Run(toolType, func(t *testing.T) {
+			body := []byte(fmt.Sprintf(`{
+				"tools":[{"type":%q,"name":"web_search","parameters":{"type":"object"}}],
+				"tool_choice":{"type":"allowed_tools","tools":[{"type":%q,"name":"web_search"}]}
+			}`, toolType, toolType))
+			out := ensureXAINativeXSearchTool(body)
+
+			tools := gjson.GetBytes(out, "tools").Array()
+			if len(tools) != 1 {
+				t.Fatalf("tools length = %d, want 1 client web_search tool only; body=%s", len(tools), out)
+			}
+			if got := tools[0].Get("type").String(); got != toolType {
+				t.Fatalf("tools.0.type = %q, want %q; body=%s", got, toolType, out)
+			}
+			if xaiRequestHasNativeXSearch(out) {
+				t.Fatalf("native x_search was injected beside client web_search tool: %s", out)
+			}
+			allowed := gjson.GetBytes(out, "tool_choice.tools").Array()
+			if len(allowed) != 1 || allowed[0].Get("name").String() != "web_search" {
+				t.Fatalf("allowed tools = %#v, want only client web_search tool; body=%s", allowed, out)
+			}
+		})
+	}
+}
+
+func TestEnsureXAINativeXSearchToolSyncsExplicitNativeToolWithClientWebSearch(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{
+		"tools":[
+			{"type":"function","name":"web_search","parameters":{"type":"object"}},
+			{"type":"x_search"}
+		],
+		"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"web_search"}]}
+	}`)
+	out := ensureXAINativeXSearchTool(body)
+
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("tools length = %d, want explicit client and native tools unchanged; body=%s", len(tools), out)
+	}
+	allowed := gjson.GetBytes(out, "tool_choice.tools").Array()
+	if len(allowed) != 2 {
+		t.Fatalf("allowed tools length = %d, want client web_search plus explicit x_search; body=%s", len(allowed), out)
+	}
+	if got := allowed[1].Get("type").String(); got != "x_search" {
+		t.Fatalf("allowed tools native type = %q, want x_search; body=%s", got, out)
 	}
 }
 
