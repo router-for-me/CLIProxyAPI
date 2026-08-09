@@ -37,6 +37,7 @@ const (
 	claudeContext1MBeta          = "context-1m-2025-08-07"
 	claudeMidConvSystemBeta      = "mid-conversation-system-2026-04-07"
 	claudeAdvancedToolUseBeta    = "advanced-tool-use-2025-11-20"
+	claudeAdvisorToolBeta        = "advisor-tool-2026-03-01"
 	claudeEffortBeta             = "effort-2025-11-24"
 	claudeServerSideFallbackBeta = "server-side-fallback-2026-06-01"
 	claudeFallbackCreditBeta     = "fallback-credit-2026-06-01"
@@ -71,12 +72,14 @@ var claudeCodeTrailingBetas = []string{
 }
 
 // claudeCodeCLIBetas assembles the Anthropic-Beta baseline the way Claude Code
-// 2.1.220 does: the list is per-request, not a fixed string. requested holds the
+// does: the list is per-request, not a fixed string. requested holds the
 // betas the caller asked for, which decide the capability flags below.
 //
 // Verified against api.anthropic.com with isolated 2.1.220 profiles on both
 // API-key and OAuth paths. A 2026-08-03 A/B capture with two distinct OAuth
 // accounts confirmed the current tool beta and OAuth trailer below.
+// The Advisor position was captured from Claude Code 2.1.226 against a local
+// loopback endpoint; it was not probed against the Anthropic API.
 // The full observed order is:
 //
 //	 1 claude-code-20250219
@@ -89,12 +92,13 @@ var claudeCodeTrailingBetas = []string{
 //	 8 prompt-caching-scope-2026-01-05
 //	 9 mid-conversation-system-2026-04-07  models accepting a role=system turn
 //	10 advanced-tool-use-2025-11-20       requests with tools
-//	11 effort-2025-11-24
-//	12 server-side-fallback-2026-06-01
-//	13 fallback-credit-2026-06-01
-//	14 fast-mode-2026-02-01               speed:fast requests only
-//	15 extended-cache-ttl-2025-04-11      OAuth credentials only
-//	16 cache-diagnosis-2026-04-07         requests with diagnostics only
+//	11 advisor-tool-2026-03-01            requests with the Advisor server tool
+//	12 effort-2025-11-24
+//	13 server-side-fallback-2026-06-01
+//	14 fallback-credit-2026-06-01
+//	15 fast-mode-2026-02-01               speed:fast requests only
+//	16 extended-cache-ttl-2025-04-11      OAuth credentials only
+//	17 cache-diagnosis-2026-04-07         requests with diagnostics only
 //
 // An empty body keeps the optimistic role=system default, matching the cloaking
 // policy for unknown and future model IDs.
@@ -119,6 +123,9 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	}
 	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() && len(tools.Array()) > 0 {
 		betas = append(betas, claudeAdvancedToolUseBeta)
+	}
+	if requested[claudeAdvisorToolBeta] {
+		betas = append(betas, claudeAdvisorToolBeta)
 	}
 	betas = append(betas, claudeEffortBeta)
 	if oauthToken && !requested[claudeFallbackCreditBeta] {
