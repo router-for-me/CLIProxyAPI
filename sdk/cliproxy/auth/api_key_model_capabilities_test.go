@@ -156,7 +156,7 @@ func TestAttachResolvedAPIKeyModelInfoSupportsKeylessOpenAICompatibility(t *test
 		BaseURL: "https://example.com/v1",
 		Models: []internalconfig.OpenAICompatibilityModel{
 			{
-				Name: "shared-upstream", Alias: "public-model", ForceMapping: true,
+				Name: "shared-upstream", Alias: "public-model", ForceMapping: true, IsCompat: true,
 				Thinking: &registry.ThinkingSupport{Levels: []string{"high"}},
 			},
 			{
@@ -189,6 +189,10 @@ func TestAttachResolvedAPIKeyModelInfoSupportsKeylessOpenAICompatibility(t *test
 	}
 	req := attachResolvedAPIKeyModelInfo(routing, cliproxyexecutor.Request{}, auth, "tenant/public-model", models[0])
 	assertResolvedThinkingLevels(t, req, "high")
+	info, ok := ResolvedAPIKeyModelInfo(req)
+	if !ok || info == nil || !info.IsCompat {
+		t.Fatal("OpenAI compatibility model IsCompat = false, want true")
+	}
 }
 
 func TestAttachResolvedAPIKeyModelInfoBindsUnknownConfiguredCapability(t *testing.T) {

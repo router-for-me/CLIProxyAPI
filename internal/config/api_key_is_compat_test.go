@@ -34,6 +34,14 @@ codex-api-key:
       - name: codex-upstream
         alias: codex-alias
         is-compat: true
+openai-compatibility:
+  - name: deepseek
+    models:
+      - name: deepseek-upstream
+        alias: deepseek-alias
+        is-compat: true
+      - name: openai-native
+        alias: openai-native
 `
 
 	var cfg Config
@@ -58,5 +66,11 @@ codex-api-key:
 	}
 	if len(cfg.CodexKey) != 1 || !cfg.CodexKey[0].Models[0].IsCompat {
 		t.Fatalf("codex-api-key IsCompat = %+v, want true", cfg.CodexKey)
+	}
+	if len(cfg.OpenAICompatibility) != 1 || !cfg.OpenAICompatibility[0].Models[0].IsCompat {
+		t.Fatalf("openai-compatibility IsCompat = %+v, want true", cfg.OpenAICompatibility)
+	}
+	if cfg.OpenAICompatibility[0].Models[1].IsCompat {
+		t.Fatal("openai-compatibility omitted IsCompat = true, want default false")
 	}
 }

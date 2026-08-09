@@ -7,7 +7,7 @@ import (
 )
 
 // APIKeyModelIsCompat reports whether the selected API-key model enables
-// compatibility handling for empty thinking signatures.
+// compatibility handling for Claude thinking blocks.
 func APIKeyModelIsCompat(req cliproxyexecutor.Request) bool {
 	modelInfo, ok := cliproxyauth.ResolvedAPIKeyModelInfo(req)
 	return ok && modelInfo != nil && modelInfo.IsCompat

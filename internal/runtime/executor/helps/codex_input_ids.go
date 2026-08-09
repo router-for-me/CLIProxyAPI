@@ -6,20 +6,25 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 const (
-	codexInputItemIDLimit    = 64
-	codexMessageItemIDPrefix = "msg"
+	codexInputItemIDLimit                 = 64
+	codexMessageItemIDPrefix              = "msg"
+	codexReasoningItemIDPrefix            = "rs"
+	codexFunctionCallItemIDPrefix         = "fc"
+	codexCustomToolCallItemIDPrefix       = "ctc"
+	codexCustomToolCallOutputItemIDPrefix = "ctco"
 )
 
-// SanitizeCodexInputItemIDs normalizes message IDs for Codex, removes encrypted
+// SanitizeCodexInputItemIDs normalizes supported input item IDs for Codex, removes encrypted
 // reasoning items whose IDs exceed the Codex limit, and deterministically shortens
 // other overlong input item IDs.
 func SanitizeCodexInputItemIDs(body []byte) []byte {
-	input := gjson.GetBytes(body, "input")
+	input := util.GetGJSONBytesNoCopy(body, "input")
 	if !input.IsArray() {
 		return body
 	}
@@ -92,10 +97,25 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 }
 
 func normalizeCodexInputItemID(item gjson.Result, id string) string {
-	if item.Get("type").String() != "message" || id == "" || strings.HasPrefix(id, codexMessageItemIDPrefix) {
+	var prefix string
+	switch item.Get("type").String() {
+	case "message":
+		prefix = codexMessageItemIDPrefix
+	case "reasoning":
+		prefix = codexReasoningItemIDPrefix
+	case "function_call":
+		prefix = codexFunctionCallItemIDPrefix
+	case "custom_tool_call":
+		prefix = codexCustomToolCallItemIDPrefix
+	case "custom_tool_call_output":
+		prefix = codexCustomToolCallOutputItemIDPrefix
+	default:
 		return id
 	}
-	return codexMessageItemIDPrefix + "_" + id
+	if id == "" || strings.HasPrefix(id, prefix) {
+		return id
+	}
+	return prefix + "_" + id
 }
 
 func shouldDropCodexEncryptedReasoningItem(item gjson.Result) bool {

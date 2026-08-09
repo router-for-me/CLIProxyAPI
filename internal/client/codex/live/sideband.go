@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -550,7 +551,7 @@ func callIDFromLocation(location string) string {
 }
 
 func handleSidebandDialError(c *gin.Context, ctx context.Context, cfg *config.Config, response *http.Response, errDial error) {
-	status := http.StatusBadGateway
+	status := clienterror.HTTPStatusFromErrorOr(errDial, http.StatusBadGateway)
 	if response != nil {
 		if response.StatusCode > 0 {
 			status = response.StatusCode

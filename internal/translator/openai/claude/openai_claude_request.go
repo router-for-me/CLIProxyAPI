@@ -24,12 +24,12 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 }
 
 // ConvertClaudeRequestToOpenAIWithCompat preserves assistant thinking text
-// when its signature is empty for configured compatibility endpoints.
+// for configured compatibility endpoints.
 func ConvertClaudeRequestToOpenAIWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
 	return convertClaudeRequestToOpenAI(modelName, inputRawJSON, stream, true)
 }
 
-func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool, preserveEmptyThinkingBlocks bool) []byte {
+func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool, preserveThinkingBlocks bool) []byte {
 	rawJSON := inputRawJSON
 	// Base OpenAI Chat Completions API template
 	out := []byte(`{"model":"","messages":[]}`)
@@ -178,7 +178,7 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					case "thinking":
 						// Only map thinking to reasoning_content for assistant messages (security: prevent injection)
 						if role == "assistant" {
-							if !shouldMapClaudeThinkingToGPTReasoning(part, preserveEmptyThinkingBlocks) {
+							if !shouldMapClaudeThinkingToGPTReasoning(part, preserveThinkingBlocks) {
 								return true
 							}
 							thinkingText := thinking.GetThinkingText(part)
@@ -373,11 +373,15 @@ func normalizeObjectSchemaProperties(schema any) any {
 	}
 }
 
-func shouldMapClaudeThinkingToGPTReasoning(part gjson.Result, preserveEmptyThinkingBlocks ...bool) bool {
-	preserveEmpty := len(preserveEmptyThinkingBlocks) > 0 && preserveEmptyThinkingBlocks[0]
+func shouldMapClaudeThinkingToGPTReasoning(part gjson.Result, preserveThinkingBlocks ...bool) bool {
+	preserveThinking := len(preserveThinkingBlocks) > 0 && preserveThinkingBlocks[0]
+	if preserveThinking {
+		return true
+	}
+
 	signature := part.Get("signature")
 	if !signature.Exists() || strings.TrimSpace(signature.String()) == "" {
-		return preserveEmpty
+		return false
 	}
 	_, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, signature.String())
 	return ok

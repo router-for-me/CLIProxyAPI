@@ -188,13 +188,10 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 	if errMsg == nil {
 		return 0
 	}
-	status := errMsg.StatusCode
-	if status <= 0 && errMsg.Error != nil {
-		if se, ok := errMsg.Error.(interface{ StatusCode() int }); ok && se != nil {
-			status = se.StatusCode()
-		}
+	if errMsg.StatusCode > 0 {
+		return errMsg.StatusCode
 	}
-	return status
+	return clienterror.HTTPStatusFromError(errMsg.Error)
 }
 
 // shouldExposeResponsesUpstreamError reports whether a terminal upstream error

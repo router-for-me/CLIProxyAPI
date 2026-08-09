@@ -97,6 +97,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	// Drop choices that point at tools removed by normalizeXAITools before any
 	// configured x_search injection, so no surviving choice references a deleted tool.
 	body = normalizeXAINamespaceToolChoice(body)
+	body = normalizeXAIForcedWebSearchToolChoice(body)
 	body = pruneXAIOrphanedToolChoice(body)
 	body = normalizeXAIToolChoiceForTools(body)
 	if e.cfg != nil && e.cfg.XAI.InjectXSearch {
@@ -582,6 +583,26 @@ func ensureXAINativeXSearchAllowedTools(body []byte) []byte {
 	}
 	body, _ = sjson.SetRawBytes(body, "tool_choice.tools.-1", xaiXSearchToolJSON)
 	return body
+}
+
+// normalizeXAIForcedWebSearchToolChoice rewrites Codex's hosted-tool choice
+// into the allowed_tools form accepted by xAI's ModelToolChoice schema.
+func normalizeXAIForcedWebSearchToolChoice(body []byte) []byte {
+	choice := gjson.GetBytes(body, "tool_choice")
+	if !choice.IsObject() || strings.TrimSpace(choice.Get("type").String()) != xaiWebSearchToolType {
+		return body
+	}
+
+	allowedChoice := []byte(`{"type":"allowed_tools","mode":"required","tools":[]}`)
+	allowedChoice, errSetAllowed := sjson.SetRawBytes(allowedChoice, "tools.-1", []byte(choice.Raw))
+	if errSetAllowed != nil {
+		return body
+	}
+	updated, errSetChoice := sjson.SetRawBytes(body, "tool_choice", allowedChoice)
+	if errSetChoice != nil {
+		return body
+	}
+	return updated
 }
 
 // pruneXAIOrphanedToolChoice removes tool_choice entries that no longer match

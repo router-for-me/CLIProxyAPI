@@ -166,12 +166,17 @@ func headerValueCaseInsensitive(headers http.Header, name string) string {
 	return ""
 }
 
-func isCodexMultiAgentClient(userAgent string) bool {
+// IsCodexClientUserAgent reports whether a request uses an official Codex client identity.
+func IsCodexClientUserAgent(userAgent string) bool {
 	userAgent = strings.TrimSpace(userAgent)
 	return strings.HasPrefix(userAgent, "Codex Desktop/") ||
 		strings.HasPrefix(userAgent, "codex-tui/") ||
 		userAgent == "codex_cli_rs" ||
 		strings.HasPrefix(userAgent, "codex_cli_rs/")
+}
+
+func isCodexMultiAgentClient(userAgent string) bool {
+	return IsCodexClientUserAgent(userAgent)
 }
 
 func codexSpawnAgentModelsForRequest(ctx context.Context, headers http.Header, homeEnabled bool) []codexSpawnAgentModel {

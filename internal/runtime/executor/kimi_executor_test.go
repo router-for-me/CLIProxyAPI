@@ -528,6 +528,20 @@ func TestNormalizeKimiUpstreamModel(t *testing.T) {
 		{"kimi-k3[1m](1024)", "k3(1024)"},
 		{"kimi-k2.6(high)", "k2.6(high)"},
 		{"kimi-k2.6[1m](high)", "k2.6(high)"},
+		{"kimi-k2.7-code", "kimi-for-coding"},
+		{"kimi-k2.7-code-highspeed", "kimi-for-coding-highspeed"},
+		{"Kimi-K2.7-Code", "kimi-for-coding"},
+		{"kimi-k2.7-code-highspeed(high)", "kimi-for-coding-highspeed(high)"},
+		{"kimi-k2.7-code[1m](high)", "kimi-for-coding(high)"},
+		{"k2.7-code", "kimi-for-coding"},
+		{"k2.7-code-highspeed", "kimi-for-coding-highspeed"},
+		{"kimi-for-coding", "kimi-for-coding"},
+		{"kimi-for-coding-highspeed", "kimi-for-coding-highspeed"},
+		{"Kimi-For-Coding", "kimi-for-coding"},
+		{"kimi-for-coding-highspeed(high)", "kimi-for-coding-highspeed(high)"},
+		{"kimi-for-coding[1m]", "kimi-for-coding"},
+		{"for-coding", "kimi-for-coding"},
+		{"for-coding-highspeed", "kimi-for-coding-highspeed"},
 	}
 
 	for _, c := range cases {
