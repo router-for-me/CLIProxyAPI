@@ -410,6 +410,30 @@ func TestClaudeToKiroRejectsUnsupportedGenerationControls(t *testing.T) {
 	}
 }
 
+func TestClaudeToKiroRejectsURLBackedImages(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "user image",
+			body: `{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://example.com/image.png"}}]}]}`,
+		},
+		{
+			name: "tool result image",
+			body: `{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"image","source":{"type":"url","url":"https://example.com/tool.png"}}]}]}]}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, errTranslate := claudeToKiro([]byte(test.body), "")
+			if errTranslate == nil || !strings.Contains(errTranslate.Error(), "URL-backed image") {
+				t.Fatalf("claudeToKiro() error = %v, want URL-backed image error", errTranslate)
+			}
+		})
+	}
+}
+
 func TestClaudeToKiroPreservesThinkingBudget(t *testing.T) {
 	payload, _, errTranslate := claudeToKiro([]byte(`{
 		"model":"claude-sonnet-4-5",

@@ -33,6 +33,11 @@ func claudeToKiro(raw []byte, requestedModel string) (*kiroPayload, *claudeReque
 	if len(request.Messages) == 0 {
 		return nil, nil, fmt.Errorf("messages must not be empty")
 	}
+	for _, message := range request.Messages {
+		if errImages := validateClaudeImageSources(message.Content); errImages != nil {
+			return nil, nil, errImages
+		}
+	}
 	if len(request.StopSequences) > 0 {
 		return nil, nil, fmt.Errorf("Kiro provider does not support stop_sequences")
 	}
@@ -113,6 +118,26 @@ func claudeToKiro(raw []byte, requestedModel string) (*kiroPayload, *claudeReque
 	}
 	payload.EstimatedInputTokens = estimateJSONTokens(payload)
 	return payload, &request, nil
+}
+
+func validateClaudeImageSources(content any) error {
+	for _, block := range contentBlocks(content) {
+		typeName, _ := block["type"].(string)
+		switch typeName {
+		case "image", "input_image":
+			source, _ := block["source"].(map[string]any)
+			sourceType, _ := source["type"].(string)
+			urlValue, _ := source["url"].(string)
+			if strings.EqualFold(strings.TrimSpace(sourceType), "url") || strings.TrimSpace(urlValue) != "" {
+				return fmt.Errorf("Kiro provider does not support URL-backed image sources; use base64 image data")
+			}
+		case "tool_result":
+			if errNested := validateClaudeImageSources(block["content"]); errNested != nil {
+				return errNested
+			}
+		}
+	}
+	return nil
 }
 
 func normalizeKiroModel(model string) string {
