@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -132,7 +133,7 @@ func observePluginExecutorStreamUsage(buffer *helps.StreamUsageBuffer, format sd
 		case sdktranslator.FormatClaude:
 			detail, ok := helps.ParseClaudeStreamUsage(usagePayload)
 			if previous, exists := buffer.Detail(); ok && exists {
-				detail = mergeClaudePluginStreamUsage(previous, detail)
+				detail = mergeClaudePluginStreamUsage(previous, detail, usagePayload)
 			}
 			buffer.Observe(detail, ok)
 		case sdktranslator.FormatOpenAI:
@@ -149,12 +150,23 @@ func observePluginExecutorStreamUsage(buffer *helps.StreamUsageBuffer, format sd
 	}
 }
 
-func mergeClaudePluginStreamUsage(previous, current coreusage.Detail) coreusage.Detail {
-	current.InputTokens = max(previous.InputTokens, current.InputTokens)
-	current.OutputTokens = max(previous.OutputTokens, current.OutputTokens)
-	current.ReasoningTokens = max(previous.ReasoningTokens, current.ReasoningTokens)
-	current.CacheReadTokens = max(previous.CacheReadTokens, current.CacheReadTokens)
-	current.CacheCreationTokens = max(previous.CacheCreationTokens, current.CacheCreationTokens)
+func mergeClaudePluginStreamUsage(previous, current coreusage.Detail, payload []byte) coreusage.Detail {
+	fields := claudePluginStreamUsageFields(payload)
+	if !fields["input_tokens"] {
+		current.InputTokens = previous.InputTokens
+	}
+	if !fields["output_tokens"] {
+		current.OutputTokens = previous.OutputTokens
+	}
+	if !fields["reasoning_tokens"] {
+		current.ReasoningTokens = previous.ReasoningTokens
+	}
+	if !fields["cache_read_input_tokens"] {
+		current.CacheReadTokens = previous.CacheReadTokens
+	}
+	if !fields["cache_creation_input_tokens"] {
+		current.CacheCreationTokens = previous.CacheCreationTokens
+	}
 	current.CachedTokens = current.CacheReadTokens
 	if current.CachedTokens == 0 {
 		current.CachedTokens = current.CacheCreationTokens
@@ -178,4 +190,27 @@ func mergeClaudePluginStreamUsage(previous, current coreusage.Detail) coreusage.
 		current.TotalTokens,
 	)
 	return current
+}
+
+func claudePluginStreamUsageFields(payload []byte) map[string]bool {
+	var envelope struct {
+		Usage map[string]json.RawMessage `json:"usage"`
+	}
+	if errUnmarshal := json.Unmarshal(helps.JSONPayload(payload), &envelope); errUnmarshal != nil {
+		return nil
+	}
+	fields := make(map[string]bool, len(envelope.Usage)+1)
+	for name := range envelope.Usage {
+		fields[name] = true
+	}
+	if fields["thinking_tokens"] {
+		fields["reasoning_tokens"] = true
+	}
+	if rawDetails, ok := envelope.Usage["output_tokens_details"]; ok {
+		var details map[string]json.RawMessage
+		if errUnmarshal := json.Unmarshal(rawDetails, &details); errUnmarshal == nil {
+			fields["reasoning_tokens"] = fields["reasoning_tokens"] || details["thinking_tokens"] != nil || details["reasoning_tokens"] != nil
+		}
+	}
+	return fields
 }

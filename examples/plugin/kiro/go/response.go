@@ -28,6 +28,7 @@ func (a *responseAccumulator) accept(event kiroEvent) ([]claudeContentBlock, err
 		// Kiro does not return an Anthropic-verifiable signature. Omit its
 		// reasoning instead of emitting a Claude thinking block that clients
 		// cannot safely replay.
+		a.HiddenReasoningTokens += estimateApproxTokens(firstStringField(event.Payload, "content", "text"))
 		return nil, nil
 	case "toolUseEvent":
 		tools, errTools := a.pendingTools.accept(event.Payload)
@@ -108,7 +109,7 @@ func (a *responseAccumulator) finish() error {
 		a.InputTokens = a.currentInputTokens()
 	}
 	if a.OutputTokens <= 0 {
-		a.OutputTokens = estimateClaudeOutputTokens(a.Blocks)
+		a.OutputTokens = estimateClaudeOutputTokens(a.Blocks) + a.HiddenReasoningTokens
 	}
 	return nil
 }

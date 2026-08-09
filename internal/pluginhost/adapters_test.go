@@ -2942,7 +2942,7 @@ func TestPluginExecutorUsageParsesFinalClaudeStreamCounts(t *testing.T) {
 
 func TestPluginExecutorUsageMergesClaudeStreamCounts(t *testing.T) {
 	var usageBuffer helps.StreamUsageBuffer
-	observePluginExecutorStreamUsage(&usageBuffer, sdktranslator.FormatClaude, []byte("event: message_start\ndata: {\"type\":\"message_start\",\"usage\":{\"input_tokens\":12,\"output_tokens\":1,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":2}}\n\n"))
+	observePluginExecutorStreamUsage(&usageBuffer, sdktranslator.FormatClaude, []byte("event: message_start\ndata: {\"type\":\"message_start\",\"usage\":{\"input_tokens\":12,\"output_tokens\":10,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":2}}\n\n"))
 	observePluginExecutorStreamUsage(&usageBuffer, sdktranslator.FormatClaude, []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n\n"))
 	detail, ok := usageBuffer.Detail()
 	if !ok {

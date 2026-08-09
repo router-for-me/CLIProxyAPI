@@ -701,6 +701,13 @@ func TestAccumulatorOmitsUnsignedReasoningAndMergesTextFragments(t *testing.T) {
 	if accumulator.Blocks[0].Type != "text" || accumulator.Blocks[0].Text != "Hello world." {
 		t.Fatalf("merged content blocks = %#v", accumulator.Blocks)
 	}
+	if errFinish := accumulator.finish(); errFinish != nil {
+		t.Fatal(errFinish)
+	}
+	visibleTokens := estimateClaudeOutputTokens(accumulator.Blocks)
+	if accumulator.OutputTokens <= visibleTokens {
+		t.Fatalf("output tokens = %d, want hidden reasoning included beyond %d visible tokens", accumulator.OutputTokens, visibleTokens)
+	}
 }
 
 func TestAccumulatorEstimatesUsageWhenUpstreamOmitsTokens(t *testing.T) {

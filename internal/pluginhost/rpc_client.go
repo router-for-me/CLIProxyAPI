@@ -451,7 +451,7 @@ func (a *rpcPluginAdapter) CountTokens(ctx context.Context, req pluginapi.Execut
 }
 
 func (a *rpcPluginAdapter) HttpRequest(ctx context.Context, req pluginapi.ExecutorHTTPRequest) (pluginapi.ExecutorHTTPResponse, error) {
-	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	callbackID, closeCallback := a.openHostCallbackContext(ctx, req.HTTPClient)
 	defer closeCallback()
 	return callPlugin[pluginapi.ExecutorHTTPResponse](ctx, a.client, pluginabi.MethodExecutorHTTPRequest, rpcExecutorHTTPRequest{
 		ExecutorHTTPRequest: req,

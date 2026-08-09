@@ -83,6 +83,23 @@ func TestRPCExecuteStreamClosesHostCallbackScopeOnContextCancelWhileChunkPending
 	}
 }
 
+func TestRPCExecutorHTTPRequestPassesHostHTTPClientToCallbackScope(t *testing.T) {
+	host := New()
+	httpClient := &callbackHTTPClient{}
+	client := &executorHTTPCallbackPluginClient{host: host}
+	adapter := &rpcPluginAdapter{id: "http-plugin", host: host, client: client}
+
+	if _, errRequest := adapter.HttpRequest(context.Background(), pluginapi.ExecutorHTTPRequest{HTTPClient: httpClient}); errRequest != nil {
+		t.Fatalf("HttpRequest() error = %v", errRequest)
+	}
+	if client.httpClient != httpClient {
+		t.Fatalf("callback HTTP client = %T, want selected auth-aware client", client.httpClient)
+	}
+	if callbackContextExists(host, client.callbackID) {
+		t.Fatal("HTTP callback scope remained open after request completed")
+	}
+}
+
 func callbackContextExists(host *Host, callbackID string) bool {
 	if host == nil || host.callbackContexts == nil {
 		return false
@@ -98,6 +115,27 @@ type streamCallbackPluginClient struct {
 	streamID   string
 	callbackID string
 }
+
+type executorHTTPCallbackPluginClient struct {
+	host       *Host
+	callbackID string
+	httpClient pluginapi.HostHTTPClient
+}
+
+func (c *executorHTTPCallbackPluginClient) Call(_ context.Context, method string, request []byte) ([]byte, error) {
+	if method != pluginabi.MethodExecutorHTTPRequest {
+		return nil, fmt.Errorf("method = %s, want %s", method, pluginabi.MethodExecutorHTTPRequest)
+	}
+	var req rpcExecutorHTTPRequest
+	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+		return nil, fmt.Errorf("decode executor HTTP request: %w", errUnmarshal)
+	}
+	c.callbackID = req.HostCallbackID
+	c.httpClient = c.host.callbackHTTPClient(req.HostCallbackID)
+	return marshalRPCResult(pluginapi.ExecutorHTTPResponse{StatusCode: http.StatusOK})
+}
+
+func (c *executorHTTPCallbackPluginClient) Shutdown() {}
 
 func newStreamCallbackPluginClient() *streamCallbackPluginClient {
 	return &streamCallbackPluginClient{called: make(chan struct{})}

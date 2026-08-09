@@ -162,6 +162,7 @@ type responseAccumulator struct {
 	StopReason             string
 	Credits                float64
 	EstimatedInputTokens   int
+	HiddenReasoningTokens  int
 	ContextUsagePercentage float64
 	ToolNames              map[string]string
 	pendingTools           pendingToolUses
