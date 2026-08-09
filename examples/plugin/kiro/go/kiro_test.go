@@ -550,6 +550,23 @@ func TestNormalizeKiroModelDoesNotRewriteDatedSnapshotAsDecimal(t *testing.T) {
 	}
 }
 
+func TestContextWindowTokensDistinguishesDatedSnapshots(t *testing.T) {
+	tests := []struct {
+		model string
+		want  int
+	}{
+		{model: "claude-opus-4-20250514", want: 200_000},
+		{model: "claude-sonnet-4.6", want: 1_000_000},
+		{model: "claude-opus-5", want: 1_000_000},
+	}
+
+	for _, test := range tests {
+		if got := contextWindowTokens(test.model); got != test.want {
+			t.Errorf("contextWindowTokens(%q) = %d, want %d", test.model, got, test.want)
+		}
+	}
+}
+
 func TestEventStreamDecoderHandlesSplitFramesAndCRC(t *testing.T) {
 	frame := testEventFrame(t, "assistantResponseEvent", map[string]any{"content": "hello"})
 	decoder := &eventStreamDecoder{}

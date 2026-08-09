@@ -8,7 +8,10 @@ import (
 	"strings"
 )
 
-var claudeVersionPattern = regexp.MustCompile(`claude-(?:opus|sonnet|haiku)-(\d+)(?:[.-](\d+))?`)
+var (
+	claudeVersionPattern       = regexp.MustCompile(`claude-(?:opus|sonnet|haiku)-(\d+)(?:[.-](\d+))?`)
+	claudeDatedSnapshotPattern = regexp.MustCompile(`claude-(?:opus|sonnet|haiku)-\d+-\d{8}(?:[^0-9]|$)`)
+)
 
 func estimateApproxTokens(text string) int {
 	if text == "" {
@@ -122,7 +125,12 @@ func stringValue(value any) string {
 }
 
 func contextWindowTokens(model string) int {
-	match := claudeVersionPattern.FindStringSubmatch(strings.ToLower(model))
+	model = strings.ToLower(model)
+	if claudeDatedSnapshotPattern.MatchString(model) {
+		return 200_000
+	}
+
+	match := claudeVersionPattern.FindStringSubmatch(model)
 	if len(match) == 3 {
 		major, errMajor := strconv.Atoi(match[1])
 		minor := 0
