@@ -20,6 +20,7 @@ type uploadCall struct {
 	Bucket    string
 	ObjectKey string
 	Path      string
+	Expected  objectIdentity
 }
 
 type fakeObjectUploader struct {
@@ -36,16 +37,16 @@ type matchingFakeObjectUploader struct {
 	matchCalls int
 }
 
-func (u *matchingFakeObjectUploader) MatchObject(_ context.Context, _, _, _ string) (bool, error) {
+func (u *matchingFakeObjectUploader) MatchObject(_ context.Context, _, _ string, _ objectIdentity) (bool, error) {
 	u.matchCalls++
 	return u.matches, u.matchErr
 }
 
-func (u *fakeObjectUploader) UploadFile(_ context.Context, bucket, objectKey, path string) error {
+func (u *fakeObjectUploader) UploadFile(_ context.Context, bucket, objectKey, path string, expected objectIdentity) error {
 	if _, errStat := os.Stat(path); errStat != nil {
 		return errStat
 	}
-	u.calls = append(u.calls, uploadCall{Bucket: bucket, ObjectKey: objectKey, Path: path})
+	u.calls = append(u.calls, uploadCall{Bucket: bucket, ObjectKey: objectKey, Path: path, Expected: expected})
 	if u.onUpload != nil {
 		u.onUpload()
 	}
@@ -55,6 +56,180 @@ func (u *fakeObjectUploader) UploadFile(_ context.Context, bucket, objectKey, pa
 		return errUpload
 	}
 	return u.err
+}
+
+func TestPreparedHourPersistsExactUsageForMixedKeyNamesAndFilteredCodex(t *testing.T) {
+	t.Parallel()
+
+	location := mustLocation(t, "Asia/Shanghai")
+	now := time.Date(2026, time.July, 15, 3, 10, 0, 0, location)
+	hour := time.Date(2026, time.July, 15, 1, 0, 0, 0, location)
+	root := filepath.Join(t.TempDir(), "keys")
+	workDir := filepath.Join(t.TempDir(), "uploader")
+
+	pandaPath := mustWriteLog(t, root, "panda", "v1-responses-2026-07-15T011000-panda.log",
+		requestLog(hour.Add(10*time.Minute), "gpt-5.6-sol", "panda response"), hour.Add(45*time.Minute))
+	alicePath := mustWriteLog(t, root, "alice", "v1-responses-2026-07-15T012000-alice.log",
+		requestLog(hour.Add(20*time.Minute), "gpt-5.6-sol", "alice response"), hour.Add(45*time.Minute))
+	filteredRaw := "Timestamp: " + hour.Add(30*time.Minute).Format(time.RFC3339Nano) + "\n" +
+		"=== REQUEST BODY ===\n" +
+		`{"model":"gpt-5.6-sol","input":"filtered"}` + "\n" +
+		"=== RESPONSE ===\n" +
+		`{"ok":true}` + "\n"
+	filteredPath := mustWriteLog(t, root, "panda", "v1-responses-2026-07-15T013000-filtered.log",
+		filteredRaw, hour.Add(45*time.Minute))
+
+	pandaWritten, pandaSize := exactSourceUsage(t, root, pandaPath, location)
+	aliceWritten, aliceSize := exactSourceUsage(t, root, alicePath, location)
+	filteredWritten, filteredSize := exactSourceUsage(t, root, filteredPath, location)
+	if filteredWritten != 0 {
+		t.Fatalf("filtered source JSONL bytes = %d, want 0", filteredWritten)
+	}
+
+	cfg := testConfig(root, workDir)
+	cfg.Upload.Enabled = true
+	cfg.Supabase.Enabled = true
+	uploader := &fakeObjectUploader{err: errors.New("retain prepared batch for test")}
+	service := mustTestService(t, cfg, uploader, now)
+	if errRun := service.RunOnce(context.Background(), false); errRun == nil {
+		t.Fatal("RunOnce error = nil, want upload failure that retains prepared state")
+	}
+
+	state, errLoad := service.loadState()
+	if errLoad != nil {
+		t.Fatalf("reload prepared state: %v", errLoad)
+	}
+	prepared, exists := state.PreparedHours[hourStateKey(hour, providerCodex)]
+	if !exists {
+		t.Fatalf("prepared hour missing: %+v", state.PreparedHours)
+	}
+	if len(prepared.Usage) != 2 {
+		t.Fatalf("prepared usage rows = %d, want 2: %+v", len(prepared.Usage), prepared.Usage)
+	}
+	if got := prepared.Usage[0]; got.KeyName != "alice" || got.Provider != providerCodex ||
+		got.SourceCount != 1 || got.SourceBytes != aliceSize || got.JSONLBytes != aliceWritten {
+		t.Errorf("alice usage = %+v, want count=1 source_bytes=%d jsonl_bytes=%d", got, aliceSize, aliceWritten)
+	}
+	if got := prepared.Usage[1]; got.KeyName != "panda" || got.Provider != providerCodex ||
+		got.SourceCount != 2 || got.SourceBytes != pandaSize+filteredSize || got.JSONLBytes != pandaWritten {
+		t.Errorf("panda usage = %+v, want count=2 source_bytes=%d jsonl_bytes=%d", got, pandaSize+filteredSize, pandaWritten)
+	}
+	if got, want := prepared.JSONLBytes, aliceWritten+pandaWritten; got != want {
+		t.Errorf("prepared JSONL bytes = %d, want exact row total %d", got, want)
+	}
+}
+
+func TestPreparedHourPersistsAllFilteredUsage(t *testing.T) {
+	t.Parallel()
+
+	location := mustLocation(t, "Asia/Shanghai")
+	now := time.Date(2026, time.July, 15, 3, 10, 0, 0, location)
+	hour := time.Date(2026, time.July, 15, 1, 0, 0, 0, location)
+	root := filepath.Join(t.TempDir(), "keys")
+	workDir := filepath.Join(t.TempDir(), "uploader")
+	filteredRaw := "Timestamp: " + hour.Add(10*time.Minute).Format(time.RFC3339Nano) + "\n" +
+		"=== REQUEST BODY ===\n" +
+		`{"model":"gpt-5.6-sol","input":"filtered"}` + "\n" +
+		"=== RESPONSE ===\n" +
+		`{"ok":true}` + "\n"
+	firstPath := mustWriteLog(t, root, "panda", "v1-responses-2026-07-15T011000-filtered.log",
+		filteredRaw, hour.Add(40*time.Minute))
+	secondPath := mustWriteLog(t, root, "panda", "v1-responses-2026-07-15T012000-filtered.log",
+		filteredRaw, hour.Add(40*time.Minute))
+	_, firstSize := exactSourceUsage(t, root, firstPath, location)
+	_, secondSize := exactSourceUsage(t, root, secondPath, location)
+
+	cfg := testConfig(root, workDir)
+	cfg.Upload.Enabled = true
+	cfg.Supabase.Enabled = true
+	service := mustTestService(t, cfg, &fakeObjectUploader{err: errors.New("retain all-filtered batch")}, now)
+	if errRun := service.RunOnce(context.Background(), false); errRun == nil {
+		t.Fatal("RunOnce error = nil, want upload failure that retains prepared state")
+	}
+
+	state, errLoad := service.loadState()
+	if errLoad != nil {
+		t.Fatalf("reload all-filtered prepared state: %v", errLoad)
+	}
+	prepared, exists := state.PreparedHours[hourStateKey(hour, providerCodex)]
+	if !exists {
+		t.Fatalf("prepared hour missing: %+v", state.PreparedHours)
+	}
+	if prepared.JSONLBytes != 0 {
+		t.Errorf("all-filtered JSONL bytes = %d, want 0", prepared.JSONLBytes)
+	}
+	if len(prepared.Usage) != 1 {
+		t.Fatalf("all-filtered usage rows = %d, want 1: %+v", len(prepared.Usage), prepared.Usage)
+	}
+	if got := prepared.Usage[0]; got.KeyName != "panda" || got.Provider != providerCodex ||
+		got.SourceCount != 2 || got.SourceBytes != firstSize+secondSize || got.JSONLBytes != 0 {
+		t.Errorf("all-filtered usage = %+v, want count=2 source_bytes=%d jsonl_bytes=0", got, firstSize+secondSize)
+	}
+}
+
+func exactSourceUsage(t *testing.T, root, path string, location *time.Location) (int64, int64) {
+	t.Helper()
+	info, errStat := os.Stat(path)
+	if errStat != nil {
+		t.Fatalf("stat source %s: %v", path, errStat)
+	}
+	source, errInspect := inspectSourceLog(root, path, info, location)
+	if errInspect != nil {
+		t.Fatalf("inspect source %s: %v", path, errInspect)
+	}
+	written, _, errWrite := writeJSONLRecordWithHash(io.Discard, source)
+	if errWrite != nil {
+		t.Fatalf("measure exact JSONL bytes for %s: %v", path, errWrite)
+	}
+	return written, info.Size()
+}
+
+func TestAggregatePreparedUsageRejectsUnsafeTotals(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		wantErr string
+		sources []sourceLog
+	}{
+		{
+			name:    "source bytes overflow",
+			wantErr: "source_bytes",
+			sources: []sourceLog{
+				{KeyName: "panda", Provider: providerCodex, Size: maxSafeJSONInteger},
+				{KeyName: "panda", Provider: providerCodex, Size: 1},
+			},
+		},
+		{
+			name:    "JSONL bytes overflow",
+			wantErr: "jsonl_bytes",
+			sources: []sourceLog{
+				{KeyName: "panda", Provider: providerCodex, JSONLBytes: maxSafeJSONInteger},
+				{KeyName: "panda", Provider: providerCodex, JSONLBytes: 1},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, errAggregate := aggregatePreparedUsage(test.sources)
+			if errAggregate == nil || !strings.Contains(errAggregate.Error(), test.wantErr) {
+				t.Fatalf("aggregatePreparedUsage error = %v, want %q", errAggregate, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestAddBatchJSONLSizeRejectsUnsafeTotal(t *testing.T) {
+	t.Parallel()
+
+	got, errAdd := addBatchJSONLSize(maxSafeJSONInteger-1, 1)
+	if errAdd != nil || got != maxSafeJSONInteger {
+		t.Fatalf("safe batch JSONL addition = %d, %v; want %d, nil", got, errAdd, maxSafeJSONInteger)
+	}
+	if _, errOverflow := addBatchJSONLSize(maxSafeJSONInteger, 1); errOverflow == nil || !strings.Contains(errOverflow.Error(), "jsonl_bytes") {
+		t.Fatalf("overflow batch JSONL error = %v, want jsonl_bytes error", errOverflow)
+	}
 }
 
 func TestRunOnceDryRunCreatesZstdJSONLAndAuditWithoutDeleting(t *testing.T) {
@@ -617,7 +792,8 @@ func TestSuccessfulUploadPersistsStateAndDeduplicatesSource(t *testing.T) {
 	if len(state.Uploaded) != 1 {
 		t.Fatalf("state uploaded entries = %d, want 1", len(state.Uploaded))
 	}
-	if finalized, exists := state.Hours["2026-07-15-02"]; !exists || finalized.ObjectKey != call.ObjectKey {
+	hourKey := hourStateKey(time.Date(2026, time.July, 15, 2, 0, 0, 0, location), providerCodex)
+	if finalized, exists := state.Hours[hourKey]; !exists || finalized.ObjectKey != call.ObjectKey {
 		t.Fatalf("finalized hour state = %+v, exists=%t; want object %s", finalized, exists, call.ObjectKey)
 	}
 	for _, uploaded := range state.Uploaded {

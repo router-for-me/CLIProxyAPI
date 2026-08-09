@@ -33,6 +33,14 @@ upload:
   # Optional for temporary credentials; leave the referenced variable unset otherwise.
   session-token-env: VOLC_TOS_SESSION_TOKEN
 
+supabase:
+  # Keep disabled until the Edge Function and its authentication policy are ready.
+  enabled: false
+  # Use the exact HTTPS URL for the log usage ingestion Edge Function.
+  ingest-url: https://ldhknedocspavyunogwt.supabase.co/functions/v1/ingest-log-usage
+  # Store the token value only in this environment variable or the repository-root .env file.
+  ingest-token-env: LOG_STATS_INGEST_TOKEN
+
 retention:
   # Delete source .log files only after the remote upload and local state are durable.
   delete-source-after-upload: true

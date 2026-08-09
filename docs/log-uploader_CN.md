@@ -117,6 +117,32 @@ go build -o bin/log-uploader ./cmd/log-uploader
 
 因此，相同 `logs-root` 和上传目标的实例即使使用不同 `work-dir`，也会自动争用同一个共享资源锁；后启动的实例会在扫描日志前失败退出，不再要求它们为了互斥而共享 `work-dir`。路径中的 `..`、符号链接等别名会先规范化，不能用来绕过共享锁。不同 `logs-root` 或不同上传目标使用不同的共享资源锁。运行账户必须有权在规范化 `logs-root` 的父目录中创建和访问 `.log-uploader-locks`。相对的 `logs-root` 和 `work-dir` 会以配置文件所在目录为基准解析，因此进程管理器不依赖特定启动目录。
 
+### 4.1 将服务器本地历史统计补传到 Supabase
+
+配置好 `supabase.ingest-url` 和 `LOG_STATS_INGEST_TOKEN` 后，可以先做只读预检：
+
+```bash
+./bin/log-uploader --config log-uploader.yaml --sync-supabase-history --dry-run
+```
+
+确认输出的 JSON 汇总正确后执行正式补传：
+
+```bash
+./bin/log-uploader --config log-uploader.yaml --sync-supabase-history
+```
+
+该模式只读取服务器本地的以下可信数据：
+
+- `work-dir/history/*.jsonl`
+- `work-dir/audit.jsonl`
+- schema-v3 `work-dir/state.json`
+
+它不会创建 TOS 客户端，不会列举、下载或读取 TOS 对象，也不会读取原始 `.log` 或 `.jsonl.zst` 内容。补传前会完整校验所有本地账本和上传状态；任何一条记录不一致时，在发出第一个 Supabase 请求前即失败。
+
+历史审计可以精确提供每个 `key_name` 的源文件数量和源日志字节数，以及批次级 JSONL/压缩字节数，但不能精确反推出每个人分别产生的 JSONL 字节数。因此历史事件使用 `usage_precision: batch_only`，不会按比例虚构每 Key JSONL 数值；正常的新上传事件仍提供精确的每 Key JSONL 字节。
+
+补传使用确定性事件 ID、持久化 outbox 和按 Supabase 目标隔离的 checkpoint。相同目标重复执行不会重复计数；更换 ingest URL 后会按新目标重新补传。历史补传只把 schema-v3 `state.json` 对应 `hours` 条目中耐久保存的 `supabase_event_id` 视为正常实时流程已接管的标记；仅在 `audit.jsonl` 中出现该 ID 的批次仍会作为历史事件补传。若审计记录与耐久标记中的 ID 不一致，预检会在网络请求前失败。命令输出只包含数量和字节汇总，不包含用户名、对象路径、日志正文或 token。
+
 ## 5. JSONL、文件名与对象路径
 
 每个原始 `.log` 对应 JSONL 中的一行。记录包含可检索元数据和经过安全处理的完整日志内容：
@@ -228,7 +254,11 @@ auths/log-uploader/state.json
 
 不要在服务运行时手工修改或删除 `state.json`。所有上传请求均禁止覆盖已有对象，并保存压缩文件的 SHA-256 元数据。
 
-`state.json` 使用 schema v2，并绑定规范化后的 Endpoint、Region、Bucket、对象前缀及归档策略。配置目标或策略发生变化时，服务会在任何删除之前拒绝启动；请使用新的 `work-dir` 或完成显式迁移，不能把旧状态直接用于另一个 Bucket。
+`state.json` 当前使用 schema v3，并绑定规范化后的 Endpoint、Region、Bucket、对象前缀及归档策略。配置目标或策略发生变化时，服务会在任何删除之前拒绝启动；请使用新的 `work-dir` 或完成显式迁移，不能把旧状态直接用于另一个 Bucket。
+
+新版本首次以非 dry-run 模式读取受信任的 schema v2 状态时，会在锁内自动执行一次单向的 v2 → v3 迁移，并在继续处理前原子保存。迁移后的 schema v3 状态不能被旧版二进制读取；如需回退旧版，必须同时恢复迁移前备份的 schema v2 状态，不能让旧版直接使用已迁移的 `state.json`。
+
+首次启用 Supabase 前，必须先确认旧状态中的 `prepared_hours` 积压已经处理完。可以先让旧版完成这些批次；如果已经升级，则保持 `supabase.enabled: false`，用新版本执行一次 `./log-uploader --config log-uploader.yaml --once`，让它恢复并结算旧的 prepared 批次，确认不再有积压后再启用 Supabase。旧 prepared 批次可能没有 Supabase 所需的精确用量元数据，直接启用会被安全拒绝。
 
 旧版无目标绑定的状态必须停服务后显式迁移。迁移命令会先核对旧状态、审计、manifest 和本地归档，全部通过后才原子替换状态：
 

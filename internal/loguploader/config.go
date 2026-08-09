@@ -3,6 +3,7 @@ package loguploader
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ type Config struct {
 	Timezone    string            `yaml:"timezone"`
 	Schedule    ScheduleConfig    `yaml:"schedule"`
 	Upload      UploadConfig      `yaml:"upload"`
+	Supabase    SupabaseConfig    `yaml:"supabase"`
 	Retention   RetentionConfig   `yaml:"retention"`
 	SessionGate SessionGateConfig `yaml:"session-gate"`
 	// Models is retained for backward-compatible config parsing.
@@ -64,6 +66,12 @@ type UploadConfig struct {
 	AccessKeyIDEnv     string `yaml:"access-key-id-env"`
 	SecretAccessKeyEnv string `yaml:"secret-access-key-env"`
 	SessionTokenEnv    string `yaml:"session-token-env"`
+}
+
+type SupabaseConfig struct {
+	Enabled        bool   `yaml:"enabled"`
+	IngestURL      string `yaml:"ingest-url"`
+	IngestTokenEnv string `yaml:"ingest-token-env"`
 }
 
 type RetentionConfig struct {
@@ -141,6 +149,9 @@ func applyConfigDefaults(cfg *Config) {
 	if strings.TrimSpace(cfg.Upload.SessionTokenEnv) == "" {
 		cfg.Upload.SessionTokenEnv = "VOLC_TOS_SESSION_TOKEN"
 	}
+	if strings.TrimSpace(cfg.Supabase.IngestTokenEnv) == "" {
+		cfg.Supabase.IngestTokenEnv = "LOG_STATS_INGEST_TOKEN"
+	}
 	applySessionGateDefaults(&cfg.SessionGate)
 }
 
@@ -201,6 +212,9 @@ func (cfg *Config) Validate() error {
 	if errGate := cfg.SessionGate.validate(); errGate != nil {
 		return errGate
 	}
+	if errSupabase := cfg.Supabase.validate(); errSupabase != nil {
+		return errSupabase
+	}
 
 	if !cfg.Upload.Enabled {
 		return nil
@@ -213,6 +227,48 @@ func (cfg *Config) Validate() error {
 	}
 	if strings.TrimSpace(cfg.Upload.Bucket) == "" {
 		return fmt.Errorf("upload.bucket is required")
+	}
+	return nil
+}
+
+func (supabase *SupabaseConfig) validate() error {
+	supabase.IngestURL = strings.TrimSpace(supabase.IngestURL)
+	supabase.IngestTokenEnv = strings.TrimSpace(supabase.IngestTokenEnv)
+	if !supabase.Enabled {
+		return nil
+	}
+	if supabase.IngestTokenEnv == "" {
+		return fmt.Errorf("supabase.ingest-token-env is required")
+	}
+
+	rawURL := supabase.IngestURL
+	parsedURL, errParse := url.Parse(rawURL)
+	if errParse != nil {
+		return fmt.Errorf("invalid supabase.ingest-url: malformed URL")
+	}
+	if !parsedURL.IsAbs() || !strings.EqualFold(parsedURL.Scheme, "https") || parsedURL.Hostname() == "" {
+		return fmt.Errorf("invalid supabase.ingest-url: must be an absolute HTTPS URL")
+	}
+	if parsedURL.User != nil {
+		return fmt.Errorf("invalid supabase.ingest-url: credentials are not allowed")
+	}
+	if parsedURL.RawQuery != "" || parsedURL.ForceQuery {
+		return fmt.Errorf("invalid supabase.ingest-url: query parameters are not allowed")
+	}
+	if parsedURL.Fragment != "" || strings.Contains(rawURL, "#") {
+		return fmt.Errorf("invalid supabase.ingest-url: fragments are not allowed")
+	}
+
+	const edgeFunctionPrefix = "/functions/v1/"
+	functionName := strings.TrimPrefix(parsedURL.Path, edgeFunctionPrefix)
+	if parsedURL.RawPath != "" || functionName == parsedURL.Path || functionName == "" || strings.Contains(functionName, "/") {
+		return fmt.Errorf("invalid supabase.ingest-url: path must be /functions/v1/<function-name>")
+	}
+	for _, character := range functionName {
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') && character != '-' && character != '_' {
+			return fmt.Errorf("invalid supabase.ingest-url: function name contains unsupported characters")
+		}
 	}
 	return nil
 }

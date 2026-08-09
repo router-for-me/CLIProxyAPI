@@ -21,15 +21,9 @@ type processLockSet struct {
 }
 
 func (s *Service) acquireProcessLock() (processLock, error) {
-	if errMkdir := os.MkdirAll(s.cfg.WorkDir, 0o750); errMkdir != nil {
-		return nil, fmt.Errorf("create uploader work directory: %w", errMkdir)
-	}
-	workLock, errWorkLock := acquireFileLock(filepath.Join(s.cfg.WorkDir, "service.lock"))
-	if errors.Is(errWorkLock, errFileLockBusy) {
-		return nil, fmt.Errorf("another log uploader instance is already using this work directory: %w", errWorkLock)
-	}
+	workLock, errWorkLock := s.acquireWorkDirLock()
 	if errWorkLock != nil {
-		return nil, fmt.Errorf("acquire log uploader work directory lock: %w", errWorkLock)
+		return nil, errWorkLock
 	}
 
 	sharedPath, errSharedPath := s.sharedResourceLockPath()
@@ -50,6 +44,20 @@ func (s *Service) acquireProcessLock() (processLock, error) {
 		return nil, errors.Join(fmt.Errorf("acquire shared uploader resource lock: %w", errSharedLock), workLock.Close())
 	}
 	return &processLockSet{locks: []processLock{workLock, sharedLock}}, nil
+}
+
+func (s *Service) acquireWorkDirLock() (processLock, error) {
+	if errMkdir := os.MkdirAll(s.cfg.WorkDir, 0o750); errMkdir != nil {
+		return nil, fmt.Errorf("create uploader work directory: %w", errMkdir)
+	}
+	workLock, errWorkLock := acquireFileLock(filepath.Join(s.cfg.WorkDir, "service.lock"))
+	if errors.Is(errWorkLock, errFileLockBusy) {
+		return nil, fmt.Errorf("another log uploader instance is already using this work directory: %w", errWorkLock)
+	}
+	if errWorkLock != nil {
+		return nil, fmt.Errorf("acquire log uploader work directory lock: %w", errWorkLock)
+	}
+	return workLock, nil
 }
 
 func (s *Service) sharedResourceLockPath() (string, error) {

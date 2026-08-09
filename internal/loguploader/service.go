@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,31 +16,40 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+type objectIdentity struct {
+	Size   int64
+	SHA256 string
+}
+
 type ObjectUploader interface {
-	UploadFile(ctx context.Context, bucket, objectKey, path string) error
+	UploadFile(ctx context.Context, bucket, objectKey, path string, expected objectIdentity) error
 }
 
 type ObjectMatcher interface {
-	MatchObject(ctx context.Context, bucket, objectKey, path string) (bool, error)
+	MatchObject(ctx context.Context, bucket, objectKey string, expected objectIdentity) (bool, error)
 }
 
 type Service struct {
-	cfg      Config
-	uploader ObjectUploader
-	location *time.Location
-	target   uploadTarget
-	policy   uploadPolicy
-	now      func() time.Time
+	cfg                      Config
+	uploader                 ObjectUploader
+	location                 *time.Location
+	target                   uploadTarget
+	policy                   uploadPolicy
+	now                      func() time.Time
+	supabaseHTTPDoer         httpDoer
+	syncStateParentDirectory func(string) error
 }
 
 type uploadState struct {
-	SchemaVersion int                       `json:"schema_version"`
-	Target        uploadTarget              `json:"target"`
-	Policy        uploadPolicy              `json:"policy"`
-	Uploaded      map[string]uploadedSource `json:"uploaded"`
-	Objects       map[string]uploadedObject `json:"objects"`
-	Hours         map[string]uploadedHour   `json:"hours"`
-	PreparedHours map[string]preparedHour   `json:"prepared_hours"`
+	SchemaVersion   int                                  `json:"schema_version"`
+	Target          uploadTarget                         `json:"target"`
+	Policy          uploadPolicy                         `json:"policy"`
+	Uploaded        map[string]uploadedSource            `json:"uploaded"`
+	Objects         map[string]uploadedObject            `json:"objects"`
+	Hours           map[string]uploadedHour              `json:"hours"`
+	PreparedHours   map[string]preparedHour              `json:"prepared_hours"`
+	SupabaseOutbox  supabaseOutboxState                  `json:"supabase_outbox"`
+	SupabaseHistory map[string]supabaseHistoryCheckpoint `json:"supabase_history,omitempty"`
 	// SessionGate tracks hold metadata for the upload session filter (optional).
 	SessionGate *sessionGateStore `json:"session_gate,omitempty"`
 	dirty       bool              `json:"-"`
@@ -83,25 +93,37 @@ type uploadedObject struct {
 }
 
 type uploadedHour struct {
-	Status         string    `json:"status"`
-	ObjectKey      string    `json:"object_key"`
-	ArchiveSHA256  string    `json:"archive_sha256"`
-	ManifestSHA256 string    `json:"manifest_sha256"`
-	UploadedAt     time.Time `json:"uploaded_at"`
+	Status          string    `json:"status"`
+	ObjectKey       string    `json:"object_key"`
+	ArchiveSHA256   string    `json:"archive_sha256"`
+	ManifestSHA256  string    `json:"manifest_sha256"`
+	SupabaseEventID string    `json:"supabase_event_id,omitempty"`
+	UploadedAt      time.Time `json:"uploaded_at"`
 }
 
 type preparedHour struct {
-	TargetID        string           `json:"target_id"`
-	Hour            time.Time        `json:"hour"`
-	Provider        string           `json:"provider"`
-	ObjectKey       string           `json:"object_key"`
-	ArchivePath     string           `json:"archive_path"`
-	JSONLBytes      int64            `json:"jsonl_bytes"`
-	CompressedBytes int64            `json:"compressed_bytes"`
-	ArchiveSHA256   string           `json:"archive_sha256"`
-	ManifestSHA256  string           `json:"manifest_sha256"`
-	Sources         []preparedSource `json:"sources"`
-	PreparedAt      time.Time        `json:"prepared_at"`
+	TargetID           string           `json:"target_id"`
+	Hour               time.Time        `json:"hour"`
+	Provider           string           `json:"provider"`
+	ObjectKey          string           `json:"object_key"`
+	ArchivePath        string           `json:"archive_path"`
+	JSONLBytes         int64            `json:"jsonl_bytes"`
+	CompressedBytes    int64            `json:"compressed_bytes"`
+	ArchiveSHA256      string           `json:"archive_sha256"`
+	ManifestSHA256     string           `json:"manifest_sha256"`
+	UsageSchemaVersion int              `json:"usage_schema_version,omitempty"`
+	UsageSHA256        string           `json:"usage_sha256,omitempty"`
+	Sources            []preparedSource `json:"sources"`
+	Usage              []preparedUsage  `json:"usage,omitempty"`
+	PreparedAt         time.Time        `json:"prepared_at"`
+}
+
+type preparedUsage struct {
+	KeyName     string `json:"key_name"`
+	Provider    string `json:"provider"`
+	SourceCount int64  `json:"source_count"`
+	SourceBytes int64  `json:"source_bytes"`
+	JSONLBytes  int64  `json:"jsonl_bytes"`
 }
 
 type preparedSource struct {
@@ -112,6 +134,7 @@ type preparedSource struct {
 	Size         int64     `json:"size_bytes"`
 	ModTime      time.Time `json:"mod_time"`
 	SHA256       string    `json:"source_sha256"`
+	JSONLBytes   *int64    `json:"jsonl_bytes,omitempty"`
 }
 
 type auditKeyNameSummary struct {
@@ -136,6 +159,7 @@ type auditRecord struct {
 	JSONLBytes      int64                          `json:"jsonl_bytes"`
 	CompressedBytes int64                          `json:"compressed_bytes"`
 	ObjectKey       string                         `json:"object_key,omitempty"`
+	SupabaseEventID string                         `json:"supabase_event_id,omitempty"`
 	ArchivePath     string                         `json:"archive_path"`
 	DeletedSources  int                            `json:"deleted_sources"`
 	Error           string                         `json:"error,omitempty"`
@@ -151,7 +175,16 @@ func NewService(cfg Config, uploader ObjectUploader) (*Service, error) {
 		return nil, errTarget
 	}
 	policy := uploadPolicy{Timezone: cfg.Timezone, Grouping: "completion-modtime-hour-v1", Naming: archiveNamingPolicy}
-	return &Service{cfg: cfg, uploader: uploader, location: location, target: target, policy: policy, now: time.Now}, nil
+	return &Service{
+		cfg:                      cfg,
+		uploader:                 uploader,
+		location:                 location,
+		target:                   target,
+		policy:                   policy,
+		now:                      time.Now,
+		supabaseHTTPDoer:         newSupabaseHTTPClient(),
+		syncStateParentDirectory: syncParentDirectory,
+	}, nil
 }
 
 // Run starts the hourly scheduler and blocks until ctx is cancelled.
@@ -233,6 +266,13 @@ func (s *Service) hasCatchUpWork() (bool, error) {
 	state, errLoad := s.loadState()
 	if errLoad != nil {
 		return false, errLoad
+	}
+	if s.cfg.Supabase.Enabled {
+		for _, entry := range state.SupabaseOutbox.Entries {
+			if entry.Status == supabaseOutboxStatusPending {
+				return true, nil
+			}
+		}
 	}
 	if len(state.PreparedHours) > 0 {
 		return true, nil
@@ -319,7 +359,13 @@ func (s *Service) runOnce(ctx context.Context, dryRun bool) error {
 	}).Info("state loaded")
 	var runErrors []error
 	if !dryRun {
-		if errResume := s.resumePreparedHours(ctx, state); errResume != nil {
+		if _, errDrain := s.drainSupabaseOutbox(ctx, &state); errDrain != nil {
+			log.WithError(errDrain).Warn("Supabase delivery remains pending at startup")
+			runErrors = append(runErrors, errDrain)
+		}
+	}
+	if !dryRun {
+		if errResume := s.resumePreparedHours(ctx, &state); errResume != nil {
 			log.WithError(errResume).Error("resume prepared hours failed")
 			runErrors = append(runErrors, errResume)
 		}
@@ -399,7 +445,7 @@ func (s *Service) runOnce(ctx context.Context, dryRun bool) error {
 	}).Info("processing pending hours")
 
 	for _, key := range groupKeys {
-		if errProcess := s.processBatch(ctx, key.Hour, key.Provider, groups[key], state, dryRun); errProcess != nil {
+		if errProcess := s.processBatch(ctx, key.Hour, key.Provider, groups[key], &state, dryRun); errProcess != nil {
 			runErrors = append(runErrors, errProcess)
 		}
 	}
@@ -489,7 +535,7 @@ func groupSources(sources []sourceLog) map[providerGroupKey][]sourceLog {
 	return groups
 }
 
-func (s *Service) processBatch(ctx context.Context, hour time.Time, provider string, sources []sourceLog, state uploadState, dryRun bool) error {
+func (s *Service) processBatch(ctx context.Context, hour time.Time, provider string, sources []sourceLog, state *uploadState, dryRun bool) error {
 	record := auditRecord{
 		Timestamp:   s.now().In(s.location),
 		Provider:    provider,
@@ -573,6 +619,10 @@ func (s *Service) processBatch(ctx context.Context, hour time.Time, provider str
 	if archiveSize != compressedSize {
 		return s.recordBatchFailure(record, fmt.Errorf("compressed archive size changed before preparation: got %d, want %d", archiveSize, compressedSize))
 	}
+	usage, errUsage := aggregatePreparedUsage(sources)
+	if errUsage != nil {
+		return s.recordBatchFailure(record, fmt.Errorf("aggregate exact prepared usage: %w", errUsage))
+	}
 	prepared := preparedHour{
 		TargetID:        s.target.ID,
 		Hour:            hour,
@@ -584,11 +634,13 @@ func (s *Service) processBatch(ctx context.Context, hour time.Time, provider str
 		ArchiveSHA256:   archiveSHA256,
 		PreparedAt:      s.now().In(s.location),
 		Sources:         make([]preparedSource, 0, len(sources)),
+		Usage:           usage,
 	}
 	for _, source := range sources {
 		if source.SHA256 == "" {
 			return s.recordBatchFailure(record, fmt.Errorf("source checksum is missing after archive construction: %s", source.Relative))
 		}
+		exactJSONLBytes := source.JSONLBytes
 		prepared.Sources = append(prepared.Sources, preparedSource{
 			Fingerprint:  source.Fingerprint,
 			RelativePath: source.Relative,
@@ -597,12 +649,19 @@ func (s *Service) processBatch(ctx context.Context, hour time.Time, provider str
 			Size:         source.Size,
 			ModTime:      source.ModTime,
 			SHA256:       source.SHA256,
+			JSONLBytes:   &exactJSONLBytes,
 		})
 	}
 	prepared.ManifestSHA256 = manifestSHA256(prepared.Sources)
+	prepared.UsageSchemaVersion = preparedUsageSchemaVersion
+	usageSHA256, errUsageSHA := s.preparedUsageSHA256(prepared)
+	if errUsageSHA != nil {
+		return s.recordBatchFailure(record, fmt.Errorf("compute prepared exact usage checksum: %w", errUsageSHA))
+	}
+	prepared.UsageSHA256 = usageSHA256
 	hourKey := hourStateKey(hour, provider)
 	state.PreparedHours[hourKey] = prepared
-	if errSave := s.saveState(state); errSave != nil {
+	if errSave := s.saveState(*state); errSave != nil {
 		delete(state.PreparedHours, hourKey)
 		return s.recordBatchFailure(record, fmt.Errorf("persist prepared hourly batch: %w", errSave))
 	}
@@ -656,12 +715,18 @@ func (s *Service) buildArchive(ctx context.Context, hour time.Time, provider str
 			break
 		}
 		written, sourceSHA256, errRecord := writeJSONLRecordWithHash(encoder, sources[index])
-		jsonlSize += written
 		if errRecord != nil {
 			errWrite = errRecord
 			break
 		}
+		nextJSONLSize, errSize := addBatchJSONLSize(jsonlSize, written)
+		if errSize != nil {
+			errWrite = errSize
+			break
+		}
+		jsonlSize = nextJSONLSize
 		sources[index].SHA256 = sourceSHA256
+		sources[index].JSONLBytes = written
 		if written == 0 {
 			filteredCount++
 		}
@@ -717,6 +782,67 @@ func (s *Service) buildArchive(ctx context.Context, hour time.Time, provider str
 	return archivePath, jsonlSize, info.Size(), nil
 }
 
+func addBatchJSONLSize(total, written int64) (int64, error) {
+	if errTotal := validateSafeJSONInteger("jsonl_bytes total", total); errTotal != nil {
+		return 0, errTotal
+	}
+	if errWritten := validateSafeJSONInteger("jsonl_bytes", written); errWritten != nil {
+		return 0, errWritten
+	}
+	next, errAdd := addSafeJSONInteger(total, written)
+	if errAdd != nil {
+		return 0, fmt.Errorf("jsonl_bytes total exceeds the safe JSON integer range")
+	}
+	return next, nil
+}
+
+func aggregatePreparedUsage(sources []sourceLog) ([]preparedUsage, error) {
+	type usageKey struct {
+		keyName  string
+		provider string
+	}
+
+	usageByKey := make(map[usageKey]preparedUsage)
+	for _, source := range sources {
+		if errSize := validateSafeJSONInteger("source_bytes", source.Size); errSize != nil {
+			return nil, errSize
+		}
+		if errJSONLBytes := validateSafeJSONInteger("jsonl_bytes", source.JSONLBytes); errJSONLBytes != nil {
+			return nil, errJSONLBytes
+		}
+		key := usageKey{keyName: source.KeyName, provider: source.Provider}
+		usage := usageByKey[key]
+		usage.KeyName = source.KeyName
+		usage.Provider = source.Provider
+		var errAdd error
+		usage.SourceCount, errAdd = addSafeJSONInteger(usage.SourceCount, 1)
+		if errAdd != nil {
+			return nil, fmt.Errorf("source_count total exceeds the safe JSON integer range")
+		}
+		usage.SourceBytes, errAdd = addSafeJSONInteger(usage.SourceBytes, source.Size)
+		if errAdd != nil {
+			return nil, fmt.Errorf("source_bytes total exceeds the safe JSON integer range")
+		}
+		usage.JSONLBytes, errAdd = addSafeJSONInteger(usage.JSONLBytes, source.JSONLBytes)
+		if errAdd != nil {
+			return nil, fmt.Errorf("jsonl_bytes total exceeds the safe JSON integer range")
+		}
+		usageByKey[key] = usage
+	}
+
+	usage := make([]preparedUsage, 0, len(usageByKey))
+	for _, row := range usageByKey {
+		usage = append(usage, row)
+	}
+	sort.Slice(usage, func(i, j int) bool {
+		if usage[i].KeyName != usage[j].KeyName {
+			return usage[i].KeyName < usage[j].KeyName
+		}
+		return usage[i].Provider < usage[j].Provider
+	})
+	return usage, nil
+}
+
 func (s *Service) objectKey(hour time.Time, filename string) string {
 	parts := []string{
 		strings.Trim(s.cfg.Upload.ObjectPrefix, "/"),
@@ -744,7 +870,7 @@ func (s *Service) statePath() string {
 
 func (s *Service) loadState() (uploadState, error) {
 	state := s.newUploadState()
-	raw, errRead := os.ReadFile(s.statePath())
+	raw, errRead := readUploadStateFile(s.statePath())
 	if errors.Is(errRead, os.ErrNotExist) {
 		return state, nil
 	}
@@ -759,6 +885,60 @@ func (s *Service) loadState() (uploadState, error) {
 		return state, errValidate
 	}
 	return state, nil
+}
+
+func readUploadStateFile(path string) (raw []byte, readErr error) {
+	return readUploadStateFileWithOpener(path, os.Open)
+}
+
+func readUploadStateFileWithOpener(path string, openFile func(string) (*os.File, error)) (raw []byte, readErr error) {
+	pathInfo, errLstat := os.Lstat(path)
+	if errLstat != nil {
+		return nil, errLstat
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("upload state must not be a symbolic link")
+	}
+	if !pathInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("upload state must be a regular file")
+	}
+	if pathInfo.Size() > maxUploadStateBytes {
+		return nil, fmt.Errorf("upload state exceeds the 128 MiB limit")
+	}
+	// Windows resolves the file identity in Lstat results lazily. Force that
+	// resolution before opening the path so a replacement cannot inherit the
+	// post-replacement identity during SameFile below.
+	if !os.SameFile(pathInfo, pathInfo) {
+		return nil, fmt.Errorf("upload state identity cannot be verified")
+	}
+
+	file, errOpen := openFile(path)
+	if errOpen != nil {
+		return nil, errOpen
+	}
+	defer func() {
+		if errClose := file.Close(); errClose != nil {
+			readErr = errors.Join(readErr, fmt.Errorf("close upload state: %w", errClose))
+		}
+	}()
+	info, errStat := file.Stat()
+	if errStat != nil {
+		return nil, fmt.Errorf("stat upload state: %w", errStat)
+	}
+	if !info.Mode().IsRegular() || !os.SameFile(pathInfo, info) {
+		return nil, fmt.Errorf("upload state changed after preflight")
+	}
+	if info.Size() > maxUploadStateBytes {
+		return nil, fmt.Errorf("upload state exceeds the 128 MiB limit")
+	}
+	raw, errRead := io.ReadAll(io.LimitReader(file, maxUploadStateBytes+1))
+	if errRead != nil {
+		return nil, fmt.Errorf("read upload state bytes: %w", errRead)
+	}
+	if int64(len(raw)) > maxUploadStateBytes {
+		return nil, fmt.Errorf("upload state exceeds the 128 MiB limit")
+	}
+	return raw, nil
 }
 
 func (s *Service) retryUploadedDeletes(state uploadState) (bool, []error) {
@@ -947,31 +1127,65 @@ func safeExistingPath(root, path string) (string, error) {
 }
 
 func (s *Service) saveState(state uploadState) error {
+	_, errSave := s.saveStateWithResult(state)
+	return errSave
+}
+
+func (s *Service) saveStateWithResult(state uploadState) (published bool, saveErr error) {
 	state.dirty = false
 	raw, errMarshal := json.MarshalIndent(state, "", "  ")
 	if errMarshal != nil {
-		return fmt.Errorf("marshal upload state: %w", errMarshal)
+		return false, fmt.Errorf("marshal upload state: %w", errMarshal)
 	}
-	tmpPath := s.statePath() + ".tmp"
-	file, errOpen := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if errOpen != nil {
-		return fmt.Errorf("open temporary upload state: %w", errOpen)
+	if int64(len(raw)) > maxUploadStateBytes {
+		return false, fmt.Errorf("upload state exceeds the 128 MiB limit")
 	}
-	_, errWrite := file.Write(raw)
-	errSync := file.Sync()
-	errClose := file.Close()
-	if errCombined := errors.Join(errWrite, errSync, errClose); errCombined != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("write temporary upload state: %w", errCombined)
+	statePath := s.statePath()
+	file, errCreate := os.CreateTemp(filepath.Dir(statePath), filepath.Base(statePath)+".*.tmp")
+	if errCreate != nil {
+		return false, fmt.Errorf("create temporary upload state: %w", errCreate)
 	}
-	if errRename := os.Rename(tmpPath, s.statePath()); errRename != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("publish upload state: %w", errRename)
+	tmpPath := file.Name()
+	fileOpen := true
+	removeTemp := true
+	defer func() {
+		if fileOpen {
+			if errClose := file.Close(); errClose != nil {
+				saveErr = errors.Join(saveErr, fmt.Errorf("close temporary upload state: %w", errClose))
+			}
+		}
+		if removeTemp {
+			if errRemove := os.Remove(tmpPath); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
+				saveErr = errors.Join(saveErr, fmt.Errorf("remove temporary upload state: %w", errRemove))
+			}
+		}
+	}()
+	if errChmod := file.Chmod(0o600); errChmod != nil {
+		return false, fmt.Errorf("set temporary upload state permissions: %w", errChmod)
 	}
-	if errSyncDir := syncParentDirectory(s.statePath()); errSyncDir != nil {
-		return errSyncDir
+	if _, errWrite := file.Write(raw); errWrite != nil {
+		return false, fmt.Errorf("write temporary upload state: %w", errWrite)
 	}
-	return nil
+	if errSync := file.Sync(); errSync != nil {
+		return false, fmt.Errorf("sync temporary upload state: %w", errSync)
+	}
+	if errClose := file.Close(); errClose != nil {
+		fileOpen = false
+		return false, fmt.Errorf("close temporary upload state: %w", errClose)
+	}
+	fileOpen = false
+	if errRename := os.Rename(tmpPath, statePath); errRename != nil {
+		return false, fmt.Errorf("publish upload state: %w", errRename)
+	}
+	removeTemp = false
+	syncStateParentDirectory := s.syncStateParentDirectory
+	if syncStateParentDirectory == nil {
+		syncStateParentDirectory = syncParentDirectory
+	}
+	if errSyncDir := syncStateParentDirectory(statePath); errSyncDir != nil {
+		return true, errSyncDir
+	}
+	return true, nil
 }
 
 func (s *Service) appendAudit(record auditRecord) error {

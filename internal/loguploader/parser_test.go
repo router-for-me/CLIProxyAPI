@@ -275,6 +275,32 @@ func mustWriteLog(t *testing.T, root, keyName, filename, contents string, modTim
 	return path
 }
 
+func TestInspectSourceLogUsesPolicyV1AbsoluteHourBoundary(t *testing.T) {
+	t.Parallel()
+
+	location := mustLocation(t, "Asia/Kathmandu")
+	completionTime := time.Date(2026, time.July, 15, 1, 37, 0, 0, location)
+	root := filepath.Join(t.TempDir(), "keys")
+	path := mustWriteLog(t, root, "panda", "v1-responses-policy-v1-hour.log",
+		requestLog(completionTime, "gpt-5.6-sol", "policy v1 hour"), completionTime)
+	info, errStat := os.Stat(path)
+	if errStat != nil {
+		t.Fatalf("stat source log: %v", errStat)
+	}
+
+	source, errInspect := inspectSourceLog(root, path, info, location)
+	if errInspect != nil {
+		t.Fatalf("inspect source log: %v", errInspect)
+	}
+	wantHour := completionTime.In(location).Truncate(time.Hour)
+	if wantHour.Minute() == 0 {
+		t.Fatalf("policy-v1 absolute hour unexpectedly used local HH:00: %s", wantHour)
+	}
+	if !source.ArchiveHour.Equal(wantHour) || source.ArchiveHour.Location() != location {
+		t.Fatalf("archive hour = %s (%s), want policy-v1 instant %s in %s", source.ArchiveHour, source.ArchiveHour.Location(), wantHour, location)
+	}
+}
+
 func TestClassifyProvider(t *testing.T) {
 	t.Parallel()
 

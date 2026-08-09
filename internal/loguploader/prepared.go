@@ -1,7 +1,10 @@
 package loguploader
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,7 +15,17 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func (s *Service) resumePreparedHours(ctx context.Context, state uploadState) error {
+// preparedCommitPreflightTimestamp uses the widest valid time.Time JSON form so
+// the pre-upload state-size check cannot under-budget the real completion time.
+func preparedCommitPreflightTimestamp() time.Time {
+	const maximumRFC3339OffsetSeconds = 23*60*60 + 59*60
+	return time.Date(
+		9999, time.December, 31, 23, 59, 59, 999999999,
+		time.FixedZone("preflight-maximum-rfc3339-offset", maximumRFC3339OffsetSeconds),
+	)
+}
+
+func (s *Service) resumePreparedHours(ctx context.Context, state *uploadState) error {
 	hourKeys := make([]string, 0, len(state.PreparedHours))
 	for hourKey := range state.PreparedHours {
 		hourKeys = append(hourKeys, hourKey)
@@ -28,9 +41,9 @@ func (s *Service) resumePreparedHours(ctx context.Context, state uploadState) er
 			continue
 		}
 		log.WithFields(log.Fields{
-			"hour":           prepared.Hour.Format(time.RFC3339),
-			"object_key":     prepared.ObjectKey,
-			"archive_size":   prepared.CompressedBytes,
+			"hour":         prepared.Hour.Format(time.RFC3339),
+			"object_key":   prepared.ObjectKey,
+			"archive_size": prepared.CompressedBytes,
 		}).Info("resuming prepared hour")
 		if errComplete := s.completePreparedHour(ctx, hourKey, prepared, state); errComplete != nil {
 			resumeErrors = append(resumeErrors, errComplete)
@@ -39,7 +52,7 @@ func (s *Service) resumePreparedHours(ctx context.Context, state uploadState) er
 	return errors.Join(resumeErrors...)
 }
 
-func (s *Service) completePreparedHour(ctx context.Context, hourKey string, prepared preparedHour, state uploadState) error {
+func (s *Service) completePreparedHour(ctx context.Context, hourKey string, prepared preparedHour, state *uploadState) error {
 	record := s.auditRecordForPrepared(prepared)
 	if prepared.TargetID != s.target.ID {
 		return s.recordBatchFailure(record, fmt.Errorf("prepared hour target does not match configured upload target"))
@@ -70,14 +83,21 @@ func (s *Service) completePreparedHour(ctx context.Context, hourKey string, prep
 		return s.recordBatchFailure(record, fmt.Errorf("upload is enabled but no object uploader is configured"))
 	}
 
+	preflightAt := preparedCommitPreflightTimestamp()
+	_, _, errPreflight := s.preflightPreparedCommit(*state, hourKey, prepared, archivePath, preflightAt)
+	if errPreflight != nil {
+		return s.recordBatchFailure(record, fmt.Errorf("preflight prepared upload commit: %w", errPreflight))
+	}
+
+	expectedObject := objectIdentity{Size: prepared.CompressedBytes, SHA256: prepared.ArchiveSHA256}
 	uploadStart := s.now()
-	errUpload := s.uploader.UploadFile(ctx, s.cfg.Upload.Bucket, prepared.ObjectKey, archivePath)
+	errUpload := s.uploader.UploadFile(ctx, s.cfg.Upload.Bucket, prepared.ObjectKey, archivePath, expectedObject)
 	if errors.Is(errUpload, ErrObjectConflict) {
 		matcher, supportsMatch := s.uploader.(ObjectMatcher)
 		if !supportsMatch {
 			return s.recordBatchFailure(record, fmt.Errorf("upload %s: verify existing object: uploader does not support checksum matching: %w", prepared.ObjectKey, errUpload))
 		}
-		matches, errMatch := matcher.MatchObject(ctx, s.cfg.Upload.Bucket, prepared.ObjectKey, archivePath)
+		matches, errMatch := matcher.MatchObject(ctx, s.cfg.Upload.Bucket, prepared.ObjectKey, expectedObject)
 		if errMatch != nil {
 			return s.recordBatchFailure(record, fmt.Errorf("upload %s: verify existing object after conflict: %w", prepared.ObjectKey, errMatch))
 		}
@@ -90,12 +110,20 @@ func (s *Service) completePreparedHour(ctx context.Context, hourKey string, prep
 	if errUpload != nil {
 		return s.recordBatchFailure(record, fmt.Errorf("upload %s: %w", prepared.ObjectKey, errUpload))
 	}
+	committedAt := s.now().In(s.location)
+	prospective, supabaseEntry, errCommitCandidate := s.preflightPreparedCommit(*state, hourKey, prepared, archivePath, committedAt)
+	if errCommitCandidate != nil {
+		return s.recordBatchFailure(record, fmt.Errorf("build prepared upload commit after TOS success: %w", errCommitCandidate))
+	}
 	log.WithFields(log.Fields{
-		"hour":             prepared.Hour.Format(time.RFC3339),
-		"object_key":       prepared.ObjectKey,
-		"archive_size":     info.Size(),
-		"upload_duration":  s.now().Sub(uploadStart).String(),
+		"hour":            prepared.Hour.Format(time.RFC3339),
+		"object_key":      prepared.ObjectKey,
+		"archive_size":    info.Size(),
+		"upload_duration": committedAt.Sub(uploadStart).String(),
 	}).Info("prepared hour uploaded")
+	if supabaseEntry != nil {
+		record.SupabaseEventID = supabaseEntry.EventID
+	}
 
 	needsCleanup := s.cfg.Retention.DeleteSourceAfterUpload || !s.cfg.Retention.KeepLocalArchives
 	preCleanupRecord := record
@@ -108,76 +136,60 @@ func (s *Service) completePreparedHour(ctx context.Context, hourKey string, prep
 		return fmt.Errorf("record successful upload before committing prepared state: %w", errAudit)
 	}
 
-	uploadedAt := s.now().In(s.location)
-	for _, source := range prepared.Sources {
-		if _, exists := state.Uploaded[source.Fingerprint]; exists {
-			return fmt.Errorf("prepared source %s is already committed", source.RelativePath)
+	original := *state
+	*state = prospective
+	published, errSave := s.saveStateWithResult(*state)
+	if errSave != nil {
+		if !published {
+			*state = original
 		}
-		state.Uploaded[source.Fingerprint] = uploadedSource{
-			ObjectKey:    prepared.ObjectKey,
-			HourKey:      hourKey,
-			TargetID:     s.target.ID,
-			UploadedAt:   uploadedAt,
-			RelativePath: source.RelativePath,
-			Size:         source.Size,
-			ModTime:      source.ModTime,
-			SHA256:       source.SHA256,
-		}
-	}
-	state.Objects[prepared.ObjectKey] = uploadedObject{
-		ObjectKey:      prepared.ObjectKey,
-		CompressedSize: prepared.CompressedBytes,
-		ArchiveSHA256:  prepared.ArchiveSHA256,
-		Verification:   "put-success-or-remote-head-match",
-		UploadedAt:     uploadedAt,
-		VerifiedAt:     uploadedAt,
-		ArchivePath:    archivePath,
-	}
-	state.Hours[hourKey] = uploadedHour{
-		Status:         "sealed",
-		ObjectKey:      prepared.ObjectKey,
-		ArchiveSHA256:  prepared.ArchiveSHA256,
-		ManifestSHA256: prepared.ManifestSHA256,
-		UploadedAt:     uploadedAt,
-	}
-	delete(state.PreparedHours, hourKey)
-	if errSave := s.saveState(state); errSave != nil {
-		for _, source := range prepared.Sources {
-			delete(state.Uploaded, source.Fingerprint)
-		}
-		delete(state.Objects, prepared.ObjectKey)
-		delete(state.Hours, hourKey)
-		state.PreparedHours[hourKey] = prepared
 		return fmt.Errorf("commit uploaded prepared hour: %w", errSave)
+	}
+
+	preferredEventID := ""
+	if supabaseEntry != nil {
+		preferredEventID = supabaseEntry.EventID
+	}
+	_, errDelivery := s.drainSupabaseOutboxWithPreferredEvent(ctx, state, preferredEventID)
+	if errDelivery != nil {
+		log.WithError(errDelivery).Warn("Supabase delivery remains pending after TOS upload")
 	}
 
 	if !needsCleanup {
 		logPreparedUpload(record)
-		return nil
+		return errDelivery
 	}
 	fingerprints := make([]string, 0, len(prepared.Sources))
 	for _, source := range prepared.Sources {
 		fingerprints = append(fingerprints, source.Fingerprint)
 	}
+	if errDelivery != nil {
+		record.Error = errDelivery.Error()
+	}
 	if s.cfg.Retention.DeleteSourceAfterUpload {
-		changed, deleteErrors := s.deleteUploadedSources(state, fingerprints, &record.DeletedSources)
+		changed, deleteErrors := s.deleteUploadedSources(*state, fingerprints, &record.DeletedSources)
 		if changed {
-			if errSave := s.saveState(state); errSave != nil {
+			if errSave := s.saveState(*state); errSave != nil {
 				deleteErrors = append(deleteErrors, errSave)
 			}
 		}
 		if len(deleteErrors) > 0 {
 			record.Status = "uploaded_delete_pending"
-			record.Error = errors.Join(deleteErrors...).Error()
+			deleteError := errors.Join(deleteErrors...).Error()
+			if record.Error == "" {
+				record.Error = deleteError
+			} else {
+				record.Error += "; " + deleteError
+			}
 			for _, errDelete := range deleteErrors {
 				log.WithError(errDelete).Error("failed to finish uploaded source cleanup")
 			}
 		}
 	}
 	if !s.cfg.Retention.KeepLocalArchives {
-		changed, archiveErrors := s.deleteLocalArchives(state, []string{prepared.ObjectKey})
+		changed, archiveErrors := s.deleteLocalArchives(*state, []string{prepared.ObjectKey})
 		if changed {
-			if errSave := s.saveState(state); errSave != nil {
+			if errSave := s.saveState(*state); errSave != nil {
 				archiveErrors = append(archiveErrors, errSave)
 			}
 		}
@@ -202,10 +214,123 @@ func (s *Service) completePreparedHour(ctx context.Context, hourKey string, prep
 		record.Status = "uploaded"
 	}
 	if errAudit := s.appendAudit(record); errAudit != nil {
-		return errAudit
+		return errors.Join(errDelivery, errAudit)
 	}
 	logPreparedUpload(record)
-	return nil
+	return errDelivery
+}
+
+func (s *Service) preflightPreparedCommit(state uploadState, hourKey string, prepared preparedHour, archivePath string, committedAt time.Time) (uploadState, *supabaseOutboxEntry, error) {
+	current, exists := state.PreparedHours[hourKey]
+	if !exists || current.ObjectKey != prepared.ObjectKey || current.ArchiveSHA256 != prepared.ArchiveSHA256 || current.ManifestSHA256 != prepared.ManifestSHA256 {
+		return uploadState{}, nil, fmt.Errorf("prepared hour changed before upload")
+	}
+	if _, existsHour := state.Hours[hourKey]; existsHour {
+		return uploadState{}, nil, fmt.Errorf("prepared hour is already sealed")
+	}
+	if _, existsObject := state.Objects[prepared.ObjectKey]; existsObject {
+		return uploadState{}, nil, fmt.Errorf("prepared object is already committed")
+	}
+	for _, source := range prepared.Sources {
+		if _, existsSource := state.Uploaded[source.Fingerprint]; existsSource {
+			return uploadState{}, nil, fmt.Errorf("prepared source is already committed")
+		}
+	}
+
+	var entry *supabaseOutboxEntry
+	if s.cfg.Supabase.Enabled {
+		event, errEvent := s.prepareSupabaseEvent(prepared)
+		if errEvent != nil {
+			return uploadState{}, nil, errEvent
+		}
+		if _, duplicateEvent := state.SupabaseOutbox.Entries[event.EventID()]; duplicateEvent {
+			return uploadState{}, nil, fmt.Errorf("duplicate Supabase event")
+		}
+		activeEntries, activePayloadBytes, errCapacity := supabaseOutboxActiveCapacity(state.SupabaseOutbox.Entries)
+		if errCapacity != nil {
+			return uploadState{}, nil, errCapacity
+		}
+		if errCapacity = validateSupabaseOutboxCapacity(activeEntries, activePayloadBytes, int64(len(event.rawJSON))); errCapacity != nil {
+			return uploadState{}, nil, errCapacity
+		}
+		payloadSHA256 := sha256.Sum256(event.rawJSON)
+		entry = &supabaseOutboxEntry{
+			EventID:       event.EventID(),
+			HourKey:       hourKey,
+			ObjectKey:     prepared.ObjectKey,
+			Status:        supabaseOutboxStatusPending,
+			Payload:       bytes.Clone(event.rawJSON),
+			PayloadSHA256: fmt.Sprintf("%x", payloadSHA256),
+			EnqueuedAt:    committedAt,
+		}
+	}
+
+	candidate, errClone := cloneUploadStateForPreflight(state)
+	if errClone != nil {
+		return uploadState{}, nil, errClone
+	}
+	for _, source := range prepared.Sources {
+		candidate.Uploaded[source.Fingerprint] = uploadedSource{
+			ObjectKey:    prepared.ObjectKey,
+			HourKey:      hourKey,
+			TargetID:     s.target.ID,
+			UploadedAt:   committedAt,
+			RelativePath: source.RelativePath,
+			Size:         source.Size,
+			ModTime:      source.ModTime,
+			SHA256:       source.SHA256,
+		}
+	}
+	candidate.Objects[prepared.ObjectKey] = uploadedObject{
+		ObjectKey:      prepared.ObjectKey,
+		CompressedSize: prepared.CompressedBytes,
+		ArchiveSHA256:  prepared.ArchiveSHA256,
+		Verification:   "put-success-or-remote-head-match",
+		UploadedAt:     committedAt,
+		VerifiedAt:     committedAt,
+		ArchivePath:    archivePath,
+	}
+	committedHour := uploadedHour{
+		Status:         "sealed",
+		ObjectKey:      prepared.ObjectKey,
+		ArchiveSHA256:  prepared.ArchiveSHA256,
+		ManifestSHA256: prepared.ManifestSHA256,
+		UploadedAt:     committedAt,
+	}
+	if entry != nil {
+		committedHour.SupabaseEventID = entry.EventID
+	}
+	candidate.Hours[hourKey] = committedHour
+	delete(candidate.PreparedHours, hourKey)
+	if entry != nil {
+		candidate.SupabaseOutbox.Entries[entry.EventID] = *entry
+	}
+	if errValidate := s.validateUploadState(&candidate); errValidate != nil {
+		return uploadState{}, nil, fmt.Errorf("validate atomic upload state: %w", errValidate)
+	}
+	rawCandidate, errMarshal := json.MarshalIndent(candidate, "", "  ")
+	if errMarshal != nil {
+		return uploadState{}, nil, fmt.Errorf("marshal prospective upload state: %w", errMarshal)
+	}
+	if int64(len(rawCandidate)) > maxUploadStateBytes {
+		return uploadState{}, nil, fmt.Errorf("prospective upload state exceeds the 128 MiB limit")
+	}
+	return candidate, entry, nil
+}
+
+func cloneUploadStateForPreflight(state uploadState) (uploadState, error) {
+	raw, errMarshal := json.MarshalIndent(state, "", "  ")
+	if errMarshal != nil {
+		return uploadState{}, fmt.Errorf("marshal upload state for preflight: %w", errMarshal)
+	}
+	if int64(len(raw)) > maxUploadStateBytes {
+		return uploadState{}, fmt.Errorf("upload state exceeds the 128 MiB limit")
+	}
+	var cloned uploadState
+	if errUnmarshal := json.Unmarshal(raw, &cloned); errUnmarshal != nil {
+		return uploadState{}, fmt.Errorf("clone upload state for preflight: %w", errUnmarshal)
+	}
+	return cloned, nil
 }
 
 func (s *Service) auditRecordForPrepared(prepared preparedHour) auditRecord {

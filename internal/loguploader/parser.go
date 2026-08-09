@@ -51,6 +51,7 @@ type sourceLog struct {
 	ModTime     time.Time
 	Fingerprint string
 	SHA256      string
+	JSONLBytes  int64
 }
 
 type jsonlRecordHeader struct {

@@ -112,7 +112,8 @@ func (s *Service) MigrateLegacyState(ctx context.Context, manifestPath, archives
 		}
 		verification := "verified-local-archive-and-upload-audit"
 		if !trustVerifiedLocal {
-			matches, errMatch := matcher.MatchObject(ctx, s.cfg.Upload.Bucket, entry.ObjectKey, archivePath)
+			expectedObject := objectIdentity{Size: entry.CompressedBytes, SHA256: entry.SHA256}
+			matches, errMatch := matcher.MatchObject(ctx, s.cfg.Upload.Bucket, entry.ObjectKey, expectedObject)
 			if errMatch != nil {
 				return fmt.Errorf("verify remote migration object %s: %w", entry.ObjectKey, errMatch)
 			}

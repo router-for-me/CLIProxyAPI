@@ -2,9 +2,12 @@ package loguploader
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net/url"
 	"os"
@@ -21,13 +24,15 @@ import (
 
 var ErrObjectConflict = errors.New("TOS object already exists and overwrite is forbidden")
 
+var errPreparedArchiveIdentityMismatch = errors.New("prepared archive identity mismatch")
+
 const archiveChecksumMetadataKey = "cliproxy-sha256"
 
 type tosObjectClient interface {
-	PutObjectFromFile(context.Context, *tos.PutObjectFromFileInput) (*tos.PutObjectFromFileOutput, error)
+	PutObjectV2(context.Context, *tos.PutObjectV2Input) (*tos.PutObjectV2Output, error)
 	HeadObjectV2(context.Context, *tos.HeadObjectV2Input) (*tos.HeadObjectV2Output, error)
 	CreateMultipartUploadV2(context.Context, *tos.CreateMultipartUploadV2Input) (*tos.CreateMultipartUploadV2Output, error)
-	UploadPartFromFile(context.Context, *tos.UploadPartFromFileInput) (*tos.UploadPartFromFileOutput, error)
+	UploadPartV2(context.Context, *tos.UploadPartV2Input) (*tos.UploadPartV2Output, error)
 	CompleteMultipartUploadV2(context.Context, *tos.CompleteMultipartUploadV2Input) (*tos.CompleteMultipartUploadV2Output, error)
 	AbortMultipartUpload(context.Context, *tos.AbortMultipartUploadInput) (*tos.AbortMultipartUploadOutput, error)
 }
@@ -93,31 +98,33 @@ func parseTOSEndpoint(value string) (string, error) {
 	return "https://" + parsed.Host, nil
 }
 
-func (u *TOSUploader) UploadFile(ctx context.Context, bucket, objectKey, path string) error {
-	fileInfo, errStat := os.Stat(path)
-	if errStat != nil {
-		return fmt.Errorf("stat archive for upload: %w", errStat)
+func (u *TOSUploader) UploadFile(ctx context.Context, bucket, objectKey, path string, expected objectIdentity) error {
+	if errIdentity := validateObjectIdentity(expected); errIdentity != nil {
+		return errIdentity
 	}
 	// Prefer multipart for multi-hundred-MiB archives so flaky links only
 	// retry a 64 MiB part instead of re-sending a multi-GB single PUT.
-	if shouldUseMultipart(fileInfo.Size()) {
-		return u.uploadMultipart(ctx, bucket, objectKey, path, fileInfo.Size())
+	if shouldUseMultipart(expected.Size) {
+		return u.uploadMultipart(ctx, bucket, objectKey, path, expected)
 	}
-	checksum, _, errChecksum := fileSHA256(path)
-	if errChecksum != nil {
-		return errChecksum
+	archive, _, errOpen := openVerifiedArchive(path, expected, 0)
+	if errOpen != nil {
+		return errOpen
 	}
-	_, errUpload := u.client.PutObjectFromFile(ctx, &tos.PutObjectFromFileInput{
+	defer closeUploadedArchive(archive, objectKey)
+	_, errUpload := u.client.PutObjectV2(ctx, &tos.PutObjectV2Input{
 		PutObjectBasicInput: tos.PutObjectBasicInput{
 			Bucket:          bucket,
 			Key:             objectKey,
+			ContentLength:   expected.Size,
+			ContentSHA256:   expected.SHA256,
 			ContentType:     "application/zstd",
 			ForbidOverwrite: true,
 			Meta: map[string]string{
-				archiveChecksumMetadataKey: checksum,
+				archiveChecksumMetadataKey: expected.SHA256,
 			},
 		},
-		FilePath: path,
+		Content: io.NewSectionReader(archive, 0, expected.Size),
 		GenericInput: tos.GenericInput{RequestHeader: map[string]string{
 			tos.HeaderIfNoneMatch: "*",
 		}},
@@ -143,7 +150,7 @@ const tosMultipartPartSize = 64 * 1024 * 1024
 // Kept moderate so weak uplinks are less likely to stall half-open connections.
 const tosMultipartConcurrency = 4
 
-// tosMultipartPartTimeout bounds a single UploadPartFromFile call so a hung
+// tosMultipartPartTimeout bounds a single UploadPartV2 call so a hung
 // TCP write becomes an error and can be retried instead of blocking forever.
 const tosMultipartPartTimeout = 5 * time.Minute
 
@@ -160,40 +167,32 @@ func shouldUseMultipart(fileSize int64) bool {
 	return fileSize >= tosMultipartThreshold
 }
 
-func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, path string, fileSize int64) error {
+func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, path string, expected objectIdentity) error {
 	multipartStart := time.Now()
+	if errIdentity := validateObjectIdentity(expected); errIdentity != nil {
+		return errIdentity
+	}
+	archive, specs, errOpen := openVerifiedArchive(path, expected, tosMultipartPartSize)
+	if errOpen != nil {
+		return errOpen
+	}
+	defer closeUploadedArchive(archive, objectKey)
 	createOut, errCreate := u.client.CreateMultipartUploadV2(ctx, &tos.CreateMultipartUploadV2Input{
 		Bucket:          bucket,
 		Key:             objectKey,
 		ContentType:     "application/zstd",
 		ForbidOverwrite: true,
 		Meta: map[string]string{
-			archiveChecksumMetadataKey: "multipart",
+			archiveChecksumMetadataKey: expected.SHA256,
 		},
 	})
 	if errCreate != nil {
+		if isTOSObjectConflict(errCreate) {
+			return fmt.Errorf("%w for %s: %w", ErrObjectConflict, objectKey, errCreate)
+		}
 		return fmt.Errorf("create multipart upload: %w", errCreate)
 	}
 	uploadID := createOut.UploadID
-
-	// Pre-calculate all parts.
-	type partSpec struct {
-		number int
-		offset int64
-		size   int64
-	}
-	var specs []partSpec
-	var offset int64
-	num := 1
-	for offset < fileSize {
-		var size int64 = tosMultipartPartSize
-		if offset+size > fileSize {
-			size = fileSize - offset
-		}
-		specs = append(specs, partSpec{number: num, offset: offset, size: size})
-		offset += size
-		num++
-	}
 
 	totalParts := len(specs)
 	log.WithFields(log.Fields{
@@ -258,11 +257,11 @@ func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, pa
 		}
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(s partSpec) {
+		go func(s multipartPartSpec) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			var partOut *tos.UploadPartFromFileOutput
+			var partOut *tos.UploadPartV2Output
 			var errPart error
 			for attempt := 0; attempt < tosMultipartPartAttempts; attempt++ {
 				if uploadCtx.Err() != nil {
@@ -278,16 +277,16 @@ func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, pa
 				}
 				partStart := time.Now()
 				partCtx, cancelPart := context.WithTimeout(uploadCtx, tosMultipartPartTimeout)
-				partOut, errPart = u.client.UploadPartFromFile(partCtx, &tos.UploadPartFromFileInput{
+				partOut, errPart = u.client.UploadPartV2(partCtx, &tos.UploadPartV2Input{
 					UploadPartBasicInput: tos.UploadPartBasicInput{
 						Bucket:     bucket,
 						Key:        objectKey,
 						UploadID:   uploadID,
 						PartNumber: s.number,
+						ContentMD5: s.contentMD5,
 					},
-					FilePath: path,
-					Offset:   uint64(s.offset),
-					PartSize: s.size,
+					Content:       io.NewSectionReader(archive, s.offset, s.size),
+					ContentLength: s.size,
 				})
 				cancelPart()
 				if errPart == nil {
@@ -352,11 +351,14 @@ func (u *TOSUploader) uploadMultipart(ctx context.Context, bucket, objectKey, pa
 	})
 	if errComplete != nil {
 		u.abortMultipartUpload(bucket, objectKey, uploadID)
+		if isTOSObjectConflict(errComplete) {
+			return fmt.Errorf("%w for %s: %w", ErrObjectConflict, objectKey, errComplete)
+		}
 		return fmt.Errorf("complete multipart upload: %w", errComplete)
 	}
 	log.WithFields(log.Fields{
 		"object_key":     objectKey,
-		"file_size_mb":   fileSize / (1024 * 1024),
+		"file_size_mb":   expected.Size / (1024 * 1024),
 		"total_parts":    totalParts,
 		"total_duration": time.Since(multipartStart).String(),
 	}).Info("multipart upload completed")
@@ -382,11 +384,10 @@ func (u *TOSUploader) abortMultipartUpload(bucket, objectKey, uploadID string) {
 	}
 }
 
-// MatchObject reports whether a remote object has the same size and SHA-256 metadata as a local archive.
-func (u *TOSUploader) MatchObject(ctx context.Context, bucket, objectKey, path string) (bool, error) {
-	checksum, size, errChecksum := fileSHA256(path)
-	if errChecksum != nil {
-		return false, errChecksum
+// MatchObject reports whether a remote object has the expected size and SHA-256 metadata.
+func (u *TOSUploader) MatchObject(ctx context.Context, bucket, objectKey string, expected objectIdentity) (bool, error) {
+	if errIdentity := validateObjectIdentity(expected); errIdentity != nil {
+		return false, errIdentity
 	}
 	output, errHead := u.client.HeadObjectV2(ctx, &tos.HeadObjectV2Input{
 		Bucket: bucket,
@@ -398,14 +399,115 @@ func (u *TOSUploader) MatchObject(ctx context.Context, bucket, objectKey, path s
 	if output == nil {
 		return false, fmt.Errorf("head TOS object returned no output")
 	}
-	if output.ContentLength != size || output.Meta == nil {
+	if output.ContentLength != expected.Size || output.Meta == nil {
 		return false, nil
 	}
 	remoteChecksum, exists := output.Meta.Get(archiveChecksumMetadataKey)
 	if !exists {
 		return false, nil
 	}
-	return strings.EqualFold(strings.TrimSpace(remoteChecksum), checksum), nil
+	return strings.EqualFold(strings.TrimSpace(remoteChecksum), expected.SHA256), nil
+}
+
+func validateObjectIdentity(expected objectIdentity) error {
+	if expected.Size < 0 || !isSHA256(expected.SHA256) || strings.ToLower(expected.SHA256) != expected.SHA256 {
+		return fmt.Errorf("invalid expected archive identity")
+	}
+	return nil
+}
+
+type multipartPartSpec struct {
+	number     int
+	offset     int64
+	size       int64
+	contentMD5 string
+}
+
+func openVerifiedArchive(path string, expected objectIdentity, partSize int64) (*os.File, []multipartPartSpec, error) {
+	archive, errOpen := os.Open(path)
+	if errOpen != nil {
+		return nil, nil, fmt.Errorf("open archive for upload: %w", errOpen)
+	}
+	specs, errVerify := verifyOpenedArchive(archive, expected, partSize)
+	if errVerify != nil {
+		if errClose := archive.Close(); errClose != nil {
+			return nil, nil, errors.Join(errVerify, fmt.Errorf("close rejected archive: %w", errClose))
+		}
+		return nil, nil, errVerify
+	}
+	return archive, specs, nil
+}
+
+func verifyOpenedArchive(archive *os.File, expected objectIdentity, partSize int64) ([]multipartPartSpec, error) {
+	info, errStat := archive.Stat()
+	if errStat != nil {
+		return nil, fmt.Errorf("stat prepared archive identity: %w", errStat)
+	}
+	if info.Size() != expected.Size {
+		return nil, errPreparedArchiveIdentityMismatch
+	}
+
+	checksum := sha256.New()
+	if partSize <= 0 {
+		copied, errCopy := io.Copy(checksum, io.NewSectionReader(archive, 0, expected.Size))
+		if errCopy != nil {
+			return nil, fmt.Errorf("verify prepared archive identity: %w", errCopy)
+		}
+		if copied != expected.Size {
+			return nil, errPreparedArchiveIdentityMismatch
+		}
+	} else {
+		var specs []multipartPartSpec
+		for offset, number := int64(0), 1; offset < expected.Size; number++ {
+			size := partSize
+			if offset+size > expected.Size {
+				size = expected.Size - offset
+			}
+			partChecksum := md5.New()
+			copied, errCopy := io.Copy(
+				io.MultiWriter(checksum, partChecksum),
+				io.NewSectionReader(archive, offset, size),
+			)
+			if errCopy != nil {
+				return nil, fmt.Errorf("verify prepared multipart archive identity: %w", errCopy)
+			}
+			if copied != size {
+				return nil, errPreparedArchiveIdentityMismatch
+			}
+			specs = append(specs, multipartPartSpec{
+				number:     number,
+				offset:     offset,
+				size:       size,
+				contentMD5: base64.StdEncoding.EncodeToString(partChecksum.Sum(nil)),
+			})
+			offset += size
+		}
+		if errIdentity := verifyOpenedArchiveResult(archive, expected, checksum); errIdentity != nil {
+			return nil, errIdentity
+		}
+		return specs, nil
+	}
+	if errIdentity := verifyOpenedArchiveResult(archive, expected, checksum); errIdentity != nil {
+		return nil, errIdentity
+	}
+	return nil, nil
+}
+
+func verifyOpenedArchiveResult(archive *os.File, expected objectIdentity, checksum hash.Hash) error {
+	info, errStat := archive.Stat()
+	if errStat != nil {
+		return fmt.Errorf("restat prepared archive identity: %w", errStat)
+	}
+	if info.Size() != expected.Size || fmt.Sprintf("%x", checksum.Sum(nil)) != expected.SHA256 {
+		return errPreparedArchiveIdentityMismatch
+	}
+	return nil
+}
+
+func closeUploadedArchive(archive *os.File, objectKey string) {
+	if errClose := archive.Close(); errClose != nil {
+		log.WithError(errClose).WithField("object_key", objectKey).Warn("close uploaded archive failed")
+	}
 }
 
 func isTOSObjectConflict(err error) bool {
