@@ -961,3 +961,64 @@ func TestExecute_TranslateNonStream_UsesTranslatedRequestPayload(t *testing.T) {
 		t.Error("TranslateNonStream must return valid JSON")
 	}
 }
+
+
+func TestValidateQoderModel(t *testing.T) {
+	storage := &qoder.QoderTokenStorage{}
+	storage.SetModelConfigs(map[string]json.RawMessage{
+		"custom-qoder-model": json.RawMessage(`{"type":"custom"}`),
+	})
+
+	tests := []struct {
+		name         string
+		rawModel     string
+		want         string
+		wantErr      bool
+		errSubstring string
+	}{
+		{
+			name:     "ModelMap hit with prefix",
+			rawModel: "qoder/auto",
+			want:     "auto",
+		},
+		{
+			name:     "ModelMap hit without prefix",
+			rawModel: "auto",
+			want:     "auto",
+		},
+		{
+			name:     "Storage config hit with prefix",
+			rawModel: "qoder/custom-qoder-model",
+			want:     "custom-qoder-model",
+		},
+		{
+			name:     "Storage config hit without prefix",
+			rawModel: "custom-qoder-model",
+			want:     "custom-qoder-model",
+		},
+		{
+			name:         "Unsupported model error",
+			rawModel:     "qoder/nonexistent",
+			wantErr:      true,
+			errSubstring: `unsupported qoder model: "nonexistent"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := validateQoderModel(tt.rawModel, storage)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateQoderModel(%q) error = %v, wantErr %v", tt.rawModel, err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), tt.errSubstring) {
+					t.Errorf("validateQoderModel(%q) error = %v, want substring %q", tt.rawModel, err, tt.errSubstring)
+				}
+				return
+			}
+			if got != tt.want {
+				t.Errorf("validateQoderModel(%q) = %q, want %q", tt.rawModel, got, tt.want)
+			}
+		})
+	}
+}
