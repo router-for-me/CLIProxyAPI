@@ -256,6 +256,66 @@ func assertResolvedThinkingLevels(t *testing.T, req cliproxyexecutor.Request, wa
 	}
 }
 
+func TestAttachResolvedAPIKeyModelInfoDefaultsToExtendedLevels(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+		Name:    "keyless",
+		Prefix:  "tenant",
+		BaseURL: "https://example.com/v1",
+		Models: []internalconfig.OpenAICompatibilityModel{
+			{Name: "shared-upstream", Alias: "public-model", ForceMapping: true, IsCompat: true},
+		},
+	}}})
+	auth := &Auth{
+		ID:       "auth-keyless-default-levels",
+		Provider: "openai-compatibility:keyless",
+		Prefix:   "tenant",
+		Attributes: map[string]string{
+			AttributeSource: "config:keyless[0]",
+			"compat_name":   "keyless",
+			"provider_key":  "openai-compatibility:keyless",
+		},
+	}
+	registerCapabilityTestAuth(t, manager, auth)
+	models, _, _, routing := manager.executionModelCandidatesWithAlias(auth, "tenant/public-model")
+	if len(models) != 1 || models[0] != "shared-upstream" {
+		t.Fatalf("execution models = %v, want [shared-upstream]", models)
+	}
+	req := attachResolvedAPIKeyModelInfo(routing, cliproxyexecutor.Request{}, auth, "tenant/public-model", models[0])
+	// Models without an explicit thinking block must default to a level set that
+	// includes xhigh/max so high-intent requests pass through to upstreams that
+	// support them (e.g. DeepSeek reasoning_effort=max) instead of being
+	// silently downgraded to high.
+	assertResolvedThinkingLevels(t, req, "low", "medium", "high", "xhigh", "max")
+}
+
+func TestAttachResolvedAPIKeyModelInfoKeepsExplicitConfiguredLevels(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+		Name:    "keyless",
+		Prefix:  "tenant",
+		BaseURL: "https://example.com/v1",
+		Models: []internalconfig.OpenAICompatibilityModel{
+			{Name: "shared-upstream", Alias: "public-model",
+				Thinking: &registry.ThinkingSupport{Levels: []string{"low", "high"}}},
+		},
+	}}})
+	auth := &Auth{
+		ID:       "auth-keyless-explicit-levels",
+		Provider: "openai-compatibility:keyless",
+		Prefix:   "tenant",
+		Attributes: map[string]string{
+			AttributeSource: "config:keyless[0]",
+			"compat_name":   "keyless",
+			"provider_key":  "openai-compatibility:keyless",
+		},
+	}
+	registerCapabilityTestAuth(t, manager, auth)
+	models, _, _, routing := manager.executionModelCandidatesWithAlias(auth, "tenant/public-model")
+	req := attachResolvedAPIKeyModelInfo(routing, cliproxyexecutor.Request{}, auth, "tenant/public-model", models[0])
+	assertResolvedThinkingLevels(t, req, "low", "high")
+}
+
 func TestCodexAPIKeyModelIsCompat(t *testing.T) {
 	cfg := &internalconfig.Config{CodexKey: []internalconfig.CodexKey{{
 		APIKey:  "codex-key",

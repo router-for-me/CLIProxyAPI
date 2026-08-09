@@ -1131,6 +1131,39 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectField: "",
 			expectErr:   true,
 		},
+		// Case 3a: default-level-model (no explicit thinking block, defaults to
+		// [low, medium, high, xhigh, max]) reasoning_effort=xhigh → passthrough
+		{
+			name:        "3a",
+			from:        "openai",
+			to:          "openai",
+			model:       "default-level-model",
+			inputJSON:   `{"model":"default-level-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
+			expectField: "reasoning_effort",
+			expectValue: "xhigh",
+			expectErr:   false,
+		},
+		// Case 3b: default-level-model reasoning_effort=max → passthrough
+		{
+			name:        "3b",
+			from:        "openai",
+			to:          "openai",
+			model:       "default-level-model",
+			inputJSON:   `{"model":"default-level-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"max"}`,
+			expectField: "reasoning_effort",
+			expectValue: "max",
+			expectErr:   false,
+		},
+		// Case 3c: default-level-model reasoning_effort=ultra → invalid level error
+		{
+			name:        "3c",
+			from:        "openai",
+			to:          "openai",
+			model:       "default-level-model",
+			inputJSON:   `{"model":"default-level-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"ultra"}`,
+			expectField: "",
+			expectErr:   true,
+		},
 		// Case 4: reasoning_effort=none → clamped to minimal
 		{
 			name:        "4",
@@ -3273,6 +3306,18 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 // getTestModels returns the shared model definitions for E2E tests.
 func getTestModels() []*registry.ModelInfo {
 	return []*registry.ModelInfo{
+		{
+			ID:          "default-level-model",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "test",
+			Type:        "openai-compatibility",
+			DisplayName: "Default Level Model",
+			// Mirrors an OpenAI-compatible config entry without an explicit
+			// `thinking` block: the routing layer fills in the default level set
+			// [low, medium, high, xhigh, max] before execution.
+			Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}},
+		},
 		{
 			ID:          "level-model",
 			Object:      "model",
