@@ -312,4 +312,3 @@ Expected: no whitespace errors, a clean `codex/fix-responses-item-id` worktree, 
 - [ ] **Step 5: Request code review before deployment**
 
 Use the `requesting-code-review` skill against `6e92e3e6..HEAD`. Resolve every Critical or Important finding and rerun the focused package test. Do not build or restart the production Compose service until the user explicitly approves deployment.
-
