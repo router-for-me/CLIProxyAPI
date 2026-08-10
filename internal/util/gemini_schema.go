@@ -25,10 +25,11 @@ const placeholderReasonDescription = "Brief explanation of why you are calling t
 // once already; scope every call site to the schema itself.
 
 type jsonSchemaCleanOptions struct {
-	addPlaceholder       bool
-	removeGeminiMetadata bool
-	flattenUnions        bool
-	forceEnumStringType  bool
+	addPlaceholder                    bool
+	removeGeminiMetadata              bool
+	flattenUnions                     bool
+	forceEnumStringType               bool
+	preserveAdditionalPropertiesFalse bool
 }
 
 // CleanJSONSchemaForAntigravity transforms a tool schema to be compatible with Antigravity API.
@@ -45,7 +46,9 @@ func CleanJSONSchemaForAntigravity(jsonStr string) string {
 // CleanJSONSchemaForAntigravityResponse transforms a response schema without applying tool-only
 // compatibility rewrites that would alter the client's structured output contract.
 func CleanJSONSchemaForAntigravityResponse(jsonStr string) string {
-	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{})
+	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{
+		preserveAdditionalPropertiesFalse: true,
+	})
 }
 
 // CleanJSONSchemaForGemini transforms a JSON schema to be compatible with Gemini tool calling.
@@ -55,6 +58,18 @@ func CleanJSONSchemaForGemini(jsonStr string) string {
 		removeGeminiMetadata: true,
 		flattenUnions:        true,
 		forceEnumStringType:  true,
+	})
+}
+
+// CleanJSONSchemaForAntigravityTool cleans a tool schema for the Antigravity request path.
+// It preserves additionalProperties because removing false weakens the caller's schema contract.
+func CleanJSONSchemaForAntigravityTool(jsonStr string, addPlaceholder bool) string {
+	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{
+		addPlaceholder:                    addPlaceholder,
+		removeGeminiMetadata:              !addPlaceholder,
+		flattenUnions:                     true,
+		forceEnumStringType:               true,
+		preserveAdditionalPropertiesFalse: true,
 	})
 }
 
@@ -76,7 +91,7 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	jsonStr = flattenTypeArrays(jsonStr)
 
 	// Phase 3: Cleanup
-	jsonStr = removeUnsupportedKeywords(jsonStr)
+	jsonStr = removeUnsupportedKeywords(jsonStr, options.preserveAdditionalPropertiesFalse)
 	if options.removeGeminiMetadata {
 		// Gemini schema cleanup: remove nullable/title and placeholder-only fields.
 		jsonStr = removeKeywords(jsonStr, []string{"nullable", "title"})
@@ -307,6 +322,17 @@ func mergeAllOf(jsonStr string) string {
 			continue
 		}
 		parentPath := trimSuffix(p, ".allOf")
+		containsFalseSchema := false
+		for _, item := range allOf.Array() {
+			if item.Type == gjson.False {
+				containsFalseSchema = true
+				break
+			}
+		}
+		if containsFalseSchema {
+			jsonStr = setRawAt(jsonStr, parentPath, "false")
+			continue
+		}
 
 		for _, item := range allOf.Array() {
 			if props := item.Get("properties"); props.IsObject() {
@@ -469,8 +495,9 @@ func flattenTypeArrays(jsonStr string) string {
 	return jsonStr
 }
 
-func removeUnsupportedKeywords(jsonStr string) string {
-	keywords := append(unsupportedConstraints,
+func removeUnsupportedKeywords(jsonStr string, preserveAdditionalPropertiesFalse bool) string {
+	keywords := append([]string{}, unsupportedConstraints...)
+	keywords = append(keywords,
 		"$schema", "$defs", "definitions", "const", "$ref", "$id", "additionalProperties",
 		"propertyNames", "patternProperties", // Gemini doesn't support these schema keywords
 		"$comment", "enumDescriptions", "enumTitles", "prefill", "deprecated", // Schema metadata fields unsupported by Gemini
@@ -481,6 +508,9 @@ func removeUnsupportedKeywords(jsonStr string) string {
 	for _, key := range keywords {
 		for _, p := range pathsByField[key] {
 			if isPropertyDefinition(trimSuffix(p, "."+key)) {
+				continue
+			}
+			if key == "additionalProperties" && preserveAdditionalPropertiesFalse && gjson.Get(jsonStr, p).Type == gjson.False {
 				continue
 			}
 			deletePaths = append(deletePaths, p)
