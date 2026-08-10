@@ -412,6 +412,7 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		return
 	}
 
+	rawJSON = normalizeResponsesInputItemIDs(rawJSON)
 	rawJSON = h.prepareCodexMultiAgentV2Tools(c, rawJSON)
 
 	// Check if the client requested a streaming response.

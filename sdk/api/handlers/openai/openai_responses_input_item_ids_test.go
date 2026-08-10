@@ -2,8 +2,12 @@ package openai
 
 import (
 	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
 
@@ -34,5 +38,38 @@ func TestNormalizeResponsesInputItemIDsPreservesValidAndUnknownItems(t *testing.
 
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("payload changed unexpectedly: %s", got)
+	}
+}
+
+func TestResponsesNormalizesLocalInputItemIDsBeforeExecution(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &responsesMultiAgentCaptureExecutor{}
+	handler, modelID := newResponsesMultiAgentTestHandler(t, executor)
+	router := gin.New()
+	router.POST("/v1/responses", handler.Responses)
+
+	payload := fmt.Sprintf(`{"model":%q,"input":[{"type":"function_call","id":"item_call123","call_id":"call_1","name":"wait"},{"type":"function_call_output","id":"fco_1","call_id":"call_1","output":"done"},{"type":"message","id":"item_msg456","role":"assistant","content":[]}],"stream":false}`, modelID)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(payload))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	payloads := executor.Payloads()
+	if len(payloads) != 1 {
+		t.Fatalf("captured payload count = %d, want 1", len(payloads))
+	}
+	captured := payloads[0]
+	if actual := gjson.GetBytes(captured, "input.0.id").String(); actual != "fc_call123" {
+		t.Fatalf("function_call id = %q, want fc_call123; payload=%s", actual, captured)
+	}
+	if actual := gjson.GetBytes(captured, "input.2.id").String(); actual != "msg_msg456" {
+		t.Fatalf("message id = %q, want msg_msg456; payload=%s", actual, captured)
+	}
+	if actual := gjson.GetBytes(captured, "input.0.call_id").String(); actual != "call_1" {
+		t.Fatalf("call_id = %q, want call_1; payload=%s", actual, captured)
 	}
 }
