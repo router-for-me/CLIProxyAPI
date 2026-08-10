@@ -53,6 +53,64 @@ type responsesSSEFramer struct {
 	outputItems          map[int][]byte
 	outputOrder          []int
 	unindexedOutputItems [][]byte
+	context              *gin.Context
+}
+
+const responsesLastSequenceKey = "openai-responses-last-sequence"
+
+// recordSequenceFromFrame remembers sequence numbers only after the SSE framer
+// has reassembled a complete frame. Raw transport chunks may split JSON tokens.
+func (f *responsesSSEFramer) recordSequenceFromFrame(frame []byte) {
+	if f == nil || f.context == nil || len(frame) == 0 {
+		return
+	}
+	payload, ok := responsesSSEDataPayload(frame)
+	if !ok || !json.Valid(payload) {
+		return
+	}
+	recordResponsesSequencePayload(f.context, payload)
+}
+
+func recordResponsesSequencePayload(c *gin.Context, payload []byte) {
+	if c == nil || !json.Valid(payload) {
+		return
+	}
+	last := int64(-1)
+	if current, ok := c.Get(responsesLastSequenceKey); ok {
+		if value, okValue := current.(int64); okValue {
+			last = value
+		}
+	}
+	sequence := gjson.GetBytes(payload, "sequence_number")
+	if sequence.Exists() && sequence.Type == gjson.Number && sequence.Int() > last {
+		last = sequence.Int()
+	}
+
+	if last >= 0 {
+		c.Set(responsesLastSequenceKey, last)
+	}
+}
+
+// recordResponsesSequenceFromConvertedOutput accepts only complete converter
+// outputs, unlike native transport chunks which must first pass through the framer.
+func recordResponsesSequenceFromConvertedOutput(c *gin.Context, output []byte) {
+	payload, ok := responsesSSEDataPayload(output)
+	if !ok {
+		payload = bytes.TrimSpace(output)
+	}
+	recordResponsesSequencePayload(c, payload)
+}
+
+func nextResponsesSequence(c *gin.Context) int {
+	if c == nil {
+		return 0
+	}
+	if current, ok := c.Get(responsesLastSequenceKey); ok {
+		if value, okValue := current.(int64); okValue && value >= 0 {
+			return int(value + 1)
+		}
+	}
+	return 0
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
@@ -100,6 +158,7 @@ func (f *responsesSSEFramer) Flush(w io.Writer) {
 }
 
 func (f *responsesSSEFramer) writeFrame(w io.Writer, frame []byte) {
+	f.recordSequenceFromFrame(frame)
 	writeResponsesSSEChunk(w, f.repairFrame(frame))
 }
 
@@ -567,7 +626,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
-	framer := &responsesSSEFramer{}
+	framer := &responsesSSEFramer{context: c}
 
 	// Peek at the first chunk
 	for {
@@ -686,6 +745,7 @@ func writeChatAsResponsesChunk(c *gin.Context, ctx context.Context, modelName st
 		if bytes.HasPrefix(out, []byte("event:")) {
 			_, _ = c.Writer.Write([]byte("\n"))
 		}
+		recordResponsesSequenceFromConvertedOutput(c, out)
 		_, _ = c.Writer.Write(out)
 		_, _ = c.Writer.Write([]byte("\n"))
 	}
@@ -702,6 +762,7 @@ func (h *OpenAIResponsesAPIHandler) forwardChatAsResponsesStream(c *gin.Context,
 				if bytes.HasPrefix(out, []byte("event:")) {
 					_, _ = c.Writer.Write([]byte("\n"))
 				}
+				recordResponsesSequenceFromConvertedOutput(c, out)
 				_, _ = c.Writer.Write(out)
 				_, _ = c.Writer.Write([]byte("\n"))
 			}
@@ -745,22 +806,22 @@ func writeResponsesTerminalError(c *gin.Context, errMsg *interfaces.ErrorMessage
 		errText = errMsg.Error.Error()
 	}
 	if isCodexResponsesClientRequest(c) {
-		chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, 0)
+		chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, nextResponsesSequence(c))
 		_, _ = fmt.Fprintf(c.Writer, "\nevent: response.failed\ndata: %s\n\n", string(chunk))
 		return
 	}
-	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
+	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, nextResponsesSequence(c))
 	_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
 	if framer == nil {
-		framer = &responsesSSEFramer{}
+		framer = &responsesSSEFramer{context: c}
+	} else if framer.context == nil {
+		framer.context = c
 	}
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
-		WriteChunk: func(chunk []byte) {
-			framer.WriteChunk(c.Writer, chunk)
-		},
+		WriteChunk: func(chunk []byte) { framer.WriteChunk(c.Writer, chunk) },
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			framer.Flush(c.Writer)
 			writeResponsesTerminalError(c, errMsg)

@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/tidwall/gjson"
 )
 
 // TestForwardResponsesStreamExposesOnlyClientErrors pins the SSE side: only
@@ -123,6 +124,102 @@ func TestForwardResponsesStreamUsesResponseFailedForCodex(t *testing.T) {
 	}
 	if !strings.Contains(body, `"type":"invalid_request"`) || !strings.Contains(body, `"code":"cyber_policy"`) {
 		t.Fatalf("missing nested Codex error detail: %q", body)
+	}
+}
+
+func TestForwardResponsesStreamTerminalErrorFollowsPartialOutputSequence(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	h := NewOpenAIResponsesAPIHandler(base)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request.Header.Set("User-Agent", "Codex Desktop/26.803.41515")
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		t.Fatal("expected gin writer to implement http.Flusher")
+	}
+
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage)
+	go func() {
+		data <- []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_")
+		data <- []byte("number\":7,\"delta\":\"partial\"}\n\n")
+		errs <- &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      errors.New(`{"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`),
+		}
+	}()
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+	body := recorder.Body.String()
+	failedIndex := strings.LastIndex(body, "data: ")
+	if failedIndex < 0 {
+		t.Fatalf("missing terminal payload: %q", body)
+	}
+	failedLine := strings.SplitN(body[failedIndex+len("data: "):], "\n", 2)[0]
+	if got := gjson.Get(failedLine, "sequence_number").Int(); got != 8 {
+		t.Fatalf("terminal sequence_number = %d, want 8; body=%q", got, body)
+	}
+	if strings.Contains(body, "response.completed") || strings.Contains(body, "[DONE]") {
+		t.Fatalf("terminal error stream must not emit completed/done: %q", body)
+	}
+}
+
+func TestForwardChatAsResponsesStreamTerminalErrorFollowsConvertedOutputSequence(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	h := NewOpenAIResponsesAPIHandler(base)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request.Header.Set("User-Agent", "Codex Desktop/26.803.41515")
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		t.Fatal("expected gin writer to implement http.Flusher")
+	}
+
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage)
+	go func() {
+		data <- []byte(`data: {"id":"chat-partial","object":"chat.completion.chunk","created":1773896263,"model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}`)
+		errs <- &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      errors.New(`{"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`),
+		}
+	}()
+
+	originalRequest := []byte(`{"model":"test-model"}`)
+	var param any
+	h.forwardChatAsResponsesStream(c, flusher, func(error) {}, data, errs, c.Request.Context(), "test-model", originalRequest, &param)
+	body := recorder.Body.String()
+	lastOutputSequence := int64(-1)
+	terminalSequence := int64(-1)
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if !gjson.Valid(payload) {
+			continue
+		}
+		sequence := gjson.Get(payload, "sequence_number").Int()
+		if gjson.Get(payload, "type").String() == "response.failed" {
+			terminalSequence = sequence
+			continue
+		}
+		if sequence > lastOutputSequence {
+			lastOutputSequence = sequence
+		}
+	}
+	if lastOutputSequence < 0 || terminalSequence <= lastOutputSequence {
+		t.Fatalf("terminal sequence_number = %d, want > converted output %d; body=%q", terminalSequence, lastOutputSequence, body)
+	}
+	if strings.Contains(body, "response.completed") || strings.Contains(body, "[DONE]") {
+		t.Fatalf("terminal error stream must not emit completed/done: %q", body)
 	}
 }
 
