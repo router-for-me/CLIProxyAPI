@@ -19,6 +19,7 @@ const (
 	modelCacheTTL          = 5 * time.Minute
 	modelDiscoveryPageSize = 50
 	modelDiscoveryMaxPages = 10
+	kiroRuntimeSDKVersion  = "1.0.0"
 )
 
 type kiroModelListResponse struct {
@@ -111,12 +112,7 @@ func fetchAvailableModels(hostCallbackID string, credential kiroCredential, key 
 			HostCallbackID: hostCallbackID,
 			Method:         http.MethodGet,
 			URL:            endpoint,
-			Headers: http.Header{
-				"Accept":                      []string{"application/json"},
-				"Authorization":               []string{"Bearer " + key},
-				"Tokentype":                   []string{"API_KEY"},
-				"X-Amzn-Codewhisperer-Optout": []string{"false"},
-			},
+			Headers:        modelDiscoveryHeaders(key),
 		})
 		if errCall != nil {
 			return nil, fmt.Errorf("call model-list endpoint: %w", errCall)
@@ -170,7 +166,34 @@ func modelDiscoveryURL(region, nextToken string) (string, error) {
 	if nextToken != "" {
 		query.Set("nextToken", nextToken)
 	}
-	return "https://codewhisperer." + region + ".amazonaws.com/ListAvailableModels?" + query.Encode(), nil
+	host := "codewhisperer.us-east-1.amazonaws.com"
+	if region != "us-east-1" {
+		host = "q." + region + ".amazonaws.com"
+	}
+	return "https://" + host + "/ListAvailableModels?" + query.Encode(), nil
+}
+
+func modelDiscoveryHeaders(key string) http.Header {
+	cfg := loadedConfig()
+	machine := machineID(key)
+	userAgent := fmt.Sprintf(
+		"aws-sdk-js/%s ua/2.1 os/%s lang/js md/nodejs#%s api/codewhispererruntime#%s m/N,E KiroIDE-%s-%s",
+		kiroRuntimeSDKVersion,
+		cfg.SystemVersion,
+		cfg.NodeVersion,
+		kiroRuntimeSDKVersion,
+		cfg.KiroVersion,
+		machine,
+	)
+	amzUserAgent := fmt.Sprintf("aws-sdk-js/%s KiroIDE-%s-%s", kiroRuntimeSDKVersion, cfg.KiroVersion, machine)
+	return http.Header{
+		"Accept":                      []string{"application/json"},
+		"Authorization":               []string{"Bearer " + key},
+		"Tokentype":                   []string{"API_KEY"},
+		"User-Agent":                  []string{userAgent},
+		"X-Amz-User-Agent":            []string{amzUserAgent},
+		"X-Amzn-Codewhisperer-Optout": []string{"true"},
+	}
 }
 
 func discoveredModelInfo(model kiroAvailableModel) pluginapi.ModelInfo {

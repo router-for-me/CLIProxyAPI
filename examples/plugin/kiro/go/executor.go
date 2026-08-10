@@ -255,7 +255,7 @@ func prepareUpstreamRequest(request pluginapi.ExecutorRequest) (upstreamRequest,
 		"User-Agent":                  []string{userAgent},
 		"X-Amz-Target":                []string{kiroAmzTarget},
 		"X-Amz-User-Agent":            []string{amzUserAgent},
-		"X-Amzn-Codewhisperer-Optout": []string{"false"},
+		"X-Amzn-Codewhisperer-Optout": []string{"true"},
 	}
 	return upstreamRequest{URL: endpoint, Headers: headers, Body: body}, payload, nil
 }

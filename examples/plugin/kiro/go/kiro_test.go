@@ -89,6 +89,13 @@ func TestModelsForAuthDiscoversPaginatesAndCaches(t *testing.T) {
 		if request.Headers.Get("Authorization") != "Bearer test-discovery-key" || request.Headers.Get("TokenType") != "API_KEY" {
 			t.Fatalf("discovery headers = %#v", request.Headers)
 		}
+		machine := machineID("test-discovery-key")
+		if !strings.Contains(request.Headers.Get("User-Agent"), "api/codewhispererruntime#1.0.0") ||
+			!strings.HasSuffix(request.Headers.Get("User-Agent"), "-"+machine) ||
+			!strings.HasSuffix(request.Headers.Get("X-Amz-User-Agent"), "-"+machine) ||
+			request.Headers.Get("X-Amzn-Codewhisperer-Optout") != "true" {
+			t.Fatalf("Kiro identity headers = %#v", request.Headers)
+		}
 		parsed, errParse := url.Parse(request.URL)
 		if errParse != nil {
 			t.Fatal(errParse)
@@ -144,6 +151,29 @@ func TestModelsForAuthDiscoversPaginatesAndCaches(t *testing.T) {
 	cached := callModelsForAuthTest(t, "kiro-pro", "callback-2")
 	if len(cached.Models) != 2 || len(requests) != 2 {
 		t.Fatalf("cached models=%d HTTP requests=%d", len(cached.Models), len(requests))
+	}
+}
+
+func TestModelDiscoveryURLUsesKiroGoRegionalHosts(t *testing.T) {
+	tests := []struct {
+		region string
+		host   string
+	}{
+		{region: "us-east-1", host: "codewhisperer.us-east-1.amazonaws.com"},
+		{region: "eu-central-1", host: "q.eu-central-1.amazonaws.com"},
+	}
+	for _, test := range tests {
+		rawURL, errURL := modelDiscoveryURL(test.region, "")
+		if errURL != nil {
+			t.Fatalf("modelDiscoveryURL(%q) error = %v", test.region, errURL)
+		}
+		parsed, errParse := url.Parse(rawURL)
+		if errParse != nil {
+			t.Fatal(errParse)
+		}
+		if parsed.Host != test.host {
+			t.Fatalf("modelDiscoveryURL(%q) host = %q, want %q", test.region, parsed.Host, test.host)
+		}
 	}
 }
 
