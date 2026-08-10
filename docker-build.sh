@@ -64,7 +64,7 @@ fi
 
 # plugins/ is bind-mounted into the API container so store-installed
 # plugin binaries survive container recreate.
-mkdir -p logs auths plugins logs/keys logs/log-qa
+mkdir -p logs auths plugins data logs/keys logs/log-qa
 
 echo
 echo "Please select an option:"
