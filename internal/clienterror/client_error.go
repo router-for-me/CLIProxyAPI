@@ -80,6 +80,18 @@ func IsRequestFault(status int, err error) bool {
 			status = statusErr.StatusCode()
 		}
 	}
+	// Payment and rate-limit statuses are authoritative even when an upstream
+	// pairs them with a generic invalid_request_error body. The credential must
+	// remain eligible for cooldown and rotation.
+	if status == http.StatusPaymentRequired || status == http.StatusTooManyRequests {
+		return false
+	}
+	// DeepSeek reports an invalid API key as 401 with the authentication_error
+	// type alongside the same generic code. Preserve that credential failure
+	// classification without weakening generic request-fault handling.
+	if status == http.StatusUnauthorized && hasAuthenticationErrorBody(err) {
+		return false
+	}
 	if hasRequestFaultBody(err) {
 		return true
 	}
@@ -110,6 +122,22 @@ func IsItemNotPersisted(message string) bool {
 	return strings.Contains(lower, "item with id") &&
 		strings.Contains(lower, "not found") &&
 		strings.Contains(lower, "items are not persisted when `store` is set to false")
+}
+
+func hasAuthenticationErrorBody(err error) bool {
+	if err == nil {
+		return false
+	}
+	body := strings.TrimSpace(err.Error())
+	if body == "" || !json.Valid([]byte(body)) {
+		return false
+	}
+	for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
+		if errType := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String())); errType == "authentication_error" {
+			return true
+		}
+	}
+	return false
 }
 
 func hasRequestFaultBody(err error) bool {

@@ -237,6 +237,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			return true
 		}
+		emitResponseError := func(errResponse error) {
+			errResponse = wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errResponse)
+			helps.RecordAPIResponseError(ctx, e.cfg, errResponse)
+			reporter.PublishFailure(ctx, errResponse)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errResponse}:
+			case <-ctx.Done():
+			}
+		}
 
 		// If the response target is Claude, directly forward complete SSE events without translation.
 		if responseFormat == to {
@@ -265,8 +274,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					reporter.Publish(ctx, detail)
 				}
-				line = restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
-				line = e.restoreResponseModel(line, req.Model)
+				restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
+				if errRestore != nil {
+					emitResponseError(fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore))
+					return
+				}
+				line = e.restoreResponseModel(restoredLine, req.Model)
 				event.Write(line)
 				event.WriteByte('\n')
 				if len(bytes.TrimSpace(line)) == 0 && !flushEvent() {
@@ -310,8 +323,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
-			line = restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
-			line = e.restoreResponseModel(line, req.Model)
+			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
+			if errRestore != nil {
+				emitResponseError(fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore))
+				return
+			}
+			line = e.restoreResponseModel(restoredLine, req.Model)
 			chunks := sdktranslator.TranslateStream(
 				ctx,
 				to,

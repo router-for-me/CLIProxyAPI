@@ -528,6 +528,84 @@ func TestCodexLiveRoutesRequireAuthAndAreRegistered(t *testing.T) {
 	}
 }
 
+func TestRealtimeStandardRoutesAndClientSecretAuth(t *testing.T) {
+	server := newTestServer(t)
+
+	unauthorizedSecret := httptest.NewRequest(http.MethodPost, "/v1/realtime/client_secrets", strings.NewReader(`{"session":{"type":"realtime","model":"gpt-realtime"}}`))
+	unauthorizedSecretRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(unauthorizedSecretRecorder, unauthorizedSecret)
+	if unauthorizedSecretRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("client_secrets unauthorized status = %d, want %d", unauthorizedSecretRecorder.Code, http.StatusUnauthorized)
+	}
+	var unauthorizedResponse struct {
+		Error struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if errUnmarshal := json.Unmarshal(unauthorizedSecretRecorder.Body.Bytes(), &unauthorizedResponse); errUnmarshal != nil {
+		t.Fatalf("unmarshal unauthorized response: %v", errUnmarshal)
+	}
+	if unauthorizedResponse.Error.Type != "authentication_error" || unauthorizedResponse.Error.Code != "invalid_api_key" {
+		t.Fatalf("unauthorized error = %+v", unauthorizedResponse.Error)
+	}
+
+	secretRequest := httptest.NewRequest(http.MethodPost, "/v1/realtime/client_secrets", strings.NewReader(`{"session":{"type":"realtime","model":"gpt-realtime"}}`))
+	secretRequest.Header.Set("Authorization", "Bearer test-key")
+	secretRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(secretRecorder, secretRequest)
+	if secretRecorder.Code != http.StatusOK {
+		t.Fatalf("client_secrets status = %d, want %d; body=%s", secretRecorder.Code, http.StatusOK, secretRecorder.Body.String())
+	}
+	var secretResponse struct {
+		Value string `json:"value"`
+	}
+	if errUnmarshal := json.Unmarshal(secretRecorder.Body.Bytes(), &secretResponse); errUnmarshal != nil {
+		t.Fatalf("unmarshal client secret: %v", errUnmarshal)
+	}
+	if secretResponse.Value == "" {
+		t.Fatal("client secret is empty")
+	}
+
+	callRequest := httptest.NewRequest(http.MethodPost, "/v1/realtime/calls", strings.NewReader("v=0\r\n"))
+	callRequest.Header.Set("Authorization", "Bearer "+secretResponse.Value)
+	callRequest.Header.Set("Content-Type", "application/sdp")
+	callRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(callRecorder, callRequest)
+	if callRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ephemeral call status = %d, want %d; body=%s", callRecorder.Code, http.StatusServiceUnavailable, callRecorder.Body.String())
+	}
+
+	for _, testCase := range []struct {
+		method string
+		path   string
+		status int
+	}{
+		{method: http.MethodGet, path: "/v1/realtime?model=gpt-realtime", status: http.StatusUpgradeRequired},
+		{method: http.MethodPost, path: "/v1/realtime", status: http.StatusServiceUnavailable},
+		{method: http.MethodPost, path: "/v1/realtime/sessions", status: http.StatusOK},
+		{method: http.MethodPost, path: "/v1/realtime/transcription_sessions", status: http.StatusNotImplemented},
+		{method: http.MethodGet, path: "/v1/realtime/translations", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/translations", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/translations/client_secrets", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/calls/call-123/accept", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/calls/call-123/reject", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/calls/call-123/refer", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/calls/call-123/hangup", status: http.StatusNotFound},
+	} {
+		request := httptest.NewRequest(testCase.method, testCase.path, nil)
+		request.Header.Set("Authorization", "Bearer test-key")
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, request)
+		if recorder.Code != testCase.status {
+			t.Errorf("%s %s status = %d, want %d; body=%s", testCase.method, testCase.path, recorder.Code, testCase.status, recorder.Body.String())
+		}
+		if testCase.method == http.MethodGet && testCase.path == "/v1/realtime?model=gpt-realtime" && recorder.Header().Get("Upgrade") != "websocket" {
+			t.Errorf("Upgrade header = %q, want websocket", recorder.Header().Get("Upgrade"))
+		}
+	}
+}
+
 func TestCodexAlphaSearchForwardsRequest(t *testing.T) {
 	server := newTestServer(t)
 	executor := &codexSearchCaptureExecutor{}

@@ -240,13 +240,25 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
-			lines[i] = restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
+			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
+			if errRestore != nil {
+				errRestore = fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore)
+				helps.RecordAPIResponseError(ctx, e.cfg, errRestore)
+				return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errRestore)
+			}
+			lines[i] = restoredLine
 		}
 		data = bytes.Join(lines, []byte("\n"))
 	} else {
 		commitClaudeDiagnostics(diagnosticsState, claudeMessageIDFromResponse(data))
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
-		data = restoreClaudeOAuthToolNamesFromResponse(data, oauthToolNamesReverseMap)
+		var errRestore error
+		data, errRestore = restoreClaudeOAuthToolNamesFromResponse(data, oauthToolNamesReverseMap)
+		if errRestore != nil {
+			errRestore = fmt.Errorf("restore Claude OAuth tool name from response: %w", errRestore)
+			helps.RecordAPIResponseError(ctx, e.cfg, errRestore)
+			return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errRestore)
+		}
 	}
 	data = e.restoreResponseModel(data, req.Model)
 	cacheClaudeThinkingReplayResponse(ctx, replayScope, data)
