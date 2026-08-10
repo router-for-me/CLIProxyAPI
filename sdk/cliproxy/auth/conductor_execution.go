@@ -381,6 +381,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				authErr = errExec
 				continue
 			}
+			if isEmptyCompletionPayload(resp.Payload) {
+				result.Success = false
+				result.Error = errEmptyCompletion
+				m.MarkResult(execCtx, result)
+				authErr = errEmptyCompletion
+				continue
+			}
 			m.MarkResult(execCtx, result)
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)
