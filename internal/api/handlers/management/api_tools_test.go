@@ -62,6 +62,15 @@ func TestCodexResetCreditGateSerializesCalls(t *testing.T) {
 	}
 }
 
+func TestCodexResetCreditRetryDelay(t *testing.T) {
+	want := []time.Duration{10 * time.Second, 20 * time.Second, 40 * time.Second}
+	for attempt, wantDelay := range want {
+		if got := codexResetCreditRetryDelay(attempt); got != wantDelay {
+			t.Fatalf("attempt %d delay = %s, want %s", attempt, got, wantDelay)
+		}
+	}
+}
+
 func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
 	t.Parallel()
 

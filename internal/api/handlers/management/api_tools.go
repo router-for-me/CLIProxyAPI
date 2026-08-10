@@ -19,7 +19,9 @@ import (
 
 const (
 	defaultAPICallTimeout          = 60 * time.Second
-	defaultCodexResetCreditSpacing = time.Second
+	defaultCodexResetCreditSpacing = 5 * time.Second
+	defaultCodexResetCreditBackoff = 10 * time.Second
+	maxCodexResetCreditRetries     = 3
 	codexResetCreditHost           = "chatgpt.com"
 	codexResetCreditPath           = "/backend-api/wham/rate-limit-reset-credits"
 )
@@ -194,11 +196,29 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 	defer release()
 
-	resp, errDo := httpClient.Do(req)
-	if errDo != nil {
-		log.WithError(errDo).Debug("management APICall request failed")
-		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
-		return
+	var resp *http.Response
+	for attempt := 0; ; attempt++ {
+		var errDo error
+		resp, errDo = httpClient.Do(req)
+		if errDo != nil {
+			log.WithError(errDo).Debug("management APICall request failed")
+			c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
+			return
+		}
+		if resp.StatusCode != http.StatusTooManyRequests || method != http.MethodGet || !isCodexResetCreditURL(parsedURL) || attempt >= maxCodexResetCreditRetries {
+			break
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+
+		timer := time.NewTimer(codexResetCreditRetryDelay(attempt))
+		select {
+		case <-c.Request.Context().Done():
+			timer.Stop()
+			c.JSON(http.StatusRequestTimeout, gin.H{"error": "request canceled"})
+			return
+		case <-timer.C:
+		}
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
@@ -220,7 +240,7 @@ func (h *Handler) APICall(c *gin.Context) {
 }
 
 func (h *Handler) acquireCodexResetCreditGate(ctx context.Context, parsedURL *url.URL) (func(), error) {
-	if parsedURL == nil || !strings.EqualFold(parsedURL.Scheme, "https") || !strings.EqualFold(parsedURL.Host, codexResetCreditHost) || parsedURL.Path != codexResetCreditPath {
+	if !isCodexResetCreditURL(parsedURL) {
 		return func() {}, nil
 	}
 	if err := ctx.Err(); err != nil {
@@ -252,6 +272,14 @@ func (h *Handler) acquireCodexResetCreditGate(ctx context.Context, parsedURL *ur
 		codexResetCreditLast = time.Now()
 		<-codexResetCreditGate
 	}, nil
+}
+
+func isCodexResetCreditURL(parsedURL *url.URL) bool {
+	return parsedURL != nil && strings.EqualFold(parsedURL.Scheme, "https") && strings.EqualFold(parsedURL.Host, codexResetCreditHost) && parsedURL.Path == codexResetCreditPath
+}
+
+func codexResetCreditRetryDelay(attempt int) time.Duration {
+	return defaultCodexResetCreditBackoff << attempt
 }
 
 func firstNonEmptyString(values ...*string) string {
