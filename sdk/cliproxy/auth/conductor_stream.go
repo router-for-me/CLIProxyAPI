@@ -350,9 +350,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 
 		if closed && (len(buffered) == 0 || isEmptyCompletion(buffered)) {
-			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
-			if len(buffered) > 0 {
-				emptyErr = errEmptyCompletion
+			emptyErr := errEmptyCompletion
+			if len(buffered) == 0 {
+				emptyErr = &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)

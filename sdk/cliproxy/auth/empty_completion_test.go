@@ -167,38 +167,38 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 		expected bool
 	}{
 		{
-			name: "openai sse empty",
-			payload: []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+			name:     "openai sse empty",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
 			expected: true,
 		},
 		{
-			name: "openai sse thinking then content is not empty",
-			payload: []byte("data: {\"choices\":[{\"delta\":{\"content\":\"\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+			name:     "openai sse thinking then content is not empty",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{\"content\":\"\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
 			expected: false,
 		},
 		{
-			name: "whitespace only zero tokens is empty",
-			payload: []byte("data: {\"choices\":[{\"delta\":{\"content\":\"   \"},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}\n\ndata: [DONE]\n\n"),
+			name:     "whitespace only zero tokens is empty",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{\"content\":\"   \"},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}\n\ndata: [DONE]\n\n"),
 			expected: true,
 		},
 		{
-			name: "non zero tokens is not empty",
-			payload: []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":5}}\n\ndata: [DONE]\n\n"),
+			name:     "non zero tokens is not empty",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":5}}\n\ndata: [DONE]\n\n"),
 			expected: false,
 		},
 		{
-			name: "tool calls are not empty",
-			payload: []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"x\"}]},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+			name:     "tool calls are not empty",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"x\"}]},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
 			expected: false,
 		},
 		{
-			name: "openai sse reasoning only is not empty",
-			payload: []byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking step by step\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+			name:     "openai sse reasoning only is not empty",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking step by step\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
 			expected: false,
 		},
 		{
-			name: "unterminated is not empty",
-			payload: []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":null}]}\n\n"),
+			name:     "unterminated is not empty",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":null}]}\n\n"),
 			expected: false,
 		},
 		{
@@ -212,13 +212,13 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: false,
 		},
 		{
-			name: "non stream empty json",
-			payload: []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`),
+			name:     "non stream empty json",
+			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`),
 			expected: true,
 		},
 		{
-			name: "non stream content is not empty",
-			payload: []byte(`{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}`),
+			name:     "non stream content is not empty",
+			payload:  []byte(`{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}`),
 			expected: false,
 		},
 		{
@@ -291,6 +291,31 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			payload:  []byte("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"candidatesTokenCount\":0}}\n\n"),
 			expected: true,
 		},
+		{
+			name:     "gemini blocked safety is not empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"SAFETY"}]}`),
+			expected: false,
+		},
+		{
+			name:     "gemini blocked recitation is not empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"RECITATION"}]}`),
+			expected: false,
+		},
+		{
+			name:     "gemini max tokens with empty content is not empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"MAX_TOKENS"}]}`),
+			expected: false,
+		},
+		{
+			name:     "gemini sse blocked safety closed by done is not empty",
+			payload:  []byte("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[]},\"finishReason\":\"SAFETY\"}]}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
+			name:     "openai sse empty choices array then done is empty",
+			payload:  []byte("data: {\"choices\":[]}\n\ndata: [DONE]\n\n"),
+			expected: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -312,35 +337,7 @@ func TestExecuteEmptyCompletionRotatesAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if !strings.Contains(string(resp.Payload), "real") {
-		t.Fatalf("Execute() payload = %q, want success content from the non-empty auth", resp.Payload)
-	}
-	// The first-picked auth (which returned empty) must have been recorded as a
-	// failure; the other must have succeeded.
-	emptyFirst := executor.firstExecute
-	if emptyFirst == "" {
-		t.Fatal("executor never executed any auth")
-	}
-	other := ids[0]
-	if emptyFirst == ids[0] {
-		other = ids[1]
-	}
-	var emptyRecorded bool
-	var otherSucceeded bool
-	for _, r := range capture.Results() {
-		if r.AuthID == emptyFirst && !r.Success {
-			emptyRecorded = true
-		}
-		if r.AuthID == other && r.Success {
-			otherSucceeded = true
-		}
-	}
-	if !emptyRecorded {
-		t.Fatalf("empty auth %q was not recorded as a failure result; results=%v", emptyFirst, capture.Results())
-	}
-	if !otherSucceeded {
-		t.Fatalf("content auth %q was not recorded as a success result; results=%v", other, capture.Results())
-	}
+	assertRotatesToContent(t, ids, executor.firstExecute, string(resp.Payload), "real", capture)
 }
 
 func TestExecuteStreamEmptyCompletionRotatesAuth(t *testing.T) {
@@ -361,35 +358,7 @@ func TestExecuteStreamEmptyCompletionRotatesAuth(t *testing.T) {
 	for chunk := range stream.Chunks {
 		got.Write(chunk.Payload)
 	}
-	if !strings.Contains(got.String(), "hello") {
-		t.Fatalf("stream payload = %q, want content from the non-empty auth", got.String())
-	}
-	// The first-streamed auth (which returned empty) must have been recorded as
-	// a failure; the other must have succeeded.
-	emptyFirst := executor.firstStream
-	if emptyFirst == "" {
-		t.Fatal("executor never streamed any auth")
-	}
-	other := ids[0]
-	if emptyFirst == ids[0] {
-		other = ids[1]
-	}
-	var emptyRecorded bool
-	var otherSucceeded bool
-	for _, r := range capture.Results() {
-		if r.AuthID == emptyFirst && !r.Success {
-			emptyRecorded = true
-		}
-		if r.AuthID == other && r.Success {
-			otherSucceeded = true
-		}
-	}
-	if !emptyRecorded {
-		t.Fatalf("empty auth %q was not recorded as a failure result; results=%v", emptyFirst, capture.Results())
-	}
-	if !otherSucceeded {
-		t.Fatalf("content auth %q was not recorded as a success result; results=%v", other, capture.Results())
-	}
+	assertRotatesToContent(t, ids, executor.firstStream, got.String(), "hello", capture)
 }
 
 func TestExecuteStreamEmptyGeminiStreamRotatesAuth(t *testing.T) {
@@ -416,33 +385,7 @@ func TestExecuteStreamEmptyGeminiStreamRotatesAuth(t *testing.T) {
 	for chunk := range stream.Chunks {
 		got.Write(chunk.Payload)
 	}
-	if !strings.Contains(got.String(), "functionCall") {
-		t.Fatalf("stream payload = %q, want content from the non-empty auth", got.String())
-	}
-	emptyFirst := executor.firstStream
-	if emptyFirst == "" {
-		t.Fatal("executor never streamed any auth")
-	}
-	other := ids[0]
-	if emptyFirst == ids[0] {
-		other = ids[1]
-	}
-	var emptyRecorded bool
-	var otherSucceeded bool
-	for _, r := range capture.Results() {
-		if r.AuthID == emptyFirst && !r.Success {
-			emptyRecorded = true
-		}
-		if r.AuthID == other && r.Success {
-			otherSucceeded = true
-		}
-	}
-	if !emptyRecorded {
-		t.Fatalf("expected failure recorded for empty auth %s, results: %+v", emptyFirst, capture.Results())
-	}
-	if !otherSucceeded {
-		t.Fatalf("expected success recorded for non-empty auth %s, results: %+v", other, capture.Results())
-	}
+	assertRotatesToContent(t, ids, executor.firstStream, got.String(), "functionCall", capture)
 }
 
 func TestExecuteStreamThinkingThenContentNotRotated(t *testing.T) {
@@ -480,5 +423,37 @@ func TestExecuteStreamThinkingThenContentNotRotated(t *testing.T) {
 		if auth.Unavailable || !auth.NextRetryAfter.IsZero() {
 			t.Fatalf("auth %q was cooled despite producing a real completion", ids[0])
 		}
+	}
+}
+
+// assertRotatesToContent verifies that an empty-completion from the first-picked
+// auth rotates to the other auth, which then succeeds with the given content.
+func assertRotatesToContent(t *testing.T, ids []string, emptyFirst, gotPayload, wantSubstr string, capture *resultCaptureHook) {
+	t.Helper()
+	if emptyFirst == "" {
+		t.Fatal("executor never executed/streamed any auth")
+	}
+	if !strings.Contains(gotPayload, wantSubstr) {
+		t.Fatalf("payload = %q, want %q from the non-empty auth", gotPayload, wantSubstr)
+	}
+	other := ids[0]
+	if emptyFirst == ids[0] {
+		other = ids[1]
+	}
+	var emptyRecorded bool
+	var otherSucceeded bool
+	for _, r := range capture.Results() {
+		if r.AuthID == emptyFirst && !r.Success {
+			emptyRecorded = true
+		}
+		if r.AuthID == other && r.Success {
+			otherSucceeded = true
+		}
+	}
+	if !emptyRecorded {
+		t.Fatalf("empty auth %q was not recorded as a failure result; results=%v", emptyFirst, capture.Results())
+	}
+	if !otherSucceeded {
+		t.Fatalf("content auth %q was not recorded as a success result; results=%v", other, capture.Results())
 	}
 }

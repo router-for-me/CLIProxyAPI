@@ -1125,9 +1125,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				continue
 			}
 			if isEmptyCompletionPayload(resp.Payload) {
-				result.Success = false
-				result.Error = errEmptyCompletion
-				m.MarkResult(creditsCtx, result)
+				m.markEmptyCompletion(creditsCtx, &result)
 				continue
 			}
 			m.MarkResult(creditsCtx, result)

@@ -382,10 +382,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				continue
 			}
 			if isEmptyCompletionPayload(resp.Payload) {
-				result.Success = false
-				result.Error = errEmptyCompletion
-				m.MarkResult(execCtx, result)
-				authErr = errEmptyCompletion
+				authErr = m.markEmptyCompletion(execCtx, &result)
 				continue
 			}
 			m.MarkResult(execCtx, result)

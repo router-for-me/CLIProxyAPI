@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 
@@ -73,13 +74,9 @@ type claudeChunk struct {
 type geminiPart struct {
 	Text             string          `json:"text"`
 	FunctionCall     json.RawMessage `json:"functionCall"`
-	FunctionCallAlt  json.RawMessage `json:"function_call"`
 	InlineData       json.RawMessage `json:"inlineData"`
-	InlineDataAlt    json.RawMessage `json:"inline_data"`
 	FileData         json.RawMessage `json:"fileData"`
-	FileDataAlt      json.RawMessage `json:"file_data"`
 	FunctionResponse json.RawMessage `json:"functionResponse"`
-	FunctionRespAlt  json.RawMessage `json:"function_response"`
 	Thought          json.RawMessage `json:"thought"`
 }
 
@@ -92,17 +89,14 @@ type geminiCandidate struct {
 
 type geminiUsageMetadata struct {
 	CandidatesTokenCount *int `json:"candidatesTokenCount"`
-	CandidatesTokensAlt  *int `json:"candidates_token_count"`
 }
 
 type geminiChunk struct {
-	Candidates       []geminiCandidate    `json:"candidates"`
-	UsageMetadata    *geminiUsageMetadata `json:"usageMetadata"`
-	UsageMetadataAlt *geminiUsageMetadata `json:"usage_metadata"`
-	Response         *struct {
-		Candidates       []geminiCandidate    `json:"candidates"`
-		UsageMetadata    *geminiUsageMetadata `json:"usageMetadata"`
-		UsageMetadataAlt *geminiUsageMetadata `json:"usage_metadata"`
+	Candidates    []geminiCandidate    `json:"candidates"`
+	UsageMetadata *geminiUsageMetadata `json:"usageMetadata"`
+	Response      *struct {
+		Candidates    []geminiCandidate    `json:"candidates"`
+		UsageMetadata *geminiUsageMetadata `json:"usageMetadata"`
 	} `json:"response"`
 }
 
@@ -115,6 +109,7 @@ type emptyCompletionAccum struct {
 	hasToolCalls     bool
 	completionTokens int
 	sawUsage         bool
+	blocked          bool
 }
 
 func (a *emptyCompletionAccum) evalJSON(data []byte) {
@@ -128,11 +123,21 @@ func (a *emptyCompletionAccum) evalJSON(data []byte) {
 }
 
 func (a *emptyCompletionAccum) evalOpenAI(data []byte) bool {
-	var chunk openAIChunk
-	if err := json.Unmarshal(data, &chunk); err != nil || len(chunk.Choices) == 0 {
+	// Recognize the OpenAI shape by the presence of a "choices" key, even when
+	// the array is empty (e.g. {"choices":[]}). Such prefixes must still be
+	// judged at stream close instead of being forwarded immediately.
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	if _, ok := probe["choices"]; !ok {
 		return false
 	}
 	a.recognized = true
+	var chunk openAIChunk
+	if err := json.Unmarshal(data, &chunk); err != nil {
+		return true
+	}
 	if chunk.Usage != nil && chunk.Usage.CompletionTokens != nil {
 		a.sawUsage = true
 		a.completionTokens += *chunk.Usage.CompletionTokens
@@ -253,9 +258,6 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 
 	candidates := chunk.Candidates
 	usage := chunk.UsageMetadata
-	if usage == nil {
-		usage = chunk.UsageMetadataAlt
-	}
 
 	if chunk.Response != nil {
 		if len(candidates) == 0 {
@@ -263,9 +265,6 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 		}
 		if usage == nil {
 			usage = chunk.Response.UsageMetadata
-		}
-		if usage == nil {
-			usage = chunk.Response.UsageMetadataAlt
 		}
 	}
 
@@ -279,25 +278,35 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 		if usage.CandidatesTokenCount != nil {
 			a.sawUsage = true
 			a.completionTokens += *usage.CandidatesTokenCount
-		} else if usage.CandidatesTokensAlt != nil {
-			a.sawUsage = true
-			a.completionTokens += *usage.CandidatesTokensAlt
 		}
 	}
 
 	allTerminal := true
+	blocked := false
 	for _, cand := range candidates {
-		if cand.FinishReason == nil || strings.TrimSpace(*cand.FinishReason) == "" {
+		if cand.FinishReason == nil {
 			allTerminal = false
+		} else {
+			reason := strings.TrimSpace(*cand.FinishReason)
+			if reason == "" {
+				allTerminal = false
+			} else if !strings.EqualFold(reason, "STOP") {
+				// A blocking or other terminal reason (SAFETY, RECITATION,
+				// MAX_TOKENS, BLOCKLIST, PROHIBITED_CONTENT, OTHER) is not an
+				// empty completion: the client must see the stop/block reason
+				// rather than a silent auth rotation.
+				allTerminal = false
+				blocked = true
+			}
 		}
 		if cand.Content != nil {
 			for _, part := range cand.Content.Parts {
-				if len(part.FunctionCall) > 0 || len(part.FunctionCallAlt) > 0 {
+				if len(part.FunctionCall) > 0 {
 					a.hasToolCalls = true
 				}
-				if len(part.InlineData) > 0 || len(part.InlineDataAlt) > 0 ||
-					len(part.FileData) > 0 || len(part.FileDataAlt) > 0 ||
-					len(part.FunctionResponse) > 0 || len(part.FunctionRespAlt) > 0 {
+				if len(part.InlineData) > 0 ||
+					len(part.FileData) > 0 ||
+					len(part.FunctionResponse) > 0 {
 					a.hasContent = true
 				}
 				if len(part.Thought) > 0 {
@@ -316,6 +325,9 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 	if allTerminal {
 		a.terminal = true
 	}
+	if blocked {
+		a.blocked = true
+	}
 
 	return true
 }
@@ -323,6 +335,9 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 // empty reports whether the accumulated stream is an empty completion.
 func (a *emptyCompletionAccum) empty() bool {
 	if !a.recognized || !a.terminal {
+		return false
+	}
+	if a.blocked {
 		return false
 	}
 	if a.hasContent || a.hasToolCalls {
@@ -404,4 +419,14 @@ func (a *emptyCompletionAccum) evalSSE(payload []byte) {
 		}
 		a.evalJSON(data)
 	}
+}
+
+// markEmptyCompletion records a failed retriable empty-completion result and
+// returns the error to propagate. Both the mixed and home (credits) execution
+// paths rotate on an empty completion, so the reporting is shared.
+func (m *Manager) markEmptyCompletion(ctx context.Context, result *Result) error {
+	result.Success = false
+	result.Error = errEmptyCompletion
+	m.MarkResult(ctx, *result)
+	return errEmptyCompletion
 }

@@ -166,6 +166,13 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 				}
 			}
 			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, Success: errExecute == nil}
+			if errExecute == nil && isEmptyCompletionPayload(response.Payload) {
+				result.Success = false
+				result.Error = errEmptyCompletion
+				m.reportHomeResult(execCtx, result, preparedAuth)
+				lastErr = errEmptyCompletion
+				continue
+			}
 			if errExecute == nil {
 				m.reportHomeResult(execCtx, result, preparedAuth)
 				releaseAttempt()
