@@ -72,13 +72,13 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 	}
 
 	// Map model name — strip provider prefix so qoder/auto → auto
-	model, _ := chatReq["model"].(string)
-	qoderModel := strings.TrimPrefix(model, "qoder/")
-	if mapped, ok := qoderauth.ModelMap[qoderModel]; ok {
-		qoderModel = mapped
-	} else if _, cached := storage.GetModelConfig(qoderModel); !cached {
-		// Not in static map and not in dynamic model cache — reject early.
-		return nil, fmt.Errorf("unsupported qoder model: %q (received %q)", qoderModel, model)
+	model := req.Model
+	if model == "" {
+		model, _ = chatReq["model"].(string)
+	}
+	qoderModel, err := validateQoderModel(model, storage)
+	if err != nil {
+		return nil, err
 	}
 	reporter := helps.NewExecutorUsageReporter(ctx, e, qoderModel, authRecord)
 	defer reporter.TrackFailure(ctx, &err)
@@ -1062,4 +1062,17 @@ func FetchQoderUsage(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.C
 		info.UserQuota.Used, info.UserQuota.Total, info.UserQuota.Unit,
 		info.TotalUsagePercentage*100)
 	return &info
+}
+
+func validateQoderModel(rawModel string, storage *qoderauth.QoderTokenStorage) (string, error) {
+	qoderModel := strings.TrimPrefix(rawModel, "qoder/")
+	if mapped, ok := qoderauth.ModelMap[qoderModel]; ok {
+		return mapped, nil
+	}
+	if storage != nil {
+		if _, cached := storage.GetModelConfig(qoderModel); cached {
+			return qoderModel, nil
+		}
+	}
+	return "", fmt.Errorf("unsupported qoder model: %q", qoderModel)
 }

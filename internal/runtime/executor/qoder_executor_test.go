@@ -961,3 +961,143 @@ func TestExecute_TranslateNonStream_UsesTranslatedRequestPayload(t *testing.T) {
 		t.Error("TranslateNonStream must return valid JSON")
 	}
 }
+
+func TestQoderExecutorExecutionModelSelection(t *testing.T) {
+	tests := []struct {
+		name          string
+		reqModel      string
+		payloadModel  string
+		wantModel     string
+		wantErr       string
+		wantTransport bool
+	}{
+		{
+			name:          "resolved request model overrides unresolved payload alias",
+			reqModel:      "qoder/auto",
+			payloadModel:  "configured-alias",
+			wantModel:     "auto",
+			wantTransport: true,
+		},
+		{
+			name:          "empty request model preserves payload fallback",
+			payloadModel:  "qoder/auto",
+			wantModel:     "auto",
+			wantTransport: true,
+		},
+		{
+			name:         "unknown resolved request model is rejected before transport",
+			reqModel:     "qoder/unknown-resolved-target",
+			payloadModel: "qoder/auto",
+			wantErr:      `unsupported qoder model: "unknown-resolved-target"`,
+		},
+	}
+
+	for _, mode := range []string{"stream", "non-stream"} {
+		t.Run(mode, func(t *testing.T) {
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					transportCalls := 0
+					ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+						transportCalls++
+						if got := req.Header.Get("X-Model-Key"); got != tt.wantModel {
+							t.Errorf("X-Model-Key = %q, want %q", got, tt.wantModel)
+						}
+						return qoderSSEHTTPResponse(req, http.StatusOK, "data: [DONE]\n\n"), nil
+					}))
+					executor := NewQoderExecutor(&config.Config{})
+					authRecord := &cliproxyauth.Auth{Storage: testQoderStorageWithModelConfig()}
+					req := cliproxyexecutor.Request{
+						Model:   tt.reqModel,
+						Payload: []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}]}`, tt.payloadModel)),
+					}
+
+					var err error
+					if mode == "stream" {
+						var result *cliproxyexecutor.StreamResult
+						result, err = executor.ExecuteStream(ctx, authRecord, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI})
+						if err == nil {
+							for chunk := range result.Chunks {
+								if chunk.Err != nil {
+									t.Fatalf("stream chunk error = %v", chunk.Err)
+								}
+							}
+						}
+					} else {
+						_, err = executor.Execute(ctx, authRecord, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI})
+					}
+
+					if tt.wantErr != "" {
+						if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+							t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+						}
+					} else if err != nil {
+						t.Fatalf("execution error = %v", err)
+					}
+					if got := transportCalls > 0; got != tt.wantTransport {
+						t.Fatalf("transport called = %v (%d calls), want %v", got, transportCalls, tt.wantTransport)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestValidateQoderModel(t *testing.T) {
+	storage := &qoder.QoderTokenStorage{}
+	storage.SetModelConfigs(map[string]json.RawMessage{
+		"custom-qoder-model": json.RawMessage(`{"type":"custom"}`),
+	})
+
+	tests := []struct {
+		name         string
+		rawModel     string
+		want         string
+		wantErr      bool
+		errSubstring string
+	}{
+		{
+			name:     "ModelMap hit with prefix",
+			rawModel: "qoder/auto",
+			want:     "auto",
+		},
+		{
+			name:     "ModelMap hit without prefix",
+			rawModel: "auto",
+			want:     "auto",
+		},
+		{
+			name:     "Storage config hit with prefix",
+			rawModel: "qoder/custom-qoder-model",
+			want:     "custom-qoder-model",
+		},
+		{
+			name:     "Storage config hit without prefix",
+			rawModel: "custom-qoder-model",
+			want:     "custom-qoder-model",
+		},
+		{
+			name:         "Unsupported model error",
+			rawModel:     "qoder/nonexistent",
+			wantErr:      true,
+			errSubstring: `unsupported qoder model: "nonexistent"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := validateQoderModel(tt.rawModel, storage)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateQoderModel(%q) error = %v, wantErr %v", tt.rawModel, err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), tt.errSubstring) {
+					t.Errorf("validateQoderModel(%q) error = %v, want substring %q", tt.rawModel, err, tt.errSubstring)
+				}
+				return
+			}
+			if got != tt.want {
+				t.Errorf("validateQoderModel(%q) = %q, want %q", tt.rawModel, got, tt.want)
+			}
+		})
+	}
+}
