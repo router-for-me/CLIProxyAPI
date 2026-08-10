@@ -29,6 +29,12 @@ type emptyCompletionTestExecutor struct {
 	firstExecute string
 	// firstStream records the first auth picked for a stream execution.
 	firstStream string
+
+	// emptyStreamPayload/contentStreamPayload override the default first-auth
+	// empty stream and subsequent-auth content stream (used to exercise
+	// non-OpenAI stream formats).
+	emptyStreamPayload   [][]byte
+	contentStreamPayload [][]byte
 }
 
 func (e *emptyCompletionTestExecutor) Identifier() string { return "claude" }
@@ -76,9 +82,12 @@ func (e *emptyCompletionTestExecutor) ExecuteStream(ctx context.Context, auth *A
 	// empty completion and subsequent auths to stream real content, so rotation
 	// tests are deterministic regardless of global selector state.
 	if len(e.streamPayloads) == 0 && e.firstStream == auth.ID {
-		empty := [][]byte{
-			[]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"),
-			[]byte("data: [DONE]\n\n"),
+		empty := e.emptyStreamPayload
+		if len(empty) == 0 {
+			empty = [][]byte{
+				[]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"),
+				[]byte("data: [DONE]\n\n"),
+			}
 		}
 		chunks := make(chan cliproxyexecutor.StreamChunk, len(empty))
 		for _, p := range empty {
@@ -95,10 +104,13 @@ func (e *emptyCompletionTestExecutor) ExecuteStream(ctx context.Context, auth *A
 		close(chunks)
 		return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 	}
-	content := [][]byte{
-		[]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n"),
-		[]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"),
-		[]byte("data: [DONE]\n\n"),
+	content := e.contentStreamPayload
+	if len(content) == 0 {
+		content = [][]byte{
+			[]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n"),
+			[]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"),
+			[]byte("data: [DONE]\n\n"),
+		}
 	}
 	chunks := make(chan cliproxyexecutor.StreamChunk, len(content))
 	for _, p := range content {
@@ -190,8 +202,13 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: false,
 		},
 		{
-			name: "non openai format is not empty",
-			payload: []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+			name:     "claude sse message_stop only is empty",
+			payload:  []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+			expected: true,
+		},
+		{
+			name:     "unrecognized format is not empty",
+			payload:  []byte("data: {\"unknown_payload\":true}\n\n"),
 			expected: false,
 		},
 		{
@@ -205,9 +222,74 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: false,
 		},
 		{
-			name: "non stream reasoning only is not empty",
-			payload: []byte(`{"choices":[{"message":{"reasoning_content":"thinking"},"finish_reason":"stop"}]}`),
+			name:     "non stream reasoning only is not empty",
+			payload:  []byte(`{"choices":[{"message":{"reasoning_content":"thinking"},"finish_reason":"stop"}]}`),
 			expected: false,
+		},
+		{
+			name:     "claude non-stream empty message is empty",
+			payload:  []byte(`{"type":"message","id":"msg_1","role":"assistant","content":[],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":0}}`),
+			expected: true,
+		},
+		{
+			name:     "claude non-stream empty message without usage is empty",
+			payload:  []byte(`{"type":"message","id":"msg_1","role":"assistant","content":[],"stop_reason":"end_turn"}`),
+			expected: true,
+		},
+		{
+			name:     "claude non-stream with tool_use is not empty",
+			payload:  []byte(`{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"get_weather","input":{}}],"stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":5}}`),
+			expected: false,
+		},
+		{
+			name:     "claude non-stream thinking-block-only is not empty",
+			payload:  []byte(`{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"thinking","thinking":"let me think","signature":"sig"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`),
+			expected: false,
+		},
+		{
+			name:     "claude non-stream with text content is not empty",
+			payload:  []byte(`{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":1}}`),
+			expected: false,
+		},
+		{
+			name:     "claude sse empty stream is empty",
+			payload:  []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null,\"usage\":{\"output_tokens\":0}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+			expected: true,
+		},
+		{
+			name:     "gemini non-stream empty candidates is empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`),
+			expected: true,
+		},
+		{
+			name:     "gemini non-stream whitespace parts is empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"   "}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`),
+			expected: true,
+		},
+		{
+			name:     "gemini non-stream without usage is empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}]}`),
+			expected: true,
+		},
+		{
+			name:     "gemini non-stream with functionCall part is not empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"search","args":{}}}]},"finishReason":"STOP"}]}`),
+			expected: false,
+		},
+		{
+			name:     "gemini non-stream with text content is not empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}]}`),
+			expected: false,
+		},
+		{
+			name:     "gemini non-stream with thought part is not empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"thinking"}]},"finishReason":"STOP"}]}`),
+			expected: false,
+		},
+		{
+			name:     "gemini sse empty stream is empty",
+			payload:  []byte("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"candidatesTokenCount\":0}}\n\n"),
+			expected: true,
 		},
 	}
 	for _, tc := range cases {
@@ -307,6 +389,59 @@ func TestExecuteStreamEmptyCompletionRotatesAuth(t *testing.T) {
 	}
 	if !otherSucceeded {
 		t.Fatalf("content auth %q was not recorded as a success result; results=%v", other, capture.Results())
+	}
+}
+
+func TestExecuteStreamEmptyGeminiStreamRotatesAuth(t *testing.T) {
+	executor := &emptyCompletionTestExecutor{
+		streamPayloads: map[string][][]byte{},
+		streamCalls:    map[string]int{},
+		emptyStreamPayload: [][]byte{
+			[]byte("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"candidatesTokenCount\":0}}\n\n"),
+		},
+		contentStreamPayload: [][]byte{
+			[]byte("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"search\",\"args\":{}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"candidatesTokenCount\":5}}\n\n"),
+		},
+	}
+	manager, ids, model, capture := newEmptyCompletionTestManager(t, executor)
+
+	stream, err := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if stream == nil {
+		t.Fatal("ExecuteStream() returned nil stream")
+	}
+	var got strings.Builder
+	for chunk := range stream.Chunks {
+		got.Write(chunk.Payload)
+	}
+	if !strings.Contains(got.String(), "functionCall") {
+		t.Fatalf("stream payload = %q, want content from the non-empty auth", got.String())
+	}
+	emptyFirst := executor.firstStream
+	if emptyFirst == "" {
+		t.Fatal("executor never streamed any auth")
+	}
+	other := ids[0]
+	if emptyFirst == ids[0] {
+		other = ids[1]
+	}
+	var emptyRecorded bool
+	var otherSucceeded bool
+	for _, r := range capture.Results() {
+		if r.AuthID == emptyFirst && !r.Success {
+			emptyRecorded = true
+		}
+		if r.AuthID == other && r.Success {
+			otherSucceeded = true
+		}
+	}
+	if !emptyRecorded {
+		t.Fatalf("expected failure recorded for empty auth %s, results: %+v", emptyFirst, capture.Results())
+	}
+	if !otherSucceeded {
+		t.Fatalf("expected success recorded for non-empty auth %s, results: %+v", other, capture.Results())
 	}
 }
 
