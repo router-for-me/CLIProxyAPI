@@ -287,9 +287,12 @@ func TestEnsureCacheControlNonCloakedMultiTurn(t *testing.T) {
 		]
 	}`)
 
-	output := ensureCacheControl(input)
+	output := normalizeCacheControlTTL(ensureCacheControl(input))
 	if got := gjson.GetBytes(output, "tools.0.cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("tools breakpoint type = %q, want ephemeral: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "tools.0.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("tools breakpoint ttl = %q, want inherited 1h: %s", got, output)
 	}
 	if got := gjson.GetBytes(output, "system.0.cache_control.ttl").String(); got != "1h" {
 		t.Fatalf("caller system breakpoint ttl = %q, want preserved 1h: %s", got, output)
@@ -299,6 +302,32 @@ func TestEnsureCacheControlNonCloakedMultiTurn(t *testing.T) {
 	}
 	if gjson.GetBytes(output, "messages.0.content.0.cache_control").Exists() {
 		t.Fatalf("first user turn unexpectedly received cache_control: %s", output)
+	}
+}
+
+func TestEnsureCacheControlPreservesLaterMessageTTL(t *testing.T) {
+	input := []byte(`{
+		"tools":[{"name":"tool"}],
+		"system":"system",
+		"messages":[
+			{"role":"user","content":"first"},
+			{"role":"assistant","content":"reply one"},
+			{"role":"user","content":"second"},
+			{"role":"assistant","content":"reply two"},
+			{"role":"user","content":[{"type":"text","text":"third","cache_control":{"type":"ephemeral","ttl":"1h"}}]}
+		]
+	}`)
+
+	output := normalizeCacheControlTTL(ensureCacheControl(input))
+	for _, path := range []string{
+		"tools.0.cache_control.ttl",
+		"system.0.cache_control.ttl",
+		"messages.2.content.0.cache_control.ttl",
+		"messages.4.content.0.cache_control.ttl",
+	} {
+		if got := gjson.GetBytes(output, path).String(); got != "1h" {
+			t.Fatalf("%s = %q, want preserved 1h: %s", path, got, output)
+		}
 	}
 }
 

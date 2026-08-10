@@ -919,6 +919,56 @@ func countCacheControls(payload []byte) int {
 	return count
 }
 
+func newCacheControl(oneHour bool) map[string]string {
+	cacheControl := map[string]string{"type": "ephemeral"}
+	if oneHour {
+		cacheControl["ttl"] = "1h"
+	}
+	return cacheControl
+}
+
+func systemHasOneHourCacheControl(payload []byte) bool {
+	system := gjson.GetBytes(payload, "system")
+	if !system.IsArray() {
+		return false
+	}
+
+	found := false
+	system.ForEach(func(_, item gjson.Result) bool {
+		found = item.Get("cache_control.ttl").String() == "1h"
+		return !found
+	})
+	return found
+}
+
+func messagesHaveOneHourCacheControlAfter(payload []byte, messageIndex, contentIndex int) bool {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return false
+	}
+
+	found := false
+	messages.ForEach(func(msgIdx, msg gjson.Result) bool {
+		currentMessageIndex := int(msgIdx.Int())
+		if currentMessageIndex < messageIndex {
+			return true
+		}
+		content := msg.Get("content")
+		if !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(itemIdx, item gjson.Result) bool {
+			if currentMessageIndex == messageIndex && int(itemIdx.Int()) <= contentIndex {
+				return true
+			}
+			found = item.Get("cache_control.ttl").String() == "1h"
+			return !found
+		})
+		return !found
+	})
+	return found
+}
+
 // normalizeCacheControlTTL ensures cache_control TTL values don't violate the
 // prompt-caching-scope-2026-01-05 ordering constraint: a 1h-TTL block must not
 // appear after a 5m-TTL block anywhere in the evaluation order.
@@ -1221,7 +1271,8 @@ func injectMessagesCacheControl(payload []byte) []byte {
 				return payload
 			}
 			cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", secondToLastUserIdx, contentCount-1)
-			result, err := sjson.SetBytes(payload, cacheControlPath, map[string]string{"type": "ephemeral"})
+			cacheControl := newCacheControl(messagesHaveOneHourCacheControlAfter(payload, secondToLastUserIdx, contentCount-1))
+			result, err := sjson.SetBytes(payload, cacheControlPath, cacheControl)
 			if err != nil {
 				log.Warnf("failed to inject cache_control into messages: %v", err)
 				return payload
@@ -1233,11 +1284,9 @@ func injectMessagesCacheControl(payload []byte) []byte {
 		text := content.String()
 		newContent := []map[string]interface{}{
 			{
-				"type": "text",
-				"text": text,
-				"cache_control": map[string]string{
-					"type": "ephemeral",
-				},
+				"type":          "text",
+				"text":          text,
+				"cache_control": newCacheControl(messagesHaveOneHourCacheControlAfter(payload, secondToLastUserIdx, -1)),
 			},
 		}
 		result, err := sjson.SetBytes(payload, contentPath, newContent)
@@ -1278,7 +1327,8 @@ func injectToolsCacheControl(payload []byte) []byte {
 	}
 
 	lastToolPath := fmt.Sprintf("tools.%d.cache_control", lastEligibleToolIndex)
-	result, err := sjson.SetBytes(payload, lastToolPath, map[string]string{"type": "ephemeral"})
+	cacheControl := newCacheControl(systemHasOneHourCacheControl(payload) || messagesHaveOneHourCacheControlAfter(payload, -1, -1))
+	result, err := sjson.SetBytes(payload, lastToolPath, cacheControl)
 	if err != nil {
 		log.Warnf("failed to inject cache_control into tools array: %v", err)
 		return payload
@@ -1317,7 +1367,8 @@ func injectSystemCacheControl(payload []byte) []byte {
 
 		// Add cache_control to the last system element
 		lastSystemPath := fmt.Sprintf("system.%d.cache_control", count-1)
-		result, err := sjson.SetBytes(payload, lastSystemPath, map[string]string{"type": "ephemeral"})
+		cacheControl := newCacheControl(messagesHaveOneHourCacheControlAfter(payload, -1, -1))
+		result, err := sjson.SetBytes(payload, lastSystemPath, cacheControl)
 		if err != nil {
 			log.Warnf("failed to inject cache_control into system array: %v", err)
 			return payload
@@ -1329,11 +1380,9 @@ func injectSystemCacheControl(payload []byte) []byte {
 		text := system.String()
 		newSystem := []map[string]interface{}{
 			{
-				"type": "text",
-				"text": text,
-				"cache_control": map[string]string{
-					"type": "ephemeral",
-				},
+				"type":          "text",
+				"text":          text,
+				"cache_control": newCacheControl(messagesHaveOneHourCacheControlAfter(payload, -1, -1)),
 			},
 		}
 		result, err := sjson.SetBytes(payload, "system", newSystem)

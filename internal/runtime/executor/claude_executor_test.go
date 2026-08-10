@@ -5827,6 +5827,34 @@ func TestClaudeExecutor_CloakedCacheBreakpointAdvancesAcrossExecutePaths(t *test
 	}
 }
 
+func TestClaudeExecutor_PreservesCallerOneHourCacheTTLAcrossExecutePaths(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5",
+		"tools":[{"name":"tool","input_schema":{"type":"object"}}],
+		"system":[{"type":"text","text":"system","cache_control":{"type":"ephemeral","ttl":"1h"}}],
+		"messages":[
+			{"role":"user","content":"first"},
+			{"role":"assistant","content":"reply one"},
+			{"role":"user","content":"second"}
+		]}`)
+
+	for _, stream := range []bool{false, true} {
+		name := "execute"
+		if stream {
+			name = "execute stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := &config.Config{DisableClaudeCloakMode: true}
+			upstreamBody := executeClaudeContextManagementRequest(t, cfg, payload, stream)
+			if got := gjson.GetBytes(upstreamBody, "tools.0.cache_control.ttl").String(); got != "1h" {
+				t.Fatalf("injected tool cache_control ttl = %q, want 1h: %s", got, upstreamBody)
+			}
+			if got := gjson.GetBytes(upstreamBody, `system.#(text=="system").cache_control.ttl`).String(); got != "1h" {
+				t.Fatalf("caller system cache_control ttl = %q, want preserved 1h: %s", got, upstreamBody)
+			}
+		})
+	}
+}
+
 func TestValidateClaudeCallerSystemBlocksAcceptsTextOnly(t *testing.T) {
 	tests := []struct {
 		name   string
