@@ -23,7 +23,7 @@ const (
 	defaultCodexResetCreditSpacing = 5 * time.Second
 	defaultCodexResetCreditBackoff = 10 * time.Second
 	maxCodexResetCreditRetries     = 3
-	codexResetCreditCacheTTL       = 5 * time.Minute
+	codexResetCreditCacheTTL       = 30 * time.Minute
 	codexResetCreditHost           = "chatgpt.com"
 	codexResetCreditPath           = "/backend-api/wham/rate-limit-reset-credits"
 	codexResetCreditConsumePath    = codexResetCreditPath + "/consume"
