@@ -125,3 +125,58 @@ func TestForwardResponsesStreamUsesResponseFailedForCodex(t *testing.T) {
 		t.Fatalf("missing nested Codex error detail: %q", body)
 	}
 }
+
+func TestForwardChatAsResponsesStreamUsesResponsesTerminalErrors(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name      string
+		status    int
+		message   string
+		userAgent string
+		wantEvent string
+		wantType  string
+	}{
+		{name: "retryable quota error stays silent", status: http.StatusTooManyRequests, message: "usage limit reached"},
+		{name: "non-Codex client gets Responses error", status: http.StatusBadRequest, message: `{"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`, wantEvent: "event: error", wantType: `"type":"error"`},
+		{name: "Codex client gets response failed", status: http.StatusBadRequest, message: `{"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`, userAgent: "Codex Desktop/26.803.41515", wantEvent: "event: response.failed", wantType: `"type":"response.failed"`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+			h := NewOpenAIResponsesAPIHandler(base)
+
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			c.Request.Header.Set("User-Agent", tc.userAgent)
+
+			flusher, ok := c.Writer.(http.Flusher)
+			if !ok {
+				t.Fatal("expected gin writer to implement http.Flusher")
+			}
+
+			data := make(chan []byte)
+			errs := make(chan *interfaces.ErrorMessage, 1)
+			errs <- &interfaces.ErrorMessage{
+				StatusCode: tc.status,
+				Error:      errors.New(tc.message),
+			}
+			close(errs)
+
+			var param any
+			h.forwardChatAsResponsesStream(c, flusher, func(error) {}, data, errs, c.Request.Context(), "test-model", nil, &param)
+			body := recorder.Body.String()
+			if tc.wantEvent == "" {
+				if body != "" {
+					t.Fatalf("retryable error exposed: %q", body)
+				}
+				return
+			}
+			if !strings.Contains(body, tc.wantEvent) || !strings.Contains(body, tc.wantType) {
+				t.Fatalf("terminal event = %q, want %q with %q", body, tc.wantEvent, tc.wantType)
+			}
+		})
+	}
+}
