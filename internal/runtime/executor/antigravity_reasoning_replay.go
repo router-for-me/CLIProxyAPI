@@ -1048,6 +1048,11 @@ type antigravityReplayIndexedContent struct {
 	parts   []gjson.Result
 }
 
+// antigravityReplayRequestIndex is an immutable, request-scoped view over one
+// exact revision of a replay payload. It retains no-copy GJSON results that
+// alias the payload bytes and memoizes context fingerprints lazily, so it must
+// be discarded and rebuilt as soon as the payload changes, and it must never be
+// shared across goroutines.
 type antigravityReplayRequestIndex struct {
 	validContents               bool
 	contents                    []antigravityReplayIndexedContent
@@ -1147,12 +1152,16 @@ func (i *antigravityReplayRequestIndex) pendingModelContentIndex() (contentIndex
 	return len(i.contents), 0
 }
 
+// antigravityReplayContextFingerprints hashes the replay context incrementally,
+// snapshotting the running SHA-256 after every content boundary so that a
+// prefix lookup is O(1). Prefix sums are appended in content order on first
+// use, so at() mutates the running hasher and is not safe for concurrent use.
 type antigravityReplayContextFingerprints struct {
-	valid    bool
-	contents []antigravityReplayIndexedContent
-	hasher   hash.Hash
-	sums     []string
-	written  int
+	valid      bool
+	contents   []antigravityReplayIndexedContent
+	hasher     hash.Hash
+	sums       []string
+	wroteBytes bool
 }
 
 func newAntigravityReplayContextFingerprints(
@@ -1186,23 +1195,25 @@ func (f *antigravityReplayContextFingerprints) write(data []byte) {
 		return
 	}
 	_, _ = f.hasher.Write(data)
-	f.written += len(data)
+	f.wroteBytes = true
 }
 
 func (f *antigravityReplayContextFingerprints) writeString(value string) {
 	if value == "" {
 		return
 	}
-	written, _ := io.WriteString(f.hasher, value)
-	f.written += written
+	_, _ = io.WriteString(f.hasher, value)
+	f.wroteBytes = true
 }
 
 func (f *antigravityReplayContextFingerprints) writeByte(value byte) {
 	f.write([]byte{value})
 }
 
+// sum reports the empty fingerprint until at least one byte has been hashed,
+// which keeps an all-empty context indistinguishable from a missing one.
 func (f *antigravityReplayContextFingerprints) sum() string {
-	if f.written == 0 {
+	if !f.wroteBytes {
 		return ""
 	}
 	return hex.EncodeToString(f.hasher.Sum(nil))
@@ -1982,7 +1993,9 @@ func antigravityReasoningReplayItemsFromRequest(payload []byte) [][]byte {
 }
 
 func (i *antigravityReplayRequestIndex) reasoningReplayItemsFromRequest() [][]byte {
-	if i == nil || len(i.contents) == 0 {
+	// Invalid contents yield a nil slice while a valid but empty array yields an
+	// empty non-nil slice, matching the pre-index behavior exactly.
+	if i == nil || !i.validContents {
 		return nil
 	}
 	items := make([][]byte, 0)

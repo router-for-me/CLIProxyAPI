@@ -205,6 +205,30 @@ func TestAntigravityReasoningReplayItemsFromIndexMatchLegacy(t *testing.T) {
 	}
 }
 
+func TestAntigravityReasoningReplayItemsNilnessMatchesLegacy(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		payload []byte
+	}{
+		{name: "missing contents", payload: []byte(`{}`)},
+		{name: "malformed contents", payload: []byte(`{"request":{"contents":`)},
+		{name: "contents not an array", payload: []byte(`{"request":{"contents":{"role":"model"}}}`)},
+		{name: "empty contents", payload: []byte(`{"request":{"contents":[]}}`)},
+		{name: "no model turn", payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			want := legacyAntigravityReasoningReplayItemsFromRequest(test.payload)
+			got := antigravityReasoningReplayItemsFromRequest(test.payload)
+			if (want == nil) != (got == nil) {
+				t.Fatalf("nil-ness differs: legacy nil=%t, indexed nil=%t", want == nil, got == nil)
+			}
+			if len(got) != len(want) {
+				t.Fatalf("items = %d, want %d", len(got), len(want))
+			}
+		})
+	}
+}
+
 func TestFilterAntigravityReasoningReplayItemsWithIndexMatchesLegacy(t *testing.T) {
 	payload := []byte(`{
 		"request":{"contents":[
