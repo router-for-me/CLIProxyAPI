@@ -20,9 +20,10 @@ import (
 
 const (
 	defaultAPICallTimeout          = 60 * time.Second
+	defaultCodexResetCreditTimeout = 10 * time.Second
 	defaultCodexResetCreditSpacing = 5 * time.Second
 	defaultCodexResetCreditBackoff = 10 * time.Second
-	maxCodexResetCreditRetries     = 3
+	maxCodexResetCreditRetries     = 2
 	codexResetCreditCacheTTL       = 30 * time.Minute
 	codexResetCreditHost           = "chatgpt.com"
 	codexResetCreditPath           = "/backend-api/wham/rate-limit-reset-credits"
@@ -196,9 +197,12 @@ func (h *Handler) APICall(c *gin.Context) {
 		req.Host = hostOverride
 	}
 
-	httpClient := &http.Client{
-		Timeout: defaultAPICallTimeout,
+	resetCreditRequest := method == http.MethodGet && isCodexResetCreditURL(parsedURL)
+	timeout := defaultAPICallTimeout
+	if resetCreditRequest {
+		timeout = defaultCodexResetCreditTimeout
 	}
+	httpClient := &http.Client{Timeout: timeout}
 	httpClient.Transport = h.apiCallTransport(auth)
 
 	release, errGate := h.acquireCodexResetCreditGate(c.Request.Context(), parsedURL)
@@ -207,7 +211,6 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 	defer release()
-	resetCreditRequest := method == http.MethodGet && isCodexResetCreditURL(parsedURL)
 	if resetCreditRequest {
 		if cached, ok := loadCodexResetCreditCache(authIndex, false); ok {
 			c.JSON(http.StatusOK, cached)
