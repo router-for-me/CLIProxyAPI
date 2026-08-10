@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -114,13 +113,11 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 	// Incremental follow-up turns continue on the same websocket using
 	// `previous_response_id` + incremental `input`, not `response.append`.
 	body = helps.SanitizeCodexInputItemIDs(body)
-	wsReqBody, errSet := sjson.SetBytes(bytes.Clone(body), "type", "response.create")
+	wsReqBody, errSet := sjson.SetBytes(body, "type", "response.create")
 	if errSet == nil && len(wsReqBody) > 0 {
 		return wsReqBody
 	}
-	fallback := bytes.Clone(body)
-	fallback, _ = sjson.SetBytes(fallback, "type", "response.create")
-	return fallback
+	return body
 }
 
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {

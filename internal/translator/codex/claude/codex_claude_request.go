@@ -26,7 +26,7 @@ import (
 // The function performs the following transformations:
 // 1. Sets up a template with the model name and empty instructions field
 // 2. Processes system messages and converts them to developer input content
-// 3. Transforms message contents (text, image, tool_use, tool_result) to appropriate formats
+// 3. Transforms message contents (text, image, document, tool_use, tool_result) to appropriate formats
 // 4. Converts tools declarations to the expected format
 // 5. Adds additional configuration parameters for the Codex API
 // 6. Maps Claude thinking configuration to Codex reasoning settings
@@ -38,7 +38,17 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in internal client format
-func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
+func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
+	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, false)
+}
+
+// ConvertClaudeRequestToCodexWithCompat preserves assistant thinking blocks with
+// empty signatures for configured compatibility endpoints.
+func ConvertClaudeRequestToCodexWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
+	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, true)
+}
+
+func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, preserveEmptyThinkingBlocks bool) []byte {
 	rawJSON := inputRawJSON
 
 	template := []byte(`{"model":"","instructions":"","input":[]}`)
@@ -129,6 +139,12 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				contentItems = append(contentItems, content)
 			}
 
+			appendDocumentContent := func(dataURL string) {
+				content := []byte(`{"type":"input_file","file_data":"","filename":"document.pdf"}`)
+				content, _ = sjson.SetBytes(content, "file_data", dataURL)
+				contentItems = append(contentItems, content)
+			}
+
 			appendReasoningContent := func(part gjson.Result) {
 				if messageRole != "assistant" {
 					return
@@ -137,13 +153,17 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				rawSignature := part.Get("signature").String()
 				signature, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, rawSignature)
 				if !ok {
-					if !codexClaudeTargetAcceptsGrokSignature(modelName) {
-						return
+					if preserveEmptyThinkingBlocks && strings.TrimSpace(rawSignature) == "" {
+						signature = rawSignature
+					} else {
+						if !codexClaudeTargetAcceptsGrokSignature(modelName) {
+							return
+						}
+						if _, err := sigcompat.InspectGrokEncryptedContent(rawSignature); err != nil {
+							return
+						}
+						signature = rawSignature
 					}
-					if _, err := sigcompat.InspectGrokEncryptedContent(rawSignature); err != nil {
-						return
-					}
-					signature = rawSignature
 				}
 
 				flushMessage()
@@ -181,6 +201,22 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 								dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
 								appendImageContent(dataURL)
 							}
+						}
+					case "document":
+						sourceResult := messageContentResult.Get("source")
+						if sourceResult.Get("type").String() != "base64" {
+							continue
+						}
+						mediaType := strings.TrimSpace(sourceResult.Get("media_type").String())
+						if !strings.EqualFold(mediaType, "application/pdf") {
+							continue
+						}
+						data := sourceResult.Get("data").String()
+						if data == "" {
+							data = sourceResult.Get("base64").String()
+						}
+						if data != "" {
+							appendDocumentContent(fmt.Sprintf("data:%s;base64,%s", mediaType, data))
 						}
 					case "tool_use":
 						flushMessage()

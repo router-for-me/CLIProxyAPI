@@ -2,12 +2,15 @@ package helps
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -334,6 +337,52 @@ func TestParseClaudeUsageFallsBackCachedTokensToCacheCreation(t *testing.T) {
 	}
 }
 
+func TestParseClaudeUsagePreservesThinkingTokensAsReasoningSubset(t *testing.T) {
+	// Sanitized shape from local Anthropic request logs under ~/.config/cpa/logs.
+	data := []byte(`{"usage":{"input_tokens":2,"cache_creation_input_tokens":831,"cache_read_input_tokens":44225,"output_tokens":244,"output_tokens_details":{"thinking_tokens":40}}}`)
+	detail := ParseClaudeUsage(data)
+	if detail.OutputTokens != 244 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 244)
+	}
+	if detail.ReasoningTokens != 40 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 40)
+	}
+	if detail.TotalTokens != 45302 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 45302)
+	}
+	if !detail.TokenBreakdown.Valid() ||
+		detail.TokenBreakdown.Output.TotalTokens != 244 ||
+		detail.TokenBreakdown.Output.NonReasoningTokens != 204 ||
+		detail.TokenBreakdown.Output.ReasoningTokens != 40 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
+}
+
+func TestParseClaudeStreamUsagePreservesThinkingTokensAsReasoningSubset(t *testing.T) {
+	line := []byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":2,"cache_creation_input_tokens":831,"cache_read_input_tokens":44225,"output_tokens":244,"output_tokens_details":{"thinking_tokens":40}}}`)
+	detail, ok := ParseClaudeStreamUsage(line)
+	if !ok {
+		t.Fatal("expected stream usage to parse")
+	}
+	if detail.OutputTokens != 244 || detail.ReasoningTokens != 40 || detail.TotalTokens != 45302 {
+		t.Fatalf("stream usage detail = %+v", detail)
+	}
+	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Output.NonReasoningTokens != 204 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
+}
+
+func TestParseClaudeUsageFallsBackToTopLevelThinkingTokens(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":3,"output_tokens":10,"thinking_tokens":4}}`)
+	detail := ParseClaudeUsage(data)
+	if detail.OutputTokens != 10 || detail.ReasoningTokens != 4 || detail.TotalTokens != 13 {
+		t.Fatalf("detail = %+v", detail)
+	}
+	if detail.TokenBreakdown.Output.NonReasoningTokens != 6 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
+}
+
 func TestParseGeminiUsageNormalizesCachedContent(t *testing.T) {
 	detail := ParseGeminiUsage([]byte(`{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"cachedContentTokenCount":4,"totalTokenCount":12}}`))
 	if detail.CachedTokens != 4 {
@@ -611,6 +660,39 @@ func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	}
 	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{CachedTokens: 2}); !ok {
 		t.Fatalf("expected non-zero cached token usage to be recorded")
+	}
+}
+
+func TestFailFromErrorsMapsContextStatuses(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "canceled", err: context.Canceled, want: clienterror.StatusClientClosedRequest},
+		{name: "deadline", err: context.DeadlineExceeded, want: http.StatusGatewayTimeout},
+		{
+			name: "url error wraps canceled",
+			err:  &url.Error{Op: "Post", URL: "https://example.com", Err: context.Canceled},
+			want: clienterror.StatusClientClosedRequest,
+		},
+		{name: "plain error", err: errors.New("boom"), want: 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fail := failFromErrors(tc.err)
+			if fail.StatusCode != tc.want {
+				t.Fatalf("StatusCode = %d, want %d; body=%q", fail.StatusCode, tc.want, fail.Body)
+			}
+			if strings.TrimSpace(fail.Body) == "" {
+				t.Fatalf("expected non-empty failure body")
+			}
+		})
+	}
+
+	if fail := failFromErrors(nil, nil); fail.StatusCode != 0 || fail.Body != "" {
+		t.Fatalf("failFromErrors(nil) = %+v, want empty failure", fail)
 	}
 }
 

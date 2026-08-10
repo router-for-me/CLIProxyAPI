@@ -15,6 +15,21 @@ func TestCloneForRuntimeNil(t *testing.T) {
 	}
 }
 
+func TestParseConfigBytes_AntigravitySensitiveWords(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`antigravity:
+  sensitive-words:
+    - "API"
+    - "proxy"
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	want := []string{"API", "proxy"}
+	if !reflect.DeepEqual(cfg.Antigravity.SensitiveWords, want) {
+		t.Fatalf("Antigravity.SensitiveWords = %#v, want %#v", cfg.Antigravity.SensitiveWords, want)
+	}
+}
+
 func TestCloneForRuntimeDeepCopiesConfig(t *testing.T) {
 	cfg := sampleCloneRuntimeConfig()
 

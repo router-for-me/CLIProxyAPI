@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -139,6 +140,36 @@ func (w *responsesWebsocketWriter) closeForUpstreamError(err error) (bool, error
 	return true, errClose
 }
 
+func (w *responsesWebsocketWriter) closeWithoutError() (bool, error) {
+	if w == nil || w.conn == nil {
+		return false, nil
+	}
+	if !w.closing.CompareAndSwap(false, true) {
+		return false, nil
+	}
+	return true, w.conn.Close()
+}
+
+func (w *responsesWebsocketWriter) closeWithPayload(payload []byte) (bool, error) {
+	if w == nil || w.conn == nil {
+		return false, nil
+	}
+	if !w.closing.CompareAndSwap(false, true) {
+		return false, nil
+	}
+	if !w.writeMu.TryLock() {
+		return false, w.conn.Close()
+	}
+	defer w.writeMu.Unlock()
+
+	errWrite := w.conn.WriteMessage(websocket.TextMessage, payload)
+	errClose := w.conn.Close()
+	if errWrite != nil {
+		return false, errWrite
+	}
+	return true, errClose
+}
+
 func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error) {
 	if w == nil || w.conn == nil {
 		return
@@ -146,7 +177,42 @@ func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error) {
 	if matched, _ := w.closeForUpstreamError(err); matched {
 		return
 	}
-	_ = w.conn.Close()
+
+	errMsg := handlers.ExecutionErrorMessage(err)
+	if !shouldExposeResponsesUpstreamError(errMsg) {
+		_, _ = w.closeWithoutError()
+		return
+	}
+	payload, errBuild := buildResponsesWebsocketErrorPayload(errMsg)
+	if errBuild != nil {
+		_, _ = w.closeWithoutError()
+		return
+	}
+	wrote, errClose := w.closeWithPayload(payload)
+	if wrote {
+		log.Infof(
+			"responses websocket: downstream_out disconnect_error event=%s payload=%s",
+			websocketPayloadEventType(payload),
+			websocketPayloadPreview(payload),
+		)
+	}
+	if errClose != nil && !errors.Is(errClose, websocket.ErrCloseSent) {
+		log.Debugf("responses websocket: upstream disconnect close failed: %v", errClose)
+	}
+}
+
+// isWebsocketConnectionClosedError reports whether the error only means the
+// connection was already torn down. These are expected during shutdown races
+// (the proxy closes after sending a terminal frame, or the client hangs up mid
+// write) and must not be logged as proxy failures.
+func isWebsocketConnectionClosedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, websocket.ErrCloseSent) {
+		return true
+	}
+	return strings.Contains(err.Error(), "use of closed network connection")
 }
 
 func truncateWebsocketCloseReason(reason string, maxBytes int) string {
@@ -243,7 +309,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			log.Infof("responses websocket: upstream execution session closed id=%s", passthroughSessionID)
 		}
 		wsTimelineLog.SetContext(c)
-		if errClose := conn.Close(); errClose != nil {
+		if errClose := conn.Close(); errClose != nil && !isWebsocketConnectionClosedError(errClose) {
 			log.Warnf("responses websocket: close connection error: %v", errClose)
 		}
 	}()
@@ -455,6 +521,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			continue
 		}
+
+		requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
+
 		if !useUpstreamWebsocketPassthrough && shouldHandleResponsesWebsocketPrewarmLocally(payload, lastRequest, false) {
 			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
 				requestJSON = updated
@@ -546,7 +615,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		)
 		if errForward != nil {
 			wsTerminateErr = errForward
-			if !errors.Is(errForward, websocket.ErrCloseSent) {
+			switch {
+			case errors.Is(errForward, websocket.ErrCloseSent):
+			case isWebsocketConnectionClosedError(errForward):
+				// The client hung up while a downstream write was in flight. This is a
+				// normal shutdown race, not a proxy failure.
+				log.Debugf("responses websocket: client closed during forward id=%s error=%v", passthroughSessionID, errForward)
+			default:
 				log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
 			}
 			return

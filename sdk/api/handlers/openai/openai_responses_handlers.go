@@ -14,8 +14,10 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/optimize-multi-agent-v2"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -51,6 +53,64 @@ type responsesSSEFramer struct {
 	outputItems          map[int][]byte
 	outputOrder          []int
 	unindexedOutputItems [][]byte
+	context              *gin.Context
+}
+
+const responsesLastSequenceKey = "openai-responses-last-sequence"
+
+// recordSequenceFromFrame remembers sequence numbers only after the SSE framer
+// has reassembled a complete frame. Raw transport chunks may split JSON tokens.
+func (f *responsesSSEFramer) recordSequenceFromFrame(frame []byte) {
+	if f == nil || f.context == nil || len(frame) == 0 {
+		return
+	}
+	payload, ok := responsesSSEDataPayload(frame)
+	if !ok || !json.Valid(payload) {
+		return
+	}
+	recordResponsesSequencePayload(f.context, payload)
+}
+
+func recordResponsesSequencePayload(c *gin.Context, payload []byte) {
+	if c == nil || !json.Valid(payload) {
+		return
+	}
+	last := int64(-1)
+	if current, ok := c.Get(responsesLastSequenceKey); ok {
+		if value, okValue := current.(int64); okValue {
+			last = value
+		}
+	}
+	sequence := gjson.GetBytes(payload, "sequence_number")
+	if sequence.Exists() && sequence.Type == gjson.Number && sequence.Int() > last {
+		last = sequence.Int()
+	}
+
+	if last >= 0 {
+		c.Set(responsesLastSequenceKey, last)
+	}
+}
+
+// recordResponsesSequenceFromConvertedOutput accepts only complete converter
+// outputs, unlike native transport chunks which must first pass through the framer.
+func recordResponsesSequenceFromConvertedOutput(c *gin.Context, output []byte) {
+	payload, ok := responsesSSEDataPayload(output)
+	if !ok {
+		payload = bytes.TrimSpace(output)
+	}
+	recordResponsesSequencePayload(c, payload)
+}
+
+func nextResponsesSequence(c *gin.Context) int {
+	if c == nil {
+		return 0
+	}
+	if current, ok := c.Get(responsesLastSequenceKey); ok {
+		if value, okValue := current.(int64); okValue && value >= 0 {
+			return int(value + 1)
+		}
+	}
+	return 0
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
@@ -98,6 +158,7 @@ func (f *responsesSSEFramer) Flush(w io.Writer) {
 }
 
 func (f *responsesSSEFramer) writeFrame(w io.Writer, frame []byte) {
+	f.recordSequenceFromFrame(frame)
 	writeResponsesSSEChunk(w, f.repairFrame(frame))
 }
 
@@ -364,6 +425,35 @@ func (h *OpenAIResponsesAPIHandler) OpenAIResponsesModels(c *gin.Context) {
 	})
 }
 
+func (h *OpenAIResponsesAPIHandler) prepareCodexMultiAgentV2Tools(c *gin.Context, payload []byte) []byte {
+	if h == nil || h.Cfg == nil {
+		return payload
+	}
+
+	requestCtx := context.Background()
+	if c != nil && c.Request != nil {
+		requestCtx = c.Request.Context()
+	}
+	requestCtx = context.WithValue(requestCtx, "gin", c)
+
+	var requestHeaders http.Header
+	if c != nil && c.Request != nil {
+		requestHeaders = c.Request.Header
+	}
+	homeEnabled := h.AuthManager != nil && h.AuthManager.HomeEnabled()
+	updated, prepared := multiagentv2.PrepareCodexMultiAgentV2Tools(
+		requestCtx,
+		requestHeaders,
+		payload,
+		h.Cfg.CodexOptimizeMultiAgentV2,
+		homeEnabled,
+	)
+	if prepared && c != nil {
+		c.Set(multiagentv2.CodexMultiAgentV2ToolsPreparedContextKey, true)
+	}
+	return updated
+}
+
 // Responses handles the /v1/responses endpoint.
 // It determines whether the request is for a streaming or non-streaming response
 // and calls the appropriate handler based on the model provider.
@@ -382,6 +472,8 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		})
 		return
 	}
+
+	rawJSON = h.prepareCodexMultiAgentV2Tools(c, rawJSON)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -534,7 +626,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
-	framer := &responsesSSEFramer{}
+	framer := &responsesSSEFramer{context: c}
 
 	// Peek at the first chunk
 	for {
@@ -653,6 +745,7 @@ func writeChatAsResponsesChunk(c *gin.Context, ctx context.Context, modelName st
 		if bytes.HasPrefix(out, []byte("event:")) {
 			_, _ = c.Writer.Write([]byte("\n"))
 		}
+		recordResponsesSequenceFromConvertedOutput(c, out)
 		_, _ = c.Writer.Write(out)
 		_, _ = c.Writer.Write([]byte("\n"))
 	}
@@ -669,24 +762,13 @@ func (h *OpenAIResponsesAPIHandler) forwardChatAsResponsesStream(c *gin.Context,
 				if bytes.HasPrefix(out, []byte("event:")) {
 					_, _ = c.Writer.Write([]byte("\n"))
 				}
+				recordResponsesSequenceFromConvertedOutput(c, out)
 				_, _ = c.Writer.Write(out)
 				_, _ = c.Writer.Write([]byte("\n"))
 			}
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
-			if errMsg == nil {
-				return
-			}
-			status := http.StatusInternalServerError
-			if errMsg.StatusCode > 0 {
-				status = errMsg.StatusCode
-			}
-			errText := http.StatusText(status)
-			if errMsg.Error != nil && errMsg.Error.Error() != "" {
-				errText = errMsg.Error.Error()
-			}
-			body := handlers.BuildErrorResponseBody(status, errText)
-			_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(body))
+			writeResponsesTerminalError(c, errMsg)
 		},
 		WriteDone: func() {
 			_, _ = c.Writer.Write([]byte("\n"))
@@ -694,29 +776,55 @@ func (h *OpenAIResponsesAPIHandler) forwardChatAsResponsesStream(c *gin.Context,
 	})
 }
 
+// isCodexResponsesClientRequest limits the alternate terminal event to official Codex clients.
+func isCodexResponsesClientRequest(c *gin.Context) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	if multiagentv2.IsCodexClientUserAgent(c.GetHeader("User-Agent")) {
+		return true
+	}
+
+	switch originator := strings.ToLower(strings.TrimSpace(c.GetHeader("Originator"))); originator {
+	case "codex desktop", "codex-tui", "codex_cli_rs":
+		return true
+	default:
+		return strings.HasPrefix(originator, "codex desktop/") || strings.HasPrefix(originator, "codex-tui/") || strings.HasPrefix(originator, "codex_cli_rs/")
+	}
+}
+
+func writeResponsesTerminalError(c *gin.Context, errMsg *interfaces.ErrorMessage) {
+	if !shouldExposeResponsesUpstreamError(errMsg) {
+		return
+	}
+	status := http.StatusInternalServerError
+	if errMsg.StatusCode > 0 {
+		status = errMsg.StatusCode
+	}
+	errText := http.StatusText(status)
+	if errMsg.Error != nil && errMsg.Error.Error() != "" {
+		errText = errMsg.Error.Error()
+	}
+	if isCodexResponsesClientRequest(c) {
+		chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, nextResponsesSequence(c))
+		_, _ = fmt.Fprintf(c.Writer, "\nevent: response.failed\ndata: %s\n\n", string(chunk))
+		return
+	}
+	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, nextResponsesSequence(c))
+	_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
+}
+
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
 	if framer == nil {
-		framer = &responsesSSEFramer{}
+		framer = &responsesSSEFramer{context: c}
+	} else if framer.context == nil {
+		framer.context = c
 	}
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
-		WriteChunk: func(chunk []byte) {
-			framer.WriteChunk(c.Writer, chunk)
-		},
+		WriteChunk: func(chunk []byte) { framer.WriteChunk(c.Writer, chunk) },
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			framer.Flush(c.Writer)
-			if errMsg == nil {
-				return
-			}
-			status := http.StatusInternalServerError
-			if errMsg.StatusCode > 0 {
-				status = errMsg.StatusCode
-			}
-			errText := http.StatusText(status)
-			if errMsg.Error != nil && errMsg.Error.Error() != "" {
-				errText = errMsg.Error.Error()
-			}
-			chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
-			_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
+			writeResponsesTerminalError(c, errMsg)
 		},
 		WriteDone: func() {
 			framer.Flush(c.Writer)

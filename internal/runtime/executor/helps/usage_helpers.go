@@ -3,7 +3,6 @@ package helps
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -306,14 +306,10 @@ func failFromErrors(errs ...error) usage.Failure {
 		if err == nil {
 			continue
 		}
-		fail := usage.Failure{
-			Body: strings.TrimSpace(err.Error()),
+		return usage.Failure{
+			Body:       strings.TrimSpace(err.Error()),
+			StatusCode: clienterror.HTTPStatusFromError(err),
 		}
-		var se interface{ StatusCode() int }
-		if errors.As(err, &se) && se != nil {
-			fail.StatusCode = se.StatusCode()
-		}
-		return fail
 	}
 	return usage.Failure{}
 }
@@ -711,9 +707,32 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 	cacheReadTokens := usageNode.Get("cache_read_input_tokens").Int()
 	cacheCreationTokens := usageNode.Get("cache_creation_input_tokens").Int()
+	rawOutputTokens := usageNode.Get("output_tokens").Int()
+	// Anthropic reports thinking as a subset of output_tokens. Prefer the official
+	// nested field, then fall back to legacy aliases used by some gateways.
+	reasoningNode := firstExistingUsageNode(
+		usageNode,
+		"output_tokens_details.thinking_tokens",
+		"output_tokens_details.reasoning_tokens",
+		"thinking_tokens",
+	)
+	reasoningTokens := reasoningNode.Int()
+	if reasoningTokens < 0 {
+		reasoningTokens = 0
+	}
+	nonReasoningOutput := rawOutputTokens
+	if reasoningTokens > 0 && reasoningTokens <= rawOutputTokens {
+		nonReasoningOutput = rawOutputTokens - reasoningTokens
+	} else if reasoningTokens > rawOutputTokens {
+		// Keep Detail.OutputTokens authoritative for keeper subset checks and
+		// avoid inventing extra non-reasoning output when the upstream payload
+		// is inconsistent.
+		nonReasoningOutput = 0
+	}
 	detail := usage.Detail{
 		InputTokens:         usageNode.Get("input_tokens").Int(),
-		OutputTokens:        usageNode.Get("output_tokens").Int(),
+		OutputTokens:        rawOutputTokens,
+		ReasoningTokens:     reasoningTokens,
 		CachedTokens:        cacheReadTokens,
 		CacheReadTokens:     cacheReadTokens,
 		CacheCreationTokens: cacheCreationTokens,
@@ -721,12 +740,14 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 	if detail.CachedTokens == 0 {
 		detail.CachedTokens = detail.CacheCreationTokens
 	}
-	detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.CacheReadTokens + detail.CacheCreationTokens
+	// raw output_tokens already includes thinking; cache fields are independent
+	// from input_tokens in the Messages API.
+	detail.TotalTokens = detail.InputTokens + rawOutputTokens + detail.CacheReadTokens + detail.CacheCreationTokens
 	detail.TokenBreakdown = usage.NewIndependentTokenBreakdown(
 		detail.InputTokens,
 		detail.CacheReadTokens,
 		detail.CacheCreationTokens,
-		detail.OutputTokens,
+		nonReasoningOutput,
 		detail.ReasoningTokens,
 		detail.TotalTokens,
 	)
