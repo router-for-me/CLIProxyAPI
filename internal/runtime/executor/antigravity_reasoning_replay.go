@@ -316,7 +316,7 @@ func applyAntigravityReasoningReplayItems(payload []byte, items [][]byte, toolSc
 	updated := payload
 	changed := false
 	index := newAntigravityReplayRequestIndex(updated)
-	for _, item := range items {
+	for itemIndex, item := range items {
 		eligible := filterAntigravityReasoningReplayItemsForRequestWithIndex(index, [][]byte{item}, toolSchemas)
 		if len(eligible) != 1 {
 			continue
@@ -329,7 +329,10 @@ func applyAntigravityReasoningReplayItems(payload []byte, items [][]byte, toolSc
 		changed = true
 		// Replay application is intentionally sequential. Rebuild only after a
 		// mutation so later items observe exactly the same payload as before.
-		index = newAntigravityReplayRequestIndex(updated)
+		// The final item has no successor, so its rebuild would never be read.
+		if itemIndex+1 < len(items) {
+			index = newAntigravityReplayRequestIndex(updated)
+		}
 	}
 	return updated, changed
 }
@@ -1332,7 +1335,11 @@ func antigravityReplayPartWritePath(payload []byte, contentIndex int, partIndex 
 func insertAntigravityReasoningReplayItemsWithSchemas(index *antigravityReplayRequestIndex, payload []byte, items [][]byte, toolSchemas map[string]any) ([]byte, bool) {
 	out := payload
 	changed := false
-	for _, item := range items {
+	// The index only exists to serve later items in this loop, so it is refreshed
+	// after a mutation exclusively when a successor still has to read it. Callers
+	// receive no index back and must rebuild their own if they keep using one.
+	for itemIndex, item := range items {
+		hasSuccessor := itemIndex+1 < len(items)
 		itemResult := gjson.ParseBytes(item)
 		switch strings.TrimSpace(itemResult.Get("type").String()) {
 		case "thought_signature":
@@ -1354,18 +1361,24 @@ func insertAntigravityReasoningReplayItemsWithSchemas(index *antigravityReplayRe
 			if err != nil {
 				// antigravityRemoveThoughtSignatureFromOtherParts may already have
 				// rewritten out, so the index has to be refreshed regardless.
-				index = newAntigravityReplayRequestIndex(out)
+				if hasSuccessor {
+					index = newAntigravityReplayRequestIndex(out)
+				}
 				continue
 			}
 			out = updated
 			changed = true
-			index = newAntigravityReplayRequestIndex(out)
+			if hasSuccessor {
+				index = newAntigravityReplayRequestIndex(out)
+			}
 		case "function_call_part":
 			updated, ok := mergeAntigravityFunctionCallPartReplayWithSchemas(index, out, itemResult, toolSchemas)
 			if ok {
 				out = updated
 				changed = true
-				index = newAntigravityReplayRequestIndex(out)
+				if hasSuccessor {
+					index = newAntigravityReplayRequestIndex(out)
+				}
 			}
 		}
 	}
