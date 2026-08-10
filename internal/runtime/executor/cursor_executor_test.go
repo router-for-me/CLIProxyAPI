@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
@@ -110,6 +111,58 @@ func TestCursorExecuteReturnsReasoningAndUsage(t *testing.T) {
 	}
 	if got := gjson.GetBytes(resp.Payload, "usage.total_tokens").Int(); got != promptTokens+7 {
 		t.Fatalf("total_tokens = %d, want %d", got, promptTokens+7)
+	}
+}
+
+func TestCursorExecuteToolResultUsesColdContinuation(t *testing.T) {
+	clientID := normalizeToolCallID("call non-stream")
+	processCount := 0
+	e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), onMcpExec func(pendingMcpExec), toolResultCh <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
+		if onMcpExec == nil {
+			return errors.New("OpenAI non-stream request did not install an MCP callback")
+		}
+		if toolResultCh != nil {
+			return errors.New("OpenAI non-stream request parked an H2 tool session")
+		}
+		processCount++
+		if processCount == 1 {
+			onMcpExec(pendingMcpExec{ToolCallId: clientID, ToolName: "read", Args: `{"path":"README.md"}`})
+			return nil
+		}
+		onText("after tool", false)
+		return nil
+	})
+
+	first, err := e.Execute(context.Background(), cursorTestAuth(), cursorTestRequest(false), cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("first Execute() error = %v", err)
+	}
+	if got := gjson.GetBytes(first.Payload, "choices.0.finish_reason").String(); got != "tool_calls" {
+		t.Fatalf("first finish_reason = %q, want tool_calls", got)
+	}
+	if got := gjson.GetBytes(first.Payload, "choices.0.message.tool_calls.0.id").String(); got != clientID {
+		t.Fatalf("tool call ID = %q, want %q", got, clientID)
+	}
+	if got := gjson.GetBytes(first.Payload, "choices.0.message.tool_calls.0.function.name").String(); got != "read" {
+		t.Fatalf("tool name = %q, want read", got)
+	}
+	if got := gjson.GetBytes(first.Payload, "choices.0.message.tool_calls.0.function.arguments").String(); got != `{"path":"README.md"}` {
+		t.Fatalf("tool arguments = %q", got)
+	}
+
+	secondPayload := []byte(`{"model":"cursor-test-model","messages":[{"role":"user","content":"hello"},{"role":"assistant","tool_calls":[{"id":"` + clientID + `","type":"function","function":{"name":"read","arguments":"{\"path\":\"README.md\"}"}}]},{"role":"tool","tool_call_id":"` + clientID + `","content":"file contents"}]}`)
+	second, err := e.Execute(context.Background(), cursorTestAuth(), cliproxyexecutor.Request{Model: "cursor-test-model", Payload: secondPayload}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("second Execute() error = %v", err)
+	}
+	if got := gjson.GetBytes(second.Payload, "choices.0.finish_reason").String(); got != "stop" {
+		t.Fatalf("second finish_reason = %q, want stop", got)
+	}
+	if got := gjson.GetBytes(second.Payload, "choices.0.message.content").String(); got != "after tool" {
+		t.Fatalf("second content = %q, want after tool", got)
+	}
+	if processCount != 2 {
+		t.Fatalf("processor calls = %d, want 2", processCount)
 	}
 }
 
@@ -284,6 +337,173 @@ func TestParseOpenAIToolCallIDDoesNotDoubleNormalize(t *testing.T) {
 	}
 }
 
+func TestFlattenConversationIntoUserTextPreservesToolResult(t *testing.T) {
+	parsed := parseOpenAIRequest([]byte(`{
+		"messages": [
+			{"role":"user","content":"Read the project file."},
+			{"role":"assistant","content":"I will read it.","tool_calls":[{"id":"call_read","type":"function","function":{"name":"read","arguments":"{\"path\":\"README.md\"}"}}]},
+			{"role":"tool","tool_call_id":"call_read","content":"project contents"}
+		]
+	}`))
+
+	flattenConversationIntoUserText(parsed)
+	for _, want := range []string{
+		"USER: Read the project file.",
+		"ASSISTANT: I will read it.",
+		`ASSISTANT_TOOL_CALL: {"arguments":"{\"path\":\"README.md\"}","id":"call_read","name":"read"}`,
+		`TOOL_RESULT: {"content":"project contents","tool_call_id":"call_read"}`,
+		"Continue your response based on this context.",
+	} {
+		if !strings.Contains(parsed.UserText, want) {
+			t.Fatalf("flattened transcript is missing %q: %q", want, parsed.UserText)
+		}
+	}
+	if len(parsed.Turns) != 0 || len(parsed.ToolResults) != 0 {
+		t.Fatal("flattenConversationIntoUserText() retained structured history")
+	}
+}
+
+func TestFlattenConversationIntoUserTextPreservesToolCallOrderAndCompleteUTF8Result(t *testing.T) {
+	largeResult := strings.Repeat("🙂", 3000)
+	payload := []byte(`{"messages":[` +
+		`{"role":"user","content":"run both"},` +
+		`{"role":"assistant","tool_calls":[` +
+		`{"id":"call_first","type":"function","function":{"name":"first","arguments":"{\"n\":1}"}},` +
+		`{"id":"call_second","type":"function","function":{"name":"second","arguments":"{\"n\":2}"}}]},` +
+		`{"role":"tool","tool_call_id":"call_first","content":` + jsonString(largeResult) + `},` +
+		`{"role":"tool","tool_call_id":"call_second","content":"done"}` +
+		`]}`)
+	parsed := parseOpenAIRequest(payload)
+
+	flattenConversationIntoUserText(parsed)
+
+	first := strings.Index(parsed.UserText, `"id":"call_first"`)
+	second := strings.Index(parsed.UserText, `"id":"call_second"`)
+	firstResult := strings.Index(parsed.UserText, `"tool_call_id":"call_first"`)
+	secondResult := strings.Index(parsed.UserText, `"tool_call_id":"call_second"`)
+	if first < 0 || second <= first || firstResult <= second || secondResult <= firstResult {
+		t.Fatalf("tool call/result order was not preserved: first=%d second=%d firstResult=%d secondResult=%d", first, second, firstResult, secondResult)
+	}
+	if !strings.Contains(parsed.UserText, largeResult) || !strings.Contains(parsed.UserText, `"name":"first"`) || !strings.Contains(parsed.UserText, `"arguments":"{\"n\":1}"`) {
+		t.Fatal("flattened transcript lost tool metadata or complete UTF-8 result")
+	}
+	if !utf8.ValidString(parsed.UserText) || strings.Contains(parsed.UserText, "[truncated]") {
+		t.Fatal("flattened transcript truncated or corrupted UTF-8")
+	}
+}
+
+func TestCursorExecuteColdContinuationRetiresAllConversationState(t *testing.T) {
+	payload := []byte(`{"model":"cursor-test-model","messages":[{"role":"user","content":"hello"},{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call-1","content":"result"}]}`)
+	parsed := parseOpenAIRequest(payload)
+	conversationID := deriveConversationId("", "", parsed.SystemPrompt)
+	firstStream := newFakeCursorStream()
+	secondStream := newFakeCursorStream()
+	canceled := 0
+	e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func(pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
+		onText("continued", false)
+		return nil
+	})
+	e.sessions["old-auth:"+conversationID] = &cursorSession{stream: firstStream, cancel: func() { canceled++ }}
+	e.sessions["cursor-test:"+conversationID] = &cursorSession{stream: secondStream, cancel: func() { canceled++ }}
+	e.checkpoints[conversationID] = &savedCheckpoint{data: []byte("stale")}
+
+	if _, err := e.Execute(context.Background(), cursorTestAuth(), cliproxyexecutor.Request{Model: "cursor-test-model", Payload: payload}, cliproxyexecutor.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	sessions := len(e.sessions)
+	_, checkpointExists := e.checkpoints[conversationID]
+	e.mu.Unlock()
+	if sessions != 0 || checkpointExists || canceled != 2 {
+		t.Fatalf("retired state: sessions=%d checkpoint=%v canceled=%d", sessions, checkpointExists, canceled)
+	}
+	for index, stream := range []*fakeCursorStream{firstStream, secondStream} {
+		select {
+		case <-stream.dead:
+		default:
+			t.Fatalf("retired stream %d remained open", index)
+		}
+	}
+}
+
+func TestCursorConversationOwnershipRejectsRetiredCheckpointWriter(t *testing.T) {
+	e := NewCursorExecutor(nil)
+	conversationID := "conversation"
+	retiredOwner := e.beginConversationStream(conversationID)
+	currentOwner := e.beginConversationStream(conversationID)
+	if e.saveCheckpoint(conversationID, retiredOwner, &savedCheckpoint{data: []byte("stale")}) {
+		t.Fatal("retired owner saved a checkpoint")
+	}
+	if !e.saveCheckpoint(conversationID, currentOwner, &savedCheckpoint{data: []byte("current")}) {
+		t.Fatal("current owner could not save checkpoint")
+	}
+	e.releaseConversationStream(conversationID, retiredOwner)
+	e.mu.Lock()
+	ownerAfterStaleRelease := e.stateOwners[conversationID]
+	e.mu.Unlock()
+	if ownerAfterStaleRelease != currentOwner {
+		t.Fatal("retired owner released the current owner")
+	}
+	e.retireConversationState(conversationID)
+	if e.saveCheckpoint(conversationID, currentOwner, &savedCheckpoint{data: []byte("late")}) {
+		t.Fatal("owner saved a checkpoint after transactional retirement")
+	}
+}
+
+func TestCursorConversationRetirementWinsAgainstClaimedSessionRestoreAndPublication(t *testing.T) {
+	e := NewCursorExecutor(nil)
+	conversationID := "conversation"
+	sessionKey := "cursor-test:" + conversationID
+	stream := newFakeCursorStream()
+	canceled := make(chan struct{})
+	owner := e.beginConversationStream(conversationID)
+	if !e.attachConversationStream(conversationID, owner, func() { close(canceled) }, stream) {
+		t.Fatal("could not attach current conversation owner")
+	}
+	session := &cursorSession{
+		stream:         stream,
+		cancel:         owner.cancel,
+		conversationID: conversationID,
+		owner:          owner,
+	}
+
+	claimed := make(chan struct{})
+	attemptRestore := make(chan struct{})
+	restored := make(chan bool, 1)
+	go func() {
+		close(claimed)
+		<-attemptRestore
+		restored <- e.publishConversationSession(conversationID, sessionKey, owner, session, false)
+	}()
+	<-claimed
+	e.retireConversationState(conversationID)
+	close(attemptRestore)
+	if <-restored {
+		t.Fatal("claimed session was restored after retirement")
+	}
+	if e.publishConversationSession(conversationID, sessionKey, owner, session, true) {
+		t.Fatal("retired processor published a later tool session")
+	}
+	if e.saveCheckpoint(conversationID, owner, &savedCheckpoint{data: []byte("late")}) {
+		t.Fatal("retired processor published a later checkpoint")
+	}
+	select {
+	case <-canceled:
+	default:
+		t.Fatal("claimed in-flight session was not canceled by retirement")
+	}
+	select {
+	case <-stream.dead:
+	default:
+		t.Fatal("claimed in-flight stream was not closed by retirement")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.sessions) != 0 || e.stateOwners[conversationID] != nil || e.checkpoints[conversationID] != nil {
+		t.Fatal("conversation state reappeared after retirement")
+	}
+}
+
 func TestCursorStreamCoalescerBatchesAdjacentDeltas(t *testing.T) {
 	type emittedDelta struct {
 		text       string
@@ -371,13 +591,79 @@ func TestCursorExecuteStreamCancellationBeforeFirstChunkReturns(t *testing.T) {
 	}
 }
 
+func TestCursorExecuteStreamOpenAICancellationAfterFirstChunkStopsSession(t *testing.T) {
+	processorExited := make(chan struct{})
+	stream := newFakeCursorStream()
+	e := newCursorExecutorHarness(func(ctx context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func(pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
+		onText("first", false)
+		<-ctx.Done()
+		close(processorExited)
+		return ctx.Err()
+	})
+	e.openStream = func(string) (cursorStream, error) { return stream, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	result, err := e.ExecuteStream(ctx, cursorTestAuth(), cursorTestRequest(true), cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case <-processorExited:
+	case <-time.After(time.Second):
+		t.Fatal("OpenAI frame processor survived client cancellation after first chunk")
+	}
+	collectCursorStream(t, result)
+	select {
+	case <-stream.dead:
+	case <-time.After(time.Second):
+		t.Fatal("OpenAI upstream stream remained open after client cancellation")
+	}
+}
+
+func TestCursorExecuteStreamClaudeCancellationRetainsSessionLifetime(t *testing.T) {
+	release := make(chan struct{})
+	processorExited := make(chan struct{})
+	e := newCursorExecutorHarness(func(ctx context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func(pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
+		onText("first", false)
+		select {
+		case <-ctx.Done():
+			return errors.New("native Claude session inherited client cancellation")
+		case <-release:
+			close(processorExited)
+			return nil
+		}
+	})
+	payload := []byte(`{"model":"cursor-test-model","max_tokens":128,"stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+	ctx, cancel := context.WithCancel(context.Background())
+	result, err := e.ExecuteStream(ctx, cursorTestAuth(), cliproxyexecutor.Request{Model: "cursor-test-model", Payload: payload}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude"), OriginalRequest: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case <-processorExited:
+		t.Fatal("native Claude session stopped with the client context")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+	collectCursorStream(t, result)
+	select {
+	case <-processorExited:
+	case <-time.After(time.Second):
+		t.Fatal("native Claude processor did not finish after release")
+	}
+}
+
 func TestCursorResumeCancellationRestoresSession(t *testing.T) {
 	e := NewCursorExecutor(nil)
 	sessionKey := "cursor-test:conversation"
+	owner := e.beginConversationStream("conversation")
 	session := &cursorSession{
-		toolResultCh: make(chan []toolResultInfo, 1),
-		resumeOutCh:  make(chan cliproxyexecutor.StreamChunk, 1),
-		cancel:       func() {},
+		toolResultCh:   make(chan []toolResultInfo, 1),
+		resumeOutCh:    make(chan cliproxyexecutor.StreamChunk, 1),
+		cancel:         func() {},
+		conversationID: "conversation",
+		owner:          owner,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -450,13 +736,16 @@ func TestCursorResumeInvalidSessionIsDiscarded(t *testing.T) {
 func TestCursorResumeRejectsUnmatchedToolResultAndRestoresSession(t *testing.T) {
 	e := NewCursorExecutor(nil)
 	sessionKey := "cursor-test:pending-session"
+	owner := e.beginConversationStream("pending-session")
 	switched := false
 	session := &cursorSession{
-		pending:      []pendingMcpExec{{ToolCallId: "call-good"}},
-		toolResultCh: make(chan []toolResultInfo, 1),
-		resumeOutCh:  make(chan cliproxyexecutor.StreamChunk, 1),
-		cancel:       func() {},
-		switchOutput: func(chan cliproxyexecutor.StreamChunk, context.Context) { switched = true },
+		pending:        []pendingMcpExec{{ToolCallId: "call-good"}},
+		toolResultCh:   make(chan []toolResultInfo, 1),
+		resumeOutCh:    make(chan cliproxyexecutor.StreamChunk, 1),
+		cancel:         func() {},
+		conversationID: "pending-session",
+		owner:          owner,
+		switchOutput:   func(chan cliproxyexecutor.StreamChunk, context.Context) { switched = true },
 	}
 	_, err := e.resumeWithToolResults(
 		context.Background(),
@@ -486,20 +775,26 @@ func TestCursorResumeRejectsUnmatchedToolResultAndRestoresSession(t *testing.T) 
 	}
 }
 
-func TestCursorToolBoundaryImmediateResumeUsesPublishedSession(t *testing.T) {
+func TestCursorOpenAIToolResultUsesColdContinuation(t *testing.T) {
 	clientID := normalizeToolCallID("call immediate")
-	e := newCursorExecutorHarness(func(ctx context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, _ func(string, bool), onMcpExec func(pendingMcpExec), toolResultCh <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
-		onMcpExec(pendingMcpExec{ToolCallId: clientID, ToolName: "read", Args: `{}`})
-		select {
-		case results := <-toolResultCh:
-			if len(results) != 1 || results[0].ToolCallId != clientID {
-				return errors.New("immediate resume delivered wrong tool result")
-			}
-		case <-ctx.Done():
-			return ctx.Err()
+	var processMu sync.Mutex
+	processCount := 0
+	e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), onMcpExec func(pendingMcpExec), toolResultCh <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
+		if toolResultCh != nil {
+			return errors.New("OpenAI request parked an H2 tool session")
 		}
+		processMu.Lock()
+		processCount++
+		current := processCount
+		processMu.Unlock()
+		if current == 1 {
+			onMcpExec(pendingMcpExec{ToolCallId: clientID, ToolName: "read", Args: `{}`})
+			return nil
+		}
+		onText("after tool", false)
 		return nil
 	})
+
 	var openMu sync.Mutex
 	openCount := 0
 	e.openStream = func(string) (cursorStream, error) {
@@ -508,43 +803,41 @@ func TestCursorToolBoundaryImmediateResumeUsesPublishedSession(t *testing.T) {
 		openMu.Unlock()
 		return newFakeCursorStream(), nil
 	}
-	first, err := e.ExecuteStream(context.Background(), cursorTestAuth(), cursorTestRequest(true), cliproxyexecutor.Options{})
+
+	openAI := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")}
+	first, err := e.ExecuteStream(context.Background(), cursorTestAuth(), cursorTestRequest(true), openAI)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondPayload := []byte(`{"model":"cursor-test-model","stream":true,"messages":[{"role":"user","content":"hello"},{"role":"assistant","tool_calls":[{"id":"` + clientID + `","type":"function","function":{"name":"read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"` + clientID + `","content":"ok"}]}`)
-	type outcome struct {
-		body string
-		err  error
+	firstBody := cursorStreamPayload(collectCursorStream(t, first))
+	if !strings.Contains(firstBody, `"finish_reason":"tool_calls"`) || strings.Contains(firstBody, `"finish_reason":"stop"`) {
+		t.Fatalf("first OpenAI tool boundary is invalid:\n%s", firstBody)
 	}
-	resumed := make(chan outcome, 1)
-	go func() {
-		for range first.Chunks {
-		}
-		second, errResume := e.ExecuteStream(context.Background(), cursorTestAuth(), cliproxyexecutor.Request{Model: "cursor-test-model", Payload: secondPayload}, cliproxyexecutor.Options{})
-		if errResume != nil {
-			resumed <- outcome{err: errResume}
-			return
-		}
-		var chunks []cliproxyexecutor.StreamChunk
-		for chunk := range second.Chunks {
-			chunks = append(chunks, chunk)
-		}
-		resumed <- outcome{body: cursorStreamPayload(chunks)}
-	}()
-	select {
-	case got := <-resumed:
-		if got.err != nil {
-			t.Fatal(got.err)
-		}
-		openMu.Lock()
-		gotOpenCount := openCount
-		openMu.Unlock()
-		if gotOpenCount != 1 {
-			t.Fatalf("immediate resume cold-started a second Cursor stream: opens=%d body=%s", gotOpenCount, got.body)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("immediate close-triggered resume hung")
+	e.mu.Lock()
+	parkedSessions := len(e.sessions)
+	e.mu.Unlock()
+	if parkedSessions != 0 {
+		t.Fatalf("OpenAI tool call parked %d H2 session(s)", parkedSessions)
+	}
+
+	secondPayload := []byte(`{"model":"cursor-test-model","stream":true,"messages":[{"role":"user","content":"hello"},{"role":"assistant","tool_calls":[{"id":"` + clientID + `","type":"function","function":{"name":"read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"` + clientID + `","content":"file contents"}]}`)
+	second, err := e.ExecuteStream(context.Background(), cursorTestAuth(), cliproxyexecutor.Request{Model: "cursor-test-model", Payload: secondPayload}, openAI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondBody := cursorStreamPayload(collectCursorStream(t, second))
+	if !strings.Contains(secondBody, `"content":"after tool"`) || !strings.Contains(secondBody, `"finish_reason":"stop"`) {
+		t.Fatalf("cold continuation did not complete normally:\n%s", secondBody)
+	}
+
+	openMu.Lock()
+	gotOpenCount := openCount
+	openMu.Unlock()
+	processMu.Lock()
+	gotProcessCount := processCount
+	processMu.Unlock()
+	if gotOpenCount != 2 || gotProcessCount != 2 {
+		t.Fatalf("cold continuation opens=%d processor calls=%d, want 2 and 2", gotOpenCount, gotProcessCount)
 	}
 }
 
