@@ -2,6 +2,7 @@ package helps
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -19,6 +20,8 @@ func TestApplyOpenRouterSessionAffinity(t *testing.T) {
 		{name: "lookalike endpoint is unchanged", url: "https://openrouter.ai.example.com/v1/chat/completions", payload: `{"prompt_cache_key":"cache-123"}`},
 		{name: "explicit header wins", url: "https://openrouter.ai/api/v1/chat/completions", header: "caller-session", payload: `{"prompt_cache_key":"cache-123"}`, wantHeader: "caller-session"},
 		{name: "blank key is ignored", url: "https://openrouter.ai/api/v1/chat/completions", payload: `{"prompt_cache_key":"  "}`},
+		{name: "control-bearing key is ignored", url: "https://openrouter.ai/api/v1/chat/completions", payload: `{"prompt_cache_key":"cache\nkey"}`},
+		{name: "oversized key is ignored", url: "https://openrouter.ai/api/v1/chat/completions", payload: `{"prompt_cache_key":"` + strings.Repeat("a", 257) + `"}`},
 	}
 
 	for _, test := range tests {
