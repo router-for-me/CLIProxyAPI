@@ -122,6 +122,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
 	body = enforceCacheControlLimit(body, 4)
 
+	// Promote default ephemeral breakpoints to the configured cache TTL (opt-in, no-op when unset).
+	body = promoteDefaultCacheControlTTL(body, claudeCacheControlDefaultTTL(e.cfg))
+
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	body = normalizeCacheControlTTL(body)
 
