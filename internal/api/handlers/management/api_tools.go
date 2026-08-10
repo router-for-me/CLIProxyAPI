@@ -17,7 +17,12 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const defaultAPICallTimeout = 60 * time.Second
+const (
+	defaultAPICallTimeout          = 60 * time.Second
+	defaultCodexResetCreditSpacing = time.Second
+	codexResetCreditHost           = "chatgpt.com"
+	codexResetCreditPath           = "/backend-api/wham/rate-limit-reset-credits"
+)
 
 const (
 	antigravityOAuthClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
@@ -25,6 +30,11 @@ const (
 )
 
 var antigravityOAuthTokenURL = "https://oauth2.googleapis.com/token"
+
+var (
+	codexResetCreditGate = make(chan struct{}, 1)
+	codexResetCreditLast time.Time
+)
 
 type apiCallRequest struct {
 	AuthIndexSnake  *string           `json:"auth_index"`
@@ -177,6 +187,13 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 	httpClient.Transport = h.apiCallTransport(auth)
 
+	release, errGate := h.acquireCodexResetCreditGate(c.Request.Context(), parsedURL)
+	if errGate != nil {
+		c.JSON(http.StatusRequestTimeout, gin.H{"error": "request canceled"})
+		return
+	}
+	defer release()
+
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
 		log.WithError(errDo).Debug("management APICall request failed")
@@ -200,6 +217,41 @@ func (h *Handler) APICall(c *gin.Context) {
 		Header:     resp.Header,
 		Body:       string(respBody),
 	})
+}
+
+func (h *Handler) acquireCodexResetCreditGate(ctx context.Context, parsedURL *url.URL) (func(), error) {
+	if parsedURL == nil || !strings.EqualFold(parsedURL.Scheme, "https") || !strings.EqualFold(parsedURL.Host, codexResetCreditHost) || parsedURL.Path != codexResetCreditPath {
+		return func() {}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	select {
+	case codexResetCreditGate <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	spacing := h.codexResetCreditSpacing
+	if spacing <= 0 {
+		spacing = defaultCodexResetCreditSpacing
+	}
+	if wait := spacing - time.Since(codexResetCreditLast); wait > 0 {
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			<-codexResetCreditGate
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	return func() {
+		codexResetCreditLast = time.Now()
+		<-codexResetCreditGate
+	}, nil
 }
 
 func firstNonEmptyString(values ...*string) string {

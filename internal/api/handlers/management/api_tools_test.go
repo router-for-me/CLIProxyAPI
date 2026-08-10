@@ -3,12 +3,64 @@ package management
 import (
 	"context"
 	"net/http"
+	"net/url"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
+
+func TestCodexResetCreditGateSerializesCalls(t *testing.T) {
+	handlers := []*Handler{
+		{codexResetCreditSpacing: time.Millisecond},
+		{codexResetCreditSpacing: time.Millisecond},
+	}
+	target, errParse := url.Parse("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")
+	if errParse != nil {
+		t.Fatal(errParse)
+	}
+	release, errAcquire := handlers[0].acquireCodexResetCreditGate(context.Background(), target)
+	if errAcquire != nil {
+		t.Fatal(errAcquire)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, errAcquire = handlers[1].acquireCodexResetCreditGate(canceled, target); errAcquire != context.Canceled {
+		t.Fatalf("canceled acquire error = %v, want context.Canceled", errAcquire)
+	}
+	release()
+
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	var wg sync.WaitGroup
+	for i := range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			release, errAcquire := handlers[i%len(handlers)].acquireCodexResetCreditGate(context.Background(), target)
+			if errAcquire != nil {
+				t.Errorf("acquire gate: %v", errAcquire)
+				return
+			}
+			current := active.Add(1)
+			if current > maxActive.Load() {
+				maxActive.Store(current)
+			}
+			time.Sleep(2 * time.Millisecond)
+			active.Add(-1)
+			release()
+		}()
+	}
+	wg.Wait()
+
+	if got := maxActive.Load(); got != 1 {
+		t.Fatalf("maximum concurrent calls = %d, want 1", got)
+	}
+}
 
 func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
 	t.Parallel()
