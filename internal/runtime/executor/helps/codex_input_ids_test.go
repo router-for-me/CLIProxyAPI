@@ -104,6 +104,34 @@ func TestSanitizeCodexInputItemIDsNormalizesCustomToolCallIDs(t *testing.T) {
 	}
 }
 
+func TestSanitizeCodexInputItemIDsNormalizesCustomToolCallOutputIDs(t *testing.T) {
+	const (
+		invalidID = "item_44e13caebc1ddf25f1337cbe_output"
+		validID   = "ctco-existing"
+	)
+	body := []byte(`{"input":[` +
+		`{"type":"custom_tool_call_output","id":"` + invalidID + `","call_id":"call-1","output":"done"},` +
+		`{"type":"custom_tool_call_output","id":"` + validID + `","call_id":"call-2","output":"done"}` +
+		`]}`)
+
+	first := SanitizeCodexInputItemIDs(body)
+	second := SanitizeCodexInputItemIDs(body)
+	normalizedAgain := SanitizeCodexInputItemIDs(first)
+
+	if actual := gjson.GetBytes(first, "input.0.id").String(); actual != "ctco_"+invalidID {
+		t.Fatalf("custom_tool_call_output ID = %q, want ctco-prefixed ID", actual)
+	}
+	if actual := gjson.GetBytes(first, "input.1.id").String(); actual != validID {
+		t.Fatalf("valid custom_tool_call_output ID changed: %q", actual)
+	}
+	if string(first) != string(second) {
+		t.Fatalf("custom_tool_call_output ID normalization is not deterministic: first=%s second=%s", first, second)
+	}
+	if string(first) != string(normalizedAgain) {
+		t.Fatalf("custom_tool_call_output ID normalization is not idempotent: first=%s normalized_again=%s", first, normalizedAgain)
+	}
+}
+
 func TestSanitizeCodexInputItemIDsDropsOverlongEncryptedReasoningItem(t *testing.T) {
 	longReasoningID := "rs_" + strings.Repeat("a", 64)
 	shortReasoningID := "rs_" + strings.Repeat("b", 48)
