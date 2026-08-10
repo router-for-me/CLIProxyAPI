@@ -48,7 +48,8 @@ type CursorExecutor struct {
 	cfg           *config.Config
 	mu            sync.Mutex
 	sessions      map[string]*cursorSession
-	checkpoints   map[string]*savedCheckpoint // keyed by conversationId
+	checkpoints   map[string]*savedCheckpoint  // keyed by conversationId
+	stateOwners   map[string]*cursorStateOwner // rejects writes from retired conversation owners
 	openStream    func(string) (cursorStream, error)
 	processFrames cursorFrameProcessor
 }
@@ -59,6 +60,11 @@ type savedCheckpoint struct {
 	blobStore map[string][]byte // blobs referenced by the checkpoint
 	authID    string            // auth that produced this checkpoint (checkpoint is auth-specific)
 	updatedAt time.Time
+}
+
+type cursorStateOwner struct {
+	cancel context.CancelFunc
+	stream cursorStream
 }
 
 type cursorStream interface {
@@ -83,16 +89,18 @@ type cursorFrameProcessor func(
 ) error
 
 type cursorSession struct {
-	stream       cursorStream
-	blobStore    map[string][]byte
-	mcpTools     []cursorproto.McpToolDef
-	pending      []pendingMcpExec
-	cancel       context.CancelFunc // cancels the session-scoped heartbeat (NOT tied to HTTP request)
-	createdAt    time.Time
-	authID       string                                                                // auth file ID that created this session (for multi-account isolation)
-	toolResultCh chan []toolResultInfo                                                 // receives tool results from the next HTTP request
-	resumeOutCh  chan cliproxyexecutor.StreamChunk                                     // output channel for resumed response
-	switchOutput func(ch chan cliproxyexecutor.StreamChunk, outputCtx context.Context) // switch output channel/request context
+	stream         cursorStream
+	blobStore      map[string][]byte
+	mcpTools       []cursorproto.McpToolDef
+	pending        []pendingMcpExec
+	cancel         context.CancelFunc // cancels the session-scoped heartbeat (NOT tied to HTTP request)
+	createdAt      time.Time
+	authID         string                                                                // auth file ID that created this session (for multi-account isolation)
+	toolResultCh   chan []toolResultInfo                                                 // receives tool results from the next HTTP request
+	resumeOutCh    chan cliproxyexecutor.StreamChunk                                     // output channel for resumed response
+	switchOutput   func(ch chan cliproxyexecutor.StreamChunk, outputCtx context.Context) // switch output channel/request context
+	conversationID string
+	owner          *cursorStateOwner
 }
 
 type pendingMcpExec struct {
@@ -109,6 +117,7 @@ func NewCursorExecutor(cfg *config.Config) *CursorExecutor {
 		cfg:         cfg,
 		sessions:    make(map[string]*cursorSession),
 		checkpoints: make(map[string]*savedCheckpoint),
+		stateOwners: make(map[string]*cursorStateOwner),
 		openStream: func(accessToken string) (cursorStream, error) {
 			return openCursorH2Stream(accessToken)
 		},
@@ -169,6 +178,99 @@ func (e *CursorExecutor) findSessionByConversationLocked(convId string) string {
 		}
 	}
 	return ""
+}
+
+// retireConversationState atomically makes all existing owners for a
+// conversation stale before releasing their streams. A late checkpoint write
+// from a canceled processor is rejected after its ownership token is removed.
+func (e *CursorExecutor) retireConversationState(conversationID string) {
+	var retired []*cursorSession
+	var owner *cursorStateOwner
+	suffix := ":" + conversationID
+
+	e.mu.Lock()
+	owner = e.stateOwners[conversationID]
+	delete(e.stateOwners, conversationID)
+	for key, session := range e.sessions {
+		if strings.HasSuffix(key, suffix) {
+			delete(e.sessions, key)
+			retired = append(retired, session)
+		}
+	}
+	delete(e.checkpoints, conversationID)
+	e.mu.Unlock()
+
+	if owner != nil {
+		if owner.cancel != nil {
+			owner.cancel()
+		}
+		if owner.stream != nil {
+			owner.stream.Close()
+		}
+	}
+	for _, session := range retired {
+		if owner != nil && session.owner == owner {
+			continue
+		}
+		if session.cancel != nil {
+			session.cancel()
+		}
+		if session.stream != nil {
+			session.stream.Close()
+		}
+	}
+}
+
+func (e *CursorExecutor) beginConversationStream(conversationID string) *cursorStateOwner {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	owner := &cursorStateOwner{}
+	e.stateOwners[conversationID] = owner
+	return owner
+}
+
+func (e *CursorExecutor) releaseConversationStream(conversationID string, owner *cursorStateOwner) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stateOwners[conversationID] == owner {
+		delete(e.stateOwners, conversationID)
+	}
+}
+
+func (e *CursorExecutor) attachConversationStream(conversationID string, owner *cursorStateOwner, cancel context.CancelFunc, stream cursorStream) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stateOwners[conversationID] != owner {
+		return false
+	}
+	owner.cancel = cancel
+	owner.stream = stream
+	return true
+}
+
+func (e *CursorExecutor) publishConversationSession(conversationID, sessionKey string, owner *cursorStateOwner, session *cursorSession, replace bool) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stateOwners[conversationID] != owner {
+		return false
+	}
+	if _, exists := e.sessions[sessionKey]; exists && !replace {
+		return false
+	}
+	session.conversationID = conversationID
+	session.owner = owner
+	e.sessions[sessionKey] = session
+	return true
+}
+
+func (e *CursorExecutor) saveCheckpoint(conversationID string, owner *cursorStateOwner, checkpoint *savedCheckpoint) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stateOwners[conversationID] != owner {
+		return false
+	}
+	e.checkpoints[conversationID] = checkpoint
+	return true
 }
 
 // cursorStatusErr implements the StatusError and RetryAfter interfaces so the
@@ -328,6 +430,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	conversationID := deriveConversationId(apiKeyFromContext(ctx), sessionID, parsed.SystemPrompt)
 	openAICompatible := isOpenAICompatibleSourceFormat(from)
 	if openAICompatible && len(parsed.ToolResults) > 0 {
+		e.retireConversationState(conversationID)
 		log.Infof("cursor: using cold continuation for %d non-stream tool result(s)", len(parsed.ToolResults))
 		flattenConversationIntoUserText(parsed)
 	}
@@ -488,24 +591,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	needsTranslate := from.String() != "" && from.String() != "openai"
 
 	if coldToolContinuation {
-		e.mu.Lock()
-		if session, hasSession := e.sessions[sessionKey]; hasSession {
-			delete(e.sessions, sessionKey)
-			session.cancel()
-			if session.stream != nil {
-				session.stream.Close()
-			}
-		} else if oldKey := e.findSessionByConversationLocked(conversationId); oldKey != "" {
-			oldSession := e.sessions[oldKey]
-			oldSession.cancel()
-			if oldSession.stream != nil {
-				oldSession.stream.Close()
-			}
-			delete(e.sessions, oldKey)
-		}
-		// A checkpoint created before an MCP call cannot contain its result.
-		delete(e.checkpoints, checkpointKey)
-		e.mu.Unlock()
+		e.retireConversationState(conversationId)
 		log.Infof("cursor: using cold continuation for %d tool result(s)", len(parsed.ToolResults))
 	}
 
@@ -552,6 +638,13 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		delete(e.sessions, oldKey)
 	}
 	e.mu.Unlock()
+	streamOwner := e.beginConversationStream(conversationId)
+	workerOwnsState := false
+	defer func() {
+		if !workerOwnsState {
+			e.releaseConversationStream(conversationId, streamOwner)
+		}
+	}()
 
 	// Look up saved checkpoint for this conversation (keyed by conversationId only).
 	// Checkpoint is auth-specific: if auth changed (e.g. quota exhaustion failover),
@@ -605,10 +698,18 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		stream.Close()
 		return nil, fmt.Errorf("cursor: failed to send request: %w", err)
 	}
-
 	// The Cursor stream lives only for this HTTP request when serving an
 	// OpenAI-compatible client. Native Claude tool calls can still retain it.
-	sessionCtx, sessionCancel := context.WithCancel(context.Background())
+	sessionParent := context.Background()
+	if openAICompatible {
+		sessionParent = ctx
+	}
+	sessionCtx, sessionCancel := context.WithCancel(sessionParent)
+	if !e.attachConversationStream(conversationId, streamOwner, sessionCancel, stream) {
+		sessionCancel()
+		stream.Close()
+		return nil, context.Canceled
+	}
 	go cursorH2Heartbeat(sessionCtx, stream)
 
 	chunks := make(chan cliproxyexecutor.StreamChunk, 64)
@@ -706,7 +807,9 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return true
 	}
 
+	workerOwnsState = true
 	go func() {
+		defer e.releaseConversationStream(conversationId, streamOwner)
 		var resumeOutCh chan cliproxyexecutor.StreamChunk
 		_ = resumeOutCh
 		thinkingActive := false
@@ -764,8 +867,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				resumeOut := make(chan cliproxyexecutor.StreamChunk, 64)
 				log.Debugf("cursor: saving session %s for MCP tool resume (tool=%s)", sessionKey, exec.ToolName)
 				outMu.Lock()
-				e.mu.Lock()
-				e.sessions[sessionKey] = &cursorSession{
+				session := &cursorSession{
 					stream:       stream,
 					blobStore:    params.BlobStore,
 					mcpTools:     params.McpTools,
@@ -785,7 +887,12 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 						outMu.Unlock()
 					},
 				}
-				e.mu.Unlock()
+				if !e.publishConversationSession(conversationId, sessionKey, streamOwner, session, true) {
+					outMu.Unlock()
+					sessionCancel()
+					stream.Close()
+					return
+				}
 				resumeOutCh = resumeOut
 
 				// Publish and close under the output lock. An immediate resume can
@@ -803,16 +910,17 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			toolResultCh,
 			usage,
 			func(cpData []byte) {
-				// Save checkpoint keyed by conversationId, tagged with authID for migration detection
-				e.mu.Lock()
-				e.checkpoints[checkpointKey] = &savedCheckpoint{
+				checkpoint := &savedCheckpoint{
 					data:      cpData,
 					blobStore: params.BlobStore,
 					authID:    authID,
 					updatedAt: time.Now(),
 				}
-				e.mu.Unlock()
-				log.Debugf("cursor: saved checkpoint (%d bytes) for conv=%s auth=%s", len(cpData), checkpointKey, authID)
+				if e.saveCheckpoint(checkpointKey, streamOwner, checkpoint) {
+					log.Debugf("cursor: saved checkpoint (%d bytes) for conv=%s auth=%s", len(cpData), checkpointKey, authID)
+				} else {
+					log.Debugf("cursor: ignored checkpoint from retired stream for conv=%s auth=%s", checkpointKey, authID)
+				}
 			},
 		)
 		streamCoalescer.close()
@@ -910,13 +1018,7 @@ func (e *CursorExecutor) resumeWithToolResults(
 		}
 	}
 	restoreSession := func() {
-		restored := false
-		e.mu.Lock()
-		if _, exists := e.sessions[sessionKey]; !exists {
-			e.sessions[sessionKey] = session
-			restored = true
-		}
-		e.mu.Unlock()
+		restored := e.publishConversationSession(session.conversationID, sessionKey, session.owner, session, false)
 		if !restored {
 			// A concurrent request replaced this session while ownership was in
 			// transit. It is no longer safe to restore, so release its resources.
@@ -1522,32 +1624,33 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 func flattenConversationIntoUserText(parsed *parsedOpenAIRequest) {
 	var buf strings.Builder
 
-	// Flatten turns into readable context
-	for _, turn := range parsed.Turns {
-		if turn.UserText != "" {
-			buf.WriteString("USER: ")
-			buf.WriteString(turn.UserText)
-			buf.WriteString("\n\n")
+	// Render from the original messages so assistant tool calls and tool results
+	// retain their exact chronological relationship. Cursor imposes no smaller
+	// request limit here, so results remain complete.
+	for _, message := range parsed.Messages {
+		role := message.Get("role").String()
+		switch role {
+		case "system":
+			continue
+		case "user":
+			writeCursorTranscriptEntry(&buf, "USER", extractTextContent(message.Get("content")))
+		case "assistant":
+			writeCursorTranscriptEntry(&buf, "ASSISTANT", extractTextContent(message.Get("content")))
+			for _, toolCall := range message.Get("tool_calls").Array() {
+				entry, _ := json.Marshal(map[string]string{
+					"id":        toolCall.Get("id").String(),
+					"name":      toolCall.Get("function.name").String(),
+					"arguments": toolCall.Get("function.arguments").String(),
+				})
+				writeCursorTranscriptEntry(&buf, "ASSISTANT_TOOL_CALL", string(entry))
+			}
+		case "tool":
+			entry, _ := json.Marshal(map[string]string{
+				"tool_call_id": message.Get("tool_call_id").String(),
+				"content":      extractTextContent(message.Get("content")),
+			})
+			writeCursorTranscriptEntry(&buf, "TOOL_RESULT", string(entry))
 		}
-		if turn.AssistantText != "" {
-			buf.WriteString("ASSISTANT: ")
-			buf.WriteString(turn.AssistantText)
-			buf.WriteString("\n\n")
-		}
-	}
-
-	// Flatten tool results
-	for _, tr := range parsed.ToolResults {
-		buf.WriteString("TOOL_RESULT (call_id: ")
-		buf.WriteString(tr.ToolCallId)
-		buf.WriteString("): ")
-		// Truncate very large tool results to avoid overwhelming the context
-		content := tr.Content
-		if len(content) > 8000 {
-			content = content[:8000] + "\n... [truncated]"
-		}
-		buf.WriteString(content)
-		buf.WriteString("\n\n")
 	}
 
 	if buf.Len() > 0 {
@@ -1555,16 +1658,21 @@ func flattenConversationIntoUserText(parsed *parsedOpenAIRequest) {
 		buf.WriteString("Continue your response based on this context.\n\n")
 	}
 
-	// Prepend flattened history to the current UserText
-	if parsed.UserText != "" {
-		parsed.UserText = buf.String() + "Current request: " + parsed.UserText
-	} else {
-		parsed.UserText = buf.String() + "Continue from the conversation above."
-	}
+	parsed.UserText = buf.String() + "Continue from the conversation above."
 
 	// Clear turns and tool results since they're now in UserText
 	parsed.Turns = nil
 	parsed.ToolResults = nil
+}
+
+func writeCursorTranscriptEntry(buf *strings.Builder, label, content string) {
+	if content == "" {
+		return
+	}
+	buf.WriteString(label)
+	buf.WriteString(": ")
+	buf.WriteString(content)
+	buf.WriteString("\n\n")
 }
 
 func extractTextContent(content gjson.Result) string {
