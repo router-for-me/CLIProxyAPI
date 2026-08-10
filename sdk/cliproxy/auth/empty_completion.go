@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -14,9 +15,10 @@ import (
 // retriable so the conductor marks the auth as failed, cools it down, and
 // rotates to the next auth/model.
 var errEmptyCompletion = &Error{
-	Code:      "empty_completion",
-	Message:   "upstream returned an empty completion",
-	Retryable: true,
+	Code:       "empty_completion",
+	Message:    "upstream returned an empty completion",
+	Retryable:  true,
+	HTTPStatus: http.StatusServiceUnavailable,
 }
 
 // openAIChunk is the minimal OpenAI-style SSE/JSON shape used to detect empty
@@ -100,6 +102,59 @@ type geminiChunk struct {
 	} `json:"response"`
 }
 
+// openAIResponseUsage is the usage block of the OpenAI Responses-API shape
+// (used by codex/xai executors).
+type openAIResponseUsage struct {
+	OutputTokens *int `json:"output_tokens"`
+}
+
+type openAIResponseContentPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type openAIResponseOutputItem struct {
+	Type      string                       `json:"type"`
+	Text      string                       `json:"text"`
+	Arguments string                       `json:"arguments"`
+	Content   []openAIResponseContentPart  `json:"content"`
+}
+
+type openAIResponseObject struct {
+	Status string                     `json:"status"`
+	Output json.RawMessage            `json:"output"`
+	Usage  *openAIResponseUsage       `json:"usage"`
+}
+
+type openAIResponseChunk struct {
+	Type      string                `json:"type"`
+	Object    string                `json:"object"`
+	Status    string                `json:"status"`
+	Output    json.RawMessage       `json:"output"`
+	Usage     *openAIResponseUsage  `json:"usage"`
+	Response  *openAIResponseObject `json:"response"`
+	Delta     string                `json:"delta"`
+	Text      string                `json:"text"`
+	Arguments string                `json:"arguments"`
+}
+
+// openAIResponseEventTypes is the conservative set of Responses-API streamed
+// event types we recognize. Unknown/partial sub-shapes are left unrecognized so
+// the stream is forwarded rather than judged empty.
+var openAIResponseEventTypes = map[string]bool{
+	"response.created":                         true,
+	"response.in_progress":                     true,
+	"response.completed":                       true,
+	"response.incomplete":                      true,
+	"response.failed":                          true,
+	"response.output_item.added":               true,
+	"response.output_item.done":                true,
+	"response.output_text.delta":               true,
+	"response.output_text.done":                true,
+	"response.function_call_arguments.delta":   true,
+	"response.function_call_arguments.done":    true,
+}
+
 // emptyCompletionAccum accumulates the properties relevant to deciding whether
 // an OpenAI-, Claude-, or Gemini-style completion is empty.
 type emptyCompletionAccum struct {
@@ -117,6 +172,9 @@ func (a *emptyCompletionAccum) evalJSON(data []byte) {
 		return
 	}
 	if a.evalClaude(data) {
+		return
+	}
+	if a.evalOpenAIResponse(data) {
 		return
 	}
 	a.evalGemini(data)
@@ -143,8 +201,16 @@ func (a *emptyCompletionAccum) evalOpenAI(data []byte) bool {
 		a.completionTokens += *chunk.Usage.CompletionTokens
 	}
 	for _, ch := range chunk.Choices {
-		if ch.FinishReason != nil && *ch.FinishReason != "" {
-			a.terminal = true
+		if ch.FinishReason != nil {
+			reason := strings.TrimSpace(*ch.FinishReason)
+			if strings.EqualFold(reason, "stop") {
+				a.terminal = true
+			} else if reason != "" {
+				// content_filter, length, and other non-stop terminal reasons
+				// are not empty completions: the client must see the reason
+				// rather than a silent auth rotation.
+				a.blocked = true
+			}
 		}
 		content := ch.Delta.Content + ch.Message.Content + ch.Delta.ReasoningContent + ch.Message.ReasoningContent
 		if strings.TrimSpace(content) != "" {
@@ -230,6 +296,102 @@ func (a *emptyCompletionAccum) evalClaude(data []byte) bool {
 	return true
 }
 
+func (a *emptyCompletionAccum) evalOpenAIResponse(data []byte) bool {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+
+	var evType string
+	if raw := probe["type"]; raw != nil {
+		_ = json.Unmarshal(raw, &evType)
+	}
+	var objName string
+	if raw := probe["object"]; raw != nil {
+		_ = json.Unmarshal(raw, &objName)
+	}
+
+	if objName != "response" && !openAIResponseEventTypes[evType] {
+		return false
+	}
+	a.recognized = true
+
+	var chunk openAIResponseChunk
+	if err := json.Unmarshal(data, &chunk); err != nil {
+		return true
+	}
+
+	switch evType {
+	case "response.completed", "response.incomplete":
+		a.terminal = true
+	}
+	if (chunk.Object == "response" && (chunk.Status == "completed" || chunk.Status == "incomplete")) ||
+		(chunk.Response != nil && (chunk.Response.Status == "completed" || chunk.Response.Status == "incomplete")) {
+		a.terminal = true
+	}
+
+	if chunk.Usage != nil && chunk.Usage.OutputTokens != nil {
+		a.sawUsage = true
+		a.completionTokens += *chunk.Usage.OutputTokens
+	}
+	if chunk.Response != nil && chunk.Response.Usage != nil && chunk.Response.Usage.OutputTokens != nil {
+		a.sawUsage = true
+		a.completionTokens += *chunk.Response.Usage.OutputTokens
+	}
+
+	switch evType {
+	case "response.output_text.delta":
+		if strings.TrimSpace(chunk.Delta) != "" {
+			a.hasContent = true
+		}
+	case "response.output_text.done":
+		if strings.TrimSpace(chunk.Text) != "" {
+			a.hasContent = true
+		}
+	case "response.function_call_arguments.delta", "response.function_call_arguments.done":
+		a.hasToolCalls = true
+	}
+
+	a.evalOpenAIResponseRawOutput(chunk.Output)
+	if chunk.Response != nil {
+		a.evalOpenAIResponseRawOutput(chunk.Response.Output)
+	}
+
+	return true
+}
+
+func (a *emptyCompletionAccum) evalOpenAIResponseRawOutput(raw json.RawMessage) {
+	if len(raw) == 0 {
+		return
+	}
+	var items []openAIResponseOutputItem
+	if err := json.Unmarshal(raw, &items); err == nil {
+		a.evalOpenAIResponseOutput(items)
+		return
+	}
+	var item openAIResponseOutputItem
+	if err := json.Unmarshal(raw, &item); err == nil {
+		a.evalOpenAIResponseOutput([]openAIResponseOutputItem{item})
+	}
+}
+
+func (a *emptyCompletionAccum) evalOpenAIResponseOutput(items []openAIResponseOutputItem) {
+	for _, item := range items {
+		switch item.Type {
+		case "function_call", "web_search_call", "file_search_call", "computer_call":
+			a.hasToolCalls = true
+		}
+		if strings.TrimSpace(item.Text) != "" {
+			a.hasContent = true
+		}
+		for _, part := range item.Content {
+			if strings.TrimSpace(part.Text) != "" {
+				a.hasContent = true
+			}
+		}
+	}
+}
+
 func (a *emptyCompletionAccum) evalClaudeBlocks(blocks []claudeContentBlock) {
 	for _, b := range blocks {
 		if b.Type == "tool_use" || len(b.Input) > 0 {
@@ -248,6 +410,30 @@ func (a *emptyCompletionAccum) evalClaudeBlocks(blocks []claudeContentBlock) {
 			a.hasContent = true
 		}
 	}
+}
+
+// hasJSONKey reports whether the given JSON object contains name as a top-level
+// key. It returns false for non-object or malformed input.
+func hasJSONKey(data []byte, name string) bool {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	_, ok := probe[name]
+	return ok
+}
+
+// hasNestedResponseCandidates reports whether the payload's response object
+// contains a candidates key (the Gemini streaming wrapper shape).
+func hasNestedResponseCandidates(data []byte) bool {
+	var probe struct {
+		Response map[string]json.RawMessage `json:"response"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	_, ok := probe.Response["candidates"]
+	return ok
 }
 
 func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
@@ -269,6 +455,20 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 	}
 
 	if len(candidates) == 0 {
+		// Only treat an empty candidates array as a recognized empty completion
+		// when the candidates key is actually present (e.g. a Gemini
+		// safety/empty response with zero candidate tokens, or a stream
+		// aggregate with nothing else). An absent candidates key is not a
+		// Gemini shape at all.
+		if hasJSONKey(data, "candidates") || hasNestedResponseCandidates(data) {
+			a.recognized = true
+			a.terminal = true
+			if usage != nil && usage.CandidatesTokenCount != nil {
+				a.sawUsage = true
+				a.completionTokens += *usage.CandidatesTokenCount
+			}
+			return true
+		}
 		return false
 	}
 
@@ -422,8 +622,8 @@ func (a *emptyCompletionAccum) evalSSE(payload []byte) {
 }
 
 // markEmptyCompletion records a failed retriable empty-completion result and
-// returns the error to propagate. Both the mixed and home (credits) execution
-// paths rotate on an empty completion, so the reporting is shared.
+// returns the error to propagate. The mixed duty execution path rotates on an
+// empty completion; the home (credits) path reports it via reportHomeResult.
 func (m *Manager) markEmptyCompletion(ctx context.Context, result *Result) error {
 	result.Success = false
 	result.Error = errEmptyCompletion

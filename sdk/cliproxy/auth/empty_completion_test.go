@@ -316,6 +316,66 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			payload:  []byte("data: {\"choices\":[]}\n\ndata: [DONE]\n\n"),
 			expected: true,
 		},
+		{
+			name:     "openai sse content_filter with empty content is not empty",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
+			name:     "openai sse length with empty content is not empty",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
+			name:     "openai non-stream content_filter with empty content is not empty",
+			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"content_filter"}],"usage":{"completion_tokens":0}}`),
+			expected: false,
+		},
+		{
+			name:     "openai non-stream length with empty content is not empty",
+			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"length"}],"usage":{"completion_tokens":0}}`),
+			expected: false,
+		},
+		{
+			name:     "openai non-stream stop empty is empty",
+			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`),
+			expected: true,
+		},
+		{
+			name:     "codex responses-api sse completed with empty output is empty",
+			payload:  []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\ndata: [DONE]\n\n"),
+			expected: true,
+		},
+		{
+			name:     "codex responses-api non-stream completed with empty output is empty",
+			payload:  []byte(`{"object":"response","id":"r","status":"completed","output":[],"usage":{"output_tokens":0}}`),
+			expected: true,
+		},
+		{
+			name:     "codex responses-api sse output_item message empty then completed is empty",
+			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"output\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]}],\"status\":\"completed\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]}]}],\"usage\":{\"output_tokens\":0}}}\n\ndata: [DONE]\n\n"),
+			expected: true,
+		},
+		{
+			name:     "codex responses-api non-stream with function_call is not empty",
+			payload:  []byte(`{"object":"response","id":"r","status":"completed","output":[{"type":"function_call","name":"get_weather","arguments":"{}","call_id":"call_1"}],"usage":{"output_tokens":5}}`),
+			expected: false,
+		},
+		{
+			name:     "codex responses-api sse with function_call is not empty",
+			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"output\":{\"type\":\"function_call\",\"name\":\"get_weather\",\"arguments\":\"{}\",\"call_id\":\"call_1\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"name\":\"get_weather\",\"arguments\":\"{}\",\"call_id\":\"call_1\"}],\"usage\":{\"output_tokens\":5}}}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
+			name:     "gemini non-stream empty candidates array is empty",
+			payload:  []byte(`{"candidates":[],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`),
+			expected: true,
+		},
+		{
+			name:     "gemini sse empty candidates array is empty",
+			payload:  []byte("data: {\"candidates\":[],\"usageMetadata\":{\"candidatesTokenCount\":0}}\n\n"),
+			expected: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

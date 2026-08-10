@@ -88,7 +88,14 @@ func (h *Host) ExecutePluginExecutor(ctx context.Context, pluginID string, req c
 	if errAdapter != nil {
 		return coreexecutor.Response{}, errAdapter
 	}
-	return adapter.Execute(ctx, (*coreauth.Auth)(nil), req, opts)
+	resp, err := adapter.Execute(ctx, (*coreauth.Auth)(nil), req, opts)
+	if err != nil {
+		return coreexecutor.Response{}, err
+	}
+	if coreauth.IsEmptyCompletionPayload(resp.Payload) {
+		return coreexecutor.Response{}, coreauth.EmptyCompletionError()
+	}
+	return resp, nil
 }
 
 // ExecutePluginExecutorStream executes a streaming request with the named plugin executor without changing the requested model.
@@ -97,7 +104,39 @@ func (h *Host) ExecutePluginExecutorStream(ctx context.Context, pluginID string,
 	if errAdapter != nil {
 		return nil, errAdapter
 	}
-	return adapter.ExecuteStream(ctx, (*coreauth.Auth)(nil), req, opts)
+	streamResult, err := adapter.ExecuteStream(ctx, (*coreauth.Auth)(nil), req, opts)
+	if err != nil {
+		return nil, err
+	}
+	return wrapStreamEmptyCompletion(streamResult), nil
+}
+
+// wrapStreamEmptyCompletion wraps a plugin stream so that a terminal but empty
+// completion (no content, no tool calls) surfaces as an empty-completion error
+// instead of a clean stream end, mirroring the conductor's aggregate-at-close
+// judgment. Chunks are forwarded immediately; the aggregate is only judged once
+// the upstream stream closes.
+func wrapStreamEmptyCompletion(streamResult *coreexecutor.StreamResult) *coreexecutor.StreamResult {
+	src := streamResult.Chunks
+	wrapped := make(chan coreexecutor.StreamChunk)
+	go func() {
+		defer close(wrapped)
+		var aggregate []byte
+		for chunk := range src {
+			if chunk.Err != nil {
+				wrapped <- chunk
+				continue
+			}
+			if len(chunk.Payload) > 0 {
+				aggregate = append(aggregate, chunk.Payload...)
+			}
+			wrapped <- chunk
+		}
+		if coreauth.IsEmptyCompletionPayload(aggregate) {
+			wrapped <- coreexecutor.StreamChunk{Err: coreauth.EmptyCompletionError()}
+		}
+	}()
+	return &coreexecutor.StreamResult{Chunks: wrapped, Headers: streamResult.Headers}
 }
 
 // CountPluginExecutor executes a count-tokens request with the named plugin executor without changing the requested model.
