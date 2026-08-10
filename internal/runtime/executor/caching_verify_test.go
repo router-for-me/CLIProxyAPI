@@ -331,7 +331,7 @@ func TestEnsureCacheControlPreservesLaterMessageTTL(t *testing.T) {
 	}
 }
 
-func TestEnsureCacheControlCappedAfterIndependentInjection(t *testing.T) {
+func TestEnsureCacheControlStopsIndependentInjectionAtLimit(t *testing.T) {
 	input := []byte(`{
 		"tools":[{"name":"tool"}],
 		"system":[{"type":"text","text":"system"}],
@@ -345,12 +345,8 @@ func TestEnsureCacheControlCappedAfterIndependentInjection(t *testing.T) {
 	}`)
 
 	output := ensureCacheControl(input)
-	if got := countCacheControls(output); got != 5 {
-		t.Fatalf("cache_control count before cap = %d, want 5: %s", got, output)
-	}
-	output = enforceCacheControlLimit(output, 4)
 	if got := countCacheControls(output); got != 4 {
-		t.Fatalf("cache_control count after cap = %d, want 4: %s", got, output)
+		t.Fatalf("cache_control count = %d, want 4: %s", got, output)
 	}
 	if got := gjson.GetBytes(output, "tools.0.cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("tools breakpoint type = %q, want ephemeral: %s", got, output)
@@ -358,8 +354,50 @@ func TestEnsureCacheControlCappedAfterIndependentInjection(t *testing.T) {
 	if got := gjson.GetBytes(output, "system.0.cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("system breakpoint type = %q, want ephemeral: %s", got, output)
 	}
-	if got := gjson.GetBytes(output, "messages.2.content.0.cache_control.type").String(); got != "ephemeral" {
-		t.Fatalf("rolling breakpoint type = %q, want ephemeral: %s", got, output)
+	for _, path := range []string{
+		"messages.0.content.0.cache_control.type",
+		"messages.1.content.0.cache_control.type",
+	} {
+		if got := gjson.GetBytes(output, path).String(); got != "ephemeral" {
+			t.Fatalf("caller breakpoint %s = %q, want preserved ephemeral: %s", path, got, output)
+		}
+	}
+	if got := gjson.GetBytes(output, "messages.2.content.0.cache_control"); got.Exists() {
+		t.Fatalf("rolling breakpoint unexpectedly replaced a caller breakpoint: %s", output)
+	}
+}
+
+func TestEnsureCacheControlPreservesFullCallerLayout(t *testing.T) {
+	input := []byte(`{
+		"tools":[{"name":"tool"}],
+		"system":[{"type":"text","text":"system"}],
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"first","cache_control":{"type":"ephemeral"}}]},
+			{"role":"assistant","content":[{"type":"text","text":"reply one","cache_control":{"type":"ephemeral"}}]},
+			{"role":"user","content":[{"type":"text","text":"second","cache_control":{"type":"ephemeral"}}]},
+			{"role":"assistant","content":[{"type":"text","text":"reply two","cache_control":{"type":"ephemeral"}}]},
+			{"role":"user","content":"third"}
+		]
+	}`)
+
+	output := ensureCacheControl(input)
+	if got := countCacheControls(output); got != 4 {
+		t.Fatalf("cache_control count = %d, want 4: %s", got, output)
+	}
+	for _, path := range []string{
+		"messages.0.content.0.cache_control.type",
+		"messages.1.content.0.cache_control.type",
+		"messages.2.content.0.cache_control.type",
+		"messages.3.content.0.cache_control.type",
+	} {
+		if got := gjson.GetBytes(output, path).String(); got != "ephemeral" {
+			t.Fatalf("caller breakpoint %s = %q, want preserved ephemeral: %s", path, got, output)
+		}
+	}
+	for _, path := range []string{"tools.0.cache_control", "system.0.cache_control"} {
+		if got := gjson.GetBytes(output, path); got.Exists() {
+			t.Fatalf("automatic breakpoint %s was added to a full caller layout: %s", path, output)
+		}
 	}
 }
 

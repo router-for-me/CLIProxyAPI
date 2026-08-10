@@ -859,13 +859,25 @@ func applyCloaking(
 // This enables up to 90% cost reduction on cached tokens (cache read = 0.1x base price).
 // See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
 func ensureCacheControl(payload []byte) []byte {
+	const maxCacheControls = 4
+
+	if countCacheControls(payload) >= maxCacheControls {
+		return payload
+	}
+
 	// 1. Inject cache_control into the LAST non-deferred tool
 	// Tools are cached first in the hierarchy, so this is the most important breakpoint.
 	payload = injectToolsCacheControl(payload)
+	if countCacheControls(payload) >= maxCacheControls {
+		return payload
+	}
 
 	// 2. Inject cache_control into the LAST system prompt element
 	// System is the second level in the cache hierarchy.
 	payload = injectSystemCacheControl(payload)
+	if countCacheControls(payload) >= maxCacheControls {
+		return payload
+	}
 
 	// 3. Inject cache_control into messages for multi-turn conversation caching
 	// This caches the conversation history up to the second-to-last user turn.

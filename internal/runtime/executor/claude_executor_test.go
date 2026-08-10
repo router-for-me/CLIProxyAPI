@@ -5855,6 +5855,48 @@ func TestClaudeExecutor_PreservesCallerOneHourCacheTTLAcrossExecutePaths(t *test
 	}
 }
 
+func TestClaudeExecutor_PreservesFullCallerCacheLayoutAcrossExecutePaths(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5",
+		"tools":[{"name":"tool","input_schema":{"type":"object"}}],
+		"system":[{"type":"text","text":"system"}],
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"first","cache_control":{"type":"ephemeral"}}]},
+			{"role":"assistant","content":[{"type":"text","text":"reply one","cache_control":{"type":"ephemeral"}}]},
+			{"role":"user","content":[{"type":"text","text":"second","cache_control":{"type":"ephemeral"}}]},
+			{"role":"assistant","content":[{"type":"text","text":"reply two","cache_control":{"type":"ephemeral"}}]},
+			{"role":"user","content":"third"}
+		]}`)
+
+	for _, stream := range []bool{false, true} {
+		name := "execute"
+		if stream {
+			name = "execute stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := &config.Config{DisableClaudeCloakMode: true}
+			upstreamBody := executeClaudeContextManagementRequest(t, cfg, payload, stream)
+			if got := countCacheControls(upstreamBody); got != 4 {
+				t.Fatalf("cache_control count = %d, want 4: %s", got, upstreamBody)
+			}
+			for _, path := range []string{
+				"messages.0.content.0.cache_control.type",
+				"messages.1.content.0.cache_control.type",
+				"messages.2.content.0.cache_control.type",
+				"messages.3.content.0.cache_control.type",
+			} {
+				if got := gjson.GetBytes(upstreamBody, path).String(); got != "ephemeral" {
+					t.Fatalf("caller breakpoint %s = %q, want preserved ephemeral: %s", path, got, upstreamBody)
+				}
+			}
+			for _, path := range []string{"tools.0.cache_control", "system.0.cache_control"} {
+				if got := gjson.GetBytes(upstreamBody, path); got.Exists() {
+					t.Fatalf("automatic breakpoint %s was added to a full caller layout: %s", path, upstreamBody)
+				}
+			}
+		})
+	}
+}
+
 func TestValidateClaudeCallerSystemBlocksAcceptsTextOnly(t *testing.T) {
 	tests := []struct {
 		name   string
