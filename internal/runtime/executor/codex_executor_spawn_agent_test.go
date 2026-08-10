@@ -107,6 +107,101 @@ func TestCodexExecutorOptimizeMultiAgentV2(t *testing.T) {
 	}
 }
 
+func TestCodexExecutorIsCompatConvertsAgentMessage(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		upstreamBody, _ = io.ReadAll(request.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[]}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	payload := codexSpawnAgentTestPayload()
+	baseCfg := config.Config{
+		Codex: config.CodexConfig{OptimizeMultiAgentV2: true},
+		CodexKey: []config.CodexKey{{
+			APIKey:  "test",
+			BaseURL: server.URL,
+			Models: []config.CodexModel{
+				{Name: "deepseek-v4-flash", Alias: "deepseek-alias", IsCompat: true},
+				{Name: "gpt-5.4", Alias: "codex-native"},
+			},
+		}},
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "test",
+		},
+	}
+
+	tests := []struct {
+		name           string
+		model          string
+		enabled        bool
+		wantType       string
+		wantRole       string
+		wantRoleExists bool
+	}{
+		{
+			name:           "is-compat converts agent_message",
+			model:          "deepseek-v4-flash",
+			enabled:        true,
+			wantType:       "message",
+			wantRole:       "user",
+			wantRoleExists: true,
+		},
+		{
+			name:           "native model keeps agent_message",
+			model:          "gpt-5.4",
+			enabled:        true,
+			wantType:       "agent_message",
+			wantRoleExists: false,
+		},
+		{
+			name:           "optimize disabled keeps agent_message",
+			model:          "deepseek-v4-flash",
+			enabled:        false,
+			wantType:       "agent_message",
+			wantRoleExists: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstreamBody = nil
+			cfg := baseCfg
+			cfg.Codex.OptimizeMultiAgentV2 = tt.enabled
+			executor := NewCodexExecutor(&cfg)
+			ctx := codexSpawnAgentTestContext()
+			req := cliproxyexecutor.Request{Model: tt.model, Payload: payload}
+			opts := cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("openai-response"),
+				Headers:      http.Header{"User-Agent": []string{"overridden-client/1.0"}},
+			}
+			if _, errExecute := executor.Execute(ctx, auth, req, opts); errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+			message := gjson.GetBytes(upstreamBody, "input.1")
+			if message.Get("type").String() != tt.wantType {
+				t.Fatalf("input.1.type = %q, want %q; body=%s", message.Get("type").String(), tt.wantType, upstreamBody)
+			}
+			if tt.wantRoleExists {
+				if message.Get("role").String() != tt.wantRole {
+					t.Fatalf("input.1.role = %q, want %q; body=%s", message.Get("role").String(), tt.wantRole, upstreamBody)
+				}
+				if message.Get("content.1.type").String() != "input_text" || message.Get("content.1.text").String() != "delegated task" {
+					t.Fatalf("compat conversion did not normalize content: %s", upstreamBody)
+				}
+				return
+			}
+			if message.Get("role").Exists() {
+				t.Fatalf("input.1.role unexpectedly present: %s", upstreamBody)
+			}
+		})
+	}
+}
+
 func codexSpawnAgentTestPayload() []byte {
 	return []byte(`{
 		"model":"gpt-5.4",

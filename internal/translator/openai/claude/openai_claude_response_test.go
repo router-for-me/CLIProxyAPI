@@ -163,17 +163,24 @@ func TestStreamingTool_EmptyNameThroughout(t *testing.T) {
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
 
-	if got := len(toolUseStarts(events)); got != 0 {
-		t.Fatalf("expected zero tool_use content_block_start, got %d (events=%+v)", got, events)
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected one tool_use content_block_start with synthetic name, got %d (events=%+v)", len(starts), events)
 	}
-	if got := countByType(events, "content_block_delta"); got != 0 {
-		t.Fatalf("expected zero content_block_delta when start was suppressed, got %d", got)
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
+		t.Fatalf("announced tool name = %q, want %q", name, "tool_0")
 	}
-	if got := countByType(events, "content_block_stop"); got != 0 {
-		t.Fatalf("expected zero content_block_stop when start was suppressed, got %d", got)
+	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_a" {
+		t.Fatalf("announced tool id = %q, want %q", id, "call_a")
 	}
-	if got := lastStopReason(events); got == "tool_use" {
-		t.Fatalf("stop_reason must not be tool_use when zero tool_use blocks were emitted; got %q", got)
+	if got := countByType(events, "content_block_delta"); got != 1 {
+		t.Fatalf("expected one content_block_delta for accumulated args, got %d", got)
+	}
+	if got := countByType(events, "content_block_stop"); got != 1 {
+		t.Fatalf("expected one content_block_stop, got %d", got)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
 	}
 }
 
@@ -182,11 +189,21 @@ func TestStreamingTool_NullName(t *testing.T) {
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":null,"arguments":""}}]}}]}`,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
-	if got := len(toolUseStarts(events)); got != 0 {
-		t.Fatalf("null name must not produce a tool_use start; got %d", got)
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("null name with id should belated-emit synthetic tool name; got %d", len(starts))
 	}
-	if got := countByType(events, "content_block_stop"); got != 0 {
-		t.Fatalf("null name must not produce content_block_stop; got %d", got)
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
+		t.Fatalf("announced tool name = %q, want %q", name, "tool_0")
+	}
+	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_a" {
+		t.Fatalf("announced tool id = %q, want %q", id, "call_a")
+	}
+	if got := countByType(events, "content_block_stop"); got != 1 {
+		t.Fatalf("expected one content_block_stop, got %d", got)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
 	}
 }
 
@@ -195,8 +212,12 @@ func TestStreamingTool_NonStringName(t *testing.T) {
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":123,"arguments":""}}]}}]}`,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
-	if got := len(toolUseStarts(events)); got != 0 {
-		t.Fatalf("non-string name must not produce a tool_use start; got %d", got)
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("non-string name with id should belated-emit synthetic tool name; got %d", len(starts))
+	}
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
+		t.Fatalf("announced tool name = %q, want %q", name, "tool_0")
 	}
 }
 
@@ -220,10 +241,10 @@ func TestStreamingTool_RepeatedName(t *testing.T) {
 	}
 }
 
-func TestStreamingTool_MixedSuppressedAndValid(t *testing.T) {
+func TestStreamingTool_MixedEmptyNameAndValid(t *testing.T) {
 	events := runStream(t, streamReq,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[
-			{"index":0,"id":"call_skip","function":{"name":"","arguments":""}},
+			{"index":0,"id":"call_empty","function":{"name":"","arguments":""}},
 			{"index":1,"id":"call_real","function":{"name":"do_it","arguments":""}}
 		]}}]}`,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[
@@ -233,16 +254,36 @@ func TestStreamingTool_MixedSuppressedAndValid(t *testing.T) {
 	)
 
 	starts := toolUseStarts(events)
-	if len(starts) != 1 {
-		t.Fatalf("expected exactly one tool_use start, got %d", len(starts))
+	if len(starts) != 2 {
+		t.Fatalf("expected two tool_use starts (valid mid-stream + synthetic empty-name), got %d", len(starts))
 	}
-	if got := countByType(events, "content_block_stop"); got != 1 {
-		t.Fatalf("expected exactly one content_block_stop, got %d", got)
+	// Valid name+id is emitted mid-stream first; empty-name is belated at finish.
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "do_it" {
+		t.Fatalf("first tool name = %q, want %q", name, "do_it")
+	}
+	if name := gjson.Get(starts[1].Payload, "content_block.name").String(); name != "tool_0" {
+		t.Fatalf("second tool name = %q, want %q", name, "tool_0")
+	}
+	if got := countByType(events, "content_block_stop"); got != 2 {
+		t.Fatalf("expected two content_block_stop events, got %d", got)
 	}
 
 	indices := blockIndices(events)
-	if len(indices) == 0 || indices[0] != 0 {
-		t.Fatalf("first content_block_start index must be 0, got %v", indices)
+	if len(indices) < 2 || indices[0] != 0 || indices[1] != 1 {
+		t.Fatalf("content_block_start indices must be [0,1], got %v", indices)
+	}
+}
+
+func TestStreamingTool_EmptyNameWithoutSignalIsSuppressed(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"function":{"name":"","arguments":""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	if got := len(toolUseStarts(events)); got != 0 {
+		t.Fatalf("empty name without id/args must stay suppressed; got %d", got)
+	}
+	if got := lastStopReason(events); got == "tool_use" {
+		t.Fatalf("stop_reason must not be tool_use when zero tool_use blocks were emitted; got %q", got)
 	}
 }
 
@@ -371,14 +412,38 @@ func TestStreamingTool_LateIDAfterFinalization(t *testing.T) {
 	}
 }
 
-func TestStreamingTool_StopReasonMixedSuppressedAndValid(t *testing.T) {
+func TestStreamingTool_StopReasonMixedEmptyNameAndValid(t *testing.T) {
 	events := runStream(t, streamReq,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[
-			{"index":0,"id":"call_skip","function":{"name":"","arguments":""}},
+			{"index":0,"id":"call_empty","function":{"name":"","arguments":""}},
 			{"index":1,"id":"call_real","function":{"name":"do_it","arguments":"{}"}}
 		]}}]}`,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+	if got := len(toolUseStarts(events)); got != 2 {
+		t.Fatalf("expected two tool_use starts, got %d", got)
+	}
+}
+
+func TestStreamingTool_EmptyNameArgsOnlyNoID(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"function":{"name":"","arguments":"{\"q\":\"x\"}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected one belated tool_use start for empty-name args-only call, got %d", len(starts))
+	}
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
+		t.Fatalf("announced tool name = %q, want %q", name, "tool_0")
+	}
+	id := gjson.Get(starts[0].Payload, "content_block.id").String()
+	if !strings.HasPrefix(id, "toolu_") {
+		t.Fatalf("synthetic id should match toolu_<nanos>_<n>, got %q", id)
+	}
 	if got := lastStopReason(events); got != "tool_use" {
 		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
 	}

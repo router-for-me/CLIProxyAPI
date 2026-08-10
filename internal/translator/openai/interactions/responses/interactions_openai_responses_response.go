@@ -50,8 +50,6 @@ type responsesToInteractionsStreamState struct {
 
 func ConvertInteractionsResponseToOpenAIResponses(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	_ = ctx
-	_ = originalRequestRawJSON
-	_ = requestRawJSON
 	if param == nil {
 		var local any
 		param = &local
@@ -78,7 +76,7 @@ func ConvertInteractionsResponseToOpenAIResponses(ctx context.Context, modelName
 	if st.TextOutputs == nil {
 		st.TextOutputs = make(map[int]*strings.Builder)
 	}
-	return convertInteractionsEventToResponses(modelName, rawJSON, st)
+	return convertInteractionsEventToResponses(modelName, originalRequestRawJSON, requestRawJSON, rawJSON, st)
 }
 
 func ConvertInteractionsResponseToOpenAIResponsesNonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
@@ -103,7 +101,7 @@ func ConvertInteractionsResponseToOpenAIResponsesNonStream(ctx context.Context, 
 	return out
 }
 
-func convertInteractionsEventToResponses(modelName string, rawJSON []byte, st *interactionsToResponsesStreamState) [][]byte {
+func convertInteractionsEventToResponses(modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, st *interactionsToResponsesStreamState) [][]byte {
 	payload := interactionsSSEPayload(rawJSON)
 	if len(payload) == 0 {
 		return nil
@@ -121,7 +119,7 @@ func convertInteractionsEventToResponses(modelName string, rawJSON []byte, st *i
 	}
 	switch root.Get("event_type").String() {
 	case "interaction.created":
-		return [][]byte{responsesCreatedEvent(modelName, root, st)}
+		return [][]byte{responsesCreatedEvent(modelName, originalRequestRawJSON, requestRawJSON, root, st)}
 	case "step.start":
 		return interactionsStepStartToResponses(root, st)
 	case "step.delta":
@@ -178,11 +176,18 @@ func interactionsStepToResponsesOutput(step gjson.Result) ([]byte, bool) {
 	return nil, false
 }
 
-func responsesCreatedEvent(modelName string, root gjson.Result, st *interactionsToResponsesStreamState) []byte {
-	payload := []byte(`{"type":"response.created","response":{"id":"","object":"response","status":"in_progress","model":""}}`)
+func responsesCreatedEvent(modelName string, originalRequestRawJSON, requestRawJSON []byte, root gjson.Result, st *interactionsToResponsesStreamState) []byte {
+	payload := []byte(`{"type":"response.created","response":{"id":"","object":"response","status":"in_progress","model":"","output":[]}}`)
 	payload, _ = sjson.SetBytes(payload, "sequence_number", nextResponsesSeq(st))
 	payload, _ = sjson.SetBytes(payload, "response.id", firstNonEmpty(root.Get("interaction.id").String(), root.Get("id").String()))
 	payload, _ = sjson.SetBytes(payload, "response.model", modelName)
+	requestModelName := translatorcommon.RequestModelName(originalRequestRawJSON, requestRawJSON)
+	if requestModelName == "" {
+		requestModelName = modelName
+	}
+	if requestModelName != "" {
+		payload, _ = sjson.SetBytes(payload, "response.model", requestModelName)
+	}
 	return emitResponsesEvent("response.created", payload)
 }
 
