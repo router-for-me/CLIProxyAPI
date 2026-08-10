@@ -3685,11 +3685,13 @@ func assertEphemeralUserTextBlock(t *testing.T, block gjson.Result, wantText str
 	}
 }
 
-func TestClaudeBillingFingerprintUsesLatestUserText(t *testing.T) {
+func TestClaudeBillingFingerprintUsesFirstUserText(t *testing.T) {
 	const prompt = "CPA_OFFICIAL_BASEURL_CLI_SYSTEM_EMPTY_b82d4e"
+	// Fingerprint from FIRST user message: later turns change per request and
+	// bust the cached prefix (system[0] before the system[1] breakpoint).
 	payload := []byte(`{"system":"must not seed the build hash","messages":[{"role":"user","content":"old"},{"role":"assistant","content":"answer"},{"role":"user","content":[{"type":"text","text":"<system-reminder>date</system-reminder>"},{"type":"text","text":"` + prompt + `"}]}]}`)
-	if got := claudeBillingFingerprintMessageText(payload); got != prompt {
-		t.Fatalf("claudeBillingFingerprintMessageText() = %q, want %q", got, prompt)
+	if got := claudeBillingFingerprintMessageText(payload); got != "old" {
+		t.Fatalf("claudeBillingFingerprintMessageText() = %q, want %q", got, "old")
 	}
 	if got := computeFingerprint(prompt, "2.1.220"); got != "e06" {
 		t.Fatalf("computeFingerprint() = %q, want official 2.1.220 capture suffix e06", got)

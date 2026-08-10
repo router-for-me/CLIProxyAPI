@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -165,29 +166,30 @@ func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, wo
 }
 
 func claudeBillingFingerprintMessageText(payload []byte) string {
-	messageText := ""
-	gjson.GetBytes(payload, "messages").ForEach(func(_, message gjson.Result) bool {
-		if message.Get("role").String() != "user" {
+	// First user message only: stable per conversation. The billing block sits
+	// in system[0], before the system[1] cache breakpoint; last user message
+	// changes every turn and busts the cached prefix (cache_read stays 0).
+	idx := firstClaudeUserMessageIndex(payload)
+	if idx < 0 {
+		return ""
+	}
+	content := gjson.GetBytes(payload, "messages."+strconv.Itoa(idx)+".content")
+	if content.Type == gjson.String {
+		return content.String()
+	}
+	if content.IsArray() {
+		// Take the LAST text part, mirroring the pre-cloak layout where the
+		// currentDate <system-reminder> block precedes the caller's text.
+		messageText := ""
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "text" {
+				messageText = part.Get("text").String()
+			}
 			return true
-		}
-		content := message.Get("content")
-		candidate := ""
-		if content.Type == gjson.String {
-			candidate = content.String()
-		} else if content.IsArray() {
-			content.ForEach(func(_, part gjson.Result) bool {
-				if part.Get("type").String() == "text" {
-					candidate = part.Get("text").String()
-				}
-				return true
-			})
-		}
-		if candidate != "" {
-			messageText = candidate
-		}
-		return true
-	})
-	return messageText
+		})
+		return messageText
+	}
+	return ""
 }
 
 func claudeCCHFallbackBillingHeader(ctx context.Context, cfg *config.Config, payload []byte, entrypoint string) string {
