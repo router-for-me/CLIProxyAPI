@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -22,8 +23,10 @@ const (
 	defaultCodexResetCreditSpacing = 5 * time.Second
 	defaultCodexResetCreditBackoff = 10 * time.Second
 	maxCodexResetCreditRetries     = 3
+	codexResetCreditCacheTTL       = 5 * time.Minute
 	codexResetCreditHost           = "chatgpt.com"
 	codexResetCreditPath           = "/backend-api/wham/rate-limit-reset-credits"
+	codexResetCreditConsumePath    = codexResetCreditPath + "/consume"
 )
 
 const (
@@ -34,9 +37,18 @@ const (
 var antigravityOAuthTokenURL = "https://oauth2.googleapis.com/token"
 
 var (
-	codexResetCreditGate = make(chan struct{}, 1)
-	codexResetCreditLast time.Time
+	codexResetCreditGate  = make(chan struct{}, 1)
+	codexResetCreditLast  time.Time
+	codexResetCreditCache = struct {
+		sync.Mutex
+		entries map[string]codexResetCreditCacheEntry
+	}{entries: make(map[string]codexResetCreditCacheEntry)}
 )
+
+type codexResetCreditCacheEntry struct {
+	response apiCallResponse
+	storedAt time.Time
+}
 
 type apiCallRequest struct {
 	AuthIndexSnake  *string           `json:"auth_index"`
@@ -195,6 +207,15 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 	defer release()
+	resetCreditRequest := method == http.MethodGet && isCodexResetCreditURL(parsedURL)
+	if resetCreditRequest {
+		if cached, ok := loadCodexResetCreditCache(authIndex, false); ok {
+			c.JSON(http.StatusOK, cached)
+			return
+		}
+	} else if method == http.MethodPost && isCodexResetCreditConsumeURL(parsedURL) {
+		deleteCodexResetCreditCache(authIndex)
+	}
 
 	var resp *http.Response
 	for attempt := 0; ; attempt++ {
@@ -205,7 +226,7 @@ func (h *Handler) APICall(c *gin.Context) {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
 			return
 		}
-		if resp.StatusCode != http.StatusTooManyRequests || method != http.MethodGet || !isCodexResetCreditURL(parsedURL) || attempt >= maxCodexResetCreditRetries {
+		if resp.StatusCode != http.StatusTooManyRequests || !resetCreditRequest || attempt >= maxCodexResetCreditRetries {
 			break
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -232,11 +253,19 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, apiCallResponse{
+	response := apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
 		Body:       string(respBody),
-	})
+	}
+	if resetCreditRequest && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		storeCodexResetCreditCache(authIndex, response)
+	} else if resetCreditRequest && resp.StatusCode == http.StatusTooManyRequests {
+		if cached, ok := loadCodexResetCreditCache(authIndex, true); ok {
+			response = cached
+		}
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) acquireCodexResetCreditGate(ctx context.Context, parsedURL *url.URL) (func(), error) {
@@ -278,8 +307,40 @@ func isCodexResetCreditURL(parsedURL *url.URL) bool {
 	return parsedURL != nil && strings.EqualFold(parsedURL.Scheme, "https") && strings.EqualFold(parsedURL.Host, codexResetCreditHost) && parsedURL.Path == codexResetCreditPath
 }
 
+func isCodexResetCreditConsumeURL(parsedURL *url.URL) bool {
+	return parsedURL != nil && strings.EqualFold(parsedURL.Scheme, "https") && strings.EqualFold(parsedURL.Host, codexResetCreditHost) && parsedURL.Path == codexResetCreditConsumePath
+}
+
 func codexResetCreditRetryDelay(attempt int) time.Duration {
 	return defaultCodexResetCreditBackoff << attempt
+}
+
+func loadCodexResetCreditCache(authIndex string, allowExpired bool) (apiCallResponse, bool) {
+	if authIndex == "" {
+		return apiCallResponse{}, false
+	}
+	codexResetCreditCache.Lock()
+	defer codexResetCreditCache.Unlock()
+	entry, ok := codexResetCreditCache.entries[authIndex]
+	if !ok || (!allowExpired && time.Since(entry.storedAt) >= codexResetCreditCacheTTL) {
+		return apiCallResponse{}, false
+	}
+	return entry.response, true
+}
+
+func storeCodexResetCreditCache(authIndex string, response apiCallResponse) {
+	if authIndex == "" {
+		return
+	}
+	codexResetCreditCache.Lock()
+	codexResetCreditCache.entries[authIndex] = codexResetCreditCacheEntry{response: response, storedAt: time.Now()}
+	codexResetCreditCache.Unlock()
+}
+
+func deleteCodexResetCreditCache(authIndex string) {
+	codexResetCreditCache.Lock()
+	delete(codexResetCreditCache.entries, authIndex)
+	codexResetCreditCache.Unlock()
 }
 
 func firstNonEmptyString(values ...*string) string {

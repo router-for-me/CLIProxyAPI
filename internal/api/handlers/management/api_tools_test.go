@@ -71,6 +71,35 @@ func TestCodexResetCreditRetryDelay(t *testing.T) {
 	}
 }
 
+func TestCodexResetCreditCacheExpiresAndDeletes(t *testing.T) {
+	const authIndex = "codex:test"
+	deleteCodexResetCreditCache(authIndex)
+	t.Cleanup(func() { deleteCodexResetCreditCache(authIndex) })
+
+	want := apiCallResponse{StatusCode: http.StatusOK, Body: `{"credits":[]}`}
+	storeCodexResetCreditCache(authIndex, want)
+	if got, ok := loadCodexResetCreditCache(authIndex, false); !ok || got.Body != want.Body {
+		t.Fatalf("fresh cache = (%+v, %v), want body %q", got, ok, want.Body)
+	}
+
+	codexResetCreditCache.Lock()
+	entry := codexResetCreditCache.entries[authIndex]
+	entry.storedAt = time.Now().Add(-codexResetCreditCacheTTL)
+	codexResetCreditCache.entries[authIndex] = entry
+	codexResetCreditCache.Unlock()
+	if _, ok := loadCodexResetCreditCache(authIndex, false); ok {
+		t.Fatal("expired cache unexpectedly returned as fresh")
+	}
+	if _, ok := loadCodexResetCreditCache(authIndex, true); !ok {
+		t.Fatal("expired cache unavailable for rate-limit fallback")
+	}
+
+	deleteCodexResetCreditCache(authIndex)
+	if _, ok := loadCodexResetCreditCache(authIndex, true); ok {
+		t.Fatal("deleted cache still available")
+	}
+}
+
 func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
 	t.Parallel()
 
