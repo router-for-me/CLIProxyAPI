@@ -29,7 +29,17 @@ const geminiClaudeThoughtSignature = "skip_thought_signature_validator"
 //
 // Returns:
 //   - []byte: The transformed request in Gemini format.
-func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool) []byte {
+func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, stream bool) []byte {
+	return convertClaudeRequestToGemini(modelName, inputRawJSON, stream, false)
+}
+
+// ConvertClaudeRequestToGeminiWithCompat preserves assistant thinking blocks
+// with empty signatures for configured compatibility endpoints.
+func ConvertClaudeRequestToGeminiWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
+	return convertClaudeRequestToGemini(modelName, inputRawJSON, stream, true)
+}
+
+func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool, preserveEmptyThinkingBlocks bool) []byte {
 	rawJSON := inputRawJSON
 	// Build output Gemini request JSON
 	out := []byte(`{"contents":[]}`)
@@ -97,6 +107,15 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						}
 						part := []byte(`{"text":""}`)
 						part, _ = sjson.SetBytes(part, "text", text)
+						partItems = append(partItems, part)
+
+					case "thinking":
+						if !preserveEmptyThinkingBlocks {
+							return true
+						}
+						part := []byte(`{"text":"","thought":true,"thoughtSignature":""}`)
+						part, _ = sjson.SetBytes(part, "text", contentResult.Get("thinking").String())
+						part, _ = sjson.SetBytes(part, "thoughtSignature", contentResult.Get("signature").String())
 						partItems = append(partItems, part)
 
 					case "tool_use":

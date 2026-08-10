@@ -37,7 +37,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
-	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, stream)
+	body := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, stream, helps.APIKeyModelIsCompat(req))
 	var errThinking error
 	body, errThinking = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
 	if errThinking != nil {
@@ -46,7 +46,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
-	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel)
+	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel, helps.APIKeyModelIsCompat(req))
 	if errValidate := validateClaudeTokenCountRequest(body); errValidate != nil {
 		return cliproxyexecutor.Response{}, errValidate
 	}
@@ -142,7 +142,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	}
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
-	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, stream)
+	body := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, stream, helps.APIKeyModelIsCompat(req))
 	body = helps.SetStringIfDifferent(body, "model", upstreamModel)
 	var errThinking error
 	body, errThinking = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
@@ -202,7 +202,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 		mcpAliases := resolveClaudeMCPAliasOptions(ctx)
 		body, _ = prepareClaudeOAuthToolNamesForUpstream(body, mcpAliases)
 	}
-	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel)
+	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel, helps.APIKeyModelIsCompat(req))
 	// Claude Code never sends metadata on count_tokens, and Anthropic rejects the
 	// field outright there ("metadata: Extra inputs are not permitted"). The
 	// Messages path still carries the credential identity; this endpoint must not.

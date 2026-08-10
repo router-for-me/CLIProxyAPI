@@ -1,10 +1,72 @@
 package gemini
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
 )
+
+const largeInlineDataSize = 20 << 20
+
+var largeInlineDataBenchmarkOutput []byte
+
+func TestConvertGeminiRequestToGeminiReusesLargeNormalizedPayload(t *testing.T) {
+	input := largeInlineDataGeminiRequest(true)
+
+	// Assert the reuse invariant with t.Fatal rather than inside testing.Benchmark:
+	// a failing benchmark aborts before any iteration completes and yields a zero
+	// BenchmarkResult, so AllocedBytesPerOp would report 0 and silently satisfy the
+	// allocation check below exactly when the payload is being copied.
+	output := ConvertGeminiRequestToGemini("gemini-test", input, false)
+	if &output[0] != &input[0] {
+		t.Fatal("normalized request should reuse the input payload")
+	}
+	largeInlineDataBenchmarkOutput = output
+
+	result := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			largeInlineDataBenchmarkOutput = ConvertGeminiRequestToGemini("gemini-test", input, false)
+		}
+	})
+
+	if result.N == 0 {
+		t.Fatal("allocation benchmark did not complete an iteration")
+	}
+	if allocated := result.AllocedBytesPerOp(); allocated >= 1<<20 {
+		t.Fatalf("normalized 20 MiB inlineData request allocated %d bytes/op, want less than 1 MiB", allocated)
+	}
+}
+
+func BenchmarkConvertGeminiRequestToGeminiLargeInlineData(b *testing.B) {
+	for _, test := range []struct {
+		name                  string
+		includeSafetySettings bool
+	}{
+		{name: "normalized_passthrough", includeSafetySettings: true},
+		{name: "attach_default_safety", includeSafetySettings: false},
+	} {
+		b.Run(test.name, func(b *testing.B) {
+			input := largeInlineDataGeminiRequest(test.includeSafetySettings)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(input)))
+			b.ResetTimer()
+			for b.Loop() {
+				largeInlineDataBenchmarkOutput = ConvertGeminiRequestToGemini("gemini-test", input, false)
+			}
+		})
+	}
+}
+
+func largeInlineDataGeminiRequest(includeSafetySettings bool) []byte {
+	prefix := `{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"video/mp4","data":"`
+	suffix := `"}}]}]`
+	if includeSafetySettings {
+		suffix += `,"safetySettings":[]`
+	}
+	return []byte(prefix + strings.Repeat("A", largeInlineDataSize) + suffix + `}`)
+}
 
 func TestBackfillEmptyFunctionResponseNames_Single(t *testing.T) {
 	input := []byte(`{

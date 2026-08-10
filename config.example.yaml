@@ -209,6 +209,9 @@ routing:
   # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
   # execution or derived session identity, and the existing first-message hash fallback.
   # Automatic failover is always enabled when bound auth becomes unavailable.
+  # An established binding outranks credential priority: once a session is bound, that
+  # credential is kept even if a higher-priority credential recovers. Credential priority
+  # still decides cold bindings, requests without a session, and post-failover rebinding.
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
@@ -302,7 +305,8 @@ nonstream-keepalive-interval: 0
 #         alias: "gemini-flash"    # client alias mapped to the upstream model
 #         display-name: "Gemini Flash" # optional catalog display name
 #         max-context-length: 1048576 # optional: override Codex client context window metadata
-#         thinking:                  # optional: exact thinking capability for this configured model
+#         is-compat: false             # optional: preserve thinking blocks with empty signatures for compatible upstreams
+#         thinking:                    # optional: exact thinking capability for this configured model
 #           levels: ["high", "medium", "low", "none", "auto"]
 #     excluded-models:
 #       - "gemini-2.5-pro"     # exclude specific models from this provider (exact match)
@@ -328,7 +332,8 @@ nonstream-keepalive-interval: 0
 #       - name: "gemini-2.5-flash" # upstream model name
 #         alias: "native-gemini-flash" # client alias mapped to the upstream model
 #         max-context-length: 1048576 # optional: override Codex client context window metadata
-#         thinking:                  # optional: exact thinking capability for this configured model
+#         is-compat: false             # optional: preserve thinking blocks with empty signatures for compatible upstreams
+#         thinking:                    # optional: exact thinking capability for this configured model
 #           levels: ["high", "medium", "low", "none", "auto"]
 #     excluded-models:
 #       - "gemini-2.5-pro"
@@ -351,6 +356,12 @@ nonstream-keepalive-interval: 0
 #         display-name: "Codex Latest" # optional catalog display name
 #         max-context-length: 1048576 # optional: override Codex client context window metadata
 #         force-mapping: true    # optional: rewrite response model fields back to the alias
+#         # When true and codex.optimize-multi-agent-v2 is also true, convert Codex
+#         # MultiAgentV2 agent_message items into portable Responses message/user input
+#         # for third-party Responses-compatible endpoints that reject agent_message.
+#         # Default false keeps agent_message unchanged for native OpenAI/Codex endpoints.
+#         # It also preserves thinking blocks with empty signatures for compatible upstreams.
+#         is-compat: false
 #         thinking:              # optional: exact thinking capability for this configured model
 #           levels: ["xhigh", "high", "medium", "low"]
 #     excluded-models:
@@ -378,6 +389,7 @@ nonstream-keepalive-interval: 0
 #         display-name: "Grok Latest" # optional catalog display name
 #         max-context-length: 1048576 # optional: override Codex client context window metadata
 #         force-mapping: true     # optional: rewrite response model fields back to the alias
+#         is-compat: false        # optional: preserve thinking blocks with empty signatures for compatible upstreams
 #         thinking:               # optional: exact thinking capability for this configured model
 #           levels: ["xhigh", "high", "medium", "low"]
 #     excluded-models:
@@ -402,6 +414,7 @@ nonstream-keepalive-interval: 0
 #         display-name: "Claude Sonnet"      # optional catalog display name
 #         max-context-length: 1048576         # optional: override Codex client context window metadata
 #         force-mapping: true                 # optional: rewrite response model fields back to the alias
+#         is-compat: false                    # optional: preserve thinking blocks with empty signatures for compatible upstreams
 #         thinking:                           # optional: exact thinking capability for this configured model
 #           levels: ["max", "xhigh", "high", "medium", "low", "minimal", "none", "auto"]
 #     excluded-models:
@@ -488,6 +501,7 @@ nonstream-keepalive-interval: 0
 #         image: false                   # optional: set true to allow this model on /v1/images/generations and /v1/images/edits (not chat/responses image input)
 #         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients. Use [text] for upstreams that reject multimodal tool result content.
 #         output-modalities: [text]       # optional: declare output modalities when known
+#         is-compat: false                # optional: preserve Claude thinking blocks for compatible upstreams
 #         thinking:                      # optional: omit to default to levels ["low","medium","high"]
 #           levels: ["low", "medium", "high"]
 #       # You may repeat the same alias to build an internal model pool.

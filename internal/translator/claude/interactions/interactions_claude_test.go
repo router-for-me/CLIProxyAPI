@@ -27,6 +27,63 @@ func TestConvertInteractionsRequestToClaudeWithToolMessagesDirect(t *testing.T) 
 	}
 }
 
+func TestConvertInteractionsRequestToClaudeGroupsConsecutiveRoleTurns(t *testing.T) {
+	raw := []byte(`{
+		"input":[
+			{"type":"thought","content":[{"type":"thinking","thinking":"reason"}]},
+			{"type":"model_output","content":[{"type":"text","text":"answer"}]},
+			{"type":"function_call","name":"first","call_id":"call_1","arguments":{}},
+			{"type":"function_call","name":"second","call_id":"call_2","arguments":{}},
+			{"type":"function_result","call_id":"call_1","result":{"value":"one"}},
+			{"type":"function_result","call_id":"call_2","result":{"value":"two"}}
+		]
+	}`)
+	out := ConvertInteractionsRequestToClaude("claude-test", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("message count = %d, want 2. Output: %s", len(messages), string(out))
+	}
+	assistantContent := messages[0].Get("content").Array()
+	wantAssistantTypes := []string{"thinking", "text", "tool_use", "tool_use"}
+	if len(assistantContent) != len(wantAssistantTypes) {
+		t.Fatalf("assistant content count = %d, want %d. Output: %s", len(assistantContent), len(wantAssistantTypes), string(out))
+	}
+	for i, wantType := range wantAssistantTypes {
+		if got := assistantContent[i].Get("type").String(); got != wantType {
+			t.Fatalf("assistant content[%d].type = %q, want %q", i, got, wantType)
+		}
+	}
+	userContent := messages[1].Get("content").Array()
+	if len(userContent) != 2 {
+		t.Fatalf("user content count = %d, want 2. Output: %s", len(userContent), string(out))
+	}
+	for i, wantID := range []string{"call_1", "call_2"} {
+		if got := userContent[i].Get("tool_use_id").String(); got != wantID {
+			t.Fatalf("user content[%d].tool_use_id = %q, want %q", i, got, wantID)
+		}
+	}
+}
+
+func TestConvertInteractionsRequestToClaudeDoesNotMergeAcrossRoleChanges(t *testing.T) {
+	raw := []byte(`{
+		"input":[
+			{"type":"model_output","content":"first assistant"},
+			{"type":"user_input","content":"user reply"},
+			{"type":"model_output","content":"second assistant"}
+		]
+	}`)
+	out := ConvertInteractionsRequestToClaude("claude-test", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("message count = %d, want 3. Output: %s", len(messages), string(out))
+	}
+	for i, wantRole := range []string{"assistant", "user", "assistant"} {
+		if got := messages[i].Get("role").String(); got != wantRole {
+			t.Fatalf("messages[%d].role = %q, want %q", i, got, wantRole)
+		}
+	}
+}
+
 func TestConvertInteractionsRequestToClaudeStringInputDirect(t *testing.T) {
 	out := ConvertInteractionsRequestToClaude("claude-test", []byte(`{"model":"claude-test","input":"hello"}`), false)
 	if got := gjson.GetBytes(out, "messages.0.role").String(); got != "user" {

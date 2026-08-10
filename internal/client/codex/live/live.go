@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -37,6 +38,9 @@ var liveProtocolHeaders = []string{
 	"Session-Id",
 	"Thread-Id",
 	"Originator",
+	"OpenAI-Safety-Identifier",
+	"OpenAI-Organization",
+	"OpenAI-Project",
 	"X-Oai-Attestation",
 }
 
@@ -45,6 +49,7 @@ type Handler struct {
 	authManager          *auth.Manager
 	cfg                  *config.Config
 	sessions             *sessionStore
+	clientSecrets        *clientSecretStore
 	sidebandAPIBaseURL   string
 	mediaRelayMu         sync.RWMutex
 	mediaRelay           mediaRelayFactory
@@ -60,6 +65,7 @@ func NewHandler(authManager *auth.Manager, cfg *config.Config) *Handler {
 		authManager:        authManager,
 		cfg:                cfg,
 		sessions:           newSessionStore(),
+		clientSecrets:      newClientSecretStore(),
 		sidebandAPIBaseURL: defaultSidebandAPIBaseURL,
 	}
 	if errUpdate := handler.UpdateConfig(cfg); errUpdate != nil {
@@ -161,35 +167,47 @@ func (h *Handler) currentMediaRelay() (mediaRelayFactory, error) {
 
 // Close releases all active Codex live sessions.
 func (h *Handler) Close() {
-	if h != nil && h.sessions != nil {
+	if h == nil {
+		return
+	}
+	if h.sessions != nil {
 		h.sessions.closeAll("server_stopped")
+	}
+	if h.clientSecrets != nil {
+		h.clientSecrets.close()
 	}
 }
 
 // Handle forwards a WebRTC SDP bootstrap request to the Codex realtime calls endpoint.
 func (h *Handler) Handle(c *gin.Context) {
 	if h == nil || h.authManager == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex auth manager unavailable"})
+		writeLiveError(c, http.StatusServiceUnavailable, "Codex auth manager unavailable")
 		return
 	}
 
 	body, errRead := readBody(c.Request.Body)
 	if errRead != nil {
-		status := http.StatusBadRequest
+		status := clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadRequest)
 		if errors.Is(errRead, errBodyTooLarge) {
 			status = http.StatusRequestEntityTooLarge
 		}
-		c.JSON(status, gin.H{"error": errRead.Error()})
+		writeLiveError(c, status, errRead.Error())
 		return
 	}
 	upstreamBody, upstreamContentType, model, errPayload := prepareCallRequest(body, c.GetHeader("Content-Type"))
+	if errPayload == nil {
+		upstreamBody, upstreamContentType, model, errPayload = applyClientSecretCallSession(upstreamBody, upstreamContentType, model, clientSecretSession(c))
+	}
+	if errPayload == nil {
+		upstreamBody, model, errPayload = rewriteCallRequestModel(upstreamBody, upstreamContentType, model)
+	}
 	if errPayload != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errPayload.Error()})
+		writeLiveError(c, http.StatusBadRequest, errPayload.Error())
 		return
 	}
 	runtimeConfig, mediaRelay, mediaRelayErr := h.currentRuntime()
 	if mediaRelayErr != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": mediaRelayErr.Error()})
+		writeLiveError(c, http.StatusServiceUnavailable, mediaRelayErr.Error())
 		return
 	}
 	var mediaSession mediaRelaySession
@@ -197,7 +215,7 @@ func (h *Handler) Handle(c *gin.Context) {
 
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
 	selectionOpts := coreexecutor.Options{
-		Headers:         c.Request.Header.Clone(),
+		Headers:         liveSelectionHeaders(c),
 		OriginalRequest: body,
 	}
 	selection, selected, errSelect := h.selectOAuth(ctx, model, selectionOpts)
@@ -209,7 +227,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		if selection != nil {
 			selection.End("missing_auth")
 		}
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex auth unavailable"})
+		writeLiveError(c, http.StatusServiceUnavailable, "Codex auth unavailable")
 		return
 	}
 
@@ -217,7 +235,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		attemptCtx, releaseAttempt, errAttempt := selection.AttemptContext(ctx)
 		if errAttempt != nil {
 			selection.End("attempt_bind_failed")
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errAttempt.Error()})
+			writeLiveError(c, http.StatusServiceUnavailable, errAttempt.Error())
 			return
 		}
 		ctx = attemptCtx
@@ -236,7 +254,7 @@ func (h *Handler) Handle(c *gin.Context) {
 	if mediaRelay != nil {
 		clientOffer, errSDP := callRequestSDP(upstreamBody, upstreamContentType)
 		if errSDP != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": errSDP.Error()})
+			writeLiveError(c, http.StatusBadRequest, errSDP.Error())
 			return
 		}
 		var upstreamOffer string
@@ -246,7 +264,7 @@ func (h *Handler) Handle(c *gin.Context) {
 			authIndex:  selectedIndex,
 		})
 		if errSDP != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": errSDP.Error()})
+			writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errSDP, http.StatusBadGateway), errSDP.Error())
 			return
 		}
 		defer func() {
@@ -258,7 +276,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		}()
 		upstreamBody, upstreamContentType, errSDP = replaceCallRequestSDP(upstreamBody, upstreamContentType, upstreamOffer)
 		if errSDP != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": errSDP.Error()})
+			writeLiveError(c, http.StatusBadRequest, errSDP.Error())
 			return
 		}
 	}
@@ -291,7 +309,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		if selection != nil {
 			selection.End("attempt_canceled")
 		}
-		c.JSON(http.StatusRequestTimeout, gin.H{"error": errContext.Error()})
+		writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errContext, http.StatusRequestTimeout), errContext.Error())
 		return
 	}
 	resp, errRequest := performRequest(selected)
@@ -300,7 +318,7 @@ func (h *Handler) Handle(c *gin.Context) {
 			selection.End("request_failed")
 		}
 		helps.RecordAPIResponseError(ctx, runtimeConfig, errRequest)
-		c.JSON(http.StatusBadGateway, gin.H{"error": errRequest.Error()})
+		writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), errRequest.Error())
 		return
 	}
 	if selection != nil && resp.StatusCode == http.StatusUnauthorized {
@@ -318,7 +336,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		}
 		if !didRefresh || refreshed == nil {
 			selection.End("refresh_unavailable")
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Codex credential unauthorized"})
+			writeLiveError(c, http.StatusUnauthorized, "Codex credential unauthorized")
 			return
 		}
 		selected = refreshed
@@ -327,7 +345,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		if errRequest != nil {
 			selection.End("retry_failed")
 			helps.RecordAPIResponseError(ctx, runtimeConfig, errRequest)
-			c.JSON(http.StatusBadGateway, gin.H{"error": errRequest.Error()})
+			writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), errRequest.Error())
 			return
 		}
 		if resp.StatusCode == http.StatusUnauthorized {
@@ -350,7 +368,7 @@ func (h *Handler) Handle(c *gin.Context) {
 	if selection != nil {
 		if errBind := selection.Bind(closeResponseBody); errBind != nil {
 			selection.End("response_bind_failed")
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})
+			writeLiveError(c, http.StatusServiceUnavailable, errBind.Error())
 			return
 		}
 	}
@@ -361,10 +379,12 @@ func (h *Handler) Handle(c *gin.Context) {
 	if errResponse != nil {
 		helps.RecordAPIResponseError(ctx, runtimeConfig, errResponse)
 		message := "Failed to read Codex live response"
+		status := clienterror.HTTPStatusFromErrorOr(errResponse, http.StatusBadGateway)
 		if errors.Is(errResponse, errBodyTooLarge) {
 			message = "Codex live response body too large"
+			status = http.StatusBadGateway
 		}
-		c.JSON(http.StatusBadGateway, gin.H{"error": message})
+		writeLiveError(c, status, message)
 		return
 	}
 	helps.AppendAPIResponseChunk(ctx, runtimeConfig, responseBody)
@@ -374,22 +394,25 @@ func (h *Handler) Handle(c *gin.Context) {
 	if success {
 		callID = callIDFromLocation(resp.Header.Get("Location"))
 		if callID == "" && mediaSession != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "Codex live response is missing a valid call ID"})
+			writeLiveError(c, http.StatusBadGateway, "Codex live response is missing a valid call ID")
 			return
 		}
 		if mediaSession != nil {
 			mediaSession.SetCallID(callID)
 		}
+		if callID != "" && strings.HasPrefix(c.Request.URL.Path, "/v1/realtime") {
+			responseHeaders.Set("Location", "/v1/realtime/calls/"+callID)
+		}
 	}
 	if success && mediaSession != nil {
 		upstreamAnswer, errSDP := callResponseSDP(responseBody, resp.Header.Get("Content-Type"))
 		if errSDP != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": errSDP.Error()})
+			writeLiveError(c, http.StatusBadGateway, errSDP.Error())
 			return
 		}
 		downstreamAnswer, errAnswer := mediaSession.AcceptUpstreamAnswer(ctx, upstreamAnswer)
 		if errAnswer != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": errAnswer.Error()})
+			writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errAnswer, http.StatusBadGateway), errAnswer.Error())
 			return
 		}
 		responseBodyToWrite = []byte(downstreamAnswer)
@@ -400,13 +423,17 @@ func (h *Handler) Handle(c *gin.Context) {
 	if success && h.sessions != nil {
 		if callID != "" {
 			session := liveSession{authID: selected.ID, model: model, media: mediaSession}
+			session.ownerPrincipal, session.ownerProvider = requestOwner(c)
+			if principal, ok := c.Get(ClientSecretPrincipalContextKey); ok {
+				session.clientSecretPrincipal, _ = principal.(string)
+			}
 			if selection != nil {
 				if mediaSession != nil {
 					if errBind := selection.Bind(func() error {
 						return mediaSession.CloseWithReason("home_selection_closed")
 					}); errBind != nil {
 						selection.End("media_bind_failed")
-						c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})
+						writeLiveError(c, http.StatusServiceUnavailable, errBind.Error())
 						return
 					}
 				}
@@ -416,7 +443,7 @@ func (h *Handler) Handle(c *gin.Context) {
 					return nil
 				}); errBind != nil {
 					selection.End("session_drain_bind_failed")
-					c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})
+					writeLiveError(c, http.StatusServiceUnavailable, errBind.Error())
 					return
 				}
 				selection.Retain()
@@ -516,6 +543,78 @@ func prepareCallRequest(body []byte, contentType string) ([]byte, string, string
 		contentType = "application/json"
 	}
 	return body, contentType, model, nil
+}
+
+func applyClientSecretCallSession(body []byte, contentType, model string, session json.RawMessage) ([]byte, string, string, error) {
+	if len(session) == 0 {
+		return body, contentType, model, nil
+	}
+	mediaType, _, errMediaType := mime.ParseMediaType(contentType)
+	if errMediaType == nil && (strings.EqualFold(mediaType, "application/sdp") || strings.EqualFold(mediaType, "text/plain")) {
+		encoded, errEncode := encodeCallRequest(string(body), session)
+		if errEncode != nil {
+			return nil, "", "", errEncode
+		}
+		return encoded, "application/json", modelFromJSON(session), nil
+	}
+	if errMediaType != nil || !strings.EqualFold(mediaType, "application/json") {
+		return nil, "", "", errors.New("Realtime client secrets require an SDP or JSON call request")
+	}
+	var payload map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil {
+		return nil, "", "", fmt.Errorf("failed to decode Realtime call request: %w", errUnmarshal)
+	}
+	payload["session"] = append(json.RawMessage(nil), session...)
+	encoded, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		return nil, "", "", fmt.Errorf("failed to encode Realtime call request: %w", errMarshal)
+	}
+	return encoded, "application/json", modelFromJSON(session), nil
+}
+
+func rewriteCallRequestModel(body []byte, contentType, model string) ([]byte, string, error) {
+	upstreamModel := codexRealtimeModel(model)
+	mediaType, _, errMediaType := mime.ParseMediaType(contentType)
+	if errMediaType != nil || !strings.EqualFold(mediaType, "application/json") || len(bytes.TrimSpace(body)) == 0 {
+		return body, upstreamModel, nil
+	}
+	var payload map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil {
+		return nil, "", fmt.Errorf("failed to decode Realtime call request: %w", errUnmarshal)
+	}
+	changed := false
+	if sessionJSON, ok := payload["session"]; ok && len(sessionJSON) > 0 {
+		var session map[string]json.RawMessage
+		if errUnmarshal := json.Unmarshal(sessionJSON, &session); errUnmarshal != nil {
+			return nil, "", fmt.Errorf("failed to decode Realtime session: %w", errUnmarshal)
+		}
+		encodedModel, errMarshal := json.Marshal(upstreamModel)
+		if errMarshal != nil {
+			return nil, "", fmt.Errorf("failed to encode Realtime model: %w", errMarshal)
+		}
+		session["model"] = encodedModel
+		encodedSession, errMarshal := json.Marshal(session)
+		if errMarshal != nil {
+			return nil, "", fmt.Errorf("failed to encode Realtime session: %w", errMarshal)
+		}
+		payload["session"] = encodedSession
+		changed = true
+	} else if _, ok := payload["model"]; ok {
+		encodedModel, errMarshal := json.Marshal(upstreamModel)
+		if errMarshal != nil {
+			return nil, "", fmt.Errorf("failed to encode Realtime model: %w", errMarshal)
+		}
+		payload["model"] = encodedModel
+		changed = true
+	}
+	if !changed {
+		return body, upstreamModel, nil
+	}
+	encoded, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		return nil, "", fmt.Errorf("failed to encode Realtime call request: %w", errMarshal)
+	}
+	return encoded, upstreamModel, nil
 }
 
 func multipartCallRequest(body []byte, boundary string) ([]byte, string, string, error) {
@@ -701,7 +800,7 @@ func headersForLogging(source http.Header) http.Header {
 
 func callResponseHeaders(source http.Header) http.Header {
 	headers := make(http.Header)
-	for _, name := range []string{"Content-Type", "Location"} {
+	for _, name := range []string{"Content-Type", "Location", "Retry-After", "X-Request-Id", "OpenAI-Request-Id"} {
 		for _, value := range source.Values(name) {
 			headers.Add(name, value)
 		}
@@ -717,13 +816,25 @@ func writeResponseHeaders(destination, source http.Header) {
 	}
 }
 
-func writeSelectionError(c *gin.Context, err error) {
-	status := http.StatusServiceUnavailable
-	if statusError, ok := err.(interface{ StatusCode() int }); ok && statusError.StatusCode() > 0 {
-		status = statusError.StatusCode()
+func writeLiveError(c *gin.Context, status int, message string) {
+	if c != nil && c.Request != nil && c.Request.URL != nil && strings.HasPrefix(c.Request.URL.Path, "/v1/realtime") {
+		errorType := "api_error"
+		if status >= http.StatusBadRequest && status < http.StatusInternalServerError {
+			errorType = "invalid_request_error"
+		}
+		if status == http.StatusUnauthorized {
+			errorType = "authentication_error"
+		}
+		writeRealtimeError(c, status, message, errorType, "realtime_request_failed")
+		return
 	}
+	c.JSON(status, gin.H{"error": message})
+}
+
+func writeSelectionError(c *gin.Context, err error) {
+	status := clienterror.HTTPStatusFromErrorOr(err, http.StatusServiceUnavailable)
 	for _, value := range auth.SafeResponseHeaders(err).Values("Retry-After") {
 		c.Writer.Header().Add("Retry-After", value)
 	}
-	c.JSON(status, gin.H{"error": err.Error()})
+	writeLiveError(c, status, err.Error())
 }
