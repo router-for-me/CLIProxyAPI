@@ -184,4 +184,19 @@ func TestShouldEnsureOpenAICompatAssistantReasoningContentDisambiguation(t *test
 	if ShouldEnsureOpenAICompatAssistantReasoningContent(compat, "deepseek-v3", "alias-standard") {
 		t.Fatalf("expected standard alias to disable fill-missing-reasoning-history")
 	}
+
+	compatPrefix := &config.OpenAICompatibility{
+		Prefix: "team",
+		Models: []config.OpenAICompatibilityModel{
+			{Name: "deepseek-v3", Alias: "alias-optin", FillMissingReasoningHistory: true},
+			{Name: "deepseek-v3", Alias: "alias-standard", FillMissingReasoningHistory: false},
+		},
+	}
+
+	if !ShouldEnsureOpenAICompatAssistantReasoningContent(compatPrefix, "deepseek-v3", "team/alias-optin") {
+		t.Fatalf("expected prefixed opt-in alias to enable fill-missing-reasoning-history")
+	}
+	if ShouldEnsureOpenAICompatAssistantReasoningContent(compatPrefix, "deepseek-v3", "team/alias-standard") {
+		t.Fatalf("expected prefixed standard alias to disable fill-missing-reasoning-history")
+	}
 }

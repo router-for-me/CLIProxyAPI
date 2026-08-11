@@ -36,8 +36,11 @@ func ShouldEnsureOpenAICompatAssistantReasoningContent(compat *config.OpenAIComp
 		return true
 	}
 
-	normUpstream := normalizeOpenAICompatibilityModelName(upstreamModel)
-	normRequested := normalizeOpenAICompatibilityModelName(requestedModel)
+	rawUpstream := stripProviderPrefix(upstreamModel, compat.Prefix)
+	rawRequested := stripProviderPrefix(requestedModel, compat.Prefix)
+
+	normUpstream := normalizeOpenAICompatibilityModelName(rawUpstream)
+	normRequested := normalizeOpenAICompatibilityModelName(rawRequested)
 
 	if normUpstream != "" && normRequested != "" {
 		for i := range compat.Models {
@@ -49,11 +52,23 @@ func ShouldEnsureOpenAICompatAssistantReasoningContent(compat *config.OpenAIComp
 		}
 	}
 
-	if fill, matched := openAICompatibilityModelFillsReasoning(compat.Models, upstreamModel); matched {
+	if fill, matched := openAICompatibilityModelFillsReasoning(compat.Models, rawUpstream); matched {
 		return fill
 	}
-	fill, _ := openAICompatibilityModelFillsReasoning(compat.Models, requestedModel)
+	fill, _ := openAICompatibilityModelFillsReasoning(compat.Models, rawRequested)
 	return fill
+}
+
+func stripProviderPrefix(model, prefix string) string {
+	model = strings.TrimSpace(model)
+	prefix = strings.TrimSpace(prefix)
+	if prefix != "" {
+		p := prefix + "/"
+		if len(model) > len(p) && strings.EqualFold(model[:len(p)], p) {
+			return strings.TrimSpace(model[len(p):])
+		}
+	}
+	return model
 }
 
 // EnsureOpenAICompatAssistantReasoningContent ensures every assistant message in history
