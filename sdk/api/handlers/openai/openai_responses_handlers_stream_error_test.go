@@ -14,8 +14,9 @@ import (
 )
 
 // TestForwardResponsesStreamExposesOnlyClientErrors pins the SSE side: only
-// request-shape failures reach the client. Credential, quota and transport
-// failures end the stream silently so the client retries on its own.
+// request-shape failures reach the client verbatim. Credential, quota and
+// transport failures are replaced with a generic terminal error that does not
+// leak upstream error details.
 func TestForwardResponsesStreamExposesOnlyClientErrors(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -24,12 +25,14 @@ func TestForwardResponsesStreamExposesOnlyClientErrors(t *testing.T) {
 		status      int
 		message     string
 		wantExposed bool
+		wantText    string
 	}{
 		{
 			name:        "bad request",
 			status:      http.StatusBadRequest,
 			message:     `{"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`,
 			wantExposed: true,
+			wantText:    "blocked",
 		},
 		{
 			// Observed in production: the same cyber_policy rejection arrives with 502
@@ -38,12 +41,14 @@ func TestForwardResponsesStreamExposesOnlyClientErrors(t *testing.T) {
 			status:      http.StatusBadGateway,
 			message:     `{"error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk.","param":null}}`,
 			wantExposed: true,
+			wantText:    "This content was flagged for possible cybersecurity risk.",
 		},
 		{
 			name:        "context length exceeded behind bad gateway status",
 			status:      http.StatusBadGateway,
 			message:     `{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window."}}`,
 			wantExposed: true,
+			wantText:    "Your input exceeds the context window.",
 		},
 		{name: "conflict", status: http.StatusConflict, message: "conflict", wantExposed: true},
 		{name: "message too big", status: http.StatusRequestEntityTooLarge, message: "too large", wantExposed: true},
@@ -78,11 +83,19 @@ func TestForwardResponsesStreamExposesOnlyClientErrors(t *testing.T) {
 
 			h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 			body := recorder.Body.String()
-			exposed := strings.Contains(body, `"type":"error"`)
-			if exposed != tc.wantExposed {
-				t.Fatalf("error exposed = %t, want %t: %q", exposed, tc.wantExposed, body)
+			wantText := tc.wantText
+			if wantText == "" {
+				wantText = tc.message
 			}
-			if exposed && strings.Contains(body, `"error":{`) {
+			rawExposed := strings.Contains(body, wantText)
+			if rawExposed != tc.wantExposed {
+				t.Fatalf("upstream error exposed = %t, want %t: %q", rawExposed, tc.wantExposed, body)
+			}
+			genericExposed := strings.Contains(body, responsesStreamPrematureCloseMessage)
+			if genericExposed == tc.wantExposed {
+				t.Fatalf("generic failure presence = %t, want %t: %q", genericExposed, !tc.wantExposed, body)
+			}
+			if rawExposed && strings.Contains(body, `"error":{`) {
 				t.Fatalf("expected streaming error chunk, got HTTP error body: %q", body)
 			}
 		})

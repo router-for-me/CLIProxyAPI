@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -52,6 +53,7 @@ type responsesSSEFramer struct {
 	outputItems          map[int][]byte
 	outputOrder          []int
 	unindexedOutputItems [][]byte
+	sawTerminalEvent     bool
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
@@ -98,6 +100,10 @@ func (f *responsesSSEFramer) Flush(w io.Writer) {
 	f.pending = f.pending[:0]
 }
 
+func (f *responsesSSEFramer) sawResponsesTerminalEvent() bool {
+	return f != nil && f.sawTerminalEvent
+}
+
 func (f *responsesSSEFramer) writeFrame(w io.Writer, frame []byte) {
 	writeResponsesSSEChunk(w, f.repairFrame(frame))
 }
@@ -108,14 +114,18 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 		return frame
 	}
 
-	switch gjson.GetBytes(payload, "type").String() {
-	case "response.output_item.done":
-		f.recordOutputItem(payload)
-	case "response.completed":
+	switch event := gjson.GetBytes(payload, "type").String(); event {
+	case "response.completed", "response.incomplete", "response.failed", "error":
+		f.sawTerminalEvent = true
+		if event != "response.completed" {
+			return frame
+		}
 		repaired := f.repairCompletedPayload(payload)
 		if !bytes.Equal(repaired, payload) {
 			return responsesSSEFrameWithData(frame, repaired)
 		}
+	case "response.output_item.done":
+		f.recordOutputItem(payload)
 	}
 	return frame
 }
@@ -553,7 +563,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				// Stream closed without data? Send headers and done.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				_, _ = c.Writer.Write([]byte("\n"))
+				writeResponsesStreamGenericFailure(c, framer, responsesStreamPrematureCloseMessage)
 				flusher.Flush()
 				cliCancel(nil)
 				return
@@ -591,6 +601,22 @@ func isCodexResponsesClientRequest(c *gin.Context) bool {
 	}
 }
 
+const responsesStreamPrematureCloseMessage = "upstream stream ended before a terminal response event"
+
+// writeResponsesStreamGenericFailure signals a terminal failure without leaking upstream error details.
+func writeResponsesStreamGenericFailure(c *gin.Context, framer *responsesSSEFramer, message string) {
+	if framer != nil {
+		framer.Flush(c.Writer)
+	}
+	if isCodexResponsesClientRequest(c) {
+		chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(http.StatusInternalServerError, message, 0)
+		_, _ = fmt.Fprintf(c.Writer, "\nevent: response.failed\ndata: %s\n\n", string(chunk))
+		return
+	}
+	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(http.StatusInternalServerError, message, 0)
+	_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
+}
+
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
 	if framer == nil {
 		framer = &responsesSSEFramer{}
@@ -602,6 +628,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			framer.Flush(c.Writer)
 			if !shouldExposeResponsesUpstreamError(errMsg) {
+				if errMsg != nil && errMsg.Error != nil {
+					log.Warnf("responses http stream: hiding upstream terminal error from client: %v", errMsg.Error)
+				}
+				writeResponsesStreamGenericFailure(c, framer, responsesStreamPrematureCloseMessage)
 				return
 			}
 			status := http.StatusInternalServerError
@@ -622,6 +652,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 		},
 		WriteDone: func() {
 			framer.Flush(c.Writer)
+			if !framer.sawResponsesTerminalEvent() {
+				log.Warnf("responses http stream: upstream ended without a terminal response event")
+				writeResponsesStreamGenericFailure(c, framer, responsesStreamPrematureCloseMessage)
+				return
+			}
 			_, _ = c.Writer.Write([]byte("\n"))
 		},
 	})

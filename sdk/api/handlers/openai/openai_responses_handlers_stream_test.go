@@ -171,8 +171,11 @@ func TestForwardResponsesStreamReassemblesSplitSSEEventChunks(t *testing.T) {
 
 	got := strings.TrimSuffix(recorder.Body.String(), "\n")
 	want := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n"
-	if got != want {
-		t.Fatalf("unexpected split-event framing.\nGot:  %q\nWant: %q", got, want)
+	if !strings.HasPrefix(got, want) {
+		t.Fatalf("unexpected split-event framing.\nGot:  %q\nWant prefix: %q", got, want)
+	}
+	if !strings.Contains(got, "event: error") || !strings.Contains(got, responsesStreamPrematureCloseMessage) {
+		t.Fatalf("expected terminal failure after non-terminal event: %q", got)
 	}
 }
 
@@ -189,8 +192,11 @@ func TestForwardResponsesStreamPreservesValidFullSSEEventChunks(t *testing.T) {
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
 	got := strings.TrimSuffix(recorder.Body.String(), "\n")
-	if got != string(chunk) {
-		t.Fatalf("unexpected full-event framing.\nGot:  %q\nWant: %q", got, string(chunk))
+	if !strings.HasPrefix(got, string(chunk)) {
+		t.Fatalf("unexpected full-event framing.\nGot:  %q\nWant prefix: %q", got, string(chunk))
+	}
+	if !strings.Contains(got, "event: error") || !strings.Contains(got, responsesStreamPrematureCloseMessage) {
+		t.Fatalf("expected terminal failure after non-terminal event: %q", got)
 	}
 }
 
@@ -208,8 +214,11 @@ func TestForwardResponsesStreamBuffersSplitDataPayloadChunks(t *testing.T) {
 
 	got := recorder.Body.String()
 	want := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n\n"
-	if got != want {
-		t.Fatalf("unexpected split-data framing.\nGot:  %q\nWant: %q", got, want)
+	if !strings.HasPrefix(got, want) {
+		t.Fatalf("unexpected split-data framing.\nGot:  %q\nWant prefix: %q", got, want)
+	}
+	if !strings.Contains(got, "event: error") || !strings.Contains(got, responsesStreamPrematureCloseMessage) {
+		t.Fatalf("expected terminal failure after non-terminal event: %q", got)
 	}
 }
 
@@ -233,7 +242,56 @@ func TestForwardResponsesStreamDropsIncompleteTrailingDataChunkOnFlush(t *testin
 
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
-	if got := recorder.Body.String(); got != "\n" {
+	got := recorder.Body.String()
+	if strings.Contains(got, "response.created") {
 		t.Fatalf("expected incomplete trailing data to be dropped on flush.\nGot: %q", got)
+	}
+	if !strings.Contains(got, "event: error") || !strings.Contains(got, responsesStreamPrematureCloseMessage) {
+		t.Fatalf("expected terminal failure after dropped chunk: %q", got)
+	}
+}
+
+func TestForwardResponsesStreamSendsErrorWhenUpstreamEndsWithoutTerminalEvent(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 1)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte(`data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs-1","summary":[{"type":"summary_text","text":"thinking"}]}}`)
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+	body := recorder.Body.String()
+	if !strings.Contains(body, "event: error") {
+		t.Fatalf("missing terminal error event: %q", body)
+	}
+	if !strings.Contains(body, responsesStreamPrematureCloseMessage) {
+		t.Fatalf("missing premature-close message: %q", body)
+	}
+	if strings.Contains(body, "event: response.failed") || strings.Contains(body, `"type":"response.completed"`) {
+		t.Fatalf("unexpected completed/failed event for non-Codex client: %q", body)
+	}
+}
+
+func TestForwardResponsesStreamSendsFailureWhenUpstreamEndsWithoutTerminalEvent(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+	c.Request.Header.Set("User-Agent", "Codex Desktop/26.803.41515")
+
+	data := make(chan []byte, 1)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte(`data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs-1","summary":[{"type":"summary_text","text":"thinking"}]}}`)
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+	body := recorder.Body.String()
+	if !strings.Contains(body, "event: response.failed") {
+		t.Fatalf("missing response.failed event: %q", body)
+	}
+	if !strings.Contains(body, responsesStreamPrematureCloseMessage) {
+		t.Fatalf("missing premature-close message: %q", body)
+	}
+	if strings.Contains(body, "event: error") || strings.Contains(body, `"type":"response.completed"`) {
+		t.Fatalf("unexpected completed/legacy error event for Codex: %q", body)
 	}
 }
