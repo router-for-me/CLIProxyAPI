@@ -2271,6 +2271,74 @@ func TestRefreshAuthForRequestAppliesRefreshReturnedScalarFields(t *testing.T) {
 	}
 }
 
+func TestAuthCredentialFingerprintCanonicalizesBaseURL(t *testing.T) {
+	left := &Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			AttributeAPIKey: "stable-api-key",
+			"base_url":      "HTTPS://API.EXAMPLE.COM/v1/",
+		},
+	}
+	right := left.Clone()
+	right.Attributes["base_url"] = "https://api.example.com/v1"
+
+	leftFingerprint, leftOK := authCredentialFingerprint(left)
+	rightFingerprint, rightOK := authCredentialFingerprint(right)
+	if !leftOK || !rightOK {
+		t.Fatalf("fingerprint availability = (%t, %t), want both true", leftOK, rightOK)
+	}
+	if leftFingerprint != rightFingerprint {
+		t.Fatal("equivalent base_url casing/trailing slash changed credential revision")
+	}
+}
+
+func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterBaseURLReplacement(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	oldAuth := &Auth{
+		ID:       "openai-base-url.json",
+		Provider: "openai-compatibility",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			AttributeAPIKey: "stable-api-key",
+			"base_url":      "https://old-api.example.com/v1",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), oldAuth); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	selected, okSelected := m.GetByID(oldAuth.ID)
+	if !okSelected || selected == nil {
+		t.Fatal("selected auth missing")
+	}
+
+	replacement := selected.Clone()
+	replacement.Attributes["base_url"] = "https://replacement-api.example.com/v1"
+	if _, errUpdate := m.Update(context.Background(), replacement); errUpdate != nil {
+		t.Fatalf("Update replacement: %v", errUpdate)
+	}
+
+	m.recordExecutionResult(context.Background(), Result{
+		AuthID:   oldAuth.ID,
+		Provider: oldAuth.Provider,
+		Model:    "gpt-test",
+		Error:    &Error{HTTPStatus: http.StatusUnauthorized, Message: "old endpoint unauthorized"},
+	}, selected, false)
+
+	current, okCurrent := m.GetByID(oldAuth.ID)
+	if !okCurrent || current == nil {
+		t.Fatal("current auth missing")
+	}
+	if gotEndpoint := authAttribute(current, "base_url"); gotEndpoint != "https://replacement-api.example.com/v1" {
+		t.Fatalf("current base_url = %q, want replacement endpoint", gotEndpoint)
+	}
+	if current.Status != StatusActive || current.Unavailable || current.LastError != nil || current.StatusMessage != "" {
+		t.Fatalf("stale endpoint result changed replacement auth: %#v", current)
+	}
+	if len(current.ModelStates) != 0 {
+		t.Fatalf("stale endpoint result created model states: %#v", current.ModelStates)
+	}
+}
+
 func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterAPIKeyReplacement(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	oldAuth := &Auth{

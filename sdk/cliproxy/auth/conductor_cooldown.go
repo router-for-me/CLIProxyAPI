@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"reflect"
 	"sort"
 	"strings"
@@ -781,6 +782,20 @@ func authHeaderCarriesCredential(name string) bool {
 	}
 }
 
+func authCredentialEndpoint(auth *Auth) string {
+	endpoint := strings.TrimRight(strings.TrimSpace(authAttribute(auth, "base_url")), "/")
+	if endpoint == "" {
+		return ""
+	}
+	parsed, errParse := url.Parse(endpoint)
+	if errParse != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return endpoint
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	return parsed.String()
+}
+
 func authCredentialFingerprint(auth *Auth) ([sha256.Size]byte, bool) {
 	if auth == nil {
 		return [sha256.Size]byte{}, false
@@ -844,6 +859,9 @@ func authCredentialFingerprint(auth *Auth) ([sha256.Size]byte, bool) {
 	parts := []string{
 		"provider=" + strings.ToLower(strings.TrimSpace(auth.Provider)),
 		"kind=" + kind,
+	}
+	if endpoint := authCredentialEndpoint(auth); endpoint != "" {
+		parts = append(parts, "endpoint="+endpoint)
 	}
 	credentialCount := 0
 	appendCredential := func(name, value string) {
