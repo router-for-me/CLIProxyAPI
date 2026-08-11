@@ -169,3 +169,19 @@ func TestEnsureOpenAICompatAssistantReasoningContent(t *testing.T) {
 		t.Fatalf("messages.3.reasoning_content = %q, want existing reasoning", res3.String())
 	}
 }
+
+func TestShouldEnsureOpenAICompatAssistantReasoningContentDisambiguation(t *testing.T) {
+	compat := &config.OpenAICompatibility{
+		Models: []config.OpenAICompatibilityModel{
+			{Name: "deepseek-v3", Alias: "alias-optin", FillMissingReasoningHistory: true},
+			{Name: "deepseek-v3", Alias: "alias-standard", FillMissingReasoningHistory: false},
+		},
+	}
+
+	if !ShouldEnsureOpenAICompatAssistantReasoningContent(compat, "deepseek-v3", "alias-optin") {
+		t.Fatalf("expected opt-in alias to enable fill-missing-reasoning-history")
+	}
+	if ShouldEnsureOpenAICompatAssistantReasoningContent(compat, "deepseek-v3", "alias-standard") {
+		t.Fatalf("expected standard alias to disable fill-missing-reasoning-history")
+	}
+}

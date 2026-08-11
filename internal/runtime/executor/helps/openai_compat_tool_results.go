@@ -36,6 +36,19 @@ func ShouldEnsureOpenAICompatAssistantReasoningContent(compat *config.OpenAIComp
 		return true
 	}
 
+	normUpstream := normalizeOpenAICompatibilityModelName(upstreamModel)
+	normRequested := normalizeOpenAICompatibilityModelName(requestedModel)
+
+	if normUpstream != "" && normRequested != "" {
+		for i := range compat.Models {
+			mName := normalizeOpenAICompatibilityModelName(compat.Models[i].Name)
+			mAlias := normalizeOpenAICompatibilityModelName(compat.Models[i].Alias)
+			if mName != "" && mAlias != "" && strings.EqualFold(normUpstream, mName) && strings.EqualFold(normRequested, mAlias) {
+				return compat.Models[i].FillMissingReasoningHistory
+			}
+		}
+	}
+
 	if fill, matched := openAICompatibilityModelFillsReasoning(compat.Models, upstreamModel); matched {
 		return fill
 	}
