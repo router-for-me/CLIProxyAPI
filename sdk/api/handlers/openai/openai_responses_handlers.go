@@ -109,6 +109,11 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 	}
 
 	switch gjson.GetBytes(payload, "type").String() {
+	case "keepalive":
+		// The Codex backend may emit proprietary heartbeat events that are not
+		// part of the public Responses event schema. Drop the complete SSE frame
+		// so strict downstream clients do not attempt to deserialize it.
+		return nil
 	case "response.output_item.done":
 		f.recordOutputItem(payload)
 	case "response.completed":
