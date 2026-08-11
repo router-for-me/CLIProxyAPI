@@ -2271,6 +2271,175 @@ func TestRefreshAuthForRequestAppliesRefreshReturnedScalarFields(t *testing.T) {
 	}
 }
 
+func TestAuthCredentialFingerprintUsesAntigravityAttributeEndpointPrecedence(t *testing.T) {
+	left := &Auth{
+		Provider: "antigravity",
+		Attributes: map[string]string{
+			"base_url": "https://attribute.example.com",
+		},
+		Metadata: map[string]any{
+			"access_token": "stable-token",
+			"base_url":     "https://old-metadata.example.com",
+		},
+	}
+	right := left.Clone()
+	right.Metadata["base_url"] = "https://new-metadata.example.com"
+
+	leftFingerprint, leftOK := authCredentialFingerprint(left)
+	rightFingerprint, rightOK := authCredentialFingerprint(right)
+	if !leftOK || !rightOK {
+		t.Fatalf("fingerprint availability = (%t, %t), want both true", leftOK, rightOK)
+	}
+	if leftFingerprint != rightFingerprint {
+		t.Fatal("shadowed Antigravity metadata base_url changed credential revision")
+	}
+}
+
+func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterAntigravityMetadataBaseURLReplacement(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	oldAuth := &Auth{
+		ID:       "antigravity-metadata-base-url.json",
+		Provider: "antigravity",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token": "stable-token",
+			"base_url":     "https://old-antigravity.example.com",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), oldAuth); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	selected, okSelected := m.GetByID(oldAuth.ID)
+	if !okSelected || selected == nil {
+		t.Fatal("selected auth missing")
+	}
+
+	replacement := selected.Clone()
+	replacement.Metadata["base_url"] = "https://replacement-antigravity.example.com"
+	if _, errUpdate := m.Update(context.Background(), replacement); errUpdate != nil {
+		t.Fatalf("Update replacement: %v", errUpdate)
+	}
+
+	m.recordExecutionResult(context.Background(), Result{
+		AuthID:   oldAuth.ID,
+		Provider: oldAuth.Provider,
+		Model:    "gemini-test",
+		Error:    &Error{HTTPStatus: http.StatusUnauthorized, Message: "old Antigravity endpoint unauthorized"},
+	}, selected, false)
+
+	current, okCurrent := m.GetByID(oldAuth.ID)
+	if !okCurrent || current == nil {
+		t.Fatal("current auth missing")
+	}
+	if gotEndpoint := authMetadataString(current, "base_url"); gotEndpoint != "https://replacement-antigravity.example.com" {
+		t.Fatalf("current metadata base_url = %q, want replacement endpoint", gotEndpoint)
+	}
+	if current.Status != StatusActive || current.Unavailable || current.LastError != nil || current.StatusMessage != "" {
+		t.Fatalf("stale metadata-endpoint result changed replacement auth: %#v", current)
+	}
+	if len(current.ModelStates) != 0 {
+		t.Fatalf("stale metadata-endpoint result created model states: %#v", current.ModelStates)
+	}
+}
+
+func TestAuthCredentialFingerprintIgnoresCodexMetadataAccountForAPIKeyAuth(t *testing.T) {
+	left := &Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			AttributeAPIKey: "stable-api-key",
+		},
+		Metadata: map[string]any{"account_id": "old-account"},
+	}
+	right := left.Clone()
+	right.Metadata["account_id"] = "new-account"
+
+	leftFingerprint, leftOK := authCredentialFingerprint(left)
+	rightFingerprint, rightOK := authCredentialFingerprint(right)
+	if !leftOK || !rightOK {
+		t.Fatalf("fingerprint availability = (%t, %t), want both true", leftOK, rightOK)
+	}
+	if leftFingerprint != rightFingerprint {
+		t.Fatal("Codex API-key auth fingerprint included an unsent metadata account_id")
+	}
+}
+
+func TestAuthCredentialFingerprintUsesCodexCustomAccountHeaderPrecedence(t *testing.T) {
+	left := &Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"header:ChatGPT-Account-ID": "custom-account",
+		},
+		Metadata: map[string]any{
+			"access_token": "stable-token",
+			"account_id":   "old-metadata-account",
+		},
+	}
+	right := left.Clone()
+	right.Metadata["account_id"] = "new-metadata-account"
+
+	leftFingerprint, leftOK := authCredentialFingerprint(left)
+	rightFingerprint, rightOK := authCredentialFingerprint(right)
+	if !leftOK || !rightOK {
+		t.Fatalf("fingerprint availability = (%t, %t), want both true", leftOK, rightOK)
+	}
+	if leftFingerprint != rightFingerprint {
+		t.Fatal("shadowed Codex metadata account_id changed credential revision")
+	}
+
+	right.Attributes["header:ChatGPT-Account-ID"] = "rotated-custom-account"
+	rotatedFingerprint, rotatedOK := authCredentialFingerprint(right)
+	if !rotatedOK || rotatedFingerprint == leftFingerprint {
+		t.Fatal("rotating effective Codex custom account header did not change credential revision")
+	}
+}
+
+func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterCodexAccountReplacement(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	oldAuth := &Auth{
+		ID:       "codex-account-scope.json",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token": "stable-token",
+			"account_id":   "old-account",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), oldAuth); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	selected, okSelected := m.GetByID(oldAuth.ID)
+	if !okSelected || selected == nil {
+		t.Fatal("selected auth missing")
+	}
+
+	replacement := selected.Clone()
+	replacement.Metadata["account_id"] = "replacement-account"
+	if _, errUpdate := m.Update(context.Background(), replacement); errUpdate != nil {
+		t.Fatalf("Update replacement: %v", errUpdate)
+	}
+
+	m.recordExecutionResult(context.Background(), Result{
+		AuthID:   oldAuth.ID,
+		Provider: oldAuth.Provider,
+		Model:    "gpt-test",
+		Error:    &Error{HTTPStatus: http.StatusUnauthorized, Message: "old Codex account unauthorized"},
+	}, selected, false)
+
+	current, okCurrent := m.GetByID(oldAuth.ID)
+	if !okCurrent || current == nil {
+		t.Fatal("current auth missing")
+	}
+	if gotAccount := authMetadataString(current, "account_id"); gotAccount != "replacement-account" {
+		t.Fatalf("current account_id = %q, want replacement account", gotAccount)
+	}
+	if current.Status != StatusActive || current.Unavailable || current.LastError != nil || current.StatusMessage != "" {
+		t.Fatalf("stale account-scope result changed replacement auth: %#v", current)
+	}
+	if len(current.ModelStates) != 0 {
+		t.Fatalf("stale account-scope result created model states: %#v", current.ModelStates)
+	}
+}
+
 func TestAuthCredentialFingerprintCanonicalizesBaseURL(t *testing.T) {
 	left := &Auth{
 		Provider: "openai-compatibility",

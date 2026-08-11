@@ -783,17 +783,78 @@ func authHeaderCarriesCredential(name string) bool {
 }
 
 func authCredentialEndpoint(auth *Auth) string {
-	endpoint := strings.TrimRight(strings.TrimSpace(authAttribute(auth, "base_url")), "/")
+	if auth == nil {
+		return ""
+	}
+	endpoint := strings.TrimSpace(authAttribute(auth, "base_url"))
+	if endpoint == "" && strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
+		// Antigravity resolves metadata base_url only when the attribute is absent.
+		endpoint = strings.TrimSpace(authMetadataString(auth, "base_url"))
+	}
 	if endpoint == "" {
 		return ""
 	}
 	parsed, errParse := url.Parse(endpoint)
 	if errParse != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return endpoint
+		return strings.TrimRight(endpoint, "/")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = strings.TrimRight(parsed.RawPath, "/")
 	return parsed.String()
+}
+
+func normalizeAuthorizationScopeHeaderName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	replacer := strings.NewReplacer("-", "", "_", "", " ", "")
+	return replacer.Replace(name)
+}
+
+func authCustomHeaderValues(auth *Auth, normalizedName string) []string {
+	if auth == nil || len(auth.Attributes) == 0 || normalizedName == "" {
+		return nil
+	}
+	unique := make(map[string]struct{})
+	for key, value := range auth.Attributes {
+		if !strings.HasPrefix(key, "header:") {
+			continue
+		}
+		name := strings.TrimPrefix(key, "header:")
+		if normalizeAuthorizationScopeHeaderName(name) != normalizedName {
+			continue
+		}
+		if value = strings.TrimSpace(value); value != "" {
+			unique[value] = struct{}{}
+		}
+	}
+	values := make([]string, 0, len(unique))
+	for value := range unique {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	return values
+}
+
+func authAuthorizationScopeMaterial(auth *Auth) []string {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return nil
+	}
+	if customAccounts := authCustomHeaderValues(auth, "chatgptaccountid"); len(customAccounts) > 0 {
+		material := make([]string, 0, len(customAccounts))
+		for _, accountID := range customAccounts {
+			material = append(material, "account_header="+accountID)
+		}
+		return material
+	}
+	// The Codex executor suppresses its metadata account header for API-key auth.
+	if strings.TrimSpace(authAttribute(auth, AttributeAPIKey)) != "" {
+		return nil
+	}
+	if accountID := strings.TrimSpace(authMetadataString(auth, "account_id")); accountID != "" {
+		return []string{"account_id=" + accountID}
+	}
+	return nil
 }
 
 func authCredentialFingerprint(auth *Auth) ([sha256.Size]byte, bool) {
@@ -862,6 +923,9 @@ func authCredentialFingerprint(auth *Auth) ([sha256.Size]byte, bool) {
 	}
 	if endpoint := authCredentialEndpoint(auth); endpoint != "" {
 		parts = append(parts, "endpoint="+endpoint)
+	}
+	for _, scope := range authAuthorizationScopeMaterial(auth) {
+		parts = append(parts, "scope="+scope)
 	}
 	credentialCount := 0
 	appendCredential := func(name, value string) {
