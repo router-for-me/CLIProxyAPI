@@ -2317,6 +2317,56 @@ func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterAPIKeyReplacement(t *
 	}
 }
 
+func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterKimiMetadataTokenRotationWithAPIKey(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	oldAuth := &Auth{
+		ID:       "kimi-metadata-token-with-api-key.json",
+		Provider: "kimi",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			AttributeAPIKey: "stable-api-key",
+		},
+		Metadata: map[string]any{
+			"access_token":  "old-metadata-token",
+			"refresh_token": "stable-refresh-token",
+		},
+	}
+	if _, err := m.Register(context.Background(), oldAuth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	selected, okSelected := m.GetByID(oldAuth.ID)
+	if !okSelected || selected == nil {
+		t.Fatal("selected auth missing")
+	}
+
+	replacement := selected.Clone()
+	replacement.Metadata["access_token"] = "replacement-metadata-token"
+	if _, err := m.Update(context.Background(), replacement); err != nil {
+		t.Fatalf("Update replacement: %v", err)
+	}
+
+	m.recordExecutionResult(context.Background(), Result{
+		AuthID:   oldAuth.ID,
+		Provider: oldAuth.Provider,
+		Model:    "kimi-test",
+		Error:    &Error{HTTPStatus: http.StatusUnauthorized, Message: "old Kimi metadata token unauthorized"},
+	}, selected, false)
+
+	current, okCurrent := m.GetByID(oldAuth.ID)
+	if !okCurrent || current == nil {
+		t.Fatal("current auth missing")
+	}
+	if got := authMetadataString(current, "access_token"); got != "replacement-metadata-token" {
+		t.Fatalf("current metadata access token = %q, want replacement token", got)
+	}
+	if current.Status != StatusActive || current.Unavailable || current.LastError != nil || current.StatusMessage != "" {
+		t.Fatalf("stale Kimi metadata-token result changed replacement auth: %#v", current)
+	}
+	if len(current.ModelStates) != 0 {
+		t.Fatalf("stale Kimi metadata-token result created model states: %#v", current.ModelStates)
+	}
+}
+
 func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterKimiAttributeTokenRotation(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	oldAuth := &Auth{

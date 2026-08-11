@@ -549,6 +549,7 @@ type pluginCredentialHeaderEntry struct {
 
 func pluginCredentialMetadata(metadata map[string]any) map[string]any {
 	out := make(map[string]any)
+	credentialValues := make(map[string][]pluginCredentialHeaderEntry)
 	credentialHeaders := make(map[string][]pluginCredentialHeaderEntry)
 	keys := make([]string, 0, len(metadata))
 	for key := range metadata {
@@ -580,12 +581,24 @@ func pluginCredentialMetadata(metadata map[string]any) map[string]any {
 			continue
 		}
 		if pluginCredentialMetadataKey(key) {
-			out[normalizePluginMetadataKey(key)] = value
+			canonical, errMarshal := json.Marshal(value)
+			if errMarshal != nil {
+				canonical = []byte(fmt.Sprintf("%T:%v", value, value))
+			}
+			canonicalKey := normalizePluginMetadataKey(key)
+			credentialValues[canonicalKey] = append(credentialValues[canonicalKey], pluginCredentialHeaderEntry{
+				source:    strings.ToLower(strings.TrimSpace(key)),
+				value:     value,
+				canonical: string(canonical),
+			})
 			continue
 		}
 		if filtered, ok := filterPluginCredentialMetadata(value); ok {
 			out[key] = filtered
 		}
+	}
+	for key, value := range canonicalPluginCredentialHeaders(credentialValues) {
+		out[key] = value
 	}
 	if canonicalHeaders := canonicalPluginCredentialHeaders(credentialHeaders); len(canonicalHeaders) > 0 {
 		out["headers"] = canonicalHeaders

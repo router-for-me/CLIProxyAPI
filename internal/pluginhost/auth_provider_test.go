@@ -538,6 +538,28 @@ func TestPluginTokenStoragePersistenceSnapshotIsDetached(t *testing.T) {
 	}
 }
 
+func TestPluginTokenStorageFingerprintPreservesCollidingTopLevelCredentialKeys(t *testing.T) {
+	storage := &pluginTokenStorage{
+		provider: "plugin-provider",
+		rawJSON:  []byte(`{"provider_state":"stable"}`),
+	}
+	storage.SetMetadata(map[string]any{
+		"apiToken":  "first-token",
+		"api_token": "stable-second-token",
+	})
+	before := storage.CredentialFingerprintMaterial()
+
+	storage.SetMetadata(map[string]any{
+		"apiToken":  "rotated-first-token",
+		"api_token": "stable-second-token",
+	})
+	after := storage.CredentialFingerprintMaterial()
+
+	if before == after {
+		t.Fatal("rotating one colliding top-level credential alias did not change the fingerprint")
+	}
+}
+
 func TestPluginTokenStorageFingerprintIncludesMetadataToken(t *testing.T) {
 	for _, key := range []string{"token", "api_token", "apiToken"} {
 		t.Run(key, func(t *testing.T) {

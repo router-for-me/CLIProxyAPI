@@ -855,21 +855,33 @@ func authCredentialFingerprint(auth *Auth) ([sha256.Size]byte, bool) {
 		credentialCount++
 	}
 
-	switch kind {
-	case AuthKindAPIKey:
-		appendCredential("api_key", material.APIKey)
-	case AuthKindOAuth:
-		// Some OAuth-classified credentials execute with Attributes["api_key"]
-		// (for example Claude), so that material remains revision-authoritative.
-		appendCredential("api_key", material.APIKey)
-		appendCredential("access_token", material.AccessToken)
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "kimi") {
+		// Kimi prefers access_token (metadata, then attributes) before api_key.
+		// Fingerprint the credential it will execute with, plus refresh identity.
+		if material.AccessToken != "" {
+			appendCredential("access_token", material.AccessToken)
+		} else {
+			appendCredential("api_key", material.APIKey)
+		}
 		appendCredential("refresh_token", material.RefreshToken)
 		appendCredential("id_token", material.IDToken)
-	default:
-		appendCredential("api_key", material.APIKey)
-		appendCredential("access_token", material.AccessToken)
-		appendCredential("refresh_token", material.RefreshToken)
-		appendCredential("id_token", material.IDToken)
+	} else {
+		switch kind {
+		case AuthKindAPIKey:
+			appendCredential("api_key", material.APIKey)
+		case AuthKindOAuth:
+			// Some OAuth-classified credentials execute with Attributes["api_key"]
+			// (for example Claude), so that material remains revision-authoritative.
+			appendCredential("api_key", material.APIKey)
+			appendCredential("access_token", material.AccessToken)
+			appendCredential("refresh_token", material.RefreshToken)
+			appendCredential("id_token", material.IDToken)
+		default:
+			appendCredential("api_key", material.APIKey)
+			appendCredential("access_token", material.AccessToken)
+			appendCredential("refresh_token", material.RefreshToken)
+			appendCredential("id_token", material.IDToken)
+		}
 	}
 	for _, header := range authCredentialHeaderMaterial(auth) {
 		appendCredential("header", header)
