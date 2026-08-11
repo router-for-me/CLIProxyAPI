@@ -672,6 +672,24 @@ func injectClaudeCodeCurrentDate(payload []byte, now time.Time) []byte {
 // real client does not already get.
 const claudeCodeContextManagement = `{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`
 
+// claudeThinkingAcceptsClearThinking reports whether the payload's thinking
+// value allows the clear_thinking_20251015 strategy. Anthropic rejects the
+// request outright otherwise:
+//
+//	`clear_thinking_20251015` strategy requires `thinking` to be enabled or adaptive
+//
+// An absent thinking field is therefore just as ineligible as an explicit
+// {"type":"disabled"}, which is why this checks for the accepted values rather
+// than excluding the disabled one.
+func claudeThinkingAcceptsClearThinking(payload []byte) bool {
+	switch gjson.GetBytes(payload, "thinking.type").String() {
+	case "enabled", "adaptive":
+		return true
+	default:
+		return false
+	}
+}
+
 // injectClaudeCodeContextManagement supplies context_management when the caller
 // omitted it. CPA already claims context-management-2025-06-27 in Anthropic-Beta,
 // so a missing body field is an observable inconsistency with the real client. A
@@ -680,7 +698,7 @@ func injectClaudeCodeContextManagement(payload []byte) ([]byte, bool) {
 	if gjson.GetBytes(payload, "context_management").Exists() {
 		return payload, false
 	}
-	if gjson.GetBytes(payload, "thinking.type").String() == "disabled" {
+	if !claudeThinkingAcceptsClearThinking(payload) {
 		return payload, false
 	}
 	updated, err := sjson.SetRawBytes(payload, "context_management", []byte(claudeCodeContextManagement))
@@ -700,10 +718,13 @@ type claudeCodeContextManagementState struct {
 // reconcileClaudeCodeContextManagement resolves automatic ownership after all
 // payload rules and forced tool-choice processing have completed.
 func reconcileClaudeCodeContextManagement(payload []byte, state claudeCodeContextManagementState) []byte {
-	thinkingType := gjson.GetBytes(payload, "thinking.type").String()
 	contextManagement := gjson.GetBytes(payload, "context_management")
 
-	if thinkingType == "disabled" {
+	// Any thinking value the strategy does not accept must drop an object CPA
+	// injected itself. disableThinkingIfToolChoiceForced deletes the whole
+	// thinking field after injection, so this also covers a request that was
+	// still eligible when injectClaudeCodeContextManagement ran.
+	if !claudeThinkingAcceptsClearThinking(payload) {
 		if state.callerOwned || !state.automaticallyInjected || state.payloadRuleTouched {
 			return payload
 		}
@@ -717,9 +738,6 @@ func reconcileClaudeCodeContextManagement(payload []byte, state claudeCodeContex
 		return updated
 	}
 
-	if thinkingType != "enabled" && thinkingType != "adaptive" {
-		return payload
-	}
 	if !state.eligible || state.callerOwned || state.payloadRuleTouched || contextManagement.Exists() {
 		return payload
 	}

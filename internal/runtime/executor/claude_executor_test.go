@@ -5574,7 +5574,6 @@ func TestInjectClaudeCodeContextManagement(t *testing.T) {
 		name    string
 		payload string
 	}{
-		{name: "omitted thinking", payload: `{"model":"claude-opus-4-6"}`},
 		{name: "enabled thinking", payload: `{"model":"claude-opus-5","thinking":{"type":"enabled"}}`},
 		{name: "adaptive thinking", payload: `{"model":"claude-opus-5","thinking":{"type":"adaptive"}}`},
 	} {
@@ -5598,16 +5597,76 @@ func TestInjectClaudeCodeContextManagement(t *testing.T) {
 		t.Fatalf("caller context_management was modified: %s", callerOwnedGot)
 	}
 
-	disabledThinking := []byte(`{"model":"claude-opus-5","thinking":{"type":"disabled"}}`)
-	disabledThinkingGot, automaticallyInjected := injectClaudeCodeContextManagement(disabledThinking)
-	if automaticallyInjected {
-		t.Error("disabled thinking context_management was reported as automatically injected")
+	// Anthropic rejects clear_thinking_20251015 unless thinking is enabled or
+	// adaptive, so an omitted thinking field is as ineligible as an explicit
+	// disabled one.
+	for _, test := range []struct {
+		name    string
+		payload string
+	}{
+		{name: "disabled thinking", payload: `{"model":"claude-opus-5","thinking":{"type":"disabled"}}`},
+		{name: "omitted thinking", payload: `{"model":"claude-opus-4-6"}`},
+		{name: "unknown thinking", payload: `{"model":"claude-opus-5","thinking":{"type":"unexpected"}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ineligible := []byte(test.payload)
+			got, automaticallyInjected := injectClaudeCodeContextManagement(ineligible)
+			if automaticallyInjected {
+				t.Error("ineligible thinking context_management was reported as automatically injected")
+			}
+			if !bytes.Equal(got, ineligible) {
+				t.Errorf("ineligible payload was modified: %s", got)
+			}
+			if cm := gjson.GetBytes(got, "context_management"); cm.Exists() {
+				t.Errorf("context_management = %s, want absent", cm.Raw)
+			}
+		})
 	}
-	if !bytes.Equal(disabledThinkingGot, disabledThinking) {
-		t.Errorf("disabled thinking payload was modified: %s", disabledThinkingGot)
-	}
-	if got := gjson.GetBytes(disabledThinkingGot, "context_management"); got.Exists() {
-		t.Errorf("disabled thinking payload has context_management = %s, want absent", got.Raw)
+}
+
+// Anthropic rejects a request carrying the clear_thinking_20251015 strategy
+// without enabled/adaptive thinking:
+//
+//	`clear_thinking_20251015` strategy requires `thinking` to be enabled or adaptive
+//
+// This walks the real execute.go ordering, where disableThinkingIfToolChoiceForced
+// deletes the thinking field between injection and reconciliation.
+func TestClaudeCodeContextManagementNeverOutlivesEligibleThinking(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		payload string
+		wantCM  bool
+	}{
+		{
+			name:    "thinking omitted from the start",
+			payload: `{"model":"claude-opus-5","messages":[]}`,
+		},
+		{
+			name:    "forced tool_choice strips thinking after injection",
+			payload: `{"model":"claude-opus-5","thinking":{"type":"enabled","budget_tokens":1024},"tool_choice":{"type":"any"},"messages":[]}`,
+		},
+		{
+			name:    "thinking survives without forced tool_choice",
+			payload: `{"model":"claude-opus-5","thinking":{"type":"enabled","budget_tokens":1024},"messages":[]}`,
+			wantCM:  true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body, injected := injectClaudeCodeContextManagement([]byte(test.payload))
+			state := claudeCodeContextManagementState{eligible: true, automaticallyInjected: injected}
+			body = disableThinkingIfToolChoiceForced(body)
+			body = reconcileClaudeCodeContextManagement(body, state)
+
+			thinkingEligible := gjson.GetBytes(body, "thinking.type").String() == "enabled" ||
+				gjson.GetBytes(body, "thinking.type").String() == "adaptive"
+			cm := gjson.GetBytes(body, "context_management")
+			if cm.Exists() && !thinkingEligible {
+				t.Fatalf("context_management = %s survived ineligible thinking; Anthropic would reject this: %s", cm.Raw, body)
+			}
+			if cm.Exists() != test.wantCM {
+				t.Fatalf("context_management present = %v, want %v; body=%s", cm.Exists(), test.wantCM, body)
+			}
+		})
 	}
 }
 
@@ -5669,6 +5728,17 @@ func TestReconcileClaudeCodeContextManagement(t *testing.T) {
 			name:    "omitted thinking prevents addition",
 			payload: `{}`,
 			state:   claudeCodeContextManagementState{eligible: true},
+		},
+		{
+			name:    "removes automatic object when thinking was stripped entirely",
+			payload: `{"context_management":` + claudeCodeContextManagement + `}`,
+			state:   claudeCodeContextManagementState{eligible: true, automaticallyInjected: true},
+		},
+		{
+			name:    "keeps caller object when thinking was stripped entirely",
+			payload: `{"context_management":` + claudeCodeContextManagement + `}`,
+			state:   claudeCodeContextManagementState{eligible: true, callerOwned: true},
+			wantRaw: claudeCodeContextManagement,
 		},
 		{
 			name:    "unknown thinking prevents addition",
@@ -5829,7 +5899,11 @@ func TestClaudeExecutorPayloadOverrideDisabledThinking(t *testing.T) {
 	})
 
 	for _, stream := range []bool{false, true} {
-		name := "forced tool choice retains automatic context management execute"
+		// Anthropic rejects the automatic strategy once forced tool choice has
+		// stripped thinking:
+		//
+		//	`clear_thinking_20251015` strategy requires `thinking` to be enabled or adaptive
+		name := "forced tool choice drops automatic context management execute"
 		if stream {
 			name += " stream"
 		}
@@ -5839,8 +5913,8 @@ func TestClaudeExecutorPayloadOverrideDisabledThinking(t *testing.T) {
 			if got := gjson.GetBytes(upstreamBody, "thinking"); got.Exists() {
 				t.Fatalf("forced tool choice thinking = %s, want absent", got.Raw)
 			}
-			if got := gjson.GetBytes(upstreamBody, "context_management").Raw; got != claudeCodeContextManagement {
-				t.Fatalf("forced tool choice context_management = %s, want %s", got, claudeCodeContextManagement)
+			if got := gjson.GetBytes(upstreamBody, "context_management"); got.Exists() {
+				t.Fatalf("forced tool choice context_management = %s, want absent because Anthropic rejects it without thinking", got.Raw)
 			}
 			if got := gjson.GetBytes(upstreamBody, "tool_choice.type").String(); got != "any" {
 				t.Fatalf("forced tool_choice.type = %q, want any", got)
