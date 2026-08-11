@@ -701,15 +701,16 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	type openAICompatPatch struct {
-		Name                  *string                             `json:"name"`
-		Prefix                *string                             `json:"prefix"`
-		Disabled              *bool                               `json:"disabled"`
-		DisableCooling        *bool                               `json:"disable-cooling"`
-		BaseURL               *string                             `json:"base-url"`
-		APIKeyEntries         *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
-		Models                *[]config.OpenAICompatibilityModel  `json:"models"`
-		Headers               *map[string]string                  `json:"headers"`
-		SupportPromptCacheKey *bool                               `json:"support-prompt-cache-key"`
+		Name                        *string                             `json:"name"`
+		Prefix                      *string                             `json:"prefix"`
+		Disabled                    *bool                               `json:"disabled"`
+		DisableCooling              *bool                               `json:"disable-cooling"`
+		BaseURL                     *string                             `json:"base-url"`
+		APIKeyEntries               *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
+		Models                      *[]config.OpenAICompatibilityModel  `json:"models"`
+		Headers                     *map[string]string                  `json:"headers"`
+		SupportPromptCacheKey       *bool                               `json:"support-prompt-cache-key"`
+		FillMissingReasoningHistory *bool                               `json:"fill-missing-reasoning-history"`
 	}
 	var body struct {
 		Name  *string            `json:"name"`
@@ -781,6 +782,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.SupportPromptCacheKey != nil {
 		entry.SupportPromptCacheKey = *body.Value.SupportPromptCacheKey
+	}
+	if body.Value.FillMissingReasoningHistory != nil {
+		entry.FillMissingReasoningHistory = *body.Value.FillMissingReasoningHistory
 	}
 	normalizeOpenAICompatibilityEntry(&entry)
 	h.cfg.OpenAICompatibility[targetIndex] = entry

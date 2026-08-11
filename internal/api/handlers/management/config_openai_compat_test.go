@@ -24,8 +24,9 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 				Models: []config.OpenAICompatibilityModel{
 					{Name: "mimo-v2.5", Alias: ""},
 				},
-				SupportPromptCacheKey: true,
-				DisableCooling:        true,
+				SupportPromptCacheKey:       true,
+				DisableCooling:              true,
+				FillMissingReasoningHistory: true,
 			},
 		},
 	}, nil)
@@ -41,8 +42,9 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 
 	var body struct {
 		OpenAICompatibility []struct {
-			SupportPromptCacheKey *bool `json:"support-prompt-cache-key"`
-			DisableCooling        *bool `json:"disable-cooling"`
+			SupportPromptCacheKey       *bool `json:"support-prompt-cache-key"`
+			DisableCooling              *bool `json:"disable-cooling"`
+			FillMissingReasoningHistory *bool `json:"fill-missing-reasoning-history"`
 		} `json:"openai-compatibility"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
@@ -56,5 +58,8 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 	}
 	if body.OpenAICompatibility[0].DisableCooling == nil || !*body.OpenAICompatibility[0].DisableCooling {
 		t.Fatalf("expected disable-cooling to be present and true, got %#v", body.OpenAICompatibility[0].DisableCooling)
+	}
+	if body.OpenAICompatibility[0].FillMissingReasoningHistory == nil || !*body.OpenAICompatibility[0].FillMissingReasoningHistory {
+		t.Fatalf("expected fill-missing-reasoning-history to be present and true, got %#v", body.OpenAICompatibility[0].FillMissingReasoningHistory)
 	}
 }
