@@ -69,13 +69,25 @@ func (e *AntigravityExecutor) obfuscateSensitiveWords(payload []byte) []byte {
 	return helps.ObfuscateSensitiveWordsInSystemInstruction(payload, matcher)
 }
 
-// antigravityTransport is a singleton HTTP/1.1 transport shared by all Antigravity requests.
-// It is initialized once via antigravityTransportOnce to avoid leaking a new connection pool
-// (and the goroutines managing it) on every request.
+// Each Antigravity credential gets its own HTTP/1.1 connection pool. Sessions routed
+// to the same auth reuse that pool, while different OAuth identities never share a
+// TCP/TLS connection, matching the native client's one-credential process model.
 var (
-	antigravityTransport     *http.Transport
-	antigravityTransportOnce sync.Once
+	antigravityBaseTransport = defaultAntigravityBaseTransport()
+	antigravityTransports    sync.Map // antigravityTransportKey -> *http.Transport
 )
+
+type antigravityTransportKey struct {
+	credential string
+	base       *http.Transport
+}
+
+func defaultAntigravityBaseTransport() *http.Transport {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
+		return transport
+	}
+	return &http.Transport{}
+}
 
 func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
 	if base == nil {
@@ -91,38 +103,101 @@ func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
 	} else {
 		clone.TLSClientConfig = clone.TLSClientConfig.Clone()
 	}
-	// Actively advertise only HTTP/1.1 in the ALPN handshake.
-	clone.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	// Native Antigravity sends no ALPN extension. With HTTP/2 disabled above,
+	// an empty NextProtos keeps the wire shape aligned while using HTTP/1.1.
+	clone.TLSClientConfig.NextProtos = nil
 	return clone
 }
 
-// initAntigravityTransport creates the shared HTTP/1.1 transport exactly once.
-func initAntigravityTransport() {
-	base, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		base = &http.Transport{}
+// antigravityHTTP11Transport returns the HTTP/1.1 pool for one credential and
+// base transport. The base is either the process default, a credential-scoped
+// proxy transport, or a context-provided transport.
+func antigravityHTTP11Transport(auth *cliproxyauth.Auth, base *http.Transport) *http.Transport {
+	if base == nil {
+		return nil
 	}
-	antigravityTransport = cloneTransportWithHTTP11(base)
+	credential, shareable := antigravityTransportScope(auth)
+	if !shareable {
+		// Without a stable credential identity there is no safe cache key: pointer
+		// identity is reused once the old auth is collected, which would silently
+		// merge two unrelated OAuth identities onto the same TCP/TLS connections.
+		// Fall back to a private pool instead of risking cross-credential sharing.
+		return cloneTransportWithHTTP11(base)
+	}
+	key := antigravityTransportKey{
+		credential: credential,
+		base:       base,
+	}
+	if cached, ok := antigravityTransports.Load(key); ok {
+		return cached.(*http.Transport)
+	}
+	clone := cloneTransportWithHTTP11(base)
+	actual, _ := antigravityTransports.LoadOrStore(key, clone)
+	stored := actual.(*http.Transport)
+	if stored != clone {
+		// Another goroutine won the race; drop the redundant pool.
+		clone.CloseIdleConnections()
+	}
+	return stored
+}
+
+// antigravityTransportScope returns the connection-pool scope for one credential
+// and reports whether that scope is stable enough to share a pool across requests.
+// Runtime auths always carry an ID; incomplete test or plugin auth objects do not
+// and must never be grouped together.
+func antigravityTransportScope(auth *cliproxyauth.Auth) (string, bool) {
+	if auth == nil {
+		return "", false
+	}
+	id := strings.TrimSpace(auth.ID)
+	if id == "" {
+		return "", false
+	}
+	return "id:" + id, true
 }
 
 // newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,
-// enforcing HTTP/1.1 by disabling HTTP/2 to perfectly mimic Node.js https defaults.
-// The underlying Transport is a singleton to avoid leaking connection pools.
+// enforcing HTTP/1.1 by disabling HTTP/2 to match the native Antigravity client, which
+// negotiates TLS 1.3 without advertising an ALPN protocol and therefore never uses h2.
+// The underlying Transport is always shared so keep-alive connections survive across
+// requests instead of forcing a fresh TCP + TLS handshake every time.
 func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	antigravityTransportOnce.Do(initAntigravityTransport)
+	credential, _ := antigravityTransportScope(auth)
+
+	// Native Antigravity reuses one transport across requests. Opt into a
+	// credential-scoped proxy transport only here so other providers keep their
+	// existing lifecycle and different OAuth identities remain isolated.
+	if proxyURL := antigravityProxyURL(cfg, auth); proxyURL != "" {
+		if transport, _, errProxy := helps.SharedProxyTransport(credential, proxyURL); errProxy == nil && transport != nil {
+			return &http.Client{Transport: antigravityHTTP11Transport(auth, transport), Timeout: timeout}
+		}
+	}
 
 	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
-	// If no transport is set, use the shared HTTP/1.1 transport.
+	// Direct requests share an HTTP/1.1 pool only within the selected credential.
 	if client.Transport == nil {
-		client.Transport = antigravityTransport
+		client.Transport = antigravityHTTP11Transport(auth, antigravityBaseTransport)
 		return client
 	}
 
-	// Preserve proxy settings from proxy-aware transports while forcing HTTP/1.1.
+	// Preserve a context-provided transport while forcing HTTP/1.1. The cache key
+	// includes credential identity, so sharing the base does not share TLS pools.
 	if transport, ok := client.Transport.(*http.Transport); ok {
-		client.Transport = cloneTransportWithHTTP11(transport)
+		client.Transport = antigravityHTTP11Transport(auth, transport)
 	}
 	return client
+}
+
+func antigravityProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if auth != nil {
+		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
+			return proxyURL
+		}
+	}
+	if cfg != nil {
+		return strings.TrimSpace(cfg.ProxyURL)
+	}
+	return ""
 }
 
 func sanitizeAntigravityGeminiRequestSignatures(modelName string, rawJSON []byte) []byte {
@@ -496,6 +571,12 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 	}
 	httpReq := req.WithContext(ctx)
 
+	// Connection management is a Request field, not a header, so the header
+	// whitelist below cannot strip it. An inbound "Connection: close" makes Go's
+	// server set Request.Close, and WithContext copies that field verbatim, which
+	// would both leak the downstream header upstream and drain the shared pool.
+	httpReq.Close = false
+
 	// --- Whitelist: save only the headers we need from the original request ---
 	contentType := httpReq.Header.Get("Content-Type")
 
@@ -510,7 +591,6 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 	}
 	// Content-Length is managed automatically by Go's http.Client from the Body
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
-	httpReq.Close = true // sends Connection: close
 
 	// Inject Authorization: Bearer <token>
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
