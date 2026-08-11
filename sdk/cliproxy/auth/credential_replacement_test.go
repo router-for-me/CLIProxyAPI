@@ -298,6 +298,39 @@ func (e *blockingUnauthorizedCredentialExecutor) HttpRequest(context.Context, *A
 	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not implemented"}
 }
 
+type blockingSuccessfulCredentialExecutor struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (*blockingSuccessfulCredentialExecutor) Identifier() string { return "codex" }
+
+func (e *blockingSuccessfulCredentialExecutor) Execute(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	close(e.started)
+	select {
+	case <-e.release:
+		return cliproxyexecutor.Response{Payload: []byte("old credential succeeded")}, nil
+	case <-ctx.Done():
+		return cliproxyexecutor.Response{}, ctx.Err()
+	}
+}
+
+func (*blockingSuccessfulCredentialExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not implemented"}
+}
+
+func (*blockingSuccessfulCredentialExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (*blockingSuccessfulCredentialExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not implemented"}
+}
+
+func (*blockingSuccessfulCredentialExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not implemented"}
+}
+
 func TestExecuteIgnoresFailureFromCredentialReplacedInFlight(t *testing.T) {
 	executor := &blockingUnauthorizedCredentialExecutor{
 		started: make(chan struct{}),
@@ -1061,48 +1094,117 @@ func TestRecordExecutionResultAppliesStaleQuotaFailureAfterTokenRotation(t *test
 	}
 }
 
-func TestRecordExecutionResultAppliesStaleSuccessAfterTokenRotation(t *testing.T) {
+func TestExecuteStaleSuccessDoesNotClearReplacementCooldown(t *testing.T) {
+	previousDisableCooling := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previousDisableCooling) })
+
+	const model = "gpt-stale-success-replacement"
+	executor := &blockingSuccessfulCredentialExecutor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
 	m := NewManager(nil, nil, nil)
-	now := time.Now()
+	m.RegisterExecutor(executor)
+	m.SetRetryConfig(0, 0, 1)
 	oldAuth := &Auth{
-		ID:       "codex-success.json",
+		ID:       "codex-stale-success.json",
 		Provider: "codex",
-		Status:   StatusError,
+		Status:   StatusActive,
 		Metadata: map[string]any{"access_token": "old-access-token"},
-		ModelStates: map[string]*ModelState{
-			"gpt-test": {
-				Status:         StatusError,
-				Unavailable:    true,
-				StatusMessage:  "transient failure",
-				LastError:      &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "transient failure"},
-				NextRetryAfter: now.Add(time.Minute),
-			},
-		},
 	}
 	if _, err := m.Register(context.Background(), oldAuth); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	selected, _ := m.GetByID(oldAuth.ID)
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(oldAuth.ID, oldAuth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(oldAuth.ID) })
+	m.RefreshSchedulerEntry(oldAuth.ID)
+
+	type executionResult struct {
+		response cliproxyexecutor.Response
+		err      error
+	}
+	done := make(chan executionResult, 1)
+	go func() {
+		response, err := m.Execute(
+			context.Background(),
+			[]string{oldAuth.Provider},
+			cliproxyexecutor.Request{Model: model},
+			cliproxyexecutor.Options{},
+		)
+		done <- executionResult{response: response, err: err}
+	}()
+	select {
+	case <-executor.started:
+	case <-time.After(time.Second):
+		t.Fatal("old credential execution did not start")
+	}
+
+	selected, ok := m.GetByID(oldAuth.ID)
+	if !ok || selected == nil {
+		t.Fatal("selected old credential missing")
+	}
 	replacement := selected.Clone()
-	replacement.Metadata["access_token"] = "rotated-access-token"
+	replacement.Metadata["access_token"] = "replacement-access-token"
 	if _, err := m.Update(context.Background(), replacement); err != nil {
 		t.Fatalf("Update replacement: %v", err)
 	}
-
+	currentReplacement, ok := m.GetByID(oldAuth.ID)
+	if !ok || currentReplacement == nil {
+		t.Fatal("replacement credential missing")
+	}
 	m.recordExecutionResult(context.Background(), Result{
 		AuthID:   oldAuth.ID,
 		Provider: oldAuth.Provider,
-		Model:    "gpt-test",
-		Success:  true,
-	}, selected, false)
+		Model:    model,
+		Error:    &Error{HTTPStatus: http.StatusUnauthorized, Message: "replacement token unauthorized"},
+	}, currentReplacement, false)
 
-	current, _ := m.GetByID(oldAuth.ID)
-	if current == nil || current.Status != StatusActive || current.LastError != nil || current.Unavailable {
-		t.Fatalf("success from pre-rotation request was not applied: %#v", current)
+	afterReplacementFailure, _ := m.GetByID(oldAuth.ID)
+	state := afterReplacementFailure.ModelStates[model]
+	if state == nil || !state.Unavailable || state.Status != StatusError || state.NextRetryAfter.IsZero() {
+		t.Fatalf("replacement credential did not enter cooldown: %#v", state)
 	}
-	state := current.ModelStates["gpt-test"]
-	if state == nil || state.Status != StatusActive || state.Unavailable || state.LastError != nil {
-		t.Fatalf("success did not clear model state: %#v", state)
+	if count := reg.GetModelCount(model); count != 0 {
+		t.Fatalf("registry model count after replacement 401 = %d, want 0", count)
+	}
+
+	close(executor.release)
+	select {
+	case result := <-done:
+		if result.err != nil {
+			t.Fatalf("old credential execution returned error: %v", result.err)
+		}
+		if got := string(result.response.Payload); got != "old credential succeeded" {
+			t.Fatalf("old credential response = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("old credential execution did not finish")
+	}
+
+	current, ok := m.GetByID(oldAuth.ID)
+	if !ok || current == nil {
+		t.Fatal("replacement credential missing after stale success")
+	}
+	if got := authAccessToken(current); got != "replacement-access-token" {
+		t.Fatalf("current access token = %q, want replacement token", got)
+	}
+	if current.Status != StatusError || !current.Unavailable || current.LastError == nil {
+		t.Fatalf("stale old success cleared replacement auth cooldown: %#v", current)
+	}
+	state = current.ModelStates[model]
+	if state == nil || !state.Unavailable || state.Status != StatusError || state.LastError == nil || state.NextRetryAfter.IsZero() {
+		t.Fatalf("stale old success cleared replacement model cooldown: %#v", state)
+	}
+	if state.LastError.HTTPStatus != http.StatusUnauthorized {
+		t.Fatalf("replacement model error status = %d, want 401", state.LastError.HTTPStatus)
+	}
+	if count := reg.GetModelCount(model); count != 0 {
+		t.Fatalf("stale old success resumed replacement registry model; count = %d", count)
+	}
+	if current.Success != 1 || current.Failed != 1 {
+		t.Fatalf("request counters = success %d, failed %d; want 1 and 1", current.Success, current.Failed)
 	}
 }
 

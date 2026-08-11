@@ -1088,10 +1088,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			currentFingerprint, okFingerprint := authCredentialFingerprint(auth)
 			staleCredentialResult = !okFingerprint || currentFingerprint != result.credentialFingerprint
 		}
+		staleSuccessfulResult := staleCredentialResult && result.Success
 		staleUnauthorizedResult := staleCredentialResult && !result.Success && isUnauthorizedError(result.Error)
-		if staleUnauthorizedResult {
+		if staleSuccessfulResult || staleUnauthorizedResult {
+			// Keep request metrics, but never let a superseded credential change
+			// availability owned by its replacement.
 			authSnapshot = auth.Clone()
-			suppressErrorEvent = true
+			suppressErrorEvent = staleUnauthorizedResult
 		} else if result.Success {
 			if modelKey != "" {
 				state := ensureModelState(auth, modelKey)
