@@ -2326,6 +2326,78 @@ func TestRefreshAuthForRequestAppliesRefreshReturnedScalarFields(t *testing.T) {
 	}
 }
 
+func TestAuthCredentialFingerprintUsesXAIAttributeEndpointPrecedence(t *testing.T) {
+	left := &Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url": "https://attribute.xai.example.com",
+		},
+		Metadata: map[string]any{
+			"access_token": "stable-token",
+			"base_url":     "https://old-metadata.xai.example.com",
+		},
+	}
+	right := left.Clone()
+	right.Metadata["base_url"] = "https://new-metadata.xai.example.com"
+
+	leftFingerprint, leftOK := authCredentialFingerprint(left)
+	rightFingerprint, rightOK := authCredentialFingerprint(right)
+	if !leftOK || !rightOK {
+		t.Fatalf("fingerprint availability = (%t, %t), want both true", leftOK, rightOK)
+	}
+	if leftFingerprint != rightFingerprint {
+		t.Fatal("shadowed xAI metadata base_url changed credential revision")
+	}
+}
+
+func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterXAIMetadataBaseURLReplacement(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	oldAuth := &Auth{
+		ID:       "xai-metadata-endpoint.json",
+		Provider: "xai",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token":  "stable-xai-token",
+			"refresh_token": "stable-xai-refresh-token",
+			"base_url":      "https://old-xai.example.com",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), oldAuth); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	selected, okSelected := m.GetByID(oldAuth.ID)
+	if !okSelected || selected == nil {
+		t.Fatal("selected auth missing")
+	}
+
+	replacement := selected.Clone()
+	replacement.Metadata["base_url"] = "https://replacement-xai.example.com"
+	if _, errUpdate := m.Update(context.Background(), replacement); errUpdate != nil {
+		t.Fatalf("Update replacement: %v", errUpdate)
+	}
+
+	m.recordExecutionResult(context.Background(), Result{
+		AuthID:   oldAuth.ID,
+		Provider: oldAuth.Provider,
+		Model:    "grok-test",
+		Error:    &Error{HTTPStatus: http.StatusUnauthorized, Message: "old xAI endpoint unauthorized"},
+	}, selected, false)
+
+	current, okCurrent := m.GetByID(oldAuth.ID)
+	if !okCurrent || current == nil {
+		t.Fatal("replacement auth missing")
+	}
+	if got := authMetadataString(current, "base_url"); got != "https://replacement-xai.example.com" {
+		t.Fatalf("current xAI metadata base_url = %q, want replacement endpoint", got)
+	}
+	if current.Status != StatusActive || current.Unavailable || current.LastError != nil || current.StatusMessage != "" {
+		t.Fatalf("stale xAI endpoint result changed replacement auth: %#v", current)
+	}
+	if len(current.ModelStates) != 0 {
+		t.Fatalf("stale xAI endpoint result created model states: %#v", current.ModelStates)
+	}
+}
+
 func TestAuthCredentialFingerprintUsesAntigravityAttributeEndpointPrecedence(t *testing.T) {
 	left := &Auth{
 		Provider: "antigravity",

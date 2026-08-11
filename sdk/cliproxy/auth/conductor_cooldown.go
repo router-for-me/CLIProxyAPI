@@ -787,9 +787,12 @@ func authCredentialEndpoint(auth *Auth) string {
 		return ""
 	}
 	endpoint := strings.TrimSpace(authAttribute(auth, "base_url"))
-	if endpoint == "" && strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
-		// Antigravity resolves metadata base_url only when the attribute is absent.
-		endpoint = strings.TrimSpace(authMetadataString(auth, "base_url"))
+	if endpoint == "" {
+		switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+		case "antigravity", "xai":
+			// Both executors resolve metadata base_url only when the attribute is absent.
+			endpoint = strings.TrimSpace(authMetadataString(auth, "base_url"))
+		}
 	}
 	if endpoint == "" {
 		return ""
