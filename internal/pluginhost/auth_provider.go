@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -542,10 +543,19 @@ func pluginCredentialFingerprintMaterial(raw []byte, metadata map[string]any) ba
 
 func pluginCredentialMetadata(metadata map[string]any) map[string]any {
 	out := make(map[string]any)
-	for key, value := range metadata {
+	credentialHeaders := make(map[string]any)
+	keys := make([]string, 0, len(metadata))
+	for key := range metadata {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := metadata[key]
 		if pluginCredentialHeaderContainer(key) {
 			if filtered, ok := filterPluginCredentialHeaders(value); ok {
-				out[key] = filtered
+				for header, credential := range filtered {
+					credentialHeaders[header] = credential
+				}
 			}
 			continue
 		}
@@ -553,12 +563,15 @@ func pluginCredentialMetadata(metadata map[string]any) map[string]any {
 			continue
 		}
 		if pluginCredentialMetadataKey(key) {
-			out[key] = value
+			out[normalizePluginMetadataKey(key)] = value
 			continue
 		}
 		if filtered, ok := filterPluginCredentialMetadata(value); ok {
 			out[key] = filtered
 		}
+	}
+	if len(credentialHeaders) > 0 {
+		out["headers"] = credentialHeaders
 	}
 	if len(out) == 0 {
 		return nil
@@ -589,13 +602,19 @@ func filterPluginCredentialHeaders(value any) (map[string]any, bool) {
 	if !headers.IsValid() || headers.Kind() != reflect.Map || headers.Type().Key().Kind() != reflect.String {
 		return nil, false
 	}
-	out := make(map[string]any)
+	keys := make([]string, 0, headers.Len())
 	iter := headers.MapRange()
 	for iter.Next() {
-		key := iter.Key().String()
-		if pluginCredentialHeaderName(key) {
-			out[key] = iter.Value().Interface()
+		keys = append(keys, iter.Key().String())
+	}
+	sort.Strings(keys)
+	out := make(map[string]any)
+	for _, key := range keys {
+		if !pluginCredentialHeaderName(key) {
+			continue
 		}
+		value := headers.MapIndex(reflect.ValueOf(key).Convert(headers.Type().Key()))
+		out[normalizePluginMetadataKey(key)] = value.Interface()
 	}
 	return out, len(out) > 0
 }

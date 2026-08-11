@@ -431,6 +431,30 @@ func TestPluginTokenStorageFingerprintIgnoresHostMetadata(t *testing.T) {
 	}
 }
 
+func TestPluginTokenStorageFingerprintCanonicalizesCredentialHeaderNames(t *testing.T) {
+	storage := &pluginTokenStorage{
+		provider: "plugin-provider",
+		rawJSON:  []byte(`{"provider_state":"stable"}`),
+	}
+	storage.SetMetadata(map[string]any{
+		"headers": map[string]any{
+			"Authorization": "Bearer same-token",
+		},
+	})
+	before := storage.CredentialFingerprintMaterial()
+
+	storage.SetMetadata(map[string]any{
+		"REQUEST_HEADERS": map[string]any{
+			"authorization": "Bearer same-token",
+		},
+	})
+	after := storage.CredentialFingerprintMaterial()
+
+	if before != after {
+		t.Fatalf("equivalent credential header casing changed fingerprint: before=%#v after=%#v", before, after)
+	}
+}
+
 func TestPluginTokenStorageFingerprintIncludesMetadataCredentialHeaders(t *testing.T) {
 	for _, header := range []string{"Authorization", "X-API-Key", "X-Access-Token", "X-Client-Secret"} {
 		t.Run(header, func(t *testing.T) {
