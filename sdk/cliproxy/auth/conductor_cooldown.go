@@ -859,6 +859,9 @@ func authCredentialFingerprint(auth *Auth) ([sha256.Size]byte, bool) {
 	case AuthKindAPIKey:
 		appendCredential("api_key", material.APIKey)
 	case AuthKindOAuth:
+		// Some OAuth-classified credentials execute with Attributes["api_key"]
+		// (for example Claude), so that material remains revision-authoritative.
+		appendCredential("api_key", material.APIKey)
 		appendCredential("access_token", material.AccessToken)
 		appendCredential("refresh_token", material.RefreshToken)
 		appendCredential("id_token", material.IDToken)

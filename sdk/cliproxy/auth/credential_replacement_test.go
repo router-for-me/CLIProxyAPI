@@ -1939,6 +1939,53 @@ func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterAPIKeyReplacement(t *
 	}
 }
 
+func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterOAuthKindAPIKeyReplacement(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	oldAuth := &Auth{
+		ID:       "claude-oauth-api-key.json",
+		Provider: "claude",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			AttributeAuthKind: AuthKindOAuth,
+			AttributeAPIKey:   "sk-ant-oat-old",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), oldAuth); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	selected, okSelected := m.GetByID(oldAuth.ID)
+	if !okSelected || selected == nil {
+		t.Fatal("selected auth missing")
+	}
+
+	replacement := selected.Clone()
+	replacement.Attributes[AttributeAPIKey] = "sk-ant-oat-replacement"
+	if _, errUpdate := m.Update(context.Background(), replacement); errUpdate != nil {
+		t.Fatalf("Update replacement: %v", errUpdate)
+	}
+
+	m.recordExecutionResult(context.Background(), Result{
+		AuthID:   oldAuth.ID,
+		Provider: oldAuth.Provider,
+		Model:    "claude-test",
+		Error:    &Error{HTTPStatus: http.StatusUnauthorized, Message: "old OAuth-shaped API key unauthorized"},
+	}, selected, false)
+
+	current, okCurrent := m.GetByID(oldAuth.ID)
+	if !okCurrent || current == nil {
+		t.Fatal("current auth missing")
+	}
+	if gotKey := authAttribute(current, AttributeAPIKey); gotKey != "sk-ant-oat-replacement" {
+		t.Fatalf("current API key = %q, want replacement key", gotKey)
+	}
+	if current.Status != StatusActive || current.Unavailable || current.LastError != nil || current.StatusMessage != "" {
+		t.Fatalf("stale OAuth-shaped API-key result changed replacement auth: %#v", current)
+	}
+	if len(current.ModelStates) != 0 {
+		t.Fatalf("stale OAuth-shaped API-key result created model states: %#v", current.ModelStates)
+	}
+}
+
 func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterCustomAuthorizationHeaderReplacement(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	const authID = "openai-custom-authorization.json"
