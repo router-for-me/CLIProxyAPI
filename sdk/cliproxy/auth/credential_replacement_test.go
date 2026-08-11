@@ -243,11 +243,14 @@ func (s *orderedCredentialStore) lastDeleteID() string {
 }
 
 type targetTrackingCredentialStore struct {
-	mu          sync.Mutex
-	blockNext   bool
-	blockedSave chan struct{}
-	releaseSave chan struct{}
-	persisted   map[string]*Auth
+	mu               sync.Mutex
+	blockNext        bool
+	blockedSave      chan struct{}
+	releaseSave      chan struct{}
+	blockAfterNext   bool
+	blockedAfterSave chan struct{}
+	releaseAfterSave chan struct{}
+	persisted        map[string]*Auth
 }
 
 func (*targetTrackingCredentialStore) List(context.Context) ([]*Auth, error) { return nil, nil }
@@ -270,6 +273,15 @@ func (s *targetTrackingCredentialStore) Save(_ context.Context, auth *Auth) (str
 		s.persisted = make(map[string]*Auth)
 	}
 	s.persisted[target] = auth.Clone()
+	if s.blockAfterNext {
+		s.blockAfterNext = false
+		blockedAfterSave := s.blockedAfterSave
+		releaseAfterSave := s.releaseAfterSave
+		s.mu.Unlock()
+		close(blockedAfterSave)
+		<-releaseAfterSave
+		return target, nil
+	}
 	s.mu.Unlock()
 	return target, nil
 }
@@ -286,6 +298,14 @@ func (s *targetTrackingCredentialStore) blockNextSaveCall() {
 	s.blockNext = true
 	s.blockedSave = make(chan struct{})
 	s.releaseSave = make(chan struct{})
+	s.mu.Unlock()
+}
+
+func (s *targetTrackingCredentialStore) blockAfterNextSaveCall() {
+	s.mu.Lock()
+	s.blockAfterNext = true
+	s.blockedAfterSave = make(chan struct{})
+	s.releaseAfterSave = make(chan struct{})
 	s.mu.Unlock()
 }
 
@@ -850,6 +870,83 @@ func TestConditionalUpdateDoesNotPublishStaleOwnerAfterReplacement(t *testing.T)
 	}
 	if token := authMetadataString(picked, "access_token"); token != "replacement-token" {
 		t.Fatalf("scheduler published token %q, want replacement token", token)
+	}
+}
+
+func TestConditionalUpdateDoesNotDeleteTargetReusedByAnotherAuth(t *testing.T) {
+	store := &targetTrackingCredentialStore{}
+	manager := NewManager(store, nil, nil)
+	original := &Auth{
+		ID:       "renamed-runtime-id",
+		FileName: "reused-credential.json",
+		Provider: "opaque-plugin",
+		Metadata: map[string]any{"access_token": "old-token"},
+	}
+	if _, errRegister := manager.Register(context.Background(), original); errRegister != nil {
+		t.Fatalf("Register original: %v", errRegister)
+	}
+
+	manager.mu.RLock()
+	expectedCurrent := manager.auths[original.ID]
+	manager.mu.RUnlock()
+	if expectedCurrent == nil {
+		t.Fatal("registered original auth missing")
+	}
+
+	refreshed := expectedCurrent.Clone()
+	refreshed.Metadata["access_token"] = "refreshed-old-token"
+	store.blockAfterNextSaveCall()
+	refreshDone := make(chan error, 1)
+	go func() {
+		_, _, errUpdate := manager.updateAuth(context.Background(), refreshed, expectedCurrent)
+		refreshDone <- errUpdate
+	}()
+	select {
+	case <-store.blockedAfterSave:
+	case <-time.After(time.Second):
+		t.Fatal("stale conditional save did not reach the persisted boundary")
+	}
+
+	replacement := expectedCurrent.Clone()
+	replacement.FileName = "renamed-credential.json"
+	replacement.Metadata["access_token"] = "replacement-token"
+	if _, errUpdate := manager.Update(WithSkipPersist(context.Background()), replacement); errUpdate != nil {
+		t.Fatalf("Update replacement: %v", errUpdate)
+	}
+
+	reused := &Auth{
+		ID:       "different-runtime-id",
+		FileName: original.FileName,
+		Provider: "other-provider",
+		Metadata: map[string]any{"access_token": "different-owner-token"},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), reused); errRegister != nil {
+		t.Fatalf("Register target reuser: %v", errRegister)
+	}
+	if _, errSave := store.Save(context.Background(), reused); errSave != nil {
+		t.Fatalf("Persist target reuser: %v", errSave)
+	}
+
+	close(store.releaseAfterSave)
+	select {
+	case errUpdate := <-refreshDone:
+		if errUpdate != nil {
+			t.Fatalf("conditional update: %v", errUpdate)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("conditional update did not finish")
+	}
+
+	persistedReuser := store.authAt(original.FileName)
+	if persistedReuser == nil || persistedReuser.ID != reused.ID {
+		t.Fatalf("reused target owner = %#v, want auth %q", persistedReuser, reused.ID)
+	}
+	if token := authMetadataString(persistedReuser, "access_token"); token != "different-owner-token" {
+		t.Fatalf("reused target token = %q, want different owner token", token)
+	}
+	persistedReplacement := store.authAt(replacement.FileName)
+	if token := authMetadataString(persistedReplacement, "access_token"); token != "replacement-token" {
+		t.Fatalf("renamed replacement token = %q, want replacement token", token)
 	}
 }
 

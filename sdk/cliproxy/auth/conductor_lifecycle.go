@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -353,6 +354,76 @@ func authPersistenceDeleteID(auth *Auth, savedID string) string {
 	return strings.TrimSpace(auth.ID)
 }
 
+func persistenceTargetsMatch(left, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == "" || right == "" {
+		return false
+	}
+	leftClean := filepath.Clean(left)
+	rightClean := filepath.Clean(right)
+	if leftClean == rightClean {
+		return true
+	}
+	if filepath.IsAbs(leftClean) != filepath.IsAbs(rightClean) {
+		return filepath.Base(leftClean) == filepath.Base(rightClean)
+	}
+	return false
+}
+
+func authOwnsPersistenceTarget(auth *Auth, target string) bool {
+	if auth == nil {
+		return false
+	}
+	if path := authAttribute(auth, AttributePath); path != "" {
+		return persistenceTargetsMatch(path, target)
+	}
+	if fileName := strings.TrimSpace(auth.FileName); fileName != "" {
+		return persistenceTargetsMatch(fileName, target)
+	}
+	return persistenceTargetsMatch(auth.ID, target)
+}
+
+func (m *Manager) persistenceTargetOwner(ctx context.Context, target string) (*Auth, *Auth) {
+	if m == nil || strings.TrimSpace(target) == "" {
+		return nil, nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, owner := range m.auths {
+		if authOwnsPersistenceTarget(owner, target) && m.shouldPersistAuth(ctx, owner) {
+			return owner, cloneAuthForConditionalPersistence(owner)
+		}
+	}
+	return nil, nil
+}
+
+// reconcilePersistenceTarget makes a stale save target reflect its current
+// runtime owner. The owner is rechecked after each store operation so a rename,
+// removal, or cross-ID target reuse that races with I/O is repaired rather than
+// having a newer credential deleted.
+func (m *Manager) reconcilePersistenceTarget(ctx context.Context, target string) error {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil
+	}
+	for {
+		owner, candidate := m.persistenceTargetOwner(ctx, target)
+		if owner == nil {
+			if errDelete := m.store.Delete(ctx, target); errDelete != nil {
+				return errDelete
+			}
+		} else if _, errSave := m.store.Save(ctx, candidate); errSave != nil {
+			return errSave
+		}
+
+		currentOwner, _ := m.persistenceTargetOwner(ctx, target)
+		if currentOwner == owner {
+			return nil
+		}
+	}
+}
+
 // persistConditionalUpdate persists a CAS-owned auth without holding the
 // manager-wide auth lock. If ownership changes while I/O is in flight, the
 // current same-ID generation is persisted again. If ownership disappears, the
@@ -372,7 +443,7 @@ func (m *Manager) persistConditionalUpdate(ctx context.Context, auth, owner *Aut
 		}
 		savedID = authPersistenceDeleteID(candidate, savedID)
 		if staleSavedID != "" && staleSavedID != savedID {
-			if errDelete := m.store.Delete(ctx, staleSavedID); errDelete != nil {
+			if errDelete := m.reconcilePersistenceTarget(ctx, staleSavedID); errDelete != nil {
 				return
 			}
 		}
@@ -397,7 +468,7 @@ func (m *Manager) persistConditionalUpdate(ctx context.Context, auth, owner *Aut
 		if deleteID == "" {
 			return
 		}
-		if errDelete := m.store.Delete(ctx, deleteID); errDelete != nil {
+		if errDelete := m.reconcilePersistenceTarget(ctx, deleteID); errDelete != nil {
 			return
 		}
 
