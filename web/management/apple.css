@@ -5830,3 +5830,261 @@ html.theme-transitioning::view-transition-new(root) {
     padding: 20px;
   }
 }
+
+/* Motion experience */
+:root {
+  --theme-x: calc(100vw - 78px);
+  --theme-y: 38px;
+}
+
+.ambient-ribbon {
+  position: absolute;
+  top: 4%;
+  left: -22%;
+  width: 144%;
+  height: 48%;
+  border-radius: 50%;
+  background:
+    linear-gradient(112deg,
+      transparent 20%,
+      color-mix(in srgb, var(--apple-purple) 13%, transparent) 38%,
+      color-mix(in srgb, var(--apple-blue) 16%, transparent) 51%,
+      color-mix(in srgb, #64d2ff 10%, transparent) 62%,
+      transparent 80%);
+  filter: blur(52px);
+  opacity: .52;
+  transform: translate3d(-4vw, -3vh, 0) rotate(-8deg) scaleX(.92);
+  animation: ambient-ribbon-drift 36s var(--apple-ease) infinite alternate;
+  will-change: transform, opacity;
+}
+
+.ambient-stars {
+  position: absolute;
+  inset: -8%;
+  opacity: .16;
+  background-image:
+    radial-gradient(circle, color-mix(in srgb, var(--accent) 68%, transparent) 0 1px, transparent 1.5px),
+    radial-gradient(circle, color-mix(in srgb, var(--apple-purple) 54%, transparent) 0 1px, transparent 1.5px),
+    radial-gradient(circle, color-mix(in srgb, #64d2ff 44%, transparent) 0 1px, transparent 1.5px);
+  background-position: 0 0, 38px 54px, 82px 17px;
+  background-size: 118px 118px, 164px 164px, 211px 211px;
+  mask-image: radial-gradient(ellipse at 50% 28%, #000 0, transparent 72%);
+  pointer-events: none;
+}
+
+html[data-theme="light"] .ambient-ribbon {
+  opacity: .28;
+}
+
+html[data-theme="light"] .ambient-stars {
+  opacity: .1;
+}
+
+.magic-pointer-glow {
+  position: fixed;
+  z-index: 40;
+  top: 0;
+  left: 0;
+  width: 380px;
+  height: 380px;
+  border-radius: 50%;
+  opacity: 0;
+  background: radial-gradient(circle,
+    color-mix(in srgb, var(--accent) 10%, transparent) 0,
+    color-mix(in srgb, var(--apple-purple) 5%, transparent) 34%,
+    transparent 70%);
+  pointer-events: none;
+  transition: opacity 260ms ease;
+  will-change: transform, opacity;
+}
+
+.magic-pointer-core {
+  position: absolute;
+  top: calc(50% - 7px);
+  left: calc(50% - 7px);
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  opacity: .55;
+  background: radial-gradient(circle, rgba(255, 255, 255, .82), color-mix(in srgb, var(--accent) 50%, transparent) 38%, transparent 72%);
+  box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+html.pointer-present .magic-pointer-glow {
+  opacity: 1;
+}
+
+html[data-theme="light"] .magic-pointer-glow {
+  opacity: 0;
+  mix-blend-mode: multiply;
+}
+
+html[data-theme="light"].pointer-present .magic-pointer-glow {
+  opacity: .54;
+}
+
+.motion-surface {
+  --motion-x: 50%;
+  --motion-y: 50%;
+  --motion-accent: var(--accent);
+  isolation: isolate;
+}
+
+.metric-card.motion-surface {
+  --motion-accent: var(--card-accent);
+}
+
+.motion-glow {
+  position: absolute !important;
+  z-index: 2;
+  inset: 0;
+  border-radius: inherit;
+  opacity: 0;
+  background:
+    radial-gradient(310px circle at var(--motion-x) var(--motion-y),
+      color-mix(in srgb, var(--motion-accent) 14%, transparent),
+      transparent 68%);
+  mix-blend-mode: screen;
+  pointer-events: none;
+  transition: opacity 240ms ease;
+}
+
+.motion-surface.is-pointer-lit > .motion-glow {
+  opacity: 1;
+}
+
+html[data-theme="light"] .motion-glow {
+  opacity: 0;
+  mix-blend-mode: multiply;
+}
+
+html[data-theme="light"] .motion-surface.is-pointer-lit > .motion-glow {
+  opacity: .46;
+}
+
+.motion-ripple-host {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.magic-ripple {
+  position: absolute !important;
+  z-index: 0 !important;
+  border-radius: 50%;
+  background: color-mix(in srgb, currentColor 24%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(.08);
+  animation: magic-ripple 620ms var(--apple-ease) both;
+}
+
+.magic-spark-burst {
+  position: fixed;
+  z-index: 5000;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.magic-spark-burst i {
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 0 10px var(--accent), 0 0 20px color-mix(in srgb, var(--apple-purple) 72%, transparent);
+  animation: magic-spark 620ms var(--apple-ease) var(--spark-delay) both;
+}
+
+.motion-ready .section-intro h2 {
+  background-size: 220% auto;
+  animation: magic-headline 12s ease-in-out infinite;
+}
+
+.motion-ready .nav-item.active .nav-symbol {
+  animation: active-symbol-float 3.8s ease-in-out infinite;
+}
+
+.motion-paused .ambient-orb,
+.motion-paused .ambient-ribbon,
+.motion-paused .section-intro h2,
+.motion-paused .nav-item.active .nav-symbol {
+  animation-play-state: paused !important;
+}
+
+@keyframes ambient-ribbon-drift {
+  0% { opacity: .36; transform: translate3d(-4vw, -3vh, 0) rotate(-8deg) scaleX(.92); }
+  100% { opacity: .66; transform: translate3d(7vw, 7vh, 0) rotate(-2deg) scaleX(1.04); }
+}
+
+@keyframes magic-ripple {
+  0% { opacity: .5; transform: scale(.08); }
+  70% { opacity: .16; }
+  100% { opacity: 0; transform: scale(1); }
+}
+
+@keyframes magic-spark {
+  0% { opacity: 0; transform: translate3d(0, 0, 0) scale(.4); }
+  24% { opacity: 1; }
+  100% { opacity: 0; transform: translate3d(var(--spark-x), var(--spark-y), 0) scale(0); }
+}
+
+@keyframes magic-headline {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+@keyframes active-symbol-float {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50% { transform: translate3d(0, -1.5px, 0); }
+}
+
+@keyframes surface-rise {
+  from { opacity: 0; transform: translate3d(0, 12px, 0) scale(.986); }
+  to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+@keyframes management-view-in {
+  from { opacity: 0; transform: translate3d(0, 10px, 0) scale(.992); }
+  to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+@keyframes theme-reveal {
+  from { clip-path: circle(0 at var(--theme-x) var(--theme-y)); }
+  to { clip-path: circle(150% at var(--theme-x) var(--theme-y)); }
+}
+
+@media (hover: none), (pointer: coarse) {
+  .magic-pointer-glow,
+  .motion-glow {
+    display: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ambient-ribbon,
+  .motion-ready .section-intro h2,
+  .motion-ready .nav-item.active .nav-symbol,
+  .magic-ripple,
+  .magic-spark-burst i {
+    animation: none !important;
+  }
+
+  .magic-pointer-glow,
+  .motion-glow,
+  .magic-spark-burst {
+    display: none !important;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .ambient-ribbon,
+  .ambient-stars,
+  .magic-pointer-glow,
+  .motion-glow {
+    display: none !important;
+  }
+}

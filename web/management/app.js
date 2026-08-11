@@ -123,6 +123,11 @@
   let oauthPollTimer = 0;
   let logsLiveTimer = 0;
   let viewEnterTimer = 0;
+  let motionFrame = 0;
+  let motionPointerX = 0;
+  let motionPointerY = 0;
+  let motionSurface = null;
+  let motionPointerGlow = null;
 
   function byId(id) {
     return document.getElementById(id);
@@ -177,7 +182,12 @@
     renderAuthSecurityState();
     setDatePreset(30, false);
     bindEvents();
-    window.setInterval(refreshQuotaCountdowns, 1000);
+    initMotionExperience();
+    window.setInterval(function () {
+      if (!document.hidden && state.currentView === "quota") {
+        refreshQuotaCountdowns();
+      }
+    }, 1000);
 
     const remembered = safeStorage(window.sessionStorage, "get", SESSION_SECRET_KEY);
     if (remembered) {
@@ -185,6 +195,148 @@
       dom.rememberSecret.checked = true;
       authenticate(remembered, true);
     }
+  }
+
+  function initMotionExperience() {
+    const root = document.documentElement;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const finePointer = window.matchMedia("(hover: hover) and (pointer: fine)");
+    root.classList.add("motion-ready");
+    if (reduceMotion.matches || !finePointer.matches) {
+      return;
+    }
+
+    motionPointerGlow = element("div", "magic-pointer-glow");
+    motionPointerGlow.setAttribute("aria-hidden", "true");
+    motionPointerGlow.appendChild(element("span", "magic-pointer-core"));
+    document.body.appendChild(motionPointerGlow);
+
+    document.addEventListener("pointermove", handleMotionPointerMove, { passive: true });
+    document.addEventListener("pointerover", handleMotionPointerOver, { passive: true });
+    document.addEventListener("pointerout", handleMotionPointerOut, { passive: true });
+    document.addEventListener("pointerdown", handleMotionPointerDown, { passive: true });
+    window.addEventListener("blur", clearMotionSurface);
+    document.addEventListener("visibilitychange", function () {
+      root.classList.toggle("motion-paused", document.hidden);
+    });
+    document.addEventListener("mouseleave", function () {
+      root.classList.remove("pointer-present");
+      clearMotionSurface();
+    });
+  }
+
+  function handleMotionPointerMove(event) {
+    if (event.pointerType && event.pointerType !== "mouse" && event.pointerType !== "pen") {
+      return;
+    }
+    motionPointerX = event.clientX;
+    motionPointerY = event.clientY;
+    document.documentElement.classList.add("pointer-present");
+    if (!motionFrame) {
+      motionFrame = window.requestAnimationFrame(renderMotionPointer);
+    }
+  }
+
+  function renderMotionPointer() {
+    motionFrame = 0;
+    if (motionPointerGlow) {
+      motionPointerGlow.style.transform = "translate3d(" + (motionPointerX - 190) + "px," + (motionPointerY - 190) + "px,0)";
+    }
+    if (!motionSurface || !motionSurface.isConnected) {
+      return;
+    }
+    const bounds = motionSurface.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) {
+      return;
+    }
+    const x = Math.max(0, Math.min(100, (motionPointerX - bounds.left) / bounds.width * 100));
+    const y = Math.max(0, Math.min(100, (motionPointerY - bounds.top) / bounds.height * 100));
+    motionSurface.style.setProperty("--motion-x", x.toFixed(2) + "%");
+    motionSurface.style.setProperty("--motion-y", y.toFixed(2) + "%");
+  }
+
+  function handleMotionPointerOver(event) {
+    const target = event.target instanceof Element ? event.target : null;
+    const surface = target && target.closest(".metric-card, .panel, .filter-bar, .list-toolbar, .settings-strip, .save-bar, .quota-card, .credential-card, .pricing-rule-card");
+    if (!surface || surface === motionSurface) {
+      return;
+    }
+    clearMotionSurface();
+    motionSurface = surface;
+    motionSurface.classList.add("motion-surface", "is-pointer-lit");
+    if (!motionSurface.querySelector(":scope > .motion-glow")) {
+      const glow = element("span", "motion-glow");
+      glow.setAttribute("aria-hidden", "true");
+      motionSurface.appendChild(glow);
+    }
+  }
+
+  function handleMotionPointerOut(event) {
+    if (!motionSurface) {
+      return;
+    }
+    const next = event.relatedTarget instanceof Node ? event.relatedTarget : null;
+    if (next && motionSurface.contains(next)) {
+      return;
+    }
+    clearMotionSurface();
+  }
+
+  function clearMotionSurface() {
+    if (!motionSurface) {
+      return;
+    }
+    motionSurface.classList.remove("is-pointer-lit");
+    motionSurface = null;
+  }
+
+  function handleMotionPointerDown(event) {
+    const target = event.target instanceof Element ? event.target : null;
+    const control = target && target.closest(".button, .icon-button, .nav-item, .preset-button, .segment button, .provider-connect");
+    if (!control || control.disabled) {
+      return;
+    }
+    const bounds = control.getBoundingClientRect();
+    const ripple = element("span", "magic-ripple");
+    const size = Math.max(bounds.width, bounds.height) * 1.45;
+    ripple.style.width = size + "px";
+    ripple.style.height = size + "px";
+    ripple.style.left = (event.clientX - bounds.left - size / 2) + "px";
+    ripple.style.top = (event.clientY - bounds.top - size / 2) + "px";
+    ripple.setAttribute("aria-hidden", "true");
+    control.classList.add("motion-ripple-host");
+    control.appendChild(ripple);
+    let rippleRemoved = false;
+    const removeRipple = function () {
+      if (rippleRemoved) {
+        return;
+      }
+      rippleRemoved = true;
+      ripple.remove();
+    };
+    ripple.addEventListener("animationend", removeRipple, { once: true });
+    window.setTimeout(removeRipple, 760);
+    if (control.matches(".button.primary, .nav-item.active")) {
+      createMagicSparks(event.clientX, event.clientY);
+    }
+  }
+
+  function createMagicSparks(x, y) {
+    const layer = element("span", "magic-spark-burst");
+    layer.setAttribute("aria-hidden", "true");
+    layer.style.left = x + "px";
+    layer.style.top = y + "px";
+    for (let index = 0; index < 6; index += 1) {
+      const spark = element("i");
+      const angle = Math.PI * 2 * index / 6 + Math.PI / 12;
+      const distance = 22 + index % 2 * 9;
+      spark.style.setProperty("--spark-x", Math.cos(angle) * distance + "px");
+      spark.style.setProperty("--spark-y", Math.sin(angle) * distance + "px");
+      spark.style.setProperty("--spark-delay", index * 18 + "ms");
+      layer.appendChild(spark);
+    }
+    document.body.appendChild(layer);
+    window.setTimeout(function () { layer.remove(); }, 760);
   }
 
   function cacheDOM() {
@@ -513,8 +665,13 @@
     dom.themeToggle.title = theme === "dark" ? "切换到浅色主题" : "切换到深色主题";
   }
 
-  function toggleTheme() {
+  function toggleTheme(event) {
     const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+    const bounds = dom.themeToggle.getBoundingClientRect();
+    const themeX = event && event.clientX ? event.clientX : bounds.left + bounds.width / 2;
+    const themeY = event && event.clientY ? event.clientY : bounds.top + bounds.height / 2;
+    document.documentElement.style.setProperty("--theme-x", themeX + "px");
+    document.documentElement.style.setProperty("--theme-y", themeY + "px");
     const apply = function () {
       applyTheme(next);
       safeStorage(window.localStorage, "set", THEME_KEY, next);
