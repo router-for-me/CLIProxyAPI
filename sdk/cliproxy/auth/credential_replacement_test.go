@@ -813,6 +813,65 @@ func TestUpdateSynchronizesMutableCredentialStorageBeforePublication(t *testing.
 	}
 }
 
+func TestConditionalUpdatePublishesSchedulerBeforePersistenceCompletes(t *testing.T) {
+	store := &orderedCredentialStore{}
+	manager := NewManager(store, &RoundRobinSelector{}, nil)
+	auth := &Auth{
+		ID:       "refresh-scheduler-before-persist.json",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{"access_token": "old-access-token"},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+
+	manager.mu.RLock()
+	expectedCurrent := manager.auths[auth.ID]
+	manager.mu.RUnlock()
+	if expectedCurrent == nil {
+		t.Fatal("registered auth missing")
+	}
+	refreshed := expectedCurrent.Clone()
+	refreshed.Metadata["access_token"] = "refreshed-access-token"
+
+	store.blockNextSave()
+	updateDone := make(chan error, 1)
+	go func() {
+		_, _, errUpdate := manager.updateAuth(context.Background(), refreshed, expectedCurrent)
+		updateDone <- errUpdate
+	}()
+	select {
+	case <-store.blockedSave:
+	case <-time.After(time.Second):
+		t.Fatal("conditional persistence did not block")
+	}
+
+	picked, errPick := manager.scheduler.pickSingle(
+		context.Background(),
+		auth.Provider,
+		"",
+		cliproxyexecutor.Options{},
+		nil,
+	)
+	if errPick != nil {
+		t.Fatalf("scheduler pick while persistence blocked: %v", errPick)
+	}
+	if got := authAccessToken(picked); got != "refreshed-access-token" {
+		t.Fatalf("scheduler token while persistence blocked = %q, want refreshed token", got)
+	}
+
+	close(store.releaseSave)
+	select {
+	case errUpdate := <-updateDone:
+		if errUpdate != nil {
+			t.Fatalf("conditional update: %v", errUpdate)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("conditional update did not finish")
+	}
+}
+
 func TestConditionalUpdateDoesNotPublishStaleOwnerAfterReplacement(t *testing.T) {
 	store := &orderedCredentialStore{}
 	m := NewManager(store, &RoundRobinSelector{}, nil)

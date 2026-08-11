@@ -181,6 +181,11 @@ func (m *Manager) updateAuth(ctx context.Context, auth, expectedCurrent *Auth) (
 		persistenceCandidate = cloneAuthForConditionalPersistence(auth)
 	}
 	m.auths[auth.ID] = authClone
+	if persistedWithCAS && m.scheduler != nil {
+		// Publish the CAS-owned generation before remote persistence so a slow
+		// store cannot leave concurrent requests selecting the superseded auth.
+		m.scheduler.upsertAuth(authClone)
+	}
 	m.mu.Unlock()
 	if persistedWithCAS {
 		m.persistConditionalUpdate(ctx, persistenceCandidate, authClone)
@@ -201,9 +206,6 @@ func (m *Manager) updateAuth(ctx context.Context, auth, expectedCurrent *Auth) (
 			}
 			m.mu.RUnlock()
 			return currentClone, false, nil
-		}
-		if m.scheduler != nil {
-			m.scheduler.upsertAuth(authClone)
 		}
 		if loop := m.refreshLoop; loop != nil {
 			loop.queueReschedule(auth.ID)
