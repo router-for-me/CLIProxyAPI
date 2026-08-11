@@ -617,6 +617,10 @@ type OpenAICompatibility struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// FillMissingReasoningHistory ensures prior assistant messages in history have a reasoning_content placeholder
+	// to satisfy strict 3rd-party OpenAI-compatible providers (e.g. OpenCode Zen).
+	FillMissingReasoningHistory bool `yaml:"fill-missing-reasoning-history,omitempty" json:"fill-missing-reasoning-history,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
@@ -664,6 +668,10 @@ type OpenAICompatibilityModel struct {
 	// Default false keeps the normal signature validation behavior.
 	IsCompat bool `yaml:"is-compat,omitempty" json:"is-compat,omitempty"`
 
+	// FillMissingReasoningHistory ensures prior assistant messages in history have a reasoning_content placeholder
+	// to satisfy strict 3rd-party OpenAI-compatible providers (e.g. OpenCode Zen).
+	FillMissingReasoningHistory bool `yaml:"fill-missing-reasoning-history,omitempty" json:"fill-missing-reasoning-history,omitempty"`
+
 	// Thinking configures the thinking/reasoning capability for this model.
 	// If nil, the model defaults to level-based reasoning with levels ["low", "medium", "high"].
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
@@ -679,3 +687,4 @@ func (m OpenAICompatibilityModel) GetForceMapping() bool    { return m.ForceMapp
 func (m OpenAICompatibilityModel) GetIsCompat() bool        { return m.IsCompat }
 
 func (m OpenAICompatibilityModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
+

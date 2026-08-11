@@ -26,6 +26,76 @@ func ShouldNormalizeOpenAIToolResultsForModel(compat *config.OpenAICompatibility
 	return normalize
 }
 
+// ShouldEnsureOpenAICompatAssistantReasoningContent reports whether the selected model
+// or provider has enabled fill-missing-reasoning-history configuration.
+func ShouldEnsureOpenAICompatAssistantReasoningContent(compat *config.OpenAICompatibility, upstreamModel, requestedModel string) bool {
+	if compat == nil {
+		return false
+	}
+	if compat.FillMissingReasoningHistory {
+		return true
+	}
+
+	if fill, matched := openAICompatibilityModelFillsReasoning(compat.Models, upstreamModel); matched {
+		return fill
+	}
+	fill, _ := openAICompatibilityModelFillsReasoning(compat.Models, requestedModel)
+	return fill
+}
+
+// EnsureOpenAICompatAssistantReasoningContent ensures every assistant message in history
+// has a non-empty reasoning_content field to satisfy strict OpenAI-compatible
+// reasoning providers (e.g. OpenCode Zen).
+func EnsureOpenAICompatAssistantReasoningContent(payload []byte) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return payload
+	}
+
+	out := payload
+	messageIndex := 0
+	messages.ForEach(func(_, message gjson.Result) bool {
+		if message.Get("role").String() == "assistant" {
+			reasoning := message.Get("reasoning_content")
+			if !reasoning.Exists() || strings.TrimSpace(reasoning.String()) == "" {
+				path := fmt.Sprintf("messages.%d.reasoning_content", messageIndex)
+				if updated, errSet := sjson.SetBytes(out, path, "[reasoning unavailable]"); errSet == nil {
+					out = updated
+				}
+			}
+		}
+		messageIndex++
+		return true
+	})
+	return out
+}
+
+func openAICompatibilityModelFillsReasoning(models []config.OpenAICompatibilityModel, model string) (bool, bool) {
+	model = normalizeOpenAICompatibilityModelName(model)
+	if model == "" {
+		return false, false
+	}
+
+	for i := range models {
+		if strings.EqualFold(model, normalizeOpenAICompatibilityModelName(models[i].Name)) {
+			return models[i].FillMissingReasoningHistory, true
+		}
+	}
+
+	matched := false
+	fills := true
+	for i := range models {
+		if !strings.EqualFold(model, normalizeOpenAICompatibilityModelName(models[i].Alias)) {
+			continue
+		}
+		matched = true
+		if !models[i].FillMissingReasoningHistory {
+			fills = false
+		}
+	}
+	return fills && matched, matched
+}
+
 // NormalizeOpenAIToolResultsTextOnly converts tool message content to strings.
 // Text parts are preserved and image parts are replaced with a short marker.
 func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {

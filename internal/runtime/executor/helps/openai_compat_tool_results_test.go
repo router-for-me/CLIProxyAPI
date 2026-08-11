@@ -109,3 +109,63 @@ func TestShouldNormalizeOpenAIToolResultsForModel(t *testing.T) {
 		t.Fatal("nil compatibility config unexpectedly enabled normalization")
 	}
 }
+
+func TestShouldEnsureOpenAICompatAssistantReasoningContent(t *testing.T) {
+	compat := &config.OpenAICompatibility{
+		Models: []config.OpenAICompatibilityModel{
+			{Name: "upstream-fill", Alias: "alias-fill", FillMissingReasoningHistory: true},
+			{Name: "upstream-nofill", Alias: "alias-nofill", FillMissingReasoningHistory: false},
+		},
+	}
+
+	compatProviderOptIn := &config.OpenAICompatibility{
+		FillMissingReasoningHistory: true,
+		Models: []config.OpenAICompatibilityModel{
+			{Name: "model-a", Alias: "alias-a"},
+		},
+	}
+
+	tests := []struct {
+		name           string
+		compat         *config.OpenAICompatibility
+		upstreamModel  string
+		requestedModel string
+		want           bool
+	}{
+		{name: "model fill true", compat: compat, upstreamModel: "upstream-fill", want: true},
+		{name: "model fill suffix", compat: compat, upstreamModel: "upstream-fill(high)", want: true},
+		{name: "alias fill true", compat: compat, upstreamModel: "unknown", requestedModel: "alias-fill", want: true},
+		{name: "model fill false", compat: compat, upstreamModel: "upstream-nofill", want: false},
+		{name: "provider level opt in", compat: compatProviderOptIn, upstreamModel: "model-a", want: true},
+		{name: "nil compat", compat: nil, upstreamModel: "upstream-fill", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ShouldEnsureOpenAICompatAssistantReasoningContent(tt.compat, tt.upstreamModel, tt.requestedModel); got != tt.want {
+				t.Fatalf("fill = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnsureOpenAICompatAssistantReasoningContent(t *testing.T) {
+	input := []byte(`{"messages":[
+		{"role":"user","content":"hello"},
+		{"role":"assistant","content":"text answer without reasoning"},
+		{"role":"user","content":"next question"},
+		{"role":"assistant","content":"answer with reasoning","reasoning_content":"existing reasoning"}
+	]}`)
+
+	got := EnsureOpenAICompatAssistantReasoningContent(input)
+
+	res1 := gjson.GetBytes(got, "messages.1.reasoning_content")
+	if !res1.Exists() || res1.String() != "[reasoning unavailable]" {
+		t.Fatalf("messages.1.reasoning_content = %q, want [reasoning unavailable]", res1.String())
+	}
+
+	res3 := gjson.GetBytes(got, "messages.3.reasoning_content")
+	if !res3.Exists() || res3.String() != "existing reasoning" {
+		t.Fatalf("messages.3.reasoning_content = %q, want existing reasoning", res3.String())
+	}
+}

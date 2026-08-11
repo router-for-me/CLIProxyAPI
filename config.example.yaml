@@ -484,6 +484,7 @@ nonstream-keepalive-interval: 0
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
 #     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests from all input protocols
+#     fill-missing-reasoning-history: false # optional: populate "[reasoning unavailable]" placeholder for prior assistant messages in history missing reasoning_content (useful for OpenCode Zen / strict 3rd-party proxies)
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -502,6 +503,7 @@ nonstream-keepalive-interval: 0
 #         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients. Use [text] for upstreams that reject multimodal tool result content.
 #         output-modalities: [text]       # optional: declare output modalities when known
 #         is-compat: false                # optional: preserve Claude thinking blocks for compatible upstreams
+#         fill-missing-reasoning-history: false # optional: populate "[reasoning unavailable]" placeholder for prior assistant messages missing reasoning_content
 #         thinking:                      # optional: omit to default to levels ["low","medium","high"]
 #           levels: ["low", "medium", "high"]
 #       # You may repeat the same alias to build an internal model pool.
