@@ -290,25 +290,31 @@ func ValidateGeminiFunctionCallPairing(inputRawJSON []byte) error {
 	}
 
 	var pending []geminiFunctionCallRef
-	contentResults := contents.Array()
-	for i := 0; i < len(contentResults); i++ {
-		parts := contentResults[i].Get("parts")
+	var validationErr error
+	contents.ForEach(func(contentIndex, content gjson.Result) bool {
+		i := int(contentIndex.Int())
+		parts := content.Get("parts")
 		if !parts.IsArray() {
 			if len(pending) > 0 {
-				return fmt.Errorf("%s[%d]: content appears before %d pending functionResponse part(s)", contentsPath, i, len(pending))
+				validationErr = fmt.Errorf(
+					"%s[%d]: content appears before %d pending functionResponse part(s)",
+					contentsPath,
+					i,
+					len(pending),
+				)
 			}
-			continue
+			return validationErr == nil
 		}
 
 		var calls []geminiFunctionCallRef
 		var responses []geminiFunctionResponseRef
-		partResults := parts.Array()
-		for j := 0; j < len(partResults); j++ {
-			part := partResults[j]
+		parts.ForEach(func(partIndex, part gjson.Result) bool {
+			j := int(partIndex.Int())
 			partPath := fmt.Sprintf("%s[%d].parts[%d]", contentsPath, i, j)
 			if call := part.Get("functionCall"); call.Exists() {
 				if call.Get("name").String() == "" {
-					return fmt.Errorf("%s: missing functionCall.name", partPath)
+					validationErr = fmt.Errorf("%s: missing functionCall.name", partPath)
+					return false
 				}
 				calls = append(calls, geminiFunctionCallRef{
 					id:   call.Get("id").String(),
@@ -322,58 +328,91 @@ func ValidateGeminiFunctionCallPairing(inputRawJSON []byte) error {
 					path: partPath,
 				})
 			}
+			return true
+		})
+		if validationErr != nil {
+			return false
 		}
 
-		if len(calls) > 0 && len(responses) > 0 {
-			return fmt.Errorf("%s[%d]: functionCall and functionResponse parts must not be interleaved in the same content", contentsPath, i)
-		}
-
-		if len(calls) > 0 {
-			if len(pending) > 0 {
-				return fmt.Errorf("%s[%d]: functionCall appears before %d pending functionResponse part(s)", contentsPath, i, len(pending))
-			}
+		switch {
+		case len(calls) > 0 && len(responses) > 0:
+			validationErr = fmt.Errorf(
+				"%s[%d]: functionCall and functionResponse parts must not be interleaved in the same content",
+				contentsPath,
+				i,
+			)
+		case len(calls) > 0 && len(pending) > 0:
+			validationErr = fmt.Errorf(
+				"%s[%d]: functionCall appears before %d pending functionResponse part(s)",
+				contentsPath,
+				i,
+				len(pending),
+			)
+		case len(calls) > 0:
 			pending = calls
-			continue
+			return true
+		case len(responses) == 0 && len(pending) > 0:
+			validationErr = fmt.Errorf(
+				"%s[%d]: content appears before %d pending functionResponse part(s)",
+				contentsPath,
+				i,
+				len(pending),
+			)
+		case len(responses) == 0:
+			return true
+		case len(pending) == 0:
+			validationErr = fmt.Errorf("%s[%d]: functionResponse without preceding functionCall", contentsPath, i)
+		case len(responses) != len(pending):
+			validationErr = fmt.Errorf(
+				"%s[%d]: functionResponse count %d does not match pending functionCall count %d",
+				contentsPath,
+				i,
+				len(responses),
+				len(pending),
+			)
+		}
+		if validationErr != nil {
+			return false
 		}
 
-		if len(responses) == 0 {
-			if len(pending) > 0 {
-				return fmt.Errorf("%s[%d]: content appears before %d pending functionResponse part(s)", contentsPath, i, len(pending))
-			}
-			continue
-		}
-		if len(pending) == 0 {
-			return fmt.Errorf("%s[%d]: functionResponse without preceding functionCall", contentsPath, i)
-		}
-		if len(responses) != len(pending) {
-			return fmt.Errorf("%s[%d]: functionResponse count %d does not match pending functionCall count %d", contentsPath, i, len(responses), len(pending))
-		}
-
-		for j := 0; j < len(responses); j++ {
-			partPath := responses[j].path
-			response := responses[j].part.Get("functionResponse")
-			call := pending[j]
+		for responseIndex, responseRef := range responses {
+			partPath := responseRef.path
+			response := responseRef.part.Get("functionResponse")
+			call := pending[responseIndex]
 			responseID := response.Get("id").String()
 			responseName := response.Get("name").String()
 
-			if call.id != "" && responseID == "" {
-				return fmt.Errorf("%s: missing functionResponse.id for %s", partPath, call.path)
+			switch {
+			case call.id != "" && responseID == "":
+				validationErr = fmt.Errorf("%s: missing functionResponse.id for %s", partPath, call.path)
+			case call.id != "" && responseID != call.id:
+				validationErr = fmt.Errorf(
+					"%s: functionResponse.id %q does not match functionCall.id %q at %s",
+					partPath,
+					responseID,
+					call.id,
+					call.path,
+				)
+			case responseName == "":
+				validationErr = fmt.Errorf("%s: missing functionResponse.name", partPath)
+			case call.name != "" && responseName != call.name:
+				validationErr = fmt.Errorf(
+					"%s: functionResponse.name %q does not match functionCall.name %q at %s",
+					partPath,
+					responseName,
+					call.name,
+					call.path,
+				)
 			}
-			if call.id != "" && responseID != call.id {
-				return fmt.Errorf("%s: functionResponse.id %q does not match functionCall.id %q at %s", partPath, responseID, call.id, call.path)
-			}
-			if responseName == "" {
-				return fmt.Errorf("%s: missing functionResponse.name", partPath)
-			}
-			if call.name != "" && responseName != call.name {
-				return fmt.Errorf("%s: functionResponse.name %q does not match functionCall.name %q at %s", partPath, responseName, call.name, call.path)
+			if validationErr != nil {
+				return false
 			}
 		}
 
 		pending = nil
-	}
-
-	return nil
+		return true
+	})
+	return validationErr
 }
 
 func decodeGeminiThoughtSignature(sig string) ([]byte, error) {

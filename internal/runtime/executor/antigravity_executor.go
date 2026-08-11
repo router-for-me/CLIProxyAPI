@@ -4,6 +4,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -132,6 +133,17 @@ func sanitizeAntigravityGeminiRequestSignatures(modelName string, rawJSON []byte
 	return normalizeAntigravityGeminiFunctionResponseRoles(rawJSON)
 }
 
+type antigravityContentEdit struct {
+	index       int64
+	start       int
+	end         int
+	replacement []byte
+}
+
+// normalizeAntigravityGeminiFunctionResponseRoles edits each response turn in
+// isolation, then splices all changed turns into the request with one body copy.
+// Applying SJSON once per field made large histories scale with history size
+// multiplied by the number of tool turns.
 func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 	rawJSON = repairAntigravityGeminiFunctionResponseNames(rawJSON)
 	contents := util.GetGJSONBytesNoCopy(rawJSON, "request.contents")
@@ -142,18 +154,23 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 		id   string
 		name string
 	}
-	out := rawJSON
+
+	edits := make([]antigravityContentEdit, 0)
 	var pending []functionRef
-	for contentIndex, content := range contents.Array() {
+	validOffsets := true
+	contents.ForEach(func(contentIndex, content gjson.Result) bool {
 		parts := content.Get("parts")
-		if !parts.IsArray() || len(parts.Array()) == 0 {
+		if !parts.IsArray() {
 			pending = nil
-			continue
+			return true
 		}
+
 		var calls, responses []functionRef
 		var responseParts []json.RawMessage
+		partCount := 0
 		hasOtherPart := false
 		parts.ForEach(func(_, part gjson.Result) bool {
+			partCount++
 			switch {
 			case part.Get("functionCall").Exists():
 				calls = append(calls, functionRef{id: part.Get("functionCall.id").String(), name: part.Get("functionCall.name").String()})
@@ -165,21 +182,27 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 			}
 			return true
 		})
+		if partCount == 0 {
+			pending = nil
+			return true
+		}
 		if len(calls) > 0 && len(responses) == 0 {
 			pending = calls
-			continue
+			return true
 		}
 		if len(responses) == 0 {
 			if hasOtherPart {
 				pending = nil
 			}
-			continue
+			return true
 		}
 		if hasOtherPart || len(calls) > 0 {
 			pending = nil
-			continue
+			return true
 		}
 
+		var contentJSON []byte
+		contentChanged := false
 		if len(pending) == len(responses) {
 			ordered := make([]json.RawMessage, 0, len(responseParts))
 			used := make([]bool, len(responses))
@@ -202,18 +225,80 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 				ordered = append(ordered, responseParts[matched])
 			}
 			if len(ordered) == len(responseParts) {
-				if encoded, errMarshal := json.Marshal(ordered); errMarshal == nil {
-					if updated, errSet := sjson.SetRawBytes(out, fmt.Sprintf("request.contents.%d.parts", contentIndex), encoded); errSet == nil {
-						out = updated
+				encoded, errMarshal := json.Marshal(ordered)
+				if errMarshal == nil && !bytes.Equal(encoded, []byte(parts.Raw)) {
+					contentJSON = []byte(content.Raw)
+					if updated, errSet := sjson.SetRawBytes(contentJSON, "parts", encoded); errSet == nil {
+						contentJSON = updated
+						contentChanged = true
 					}
 				}
 			}
 		}
 		pending = nil
 		if content.Get("role").String() != "model" {
-			if updated, errSet := sjson.SetBytes(out, fmt.Sprintf("request.contents.%d.role", contentIndex), "model"); errSet == nil {
-				out = updated
+			if contentJSON == nil {
+				contentJSON = []byte(content.Raw)
 			}
+			if updated, errSet := sjson.SetBytes(contentJSON, "role", "model"); errSet == nil {
+				contentJSON = updated
+				contentChanged = true
+			}
+		}
+		if !contentChanged {
+			return true
+		}
+
+		start := content.Index
+		end := start + len(content.Raw)
+		if start < 0 || end < start || end > len(rawJSON) || !bytes.Equal(rawJSON[start:end], []byte(content.Raw)) {
+			validOffsets = false
+		}
+		edits = append(edits, antigravityContentEdit{
+			index:       contentIndex.Int(),
+			start:       start,
+			end:         end,
+			replacement: contentJSON,
+		})
+		return true
+	})
+	if len(edits) == 0 {
+		return rawJSON
+	}
+	if !validOffsets {
+		return applyAntigravityContentEditsWithSJSON(rawJSON, edits)
+	}
+
+	finalSize := len(rawJSON)
+	cursor := 0
+	for _, edit := range edits {
+		if edit.start < cursor {
+			return applyAntigravityContentEditsWithSJSON(rawJSON, edits)
+		}
+		finalSize += len(edit.replacement) - (edit.end - edit.start)
+		if finalSize < 0 {
+			return applyAntigravityContentEditsWithSJSON(rawJSON, edits)
+		}
+		cursor = edit.end
+	}
+	out := make([]byte, 0, finalSize)
+	cursor = 0
+	for _, edit := range edits {
+		out = append(out, rawJSON[cursor:edit.start]...)
+		out = append(out, edit.replacement...)
+		cursor = edit.end
+	}
+	return append(out, rawJSON[cursor:]...)
+}
+
+// applyAntigravityContentEditsWithSJSON preserves the legacy path semantics if
+// a GJSON result cannot be proven to point into the original request bytes.
+func applyAntigravityContentEditsWithSJSON(rawJSON []byte, edits []antigravityContentEdit) []byte {
+	out := rawJSON
+	for _, edit := range edits {
+		path := fmt.Sprintf("request.contents.%d", edit.index)
+		if updated, errSet := sjson.SetRawBytes(out, path, edit.replacement); errSet == nil {
+			out = updated
 		}
 	}
 	return out
