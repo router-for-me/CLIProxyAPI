@@ -1090,6 +1090,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		if result.hasCredentialFingerprint {
 			currentFingerprint, okFingerprint := authCredentialFingerprint(auth)
 			staleCredentialResult = !okFingerprint || currentFingerprint != result.credentialFingerprint
+		} else if result.hasCredentialGeneration {
+			staleCredentialResult = auth.credentialGeneration == 0 || auth.credentialGeneration != result.credentialGeneration
 		}
 		staleSuccessfulResult := staleCredentialResult && result.Success
 		staleUnauthorizedResult := staleCredentialResult && !result.Success && isUnauthorizedError(result.Error)
@@ -1266,11 +1268,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 type authCredentialRevision struct {
 	fingerprint    [sha256.Size]byte
 	hasFingerprint bool
+	generation     uint64
 }
 
 func captureAuthCredentialRevision(auth *Auth) authCredentialRevision {
 	fingerprint, ok := authCredentialFingerprint(auth)
-	return authCredentialRevision{fingerprint: fingerprint, hasFingerprint: ok}
+	var generation uint64
+	if auth != nil {
+		generation = auth.credentialGeneration
+	}
+	return authCredentialRevision{fingerprint: fingerprint, hasFingerprint: ok, generation: generation}
 }
 
 type executionCredentialStorage struct {
@@ -1368,6 +1375,8 @@ func (m *Manager) recordExecutionResultWithRevision(ctx context.Context, result 
 	if !ephemeral {
 		result.credentialFingerprint = revision.fingerprint
 		result.hasCredentialFingerprint = revision.hasFingerprint
+		result.credentialGeneration = revision.generation
+		result.hasCredentialGeneration = revision.generation != 0
 		m.MarkResult(ctx, result)
 		return
 	}

@@ -91,6 +91,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	syncAuthStorageMetadata(auth)
 	auth.EnsureIndex()
+	auth.credentialGeneration = m.authGeneration.Add(1)
 	authClone := auth.Clone()
 	m.mu.Lock()
 	m.auths[auth.ID] = authClone
@@ -155,6 +156,7 @@ func (m *Manager) updateAuth(ctx context.Context, auth, expectedCurrent *Auth) (
 	}
 	syncAuthStorageMetadata(auth)
 	auth.EnsureIndex()
+	auth.credentialGeneration = m.authGeneration.Add(1)
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
 	persistedWithCAS := expectedCurrent != nil
@@ -283,6 +285,7 @@ func (m *Manager) Load(ctx context.Context) error {
 			continue
 		}
 		auth.EnsureIndex()
+		auth.credentialGeneration = m.authGeneration.Add(1)
 		m.auths[auth.ID] = auth.Clone()
 	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)

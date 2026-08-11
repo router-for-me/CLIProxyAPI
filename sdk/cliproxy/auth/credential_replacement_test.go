@@ -388,6 +388,67 @@ func TestExecuteIgnoresFailureFromCredentialReplacedInFlight(t *testing.T) {
 	}
 }
 
+func TestExecuteIgnoresLateUnauthorizedFromOpaqueGenerationAfterAPIKeyReplacement(t *testing.T) {
+	executor := &blockingUnauthorizedCredentialExecutor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	m := NewManager(nil, nil, nil)
+	m.RegisterExecutor(executor)
+	m.SetRetryConfig(0, 0, 1)
+	auth := &Auth{
+		ID:       "opaque-generation-inflight.json",
+		Provider: "codex",
+		Status:   StatusActive,
+		Storage:  &opaqueCredentialStorage{},
+	}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "gpt-test"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	m.RefreshSchedulerEntry(auth.ID)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "gpt-test"}, cliproxyexecutor.Options{})
+		done <- err
+	}()
+	select {
+	case <-executor.started:
+	case <-time.After(time.Second):
+		t.Fatal("execution did not start")
+	}
+
+	current, _ := m.GetByID(auth.ID)
+	replacement := current.Clone()
+	replacement.Storage = nil
+	replacement.Attributes = map[string]string{AttributeAPIKey: "replacement-api-key"}
+	if _, err := m.Update(context.Background(), replacement); err != nil {
+		t.Fatalf("Update replacement: %v", err)
+	}
+	close(executor.release)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Execute error = nil, want old opaque credential unauthorized")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("execution did not finish")
+	}
+
+	current, _ = m.GetByID(auth.ID)
+	if gotKey := authAttribute(current, AttributeAPIKey); gotKey != "replacement-api-key" {
+		t.Fatalf("current API key = %q, want replacement key", gotKey)
+	}
+	if current == nil || current.Status != StatusActive || current.Unavailable || current.LastError != nil {
+		t.Fatalf("late opaque-generation failure changed replacement auth: %#v", current)
+	}
+	if len(current.ModelStates) != 0 {
+		t.Fatalf("late opaque-generation failure created model state: %#v", current.ModelStates)
+	}
+}
+
 type lateUnauthorizedStreamCredentialExecutor struct {
 	provider string
 	release  chan struct{}
