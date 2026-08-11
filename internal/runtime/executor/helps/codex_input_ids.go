@@ -31,6 +31,7 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 
 	items := input.Array()
 	occupied := make(map[string]struct{}, len(items))
+	preserved := make(map[string]struct{}, len(items))
 	for _, item := range items {
 		if shouldDropCodexEncryptedReasoningItem(item) {
 			continue
@@ -39,13 +40,20 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 		if itemID.Type != gjson.String {
 			continue
 		}
-		id := normalizeCodexInputItemID(item, itemID.String())
+		originalID := itemID.String()
+		id := normalizeCodexInputItemID(item, originalID)
+		if id == originalID {
+			// Record preserved identities before length handling so a rewrite cannot
+			// merge with an overlong ID that will be shortened later.
+			preserved[id] = struct{}{}
+		}
 		if len([]rune(id)) <= codexInputItemIDLimit {
 			occupied[id] = struct{}{}
 		}
 	}
 
 	mapped := make(map[string]string, len(items))
+	collisionMapped := make(map[string]string, len(items))
 	rebuilt := make([]string, 0, len(items))
 	changed := false
 	for _, item := range items {
@@ -59,6 +67,22 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 		if itemID.Type == gjson.String {
 			originalID := itemID.String()
 			id := normalizeCodexInputItemID(item, originalID)
+			if id != originalID {
+				if collisionID, ok := collisionMapped[id]; ok {
+					id = collisionID
+				} else if _, exists := preserved[id]; exists {
+					for attempt := 0; ; attempt++ {
+						collisionID := codexInputItemIDWithHashSuffix(id, attempt)
+						if _, occupiedID := occupied[collisionID]; occupiedID {
+							continue
+						}
+						collisionMapped[id] = collisionID
+						occupied[collisionID] = struct{}{}
+						id = collisionID
+						break
+					}
+				}
+			}
 			if len([]rune(id)) > codexInputItemIDLimit {
 				shortened, ok := mapped[id]
 				if !ok {
@@ -139,7 +163,11 @@ func shortenCodexInputItemIDWithAttempt(id string, attempt int) string {
 	if len(runes) <= codexInputItemIDLimit {
 		return id
 	}
+	return codexInputItemIDWithHashSuffix(id, attempt)
+}
 
+func codexInputItemIDWithHashSuffix(id string, attempt int) string {
+	runes := []rune(id)
 	hashInput := id
 	if attempt > 0 {
 		hashInput += "\x00" + strconv.Itoa(attempt)
@@ -147,5 +175,8 @@ func shortenCodexInputItemIDWithAttempt(id string, attempt int) string {
 	sum := sha256.Sum256([]byte(hashInput))
 	suffix := "_" + hex.EncodeToString(sum[:8])
 	prefixLength := codexInputItemIDLimit - len(suffix)
+	if len(runes) < prefixLength {
+		prefixLength = len(runes)
+	}
 	return string(runes[:prefixLength]) + suffix
 }
