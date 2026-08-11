@@ -214,4 +214,18 @@ func TestShouldEnsureOpenAICompatAssistantReasoningContentDisambiguation(t *test
 	if ShouldEnsureOpenAICompatAssistantReasoningContent(compatUpstreamNamespace, "deepseek/v3", "deepseek/v3-standard") {
 		t.Fatalf("expected preserved upstream namespace standard alias to disable fill-missing-reasoning-history")
 	}
+
+	compatSuffixed := &config.OpenAICompatibility{
+		Models: []config.OpenAICompatibilityModel{
+			{Name: "deepseek-v3", Alias: "public(low)", FillMissingReasoningHistory: true},
+			{Name: "deepseek-v3", Alias: "public(high)", FillMissingReasoningHistory: false},
+		},
+	}
+
+	if !ShouldEnsureOpenAICompatAssistantReasoningContent(compatSuffixed, "deepseek-v3", "public(low)") {
+		t.Fatalf("expected public(low) suffixed alias to enable fill-missing-reasoning-history")
+	}
+	if ShouldEnsureOpenAICompatAssistantReasoningContent(compatSuffixed, "deepseek-v3", "public(high)") {
+		t.Fatalf("expected public(high) suffixed alias to disable fill-missing-reasoning-history")
+	}
 }
