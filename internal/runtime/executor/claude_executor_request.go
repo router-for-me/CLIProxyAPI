@@ -540,6 +540,14 @@ func isZlibHeader(header []byte) bool {
 	return cmf&0x0f == 8 && cmf>>4 <= 7 && (uint16(cmf)<<8|uint16(flg))%31 == 0
 }
 
+// claudeCredentialUsesOAuth classifies the selected upstream credential. It is the
+// single authority for every decision that has to agree with the OAuth beta
+// profile, including the extended-cache-ttl beta and the matching body cache ttl.
+func claudeCredentialUsesOAuth(auth *cliproxyauth.Auth, apiKey string) bool {
+	hasAPIKeyAttr := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
+	return isClaudeOAuthToken(apiKey) || !hasAPIKeyAttr
+}
+
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, body []byte, cfg *config.Config, incomingHeaders http.Header, confirmedClaudeCode bool, sessionIDs ...string) error {
 	if r == nil {
 		return nil
@@ -556,8 +564,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		hd = cfg.ClaudeHeaderDefaults
 	}
 
-	hasAPIKeyAttr := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
-	oauthToken := isClaudeOAuthToken(apiKey) || !hasAPIKeyAttr
+	oauthToken := claudeCredentialUsesOAuth(auth, apiKey)
 	useAPIKey := !oauthToken
 	isAnthropicBase := isAnthropicUpstreamURL(r.URL)
 	if isAnthropicBase && useAPIKey {

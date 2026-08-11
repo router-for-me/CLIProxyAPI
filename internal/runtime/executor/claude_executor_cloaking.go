@@ -221,7 +221,7 @@ func checkSystemInstructionsWithSigningModeAt(payload []byte, strictMode bool, c
 
 	billingText := generateBillingHeader(cchSigning, version, messageText, entrypoint, workload)
 	billingBlock := buildTextBlock(billingText, nil)
-	agentBlock := buildTextBlock(claudeCodeCLIIdentity, map[string]string{"type": "ephemeral"})
+	agentBlock := buildTextBlock(claudeCodeCLIIdentity, &claudeCodeCacheControl)
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte("["+billingBlock+","+agentBlock+"]"))
 	if strictMode {
 		return injectClaudeCodeCurrentDate(payload, now)
@@ -383,12 +383,12 @@ func collectForwardedClaudeSystemPromptBlocks(system gjson.Result) []string {
 // buildTextBlock constructs a JSON text block with JSON.stringify-compatible
 // HTML characters. encoding/json's default \u003c escaping would change the
 // exact currentDate bytes and therefore the final CCH.
-func buildTextBlock(text string, cacheControl map[string]string) string {
+func buildTextBlock(text string, cacheControl *claudeCacheControl) string {
 	block := `{"type":"text","text":` + marshalJSONStringWithoutHTMLEscape(text)
-	if cacheControl != nil && len(cacheControl) > 0 {
-		block += `,"cache_control":{"type":"ephemeral"`
-		if ttl, ok := cacheControl["ttl"]; ok {
-			block += `,"ttl":` + marshalJSONStringWithoutHTMLEscape(ttl)
+	if cacheControl != nil && cacheControl.Type != "" {
+		block += `,"cache_control":{"type":` + marshalJSONStringWithoutHTMLEscape(cacheControl.Type)
+		if cacheControl.TTL != "" {
+			block += `,"ttl":` + marshalJSONStringWithoutHTMLEscape(cacheControl.TTL)
 		}
 		block += "}"
 	}
@@ -505,7 +505,7 @@ func insertClaudeMidConversationSystemMessages(payload []byte, texts []string) [
 
 	systemMessages := make([]string, 0, len(texts))
 	for _, text := range texts {
-		content := "[" + buildTextBlock(text, map[string]string{"type": "ephemeral"}) + "]"
+		content := "[" + buildTextBlock(text, &claudeCodeCacheControl) + "]"
 		systemMessages = append(systemMessages, `{"role":"system","content":`+content+"}")
 	}
 	rawMessages := make([]string, 0, len(messageBlocks)+len(systemMessages))
@@ -631,7 +631,7 @@ func injectClaudeCodeCurrentDate(payload []byte, now time.Time) []byte {
 	dateBlock := buildTextBlock(dateText, nil)
 
 	if content.Type == gjson.String {
-		userBlock := buildTextBlock(content.String(), map[string]string{"type": "ephemeral"})
+		userBlock := buildTextBlock(content.String(), &claudeCodeCacheControl)
 		newArray := "[" + dateBlock + "," + userBlock + "]"
 		payload, _ = sjson.SetRawBytes(payload, contentPath, []byte(newArray))
 		return payload
@@ -730,6 +730,10 @@ func reconcileClaudeCodeContextManagement(payload []byte, state claudeCodeContex
 	return updated
 }
 
+// withEphemeralCacheControl stamps the native Claude Code default cache marker
+// {"type":"ephemeral"} onto a content block. A 1h ttl is not part of the default
+// shape; upgradeClaudeCacheControlTTL adds it for the credentials native uses it
+// on, after all placement decisions are final.
 func withEphemeralCacheControl(rawBlock string) string {
 	updated, err := sjson.SetRawBytes([]byte(rawBlock), "cache_control", []byte(`{"type":"ephemeral"}`))
 	if err != nil {
@@ -848,30 +852,156 @@ func applyCloaking(
 	return payload, true, nil
 }
 
-// ensureCacheControl injects cache_control breakpoints into the payload for optimal prompt caching.
-// According to Anthropic's documentation, cache prefixes are created in order: tools -> system -> messages.
-// This function adds cache_control to:
-// 1. The LAST non-deferred tool in the tools array (caches all preceding tool definitions)
-// 2. The LAST system prompt element
-// 3. The SECOND-TO-LAST user turn (caches conversation history for multi-turn)
+type claudeCacheControl struct {
+	Type string `json:"type"`
+	TTL  string `json:"ttl,omitempty"`
+}
+
+// claudeCodeCacheControl is the default Claude Code breakpoint shape.
 //
-// Up to 4 cache breakpoints are allowed per request. Tools, System, and Messages are INDEPENDENT breakpoints.
-// This enables up to 90% cost reduction on cached tokens (cache read = 0.1x base price).
+// Recovered from the cache-control constructor in the installed 2.1.220,
+// 2.1.221 and 2.1.227 binaries, which is byte-identical in all three:
+//
+//	function ctor({scope, ttl} = {}) {
+//	  return {type: "ephemeral", ...ttl && {ttl}, ...scope === "global" && {scope}}
+//	}
+//
+// ttl is spread in only when the caller passes one, so the default native wire
+// shape carries no ttl at all. upgradeClaudeCacheControlTTL applies the 1h pool
+// separately, for the credentials native selects it on. The struct field order
+// preserves the native {type, ttl} key order when sjson marshals a value.
+var claudeCodeCacheControl = claudeCacheControl{
+	Type: "ephemeral",
+}
+
+// claudeCacheControlTTL1h is the only non-default ttl native ever selects.
+const claudeCacheControlTTL1h = "1h"
+
+// ensureCacheControl injects default cache_control breakpoints for translated
+// entrypoints (Responses/Chat/Gemini) after cloaking. Placement follows the
+// native request builder recovered from the installed binaries:
+//  1. LAST system block when no system marker exists
+//  2. LAST cacheable message when that message has no marker
+//
+// Tools are normally not stamped: the native Messages builder never passes a
+// cacheControl to its tool-schema converter, and a system breakpoint already
+// covers the tools prefix. The one exception is a payload with tools but no
+// system at all, which native never produces (it always sends a system prompt).
+// Without the fallback such a request has its only breakpoint on the volatile
+// final message, so a stateless caller with large tool definitions rewrites the
+// whole prefix on every request and never reads it back.
+//
+// Each section injects independently so cloaking's first-user marker cannot
+// suppress system/latest-user breakpoints. Callers still run enforceCacheControlLimit.
 // See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
 func ensureCacheControl(payload []byte) []byte {
-	// 1. Inject cache_control into the LAST non-deferred tool
-	// Tools are cached first in the hierarchy, so this is the most important breakpoint.
-	payload = injectToolsCacheControl(payload)
-
-	// 2. Inject cache_control into the LAST system prompt element
-	// System is the second level in the cache hierarchy.
+	if !claudePayloadHasCacheableSystem(payload) {
+		payload = injectToolsCacheControl(payload)
+	}
 	payload = injectSystemCacheControl(payload)
-
-	// 3. Inject cache_control into messages for multi-turn conversation caching
-	// This caches the conversation history up to the second-to-last user turn.
 	payload = injectMessagesCacheControl(payload)
-
 	return payload
+}
+
+// claudePayloadHasCacheableSystem reports whether the payload has a system prompt
+// that injectSystemCacheControl can actually host a breakpoint on. An absent key, an
+// empty array and an empty string all leave the tools prefix uncovered.
+func claudePayloadHasCacheableSystem(payload []byte) bool {
+	system := gjson.GetBytes(payload, "system")
+	switch {
+	case !system.Exists():
+		return false
+	case system.IsArray():
+		return system.Get("#").Int() > 0
+	case system.Type == gjson.String:
+		return strings.TrimSpace(system.String()) != ""
+	default:
+		return false
+	}
+}
+
+// upgradeClaudeCacheControlTTL mirrors the native ttl upgrade helper, which only
+// touches blocks that already carry a cache_control without a ttl:
+//
+//	function upgrade(block, ttl) {
+//	  if (!("cache_control" in block) || !block.cache_control || block.cache_control.ttl) return block
+//	  return {...block, cache_control: {...block.cache_control, ttl}}
+//	}
+//
+// It never creates a breakpoint, so placement stays owned by ensureCacheControl.
+// Native gates the 1h selection on OAuth scopes, a non-overage account and an
+// allowlisted internal query source, and pushes extended-cache-ttl-2025-04-11
+// only when that selection produced a 1h body ttl. CPA has no query-source
+// equivalent, so the credential check is the reproducible half: OAuth is exactly
+// when claudeCodeCLIBetas emits extended-cache-ttl, which keeps body ttl and the
+// beta strictly paired the way native does. API-key credentials keep the plain
+// {"type":"ephemeral"} native default, which also avoids sending ttl to
+// Anthropic-compatible gateways that never advertised support for it.
+func upgradeClaudeCacheControlTTL(payload []byte, ttl string) []byte {
+	if ttl == "" || len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+
+	upgrade := func(path string, block gjson.Result) {
+		cacheControl := block.Get("cache_control")
+		if !cacheControl.IsObject() || cacheControl.Get("ttl").Exists() {
+			return
+		}
+		blockType := cacheControl.Get("type")
+		if blockType.Type != gjson.String {
+			return
+		}
+		// Rebuild the object so the native {type, ttl, scope} key order survives
+		// instead of appending ttl after a caller-supplied scope.
+		upgraded := `{"type":` + marshalJSONStringWithoutHTMLEscape(blockType.String()) +
+			`,"ttl":` + marshalJSONStringWithoutHTMLEscape(ttl)
+		if scope := cacheControl.Get("scope"); scope.Exists() {
+			upgraded += `,"scope":` + scope.Raw
+		}
+		upgraded += "}"
+		updated, errSet := sjson.SetRawBytes(payload, path+".cache_control", []byte(upgraded))
+		if errSet != nil {
+			return
+		}
+		payload = updated
+	}
+
+	forEachClaudeCacheControlBlock(payload, upgrade)
+	return payload
+}
+
+// forEachClaudeCacheControlBlock walks every block that can carry cache_control
+// in Anthropic's evaluation order: tools, then system, then messages.
+func forEachClaudeCacheControlBlock(payload []byte, visit func(path string, block gjson.Result)) {
+	if tools := gjson.GetBytes(payload, "tools"); tools.IsArray() {
+		tools.ForEach(func(idx, item gjson.Result) bool {
+			visit(fmt.Sprintf("tools.%d", int(idx.Int())), item)
+			return true
+		})
+	}
+	if system := gjson.GetBytes(payload, "system"); system.IsArray() {
+		system.ForEach(func(idx, item gjson.Result) bool {
+			visit(fmt.Sprintf("system.%d", int(idx.Int())), item)
+			return true
+		})
+	}
+	if messages := gjson.GetBytes(payload, "messages"); messages.IsArray() {
+		messages.ForEach(func(msgIdx, message gjson.Result) bool {
+			content := message.Get("content")
+			if !content.IsArray() {
+				return true
+			}
+			content.ForEach(func(itemIdx, item gjson.Result) bool {
+				visit(fmt.Sprintf("messages.%d.content.%d", int(msgIdx.Int()), int(itemIdx.Int())), item)
+				return true
+			})
+			return true
+		})
+	}
+}
+
+func shouldEnsureCacheControl(payload []byte, cloaked, confirmedClaudeCode bool) bool {
+	return !confirmedClaudeCode && (cloaked || countCacheControls(payload) == 0)
 }
 
 func countCacheControls(payload []byte) int {
@@ -1181,64 +1311,64 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 	return payload
 }
 
-// injectMessagesCacheControl adds cache_control to the second-to-last user turn for multi-turn caching.
-// Per Anthropic docs: "Place cache_control on the second-to-last User message to let the model reuse the earlier cache."
-// This enables caching of conversation history, which is especially beneficial for long multi-turn conversations.
-// Only adds cache_control if:
-// - There are at least 2 user turns in the conversation
-// - No message content already has cache_control
+// injectMessagesCacheControl adds cache_control to the message the native rolling
+// breakpoint selector would pick. Recovered from the marker selector in the
+// installed 2.1.220/2.1.221/2.1.227 binaries:
+//
+//	eligible(msg): a non-assistant turn is always eligible; an assistant turn with
+//	               string content is eligible; an assistant turn with array content
+//	               is eligible only when its last block is not thinking-like.
+//	last        := walk back from the end, skipping internal system turns and
+//	               ineligible turns.
+//	target      := (final turn is a system turn with non-empty STRING content and
+//	               last >= 0) ? final turn : last
+//
+// The final-system special case is deliberately narrow: native requires string
+// content there and writes a brand new single text block for it rather than
+// stamping the last element of an existing array. Markers on other messages must
+// not suppress this rolling write.
 func injectMessagesCacheControl(payload []byte) []byte {
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.Exists() || !messages.IsArray() {
 		return payload
 	}
 
-	// Check if ANY message content already has cache_control
-	hasCacheControlInMessages := false
-	messages.ForEach(func(_, msg gjson.Result) bool {
-		content := msg.Get("content")
-		if content.IsArray() {
-			content.ForEach(func(_, item gjson.Result) bool {
-				if item.Get("cache_control").Exists() {
-					hasCacheControlInMessages = true
-					return false
-				}
-				return true
-			})
+	lastMessageIndex := int(messages.Get("#").Int()) - 1
+	lastEligibleIndex := -1
+	messages.ForEach(func(index gjson.Result, message gjson.Result) bool {
+		if role := message.Get("role").String(); role != "user" && role != "assistant" {
+			return true
 		}
-		return !hasCacheControlInMessages
-	})
-	if hasCacheControlInMessages {
-		return payload
-	}
-
-	// Find all user message indices
-	var userMsgIndices []int
-	messages.ForEach(func(index gjson.Result, msg gjson.Result) bool {
-		if msg.Get("role").String() == "user" {
-			userMsgIndices = append(userMsgIndices, int(index.Int()))
+		if claudeMessageEligibleForRollingCache(message) {
+			lastEligibleIndex = int(index.Int())
 		}
 		return true
 	})
 
-	// Need at least 2 user turns to cache the second-to-last
-	if len(userMsgIndices) < 2 {
+	if lastEligibleIndex >= 0 {
+		finalMessage := messages.Get(fmt.Sprintf("%d", lastMessageIndex))
+		finalContent := finalMessage.Get("content")
+		if finalMessage.Get("role").String() == "system" &&
+			finalContent.Type == gjson.String &&
+			strings.TrimSpace(finalContent.String()) != "" {
+			return injectClaudeFinalSystemCacheControl(payload, lastMessageIndex, finalContent.String())
+		}
+	}
+	if lastEligibleIndex < 0 {
 		return payload
 	}
 
-	// Get the second-to-last user message index
-	secondToLastUserIdx := userMsgIndices[len(userMsgIndices)-2]
-
-	// Get the content of this message
-	contentPath := fmt.Sprintf("messages.%d.content", secondToLastUserIdx)
+	contentPath := fmt.Sprintf("messages.%d.content", lastEligibleIndex)
 	content := gjson.GetBytes(payload, contentPath)
+	if messageContentHasCacheControl(content) {
+		return payload
+	}
 
 	if content.IsArray() {
-		// Add cache_control to the last content block of this message
 		contentCount := int(content.Get("#").Int())
 		if contentCount > 0 {
-			cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", secondToLastUserIdx, contentCount-1)
-			result, err := sjson.SetBytes(payload, cacheControlPath, map[string]string{"type": "ephemeral"})
+			cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", lastEligibleIndex, contentCount-1)
+			result, err := sjson.SetBytes(payload, cacheControlPath, claudeCodeCacheControl)
 			if err != nil {
 				log.Warnf("failed to inject cache_control into messages: %v", err)
 				return payload
@@ -1246,18 +1376,8 @@ func injectMessagesCacheControl(payload []byte) []byte {
 			payload = result
 		}
 	} else if content.Type == gjson.String {
-		// Convert string content to array with cache_control
-		text := content.String()
-		newContent := []map[string]interface{}{
-			{
-				"type": "text",
-				"text": text,
-				"cache_control": map[string]string{
-					"type": "ephemeral",
-				},
-			},
-		}
-		result, err := sjson.SetBytes(payload, contentPath, newContent)
+		newContent := "[" + buildTextBlock(content.String(), &claudeCodeCacheControl) + "]"
+		result, err := sjson.SetRawBytes(payload, contentPath, []byte(newContent))
 		if err != nil {
 			log.Warnf("failed to inject cache_control into message string content: %v", err)
 			return payload
@@ -1266,6 +1386,58 @@ func injectMessagesCacheControl(payload []byte) []byte {
 	}
 
 	return payload
+}
+
+// claudeMessageEligibleForRollingCache reports whether the native selector would
+// consider this user/assistant turn as a rolling breakpoint host. Native rejects
+// an assistant turn whose last content block is thinking-like, because a thinking
+// block cannot host the marker.
+func claudeMessageEligibleForRollingCache(message gjson.Result) bool {
+	content := message.Get("content")
+	if content.Type == gjson.String {
+		return true
+	}
+	if !content.IsArray() || content.Get("#").Int() == 0 {
+		return false
+	}
+	if message.Get("role").String() != "assistant" {
+		return true
+	}
+	lastBlock := content.Get(fmt.Sprintf("%d", content.Get("#").Int()-1))
+	switch lastBlock.Get("type").String() {
+	case "thinking", "redacted_thinking":
+		return false
+	default:
+		return true
+	}
+}
+
+// injectClaudeFinalSystemCacheControl reproduces the native final-system special
+// case, which replaces the string content with a single marked text block.
+func injectClaudeFinalSystemCacheControl(payload []byte, messageIndex int, text string) []byte {
+	contentPath := fmt.Sprintf("messages.%d.content", messageIndex)
+	newContent := "[" + buildTextBlock(text, &claudeCodeCacheControl) + "]"
+	result, err := sjson.SetRawBytes(payload, contentPath, []byte(newContent))
+	if err != nil {
+		log.Warnf("failed to inject cache_control into trailing system message: %v", err)
+		return payload
+	}
+	return result
+}
+
+func messageContentHasCacheControl(content gjson.Result) bool {
+	if content.IsArray() {
+		found := false
+		content.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("cache_control").Exists() {
+				found = true
+				return false
+			}
+			return true
+		})
+		return found
+	}
+	return false
 }
 
 // injectToolsCacheControl adds cache_control to the last non-deferred tool in the tools array.
@@ -1295,7 +1467,7 @@ func injectToolsCacheControl(payload []byte) []byte {
 	}
 
 	lastToolPath := fmt.Sprintf("tools.%d.cache_control", lastEligibleToolIndex)
-	result, err := sjson.SetBytes(payload, lastToolPath, map[string]string{"type": "ephemeral"})
+	result, err := sjson.SetBytes(payload, lastToolPath, claudeCodeCacheControl)
 	if err != nil {
 		log.Warnf("failed to inject cache_control into tools array: %v", err)
 		return payload
@@ -1334,26 +1506,22 @@ func injectSystemCacheControl(payload []byte) []byte {
 
 		// Add cache_control to the last system element
 		lastSystemPath := fmt.Sprintf("system.%d.cache_control", count-1)
-		result, err := sjson.SetBytes(payload, lastSystemPath, map[string]string{"type": "ephemeral"})
+		result, err := sjson.SetBytes(payload, lastSystemPath, claudeCodeCacheControl)
 		if err != nil {
 			log.Warnf("failed to inject cache_control into system array: %v", err)
 			return payload
 		}
 		payload = result
 	} else if system.Type == gjson.String {
-		// Convert string system prompt to array with cache_control
-		// "system": "text" -> "system": [{"type": "text", "text": "text", "cache_control": {"type": "ephemeral"}}]
-		text := system.String()
-		newSystem := []map[string]interface{}{
-			{
-				"type": "text",
-				"text": text,
-				"cache_control": map[string]string{
-					"type": "ephemeral",
-				},
-			},
+		// Empty/blank strings are not cacheable hosts. claudePayloadHasCacheableSystem
+		// already treats them as missing so tools can cover the prefix; converting them
+		// here would create a second, useless breakpoint on whitespace.
+		if strings.TrimSpace(system.String()) == "" {
+			return payload
 		}
-		result, err := sjson.SetBytes(payload, "system", newSystem)
+		// Convert string system prompt to an ordered native text block.
+		newSystem := "[" + buildTextBlock(system.String(), &claudeCodeCacheControl) + "]"
+		result, err := sjson.SetRawBytes(payload, "system", []byte(newSystem))
 		if err != nil {
 			log.Warnf("failed to inject cache_control into system string: %v", err)
 			return payload

@@ -779,15 +779,21 @@ func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode220CLIFingerprint(t *testi
 	if got := system[1].Get("cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("system[1].cache_control.type = %q, want ephemeral", got)
 	}
+	// This credential is an API key, and native only selects the 1h cache pool for
+	// OAuth. The body ttl therefore has to stay absent, matching the fact that
+	// claudeCodeCLIBetas does not emit extended-cache-ttl-2025-04-11 here either.
 	if system[1].Get("cache_control.ttl").Exists() {
-		t.Fatalf("system[1] unexpectedly has cache_control.ttl: %s", system[1].Raw)
+		t.Fatalf("API-key request must not carry a 1h body ttl: %s", system[1].Raw)
+	}
+	if betas := seenHeaders.Get("Anthropic-Beta"); strings.Contains(betas, claudeExtendedCacheTTLBeta) {
+		t.Fatalf("API-key request must not declare extended-cache-ttl: %s", betas)
 	}
 	content := gjson.GetBytes(seenBody, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "x")
+	assertEphemeralUserTextBlock(t, content[1], "x", "")
 
 	userID := gjson.GetBytes(seenBody, "metadata.user_id").String()
 	if !helps.IsValidUserID(userID) {
@@ -852,6 +858,77 @@ func TestClaudeExecutor_ConfirmedClaudeCodeRequestPreservesInteractiveIdentity(t
 	}
 	if got := seenHeaders.Get("Anthropic-Beta"); got != incoming.Get("Anthropic-Beta") {
 		t.Fatalf("Anthropic-Beta = %q, want preserved %q", got, incoming.Get("Anthropic-Beta"))
+	}
+}
+
+func TestClaudeExecutor_ConfirmedClaudeCodeWithoutCacheControlPreservesContent(t *testing.T) {
+	tests := []struct {
+		name   string
+		stream bool
+	}{
+		{name: "non-stream"},
+		{name: "stream", stream: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var seenBody []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seenBody, _ = io.ReadAll(r.Body)
+				if tt.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = w.Write([]byte("event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-opus-4-6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+			}))
+			defer server.Close()
+
+			const sessionID = "11111111-2222-4333-8444-555555555555"
+			const userID = `{"device_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","account_uuid":"","session_id":"11111111-2222-4333-8444-555555555555"}`
+			payload := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":"x"}],"metadata":{"user_id":` + fmt.Sprintf("%q", userID) + `}}`)
+			incoming := http.Header{
+				"User-Agent":               {"claude-cli/2.1.220 (external, cli)"},
+				"X-App":                    {"cli"},
+				"Anthropic-Beta":           {"claude-code-20250219"},
+				"X-Claude-Code-Session-Id": {sessionID},
+			}
+			executor := NewClaudeExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"api_key":  "key-confirmed-markerless",
+				"base_url": server.URL,
+			}}
+			req := cliproxyexecutor.Request{Model: "claude-opus-4-6", Payload: payload}
+			opts := cliproxyexecutor.Options{
+				Stream:          tt.stream,
+				SourceFormat:    sdktranslator.FormatClaude,
+				OriginalRequest: payload,
+				Headers:         incoming,
+			}
+
+			if tt.stream {
+				result, errStream := executor.ExecuteStream(context.Background(), auth, req, opts)
+				if errStream != nil {
+					t.Fatalf("ExecuteStream() error = %v", errStream)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream chunk error = %v", chunk.Err)
+					}
+				}
+			} else if _, errExecute := executor.Execute(context.Background(), auth, req, opts); errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+
+			content := gjson.GetBytes(seenBody, "messages.0.content")
+			if content.Type != gjson.String || content.String() != "x" {
+				t.Fatalf("messages.0.content = %s, want native string content preserved; body=%s", content.Raw, seenBody)
+			}
+			if gjson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
+				t.Fatalf("confirmed markerless native request received synthetic cache_control: %s", seenBody)
+			}
+		})
 	}
 }
 
@@ -973,8 +1050,8 @@ func TestClaudeExecutor_CopiedVSCodeAgentSDKHeadersWithoutMetadataAreCloaked(t *
 		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "x")
-	assertClaudeMidConversationSystemMessage(t, seenBody, 1, "spoofed-system")
+	assertEphemeralUserTextBlock(t, content[1], "x", "")
+	assertClaudeMidConversationSystemMessage(t, seenBody, 1, "spoofed-system", "")
 }
 
 func TestClaudeExecutor_AgentSDKEntrypointWithStrongSignalsUsesCLICloak(t *testing.T) {
@@ -2116,7 +2193,7 @@ func TestClaudeExecutor_LegacySystemReminderAcrossMessagesAndStream(t *testing.T
 		if len(body) == 0 {
 			t.Fatalf("missing %s upstream capture", kind)
 		}
-		assertClaudeLegacySystemReminderLayout(t, body, "legacy-system-prompt", wantUser)
+		assertClaudeLegacySystemReminderLayout(t, body, "legacy-system-prompt", wantUser, "1h")
 		if _, ok := claudeBillingCCHDigitsOffset(body); !ok {
 			t.Fatalf("%s body is missing final CCH", kind)
 		}
@@ -3608,7 +3685,10 @@ func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity
 	}
 }
 
-func assertClaudeMidConversationSystemMessage(t *testing.T, body []byte, messageIndex int, wantText string) {
+// assertClaudeMidConversationSystemMessage checks a forwarded caller system prompt.
+// wantTTL is "" for the native default marker and "1h" once
+// upgradeClaudeCacheControlTTL has run, which only happens for OAuth credentials.
+func assertClaudeMidConversationSystemMessage(t *testing.T, body []byte, messageIndex int, wantText, wantTTL string) {
 	t.Helper()
 	messagePath := fmt.Sprintf("messages.%d", messageIndex)
 	if got := gjson.GetBytes(body, messagePath+".role").String(); got != "system" {
@@ -3624,12 +3704,12 @@ func assertClaudeMidConversationSystemMessage(t *testing.T, body []byte, message
 	if got := content[0].Get("cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("%s.content.0.cache_control.type = %q, want ephemeral", messagePath, got)
 	}
-	if content[0].Get("cache_control.ttl").Exists() {
-		t.Fatalf("%s.content.0 unexpectedly has cache_control.ttl", messagePath)
+	if got := content[0].Get("cache_control.ttl").String(); got != wantTTL {
+		t.Fatalf("%s.content.0.cache_control.ttl = %q, want %q: %s", messagePath, got, wantTTL, content[0].Raw)
 	}
 }
 
-func assertClaudeLegacySystemReminderLayout(t *testing.T, body []byte, wantSystem, wantUser string) {
+func assertClaudeLegacySystemReminderLayout(t *testing.T, body []byte, wantSystem, wantUser, wantTTL string) {
 	t.Helper()
 	if got := gjson.GetBytes(body, "system.#").Int(); got != 2 {
 		t.Fatalf("top-level system block count = %d, want billing and identity only", got)
@@ -3648,7 +3728,7 @@ func assertClaudeLegacySystemReminderLayout(t *testing.T, body []byte, wantSyste
 	if content[1].Get("cache_control").Exists() {
 		t.Fatalf("caller reminder unexpectedly has cache_control: %s", content[1].Raw)
 	}
-	assertEphemeralUserTextBlock(t, content[2], wantUser)
+	assertEphemeralUserTextBlock(t, content[2], wantUser, wantTTL)
 }
 
 func assertClaudeCodeCurrentDateBlock(t *testing.T, block gjson.Result) {
@@ -3669,7 +3749,10 @@ func assertClaudeCodeCurrentDateBlockAt(t *testing.T, block gjson.Result, now ti
 	}
 }
 
-func assertEphemeralUserTextBlock(t *testing.T, block gjson.Result, wantText string) {
+// assertEphemeralUserTextBlock checks the cloaked first-user block. wantTTL is ""
+// for the native default marker and "1h" once upgradeClaudeCacheControlTTL has run,
+// which only happens for OAuth credentials.
+func assertEphemeralUserTextBlock(t *testing.T, block gjson.Result, wantText, wantTTL string) {
 	t.Helper()
 	if got := block.Get("type").String(); got != "text" {
 		t.Fatalf("user block type = %q, want text", got)
@@ -3680,8 +3763,8 @@ func assertEphemeralUserTextBlock(t *testing.T, block gjson.Result, wantText str
 	if got := block.Get("cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("user block cache_control.type = %q, want ephemeral", got)
 	}
-	if block.Get("cache_control.ttl").Exists() {
-		t.Fatalf("user block must not contain cache_control.ttl: %s", block.Raw)
+	if got := block.Get("cache_control.ttl").String(); got != wantTTL {
+		t.Fatalf("user block cache_control.ttl = %q, want %q: %s", got, wantTTL, block.Raw)
 	}
 }
 
@@ -3755,7 +3838,7 @@ func TestInjectClaudeCodeCurrentDateIsIdempotentAndAlignsFirstUserCache(t *testi
 	if content[0].Get("cache_control").Exists() {
 		t.Fatalf("currentDate block must not contain cache_control: %s", content[0].Raw)
 	}
-	assertEphemeralUserTextBlock(t, content[1], "hello")
+	assertEphemeralUserTextBlock(t, content[1], "hello", "")
 }
 
 func TestInjectClaudeCodeCurrentDateMovesExistingCopyToFirstBlock(t *testing.T) {
@@ -3770,7 +3853,7 @@ func TestInjectClaudeCodeCurrentDateMovesExistingCopyToFirstBlock(t *testing.T) 
 		t.Fatalf("content has %d blocks, want one currentDate and user text: %s", len(content), out)
 	}
 	assertClaudeCodeCurrentDateBlockAt(t, content[0], fixed)
-	assertEphemeralUserTextBlock(t, content[1], "hello")
+	assertEphemeralUserTextBlock(t, content[1], "hello", "")
 }
 
 func TestInjectClaudeCodeCurrentDatePrecedesExistingReminder(t *testing.T) {
@@ -3789,7 +3872,7 @@ func TestInjectClaudeCodeCurrentDatePrecedesExistingReminder(t *testing.T) {
 	if got := content[1].Get("text").String(); got != reminder {
 		t.Fatalf("content[1].text = %q, want standalone reminder", got)
 	}
-	assertEphemeralUserTextBlock(t, content[2], "continue")
+	assertEphemeralUserTextBlock(t, content[2], "continue", "")
 }
 
 // Test case 1: String system prompt becomes an authoritative mid-conversation
@@ -3817,15 +3900,15 @@ func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 		t.Fatalf("blocks[1] cache_control.type = %q, want ephemeral", got)
 	}
 	if blocks[1].Get("cache_control.ttl").Exists() {
-		t.Fatalf("blocks[1] should not set cache_control.ttl: %s", blocks[1].Raw)
+		t.Fatalf("blocks[1] cache_control must not carry a default ttl: %s", blocks[1].Raw)
 	}
 	content := gjson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text: %s", len(content), out)
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi")
-	assertClaudeMidConversationSystemMessage(t, out, 1, "You are a helpful assistant.")
+	assertEphemeralUserTextBlock(t, content[1], "hi", "")
+	assertClaudeMidConversationSystemMessage(t, out, 1, "You are a helpful assistant.", "")
 }
 
 func TestClaudeUsesLegacySystemReminder(t *testing.T) {
@@ -3863,8 +3946,8 @@ func TestCheckSystemInstructionsWithMode_FutureModelDefaultsToMidSystem(t *testi
 		t.Fatalf("user content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi")
-	assertClaudeMidConversationSystemMessage(t, out, 1, "future instructions")
+	assertEphemeralUserTextBlock(t, content[1], "hi", "")
+	assertClaudeMidConversationSystemMessage(t, out, 1, "future instructions", "")
 }
 
 func TestCheckSystemInstructionsWithMode_LegacyModelUsesSystemReminder(t *testing.T) {
@@ -3888,7 +3971,7 @@ func TestCheckSystemInstructionsWithMode_LegacyModelUsesSystemReminder(t *testin
 	if content[1].Get("cache_control").Exists() {
 		t.Fatalf("caller system reminder unexpectedly has cache_control: %s", content[1].Raw)
 	}
-	assertEphemeralUserTextBlock(t, content[2], "hi")
+	assertEphemeralUserTextBlock(t, content[2], "hi", "")
 }
 
 func TestCheckSystemInstructionsWithMode_LegacyModelKeepsSystemBlocksSeparate(t *testing.T) {
@@ -3912,7 +3995,7 @@ func TestCheckSystemInstructionsWithMode_LegacyModelKeepsSystemBlocksSeparate(t 
 			t.Fatalf("content[%d] caller reminder unexpectedly has cache_control: %s", idx+1, block.Raw)
 		}
 	}
-	assertEphemeralUserTextBlock(t, content[3], "hi")
+	assertEphemeralUserTextBlock(t, content[3], "hi", "")
 }
 
 // Test case 2: Strict mode keeps only the injected Claude Code system blocks.
@@ -3930,7 +4013,7 @@ func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
 		t.Fatalf("strict mode content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi")
+	assertEphemeralUserTextBlock(t, content[1], "hi", "")
 }
 
 // Test case 3: Empty string system prompt adds only currentDate before user text.
@@ -3948,7 +4031,7 @@ func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) 
 		t.Fatalf("empty system content has %d blocks, want 2", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi")
+	assertEphemeralUserTextBlock(t, content[1], "hi", "")
 }
 
 // Test case 4: Array system prompt becomes one mid-conversation system message.
@@ -3966,8 +4049,8 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi")
-	assertClaudeMidConversationSystemMessage(t, out, 1, "Be concise.")
+	assertEphemeralUserTextBlock(t, content[1], "hi", "")
+	assertClaudeMidConversationSystemMessage(t, out, 1, "Be concise.", "")
 }
 
 func TestCheckSystemInstructionsWithMode_ArraySystemKeepsBlocksAsSeparateMessages(t *testing.T) {
@@ -3985,9 +4068,9 @@ func TestCheckSystemInstructionsWithMode_ArraySystemKeepsBlocksAsSeparateMessage
 		t.Fatalf("user content has %d blocks, want currentDate and user text: %s", len(content), out)
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi")
-	assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance")
-	assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance")
+	assertEphemeralUserTextBlock(t, content[1], "hi", "")
+	assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance", "")
+	assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance", "")
 }
 
 func TestRelocateClaudeSystemPromptForCountTokensKeepsBlocksSeparate(t *testing.T) {
@@ -4030,8 +4113,8 @@ func TestRelocateClaudeSystemPromptForCountTokensKeepsBlocksSeparate(t *testing.
 			if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
 				t.Fatalf("message count = %d, want user and two system messages: %s", got, out)
 			}
-			assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance")
-			assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance")
+			assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance", "")
+			assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance", "")
 		})
 	}
 }
@@ -4051,8 +4134,8 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 		t.Fatalf("messages[0].content has %d blocks, want 2", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi")
-	assertClaudeMidConversationSystemMessage(t, out, 1, wantSystem)
+	assertEphemeralUserTextBlock(t, content[1], "hi", "")
+	assertClaudeMidConversationSystemMessage(t, out, 1, wantSystem, "")
 }
 
 func TestCheckSystemInstructionsWithSigningMode_LongPromptIsExactAndIdempotent(t *testing.T) {
@@ -4086,8 +4169,8 @@ func TestCheckSystemInstructionsWithSigningMode_LongPromptIsExactAndIdempotent(t
 		t.Fatalf("user content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hello")
-	assertClaudeMidConversationSystemMessage(t, first, 1, wantSystem)
+	assertEphemeralUserTextBlock(t, content[1], "hello", "")
+	assertClaudeMidConversationSystemMessage(t, first, 1, wantSystem, "")
 	if strings.Contains(content[0].Get("text").String(), "PI_SYSTEM_BEGIN") || strings.Contains(content[1].Get("text").String(), "PI_SYSTEM_BEGIN") {
 		t.Fatal("caller system prompt leaked into the user content blocks")
 	}
@@ -4959,8 +5042,8 @@ func TestClaudeExecutor_ExecuteOAuthCustomToolMCPAliasRoundTrip(t *testing.T) {
 		t.Fatalf("Messages first user content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "search")
-	assertClaudeMidConversationSystemMessage(t, upstreamBody, 1, "messages-system-prompt")
+	assertEphemeralUserTextBlock(t, content[1], "search", "1h")
+	assertClaudeMidConversationSystemMessage(t, upstreamBody, 1, "messages-system-prompt", "1h")
 }
 
 func TestClaudeExecutor_ExecuteStreamOAuthCustomToolMCPAliasRoundTrip(t *testing.T) {
@@ -5036,8 +5119,8 @@ func TestClaudeExecutor_ExecuteStreamOAuthCustomToolMCPAliasRoundTrip(t *testing
 		t.Fatalf("streaming first user content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "fetch")
-	assertClaudeMidConversationSystemMessage(t, upstreamBody, 1, "stream-system-prompt")
+	assertEphemeralUserTextBlock(t, content[1], "fetch", "1h")
+	assertClaudeMidConversationSystemMessage(t, upstreamBody, 1, "stream-system-prompt", "1h")
 	assertClaudeCredentialIdentity(t, upstreamBody, upstreamHeaders, deviceIDs, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 	if !strings.Contains(downstream.String(), `"name":"fetch_url"`) {
 		t.Fatalf("downstream stream did not restore fetch_url: %s", downstream.String())
@@ -5093,7 +5176,7 @@ func TestInsertClaudeMidConversationSystemMessages_FollowsToolResultUserTurn(t *
 	if got := blocks.Get("0.tool_use_id").String(); got != "toolu_1" {
 		t.Fatalf("tool_use_id = %q, want toolu_1: %s", got, out)
 	}
-	assertClaudeMidConversationSystemMessage(t, out, 2, "guidance")
+	assertClaudeMidConversationSystemMessage(t, out, 2, "guidance", "")
 }
 
 func TestInsertClaudeMidConversationSystemMessages_PrecedesExistingAssistantTurn(t *testing.T) {
@@ -5114,7 +5197,7 @@ func TestInsertClaudeMidConversationSystemMessages_PrecedesExistingAssistantTurn
 			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
 		}
 	}
-	assertClaudeMidConversationSystemMessage(t, out, 1, "guidance")
+	assertClaudeMidConversationSystemMessage(t, out, 1, "guidance", "")
 }
 
 func TestInsertClaudeMidConversationSystemMessages_FollowsConsecutiveUserRun(t *testing.T) {
@@ -5135,7 +5218,7 @@ func TestInsertClaudeMidConversationSystemMessages_FollowsConsecutiveUserRun(t *
 			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
 		}
 	}
-	assertClaudeMidConversationSystemMessage(t, out, 2, "guidance")
+	assertClaudeMidConversationSystemMessage(t, out, 2, "guidance", "")
 }
 
 func TestInsertClaudeMidConversationSystemMessages_IsIdempotent(t *testing.T) {
@@ -5149,8 +5232,8 @@ func TestInsertClaudeMidConversationSystemMessages_IsIdempotent(t *testing.T) {
 	if got := gjson.GetBytes(first, "messages.#").Int(); got != 3 {
 		t.Fatalf("message count = %d, want user and two system messages: %s", got, first)
 	}
-	assertClaudeMidConversationSystemMessage(t, first, 1, texts[0])
-	assertClaudeMidConversationSystemMessage(t, first, 2, texts[1])
+	assertClaudeMidConversationSystemMessage(t, first, 1, texts[0], "")
+	assertClaudeMidConversationSystemMessage(t, first, 2, texts[1], "")
 }
 
 // TestClaudeCodeCLIBetas_MatchesObservedClientMatrix pins the Anthropic-Beta
@@ -5941,5 +6024,77 @@ func TestClaudeExecutor_CountTokensRejectsNonTextCallerSystemBlock(t *testing.T)
 	}
 	if upstreamCalled {
 		t.Fatal("countTokensUpstream() called upstream, want local rejection")
+	}
+}
+
+// The native gate selects the 1h cache pool only for OAuth credentials and pushes
+// extended-cache-ttl-2025-04-11 exactly when that selection produced a 1h body ttl.
+// Body ttl and the beta must therefore always travel together.
+func TestClaudeExecutor_CacheTTLIsPairedWithExtendedCacheTTLBeta(t *testing.T) {
+	tests := []struct {
+		name     string
+		apiKey   string
+		wantTTL  string
+		wantBeta bool
+	}{
+		{
+			name:     "oauth credential selects the 1h pool",
+			apiKey:   "sk-ant-oat-cache-ttl-pairing",
+			wantTTL:  "1h",
+			wantBeta: true,
+		},
+		{
+			name:     "api key credential keeps the default pool",
+			apiKey:   "key-cache-ttl-pairing",
+			wantTTL:  "",
+			wantBeta: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var seenBody []byte
+			var seenHeaders http.Header
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seenBody, _ = io.ReadAll(r.Body)
+				seenHeaders = r.Header.Clone()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-opus-4-6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+			}))
+			defer server.Close()
+
+			executor := NewClaudeExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				ID: "cache-ttl-pairing",
+				Attributes: map[string]string{
+					"api_key":  test.apiKey,
+					"base_url": server.URL,
+				},
+				Metadata: claudeOAuthTestMetadata(),
+			}
+			_, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "claude-opus-4-6",
+				Payload: []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":[{"type":"text","text":"x"}]}]}`),
+			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+			if errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+
+			gotTTL := gjson.GetBytes(seenBody, "system.1.cache_control.ttl").String()
+			if gotTTL != test.wantTTL {
+				t.Fatalf("system[1].cache_control.ttl = %q, want %q: %s", gotTTL, test.wantTTL, seenBody)
+			}
+			if got := gjson.GetBytes(seenBody, "system.1.cache_control.type").String(); got != "ephemeral" {
+				t.Fatalf("system[1].cache_control.type = %q, want ephemeral: %s", got, seenBody)
+			}
+			gotBeta := strings.Contains(seenHeaders.Get("Anthropic-Beta"), claudeExtendedCacheTTLBeta)
+			if gotBeta != test.wantBeta {
+				t.Fatalf("extended-cache-ttl declared = %v, want %v: %s", gotBeta, test.wantBeta, seenHeaders.Get("Anthropic-Beta"))
+			}
+			// The pairing invariant itself: a 1h body ttl without the beta, or the beta
+			// without a 1h body ttl, is a combination native never produces.
+			if (gotTTL == "1h") != gotBeta {
+				t.Fatalf("body ttl %q and extended-cache-ttl beta %v disagree", gotTTL, gotBeta)
+			}
+		})
 	}
 }
