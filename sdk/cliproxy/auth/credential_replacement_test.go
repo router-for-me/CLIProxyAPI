@@ -883,6 +883,17 @@ func TestConditionalUpdateDoesNotPublishStaleOwnerAfterReplacement(t *testing.T)
 	}
 }
 
+func TestPersistenceTargetsMatchCaseInsensitiveAbsolutePaths(t *testing.T) {
+	left := filepath.Join(string(filepath.Separator), "Credentials", "Auth.json")
+	right := filepath.Join(string(filepath.Separator), "credentials", "auth.json")
+	if !persistenceTargetsMatchWithCaseFold(left, right, true) {
+		t.Fatalf("case-insensitive absolute targets %q and %q should match", left, right)
+	}
+	if persistenceTargetsMatchWithCaseFold(left, right, false) {
+		t.Fatalf("case-sensitive absolute targets %q and %q unexpectedly match", left, right)
+	}
+}
+
 func TestConditionalUpdateRemovesStaleTargetAcrossRelativeSubdirectoryRename(t *testing.T) {
 	store := &targetTrackingCredentialStore{root: t.TempDir()}
 	manager := NewManager(store, nil, nil)

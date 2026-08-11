@@ -355,6 +355,10 @@ func authPersistenceDeleteID(auth *Auth, savedID string) string {
 }
 
 func persistenceTargetsMatch(left, right string) bool {
+	return persistenceTargetsMatchWithCaseFold(left, right, filepath.Separator == '\\')
+}
+
+func persistenceTargetsMatchWithCaseFold(left, right string, caseInsensitive bool) bool {
 	left = strings.TrimSpace(left)
 	right = strings.TrimSpace(right)
 	if left == "" || right == "" {
@@ -362,6 +366,10 @@ func persistenceTargetsMatch(left, right string) bool {
 	}
 	leftClean := filepath.Clean(left)
 	rightClean := filepath.Clean(right)
+	if caseInsensitive {
+		leftClean = strings.ToLower(leftClean)
+		rightClean = strings.ToLower(rightClean)
+	}
 	if leftClean == rightClean {
 		return true
 	}
@@ -379,12 +387,7 @@ func persistenceTargetsMatch(left, right string) bool {
 		filepath.VolumeName(relativeTarget) != "" {
 		return false
 	}
-	suffix := string(filepath.Separator) + relativeTarget
-	if filepath.Separator == '\\' {
-		absoluteTarget = strings.ToLower(absoluteTarget)
-		suffix = strings.ToLower(suffix)
-	}
-	return strings.HasSuffix(absoluteTarget, suffix)
+	return strings.HasSuffix(absoluteTarget, string(filepath.Separator)+relativeTarget)
 }
 
 func (m *Manager) authPersistenceTarget(auth *Auth) string {

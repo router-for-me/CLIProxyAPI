@@ -541,9 +541,15 @@ func pluginCredentialFingerprintMaterial(raw []byte, metadata map[string]any) ba
 	return baseauth.CredentialFingerprintMaterial{Opaque: string(canonical)}
 }
 
+type pluginCredentialHeaderEntry struct {
+	source    string
+	value     any
+	canonical string
+}
+
 func pluginCredentialMetadata(metadata map[string]any) map[string]any {
 	out := make(map[string]any)
-	credentialHeaders := make(map[string]any)
+	credentialHeaders := make(map[string][]pluginCredentialHeaderEntry)
 	keys := make([]string, 0, len(metadata))
 	for key := range metadata {
 		keys = append(keys, key)
@@ -553,8 +559,19 @@ func pluginCredentialMetadata(metadata map[string]any) map[string]any {
 		value := metadata[key]
 		if pluginCredentialHeaderContainer(key) {
 			if filtered, ok := filterPluginCredentialHeaders(value); ok {
-				for header, credential := range filtered {
-					credentialHeaders[header] = credential
+				source := normalizePluginMetadataKey(key)
+				for header, credentials := range filtered {
+					for _, credential := range credentials {
+						canonical, errMarshal := json.Marshal(credential)
+						if errMarshal != nil {
+							canonical = []byte(fmt.Sprintf("%T:%v", credential, credential))
+						}
+						credentialHeaders[header] = append(credentialHeaders[header], pluginCredentialHeaderEntry{
+							source:    source,
+							value:     credential,
+							canonical: string(canonical),
+						})
+					}
 				}
 			}
 			continue
@@ -570,11 +587,44 @@ func pluginCredentialMetadata(metadata map[string]any) map[string]any {
 			out[key] = filtered
 		}
 	}
-	if len(credentialHeaders) > 0 {
-		out["headers"] = credentialHeaders
+	if canonicalHeaders := canonicalPluginCredentialHeaders(credentialHeaders); len(canonicalHeaders) > 0 {
+		out["headers"] = canonicalHeaders
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	return out
+}
+
+func canonicalPluginCredentialHeaders(entries map[string][]pluginCredentialHeaderEntry) map[string]any {
+	out := make(map[string]any, len(entries))
+	for header, candidates := range entries {
+		values := make(map[string]any)
+		pairs := make(map[string]pluginCredentialHeaderEntry)
+		for _, candidate := range candidates {
+			values[candidate.canonical] = candidate.value
+			pairs[candidate.source+"\x00"+candidate.canonical] = candidate
+		}
+		if len(values) == 1 {
+			for _, value := range values {
+				out[header] = value
+			}
+			continue
+		}
+		keys := make([]string, 0, len(pairs))
+		for key := range pairs {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		collisions := make([]map[string]any, 0, len(keys))
+		for _, key := range keys {
+			candidate := pairs[key]
+			collisions = append(collisions, map[string]any{
+				"source": candidate.source,
+				"value":  candidate.value,
+			})
+		}
+		out[header] = collisions
 	}
 	return out
 }
@@ -597,7 +647,7 @@ func filterPluginCredentialMetadata(value any) (any, bool) {
 	}
 }
 
-func filterPluginCredentialHeaders(value any) (map[string]any, bool) {
+func filterPluginCredentialHeaders(value any) (map[string][]any, bool) {
 	headers := reflect.ValueOf(value)
 	if !headers.IsValid() || headers.Kind() != reflect.Map || headers.Type().Key().Kind() != reflect.String {
 		return nil, false
@@ -608,13 +658,14 @@ func filterPluginCredentialHeaders(value any) (map[string]any, bool) {
 		keys = append(keys, iter.Key().String())
 	}
 	sort.Strings(keys)
-	out := make(map[string]any)
+	out := make(map[string][]any)
 	for _, key := range keys {
 		if !pluginCredentialHeaderName(key) {
 			continue
 		}
 		value := headers.MapIndex(reflect.ValueOf(key).Convert(headers.Type().Key()))
-		out[normalizePluginMetadataKey(key)] = value.Interface()
+		canonicalKey := normalizePluginMetadataKey(key)
+		out[canonicalKey] = append(out[canonicalKey], value.Interface())
 	}
 	return out, len(out) > 0
 }

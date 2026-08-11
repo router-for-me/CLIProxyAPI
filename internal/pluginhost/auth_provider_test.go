@@ -431,6 +431,36 @@ func TestPluginTokenStorageFingerprintIgnoresHostMetadata(t *testing.T) {
 	}
 }
 
+func TestPluginTokenStorageFingerprintPreservesCollidingCredentialHeaders(t *testing.T) {
+	storage := &pluginTokenStorage{
+		provider: "plugin-provider",
+		rawJSON:  []byte(`{"provider_state":"stable"}`),
+	}
+	storage.SetMetadata(map[string]any{
+		"headers": map[string]any{
+			"Authorization": "Bearer first-token",
+		},
+		"requestHeaders": map[string]any{
+			"authorization": "Bearer stable-second-token",
+		},
+	})
+	before := storage.CredentialFingerprintMaterial()
+
+	storage.SetMetadata(map[string]any{
+		"headers": map[string]any{
+			"Authorization": "Bearer rotated-first-token",
+		},
+		"requestHeaders": map[string]any{
+			"authorization": "Bearer stable-second-token",
+		},
+	})
+	after := storage.CredentialFingerprintMaterial()
+
+	if before == after {
+		t.Fatal("rotating one colliding credential-header source did not change the fingerprint")
+	}
+}
+
 func TestPluginTokenStorageFingerprintCanonicalizesCredentialHeaderNames(t *testing.T) {
 	storage := &pluginTokenStorage{
 		provider: "plugin-provider",
