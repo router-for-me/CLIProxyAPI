@@ -402,6 +402,9 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	if c != nil && c.Request != nil {
 		requestCtx = c.Request.Context()
 	}
+	if scopedUsageManager := coreusage.ManagerFromContext(requestCtx); scopedUsageManager != nil {
+		parentCtx = coreusage.WithManager(parentCtx, scopedUsageManager)
+	}
 
 	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
 		if requestID := logging.GetRequestID(requestCtx); requestID != "" {

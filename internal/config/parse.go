@@ -27,6 +27,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
+	cfg.UsageStatisticsRetentionDays = DefaultUsageStatisticsRetentionDays
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
 	cfg.SaveCooldownStatus = false
@@ -92,6 +93,8 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if errResolvePluginsDir := cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && cfg.Plugins.Enabled {
 		return nil, errResolvePluginsDir
 	}
+	cfg.NormalizeUsageConfig()
+	cfg.SanitizeAPIKeyMetadata()
 
 	// Apply the same sanitization pipeline.
 	cfg.SanitizeGeminiKeys()

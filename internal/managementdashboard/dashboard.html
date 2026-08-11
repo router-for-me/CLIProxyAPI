@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="dark light">
+  <title>CLIProxy 用量与计费中心</title>
+  <link rel="stylesheet" href="/management/usage/dashboard.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+  <section id="auth-view" class="auth-view" aria-labelledby="auth-title">
+    <div class="auth-frame">
+      <div class="auth-intro">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true"><span></span></span>
+          <span>CLIProxy</span>
+        </div>
+        <p class="eyebrow">PULSE CONSOLE</p>
+        <h1 id="auth-title">看见每一个 Key<br>产生的价值。</h1>
+        <p class="auth-summary">独立统计调用量、Token、延迟与预估费用。所有凭据只在当前页面使用，原始 API Key 永不展示。</p>
+        <div class="auth-signal" aria-label="服务状态检查将在登录后进行">
+          <span class="signal-dot" aria-hidden="true"></span>
+          <span>管理通道待连接</span>
+        </div>
+      </div>
+
+      <form id="auth-form" class="auth-panel" novalidate>
+        <div>
+          <p class="eyebrow">安全连接</p>
+          <h2>进入用量中心</h2>
+          <p class="muted">请输入配置中的管理密码，而不是普通 API Key。</p>
+        </div>
+        <label class="field-label" for="management-secret">管理密码</label>
+        <div class="password-field">
+          <input id="management-secret" name="management-secret" type="password" autocomplete="current-password" spellcheck="false" required autofocus>
+          <button id="toggle-secret" class="text-button" type="button" aria-label="显示管理密码">显示</button>
+        </div>
+        <label class="check-row" for="remember-secret">
+          <input id="remember-secret" type="checkbox">
+          <span>仅在当前标签页记住</span>
+        </label>
+        <div id="insecure-warning" class="auth-security-warning" role="alert" hidden>
+          当前页面通过远程 HTTP 访问，管理密码会以明文方式传输。请优先改用 HTTPS。
+        </div>
+        <label id="insecure-confirm-row" class="check-row insecure-confirm" for="insecure-confirm" hidden>
+          <input id="insecure-confirm" type="checkbox">
+          <span>我了解风险，仍要连接</span>
+        </label>
+        <p id="auth-error" class="form-error" role="alert" hidden></p>
+        <button id="connect-button" class="button primary wide" type="submit">
+          <span>连接管理服务</span>
+          <span class="button-arrow" aria-hidden="true">→</span>
+        </button>
+        <p class="security-note">连续输错可能触发服务器的临时 IP 保护，请确认密码后再重试。</p>
+      </form>
+    </div>
+  </section>
+
+  <div id="app-view" class="app-shell" hidden>
+    <aside class="sidebar" aria-label="主导航">
+      <div class="sidebar-brand">
+        <span class="brand-mark compact" aria-hidden="true"><span></span></span>
+        <div>
+          <strong>CLIProxy</strong>
+          <small>Pulse Console</small>
+        </div>
+      </div>
+
+      <nav class="primary-nav">
+        <button class="nav-item active" type="button" data-view="overview" aria-label="总览" aria-current="page">
+          <span class="nav-symbol" aria-hidden="true">⌁</span>
+          <span>总览</span>
+        </button>
+        <button class="nav-item" type="button" data-view="keys" aria-label="API Keys">
+          <span class="nav-symbol" aria-hidden="true">◇</span>
+          <span>API Keys</span>
+        </button>
+        <button class="nav-item" type="button" data-view="billing" aria-label="计费规则">
+          <span class="nav-symbol" aria-hidden="true">¥</span>
+          <span>计费规则</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <a class="quiet-link" href="/management.html">← 原管理面板</a>
+        <button id="sign-out" class="quiet-button" type="button">断开连接</button>
+        <div class="connection-state"><span class="signal-dot online" aria-hidden="true"></span><span>已安全连接</span></div>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="page-heading">
+          <p id="page-kicker" class="eyebrow">实时成本视图</p>
+          <h1 id="page-title">用量总览</h1>
+          <p id="last-updated" class="muted">等待首次同步</p>
+        </div>
+        <div class="topbar-actions">
+          <button id="export-csv" class="button secondary compact-button" type="button" title="按当前筛选导出 CSV">
+            <span aria-hidden="true">⇩</span><span class="button-label">导出</span>
+          </button>
+          <button id="refresh-data" class="icon-button" type="button" title="刷新数据" aria-label="刷新数据">↻</button>
+          <button id="theme-toggle" class="icon-button" type="button" title="切换明暗主题" aria-label="切换明暗主题">◐</button>
+          <details class="compact-menu">
+            <summary class="icon-button" role="button" title="更多操作" aria-label="更多操作" aria-expanded="false">•••</summary>
+            <div class="compact-menu-popover">
+              <button id="compact-export" class="mobile-only-menu-action" type="button">导出当前筛选 CSV</button>
+              <a href="/management.html">打开原管理面板</a>
+              <button id="compact-sign-out" type="button">断开连接</button>
+            </div>
+          </details>
+        </div>
+      </header>
+
+      <main id="main-content" tabindex="-1">
+        <div id="notice-stack" class="notice-stack" aria-live="polite"></div>
+
+        <section id="overview-view" class="view" data-view-panel="overview">
+          <section class="filter-bar" aria-label="用量筛选">
+            <div class="preset-group" role="group" aria-label="日期范围">
+              <button class="preset-button" type="button" data-days="7" aria-pressed="false">7 天</button>
+              <button class="preset-button active" type="button" data-days="30" aria-pressed="true">30 天</button>
+              <button class="preset-button" type="button" data-days="90" aria-pressed="false">90 天</button>
+              <button class="preset-button" type="button" data-days="all" aria-pressed="false">全部</button>
+            </div>
+            <div class="filter-fields">
+              <label><span>开始</span><input id="filter-from" type="date"></label>
+              <label><span>结束</span><input id="filter-to" type="date"></label>
+              <label><span>Key</span><select id="filter-key"><option value="">全部 Key</option></select></label>
+              <label><span>Provider</span><select id="filter-provider"><option value="">全部 Provider</option></select></label>
+              <label><span>模型</span><select id="filter-model"><option value="">全部模型</option></select></label>
+              <label><span>Tier</span><select id="filter-tier"><option value="">全部 Tier</option></select></label>
+            </div>
+            <button id="clear-filters" class="text-button filter-clear" type="button">清除筛选</button>
+          </section>
+
+          <section class="metric-grid" aria-label="关键指标">
+            <article class="metric-card accent-metric">
+              <div class="metric-label"><span>预估费用</span><span class="metric-badge">EST.</span></div>
+              <strong id="metric-cost" class="metric-value">—</strong>
+              <span id="metric-cost-note" class="metric-note">等待统计数据</span>
+            </article>
+            <article class="metric-card">
+              <div class="metric-label"><span>总 Token</span><span aria-hidden="true">◫</span></div>
+              <strong id="metric-tokens" class="metric-value">—</strong>
+              <span id="metric-token-note" class="metric-note">输入与输出总量</span>
+            </article>
+            <article class="metric-card">
+              <div class="metric-label"><span>请求次数</span><span aria-hidden="true">↗</span></div>
+              <strong id="metric-requests" class="metric-value">—</strong>
+              <span id="metric-request-note" class="metric-note">最终请求成功 · 失败 · 上游失败尝试</span>
+            </article>
+            <article class="metric-card">
+              <div class="metric-label"><span>成功率</span><span aria-hidden="true">✓</span></div>
+              <strong id="metric-success" class="metric-value">—</strong>
+              <span id="metric-success-note" class="metric-note">成功 / 最终请求</span>
+            </article>
+            <article class="metric-card">
+              <div class="metric-label"><span>平均延迟</span><span aria-hidden="true">≈</span></div>
+              <strong id="metric-latency" class="metric-value">—</strong>
+              <span id="metric-latency-note" class="metric-note">首 Token —</span>
+            </article>
+          </section>
+
+          <div class="overview-grid">
+            <section class="panel trend-panel" aria-labelledby="trend-title">
+              <div class="panel-header">
+                <div><p class="eyebrow">UTC DAILY</p><h2 id="trend-title">用量趋势</h2></div>
+                <div class="chart-controls">
+                  <div class="segmented" role="group" aria-label="趋势指标">
+                    <button class="segment active" type="button" data-chart-mode="attempts" aria-pressed="true">请求</button>
+                    <button class="segment" type="button" data-chart-mode="tokens" aria-pressed="false">Token</button>
+                    <button class="segment" type="button" data-chart-mode="cost" aria-pressed="false">费用</button>
+                  </div>
+                  <select id="chart-currency" class="currency-select" aria-label="图表币种" hidden></select>
+                </div>
+              </div>
+              <div id="chart-wrap" class="chart-wrap">
+                <svg id="trend-chart" viewBox="0 0 1000 320" preserveAspectRatio="none" role="img" aria-label="每日用量趋势图"></svg>
+                <div id="chart-tooltip" class="chart-tooltip" role="status" hidden></div>
+                <div id="chart-empty" class="empty-state compact-empty" hidden><strong>暂无趋势数据</strong><span>新的请求会在这里形成曲线。</span></div>
+              </div>
+              <table id="chart-data-table" class="sr-only"><caption>每日用量趋势明细</caption><thead><tr><th>日期</th><th>数值</th></tr></thead><tbody></tbody></table>
+            </section>
+
+            <section class="panel cost-panel" aria-labelledby="cost-title">
+              <div class="panel-header"><div><p class="eyebrow">COST LENS</p><h2 id="cost-title">费用构成</h2></div></div>
+              <div id="currency-costs" class="currency-costs"></div>
+              <div class="unpriced-block">
+                <div><span class="warning-dot" aria-hidden="true"></span><span>未定价用量</span></div>
+                <strong id="unpriced-tokens">—</strong>
+                <small id="unpriced-note">尚未检测到未定价请求</small>
+              </div>
+              <p class="panel-footnote">费用为按请求发生时规则计算的预估值，不作为正式结算凭证。</p>
+            </section>
+          </div>
+
+          <div class="overview-grid lower-grid">
+            <section class="panel" aria-labelledby="key-rank-title">
+              <div class="panel-header"><div><p class="eyebrow">CLIENT KEYS</p><h2 id="key-rank-title">Key 使用排行</h2></div><button class="text-button" type="button" data-go-view="keys">管理 Key →</button></div>
+              <div class="table-scroll">
+                <table class="data-table">
+                  <thead><tr><th>Key</th><th>请求</th><th>Token</th><th>成功率</th><th>预估费用</th></tr></thead>
+                  <tbody id="key-ranking-body"></tbody>
+                </table>
+              </div>
+              <div id="key-ranking-empty" class="empty-state" hidden><strong>暂无 Key 用量</strong><span>启用统计并发起请求后即可查看。</span></div>
+            </section>
+
+            <section class="panel" aria-labelledby="model-title">
+              <div class="panel-header"><div><p class="eyebrow">MODELS</p><h2 id="model-title">模型分布</h2></div><span id="model-count" class="status-chip">0 个模型</span></div>
+              <div id="model-breakdown" class="model-breakdown"></div>
+              <div id="model-empty" class="empty-state" hidden><strong>暂无模型数据</strong><span>当前筛选范围没有匹配记录。</span></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="keys-view" class="view" data-view-panel="keys" hidden>
+          <section class="section-intro">
+            <div><p class="eyebrow">IDENTITY & ACCESS</p><h2>客户端 API Keys</h2><p>使用别名区分场景，停用异常 Key；页面只显示脱敏凭据。</p></div>
+            <div class="section-actions"><span id="key-total" class="status-chip">0 个 Key</span><button id="keys-refresh" class="button secondary" type="button">刷新列表</button></div>
+          </section>
+          <section class="list-toolbar" aria-label="Key 列表筛选">
+            <label class="search-field"><span class="sr-only">搜索 Key</span><input id="key-search" type="search" placeholder="搜索别名、ID 或脱敏 Key"></label>
+            <label><span>状态</span><select id="key-status-filter"><option value="all">全部状态</option><option value="enabled">已启用</option><option value="disabled">已停用</option><option value="issue">存在问题</option></select></label>
+            <label><span>排序</span><select id="key-sort"><option value="requests">请求量最高</option><option value="tokens">Token 最高</option><option value="cost">费用最高</option><option value="alias">别名 A–Z</option><option value="recent">最近使用</option></select></label>
+          </section>
+          <section class="panel key-list-panel">
+            <div class="table-scroll">
+              <table class="data-table key-table">
+                <thead><tr><th>Key 档案</th><th>状态</th><th>请求</th><th>Token</th><th>预估费用</th><th>最近使用</th><th><span class="sr-only">操作</span></th></tr></thead>
+                <tbody id="keys-table-body"></tbody>
+              </table>
+            </div>
+            <div id="keys-card-list" class="keys-card-list"></div>
+            <div id="keys-empty" class="empty-state" hidden><strong>没有匹配的 Key</strong><span>尝试调整搜索词或状态筛选。</span></div>
+            <footer class="pagination-bar">
+              <span id="pagination-summary">0–0 / 0</span>
+              <div><button id="page-prev" class="icon-button" type="button" aria-label="上一页">←</button><button id="page-next" class="icon-button" type="button" aria-label="下一页">→</button></div>
+            </footer>
+          </section>
+        </section>
+
+        <section id="billing-view" class="view" data-view-panel="billing" hidden>
+          <section class="section-intro billing-intro">
+            <div><p class="eyebrow">PRICING ENGINE</p><h2>计费规则</h2><p>规则按从上到下的顺序首次匹配。价格单位为每 100 万 Token。</p></div>
+            <div id="billing-dirty" class="dirty-indicator" hidden><span></span>有未保存修改</div>
+          </section>
+
+          <section class="settings-strip" aria-label="统计设置">
+            <label class="switch-setting" for="billing-enabled">
+              <span><strong>收集用量统计</strong><small>关闭后新请求不再写入统计</small></span>
+              <input id="billing-enabled" type="checkbox" role="switch">
+            </label>
+            <label><span>保留天数</span><input id="retention-days" type="number" min="1" max="3650" step="1"></label>
+            <label><span>币种</span><input id="pricing-currency" type="text" maxlength="16" placeholder="USD"></label>
+            <label><span>规则版本</span><input id="pricing-version" type="text" maxlength="96" placeholder="rates-2026-08"></label>
+          </section>
+
+          <section class="panel pricing-panel" aria-labelledby="pricing-title">
+            <div class="panel-header">
+              <div><p class="eyebrow">FIRST MATCH WINS</p><h2 id="pricing-title">模型单价</h2></div>
+              <button id="add-pricing-rule" class="button secondary" type="button"><span aria-hidden="true">＋</span>添加规则</button>
+            </div>
+            <p class="table-swipe-hint">左右滑动查看全部价格列</p>
+            <div class="pricing-scroll" tabindex="0" aria-label="价格规则表，可横向滚动">
+              <table class="data-table pricing-table">
+                <thead><tr><th>Provider</th><th>模型</th><th>Tier</th><th>输入</th><th>缓存输入</th><th>输出</th><th><span class="sr-only">排序与删除</span></th></tr></thead>
+                <tbody id="pricing-rules-body"></tbody>
+              </table>
+            </div>
+            <div id="pricing-empty" class="empty-state"><strong>尚未配置价格</strong><span>添加规则后，匹配的新请求将开始累计预估费用。</span></div>
+            <p id="billing-form-error" class="form-error billing-error" role="alert" hidden></p>
+          </section>
+
+          <section class="billing-note">
+            <strong>关于历史费用</strong>
+            <p>保存新规则后，已有历史费用与之后的新请求都会按当前价格重新计算。缓存读取与缓存写入统一使用“缓存输入”单价。</p>
+          </section>
+
+          <footer class="save-bar">
+            <div><strong>保存计费设置</strong><span id="settings-revision">版本 —</span></div>
+            <div><button id="reset-billing" class="button secondary" type="button">撤销修改</button><button id="save-billing" class="button primary" type="button">保存并应用</button></div>
+          </footer>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="profile-dialog" class="modal" aria-labelledby="profile-dialog-title">
+    <form id="profile-form" class="modal-content" novalidate>
+      <header class="modal-header"><div><p class="eyebrow">KEY PROFILE</p><h2 id="profile-dialog-title">编辑 Key 档案</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭">×</button></header>
+      <div class="modal-body">
+        <div class="identity-preview"><span class="key-avatar" aria-hidden="true">K</span><div><strong id="profile-preview-alias">未命名 Key</strong><code id="profile-preview-key">••••••••</code></div><span id="profile-preview-status" class="status-chip">已启用</span></div>
+        <label class="field-label" for="profile-alias">别名</label>
+        <input id="profile-alias" type="text" maxlength="128" placeholder="例如：生产环境 / 财务团队">
+        <div class="field-meta"><span>用于报表和筛选，不影响认证</span><span id="alias-count">0 / 128</span></div>
+        <label class="switch-setting modal-switch" for="profile-disabled">
+          <span><strong>停用此 Key</strong><small>停用后，此 Key 的新请求会被拒绝</small></span>
+          <input id="profile-disabled" type="checkbox" role="switch">
+        </label>
+        <details class="advanced-settings">
+          <summary>高级设置</summary>
+          <label class="field-label" for="profile-id">稳定 ID</label>
+          <input id="profile-id" type="text" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" spellcheck="false">
+          <p>修改 ID 可能使后续统计与原历史记录分开。允许字母、数字、点、下划线和连字符。</p>
+        </details>
+        <p id="profile-form-error" class="form-error" role="alert" hidden></p>
+      </div>
+      <footer class="modal-footer"><button class="button secondary" type="button" data-close-dialog>取消</button><button id="save-profile" class="button primary" type="submit">保存档案</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="modal confirm-modal" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+    <div class="modal-content">
+      <header class="modal-header"><div><p class="eyebrow">请确认</p><h2 id="confirm-title">确认操作</h2></div></header>
+      <div class="modal-body"><p id="confirm-message"></p></div>
+      <footer class="modal-footer"><button id="confirm-cancel" class="button secondary" type="button">取消</button><button id="confirm-accept" class="button danger" type="button">确认</button></footer>
+    </div>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <script src="/management/usage/dashboard.js" defer></script>
+</body>
+</html>

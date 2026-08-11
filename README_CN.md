@@ -138,9 +138,17 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)
 
+新版管理 Web 默认从 `web/management` 目录加载，并通过 `/management.html` 访问。服务端会在每次请求时读取磁盘文件，因此修改 HTML、CSS 或 JavaScript 后刷新浏览器即可，无需重新编译 EXE。可通过 `remote-management.web-directory` 指定其他目录；相对路径以当前配置文件所在目录为基准。原版管理页仍保留在 `/management/` 和 `/management/legacy`。
+
 ## 使用量统计
 
-自v6.10.0版本以后，CLIProxyAPI及 [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) 项目不再预置数据统计功能，如果有数据统计需求的请使用以下项目：
+CLIProxyAPI 内置了有容量上限、可持久化的客户端 API Key 使用量聚合。开启 `usage-statistics-enabled` 后，可通过 `api-key-metadata` 为每个 Key 设置稳定 ID、别名和停用状态，并按需配置自己的 `usage-pricing` 规则进行费用预估。Management API 提供 `/v0/management/usage` 汇总、JSON/CSV 导出和不泄露原始 Key 的档案接口；TUI 也支持修改别名和停用 Key。
+
+用量汇总现在明确拆分两类指标：`attempts`/`success`/`failed` 表示一次外部客户端请求的最终结果，用于用户统计和计费；`upstream_attempts`/`upstream_failed_attempts` 表示凭证、模型或提供商的每次上游尝试，用于运维和重试分析。拆分前生成的历史快照无法还原重试关系，仍保留旧口径。
+
+统计按 UTC 日期聚合上游调用尝试，因此重试会分别计数。使用量快照不会写入原始客户端 Key 或请求内容。费用仅依据你配置的价格进行估算，不等同于支付、余额、开票或权威结算系统。
+
+如需请求级历史、可视化仪表盘或生产级计费流程，可使用以下独立服务：
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 

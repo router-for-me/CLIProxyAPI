@@ -9,8 +9,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 type serverOptionConfig struct {
@@ -27,6 +29,8 @@ type serverOptionConfig struct {
 	pluginHost            *pluginhost.Host
 	configReloadHook      func(context.Context, *config.Config)
 	exampleAPIKeySafeMode bool
+	usageStatistics       *internalusage.Collector
+	usageManager          *coreusage.Manager
 }
 
 // ServerOption customises HTTP server construction.
@@ -124,6 +128,20 @@ func WithPluginHost(host *pluginhost.Host) ServerOption {
 func WithConfigReloadHook(hook func(context.Context, *config.Config)) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.configReloadHook = hook
+	}
+}
+
+// WithUsageStatistics exposes the bounded usage collector through management routes.
+func WithUsageStatistics(stats *internalusage.Collector) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.usageStatistics = stats
+	}
+}
+
+// WithUsageManager scopes built-in usage accounting to this server instance.
+func WithUsageManager(manager *coreusage.Manager) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.usageManager = manager
 	}
 }
 

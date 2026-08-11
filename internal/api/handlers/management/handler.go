@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -38,28 +40,31 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                     *config.Config
-	configFilePath          string
-	mu                      sync.Mutex
-	reloadMu                sync.Mutex
-	reloadGeneration        uint64
-	appliedReloadGeneration uint64
-	attemptsMu              sync.Mutex
-	failedAttempts          map[string]*attemptInfo // keyed by client IP
-	authManager             *coreauth.Manager
-	tokenStore              coreauth.Store
-	localPassword           string
-	allowRemoteOverride     bool
-	envSecret               string
-	logDir                  string
-	postAuthHook            coreauth.PostAuthHook
-	postAuthPersistHook     coreauth.PostAuthHook
-	pluginHost              *pluginhost.Host
-	configReloadHook        func(context.Context, *config.Config)
-	pluginStoreRegistryURL  string
-	pluginStoreHTTPClient   pluginstore.HTTPDoer
-	pluginReleaseCacheMu    sync.Mutex
-	pluginReleaseCache      map[string]pluginReleaseCacheEntry
+	cfg                      *config.Config
+	configFilePath           string
+	mu                       sync.Mutex
+	reloadMu                 sync.Mutex
+	reloadGeneration         uint64
+	appliedReloadGeneration  uint64
+	attemptsMu               sync.Mutex
+	failedAttempts           map[string]*attemptInfo // keyed by client IP
+	authManager              *coreauth.Manager
+	tokenStore               coreauth.Store
+	localPassword            string
+	allowRemoteOverride      bool
+	envSecret                string
+	logDir                   string
+	postAuthHook             coreauth.PostAuthHook
+	postAuthPersistHook      coreauth.PostAuthHook
+	pluginHost               *pluginhost.Host
+	configReloadHook         func(context.Context, *config.Config)
+	configImmediateHook      func(*config.Config, uint64)
+	configReloadCompleteHook func(*config.Config, uint64)
+	pluginStoreRegistryURL   string
+	pluginStoreHTTPClient    pluginstore.HTTPDoer
+	pluginReleaseCacheMu     sync.Mutex
+	pluginReleaseCache       map[string]pluginReleaseCacheEntry
+	usageCollector           *internalusage.Collector
 }
 
 type configReloadSnapshot struct {
@@ -126,6 +131,10 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 		return
 	}
 	h.mu.Lock()
+	if h.reloadGeneration > h.appliedReloadGeneration && h.cfg != nil && !reflect.DeepEqual(h.cfg, cfg) {
+		h.mu.Unlock()
+		return
+	}
 	h.cfg = cfg
 	h.mu.Unlock()
 }
@@ -137,6 +146,16 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 	}
 	h.mu.Lock()
 	h.authManager = manager
+	h.mu.Unlock()
+}
+
+// SetUsageCollector updates the bounded usage collector exposed by management endpoints.
+func (h *Handler) SetUsageCollector(collector *internalusage.Collector) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.usageCollector = collector
 	h.mu.Unlock()
 }
 
@@ -157,6 +176,29 @@ func (h *Handler) SetConfigReloadHook(hook func(context.Context, *config.Config)
 	}
 	h.mu.Lock()
 	h.configReloadHook = hook
+	h.mu.Unlock()
+}
+
+// SetConfigImmediateHook updates the lightweight callback applied after a
+// management save and before the success response is returned. The callback
+// must not retain or mutate the supplied configuration snapshot.
+func (h *Handler) SetConfigImmediateHook(hook func(*config.Config, uint64)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.configImmediateHook = hook
+	h.mu.Unlock()
+}
+
+// SetConfigReloadCompleteHook updates the callback invoked after a management
+// reload attempt finishes. It is used to release runtime stale-update guards.
+func (h *Handler) SetConfigReloadCompleteHook(hook func(*config.Config, uint64)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.configReloadCompleteHook = hook
 	h.mu.Unlock()
 }
 
@@ -210,7 +252,11 @@ func (h *Handler) reloadConfigAfterManagementSave(ctx context.Context, snapshot 
 	if snapshot.generation > h.appliedReloadGeneration {
 		h.appliedReloadGeneration = snapshot.generation
 	}
+	completeHook := h.configReloadCompleteHook
 	h.mu.Unlock()
+	if completeHook != nil {
+		completeHook(snapshot.cfg, snapshot.generation)
+	}
 }
 
 // reloadConfigAfterManagementSaveAsync reloads from an independent config snapshot.
@@ -412,6 +458,15 @@ func (h *Handler) persistLocked(c *gin.Context) bool {
 		return false
 	}
 	snapshot := h.reloadSnapshotConfigLocked()
+	if h.usageCollector != nil {
+		h.usageCollector.ApplyConfig(snapshot.cfg)
+	}
+	immediateHook := h.configImmediateHook
+	h.mu.Unlock()
+	if immediateHook != nil {
+		immediateHook(snapshot.cfg, snapshot.generation)
+	}
+	h.mu.Lock()
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	var reqCtx context.Context
 	if c != nil && c.Request != nil {

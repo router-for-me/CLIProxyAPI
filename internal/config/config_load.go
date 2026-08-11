@@ -38,6 +38,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 				// Missing and optional: return empty config (cloud deploy standby).
 				cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
 				cfg.NormalizePluginsConfig()
+				cfg.NormalizeUsageConfig()
 				return cfg, nil
 			}
 		}
@@ -48,6 +49,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if optional && len(bytes.TrimSpace(data)) == 0 {
 		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
 		cfg.NormalizePluginsConfig()
+		cfg.NormalizeUsageConfig()
 		return cfg, nil
 	}
 
@@ -55,6 +57,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		if optional {
 			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
 			cfgOptional.NormalizePluginsConfig()
+			cfgOptional.NormalizeUsageConfig()
 			return cfgOptional, nil
 		}
 		return nil, errValidate
@@ -68,6 +71,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
+	cfg.UsageStatisticsRetentionDays = DefaultUsageStatisticsRetentionDays
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
 	cfg.SaveCooldownStatus = false
@@ -83,6 +87,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
 			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
 			cfgOptional.NormalizePluginsConfig()
+			cfgOptional.NormalizeUsageConfig()
 			return cfgOptional, nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
@@ -146,6 +151,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if errResolvePluginsDir := cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && cfg.Plugins.Enabled {
 		return nil, errResolvePluginsDir
 	}
+	cfg.NormalizeUsageConfig()
+	cfg.SanitizeAPIKeyMetadata()
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()

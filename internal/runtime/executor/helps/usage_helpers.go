@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -41,6 +42,8 @@ type UsageReporter struct {
 	ttft            time.Duration
 	ttftStart       time.Time
 	ttftSet         bool
+	clientKeyID     string
+	clientKeyAlias  string
 	once            sync.Once
 }
 
@@ -60,21 +63,27 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
 	apiKey := APIKeyFromContext(ctx)
+	clientKeyID, clientKeyAlias := ClientKeyMetadataFromContext(ctx)
+	if clientKeyID == "" {
+		clientKeyID = sdkaccess.FallbackClientKeyID(apiKey)
+	}
 	alias := usage.RequestedModelAliasFromContext(ctx)
 	if alias == "" {
 		alias = model
 	}
 	reporter := &UsageReporter{
-		provider:    provider,
-		model:       model,
-		alias:       strings.TrimSpace(alias),
-		requestedAt: time.Now(),
-		apiKey:      apiKey,
-		source:      resolveUsageSource(auth, apiKey),
-		authType:    resolveUsageAuthType(auth),
-		reasoning:   usage.ReasoningEffortFromContext(ctx),
-		serviceTier: usage.ServiceTierFromContext(ctx),
-		generate:    usage.GenerateFromContext(ctx),
+		provider:       provider,
+		model:          model,
+		alias:          strings.TrimSpace(alias),
+		requestedAt:    time.Now(),
+		apiKey:         apiKey,
+		clientKeyID:    clientKeyID,
+		clientKeyAlias: clientKeyAlias,
+		source:         resolveUsageSource(auth, apiKey),
+		authType:       resolveUsageAuthType(auth),
+		reasoning:      usage.ReasoningEffortFromContext(ctx),
+		serviceTier:    usage.ServiceTierFromContext(ctx),
+		generate:       usage.GenerateFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -203,7 +212,10 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 	if !hasNonZeroTokenUsage(detail) {
 		return usage.Record{}, false
 	}
-	return r.buildRecordForModel(model, detail, false, usage.Failure{}), true
+	record := r.buildRecordForModel(model, detail, false, usage.Failure{})
+	record.UpstreamAttempt = false
+	record.Supplemental = true
+	return record, true
 }
 
 func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
@@ -268,14 +280,14 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures .
 		fail = failures[0]
 	}
 	if r == nil {
-		return usage.Record{Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
+		return usage.Record{Detail: detail, OutcomeKnown: true, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
 	}
 	return r.buildRecordForModel(r.model, detail, failed, fail)
 }
 
 func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, failed bool, fail usage.Failure) usage.Record {
 	if r == nil {
-		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
+		return usage.Record{Model: model, Detail: detail, OutcomeKnown: true, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
 	}
 	return usage.Record{
 		Provider:            r.provider,
@@ -284,6 +296,8 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Alias:               r.alias,
 		Source:              r.source,
 		APIKey:              r.apiKey,
+		ClientKeyID:         r.clientKeyID,
+		ClientKeyAlias:      r.clientKeyAlias,
 		AuthID:              r.authID,
 		AuthIndex:           r.authIndex,
 		AccessTokenSHA256:   r.accessTokenFingerprint(),
@@ -295,6 +309,8 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		RequestedAt:         r.requestedAt,
 		Latency:             r.latency(),
 		TTFT:                r.ttftDuration(),
+		OutcomeKnown:        true,
+		UpstreamAttempt:     true,
 		Failed:              failed,
 		Fail:                fail,
 		Detail:              detail,
@@ -403,6 +419,43 @@ func APIKeyFromContext(ctx context.Context) string {
 		}
 	}
 	return ""
+}
+
+// ClientKeyMetadataFromContext returns the stable ID and user-facing alias
+// attached by the frontend access provider.
+func ClientKeyMetadataFromContext(ctx context.Context) (string, string) {
+	if ctx == nil {
+		return "", ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return "", ""
+	}
+	rawMetadata, exists := ginCtx.Get("accessMetadata")
+	if !exists {
+		return "", ""
+	}
+	switch metadata := rawMetadata.(type) {
+	case map[string]string:
+		return strings.TrimSpace(metadata[sdkaccess.MetadataClientKeyID]), strings.TrimSpace(metadata[sdkaccess.MetadataClientKeyAlias])
+	case map[string]any:
+		return contextMetadataString(metadata[sdkaccess.MetadataClientKeyID]), contextMetadataString(metadata[sdkaccess.MetadataClientKeyAlias])
+	default:
+		return "", ""
+	}
+}
+
+func contextMetadataString(value any) string {
+	switch typedValue := value.(type) {
+	case string:
+		return strings.TrimSpace(typedValue)
+	case []byte:
+		return strings.TrimSpace(string(typedValue))
+	case fmt.Stringer:
+		return strings.TrimSpace(typedValue.String())
+	default:
+		return ""
+	}
 }
 
 func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {

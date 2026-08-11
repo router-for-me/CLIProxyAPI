@@ -237,23 +237,182 @@ func (c *Client) GetLogs(after int64, limit int) ([]string, int64, error) {
 // GetAPIKeys fetches the list of API keys.
 // API returns {"api-keys": [...]}.
 func (c *Client) GetAPIKeys() ([]string, error) {
+	keys, _, err := c.GetAPIKeysAndProfiles()
+	return keys, err
+}
+
+// GetAPIKeysAndProfiles fetches raw keys and stable profile identities from
+// one configuration snapshot so index-based edits cannot mix revisions.
+func (c *Client) GetAPIKeysAndProfiles() ([]string, []APIKeyProfile, error) {
 	wrapper, err := c.getJSON("/v0/management/api-keys")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	arr, ok := wrapper["api-keys"]
 	if !ok {
-		return nil, nil
+		return nil, nil, nil
 	}
 	raw, err := json.Marshal(arr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var result []string
 	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, nil, err
+	}
+	var profiles []APIKeyProfile
+	if profileValue, exists := wrapper["api-key-profiles"]; exists && profileValue != nil {
+		profileData, errMarshal := json.Marshal(profileValue)
+		if errMarshal != nil {
+			return nil, nil, errMarshal
+		}
+		if errUnmarshal := json.Unmarshal(profileData, &profiles); errUnmarshal != nil {
+			return nil, nil, errUnmarshal
+		}
+	}
+	return result, profiles, nil
+}
+
+// APIKeyProfile describes management metadata for one client API key.
+// MaskedKey is safe to display and never contains the full API key.
+type APIKeyProfile struct {
+	Index     int    `json:"index"`
+	ID        string `json:"id"`
+	Revision  string `json:"key_revision"`
+	Alias     string `json:"alias"`
+	Disabled  bool   `json:"disabled"`
+	MaskedKey string `json:"masked_key"`
+	Effective bool   `json:"effective"`
+	Issue     string `json:"issue"`
+}
+
+// ClientKeyUsageReport is the secret-safe aggregate returned by the management API.
+type ClientKeyUsageReport struct {
+	Enabled          bool             `json:"enabled"`
+	Estimated        bool             `json:"estimated"`
+	Currency         string           `json:"currency"`
+	Currencies       []string         `json:"currencies"`
+	Keys             []ClientKeyUsage `json:"keys"`
+	PersistenceError string           `json:"persistence_error"`
+}
+
+// ClientKeyUsage contains aggregate usage for one stable client-key ID.
+type ClientKeyUsage struct {
+	KeyID   string             `json:"key_id"`
+	Alias   string             `json:"alias"`
+	Summary ClientUsageSummary `json:"summary"`
+}
+
+// ClientUsageSummary contains additive attempt, token, and estimated-cost totals.
+type ClientUsageSummary struct {
+	Attempts                      int64             `json:"attempts"`
+	Success                       int64             `json:"success"`
+	Failed                        int64             `json:"failed"`
+	Tokens                        ClientUsageTokens `json:"tokens"`
+	EstimatedCostMicros           int64             `json:"estimated_cost_micros"`
+	EstimatedCostMicrosByCurrency map[string]int64  `json:"estimated_cost_micros_by_currency"`
+	UnpricedTokens                int64             `json:"unpriced_tokens"`
+	UnpricedAttempts              int64             `json:"unpriced_attempts"`
+}
+
+// ClientUsageTokens contains the provider-reported aggregate token total.
+type ClientUsageTokens struct {
+	TotalTokens int64 `json:"total_tokens"`
+}
+
+// GetClientKeyUsage fetches bounded aggregate usage grouped by stable key ID.
+func (c *Client) GetClientKeyUsage() (ClientKeyUsageReport, error) {
+	data, err := c.get("/v0/management/client-key-usage")
+	if err != nil {
+		return ClientKeyUsageReport{}, err
+	}
+	var report ClientKeyUsageReport
+	if err = json.Unmarshal(data, &report); err != nil {
+		return ClientKeyUsageReport{}, err
+	}
+	return report, nil
+}
+
+// GetAPIKeyProfiles fetches display-safe client API key profiles.
+func (c *Client) GetAPIKeyProfiles() ([]APIKeyProfile, error) {
+	wrapper, err := c.getJSON("/v0/management/api-key-profiles")
+	if err != nil {
+		return nil, err
+	}
+	profiles, ok := wrapper["api-key-profiles"]
+	if !ok || profiles == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(profiles)
+	if err != nil {
+		return nil, err
+	}
+	var result []APIKeyProfile
+	if err = json.Unmarshal(raw, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+// PutAPIKeyProfiles replaces client API key profile metadata.
+func (c *Client) PutAPIKeyProfiles(profiles []APIKeyProfile) error {
+	updates := make([]map[string]any, 0, len(profiles))
+	for _, profile := range profiles {
+		updates = append(updates, map[string]any{
+			"index":       profile.Index,
+			"expected_id": profile.ID,
+			"id":          profile.ID,
+			"alias":       profile.Alias,
+			"disabled":    profile.Disabled,
+		})
+	}
+	jsonBody, err := json.Marshal(updates)
+	if err != nil {
+		return err
+	}
+	_, err = c.put("/v0/management/api-key-profiles", strings.NewReader(string(jsonBody)))
+	return err
+}
+
+// PatchAPIKeyProfile updates selected metadata fields for a client API key.
+func (c *Client) PatchAPIKeyProfile(index int, id, alias *string, disabled *bool) error {
+	return c.PatchAPIKeyProfileExpected(index, "", id, alias, disabled)
+}
+
+// PatchAPIKeyProfileExpected updates a profile only if its stable ID still
+// matches, preventing a stale TUI index from changing a different key.
+func (c *Client) PatchAPIKeyProfileExpected(index int, expectedID string, id, alias *string, disabled *bool) error {
+	body := map[string]any{"index": index}
+	if expectedID = strings.TrimSpace(expectedID); expectedID != "" {
+		body["expected_id"] = expectedID
+	}
+	if id != nil {
+		body["id"] = *id
+	}
+	if alias != nil {
+		body["alias"] = *alias
+	}
+	if disabled != nil {
+		body["disabled"] = *disabled
+	}
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	_, err = c.patch("/v0/management/api-key-profiles", strings.NewReader(string(jsonBody)))
+	return err
+}
+
+// DeleteAPIKeyProfile removes metadata without deleting the API key.
+func (c *Client) DeleteAPIKeyProfile(index int) error {
+	_, code, err := c.doRequest("DELETE", fmt.Sprintf("/v0/management/api-key-profiles?index=%d", index), nil)
+	if err != nil {
+		return err
+	}
+	if code >= 400 {
+		return fmt.Errorf("delete profile failed (HTTP %d)", code)
+	}
+	return nil
 }
 
 // AddAPIKey adds a new API key by sending old=nil, new=key which appends.
@@ -266,7 +425,24 @@ func (c *Client) AddAPIKey(key string) error {
 
 // EditAPIKey replaces an API key at the given index.
 func (c *Client) EditAPIKey(index int, newValue string) error {
+	return c.EditAPIKeyExpected(index, "", newValue)
+}
+
+// EditAPIKeyExpected replaces a key only if its stable profile ID still matches.
+func (c *Client) EditAPIKeyExpected(index int, expectedID, newValue string) error {
+	return c.EditAPIKeyExpectedRevision(index, expectedID, "", newValue)
+}
+
+// EditAPIKeyExpectedRevision also verifies the secret-safe key fingerprint so
+// a concurrent rotation that preserves the stable ID is still detected.
+func (c *Client) EditAPIKeyExpectedRevision(index int, expectedID, expectedRevision, newValue string) error {
 	body := map[string]any{"index": index, "value": newValue}
+	if expectedID = strings.TrimSpace(expectedID); expectedID != "" {
+		body["expected_id"] = expectedID
+	}
+	if expectedRevision = strings.TrimSpace(expectedRevision); expectedRevision != "" {
+		body["expected_key_revision"] = expectedRevision
+	}
 	jsonBody, _ := json.Marshal(body)
 	_, err := c.patch("/v0/management/api-keys", strings.NewReader(string(jsonBody)))
 	return err
@@ -274,7 +450,25 @@ func (c *Client) EditAPIKey(index int, newValue string) error {
 
 // DeleteAPIKey deletes an API key by index.
 func (c *Client) DeleteAPIKey(index int) error {
-	_, code, err := c.doRequest("DELETE", fmt.Sprintf("/v0/management/api-keys?index=%d", index), nil)
+	return c.DeleteAPIKeyExpected(index, "")
+}
+
+// DeleteAPIKeyExpected deletes a key only if its stable profile ID still matches.
+func (c *Client) DeleteAPIKeyExpected(index int, expectedID string) error {
+	return c.DeleteAPIKeyExpectedRevision(index, expectedID, "")
+}
+
+// DeleteAPIKeyExpectedRevision verifies both stable identity and the current
+// raw-key revision before deleting an index.
+func (c *Client) DeleteAPIKeyExpectedRevision(index int, expectedID, expectedRevision string) error {
+	path := fmt.Sprintf("/v0/management/api-keys?index=%d", index)
+	if expectedID = strings.TrimSpace(expectedID); expectedID != "" {
+		path += "&expected_id=" + url.QueryEscape(expectedID)
+	}
+	if expectedRevision = strings.TrimSpace(expectedRevision); expectedRevision != "" {
+		path += "&expected_key_revision=" + url.QueryEscape(expectedRevision)
+	}
+	_, code, err := c.doRequest("DELETE", path, nil)
 	if err != nil {
 		return err
 	}

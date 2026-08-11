@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="dark light">
+  <title>CLIProxy 管理中心</title>
+  <link rel="stylesheet" href="/management/app.css">
+  <link rel="stylesheet" href="/management/prism.css">
+  <link rel="stylesheet" href="/management/apple.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+  <div class="ambient-stage" aria-hidden="true">
+    <span class="ambient-orb ambient-orb-blue"></span>
+    <span class="ambient-orb ambient-orb-cyan"></span>
+    <span class="ambient-orb ambient-orb-purple"></span>
+  </div>
+
+  <section id="auth-view" class="auth-view" aria-labelledby="auth-title">
+    <div class="auth-frame">
+      <div class="auth-intro">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true"><span></span></span>
+          <span>CLIProxy</span>
+        </div>
+        <p class="eyebrow">CLIProxy 管理中心</p>
+        <h1 id="auth-title">让每一次请求，<br>都清晰可见。</h1>
+        <p class="auth-summary">在一个界面中管理凭据、路由、日志、用量与计费。管理密码只在当前页面使用，客户端 Key 始终脱敏展示。</p>
+        <div class="auth-signal" aria-label="服务状态检查将在登录后进行">
+          <span class="signal-dot" aria-hidden="true"></span>
+          <span>管理通道待连接</span>
+        </div>
+      </div>
+
+      <form id="auth-form" class="auth-panel" aria-labelledby="auth-form-title" novalidate>
+        <div>
+          <p class="eyebrow">安全连接</p>
+          <h2 id="auth-form-title">进入管理中心</h2>
+          <p class="muted">请输入配置中的管理密码，而不是普通 API Key。</p>
+        </div>
+        <label class="field-label" for="management-secret">管理密码</label>
+        <div class="password-field">
+          <input id="management-secret" name="management-secret" type="password" autocomplete="current-password" spellcheck="false" required autofocus>
+          <button id="toggle-secret" class="text-button" type="button" aria-label="显示管理密码">显示</button>
+        </div>
+        <label class="check-row" for="remember-secret">
+          <input id="remember-secret" type="checkbox">
+          <span>仅在当前标签页记住</span>
+        </label>
+        <div id="insecure-warning" class="auth-security-warning" role="alert" hidden>
+          当前页面通过远程 HTTP 访问，管理密码会以明文方式传输。请优先改用 HTTPS。
+        </div>
+        <label id="insecure-confirm-row" class="check-row insecure-confirm" for="insecure-confirm" hidden>
+          <input id="insecure-confirm" type="checkbox">
+          <span>我了解风险，仍要连接</span>
+        </label>
+        <p id="auth-error" class="form-error" role="alert" hidden></p>
+        <button id="connect-button" class="button primary wide" type="submit">
+          <span>连接管理服务</span>
+          <span class="button-arrow" aria-hidden="true">→</span>
+        </button>
+        <p class="security-note">连续输错可能触发服务器的临时 IP 保护，请确认密码后再重试。</p>
+      </form>
+    </div>
+  </section>
+
+  <div id="app-view" class="app-shell" hidden>
+    <aside class="sidebar" aria-label="主导航">
+      <div class="sidebar-brand">
+        <span class="brand-mark compact" aria-hidden="true"><span></span></span>
+        <div>
+          <strong>CLIProxy</strong>
+          <small>管理中心</small>
+        </div>
+      </div>
+
+      <nav class="primary-nav" aria-label="管理中心页面">
+        <p class="nav-section-label">工作台</p>
+        <button class="nav-item active" type="button" data-view="overview" aria-label="总览" aria-current="page">
+          <span class="nav-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5"></path><path d="M5.5 9.5V21h13V9.5"></path><path d="M9 21v-7h6v7"></path></svg></span>
+          <span>总览</span>
+        </button>
+        <p class="nav-section-label">身份与访问</p>
+        <button class="nav-item" type="button" data-view="keys" aria-label="客户端 Key">
+          <span class="nav-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"></circle><path d="m11 12 8-8m-3 3 3 3m-6 0 3 3"></path></svg></span><span>客户端 Key</span>
+        </button>
+        <button class="nav-item" type="button" data-view="credentials" aria-label="上游凭据">
+          <span class="nav-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5.5" rx="7.5" ry="3"></ellipse><path d="M4.5 5.5v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6"></path><path d="M4.5 11.5v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6"></path></svg></span><span>上游凭据</span>
+        </button>
+        <p class="nav-section-label">用量与运营</p>
+        <button class="nav-item" type="button" data-view="quota" aria-label="配额管理">
+          <span class="nav-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 16.5a8 8 0 1 1 16 0"></path><path d="m12 13 4-4"></path><circle cx="12" cy="16.5" r="1.5"></circle><path d="M4 16.5h16"></path></svg></span><span>配额管理</span>
+        </button>
+        <button class="nav-item" type="button" data-view="billing" aria-label="计费规则">
+          <span class="nav-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"></rect><path d="M3 9h18"></path><path d="M7 15h4"></path></svg></span><span>计费规则</span>
+        </button>
+        <button class="nav-item" type="button" data-view="logs" aria-label="请求与日志">
+          <span class="nav-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h3l2.2-5 3.4 10 2.8-7 2 4H21"></path></svg></span><span>请求与日志</span>
+        </button>
+        <p class="nav-section-label">系统</p>
+        <button class="nav-item" type="button" data-view="settings" aria-label="系统设置">
+          <span class="nav-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h10m4 0h2M4 17h2m4 0h10"></path><circle cx="16" cy="7" r="2"></circle><circle cx="8" cy="17" r="2"></circle></svg></span><span>系统设置</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <a class="quiet-link" href="/management/">← 经典管理页</a>
+        <button id="sign-out" class="quiet-button" type="button">断开连接</button>
+        <div class="connection-state"><span class="signal-dot online" aria-hidden="true"></span><span>已安全连接</span></div>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="page-heading">
+          <p id="page-kicker" class="eyebrow">指挥中心</p>
+          <h1 id="page-title">总览</h1>
+          <p id="last-updated" class="muted" role="status" aria-live="polite">等待首次同步</p>
+        </div>
+        <div class="topbar-actions">
+          <button id="command-open" class="command-trigger" type="button" aria-label="打开快捷指令" aria-haspopup="dialog" aria-controls="command-dialog" aria-keyshortcuts="Control+K Meta+K">
+            <span aria-hidden="true">⌕</span><span>快速前往</span><kbd>⌘ K</kbd>
+          </button>
+          <button id="export-csv" class="button secondary compact-button" type="button" title="按当前筛选导出 CSV">
+            <span aria-hidden="true">⇩</span><span class="button-label">导出</span>
+          </button>
+          <button id="refresh-data" class="icon-button" type="button" title="刷新数据" aria-label="刷新数据"><span aria-hidden="true">↻</span></button>
+          <button id="theme-toggle" class="icon-button" type="button" title="切换明暗主题" aria-label="切换明暗主题">◐</button>
+          <details class="compact-menu">
+            <summary class="icon-button" role="button" title="更多操作" aria-label="更多操作" aria-expanded="false">•••</summary>
+            <div class="compact-menu-popover">
+              <button id="compact-export" class="mobile-only-menu-action" type="button">导出当前筛选 CSV</button>
+              <a href="/management/">打开经典管理页</a>
+              <button id="compact-sign-out" type="button">断开连接</button>
+            </div>
+          </details>
+        </div>
+      </header>
+
+      <main id="main-content" tabindex="-1" aria-labelledby="page-title">
+        <div id="notice-stack" class="notice-stack" aria-live="polite"></div>
+
+        <section id="overview-view" class="view" data-view-panel="overview" aria-label="用量总览">
+          <section class="filter-bar" aria-label="用量筛选">
+            <div class="preset-group" role="group" aria-label="日期范围">
+              <button class="preset-button" type="button" data-days="7" aria-pressed="false">7 天</button>
+              <button class="preset-button active" type="button" data-days="30" aria-pressed="true">30 天</button>
+              <button class="preset-button" type="button" data-days="90" aria-pressed="false">90 天</button>
+              <button class="preset-button" type="button" data-days="all" aria-pressed="false">全部</button>
+            </div>
+            <div class="filter-fields">
+              <label><span>开始</span><input id="filter-from" type="date"></label>
+              <label><span>结束</span><input id="filter-to" type="date"></label>
+              <label><span>Key</span><select id="filter-key"><option value="">全部 Key</option></select></label>
+              <label><span>服务商</span><select id="filter-provider"><option value="">全部服务商</option></select></label>
+              <label><span>模型</span><select id="filter-model"><option value="">全部模型</option></select></label>
+              <label><span>服务层级</span><select id="filter-tier"><option value="">全部层级</option></select></label>
+            </div>
+            <button id="clear-filters" class="text-button filter-clear" type="button">清除筛选</button>
+          </section>
+
+          <section class="metric-grid" aria-label="关键指标">
+            <article class="metric-card accent-metric">
+              <div class="metric-label"><span>预估费用</span><span class="metric-badge">EST.</span></div>
+              <strong id="metric-cost" class="metric-value">—</strong>
+              <span id="metric-cost-note" class="metric-note">等待统计数据</span>
+            </article>
+            <article class="metric-card">
+              <div class="metric-label"><span>总 Token</span><span aria-hidden="true">◫</span></div>
+              <strong id="metric-tokens" class="metric-value">—</strong>
+              <span id="metric-token-note" class="metric-note">输入与输出总量</span>
+            </article>
+            <article class="metric-card">
+              <div class="metric-label"><span>请求次数</span><span aria-hidden="true">↗</span></div>
+              <strong id="metric-requests" class="metric-value">—</strong>
+              <span id="metric-request-note" class="metric-note">最终请求成功 · 失败 · 上游失败尝试</span>
+            </article>
+            <article class="metric-card">
+              <div class="metric-label"><span>成功率</span><span aria-hidden="true">✓</span></div>
+              <strong id="metric-success" class="metric-value">—</strong>
+              <span id="metric-success-note" class="metric-note">成功 / 最终请求</span>
+            </article>
+            <article class="metric-card">
+              <div class="metric-label"><span>平均延迟</span><span aria-hidden="true">≈</span></div>
+              <strong id="metric-latency" class="metric-value">—</strong>
+              <span id="metric-latency-note" class="metric-note">首 Token —</span>
+            </article>
+          </section>
+
+          <section class="panel live-throughput-panel" aria-labelledby="live-throughput-title">
+            <div class="panel-header live-throughput-header">
+              <div><p class="eyebrow">即时流量 · 自动聚合</p><h2 id="live-throughput-title">以 10 分钟为粒度的吞吐</h2><p class="panel-subtitle">最近一段实时窗口的成功与失败调用，悬停柱状图可查看每个时间段。</p></div>
+              <div class="live-throughput-summary" aria-label="实时窗口汇总"><span class="live-success-dot">成功 <strong id="live-throughput-success">0</strong></span><span class="live-failure-dot">失败 <strong id="live-throughput-failed">0</strong></span></div>
+            </div>
+            <div id="live-throughput-chart" class="live-throughput-chart" role="img" aria-label="每十分钟调用吞吐图"></div>
+            <div class="live-throughput-foot"><span id="live-throughput-window">最近 3 小时 20 分</span><span>按浏览器本地时间显示；实时窗口仅保留聚合数据，服务重启后从新的调用开始统计。</span></div>
+          </section>
+
+          <div class="overview-grid">
+            <section class="panel trend-panel" aria-labelledby="trend-title">
+              <div class="panel-header">
+                <div><p class="eyebrow">按日统计 · 本地时间</p><h2 id="trend-title">用量趋势</h2></div>
+                <div class="chart-controls">
+                  <div class="segmented" role="group" aria-label="趋势指标">
+                    <button class="segment active" type="button" data-chart-mode="attempts" aria-pressed="true">请求</button>
+                    <button class="segment" type="button" data-chart-mode="tokens" aria-pressed="false">Token</button>
+                    <button class="segment" type="button" data-chart-mode="cost" aria-pressed="false">费用</button>
+                  </div>
+                  <select id="chart-currency" class="currency-select" aria-label="图表币种" hidden></select>
+                </div>
+              </div>
+              <div id="chart-wrap" class="chart-wrap">
+                <svg id="trend-chart" viewBox="0 0 1000 320" preserveAspectRatio="none" role="img" aria-label="每日用量趋势图"></svg>
+                <div id="chart-tooltip" class="chart-tooltip" role="status" hidden></div>
+                <div id="chart-empty" class="empty-state compact-empty" hidden><strong>暂无趋势数据</strong><span>新的请求会在这里形成曲线。</span></div>
+              </div>
+              <table id="chart-data-table" class="sr-only"><caption>每日用量趋势明细</caption><thead><tr><th>日期</th><th>数值</th></tr></thead><tbody></tbody></table>
+            </section>
+
+            <section class="panel cost-panel" aria-labelledby="cost-title">
+              <div class="panel-header"><div><p class="eyebrow">费用视角</p><h2 id="cost-title">费用构成</h2></div></div>
+              <div id="currency-costs" class="currency-costs"></div>
+              <div class="unpriced-block">
+                <div><span class="warning-dot" aria-hidden="true"></span><span>未定价用量</span></div>
+                <strong id="unpriced-tokens">—</strong>
+                <small id="unpriced-note">尚未检测到未定价请求</small>
+              </div>
+              <p class="panel-footnote">费用为按请求发生时规则计算的预估值，不作为正式结算凭证。</p>
+            </section>
+          </div>
+
+          <div class="overview-grid lower-grid">
+            <section class="panel" aria-labelledby="key-rank-title">
+              <div class="panel-header"><div><p class="eyebrow">客户端密钥</p><h2 id="key-rank-title">Key 使用排行</h2></div><button class="text-button" type="button" data-go-view="keys">管理 Key →</button></div>
+              <div class="table-scroll">
+                <table class="data-table">
+                  <caption class="sr-only">客户端 Key 使用排行</caption>
+                  <thead><tr><th>Key</th><th>请求</th><th>Token</th><th>成功率</th><th>预估费用</th></tr></thead>
+                  <tbody id="key-ranking-body"></tbody>
+                </table>
+              </div>
+              <div id="key-ranking-empty" class="empty-state" hidden><strong>暂无 Key 用量</strong><span>启用统计并发起请求后即可查看。</span></div>
+            </section>
+
+            <section class="panel" aria-labelledby="model-title">
+              <div class="panel-header"><div><p class="eyebrow">模型</p><h2 id="model-title">模型分布</h2></div><span id="model-count" class="status-chip">0 个模型</span></div>
+              <div id="model-breakdown" class="model-breakdown"></div>
+              <div id="model-empty" class="empty-state" hidden><strong>暂无模型数据</strong><span>当前筛选范围没有匹配记录。</span></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="keys-view" class="view" data-view-panel="keys" aria-labelledby="keys-title" hidden>
+          <section class="section-intro">
+            <div><p class="eyebrow">身份与访问</p><h2 id="keys-title">客户端 Key</h2><p>使用别名区分场景，停用异常 Key；页面只显示脱敏凭据。</p></div>
+            <div class="section-actions"><span id="key-total" class="status-chip">0 个 Key</span><button id="key-create" class="button primary" type="button">＋ 新增 Key</button><button id="key-reset-usage" class="button secondary key-usage-reset-button" type="button" title="清零所有客户端 Key 的本地用量统计与计费累计">重置全部 Key 用量</button><button id="keys-refresh" class="button secondary" type="button">刷新列表</button></div>
+          </section>
+          <section class="list-toolbar" aria-label="Key 列表筛选">
+            <label class="search-field"><span class="sr-only">搜索 Key</span><input id="key-search" type="search" placeholder="搜索别名、ID 或脱敏 Key"></label>
+            <label><span>状态</span><select id="key-status-filter"><option value="all">全部状态</option><option value="enabled">已启用</option><option value="disabled">已停用</option><option value="issue">存在问题</option></select></label>
+            <label><span>排序</span><select id="key-sort"><option value="requests">请求量最高</option><option value="tokens">Token 最高</option><option value="cost">费用最高</option><option value="alias">别名 A–Z</option><option value="recent">最近使用</option></select></label>
+          </section>
+          <section class="panel key-list-panel">
+            <div class="table-scroll">
+              <table class="data-table key-table">
+                <caption class="sr-only">客户端 Key 档案与用量</caption>
+                <thead><tr><th>Key 档案</th><th>状态</th><th>请求</th><th>Token</th><th>预估费用</th><th>最近使用</th><th><span class="sr-only">操作</span></th></tr></thead>
+                <tbody id="keys-table-body"></tbody>
+              </table>
+            </div>
+            <div id="keys-card-list" class="keys-card-list"></div>
+            <div id="keys-empty" class="empty-state" hidden><strong>没有匹配的 Key</strong><span>尝试调整搜索词或状态筛选。</span></div>
+            <footer class="pagination-bar">
+              <span id="pagination-summary" role="status" aria-live="polite">0–0 / 0</span>
+              <div><button id="page-prev" class="icon-button" type="button" aria-label="上一页">←</button><button id="page-next" class="icon-button" type="button" aria-label="下一页">→</button></div>
+            </footer>
+          </section>
+          <section id="key-detail-panel" class="panel key-detail-panel" aria-labelledby="key-detail-title" hidden>
+            <div class="panel-header key-detail-header">
+              <div><p class="eyebrow">客户端 Key · 详细使用情况</p><h3 id="key-detail-title">Key 使用详情</h3><p id="key-detail-subtitle" class="panel-subtitle"></p></div>
+              <div class="key-detail-actions"><span id="key-detail-status" class="status-chip">历史数据</span><button id="key-detail-close" class="icon-button" type="button" aria-label="关闭 Key 详情">×</button></div>
+            </div>
+            <div id="key-detail-stats" class="key-detail-stats" aria-live="polite"></div>
+            <div class="key-detail-grid">
+              <section class="key-detail-section" aria-labelledby="key-detail-models-title"><div class="key-detail-section-heading"><h4 id="key-detail-models-title">模型与服务层级</h4><span id="key-detail-model-count" class="muted"></span></div><div class="table-scroll"><table class="data-table compact-table key-detail-token-table"><thead><tr><th>模型</th><th>请求</th><th class="token-column token-input">输入</th><th class="token-column token-cache">缓存输入</th><th class="token-column token-output">输出</th><th>成功率</th><th>预估费用</th></tr></thead><tbody id="key-detail-models"></tbody></table></div><div id="key-detail-models-empty" class="empty-state compact-empty" hidden><strong>暂无模型明细</strong><span>在当前筛选时间内没有匹配的调用。</span></div></section>
+              <section class="key-detail-section" aria-labelledby="key-detail-daily-title"><div class="key-detail-section-heading"><h4 id="key-detail-daily-title">每日调用</h4><span class="muted">按当前日期范围</span></div><div id="key-detail-daily" class="key-detail-daily"></div><div id="key-detail-daily-empty" class="empty-state compact-empty" hidden><strong>暂无每日记录</strong><span>新的调用会自动汇总到这里。</span></div></section>
+            </div>
+          </section>
+        </section>
+
+        <section id="credentials-view" class="view" data-view-panel="credentials" aria-labelledby="credentials-title" hidden>
+          <section class="section-intro">
+            <div><p class="eyebrow">身份与访问</p><h2 id="credentials-title">上游凭据</h2><p>统一管理 OAuth 账号、认证文件和上游连接状态。客户端 Key 与上游凭据在这里保持清晰分离。</p></div>
+            <div class="section-actions"><span id="credential-total" class="status-chip">0 个凭据</span><button id="credentials-refresh" class="button secondary" type="button">刷新</button></div>
+          </section>
+
+          <div class="credential-hero-grid">
+            <section class="panel connect-panel" aria-labelledby="oauth-connect-title">
+              <div class="panel-header"><div><p class="eyebrow">一键连接</p><h2 id="oauth-connect-title">添加 OAuth 账号</h2></div><span class="status-chip soft">安全回调</span></div>
+              <p class="panel-copy">登录将在新的浏览器标签页中完成。成功后此页面会自动检测并刷新凭据列表。</p>
+              <div class="provider-connect-grid">
+                <button class="provider-connect" type="button" data-oauth-provider="codex" data-oauth-endpoint="/v0/management/codex-auth-url"><span class="provider-orb codex" aria-hidden="true">C</span><span><strong>Codex</strong><small>OpenAI 账号</small></span><span aria-hidden="true">↗</span></button>
+                <button class="provider-connect" type="button" data-oauth-provider="claude" data-oauth-endpoint="/v0/management/anthropic-auth-url"><span class="provider-orb claude" aria-hidden="true">A</span><span><strong>Claude</strong><small>Anthropic 账号</small></span><span aria-hidden="true">↗</span></button>
+                <button class="provider-connect" type="button" data-oauth-provider="antigravity" data-oauth-endpoint="/v0/management/antigravity-auth-url"><span class="provider-orb gemini" aria-hidden="true">G</span><span><strong>Antigravity</strong><small>Google 账号</small></span><span aria-hidden="true">↗</span></button>
+                <button class="provider-connect" type="button" data-oauth-provider="kimi" data-oauth-endpoint="/v0/management/kimi-auth-url"><span class="provider-orb kimi" aria-hidden="true">K</span><span><strong>Kimi</strong><small>设备授权</small></span><span aria-hidden="true">↗</span></button>
+                <button class="provider-connect" type="button" data-oauth-provider="xai" data-oauth-endpoint="/v0/management/xai-auth-url"><span class="provider-orb xai" aria-hidden="true">x</span><span><strong>xAI</strong><small>OAuth 账号</small></span><span aria-hidden="true">↗</span></button>
+              </div>
+              <div id="oauth-session" class="oauth-session" role="status" hidden></div>
+              <details id="oauth-callback-panel" class="oauth-callback-panel" hidden>
+                <summary>无法自动回调？手动完成授权</summary>
+                <div class="oauth-callback-body">
+                  <p>粘贴浏览器地址栏中的完整 callback URL；xAI 也可以只粘贴授权码。</p>
+                  <div class="oauth-callback-fields">
+                    <div class="oauth-callback-context"><span>当前服务商</span><strong id="oauth-callback-provider">—</strong></div>
+                    <label for="oauth-callback-value"><span>Callback URL 或授权码</span><textarea id="oauth-callback-value" rows="3" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="https://localhost/callback?code=…"></textarea></label>
+                  </div>
+                  <div class="oauth-callback-actions">
+                    <p id="oauth-callback-status" role="status" aria-live="polite"></p>
+                    <button id="oauth-callback-submit" class="button primary" type="button">提交回调</button>
+                  </div>
+                </div>
+              </details>
+            </section>
+
+            <section class="panel upload-panel" aria-labelledby="credential-upload-title">
+              <div class="panel-header"><div><p class="eyebrow">导入凭据</p><h2 id="credential-upload-title">上传认证文件</h2></div></div>
+              <label class="drop-zone" for="auth-upload-input">
+                <input id="auth-upload-input" class="sr-only" type="file" accept="application/json,.json" multiple>
+                <span class="drop-icon" aria-hidden="true">⇧</span>
+                <strong>选择 JSON 文件</strong>
+                <span>支持多选；文件将写入服务器配置的 auths 目录。也可按 Enter 键选择。</span>
+              </label>
+              <p id="auth-upload-status" class="field-meta" role="status"></p>
+            </section>
+          </div>
+
+          <section class="panel credential-list-panel" aria-labelledby="credential-list-title">
+            <div class="panel-header"><div><p class="eyebrow">连接池</p><h2 id="credential-list-title">已连接账号</h2></div></div>
+            <div class="list-toolbar" aria-label="凭据列表筛选">
+              <label class="search-field"><span class="sr-only">搜索凭据</span><input id="credential-search" type="search" placeholder="搜索账号、服务商或文件名"></label>
+              <label><span>服务商</span><select id="credential-provider"><option value="all">全部服务商</option></select></label>
+              <label><span>状态</span><select id="credential-status"><option value="all">全部状态</option><option value="active">可用</option><option value="waiting">等待授权</option><option value="disabled">已停用</option><option value="issue">需要处理</option></select></label>
+            </div>
+            <div class="table-scroll"><table class="data-table credential-table"><caption class="sr-only">已连接的上游账号</caption><thead><tr><th>账号</th><th>服务商</th><th>状态</th><th>请求</th><th>最近刷新</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="credential-table-body"></tbody></table></div>
+            <div id="credential-card-list" class="credential-card-list"></div>
+            <div id="credential-empty" class="empty-state" hidden><strong>暂无匹配凭据</strong><span>连接 OAuth 账号或上传认证文件后会显示在这里。</span></div>
+          </section>
+        </section>
+
+        <section id="quota-view" class="view legacy-quota" data-view-panel="quota" aria-labelledby="quota-title" hidden>
+          <section class="section-intro quota-intro">
+            <div><p class="eyebrow">上游用量</p><h2 id="quota-title">配额管理</h2><p>直接查询服务商返回的账户额度、重置时间和套餐状态。仅在你主动查询时访问上游。</p></div>
+            <div class="section-actions"><span class="status-chip soft">按需查询</span><button id="quota-refresh-all" class="button primary" type="button"><span aria-hidden="true">↻</span> 查询全部</button></div>
+          </section>
+
+          <section class="quota-summary" aria-label="额度查询概览">
+            <article class="quota-summary-card">
+              <span class="quota-summary-icon total" aria-hidden="true">◎</span>
+              <span><small>可查询凭证</small><strong id="quota-total">0</strong><em>支持 Codex、Claude、Antigravity、Kimi 与 Grok</em></span>
+            </article>
+            <article class="quota-summary-card">
+              <span class="quota-summary-icon ready" aria-hidden="true">✓</span>
+              <span><small>本次已更新</small><strong id="quota-ready-count">0</strong><em>查询结果仅保留在当前页面</em></span>
+            </article>
+            <article class="quota-summary-card">
+              <span class="quota-summary-icon issue" aria-hidden="true">!</span>
+              <span><small>需要处理</small><strong id="quota-issue-count">0</strong><em>过期、限流或暂不支持</em></span>
+            </article>
+          </section>
+
+          <section class="panel quota-panel" aria-labelledby="quota-accounts-title">
+            <div class="panel-header quota-panel-header">
+              <div><p class="eyebrow">实时额度</p><h2 id="quota-accounts-title">账户配额</h2><p class="panel-copy">单独刷新某个账号，或批量查询当前筛选结果。批量查询会控制并发，减少触发上游限流的概率。</p></div>
+            </div>
+            <div class="quota-toolbar">
+              <label class="search-field quota-search"><span class="sr-only">搜索可查询凭证</span><input id="quota-search" type="search" placeholder="搜索账号、服务商或文件名"></label>
+              <div id="quota-provider-tabs" class="quota-provider-tabs" role="group" aria-label="按服务商筛选">
+                <button class="segment active" type="button" data-quota-provider="all" aria-pressed="true">全部</button>
+                <button class="segment" type="button" data-quota-provider="codex" aria-pressed="false">Codex</button>
+                <button class="segment" type="button" data-quota-provider="claude" aria-pressed="false">Claude</button>
+                <button class="segment" type="button" data-quota-provider="antigravity" aria-pressed="false">Antigravity</button>
+                <button class="segment" type="button" data-quota-provider="kimi" aria-pressed="false">Kimi</button>
+                <button class="segment" type="button" data-quota-provider="xai" aria-pressed="false">Grok</button>
+              </div>
+            </div>
+            <div id="quota-card-list" class="quota-card-list" aria-live="polite"></div>
+             <section id="quota-window-panel" class="quota-window-panel" aria-labelledby="quota-window-title" hidden>
+               <div class="quota-window-header">
+                 <div><h3 id="quota-window-title">配额窗口</h3><p id="quota-window-range">展示当前已查询凭证的下次重置时间</p></div>
+                 <div class="quota-window-actions" aria-label="配额窗口范围">
+                   <div class="quota-window-nav" role="group" aria-label="切换时间窗口">
+                     <button class="quota-window-nav-button" type="button" data-quota-window-shift="-1" aria-label="上一段">‹</button>
+                     <button class="quota-window-today" type="button" data-quota-window-today>今天</button>
+                     <button class="quota-window-nav-button" type="button" data-quota-window-shift="1" aria-label="下一段">›</button>
+                   </div>
+                   <div class="quota-window-scale" role="group" aria-label="时间刻度">
+                     <button class="active" type="button" data-quota-window-mode="week" aria-pressed="true">按周</button>
+                     <button type="button" data-quota-window-mode="hours" aria-pressed="false">5 小时</button>
+                   </div>
+                 </div>
+               </div>
+               <div class="quota-window-board">
+                 <div id="quota-window-days" class="quota-window-days" aria-hidden="true"></div>
+                 <div id="quota-window-rows" class="quota-window-rows"></div>
+               </div>
+               <div class="quota-window-legend" aria-label="时间轴图例">
+                 <span><i class="quota-window-legend-swatch current" aria-hidden="true"></i>当前窗口</span>
+                 <span><i class="quota-window-legend-swatch upcoming" aria-hidden="true"></i>即将开始</span>
+                 <span><i class="quota-window-legend-swatch ended" aria-hidden="true"></i>已结束</span>
+                  <span><i class="quota-window-legend-line" aria-hidden="true"></i>主动重置到期时间</span>
+               </div>
+               <p class="quota-window-note">条带从本次查询时刻延伸至服务商返回的重置时间，仅作额度窗口参考。</p>
+             </section>
+            <div id="quota-empty" class="empty-state quota-empty" hidden><strong>没有可查询的凭证</strong><span>请先连接受支持的 OAuth 账号，或调整当前搜索与服务商筛选。</span><button class="button secondary" type="button" data-go-view="credentials">前往上游凭据</button></div>
+          </section>
+
+          <section class="quota-privacy-note" aria-label="查询说明">
+            <span aria-hidden="true">⌁</span>
+            <div><strong>额度与本地计费是两套数据</strong><p>这里展示供应商账户的剩余额度；“计费规则”展示 CLIProxy 根据实际请求统计的预估费用。页面不会显示或保存 OAuth Token。</p></div>
+          </section>
+        </section>
+
+        <section id="logs-view" class="view" data-view-panel="logs" aria-labelledby="logs-title" hidden>
+          <section class="section-intro">
+            <div><p class="eyebrow">可观测性</p><h2 id="logs-title">请求与日志</h2><p>在一条安静、清晰的时间线上查看运行状态，快速定位失败请求。</p></div>
+            <div class="section-actions"><label class="live-toggle"><input id="logs-live" type="checkbox" role="switch"><span>实时</span></label><button id="logs-refresh" class="button secondary" type="button">刷新</button><button id="logs-clear" class="button danger subtle-danger" type="button">清空日志</button></div>
+          </section>
+          <section class="panel log-panel" aria-labelledby="runtime-log-title">
+            <div class="panel-header"><div><p class="eyebrow">运行日志</p><h2 id="runtime-log-title">服务器日志流</h2></div><span id="log-line-count" class="status-chip">0 行</span></div>
+            <div class="log-toolbar"><label class="search-field"><span class="sr-only">搜索日志</span><input id="log-search" type="search" placeholder="搜索文本或请求 ID"></label><label><span class="sr-only">级别</span><select id="log-level"><option value="all">全部级别</option><option value="error">Error</option><option value="warn">Warning</option><option value="info">Info</option><option value="debug">Debug</option></select></label><button id="logs-tail" class="text-button" type="button">滚动到底部</button></div>
+            <div id="log-console" class="log-console" role="log" aria-live="polite" aria-label="服务器日志" tabindex="0"></div>
+            <div id="logs-empty" class="empty-state" hidden><strong>暂无日志</strong><span>请先在系统设置中开启文件日志，或等待新的请求。</span></div>
+          </section>
+          <section class="panel error-files-panel" aria-labelledby="error-files-title">
+            <div class="panel-header"><div><p class="eyebrow">失败请求</p><h2 id="error-files-title">错误日志文件</h2></div><span id="error-file-count" class="status-chip">0 个文件</span></div>
+            <div id="error-file-list" class="file-list"></div>
+            <div id="error-files-empty" class="empty-state" hidden><strong>没有错误文件</strong><span>当前没有可下载的失败请求日志。</span></div>
+          </section>
+        </section>
+
+        <section id="settings-view" class="view" data-view-panel="settings" aria-labelledby="settings-title" hidden>
+          <section class="section-intro">
+            <div><p class="eyebrow">系统控制</p><h2 id="settings-title">系统设置</h2><p>常用运行参数可以直接修改；完整 YAML 保留所有高级能力和注释。</p></div>
+            <div class="section-actions"><span id="settings-state" class="status-chip" role="status" aria-live="polite">已同步</span><button id="settings-refresh" class="button secondary" type="button">重新载入</button></div>
+          </section>
+          <form id="runtime-settings-form" class="settings-grid" novalidate>
+            <section class="panel settings-card" aria-labelledby="routing-settings-title">
+              <div class="panel-header"><div><p class="eyebrow">流量策略</p><h2 id="routing-settings-title">路由与重试</h2></div></div>
+              <label class="setting-row"><span><strong>路由策略</strong><small>轮询更均衡，填满优先提高单账号利用率</small></span><select id="runtime-routing"><option value="round-robin">轮询</option><option value="fill-first">填满优先</option></select></label>
+              <label class="setting-row"><span><strong>请求重试次数</strong><small>失败后切换凭据并重试</small></span><input id="runtime-retry" type="number" min="0" max="20" step="1"></label>
+              <label class="setting-row"><span><strong>最大重试间隔</strong><small>单位：秒</small></span><input id="runtime-retry-interval" type="number" min="0" step="1"></label>
+              <label class="setting-row"><span><strong>上游代理</strong><small>支持 HTTP / SOCKS 地址</small></span><input id="runtime-proxy" type="text" spellcheck="false" placeholder="socks5://127.0.0.1:7890"></label>
+            </section>
+            <section class="panel settings-card" aria-labelledby="behavior-settings-title">
+              <div class="panel-header"><div><p class="eyebrow">运行行为</p><h2 id="behavior-settings-title">调试与记录</h2></div></div>
+              <label class="setting-row switch-row"><span><strong>调试模式</strong><small>输出更详细的诊断信息</small></span><input id="runtime-debug" type="checkbox" role="switch"></label>
+              <label class="setting-row switch-row"><span><strong>文件日志</strong><small>启用后可在日志页面查看</small></span><input id="runtime-file-log" type="checkbox" role="switch"></label>
+              <label class="setting-row switch-row"><span><strong>请求日志</strong><small>记录请求详情，可能增加磁盘使用</small></span><input id="runtime-request-log" type="checkbox" role="switch"></label>
+              <label class="setting-row switch-row"><span><strong>WebSocket 认证</strong><small>要求 WebSocket 客户端携带 API Key</small></span><input id="runtime-ws-auth" type="checkbox" role="switch"></label>
+              <label class="setting-row switch-row"><span><strong>强制模型前缀</strong><small>在多服务商场景中保持模型路由明确</small></span><input id="runtime-model-prefix" type="checkbox" role="switch"></label>
+              <button id="runtime-settings-save" class="button primary wide" type="submit">保存常用设置</button>
+            </section>
+          </form>
+          <section class="panel yaml-panel" aria-labelledby="yaml-title">
+            <div class="panel-header"><div><p class="eyebrow">高级配置</p><h2 id="yaml-title">config.yaml</h2><p class="panel-copy">保存前会由服务器完整校验；无效配置不会写入。</p></div><div class="section-actions"><button id="yaml-reload" class="button secondary" type="button">放弃修改</button><button id="yaml-save" class="button primary" type="button">验证并保存</button></div></div>
+            <div class="yaml-warning"><span aria-hidden="true">!</span><span>配置可能包含上游密钥。请勿复制到不可信位置，页面也不会将内容发送到第三方。</span></div>
+            <textarea id="yaml-editor" class="yaml-editor" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="完整 YAML 配置"></textarea>
+            <footer class="editor-footer"><span id="yaml-status" role="status" aria-live="polite">等待载入</span><span id="yaml-lines">0 行</span></footer>
+          </section>
+        </section>
+
+        <section id="billing-view" class="view" data-view-panel="billing" aria-labelledby="billing-title" hidden>
+          <section class="section-intro billing-intro">
+            <div><p class="eyebrow">计费引擎</p><h2 id="billing-title">计费规则</h2><p>规则按从上到下的顺序首次匹配。价格单位为每 100 万 Token。</p></div>
+          </section>
+
+          <section class="settings-strip" aria-label="统计设置">
+            <label class="switch-setting" for="billing-enabled">
+              <span><strong>收集用量统计</strong><small>关闭后新请求不再写入统计</small></span>
+              <input id="billing-enabled" type="checkbox" role="switch">
+            </label>
+            <label><span>保留周期</span><select id="retention-days"><option value="30">30 天</option><option value="60">60 天</option><option value="90">90 天</option><option value="180">180 天</option><option value="365">1 年</option><option value="730">2 年</option></select></label>
+            <label><span>结算币种</span><select id="pricing-currency"><option value="USD">USD · 美元</option><option value="CNY">CNY · 人民币</option><option value="EUR">EUR · 欧元</option><option value="JPY">JPY · 日元</option><option value="GBP">GBP · 英镑</option></select></label>
+            <label><span>规则版本</span><select id="pricing-version"><option value="default">默认版本</option></select></label>
+          </section>
+
+          <section class="panel pricing-panel" aria-labelledby="pricing-title">
+            <div class="panel-header">
+              <div><p class="eyebrow">从上到下匹配</p><h2 id="pricing-title">模型单价</h2><p class="panel-copy">先选择服务商和模型，再填写每 100 万 Token 的价格。</p></div>
+              <div class="pricing-heading-actions"><span id="pricing-catalog-status" class="status-chip soft" role="status" aria-live="polite">读取服务商…</span><span id="pricing-rule-count" class="status-chip">0 条规则</span><button id="add-pricing-rule" class="button primary" type="button"><span aria-hidden="true">＋</span>添加规则</button></div>
+            </div>
+            <div class="pricing-flow" aria-hidden="true"><span><b>1</b>选择匹配范围</span><i></i><span><b>2</b>填写模型单价</span><i></i><span><b>3</b>保存并应用</span></div>
+            <div id="pricing-rules-body" class="pricing-rule-list" aria-label="模型计费规则，按照顺序优先匹配"></div>
+            <datalist id="billing-rate-suggestions"><option value="0.00" label="免费"></option></datalist>
+            <div id="pricing-empty" class="empty-state"><strong>尚未配置价格</strong><span>添加规则后，匹配的新请求将开始累计预估费用。</span></div>
+            <p id="billing-form-error" class="form-error billing-error" role="alert" hidden></p>
+          </section>
+
+          <section class="billing-note">
+            <strong>关于历史费用</strong>
+            <p>保存新规则后，已有历史费用与之后的新请求都会按当前价格重新计算。缓存读取与缓存写入统一使用“缓存输入”单价。</p>
+          </section>
+
+          <footer class="save-bar">
+            <div><strong>保存计费设置</strong><span id="settings-revision">版本 —</span><span id="billing-dirty" class="dirty-indicator" role="status" aria-live="polite" hidden><i></i>有未保存修改</span></div>
+            <div><button id="reset-billing" class="button secondary" type="button">撤销修改</button><button id="save-billing" class="button primary" type="button">保存并应用</button></div>
+          </footer>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="profile-dialog" class="modal" aria-labelledby="profile-dialog-title">
+    <form id="profile-form" class="modal-content" novalidate>
+      <header class="modal-header"><div><p class="eyebrow">密钥档案</p><h2 id="profile-dialog-title">编辑 Key 档案</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭 Key 档案对话框">×</button></header>
+      <div class="modal-body">
+        <div class="identity-preview"><span class="key-avatar" aria-hidden="true">K</span><div><strong id="profile-preview-alias">未命名 Key</strong><code id="profile-preview-key">••••••••</code></div><span id="profile-preview-status" class="status-chip">已启用</span></div>
+        <label class="field-label" for="profile-alias">别名</label>
+        <input id="profile-alias" type="text" maxlength="128" placeholder="例如：生产环境 / 财务团队">
+        <div class="field-meta"><span>用于报表和筛选，不影响认证</span><span id="alias-count">0 / 128</span></div>
+        <details class="advanced-settings">
+          <summary>高级设置</summary>
+          <label class="field-label" for="profile-id">稳定 ID</label>
+          <input id="profile-id" type="text" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" spellcheck="false">
+          <p>修改 ID 可能使后续统计与原历史记录分开。允许字母、数字、点、下划线和连字符。</p>
+        </details>
+        <p id="profile-form-error" class="form-error" role="alert" hidden></p>
+      </div>
+      <footer class="modal-footer"><button class="button secondary" type="button" data-close-dialog>取消</button><button id="save-profile" class="button primary" type="submit">保存档案</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="key-create-dialog" class="modal" aria-labelledby="key-create-dialog-title">
+    <form id="key-create-form" class="modal-content" novalidate>
+      <header class="modal-header"><div><p class="eyebrow">身份与访问</p><h2 id="key-create-dialog-title">新增客户端 Key</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭新增 Key 对话框">×</button></header>
+      <div class="modal-body">
+        <div class="create-key-notice"><span class="key-avatar" aria-hidden="true">K</span><div><strong>安全添加</strong><p>Key 仅用于本次保存；保存后列表只显示脱敏信息。</p></div></div>
+        <label class="field-label" for="key-create-value">API Key</label>
+        <div class="generated-key-field"><input id="key-create-value" type="password" autocomplete="new-password" spellcheck="false" required><button id="key-create-toggle-visibility" class="input-action-button" type="button" aria-pressed="false">显示</button></div>
+        <div class="key-generator-actions"><span>已自动生成 256 位安全随机 Key</span><div><button id="key-create-regenerate" type="button">重新生成</button><button id="key-create-copy" type="button">复制</button></div></div>
+        <div class="field-meta"><span>请先复制并妥善保存；完成新增后页面不会再显示完整 Key。</span></div>
+        <label class="field-label" for="key-create-alias">别名 <span class="field-optional">可选</span></label>
+        <input id="key-create-alias" type="text" maxlength="128" placeholder="例如：生产环境 / 财务团队">
+        <div class="field-meta"><span>用于报表、筛选和日常识别，不影响认证。</span></div>
+        <details class="advanced-settings">
+          <summary>高级设置</summary>
+          <label class="field-label" for="key-create-id">稳定 ID <span class="field-optional">可选</span></label>
+          <input id="key-create-id" type="text" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" spellcheck="false" placeholder="留空则自动生成">
+          <p>填写后可在轮换 Key 时保持报表连续。仅允许字母、数字、点、下划线和连字符。</p>
+        </details>
+        <p id="key-create-form-error" class="form-error" role="alert" hidden></p>
+      </div>
+      <footer class="modal-footer"><button class="button secondary" type="button" data-close-dialog>取消</button><button id="save-key-create" class="button primary" type="submit">新增 Key</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="key-created-dialog" class="modal" aria-labelledby="key-created-dialog-title">
+    <div class="modal-content">
+      <header class="modal-header"><div><p class="eyebrow">身份与访问</p><h2 id="key-created-dialog-title">Key 已创建</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭 Key 创建结果">×</button></header>
+      <div class="modal-body">
+        <div class="create-key-notice"><span class="key-avatar" aria-hidden="true">✓</span><div><strong>请立即保存此 Key</strong><p>为了安全，它只会在当前窗口显示一次。关闭窗口后无法再次查看完整内容。</p></div></div>
+        <label class="field-label" for="key-created-value">客户端 Key</label>
+        <div class="generated-key-field"><input id="key-created-value" type="text" readonly spellcheck="false" aria-describedby="key-created-hint"><button id="key-created-copy" class="input-action-button" type="button">复制</button></div>
+        <p id="key-created-hint" class="one-time-key-hint">复制后再关闭此窗口。列表中只会显示脱敏后的 Key。</p>
+      </div>
+      <footer class="modal-footer"><span class="status-chip success">已创建</span><button class="button primary" type="button" data-close-dialog>我已安全保存</button></footer>
+    </div>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="modal confirm-modal" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+    <div class="modal-content">
+      <header class="modal-header"><div><p class="eyebrow">请确认</p><h2 id="confirm-title">确认操作</h2></div></header>
+      <div class="modal-body"><p id="confirm-message"></p></div>
+      <footer class="modal-footer"><button id="confirm-cancel" class="button secondary" type="button">取消</button><button id="confirm-accept" class="button danger" type="button">确认</button></footer>
+    </div>
+  </dialog>
+
+  <dialog id="command-dialog" class="command-dialog" aria-labelledby="command-title" aria-describedby="command-hint">
+    <div class="command-surface">
+      <h2 id="command-title" class="sr-only">快速前往</h2>
+      <header class="command-header">
+        <span aria-hidden="true">⌕</span>
+        <label class="sr-only" for="command-search">搜索页面或操作</label>
+        <input id="command-search" type="search" autocomplete="off" placeholder="搜索页面或操作…">
+        <kbd>Esc</kbd>
+      </header>
+      <nav id="command-list" class="command-list" aria-label="快捷指令">
+        <button type="button" data-command-view="overview"><span aria-hidden="true">⌂</span><span><strong>总览</strong><small>关键指标与用量趋势</small></span><span class="command-chevron" aria-hidden="true">›</span></button>
+        <button type="button" data-command-view="keys"><span aria-hidden="true">◇</span><span><strong>客户端 Key</strong><small>别名、状态与使用排行</small></span><span class="command-chevron" aria-hidden="true">›</span></button>
+        <button type="button" data-command-view="credentials"><span aria-hidden="true">◎</span><span><strong>上游凭据</strong><small>OAuth 和认证文件</small></span><span class="command-chevron" aria-hidden="true">›</span></button>
+        <button type="button" data-command-view="quota"><span aria-hidden="true">◔</span><span><strong>配额管理</strong><small>账户额度、套餐与重置时间</small></span><span class="command-chevron" aria-hidden="true">›</span></button>
+        <button type="button" data-command-view="billing"><span aria-hidden="true">◉</span><span><strong>计费规则</strong><small>价格、留存与统计开关</small></span><span class="command-chevron" aria-hidden="true">›</span></button>
+        <button type="button" data-command-view="logs"><span aria-hidden="true">≋</span><span><strong>请求与日志</strong><small>实时运行日志和失败请求</small></span><span class="command-chevron" aria-hidden="true">›</span></button>
+        <button type="button" data-command-view="settings"><span aria-hidden="true">⌘</span><span><strong>系统设置</strong><small>路由、重试与完整 YAML</small></span><span class="command-chevron" aria-hidden="true">›</span></button>
+        <a href="/management/"><span aria-hidden="true">↗</span><span><strong>经典管理页</strong><small>打开尚未迁移的高级功能</small></span><span class="command-chevron" aria-hidden="true">›</span></a>
+      </nav>
+      <footer id="command-hint" class="command-footer"><span><kbd>↑</kbd><kbd>↓</kbd> 选择</span><span><kbd>Enter</kbd> 打开</span></footer>
+    </div>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
+  <script src="/management/app.js" defer></script>
+</body>
+</html>

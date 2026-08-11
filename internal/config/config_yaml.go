@@ -55,6 +55,8 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "plugins", "configs")
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "api-key-metadata")
+	pruneMappingEntryFieldsToGeneratedKeys(original.Content[0], generated.Content[0], "api-key-metadata")
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
@@ -339,6 +341,10 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 			return node.Value == "plugins"
 		case "routing.strategy":
 			return node.Value == "round-robin"
+		case "usage-pricing.currency":
+			return node.Value == DefaultUsagePricingCurrency
+		case "usage-pricing.version":
+			return node.Value == DefaultUsagePricingVersion
 		}
 	}
 
@@ -347,6 +353,8 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		switch fullPath {
 		case "error-logs-max-files":
 			return node.Value == "10"
+		case "usage-statistics-retention-days":
+			return node.Value == "90"
 		}
 	}
 
@@ -715,6 +723,41 @@ func pruneMappingToGeneratedKeys(dstRoot, srcRoot *yaml.Node, keyPath ...string)
 		return
 	}
 	pruneMissingMapKeys(dstVal, srcVal)
+}
+
+// pruneMappingEntryFieldsToGeneratedKeys removes fields omitted from generated
+// child mappings. This is required for optional metadata fields whose zero value
+// is intentionally omitted by YAML marshaling, such as disabled: false.
+func pruneMappingEntryFieldsToGeneratedKeys(dstRoot, srcRoot *yaml.Node, key string) {
+	if dstRoot == nil || srcRoot == nil || key == "" || dstRoot.Kind != yaml.MappingNode || srcRoot.Kind != yaml.MappingNode {
+		return
+	}
+	dstIndex := findMapKeyIndex(dstRoot, key)
+	srcIndex := findMapKeyIndex(srcRoot, key)
+	if dstIndex < 0 || srcIndex < 0 || dstIndex+1 >= len(dstRoot.Content) || srcIndex+1 >= len(srcRoot.Content) {
+		return
+	}
+	dstEntries := dstRoot.Content[dstIndex+1]
+	srcEntries := srcRoot.Content[srcIndex+1]
+	if dstEntries == nil || srcEntries == nil || dstEntries.Kind != yaml.MappingNode || srcEntries.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i+1 < len(srcEntries.Content); i += 2 {
+		entryKey := srcEntries.Content[i]
+		srcEntry := srcEntries.Content[i+1]
+		if entryKey == nil || srcEntry == nil || srcEntry.Kind != yaml.MappingNode {
+			continue
+		}
+		dstEntryIndex := findMapKeyIndex(dstEntries, entryKey.Value)
+		if dstEntryIndex < 0 || dstEntryIndex+1 >= len(dstEntries.Content) {
+			continue
+		}
+		dstEntry := dstEntries.Content[dstEntryIndex+1]
+		if dstEntry == nil || dstEntry.Kind != yaml.MappingNode {
+			continue
+		}
+		pruneMissingMapKeys(dstEntry, srcEntry)
+	}
 }
 
 func pruneMissingMapKeys(dstMap, srcMap *yaml.Node) {

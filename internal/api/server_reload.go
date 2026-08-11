@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -28,6 +29,59 @@ func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) bool {
 	return true
 }
 
+func (s *Server) applyImmediateManagementConfig(cfg *config.Config, generation uint64) {
+	if s == nil || cfg == nil {
+		return
+	}
+	snapshot, errMarshal := managementConfigSnapshot(cfg)
+	if errMarshal != nil {
+		return
+	}
+	s.managementConfigMu.Lock()
+	defer s.managementConfigMu.Unlock()
+	if generation < s.pendingManagementGeneration {
+		return
+	}
+	s.pendingManagementConfig = snapshot
+	s.pendingManagementGeneration = generation
+	s.deferredManagementConfig = nil
+	if s.usageStatistics != nil {
+		s.usageStatistics.ApplyConfig(cfg)
+	}
+	s.applyAccessConfig(nil, cfg)
+
+	// Keep directly consumed runtime snapshots current before returning the
+	// management response. The watcher applies the remaining settings later.
+	s.cfg = cfg
+	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
+	managementasset.SetCurrentConfig(cfg)
+	if s.handlers != nil {
+		s.handlers.UpdateClients(effectiveSDKConfig(cfg))
+	}
+}
+
+func (s *Server) completeManagementConfigReload(cfg *config.Config, generation uint64) {
+	if s == nil || cfg == nil {
+		return
+	}
+	snapshot, errMarshal := managementConfigSnapshot(cfg)
+	if errMarshal != nil {
+		return
+	}
+	s.managementConfigMu.Lock()
+	var deferred *config.Config
+	if generation == s.pendingManagementGeneration && bytes.Equal(s.pendingManagementConfig, snapshot) {
+		s.pendingManagementConfig = nil
+		s.pendingManagementGeneration = 0
+		deferred = s.deferredManagementConfig
+		s.deferredManagementConfig = nil
+	}
+	s.managementConfigMu.Unlock()
+	if deferred != nil {
+		s.updateClientsContext(context.Background(), deferred, generation, true)
+	}
+}
+
 // UpdateClients updates the server's client list and configuration.
 // This method is called when the configuration or authentication tokens change.
 //
@@ -35,12 +89,16 @@ func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) bool {
 //   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
 func (s *Server) UpdateClients(cfg *config.Config) {
-	s.UpdateClientsContext(context.Background(), cfg)
+	s.updateClientsContext(context.Background(), cfg, 0, false)
 }
 
 // UpdateClientsContext updates runtime clients while honoring cancellation between
 // short configuration and filesystem operations.
 func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) bool {
+	return s.updateClientsContext(ctx, cfg, 0, false)
+}
+
+func (s *Server) updateClientsContext(ctx context.Context, cfg *config.Config, completedManagementGeneration uint64, deferred bool) bool {
 	if s == nil || cfg == nil {
 		return false
 	}
@@ -49,6 +107,29 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 	}
 	if errContext := ctx.Err(); errContext != nil {
 		return false
+	}
+	incomingConfig, errSnapshot := managementConfigSnapshot(cfg)
+	if errSnapshot != nil {
+		return false
+	}
+	s.managementConfigMu.Lock()
+	if len(s.pendingManagementConfig) > 0 && !bytes.Equal(s.pendingManagementConfig, incomingConfig) {
+		if deferred && s.pendingManagementGeneration > completedManagementGeneration {
+			s.managementConfigMu.Unlock()
+			return false
+		}
+		s.deferredManagementConfig = cfg.CloneForRuntime()
+		s.managementConfigMu.Unlock()
+		return false
+	}
+	if len(s.pendingManagementConfig) > 0 {
+		// A matching watcher snapshot supersedes a stale snapshot that may have
+		// been deferred during this management-save generation.
+		s.deferredManagementConfig = nil
+	}
+	defer s.managementConfigMu.Unlock()
+	if s.usageStatistics != nil {
+		s.usageStatistics.ApplyConfig(cfg)
 	}
 	// Reconstruct old config from YAML snapshot to avoid reference sharing issues
 	var oldCfg *config.Config
@@ -232,6 +313,13 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		openAICompatCount,
 	)
 	return ctx.Err() == nil
+}
+
+func managementConfigSnapshot(cfg *config.Config) ([]byte, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	return yaml.Marshal(cfg)
 }
 
 func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {

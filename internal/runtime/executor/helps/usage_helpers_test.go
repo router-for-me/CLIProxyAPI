@@ -5,12 +5,15 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -576,6 +579,49 @@ func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
 	}
 	if record.Alias != "client-gpt" {
 		t.Fatalf("alias = %q, want %q", record.Alias, "client-gpt")
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesClientKeyMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "http://example.test/v1/responses", nil)
+	ginCtx.Set("userApiKey", "client-key")
+	ginCtx.Set("accessMetadata", map[string]string{
+		sdkaccess.MetadataClientKeyID:    " tenant-a ",
+		sdkaccess.MetadataClientKeyAlias: " Team A ",
+	})
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+
+	if record.APIKey != "client-key" {
+		t.Fatalf("APIKey = %q, want client-key", record.APIKey)
+	}
+	if record.ClientKeyID != "tenant-a" {
+		t.Fatalf("ClientKeyID = %q, want tenant-a", record.ClientKeyID)
+	}
+	if record.ClientKeyAlias != "Team A" {
+		t.Fatalf("ClientKeyAlias = %q, want Team A", record.ClientKeyAlias)
+	}
+}
+
+func TestUsageReporterBuildRecordUsesFallbackClientKeyID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "http://example.test/v1/responses", nil)
+	ginCtx.Set("userApiKey", "legacy-key")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+
+	if got, want := record.ClientKeyID, sdkaccess.FallbackClientKeyID("legacy-key"); got != want {
+		t.Fatalf("ClientKeyID = %q, want %q", got, want)
+	}
+	if record.ClientKeyAlias != "" {
+		t.Fatalf("ClientKeyAlias = %q, want empty", record.ClientKeyAlias)
 	}
 }
 

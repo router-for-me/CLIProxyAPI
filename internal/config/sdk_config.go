@@ -51,6 +51,10 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// APIKeyMetadata stores optional identity and availability metadata keyed by
+	// the corresponding client API key from APIKeys.
+	APIKeyMetadata map[string]ClientAPIKeyMetadata `yaml:"api-key-metadata,omitempty" json:"api-key-metadata,omitempty"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
@@ -67,6 +71,19 @@ type SDKConfig struct {
 type ClaudeCodeConfig struct {
 	// DisableCloakingModelList disables model ID cloaking in Anthropic model list responses.
 	DisableCloakingModelList bool `yaml:"disable-cloaking-model-list" json:"disable-cloaking-model-list"`
+}
+
+// ClientAPIKeyMetadata describes an inbound client API key without changing
+// the legacy api-keys list representation.
+type ClientAPIKeyMetadata struct {
+	// ID is the stable identifier used for usage aggregation and billing.
+	ID string `yaml:"id,omitempty" json:"id,omitempty"`
+
+	// Alias is the user-facing name displayed for this client key.
+	Alias string `yaml:"alias,omitempty" json:"alias,omitempty"`
+
+	// Disabled prevents the associated client key from authenticating.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.

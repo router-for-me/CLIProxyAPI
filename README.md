@@ -138,9 +138,15 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
+The primary web console is served from `web/management` at `/management.html`. Its files are read from disk on every request, so front-end changes do not require rebuilding the executable. Set `remote-management.web-directory` to use another directory; relative paths are resolved from the active config file. The original panel remains available at `/management/` and `/management/legacy`.
+
 ## Usage Statistics
 
-Since v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. If you need usage statistics, use:
+CLIProxyAPI includes bounded, persistent usage aggregates for inbound client API keys. Enable `usage-statistics-enabled`, assign stable IDs and aliases with `api-key-metadata`, and optionally add your own `usage-pricing` rules to estimate cost. The Management API exposes summaries at `/v0/management/usage`, JSON/CSV exports, and secret-safe key profiles; the TUI can edit aliases and suspend keys.
+
+Statistics expose two separate counters: `attempts`/`success`/`failed` count one final inbound client request (used for user statistics and billing), while `upstream_attempts`/`upstream_failed_attempts` count each credential/model/provider attempt (used for operations and retry analysis). Raw client keys and request payloads are never written to the usage snapshot. Estimated cost uses the prices you configure and is not a payment, credit-balance, invoicing, or authoritative settlement system. Snapshots created before this split retain their legacy counters because retries cannot be reconstructed after the fact.
+
+For request-level history, dashboards, or production billing workflows, use a dedicated service such as:
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 

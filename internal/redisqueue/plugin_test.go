@@ -35,6 +35,8 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			Model:               "gpt-5.4",
 			Alias:               "client-gpt",
 			APIKey:              "test-key",
+			ClientKeyID:         "tenant-a",
+			ClientKeyAlias:      "Team A",
 			AuthIndex:           "0",
 			AccessTokenSHA256:   "token-version-hash",
 			AuthType:            "apikey",
@@ -62,6 +64,9 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
 		requireStringField(t, payload, "auth_type", "apikey")
 		requireStringField(t, payload, "access_token_sha256", "token-version-hash")
+		requireStringField(t, payload, "api_key", "test-key")
+		requireStringField(t, payload, "client_key_id", "tenant-a")
+		requireStringField(t, payload, "client_key_alias", "Team A")
 		requireMissingField(t, payload, "user_api_key")
 		requireStringField(t, payload, "request_id", "ctx-request-id")
 		requireStringField(t, payload, "client_ip", "192.0.2.10")
@@ -212,6 +217,21 @@ func TestUsageQueuePluginAcceptsDeprecatedRequestTierRecordField(t *testing.T) {
 		payload := popSinglePayload(t)
 		requireStringField(t, payload, "service_tier", "priority")
 		requireMissingField(t, payload, "request_service_tier")
+	})
+}
+
+func TestUsageQueuePluginHonorsExplicitOutcomeOverContextStatus(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusInternalServerError)
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider: "openai", Model: "gpt-5", OutcomeKnown: true, UpstreamAttempt: true,
+			Failed: false, RequestedAt: time.Now(),
+		})
+		payload := popSinglePayload(t)
+		requireBoolField(t, payload, "failed", false)
+		requireFailField(t, payload, http.StatusOK, "")
 	})
 }
 

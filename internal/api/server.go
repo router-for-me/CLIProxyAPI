@@ -26,9 +26,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"gopkg.in/yaml.v3"
@@ -60,6 +62,13 @@ type Server struct {
 	// This prevents issues when the config object is modified in place by Management API.
 	oldConfigYaml []byte
 
+	// managementConfigMu orders lightweight pre-response config application
+	// against watcher-driven runtime updates.
+	managementConfigMu          sync.Mutex
+	pendingManagementConfig     []byte
+	pendingManagementGeneration uint64
+	deferredManagementConfig    *config.Config
+
 	// accessManager handles request authentication providers.
 	accessManager *sdkaccess.Manager
 
@@ -84,6 +93,9 @@ type Server struct {
 
 	// pluginHost owns dynamic plugin Management API route dispatch.
 	pluginHost *pluginhost.Host
+
+	// usageStatistics owns bounded client-key usage aggregates for management reporting.
+	usageStatistics *internalusage.Collector
 
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
@@ -137,6 +149,15 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
 	engine.Use(logging.CPATraceIDMiddleware())
+	if optionState.usageManager != nil {
+		engine.Use(func(c *gin.Context) {
+			if c.Request != nil {
+				requestContext := coreusage.WithManager(c.Request.Context(), optionState.usageManager)
+				c.Request = c.Request.WithContext(requestContext)
+			}
+			c.Next()
+		})
+	}
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
 	}
@@ -180,6 +201,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		envManagementSecret: envManagementSecret,
 		wsRoutes:            make(map[string]struct{}),
 		pluginHost:          optionState.pluginHost,
+		usageStatistics:     optionState.usageStatistics,
 
 		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
 	}
@@ -204,6 +226,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	s.mgmt.SetPluginHost(optionState.pluginHost)
 	s.mgmt.SetConfigReloadHook(optionState.configReloadHook)
+	s.mgmt.SetConfigImmediateHook(s.applyImmediateManagementConfig)
+	s.mgmt.SetConfigReloadCompleteHook(s.completeManagementConfigReload)
+	s.mgmt.SetUsageCollector(optionState.usageStatistics)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
