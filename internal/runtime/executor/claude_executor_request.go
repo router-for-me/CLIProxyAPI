@@ -369,15 +369,49 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 }
 
 // normalizeClaudeSamplingForUpstream keeps Anthropic message requests valid.
-func normalizeClaudeSamplingForUpstream(body []byte) []byte {
-	body, _ = sjson.DeleteBytes(body, "temperature")
-	body, _ = sjson.DeleteBytes(body, "top_p")
-
-	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
-	switch thinkingType {
+//
+// Translated and cloaked callers keep the conservative normalization: their
+// sampling knobs come from a protocol that was not written for Anthropic, and
+// Anthropic rejects several combinations outright, so neither temperature nor
+// top_p is worth forwarding.
+//
+// A confirmed native Claude Code client owns its own wire, exactly like
+// cache_control placement. The measured structured Haiku helper sends
+// "temperature":1 and claudeCodeHelperShapeStructured keys on it, so stripping
+// it would emit a shape no native client ever produces. Keep what the caller
+// sent and drop only what Anthropic actually rejects (verified live):
+//   - thinking active: temperature must be 1, top_p must be >= 0.95, top_k unset
+//   - otherwise: temperature and top_p cannot both be specified
+func normalizeClaudeSamplingForUpstream(body []byte, nativeOwned bool) []byte {
+	thinkingActive := false
+	switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String())) {
 	case "enabled", "adaptive", "auto":
+		thinkingActive = true
+	}
+
+	if !nativeOwned {
+		body, _ = sjson.DeleteBytes(body, "temperature")
 		body, _ = sjson.DeleteBytes(body, "top_p")
+		if thinkingActive {
+			body, _ = sjson.DeleteBytes(body, "top_k")
+		}
+		return body
+	}
+
+	if thinkingActive {
+		if temperature := gjson.GetBytes(body, "temperature"); temperature.Exists() && temperature.Num != 1 {
+			body, _ = sjson.DeleteBytes(body, "temperature")
+		}
+		if topP := gjson.GetBytes(body, "top_p"); topP.Exists() && topP.Num < 0.95 {
+			body, _ = sjson.DeleteBytes(body, "top_p")
+		}
 		body, _ = sjson.DeleteBytes(body, "top_k")
+		return body
+	}
+	// Anthropic accepts either one but not both; temperature is the knob native
+	// Claude Code actually sends, so top_p is the one that gives way.
+	if gjson.GetBytes(body, "temperature").Exists() && gjson.GetBytes(body, "top_p").Exists() {
+		body, _ = sjson.DeleteBytes(body, "top_p")
 	}
 	return body
 }
@@ -549,6 +583,34 @@ func claudeCredentialUsesOAuth(auth *cliproxyauth.Auth, apiKey string) bool {
 }
 
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, body []byte, cfg *config.Config, incomingHeaders http.Header, confirmedClaudeCode bool, sessionIDs ...string) error {
+	return applyClaudeHeadersWithNativeProfile(
+		r,
+		auth,
+		apiKey,
+		stream,
+		extraBetas,
+		body,
+		cfg,
+		incomingHeaders,
+		confirmedClaudeCode,
+		false,
+		sessionIDs...,
+	)
+}
+
+func applyClaudeHeadersWithNativeProfile(
+	r *http.Request,
+	auth *cliproxyauth.Auth,
+	apiKey string,
+	stream bool,
+	extraBetas []string,
+	body []byte,
+	cfg *config.Config,
+	incomingHeaders http.Header,
+	confirmedClaudeCode bool,
+	helperProfile bool,
+	sessionIDs ...string,
+) error {
 	if r == nil {
 		return nil
 	}
@@ -598,7 +660,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 	if confirmedClaudeCode && incomingBetas != "" {
 		baseBetas = incomingBetas
-		if oauthToken {
+		// Measured Haiku helper requests already carry the exact credential
+		// beta profile and intentionally omit extended-cache-ttl.
+		if oauthToken && !helperProfile {
 			if countTokens {
 				baseBetas = withClaudeCountTokensOAuthBeta(baseBetas)
 			} else {
@@ -657,6 +721,11 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	identityHeader("X-Stainless-Retry-Count", "0")
 	identityHeader("X-Stainless-Runtime", "node")
 	identityHeader("X-Stainless-Lang", "js")
+	// Native async SDK helpers add this header independently of body.stream.
+	// Preserve it only after the complete native-client detector succeeds.
+	if confirmedClaudeCode && incomingHeaders.Get("X-Stainless-Async") == "async" {
+		r.Header.Set("X-Stainless-Async", "async")
+	}
 	// Claude Code omits X-Stainless-Timeout on count_tokens; only a confirmed
 	// native client that sent one of its own keeps it there.
 	if !countTokens {
@@ -687,18 +756,24 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		identityHeader("X-Claude-Code-Session-Id", sessionID)
 	}
 	// Per-request UUID, matches Claude Code's x-client-request-id for first-party API.
-	if isAnthropicBase {
+	// identityHeader prefers the incoming value for a confirmed client, so a confirmed
+	// helper keeps its own native request ID and this fresh UUID only covers a caller
+	// that sent none. Helpers opt in on custom gateways too.
+	if isAnthropicBase || helperProfile {
 		identityHeader("x-client-request-id", uuid.New().String())
 	}
 	r.Header.Set("Connection", "keep-alive")
-	// Claude Code negotiates transport identically for streaming and non-streaming
-	// requests: Accept stays application/json and full compression is offered even
-	// when the body sets stream:true, because Anthropic selects SSE from the body
-	// rather than from Accept. Verified across every captured 2.1.220 stream.
-	// Forcing text/event-stream plus identity here would otherwise mark every
-	// streaming request, which is nearly all traffic. decodeResponseBody already
-	// wraps the success path, so a compressed SSE body is decoded transparently.
+	// Regular Claude Code requests negotiate transport identically for streaming
+	// and non-streaming requests. Measured Haiku helpers are the exception: their
+	// minimal non-stream request offers gzip only, while the structured streaming
+	// helper offers the full compression set. Confirmed helpers preserve the
+	// incoming native values.
 	applyTransportNegotiation := func() {
+		if helperProfile {
+			identityHeader("Accept", "application/json")
+			identityHeader("Accept-Encoding", "gzip")
+			return
+		}
 		if stream && !isAnthropicBase {
 			// Other Anthropic-compatible upstreams (Kimi, custom gateways) may select
 			// SSE from Accept and need not compress predictably, so they keep the

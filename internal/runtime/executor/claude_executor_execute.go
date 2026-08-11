@@ -108,7 +108,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 	body = reconcileClaudeCodeContextManagement(body, contextManagementState)
-	body = normalizeClaudeSamplingForUpstream(body)
+	body = normalizeClaudeSamplingForUpstream(body, confirmedClaudeCode)
 
 	// Default cache_control for translated entrypoints (Responses/Chat/Gemini) and other
 	// non-native callers. Confirmed native Claude Code owns its marker placement and must
@@ -145,7 +145,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = normalizeCacheControlTTL(body)
 	// Payload rules and other request processing may rewrite stream. Keep the
 	// upstream body, transport headers, and response parser on one authority.
-	body = helps.SetBoolIfDifferent(body, "stream", upstreamStream)
+	// Native non-stream Haiku helper requests omit stream rather than sending
+	// false, so preserve that measured wire shape when the transport agrees.
+	streamField := gjson.GetBytes(body, "stream")
+	if !claudeCodeDetection.HelperProfile || streamField.Exists() || upstreamStream {
+		body = helps.SetBoolIfDifferent(body, "stream", upstreamStream)
+	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -166,7 +171,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	cchBilling := ""
 	if cchSigning {
-		cchBilling = claudeCCHFallbackBillingHeader(ctx, e.cfg, bodyForUpstream, claudeCodeDetection.Entrypoint)
+		if !claudeCodeDetection.HelperProfile || claudeBodyNeedsBillingFallback(bodyForUpstream) {
+			cchBilling = claudeCCHFallbackBillingHeader(ctx, e.cfg, bodyForUpstream, claudeCodeDetection.Entrypoint)
+		}
 		bodyForUpstream, err = finalizeAnthropicMessagesBodyCCH(bodyForUpstream, cchBilling)
 		if err != nil {
 			return resp, fmt.Errorf("finalize Claude CCH: %w", err)
@@ -177,7 +184,19 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, upstreamStream, extraBetas, bodyForUpstream, e.cfg, incomingHeaders, confirmedClaudeCode && !cloaked, claudeSessionID); errHeaders != nil {
+	if errHeaders := applyClaudeHeadersWithNativeProfile(
+		httpReq,
+		auth,
+		apiKey,
+		upstreamStream,
+		extraBetas,
+		bodyForUpstream,
+		e.cfg,
+		incomingHeaders,
+		confirmedClaudeCode && !cloaked,
+		claudeCodeDetection.HelperProfile,
+		claudeSessionID,
+	); errHeaders != nil {
 		return resp, errHeaders
 	}
 	fastRequest := isAnthropicUpstreamBase(baseURL) && claudeRequestIsFast(httpReq, bodyForUpstream)

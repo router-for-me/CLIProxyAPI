@@ -4489,7 +4489,7 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 
 func TestNormalizeClaudeSamplingForUpstream_RemovesTemperature(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`)
-	out := normalizeClaudeSamplingForUpstream(payload)
+	out := normalizeClaudeSamplingForUpstream(payload, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -4498,7 +4498,7 @@ func TestNormalizeClaudeSamplingForUpstream_RemovesTemperature(t *testing.T) {
 
 func TestNormalizeClaudeSamplingForUpstream_RemovesTemperatureWithThinkingEnabled(t *testing.T) {
 	payload := []byte(`{"temperature":0.2,"thinking":{"type":"enabled","budget_tokens":2048}}`)
-	out := normalizeClaudeSamplingForUpstream(payload)
+	out := normalizeClaudeSamplingForUpstream(payload, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -4507,7 +4507,7 @@ func TestNormalizeClaudeSamplingForUpstream_RemovesTemperatureWithThinkingEnable
 
 func TestNormalizeClaudeSamplingForUpstream_RemovesTopPAndTopKForThinking(t *testing.T) {
 	payload := []byte(`{"temperature":0.2,"top_p":0.9,"top_k":40,"thinking":{"type":"adaptive"}}`)
-	out := normalizeClaudeSamplingForUpstream(payload)
+	out := normalizeClaudeSamplingForUpstream(payload, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -4522,7 +4522,7 @@ func TestNormalizeClaudeSamplingForUpstream_RemovesTopPAndTopKForThinking(t *tes
 
 func TestNormalizeClaudeSamplingForUpstream_NoThinkingRemovesTemperatureAndTopP(t *testing.T) {
 	payload := []byte(`{"temperature":0,"top_p":0.9,"top_k":40,"messages":[{"role":"user","content":"hi"}]}`)
-	out := normalizeClaudeSamplingForUpstream(payload)
+	out := normalizeClaudeSamplingForUpstream(payload, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -4538,13 +4538,109 @@ func TestNormalizeClaudeSamplingForUpstream_NoThinkingRemovesTemperatureAndTopP(
 func TestNormalizeClaudeSamplingForUpstream_AfterForcedToolChoiceRemovesTemperature(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"tool_choice":{"type":"any"}}`)
 	out := disableThinkingIfToolChoiceForced(payload)
-	out = normalizeClaudeSamplingForUpstream(out)
+	out = normalizeClaudeSamplingForUpstream(out, false)
 
 	if gjson.GetBytes(out, "thinking").Exists() {
 		t.Fatalf("thinking should be removed when tool_choice forces tool use")
 	}
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
+	}
+}
+
+// The measured structured Haiku helper sends "temperature":1, and
+// claudeCodeHelperShapeStructured keys on exactly that value. Stripping it would
+// make CPA emit a shape no native client produces, so a confirmed native caller
+// must keep it.
+func TestNormalizeClaudeSamplingForUpstreamNativeKeepsMeasuredHelperTemperature(t *testing.T) {
+	// Top-level key order and values mirror the measured structured helper.
+	payload := []byte(`{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":[{"type":"text","text":"helper probe"}]}],"system":[{"type":"text","text":"Return a short title."}],"tools":[],"metadata":{"user_id":"u"},"max_tokens":32000,"thinking":{"type":"disabled"},"temperature":1,"output_config":{"format":{"type":"json_schema"}},"stream":true}`)
+	if got := gjson.GetBytes(payload, "temperature"); !got.Exists() || got.Num != 1 {
+		t.Fatalf("measured helper fixture should carry temperature=1, got %q", got.Raw)
+	}
+
+	out := normalizeClaudeSamplingForUpstream(payload, true)
+
+	if got := gjson.GetBytes(out, "temperature"); !got.Exists() || got.Num != 1 {
+		t.Fatalf("confirmed native must preserve the measured temperature, got %q", got.Raw)
+	}
+}
+
+// Anthropic's real constraints, verified against the live API: with thinking
+// active temperature must be 1, top_p must be >= 0.95 and top_k must be unset;
+// otherwise temperature and top_p cannot both be specified. Preserving the
+// native wire must never forward a combination that would 400.
+func TestNormalizeClaudeSamplingForUpstreamNativeDropsOnlyRejectedCombinations(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		keep    map[string]float64
+		dropped []string
+	}{
+		{
+			name:    "thinking off keeps every accepted knob",
+			payload: `{"temperature":0.5,"top_k":40}`,
+			keep:    map[string]float64{"temperature": 0.5, "top_k": 40},
+		},
+		{
+			name:    "thinking off drops top_p when temperature is also set",
+			payload: `{"temperature":0.5,"top_p":0.9}`,
+			keep:    map[string]float64{"temperature": 0.5},
+			dropped: []string{"top_p"},
+		},
+		{
+			name:    "thinking off keeps a lone top_p",
+			payload: `{"top_p":0.9}`,
+			keep:    map[string]float64{"top_p": 0.9},
+		},
+		{
+			name:    "thinking disabled is not thinking",
+			payload: `{"temperature":1,"thinking":{"type":"disabled"}}`,
+			keep:    map[string]float64{"temperature": 1},
+		},
+		{
+			name:    "thinking enabled keeps temperature 1",
+			payload: `{"temperature":1,"thinking":{"type":"enabled","budget_tokens":1024}}`,
+			keep:    map[string]float64{"temperature": 1},
+		},
+		{
+			name:    "thinking enabled drops temperature that is not 1",
+			payload: `{"temperature":0.5,"thinking":{"type":"enabled","budget_tokens":1024}}`,
+			dropped: []string{"temperature"},
+		},
+		{
+			name:    "thinking enabled keeps top_p at or above 0.95",
+			payload: `{"top_p":0.99,"thinking":{"type":"enabled","budget_tokens":1024}}`,
+			keep:    map[string]float64{"top_p": 0.99},
+		},
+		{
+			name:    "thinking enabled drops top_p below 0.95",
+			payload: `{"top_p":0.9,"thinking":{"type":"enabled","budget_tokens":1024}}`,
+			dropped: []string{"top_p"},
+		},
+		{
+			name:    "thinking enabled always drops top_k",
+			payload: `{"top_k":40,"thinking":{"type":"enabled","budget_tokens":1024}}`,
+			dropped: []string{"top_k"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := normalizeClaudeSamplingForUpstream([]byte(tc.payload), true)
+
+			for field, want := range tc.keep {
+				got := gjson.GetBytes(out, field)
+				if !got.Exists() || got.Num != want {
+					t.Fatalf("%s = %q, want %v preserved", field, got.Raw, want)
+				}
+			}
+			for _, field := range tc.dropped {
+				if got := gjson.GetBytes(out, field); got.Exists() {
+					t.Fatalf("%s = %q, want dropped because Anthropic rejects it", field, got.Raw)
+				}
+			}
+		})
 	}
 }
 
