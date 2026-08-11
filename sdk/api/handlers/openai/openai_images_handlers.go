@@ -1230,6 +1230,19 @@ func (h *OpenAIAPIHandler) streamRoutedImages(c *gin.Context, imageReq []byte, i
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
+				// A terminal error may already be buffered on errChan: the producer sends it
+				// before closing both channels, so both select cases can be ready here.
+				// Surface the error instead of finalizing a successful stream.
+				if errMsg, okPendingErr := handlers.PendingStreamError(errChan); okPendingErr {
+					stopKeepAlive()
+					h.WriteErrorResponse(c, errMsg)
+					if errMsg != nil {
+						cliCancel(errMsg.Error)
+					} else {
+						cliCancel(nil)
+					}
+					return
+				}
 				stopKeepAlive()
 				setImagesSSEHeaders(c)
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
@@ -1358,6 +1371,19 @@ func (h *OpenAIAPIHandler) streamOpenAICompatImages(c *gin.Context, compatReq []
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
+				// A terminal error may already be buffered on errChan: the producer sends it
+				// before closing both channels, so both select cases can be ready here.
+				// Surface the error instead of finalizing a successful stream.
+				if errMsg, okPendingErr := handlers.PendingStreamError(errChan); okPendingErr {
+					stopKeepAlive()
+					h.WriteErrorResponse(c, errMsg)
+					if errMsg != nil {
+						cliCancel(errMsg.Error)
+					} else {
+						cliCancel(nil)
+					}
+					return
+				}
 				stopKeepAlive()
 				setImagesSSEHeaders(c)
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
@@ -1799,6 +1825,19 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
+				// A terminal error may already be buffered on errChan: the producer sends it
+				// before closing both channels, so both select cases can be ready here.
+				// Surface the error instead of finalizing a successful stream.
+				if errMsg, okPendingErr := handlers.PendingStreamError(errChan); okPendingErr {
+					stopKeepAlive()
+					h.WriteErrorResponse(c, errMsg)
+					if errMsg != nil {
+						cliCancel(errMsg.Error)
+					} else {
+						cliCancel(nil)
+					}
+					return
+				}
 				stopKeepAlive()
 				setImagesSSEHeaders(c)
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
