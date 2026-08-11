@@ -45,7 +45,21 @@ func TestHomeCodexTerminalStreamFailureUsesFreshDispatchOnNextRequest(t *testing
 			_ = conn.WriteJSON(map[string]any{"type": "response.created", "response": map[string]any{"id": "response-1"}})
 			_ = conn.WriteJSON(map[string]any{"type": "error", "status": http.StatusBadGateway, "error": map[string]any{"message": "terminal failure"}})
 		} else {
-			_ = conn.WriteJSON(map[string]any{"type": "response.completed", "response": map[string]any{"id": "response-2", "output": []any{}}})
+			writeCompletion := func() {
+				_ = conn.WriteJSON(map[string]any{"type": "response.completed", "response": map[string]any{
+					"id": "response-2", "object": "response", "status": "completed",
+					"output": []any{map[string]any{
+						"type": "message", "status": "completed", "role": "assistant",
+						"content": []any{map[string]any{"type": "output_text", "text": "ok"}},
+					}},
+					"usage": map[string]any{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+				}})
+			}
+			writeCompletion()
+			if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				return
+			}
+			writeCompletion()
 		}
 		for {
 			if _, _, errRead := conn.ReadMessage(); errRead != nil {

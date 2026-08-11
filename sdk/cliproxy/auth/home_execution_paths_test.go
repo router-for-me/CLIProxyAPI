@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -516,8 +517,9 @@ func (e *lifecycleRetryExecutor) ExecuteStream(ctx context.Context, _ *Auth, _ c
 		e.firstCtx = ctx
 		return nil, &Error{HTTPStatus: http.StatusUpgradeRequired, Message: "websocket upgrade required"}
 	}
-	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
-	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed"}`)}
+	chunks := make(chan cliproxyexecutor.StreamChunk, 2)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"type":"response.output_text.delta","delta":"ok"}`)}
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"status":"completed"}}`)}
 	close(chunks)
 	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 }
@@ -592,8 +594,9 @@ func (e *retryingHomeStreamExecutor) ExecuteStream(context.Context, *Auth, clipr
 	if e.calls.Add(1) == 1 {
 		return nil, &Error{HTTPStatus: http.StatusUnauthorized, Message: "expired"}
 	}
-	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
-	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\"}\n\n")}
+	chunks := make(chan cliproxyexecutor.StreamChunk, 2)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n")}
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")}
 	close(chunks)
 	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 }
@@ -623,6 +626,123 @@ func TestHomeStreamRetryUsesFreshSelection(t *testing.T) {
 	}
 	if got := dispatcher.calls.Load(); got != 2 {
 		t.Fatalf("Home RPOP calls = %d, want 2 for retrying stream invocations", got)
+	}
+}
+
+type alwaysEmptyHomeStreamExecutor struct {
+	calls atomic.Int32
+}
+
+func (*alwaysEmptyHomeStreamExecutor) Identifier() string { return "home-execution" }
+func (*alwaysEmptyHomeStreamExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (e *alwaysEmptyHomeStreamExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.calls.Add(1)
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\n")}
+	close(chunks)
+	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+}
+func (*alwaysEmptyHomeStreamExecutor) Refresh(context.Context, *Auth) (*Auth, error) {
+	return nil, nil
+}
+func (*alwaysEmptyHomeStreamExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (*alwaysEmptyHomeStreamExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestHomeStreamRepeatedEmptyCompletionStopsAtRepeatedAuth(t *testing.T) {
+	dispatcher := &retainingHomeExecutionDispatcher{}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+	executor := &alwaysEmptyHomeStreamExecutor{}
+	manager.RegisterExecutor(executor)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, errExecute := manager.ExecuteStream(ctx, []string{"home-execution"}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{Stream: true})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+	var terminalErr error
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			terminalErr = chunk.Err
+		}
+	}
+	if !isEmptyCompletionError(terminalErr) {
+		t.Fatalf("terminal error = %v, want empty_completion", terminalErr)
+	}
+	if got := executor.calls.Load(); got != 1 {
+		t.Fatalf("executor calls = %d, want 1 before repeated auth is rejected", got)
+	}
+	if got := dispatcher.calls.Load(); got != 2 {
+		t.Fatalf("Home RPOP calls = %d, want 2 to detect the repeated auth", got)
+	}
+}
+
+type alternatingEmptyHomeDispatcher struct {
+	calls atomic.Int32
+}
+
+func (*alternatingEmptyHomeDispatcher) HeartbeatOK() bool { return true }
+func (d *alternatingEmptyHomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+	call := d.calls.Add(1)
+	authID := "home-auth-a"
+	if call == 2 {
+		authID = "home-auth-b"
+	}
+	return json.Marshal(homeAuthDispatchResponse{Auth: Auth{ID: authID, Provider: "home-execution", Status: StatusActive}})
+}
+func (*alternatingEmptyHomeDispatcher) AbortAmbiguousDispatch() {}
+
+type alternatingEmptyHomeExecutor struct {
+	calls atomic.Int32
+}
+
+func (*alternatingEmptyHomeExecutor) Identifier() string { return "home-execution" }
+func (*alternatingEmptyHomeExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (e *alternatingEmptyHomeExecutor) ExecuteStream(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.calls.Add(1)
+	if auth.ID == "home-auth-b" {
+		return nil, &Error{Code: "transient", Message: "transient stream failure", Retryable: true}
+	}
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n")}
+	close(chunks)
+	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+}
+func (*alternatingEmptyHomeExecutor) Refresh(context.Context, *Auth) (*Auth, error) { return nil, nil }
+func (*alternatingEmptyHomeExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (*alternatingEmptyHomeExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestHomeStreamDoesNotRevisitEmptyAuthAfterAnotherFailure(t *testing.T) {
+	dispatcher := &alternatingEmptyHomeDispatcher{}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+	executor := &alternatingEmptyHomeExecutor{}
+	manager.RegisterExecutor(executor)
+
+	_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-execution"}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{Stream: true}, 0)
+	if errExecute == nil || !strings.Contains(errExecute.Error(), "transient stream failure") {
+		t.Fatalf("executeStreamMixedOnce() error = %v, want last transient failure", errExecute)
+	}
+	if got := executor.calls.Load(); got != 2 {
+		t.Fatalf("executor calls = %d, want one call per distinct auth", got)
+	}
+	if got := dispatcher.calls.Load(); got != 3 {
+		t.Fatalf("Home RPOP calls = %d, want third dispatch rejected before execution", got)
 	}
 }
 

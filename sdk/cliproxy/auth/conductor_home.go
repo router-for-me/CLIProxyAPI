@@ -1124,6 +1124,12 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				m.MarkResult(creditsCtx, result)
 				continue
 			}
+			if isEmptyCompletionPayload(resp.Payload) {
+				result.Success = false
+				result.Error = errEmptyCompletion
+				m.recordExecutionResult(creditsCtx, result, c.auth, false)
+				continue
+			}
 			m.MarkResult(creditsCtx, result)
 			attemptAliasResult := resolveAttemptAliasResult(routing, c.auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)

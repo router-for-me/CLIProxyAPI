@@ -98,8 +98,9 @@ func (e *requestPrepareExecutor) ExecuteStream(_ context.Context, auth *Auth, _ 
 	if e.executeErr != nil {
 		return nil, e.executeErr
 	}
-	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
-	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed"}`)}
+	chunks := make(chan cliproxyexecutor.StreamChunk, 2)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"type":"response.output_text.delta","delta":"ok"}`)}
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"status":"completed"}}`)}
 	close(chunks)
 	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 }

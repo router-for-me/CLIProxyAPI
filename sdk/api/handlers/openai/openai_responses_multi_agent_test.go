@@ -91,11 +91,13 @@ type responsesMultiAgentCaptureExecutor struct {
 	websocketDirectCaptureExecutor
 }
 
+const responsesMultiAgentCompletion = `{"id":"resp-1","status":"completed","output":[{"type":"message","id":"msg-1","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}`
+
 func (e *responsesMultiAgentCaptureExecutor) Execute(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
 	e.mu.Lock()
 	e.payloads = append(e.payloads, bytes.Clone(req.Payload))
 	e.mu.Unlock()
-	return coreexecutor.Response{Payload: []byte(`{"id":"resp-1","output":[]}`)}, nil
+	return coreexecutor.Response{Payload: []byte(responsesMultiAgentCompletion)}, nil
 }
 
 func (e *responsesMultiAgentCaptureExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
@@ -103,7 +105,7 @@ func (e *responsesMultiAgentCaptureExecutor) ExecuteStream(_ context.Context, _ 
 	e.payloads = append(e.payloads, bytes.Clone(req.Payload))
 	e.mu.Unlock()
 	chunks := make(chan coreexecutor.StreamChunk, 1)
-	chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}\n\n")}
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf("data: {\"type\":\"response.completed\",\"response\":%s}\n\n", responsesMultiAgentCompletion))}
 	close(chunks)
 	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }
