@@ -11,7 +11,35 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
+
+type pairRequestPluginHooks struct {
+	calls int64
+}
+
+func (h *pairRequestPluginHooks) NormalizeRequest(_ context.Context, _, _ sdktranslator.Format, _ string, body []byte, _ bool) []byte {
+	h.calls++
+	updated, _ := sjson.SetBytes(body, "plugin_call", h.calls)
+	return updated
+}
+
+func (*pairRequestPluginHooks) TranslateRequest(context.Context, sdktranslator.Format, sdktranslator.Format, string, []byte, bool) ([]byte, bool) {
+	return nil, false
+}
+
+func (*pairRequestPluginHooks) NormalizeResponseBefore(context.Context, sdktranslator.Format, sdktranslator.Format, string, []byte, []byte, []byte, bool) []byte {
+	return nil
+}
+
+func (*pairRequestPluginHooks) TranslateResponse(context.Context, sdktranslator.Format, sdktranslator.Format, string, []byte, []byte, []byte, bool) ([]byte, bool) {
+	return nil, false
+}
+
+func (*pairRequestPluginHooks) NormalizeResponseAfter(context.Context, sdktranslator.Format, sdktranslator.Format, string, []byte, []byte, []byte, bool) []byte {
+	return nil
+}
 
 func geminiToolHistoryPayload(turns int) []byte {
 	contents := []string{`{"role":"user","parts":[{"text":"start"}]}`}
@@ -96,6 +124,35 @@ func TestTranslateRequestPairTranslatesDistinctPayloads(t *testing.T) {
 	}
 	if bytes.Equal(base, work) {
 		t.Fatal("distinct payloads produced identical translations; the reuse path was taken by mistake")
+	}
+}
+
+func TestTranslateRequestPairPreservesPluginHookInvocations(t *testing.T) {
+	hooks := &pairRequestPluginHooks{}
+	sdktranslator.SetPluginHooks(hooks)
+	t.Cleanup(func() { sdktranslator.SetPluginHooks(nil) })
+
+	payload := geminiToolHistoryPayload(1)
+	base, work := TranslateRequestPairWithCodexMultiAgentV2(
+		context.Background(),
+		http.Header{},
+		&config.Config{},
+		sdktranslator.FormatGemini,
+		sdktranslator.FromString("antigravity"),
+		"gemini-3.6-flash-high",
+		payload,
+		payload,
+		true,
+	)
+
+	if hooks.calls != 2 {
+		t.Fatalf("plugin hook calls = %d, want 2", hooks.calls)
+	}
+	if got := gjson.GetBytes(base, "plugin_call").Int(); got != 1 {
+		t.Fatalf("baseline plugin_call = %d, want 1", got)
+	}
+	if got := gjson.GetBytes(work, "plugin_call").Int(); got != 2 {
+		t.Fatalf("working plugin_call = %d, want 2", got)
 	}
 }
 

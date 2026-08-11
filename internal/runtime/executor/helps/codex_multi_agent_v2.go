@@ -38,13 +38,14 @@ func TranslateRequestWithCodexMultiAgentV2(ctx context.Context, headers http.Hea
 // TranslateRequestPairWithCodexMultiAgentV2 translates the untouched baseline
 // payload and the working payload that later stages mutate in place. Executors
 // normally assign the original payload to the request before translating, so both
-// translations would rescan the same bytes and produce the same result. Request
-// translation is deterministic and never aliases its input, so that case is
-// translated once and duplicated, which removes a full extra pass over payloads
-// that can reach tens of megabytes.
+// translations would rescan the same bytes and produce the same result. Built-in
+// request translation is deterministic, so that case is translated once and
+// duplicated when no plugin hooks are installed. Hooks retain two invocations
+// because they may have request-scoped output or side effects. This removes a
+// full extra pass over payloads that can reach tens of megabytes.
 func TranslateRequestPairWithCodexMultiAgentV2(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, originalPayload, requestPayload []byte, stream bool) (original, working []byte) {
 	original = TranslateRequestWithCodexMultiAgentV2(ctx, headers, cfg, from, to, model, originalPayload, stream)
-	if sameByteSlice(originalPayload, requestPayload) {
+	if sameByteSlice(originalPayload, requestPayload) && !sdktranslator.HasPluginHooks() {
 		// The caller mutates the working copy, so it must not share the baseline array.
 		return original, append([]byte(nil), original...)
 	}
